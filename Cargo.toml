@@ -1,0 +1,35 @@
+[package]
+name = "hyper"
+version = "0.1.0"
+edition = "2024"
+build = "build.rs"
+license = "Apache-2.0"
+description = "A modular, Rust-based type-1 hypervisor kernel"
+publish = false
+
+[lib]
+test = false
+bench = false
+doctest = false
+
+[[bin]]
+name = "hyper"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+
+[lints.clippy]
+expect_used = "deny"
+unwrap_used = "deny"
+
+[profile.dev]
+lto = "thin"
+panic = "abort"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 2
+panic = "abort"

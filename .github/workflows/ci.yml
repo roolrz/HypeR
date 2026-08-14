@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format and Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Check formatting and lints
+        run: |
+          make check
+          cargo fmt --all -- --check
+          cargo fmt --manifest-path tests/host/Cargo.toml -- --check
+          cargo fmt --manifest-path tools/kconfig/Cargo.toml -- --check
+
+  test:
+    name: Host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Run host and configuration tests
+        run: make test
+
+  build:
+    name: Build (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Build kernel image
+        run: make image PROFILE=${{ matrix.profile }}
+      - name: Upload kernel image
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyper-aarch64-${{ matrix.profile }}
+          path: |
+            target/aarch64-unknown-none/${{ matrix.profile }}/hyper
+            target/aarch64-unknown-none/${{ matrix.profile }}/hyper.img
+          if-no-files-found: error
+
+  image-test:
+    name: Image tests (${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Download kernel image
+        uses: actions/download-artifact@v4
+        with:
+          name: hyper-aarch64-${{ matrix.profile }}
+          path: target/aarch64-unknown-none/${{ matrix.profile }}
+      - name: Verify image ABI and atomic backends
+        run: make test-image PROFILE=${{ matrix.profile }}
+
+  qemu-boot:
+    name: Four-core QEMU (${{ matrix.cpu }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [lint, test, build, image-test]
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu: [cortex-a72, max]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Download debug kernel image
+        uses: actions/download-artifact@v4
+        with:
+          name: hyper-aarch64-debug
+          path: target/aarch64-unknown-none/debug
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends qemu-system-arm
+      - name: Verify SMP boot, idle threads, and timer IRQs
+        run: make test-qemu PROFILE=debug QEMU_CPU=${{ matrix.cpu }}
+      - name: Clean up QEMU processes
+        if: always()
+        run: |
+          pkill -TERM -x qemu-system-aarch64 2>/dev/null || true
+          for attempt in 1 2 3 4 5; do
+            if ! pgrep -x qemu-system-aarch64 >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          pkill -KILL -x qemu-system-aarch64 2>/dev/null || true

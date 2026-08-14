@@ -1,0 +1,22 @@
+name: Set up HypeR toolchain
+description: Install the pinned Rust toolchain and AArch64 bare-metal target
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust toolchain
+      shell: bash
+      run: |
+        toolchain=$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' rust-toolchain.toml)
+        if [ -z "$toolchain" ]; then
+          echo "rust-toolchain.toml does not declare a channel" >&2
+          exit 1
+        fi
+        rustup set profile minimal
+        rustup toolchain install "$toolchain" \
+          --component clippy \
+          --component llvm-tools \
+          --component rust-src \
+          --component rustfmt \
+          --target aarch64-unknown-none
+        rustup default "$toolchain"

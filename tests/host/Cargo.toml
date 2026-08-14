@@ -1,0 +1,14 @@
+[package]
+name = "hyper-host-tests"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+hyper = { path = "../.." }
+
+[lints.clippy]
+expect_used = "deny"
+unwrap_used = "deny"
+
+[workspace]

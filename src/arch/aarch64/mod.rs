@@ -1,0 +1,111 @@
+mod atomics;
+mod barrier;
+mod cache;
+mod context;
+mod exception;
+mod gic;
+mod interrupts;
+mod memory;
+mod platform;
+mod psci;
+pub mod registers;
+mod smp;
+mod timer;
+
+pub use atomics::{AtomicCapabilities, capabilities as atomic_capabilities};
+pub use barrier::Aarch64Barrier;
+pub use cache::Aarch64Cache;
+pub use context::{ThreadContext, UserContext, VcpuContext, switch_thread_context};
+pub use exception::{install_runtime_vectors, validate_runtime_vectors};
+pub use gic::{Aarch64GicCpuInterface, current_gic_affinity};
+pub use hyper::drivers::power::psci::Error as CpuPowerError;
+pub use interrupts::{LocalInterruptMask, enable_irq as enable_local_irq};
+pub use memory::{
+    Aarch64AddressTranslation as ArchitectureAddressTranslation, ActivationContext,
+    Error as MemoryError, PreparedAddressSpace,
+};
+pub use platform::{EssentialDeviceDiscovery, EssentialPlatformInfo};
+pub use psci::Aarch64Psci as ArchitectureCpuPower;
+pub use smp::{
+    SecondaryBootParameters, current_cpu_index, current_hardware_id, secondary_entry_physical,
+    send_event,
+};
+pub use timer::{El2PhysicalTimer, Error as TimerError};
+
+pub fn initialize_cpu_power(
+    info: hyper::platform::CpuPowerInfo,
+) -> Result<ArchitectureCpuPower, CpuPowerError> {
+    match info {
+        hyper::platform::CpuPowerInfo::Psci(info) => psci::bind(info),
+    }
+}
+
+unsafe extern "C" {
+    fn aarch64_activate_final_address_space(root: u64, virtual_base: u64, stack_top: u64) -> !;
+}
+
+/// Prepares the architecture-owned final address space.
+///
+/// # Safety
+///
+/// The bootstrap identity map must cover every page the early allocator may
+/// return.
+pub unsafe fn prepare_address_space(
+    allocator: &mut hyper::mm::BootAllocator,
+    platform: &hyper::platform::PlatformInfo,
+    image: hyper::hal::memory::KernelImageLayout,
+) -> Result<PreparedAddressSpace, MemoryError> {
+    unsafe { memory::prepare(allocator, platform, image) }
+}
+
+/// Activates final stage-1 translation and enters the high kernel alias.
+///
+/// # Safety
+///
+/// `memory` must remain installed in global boot state for the lifetime of the
+/// active address space.
+pub unsafe fn activate_memory(context: ActivationContext) -> ! {
+    unsafe {
+        aarch64_activate_final_address_space(
+            context.root.get(),
+            memory::KERNEL_BASE,
+            context.stack_top.get(),
+        )
+    }
+}
+
+/// Keeps this processing element in a side-effect-free idle loop.
+pub fn halt() -> ! {
+    loop {
+        wait_for_interrupt();
+    }
+}
+
+/// Suspends this processing element until an interrupt or event is observed.
+pub fn wait_for_interrupt() {
+    // SAFETY: WFI only suspends this processing element until an event or
+    // interrupt occurs and does not access memory.
+    unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) };
+}
+
+/// Rust continuation of the architectural entry path.
+#[unsafe(no_mangle)]
+extern "C" fn aarch64_rust_entry(dtb_address: usize) -> ! {
+    atomics::initialize();
+    crate::kernel::boot(dtb_address)
+}
+
+/// Rust entry point after activating the high kernel mapping.
+#[unsafe(no_mangle)]
+extern "C" fn aarch64_virtual_entry() -> ! {
+    crate::kernel::finish_boot()
+}
+
+/// Rust continuation for a secondary CPU after its final mappings are active.
+#[unsafe(no_mangle)]
+extern "C" fn aarch64_secondary_rust_entry(cpu_index: usize) -> ! {
+    if !atomics::current_cpu_supports_selected_backend() {
+        halt()
+    }
+    crate::kernel::cpu::secondary_entry(cpu_index)
+}

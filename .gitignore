@@ -1,0 +1,12 @@
+/target/
+/tests/host/target/
+/tests/host/Cargo.lock
+/tools/kconfig/target/
+/tools/kconfig/Cargo.lock
+/.config
+/.idea/
+/.vscode/
+/.agent/
+*.swp
+*.swo
+*.log
