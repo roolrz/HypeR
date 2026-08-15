@@ -6,7 +6,9 @@ mod state;
 use hyper::sync::InterruptSpinLock;
 
 use self::state::{Scheduler, SwitchPair};
-use super::thread::{KernelThreadEntry, ThreadId, ThreadPriority, ThreadState};
+use super::thread::{
+    KernelThreadEntry, ThreadId, ThreadPriority, ThreadState, VcpuExecution, VirtualMachineId,
+};
 use super::wait::WaitQueue;
 
 type SchedulerLock = InterruptSpinLock<Option<Scheduler>, crate::arch::LocalInterruptMask>;
@@ -47,6 +49,19 @@ pub struct Capabilities {
     pub bootstrap_thread: ThreadId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SecondaryStack {
+    pub physical_top: u64,
+    pub virtual_top: usize,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CurrentVcpu {
+    pub thread: ThreadId,
+    pub execution: *mut VcpuExecution,
+    pub stack: (usize, usize),
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Statistics {
     pub threads: usize,
@@ -64,6 +79,7 @@ pub(crate) struct CrashTaskSnapshot {
     pub state: ThreadState,
     pub execution: super::thread::ExecutionKind,
     pub stack: Option<(usize, usize)>,
+    pub stack_statistics: Option<crate::kernel::mm::stack::StackStatistics>,
 }
 
 pub(crate) struct ParkToken(SwitchPair);
@@ -93,6 +109,18 @@ pub fn statistics() -> Result<Statistics, Error> {
     SCHEDULER.with(|slot| Ok(slot.as_ref().ok_or(Error::NotInitialized)?.statistics()))
 }
 
+pub fn thread_stack_statistics(
+    id: ThreadId,
+) -> Result<Option<crate::kernel::mm::stack::StackStatistics>, Error> {
+    SCHEDULER.with(|slot| {
+        let thread = slot.as_ref().ok_or(Error::NotInitialized)?.thread(id)?;
+        if matches!(thread.state(), ThreadState::Running | ThreadState::Idle) {
+            return Err(Error::InvalidThreadState);
+        }
+        Ok(thread.kernel_stack_statistics())
+    })
+}
+
 /// Captures current-task metadata without waiting on a potentially held lock.
 pub(crate) fn crash_snapshot(cpu: usize) -> Option<CrashTaskSnapshot> {
     SCHEDULER
@@ -104,12 +132,13 @@ pub(crate) fn crash_snapshot(cpu: usize) -> Option<CrashTaskSnapshot> {
                 state: thread.state(),
                 execution: thread.execution_kind(),
                 stack: thread.kernel_stack_bounds(),
+                stack_statistics: thread.kernel_stack_statistics(),
             })
         })
         .flatten()
 }
 
-pub fn register_secondary_cpu(cpu: usize, name: &str) -> Result<usize, Error> {
+pub fn register_secondary_cpu(cpu: usize, name: &str) -> Result<SecondaryStack, Error> {
     SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
@@ -136,6 +165,31 @@ pub fn kthread_create_with_priority(
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
             .create_kernel_thread(cpu, name, entry, argument, priority)
+    })
+}
+
+pub(crate) fn vcpu_create(
+    name: &str,
+    virtual_machine: VirtualMachineId,
+    vcpu_id: u32,
+    context: crate::arch::VcpuContext,
+    entry: KernelThreadEntry,
+) -> Result<ThreadId, Error> {
+    let cpu = crate::arch::current_cpu_index();
+    SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .create_vcpu_thread(cpu, name, virtual_machine, vcpu_id, context, entry)
+    })
+}
+
+/// Returns the pinned vCPU payload owned by the calling CPU's current Thread.
+pub(crate) fn current_vcpu() -> Result<CurrentVcpu, Error> {
+    let cpu = crate::arch::current_cpu_index();
+    SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .current_vcpu(cpu)
     })
 }
 
@@ -168,20 +222,31 @@ pub fn yield_now() -> Result<(), Error> {
 }
 
 pub fn thread_become_idle() -> ! {
-    if let Err(error) = install_current_idle() {
-        crate::pr_crit!("HypeR: idle-thread installation failed: {error:?}");
-        crate::arch::halt()
-    }
-    run_idle_loop()
+    crate::arch::disable_local_interrupts();
+    let stack = match install_current_idle() {
+        Ok(stack) => stack,
+        Err(error) => {
+            crate::pr_crit!("HypeR: idle-thread installation failed: {error:?}");
+            crate::arch::halt()
+        }
+    };
+    // SAFETY: The current Thread exclusively owns this newly installed stack,
+    // local interrupts are masked, and the idle continuation never returns.
+    unsafe { crate::kernel::mm::stack::reset_and_enter(stack, enter_clean_idle, 0) }
 }
 
-pub(crate) fn install_current_idle() -> Result<(), Error> {
+pub(crate) fn install_current_idle() -> Result<(usize, usize), Error> {
     let cpu = crate::arch::current_cpu_index();
     SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
             .install_current_as_idle(cpu)
     })
+}
+
+extern "C" fn enter_clean_idle(_argument: usize) -> ! {
+    crate::arch::enable_local_irq();
+    run_idle_loop()
 }
 
 pub(crate) fn run_idle_loop() -> ! {

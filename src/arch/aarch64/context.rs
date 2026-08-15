@@ -331,6 +331,15 @@ unsafe extern "C" {
     fn aarch64_switch_context(previous: *mut ThreadContext, next: *const ThreadContext);
     fn aarch64_thread_trampoline();
     fn aarch64_enter_guest(context: *const u8) -> !;
+    fn aarch64_reset_stack_and_enter(
+        bottom: usize,
+        top: usize,
+        watermark: u64,
+        canary: u64,
+        callback: extern "C" fn(usize) -> !,
+        argument: usize,
+    ) -> !;
+    fn aarch64_run_on_emergency_stack(callback: extern "C" fn(usize) -> !, argument: usize) -> !;
 }
 
 /// Switches AAPCS64 callee-saved state and kernel stacks.
@@ -341,6 +350,32 @@ unsafe extern "C" {
 /// previous context. `next` must own a valid mapped kernel stack.
 pub unsafe fn switch_thread_context(previous: &mut ThreadContext, next: &ThreadContext) {
     unsafe { aarch64_switch_context(previous, next) };
+}
+
+/// Abandons the current call chain and enters a continuation on a clean stack.
+///
+/// # Safety
+///
+/// `bottom..top` must be the exclusively owned, writable stack currently in
+/// use. Interrupts must be masked, and `callback` must never return.
+pub unsafe fn reset_stack_and_enter(
+    bottom: usize,
+    top: usize,
+    watermark: u64,
+    canary: u64,
+    callback: extern "C" fn(usize) -> !,
+    argument: usize,
+) -> ! {
+    unsafe { aarch64_reset_stack_and_enter(bottom, top, watermark, canary, callback, argument) }
+}
+
+/// Permanently invokes fatal handling on the calling CPU's emergency stack.
+///
+/// # Safety
+///
+/// `argument` must remain valid forever or until `callback` stops the CPU.
+pub unsafe fn run_on_emergency_stack(callback: extern "C" fn(usize) -> !, argument: usize) -> ! {
+    unsafe { aarch64_run_on_emergency_stack(callback, argument) }
 }
 
 const _: () = {

@@ -35,7 +35,7 @@ pub(super) fn initialize_local() -> Result<(), super::Error> {
             return Err(super::Error::TimerQueueAlreadyInitialized);
         }
         crate::arch::ArchitectureTimer::disable();
-        timers.queue = DeadlineQueue::with_id(cpu);
+        timers.queue.initialize_id(cpu)?;
         timers.initialized = true;
         Ok(())
     })

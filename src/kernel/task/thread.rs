@@ -1,13 +1,12 @@
 //! Architecture-neutral thread objects and execution payloads.
 
-use alloc::alloc::{alloc_zeroed, dealloc};
 use alloc::boxed::Box;
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
-const DEFAULT_KERNEL_STACK_SIZE: usize = 64 * 1024;
-const KERNEL_STACK_ALIGNMENT: usize = 16;
 const THREAD_NAME_CAPACITY: usize = 32;
+
+use crate::kernel::mm::stack::KernelStack;
 
 pub type KernelThreadEntry = extern "C" fn(usize);
 
@@ -115,7 +114,6 @@ pub enum ExecutionKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Allocation,
-    InvalidStackLayout,
     NameTooLong,
     Vgic(crate::arch::VgicError),
 }
@@ -170,7 +168,7 @@ impl Thread {
         entry: KernelThreadEntry,
         argument: usize,
     ) -> Result<Self, Error> {
-        let stack = KernelStack::allocate(DEFAULT_KERNEL_STACK_SIZE)?;
+        let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
         let mut context = crate::arch::ThreadContext::empty();
         context.prepare(stack.top(), entry, argument);
         Ok(Self {
@@ -196,7 +194,7 @@ impl Thread {
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
             context: crate::arch::ThreadContext::empty(),
-            kernel_stack: Some(KernelStack::allocate(DEFAULT_KERNEL_STACK_SIZE)?),
+            kernel_stack: Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
             execution: ThreadExecution::Kernel,
         })
     }
@@ -226,18 +224,27 @@ impl Thread {
         virtual_machine: VirtualMachineId,
         vcpu_id: u32,
         mut context: crate::arch::VcpuContext,
+        entry: KernelThreadEntry,
     ) -> Result<Self, Error> {
         let _ = context.initialize_vgic()?;
-        Self::with_payload(
+        let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
+        let mut scheduling_context = crate::arch::ThreadContext::empty();
+        scheduling_context.prepare(stack.top(), entry, 0);
+        Ok(Self {
             id,
             cpu_index,
-            name,
-            ThreadExecution::Vcpu(try_box(VcpuExecution {
+            name: ThreadName::new(name)?,
+            priority: ThreadPriority::NORMAL,
+            state: ThreadState::Dormant,
+            queue_links: QueueLinks::EMPTY,
+            context: scheduling_context,
+            kernel_stack: Some(stack),
+            execution: ThreadExecution::Vcpu(try_box(VcpuExecution {
                 virtual_machine,
                 vcpu_id,
                 context,
             })?),
-        )
+        })
     }
 
     fn with_payload(
@@ -254,7 +261,7 @@ impl Thread {
             state: ThreadState::Dormant,
             queue_links: QueueLinks::EMPTY,
             context: crate::arch::ThreadContext::empty(),
-            kernel_stack: Some(KernelStack::allocate(DEFAULT_KERNEL_STACK_SIZE)?),
+            kernel_stack: Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
             execution,
         })
     }
@@ -340,12 +347,30 @@ impl Thread {
         self.kernel_stack.is_some()
     }
 
+    pub(crate) fn ensure_kernel_stack(&mut self) -> Result<(usize, usize), Error> {
+        if self.kernel_stack.is_none() {
+            self.kernel_stack =
+                Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?);
+        }
+        self.kernel_stack_bounds().ok_or(Error::Allocation)
+    }
+
     pub(crate) fn kernel_stack_top(&self) -> Option<usize> {
         self.kernel_stack.as_ref().map(KernelStack::top)
     }
 
+    pub(crate) fn kernel_stack_physical_top(&self) -> Option<u64> {
+        self.kernel_stack.as_ref().map(KernelStack::physical_top)
+    }
+
     pub(crate) fn kernel_stack_bounds(&self) -> Option<(usize, usize)> {
         self.kernel_stack.as_ref().map(KernelStack::bounds)
+    }
+
+    pub(crate) fn kernel_stack_statistics(
+        &self,
+    ) -> Option<crate::kernel::mm::stack::StackStatistics> {
+        self.kernel_stack.as_ref().map(KernelStack::statistics)
     }
 }
 
@@ -381,41 +406,6 @@ impl ThreadName {
         unsafe { core::str::from_utf8_unchecked(bytes) }
     }
 }
-
-struct KernelStack {
-    base: NonNull<u8>,
-    layout: Layout,
-}
-
-impl KernelStack {
-    fn allocate(size: usize) -> Result<Self, Error> {
-        let layout = Layout::from_size_align(size, KERNEL_STACK_ALIGNMENT)
-            .map_err(|_| Error::InvalidStackLayout)?;
-        // SAFETY: The global allocator is initialized before scheduler setup;
-        // the returned allocation is owned by this KernelStack on success.
-        let base = NonNull::new(unsafe { alloc_zeroed(layout) }).ok_or(Error::Allocation)?;
-        Ok(Self { base, layout })
-    }
-
-    fn top(&self) -> usize {
-        self.base.as_ptr() as usize + self.layout.size()
-    }
-
-    fn bounds(&self) -> (usize, usize) {
-        (self.base.as_ptr() as usize, self.top())
-    }
-}
-
-impl Drop for KernelStack {
-    fn drop(&mut self) {
-        // SAFETY: base was allocated with exactly this layout and ownership is
-        // unique to KernelStack until this destructor runs.
-        unsafe { dealloc(self.base.as_ptr(), self.layout) };
-    }
-}
-
-// SAFETY: KernelStack owns an allocation and contains no thread-affine state.
-unsafe impl Send for KernelStack {}
 
 fn try_box<T>(value: T) -> Result<Box<T>, Error> {
     let layout = Layout::new::<T>();

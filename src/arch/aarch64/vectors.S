@@ -106,8 +106,30 @@ aarch64_runtime_vectors:
     mrs     x1, fpsr
     str     x1, [sp, #EXCEPTION_FRAME_FPSR_OFFSET]
 
-    mov     x0, sp
+    // IRQ handlers run on a private per-CPU stack. The architectural frame
+    // remains on the interrupted context so ERET and crash diagnostics retain
+    // the exact original register image.
+    mov     x19, sp
+    ldr     x1, [x19, #EXCEPTION_FRAME_VECTOR_OFFSET]
+    and     x1, x1, #3
+    cmp     x1, #1
+    b.ne    .Ldispatch_on_current_stack
+    mrs     x1, tpidr_el2
+    adrp    x2, AARCH64_IRQ_STACK_BOUNDS
+    add     x2, x2, :lo12:AARCH64_IRQ_STACK_BOUNDS
+    add     x2, x2, x1, lsl #4
+    ldp     x2, x3, [x2]
+    cbz     x3, .Ldispatch_on_current_stack
+    cmp     x19, x2
+    b.lo    .Lswitch_to_irq_stack
+    cmp     x19, x3
+    b.ls    .Ldispatch_on_current_stack
+.Lswitch_to_irq_stack:
+    mov     sp, x3
+.Ldispatch_on_current_stack:
+    mov     x0, x19
     bl      aarch64_exception_dispatch
+    mov     sp, x19
 
     ldr     x1, [sp, #EXCEPTION_FRAME_ELR_OFFSET]
     msr     elr_el2, x1

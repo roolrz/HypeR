@@ -2,12 +2,11 @@
 
 mod fdt;
 
-use core::convert::Infallible;
 use hyper::hal::interrupt::InterruptId;
 use hyper::mm::{BuddyError, PAGE_SIZE};
 
 use super::{VmBundle, VmInterruptController};
-use crate::kernel::task::thread::{VcpuExecution, VirtualMachineId};
+use crate::kernel::task::thread::{ThreadId, VirtualMachineId};
 use crate::kernel::vm::memory::GuestAddressSpace;
 
 const GUEST_RAM_IPA: u64 = 0x4000_0000;
@@ -22,12 +21,13 @@ pub enum Error {
     AddressOverflow,
     Allocation(BuddyError),
     Cache(hyper::hal::cache::CacheError),
-    Context(crate::arch::VgicError),
     DeviceTree(fdt::Error),
     Interrupts(super::interrupt::Error),
     InvalidKernel,
     InvalidLayout,
     Memory(crate::kernel::vm::memory::Error),
+    Runtime(super::runtime::Error),
+    Scheduler(crate::kernel::task::scheduler::Error),
     UnsupportedArchitecture,
     UnsupportedGuestType,
     UnsupportedMemorySize,
@@ -66,6 +66,18 @@ impl From<crate::kernel::vm::memory::Error> for Error {
     }
 }
 
+impl From<super::runtime::Error> for Error {
+    fn from(error: super::runtime::Error) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<crate::kernel::task::scheduler::Error> for Error {
+    fn from(error: crate::kernel::task::scheduler::Error) -> Self {
+        Self::Scheduler(error)
+    }
+}
+
 impl From<super::interrupt::Error> for Error {
     fn from(error: super::interrupt::Error) -> Self {
         Self::Interrupts(error)
@@ -78,7 +90,7 @@ impl From<super::VcpuInterruptError> for Error {
     }
 }
 
-pub fn boot(guest: VmBundle<'_>) -> Result<Infallible, Error> {
+pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     validate_guest(&guest)?;
     let image = guest.kernel();
     let initramfs = guest.initramfs();
@@ -93,11 +105,14 @@ pub fn boot(guest: VmBundle<'_>) -> Result<Infallible, Error> {
     crate::kernel::vm::memory::install(address_space)?;
     let guest_memory = crate::kernel::vm::memory::statistics(virtual_machine)
         .ok_or(crate::kernel::vm::memory::Error::NotInstalled)?;
-    let (interrupts, mut execution) = prepare_boot_vcpu(guest.vcpu_count())?;
+    let (interrupts, context) = prepare_boot_vcpu(guest.vcpu_count())?;
 
     report_guest_layout(&guest, initramfs_range, stage2_root, guest_memory);
     crate::kernel::mm::report_statistics("guest prepared");
-    enter_guest(&mut execution, &interrupts)
+    super::runtime::install(virtual_machine, interrupts)?;
+    let thread = super::vcpu::create_thread(virtual_machine, 0, context)?;
+    crate::kernel::task::scheduler::thread_ready(thread)?;
+    Ok(thread)
 }
 
 fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
@@ -182,7 +197,9 @@ fn load_payload(
     Ok(())
 }
 
-fn prepare_boot_vcpu(vcpu_count: u32) -> Result<(VmInterruptController, VcpuExecution), Error> {
+fn prepare_boot_vcpu(
+    vcpu_count: u32,
+) -> Result<(VmInterruptController, crate::arch::VcpuContext), Error> {
     let interrupts =
         VmInterruptController::new(vcpu_count, InterruptId::new(GUEST_TIMER_INTERRUPT))?;
     let mut context = crate::arch::VcpuContext::new(GUEST_KERNEL_IPA);
@@ -194,13 +211,7 @@ fn prepare_boot_vcpu(vcpu_count: u32) -> Result<(VmInterruptController, VcpuExec
         crate::kernel::time::monotonic_ticks(),
         crate::kernel::time::monotonic_ticks(),
     );
-    let _ = context.initialize_vgic().map_err(Error::Context)?;
-    let execution = VcpuExecution {
-        virtual_machine: VirtualMachineId(1),
-        vcpu_id: 0,
-        context,
-    };
-    Ok((interrupts, execution))
+    Ok((interrupts, context))
 }
 
 fn report_guest_layout(
@@ -228,20 +239,6 @@ fn report_guest_layout(
         memory.boot_committed_pages,
         memory.addressable_pages
     );
-}
-
-fn enter_guest(
-    execution: &mut VcpuExecution,
-    interrupts: &VmInterruptController,
-) -> Result<Infallible, Error> {
-    // SAFETY: All guest-visible RAM and device mappings are complete. These
-    // stack objects remain pinned because guest entry never returns.
-    unsafe {
-        execution.activate_virtual_hardware(interrupts)?;
-        crate::kernel::vm::memory::activate(execution.virtual_machine)?;
-        crate::arch::enable_local_irq();
-        execution.context.enter()
-    }
 }
 
 fn align_up(value: u64, alignment: u64) -> Result<u64, Error> {

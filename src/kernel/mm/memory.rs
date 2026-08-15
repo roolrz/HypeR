@@ -57,6 +57,30 @@ impl PreparedMemory {
             .map_err(Error::from)
     }
 
+    pub fn map_kernel_stack(
+        &self,
+        slot: usize,
+        physical: PhysicalAddress,
+        pages: usize,
+        allocate_table: &mut dyn FnMut() -> Option<PhysicalAddress>,
+    ) -> Result<crate::arch::StackMapping, Error> {
+        self.address_space
+            .map_stack(slot, physical, pages, allocate_table)
+            .map_err(Error::from)
+    }
+
+    pub fn unmap_kernel_stack(&self, slot: usize, pages: usize) -> Result<(), Error> {
+        self.address_space
+            .unmap_stack(slot, pages)
+            .map_err(Error::from)
+    }
+
+    pub fn address_is_mapped(&self, address: usize) -> Result<bool, Error> {
+        self.address_space
+            .address_is_mapped(address)
+            .map_err(Error::from)
+    }
+
     pub fn initialize_global_allocator(
         &self,
         allocator: &GlobalAllocator,

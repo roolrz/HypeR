@@ -124,18 +124,60 @@ pub(crate) fn fatal_context(context: CrashContext, arguments: fmt::Arguments<'_>
 
 /// Publishes a remote CPU's exact IRQ frame and permanently stops that CPU.
 pub(crate) fn stop_this_cpu(context: CrashContext) -> ! {
+    let mut payload = StopPayload { context };
+    // SAFETY: payload remains live on the abandoned stack and the callback
+    // never returns after switching to the per-CPU emergency stack.
+    unsafe {
+        crate::arch::run_on_emergency_stack(
+            stop_this_cpu_on_emergency_stack,
+            (&mut payload as *mut StopPayload) as usize,
+        )
+    }
+}
+
+struct StopPayload {
+    context: CrashContext,
+}
+
+extern "C" fn stop_this_cpu_on_emergency_stack(argument: usize) -> ! {
+    // SAFETY: stop_this_cpu passes one live payload and the callback never
+    // returns to outlive it.
+    let payload = unsafe { &*(argument as *const StopPayload) };
     crate::arch::disable_local_interrupts();
-    publish_current_cpu(context);
+    publish_current_cpu(payload.context);
     STOPPED_CPUS.fetch_add(1, Ordering::AcqRel);
     crate::arch::halt()
 }
 
 fn enter(context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
+    let mut payload = CrashPayload { context, reason };
+    // SAFETY: payload remains live on the abandoned stack and fatal handling
+    // permanently owns control after switching to the emergency stack.
+    unsafe {
+        crate::arch::run_on_emergency_stack(
+            enter_on_emergency_stack,
+            (&mut payload as *mut CrashPayload<'_>) as usize,
+        )
+    }
+}
+
+struct CrashPayload<'reason> {
+    context: CrashContext,
+    reason: fmt::Arguments<'reason>,
+}
+
+extern "C" fn enter_on_emergency_stack(argument: usize) -> ! {
+    // SAFETY: enter passes one live payload and this callback never returns.
+    let payload = unsafe { &*(argument as *const CrashPayload<'_>) };
     crate::arch::disable_local_interrupts();
     let cpu = crate::arch::current_cpu_index();
     match CRASH_OWNER.compare_exchange(NO_CRASH_OWNER, cpu, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => {}
-        Err(owner) if owner != cpu => stop_this_cpu(context),
+        Err(owner) if owner != cpu => {
+            publish_current_cpu(payload.context);
+            STOPPED_CPUS.fetch_add(1, Ordering::AcqRel);
+            crate::arch::halt()
+        }
         Err(_) => {
             super::log::emergency(format_args!(
                 "RECURSIVE KERNEL PANIC on CPU {cpu}; diagnostics aborted"
@@ -144,9 +186,9 @@ fn enter(context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
         }
     }
 
-    publish_current_cpu(context);
+    publish_current_cpu(payload.context);
     let stop = stop_other_cpus();
-    emit_banner(cpu, reason, stop);
+    emit_banner(cpu, payload.reason, stop);
     dump_cpu_states(cpu);
     super::log::emergency(format_args!(
         "---[ end HypeR kernel panic - system halted ]---"
@@ -240,12 +282,27 @@ fn dump_cpu_header(
         context.hardware_id, context.current_el, context.interrupt_mask
     ));
     match task {
-        Some(task) => super::log::emergency(format_args!(
-            "CPU {cpu}: task {} {:?} {:?}",
-            task.id.get(),
-            task.state,
-            task.execution
-        )),
+        Some(task) => {
+            super::log::emergency(format_args!(
+                "CPU {cpu}: task {} {:?} {:?}",
+                task.id.get(),
+                task.state,
+                task.execution
+            ));
+            if let Some(stack) = task.stack_statistics {
+                super::log::emergency(format_args!(
+                    "CPU {cpu}: task stack {}/{} bytes used, guard {:#x}, canary {}",
+                    stack.used,
+                    stack.size,
+                    stack.guard_page,
+                    if stack.canary_intact {
+                        "intact"
+                    } else {
+                        "CORRUPTED"
+                    }
+                ));
+            }
+        }
         None => super::log::emergency(format_args!(
             "CPU {cpu}: current task unavailable (scheduler lock busy or not initialized)"
         )),
@@ -331,7 +388,7 @@ fn dump_backtrace(
         super::log::emergency(format_args!("  frame pointer unavailable"));
         return;
     }
-    let Some((bottom, top)) = stack_bounds(context.stack_pointer, task) else {
+    let Some((bottom, top)) = stack_bounds(cpu, context.stack_pointer, task) else {
         super::log::emergency(format_args!("  stack bounds unavailable; unwind stopped"));
         return;
     };
@@ -339,12 +396,14 @@ fn dump_backtrace(
 }
 
 fn stack_bounds(
+    cpu: usize,
     stack_pointer: u64,
     task: Option<super::task::scheduler::CrashTaskSnapshot>,
 ) -> Option<(usize, usize)> {
     task.and_then(|task| task.stack)
         .filter(|(bottom, top)| *bottom <= stack_pointer as usize && stack_pointer as usize <= *top)
         .or_else(|| crate::arch::bootstrap_stack_bounds(stack_pointer))
+        .or_else(|| super::mm::stack::exception_stack_bounds(cpu, stack_pointer as usize))
 }
 
 fn walk_frame_chain(mut frame: usize, bottom: usize, top: usize) {

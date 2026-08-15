@@ -29,6 +29,7 @@ jobs:
           cargo fmt --all -- --check
           cargo fmt --manifest-path tests/host/Cargo.toml -- --check
           cargo fmt --manifest-path tools/kconfig/Cargo.toml -- --check
+          cargo fmt --manifest-path tools/kallsyms/Cargo.toml -- --check
 
   test:
     name: Host tests
@@ -41,46 +42,41 @@ jobs:
         run: make test
 
   build:
-    name: Build (${{ matrix.profile }})
+    name: Build canonical kernel
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [debug, release]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - name: Build kernel image
-        run: make image PROFILE=${{ matrix.profile }}
-      - name: Upload kernel image
+      - name: Build and verify stripped delivery copy
+        run: make release
+      - name: Upload canonical and stripped artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: hyper-aarch64-${{ matrix.profile }}
+          name: hyper-aarch64-kernel
           path: |
-            target/aarch64-unknown-none/${{ matrix.profile }}/hyper
-            target/aarch64-unknown-none/${{ matrix.profile }}/hyper.img
+            target/aarch64-unknown-none/kernel/hyper
+            target/aarch64-unknown-none/kernel/hyper.img
+            target/aarch64-unknown-none/kernel/hyper.kallsyms
+            target/aarch64-unknown-none/kernel/hyper.stripped
+            target/aarch64-unknown-none/kernel/hyper.stripped.img
           if-no-files-found: error
 
   image-test:
-    name: Image tests (${{ matrix.profile }})
+    name: Image tests
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: build
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [debug, release]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
       - name: Download kernel image
         uses: actions/download-artifact@v4
         with:
-          name: hyper-aarch64-${{ matrix.profile }}
-          path: target/aarch64-unknown-none/${{ matrix.profile }}
+          name: hyper-aarch64-kernel
+          path: target/aarch64-unknown-none/kernel
       - name: Verify image ABI and atomic backends
-        run: make test-image PROFILE=${{ matrix.profile }}
+        run: make test-image
 
   qemu-boot:
     name: Four-core QEMU (${{ matrix.cpu }})
@@ -94,17 +90,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - name: Download debug kernel image
-        uses: actions/download-artifact@v4
-        with:
-          name: hyper-aarch64-debug
-          path: target/aarch64-unknown-none/debug
       - name: Install QEMU
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends cpio qemu-system-arm
       - name: Verify host SMP and Linux guest init
-        run: make test-qemu PROFILE=debug QEMU_CPU=${{ matrix.cpu }}
+        run: make test-qemu QEMU_CPU=${{ matrix.cpu }}
       - name: Clean up QEMU processes
         if: always()
         run: |

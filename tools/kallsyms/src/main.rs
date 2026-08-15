@@ -21,23 +21,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = env::args_os().skip(1);
     let nm = arguments
         .next()
-        .ok_or("usage: hyper-kallsyms <llvm-nm> <elf> <output> <capacity>")?;
+        .ok_or("usage: hyper-kallsyms <llvm-nm> <elf> <output>")?;
     let elf = arguments.next().ok_or("missing ELF path")?;
     let output = arguments.next().ok_or("missing output path")?;
-    let capacity = arguments
-        .next()
-        .ok_or("missing storage capacity")?
-        .to_string_lossy()
-        .parse::<usize>()?;
     if arguments.next().is_some() {
         return Err("unexpected extra argument".into());
     }
 
     let symbols = read_symbols(Path::new(&nm), Path::new(&elf))?;
-    let image = encode_symbols(&symbols, capacity)?;
+    let image = encode_symbols(&symbols)?;
     fs::write(&output, image)?;
     println!(
-        "embedded {} complete function symbols into {}",
+        "generated exact kallsyms image for {} complete function symbols at {}",
         symbols.len(),
         Path::new(&output).display()
     );
@@ -92,7 +87,7 @@ fn compare_symbols(left: &FunctionSymbol, right: &FunctionSymbol) -> Ordering {
     })
 }
 
-fn encode_symbols(symbols: &[FunctionSymbol], capacity: usize) -> Result<Vec<u8>, Box<dyn Error>> {
+fn encode_symbols(symbols: &[FunctionSymbol]) -> Result<Vec<u8>, Box<dyn Error>> {
     let records_size = symbols
         .len()
         .checked_mul(RECORD_SIZE)
@@ -107,11 +102,7 @@ fn encode_symbols(symbols: &[FunctionSymbol], capacity: usize) -> Result<Vec<u8>
     let used = strings_offset
         .checked_add(strings_size)
         .ok_or("symbol image size overflow")?;
-    if used > capacity {
-        return Err(format!("kallsyms requires {used} bytes, capacity is {capacity}").into());
-    }
-
-    let mut image = vec![0u8; capacity];
+    let mut image = vec![0u8; used];
     image[..8].copy_from_slice(MAGIC);
     write_u32(&mut image, 8, VERSION)?;
     write_u32(&mut image, 12, u32::try_from(symbols.len())?)?;

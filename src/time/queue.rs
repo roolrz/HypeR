@@ -9,6 +9,7 @@ pub enum Error {
     Full,
     InvalidHandle,
     InvalidInterval,
+    QueueAlreadyUsed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,6 +120,20 @@ impl<const CAPACITY: usize> DeadlineQueue<CAPACITY> {
                 overruns: 0,
             },
         }
+    }
+
+    /// Assigns an identity to a statically constructed queue before first use.
+    ///
+    /// This avoids materializing a potentially large fixed-capacity queue on
+    /// a kernel stack merely to change its ID. Once a scheduling operation has
+    /// been attempted, rebinding is rejected so existing handles cannot alias
+    /// another queue identity.
+    pub fn initialize_id(&mut self, queue_id: usize) -> Result<(), Error> {
+        if self.stats.schedules != 0 || self.heap_len != 0 {
+            return Err(Error::QueueAlreadyUsed);
+        }
+        self.queue_id = queue_id;
+        Ok(())
     }
 
     pub fn schedule(

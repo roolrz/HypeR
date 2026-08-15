@@ -2,8 +2,8 @@
 # Validates the built ELF and raw Linux Image without rebuilding either file.
 set -eu
 
-if [ "$#" -ne 5 ]; then
-    echo "usage: verify-image.sh LLVM_READOBJ LLVM_NM LLVM_OBJDUMP ELF IMAGE" >&2
+if [ "$#" -ne 6 ]; then
+    echo "usage: verify-image.sh LLVM_READOBJ LLVM_NM LLVM_OBJDUMP ELF IMAGE KALLSYMS" >&2
     exit 2
 fi
 
@@ -12,6 +12,7 @@ nm=$2
 objdump=$3
 elf=$4
 image=$5
+kallsyms=$6
 
 header=$($readobj --file-headers "$elf")
 printf '%s\n' "$header" | grep -q 'Type: SharedObject'
@@ -60,6 +61,8 @@ printf '%s\n' "$symbols" | grep -q '__kallsyms_symbols_start'
 printf '%s\n' "$symbols" | grep -q '__kallsyms_symbols_end'
 printf '%s\n' "$symbols" | grep -q '__kallsyms_strings_start'
 printf '%s\n' "$symbols" | grep -q '__kallsyms_strings_end'
+printf '%s\n' "$symbols" | grep -q '__kallsyms_start'
+printf '%s\n' "$symbols" | grep -q '__kallsyms_end'
 printf '%s\n' "$symbols" | grep -q '__aarch64_have_lse_atomics'
 printf '%s\n' "$symbols" | grep -q '__aarch64_cas1_acq_rel'
 
@@ -71,5 +74,19 @@ printf '%s\n' "$instructions" | grep -Eq '[[:space:]]stl?xrb[[:space:]]'
 dynamic_symbols=$($nm -D --defined-only "$elf")
 printf '%s\n' "$dynamic_symbols" | grep -q ' hyper_kallsyms_lookup$'
 printf '%s\n' "$sections" | grep -q 'Name: \.kallsyms'
+
+kallsyms_section_size=$(printf '%s\n' "$sections" | awk '
+    /Name: \.kallsyms / { in_kallsyms = 1; next }
+    in_kallsyms && /Size:/ { print $2; exit }
+')
+kallsyms_file_size=$(wc -c < "$kallsyms" | tr -d ' ')
+kallsyms_strings_offset=$(od -An -tu4 -j 16 -N 4 "$kallsyms" | tr -d ' ')
+kallsyms_strings_size=$(od -An -tu4 -j 20 -N 4 "$kallsyms" | tr -d ' ')
+kallsyms_used=$((kallsyms_strings_offset + kallsyms_strings_size))
+if [ "$kallsyms_section_size" -ne "$kallsyms_file_size" ] ||
+    [ "$kallsyms_used" -ne "$kallsyms_file_size" ]; then
+    echo "kallsyms section is not exact-sized: section=$kallsyms_section_size, used=$kallsyms_used, file=$kallsyms_file_size" >&2
+    exit 1
+fi
 
 echo "verified PIE, RELA/RELR, kallsyms, Linux header, and runtime atomic paths"

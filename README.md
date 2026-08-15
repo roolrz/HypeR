@@ -63,13 +63,16 @@ Use `make config` for an interactive configuration, `make olddefconfig` after
 adding Kconfig symbols, or `make defconfig` to restore the tracked QEMU AArch64
 defaults.
 
-`make image` produces `target/aarch64-unknown-none/debug/hyper.img`. The ELF is
-retained beside it for symbolic debugging.
+`make image` produces `target/aarch64-unknown-none/kernel/hyper.img`. The
+canonical ELF, including debugger-only information, is retained beside it.
+`make release` does not recompile: it creates `hyper.stripped` by removing only
+debug sections from that ELF and verifies that both ELFs produce byte-identical
+raw Images.
 
 ## Continuous integration
 
 GitHub Actions runs independent required-quality stages for formatting and
-Clippy, host unit tests, debug/release bare-metal builds, image ABI validation,
+Clippy, host unit tests, the canonical bare-metal build, image ABI validation,
 and four-core QEMU boot tests on the `cortex-a72` and `max` CPU models. Runtime
 tests require the ramdisk-loaded Linux guest to initialize GICv3 and the
 virtual Arm timer and execute `/init`. Build artifacts contain both the ELF
@@ -126,6 +129,12 @@ are intentionally returned as stored; demangling is a presentation-layer
 concern and must not make lookup itself allocate. Initialization verifies the
 mechanism by resolving the randomized address of the exported
 `hyper_kallsyms_lookup` entry.
+
+Image construction derives the compact `.kallsyms` payload from the actual
+linked function set. A bootstrap link determines the exact record and string
+sizes, a second link embeds that exact-size section, and a final generation
+refreshes addresses from the resulting ELF. There is no fixed kallsyms
+capacity or unused reserved tail.
 
 ## Kernel configuration
 
@@ -228,13 +237,14 @@ All test-only code and executables live under one top-level hierarchy:
 tests/
   host/       host-side unit and subsystem tests
   image/      ELF, Linux Image, PIE, and atomic-backend validation
-  kernel/     feature-gated bare-metal scheduler/synchronization tests
+  kernel/     feature-gated bare-metal scheduler, synchronization, and stack tests
   qemu/       four-core host boot and Linux guest-init integration tests
 ```
 
 Normal images contain no test routines. QEMU test targets enable the
 `kernel-self-test` Cargo feature, which includes `tests/kernel` and executes
-real kernel-thread context-switch tests before entering the guest.
+real kernel-thread context-switch and guarded-stack tests before entering the
+guest.
 
 The kernel layer consumes only the `arch` facade. Kernel memory policy owns the
 boot allocator, image/DTB reservations, and runtime-allocator handoff. The HAL
@@ -289,7 +299,8 @@ The final non-VHE EL2 address space uses a 48-bit VA and 4 KiB granule:
 | MMIO window | `0x0000_1000_0000_0000 + PA` | Device-nGnRnE, RW, XN |
 | RAM linear map | `0x0000_4000_0000_0000 + PA` | Normal-WB, NX; kernel pages preserve RO/RW |
 | Kernel image | `0x0000_ff00_0000_0000 + offset` | text RX, rodata R+XN, data/BSS RW+XN |
-| Kernel stack | `0x0000_ff80_0000_0000` | Normal-WB, RW, XN |
+| Bootstrap stack | `0x0000_ff80_0000_1000` | 64 KiB transition stack; unmapped lower guard page |
+| Runtime stack arena | `0x0000_ff80_0020_0000` | Guarded thread and per-CPU exception-stack slots |
 
 After TTBR activation, execution, exception vectors, and the stack move to the
 high kernel mapping. The DTB is scanned again through the linear map after the
@@ -308,12 +319,13 @@ aliases at page granularity.
 
 The allocation-free FDT pass records enabled `/cpus` children and their `reg`
 hardware IDs up to `CONFIG_MAX_CPUS`. The boot CPU assigns stable logical CPU
-indices, allocates a private 64 KiB kernel stack and initial idle Thread for
-each secondary, and starts it through the architecture-neutral CPU-power
-service. Each boot record is cleaned to PoC before CPU_ON because the PSCI
-target begins with data caching disabled. AArch64 supplies a position-independent PSCI physical trampoline that
-installs deterministic EL2 state, the final TTBR, the high runtime vectors,
-`TPIDR_EL2`, and the secondary's virtual stack before entering Rust.
+indices, allocates an exact page-backed guarded kernel stack and initial idle
+Thread for each secondary, and starts it through the architecture-neutral
+CPU-power service. Each boot record is cleaned to PoC before CPU_ON because the
+PSCI target begins with data caching disabled. AArch64 supplies a
+position-independent PSCI physical trampoline that installs deterministic EL2
+state, the final TTBR, the high runtime vectors, `TPIDR_EL2`, and the
+secondary's virtual stack before entering Rust.
 
 Each secondary matches and wakes its GICv3 Redistributor, initializes its
 system-register CPU interface, enables registered PPIs, starts its private
@@ -442,6 +454,33 @@ requiring a linear scan. `kthread_create` registers a dormant kernel thread,
 and `thread_ready` enqueues it on its owning CPU. Fresh kernel threads enter
 through a common trampoline; returning from an entry function terminates the
 thread and transfers to another ready thread before its stack is reclaimed.
+The saved `ThreadContext` is kept in the pinned Thread object rather than at the
+stack bottom, so an overflow cannot corrupt the state needed by the scheduler.
+Secondary CPUs abandon and refill their initialization call chain before
+publishing online state and entering the idle continuation at a clean stack top.
+The 64 KiB bootstrap stack exists only for CPU0's unusually deep complete
+initialization call chain. Before CPU0 becomes idle, it abandons that call
+chain and pivots onto the same configurable guarded stack model used by
+secondary idle Threads. The
+boot vCPU is a normal scheduler-owned `Thread::Vcpu`: its `VcpuExecution`
+and shared VM interrupt runtime remain pinned independently of the bootstrap
+call chain, and guest synchronous exceptions use that thread's guarded kernel
+stack. The bootstrap Thread becomes CPU0's idle Thread after enqueueing the
+vCPU.
+
+Kernel thread stacks are dedicated buddy allocations, not heap buffers. Each is
+mapped into a private virtual slot above an unmapped lower guard page and
+contains a bottom canary plus a fill watermark for peak-usage diagnostics.
+Every CPU also owns separate IRQ and emergency/crash stacks. AArch64 leaves the
+fixed architectural exception frame on the interrupted stack, then runs IRQ
+dispatch and timer callbacks on the CPU's IRQ stack; fatal reporting switches
+permanently to the emergency stack before stopping peers and dumping state.
+`CONFIG_KERNEL_STACK_SIZE_KB`, `CONFIG_IRQ_STACK_SIZE_KB`, and
+`CONFIG_EMERGENCY_STACK_SIZE_KB` control the three stack classes, while
+`CONFIG_MAX_KERNEL_STACKS` bounds the virtual arena. Thread stacks have a
+tested 16 KiB default and minimum; IRQ and emergency stacks default to 32 KiB.
+Bare-metal tests verify guard mappings, canaries, high-water marks, exact page
+accounting and reclaim, and a real timer interrupt's stack switch.
 
 Scheduler wait queues use the same intrusive node and atomically combine the
 Blocked transition with next-thread selection. The kernel synchronization
@@ -462,8 +501,7 @@ or exiting normal thread falls back to this pinned idle context, so the
 scheduler always has a valid running context. Every online CPU owns a distinct
 idle Thread, ready set, and current-thread slot. This milestone remains
 cooperative; timer preemption, load balancing and affinity migration, EL0
-exception return, scheduled/multi-vCPU guest run loops, and stack guard pages
-remain future work.
+exception return, multi-vCPU startup and guest timeslicing remain future work.
 Kernel initialization uses explicit error propagation and does not use
 `unwrap` or `expect`. Since Rust's `GlobalAlloc` deallocation interface cannot
 return an error, allocator invariant failures record a stable diagnostic code
@@ -504,9 +542,11 @@ map base. AArch64 supplies the direct-map layout through `hal::memory`, while
 `kernel::memory` performs the boot-memory handoff after address-space
 activation.
 
-`make verify` also validates that debug and release ELF files contain only
-relative relocations, carry standard RELR sections and dynamic tags, and produce
-a valid Linux AArch64 Image with a page-aligned declared memory footprint. It
+`make verify` also validates that the canonical ELF contains only relative
+relocations, carries standard RELR sections and dynamic tags, and produces a
+valid Linux AArch64 Image with a page-aligned declared memory footprint. It
+strips only debugger sections into a delivery copy and requires its raw Image
+to be byte-identical to the canonical Image. It
 checks both linked atomic backends, boots the baseline `cortex-a72` and
 feature-rich `max` QEMU CPU models, validates the reported KASLR slide geometry,
 and requires recurring EL2 timer interrupts on every CPU.

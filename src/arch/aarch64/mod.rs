@@ -19,9 +19,13 @@ mod vsysreg;
 pub use atomics::{AtomicCapabilities, capabilities as atomic_capabilities};
 pub use barrier::Aarch64Barrier;
 pub use cache::Aarch64Cache;
-pub use context::{ThreadContext, UserContext, VcpuContext, switch_thread_context};
+pub use context::{
+    ThreadContext, UserContext, VcpuContext, reset_stack_and_enter, run_on_emergency_stack,
+    switch_thread_context,
+};
 pub use exception::{
-    CrashContext, capture_crash_context, install_runtime_vectors, validate_runtime_vectors,
+    CrashContext, capture_crash_context, install_exception_stacks, install_runtime_vectors,
+    validate_runtime_vectors,
 };
 pub use gic::{
     Aarch64GicCpuInterface, acknowledge_interrupt, broadcast_crash_stop, crash_stop_interrupt,
@@ -35,7 +39,7 @@ pub use interrupts::{
 pub use kaslr::select as select_kaslr_layout;
 pub use memory::{
     Aarch64AddressTranslation as ArchitectureAddressTranslation, ActivationContext,
-    Error as MemoryError, PreparedAddressSpace, bootstrap_stack_bounds,
+    Error as MemoryError, PreparedAddressSpace, StackMapping, bootstrap_stack_bounds,
 };
 pub use platform::{EssentialDeviceDiscovery, EssentialPlatformInfo, decode_platform_interrupt};
 pub use psci::Aarch64Psci as ArchitectureCpuPower;

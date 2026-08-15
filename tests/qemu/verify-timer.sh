@@ -51,6 +51,7 @@ while [ "$attempt" -lt 300 ]; do
         grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
         grep -q 'HypeR: scheduler active on bootstrap thread 0' "$log" &&
         grep -q 'HypeR test: scheduler ready/wait queues and sleeping sync passed' "$log" &&
+        grep -q 'HypeR test: guarded thread, IRQ, and emergency stacks passed' "$log" &&
         grep -q 'HypeR: Arm Generic Timer: EL2 INTID 26, guest virtual INTID 27 (host VIRQ [0-9][0-9]*), [1-9][0-9]* Hz tick from a [1-9][0-9]* Hz counter' "$log" &&
         grep -q 'HypeR: monotonic clocksource active at [1-9][0-9]* Hz' "$log" &&
         grep -q 'HypeR: virtual architected timer injection validated' "$log" &&
@@ -61,6 +62,7 @@ while [ "$attempt" -lt 300 ]; do
         grep -q 'HypeR: platform bus: .* bound, .* unmatched, .* deferred, .* failed' "$log" &&
         grep -q "HypeR: loaded VM 'alpine' from boot ramdisk: 128 MiB RAM, 1 vCPU(s)" "$log" &&
         grep -q 'HypeR: kernel initialization complete; starting Linux guest' "$log" &&
+        grep -q 'HypeR: vCPU 0 running as scheduler thread [1-9][0-9]* on guarded stack 0x[0-9a-f][0-9a-f]*-0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'arch_timer: cp15 timer running at .* (virt).' "$log" &&
         grep -q 'HypeR guest: Linux userspace is running' "$log"; then
         echo "verified EL2 host ticks and the Linux virtual timer using model $cpu"

@@ -29,12 +29,16 @@ rustc-demangle = { version = "0.1.28", default-features = false }
 expect_used = "deny"
 unwrap_used = "deny"
 
-[profile.dev]
-lto = "thin"
-panic = "abort"
-
-[profile.release]
+[profile.kernel]
+inherits = "release"
 codegen-units = 1
+debug = 2
+debug-assertions = true
+incremental = false
 lto = true
 opt-level = 2
+overflow-checks = true
 panic = "abort"
+rpath = false
+split-debuginfo = "off"
+strip = "none"

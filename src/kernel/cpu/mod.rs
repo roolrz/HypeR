@@ -7,14 +7,16 @@ pub use smp::{Capabilities, Error, secondary_entry};
 
 /// Starts secondary CPUs and waits for their local kernel state to come online.
 pub(crate) fn initialize(boot: &mut super::boot::Initialization) {
-    let capabilities = match super::boot::with_boot_state(|state| {
-        smp::initialize(
-            &state.platform,
-            state.memory.root_address(),
-            state.image_physical_start,
-            state.memory.kernel_base(),
-        )
-    }) {
+    let (platform, root, image_physical_start, kernel_base) =
+        super::boot::with_boot_state(|state| {
+            (
+                state.platform,
+                state.memory.root_address(),
+                state.image_physical_start,
+                state.memory.kernel_base(),
+            )
+        });
+    let capabilities = match smp::initialize(&platform, root, image_physical_start, kernel_base) {
         Ok(capabilities) => capabilities,
         Err(error) => super::boot::fail("SMP initialization", error),
     };

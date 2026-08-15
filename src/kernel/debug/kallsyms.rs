@@ -2,24 +2,27 @@
 
 use core::ptr::addr_of;
 
-use hyper::debug::kallsyms::{COMPACT_MAGIC, CompactSymbolTable, SymbolTable};
+#[cfg(not(hyper_embed_kallsyms))]
+use hyper::debug::kallsyms::COMPACT_MAGIC;
+use hyper::debug::kallsyms::{CompactSymbolTable, SymbolTable};
 pub use hyper::debug::kallsyms::{Error, Symbol};
-
-#[cfg(debug_assertions)]
-const KALLSYMS_STORAGE_SIZE: usize = 768 * 1024;
-#[cfg(not(debug_assertions))]
-const KALLSYMS_STORAGE_SIZE: usize = 128 * 1024;
-
-#[repr(C, align(8))]
-struct KallsymsStorage([u8; KALLSYMS_STORAGE_SIZE]);
 
 #[used]
 #[unsafe(link_section = ".kallsyms")]
-static KALLSYMS_STORAGE: KallsymsStorage = KallsymsStorage(empty_storage());
+#[cfg(hyper_embed_kallsyms)]
+static KALLSYMS_STORAGE: [u8; include_bytes!(env!("HYPER_KALLSYMS_BLOB")).len()] =
+    *include_bytes!(env!("HYPER_KALLSYMS_BLOB"));
+
+#[used]
+#[unsafe(link_section = ".kallsyms")]
+#[cfg(not(hyper_embed_kallsyms))]
+static KALLSYMS_STORAGE: [u8; COMPACT_MAGIC.len()] = COMPACT_MAGIC;
 
 unsafe extern "C" {
     static __image_start: u8;
     static __image_end: u8;
+    static __kallsyms_start: u8;
+    static __kallsyms_end: u8;
     static __kallsyms_symbols_start: u8;
     static __kallsyms_symbols_end: u8;
     static __kallsyms_strings_start: u8;
@@ -34,10 +37,19 @@ pub fn lookup(address: usize) -> Result<Option<Symbol<'static>>, Error> {
     let image_size = image_end
         .checked_sub(image_start)
         .ok_or(Error::InvalidSymbolTable)?;
-    if let Ok(table) = CompactSymbolTable::new(&KALLSYMS_STORAGE.0, image_start, image_size) {
+    if let Ok(table) = CompactSymbolTable::new(compact_storage()?, image_start, image_size) {
         return table.lookup_containing(address);
     }
     dynamic_table(image_start, image_size)?.lookup_containing(address)
+}
+
+fn compact_storage() -> Result<&'static [u8], Error> {
+    let start = addr_of!(__kallsyms_start) as usize;
+    let end = addr_of!(__kallsyms_end) as usize;
+    let size = end.checked_sub(start).ok_or(Error::InvalidSymbolTable)?;
+    // SAFETY: The linker retains this complete immutable range in the
+    // permanent read-only kernel image mapping.
+    Ok(unsafe { core::slice::from_raw_parts(start as *const u8, size) })
 }
 
 fn dynamic_table(image_start: usize, image_size: usize) -> Result<SymbolTable<'static>, Error> {
@@ -59,14 +71,4 @@ fn dynamic_table(image_start: usize, image_size: usize) -> Result<SymbolTable<'s
     // read-only image mapping.
     let strings = unsafe { core::slice::from_raw_parts(strings_start as *const u8, string_size) };
     SymbolTable::new(symbols, strings, image_start, image_size)
-}
-
-const fn empty_storage() -> [u8; KALLSYMS_STORAGE_SIZE] {
-    let mut storage = [0; KALLSYMS_STORAGE_SIZE];
-    let mut index = 0;
-    while index < COMPACT_MAGIC.len() {
-        storage[index] = COMPACT_MAGIC[index];
-        index += 1;
-    }
-    storage
 }

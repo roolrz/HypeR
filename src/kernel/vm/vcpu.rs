@@ -5,7 +5,64 @@ use hyper::drivers::interrupt::vgic::{
 };
 
 use super::VmInterruptController;
-use crate::kernel::task::thread::VcpuExecution;
+use crate::kernel::task::thread::{ThreadId, VcpuExecution, VirtualMachineId};
+
+pub(super) fn create_thread(
+    virtual_machine: VirtualMachineId,
+    vcpu_id: u32,
+    context: crate::arch::VcpuContext,
+) -> Result<ThreadId, crate::kernel::task::scheduler::Error> {
+    crate::kernel::task::scheduler::vcpu_create(
+        "vcpu/0",
+        virtual_machine,
+        vcpu_id,
+        context,
+        thread_entry,
+    )
+}
+
+extern "C" fn thread_entry(_argument: usize) {
+    run_current()
+}
+
+fn run_current() -> ! {
+    crate::arch::disable_local_interrupts();
+    let current = match crate::kernel::task::scheduler::current_vcpu() {
+        Ok(current) => current,
+        Err(error) => crate::kernel::boot::fail("current vCPU lookup", error),
+    };
+    let stack_marker = 0usize;
+    let stack_pointer = (&stack_marker as *const usize) as usize;
+    if stack_pointer < current.stack.0 || stack_pointer >= current.stack.1 {
+        crate::kernel::boot::fail("vCPU kernel-stack validation", current.stack);
+    }
+    // SAFETY: The scheduler pins the current Thread and grants its vCPU
+    // payload exclusively to this non-returning run loop.
+    let execution = unsafe { &mut *current.execution };
+    let interrupts = match super::runtime::interrupts(execution.virtual_machine) {
+        Ok(interrupts) => interrupts,
+        Err(error) => crate::kernel::boot::fail("vCPU runtime lookup", error),
+    };
+    crate::println!(
+        "HypeR: vCPU {} running as scheduler thread {} on guarded stack {:#x}-{:#x}",
+        execution.vcpu_id,
+        current.thread.get(),
+        current.stack.0,
+        current.stack.1
+    );
+    // SAFETY: This current scheduler Thread exclusively owns the stopped vCPU,
+    // runtime objects are pinned, and local interrupts remain masked.
+    unsafe {
+        if let Err(error) = execution.activate_virtual_hardware(interrupts) {
+            crate::kernel::boot::fail("vCPU virtual-hardware activation", error);
+        }
+        if let Err(error) = super::memory::activate(execution.virtual_machine) {
+            crate::kernel::boot::fail("vCPU stage-2 activation", error);
+        }
+        crate::arch::enable_local_irq();
+        execution.context.enter()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VcpuInterruptError {

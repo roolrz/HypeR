@@ -28,6 +28,26 @@ config MAX_CPUS
     range 1 256
     default 8
 
+config MAX_KERNEL_STACKS
+    int "Maximum simultaneously allocated kernel stacks"
+    range 64 16384
+    default 1024
+
+config KERNEL_STACK_SIZE_KB
+    int "Kernel thread stack size in KiB"
+    range 16 256
+    default 16
+
+config IRQ_STACK_SIZE_KB
+    int "Per-CPU IRQ stack size in KiB"
+    range 16 128
+    default 32
+
+config EMERGENCY_STACK_SIZE_KB
+    int "Per-CPU emergency stack size in KiB"
+    range 16 128
+    default 32
+
 config TIMER_HZ
     int "Kernel timer frequency"
     range 10 10000

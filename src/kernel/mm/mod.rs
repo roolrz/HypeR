@@ -8,6 +8,7 @@ use hyper::hal::cache::CacheMaintenance;
 pub mod allocator;
 pub mod memory;
 pub mod page_block;
+pub mod stack;
 
 pub use memory::PreparedMemory;
 
@@ -36,6 +37,15 @@ pub(crate) fn initialize() {
     if let Err(error) = verify_rust_allocator_interface() {
         super::boot::fail("Rust allocator interface validation", error);
     }
+    if let Err(error) = stack::prepare_cpu(crate::arch::current_cpu_index()) {
+        super::boot::fail("bootstrap exception-stack initialization", error);
+    }
+    crate::println!(
+        "HypeR: guarded kernel stacks: thread {} KiB, per-CPU IRQ {} KiB, emergency {} KiB",
+        hyper::config::KERNEL_STACK_SIZE_KB,
+        hyper::config::IRQ_STACK_SIZE_KB,
+        hyper::config::EMERGENCY_STACK_SIZE_KB
+    );
 }
 
 /// Removes bootstrap-only mappings and reports the permanent memory layout.

@@ -1,6 +1,7 @@
 use core::arch::asm;
+use core::cell::UnsafeCell;
 use core::mem::{offset_of, size_of};
-use core::ptr::addr_of;
+use core::ptr::{addr_of, write_volatile};
 
 use hyper::hal::exception::{ExceptionKind, ExceptionOrigin, ExceptionReport};
 use hyper::sync::atomic::{AtomicU64, Ordering};
@@ -8,6 +9,42 @@ use hyper::sync::atomic::{AtomicU64, Ordering};
 use super::registers;
 
 static VECTOR_TEST_EXPECTED: AtomicU64 = AtomicU64::new(registers::EXCEPTION_VECTOR_TEST_NONE);
+
+const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+struct StackBounds {
+    bottom: u64,
+    top: u64,
+}
+
+impl StackBounds {
+    const EMPTY: Self = Self { bottom: 0, top: 0 };
+}
+
+#[repr(C, align(64))]
+struct StackTable {
+    entries: UnsafeCell<[StackBounds; MAX_CPUS]>,
+}
+
+impl StackTable {
+    const fn new() -> Self {
+        Self {
+            entries: UnsafeCell::new([StackBounds::EMPTY; MAX_CPUS]),
+        }
+    }
+}
+
+// SAFETY: A CPU's entries are installed once by the boot CPU before that CPU
+// can accept runtime exceptions, then remain immutable.
+unsafe impl Sync for StackTable {}
+
+#[unsafe(no_mangle)]
+static AARCH64_IRQ_STACK_BOUNDS: StackTable = StackTable::new();
+
+#[unsafe(no_mangle)]
+static AARCH64_EMERGENCY_STACK_BOUNDS: StackTable = StackTable::new();
 
 #[repr(C, align(16))]
 struct ExceptionFrame {
@@ -177,6 +214,41 @@ fn exception_crash_context(frame: &ExceptionFrame, stack_pointer: u64) -> CrashC
 
 pub fn runtime_vector_address() -> u64 {
     addr_of!(aarch64_runtime_vectors) as u64
+}
+
+pub fn install_exception_stacks(
+    cpu: usize,
+    irq: (usize, usize),
+    emergency: (usize, usize),
+) -> Result<(), ()> {
+    if cpu >= MAX_CPUS || irq.0 >= irq.1 || emergency.0 >= emergency.1 {
+        return Err(());
+    }
+    // SAFETY: prepare_cpu serializes installation and the target CPU has not
+    // enabled exceptions before its matching entry is published.
+    unsafe {
+        let irq_entry = (*AARCH64_IRQ_STACK_BOUNDS.entries.get())
+            .as_mut_ptr()
+            .add(cpu);
+        write_volatile(
+            irq_entry,
+            StackBounds {
+                bottom: irq.0 as u64,
+                top: irq.1 as u64,
+            },
+        );
+        let emergency_entry = (*AARCH64_EMERGENCY_STACK_BOUNDS.entries.get())
+            .as_mut_ptr()
+            .add(cpu);
+        write_volatile(
+            emergency_entry,
+            StackBounds {
+                bottom: emergency.0 as u64,
+                top: emergency.1 as u64,
+            },
+        );
+    }
+    Ok(())
 }
 
 /// Installs the complete runtime EL2 exception vector table.

@@ -19,11 +19,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/arch/aarch64/vectors.S");
     println!("cargo:rerun-if-changed=src/arch/aarch64/context.S");
     println!("cargo:rerun-if-changed=src/arch/aarch64/registers.rs");
+    println!("cargo:rerun-if-changed=src/arch/aarch64/linker.ld");
     println!("cargo:rerun-if-changed=Kconfig");
     println!("cargo:rerun-if-changed=.config");
+    println!("cargo:rerun-if-env-changed=HYPER_KALLSYMS_BLOB");
+    println!("cargo:rustc-check-cfg=cfg(hyper_embed_kallsyms)");
 
     let output_directory = PathBuf::from(env::var("OUT_DIR")?);
     export_kernel_configuration(&output_directory)?;
+    configure_kallsyms_embedding()?;
 
     let target = env::var("TARGET")?;
     if target != "aarch64-unknown-none" {
@@ -41,6 +45,20 @@ fn main() -> Result<(), Box<dyn Error>> {
         compile_assembly(source, &output_directory, &object_path)?;
         println!("cargo:rustc-link-arg-bin=hyper={}", object_path.display());
     }
+    Ok(())
+}
+
+fn configure_kallsyms_embedding() -> Result<(), Box<dyn Error>> {
+    let Some(path) = env::var_os("HYPER_KALLSYMS_BLOB").filter(|path| !path.is_empty()) else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path).canonicalize()?;
+    if !path.is_file() {
+        return Err(format!("kallsyms blob is not a regular file: {}", path.display()).into());
+    }
+    println!("cargo:rerun-if-changed={}", path.display());
+    println!("cargo:rustc-cfg=hyper_embed_kallsyms");
+    println!("cargo:rustc-env=HYPER_KALLSYMS_BLOB={}", path.display());
     Ok(())
 }
 

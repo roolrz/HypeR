@@ -1,14 +1,20 @@
 use core::arch::asm;
-use core::ptr::{read_volatile, write_volatile};
+use core::ptr::{read_volatile, write_bytes, write_volatile};
 
 use hyper::hal::memory::KernelImageLayout;
 use hyper::mm::{BootAllocator, BootAllocatorError, PAGE_SIZE, PhysicalAddress, VirtualAddress};
 use hyper::platform::{PhysicalRange, PlatformInfo};
 
 use super::super::registers;
-use super::layout::{KERNEL_BASE, KERNEL_STACK_BASE, LINEAR_BASE, MMIO_BASE};
+use super::address_space::StackMapping;
+use super::layout::{
+    KERNEL_BASE, KERNEL_STACK_ARENA_BASE, KERNEL_STACK_BASE, LINEAR_BASE, MMIO_BASE,
+};
 
+/// Early CPU0 stack used only by the complete initialization call chain.
 pub(super) const KERNEL_STACK_PAGES: usize = 16;
+const STACK_GUARD_PAGES: usize = 1;
+const STACK_SLOT_PAGES: usize = 1 + 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -17,6 +23,7 @@ pub enum Error {
     Conflict,
     InvalidAddress,
     InvalidRange,
+    RuntimeAllocation,
 }
 
 impl From<BootAllocatorError> for Error {
@@ -251,7 +258,7 @@ pub(super) unsafe fn build_final_address_space(
     unsafe { map_kernel_at(&mut builder, kernel, kernel_base)? };
     unsafe {
         builder.map_range(
-            VirtualAddress::new(KERNEL_STACK_BASE),
+            VirtualAddress::new(KERNEL_STACK_BASE + PAGE_SIZE),
             PhysicalRange::new(stack.get(), stack_size).ok_or(Error::InvalidRange)?,
             MappingFlags::NORMAL_RW,
         )?;
@@ -259,9 +266,200 @@ pub(super) unsafe fn build_final_address_space(
 
     Ok(FinalAddressSpace {
         root: builder.root(),
-        stack_top: VirtualAddress::new(KERNEL_STACK_BASE + stack_size),
+        stack_top: VirtualAddress::new(KERNEL_STACK_BASE + PAGE_SIZE + stack_size),
         kernel_base,
     })
+}
+
+pub(super) fn map_runtime_stack(
+    root: PhysicalAddress,
+    slot: usize,
+    physical: PhysicalAddress,
+    pages: usize,
+    allocate_table: &mut dyn FnMut() -> Option<PhysicalAddress>,
+) -> Result<StackMapping, Error> {
+    let (guard_page, bottom, top) = stack_slot_range(slot, pages)?;
+    let mut mapped = 0usize;
+    while mapped < pages {
+        let virtual_address = bottom
+            .checked_add(mapped * PAGE_SIZE as usize)
+            .ok_or(Error::AddressOverflow)? as u64;
+        let physical_address = physical
+            .get()
+            .checked_add(mapped as u64 * PAGE_SIZE)
+            .ok_or(Error::AddressOverflow)?;
+        if let Err(error) =
+            map_runtime_page(root, virtual_address, physical_address, allocate_table)
+        {
+            let _ = unmap_runtime_pages(root, bottom as u64, mapped);
+            flush_stage1_tlb();
+            return Err(error);
+        }
+        mapped += 1;
+    }
+    flush_stage1_tlb();
+    Ok(StackMapping {
+        guard_page,
+        bottom,
+        top,
+    })
+}
+
+pub(super) fn unmap_runtime_stack(
+    root: PhysicalAddress,
+    slot: usize,
+    pages: usize,
+) -> Result<(), Error> {
+    let (_, bottom, _) = stack_slot_range(slot, pages)?;
+    unmap_runtime_pages(root, bottom as u64, pages)?;
+    flush_stage1_tlb();
+    Ok(())
+}
+
+pub(super) fn runtime_address_is_mapped(
+    root: PhysicalAddress,
+    address: u64,
+) -> Result<bool, Error> {
+    if address >= registers::STAGE1_VA_LIMIT {
+        return Err(Error::InvalidAddress);
+    }
+    let mut table = root;
+    for level in 0..4 {
+        let entry = read_runtime_entry(table, table_index(address, level))?;
+        if entry == 0 {
+            return Ok(false);
+        }
+        let kind = entry & registers::TRANSLATION_DESC_TYPE_MASK;
+        if (level < 3 && kind == registers::STAGE1_DESC_BLOCK)
+            || (level == 3 && kind == registers::STAGE1_DESC_TABLE_OR_PAGE)
+        {
+            return Ok(true);
+        }
+        if kind != registers::STAGE1_DESC_TABLE_OR_PAGE {
+            return Ok(false);
+        }
+        table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
+    }
+    Ok(false)
+}
+
+fn stack_slot_range(slot: usize, pages: usize) -> Result<(usize, usize, usize), Error> {
+    if pages == 0 || pages + STACK_GUARD_PAGES > STACK_SLOT_PAGES {
+        return Err(Error::InvalidRange);
+    }
+    let stride = STACK_SLOT_PAGES as u64 * PAGE_SIZE;
+    let guard_page = KERNEL_STACK_ARENA_BASE
+        .checked_add(
+            u64::try_from(slot)
+                .ok()
+                .and_then(|slot| slot.checked_mul(stride))
+                .ok_or(Error::AddressOverflow)?,
+        )
+        .ok_or(Error::AddressOverflow)?;
+    let bottom = guard_page
+        .checked_add(STACK_GUARD_PAGES as u64 * PAGE_SIZE)
+        .ok_or(Error::AddressOverflow)?;
+    let top = bottom
+        .checked_add(pages as u64 * PAGE_SIZE)
+        .filter(|top| *top < registers::STAGE1_VA_LIMIT)
+        .ok_or(Error::InvalidAddress)?;
+    Ok((
+        usize::try_from(guard_page).map_err(|_| Error::InvalidAddress)?,
+        usize::try_from(bottom).map_err(|_| Error::InvalidAddress)?,
+        usize::try_from(top).map_err(|_| Error::InvalidAddress)?,
+    ))
+}
+
+fn map_runtime_page(
+    root: PhysicalAddress,
+    virtual_address: u64,
+    physical_address: u64,
+    allocate_table: &mut dyn FnMut() -> Option<PhysicalAddress>,
+) -> Result<(), Error> {
+    if !virtual_address.is_multiple_of(PAGE_SIZE)
+        || !physical_address.is_multiple_of(PAGE_SIZE)
+        || virtual_address >= registers::STAGE1_VA_LIMIT
+        || physical_address >= registers::PHYSICAL_ADDRESS_LIMIT
+    {
+        return Err(Error::InvalidAddress);
+    }
+    let mut table = root;
+    for level in 0..3 {
+        let index = table_index(virtual_address, level);
+        let entry = read_runtime_entry(table, index)?;
+        table = if entry == 0 {
+            let child = allocate_table().ok_or(Error::RuntimeAllocation)?;
+            zero_runtime_table(child)?;
+            write_runtime_entry(
+                table,
+                index,
+                child.get() | registers::STAGE1_DESC_TABLE_OR_PAGE,
+            )?;
+            child
+        } else if entry & registers::TRANSLATION_DESC_TYPE_MASK
+            == registers::STAGE1_DESC_TABLE_OR_PAGE
+        {
+            PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT)
+        } else {
+            return Err(Error::Conflict);
+        };
+    }
+    let index = table_index(virtual_address, 3);
+    if read_runtime_entry(table, index)? != 0 {
+        return Err(Error::Conflict);
+    }
+    let descriptor = physical_address
+        | MappingFlags::NORMAL_RW.descriptor_bits()
+        | registers::STAGE1_DESC_TABLE_OR_PAGE;
+    write_runtime_entry(table, index, descriptor)
+}
+
+fn unmap_runtime_pages(
+    root: PhysicalAddress,
+    virtual_start: u64,
+    pages: usize,
+) -> Result<(), Error> {
+    for page in 0..pages {
+        let address = virtual_start
+            .checked_add(page as u64 * PAGE_SIZE)
+            .ok_or(Error::AddressOverflow)?;
+        let mut table = root;
+        for level in 0..3 {
+            let entry = read_runtime_entry(table, table_index(address, level))?;
+            if entry & registers::TRANSLATION_DESC_TYPE_MASK != registers::STAGE1_DESC_TABLE_OR_PAGE
+            {
+                return Err(Error::Conflict);
+            }
+            table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
+        }
+        let index = table_index(address, 3);
+        if read_runtime_entry(table, index)? == 0 {
+            return Err(Error::Conflict);
+        }
+        write_runtime_entry(table, index, 0)?;
+    }
+    Ok(())
+}
+
+fn zero_runtime_table(table: PhysicalAddress) -> Result<(), Error> {
+    let address = runtime_table_address(table)? as *mut u8;
+    // SAFETY: The newly allocated page-table page is exclusively owned and
+    // writable through the permanent linear map.
+    unsafe { write_bytes(address, 0, PAGE_SIZE as usize) };
+    Ok(())
+}
+
+fn flush_stage1_tlb() {
+    // SAFETY: Runtime stack mappings are globally visible EL2 stage-1 entries.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi alle2is",
+            "dsb ish",
+            "isb",
+            options(nostack, preserves_flags)
+        )
+    };
 }
 
 /// Removes low transition aliases after execution, data, devices, and the stack

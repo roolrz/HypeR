@@ -59,7 +59,9 @@ SECTIONS
     }
     .kallsyms : ALIGN(8)
     {
+        __kallsyms_start = .;
         KEEP(*(.kallsyms))
+        __kallsyms_end = .;
     }
     .gnu.hash : ALIGN(8) { *(.gnu.hash) }
     .hash : ALIGN(8) { *(.hash) }

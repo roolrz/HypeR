@@ -61,6 +61,7 @@ while [ "$attempt" -lt 300 ]; do
     if grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
         grep -q 'HypeR: scheduler active on bootstrap thread 0' "$log" &&
         grep -q 'HypeR test: scheduler ready/wait queues and sleeping sync passed' "$log" &&
+        grep -q 'HypeR test: guarded thread, IRQ, and emergency stacks passed' "$log" &&
         grep -q 'HypeR: kallsyms resolved hyper_kallsyms_lookup at 0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR: kernel log ring: 65536 bytes, 0 records dropped' "$log" &&
         grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
@@ -78,6 +79,7 @@ while [ "$attempt" -lt 300 ]; do
         grep -q 'HypeR: transition identity mappings retired' "$log" &&
         grep -q "HypeR: loaded VM 'alpine' from boot ramdisk: 128 MiB RAM, 1 vCPU(s)" "$log" &&
         grep -q 'HypeR: kernel initialization complete; starting Linux guest' "$log" &&
+        grep -q 'HypeR: vCPU 0 running as scheduler thread [1-9][0-9]* on guarded stack 0x[0-9a-f][0-9a-f]*-0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR: periodic timer IRQs active on 4 CPUs' "$log" &&
         grep -q 'Booting Linux on physical CPU' "$log" &&
         grep -q 'arch_timer: cp15 timer running at .* (virt).' "$log" &&

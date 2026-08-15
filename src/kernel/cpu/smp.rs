@@ -24,6 +24,7 @@ pub enum Error {
     CpuDidNotStart(usize),
     CpuPower(super::super::device::cpu_power::Error),
     InvalidAddress,
+    Stack(super::super::mm::stack::Error),
     Scheduler(super::super::task::scheduler::Error),
 }
 
@@ -36,6 +37,12 @@ impl From<super::super::device::cpu_power::Error> for Error {
 impl From<super::super::task::scheduler::Error> for Error {
     fn from(error: super::super::task::scheduler::Error) -> Self {
         Self::Scheduler(error)
+    }
+}
+
+impl From<super::super::mm::stack::Error> for Error {
+    fn from(error: super::super::mm::stack::Error) -> Self {
+        Self::Stack(error)
     }
 }
 
@@ -95,16 +102,13 @@ pub fn initialize(
         }
         let cpu_index = next_cpu_index;
         next_cpu_index += 1;
+        super::super::mm::stack::prepare_cpu(cpu_index)?;
         let name = format!("idle/{cpu_index}");
-        let virtual_stack_top =
-            super::super::task::scheduler::register_secondary_cpu(cpu_index, &name)?;
-        let physical_stack_top =
-            super::super::mm::memory::linear_physical_address(virtual_stack_top)
-                .ok_or(Error::InvalidAddress)?;
+        let stack = super::super::task::scheduler::register_secondary_cpu(cpu_index, &name)?;
         let mut parameters = Box::new(crate::arch::SecondaryBootParameters::new(
             root,
-            physical_stack_top,
-            virtual_stack_top as u64,
+            stack.physical_top,
+            stack.virtual_top as u64,
             cpu_index,
         ));
         let context = super::super::mm::memory::linear_physical_address(
@@ -163,10 +167,19 @@ pub fn secondary_entry(cpu_index: usize) -> ! {
         crate::pr_crit!("HypeR: CPU {cpu_index} local timer initialization failed: {error:?}");
         crate::arch::halt()
     }
-    if let Err(error) = super::super::task::scheduler::install_current_idle() {
-        crate::pr_crit!("HypeR: CPU {cpu_index} idle-thread installation failed: {error:?}");
-        crate::arch::halt()
-    }
+    let stack = match super::super::task::scheduler::install_current_idle() {
+        Ok(stack) => stack,
+        Err(error) => {
+            crate::pr_crit!("HypeR: CPU {cpu_index} idle-thread installation failed: {error:?}");
+            crate::arch::halt()
+        }
+    };
+    // SAFETY: This CPU still has local interrupts masked, `stack` belongs to
+    // its current idle Thread, and the continuation never returns.
+    unsafe { super::super::mm::stack::reset_and_enter(stack, enter_clean_idle, cpu_index) }
+}
+
+extern "C" fn enter_clean_idle(cpu_index: usize) -> ! {
     ONLINE[cpu_index].store(true, Ordering::Release);
     crate::arch::send_event();
     crate::println!(

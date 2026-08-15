@@ -7,6 +7,7 @@ mod gicv3;
 mod interrupt;
 mod linux;
 pub mod memory;
+mod runtime;
 mod vcpu;
 
 pub(crate) use arch_timer::{handle_interrupt as handle_arch_timer_interrupt, handle_maintenance};
@@ -19,7 +20,9 @@ pub fn select_default(ramdisk: &[u8]) -> Result<VmBundle<'_>, VmBundleError> {
     hyper::vm::bundle::select_default(ramdisk)
 }
 
-pub fn boot_linux(guest: VmBundle<'_>) -> Result<core::convert::Infallible, LinuxBootError> {
+pub fn boot_linux(
+    guest: VmBundle<'_>,
+) -> Result<crate::kernel::task::thread::ThreadId, LinuxBootError> {
     linux::boot(guest)
 }
 
@@ -65,10 +68,12 @@ pub(crate) fn start_default() -> ! {
         guest.vcpu_count()
     );
     crate::println!("HypeR: kernel initialization complete; starting Linux guest");
-    match boot_linux(guest) {
-        Ok(never) => match never {},
+    let vcpu = match boot_linux(guest) {
+        Ok(vcpu) => vcpu,
         Err(error) => super::boot::fail("Linux guest boot", error),
-    }
+    };
+    crate::println!("HypeR: Linux boot vCPU scheduled as thread {}", vcpu.get());
+    super::task::scheduler::thread_become_idle()
 }
 
 pub(crate) fn handle_guest_sync(frame: &mut crate::arch::GuestSyncFrame<'_>) -> bool {

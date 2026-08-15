@@ -231,6 +231,23 @@ mod software_timers {
     }
 
     #[test]
+    fn binds_a_static_queue_identity_only_before_first_use() {
+        let mut queue = DeadlineQueue::<1>::new();
+        super::require_ok(queue.initialize_id(7));
+        let handle = super::require_ok(queue.schedule(1, TimerMode::OneShot, callback, 0));
+        assert_eq!(
+            queue.initialize_id(8),
+            Err(TimerQueueError::QueueAlreadyUsed)
+        );
+
+        let mut other_queue = DeadlineQueue::<1>::new();
+        assert_eq!(
+            other_queue.cancel(handle),
+            Err(TimerQueueError::InvalidHandle)
+        );
+    }
+
+    #[test]
     fn compares_deadlines_across_counter_wraparound() {
         let mut queue = DeadlineQueue::<2>::new();
         let before_wrap = super::require_ok(queue.schedule(

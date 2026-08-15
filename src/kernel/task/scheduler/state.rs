@@ -4,9 +4,10 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use super::queue::{self, ReadyQueues};
-use super::{Error, Statistics};
+use super::{CurrentVcpu, Error, SecondaryStack, Statistics};
 use crate::kernel::task::thread::{
     KernelThreadEntry, QueueMembership, Thread, ThreadId, ThreadPriority, ThreadState,
+    VirtualMachineId,
 };
 use crate::kernel::task::wait::WaitQueue;
 
@@ -76,7 +77,7 @@ impl Scheduler {
         Ok(self.cpus[self.cpu_slot(cpu)?].current)
     }
 
-    pub fn register_secondary(&mut self, cpu: usize, name: &str) -> Result<usize, Error> {
+    pub fn register_secondary(&mut self, cpu: usize, name: &str) -> Result<SecondaryStack, Error> {
         if cpu >= MAX_CPUS {
             return Err(Error::InvalidCpuIndex);
         }
@@ -86,11 +87,17 @@ impl Scheduler {
         self.reserve_thread_and_cpu()?;
         let id = self.next_thread_id()?;
         let thread = Box::new(Thread::secondary_bootstrap(id, cpu, name)?);
-        let stack_top = thread.kernel_stack_top().ok_or(Error::Allocation)?;
+        let virtual_top = thread.kernel_stack_top().ok_or(Error::Allocation)?;
+        let physical_top = thread
+            .kernel_stack_physical_top()
+            .ok_or(Error::Allocation)?;
         self.register_thread(thread)?;
         self.cpus.push(CpuScheduler::new(cpu, id));
         self.cpu_slots[cpu] = Some(self.cpus.len() - 1);
-        Ok(stack_top)
+        Ok(SecondaryStack {
+            physical_top,
+            virtual_top,
+        })
     }
 
     pub fn create_kernel_thread(
@@ -108,6 +115,48 @@ impl Scheduler {
         thread.set_priority(priority);
         self.register_thread(thread)?;
         Ok(id)
+    }
+
+    pub fn create_vcpu_thread(
+        &mut self,
+        cpu: usize,
+        name: &str,
+        virtual_machine: VirtualMachineId,
+        vcpu_id: u32,
+        context: crate::arch::VcpuContext,
+        entry: KernelThreadEntry,
+    ) -> Result<ThreadId, Error> {
+        self.cpu_slot(cpu)?;
+        self.threads.try_reserve(1).map_err(|_| Error::Allocation)?;
+        let id = self.next_thread_id()?;
+        let thread = Box::new(Thread::vcpu(
+            id,
+            cpu,
+            name,
+            virtual_machine,
+            vcpu_id,
+            context,
+            entry,
+        )?);
+        self.register_thread(thread)?;
+        Ok(id)
+    }
+
+    pub fn current_vcpu(&mut self, cpu: usize) -> Result<CurrentVcpu, Error> {
+        let id = self.current_thread(cpu)?;
+        let thread = self.thread_mut(id)?;
+        if thread.state() != ThreadState::Running {
+            return Err(Error::InvalidThreadState);
+        }
+        let stack = thread.kernel_stack_bounds().ok_or(Error::Allocation)?;
+        let execution = thread
+            .vcpu_execution_mut()
+            .ok_or(Error::InvalidThreadState)? as *mut _;
+        Ok(CurrentVcpu {
+            thread: id,
+            execution,
+            stack,
+        })
     }
 
     pub fn make_ready(&mut self, id: ThreadId) -> Result<bool, Error> {
@@ -209,7 +258,7 @@ impl Scheduler {
         }
     }
 
-    pub fn install_current_as_idle(&mut self, cpu: usize) -> Result<(), Error> {
+    pub fn install_current_as_idle(&mut self, cpu: usize) -> Result<(usize, usize), Error> {
         let cpu_slot = self.cpu_slot(cpu)?;
         if self.cpus[cpu_slot].idle.is_some() {
             return Err(Error::IdleThreadAlreadyInstalled);
@@ -218,9 +267,11 @@ impl Scheduler {
         if self.thread(current)?.state() != ThreadState::Running {
             return Err(Error::InvalidIdleTransition);
         }
-        self.thread_mut(current)?.set_state(ThreadState::Idle);
+        let thread = self.thread_mut(current)?;
+        let stack = thread.ensure_kernel_stack()?;
+        thread.set_state(ThreadState::Idle);
         self.cpus[cpu_slot].idle = Some(current);
-        Ok(())
+        Ok(stack)
     }
 
     pub fn finish_switch(&mut self, cpu: usize) {

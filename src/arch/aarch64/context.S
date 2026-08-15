@@ -52,6 +52,63 @@ aarch64_thread_trampoline:
     b       .
 .size aarch64_thread_trampoline, . - aarch64_thread_trampoline
 
+/*
+ * Abandons the current call chain, refills one stack in place, and enters a
+ * non-returning continuation at its clean top.
+ *
+ * x0 = mapped bottom, x1 = top, x2 = watermark word, x3 = canary,
+ * x4 = callback, x5 = callback argument
+ */
+.global aarch64_reset_stack_and_enter
+.type aarch64_reset_stack_and_enter, %function
+aarch64_reset_stack_and_enter:
+    mov     sp, x1
+    mov     x29, xzr
+    mov     x30, xzr
+    str     x3, [x0], #8
+.Lreset_stack_watermark:
+    cmp     x0, x1
+    b.hs    .Lreset_stack_enter
+    str     x2, [x0], #8
+    b       .Lreset_stack_watermark
+.Lreset_stack_enter:
+    mov     x0, x5
+    blr     x4
+.Lreset_stack_halt:
+    msr     daifset, #0xf
+    wfe
+    b       .Lreset_stack_halt
+.size aarch64_reset_stack_and_enter, . - aarch64_reset_stack_and_enter
+
+/* Permanently transfers fatal handling onto this CPU's emergency stack. */
+.global aarch64_run_on_emergency_stack
+.type aarch64_run_on_emergency_stack, %function
+aarch64_run_on_emergency_stack:
+    mov     x19, x0
+    mov     x20, x1
+    mrs     x2, tpidr_el2
+    adrp    x3, AARCH64_EMERGENCY_STACK_BOUNDS
+    add     x3, x3, :lo12:AARCH64_EMERGENCY_STACK_BOUNDS
+    add     x3, x3, x2, lsl #4
+    ldp     x4, x5, [x3]
+    cbz     x5, .Lemergency_current_stack
+    mov     x6, sp
+    cmp     x6, x4
+    b.lo    .Lemergency_switch
+    cmp     x6, x5
+    b.ls    .Lemergency_current_stack
+.Lemergency_switch:
+    mov     sp, x5
+    mov     x29, xzr
+.Lemergency_current_stack:
+    mov     x0, x20
+    blr     x19
+.Lemergency_halt:
+    msr     daifset, #0xf
+    wfe
+    b       .Lemergency_halt
+.size aarch64_run_on_emergency_stack, . - aarch64_run_on_emergency_stack
+
 /* Captures a best-effort kernel register image for software panic paths. */
 .global aarch64_capture_crash_context
 .type aarch64_capture_crash_context, %function
