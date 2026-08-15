@@ -54,7 +54,7 @@ jobs:
       - name: Build kernel image
         run: make image PROFILE=${{ matrix.profile }}
       - name: Upload kernel image
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: hyper-aarch64-${{ matrix.profile }}
           path: |
