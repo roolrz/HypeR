@@ -33,7 +33,7 @@ impl ThreadContext {
         self.callee_saved[0] = entry as usize as u64;
         self.callee_saved[1] = argument as u64;
         self.link_register = aarch64_thread_trampoline as *const () as usize as u64;
-        self.stack_pointer = (stack_top & !0xf) as u64;
+        self.stack_pointer = (stack_top & !(registers::STACK_ALIGNMENT_MASK as usize)) as u64;
     }
 }
 
@@ -96,7 +96,7 @@ impl VcpuContext {
             stack_pointer_el0: 0,
             stack_pointer_el1: 0,
             program_counter,
-            processor_state: 0x3c5,
+            processor_state: registers::SPSR_EL1H_AND_DAIF,
             sctlr_el1: registers::SCTLR_EL1_GUEST_RESET_VALUE,
             tcr_el1: 0,
             ttbr0_el1: 0,

@@ -6,8 +6,7 @@ use hyper::hal::timer::{
 };
 use hyper::sync::atomic::{AtomicU64, Ordering};
 
-const TIMER_ENABLE: u64 = 1 << 0;
-const TIMER_MASK: u64 = 1 << 1;
+use super::registers;
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
 
@@ -52,12 +51,12 @@ impl DeadlineTimer for El2PhysicalTimer {
     fn set_deadline(deadline: u64) -> Result<(), Self::Error> {
         let _ = current_cpu()?;
         write_deadline(deadline);
-        write_control(TIMER_ENABLE);
+        write_control(registers::CNT_CTL_ENABLE);
         Ok(())
     }
 
     fn mask() {
-        write_control(TIMER_ENABLE | TIMER_MASK);
+        write_control(registers::CNT_CTL_ENABLE | registers::CNT_CTL_IMASK);
     }
 
     fn disable() {
@@ -214,7 +213,8 @@ pub fn virtual_timer_interrupt_asserted() -> bool {
             options(nomem, nostack, preserves_flags)
         );
     }
-    control & (TIMER_ENABLE | TIMER_MASK | CONTROL_STATUS) == (TIMER_ENABLE | CONTROL_STATUS)
+    control & (registers::CNT_CTL_ENABLE | registers::CNT_CTL_IMASK | CONTROL_STATUS)
+        == (registers::CNT_CTL_ENABLE | CONTROL_STATUS)
 }
 
 fn write_deadline(deadline: u64) {

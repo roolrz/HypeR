@@ -7,28 +7,17 @@ use hyper::mm::{PAGE_SIZE, PhysicalAddress};
 
 use super::registers;
 
-const ENTRY_COUNT: usize = 512;
-const TABLE_DESCRIPTOR: u64 = 0b11;
-const PAGE_DESCRIPTOR: u64 = 0b11;
-const BLOCK_DESCRIPTOR: u64 = 0b01;
-const ADDRESS_MASK: u64 = 0x0000_ffff_ffff_f000;
 // A 39-bit IPA started at level 1 uses exactly one 4 KiB root table. A
 // 40-bit IPA would require two concatenated, 8 KiB-aligned root tables.
-const IPA_BITS: u32 = 39;
-const IPA_LIMIT: u64 = 1 << IPA_BITS;
-const PA_LIMIT: u64 = 1 << 40;
-const LEVEL_SHIFTS: [u32; 3] = [30, 21, 12];
-const LEVEL_SIZES: [u64; 3] = [1 << 30, 1 << 21, PAGE_SIZE];
-
-const S2_ACCESS_FLAG: u64 = 1 << 10;
-const S2_INNER_SHAREABLE: u64 = 3 << 8;
-const S2_READ_WRITE: u64 = 3 << 6;
-const S2_MEMATTR_NORMAL_WB: u64 = 0xf << 2;
-const S2_MEMATTR_DEVICE_NGNRE: u64 = 0x1 << 2;
-
 const _: () = {
-    assert!(ENTRY_COUNT as u64 * LEVEL_SIZES[0] == IPA_LIMIT);
-    assert!(registers::VTCR_EL2_GUEST_VALUE & 0x3f == 64 - IPA_BITS as u64);
+    assert!(
+        registers::TRANSLATION_TABLE_ENTRY_COUNT_4K as u64 * registers::STAGE2_LEVEL_SIZES_4K[0]
+            == registers::STAGE2_IPA_LIMIT
+    );
+    assert!(
+        registers::VTCR_EL2_GUEST_VALUE & registers::VTCR_EL2_T0SZ_MASK
+            == 64 - registers::STAGE2_IPA_BITS as u64
+    );
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,7 +85,7 @@ impl Stage2AddressSpace {
     /// The caller must exclusively own the local guest execution context and
     /// must not switch VMIDs without first stopping lower-EL execution.
     pub unsafe fn activate(&self) {
-        let vttbr = (u64::from(self.vmid) << 48) | self.root.get();
+        let vttbr = (u64::from(self.vmid) << registers::VTTBR_EL2_VMID_SHIFT) | self.root.get();
         // SAFETY: The hierarchy is complete and owned by this address space.
         unsafe {
             asm!(
@@ -137,7 +126,7 @@ impl Stage2AddressSpace {
         }
         let end = ipa.checked_add(size).ok_or(Error::AddressOverflow)?;
         let physical_end = physical.checked_add(size).ok_or(Error::AddressOverflow)?;
-        if end > IPA_LIMIT || physical_end > PA_LIMIT {
+        if end > registers::STAGE2_IPA_LIMIT || physical_end > registers::PHYSICAL_ADDRESS_LIMIT {
             return Err(Error::InvalidAddress);
         }
 
@@ -148,7 +137,7 @@ impl Stage2AddressSpace {
             let remaining = size - offset;
             let level = best_level(current_ipa, current_physical, remaining);
             self.map_leaf(current_ipa, current_physical, level, memory, allocator)?;
-            offset += LEVEL_SIZES[level];
+            offset += registers::STAGE2_LEVEL_SIZES_4K[level];
         }
         Ok(())
     }
@@ -165,12 +154,18 @@ impl Stage2AddressSpace {
         for level in 0..leaf_level {
             let index = index(ipa, level);
             let entry = read_entry(table, index)?;
-            table = if entry & 0b11 == TABLE_DESCRIPTOR {
-                PhysicalAddress::new(entry & ADDRESS_MASK)
+            table = if entry & registers::TRANSLATION_DESC_TYPE_MASK
+                == registers::STAGE2_DESC_TABLE_OR_PAGE
+            {
+                PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT)
             } else if entry == 0 {
                 let child = allocator().ok_or(Error::Allocation)?;
                 validate_table(child)?;
-                write_entry(table, index, child.get() | TABLE_DESCRIPTOR)?;
+                write_entry(
+                    table,
+                    index,
+                    child.get() | registers::STAGE2_DESC_TABLE_OR_PAGE,
+                )?;
                 child
             } else {
                 return Err(Error::Conflict);
@@ -178,17 +173,21 @@ impl Stage2AddressSpace {
         }
 
         let kind = if leaf_level == 2 {
-            PAGE_DESCRIPTOR
+            registers::STAGE2_DESC_TABLE_OR_PAGE
         } else {
-            BLOCK_DESCRIPTOR
+            registers::STAGE2_DESC_BLOCK
         };
-        let attributes = S2_ACCESS_FLAG
-            | S2_READ_WRITE
+        let attributes = registers::STAGE2_DESC_ACCESS_FLAG
+            | registers::STAGE2_DESC_READ_WRITE
             | match memory {
-                MemoryType::Normal => S2_INNER_SHAREABLE | S2_MEMATTR_NORMAL_WB,
-                MemoryType::Device => S2_MEMATTR_DEVICE_NGNRE,
+                MemoryType::Normal => {
+                    registers::STAGE2_DESC_INNER_SHAREABLE
+                        | registers::STAGE2_DESC_MEMATTR_NORMAL_WB
+                }
+                MemoryType::Device => registers::STAGE2_DESC_MEMATTR_DEVICE_NGNRE,
             };
-        let descriptor = (physical & ADDRESS_MASK) | attributes | kind;
+        let descriptor =
+            (physical & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT) | attributes | kind;
         let slot = index(ipa, leaf_level);
         let existing = read_entry(table, slot)?;
         if existing != 0 && existing != descriptor {
@@ -199,7 +198,7 @@ impl Stage2AddressSpace {
 }
 
 fn best_level(ipa: u64, physical: u64, remaining: u64) -> usize {
-    for (level, &size) in LEVEL_SIZES.iter().enumerate() {
+    for (level, &size) in registers::STAGE2_LEVEL_SIZES_4K.iter().enumerate() {
         if ipa & (size - 1) == 0 && physical & (size - 1) == 0 && remaining >= size {
             return level;
         }
@@ -208,11 +207,12 @@ fn best_level(ipa: u64, physical: u64, remaining: u64) -> usize {
 }
 
 fn index(ipa: u64, level: usize) -> usize {
-    ((ipa >> LEVEL_SHIFTS[level]) & (ENTRY_COUNT as u64 - 1)) as usize
+    ((ipa >> registers::STAGE2_LEVEL_SHIFTS_4K[level])
+        & (registers::TRANSLATION_TABLE_ENTRY_COUNT_4K as u64 - 1)) as usize
 }
 
 fn validate_table(table: PhysicalAddress) -> Result<(), Error> {
-    if table.get() & (PAGE_SIZE - 1) != 0 || table.get() >= PA_LIMIT {
+    if table.get() & (PAGE_SIZE - 1) != 0 || table.get() >= registers::PHYSICAL_ADDRESS_LIMIT {
         Err(Error::InvalidAddress)
     } else {
         Ok(())

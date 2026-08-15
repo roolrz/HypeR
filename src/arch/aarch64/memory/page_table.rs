@@ -10,15 +10,6 @@ use super::layout::{KERNEL_BASE, KERNEL_STACK_BASE, LINEAR_BASE, MMIO_BASE};
 
 const KERNEL_STACK_PAGES: usize = 16;
 
-const ENTRY_COUNT: usize = 512;
-const TABLE_DESCRIPTOR: u64 = 0b11;
-const PAGE_DESCRIPTOR: u64 = 0b11;
-const ADDRESS_MASK: u64 = 0x0000_ffff_ffff_f000;
-const VA_LIMIT: u64 = 1 << 48;
-const PA_LIMIT: u64 = 1 << 40;
-const LEVEL_SHIFTS: [u32; 4] = [39, 30, 21, 12];
-const LEVEL_SIZES: [u64; 4] = [1 << 39, 1 << 30, 1 << 21, PAGE_SIZE];
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     AddressOverflow,
@@ -75,7 +66,7 @@ impl MappingFlags {
             MemoryType::Device => registers::STAGE1_DESC_OUTER_SHAREABLE,
         };
         if !self.writable {
-            bits |= 1 << 7;
+            bits |= registers::STAGE1_DESC_AP_READ_ONLY;
         }
         if !self.executable {
             bits |= registers::STAGE1_DESC_EXECUTE_NEVER;
@@ -152,7 +143,7 @@ impl<'allocator> PageTableBuilder<'allocator> {
             let remaining = length - offset;
             let level = best_mapping_level(virtual_address, physical_address, remaining);
             unsafe { self.map_leaf(virtual_address, physical_address, level, flags)? };
-            offset += LEVEL_SIZES[level];
+            offset += registers::STAGE1_LEVEL_SIZES_4K[level];
         }
         Ok(())
     }
@@ -164,7 +155,10 @@ impl<'allocator> PageTableBuilder<'allocator> {
         leaf_level: usize,
         flags: MappingFlags,
     ) -> Result<(), Error> {
-        if virtual_address >= VA_LIMIT || physical_address >= PA_LIMIT || leaf_level == 0 {
+        if virtual_address >= registers::STAGE1_VA_LIMIT
+            || physical_address >= registers::PHYSICAL_ADDRESS_LIMIT
+            || leaf_level == 0
+        {
             return Err(Error::InvalidAddress);
         }
 
@@ -172,11 +166,19 @@ impl<'allocator> PageTableBuilder<'allocator> {
         for level in 0..leaf_level {
             let index = table_index(virtual_address, level);
             let entry = unsafe { read_entry(table, index)? };
-            table = if entry & 0b11 == TABLE_DESCRIPTOR {
-                PhysicalAddress::new(entry & ADDRESS_MASK)
+            table = if entry & registers::STAGE1_DESC_TABLE_OR_PAGE
+                == registers::STAGE1_DESC_TABLE_OR_PAGE
+            {
+                PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT)
             } else if entry == 0 {
                 let child = unsafe { self.allocator.allocate_zeroed_pages(1, 1)? };
-                unsafe { write_entry(table, index, child.get() | TABLE_DESCRIPTOR)? };
+                unsafe {
+                    write_entry(
+                        table,
+                        index,
+                        child.get() | registers::STAGE1_DESC_TABLE_OR_PAGE,
+                    )?
+                };
                 child
             } else {
                 return Err(Error::Conflict);
@@ -185,12 +187,13 @@ impl<'allocator> PageTableBuilder<'allocator> {
 
         let index = table_index(virtual_address, leaf_level);
         let descriptor_kind = if leaf_level == 3 {
-            PAGE_DESCRIPTOR
+            registers::STAGE1_DESC_TABLE_OR_PAGE
         } else {
             registers::STAGE1_DESC_BLOCK
         };
-        let descriptor =
-            (physical_address & ADDRESS_MASK) | flags.descriptor_bits() | descriptor_kind;
+        let descriptor = (physical_address & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT)
+            | flags.descriptor_bits()
+            | descriptor_kind;
         let existing = unsafe { read_entry(table, index)? };
         if existing != 0 && existing != descriptor {
             return Err(Error::Conflict);
@@ -294,7 +297,7 @@ fn unmap_identity_range(root: PhysicalAddress, range: PhysicalRange) -> Result<(
     while address < end {
         let mut table = root;
         let mut advanced = false;
-        for (level, &level_size) in LEVEL_SIZES.iter().enumerate() {
+        for (level, &level_size) in registers::STAGE1_LEVEL_SIZES_4K.iter().enumerate() {
             let index = table_index(address, level);
             let entry = read_runtime_entry(table, index)?;
             if entry == 0 {
@@ -304,9 +307,9 @@ fn unmap_identity_range(root: PhysicalAddress, range: PhysicalRange) -> Result<(
                 advanced = true;
                 break;
             }
-            let descriptor_kind = entry & 0b11;
+            let descriptor_kind = entry & registers::TRANSLATION_DESC_TYPE_MASK;
             let is_leaf = (level < 3 && descriptor_kind == registers::STAGE1_DESC_BLOCK)
-                || (level == 3 && descriptor_kind == PAGE_DESCRIPTOR);
+                || (level == 3 && descriptor_kind == registers::STAGE1_DESC_TABLE_OR_PAGE);
             if is_leaf {
                 write_runtime_entry(table, index, 0)?;
                 address = address
@@ -315,10 +318,10 @@ fn unmap_identity_range(root: PhysicalAddress, range: PhysicalRange) -> Result<(
                 advanced = true;
                 break;
             }
-            if descriptor_kind != TABLE_DESCRIPTOR {
+            if descriptor_kind != registers::STAGE1_DESC_TABLE_OR_PAGE {
                 return Err(Error::Conflict);
             }
-            table = PhysicalAddress::new(entry & ADDRESS_MASK);
+            table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
         }
         if !advanced {
             return Err(Error::Conflict);
@@ -343,7 +346,7 @@ fn write_runtime_entry(table: PhysicalAddress, index: usize, value: u64) -> Resu
 fn runtime_table_address(table: PhysicalAddress) -> Result<usize, Error> {
     LINEAR_BASE
         .checked_add(table.get())
-        .filter(|address| *address < VA_LIMIT)
+        .filter(|address| *address < registers::STAGE1_VA_LIMIT)
         .and_then(|address| usize::try_from(address).ok())
         .ok_or(Error::InvalidAddress)
 }
@@ -525,7 +528,7 @@ unsafe fn map_kernel_at(
 }
 
 fn best_mapping_level(virtual_address: u64, physical_address: u64, remaining: u64) -> usize {
-    for (level, &size) in LEVEL_SIZES.iter().enumerate().skip(1) {
+    for (level, &size) in registers::STAGE1_LEVEL_SIZES_4K.iter().enumerate().skip(1) {
         if virtual_address.is_multiple_of(size)
             && physical_address.is_multiple_of(size)
             && remaining >= size
@@ -537,7 +540,8 @@ fn best_mapping_level(virtual_address: u64, physical_address: u64, remaining: u6
 }
 
 fn table_index(address: u64, level: usize) -> usize {
-    ((address >> LEVEL_SHIFTS[level]) & (ENTRY_COUNT as u64 - 1)) as usize
+    ((address >> registers::STAGE1_LEVEL_SHIFTS_4K[level])
+        & (registers::TRANSLATION_TABLE_ENTRY_COUNT_4K as u64 - 1)) as usize
 }
 
 unsafe fn read_entry(table: PhysicalAddress, index: usize) -> Result<u64, Error> {

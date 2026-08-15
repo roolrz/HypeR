@@ -6,7 +6,6 @@ pub(super) const LINEAR_BASE: u64 = super::super::registers::LINEAR_VIRTUAL_BASE
 pub(in crate::arch::aarch64) const KERNEL_BASE: u64 = super::super::registers::KERNEL_VIRTUAL_BASE;
 pub(super) const KERNEL_STACK_BASE: u64 = KERNEL_BASE + super::super::kaslr::WINDOW_SIZE;
 const BOOTSTRAP_ACCESSIBLE_LIMIT: u64 = 0x1_0000_0000;
-const VIRTUAL_ADDRESS_LIMIT: u64 = 1 << 48;
 
 pub struct Aarch64AddressTranslation;
 
@@ -34,6 +33,6 @@ impl AddressTranslation for Aarch64AddressTranslation {
 
 fn translated_address(base: u64, physical: PhysicalAddress) -> Option<VirtualAddress> {
     base.checked_add(physical.get())
-        .filter(|address| *address < VIRTUAL_ADDRESS_LIMIT)
+        .filter(|address| *address < super::super::registers::STAGE1_VA_LIMIT)
         .map(VirtualAddress::new)
 }

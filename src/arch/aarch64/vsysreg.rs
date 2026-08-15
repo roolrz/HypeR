@@ -3,32 +3,7 @@
 use core::arch::asm;
 
 use super::VcpuContext;
-
-const EC_SHIFT: u64 = 26;
-const EC_MASK: u64 = 0x3f;
-const EC_WFX: u64 = 0x01;
-const EC_HVC64: u64 = 0x16;
-const EC_SMC64: u64 = 0x17;
-const EC_SYSTEM_REGISTER: u64 = 0x18;
-const INSTRUCTION_SIZE: u64 = 4;
-const SMCCC_NOT_SUPPORTED: u64 = u64::MAX;
-const SMCCC_VERSION: u64 = 0x8000_0000;
-const SMCCC_ARCH_FEATURES: u64 = 0x8000_0001;
-const PSCI_VERSION: u64 = 0x8400_0000;
-const PSCI_MIGRATE_INFO_TYPE: u64 = 0x8400_0006;
-const PSCI_FEATURES: u64 = 0x8400_000a;
-const PSCI_VERSION_1_0: u64 = 0x0001_0000;
-const SMCCC_VERSION_1_1: u64 = 0x0001_0001;
-const PSCI_TOS_NOT_PRESENT: u64 = 2;
-const SPSR_MODE_MASK: u64 = 0xf;
-const SPSR_EL0T: u64 = 0x0;
-const SPSR_EL1T: u64 = 0x4;
-const SPSR_MODE_AND_DAIF_MASK: u64 = 0x3cf;
-const SPSR_EL1H_AND_DAIF: u64 = 0x3c5;
-const VECTOR_CURRENT_EL_SP0: u64 = 0x000;
-const VECTOR_CURRENT_EL_SPX: u64 = 0x200;
-const VECTOR_LOWER_EL_AARCH64: u64 = 0x400;
-const ESR_IL: u64 = 1 << 25;
+use super::registers::{self, SystemRegisterEncoding as Encoding};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GuestSyncAction {
@@ -46,16 +21,23 @@ pub enum ValidationError {
 }
 
 pub fn validate() -> Result<(), ValidationError> {
-    let syndrome =
-        (EC_SYSTEM_REGISTER << EC_SHIFT) | ESR_IL | (3 << 20) | (5 << 17) | (17 << 5) | 1;
+    let syndrome = (registers::ESR_EC_SYSTEM_REGISTER << registers::ESR_EC_SHIFT)
+        | registers::ESR_IL
+        | (3 << registers::ESR_SYSREG_OP0_SHIFT)
+        | (5 << registers::ESR_SYSREG_OP2_SHIFT)
+        | (17 << registers::ESR_SYSREG_RT_SHIFT)
+        | registers::ESR_SYSREG_DIRECTION_READ;
     let access = decode_access(syndrome);
-    if access.encoding != MPIDR_EL1 || access.target != 17 || access.direction != Direction::Read {
+    if access.encoding != registers::SYSREG_MPIDR_EL1
+        || access.target != 17
+        || access.direction != Direction::Read
+    {
         return Err(ValidationError::InvalidDecoder);
     }
     if virtual_mpidr(0x1234_5678) != 0x0000_0012_0034_5678 {
         return Err(ValidationError::InvalidTopology);
     }
-    if sanitize_pfr0(u64::MAX) != 0x11 {
+    if sanitize_pfr0(u64::MAX) != registers::ID_AA64PFR0_GUEST_BASE {
         return Err(ValidationError::UnsafeFeatureExposure);
     }
     Ok(())
@@ -114,15 +96,23 @@ impl<'a> GuestSyncFrame<'a> {
     }
 
     fn advance(&mut self) {
-        *self.program_counter = self.program_counter.wrapping_add(INSTRUCTION_SIZE);
+        *self.program_counter = self
+            .program_counter
+            .wrapping_add(registers::AARCH64_INSTRUCTION_SIZE);
     }
 
     pub(crate) fn data_access(&self) -> Option<GuestDataAccess> {
-        if (self.syndrome >> EC_SHIFT) & EC_MASK != 0x24 || self.syndrome & (1 << 24) == 0 {
+        if (self.syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK
+            != registers::ESR_EC_DATA_ABORT_LOWER
+            || self.syndrome & registers::ESR_DATA_ABORT_ISV == 0
+        {
             return None;
         }
-        let size = 1usize << ((self.syndrome >> 22) & 0x3);
-        let target = ((self.syndrome >> 16) & 0x1f) as u8;
+        let size = 1usize
+            << ((self.syndrome >> registers::ESR_DATA_ABORT_SAS_SHIFT)
+                & registers::ESR_DATA_ABORT_SAS_MASK);
+        let target = ((self.syndrome >> registers::ESR_DATA_ABORT_SRT_SHIFT)
+            & registers::ESR_DATA_ABORT_SRT_MASK) as u8;
         let mask = if size == 8 {
             u64::MAX
         } else {
@@ -131,11 +121,11 @@ impl<'a> GuestSyncFrame<'a> {
         Some(GuestDataAccess {
             address: self.physical_address,
             size,
-            write: self.syndrome & (1 << 6) != 0,
+            write: self.syndrome & registers::ESR_DATA_ABORT_WNR != 0,
             value: self.read_general(target) & mask,
             target,
-            sign_extend: self.syndrome & (1 << 21) != 0,
-            register_64_bit: self.syndrome & (1 << 15) != 0,
+            sign_extend: self.syndrome & registers::ESR_DATA_ABORT_SSE != 0,
+            register_64_bit: self.syndrome & registers::ESR_DATA_ABORT_SF != 0,
         })
     }
 
@@ -165,27 +155,6 @@ enum Direction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Encoding {
-    op0: u8,
-    op1: u8,
-    crn: u8,
-    crm: u8,
-    op2: u8,
-}
-
-impl Encoding {
-    const fn new(op0: u8, op1: u8, crn: u8, crm: u8, op2: u8) -> Self {
-        Self {
-            op0,
-            op1,
-            crn,
-            crm,
-            op2,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Access {
     encoding: Encoding,
     target: u8,
@@ -197,11 +166,11 @@ pub(crate) fn handle_guest_sync(
     vcpu_id: u32,
     frame: &mut GuestSyncFrame<'_>,
 ) -> GuestSyncAction {
-    match (frame.syndrome >> EC_SHIFT) & EC_MASK {
-        EC_SYSTEM_REGISTER => emulate_system_register(context, vcpu_id, frame),
-        EC_HVC64 => emulate_hypercall(frame),
-        EC_SMC64 => unsupported_call(frame),
-        EC_WFX => {
+    match (frame.syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK {
+        registers::ESR_EC_SYSTEM_REGISTER => emulate_system_register(context, vcpu_id, frame),
+        registers::ESR_EC_HVC64 => emulate_hypercall(frame),
+        registers::ESR_EC_SMC64 => unsupported_call(frame),
+        registers::ESR_EC_WFX => {
             // A scheduler-aware WFI exit can replace this resume policy once
             // vCPU threads gain a blocked state and interrupt wakeup queue.
             frame.advance();
@@ -209,7 +178,9 @@ pub(crate) fn handle_guest_sync(
         }
         // Lower-EL aborts require stage-2 fault resolution and must not be
         // mistaken for guest Undefined Instruction exceptions.
-        0x20 | 0x24 => GuestSyncAction::Unhandled,
+        registers::ESR_EC_INSTRUCTION_ABORT_LOWER | registers::ESR_EC_DATA_ABORT_LOWER => {
+            GuestSyncAction::Unhandled
+        }
         _ => inject_undefined(context, frame),
     }
 }
@@ -217,15 +188,17 @@ pub(crate) fn handle_guest_sync(
 fn emulate_hypercall(frame: &mut GuestSyncFrame<'_>) -> GuestSyncAction {
     let function = frame.read_general(0);
     let result = match function {
-        SMCCC_VERSION => SMCCC_VERSION_1_1,
-        SMCCC_ARCH_FEATURES => SMCCC_NOT_SUPPORTED,
-        PSCI_VERSION => PSCI_VERSION_1_0,
-        PSCI_MIGRATE_INFO_TYPE => PSCI_TOS_NOT_PRESENT,
-        PSCI_FEATURES => match frame.read_general(1) {
-            PSCI_VERSION | PSCI_FEATURES | PSCI_MIGRATE_INFO_TYPE => 0,
-            _ => SMCCC_NOT_SUPPORTED,
+        registers::SMCCC_VERSION => registers::SMCCC_VERSION_1_1,
+        registers::SMCCC_ARCH_FEATURES => registers::SMCCC_NOT_SUPPORTED,
+        registers::PSCI_VERSION => registers::PSCI_VERSION_1_0,
+        registers::PSCI_MIGRATE_INFO_TYPE => registers::PSCI_TOS_NOT_PRESENT,
+        registers::PSCI_FEATURES => match frame.read_general(1) {
+            registers::PSCI_VERSION
+            | registers::PSCI_FEATURES
+            | registers::PSCI_MIGRATE_INFO_TYPE => 0,
+            _ => registers::SMCCC_NOT_SUPPORTED,
         },
-        _ => SMCCC_NOT_SUPPORTED,
+        _ => registers::SMCCC_NOT_SUPPORTED,
     };
     frame.write_general(0, result);
     // HVC and SMC save the architectural return address in ELR_EL2. Unlike
@@ -235,7 +208,7 @@ fn emulate_hypercall(frame: &mut GuestSyncFrame<'_>) -> GuestSyncAction {
 }
 
 fn unsupported_call(frame: &mut GuestSyncFrame<'_>) -> GuestSyncAction {
-    frame.write_general(0, SMCCC_NOT_SUPPORTED);
+    frame.write_general(0, registers::SMCCC_NOT_SUPPORTED);
     GuestSyncAction::Resume
 }
 
@@ -256,7 +229,7 @@ fn emulate_system_register(
         },
         Direction::Write => {
             let value = frame.read_general(access.target);
-            if access.encoding == ICC_SGI1R_EL1 {
+            if access.encoding == registers::SYSREG_ICC_SGI1R_EL1 {
                 frame.advance();
                 return GuestSyncAction::SoftwareInterrupt(value);
             }
@@ -272,15 +245,9 @@ fn emulate_system_register(
 
 fn decode_access(esr: u64) -> Access {
     Access {
-        encoding: Encoding::new(
-            ((esr >> 20) & 0x3) as u8,
-            ((esr >> 14) & 0x7) as u8,
-            ((esr >> 10) & 0xf) as u8,
-            ((esr >> 1) & 0xf) as u8,
-            ((esr >> 17) & 0x7) as u8,
-        ),
-        target: ((esr >> 5) & 0x1f) as u8,
-        direction: if esr & 1 == 0 {
+        encoding: Encoding::from_esr(esr),
+        target: ((esr >> registers::ESR_SYSREG_RT_SHIFT) & registers::ESR_SYSREG_RT_MASK) as u8,
+        direction: if esr & registers::ESR_SYSREG_DIRECTION_READ == 0 {
             Direction::Write
         } else {
             Direction::Read
@@ -290,25 +257,33 @@ fn decode_access(esr: u64) -> Access {
 
 fn read_virtual_register(_context: &VcpuContext, vcpu_id: u32, encoding: Encoding) -> Option<u64> {
     match encoding {
-        MIDR_EL1 => Some(read_midr_el1()),
-        MPIDR_EL1 => Some(virtual_mpidr(vcpu_id)),
-        REVIDR_EL1 => Some(read_revidr_el1()),
-        ID_AA64PFR0_EL1 => Some(sanitize_pfr0(read_id_aa64pfr0_el1())),
-        ID_AA64PFR1_EL1 | ID_AA64PFR2_EL1 | ID_AA64FPFR0_EL1 | ID_AA64DFR1_EL1
-        | ID_AA64AFR0_EL1 | ID_AA64AFR1_EL1 | ID_AA64ISAR3_EL1 | ID_AA64MMFR3_EL1
-        | ID_AA64MMFR4_EL1 | ID_AA64ZFR0_EL1 | ID_AA64SMFR0_EL1 => Some(0),
-        ID_AA64DFR0_EL1 => Some(0x0000_0000_0000_0f0f),
-        ID_AA64ISAR0_EL1 => Some(sanitize_isar0(read_id_aa64isar0_el1())),
-        ID_AA64ISAR1_EL1 => Some(sanitize_isar1(read_id_aa64isar1_el1())),
-        ID_AA64ISAR2_EL1 => Some(sanitize_isar2(read_id_aa64isar2_el1())),
-        ID_AA64MMFR0_EL1 => Some(read_id_aa64mmfr0_el1()),
-        ID_AA64MMFR1_EL1 => Some(read_id_aa64mmfr1_el1()),
-        ID_AA64MMFR2_EL1 => Some(read_id_aa64mmfr2_el1()),
-        CTR_EL0 => Some(read_ctr_el0()),
-        DCZID_EL0 => Some(read_dczid_el0()),
-        CNTFRQ_EL0 => Some(read_cntfrq_el0()),
-        CNTPCT_EL0 => Some(read_cntvct_el0()),
-        ACTLR_EL1 => Some(0),
+        registers::SYSREG_MIDR_EL1 => Some(read_midr_el1()),
+        registers::SYSREG_MPIDR_EL1 => Some(virtual_mpidr(vcpu_id)),
+        registers::SYSREG_REVIDR_EL1 => Some(read_revidr_el1()),
+        registers::SYSREG_ID_AA64PFR0_EL1 => Some(sanitize_pfr0(read_id_aa64pfr0_el1())),
+        registers::SYSREG_ID_AA64PFR1_EL1
+        | registers::SYSREG_ID_AA64PFR2_EL1
+        | registers::SYSREG_ID_AA64FPFR0_EL1
+        | registers::SYSREG_ID_AA64DFR1_EL1
+        | registers::SYSREG_ID_AA64AFR0_EL1
+        | registers::SYSREG_ID_AA64AFR1_EL1
+        | registers::SYSREG_ID_AA64ISAR3_EL1
+        | registers::SYSREG_ID_AA64MMFR3_EL1
+        | registers::SYSREG_ID_AA64MMFR4_EL1
+        | registers::SYSREG_ID_AA64ZFR0_EL1
+        | registers::SYSREG_ID_AA64SMFR0_EL1 => Some(0),
+        registers::SYSREG_ID_AA64DFR0_EL1 => Some(registers::ID_AA64DFR0_GUEST_BASE),
+        registers::SYSREG_ID_AA64ISAR0_EL1 => Some(sanitize_isar0(read_id_aa64isar0_el1())),
+        registers::SYSREG_ID_AA64ISAR1_EL1 => Some(sanitize_isar1(read_id_aa64isar1_el1())),
+        registers::SYSREG_ID_AA64ISAR2_EL1 => Some(sanitize_isar2(read_id_aa64isar2_el1())),
+        registers::SYSREG_ID_AA64MMFR0_EL1 => Some(read_id_aa64mmfr0_el1()),
+        registers::SYSREG_ID_AA64MMFR1_EL1 => Some(read_id_aa64mmfr1_el1()),
+        registers::SYSREG_ID_AA64MMFR2_EL1 => Some(read_id_aa64mmfr2_el1()),
+        registers::SYSREG_CTR_EL0 => Some(read_ctr_el0()),
+        registers::SYSREG_DCZID_EL0 => Some(read_dczid_el0()),
+        registers::SYSREG_CNTFRQ_EL0 => Some(read_cntfrq_el0()),
+        registers::SYSREG_CNTPCT_EL0 => Some(read_cntvct_el0()),
+        registers::SYSREG_ACTLR_EL1 => Some(0),
         _ => None,
     }
 }
@@ -316,17 +291,17 @@ fn read_virtual_register(_context: &VcpuContext, vcpu_id: u32, encoding: Encodin
 fn write_virtual_register(encoding: Encoding, _value: u64) -> bool {
     // ACTLR_EL1 is architecturally implementation-defined. RAZ/WI prevents a
     // guest from depending on host-specific auxiliary controls.
-    encoding == ACTLR_EL1
+    encoding == registers::SYSREG_ACTLR_EL1
 }
 
 fn inject_undefined(context: &mut VcpuContext, frame: &mut GuestSyncFrame<'_>) -> GuestSyncAction {
     let saved_pc = *frame.program_counter;
     let saved_pstate = *frame.processor_state;
-    let syndrome = frame.syndrome & ESR_IL;
-    let vector_offset = match saved_pstate & SPSR_MODE_MASK {
-        SPSR_EL0T => VECTOR_LOWER_EL_AARCH64,
-        SPSR_EL1T => VECTOR_CURRENT_EL_SP0,
-        _ => VECTOR_CURRENT_EL_SPX,
+    let syndrome = frame.syndrome & registers::ESR_IL;
+    let vector_offset = match saved_pstate & registers::SPSR_M_MASK {
+        registers::SPSR_EL0T => registers::VECTOR_LOWER_EL_AARCH64,
+        registers::SPSR_EL1T => registers::VECTOR_CURRENT_EL_SP0,
+        _ => registers::VECTOR_CURRENT_EL_SPX,
     };
 
     context.esr_el1 = syndrome;
@@ -353,13 +328,15 @@ fn inject_undefined(context: &mut VcpuContext, frame: &mut GuestSyncFrame<'_>) -
     }
     context.vbar_el1 = live_vbar;
     *frame.program_counter = live_vbar.wrapping_add(vector_offset);
-    *frame.processor_state = (saved_pstate & !SPSR_MODE_AND_DAIF_MASK) | SPSR_EL1H_AND_DAIF;
+    *frame.processor_state =
+        (saved_pstate & !registers::SPSR_MODE_AND_DAIF_MASK) | registers::SPSR_EL1H_AND_DAIF;
     GuestSyncAction::Injected
 }
 
 const fn virtual_mpidr(vcpu_id: u32) -> u64 {
     let id = vcpu_id as u64;
-    (id & 0x00ff_ffff) | ((id & 0xff00_0000) << 8)
+    (id & registers::MPIDR_AFF0_TO_2_MASK)
+        | ((id & registers::MPIDR_LINEAR_AFF3_MASK) << registers::MPIDR_AFF3_FROM_LINEAR_ID_SHIFT)
 }
 
 fn sanitize_pfr0(_value: u64) -> u64 {
@@ -367,17 +344,16 @@ fn sanitize_pfr0(_value: u64) -> u64 {
     // AArch64 EL0 and EL1 plus the base FP/Advanced-SIMD implementation.
     // Optional fields use feature-specific absence encodings, so copying a
     // common all-ones mask across them would incorrectly advertise SVE.
-    0x11
+    registers::ID_AA64PFR0_GUEST_BASE
 }
 
 fn sanitize_isar1(value: u64) -> u64 {
-    const POINTER_AUTHENTICATION: u64 = (0xf << 4) | (0xf << 8) | (0xf << 24) | (0xf << 28);
-    value & !POINTER_AUTHENTICATION
+    value & !registers::ID_AA64ISAR1_POINTER_AUTH_MASK
 }
 
 fn sanitize_isar0(value: u64) -> u64 {
     // Transactional Memory state is not part of the vCPU context contract.
-    value & !(0xf << 52)
+    value & !registers::ID_AA64ISAR0_TME_MASK
 }
 
 fn sanitize_isar2(_value: u64) -> u64 {
@@ -418,32 +394,3 @@ read_register!(read_ctr_el0, "CTR_EL0");
 read_register!(read_dczid_el0, "DCZID_EL0");
 read_register!(read_cntfrq_el0, "CNTFRQ_EL0");
 read_register!(read_cntvct_el0, "CNTVCT_EL0");
-
-const MIDR_EL1: Encoding = Encoding::new(3, 0, 0, 0, 0);
-const MPIDR_EL1: Encoding = Encoding::new(3, 0, 0, 0, 5);
-const REVIDR_EL1: Encoding = Encoding::new(3, 0, 0, 0, 6);
-const ID_AA64PFR0_EL1: Encoding = Encoding::new(3, 0, 0, 4, 0);
-const ID_AA64PFR1_EL1: Encoding = Encoding::new(3, 0, 0, 4, 1);
-const ID_AA64PFR2_EL1: Encoding = Encoding::new(3, 0, 0, 4, 2);
-const ID_AA64ZFR0_EL1: Encoding = Encoding::new(3, 0, 0, 4, 4);
-const ID_AA64SMFR0_EL1: Encoding = Encoding::new(3, 0, 0, 4, 5);
-const ID_AA64FPFR0_EL1: Encoding = Encoding::new(3, 0, 0, 4, 7);
-const ID_AA64DFR0_EL1: Encoding = Encoding::new(3, 0, 0, 5, 0);
-const ID_AA64DFR1_EL1: Encoding = Encoding::new(3, 0, 0, 5, 1);
-const ID_AA64AFR0_EL1: Encoding = Encoding::new(3, 0, 0, 5, 4);
-const ID_AA64AFR1_EL1: Encoding = Encoding::new(3, 0, 0, 5, 5);
-const ID_AA64ISAR0_EL1: Encoding = Encoding::new(3, 0, 0, 6, 0);
-const ID_AA64ISAR1_EL1: Encoding = Encoding::new(3, 0, 0, 6, 1);
-const ID_AA64ISAR2_EL1: Encoding = Encoding::new(3, 0, 0, 6, 2);
-const ID_AA64ISAR3_EL1: Encoding = Encoding::new(3, 0, 0, 6, 3);
-const ID_AA64MMFR0_EL1: Encoding = Encoding::new(3, 0, 0, 7, 0);
-const ID_AA64MMFR1_EL1: Encoding = Encoding::new(3, 0, 0, 7, 1);
-const ID_AA64MMFR2_EL1: Encoding = Encoding::new(3, 0, 0, 7, 2);
-const ID_AA64MMFR3_EL1: Encoding = Encoding::new(3, 0, 0, 7, 3);
-const ID_AA64MMFR4_EL1: Encoding = Encoding::new(3, 0, 0, 7, 4);
-const CTR_EL0: Encoding = Encoding::new(3, 3, 0, 0, 1);
-const DCZID_EL0: Encoding = Encoding::new(3, 3, 0, 0, 7);
-const CNTFRQ_EL0: Encoding = Encoding::new(3, 3, 14, 0, 0);
-const CNTPCT_EL0: Encoding = Encoding::new(3, 3, 14, 0, 1);
-const ACTLR_EL1: Encoding = Encoding::new(3, 0, 1, 0, 1);
-const ICC_SGI1R_EL1: Encoding = Encoding::new(3, 0, 12, 11, 5);

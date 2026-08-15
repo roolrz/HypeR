@@ -2,6 +2,8 @@ use core::arch::asm;
 
 use hyper::hal::interrupt::InterruptMask;
 
+use super::registers;
+
 /// Local AArch64 interrupt-mask policy used by IRQ-safe kernel locks.
 pub struct LocalInterruptMask;
 
@@ -16,8 +18,9 @@ impl InterruptMask for LocalInterruptMask {
         unsafe {
             asm!(
                 "mrs {state}, daif",
-                "msr daifset, #0xf",
+                "msr daifset, #{all}",
                 state = out(reg) state,
+                all = const registers::DAIFSET_ALL,
                 options(nomem, nostack, preserves_flags)
             );
         }
@@ -43,5 +46,11 @@ impl InterruptMask for LocalInterruptMask {
 /// Runtime vectors and the interrupt dispatcher must be installed first.
 pub fn enable_irq() {
     // SAFETY: DAIFClr with immediate 2 clears only the IRQ mask bit.
-    unsafe { asm!("msr daifclr, #2", options(nomem, nostack, preserves_flags)) };
+    unsafe {
+        asm!(
+            "msr daifclr, #{irq}",
+            irq = const registers::DAIFCLR_IRQ,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
 }

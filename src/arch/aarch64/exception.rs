@@ -7,15 +7,7 @@ use hyper::sync::atomic::{AtomicU64, Ordering};
 
 use super::registers;
 
-const ESR_EXCEPTION_CLASS_SHIFT: u64 = 26;
-const ESR_EXCEPTION_CLASS_MASK: u64 = 0x3f;
-const ESR_EXCEPTION_CLASS_BRK64: u64 = 0x3c;
-const VECTOR_CURRENT_SP0_SYNCHRONOUS: u64 = 0;
-const VECTOR_CURRENT_SPX_SYNCHRONOUS: u64 = 4;
-const VECTOR_TEST_IMMEDIATE: u64 = 0x4859;
-const NO_VECTOR_TEST: u64 = u64::MAX;
-
-static VECTOR_TEST_EXPECTED: AtomicU64 = AtomicU64::new(NO_VECTOR_TEST);
+static VECTOR_TEST_EXPECTED: AtomicU64 = AtomicU64::new(registers::EXCEPTION_VECTOR_TEST_NONE);
 
 #[repr(C, align(16))]
 struct ExceptionFrame {
@@ -86,15 +78,27 @@ pub enum ValidationError {
 }
 
 pub fn validate_runtime_vectors() -> Result<(), ValidationError> {
-    VECTOR_TEST_EXPECTED.store(VECTOR_CURRENT_SPX_SYNCHRONOUS, Ordering::Release);
+    VECTOR_TEST_EXPECTED.store(
+        registers::EXCEPTION_VECTOR_CURRENT_SPX_SYNC,
+        Ordering::Release,
+    );
     // SAFETY: The dispatcher recognizes this private BRK immediate, advances
     // ELR past the instruction, and restores the complete interrupted state.
-    unsafe { asm!("brk #0x4859", options(nostack)) };
-    if VECTOR_TEST_EXPECTED.load(Ordering::Acquire) != NO_VECTOR_TEST {
+    unsafe {
+        asm!(
+            "brk #{test}",
+            test = const registers::EXCEPTION_VECTOR_TEST_IMMEDIATE,
+            options(nostack)
+        )
+    };
+    if VECTOR_TEST_EXPECTED.load(Ordering::Acquire) != registers::EXCEPTION_VECTOR_TEST_NONE {
         return Err(ValidationError::ExceptionDidNotReturn);
     }
 
-    VECTOR_TEST_EXPECTED.store(VECTOR_CURRENT_SP0_SYNCHRONOUS, Ordering::Release);
+    VECTOR_TEST_EXPECTED.store(
+        registers::EXCEPTION_VECTOR_CURRENT_SP0_SYNC,
+        Ordering::Release,
+    );
     let _saved_sp_el0: u64;
     // SAFETY: No stack access occurs while SPSel selects the deliberately
     // unusable SP_EL0 value. Slot zero must select SP_EL2 before constructing
@@ -102,18 +106,20 @@ pub fn validate_runtime_vectors() -> Result<(), ValidationError> {
     unsafe {
         asm!(
             "mrs {saved}, sp_el0",
-            "mov x9, #0x1000",
+            "mov x9, #{invalid_sp}",
             "msr sp_el0, x9",
             "msr spsel, #0",
-            "brk #0x4859",
+            "brk #{test}",
             "msr spsel, #1",
             "msr sp_el0, {saved}",
             saved = lateout(reg) _saved_sp_el0,
+            invalid_sp = const registers::EXCEPTION_VECTOR_TEST_INVALID_SP,
+            test = const registers::EXCEPTION_VECTOR_TEST_IMMEDIATE,
             out("x9") _,
             options(nostack)
         );
     }
-    if VECTOR_TEST_EXPECTED.load(Ordering::Acquire) != NO_VECTOR_TEST {
+    if VECTOR_TEST_EXPECTED.load(Ordering::Acquire) != registers::EXCEPTION_VECTOR_TEST_NONE {
         return Err(ValidationError::ExceptionDidNotReturn);
     }
     Ok(())
@@ -121,16 +127,16 @@ pub fn validate_runtime_vectors() -> Result<(), ValidationError> {
 
 #[unsafe(no_mangle)]
 extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
-    let exception_class = (frame.esr >> ESR_EXCEPTION_CLASS_SHIFT) & ESR_EXCEPTION_CLASS_MASK;
+    let exception_class = (frame.esr >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK;
     if matches!(
         frame.vector,
-        VECTOR_CURRENT_SP0_SYNCHRONOUS | VECTOR_CURRENT_SPX_SYNCHRONOUS
-    ) && exception_class == ESR_EXCEPTION_CLASS_BRK64
-        && frame.esr & 0xffff == VECTOR_TEST_IMMEDIATE
+        registers::EXCEPTION_VECTOR_CURRENT_SP0_SYNC | registers::EXCEPTION_VECTOR_CURRENT_SPX_SYNC
+    ) && exception_class == registers::ESR_EC_BRK64
+        && frame.esr & registers::ESR_BRK_COMMENT_MASK == registers::EXCEPTION_VECTOR_TEST_IMMEDIATE
         && VECTOR_TEST_EXPECTED
             .compare_exchange(
                 frame.vector,
-                NO_VECTOR_TEST,
+                registers::EXCEPTION_VECTOR_TEST_NONE,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
@@ -197,7 +203,8 @@ fn guest_physical_address(fault_address: u64) -> u64 {
             options(nomem, nostack, preserves_flags)
         );
     }
-    ((hpfar & 0x0000_00ff_ffff_fff0) << 8) | (fault_address & 0xfff)
+    ((hpfar & registers::HPFAR_EL2_FIPA_MASK) << registers::HPFAR_EL2_FIPA_TO_IPA_SHIFT)
+        | (fault_address & registers::PAGE_OFFSET_MASK_4K)
 }
 
 fn interrupted_stack_pointer(frame: &ExceptionFrame, origin: ExceptionOrigin) -> u64 {
@@ -209,8 +216,19 @@ fn interrupted_stack_pointer(frame: &ExceptionFrame, origin: ExceptionOrigin) ->
         // AArch64 EL0t and EL1t use SP_EL0; EL1h uses SP_EL1. Other mode
         // values are invalid for an AArch64 lower-EL vector and are reported
         // with SP_EL1 as the conservative privileged-context choice.
-        ExceptionOrigin::LowerAarch64 if frame.spsr & 0xf != 0x5 => frame.sp_el0,
-        ExceptionOrigin::LowerAarch32 if matches!(frame.spsr & 0x1f, 0x10 | 0x1f) => frame.sp_el0,
+        ExceptionOrigin::LowerAarch64
+            if frame.spsr & registers::SPSR_M_MASK != registers::SPSR_EL1H =>
+        {
+            frame.sp_el0
+        }
+        ExceptionOrigin::LowerAarch32
+            if matches!(
+                frame.spsr & registers::SPSR_AARCH32_M_MASK,
+                registers::SPSR_AARCH32_USR | registers::SPSR_AARCH32_SYS
+            ) =>
+        {
+            frame.sp_el0
+        }
         ExceptionOrigin::LowerAarch64 | ExceptionOrigin::LowerAarch32 => frame.sp_el1,
     }
 }
@@ -235,39 +253,43 @@ fn decode_vector(vector: u64) -> Option<(ExceptionKind, ExceptionOrigin)> {
 
 fn syndrome_description(exception_class: u64) -> &'static str {
     match exception_class {
-        0x00 => "unknown reason",
-        0x01 => "trapped WFI or WFE",
-        0x03 => "trapped MCR or MRC",
-        0x04 => "trapped MCRR or MRRC",
-        0x05 => "trapped MCR or MRC access",
-        0x06 => "trapped LDC or STC",
-        0x07 => "trapped SIMD or floating-point access",
-        0x0c => "trapped MRRC access",
-        0x0e => "illegal execution state",
-        0x11 => "supervisor call from AArch32",
-        0x12 => "hypervisor call from AArch32",
-        0x13 => "monitor call from AArch32",
-        0x15 => "supervisor call from AArch64",
-        0x16 => "hypervisor call from AArch64",
-        0x17 => "monitor call from AArch64",
-        0x18 => "trapped system register access",
-        0x19 => "trapped SVE access",
-        0x1c => "pointer authentication failure",
-        0x20 => "instruction abort from lower EL",
-        0x21 => "instruction abort at current EL",
-        0x22 => "PC alignment fault",
-        0x24 => "data abort from lower EL",
-        0x25 => "data abort at current EL",
-        0x26 => "SP alignment fault",
-        0x28 => "floating-point exception from AArch32",
-        0x2c => "floating-point exception from AArch64",
-        0x2f => "SError interrupt",
-        0x30 | 0x31 => "hardware breakpoint",
-        0x32 | 0x33 => "software step",
-        0x34 | 0x35 => "watchpoint",
-        0x38 => "BKPT instruction",
-        0x3a => "vector catch",
-        0x3c => "BRK instruction",
+        registers::ESR_EC_UNKNOWN => "unknown reason",
+        registers::ESR_EC_WFX => "trapped WFI or WFE",
+        registers::ESR_EC_CP15_RT => "trapped MCR or MRC",
+        registers::ESR_EC_CP15_RRT => "trapped MCRR or MRRC",
+        registers::ESR_EC_CP14_RT => "trapped MCR or MRC access",
+        registers::ESR_EC_CP14_DT => "trapped LDC or STC",
+        registers::ESR_EC_FP_ASIMD => "trapped SIMD or floating-point access",
+        registers::ESR_EC_CP14_RRT => "trapped MRRC access",
+        registers::ESR_EC_ILLEGAL_STATE => "illegal execution state",
+        registers::ESR_EC_SVC32 => "supervisor call from AArch32",
+        registers::ESR_EC_HVC32 => "hypervisor call from AArch32",
+        registers::ESR_EC_SMC32 => "monitor call from AArch32",
+        registers::ESR_EC_SVC64 => "supervisor call from AArch64",
+        registers::ESR_EC_HVC64 => "hypervisor call from AArch64",
+        registers::ESR_EC_SMC64 => "monitor call from AArch64",
+        registers::ESR_EC_SYSTEM_REGISTER => "trapped system register access",
+        registers::ESR_EC_SVE => "trapped SVE access",
+        registers::ESR_EC_PAC_FAILURE => "pointer authentication failure",
+        registers::ESR_EC_INSTRUCTION_ABORT_LOWER => "instruction abort from lower EL",
+        registers::ESR_EC_INSTRUCTION_ABORT_CURRENT => "instruction abort at current EL",
+        registers::ESR_EC_PC_ALIGNMENT => "PC alignment fault",
+        registers::ESR_EC_DATA_ABORT_LOWER => "data abort from lower EL",
+        registers::ESR_EC_DATA_ABORT_CURRENT => "data abort at current EL",
+        registers::ESR_EC_SP_ALIGNMENT => "SP alignment fault",
+        registers::ESR_EC_FP32 => "floating-point exception from AArch32",
+        registers::ESR_EC_FP64 => "floating-point exception from AArch64",
+        registers::ESR_EC_SERROR => "SError interrupt",
+        registers::ESR_EC_BREAKPOINT_LOWER | registers::ESR_EC_BREAKPOINT_CURRENT => {
+            "hardware breakpoint"
+        }
+        registers::ESR_EC_SOFTWARE_STEP_LOWER | registers::ESR_EC_SOFTWARE_STEP_CURRENT => {
+            "software step"
+        }
+        registers::ESR_EC_WATCHPOINT_LOWER | registers::ESR_EC_WATCHPOINT_CURRENT => "watchpoint",
+        registers::ESR_EC_BKPT32 => "BKPT instruction",
+        registers::ESR_EC_VECTOR_CATCH => "vector catch",
+        registers::ESR_EC_BRK64 => "BRK instruction",
         _ => "reserved or implementation-defined exception class",
     }
 }

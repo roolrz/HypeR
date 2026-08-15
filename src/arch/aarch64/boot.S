@@ -29,7 +29,7 @@ _start:
 .section .text.boot, "ax"
 .balign 16
 .Lprimary_entry:
-    msr     daifset, #0xf
+    msr     daifset, #DAIFSET_ALL
     clrex
 
     // A hypervisor kernel requires EL2. EL1 fallback is intentionally rejected.
@@ -40,7 +40,7 @@ _start:
     // Firmware/PSCI should retain secondaries. Park any that enter defensively.
     mrs     x1, mpidr_el1
     ubfx    x2, x1, #32, #8
-    and     x1, x1, #0x00ffffff
+    and     x1, x1, #MPIDR_AFF0_TO_2_MASK
     orr     x1, x1, x2
     cbnz    x1, .Lsecondary_halt
 
@@ -175,7 +175,7 @@ _start:
     b.ne    .Lclear_table
 
     // L0[0] covers the low 512 GiB through the bootstrap L1 table.
-    orr     x1, x5, #0x3
+    orr     x1, x5, #STAGE1_DESC_TABLE_OR_PAGE
     str     x1, [x4]
 
     // 0..1 GiB: QEMU `virt` MMIO, Device-nGnRnE, execute-never.
@@ -228,7 +228,7 @@ _start:
 .global aarch64_activate_final_address_space
 .type aarch64_activate_final_address_space, %function
 aarch64_activate_final_address_space:
-    msr     daifset, #0xf
+    msr     daifset, #DAIFSET_ALL
     mov     x19, x0
     mov     x20, x1
     mov     x21, x2
@@ -329,7 +329,7 @@ aarch64_activate_final_address_space:
 .global aarch64_secondary_entry
 .type aarch64_secondary_entry, %function
 aarch64_secondary_entry:
-    msr     daifset, #0xf
+    msr     daifset, #DAIFSET_ALL
     clrex
     mov     x19, x0
 

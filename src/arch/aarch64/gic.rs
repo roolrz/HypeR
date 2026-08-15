@@ -2,9 +2,7 @@ use core::arch::asm;
 
 use hyper::drivers::interrupt::gicv3::CpuInterface;
 
-const ICC_SRE_EL2_SRE: u64 = 1 << 0;
-const ICC_CTLR_EL1_EOI_MODE: u64 = 1 << 1;
-const ICC_IAR1_INTID_MASK: u64 = 0x00ff_ffff;
+use super::registers;
 
 /// AArch64 implementation of the GICv3 system-register CPU interface.
 pub struct Aarch64GicCpuInterface;
@@ -17,15 +15,16 @@ impl CpuInterface for Aarch64GicCpuInterface {
         unsafe {
             asm!(
                 "mrs {sre}, ICC_SRE_EL2",
-                "orr {sre}, {sre}, #1",
+                "orr {sre}, {sre}, #{sre_bit}",
                 "msr ICC_SRE_EL2, {sre}",
                 "isb",
                 "mrs {sre}, ICC_SRE_EL2",
                 sre = inout(reg) 0u64 => sre,
+                sre_bit = const registers::ICC_SRE_EL2_SRE,
                 options(nomem, nostack, preserves_flags)
             );
         }
-        if sre & ICC_SRE_EL2_SRE == 0 {
+        if sre & registers::ICC_SRE_EL2_SRE == 0 {
             return false;
         }
 
@@ -33,22 +32,24 @@ impl CpuInterface for Aarch64GicCpuInterface {
         unsafe {
             asm!(
                 "msr ICH_HCR_EL2, xzr",
-                "mov {control:w}, #0xff",
+                "mov {control:w}, #{priority}",
                 "msr ICC_PMR_EL1, {control}",
                 "msr ICC_BPR1_EL1, xzr",
                 "mrs {control}, ICC_CTLR_EL1",
                 control = out(reg) control,
+                priority = const registers::ICC_PMR_ALLOW_ALL,
                 options(nomem, nostack, preserves_flags)
             );
         }
-        control &= !ICC_CTLR_EL1_EOI_MODE;
+        control &= !registers::ICC_CTLR_EL1_EOI_MODE;
         unsafe {
             asm!(
                 "msr ICC_CTLR_EL1, {control}",
-                "mov {control:w}, #1",
+                "mov {control:w}, #{enable}",
                 "msr ICC_IGRPEN1_EL1, {control}",
                 "isb",
                 control = inout(reg) control => _,
+                enable = const registers::ICC_IGRPEN1_ENABLE,
                 options(nomem, nostack, preserves_flags)
             );
         }
@@ -66,7 +67,7 @@ impl CpuInterface for Aarch64GicCpuInterface {
                 options(nomem, nostack, preserves_flags)
             );
         }
-        (interrupt & ICC_IAR1_INTID_MASK) as u32
+        (interrupt & registers::ICC_IAR1_INTID_MASK) as u32
     }
 
     fn end(interrupt: u32) {
@@ -98,7 +99,7 @@ pub fn current_gic_affinity() -> u32 {
             options(nomem, nostack, preserves_flags)
         );
     }
-    let affinity_0_to_2 = mpidr & 0x00ff_ffff;
-    let affinity_3 = (mpidr >> 32) & 0xff;
-    (affinity_0_to_2 | (affinity_3 << 24)) as u32
+    let affinity_0_to_2 = mpidr & registers::MPIDR_AFF0_TO_2_MASK;
+    let affinity_3 = (mpidr >> registers::MPIDR_AFF3_SHIFT) & registers::MPIDR_AFF3_MASK;
+    (affinity_0_to_2 | (affinity_3 << registers::GIC_AFF3_SHIFT)) as u32
 }

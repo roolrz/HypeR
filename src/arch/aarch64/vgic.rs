@@ -5,17 +5,7 @@ use core::arch::asm;
 use hyper::drivers::interrupt::vgic::{InterruptGroup, ListEntry, ListState, VirtualInterruptId};
 use hyper::drivers::interrupt::vgicv3::{decode_list_register, encode_list_register};
 
-pub const MAX_LIST_REGISTERS: usize = 16;
-
-const ICH_VTR_LIST_REGISTERS_MASK: u64 = 0x1f;
-const ICH_VTR_ID_BITS_SHIFT: u64 = 23;
-const ICH_VTR_ID_BITS_MASK: u64 = 0x7;
-const ICH_VTR_PREEMPTION_BITS_SHIFT: u64 = 26;
-const ICH_VTR_PRIORITY_BITS_SHIFT: u64 = 29;
-const ICH_VTR_BITS_MASK: u64 = 0x7;
-const ICH_HCR_ENABLE: u64 = 1 << 0;
-const ICH_VMCR_ENABLE_GROUP1: u64 = 1 << 1;
-const ICH_VMCR_PRIORITY_MASK_ALLOW_ALL: u64 = 0xff << 24;
+use super::registers;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -47,7 +37,7 @@ pub struct CpuContext {
     virtual_machine_control: u64,
     active_priorities_group0: [u64; 4],
     active_priorities_group1: [u64; 4],
-    list_registers: [Option<ListEntry>; MAX_LIST_REGISTERS],
+    list_registers: [Option<ListEntry>; registers::ICH_MAX_LIST_REGISTERS],
     list_register_count: u8,
     active_priority_register_count: u8,
 }
@@ -55,11 +45,12 @@ pub struct CpuContext {
 impl CpuContext {
     pub const fn empty() -> Self {
         Self {
-            control: ICH_HCR_ENABLE,
-            virtual_machine_control: ICH_VMCR_ENABLE_GROUP1 | ICH_VMCR_PRIORITY_MASK_ALLOW_ALL,
+            control: registers::ICH_HCR_ENABLE,
+            virtual_machine_control: registers::ICH_VMCR_ENABLE_GROUP1
+                | registers::ICH_VMCR_PRIORITY_MASK_ALLOW_ALL,
             active_priorities_group0: [0; 4],
             active_priorities_group1: [0; 4],
-            list_registers: [None; MAX_LIST_REGISTERS],
+            list_registers: [None; registers::ICH_MAX_LIST_REGISTERS],
             list_register_count: 0,
             active_priority_register_count: 0,
         }
@@ -94,17 +85,21 @@ pub fn capabilities() -> Result<Capabilities, Error> {
             options(nomem, nostack, preserves_flags)
         );
     }
-    let list_registers = ((value & ICH_VTR_LIST_REGISTERS_MASK) + 1) as u8;
-    let priority_bits = (((value >> ICH_VTR_PRIORITY_BITS_SHIFT) & ICH_VTR_BITS_MASK) + 1) as u8;
-    let preemption_bits =
-        (((value >> ICH_VTR_PREEMPTION_BITS_SHIFT) & ICH_VTR_BITS_MASK) + 1) as u8;
-    let interrupt_id_bits = match (value >> ICH_VTR_ID_BITS_SHIFT) & ICH_VTR_ID_BITS_MASK {
-        0 => 16,
-        1 => 24,
-        _ => return Err(Error::InvalidTypeRegister),
-    };
+    let list_registers = ((value & registers::ICH_VTR_LIST_REGISTERS_MASK) + 1) as u8;
+    let priority_bits = (((value >> registers::ICH_VTR_PRIORITY_BITS_SHIFT)
+        & registers::ICH_VTR_BITS_MASK)
+        + 1) as u8;
+    let preemption_bits = (((value >> registers::ICH_VTR_PREEMPTION_BITS_SHIFT)
+        & registers::ICH_VTR_BITS_MASK)
+        + 1) as u8;
+    let interrupt_id_bits =
+        match (value >> registers::ICH_VTR_ID_BITS_SHIFT) & registers::ICH_VTR_ID_BITS_MASK {
+            0 => 16,
+            1 => 24,
+            _ => return Err(Error::InvalidTypeRegister),
+        };
     if list_registers == 0
-        || usize::from(list_registers) > MAX_LIST_REGISTERS
+        || usize::from(list_registers) > registers::ICH_MAX_LIST_REGISTERS
         || !(5..=8).contains(&priority_bits)
         || !(5..=7).contains(&preemption_bits)
         || preemption_bits > priority_bits
@@ -171,7 +166,7 @@ pub unsafe fn activate(context: &CpuContext) -> Result<(), Error> {
     let active_priority_count = active_priority_register_count(capabilities);
     if count != implemented
         || context.active_priority_register_count != active_priority_count
-        || count > MAX_LIST_REGISTERS
+        || count > registers::ICH_MAX_LIST_REGISTERS
     {
         return Err(Error::IncompatibleCpuInterface);
     }
@@ -196,7 +191,7 @@ pub unsafe fn activate(context: &CpuContext) -> Result<(), Error> {
         asm!(
             "msr ICH_HCR_EL2, {value}",
             "isb",
-            value = in(reg) context.control | ICH_HCR_ENABLE,
+            value = in(reg) context.control | registers::ICH_HCR_ENABLE,
             options(nomem, nostack)
         );
     }
@@ -215,7 +210,7 @@ pub unsafe fn deactivate(context: &mut CpuContext) -> Result<(), Error> {
     let active_priority_count = active_priority_register_count(capabilities);
     if count != implemented
         || context.active_priority_register_count != active_priority_count
-        || count > MAX_LIST_REGISTERS
+        || count > registers::ICH_MAX_LIST_REGISTERS
     {
         return Err(Error::IncompatibleCpuInterface);
     }

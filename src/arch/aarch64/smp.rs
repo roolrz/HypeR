@@ -3,6 +3,8 @@
 use core::arch::asm;
 use core::ptr::addr_of;
 
+use super::registers;
+
 unsafe extern "C" {
     static aarch64_secondary_entry: u8;
 }
@@ -71,9 +73,9 @@ pub fn current_hardware_id() -> u64 {
             options(nomem, nostack, preserves_flags)
         );
     }
-    let affinity_0_to_2 = mpidr & 0x00ff_ffff;
-    let affinity_3 = (mpidr >> 32) & 0xff;
-    affinity_0_to_2 | (affinity_3 << 32)
+    let affinity_0_to_2 = mpidr & registers::MPIDR_AFF0_TO_2_MASK;
+    let affinity_3 = (mpidr >> registers::MPIDR_AFF3_SHIFT) & registers::MPIDR_AFF3_MASK;
+    affinity_0_to_2 | (affinity_3 << registers::MPIDR_AFF3_SHIFT)
 }
 
 /// Wakes processing elements waiting in WFE after publishing shared state.
