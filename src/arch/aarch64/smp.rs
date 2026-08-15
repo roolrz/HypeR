@@ -32,7 +32,7 @@ impl SecondaryBootParameters {
             physical_stack_top,
             virtual_stack_top,
             cpu_index: cpu_index as u64,
-            rust_entry: super::aarch64_secondary_rust_entry as *const () as usize as u64,
+            rust_entry: crate::start_secondary_cpu as *const () as usize as u64,
             runtime_vectors: super::exception::runtime_vector_address(),
         }
     }

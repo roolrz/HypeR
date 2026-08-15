@@ -8,6 +8,45 @@ pub mod kernel;
 
 use core::panic::PanicInfo;
 
+/// Primary kernel entry after architecture initialization is complete.
+///
+/// AArch64 enters here only after relocation, permanent page-table activation,
+/// VBAR relocation, and the switch to the final kernel stack.
+#[unsafe(no_mangle)]
+extern "C" fn start_kernel() -> ! {
+    let mut boot = crate::kernel::boot::enter_runtime();
+
+    crate::kernel::mm::initialize();
+    crate::kernel::debug::initialize();
+    crate::kernel::task::initialize();
+
+    crate::kernel::device::initialize_cpu_power(&boot);
+    crate::kernel::irq::initialize_controller(&mut boot);
+    crate::kernel::irq::initialize_exceptions();
+    crate::kernel::irq::initialize_virtualization(&boot);
+    crate::kernel::time::initialize_timekeeping();
+    crate::kernel::irq::initialize_timer(&mut boot);
+
+    crate::kernel::vm::initialize_virtual_devices(&boot);
+    crate::kernel::device::initialize_driver_framework(&boot);
+    crate::kernel::cpu::initialize(&mut boot);
+
+    crate::kernel::irq::publish_online_cpu_count(&boot);
+    crate::kernel::mm::finalize_address_space();
+    crate::kernel::log::report_startup_state();
+
+    crate::kernel::vm::start_default()
+}
+
+/// Rust kernel entry used by secondary CPUs after architectural setup.
+#[unsafe(no_mangle)]
+extern "C" fn start_secondary_cpu(cpu_index: usize) -> ! {
+    if !crate::arch::secondary_cpu_is_compatible() {
+        crate::arch::halt()
+    }
+    crate::kernel::cpu::secondary_entry(cpu_index)
+}
+
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
     crate::kernel::log::panic(info);

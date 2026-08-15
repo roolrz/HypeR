@@ -17,7 +17,8 @@ pub use aarch64::{
     SecondaryBootParameters, Stage2AddressSpace, Stage2Error, ThreadContext, TimerError,
     UserContext, VcpuContext, VgicError, activate_memory, atomic_capabilities, current_cpu_index,
     current_gic_affinity, current_hardware_id, disable_vgic, enable_local_irq, halt,
-    initialize_cpu_power, install_runtime_vectors, prepare_address_space, secondary_entry_physical,
-    select_kaslr_layout, send_event, switch_thread_context, validate_runtime_vectors,
-    validate_vgic, validate_vsysreg, vgic_maintenance_state, wait_for_interrupt,
+    initialize_cpu_power, install_runtime_vectors, prepare_address_space,
+    secondary_cpu_is_compatible, secondary_entry_physical, select_kaslr_layout, send_event,
+    switch_thread_context, validate_runtime_vectors, validate_vgic, validate_vsysreg,
+    vgic_maintenance_state, wait_for_interrupt,
 };

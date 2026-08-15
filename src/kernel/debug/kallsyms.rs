@@ -2,8 +2,8 @@
 
 use core::ptr::addr_of;
 
-use hyper::kallsyms::SymbolTable;
-pub use hyper::kallsyms::{Error, Symbol};
+use hyper::debug::kallsyms::SymbolTable;
+pub use hyper::debug::kallsyms::{Error, Symbol};
 
 unsafe extern "C" {
     static __image_start: u8;

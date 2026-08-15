@@ -109,6 +109,16 @@ pub fn flush() {
     console::flush();
 }
 
+/// Reports the state of the logging backend at the end of kernel startup.
+pub(crate) fn report_startup_state() {
+    let statistics = statistics();
+    crate::println!(
+        "HypeR: kernel log ring: {} bytes, {} records dropped",
+        statistics.capacity,
+        statistics.dropped
+    );
+}
+
 pub fn panic(info: &PanicInfo<'_>) {
     if PANIC_PATH_ACTIVE.swap(true, Ordering::AcqRel) {
         crate::arch::halt()

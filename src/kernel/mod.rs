@@ -1,6 +1,6 @@
 //! Architecture-independent kernel policy, grouped by subsystem.
 
-mod boot;
+pub(crate) mod boot;
 pub mod cpu;
 pub mod debug;
 pub mod device;
@@ -11,7 +11,7 @@ pub mod task;
 pub mod time;
 pub mod vm;
 
-pub use boot::{boot, finish_boot};
+pub(crate) use boot::prepare_boot_environment;
 
 // Stable facades for existing kernel callers. New internal code should prefer
 // the subsystem-qualified paths above.

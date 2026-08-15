@@ -13,9 +13,10 @@ compatibility without coupling those policies to architecture or device code.
 ```text
 Linux AArch64 boot ABI
     -> architectural assembly entry
-    -> Rust entry
-    -> flattened device tree discovery
+    -> AArch64 Rust bootstrap and flattened device tree discovery
     -> optional command-line early console
+    -> permanent mappings, vectors, and kernel stack
+    -> start_kernel in src/main.rs
     -> essential architecture initialization
     -> platform driver probing
     -> kernel initialization
@@ -113,9 +114,10 @@ recovery uses the selected base rather than a compile-time VA.
 
 The kernel image retains an allocated ELF `.dynsym/.dynstr` pair through lld's
 export-dynamic mode. Linker boundaries keep both tables in the permanent
-read-only image mapping. The architecture-independent `hyper::kallsyms` parser
-validates little-endian ELF64 entries and resolves the nearest preceding
-defined function without allocation, locks, a filesystem, or DWARF.
+read-only image mapping. The architecture-independent
+`hyper::debug::kallsyms` parser validates little-endian ELF64 entries and
+resolves the nearest preceding defined function without allocation, locks, a
+filesystem, or DWARF.
 
 `kernel::debug::kallsyms::lookup(address)` converts a runtime PC through the
 actual KASLR base and returns the raw symbol name, runtime start, declared size,
@@ -189,7 +191,8 @@ remain in the kernel log ring for a later console or dmesg-style reader.
 
 ## Design boundaries
 
-- `arch`: architecture-specific entry and CPU mechanisms.
+- `main.rs`: discoverable Rust kernel entries and top-level phase transitions.
+- `arch`: architecture-specific entry assembly and CPU mechanisms.
 - `hal`: narrow hardware-policy contracts consumed by architecture-independent code.
 - `platform`: firmware data parsing and immutable hardware description.
 - `drivers`: device implementations selected from platform description.

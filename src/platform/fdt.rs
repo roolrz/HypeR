@@ -315,61 +315,17 @@ fn discover_in_blob(
     loop {
         let token = take_u32(structure, &mut cursor)?;
         match token {
-            FDT_BEGIN_NODE => {
-                if depth == MAX_DEPTH {
-                    return Err(Error::TooDeep);
-                }
-                let name = take_c_string(structure, &mut cursor)?;
-                let node_id = NodeId(next_node_id);
-                next_node_id = next_node_id.checked_add(1).ok_or(Error::TooLarge)?;
-                visitor.begin_node(node_id, name);
-                align_cursor(&mut cursor, structure.len())?;
-                if depth != 0 {
-                    decode_ranges(&mut nodes[depth - 1])?;
-                }
-                let (address_cells, size_cells, reserved_child, parent_disabled) = if depth == 0 {
-                    (2, 1, false, false)
-                } else {
-                    let parent = nodes[depth - 1];
-                    (
-                        parent.child_address_cells,
-                        parent.child_size_cells,
-                        parent.children_are_reserved,
-                        parent.disabled,
-                    )
-                };
-                nodes[depth] = NodeState {
-                    id: node_id,
-                    register_address_cells: address_cells,
-                    register_size_cells: size_cells,
-                    is_memory: name == "memory" || name.starts_with("memory@"),
-                    is_cpu: name == "cpu" || name.starts_with("cpu@"),
-                    is_reserved_region: reserved_child,
-                    children_are_reserved: name == "reserved-memory",
-                    disabled: parent_disabled,
-                    ..NodeState::EMPTY
-                };
-                depth += 1;
-            }
-            FDT_END_NODE => {
-                if depth == 0 {
-                    return Err(Error::BadStructure);
-                }
-                depth -= 1;
-                decode_ranges(&mut nodes[depth])?;
-                finish_node(nodes[depth], &mut discovered, &nodes[..depth], visitor)?;
-            }
+            FDT_BEGIN_NODE => begin_node(
+                structure,
+                &mut cursor,
+                &mut depth,
+                &mut next_node_id,
+                &mut nodes,
+                visitor,
+            )?,
+            FDT_END_NODE => end_node(&mut depth, &mut nodes, &mut discovered, visitor)?,
             FDT_PROP => {
-                if depth == 0 {
-                    return Err(Error::BadStructure);
-                }
-                let length = take_u32(structure, &mut cursor)? as usize;
-                let name_offset = take_u32(structure, &mut cursor)? as usize;
-                let value = take_bytes(structure, &mut cursor, length)?;
-                align_cursor(&mut cursor, structure.len())?;
-                let name = string_at(strings, name_offset)?;
-                visitor.property(nodes[depth - 1].id, name, value);
-                apply_property(&mut nodes[depth - 1], name, value)?;
+                visit_property(structure, strings, &mut cursor, depth, &mut nodes, visitor)?
             }
             FDT_NOP => {}
             FDT_END => {
@@ -393,6 +349,85 @@ fn discover_in_blob(
         mmio: discovered.mmio,
         dtb_size: header.total_size as u64,
     })
+}
+
+fn begin_node(
+    structure: &[u8],
+    cursor: &mut usize,
+    depth: &mut usize,
+    next_node_id: &mut u32,
+    nodes: &mut [NodeState; MAX_DEPTH],
+    visitor: &mut impl NodeVisitor,
+) -> Result<(), Error> {
+    if *depth == MAX_DEPTH {
+        return Err(Error::TooDeep);
+    }
+    let name = take_c_string(structure, cursor)?;
+    let node_id = NodeId(*next_node_id);
+    *next_node_id = next_node_id.checked_add(1).ok_or(Error::TooLarge)?;
+    visitor.begin_node(node_id, name);
+    align_cursor(cursor, structure.len())?;
+    if *depth != 0 {
+        decode_ranges(&mut nodes[*depth - 1])?;
+    }
+    let (address_cells, size_cells, reserved_child, parent_disabled) = if *depth == 0 {
+        (2, 1, false, false)
+    } else {
+        let parent = nodes[*depth - 1];
+        (
+            parent.child_address_cells,
+            parent.child_size_cells,
+            parent.children_are_reserved,
+            parent.disabled,
+        )
+    };
+    nodes[*depth] = NodeState {
+        id: node_id,
+        register_address_cells: address_cells,
+        register_size_cells: size_cells,
+        is_memory: name == "memory" || name.starts_with("memory@"),
+        is_cpu: name == "cpu" || name.starts_with("cpu@"),
+        is_reserved_region: reserved_child,
+        children_are_reserved: name == "reserved-memory",
+        disabled: parent_disabled,
+        ..NodeState::EMPTY
+    };
+    *depth += 1;
+    Ok(())
+}
+
+fn end_node(
+    depth: &mut usize,
+    nodes: &mut [NodeState; MAX_DEPTH],
+    discovered: &mut DiscoveryState,
+    visitor: &mut impl NodeVisitor,
+) -> Result<(), Error> {
+    if *depth == 0 {
+        return Err(Error::BadStructure);
+    }
+    *depth -= 1;
+    decode_ranges(&mut nodes[*depth])?;
+    finish_node(nodes[*depth], discovered, &nodes[..*depth], visitor)
+}
+
+fn visit_property(
+    structure: &[u8],
+    strings: &[u8],
+    cursor: &mut usize,
+    depth: usize,
+    nodes: &mut [NodeState; MAX_DEPTH],
+    visitor: &mut impl NodeVisitor,
+) -> Result<(), Error> {
+    if depth == 0 {
+        return Err(Error::BadStructure);
+    }
+    let length = take_u32(structure, cursor)? as usize;
+    let name_offset = take_u32(structure, cursor)? as usize;
+    let value = take_bytes(structure, cursor, length)?;
+    align_cursor(cursor, structure.len())?;
+    let name = string_at(strings, name_offset)?;
+    visitor.property(nodes[depth - 1].id, name, value);
+    apply_property(&mut nodes[depth - 1], name, value)
 }
 
 fn finish_node(

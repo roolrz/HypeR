@@ -21,6 +21,46 @@ pub fn boot_linux(guest: VmBundle<'_>) -> Result<core::convert::Infallible, Linu
     linux::boot(guest)
 }
 
+/// Validates the guest-visible devices needed before loading the first VM.
+pub(crate) fn initialize_virtual_devices(boot: &super::boot::Initialization) {
+    if let Err(error) = validate_arch_timer(boot.timer().guest_virtual_interrupt) {
+        super::boot::fail("virtual architected timer validation", error);
+    }
+    crate::println!("HypeR: virtual architected timer injection validated");
+}
+
+/// Loads the default VM bundle from the boot ramdisk and enters the guest.
+pub(crate) fn start_default() -> ! {
+    let initial_ramdisk = super::boot::with_boot_state(|state| state.initial_ramdisk);
+    let ramdisk_address = match super::mm::memory::linear_address(initial_ramdisk.start()) {
+        Some(address) => address,
+        None => super::boot::fail("initial ramdisk address translation", initial_ramdisk),
+    };
+    let ramdisk_size = match usize::try_from(initial_ramdisk.size()) {
+        Ok(size) => size,
+        Err(_) => super::boot::fail("initial ramdisk size conversion", initial_ramdisk),
+    };
+    // SAFETY: Early boot reserved this firmware-owned RAM range before buddy
+    // handoff, and the permanent linear map covers the validated complete range.
+    let ramdisk =
+        unsafe { core::slice::from_raw_parts(ramdisk_address as *const u8, ramdisk_size) };
+    let guest = match select_default(ramdisk) {
+        Ok(guest) => guest,
+        Err(error) => super::boot::fail("VM bundle loading", error),
+    };
+    crate::println!(
+        "HypeR: loaded VM '{}' from boot ramdisk: {} MiB RAM, {} vCPU(s)",
+        guest.name(),
+        guest.memory_size() / (1024 * 1024),
+        guest.vcpu_count()
+    );
+    crate::println!("HypeR: kernel initialization complete; starting Linux guest");
+    match boot_linux(guest) {
+        Ok(never) => match never {},
+        Err(error) => super::boot::fail("Linux guest boot", error),
+    }
+}
+
 pub(crate) fn handle_guest_sync(frame: &mut crate::arch::GuestSyncFrame<'_>) -> bool {
     match active_vcpu::with(|execution, interrupts| {
         let action =

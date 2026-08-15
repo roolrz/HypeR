@@ -79,6 +79,21 @@ impl From<super::VcpuInterruptError> for Error {
 }
 
 pub fn boot(guest: VmBundle<'_>) -> Result<Infallible, Error> {
+    let guest_ram_order = validate_guest(&guest)?;
+    let image = guest.kernel();
+    let initramfs = guest.initramfs();
+    let guest_ram = GuestRam::allocate(guest.memory_size(), guest_ram_order)?;
+    let initramfs_range = layout_payload(image, initramfs, guest_ram.size)?;
+
+    load_payload(&guest, &guest_ram, initramfs_range)?;
+    let (stage2, _table_pages) = build_stage2_address_space(&guest_ram)?;
+    let (interrupts, mut execution) = prepare_boot_vcpu(guest.vcpu_count())?;
+
+    report_guest_layout(&guest, initramfs_range, stage2.root_address());
+    enter_guest(&mut execution, &interrupts, &stage2)
+}
+
+fn validate_guest(guest: &VmBundle<'_>) -> Result<usize, Error> {
     if guest.guest_type() != "linux" {
         return Err(Error::UnsupportedGuestType);
     }
@@ -103,15 +118,14 @@ pub fn boot(guest: VmBundle<'_>) -> Result<Infallible, Error> {
     if guest_ram_order > MAX_ORDER {
         return Err(Error::UnsupportedMemorySize);
     }
-    let guest_ram = PageBlock::allocate(guest_ram_order)?;
-    let ram_physical = guest_ram.physical();
-    let ram_virtual = linear_address(ram_physical)?;
-    // SAFETY: The contiguous block is exclusively owned by this VM and the
-    // permanent linear map covers its complete physical range.
-    let guest_ram_size_usize = usize::try_from(guest_ram_size).map_err(|_| Error::InvalidLayout)?;
-    unsafe { write_bytes(ram_virtual as *mut u8, 0, guest_ram_size_usize) };
+    Ok(guest_ram_order)
+}
 
-    let initramfs = guest.initramfs();
+fn layout_payload(
+    image: &[u8],
+    initramfs: Option<&[u8]>,
+    guest_ram_size: u64,
+) -> Result<Option<(u64, u64)>, Error> {
     let image_end = GUEST_KERNEL_IPA
         .checked_add(image.len() as u64)
         .ok_or(Error::AddressOverflow)?;
@@ -132,9 +146,19 @@ pub fn boot(guest: VmBundle<'_>) -> Result<Infallible, Error> {
     if payload_end > ram_end {
         return Err(Error::InvalidLayout);
     }
+    Ok(initramfs_range)
+}
+
+fn load_payload(
+    guest: &VmBundle<'_>,
+    guest_ram: &GuestRam,
+    initramfs_range: Option<(u64, u64)>,
+) -> Result<(), Error> {
+    let image = guest.kernel();
+    let initramfs = guest.initramfs();
     let device_tree = fdt::build(
         GUEST_RAM_IPA,
-        guest_ram_size,
+        guest_ram.size,
         initramfs_range,
         guest.command_line(),
         guest.vcpu_count(),
@@ -143,31 +167,48 @@ pub fn boot(guest: VmBundle<'_>) -> Result<Infallible, Error> {
         return Err(Error::InvalidLayout);
     }
 
-    copy_into_guest(ram_virtual, guest_ram_size, GUEST_KERNEL_IPA, image)?;
+    copy_into_guest(
+        guest_ram.virtual_address,
+        guest_ram.size,
+        GUEST_KERNEL_IPA,
+        image,
+    )?;
     if let (Some(bytes), Some((start, _))) = (initramfs, initramfs_range) {
-        copy_into_guest(ram_virtual, guest_ram_size, start, bytes)?;
+        copy_into_guest(guest_ram.virtual_address, guest_ram.size, start, bytes)?;
     }
-    copy_into_guest(ram_virtual, guest_ram_size, GUEST_DTB_IPA, &device_tree)?;
-    let image_virtual = guest_host_virtual(ram_virtual, guest_ram_size, GUEST_KERNEL_IPA)?;
-    let dtb_virtual = guest_host_virtual(ram_virtual, guest_ram_size, GUEST_DTB_IPA)?;
+    copy_into_guest(
+        guest_ram.virtual_address,
+        guest_ram.size,
+        GUEST_DTB_IPA,
+        &device_tree,
+    )?;
+    let image_virtual =
+        guest_host_virtual(guest_ram.virtual_address, guest_ram.size, GUEST_KERNEL_IPA)?;
+    let dtb_virtual = guest_host_virtual(guest_ram.virtual_address, guest_ram.size, GUEST_DTB_IPA)?;
     // SAFETY: These exclusively owned ranges have just been initialized and
     // cannot be observed by the guest before stage-2 activation and ERET.
     unsafe {
         crate::arch::ArchitectureCache::publish_instruction_range(image_virtual, image.len())?;
         if let (Some(bytes), Some((start, _))) = (initramfs, initramfs_range) {
-            let initramfs_virtual = guest_host_virtual(ram_virtual, guest_ram_size, start)?;
+            let initramfs_virtual =
+                guest_host_virtual(guest_ram.virtual_address, guest_ram.size, start)?;
             crate::arch::ArchitectureCache::publish_data_range(initramfs_virtual, bytes.len())?;
         }
         crate::arch::ArchitectureCache::publish_data_range(dtb_virtual, device_tree.len())?;
     }
+    Ok(())
+}
 
+fn build_stage2_address_space(
+    guest_ram: &GuestRam,
+) -> Result<(crate::arch::Stage2AddressSpace, Stage2PagePool), Error> {
     let mut table_pages = Stage2PagePool::new();
     let mut allocate_table = || table_pages.allocate_zeroed();
     let mut stage2 = crate::arch::Stage2AddressSpace::new(1, &mut allocate_table)?;
     stage2.map_normal(
         GUEST_RAM_IPA,
-        ram_physical.get(),
-        guest_ram_size,
+        guest_ram.physical.get(),
+        guest_ram.size,
         &mut allocate_table,
     )?;
     stage2.map_device(
@@ -176,9 +217,12 @@ pub fn boot(guest: VmBundle<'_>) -> Result<Infallible, Error> {
         GUEST_UART_SIZE,
         &mut allocate_table,
     )?;
+    Ok((stage2, table_pages))
+}
 
+fn prepare_boot_vcpu(vcpu_count: u32) -> Result<(VmInterruptController, VcpuExecution), Error> {
     let interrupts =
-        VmInterruptController::new(guest.vcpu_count(), InterruptId::new(GUEST_TIMER_INTERRUPT))?;
+        VmInterruptController::new(vcpu_count, InterruptId::new(GUEST_TIMER_INTERRUPT))?;
     let mut context = crate::arch::VcpuContext::new(GUEST_KERNEL_IPA);
     context.general[0] = GUEST_DTB_IPA;
     context.general[1] = 0;
@@ -189,17 +233,24 @@ pub fn boot(guest: VmBundle<'_>) -> Result<Infallible, Error> {
         crate::kernel::time::monotonic_ticks(),
     );
     let _ = context.initialize_vgic().map_err(Error::Context)?;
-    let mut execution = VcpuExecution {
+    let execution = VcpuExecution {
         virtual_machine: VirtualMachineId(1),
         vcpu_id: 0,
         context,
     };
+    Ok((interrupts, execution))
+}
 
+fn report_guest_layout(
+    guest: &VmBundle<'_>,
+    initramfs_range: Option<(u64, u64)>,
+    stage2_root: u64,
+) {
     crate::println!(
         "HypeR: entering Linux guest: Image {} bytes, initramfs {} bytes, RAM {} MiB",
-        image.len(),
-        initramfs.map_or(0, |bytes| bytes.len()),
-        guest_ram_size / (1024 * 1024)
+        guest.kernel().len(),
+        guest.initramfs().map_or(0, |bytes| bytes.len()),
+        guest.memory_size() / (1024 * 1024)
     );
     crate::println!(
         "HypeR: guest IPA layout: DTB {:#x}, Image {:#x}, initramfs {:#x}-{:#x}, stage-2 root {:#x}",
@@ -207,16 +258,47 @@ pub fn boot(guest: VmBundle<'_>) -> Result<Infallible, Error> {
         GUEST_KERNEL_IPA,
         initramfs_range.map_or(0, |(start, _)| start),
         initramfs_range.map_or(0, |(_, end)| end),
-        stage2.root_address()
+        stage2_root
     );
+}
 
+fn enter_guest(
+    execution: &mut VcpuExecution,
+    interrupts: &VmInterruptController,
+    stage2: &crate::arch::Stage2AddressSpace,
+) -> Result<Infallible, Error> {
     // SAFETY: All guest-visible RAM and device mappings are complete. These
     // stack objects remain pinned because guest entry never returns.
     unsafe {
-        execution.activate_virtual_hardware(&interrupts)?;
+        execution.activate_virtual_hardware(interrupts)?;
         stage2.activate();
         crate::arch::enable_local_irq();
         execution.context.enter()
+    }
+}
+
+struct GuestRam {
+    _pages: PageBlock,
+    physical: PhysicalAddress,
+    virtual_address: usize,
+    size: u64,
+}
+
+impl GuestRam {
+    fn allocate(size: u64, order: usize) -> Result<Self, Error> {
+        let pages = PageBlock::allocate(order)?;
+        let physical = pages.physical();
+        let virtual_address = linear_address(physical)?;
+        let size_usize = usize::try_from(size).map_err(|_| Error::InvalidLayout)?;
+        // SAFETY: The contiguous block is exclusively owned by this VM and the
+        // permanent linear map covers its complete physical range.
+        unsafe { write_bytes(virtual_address as *mut u8, 0, size_usize) };
+        Ok(Self {
+            _pages: pages,
+            physical,
+            virtual_address,
+            size,
+        })
     }
 }
 

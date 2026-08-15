@@ -48,6 +48,12 @@ aarch64_runtime_vectors:
     VECTOR_SLOT EXCEPTION_VECTOR_LOWER_AARCH32_SERROR
 .size aarch64_runtime_vectors, . - aarch64_runtime_vectors
 
+/*
+ * Intentionally one linear exception path: every interrupted register must be
+ * saved before the first Rust call and restored without introducing another
+ * call frame. Splitting this sequence would clobber unsaved state or add an
+ * exception-stack dependency to the most failure-sensitive path.
+ */
 .Lruntime_vector_common:
     stp     x2, x3, [sp, #(EXCEPTION_FRAME_X0_OFFSET + 16)]
     stp     x4, x5, [sp, #(EXCEPTION_FRAME_X0_OFFSET + 32)]

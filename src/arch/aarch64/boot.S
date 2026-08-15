@@ -14,7 +14,7 @@
 
 /* Linux AArch64 Image header. code0 branches over the 64-byte header. */
 _start:
-    b       .Lprimary_entry
+    b       aarch64_primary_entry
     .long   0
     .quad   IMAGE_TEXT_OFFSET
     .quad   __image_size
@@ -25,10 +25,12 @@ _start:
     .long   IMAGE_MAGIC
     .long   0
 .Limage_header_end:
+.size _start, .Limage_header_end - _start
 
 .section .text.boot, "ax"
 .balign 16
-.Lprimary_entry:
+.type aarch64_primary_entry, %function
+aarch64_primary_entry:
     msr     daifset, #DAIFSET_ALL
     clrex
 
@@ -70,11 +72,24 @@ _start:
     msr     sctlr_el2, x1
     isb
 
-    /*
-     * Apply static PIE relative relocations before using Rust static data.
-     * Every accepted relocation writes `load_bias + addend` to
-     * `load_bias + offset`. Any non-relative relocation is a build defect.
-     */
+    bl      aarch64_boot_apply_relocations
+    bl      aarch64_boot_initialize_el2
+    bl      aarch64_boot_clear_bss
+    bl      aarch64_boot_build_page_tables
+    bl      aarch64_boot_enable_translation
+
+    adrp    x1, __boot_stack_top
+    add     x1, x1, :lo12:__boot_stack_top
+    mov     sp, x1
+    mov     x29, xzr
+    mov     x30, xzr
+    mov     x0, x20
+    bl      aarch64_bootstrap
+.size aarch64_primary_entry, . - aarch64_primary_entry
+
+/* Applies physical-load PIE relocations. x21 is the physical load bias. */
+.type aarch64_boot_apply_relocations, %function
+aarch64_boot_apply_relocations:
     adrp    x1, __rela_dyn_start
     add     x1, x1, :lo12:__rela_dyn_start
     adrp    x2, __rela_dyn_end
@@ -93,10 +108,6 @@ _start:
     add     x1, x1, #24
     b       .Lrelocate
 .Lrelocation_done:
-    /*
-     * Decode standard ELF RELR entries. Direct entries select one address;
-     * bitmap entries describe the following 63 pointer-sized locations.
-     */
     adrp    x1, __relr_dyn_start
     add     x1, x1, :lo12:__relr_dyn_start
     adrp    x2, __relr_dyn_end
@@ -128,8 +139,12 @@ _start:
     b.ne    .Lrelr_load_bitmap_loop
     b       .Lrelr_load_loop
 .Lrelr_load_done:
+    ret
+.size aarch64_boot_apply_relocations, . - aarch64_boot_apply_relocations
 
-    // Initialize EL2 controls before installing translation state.
+/* Establishes deterministic EL2 controls before enabling translation. */
+.type aarch64_boot_initialize_el2, %function
+aarch64_boot_initialize_el2:
     ldr     x1, =HCR_EL2_BOOT_VALUE
     msr     hcr_el2, x1
     msr     cptr_el2, xzr
@@ -141,8 +156,12 @@ _start:
     msr     cnthctl_el2, xzr
     msr     cnthp_ctl_el2, xzr
     isb
+    ret
+.size aarch64_boot_initialize_el2, . - aarch64_boot_initialize_el2
 
-    // Clear all Rust zero-initialized static storage.
+/* Clears Rust static storage and installs the early fault vectors. */
+.type aarch64_boot_clear_bss, %function
+aarch64_boot_clear_bss:
     adrp    x1, __bss_start
     add     x1, x1, :lo12:__bss_start
     adrp    x2, __bss_end
@@ -152,17 +171,17 @@ _start:
     b.hs    .Lbss_done
     str     xzr, [x1], #8
     b       .Lbss_loop
-
 .Lbss_done:
-    // Install exception vectors before any operation that can fault.
     adrp    x1, .Lexception_vectors
     add     x1, x1, :lo12:.Lexception_vectors
     msr     vbar_el2, x1
     isb
+    ret
+.size aarch64_boot_clear_bss, . - aarch64_boot_clear_bss
 
-    // Build L0 and L1 tables for a 48-bit identity-mapped bootstrap VA.
-    adrp    x4, __boot_l0_table
-    add     x4, x4, :lo12:__boot_l0_table
+/* Builds the low identity map and returns its root in x0. */
+.type aarch64_boot_build_page_tables, %function
+aarch64_boot_build_page_tables:
     adrp    x4, __boot_l1_table
     add     x5, x4, :lo12:__boot_l1_table
     adrp    x4, __boot_l0_table
@@ -173,16 +192,10 @@ _start:
     str     xzr, [x1], #8
     subs    x2, x2, #1
     b.ne    .Lclear_table
-
-    // L0[0] covers the low 512 GiB through the bootstrap L1 table.
     orr     x1, x5, #STAGE1_DESC_TABLE_OR_PAGE
     str     x1, [x4]
-
-    // 0..1 GiB: QEMU `virt` MMIO, Device-nGnRnE, execute-never.
     ldr     x1, =BOOT_DEVICE_BLOCK_FLAGS
     str     x1, [x5]
-
-    // 1..4 GiB: QEMU RAM bootstrap window, Normal WBWA and executable.
     mov     x1, #1
     ldr     x2, =BOOT_NORMAL_BLOCK_FLAGS
 .Lmap_ram:
@@ -192,30 +205,28 @@ _start:
     add     x1, x1, #1
     cmp     x1, #4
     b.lo    .Lmap_ram
+    mov     x0, x4
+    ret
+.size aarch64_boot_build_page_tables, . - aarch64_boot_build_page_tables
 
+/* Activates the bootstrap identity map passed in x0. */
+.type aarch64_boot_enable_translation, %function
+aarch64_boot_enable_translation:
     dsb     sy
     ldr     x1, =MAIR_EL2_BOOT_VALUE
     msr     mair_el2, x1
     ldr     x1, =TCR_EL2_FINAL_VALUE
     msr     tcr_el2, x1
-    msr     ttbr0_el2, x4
+    msr     ttbr0_el2, x0
     isb
     tlbi    alle2
     dsb     sy
     isb
-
-    // Enable the identity map and caches. Execution continues at the same VA.
     ldr     x1, =SCTLR_EL2_BOOT_VALUE
     msr     sctlr_el2, x1
     isb
-
-    adrp    x1, __boot_stack_top
-    add     x1, x1, :lo12:__boot_stack_top
-    mov     sp, x1
-    mov     x29, xzr
-    mov     x30, xzr
-    mov     x0, x20
-    bl      aarch64_rust_entry
+    ret
+.size aarch64_boot_enable_translation, . - aarch64_boot_enable_translation
 
 /*
  * Switches from the bootstrap root to the final 48-bit address space and
@@ -304,10 +315,11 @@ aarch64_activate_final_address_space:
     mov     sp, x21
     mov     x29, xzr
     mov     x30, xzr
-    adr     x3, aarch64_virtual_entry
+    adr     x3, start_kernel
     sub     x3, x3, x22
     add     x3, x20, x3
     br      x3
+.size aarch64_activate_final_address_space, . - aarch64_activate_final_address_space
 
 .Lunsupported_boot:
 .Lsecondary_halt:
@@ -378,6 +390,7 @@ aarch64_secondary_entry:
     mov     x30, xzr
     ldr     x1, [x19, #32]
     br      x1
+.size aarch64_secondary_entry, . - aarch64_secondary_entry
 
 /* Save early synchronous fault state for debugger inspection. */
 .macro EARLY_VECTOR

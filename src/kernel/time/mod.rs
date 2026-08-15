@@ -43,6 +43,18 @@ pub fn initialize() -> Result<Capabilities, Error> {
     })
 }
 
+/// Initializes and reports the kernel monotonic clock source.
+pub(crate) fn initialize_timekeeping() {
+    let capabilities = match initialize() {
+        Ok(capabilities) => capabilities,
+        Err(error) => super::boot::fail("monotonic timekeeping initialization", error),
+    };
+    crate::println!(
+        "HypeR: monotonic clocksource active at {} Hz",
+        capabilities.counter_frequency_hz
+    );
+}
+
 pub fn counter_frequency_hz() -> Result<u64, Error> {
     let frequency = COUNTER_FREQUENCY_HZ.load(Ordering::Acquire);
     if frequency == 0 {

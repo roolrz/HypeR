@@ -55,6 +55,11 @@ pub fn initialize_cpu_power(
     }
 }
 
+/// Checks that a secondary CPU supports the backend selected by the boot CPU.
+pub fn secondary_cpu_is_compatible() -> bool {
+    atomics::current_cpu_supports_selected_backend()
+}
+
 unsafe extern "C" {
     fn aarch64_activate_final_address_space(root: u64, virtual_base: u64, stack_top: u64) -> !;
 }
@@ -104,24 +109,13 @@ pub fn wait_for_interrupt() {
     unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) };
 }
 
-/// Rust continuation of the architectural entry path.
+/// Rust continuation used while the architecture bootstrap is still active.
+///
+/// This is not the kernel entry: the permanent address space and stack are
+/// prepared from here, then assembly completes the transition to
+/// `start_kernel`.
 #[unsafe(no_mangle)]
-extern "C" fn aarch64_rust_entry(dtb_address: usize) -> ! {
+extern "C" fn aarch64_bootstrap(dtb_address: usize) -> ! {
     atomics::initialize();
-    crate::kernel::boot(dtb_address)
-}
-
-/// Rust entry point after activating the high kernel mapping.
-#[unsafe(no_mangle)]
-extern "C" fn aarch64_virtual_entry() -> ! {
-    crate::kernel::finish_boot()
-}
-
-/// Rust continuation for a secondary CPU after its final mappings are active.
-#[unsafe(no_mangle)]
-extern "C" fn aarch64_secondary_rust_entry(cpu_index: usize) -> ! {
-    if !atomics::current_cpu_supports_selected_backend() {
-        halt()
-    }
-    crate::kernel::cpu::secondary_entry(cpu_index)
+    crate::kernel::prepare_boot_environment(dtb_address)
 }

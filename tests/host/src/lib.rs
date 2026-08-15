@@ -819,7 +819,7 @@ mod kaslr {
 
 #[cfg(test)]
 mod kallsyms {
-    use hyper::kallsyms::{Error, SymbolTable};
+    use hyper::debug::kallsyms::{Error, SymbolTable};
 
     fn symbol(name: u32, info: u8, section: u16, value: u64, size: u64) -> [u8; 24] {
         let mut bytes = [0u8; 24];

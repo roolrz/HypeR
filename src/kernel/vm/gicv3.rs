@@ -230,123 +230,168 @@ fn write_interrupt_register(
     first: u32,
     end: u32,
 ) -> Result<(), Error> {
-    if (0x0080..0x0100).contains(&offset) && size == 4 {
-        return apply_bitmap(
-            interrupts,
-            vcpu,
-            offset,
-            0x80,
-            value,
-            (first, end),
-            |controller, id, cpu, set| {
-                controller.set_group(
-                    id,
-                    cpu,
-                    if set {
-                        InterruptGroup::Group1
-                    } else {
-                        InterruptGroup::Group0
-                    },
-                )
-            },
-        );
-    }
-    if (0x0100..0x0180).contains(&offset) && size == 4 {
-        return apply_bitmap(
-            interrupts,
-            vcpu,
-            offset,
-            0x100,
-            value,
-            (first, end),
-            |controller, id, cpu, _| controller.set_enabled(id, cpu, true),
-        );
-    }
-    if (0x0180..0x0200).contains(&offset) && size == 4 {
-        return apply_bitmap(
-            interrupts,
-            vcpu,
-            offset,
-            0x180,
-            value,
-            (first, end),
-            |controller, id, cpu, _| controller.set_enabled(id, cpu, false),
-        );
-    }
-    if (0x0200..0x0280).contains(&offset) && size == 4 {
-        return apply_bitmap(
-            interrupts,
-            vcpu,
-            offset,
-            0x200,
-            value,
-            (first, end),
-            |controller, id, cpu, _| controller.inject(id, cpu),
-        );
-    }
-    if (0x0280..0x0300).contains(&offset) && size == 4 {
-        return apply_bitmap(
-            interrupts,
-            vcpu,
-            offset,
-            0x280,
-            value,
-            (first, end),
-            |controller, id, cpu, _| controller.clear_pending(id, cpu),
-        );
+    let range = (first, end);
+    if let Some(result) = write_bitmap_register(interrupts, vcpu, offset, size, value, range) {
+        return result;
     }
     if (0x0300..0x0400).contains(&offset) && size == 4 {
         return Ok(());
     }
     if (0x0400..0x0800).contains(&offset) && matches!(size, 1 | 2 | 4 | 8) {
-        return interrupts.with(|controller| {
-            for byte in 0..size {
-                let id = (offset - 0x400) as u32 + byte as u32;
-                if id < first || id >= end {
-                    continue;
-                }
-                let interrupt = VirtualInterruptId::new(id).ok_or(Error::InvalidAccess)?;
-                controller.set_priority(
-                    interrupt,
-                    target_for(id, vcpu),
-                    (value >> (byte * 8)) as u8,
-                )?;
-            }
-            Ok(())
-        });
+        return write_priority_register(interrupts, vcpu, offset, size, value, range);
     }
     if (0x0c00..0x0d00).contains(&offset) && size == 4 {
-        let register = ((offset - 0xc00) / 4) as u32;
-        return interrupts.with(|controller| {
-            for field in 0..16u32 {
-                let id = register * 16 + field;
-                if id < first || id >= end || id < 16 {
-                    continue;
-                }
-                let interrupt = VirtualInterruptId::new(id).ok_or(Error::InvalidAccess)?;
-                let trigger = if value & (2 << (field * 2)) != 0 {
-                    InterruptTrigger::Edge
-                } else {
-                    InterruptTrigger::Level
-                };
-                controller.set_trigger(interrupt, target_for(id, vcpu), trigger)?;
-            }
-            Ok(())
-        });
+        return write_configuration_register(interrupts, vcpu, offset, value, range);
     }
     if (0x6100..0x8000).contains(&offset) && size == 8 {
-        let id = 32 + ((offset - 0x6100) / 8) as u32;
-        if id < end {
-            return interrupts.with(|controller| {
-                controller.route(
-                    VirtualInterruptId::new(id).ok_or(Error::InvalidAccess)?,
-                    VirtualCpuId::new(0),
-                )?;
-                Ok(())
-            });
-        }
+        return write_route_register(interrupts, offset, end);
     }
     Err(Error::InvalidAccess)
+}
+
+fn write_bitmap_register(
+    interrupts: &VmInterruptController,
+    vcpu: VirtualCpuId,
+    offset: u64,
+    size: usize,
+    value: u64,
+    range: (u32, u32),
+) -> Option<Result<(), Error>> {
+    if size != 4 {
+        return None;
+    }
+    if (0x0080..0x0100).contains(&offset) {
+        return Some(apply_bitmap(
+            interrupts,
+            vcpu,
+            offset,
+            0x80,
+            value,
+            range,
+            |controller, id, cpu, set| {
+                let group = if set {
+                    InterruptGroup::Group1
+                } else {
+                    InterruptGroup::Group0
+                };
+                controller.set_group(id, cpu, group)
+            },
+        ));
+    }
+    if (0x0100..0x0180).contains(&offset) {
+        return Some(apply_bitmap(
+            interrupts,
+            vcpu,
+            offset,
+            0x100,
+            value,
+            range,
+            |controller, id, cpu, _| controller.set_enabled(id, cpu, true),
+        ));
+    }
+    if (0x0180..0x0200).contains(&offset) {
+        return Some(apply_bitmap(
+            interrupts,
+            vcpu,
+            offset,
+            0x180,
+            value,
+            range,
+            |controller, id, cpu, _| controller.set_enabled(id, cpu, false),
+        ));
+    }
+    if (0x0200..0x0280).contains(&offset) {
+        return Some(apply_bitmap(
+            interrupts,
+            vcpu,
+            offset,
+            0x200,
+            value,
+            range,
+            |controller, id, cpu, _| controller.inject(id, cpu),
+        ));
+    }
+    if (0x0280..0x0300).contains(&offset) {
+        return Some(apply_bitmap(
+            interrupts,
+            vcpu,
+            offset,
+            0x280,
+            value,
+            range,
+            |controller, id, cpu, _| controller.clear_pending(id, cpu),
+        ));
+    }
+    None
+}
+
+fn write_priority_register(
+    interrupts: &VmInterruptController,
+    vcpu: VirtualCpuId,
+    offset: u64,
+    size: usize,
+    value: u64,
+    range: (u32, u32),
+) -> Result<(), Error> {
+    interrupts.with(|controller| {
+        for byte in 0..size {
+            let id = (offset - 0x400) as u32 + byte as u32;
+            if id < range.0 || id >= range.1 {
+                continue;
+            }
+            let interrupt = VirtualInterruptId::new(id).ok_or(Error::InvalidAccess)?;
+            controller.set_priority(
+                interrupt,
+                target_for(id, vcpu),
+                (value >> (byte * 8)) as u8,
+            )?;
+        }
+        Ok(())
+    })
+}
+
+fn write_configuration_register(
+    interrupts: &VmInterruptController,
+    vcpu: VirtualCpuId,
+    offset: u64,
+    value: u64,
+    range: (u32, u32),
+) -> Result<(), Error> {
+    let register = ((offset - 0xc00) / 4) as u32;
+    interrupts.with(|controller| {
+        for field in 0..16u32 {
+            let id = register * 16 + field;
+            if id < range.0 || id >= range.1 || id < 16 {
+                continue;
+            }
+            let interrupt = VirtualInterruptId::new(id).ok_or(Error::InvalidAccess)?;
+            let trigger = if value & (2 << (field * 2)) != 0 {
+                InterruptTrigger::Edge
+            } else {
+                InterruptTrigger::Level
+            };
+            controller.set_trigger(interrupt, target_for(id, vcpu), trigger)?;
+        }
+        Ok(())
+    })
+}
+
+fn write_route_register(
+    interrupts: &VmInterruptController,
+    offset: u64,
+    end: u32,
+) -> Result<(), Error> {
+    let id = 32 + ((offset - 0x6100) / 8) as u32;
+    if id >= end {
+        return Err(Error::InvalidAccess);
+    }
+    interrupts.with(|controller| {
+        controller.route(
+            VirtualInterruptId::new(id).ok_or(Error::InvalidAccess)?,
+            VirtualCpuId::new(0),
+        )?;
+        Ok(())
+    })
 }
 
 fn bitmap(
