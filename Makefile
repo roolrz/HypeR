@@ -91,7 +91,10 @@ run: image
 		-cpu $(QEMU_CPU) \
 		-smp $(QEMU_CPUS) \
 		-m $(QEMU_MEMORY) \
-		-nographic \
+		-nodefaults \
+		-display none \
+		-serial stdio \
+		-monitor none \
 		-no-reboot \
 		-kernel $(KERNEL_IMAGE)
 

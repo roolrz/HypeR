@@ -32,7 +32,10 @@ trap 'exit 143' TERM
     -cpu "$cpu" \
     -smp 4 \
     -m "$memory" \
-    -nographic \
+    -nodefaults \
+    -display none \
+    -serial stdio \
+    -monitor none \
     -no-reboot \
     -kernel "$image" >"$log" 2>&1 &
 pid=$!
