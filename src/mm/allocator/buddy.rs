@@ -154,6 +154,12 @@ impl BuddyAllocator {
     unsafe fn add_interval(&mut self, mut start: u64, end: u64) -> Result<(), BuddyError> {
         while start < end {
             let remaining_pages = (end - start) / PAGE_SIZE;
+            if remaining_pages == 0 {
+                // A sub-page tail cannot back a buddy block. Callers supply
+                // page-aligned bounds, so this only guards future refactoring
+                // against inserting a block that overruns `end`.
+                break;
+            }
             let alignment_order = if start == 0 {
                 MAX_ORDER
             } else {
@@ -226,6 +232,9 @@ const fn block_size(order: usize) -> u64 {
 }
 
 fn floor_log2(value: u64) -> usize {
+    if value == 0 {
+        return 0;
+    }
     (u64::BITS - 1 - value.leading_zeros()) as usize
 }
 

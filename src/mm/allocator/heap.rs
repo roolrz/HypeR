@@ -220,10 +220,10 @@ impl SlabAllocator {
             .ok_or(BuddyError::Unaddressable)?;
         let object_size = CLASS_SIZES[class];
         let page_virtual = header_pointer as usize;
-        let object_start = align_up_usize(
-            page_virtual + core::mem::size_of::<SlabHeader>(),
-            object_size,
-        );
+        let object_start = page_virtual
+            .checked_add(core::mem::size_of::<SlabHeader>())
+            .and_then(|header_end| align_up_usize(header_end, object_size))
+            .ok_or(BuddyError::Unaddressable)?;
         let capacity = (PAGE_SIZE as usize - (object_start - page_virtual)) / object_size;
         if capacity == 0 || capacity > u16::MAX as usize {
             allocator_fault(AllocatorFault::InvalidSlabHeader);
@@ -317,7 +317,16 @@ impl SlabAllocator {
             }
             return null_mut();
         };
-        let user = align_up_usize(base + header_size, layout.align());
+        let Some(user) = base
+            .checked_add(header_size)
+            .and_then(|header_end| align_up_usize(header_end, layout.align()))
+        else {
+            // SAFETY: This allocation has not been exposed to a caller.
+            if unsafe { self.buddy.deallocate(PhysicalAddress::new(physical), order) }.is_err() {
+                allocator_fault(AllocatorFault::BuddyDeallocation);
+            }
+            return null_mut();
+        };
         let header = (user - header_size) as *mut LargeHeader;
         // SAFETY: The header lies inside the exclusively owned buddy block.
         unsafe {
@@ -484,6 +493,8 @@ fn class_for(layout: Layout) -> Option<usize> {
     CLASS_SIZES.iter().position(|&size| size >= required)
 }
 
-fn align_up_usize(value: usize, alignment: usize) -> usize {
-    (value + alignment - 1) & !(alignment - 1)
+fn align_up_usize(value: usize, alignment: usize) -> Option<usize> {
+    value
+        .checked_add(alignment - 1)
+        .map(|rounded| rounded & !(alignment - 1))
 }
