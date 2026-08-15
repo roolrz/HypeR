@@ -38,7 +38,10 @@ mod virtual_pl011 {
         assert!(uart.receive(b'A'));
 
         let status = super::require_ok(uart.read(reg::MIS as u64, 4));
-        assert_ne!(super::require_some(status.value) & u64::from(reg::INT_RT), 0);
+        assert_ne!(
+            super::require_some(status.value) & u64::from(reg::INT_RT),
+            0
+        );
         let data = super::require_ok(uart.read(reg::DR as u64, 4));
         assert_eq!(data.value, Some(u64::from(b'A')));
         assert!(!data.interrupt_asserted);
@@ -52,7 +55,10 @@ mod virtual_pl011 {
             let _ = uart.receive(value);
         }
         let status = super::require_ok(uart.read(reg::RSR_ECR as u64, 4));
-        assert_ne!(super::require_some(status.value) & u64::from(reg::RSR_OE), 0);
+        assert_ne!(
+            super::require_some(status.value) & u64::from(reg::RSR_OE),
+            0
+        );
         assert!(status.interrupt_asserted);
     }
 }
@@ -187,12 +193,7 @@ mod software_timers {
     fn rejects_invalid_periodic_intervals() {
         let mut queue = DeadlineQueue::<2>::new();
         assert_eq!(
-            queue.schedule(
-                10,
-                TimerMode::Periodic { interval: 0 },
-                callback,
-                0,
-            ),
+            queue.schedule(10, TimerMode::Periodic { interval: 0 }, callback, 0,),
             Err(TimerQueueError::InvalidInterval)
         );
         assert_eq!(
@@ -250,20 +251,20 @@ mod software_timers {
     #[test]
     fn compares_deadlines_across_counter_wraparound() {
         let mut queue = DeadlineQueue::<2>::new();
-        let before_wrap = super::require_ok(queue.schedule(
-            u64::MAX - 2,
-            TimerMode::OneShot,
-            callback,
-            1,
-        ));
-        let after_wrap =
-            super::require_ok(queue.schedule(3, TimerMode::OneShot, callback, 2));
+        let before_wrap =
+            super::require_ok(queue.schedule(u64::MAX - 2, TimerMode::OneShot, callback, 1));
+        let after_wrap = super::require_ok(queue.schedule(3, TimerMode::OneShot, callback, 2));
 
         assert_eq!(
-            super::require_some(queue.pop_expired(u64::MAX - 1)).0.handle,
+            super::require_some(queue.pop_expired(u64::MAX - 1))
+                .0
+                .handle,
             before_wrap
         );
-        assert_eq!(super::require_some(queue.pop_expired(3)).0.handle, after_wrap);
+        assert_eq!(
+            super::require_some(queue.pop_expired(3)).0.handle,
+            after_wrap
+        );
     }
 }
 
@@ -1046,9 +1047,8 @@ mod kallsyms {
         assert_eq!(resolved.name, "second");
         assert_eq!(resolved.offset, 8);
         assert!(super::require_ok(table.lookup_containing(0xff00_2000_0148)).is_none());
-        let contained = super::require_some(super::require_ok(
-            table.lookup_containing(0xff00_2000_0188),
-        ));
+        let contained =
+            super::require_some(super::require_ok(table.lookup_containing(0xff00_2000_0188)));
         assert_eq!(contained.name, "second");
         assert!(super::require_ok(table.lookup(0x100)).is_none());
     }
@@ -1061,10 +1061,7 @@ mod kallsyms {
             size: 0x40,
             offset: 0x18,
         };
-        assert_eq!(
-            symbol.to_string(),
-            "foo::example_function+0x18/0x40"
-        );
+        assert_eq!(symbol.to_string(), "foo::example_function+0x18/0x40");
 
         let foreign = hyper::debug::kallsyms::Symbol {
             name: "start_kernel",
@@ -1752,16 +1749,14 @@ mod boot_allocator {
             PAGE_SIZE * 8,
         ))));
         let mut reserved = RegionList::<MAX_RESERVED_REGIONS>::new();
-        super::require_ok(reserved.insert(super::require_some(PhysicalRange::new(
-            0,
-            PAGE_SIZE * 3,
-        ))));
+        super::require_ok(
+            reserved.insert(super::require_some(PhysicalRange::new(0, PAGE_SIZE * 3))),
+        );
         super::require_ok(reserved.insert(super::require_some(PhysicalRange::new(
             PAGE_SIZE * 32,
             PAGE_SIZE,
         ))));
-        let allocator =
-            super::require_ok(BootAllocator::new(&memory, &reserved, PAGE_SIZE * 64));
+        let allocator = super::require_ok(BootAllocator::new(&memory, &reserved, PAGE_SIZE * 64));
 
         let stats = allocator.stats();
         assert_eq!(stats.ram_pages, 8);
@@ -1838,7 +1833,10 @@ mod runtime_allocators {
         assert_eq!(allocated.allocated_pages, 5);
         assert_eq!(allocated.peak_allocated_pages, 5);
         assert_eq!(allocated.allocation_requests, 2);
-        assert_eq!(free_pages_from_blocks(&allocated.free_blocks), allocated.free_pages);
+        assert_eq!(
+            free_pages_from_blocks(&allocated.free_blocks),
+            allocated.free_pages
+        );
 
         // SAFETY: Both blocks are live allocations with matching orders.
         unsafe {
