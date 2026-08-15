@@ -44,11 +44,8 @@ pid=$!
 
 attempt=0
 while [ "$attempt" -lt 100 ]; do
-    if grep -q 'HypeR: timer tick 3' "$log" &&
-        grep -q 'HypeR: SMP online: 4/4 discovered CPUs' "$log" &&
-        grep -q 'HypeR: CPU 1 timer tick 1' "$log" &&
-        grep -q 'HypeR: CPU 2 timer tick 1' "$log" &&
-        grep -q 'HypeR: CPU 3 timer tick 1' "$log" &&
+    if grep -q 'HypeR: SMP online: 4/4 discovered CPUs' "$log" &&
+        grep -q 'HypeR: periodic timer IRQs active on 4 CPUs' "$log" &&
         grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
         grep -q 'HypeR: scheduler active on bootstrap thread 0' "$log" &&
         grep -q 'HypeR: kallsyms resolved hyper_kallsyms_lookup at 0x[0-9a-f][0-9a-f]*' "$log" &&

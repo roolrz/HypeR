@@ -9,22 +9,31 @@
 
 .section .text.exceptions, "ax"
 
-.macro VECTOR_SLOT number
+.macro VECTOR_SLOT number, uses_sp0=0
+    // SP0 vectors arrive with SP selecting SP_EL0. Switch before touching the
+    // stack so an untrusted lower-EL stack can never hold an EL2 frame.
+    .if \uses_sp0
+    msr     spsel, #1
+    .endif
     sub     sp, sp, #EXCEPTION_FRAME_SIZE
     stp     x0, x1, [sp, #EXCEPTION_FRAME_X0_OFFSET]
     mov     x0, #\number
     b       .Lruntime_vector_common
+    .if \uses_sp0
+    .space  108
+    .else
     .space  112
+    .endif
 .endm
 
 .balign 2048
 .global aarch64_runtime_vectors
 .type aarch64_runtime_vectors, %object
 aarch64_runtime_vectors:
-    VECTOR_SLOT 0
-    VECTOR_SLOT 1
-    VECTOR_SLOT 2
-    VECTOR_SLOT 3
+    VECTOR_SLOT 0, 1
+    VECTOR_SLOT 1, 1
+    VECTOR_SLOT 2, 1
+    VECTOR_SLOT 3, 1
     VECTOR_SLOT 4
     VECTOR_SLOT 5
     VECTOR_SLOT 6
@@ -65,6 +74,10 @@ aarch64_runtime_vectors:
     mrs     x1, far_el2
     str     x1, [sp, #EXCEPTION_FRAME_FAR_OFFSET]
     str     x0, [sp, #EXCEPTION_FRAME_VECTOR_OFFSET]
+    mrs     x1, sp_el0
+    str     x1, [sp, #EXCEPTION_FRAME_SP_EL0_OFFSET]
+    mrs     x1, sp_el1
+    str     x1, [sp, #EXCEPTION_FRAME_SP_EL1_OFFSET]
 
     stp     q0, q1, [sp, #(EXCEPTION_FRAME_SIMD_OFFSET + 0)]
     stp     q2, q3, [sp, #(EXCEPTION_FRAME_SIMD_OFFSET + 32)]
@@ -94,6 +107,10 @@ aarch64_runtime_vectors:
     msr     elr_el2, x1
     ldr     x1, [sp, #EXCEPTION_FRAME_SPSR_OFFSET]
     msr     spsr_el2, x1
+    ldr     x1, [sp, #EXCEPTION_FRAME_SP_EL0_OFFSET]
+    msr     sp_el0, x1
+    ldr     x1, [sp, #EXCEPTION_FRAME_SP_EL1_OFFSET]
+    msr     sp_el1, x1
     ldr     x1, [sp, #EXCEPTION_FRAME_FPCR_OFFSET]
     msr     fpcr, x1
     ldr     x1, [sp, #EXCEPTION_FRAME_FPSR_OFFSET]

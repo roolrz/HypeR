@@ -44,4 +44,15 @@ impl<T, M: InterruptMask> InterruptSpinLock<T, M> {
         drop(restore);
         result
     }
+
+    /// Runs `operation` only when the underlying lock is immediately free.
+    pub fn try_with<R>(&self, operation: impl FnOnce(&mut T) -> R) -> Option<R> {
+        let restore = InterruptRestore::<M> {
+            state: M::save_and_disable(),
+            policy: PhantomData,
+        };
+        let result = self.lock.try_with(operation);
+        drop(restore);
+        result
+    }
 }

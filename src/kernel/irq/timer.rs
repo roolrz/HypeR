@@ -3,7 +3,7 @@
 use hyper::hal::interrupt::{InterruptId, InterruptTrigger};
 use hyper::hal::timer::{PeriodicTimer, PeriodicTimerProperties};
 use hyper::platform::{PlatformInterruptTrigger, TimerInfo, TimerKind};
-use hyper::sync::atomic::{AtomicU64, Ordering};
+use hyper::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::interrupt::{HandlerResult, IrqDomainId, VirtualInterrupt};
 
@@ -13,6 +13,10 @@ const TIMER_PRIORITY: u8 = 0x80;
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
 
 static TICK_COUNT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static RECURRING_IRQ_OBSERVED: [AtomicBool; MAX_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_CPUS];
+static ONLINE_CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
+static ACTIVE_REPORT_PRINTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -107,6 +111,15 @@ pub fn initialize_local_cpu() -> Result<(), Error> {
     Ok(())
 }
 
+/// Publishes the stable online CPU count used for timer health observation.
+pub fn set_online_cpu_count(count: usize) -> Result<(), Error> {
+    if count == 0 || count > MAX_CPUS {
+        return Err(Error::InvalidCpuIndex);
+    }
+    ONLINE_CPU_COUNT.store(count, Ordering::Release);
+    Ok(())
+}
+
 fn shared_probe(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
     HandlerResult::NotHandled
 }
@@ -120,10 +133,24 @@ fn handle_tick(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
         super::exception::fatal_timer(crate::arch::TimerError::InvalidCpuIndex);
     }
     let tick = TICK_COUNT[cpu].fetch_add(1, Ordering::Relaxed) + 1;
-    if cpu == 0 && (tick <= 3 || tick.is_multiple_of(u64::from(TICKS_PER_SECOND))) {
-        crate::println!("HypeR: timer tick {tick}");
-    } else if cpu != 0 && tick == 1 {
-        crate::println!("HypeR: CPU {cpu} timer tick 1");
+    if tick == 3 {
+        RECURRING_IRQ_OBSERVED[cpu].store(true, Ordering::Release);
+        report_timer_health_once();
     }
     HandlerResult::Handled
+}
+
+fn report_timer_health_once() {
+    let online = ONLINE_CPU_COUNT.load(Ordering::Acquire);
+    if online == 0
+        || !RECURRING_IRQ_OBSERVED[..online]
+            .iter()
+            .all(|observed| observed.load(Ordering::Acquire))
+        || ACTIVE_REPORT_PRINTED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return;
+    }
+    crate::println!("HypeR: periodic timer IRQs active on {online} CPUs");
 }

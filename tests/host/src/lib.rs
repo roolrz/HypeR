@@ -767,9 +767,12 @@ mod synchronization {
         lock.with(|value| {
             assert_eq!(MASK_DEPTH.load(Ordering::SeqCst), 1);
             *value += 1;
+            assert!(lock.try_with(|_| ()).is_none());
+            assert_eq!(MASK_DEPTH.load(Ordering::SeqCst), 1);
         });
         assert_eq!(MASK_DEPTH.load(Ordering::SeqCst), 0);
-        assert_eq!(lock.with(|value| *value), 42);
+        assert_eq!(lock.try_with(|value| *value), Some(42));
+        assert_eq!(MASK_DEPTH.load(Ordering::SeqCst), 0);
     }
 
     #[test]

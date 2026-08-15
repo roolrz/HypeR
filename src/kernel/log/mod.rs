@@ -5,6 +5,7 @@ use core::panic::PanicInfo;
 
 use hyper::log::{AppendError, Level, ReadError, ReadResult, RecordFlags, RingBuffer};
 use hyper::sync::InterruptSpinLock;
+use hyper::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) mod console;
 
@@ -59,6 +60,7 @@ pub struct Statistics {
 
 static LOG_RING: KernelSpinLock<RingBuffer<LOG_BUFFER_SIZE>> =
     KernelSpinLock::new(RingBuffer::new());
+static PANIC_PATH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn log(level: Level, arguments: fmt::Arguments<'_>) -> Result<u64, Error> {
     let mut formatted = FormatBuffer::new();
@@ -108,8 +110,27 @@ pub fn flush() {
 }
 
 pub fn panic(info: &PanicInfo<'_>) {
-    let _ = log(Level::Emergency, format_args!("PANIC: {info}"));
-    console::flush();
+    if PANIC_PATH_ACTIVE.swap(true, Ordering::AcqRel) {
+        crate::arch::halt()
+    }
+    emergency(format_args!("PANIC: {info}"));
+}
+
+/// Emits a fatal diagnostic without waiting for a potentially interrupted
+/// logging lock. Retention in the ring is best-effort; direct console output is
+/// attempted independently so a lock failure cannot stall the fail-stop path.
+pub fn emergency(arguments: fmt::Arguments<'_>) {
+    let mut formatted = FormatBuffer::new();
+    let _ = formatted.write_fmt(arguments);
+    let flags = if formatted.truncated {
+        RecordFlags::TRUNCATED
+    } else {
+        RecordFlags::NONE
+    };
+    let _ = LOG_RING.try_with(|ring| {
+        let _ = ring.append(Level::Emergency, formatted.as_slice(), flags);
+    });
+    console::emergency_write(formatted.as_slice());
 }
 
 #[macro_export]

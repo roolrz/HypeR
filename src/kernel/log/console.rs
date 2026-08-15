@@ -64,6 +64,19 @@ pub fn flush() {
     }
 }
 
+/// Writes a best-effort fatal message without waiting for kernel log locks.
+pub(super) fn emergency_write(message: &[u8]) {
+    let device = CONSOLE.try_with(|state| state.device).flatten();
+    let Some(device) = device else {
+        return;
+    };
+    device.write_bytes(b"<0>[exception] ");
+    device.write_bytes(message);
+    if !message.ends_with(b"\n") {
+        device.write_bytes(b"\n");
+    }
+}
+
 fn drain() {
     let mut message = [0u8; LOG_LINE_MAX];
     loop {

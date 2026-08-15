@@ -210,6 +210,9 @@ pub fn finish_boot() -> ! {
         Ok(capabilities) => capabilities,
         Err(error) => boot_failure("SMP initialization", error),
     };
+    if let Err(error) = irq::timer::set_online_cpu_count(smp_capabilities.online_cpus) {
+        boot_failure("timer CPU-count publication", error);
+    }
     if let Err(error) =
         with_boot_state(|state| state.memory.retire_identity_mappings(&state.platform))
     {

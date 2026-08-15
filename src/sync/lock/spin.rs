@@ -45,4 +45,25 @@ impl<T> SpinLock<T> {
         drop(release);
         result
     }
+
+    /// Runs `operation` only when the lock can be acquired immediately.
+    ///
+    /// Fatal and diagnostic paths use this to avoid waiting on a lock held by
+    /// the context that they interrupted.
+    pub fn try_with<R>(&self, operation: impl FnOnce(&mut T) -> R) -> Option<R> {
+        if self
+            .locked
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+
+        let release = LockRelease(&self.locked);
+        // SAFETY: The successful transition above gives this caller exclusive
+        // access until `release` is dropped.
+        let result = operation(unsafe { &mut *self.value.get() });
+        drop(release);
+        Some(result)
+    }
 }
