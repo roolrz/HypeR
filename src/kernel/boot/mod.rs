@@ -31,11 +31,20 @@ pub fn boot(dtb_address: usize) -> ! {
     };
     let chosen = match chosen_discovery.finish() {
         Ok(chosen) => Some(chosen),
-        Err(error) => {
-            crate::pr_warn!("HypeR: ignoring invalid DTB /chosen properties: {error:?}");
-            None
-        }
+        Err(error) => boot_failure("DTB /chosen discovery", error),
     };
+    if let Some(error) = chosen
+        .as_ref()
+        .and_then(chosen::Properties::command_line_error)
+    {
+        crate::pr_warn!("HypeR: ignoring invalid DTB bootargs: {error:?}");
+    }
+    if let Some(error) = chosen
+        .as_ref()
+        .and_then(chosen::Properties::kaslr_seed_error)
+    {
+        crate::pr_warn!("HypeR: ignoring invalid DTB kaslr-seed: {error:?}");
+    }
     let early_console =
         match console::early_console(chosen.as_ref().and_then(chosen::Properties::command_line)) {
             Ok(Some(info)) if early_console_is_accessible(&platform, info) => Some(info),
@@ -71,14 +80,37 @@ pub fn boot(dtb_address: usize) -> ! {
         Ok(layout) => layout,
         Err(error) => boot_failure("KASLR layout selection", error),
     };
+    let initial_ramdisk = match chosen
+        .as_ref()
+        .and_then(chosen::Properties::initial_ramdisk)
+    {
+        Some(range)
+            if initial_ramdisk_is_accessible(
+                &platform,
+                range,
+                dtb_address as u64,
+                image::layout(),
+            ) =>
+        {
+            range
+        }
+        Some(range) => boot_failure("initial ramdisk validation", range),
+        None => boot_failure("initial ramdisk discovery", "missing /chosen initrd range"),
+    };
 
     // SAFETY: The architecture established and owns the bootstrap mapping used
     // by its early physical-page allocation policy.
-    let memory =
-        match unsafe { mm::memory::prepare(&platform, dtb_address as u64, kaslr.kernel_base) } {
-            Ok(memory) => memory,
-            Err(error) => boot_failure("final address-space preparation", error),
-        };
+    let memory = match unsafe {
+        mm::memory::prepare(
+            &platform,
+            dtb_address as u64,
+            initial_ramdisk,
+            kaslr.kernel_base,
+        )
+    } {
+        Ok(memory) => memory,
+        Err(error) => boot_failure("final address-space preparation", error),
+    };
     let activation = memory.activation_context();
 
     crate::println!(
@@ -99,6 +131,7 @@ pub fn boot(dtb_address: usize) -> ! {
         memory,
         dtb_address: dtb_address as u64,
         image_physical_start,
+        initial_ramdisk,
     }) {
         boot_failure("boot-state installation", error);
     }
@@ -183,6 +216,10 @@ pub fn finish_boot() -> ! {
     if let Err(error) = crate::arch::validate_runtime_vectors() {
         boot_failure("runtime exception-vector validation", error);
     }
+    if let Err(error) = crate::arch::validate_vsysreg() {
+        boot_failure("guest system-register emulation validation", error);
+    }
+    crate::println!("HypeR: guest synchronous trap and vSysReg emulation validated");
     let vgic_capabilities = match irq::vgic::initialize(
         interrupt_capabilities.root_domain,
         interrupt_capabilities.maintenance_interrupt,
@@ -332,9 +369,58 @@ pub fn finish_boot() -> ! {
         log_statistics.capacity,
         log_statistics.dropped
     );
-    crate::println!("HypeR: kernel initialization complete; bootstrap thread becoming idle");
-    crate::arch::enable_local_irq();
-    task::scheduler::thread_become_idle()
+    let initial_ramdisk = with_boot_state(|state| state.initial_ramdisk);
+    let ramdisk_address = match mm::memory::linear_address(initial_ramdisk.start()) {
+        Some(address) => address,
+        None => boot_failure("initial ramdisk address translation", initial_ramdisk),
+    };
+    let ramdisk_size = match usize::try_from(initial_ramdisk.size()) {
+        Ok(size) => size,
+        Err(_) => boot_failure("initial ramdisk size conversion", initial_ramdisk),
+    };
+    // SAFETY: Early boot reserved this firmware-owned RAM range before buddy
+    // handoff, and the permanent linear map covers the validated complete range.
+    let ramdisk =
+        unsafe { core::slice::from_raw_parts(ramdisk_address as *const u8, ramdisk_size) };
+    let guest = match super::vm::select_default(ramdisk) {
+        Ok(guest) => guest,
+        Err(error) => boot_failure("VM bundle loading", error),
+    };
+    crate::println!(
+        "HypeR: loaded VM '{}' from boot ramdisk: {} MiB RAM, {} vCPU(s)",
+        guest.name(),
+        guest.memory_size() / (1024 * 1024),
+        guest.vcpu_count()
+    );
+    crate::println!("HypeR: kernel initialization complete; starting Linux guest");
+    match super::vm::boot_linux(guest) {
+        Ok(never) => match never {},
+        Err(error) => boot_failure("Linux guest boot", error),
+    }
+}
+
+fn initial_ramdisk_is_accessible(
+    platform: &hyper::platform::PlatformInfo,
+    range: hyper::platform::PhysicalRange,
+    dtb_address: u64,
+    image: hyper::hal::memory::KernelImageLayout,
+) -> bool {
+    let in_ram = platform
+        .memory
+        .as_slice()
+        .iter()
+        .any(|memory| memory.start() <= range.start() && range.end() <= memory.end());
+    let excluded = platform
+        .no_map
+        .as_slice()
+        .iter()
+        .any(|reserved| reserved.overlaps(range));
+    let overlaps_dtb = hyper::platform::PhysicalRange::new(dtb_address, platform.dtb_size)
+        .is_none_or(|dtb| dtb.overlaps(range));
+    let overlaps_image =
+        hyper::platform::PhysicalRange::new(image.physical_start, image.total_size)
+            .is_none_or(|kernel| kernel.overlaps(range));
+    in_ram && !excluded && !overlaps_dtb && !overlaps_image
 }
 
 fn early_console_is_accessible(

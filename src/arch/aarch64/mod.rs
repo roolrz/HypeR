@@ -11,8 +11,10 @@ mod platform;
 mod psci;
 pub mod registers;
 mod smp;
+mod stage2;
 mod timer;
 mod vgic;
+mod vsysreg;
 
 pub use atomics::{AtomicCapabilities, capabilities as atomic_capabilities};
 pub use barrier::Aarch64Barrier;
@@ -33,6 +35,7 @@ pub use smp::{
     SecondaryBootParameters, current_cpu_index, current_hardware_id, secondary_entry_physical,
     send_event,
 };
+pub use stage2::{Error as Stage2Error, Stage2AddressSpace};
 pub use timer::{ArmGenericCounter, El2PhysicalTimer, Error as TimerError};
 pub use vgic::{
     Capabilities as VgicCapabilities, CpuContext as VgicCpuContext, Error as VgicError,
@@ -41,6 +44,8 @@ pub use vgic::{
     disable as disable_vgic, maintenance_state as vgic_maintenance_state,
     validate_context_switch as validate_vgic,
 };
+pub use vsysreg::validate as validate_vsysreg;
+pub(crate) use vsysreg::{GuestSyncAction, GuestSyncFrame, handle_guest_sync};
 
 pub fn initialize_cpu_power(
     info: hyper::platform::CpuPowerInfo,

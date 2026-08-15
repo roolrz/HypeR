@@ -23,8 +23,11 @@ KERNEL_IMAGE := target/$(TARGET)/$(PROFILE)/hyper.img
 KCONFIG_MANIFEST := tools/kconfig/Cargo.toml
 HOST_TEST_MANIFEST := tests/host/Cargo.toml
 DEFCONFIG := configs/qemu_aarch64_defconfig
+GUEST_OUTPUT := target/guest
+GUEST_ASSET_STAMP := $(GUEST_OUTPUT)/.alpine-3.23.5.stamp
+HOST_INITRD := $(GUEST_OUTPUT)/hypervisor-initrd.cpio
 
-.PHONY: all config defconfig olddefconfig build image check test test-image test-timer test-qemu verify verify-image verify-boot verify-smp run clean
+.PHONY: all config defconfig olddefconfig guest-assets clean-guest-assets build image check test test-image test-timer test-qemu verify verify-image verify-boot verify-smp run clean
 
 all: image
 
@@ -39,6 +42,14 @@ olddefconfig:
 
 config:
 	cargo run --quiet --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET) -- config .config .config
+
+$(GUEST_ASSET_STAMP): tools/guest/fetch-alpine.sh tools/guest/init tools/guest/boot.conf tools/guest/alpine.manifest
+	sh tools/guest/fetch-alpine.sh
+
+guest-assets: $(GUEST_ASSET_STAMP)
+
+clean-guest-assets:
+	rm -f $(GUEST_OUTPUT)/Image $(GUEST_OUTPUT)/initramfs.cpio.gz $(GUEST_OUTPUT)/alpine.cpio $(HOST_INITRD) $(GUEST_ASSET_STAMP)
 
 build: .config
 	cargo build $(CARGO_PROFILE)
@@ -70,11 +81,11 @@ verify: check test
 test-image:
 	sh tests/image/verify-image.sh $(READOBJ) $(NM) $(OBJDUMP) $(KERNEL_ELF) $(KERNEL_IMAGE)
 
-test-timer: image
-	sh tests/qemu/verify-timer.sh $(QEMU) $(KERNEL_IMAGE) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
+test-timer: image guest-assets
+	sh tests/qemu/verify-timer.sh $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
-test-qemu: image
-	sh tests/qemu/verify-smp.sh $(QEMU) $(KERNEL_IMAGE) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
+test-qemu: image guest-assets
+	sh tests/qemu/verify-smp.sh $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
 # Compatibility targets build the image before running the corresponding test.
 verify-image: image
@@ -86,7 +97,7 @@ verify-boot: image
 verify-smp: image
 	$(MAKE) test-qemu PROFILE=$(PROFILE) QEMU_CPU=$(QEMU_CPU)
 
-run: image
+run: image guest-assets
 	$(QEMU) \
 		-machine virt,virtualization=on,gic-version=3,dtb-randomness=on \
 		-cpu $(QEMU_CPU) \
@@ -98,6 +109,7 @@ run: image
 		-monitor none \
 		-no-reboot \
 		-append "$(QEMU_BOOTARGS)" \
+		-initrd $(HOST_INITRD) \
 		-kernel $(KERNEL_IMAGE)
 
 clean:

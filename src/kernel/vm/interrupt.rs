@@ -7,8 +7,7 @@ use hyper::drivers::interrupt::vgic::{
 use hyper::hal::interrupt::InterruptId;
 use hyper::sync::InterruptSpinLock;
 
-type ControllerLock =
-    InterruptSpinLock<VirtualInterruptController, crate::arch::LocalInterruptMask>;
+type ControllerLock = InterruptSpinLock<ControllerState, crate::arch::LocalInterruptMask>;
 
 const TIMER_PRIORITY: u8 = 0x80;
 
@@ -26,8 +25,14 @@ impl From<VgicError> for Error {
 
 /// Serialized virtual interrupt state shared by all vCPUs in one VM.
 pub struct VmInterruptController {
-    controller: ControllerLock,
+    state: ControllerLock,
     timer_interrupt: VirtualInterruptId,
+    vcpu_count: u32,
+}
+
+struct ControllerState {
+    controller: VirtualInterruptController,
+    distributor_control: u32,
 }
 
 impl VmInterruptController {
@@ -37,21 +42,41 @@ impl VmInterruptController {
         let mut controller = VirtualInterruptController::new(vcpu_count)?;
         for index in 0..vcpu_count {
             let vcpu = VirtualCpuId::new(index);
-            controller.configure(
-                timer_interrupt,
-                vcpu,
-                TIMER_PRIORITY,
-                InterruptGroup::Group1,
-                InterruptTrigger::Level,
-            )?;
+            for id in 0..32 {
+                let interrupt = VirtualInterruptId::new(id).ok_or(Error::InvalidInterrupt)?;
+                controller.configure(
+                    interrupt,
+                    vcpu,
+                    TIMER_PRIORITY,
+                    InterruptGroup::Group1,
+                    if id < 16 {
+                        InterruptTrigger::Edge
+                    } else {
+                        InterruptTrigger::Level
+                    },
+                )?;
+            }
             controller.set_maintenance_on_eoi(timer_interrupt, vcpu, true)?;
             // GIC register emulation will eventually transfer ownership of
             // this enable bit to the guest Redistributor model.
             controller.set_enabled(timer_interrupt, vcpu, true)?;
         }
+        for id in 32..64 {
+            controller.configure(
+                VirtualInterruptId::new(id).ok_or(Error::InvalidInterrupt)?,
+                VirtualCpuId::new(0),
+                TIMER_PRIORITY,
+                InterruptGroup::Group1,
+                InterruptTrigger::Level,
+            )?;
+        }
         Ok(Self {
-            controller: InterruptSpinLock::new(controller),
+            state: InterruptSpinLock::new(ControllerState {
+                controller,
+                distributor_control: 0,
+            }),
             timer_interrupt,
+            vcpu_count,
         })
     }
 
@@ -59,18 +84,34 @@ impl VmInterruptController {
         self.timer_interrupt
     }
 
+    pub(crate) const fn vcpu_count(&self) -> u32 {
+        self.vcpu_count
+    }
+
     pub(crate) fn with<R>(
         &self,
         operation: impl FnOnce(&mut VirtualInterruptController) -> R,
     ) -> R {
-        self.controller.with(operation)
+        self.state.with(|state| operation(&mut state.controller))
     }
 
     pub(crate) fn timer_snapshot(
         &self,
         vcpu: VirtualCpuId,
     ) -> Result<InterruptSnapshot, VgicError> {
-        self.controller
-            .with(|controller| controller.snapshot(self.timer_interrupt, vcpu))
+        self.state
+            .with(|state| state.controller.snapshot(self.timer_interrupt, vcpu))
+    }
+
+    pub(crate) fn distributor_control(&self) -> u32 {
+        self.state.with(|state| state.distributor_control)
+    }
+
+    pub(crate) fn set_distributor_control(&self, value: u32) {
+        self.state.with(|state| {
+            // Only the non-secure group enables and affinity routing are
+            // meaningful in the initial one-security-state virtual GIC.
+            state.distributor_control = value & ((1 << 4) | (1 << 1));
+        });
     }
 }

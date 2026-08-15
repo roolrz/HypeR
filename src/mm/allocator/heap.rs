@@ -449,6 +449,37 @@ impl<M: InterruptMask> KernelGlobalAllocator<M> {
             unsafe { state.heap_mut() }.map(|heap| heap.stats())
         })
     }
+
+    /// Allocates one physically contiguous, naturally aligned buddy block.
+    ///
+    /// The returned block is not a Rust heap allocation. Its owner must either
+    /// retain it permanently or return it once with [`Self::deallocate_pages`].
+    pub fn allocate_pages(&self, order: usize) -> Result<PhysicalAddress, BuddyError> {
+        self.state.with(|state| {
+            // SAFETY: Access is serialized and checked by `initialized`.
+            let heap = unsafe { state.heap_mut() }.ok_or(BuddyError::OutOfMemory)?;
+            heap.buddy.allocate(order)
+        })
+    }
+
+    /// Returns a contiguous block issued by [`Self::allocate_pages`].
+    ///
+    /// # Safety
+    ///
+    /// `address` and `order` must identify one live block issued by this
+    /// allocator. The block must no longer be mapped into an active consumer.
+    pub unsafe fn deallocate_pages(
+        &self,
+        address: PhysicalAddress,
+        order: usize,
+    ) -> Result<(), BuddyError> {
+        self.state.with(|state| {
+            // SAFETY: The caller owns the block and the heap lock serializes
+            // free-list mutation.
+            let heap = unsafe { state.heap_mut() }.ok_or(BuddyError::OutOfMemory)?;
+            unsafe { heap.buddy.deallocate(address, order) }
+        })
+    }
 }
 
 impl<M: InterruptMask> Default for KernelGlobalAllocator<M> {

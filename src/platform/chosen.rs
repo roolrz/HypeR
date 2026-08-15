@@ -2,7 +2,10 @@
 
 use core::str;
 
-use super::fdt::{NodeId, NodeResources, NodeVisitor};
+use super::{
+    PhysicalRange,
+    fdt::{NodeId, NodeResources, NodeVisitor},
+};
 
 pub const MAX_COMMAND_LINE_SIZE: usize = 512;
 
@@ -10,7 +13,10 @@ pub const MAX_COMMAND_LINE_SIZE: usize = 512;
 pub enum Error {
     DuplicateBootargs,
     DuplicateKaslrSeed,
+    DuplicateInitrdEnd,
+    DuplicateInitrdStart,
     InvalidEncoding,
+    InvalidInitrd,
     InvalidKaslrSeed,
     InvalidTree,
     TooLong,
@@ -71,7 +77,10 @@ impl CommandLine {
 #[derive(Clone, Copy)]
 pub struct Properties {
     command_line: Option<CommandLine>,
+    command_line_error: Option<Error>,
     kaslr_seed: Option<u64>,
+    kaslr_seed_error: Option<Error>,
+    initial_ramdisk: Option<PhysicalRange>,
 }
 
 impl Properties {
@@ -82,6 +91,18 @@ impl Properties {
     pub const fn kaslr_seed(&self) -> Option<u64> {
         self.kaslr_seed
     }
+
+    pub const fn command_line_error(&self) -> Option<Error> {
+        self.command_line_error
+    }
+
+    pub const fn kaslr_seed_error(&self) -> Option<Error> {
+        self.kaslr_seed_error
+    }
+
+    pub const fn initial_ramdisk(&self) -> Option<PhysicalRange> {
+        self.initial_ramdisk
+    }
 }
 
 /// Extracts boot configuration during the allocation-free initial FDT walk.
@@ -89,7 +110,11 @@ pub struct Discovery {
     depth: usize,
     chosen_depth: Option<usize>,
     command_line: Option<CommandLine>,
+    command_line_error: Option<Error>,
     kaslr_seed: Option<u64>,
+    kaslr_seed_error: Option<Error>,
+    initrd_start: Option<u64>,
+    initrd_end: Option<u64>,
     error: Option<Error>,
 }
 
@@ -99,7 +124,11 @@ impl Discovery {
             depth: 0,
             chosen_depth: None,
             command_line: None,
+            command_line_error: None,
             kaslr_seed: None,
+            kaslr_seed_error: None,
+            initrd_start: None,
+            initrd_end: None,
             error: None,
         }
     }
@@ -108,31 +137,76 @@ impl Discovery {
         match self.error {
             Some(error) => Err(error),
             None if self.depth != 0 => Err(Error::InvalidTree),
-            None => Ok(Properties {
-                command_line: self.command_line,
-                kaslr_seed: self.kaslr_seed,
-            }),
+            None => {
+                let initial_ramdisk = match (self.initrd_start, self.initrd_end) {
+                    (None, None) => None,
+                    (Some(start), Some(end)) => Some(
+                        PhysicalRange::new(
+                            start,
+                            end.checked_sub(start).ok_or(Error::InvalidInitrd)?,
+                        )
+                        .ok_or(Error::InvalidInitrd)?,
+                    ),
+                    _ => return Err(Error::InvalidInitrd),
+                };
+                Ok(Properties {
+                    command_line: self.command_line,
+                    command_line_error: self.command_line_error,
+                    kaslr_seed: self.kaslr_seed,
+                    kaslr_seed_error: self.kaslr_seed_error,
+                    initial_ramdisk,
+                })
+            }
         }
     }
 
     fn record_property(&mut self, name: &str, value: &[u8]) -> Result<(), Error> {
         match name {
             "bootargs" => {
-                if self.command_line.is_some() {
-                    return Err(Error::DuplicateBootargs);
+                if self.command_line.is_some() || self.command_line_error.is_some() {
+                    self.command_line = None;
+                    self.command_line_error = Some(Error::DuplicateBootargs);
+                } else {
+                    match CommandLine::from_property(value) {
+                        Ok(command_line) => self.command_line = Some(command_line),
+                        Err(error) => self.command_line_error = Some(error),
+                    }
                 }
-                self.command_line = Some(CommandLine::from_property(value)?);
             }
             "kaslr-seed" => {
-                if self.kaslr_seed.is_some() {
-                    return Err(Error::DuplicateKaslrSeed);
+                if self.kaslr_seed.is_some() || self.kaslr_seed_error.is_some() {
+                    self.kaslr_seed = None;
+                    self.kaslr_seed_error = Some(Error::DuplicateKaslrSeed);
+                } else {
+                    match <[u8; 8]>::try_from(value) {
+                        Ok(raw) => self.kaslr_seed = Some(u64::from_be_bytes(raw)),
+                        Err(_) => self.kaslr_seed_error = Some(Error::InvalidKaslrSeed),
+                    }
                 }
-                let raw: [u8; 8] = value.try_into().map_err(|_| Error::InvalidKaslrSeed)?;
-                self.kaslr_seed = Some(u64::from_be_bytes(raw));
+            }
+            "linux,initrd-start" => {
+                if self.initrd_start.is_some() {
+                    return Err(Error::DuplicateInitrdStart);
+                }
+                self.initrd_start = Some(decode_address(value)?);
+            }
+            "linux,initrd-end" => {
+                if self.initrd_end.is_some() {
+                    return Err(Error::DuplicateInitrdEnd);
+                }
+                self.initrd_end = Some(decode_address(value)?);
             }
             _ => {}
         }
         Ok(())
+    }
+}
+
+fn decode_address(value: &[u8]) -> Result<u64, Error> {
+    match value {
+        [a, b, c, d] => Ok(u64::from(u32::from_be_bytes([*a, *b, *c, *d]))),
+        [a, b, c, d, e, f, g, h] => Ok(u64::from_be_bytes([*a, *b, *c, *d, *e, *f, *g, *h])),
+        _ => Err(Error::InvalidInitrd),
     }
 }
 
@@ -155,7 +229,7 @@ impl NodeVisitor for Discovery {
     }
 
     fn property(&mut self, _id: NodeId, name: &str, value: &[u8]) {
-        if self.error.is_some() || self.chosen_depth != Some(self.depth) {
+        if self.chosen_depth != Some(self.depth) {
             return;
         }
         if let Err(error) = self.record_property(name, value) {

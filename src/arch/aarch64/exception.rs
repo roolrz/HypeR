@@ -153,6 +153,19 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
         crate::kernel::interrupt::dispatch();
         return;
     }
+    if kind == ExceptionKind::Synchronous && origin == ExceptionOrigin::LowerAarch64 {
+        let mut guest_frame = super::GuestSyncFrame::new(
+            &mut frame.general,
+            &mut frame.elr,
+            &mut frame.spsr,
+            frame.esr,
+            frame.far,
+            guest_physical_address(frame.far),
+        );
+        if crate::kernel::vm::handle_guest_sync(&mut guest_frame) {
+            return;
+        }
+    }
 
     let stack_pointer = interrupted_stack_pointer(frame, origin);
     let (architecture_class, description) = if kind == ExceptionKind::Fiq {
@@ -171,6 +184,20 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
         status: frame.spsr,
         stack_pointer,
     })
+}
+
+fn guest_physical_address(fault_address: u64) -> u64 {
+    let hpfar: u64;
+    // SAFETY: HPFAR_EL2 is readable at EL2. Its FIPA field supplies IPA bits
+    // above the page offset for a stage-2 abort.
+    unsafe {
+        asm!(
+            "mrs {hpfar}, HPFAR_EL2",
+            hpfar = out(reg) hpfar,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    ((hpfar & 0x0000_00ff_ffff_fff0) << 8) | (fault_address & 0xfff)
 }
 
 fn interrupted_stack_pointer(frame: &ExceptionFrame, origin: ExceptionOrigin) -> u64 {

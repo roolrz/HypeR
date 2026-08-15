@@ -19,7 +19,10 @@ Linux AArch64 boot ABI
     -> essential architecture initialization
     -> platform driver probing
     -> kernel initialization
-    -> idle
+    -> U-Boot ramdisk and nested VM bundle loader
+    -> stage-2 VM address space and virtual platform
+    -> Linux EL1 entry
+    -> initramfs /init
 ```
 
 QEMU passes the DTB address in `x0`, following the Linux AArch64 boot protocol.
@@ -47,8 +50,12 @@ The default QEMU command line adds
 `earlycon=pl011,mmio32,0x09000000` to the generated DTB `/chosen/bootargs`.
 Override `QEMU_BOOTARGS` with an empty value to exercise a silent early boot.
 
-`make run` starts the verified four-CPU configuration. Uniprocessor QEMU is not
-part of the supported or tested platform matrix.
+`make image` builds HypeR without embedding a guest. `make guest-assets`
+downloads a checksum-pinned Alpine AArch64 kernel and initramfs and creates the
+nested CPIO boot ramdisk used by CI. `make run` passes that ramdisk separately,
+matching the standard U-Boot `/chosen/linux,initrd-*` handoff. The format is
+specified in `docs/vm-bundle.md`. The initial guest exposes one vCPU;
+uniprocessor HypeR boot is not part of the supported or tested platform matrix.
 
 `make image` generates the default `.config` automatically when none exists.
 Use `make config` for an interactive configuration, `make olddefconfig` after
@@ -62,8 +69,10 @@ retained beside it for symbolic debugging.
 
 GitHub Actions runs independent required-quality stages for formatting and
 Clippy, host unit tests, debug/release bare-metal builds, image ABI validation,
-and four-core QEMU boot tests on the `cortex-a72` and `max` CPU models. Build
-artifacts contain both the ELF image used for debugging and the raw Linux Image.
+and four-core QEMU boot tests on the `cortex-a72` and `max` CPU models. Runtime
+tests require the ramdisk-loaded Linux guest to initialize GICv3 and the
+virtual Arm timer and execute `/init`. Build artifacts contain both the ELF
+image used for debugging and the raw HypeR Image.
 
 The workflow installs the toolchain pinned by `rust-toolchain.toml`, grants only
 read access to repository contents, cancels superseded runs on the same ref,
@@ -213,7 +222,7 @@ All test-only code and executables live under one top-level hierarchy:
 tests/
   host/       host-side unit and subsystem tests
   image/      ELF, Linux Image, PIE, and atomic-backend validation
-  qemu/       four-core boot, SMP, idle-thread, and timer integration tests
+  qemu/       four-core host boot and Linux guest-init integration tests
 ```
 
 The kernel layer consumes only the `arch` facade. Kernel memory policy owns the
@@ -222,8 +231,10 @@ describes bootstrap reachability, permanent virtual layout, and physical-to-
 virtual translation. AArch64 retains only its concrete layout values, page-table
 format, mapping construction, TLB maintenance, and address-space activation.
 
-No GPL-licensed runtime code or dependency is used. New dependencies require a
-license and `no_std` review before adoption.
+No GPL-licensed code is incorporated into the Apache-2.0 HypeR source. The
+generated, ignored guest payload is an external Linux/Alpine binary with its
+own license and source-availability obligations; see `tools/guest/README.md`.
+New Rust dependencies require a license and `no_std` review before adoption.
 
 ## CPU power management
 
@@ -297,9 +308,9 @@ current and idle identities are per CPU; ordinary ready Threads remain in the
 shared scheduler pool but have an explicit CPU owner. Cross-CPU migration is
 deferred until a stopped-thread hand-off protocol exists, preventing one saved
 context from being selected by two CPUs simultaneously.
-`make test-qemu` boots an existing image with four CPUs and verifies all
-secondary idle paths and
-recurring timer interrupts on both `cortex-a72` and `max`.
+`make test-qemu` boots the image with four host CPUs, verifies all secondary
+idle paths and recurring EL2 timer interrupts, and then requires the
+ramdisk-loaded Linux guest to execute `/init` on both `cortex-a72` and `max`.
 
 ## Interrupt controller
 
@@ -335,8 +346,16 @@ AArch64 early-platform discovery also decodes the hypervisor physical timer
 interrupt from the Linux `arm,armv8-timer` binding. The kernel runs CNTHP_EL2 at 100 Hz, rearms
 against absolute counter deadlines to avoid cumulative drift, and routes PPI 26
 through GICv3 on QEMU. HCR_EL2 routes physical IRQ, FIQ, and SError exceptions
-to EL2. GIC virtualization state and guest virtual interrupts remain a separate
-future hypervisor subsystem.
+to EL2.
+
+The initial Linux VM owns manifest-configured contiguous guest RAM behind a 39-bit-IPA
+stage-2 address space. HypeR builds a Linux-format guest DTB describing one
+vCPU, PSCI over HVC, GICv3, the Arm architectural timer, and a directly mapped
+PL011 console. GICD/GICR accesses are emulated, `ICC_SGI1R_EL1` self-IPIs are
+delivered through the vGIC model, and the hardware-assisted virtual timer
+injects PPI 27. The external Alpine kernel and deterministic initramfs are
+loaded from a versioned VM bundle inside the firmware ramdisk; disk and network
+devices are not part of this milestone.
 
 ## Platform driver model
 
@@ -401,7 +420,7 @@ runnable. A yielding or exiting normal thread falls back to this pinned idle
 context, so the scheduler always has a valid running context. Every online CPU
 owns a distinct idle Thread and current-thread slot. This milestone remains
 cooperative; timer preemption, load balancing and affinity policy, EL0 exception
-return, vCPU entry, stack guard pages, and address-space activation remain
+return, scheduled/multi-vCPU guest run loops, and stack guard pages remain
 future work.
 Kernel initialization uses explicit error propagation and does not use
 `unwrap` or `expect`. Since Rust's `GlobalAlloc` deallocation interface cannot
@@ -449,3 +468,5 @@ a valid Linux AArch64 Image with a page-aligned declared memory footprint. It
 checks both linked atomic backends, boots the baseline `cortex-a72` and
 feature-rich `max` QEMU CPU models, validates the reported KASLR slide geometry,
 and requires recurring EL2 timer interrupts on every CPU.
+The QEMU checks also require Linux to select the virtual architectural timer,
+finish initramfs unpacking, and print the two deterministic `/init` markers.

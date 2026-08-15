@@ -2,16 +2,17 @@
 # Exercises recurring timer delivery on the supported four-core QEMU setup.
 set -eu
 
-if [ "$#" -ne 5 ]; then
-    echo "usage: verify-qemu-timer.sh QEMU IMAGE CPU MEMORY BOOTARGS" >&2
+if [ "$#" -ne 6 ]; then
+    echo "usage: verify-qemu-timer.sh QEMU IMAGE INITRD CPU MEMORY BOOTARGS" >&2
     exit 2
 fi
 
 qemu=$1
 image=$2
-cpu=$3
-memory=$4
-bootargs=$5
+initrd=$3
+cpu=$4
+memory=$5
+bootargs=$6
 log=$(mktemp -t hyper-qemu-timer.XXXXXX)
 pid=
 
@@ -39,11 +40,12 @@ trap 'exit 143' TERM
     -monitor none \
     -no-reboot \
     -append "$bootargs" \
+    -initrd "$initrd" \
     -kernel "$image" >"$log" 2>&1 &
 pid=$!
 
 attempt=0
-while [ "$attempt" -lt 100 ]; do
+while [ "$attempt" -lt 300 ]; do
     if grep -q 'HypeR: SMP online: 4/4 discovered CPUs' "$log" &&
         grep -q 'HypeR: periodic timer IRQs active on 4 CPUs' "$log" &&
         grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
@@ -51,12 +53,16 @@ while [ "$attempt" -lt 100 ]; do
         grep -q 'HypeR: Arm Generic Timer: EL2 INTID 26, guest virtual INTID 27 (host VIRQ [0-9][0-9]*), [1-9][0-9]* Hz tick from a [1-9][0-9]* Hz counter' "$log" &&
         grep -q 'HypeR: monotonic clocksource active at [1-9][0-9]* Hz' "$log" &&
         grep -q 'HypeR: virtual architected timer injection validated' "$log" &&
+        grep -q 'HypeR: guest synchronous trap and vSysReg emulation validated' "$log" &&
         grep -q 'HypeR: kallsyms resolved hyper_kallsyms_lookup at 0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR: kernel log ring: 65536 bytes, 0 records dropped' "$log" &&
         grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
         grep -q 'HypeR: platform bus: .* bound, .* unmatched, .* deferred, .* failed' "$log" &&
-        grep -q 'HypeR: kernel initialization complete; bootstrap thread becoming idle' "$log"; then
-        echo "verified recurring EL2 timer IRQs on four QEMU CPUs using model $cpu"
+        grep -q "HypeR: loaded VM 'alpine' from boot ramdisk: 128 MiB RAM, 1 vCPU(s)" "$log" &&
+        grep -q 'HypeR: kernel initialization complete; starting Linux guest' "$log" &&
+        grep -q 'arch_timer: cp15 timer running at .* (virt).' "$log" &&
+        grep -q 'HypeR guest: Linux userspace is running' "$log"; then
+        echo "verified EL2 host ticks and the Linux virtual timer using model $cpu"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then

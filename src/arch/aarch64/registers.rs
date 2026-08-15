@@ -29,8 +29,14 @@ define_asm_constants! {
     HCR_EL2_FMO = 1 << 3;
     HCR_EL2_IMO = 1 << 4;
     HCR_EL2_AMO = 1 << 5;
+    HCR_EL2_VM = 1 << 0;
+    HCR_EL2_TID3 = 1 << 18;
     HCR_EL2_RW = 1 << 31;
-    HCR_EL2_BOOT_VALUE = HCR_EL2_RW | HCR_EL2_FMO | HCR_EL2_IMO | HCR_EL2_AMO;
+    HCR_EL2_BOOT_VALUE = HCR_EL2_RW
+        | HCR_EL2_FMO
+        | HCR_EL2_IMO
+        | HCR_EL2_AMO
+        | HCR_EL2_TID3;
     R_AARCH64_RELATIVE = 1027;
 
     ID_AA64MMFR0_PARANGE_MASK = 0xf;
@@ -68,6 +74,11 @@ define_asm_constants! {
     THREAD_CONTEXT_D8_OFFSET = 104;
     THREAD_CONTEXT_FPCR_OFFSET = 168;
     THREAD_CONTEXT_FPSR_OFFSET = 176;
+
+    VCPU_CONTEXT_X0_OFFSET = 0;
+    VCPU_CONTEXT_X30_OFFSET = 240;
+    VCPU_CONTEXT_PC_OFFSET = 264;
+    VCPU_CONTEXT_PSTATE_OFFSET = 272;
 
     MAIR_ATTR_DEVICE_NGNRNE = 0x00;
     MAIR_ATTR_NORMAL_WB = 0xff;
@@ -123,3 +134,10 @@ define_asm_constants! {
         | STAGE1_DESC_INNER_SHAREABLE
         | STAGE1_DESC_ACCESS_FLAG;
 }
+
+/// Architecturally required SCTLR_EL1 reset policy for an AArch64 guest.
+pub const SCTLR_EL1_GUEST_RESET_VALUE: u64 =
+    (1 << 29) | (1 << 28) | (1 << 23) | (1 << 22) | (1 << 20) | (1 << 11);
+
+pub const VTCR_EL2_GUEST_VALUE: u64 =
+    (1 << 31) | 25 | (1 << 6) | (1 << 8) | (1 << 10) | (3 << 12) | (2 << 16);

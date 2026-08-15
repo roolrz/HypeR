@@ -74,6 +74,7 @@ impl PreparedMemory {
 pub unsafe fn prepare(
     platform: &PlatformInfo,
     dtb_address: u64,
+    initial_ramdisk: PhysicalRange,
     kernel_base: u64,
 ) -> Result<PreparedMemory, Error> {
     let image = crate::kernel::boot::image::layout();
@@ -90,6 +91,7 @@ pub unsafe fn prepare(
         PhysicalRange::new(dtb_address, platform.dtb_size)
             .ok_or(BootAllocatorError::InvalidRequest)?,
     )?;
+    allocator.reserve(initial_ramdisk)?;
 
     let address_space = unsafe {
         crate::arch::prepare_address_space(&mut allocator, platform, image, kernel_base)?

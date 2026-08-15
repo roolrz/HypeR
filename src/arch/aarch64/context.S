@@ -51,3 +51,31 @@ aarch64_thread_trampoline:
     bl      kernel_thread_exit
     b       .
 .size aarch64_thread_trampoline, . - aarch64_thread_trampoline
+
+.global aarch64_enter_guest
+.type aarch64_enter_guest, %function
+aarch64_enter_guest:
+    // Keep the context pointer in x30 until every other guest register is live.
+    mov     x30, x0
+    ldr     x1, [x30, #VCPU_CONTEXT_PC_OFFSET]
+    msr     elr_el2, x1
+    ldr     x1, [x30, #VCPU_CONTEXT_PSTATE_OFFSET]
+    msr     spsr_el2, x1
+    ldp     x0, x1, [x30, #(VCPU_CONTEXT_X0_OFFSET + 0)]
+    ldp     x2, x3, [x30, #(VCPU_CONTEXT_X0_OFFSET + 16)]
+    ldp     x4, x5, [x30, #(VCPU_CONTEXT_X0_OFFSET + 32)]
+    ldp     x6, x7, [x30, #(VCPU_CONTEXT_X0_OFFSET + 48)]
+    ldp     x8, x9, [x30, #(VCPU_CONTEXT_X0_OFFSET + 64)]
+    ldp     x10, x11, [x30, #(VCPU_CONTEXT_X0_OFFSET + 80)]
+    ldp     x12, x13, [x30, #(VCPU_CONTEXT_X0_OFFSET + 96)]
+    ldp     x14, x15, [x30, #(VCPU_CONTEXT_X0_OFFSET + 112)]
+    ldp     x16, x17, [x30, #(VCPU_CONTEXT_X0_OFFSET + 128)]
+    ldp     x18, x19, [x30, #(VCPU_CONTEXT_X0_OFFSET + 144)]
+    ldp     x20, x21, [x30, #(VCPU_CONTEXT_X0_OFFSET + 160)]
+    ldp     x22, x23, [x30, #(VCPU_CONTEXT_X0_OFFSET + 176)]
+    ldp     x24, x25, [x30, #(VCPU_CONTEXT_X0_OFFSET + 192)]
+    ldp     x26, x27, [x30, #(VCPU_CONTEXT_X0_OFFSET + 208)]
+    ldp     x28, x29, [x30, #(VCPU_CONTEXT_X0_OFFSET + 224)]
+    ldr     x30, [x30, #VCPU_CONTEXT_X30_OFFSET]
+    eret
+.size aarch64_enter_guest, . - aarch64_enter_guest

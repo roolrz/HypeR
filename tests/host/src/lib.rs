@@ -79,6 +79,199 @@ mod generic_timer {
 }
 
 #[cfg(test)]
+mod cpio {
+    use hyper::archive::cpio::{Archive, EntryKind, Error};
+    use hyper::vm::bundle;
+
+    fn append_hex(output: &mut Vec<u8>, value: u32) {
+        output.extend_from_slice(format!("{value:08x}").as_bytes());
+    }
+
+    fn append_entry(output: &mut Vec<u8>, name: &str, mode: u32, data: &[u8]) {
+        append_entry_with_checksum(output, name, mode, data, false);
+    }
+
+    fn append_entry_with_checksum(
+        output: &mut Vec<u8>,
+        name: &str,
+        mode: u32,
+        data: &[u8],
+        checksum: bool,
+    ) {
+        output.extend_from_slice(if checksum { b"070702" } else { b"070701" });
+        append_hex(output, 1);
+        append_hex(output, mode);
+        for value in [0, 0, 1, 0] {
+            append_hex(output, value);
+        }
+        append_hex(output, data.len() as u32);
+        for value in [0, 0, 0, 0] {
+            append_hex(output, value);
+        }
+        append_hex(output, (name.len() + 1) as u32);
+        append_hex(
+            output,
+            if checksum {
+                data.iter()
+                    .fold(0u32, |sum, byte| sum.wrapping_add(u32::from(*byte)))
+            } else {
+                0
+            },
+        );
+        output.extend_from_slice(name.as_bytes());
+        output.push(0);
+        while output.len() & 3 != 0 {
+            output.push(0);
+        }
+        output.extend_from_slice(data);
+        while output.len() & 3 != 0 {
+            output.push(0);
+        }
+    }
+
+    fn archive(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut output = Vec::new();
+        for (name, data) in entries {
+            append_entry(&mut output, name, 0o100_644, data);
+        }
+        append_entry(&mut output, "TRAILER!!!", 0, &[]);
+        output
+    }
+
+    #[test]
+    fn parses_newc_files_without_allocating_in_the_parser() {
+        let bytes = archive(&[("hypervisor/boot.conf", b"default=demo"), ("empty", b"")]);
+        let archive = super::require_ok(Archive::new(&bytes));
+        let entry = super::require_some(super::require_ok(
+            archive.find_unique("hypervisor/boot.conf"),
+        ));
+        assert_eq!(entry.kind(), EntryKind::File);
+        assert_eq!(entry.data(), b"default=demo");
+        assert_eq!(super::require_ok(archive.find_unique("missing")), None);
+    }
+
+    #[test]
+    fn rejects_duplicate_and_truncated_entries() {
+        let duplicate = archive(&[("manifest", b"one"), ("manifest", b"two")]);
+        let parsed = super::require_ok(Archive::new(&duplicate));
+        assert_eq!(parsed.find_unique("manifest"), Err(Error::DuplicateEntry));
+
+        let mut truncated = archive(&[("manifest", b"payload")]);
+        truncated.truncate(truncated.len() - 120);
+        assert!(Archive::new(&truncated).is_err());
+    }
+
+    #[test]
+    fn validates_crc_archives() {
+        let mut bytes = Vec::new();
+        append_entry_with_checksum(&mut bytes, "payload", 0o100_644, b"checked", true);
+        append_entry(&mut bytes, "TRAILER!!!", 0, &[]);
+        let parsed = super::require_ok(Archive::new(&bytes));
+        let payload = super::require_some(super::require_ok(parsed.find_unique("payload")));
+        assert_eq!(payload.data(), b"checked");
+
+        let data_offset = payload.data().as_ptr() as usize - bytes.as_ptr() as usize;
+        bytes[data_offset] ^= 1;
+        assert_eq!(
+            Archive::new(&bytes).map(|_| ()),
+            Err(Error::InvalidChecksum)
+        );
+
+        let mut newc_with_checksum = archive(&[("payload", b"unchecked")]);
+        newc_with_checksum[102..110].copy_from_slice(b"00000001");
+        assert_eq!(
+            Archive::new(&newc_with_checksum).map(|_| ()),
+            Err(Error::InvalidChecksum)
+        );
+    }
+
+    #[test]
+    fn loads_a_versioned_nested_vm_bundle() {
+        let mut kernel = [0u8; 64];
+        kernel[56..60].copy_from_slice(b"ARMd");
+        let manifest = b"format=hyper-vm-v1\ntype=linux\narchitecture=aarch64\nmemory=134217728\nvcpus=1\ncommand_line=console=ttyAMA0 rdinit=/init\nkernel=kernel/Image\ninitramfs=initramfs/root.cpio\n";
+        let inner = archive(&[
+            ("manifest", manifest),
+            ("kernel/Image", &kernel),
+            ("initramfs/root.cpio", b"guest initramfs"),
+        ]);
+        let outer = archive(&[
+            (
+                "hypervisor/boot.conf",
+                b"format=hyper-boot-v1\ndefault=demo\n",
+            ),
+            ("hypervisor/vms/demo.cpio", &inner),
+        ]);
+        let guest = super::require_ok(bundle::select_default(&outer));
+        assert_eq!(guest.name(), "demo");
+        assert_eq!(guest.guest_type(), "linux");
+        assert_eq!(guest.architecture(), "aarch64");
+        assert_eq!(guest.memory_size(), 128 * 1024 * 1024);
+        assert_eq!(guest.vcpu_count(), 1);
+        assert_eq!(guest.kernel(), &kernel);
+        assert_eq!(guest.initramfs(), Some(b"guest initramfs".as_slice()));
+    }
+
+    #[test]
+    fn rejects_unknown_manifest_properties() {
+        let mut kernel = [0u8; 64];
+        kernel[56..60].copy_from_slice(b"ARMd");
+        let manifest = b"format=hyper-vm-v1\ntype=linux\narchitecture=aarch64\nmemory=134217728\nvcpus=1\ncommand_line=console=ttyAMA0\nkernel=kernel/Image\ninitramfs=\ntypo=value\n";
+        let inner = archive(&[("manifest", manifest), ("kernel/Image", &kernel)]);
+        let outer = archive(&[
+            (
+                "hypervisor/boot.conf",
+                b"format=hyper-boot-v1\ndefault=demo\n",
+            ),
+            ("hypervisor/vms/demo.cpio", &inner),
+        ]);
+        assert_eq!(
+            bundle::select_default(&outer).map(|_| ()),
+            Err(bundle::Error::UnknownProperty)
+        );
+    }
+
+    #[test]
+    fn keeps_package_parsing_independent_from_runner_capabilities() {
+        let manifest = b"format=hyper-vm-v1\ntype=freebsd\narchitecture=x86_64\nmemory=134217728\nvcpus=64\ncommand_line=\nkernel=kernel/guest.bin\ninitramfs=\n";
+        let inner = archive(&[("manifest", manifest), ("kernel/guest.bin", b"opaque")]);
+        let outer = archive(&[
+            (
+                "hypervisor/boot.conf",
+                b"format=hyper-boot-v1\ndefault=portable\n",
+            ),
+            ("hypervisor/vms/portable.cpio", &inner),
+        ]);
+        let guest = super::require_ok(bundle::select_default(&outer));
+        assert_eq!(guest.guest_type(), "freebsd");
+        assert_eq!(guest.architecture(), "x86_64");
+        assert_eq!(guest.vcpu_count(), 64);
+        assert_eq!(guest.command_line(), "");
+        assert_eq!(guest.kernel(), b"opaque");
+    }
+
+    #[test]
+    fn reports_the_archive_layer_that_is_malformed() {
+        assert!(matches!(
+            bundle::select_default(b"invalid"),
+            Err(bundle::Error::BootArchive(_))
+        ));
+
+        let outer = archive(&[
+            (
+                "hypervisor/boot.conf",
+                b"format=hyper-boot-v1\ndefault=broken\n",
+            ),
+            ("hypervisor/vms/broken.cpio", b"invalid"),
+        ]);
+        assert!(matches!(
+            bundle::select_default(&outer),
+            Err(bundle::Error::BundleArchive(_))
+        ));
+    }
+}
+
+#[cfg(test)]
 mod fdt {
     use std::boxed::Box;
 
@@ -143,8 +336,10 @@ mod fdt {
         const STATUS: u32 = 86;
         const BOOTARGS: u32 = 93;
         const KASLR_SEED: u32 = 102;
+        const INITRD_START: u32 = 113;
+        const INITRD_END: u32 = 132;
 
-        let strings = b"#address-cells\0#size-cells\0reg\0compatible\0device_type\0ranges\0no-map\0interrupts\0method\0status\0bootargs\0kaslr-seed\0";
+        let strings = b"#address-cells\0#size-cells\0reg\0compatible\0device_type\0ranges\0no-map\0interrupts\0method\0status\0bootargs\0kaslr-seed\0linux,initrd-start\0linux,initrd-end\0";
         let mut structure = Vec::new();
         begin_node(&mut structure, b"");
         property(&mut structure, ADDRESS_CELLS, &2u32.to_be_bytes());
@@ -159,6 +354,16 @@ mod fdt {
             &mut structure,
             KASLR_SEED,
             &0x0123_4567_89ab_cdef_u64.to_be_bytes(),
+        );
+        property(
+            &mut structure,
+            INITRD_START,
+            &0x0000_0000_4800_0000_u64.to_be_bytes(),
+        );
+        property(
+            &mut structure,
+            INITRD_END,
+            &0x0000_0000_4900_0000_u64.to_be_bytes(),
         );
         push_u32(&mut structure, FDT_END_NODE);
         begin_node(&mut structure, b"memory@40000000");
@@ -293,6 +498,11 @@ mod fdt {
         let command_line = super::require_some(chosen.command_line());
         assert_eq!(command_line.value("loglevel"), Some("7"));
         assert_eq!(chosen.kaslr_seed(), Some(0x0123_4567_89ab_cdef));
+        assert_eq!(chosen.command_line_error(), None);
+        assert_eq!(chosen.kaslr_seed_error(), None);
+        let initrd = super::require_some(chosen.initial_ramdisk());
+        assert_eq!(initrd.start(), 0x4800_0000);
+        assert_eq!(initrd.end(), 0x4900_0000);
         assert_eq!(
             super::require_ok(console::early_console(Some(&command_line))),
             Some(hyper::platform::ConsoleInfo {
@@ -356,6 +566,27 @@ mod fdt {
                 0x2000,
             ))]
         );
+    }
+
+    #[test]
+    fn preserves_the_initrd_when_optional_bootargs_are_invalid() {
+        let mut blob = qemu_like_dtb();
+        let old = b"earlycon=pl011,mmio32,0x09000000 loglevel=7\0";
+        let mut invalid = *old;
+        invalid[0] = 0xff;
+        replace_first(&mut blob, old, &invalid);
+
+        let mut chosen = chosen::Discovery::new();
+        let _ = super::require_ok(fdt::discover_from_bytes_with(&blob, &mut chosen));
+        let chosen = super::require_ok(chosen.finish());
+        assert!(chosen.command_line().is_none());
+        assert_eq!(
+            chosen.command_line_error(),
+            Some(chosen::Error::InvalidEncoding)
+        );
+        let initrd = super::require_some(chosen.initial_ramdisk());
+        assert_eq!(initrd.start(), 0x4800_0000);
+        assert_eq!(initrd.end(), 0x4900_0000);
     }
 
     #[test]

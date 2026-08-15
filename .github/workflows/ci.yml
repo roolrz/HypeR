@@ -102,8 +102,8 @@ jobs:
       - name: Install QEMU
         run: |
           sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends qemu-system-arm
-      - name: Verify SMP boot, idle threads, and timer IRQs
+          sudo apt-get install --yes --no-install-recommends cpio qemu-system-arm
+      - name: Verify host SMP and Linux guest init
         run: make test-qemu PROFILE=debug QEMU_CPU=${{ matrix.cpu }}
       - name: Clean up QEMU processes
         if: always()

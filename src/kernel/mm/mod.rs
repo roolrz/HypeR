@@ -2,5 +2,6 @@
 
 pub mod allocator;
 pub mod memory;
+pub mod page_block;
 
 pub use memory::PreparedMemory;
