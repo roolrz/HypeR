@@ -6,7 +6,7 @@ use hyper::drivers::console::ConsoleDevice;
 use hyper::hal::console::{Console, ConsoleWriter};
 use hyper::log::{Level, ReadResult, Record, RecordFlags};
 use hyper::sync::InterruptSpinLock;
-use hyper::sync::atomic::{AtomicBool, AtomicFlag, Ordering};
+use hyper::sync::atomic::{AtomicBool, AtomicFlag, AtomicUsize, Ordering};
 
 type KernelSpinLock<T> = InterruptSpinLock<T, crate::arch::LocalInterruptMask>;
 
@@ -30,10 +30,12 @@ impl ConsoleState {
 }
 
 static CONSOLE: KernelSpinLock<ConsoleState> = KernelSpinLock::new(ConsoleState::new());
+static EMERGENCY_CONSOLE: AtomicUsize = AtomicUsize::new(0);
 static FLUSHING: AtomicFlag = AtomicFlag::new(false);
 static FLUSH_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 pub fn install(console: ConsoleDevice) {
+    EMERGENCY_CONSOLE.store(console.emergency_handle(), Ordering::Release);
     CONSOLE.with(|state| state.device = Some(console));
     flush();
 }
@@ -66,8 +68,10 @@ pub fn flush() {
 
 /// Writes a best-effort fatal message without waiting for kernel log locks.
 pub(super) fn emergency_write(message: &[u8]) {
-    let device = CONSOLE.try_with(|state| state.device).flatten();
-    let Some(device) = device else {
+    let handle = EMERGENCY_CONSOLE.load(Ordering::Acquire);
+    // SAFETY: install publishes handles only after binding a permanent MMIO
+    // mapping. Crash handling is the sole lock-free writer to that device.
+    let Some(device) = (unsafe { ConsoleDevice::from_emergency_handle(handle) }) else {
         return;
     };
     device.write_bytes(b"<0>[exception] ");

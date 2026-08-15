@@ -70,6 +70,28 @@ impl Console for ConsoleDevice {
     }
 }
 
+impl ConsoleDevice {
+    /// Encodes a lock-free handle retained by fatal console paths.
+    pub const fn emergency_handle(self) -> usize {
+        match self {
+            Self::Pl011(device) => device.mmio_base() | 1,
+        }
+    }
+
+    /// Reconstructs a console from a handle returned by [`Self::emergency_handle`].
+    ///
+    /// # Safety
+    ///
+    /// The encoded MMIO mapping must still be valid and exclusively owned by
+    /// the console subsystem.
+    pub const unsafe fn from_emergency_handle(handle: usize) -> Option<Self> {
+        match handle & 3 {
+            1 => Some(Self::Pl011(unsafe { Pl011::from_mmio_base(handle & !3) })),
+            _ => None,
+        }
+    }
+}
+
 /// Binds a discovered console description to its mapped register address.
 ///
 /// # Safety

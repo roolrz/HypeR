@@ -31,6 +31,10 @@ impl Pl011 {
         Self { base }
     }
 
+    pub(crate) const fn mmio_base(self) -> usize {
+        self.base
+    }
+
     fn read_register(&self, offset: usize) -> u32 {
         // SAFETY: The constructor requires a valid, permanently mapped PL011.
         unsafe { read_volatile((self.base + offset) as *const u32) }

@@ -8,7 +8,7 @@ use hyper::platform::{PhysicalRange, PlatformInfo};
 use super::super::registers;
 use super::layout::{KERNEL_BASE, KERNEL_STACK_BASE, LINEAR_BASE, MMIO_BASE};
 
-const KERNEL_STACK_PAGES: usize = 16;
+pub(super) const KERNEL_STACK_PAGES: usize = 16;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

@@ -106,7 +106,6 @@ struct InterruptState {
 }
 
 enum DispatchOutcome {
-    Spurious,
     Handled,
     Quarantined {
         hardware: InterruptId,
@@ -333,8 +332,9 @@ pub fn unregister(registration: Registration) -> Result<(), Error> {
     })
 }
 
-pub fn dispatch() {
-    let outcome = match with_state(|state| Ok(state.dispatch_one())) {
+/// Dispatches an interrupt already acknowledged by architecture exception entry.
+pub fn dispatch(hardware: InterruptId) {
+    let outcome = match with_state(|state| Ok(state.dispatch_one(hardware))) {
         Ok(outcome) => outcome,
         Err(Error::NotInitialized) => {
             crate::kernel::exception::fatal_interrupt("controller not initialized", None)
@@ -342,19 +342,23 @@ pub fn dispatch() {
         Err(error) => crate::kernel::exception::fatal_interrupt_state(error),
     };
     match outcome {
-        DispatchOutcome::Spurious | DispatchOutcome::Handled => {}
+        DispatchOutcome::Handled => {}
         DispatchOutcome::Quarantined {
             hardware,
             virtual_interrupt,
-        } => crate::pr_warn!(
-            "HypeR: quarantined unhandled IRQ: INTID {}, VIRQ {}",
-            hardware.get(),
-            virtual_interrupt.get()
-        ),
-        DispatchOutcome::Unmapped(hardware) => crate::pr_warn!(
-            "HypeR: masked IRQ without a domain mapping: INTID {}",
-            hardware.get()
-        ),
+        } => {
+            crate::pr_warn!(
+                "HypeR: quarantined unhandled IRQ: INTID {}, VIRQ {}",
+                hardware.get(),
+                virtual_interrupt.get()
+            );
+        }
+        DispatchOutcome::Unmapped(hardware) => {
+            crate::pr_warn!(
+                "HypeR: masked IRQ without a domain mapping: INTID {}",
+                hardware.get()
+            );
+        }
     }
 }
 
@@ -395,10 +399,7 @@ impl InterruptState {
             })
     }
 
-    fn dispatch_one(&mut self) -> DispatchOutcome {
-        let Some(hardware) = self.controller.acknowledge() else {
-            return DispatchOutcome::Spurious;
-        };
+    fn dispatch_one(&mut self, hardware: InterruptId) -> DispatchOutcome {
         let Some((domain_index, mapping_index)) = self.mapping_position_by_hardware(hardware)
         else {
             let _ = self.controller.disable(hardware);

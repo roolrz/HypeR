@@ -22,6 +22,7 @@ extern "C" fn start_kernel() -> ! {
 
     crate::kernel::device::initialize_cpu_power(&boot);
     crate::kernel::irq::initialize_controller(&mut boot);
+    crate::kernel::crash::initialize(&boot);
     crate::kernel::irq::initialize_exceptions();
     crate::kernel::irq::initialize_virtualization(&boot);
     crate::kernel::time::initialize_timekeeping();
@@ -49,6 +50,5 @@ extern "C" fn start_secondary_cpu(cpu_index: usize) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    crate::kernel::log::panic(info);
-    crate::arch::halt()
+    crate::kernel::crash::panic(info)
 }

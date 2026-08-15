@@ -47,6 +47,132 @@ const _: () = {
 
 unsafe extern "C" {
     static aarch64_runtime_vectors: u8;
+    fn aarch64_capture_crash_context(context: *mut CrashContext);
+}
+
+pub const NO_EXCEPTION_VECTOR: u64 = u64::MAX;
+
+/// Register and control-state snapshot consumed by architecture-neutral crash
+/// policy. Exception entry provides every general register; a software panic
+/// cannot preserve x0 because the capture ABI uses it for the output pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C, align(16))]
+pub struct CrashContext {
+    pub general: [u64; 31],
+    general_valid: u64,
+    pub stack_pointer: u64,
+    pub program_counter: u64,
+    pub processor_state: u64,
+    pub syndrome: u64,
+    pub fault_address: u64,
+    pub exception_vector: u64,
+    pub hardware_id: u64,
+    pub current_el: u64,
+    pub interrupt_mask: u64,
+    pub sctlr_el2: u64,
+    pub tcr_el2: u64,
+    pub ttbr0_el2: u64,
+    pub vbar_el2: u64,
+    pub hcr_el2: u64,
+}
+
+impl CrashContext {
+    const fn empty() -> Self {
+        Self {
+            general: [0; 31],
+            general_valid: 0,
+            stack_pointer: 0,
+            program_counter: 0,
+            processor_state: 0,
+            syndrome: 0,
+            fault_address: 0,
+            exception_vector: NO_EXCEPTION_VECTOR,
+            hardware_id: 0,
+            current_el: 0,
+            interrupt_mask: 0,
+            sctlr_el2: 0,
+            tcr_el2: 0,
+            ttbr0_el2: 0,
+            vbar_el2: 0,
+            hcr_el2: 0,
+        }
+    }
+
+    pub const fn general_is_valid(&self, register: usize) -> bool {
+        register < 31 && self.general_valid & (1 << register) != 0
+    }
+
+    pub const fn has_exception_frame(&self) -> bool {
+        self.exception_vector != NO_EXCEPTION_VECTOR
+    }
+}
+
+const _: () = {
+    assert!(offset_of!(CrashContext, general) == registers::CRASH_CONTEXT_X0_OFFSET as usize);
+    assert!(
+        offset_of!(CrashContext, general_valid) == registers::CRASH_CONTEXT_VALID_OFFSET as usize
+    );
+    assert!(offset_of!(CrashContext, stack_pointer) == registers::CRASH_CONTEXT_SP_OFFSET as usize);
+    assert!(
+        offset_of!(CrashContext, program_counter) == registers::CRASH_CONTEXT_PC_OFFSET as usize
+    );
+    assert!(
+        offset_of!(CrashContext, processor_state)
+            == registers::CRASH_CONTEXT_PSTATE_OFFSET as usize
+    );
+    assert!(offset_of!(CrashContext, syndrome) == registers::CRASH_CONTEXT_ESR_OFFSET as usize);
+    assert!(
+        offset_of!(CrashContext, fault_address) == registers::CRASH_CONTEXT_FAR_OFFSET as usize
+    );
+    assert!(
+        offset_of!(CrashContext, exception_vector)
+            == registers::CRASH_CONTEXT_VECTOR_OFFSET as usize
+    );
+    assert!(
+        offset_of!(CrashContext, hardware_id) == registers::CRASH_CONTEXT_MPIDR_OFFSET as usize
+    );
+    assert!(
+        offset_of!(CrashContext, current_el) == registers::CRASH_CONTEXT_CURRENT_EL_OFFSET as usize
+    );
+    assert!(
+        offset_of!(CrashContext, interrupt_mask) == registers::CRASH_CONTEXT_DAIF_OFFSET as usize
+    );
+    assert!(
+        offset_of!(CrashContext, sctlr_el2) == registers::CRASH_CONTEXT_SCTLR_EL2_OFFSET as usize
+    );
+    assert!(offset_of!(CrashContext, tcr_el2) == registers::CRASH_CONTEXT_TCR_EL2_OFFSET as usize);
+    assert!(
+        offset_of!(CrashContext, ttbr0_el2) == registers::CRASH_CONTEXT_TTBR0_EL2_OFFSET as usize
+    );
+    assert!(
+        offset_of!(CrashContext, vbar_el2) == registers::CRASH_CONTEXT_VBAR_EL2_OFFSET as usize
+    );
+    assert!(offset_of!(CrashContext, hcr_el2) == registers::CRASH_CONTEXT_HCR_EL2_OFFSET as usize);
+    assert!(size_of::<CrashContext>() == registers::CRASH_CONTEXT_SIZE as usize);
+};
+
+/// Captures the calling kernel context for a software panic.
+#[unsafe(export_name = "aarch64_capture_crash_context_rust")]
+pub fn capture_crash_context() -> CrashContext {
+    let mut context = CrashContext::empty();
+    // SAFETY: The assembly routine writes exactly one aligned CrashContext and
+    // preserves all AAPCS64 callee-saved registers.
+    unsafe { aarch64_capture_crash_context(&mut context) };
+    context.general_valid = ((1u64 << 31) - 1) & !1;
+    context
+}
+
+fn exception_crash_context(frame: &ExceptionFrame, stack_pointer: u64) -> CrashContext {
+    let mut context = capture_crash_context();
+    context.general = frame.general;
+    context.general_valid = (1u64 << 31) - 1;
+    context.stack_pointer = stack_pointer;
+    context.program_counter = frame.elr;
+    context.processor_state = frame.spsr;
+    context.syndrome = frame.esr;
+    context.fault_address = frame.far;
+    context.exception_vector = frame.vector;
+    context
 }
 
 pub fn runtime_vector_address() -> u64 {
@@ -147,16 +273,27 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
     }
 
     let Some((kind, origin)) = decode_vector(frame.vector) else {
+        let context = exception_crash_context(frame, frame.sp_el1);
         crate::kernel::exception::fatal_invalid_vector(
             frame.vector,
             frame.esr,
             frame.elr,
             frame.far,
             frame.spsr,
+            context,
         );
     };
     if kind == ExceptionKind::Irq {
-        crate::kernel::interrupt::dispatch();
+        let Some(interrupt) = super::acknowledge_interrupt() else {
+            return;
+        };
+        if crate::kernel::crash::is_stop_interrupt(interrupt) {
+            super::end_interrupt(interrupt);
+            let stack_pointer = interrupted_stack_pointer(frame, origin);
+            let context = exception_crash_context(frame, stack_pointer);
+            crate::kernel::crash::stop_this_cpu(context)
+        }
+        crate::kernel::interrupt::dispatch(interrupt);
         return;
     }
     if kind == ExceptionKind::Synchronous && origin == ExceptionOrigin::LowerAarch64 {
@@ -179,17 +316,21 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
     } else {
         (exception_class as u8, syndrome_description(exception_class))
     };
-    crate::kernel::exception::fatal(ExceptionReport {
-        origin,
-        kind,
-        architecture_class,
-        description,
-        syndrome: frame.esr,
-        instruction_pointer: frame.elr,
-        fault_address_register: frame.far,
-        status: frame.spsr,
-        stack_pointer,
-    })
+    let context = exception_crash_context(frame, stack_pointer);
+    crate::kernel::exception::fatal(
+        ExceptionReport {
+            origin,
+            kind,
+            architecture_class,
+            description,
+            syndrome: frame.esr,
+            instruction_pointer: frame.elr,
+            fault_address_register: frame.far,
+            status: frame.spsr,
+            stack_pointer,
+        },
+        context,
+    )
 }
 
 fn guest_physical_address(fault_address: u64) -> u64 {

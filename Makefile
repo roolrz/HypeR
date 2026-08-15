@@ -16,11 +16,17 @@ OBJDUMP ?= $(LLVM_BIN)/llvm-objdump
 
 ifeq ($(PROFILE),release)
 CARGO_PROFILE := --release
+KALLSYMS_STORAGE_SIZE := 131072
+else
+KALLSYMS_STORAGE_SIZE := 786432
 endif
 
 KERNEL_ELF := target/$(TARGET)/$(PROFILE)/hyper
 KERNEL_IMAGE := target/$(TARGET)/$(PROFILE)/hyper.img
 KCONFIG_MANIFEST := tools/kconfig/Cargo.toml
+KALLSYMS_MANIFEST := tools/kallsyms/Cargo.toml
+KALLSYMS_BLOB := target/$(TARGET)/$(PROFILE)/hyper.kallsyms
+KALLSYMS_ELF := target/$(TARGET)/$(PROFILE)/hyper.with-kallsyms
 HOST_TEST_MANIFEST := tests/host/Cargo.toml
 DEFCONFIG := configs/qemu_aarch64_defconfig
 GUEST_OUTPUT := target/guest
@@ -55,6 +61,9 @@ build: .config
 	cargo build $(CARGO_PROFILE)
 
 image: build
+	cargo run --quiet --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET) -- $(NM) $(KERNEL_ELF) $(KALLSYMS_BLOB) $(KALLSYMS_STORAGE_SIZE)
+	$(OBJCOPY) --update-section=.kallsyms=$(KALLSYMS_BLOB) $(KERNEL_ELF) $(KALLSYMS_ELF)
+	mv $(KALLSYMS_ELF) $(KERNEL_ELF)
 	$(OBJCOPY) --output-target=binary $(KERNEL_ELF) $(KERNEL_IMAGE)
 
 check: .config
@@ -62,15 +71,18 @@ check: .config
 	cargo clippy --target $(TARGET) -- -D warnings
 	cargo clippy --manifest-path $(HOST_TEST_MANIFEST) --target $(HOST_TARGET) -- -D warnings
 	cargo clippy --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET) -- -D warnings
+	cargo clippy --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET) -- -D warnings
 
 test: .config
 	cargo test --manifest-path $(HOST_TEST_MANIFEST) --target $(HOST_TARGET)
 	cargo test --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET)
+	cargo test --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET)
 
 verify: check test
 	cargo fmt -- --check
 	cargo fmt --manifest-path $(HOST_TEST_MANIFEST) -- --check
 	cargo fmt --manifest-path $(KCONFIG_MANIFEST) -- --check
+	cargo fmt --manifest-path $(KALLSYMS_MANIFEST) -- --check
 	$(MAKE) image PROFILE=debug
 	$(MAKE) image PROFILE=release
 	$(MAKE) test-image PROFILE=debug

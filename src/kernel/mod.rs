@@ -2,6 +2,7 @@
 
 pub(crate) mod boot;
 pub mod cpu;
+pub mod crash;
 pub mod debug;
 pub mod device;
 pub mod irq;

@@ -819,7 +819,10 @@ mod kaslr {
 
 #[cfg(test)]
 mod kallsyms {
-    use hyper::debug::kallsyms::{Error, SymbolTable};
+    use hyper::debug::kallsyms::{
+        COMPACT_HEADER_SIZE, COMPACT_MAGIC, COMPACT_RECORD_SIZE, COMPACT_VERSION,
+        CompactSymbolTable, Error, SymbolTable,
+    };
 
     fn symbol(name: u32, info: u8, section: u16, value: u64, size: u64) -> [u8; 24] {
         let mut bytes = [0u8; 24];
@@ -853,7 +856,67 @@ mod kallsyms {
         let resolved = super::require_some(super::require_ok(table.lookup(0xff00_2000_0188)));
         assert_eq!(resolved.name, "second");
         assert_eq!(resolved.offset, 8);
+        assert!(super::require_ok(table.lookup_containing(0xff00_2000_0148)).is_none());
+        let contained = super::require_some(super::require_ok(
+            table.lookup_containing(0xff00_2000_0188),
+        ));
+        assert_eq!(contained.name, "second");
         assert!(super::require_ok(table.lookup(0x100)).is_none());
+    }
+
+    #[test]
+    fn displays_runtime_symbols_with_rust_names_demangled() {
+        let symbol = hyper::debug::kallsyms::Symbol {
+            name: "_RNvCskwGfYPst2Cb_3foo16example_function",
+            address: 0x1000,
+            size: 0x40,
+            offset: 0x18,
+        };
+        assert_eq!(
+            symbol.to_string(),
+            "foo::example_function+0x18/0x40"
+        );
+
+        let foreign = hyper::debug::kallsyms::Symbol {
+            name: "start_kernel",
+            address: 0x2000,
+            size: 0x20,
+            offset: 4,
+        };
+        assert_eq!(foreign.to_string(), "start_kernel+0x4/0x20");
+    }
+
+    #[test]
+    fn resolves_a_containing_symbol_from_the_compact_runtime_table() {
+        let strings = b"first\0second\0";
+        let strings_offset = COMPACT_HEADER_SIZE + 2 * COMPACT_RECORD_SIZE;
+        let mut image = vec![0; strings_offset + strings.len()];
+        image[..8].copy_from_slice(&COMPACT_MAGIC);
+        put_u32(&mut image, 8, COMPACT_VERSION);
+        put_u32(&mut image, 12, 2);
+        put_u32(&mut image, 16, strings_offset as u32);
+        put_u32(&mut image, 20, strings.len() as u32);
+        put_record(&mut image, 0, 0x100, 0x40, 0);
+        put_record(&mut image, 1, 0x180, 0x20, 6);
+        image[strings_offset..].copy_from_slice(strings);
+
+        let base = 0xff00_4000_0000;
+        let table = super::require_ok(CompactSymbolTable::new(&image, base, 0x1000));
+        let symbol = super::require_some(super::require_ok(table.lookup_containing(base + 0x188)));
+        assert_eq!(symbol.name, "second");
+        assert_eq!(symbol.offset, 8);
+        assert!(super::require_ok(table.lookup_containing(base + 0x160)).is_none());
+    }
+
+    fn put_record(image: &mut [u8], index: usize, address: u64, size: u32, name: u32) {
+        let offset = COMPACT_HEADER_SIZE + index * COMPACT_RECORD_SIZE;
+        image[offset..offset + 8].copy_from_slice(&address.to_le_bytes());
+        put_u32(image, offset + 8, size);
+        put_u32(image, offset + 12, name);
+    }
+
+    fn put_u32(image: &mut [u8], offset: usize, value: u32) {
+        image[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
 
     #[test]

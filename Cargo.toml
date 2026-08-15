@@ -19,6 +19,7 @@ test = false
 bench = false
 
 [dependencies]
+rustc-demangle = { version = "0.1.28", default-features = false }
 
 [lints.clippy]
 expect_used = "deny"

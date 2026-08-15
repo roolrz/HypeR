@@ -1,6 +1,7 @@
 use core::arch::asm;
 
 use hyper::drivers::interrupt::gicv3::CpuInterface;
+use hyper::hal::interrupt::InterruptId;
 
 use super::registers;
 
@@ -102,4 +103,50 @@ pub fn current_gic_affinity() -> u32 {
     let affinity_0_to_2 = mpidr & registers::MPIDR_AFF0_TO_2_MASK;
     let affinity_3 = (mpidr >> registers::MPIDR_AFF3_SHIFT) & registers::MPIDR_AFF3_MASK;
     (affinity_0_to_2 | (affinity_3 << registers::GIC_AFF3_SHIFT)) as u32
+}
+
+/// Returns the architecture-reserved emergency stop interrupt.
+pub const fn crash_stop_interrupt() -> InterruptId {
+    InterruptId::new(registers::GIC_CRASH_STOP_SGI as u32)
+}
+
+/// Tests whether an acknowledged interrupt is the emergency stop IPI.
+pub fn is_crash_stop_interrupt(interrupt: InterruptId) -> bool {
+    interrupt == crash_stop_interrupt()
+}
+
+/// Sends the emergency stop SGI to every participating PE except self.
+pub fn broadcast_crash_stop() -> bool {
+    broadcast_sgi(crash_stop_interrupt())
+}
+
+fn broadcast_sgi(interrupt: InterruptId) -> bool {
+    if interrupt.get() >= 16 {
+        return false;
+    }
+    let value =
+        (u64::from(interrupt.get()) << registers::ICC_SGI1R_INTID_SHIFT) | registers::ICC_SGI1R_IRM;
+    // SAFETY: The GICv3 system-register interface is active before this API is
+    // used. IRM routes the SGI to all participating PEs except the caller.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "msr ICC_SGI1R_EL1, {value}",
+            "isb",
+            value = in(reg) value,
+            options(nostack, preserves_flags)
+        );
+    }
+    true
+}
+
+/// Acknowledges the highest-priority physical Group-1 interrupt on this CPU.
+pub fn acknowledge_interrupt() -> Option<InterruptId> {
+    let raw = <Aarch64GicCpuInterface as CpuInterface>::acknowledge();
+    (raw < registers::GIC_SPURIOUS_INTERRUPT_MIN as u32).then_some(InterruptId::new(raw))
+}
+
+/// Completes one interrupt returned by [`acknowledge_interrupt`].
+pub fn end_interrupt(interrupt: InterruptId) {
+    <Aarch64GicCpuInterface as CpuInterface>::end(interrupt.get());
 }

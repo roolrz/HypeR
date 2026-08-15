@@ -176,6 +176,9 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
         trigger: InterruptTrigger,
     ) -> Result<(), Error> {
         let id = self.validate_configurable(interrupt)?;
+        if id < 16 && trigger != InterruptTrigger::Edge {
+            return Err(Error::InvalidInterrupt);
+        }
         let (base, local_id, redistributor) = if id < 32 {
             let redistributor = self.current_redistributor()?;
             (
@@ -190,14 +193,16 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
         };
         unsafe { write_u8(base, GICD_IPRIORITYR + local_id as usize, priority) };
 
-        let configuration_offset = GICD_ICFGR + ((local_id / 16) as usize * 4);
-        let trigger_bit = 1u32 << (((local_id % 16) * 2) + 1);
-        let mut configuration = unsafe { read_u32(base, configuration_offset) };
-        match trigger {
-            InterruptTrigger::Level => configuration &= !trigger_bit,
-            InterruptTrigger::Edge => configuration |= trigger_bit,
+        if id >= 16 {
+            let configuration_offset = GICD_ICFGR + ((local_id / 16) as usize * 4);
+            let trigger_bit = 1u32 << (((local_id % 16) * 2) + 1);
+            let mut configuration = unsafe { read_u32(base, configuration_offset) };
+            match trigger {
+                InterruptTrigger::Level => configuration &= !trigger_bit,
+                InterruptTrigger::Edge => configuration |= trigger_bit,
+            }
+            unsafe { write_u32(base, configuration_offset, configuration) };
         }
-        unsafe { write_u32(base, configuration_offset, configuration) };
         if id >= 32 {
             unsafe {
                 write_u64(
@@ -342,7 +347,7 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
 
     fn validate_configurable(&self, interrupt: InterruptId) -> Result<u32, Error> {
         let id = interrupt.get();
-        if !(16..self.interrupt_count).contains(&id) {
+        if id >= self.interrupt_count {
             return Err(Error::InvalidInterrupt);
         }
         Ok(id)

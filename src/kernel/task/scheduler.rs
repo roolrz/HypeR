@@ -38,6 +38,14 @@ pub struct Capabilities {
     pub bootstrap_thread: ThreadId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CrashTaskSnapshot {
+    pub id: ThreadId,
+    pub state: ThreadState,
+    pub execution: super::thread::ExecutionKind,
+    pub stack: Option<(usize, usize)>,
+}
+
 struct Scheduler {
     // Individual heap allocations pin contexts and stacks while the Vec grows.
     #[allow(clippy::vec_box)]
@@ -91,6 +99,24 @@ pub fn initialize() -> Result<Capabilities, Error> {
             bootstrap_thread: ThreadId::BOOTSTRAP,
         })
     })
+}
+
+/// Captures current-task metadata without waiting on a potentially held lock.
+pub(crate) fn crash_snapshot(cpu_index: usize) -> Option<CrashTaskSnapshot> {
+    SCHEDULER
+        .try_with(|slot| {
+            let scheduler = slot.as_ref()?;
+            let cpu_slot = scheduler.cpu_slot(cpu_index).ok()?;
+            let thread_index = scheduler.current_thread_index(cpu_slot).ok()?;
+            let thread = &scheduler.threads[thread_index];
+            Some(CrashTaskSnapshot {
+                id: thread.id(),
+                state: thread.state(),
+                execution: thread.execution_kind(),
+                stack: thread.kernel_stack_bounds(),
+            })
+        })
+        .flatten()
 }
 
 /// Allocates and registers the initial execution context for a secondary CPU.

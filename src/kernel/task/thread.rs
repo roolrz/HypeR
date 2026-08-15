@@ -271,6 +271,10 @@ impl Thread {
     pub(crate) fn kernel_stack_top(&self) -> Option<usize> {
         self.kernel_stack.as_ref().map(KernelStack::top)
     }
+
+    pub(crate) fn kernel_stack_bounds(&self) -> Option<(usize, usize)> {
+        self.kernel_stack.as_ref().map(KernelStack::bounds)
+    }
 }
 
 struct ThreadName {
@@ -323,6 +327,10 @@ impl KernelStack {
 
     fn top(&self) -> usize {
         self.base.as_ptr() as usize + self.layout.size()
+    }
+
+    fn bounds(&self) -> (usize, usize) {
+        (self.base.as_ptr() as usize, self.top())
     }
 }
 

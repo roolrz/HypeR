@@ -3,6 +3,7 @@
 /tests/host/Cargo.lock
 /tools/kconfig/target/
 /tools/kconfig/Cargo.lock
+/tools/kallsyms/target/
 /.config
 /.idea/
 /.vscode/

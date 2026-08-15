@@ -70,5 +70,6 @@ printf '%s\n' "$instructions" | grep -Eq '[[:space:]]stl?xrb[[:space:]]'
 
 dynamic_symbols=$($nm -D --defined-only "$elf")
 printf '%s\n' "$dynamic_symbols" | grep -q ' hyper_kallsyms_lookup$'
+printf '%s\n' "$sections" | grep -q 'Name: \.kallsyms'
 
 echo "verified PIE, RELA/RELR, kallsyms, Linux header, and runtime atomic paths"

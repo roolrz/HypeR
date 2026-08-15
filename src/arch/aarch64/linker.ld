@@ -57,6 +57,10 @@ SECTIONS
         *(.dynstr)
         __kallsyms_strings_end = .;
     }
+    .kallsyms : ALIGN(8)
+    {
+        KEEP(*(.kallsyms))
+    }
     .gnu.hash : ALIGN(8) { *(.gnu.hash) }
     .hash : ALIGN(8) { *(.hash) }
 

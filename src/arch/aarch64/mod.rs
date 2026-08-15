@@ -20,14 +20,21 @@ pub use atomics::{AtomicCapabilities, capabilities as atomic_capabilities};
 pub use barrier::Aarch64Barrier;
 pub use cache::Aarch64Cache;
 pub use context::{ThreadContext, UserContext, VcpuContext, switch_thread_context};
-pub use exception::{install_runtime_vectors, validate_runtime_vectors};
-pub use gic::{Aarch64GicCpuInterface, current_gic_affinity};
+pub use exception::{
+    CrashContext, capture_crash_context, install_runtime_vectors, validate_runtime_vectors,
+};
+pub use gic::{
+    Aarch64GicCpuInterface, acknowledge_interrupt, broadcast_crash_stop, crash_stop_interrupt,
+    current_gic_affinity, end_interrupt, is_crash_stop_interrupt,
+};
 pub use hyper::drivers::power::psci::Error as CpuPowerError;
-pub use interrupts::{LocalInterruptMask, enable_irq as enable_local_irq};
+pub use interrupts::{
+    LocalInterruptMask, disable_all as disable_local_interrupts, enable_irq as enable_local_irq,
+};
 pub use kaslr::select as select_kaslr_layout;
 pub use memory::{
     Aarch64AddressTranslation as ArchitectureAddressTranslation, ActivationContext,
-    Error as MemoryError, PreparedAddressSpace,
+    Error as MemoryError, PreparedAddressSpace, bootstrap_stack_bounds,
 };
 pub use platform::{EssentialDeviceDiscovery, EssentialPlatformInfo};
 pub use psci::Aarch64Psci as ArchitectureCpuPower;

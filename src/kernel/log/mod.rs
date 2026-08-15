@@ -1,11 +1,9 @@
 //! Kernel log production, retention, and reader API.
 
 use core::fmt::{self, Write};
-use core::panic::PanicInfo;
 
 use hyper::log::{AppendError, Level, ReadError, ReadResult, RecordFlags, RingBuffer};
 use hyper::sync::InterruptSpinLock;
-use hyper::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) mod console;
 
@@ -60,7 +58,6 @@ pub struct Statistics {
 
 static LOG_RING: KernelSpinLock<RingBuffer<LOG_BUFFER_SIZE>> =
     KernelSpinLock::new(RingBuffer::new());
-static PANIC_PATH_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn log(level: Level, arguments: fmt::Arguments<'_>) -> Result<u64, Error> {
     let mut formatted = FormatBuffer::new();
@@ -117,13 +114,6 @@ pub(crate) fn report_startup_state() {
         statistics.capacity,
         statistics.dropped
     );
-}
-
-pub fn panic(info: &PanicInfo<'_>) {
-    if PANIC_PATH_ACTIVE.swap(true, Ordering::AcqRel) {
-        crate::arch::halt()
-    }
-    emergency(format_args!("PANIC: {info}"));
 }
 
 /// Emits a fatal diagnostic without waiting for a potentially interrupted

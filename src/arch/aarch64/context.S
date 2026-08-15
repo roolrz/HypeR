@@ -52,6 +52,53 @@ aarch64_thread_trampoline:
     b       .
 .size aarch64_thread_trampoline, . - aarch64_thread_trampoline
 
+/* Captures a best-effort kernel register image for software panic paths. */
+.global aarch64_capture_crash_context
+.type aarch64_capture_crash_context, %function
+aarch64_capture_crash_context:
+    stp     x1, x2, [x0, #(CRASH_CONTEXT_X0_OFFSET + 8)]
+    stp     x3, x4, [x0, #(CRASH_CONTEXT_X0_OFFSET + 24)]
+    stp     x5, x6, [x0, #(CRASH_CONTEXT_X0_OFFSET + 40)]
+    stp     x7, x8, [x0, #(CRASH_CONTEXT_X0_OFFSET + 56)]
+    stp     x9, x10, [x0, #(CRASH_CONTEXT_X0_OFFSET + 72)]
+    stp     x11, x12, [x0, #(CRASH_CONTEXT_X0_OFFSET + 88)]
+    stp     x13, x14, [x0, #(CRASH_CONTEXT_X0_OFFSET + 104)]
+    stp     x15, x16, [x0, #(CRASH_CONTEXT_X0_OFFSET + 120)]
+    stp     x17, x18, [x0, #(CRASH_CONTEXT_X0_OFFSET + 136)]
+    stp     x19, x20, [x0, #(CRASH_CONTEXT_X0_OFFSET + 152)]
+    stp     x21, x22, [x0, #(CRASH_CONTEXT_X0_OFFSET + 168)]
+    stp     x23, x24, [x0, #(CRASH_CONTEXT_X0_OFFSET + 184)]
+    stp     x25, x26, [x0, #(CRASH_CONTEXT_X0_OFFSET + 200)]
+    stp     x27, x28, [x0, #(CRASH_CONTEXT_X0_OFFSET + 216)]
+    stp     x29, x30, [x0, #(CRASH_CONTEXT_X0_OFFSET + 232)]
+    mov     x1, sp
+    str     x1, [x0, #CRASH_CONTEXT_SP_OFFSET]
+    str     x30, [x0, #CRASH_CONTEXT_PC_OFFSET]
+    mrs     x1, nzcv
+    mrs     x2, daif
+    orr     x1, x1, x2
+    mrs     x2, CurrentEL
+    add     x3, x2, #1
+    orr     x1, x1, x3
+    str     x1, [x0, #CRASH_CONTEXT_PSTATE_OFFSET]
+    mrs     x1, mpidr_el1
+    str     x1, [x0, #CRASH_CONTEXT_MPIDR_OFFSET]
+    str     x2, [x0, #CRASH_CONTEXT_CURRENT_EL_OFFSET]
+    mrs     x1, daif
+    str     x1, [x0, #CRASH_CONTEXT_DAIF_OFFSET]
+    mrs     x1, sctlr_el2
+    str     x1, [x0, #CRASH_CONTEXT_SCTLR_EL2_OFFSET]
+    mrs     x1, tcr_el2
+    str     x1, [x0, #CRASH_CONTEXT_TCR_EL2_OFFSET]
+    mrs     x1, ttbr0_el2
+    str     x1, [x0, #CRASH_CONTEXT_TTBR0_EL2_OFFSET]
+    mrs     x1, vbar_el2
+    str     x1, [x0, #CRASH_CONTEXT_VBAR_EL2_OFFSET]
+    mrs     x1, hcr_el2
+    str     x1, [x0, #CRASH_CONTEXT_HCR_EL2_OFFSET]
+    ret
+.size aarch64_capture_crash_context, . - aarch64_capture_crash_context
+
 .global aarch64_enter_guest
 .type aarch64_enter_guest, %function
 aarch64_enter_guest:

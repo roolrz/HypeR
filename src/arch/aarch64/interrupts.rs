@@ -54,3 +54,15 @@ pub fn enable_irq() {
         )
     };
 }
+
+/// Masks every local exception class for irreversible crash handling.
+pub fn disable_all() {
+    // SAFETY: Crash handling never restores execution after applying the mask.
+    unsafe {
+        asm!(
+            "msr daifset, #{all}",
+            all = const registers::DAIFSET_ALL,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+}
