@@ -235,6 +235,48 @@ pub(super) fn deliver_software_interrupt(
     Ok(())
 }
 
+pub(super) fn update_active_device_interrupt(
+    interrupt: VirtualInterruptId,
+    asserted: bool,
+) -> Result<bool, VcpuInterruptError> {
+    let active = super::active_vcpu::with(|execution, interrupts| {
+        update_device_interrupt(execution, interrupts, interrupt, asserted)
+    })?;
+    match active {
+        Some(result) => result.map(|()| true),
+        None => Ok(false),
+    }
+}
+
+fn update_device_interrupt(
+    execution: &mut VcpuExecution,
+    interrupts: &VmInterruptController,
+    interrupt: VirtualInterruptId,
+    asserted: bool,
+) -> Result<(), VcpuInterruptError> {
+    // SAFETY: Guest exception and physical IRQ entry both mask local IRQs, and
+    // active_vcpu proves this is the vCPU whose virtual interface is loaded.
+    unsafe { execution.context.deactivate_vgic()? };
+    let result = interrupts.with(|controller| {
+        let vcpu = VirtualCpuId::new(execution.vcpu_id);
+        controller.synchronize(vcpu, execution.context.vgic.slots())?;
+        if asserted {
+            controller.inject(interrupt, vcpu)?;
+        } else {
+            controller.clear_pending(interrupt, vcpu)?;
+        }
+        let _ = controller.refill(vcpu, execution.context.vgic.slots_mut())?;
+        Ok::<(), hyper::drivers::interrupt::vgic::Error>(())
+    });
+    if let Err(error) = result {
+        crate::arch::disable_vgic();
+        return Err(error.into());
+    }
+    // SAFETY: The model and complete LR snapshot have just been reconciled.
+    unsafe { execution.context.activate_vgic()? };
+    Ok(())
+}
+
 fn set_host_timer_enabled(enabled: bool) -> Result<(), VcpuInterruptError> {
     let interrupt = crate::kernel::irq::timer::guest_virtual_host_interrupt()
         .ok_or(VcpuInterruptError::HostInterrupt)?;

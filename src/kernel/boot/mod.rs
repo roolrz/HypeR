@@ -14,6 +14,7 @@ mod state;
 /// explicit without exposing the full early-boot state to every subsystem.
 pub(crate) struct Initialization {
     essential: crate::arch::EssentialPlatformInfo,
+    early_console: Option<ConsoleInfo>,
     linear_dtb: usize,
     interrupts: Option<irq::interrupt::Capabilities>,
     timer: Option<irq::timer::Capabilities>,
@@ -27,6 +28,10 @@ impl Initialization {
 
     pub(crate) const fn linear_dtb(&self) -> usize {
         self.linear_dtb
+    }
+
+    pub(crate) const fn early_console(&self) -> Option<ConsoleInfo> {
+        self.early_console
     }
 
     pub(crate) fn interrupts(&self) -> irq::interrupt::Capabilities {
@@ -228,6 +233,7 @@ pub(crate) fn enter_runtime() -> Initialization {
 
     Initialization {
         essential,
+        early_console,
         linear_dtb,
         interrupts: None,
         timer: None,

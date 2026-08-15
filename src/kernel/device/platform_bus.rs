@@ -37,11 +37,20 @@ pub enum Error {
     Scan(ScanError),
 }
 
-pub fn initialize(linear_dtb: usize, claims: &[Option<fdt::NodeId>]) -> Result<ProbeReport, Error> {
+pub fn initialize(
+    linear_dtb: usize,
+    claims: &[Option<fdt::NodeId>],
+    reserved_console_base: Option<u64>,
+) -> Result<ProbeReport, Error> {
     let mut scanner = DeviceScanner::new(claims);
     // SAFETY: The DTB reservation remains in the permanent RAM linear map.
     unsafe { fdt::discover_with(linear_dtb, &mut scanner) }.map_err(Error::Fdt)?;
-    let devices = scanner.finish().map_err(Error::Scan)?;
+    let mut devices = scanner.finish().map_err(Error::Scan)?;
+    devices.retain(|device| {
+        reserved_console_base.is_none_or(|reserved| {
+            device.registers().first().map(|range| range.start()) != Some(reserved)
+        })
+    });
     let mut manager = DriverManager::new();
     for &driver in BUILTIN_DRIVERS {
         manager

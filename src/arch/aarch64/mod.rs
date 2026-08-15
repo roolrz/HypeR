@@ -36,7 +36,7 @@ pub use memory::{
     Aarch64AddressTranslation as ArchitectureAddressTranslation, ActivationContext,
     Error as MemoryError, PreparedAddressSpace, bootstrap_stack_bounds,
 };
-pub use platform::{EssentialDeviceDiscovery, EssentialPlatformInfo};
+pub use platform::{EssentialDeviceDiscovery, EssentialPlatformInfo, decode_platform_interrupt};
 pub use psci::Aarch64Psci as ArchitectureCpuPower;
 pub use smp::{
     SecondaryBootParameters, current_cpu_index, current_hardware_id, secondary_entry_physical,
@@ -52,7 +52,7 @@ pub use vgic::{
     validate_context_switch as validate_vgic,
 };
 pub use vsysreg::validate as validate_vsysreg;
-pub(crate) use vsysreg::{GuestSyncAction, GuestSyncFrame, handle_guest_sync};
+pub(crate) use vsysreg::{GuestDataAccess, GuestSyncAction, GuestSyncFrame, handle_guest_sync};
 
 pub fn initialize_cpu_power(
     info: hyper::platform::CpuPowerInfo,

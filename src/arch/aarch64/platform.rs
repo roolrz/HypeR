@@ -269,6 +269,15 @@ fn discover_timer(node: &NodeResources<'_>) -> Result<TimerInfo, Error> {
     })
 }
 
+/// Decodes one three-cell GIC interrupt specifier from a platform device.
+pub fn decode_platform_interrupt(descriptor: &[u32]) -> Result<PlatformInterrupt, Error> {
+    let flags = *descriptor.get(2).ok_or(Error::InvalidInterrupt)?;
+    Ok(PlatformInterrupt {
+        interrupt: decode_gic_interrupt(descriptor)?,
+        trigger: decode_gic_trigger(flags)?,
+    })
+}
+
 fn discover_psci(candidate: Candidate) -> Result<CpuPowerInfo, Error> {
     Ok(CpuPowerInfo::Psci(PsciInfo {
         compatible_version: candidate.psci_version.ok_or(Error::InvalidPsci)?,

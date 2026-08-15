@@ -102,8 +102,12 @@ pub fn build(
 
     builder.begin_node("pl011@9000000")?;
     builder.property_string_list("compatible", &["arm,pl011", "arm,primecell"])?;
-    builder.property_u64_pair("reg", 0x0900_0000, 0x1000)?;
-    builder.property_cells("interrupts", &[0, 1, 4])?;
+    builder.property_u64_pair(
+        "reg",
+        super::super::console::BASE,
+        super::super::console::SIZE,
+    )?;
+    builder.property_cells("interrupts", &[0, super::super::console::INTERRUPT - 32, 4])?;
     builder.property_cells("clocks", &[UART_CLOCK_PHANDLE, APB_CLOCK_PHANDLE])?;
     builder.property_string_list("clock-names", &["uartclk", "apb_pclk"])?;
     builder.end_node()?;

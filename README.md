@@ -285,8 +285,11 @@ The final non-VHE EL2 address space uses a 48-bit VA and 4 KiB granule:
 
 After TTBR activation, execution, exception vectors, and the stack move to the
 high kernel mapping. The DTB is scanned again through the linear map after the
-heap is installed, and the PL011 driver is rebound to the MMIO window as a
-runtime mapping check.
+heap is installed. The selected early PL011 is promoted to runtime ownership:
+its RX, receive-timeout, and error sources are connected to the kernel IRQ
+domain while the firmware baud and line settings are preserved. That UART is
+reserved from ordinary platform probing; any additional PL011 instances remain
+normal platform devices.
 The architecture then removes transition identity leaves and invalidates the
 EL2 TLB on all online CPUs. Identity aliases remain only while PSCI secondaries
 execute the physical trampoline and are retired after every admitted CPU has
@@ -353,12 +356,25 @@ to EL2.
 
 The initial Linux VM owns manifest-configured contiguous guest RAM behind a 39-bit-IPA
 stage-2 address space. HypeR builds a Linux-format guest DTB describing one
-vCPU, PSCI over HVC, GICv3, the Arm architectural timer, and a directly mapped
-PL011 console. GICD/GICR accesses are emulated, `ICC_SGI1R_EL1` self-IPIs are
-delivered through the vGIC model, and the hardware-assisted virtual timer
-injects PPI 27. The external Alpine kernel and deterministic initramfs are
-loaded from a versioned VM bundle inside the firmware ramdisk; disk and network
-devices are not part of this milestone.
+vCPU, PSCI over HVC, GICv3, the Arm architectural timer, and an emulated PL011
+console. The guest UART is no longer a stage-2 passthrough alias of the host
+UART: TX is routed to the host console backend, physical RX interrupts feed the
+virtual receive FIFO, and the model injects guest SPI 33 through the vGIC.
+GICD/GICR accesses are emulated, `ICC_SGI1R_EL1` self-IPIs are delivered through
+the vGIC model, and the hardware-assisted virtual timer injects PPI 27. The
+external Alpine kernel and deterministic initramfs are loaded from a versioned
+VM bundle inside the firmware ramdisk; disk and network devices are not part of
+this milestone.
+
+The console backend is kept outside the virtual PL011 register model. This is
+the boundary where a later Linux driver domain can provide a byte stream without
+making the guest device model depend on a physical UART driver. Virtio-console
+is intentionally deferred until there is one reusable virtio-mmio transport
+with feature/status negotiation, split virtqueues, checked guest-memory DMA,
+reset, notification, and interrupt handling. That transport should be shared by
+console, block, and network devices; implementing a console-only subset would
+create an incompatible protocol island and would not help the planned Linux
+storage/network driver-domain design.
 
 ## Platform driver model
 
@@ -372,10 +388,13 @@ heap-backed device names, complete compatible tables, properties, MMIO ranges,
 and interrupt cells. Early claims are excluded from normal probing. Platform
 drivers register a name and compatible table; the manager performs matching and
 probe, records deferred and failed devices separately, and owns bound instances
-through suspend, resume, and remove. The PL011 UART is the first ordinary
-built-in platform driver and binds through its `arm,pl011` compatibility entry
-only after the allocator is available. Its presence is not a boot requirement,
-and binding a serial device does not implicitly select it as the kernel console.
+through suspend, resume, and remove. PL011 register definitions, line and baud
+configuration, FIFO levels, polling I/O, modem/flow control, DMA controls, and
+interrupt masks/status/acknowledgement live in the reusable physical driver.
+The selected console has a dedicated runtime owner; other PL011 instances bind
+through the ordinary `arm,pl011` platform entry after the allocator is
+available. A serial device's presence still does not implicitly select it as
+the kernel console.
 
 ## Runtime allocation
 

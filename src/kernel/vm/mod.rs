@@ -2,6 +2,7 @@
 
 mod active_vcpu;
 mod arch_timer;
+mod console;
 mod gicv3;
 mod interrupt;
 mod linux;
@@ -26,7 +27,15 @@ pub(crate) fn initialize_virtual_devices(boot: &super::boot::Initialization) {
     if let Err(error) = validate_arch_timer(boot.timer().guest_virtual_interrupt) {
         super::boot::fail("virtual architected timer validation", error);
     }
+    if let Err(error) = console::initialize() {
+        super::boot::fail("virtual console initialization", error);
+    }
     crate::println!("HypeR: virtual architected timer injection validated");
+    crate::println!("HypeR: virtual PL011 console initialized (host UART backend)");
+}
+
+pub(crate) fn receive_console_input(byte: u8) -> Result<(), console::Error> {
+    console::receive(byte)
 }
 
 /// Loads the default VM bundle from the boot ramdisk and enters the guest.
@@ -81,6 +90,21 @@ pub(crate) fn handle_guest_sync(frame: &mut crate::arch::GuestSyncFrame<'_>) -> 
         let Some(access) = frame.data_access() else {
             return action;
         };
+        if console::handles(access.address) {
+            return match console::access(access) {
+                Ok(value) => {
+                    frame.complete_data_access(access, value);
+                    crate::arch::GuestSyncAction::Resume
+                }
+                Err(error) => {
+                    crate::pr_err!(
+                        "HypeR: unsupported guest console access at {:#x}: {error:?}",
+                        access.address
+                    );
+                    action
+                }
+            };
+        }
         if !gicv3::handles(access.address) {
             return action;
         }

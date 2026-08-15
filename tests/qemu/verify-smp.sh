@@ -13,8 +13,14 @@ initrd=$3
 cpu=$4
 memory=$5
 bootargs=$6
-log=$(mktemp -t hyper-qemu-smp.XXXXXX)
+temp=$(mktemp -d -t hyper-qemu-smp.XXXXXX)
+log=$temp/output.log
+input=$temp/input
 pid=
+input_sent=false
+
+mkfifo "$input"
+exec 3<>"$input"
 
 cleanup() {
     if [ -n "$pid" ]; then
@@ -23,7 +29,7 @@ cleanup() {
         fi
         wait "$pid" 2>/dev/null || true
     fi
-    rm -f "$log"
+    rm -rf "$temp"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
@@ -41,11 +47,15 @@ trap 'exit 143' TERM
     -no-reboot \
     -append "$bootargs" \
     -initrd "$initrd" \
-    -kernel "$image" >"$log" 2>&1 &
+    -kernel "$image" <"$input" >"$log" 2>&1 &
 pid=$!
 
 attempt=0
 while [ "$attempt" -lt 300 ]; do
+    if [ "$input_sent" = false ] && grep -q 'HypeR guest: Linux userspace is running' "$log"; then
+        printf 'hyper-console-input\n' >&3
+        input_sent=true
+    fi
     if grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
         grep -q 'HypeR: scheduler active on bootstrap thread 0' "$log" &&
         grep -q 'HypeR: kallsyms resolved hyper_kallsyms_lookup at 0x[0-9a-f][0-9a-f]*' "$log" &&
@@ -70,7 +80,8 @@ while [ "$attempt" -lt 300 ]; do
         grep -q 'arch_timer: cp15 timer running at .* (virt).' "$log" &&
         grep -q 'Run /init as init process' "$log" &&
         grep -q 'HypeR guest: /init reached' "$log" &&
-        grep -q 'HypeR guest: Linux userspace is running' "$log"; then
+        grep -q 'HypeR guest: Linux userspace is running' "$log" &&
+        grep -q 'HypeR guest: console input: hyper-console-input' "$log"; then
         kaslr_base=$(sed -n 's/.*randomized kernel base \(0x[0-9a-f][0-9a-f]*\),.*/\1/p' "$log" | tail -n 1)
         kaslr_offset=$(sed -n 's/.*KASLR offset \(0x[0-9a-f][0-9a-f]*\).*/\1/p' "$log" | tail -n 1)
         kaslr_base_value=$((kaslr_base))

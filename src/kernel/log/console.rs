@@ -81,6 +81,16 @@ pub(super) fn emergency_write(message: &[u8]) {
     }
 }
 
+/// Writes one guest-console byte through the selected host console without
+/// inserting a kernel log prefix.
+pub(crate) fn write_raw_byte(byte: u8) {
+    CONSOLE.with(|state| {
+        if let Some(device) = state.device {
+            device.write_byte(byte);
+        }
+    });
+}
+
 fn drain() {
     let mut message = [0u8; LOG_LINE_MAX];
     loop {

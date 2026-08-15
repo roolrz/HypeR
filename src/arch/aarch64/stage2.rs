@@ -33,6 +33,9 @@ pub enum Error {
 #[derive(Clone, Copy)]
 enum MemoryType {
     Normal,
+    // Retained for future device passthrough/driver-domain mappings. The
+    // built-in guest console is intentionally trapped and emulated instead.
+    #[allow(dead_code)]
     Device,
 }
 
@@ -68,6 +71,7 @@ impl Stage2AddressSpace {
         self.map_range(ipa, physical, size, MemoryType::Normal, allocator)
     }
 
+    #[allow(dead_code)]
     pub fn map_device(
         &mut self,
         ipa: u64,

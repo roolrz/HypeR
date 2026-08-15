@@ -2,6 +2,7 @@
 
 pub mod cpu_power;
 pub(crate) mod platform_bus;
+mod serial;
 
 /// Selects and activates the firmware CPU power-management interface.
 pub(crate) fn initialize_cpu_power(boot: &super::boot::Initialization) {
@@ -26,7 +27,11 @@ pub(crate) fn initialize_cpu_power(boot: &super::boot::Initialization) {
 
 /// Enumerates platform devices and binds all built-in drivers.
 pub(crate) fn initialize_driver_framework(boot: &super::boot::Initialization) {
-    let report = match platform_bus::initialize(boot.linear_dtb(), boot.essential().claims()) {
+    let report = match platform_bus::initialize(
+        boot.linear_dtb(),
+        boot.essential().claims(),
+        boot.early_console().map(|console| console.base),
+    ) {
         Ok(report) => report,
         Err(error) => super::boot::fail("driver-framework initialization", error),
     };
@@ -37,4 +42,19 @@ pub(crate) fn initialize_driver_framework(boot: &super::boot::Initialization) {
         report.deferred,
         report.failed
     );
+}
+
+/// Promotes the early PL011 to an interrupt-driven input console.
+pub(crate) fn initialize_console_input(boot: &super::boot::Initialization) {
+    match serial::initialize(boot) {
+        Ok(Some(capabilities)) => crate::println!(
+            "HypeR: PL011 runtime input active: INTID {}, VIRQ {}",
+            capabilities.hardware_interrupt,
+            capabilities.virtual_interrupt
+        ),
+        Ok(None) => crate::pr_warn!("HypeR: no early PL011 selected; console input disabled"),
+        Err(error) => crate::pr_warn!(
+            "HypeR: PL011 remains output-only; runtime input unavailable: {error:?}"
+        ),
+    }
 }

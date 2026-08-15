@@ -17,9 +17,6 @@ use crate::kernel::task::thread::{VcpuExecution, VirtualMachineId};
 const GUEST_RAM_IPA: u64 = 0x4000_0000;
 const GUEST_DTB_IPA: u64 = GUEST_RAM_IPA + 0x0001_0000;
 const GUEST_KERNEL_IPA: u64 = GUEST_RAM_IPA + 0x0020_0000;
-const GUEST_UART_IPA: u64 = 0x0900_0000;
-const GUEST_UART_PHYSICAL: u64 = 0x0900_0000;
-const GUEST_UART_SIZE: u64 = 0x1000;
 const GUEST_TIMER_INTERRUPT: u32 = 27;
 const AARCH64_IMAGE_MAGIC_OFFSET: usize = 56;
 const AARCH64_IMAGE_HEADER_SIZE: usize = 64;
@@ -209,12 +206,6 @@ fn build_stage2_address_space(
         GUEST_RAM_IPA,
         guest_ram.physical.get(),
         guest_ram.size,
-        &mut allocate_table,
-    )?;
-    stage2.map_device(
-        GUEST_UART_IPA,
-        GUEST_UART_PHYSICAL,
-        GUEST_UART_SIZE,
         &mut allocate_table,
     )?;
     Ok((stage2, table_pages))
