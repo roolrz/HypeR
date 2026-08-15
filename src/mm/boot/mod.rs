@@ -2,4 +2,4 @@
 
 mod allocator;
 
-pub use allocator::{BootAllocator, BootAllocatorError, MAX_BOOT_RESERVATIONS};
+pub use allocator::{BootAllocator, BootAllocatorError, BootMemoryStats, MAX_BOOT_RESERVATIONS};

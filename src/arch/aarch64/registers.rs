@@ -351,7 +351,11 @@ pub const ESR_SYSREG_OP0_SHIFT: u64 = 20;
 pub const ESR_SYSREG_OP0_MASK: u64 = 0x3;
 
 // ESR_ELx ISS layout for data aborts with a valid instruction syndrome.
+pub const ESR_ABORT_FSC_MASK: u64 = 0x3f;
+pub const ESR_ABORT_TRANSLATION_FAULT_LEVEL0: u64 = 0b000100;
+pub const ESR_ABORT_TRANSLATION_FAULT_LEVEL3: u64 = 0b000111;
 pub const ESR_DATA_ABORT_WNR: u64 = 1 << 6;
+pub const ESR_DATA_ABORT_S1PTW: u64 = 1 << 7;
 pub const ESR_DATA_ABORT_SF: u64 = 1 << 15;
 pub const ESR_DATA_ABORT_SRT_SHIFT: u64 = 16;
 pub const ESR_DATA_ABORT_SRT_MASK: u64 = 0x1f;
@@ -440,6 +444,7 @@ pub const VTCR_EL2_GUEST_VALUE: u64 = VTCR_EL2_RES1
     | VTCR_EL2_TG0_4K
     | VTCR_EL2_PS_40BIT;
 pub const VTTBR_EL2_VMID_SHIFT: u32 = 48;
+pub const TLBI_IPAS2E1_IPA_SHIFT: u32 = 12;
 pub const STAGE2_DESC_INVALID: u64 = 0b00;
 pub const STAGE2_DESC_BLOCK: u64 = 0b01;
 pub const STAGE2_DESC_TABLE_OR_PAGE: u64 = 0b11;

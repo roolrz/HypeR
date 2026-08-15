@@ -41,6 +41,27 @@ pub enum BuddyError {
     Unaddressable,
 }
 
+/// A consistent snapshot of the physical page pool.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BuddyStats {
+    /// Pages initially handed to the runtime allocator after boot reservations.
+    pub managed_pages: usize,
+    pub free_pages: usize,
+    pub allocated_pages: usize,
+    pub peak_allocated_pages: usize,
+    pub allocation_requests: u64,
+    pub allocation_failures: u64,
+    pub deallocations: u64,
+    /// Number of free blocks at each buddy order.
+    pub free_blocks: [usize; MAX_ORDER + 1],
+}
+
+impl BuddyStats {
+    pub fn largest_free_order(&self) -> Option<usize> {
+        self.free_blocks.iter().rposition(|&blocks| blocks != 0)
+    }
+}
+
 /// Intrusive physical page allocator using power-of-two buddy blocks.
 ///
 /// Free-list links are stored in the first word of each free block. The
@@ -48,8 +69,14 @@ pub enum BuddyError {
 /// metadata. All methods require external synchronization.
 pub struct BuddyAllocator {
     free_lists: [u64; MAX_ORDER + 1],
+    free_blocks: [usize; MAX_ORDER + 1],
     direct_map_base: u64,
+    managed_pages: usize,
     free_pages: usize,
+    peak_allocated_pages: usize,
+    allocation_requests: u64,
+    allocation_failures: u64,
+    deallocations: u64,
 }
 
 // SAFETY: The allocator contains only physical addresses and is always used
@@ -69,8 +96,14 @@ impl BuddyAllocator {
     ) -> Result<Self, BuddyError> {
         let mut allocator = Self {
             free_lists: [NONE; MAX_ORDER + 1],
+            free_blocks: [0; MAX_ORDER + 1],
             direct_map_base,
+            managed_pages: 0,
             free_pages: 0,
+            peak_allocated_pages: 0,
+            allocation_requests: 0,
+            allocation_failures: 0,
+            deallocations: 0,
         };
 
         for &memory in handoff.memory() {
@@ -92,16 +125,22 @@ impl BuddyAllocator {
                 };
             }
         }
+        allocator.managed_pages = allocator.free_pages;
         Ok(allocator)
     }
 
     pub fn allocate(&mut self, order: usize) -> Result<PhysicalAddress, BuddyError> {
+        self.allocation_requests = self.allocation_requests.saturating_add(1);
         if order > MAX_ORDER {
+            self.allocation_failures = self.allocation_failures.saturating_add(1);
             return Err(BuddyError::InvalidOrder);
         }
-        let source_order = (order..=MAX_ORDER)
-            .find(|&candidate| self.free_lists[candidate] != NONE)
-            .ok_or(BuddyError::OutOfMemory)?;
+        let Some(source_order) =
+            (order..=MAX_ORDER).find(|&candidate| self.free_lists[candidate] != NONE)
+        else {
+            self.allocation_failures = self.allocation_failures.saturating_add(1);
+            return Err(BuddyError::OutOfMemory);
+        };
         let block = unsafe { self.pop(source_order)? };
 
         for split_order in (order..source_order).rev() {
@@ -111,6 +150,9 @@ impl BuddyAllocator {
             unsafe { self.push(split_order, buddy)? };
         }
         self.free_pages -= 1usize << order;
+        self.peak_allocated_pages = self
+            .peak_allocated_pages
+            .max(self.managed_pages - self.free_pages);
         Ok(PhysicalAddress::new(block))
     }
 
@@ -131,6 +173,7 @@ impl BuddyAllocator {
         let mut block = address.get();
         let mut current_order = order;
         self.free_pages += 1usize << order;
+        self.deallocations = self.deallocations.saturating_add(1);
 
         while current_order < MAX_ORDER {
             let buddy = block ^ block_size(current_order);
@@ -145,6 +188,19 @@ impl BuddyAllocator {
 
     pub const fn free_pages(&self) -> usize {
         self.free_pages
+    }
+
+    pub const fn stats(&self) -> BuddyStats {
+        BuddyStats {
+            managed_pages: self.managed_pages,
+            free_pages: self.free_pages,
+            allocated_pages: self.managed_pages - self.free_pages,
+            peak_allocated_pages: self.peak_allocated_pages,
+            allocation_requests: self.allocation_requests,
+            allocation_failures: self.allocation_failures,
+            deallocations: self.deallocations,
+            free_blocks: self.free_blocks,
+        }
     }
 
     pub const fn direct_map_base(&self) -> u64 {
@@ -177,6 +233,7 @@ impl BuddyAllocator {
     unsafe fn push(&mut self, order: usize, address: u64) -> Result<(), BuddyError> {
         unsafe { self.write_next(address, self.free_lists[order])? };
         self.free_lists[order] = address;
+        self.free_blocks[order] += 1;
         Ok(())
     }
 
@@ -184,6 +241,7 @@ impl BuddyAllocator {
         let address = self.free_lists[order];
         debug_assert_ne!(address, NONE);
         self.free_lists[order] = unsafe { self.read_next(address)? };
+        self.free_blocks[order] -= 1;
         Ok(address)
     }
 
@@ -198,6 +256,7 @@ impl BuddyAllocator {
                 } else {
                     unsafe { self.write_next(previous, next)? };
                 }
+                self.free_blocks[order] -= 1;
                 return Ok(true);
             }
             previous = current;

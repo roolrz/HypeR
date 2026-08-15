@@ -16,6 +16,13 @@ pub enum BootAllocatorError {
     Unaddressable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BootMemoryStats {
+    pub ram_pages: usize,
+    pub reserved_pages: usize,
+    pub available_pages: usize,
+}
+
 /// Page-granular early physical memory allocator.
 ///
 /// This allocator is intentionally allocation-free. Every returned range is
@@ -140,6 +147,45 @@ impl BootAllocator {
     pub fn handoff(&self) -> crate::mm::MemoryHandoff {
         crate::mm::MemoryHandoff::new(self.memory, self.reserved)
     }
+
+    /// Returns page counts after intersecting reservations with actual RAM.
+    pub fn stats(&self) -> BootMemoryStats {
+        let ram_pages = self.memory.as_slice().iter().map(page_aligned_pages).sum();
+        let reserved_pages = self
+            .memory
+            .as_slice()
+            .iter()
+            .map(|memory| reserved_pages_in(*memory, self.reserved.as_slice()))
+            .sum::<usize>()
+            .min(ram_pages);
+        BootMemoryStats {
+            ram_pages,
+            reserved_pages,
+            available_pages: ram_pages - reserved_pages,
+        }
+    }
+}
+
+fn page_aligned_pages(range: &PhysicalRange) -> usize {
+    let Some(start) = range.start().checked_add(PAGE_SIZE - 1) else {
+        return 0;
+    };
+    let start = start & !(PAGE_SIZE - 1);
+    let end = range.end() & !(PAGE_SIZE - 1);
+    usize::try_from(end.saturating_sub(start) / PAGE_SIZE).unwrap_or(usize::MAX)
+}
+
+fn reserved_pages_in(memory: PhysicalRange, reserved: &[PhysicalRange]) -> usize {
+    let memory_start = memory.start().saturating_add(PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    let memory_end = memory.end() & !(PAGE_SIZE - 1);
+    reserved
+        .iter()
+        .map(|range| {
+            let start = range.start().max(memory_start);
+            let end = range.end().min(memory_end);
+            usize::try_from(end.saturating_sub(start) / PAGE_SIZE).unwrap_or(usize::MAX)
+        })
+        .sum()
 }
 
 fn page_covering_range(range: PhysicalRange) -> Result<PhysicalRange, BootAllocatorError> {

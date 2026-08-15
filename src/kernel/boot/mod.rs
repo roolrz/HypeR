@@ -303,3 +303,7 @@ pub(crate) fn with_boot_state<R>(operation: impl FnOnce(&BootState) -> R) -> R {
         Err(error) => fail("boot-state access", error),
     }
 }
+
+pub(crate) fn try_with_boot_state<R>(operation: impl FnOnce(&BootState) -> R) -> Option<R> {
+    state::with(operation).ok()
+}

@@ -40,7 +40,34 @@ pub fn validate() -> Result<(), ValidationError> {
     if sanitize_pfr0(u64::MAX) != registers::ID_AA64PFR0_GUEST_BASE {
         return Err(ValidationError::UnsafeFeatureExposure);
     }
+    if !validate_translation_fault_decoder() {
+        return Err(ValidationError::InvalidDecoder);
+    }
     Ok(())
+}
+
+fn validate_translation_fault_decoder() -> bool {
+    let mut general = [0; 31];
+    let mut program_counter = 0;
+    let mut processor_state = 0;
+    let syndrome = (registers::ESR_EC_DATA_ABORT_LOWER << registers::ESR_EC_SHIFT)
+        | registers::ESR_ABORT_TRANSLATION_FAULT_LEVEL3
+        | registers::ESR_DATA_ABORT_WNR
+        | registers::ESR_DATA_ABORT_S1PTW;
+    let frame = GuestSyncFrame::new(
+        &mut general,
+        &mut program_counter,
+        &mut processor_state,
+        syndrome,
+        0,
+        0x4321_0abc,
+    );
+    frame.translation_fault()
+        == Some(GuestTranslationFault {
+            address: 0x4321_0abc,
+            access: GuestMemoryAccess::Write,
+            during_page_walk: true,
+        })
 }
 
 pub(crate) struct GuestSyncFrame<'a> {
@@ -61,6 +88,20 @@ pub(crate) struct GuestDataAccess {
     target: u8,
     sign_extend: bool,
     register_64_bit: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestMemoryAccess {
+    Execute,
+    Read,
+    Write,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GuestTranslationFault {
+    pub address: u64,
+    pub access: GuestMemoryAccess,
+    pub during_page_walk: bool,
 }
 
 impl<'a> GuestSyncFrame<'a> {
@@ -126,6 +167,36 @@ impl<'a> GuestSyncFrame<'a> {
             target,
             sign_extend: self.syndrome & registers::ESR_DATA_ABORT_SSE != 0,
             register_64_bit: self.syndrome & registers::ESR_DATA_ABORT_SF != 0,
+        })
+    }
+
+    pub(crate) fn translation_fault(&self) -> Option<GuestTranslationFault> {
+        let exception_class = (self.syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK;
+        if !matches!(
+            exception_class,
+            registers::ESR_EC_INSTRUCTION_ABORT_LOWER | registers::ESR_EC_DATA_ABORT_LOWER
+        ) {
+            return None;
+        }
+        let fault_status = self.syndrome & registers::ESR_ABORT_FSC_MASK;
+        if !(registers::ESR_ABORT_TRANSLATION_FAULT_LEVEL0
+            ..=registers::ESR_ABORT_TRANSLATION_FAULT_LEVEL3)
+            .contains(&fault_status)
+        {
+            return None;
+        }
+        let access = if exception_class == registers::ESR_EC_INSTRUCTION_ABORT_LOWER {
+            GuestMemoryAccess::Execute
+        } else if self.syndrome & registers::ESR_DATA_ABORT_WNR != 0 {
+            GuestMemoryAccess::Write
+        } else {
+            GuestMemoryAccess::Read
+        };
+        Some(GuestTranslationFault {
+            address: self.physical_address,
+            access,
+            during_page_walk: exception_class == registers::ESR_EC_DATA_ABORT_LOWER
+                && self.syndrome & registers::ESR_DATA_ABORT_S1PTW != 0,
         })
     }
 

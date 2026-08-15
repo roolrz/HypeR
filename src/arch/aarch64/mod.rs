@@ -52,7 +52,10 @@ pub use vgic::{
     validate_context_switch as validate_vgic,
 };
 pub use vsysreg::validate as validate_vsysreg;
-pub(crate) use vsysreg::{GuestDataAccess, GuestSyncAction, GuestSyncFrame, handle_guest_sync};
+pub(crate) use vsysreg::{
+    GuestDataAccess, GuestMemoryAccess, GuestSyncAction, GuestSyncFrame, GuestTranslationFault,
+    handle_guest_sync,
+};
 
 pub fn initialize_cpu_power(
     info: hyper::platform::CpuPowerInfo,

@@ -6,6 +6,7 @@ mod console;
 mod gicv3;
 mod interrupt;
 mod linux;
+pub mod memory;
 mod vcpu;
 
 pub(crate) use arch_timer::{handle_interrupt as handle_arch_timer_interrupt, handle_maintenance};
@@ -86,6 +87,21 @@ pub(crate) fn handle_guest_sync(frame: &mut crate::arch::GuestSyncFrame<'_>) -> 
             }
             crate::arch::GuestSyncAction::Unhandled => {}
             _ => return action,
+        }
+        if let Some(fault) = frame.translation_fault() {
+            match memory::resolve_translation_fault(execution.virtual_machine, fault) {
+                Ok(true) => return crate::arch::GuestSyncAction::Resume,
+                Ok(false) => {}
+                Err(error) => {
+                    crate::pr_err!(
+                        "HypeR: guest memory fault resolution failed at {:#x} ({:?}, S1PTW={}): {error:?}",
+                        fault.address,
+                        fault.access,
+                        fault.during_page_walk
+                    );
+                    return crate::arch::GuestSyncAction::Unhandled;
+                }
+            }
         }
         let Some(access) = frame.data_access() else {
             return action;

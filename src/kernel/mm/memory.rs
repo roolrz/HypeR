@@ -1,7 +1,7 @@
 //! Kernel memory initialization and architecture handoff policy.
 
 use hyper::hal::memory::{AddressTranslation, VirtualMemoryLayout};
-use hyper::mm::{BootAllocator, BootAllocatorError, PhysicalAddress};
+use hyper::mm::{BootAllocator, BootAllocatorError, BootMemoryStats, PhysicalAddress};
 use hyper::platform::{PhysicalRange, PlatformInfo};
 
 use super::allocator::GlobalAllocator;
@@ -41,6 +41,10 @@ impl PreparedMemory {
 
     pub fn reservation_count(&self) -> usize {
         self.allocator.reservations().len()
+    }
+
+    pub fn boot_memory_stats(&self) -> BootMemoryStats {
+        self.allocator.stats()
     }
 
     pub fn activation_context(&self) -> crate::arch::ActivationContext {

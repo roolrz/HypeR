@@ -9,7 +9,9 @@ use crate::hal::interrupt::InterruptMask;
 use crate::sync::InterruptSpinLock;
 use crate::sync::atomic::{AtomicU8, Ordering};
 
-use crate::mm::{BuddyAllocator, BuddyError, MAX_ORDER, MemoryHandoff, PAGE_SIZE, PhysicalAddress};
+use crate::mm::{
+    BuddyAllocator, BuddyError, BuddyStats, MAX_ORDER, MemoryHandoff, PAGE_SIZE, PhysicalAddress,
+};
 
 const NONE: u64 = u64::MAX;
 const SLAB_MAGIC: u64 = 0x4859_5045_5253_4c42;
@@ -26,6 +28,7 @@ enum AllocatorFault {
     InvalidPartialList = 5,
     BuddyDeallocation = 6,
     InvalidLargeHeader = 7,
+    PageOwnerUnderflow = 8,
 }
 
 static LAST_ALLOCATOR_FAULT: AtomicU8 = AtomicU8::new(0);
@@ -55,11 +58,53 @@ impl From<BuddyError> for InitError {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// Subsystem ownership for allocations made directly from the page allocator.
+///
+/// Heap backing pages are accounted separately. `Guest` means physically
+/// committed guest memory, not the guest's advertised address-space size.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PageOwner {
+    Kernel = 0,
+    PageTable = 1,
+    Guest = 2,
+}
+
+impl PageOwner {
+    const COUNT: usize = 3;
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PageOwnerStats {
+    pub pages: usize,
+    pub peak_pages: usize,
+    pub allocation_requests: u64,
+    pub allocation_failures: u64,
+    pub deallocations: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HeapStats {
+    pub buddy: BuddyStats,
+    /// Compatibility shortcut for `buddy.free_pages`.
     pub free_pages: usize,
     pub slab_pages: usize,
+    pub large_heap_pages: usize,
     pub live_allocations: usize,
+    pub live_slab_allocations: usize,
+    pub live_large_allocations: usize,
+    pub peak_live_allocations: usize,
+    pub requested_bytes: usize,
+    pub peak_requested_bytes: usize,
+    pub allocation_requests: u64,
+    pub allocation_failures: u64,
+    pub kernel_pages: PageOwnerStats,
+    pub page_table_pages: PageOwnerStats,
+    pub guest_pages: PageOwnerStats,
 }
 
 #[repr(C)]
@@ -87,7 +132,16 @@ pub struct SlabAllocator {
     buddy: BuddyAllocator,
     partial: [u64; CLASS_SIZES.len()],
     slab_pages: usize,
+    large_heap_pages: usize,
     live_allocations: usize,
+    live_slab_allocations: usize,
+    live_large_allocations: usize,
+    peak_live_allocations: usize,
+    requested_bytes: usize,
+    peak_requested_bytes: usize,
+    allocation_requests: u64,
+    allocation_failures: u64,
+    page_owners: [PageOwnerStats; PageOwner::COUNT],
 }
 
 // SAFETY: All access occurs while `GLOBAL_ALLOCATOR.state` is locked.
@@ -107,7 +161,16 @@ impl SlabAllocator {
             buddy: unsafe { BuddyAllocator::from_handoff(handoff, direct_map_base)? },
             partial: [NONE; CLASS_SIZES.len()],
             slab_pages: 0,
+            large_heap_pages: 0,
             live_allocations: 0,
+            live_slab_allocations: 0,
+            live_large_allocations: 0,
+            peak_live_allocations: 0,
+            requested_bytes: 0,
+            peak_requested_bytes: 0,
+            allocation_requests: 0,
+            allocation_failures: 0,
+            page_owners: [PageOwnerStats::default(); PageOwner::COUNT],
         })
     }
 
@@ -117,11 +180,21 @@ impl SlabAllocator {
     ///
     /// The result must be released once with the same layout.
     pub unsafe fn allocate(&mut self, layout: Layout) -> *mut u8 {
-        if let Some(class) = class_for(layout) {
+        self.allocation_requests = self.allocation_requests.saturating_add(1);
+        let pointer = if let Some(class) = class_for(layout) {
             unsafe { self.allocate_slab(class) }
         } else {
             unsafe { self.allocate_large(layout) }
+        };
+        if pointer.is_null() {
+            self.allocation_failures = self.allocation_failures.saturating_add(1);
+        } else {
+            let requested = layout.size().max(1);
+            self.requested_bytes = self.requested_bytes.saturating_add(requested);
+            self.peak_requested_bytes = self.peak_requested_bytes.max(self.requested_bytes);
+            self.peak_live_allocations = self.peak_live_allocations.max(self.live_allocations);
         }
+        pointer
     }
 
     /// Releases a live allocation returned by `allocate`.
@@ -135,6 +208,10 @@ impl SlabAllocator {
         } else {
             unsafe { self.deallocate_large(pointer) };
         }
+        self.requested_bytes = self
+            .requested_bytes
+            .checked_sub(layout.size().max(1))
+            .unwrap_or_else(|| allocator_fault(AllocatorFault::AllocationCountUnderflow));
     }
 
     unsafe fn allocate_slab(&mut self, class: usize) -> *mut u8 {
@@ -163,6 +240,7 @@ impl SlabAllocator {
         header.free_head = unsafe { *(pointer as *const usize) };
         header.in_use += 1;
         self.live_allocations += 1;
+        self.live_slab_allocations += 1;
         if header.free_head == 0 {
             self.partial[class] = header.next_partial;
             header.next_partial = NONE;
@@ -197,6 +275,7 @@ impl SlabAllocator {
         header.free_head = pointer as usize;
         header.in_use -= 1;
         self.live_allocations -= 1;
+        self.live_slab_allocations -= 1;
 
         if was_full {
             header.next_partial = self.partial[class];
@@ -338,6 +417,8 @@ impl SlabAllocator {
             })
         };
         self.live_allocations += 1;
+        self.live_large_allocations += 1;
+        self.large_heap_pages += 1usize << order;
         user as *mut u8
     }
 
@@ -352,6 +433,8 @@ impl SlabAllocator {
             allocator_fault(AllocatorFault::AllocationCountUnderflow);
         }
         self.live_allocations -= 1;
+        self.live_large_allocations -= 1;
+        self.large_heap_pages -= 1usize << usize::from(header.order);
         // SAFETY: The header records the exact buddy allocation.
         if unsafe {
             self.buddy.deallocate(
@@ -378,11 +461,64 @@ impl SlabAllocator {
     }
 
     pub fn stats(&self) -> HeapStats {
+        let buddy = self.buddy.stats();
         HeapStats {
-            free_pages: self.buddy.free_pages(),
+            buddy,
+            free_pages: buddy.free_pages,
             slab_pages: self.slab_pages,
+            large_heap_pages: self.large_heap_pages,
             live_allocations: self.live_allocations,
+            live_slab_allocations: self.live_slab_allocations,
+            live_large_allocations: self.live_large_allocations,
+            peak_live_allocations: self.peak_live_allocations,
+            requested_bytes: self.requested_bytes,
+            peak_requested_bytes: self.peak_requested_bytes,
+            allocation_requests: self.allocation_requests,
+            allocation_failures: self.allocation_failures,
+            kernel_pages: self.page_owners[PageOwner::Kernel.index()],
+            page_table_pages: self.page_owners[PageOwner::PageTable.index()],
+            guest_pages: self.page_owners[PageOwner::Guest.index()],
         }
+    }
+
+    fn allocate_pages(
+        &mut self,
+        order: usize,
+        owner: PageOwner,
+    ) -> Result<PhysicalAddress, BuddyError> {
+        let owner_stats = &mut self.page_owners[owner.index()];
+        owner_stats.allocation_requests = owner_stats.allocation_requests.saturating_add(1);
+        match self.buddy.allocate(order) {
+            Ok(address) => {
+                let pages = 1usize << order;
+                owner_stats.pages += pages;
+                owner_stats.peak_pages = owner_stats.peak_pages.max(owner_stats.pages);
+                Ok(address)
+            }
+            Err(error) => {
+                owner_stats.allocation_failures = owner_stats.allocation_failures.saturating_add(1);
+                Err(error)
+            }
+        }
+    }
+
+    unsafe fn deallocate_pages(
+        &mut self,
+        address: PhysicalAddress,
+        order: usize,
+        owner: PageOwner,
+    ) -> Result<(), BuddyError> {
+        let pages = 1usize
+            .checked_shl(order as u32)
+            .ok_or(BuddyError::InvalidOrder)?;
+        let owner_stats = &mut self.page_owners[owner.index()];
+        if owner_stats.pages < pages {
+            allocator_fault(AllocatorFault::PageOwnerUnderflow);
+        }
+        unsafe { self.buddy.deallocate(address, order)? };
+        owner_stats.pages -= pages;
+        owner_stats.deallocations = owner_stats.deallocations.saturating_add(1);
+        Ok(())
     }
 }
 
@@ -455,10 +591,18 @@ impl<M: InterruptMask> KernelGlobalAllocator<M> {
     /// The returned block is not a Rust heap allocation. Its owner must either
     /// retain it permanently or return it once with [`Self::deallocate_pages`].
     pub fn allocate_pages(&self, order: usize) -> Result<PhysicalAddress, BuddyError> {
+        self.allocate_pages_for(order, PageOwner::Kernel)
+    }
+
+    pub fn allocate_pages_for(
+        &self,
+        order: usize,
+        owner: PageOwner,
+    ) -> Result<PhysicalAddress, BuddyError> {
         self.state.with(|state| {
             // SAFETY: Access is serialized and checked by `initialized`.
             let heap = unsafe { state.heap_mut() }.ok_or(BuddyError::OutOfMemory)?;
-            heap.buddy.allocate(order)
+            heap.allocate_pages(order, owner)
         })
     }
 
@@ -473,11 +617,25 @@ impl<M: InterruptMask> KernelGlobalAllocator<M> {
         address: PhysicalAddress,
         order: usize,
     ) -> Result<(), BuddyError> {
+        unsafe { self.deallocate_pages_for(address, order, PageOwner::Kernel) }
+    }
+
+    /// Returns a block allocated for the same `owner`.
+    ///
+    /// # Safety
+    ///
+    /// The address, order, and owner must exactly match a live allocation.
+    pub unsafe fn deallocate_pages_for(
+        &self,
+        address: PhysicalAddress,
+        order: usize,
+        owner: PageOwner,
+    ) -> Result<(), BuddyError> {
         self.state.with(|state| {
             // SAFETY: The caller owns the block and the heap lock serializes
             // free-list mutation.
             let heap = unsafe { state.heap_mut() }.ok_or(BuddyError::OutOfMemory)?;
-            unsafe { heap.buddy.deallocate(address, order) }
+            unsafe { heap.deallocate_pages(address, order, owner) }
         })
     }
 }

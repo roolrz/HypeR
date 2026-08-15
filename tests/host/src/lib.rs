@@ -1595,13 +1595,39 @@ mod boot_allocator {
             Err(BootAllocatorError::OutOfMemory)
         );
     }
+
+    #[test]
+    fn reports_only_reserved_pages_that_overlap_ram() {
+        let mut memory = RegionList::<MAX_MEMORY_REGIONS>::new();
+        super::require_ok(memory.insert(super::require_some(PhysicalRange::new(
+            PAGE_SIZE,
+            PAGE_SIZE * 8,
+        ))));
+        let mut reserved = RegionList::<MAX_RESERVED_REGIONS>::new();
+        super::require_ok(reserved.insert(super::require_some(PhysicalRange::new(
+            0,
+            PAGE_SIZE * 3,
+        ))));
+        super::require_ok(reserved.insert(super::require_some(PhysicalRange::new(
+            PAGE_SIZE * 32,
+            PAGE_SIZE,
+        ))));
+        let allocator =
+            super::require_ok(BootAllocator::new(&memory, &reserved, PAGE_SIZE * 64));
+
+        let stats = allocator.stats();
+        assert_eq!(stats.ram_pages, 8);
+        assert_eq!(stats.reserved_pages, 2);
+        assert_eq!(stats.available_pages, 6);
+    }
 }
 
 #[cfg(test)]
 mod runtime_allocators {
     use std::alloc::{Layout, alloc_zeroed, dealloc};
 
-    use hyper::mm::heap::SlabAllocator;
+    use hyper::hal::interrupt::InterruptMask;
+    use hyper::mm::heap::{KernelGlobalAllocator, PageOwner, SlabAllocator};
     use hyper::mm::{BootAllocator, BuddyAllocator, PAGE_SIZE};
     use hyper::platform::{MAX_MEMORY_REGIONS, MAX_RESERVED_REGIONS, PhysicalRange, RegionList};
 
@@ -1654,9 +1680,17 @@ mod runtime_allocators {
             BuddyAllocator::from_handoff(&handoff, memory.pointer as u64)
         });
         let initial = buddy.free_pages();
+        let initial_stats = buddy.stats();
+        assert_eq!(initial_stats.managed_pages, 64);
+        assert_eq!(initial_stats.free_blocks[6], 1);
         let first = super::require_ok(buddy.allocate(0));
         let second = super::require_ok(buddy.allocate(2));
         assert_eq!(buddy.free_pages(), initial - 5);
+        let allocated = buddy.stats();
+        assert_eq!(allocated.allocated_pages, 5);
+        assert_eq!(allocated.peak_allocated_pages, 5);
+        assert_eq!(allocated.allocation_requests, 2);
+        assert_eq!(free_pages_from_blocks(&allocated.free_blocks), allocated.free_pages);
 
         // SAFETY: Both blocks are live allocations with matching orders.
         unsafe {
@@ -1664,6 +1698,7 @@ mod runtime_allocators {
             super::require_ok(buddy.deallocate(second, 2));
         }
         assert_eq!(buddy.free_pages(), initial);
+        assert_eq!(buddy.stats().deallocations, 2);
         assert!(buddy.allocate(6).is_ok());
     }
 
@@ -1700,6 +1735,54 @@ mod runtime_allocators {
         let stats = slab.stats();
         assert_eq!(stats.live_allocations, 0);
         assert_eq!(stats.slab_pages, 0);
+        assert_eq!(stats.large_heap_pages, 0);
+        assert_eq!(stats.requested_bytes, 0);
+        assert_eq!(stats.peak_live_allocations, 201);
+        assert!(stats.peak_requested_bytes >= 200 * 24 + 9000);
         assert_eq!(stats.free_pages, initial);
+    }
+
+    struct TestInterruptMask;
+
+    impl InterruptMask for TestInterruptMask {
+        type State = ();
+
+        fn save_and_disable() -> Self::State {}
+
+        fn restore(_: Self::State) {}
+    }
+
+    #[test]
+    fn accounts_direct_pages_by_owner() {
+        let (memory, handoff) = handoff(64);
+        let allocator = KernelGlobalAllocator::<TestInterruptMask>::new();
+        // SAFETY: The aligned test buffer is the direct map and outlives the allocator.
+        super::require_ok(unsafe { allocator.initialize(&handoff, memory.pointer as u64) });
+
+        let guest = super::require_ok(allocator.allocate_pages_for(3, PageOwner::Guest));
+        let table = super::require_ok(allocator.allocate_pages_for(0, PageOwner::PageTable));
+        let stats = super::require_some(allocator.stats());
+        assert_eq!(stats.guest_pages.pages, 8);
+        assert_eq!(stats.page_table_pages.pages, 1);
+        assert_eq!(stats.buddy.allocated_pages, 9);
+
+        // SAFETY: These are the exact live blocks and owners returned above.
+        unsafe {
+            super::require_ok(allocator.deallocate_pages_for(table, 0, PageOwner::PageTable));
+            super::require_ok(allocator.deallocate_pages_for(guest, 3, PageOwner::Guest));
+        }
+        let stats = super::require_some(allocator.stats());
+        assert_eq!(stats.guest_pages.pages, 0);
+        assert_eq!(stats.guest_pages.peak_pages, 8);
+        assert_eq!(stats.page_table_pages.pages, 0);
+        assert_eq!(stats.buddy.allocated_pages, 0);
+    }
+
+    fn free_pages_from_blocks(blocks: &[usize]) -> usize {
+        blocks
+            .iter()
+            .enumerate()
+            .map(|(order, blocks)| blocks << order)
+            .sum()
     }
 }

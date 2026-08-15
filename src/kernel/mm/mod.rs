@@ -11,6 +11,19 @@ pub mod page_block;
 
 pub use memory::PreparedMemory;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemoryStats {
+    pub boot: hyper::mm::BootMemoryStats,
+    pub runtime: hyper::mm::heap::HeapStats,
+}
+
+/// Returns a lock-consistent allocator snapshot once memory initialization is complete.
+pub fn statistics() -> Option<MemoryStats> {
+    let boot = super::boot::try_with_boot_state(|state| state.memory.boot_memory_stats())?;
+    let runtime = allocator::GLOBAL_ALLOCATOR.stats()?;
+    Some(MemoryStats { boot, runtime })
+}
+
 /// Activates the kernel allocator and validates Rust allocation plumbing.
 pub(crate) fn initialize() {
     if let Err(error) = super::boot::with_boot_state(|state| {
@@ -69,13 +82,45 @@ pub(crate) fn finalize_address_space() {
             state.memory.root_address()
         );
     });
-    if let Some(stats) = allocator::GLOBAL_ALLOCATOR.stats() {
-        crate::println!(
-            "HypeR: global buddy/slab allocator active: {} free pages, {} live allocations",
-            stats.free_pages,
-            stats.live_allocations
-        );
-    }
+    report_statistics("kernel initialized");
+}
+
+pub(crate) fn report_statistics(reason: &str) {
+    let Some(stats) = statistics() else {
+        return;
+    };
+    let runtime = stats.runtime;
+    let buddy = runtime.buddy;
+    crate::println!(
+        "HypeR: memory ({reason}): {} MiB RAM, {} reserved pages, {} managed pages",
+        stats.boot.ram_pages * hyper::mm::PAGE_SIZE as usize / (1024 * 1024),
+        stats.boot.reserved_pages,
+        buddy.managed_pages
+    );
+    crate::println!(
+        "HypeR: pages: {} allocated (peak {}), {} free, largest free order {}, {} failures",
+        buddy.allocated_pages,
+        buddy.peak_allocated_pages,
+        buddy.free_pages,
+        buddy.largest_free_order().map_or(0, |order| order),
+        buddy.allocation_failures
+    );
+    crate::println!(
+        "HypeR: page owners: guest {} (peak {}), page tables {}, kernel {}, heap {}",
+        runtime.guest_pages.pages,
+        runtime.guest_pages.peak_pages,
+        runtime.page_table_pages.pages,
+        runtime.kernel_pages.pages,
+        runtime.slab_pages + runtime.large_heap_pages
+    );
+    crate::println!(
+        "HypeR: heap: {} live objects (peak {}), {} KiB requested (peak {} KiB), {} failures",
+        runtime.live_allocations,
+        runtime.peak_live_allocations,
+        runtime.requested_bytes.div_ceil(1024),
+        runtime.peak_requested_bytes.div_ceil(1024),
+        runtime.allocation_failures
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

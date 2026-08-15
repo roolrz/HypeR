@@ -45,6 +45,17 @@ pub struct Stage2AddressSpace {
 }
 
 impl Stage2AddressSpace {
+    pub fn required_table_pages(ipa: u64, size: u64) -> Result<usize, Error> {
+        validate_range(ipa, ipa, size)?;
+        let end = ipa.checked_add(size).ok_or(Error::AddressOverflow)?;
+        let level1 = covering_regions(ipa, end, registers::STAGE2_LEVEL_SIZES_4K[0])?;
+        let level2 = covering_regions(ipa, end, registers::STAGE2_LEVEL_SIZES_4K[1])?;
+        1usize
+            .checked_add(level1)
+            .and_then(|pages| pages.checked_add(level2))
+            .ok_or(Error::AddressOverflow)
+    }
+
     pub fn new(
         vmid: u16,
         allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
@@ -61,6 +72,7 @@ impl Stage2AddressSpace {
         self.root.get()
     }
 
+    #[allow(dead_code)]
     pub fn map_normal(
         &mut self,
         ipa: u64,
@@ -69,6 +81,47 @@ impl Stage2AddressSpace {
         allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         self.map_range(ipa, physical, size, MemoryType::Normal, allocator)
+    }
+
+    pub fn map_normal_page(
+        &mut self,
+        ipa: u64,
+        physical: u64,
+        allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
+    ) -> Result<(), Error> {
+        validate_page(ipa, physical)?;
+        self.map_leaf(ipa, physical, 2, MemoryType::Normal, allocator)
+    }
+
+    /// Adds a 4 KiB mapping while this VMID is active, then invalidates stale
+    /// combined stage-1/stage-2 translations for the faulting IPA.
+    ///
+    /// # Safety
+    ///
+    /// This address space must be active on the current CPU, and the caller
+    /// must serialize page-table updates for this VM.
+    pub unsafe fn map_normal_page_active(
+        &mut self,
+        ipa: u64,
+        physical: u64,
+        allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
+    ) -> Result<(), Error> {
+        self.map_normal_page(ipa, physical, allocator)?;
+        unsafe { invalidate_ipa(ipa) };
+        Ok(())
+    }
+
+    /// Invalidates a previously cached translation for one active guest page.
+    ///
+    /// # Safety
+    ///
+    /// This address space must be active on the current CPU.
+    pub unsafe fn invalidate_page_active(&self, ipa: u64) -> Result<(), Error> {
+        if ipa & (PAGE_SIZE - 1) != 0 || ipa >= registers::STAGE2_IPA_LIMIT {
+            return Err(Error::InvalidAddress);
+        }
+        unsafe { invalidate_ipa(ipa) };
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -121,18 +174,7 @@ impl Stage2AddressSpace {
         memory: MemoryType,
         allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
-        if size == 0
-            || ipa & (PAGE_SIZE - 1) != 0
-            || physical & (PAGE_SIZE - 1) != 0
-            || size & (PAGE_SIZE - 1) != 0
-        {
-            return Err(Error::InvalidRange);
-        }
-        let end = ipa.checked_add(size).ok_or(Error::AddressOverflow)?;
-        let physical_end = physical.checked_add(size).ok_or(Error::AddressOverflow)?;
-        if end > registers::STAGE2_IPA_LIMIT || physical_end > registers::PHYSICAL_ADDRESS_LIMIT {
-            return Err(Error::InvalidAddress);
-        }
+        validate_range(ipa, physical, size)?;
 
         let mut offset = 0;
         while offset < size {
@@ -220,6 +262,58 @@ fn validate_table(table: PhysicalAddress) -> Result<(), Error> {
         Err(Error::InvalidAddress)
     } else {
         Ok(())
+    }
+}
+
+fn validate_page(ipa: u64, physical: u64) -> Result<(), Error> {
+    if ipa & (PAGE_SIZE - 1) != 0 || physical & (PAGE_SIZE - 1) != 0 {
+        return Err(Error::InvalidRange);
+    }
+    if ipa >= registers::STAGE2_IPA_LIMIT
+        || physical >= registers::PHYSICAL_ADDRESS_LIMIT
+        || ipa.checked_add(PAGE_SIZE).is_none()
+        || physical.checked_add(PAGE_SIZE).is_none()
+    {
+        return Err(Error::InvalidAddress);
+    }
+    Ok(())
+}
+
+fn validate_range(ipa: u64, physical: u64, size: u64) -> Result<(), Error> {
+    if size == 0
+        || ipa & (PAGE_SIZE - 1) != 0
+        || physical & (PAGE_SIZE - 1) != 0
+        || size & (PAGE_SIZE - 1) != 0
+    {
+        return Err(Error::InvalidRange);
+    }
+    let end = ipa.checked_add(size).ok_or(Error::AddressOverflow)?;
+    let physical_end = physical.checked_add(size).ok_or(Error::AddressOverflow)?;
+    if end > registers::STAGE2_IPA_LIMIT || physical_end > registers::PHYSICAL_ADDRESS_LIMIT {
+        return Err(Error::InvalidAddress);
+    }
+    Ok(())
+}
+
+fn covering_regions(start: u64, end: u64, span: u64) -> Result<usize, Error> {
+    let first = start / span;
+    let last = end.checked_sub(1).ok_or(Error::InvalidRange)? / span;
+    usize::try_from(last - first + 1).map_err(|_| Error::AddressOverflow)
+}
+
+unsafe fn invalidate_ipa(ipa: u64) {
+    let operand = ipa >> registers::TLBI_IPAS2E1_IPA_SHIFT;
+    // SAFETY: The caller guarantees the current VTTBR_EL2 selects the address
+    // space whose invalid-to-valid descriptor was just published.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi ipas2e1is, {operand}",
+            "dsb ish",
+            "isb",
+            operand = in(reg) operand,
+            options(nostack, preserves_flags)
+        );
     }
 }
 

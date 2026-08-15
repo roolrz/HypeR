@@ -6,8 +6,8 @@ pub mod boot;
 pub mod kaslr;
 
 pub use address::{PAGE_SIZE, PhysicalAddress, VirtualAddress};
-pub use allocator::{BuddyAllocator, BuddyError, MAX_ORDER, MemoryHandoff};
-pub use boot::{BootAllocator, BootAllocatorError};
+pub use allocator::{BuddyAllocator, BuddyError, BuddyStats, MAX_ORDER, MemoryHandoff};
+pub use boot::{BootAllocator, BootAllocatorError, BootMemoryStats};
 
 // Compatibility facade for the existing global-allocator integration.
 pub use allocator::heap;

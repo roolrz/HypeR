@@ -5,7 +5,10 @@ compile_error!("the AArch64 target requires CONFIG_ARCH_AARCH64=y");
 pub(crate) mod aarch64;
 
 #[cfg(target_arch = "aarch64")]
-pub(crate) use aarch64::{GuestDataAccess, GuestSyncAction, GuestSyncFrame, handle_guest_sync};
+pub(crate) use aarch64::{
+    GuestDataAccess, GuestMemoryAccess, GuestSyncAction, GuestSyncFrame, GuestTranslationFault,
+    handle_guest_sync,
+};
 
 #[cfg(target_arch = "aarch64")]
 pub use aarch64::{
