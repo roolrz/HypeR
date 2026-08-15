@@ -210,7 +210,10 @@ kernel/
   irq/        exception policy, IRQ domains, kernel timer
   log/        record production and console draining
   mm/         allocator ownership and memory initialization policy
+  sync/       scheduler-aware sleeping synchronization primitives
   task/       thread objects and scheduler policy
+  time/       monotonic timekeeping and per-CPU software timers
+  vm/         guest lifecycle, vCPU state, devices, and memory policy
 ```
 
 Reusable mechanisms follow the same rule: `mm/boot` and `mm/allocator` separate
@@ -225,8 +228,13 @@ All test-only code and executables live under one top-level hierarchy:
 tests/
   host/       host-side unit and subsystem tests
   image/      ELF, Linux Image, PIE, and atomic-backend validation
+  kernel/     feature-gated bare-metal scheduler/synchronization tests
   qemu/       four-core host boot and Linux guest-init integration tests
 ```
+
+Normal images contain no test routines. QEMU test targets enable the
+`kernel-self-test` Cargo feature, which includes `tests/kernel` and executes
+real kernel-thread context-switch tests before entering the guest.
 
 The kernel layer consumes only the `arch` facade. Kernel memory policy owns the
 boot allocator, image/DTB reservations, and runtime-allocator handoff. The HAL
@@ -426,24 +434,36 @@ added without changing the scheduler's core object model.
 
 AArch64 cooperative switching preserves the AAPCS64 callee-saved integer and
 SIMD registers, FPCR/FPSR, stack pointer, frame pointer, and return address.
-`kthread_create` registers a dormant kernel thread, while the generic
-`thread_ready` scheduler transition makes either a dormant or blocked Thread
-runnable. This keeps run-queue policy independent of the kernel-thread, user,
-and vCPU execution kinds. Fresh kernel threads enter through a common
-trampoline; returning from an entry function terminates the thread and
-transfers to another ready thread before its stack is reclaimed. Heap
-allocation pins each registered Thread independently of scheduler-container
-growth.
+Each CPU owns 32 fixed-priority FIFO ready queues selected through a bitmap;
+equal-priority threads use round-robin order. Queue nodes are intrusive in the
+Thread object, so ready, block, wake, priority-change, and exit transitions do
+not allocate. Thread IDs map directly to stable scheduler slots instead of
+requiring a linear scan. `kthread_create` registers a dormant kernel thread,
+and `thread_ready` enqueues it on its owning CPU. Fresh kernel threads enter
+through a common trampoline; returning from an entry function terminates the
+thread and transfers to another ready thread before its stack is reclaimed.
+
+Scheduler wait queues use the same intrusive node and atomically combine the
+Blocked transition with next-thread selection. The kernel synchronization
+layer builds FIFO sleeping `Mutex` and counting `Semaphore` primitives on that
+operation. Mutex ownership and semaphore permits are handed directly to the
+oldest waiter, avoiding lost wakeups and resource stealing. Sleeping acquire
+operations reject IRQ-disabled context; IRQ-safe state locks remain the layer
+used by interrupt handlers. Feature-gated bare-metal tests perform real
+multi-thread context switches covering priority changes, semaphore blocking,
+mutex contention, FIFO direct handoff, nonblocking operations, and wait-queue
+wake-all behavior.
 
 After initialization, `thread_become_idle` formally converts the bootstrap
 execution context into the scheduler's idle Thread. The idle loop schedules
-normal ready work first and executes one architectural WFI only when no work is
-runnable. A yielding or exiting normal thread falls back to this pinned idle
-context, so the scheduler always has a valid running context. Every online CPU
-owns a distinct idle Thread and current-thread slot. This milestone remains
-cooperative; timer preemption, load balancing and affinity policy, EL0 exception
-return, scheduled/multi-vCPU guest run loops, and stack guard pages remain
-future work.
+normal ready work first and executes one architectural WFE only when no work is
+runnable, allowing a remote enqueue to wake it with SEV. A yielding, blocking,
+or exiting normal thread falls back to this pinned idle context, so the
+scheduler always has a valid running context. Every online CPU owns a distinct
+idle Thread, ready set, and current-thread slot. This milestone remains
+cooperative; timer preemption, load balancing and affinity migration, EL0
+exception return, scheduled/multi-vCPU guest run loops, and stack guard pages
+remain future work.
 Kernel initialization uses explicit error propagation and does not use
 `unwrap` or `expect`. Since Rust's `GlobalAlloc` deallocation interface cannot
 return an error, allocator invariant failures record a stable diagnostic code

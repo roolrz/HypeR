@@ -6,6 +6,10 @@ extern crate alloc;
 mod arch;
 pub mod kernel;
 
+#[cfg(feature = "kernel-self-test")]
+#[path = "../tests/kernel/mod.rs"]
+mod kernel_tests;
+
 use core::panic::PanicInfo;
 
 /// Primary kernel entry after architecture initialization is complete.
@@ -32,6 +36,9 @@ extern "C" fn start_kernel() -> ! {
     crate::kernel::device::initialize_console_input(&boot);
     crate::kernel::device::initialize_driver_framework(&boot);
     crate::kernel::cpu::initialize(&mut boot);
+
+    #[cfg(feature = "kernel-self-test")]
+    crate::kernel_tests::run();
 
     crate::kernel::irq::publish_online_cpu_count(&boot);
     crate::kernel::mm::finalize_address_space();

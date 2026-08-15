@@ -76,6 +76,10 @@ pub(crate) fn initialize_timer(boot: &mut super::boot::Initialization) {
         "HypeR: timer mapped to dynamic VIRQ {}",
         capabilities.virtual_interrupt.get()
     );
+    crate::println!(
+        "HypeR: per-CPU software timer queues active: {} timers per CPU",
+        hyper::config::TIMER_QUEUE_CAPACITY
+    );
     boot.set_timer(capabilities);
 }
 

@@ -1,23 +1,14 @@
 use core::arch::asm;
 
 use hyper::drivers::timer::arm_generic::{CONTROL_STATUS, VirtualTimerState};
-use hyper::hal::timer::{
-    DeadlineTimer, MonotonicCounter, PeriodicTimer, PeriodicTimerProperties, deadline_reached,
-};
-use hyper::sync::atomic::{AtomicU64, Ordering};
+use hyper::hal::timer::{DeadlineTimer, MonotonicCounter};
 
 use super::registers;
-
-const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
-
-static INTERVAL: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static NEXT_DEADLINE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidFrequency,
     InvalidCpuIndex,
-    NotStarted,
 }
 
 /// The physical system counter shared by all processing elements.
@@ -64,60 +55,9 @@ impl DeadlineTimer for El2PhysicalTimer {
     }
 }
 
-impl PeriodicTimer for El2PhysicalTimer {
-    type Error = Error;
-
-    fn start(ticks_per_second: u32) -> Result<PeriodicTimerProperties, Self::Error> {
-        let cpu = current_cpu()?;
-        let frequency = ArmGenericCounter::frequency_hz()?;
-        if ticks_per_second == 0 {
-            return Err(Error::InvalidFrequency);
-        }
-        let interval = frequency / u64::from(ticks_per_second);
-        if interval == 0 {
-            return Err(Error::InvalidFrequency);
-        }
-        let deadline = physical_count().wrapping_add(interval);
-        INTERVAL[cpu].store(interval, Ordering::Release);
-        NEXT_DEADLINE[cpu].store(deadline, Ordering::Release);
-        Self::set_deadline(deadline)?;
-        Ok(PeriodicTimerProperties {
-            counter_frequency_hz: frequency,
-            interval_ticks: interval,
-        })
-    }
-
-    fn handle_interrupt() -> Result<(), Self::Error> {
-        let cpu = current_cpu()?;
-        let interval = INTERVAL[cpu].load(Ordering::Acquire);
-        if interval == 0 {
-            return Err(Error::NotStarted);
-        }
-        let previous = NEXT_DEADLINE[cpu].load(Ordering::Relaxed);
-        let now = physical_count();
-        let elapsed = now.wrapping_sub(previous);
-        let periods = if deadline_reached(now, previous) {
-            elapsed / interval + 1
-        } else {
-            1
-        };
-        let deadline = previous.wrapping_add(interval.wrapping_mul(periods));
-        NEXT_DEADLINE[cpu].store(deadline, Ordering::Relaxed);
-        write_deadline(deadline);
-        Ok(())
-    }
-
-    fn stop() {
-        Self::disable();
-        if let Ok(cpu) = current_cpu() {
-            INTERVAL[cpu].store(0, Ordering::Release);
-        }
-    }
-}
-
 fn current_cpu() -> Result<usize, Error> {
     let cpu = super::current_cpu_index();
-    (cpu < MAX_CPUS)
+    (cpu < hyper::config::MAX_CPUS as usize)
         .then_some(cpu)
         .ok_or(Error::InvalidCpuIndex)
 }

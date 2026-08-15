@@ -120,6 +120,137 @@ mod generic_timer {
 }
 
 #[cfg(test)]
+mod software_timers {
+    use hyper::time::{DeadlineQueue, TimerEvent, TimerMode, TimerQueueError};
+
+    fn callback(_: TimerEvent, _: usize) {}
+
+    #[test]
+    fn orders_cancels_and_reschedules_deadlines() {
+        let mut queue = DeadlineQueue::<4>::new();
+        let late = super::require_ok(queue.schedule(30, TimerMode::OneShot, callback, 30));
+        let early = super::require_ok(queue.schedule(10, TimerMode::OneShot, callback, 10));
+        let cancelled = super::require_ok(queue.schedule(20, TimerMode::OneShot, callback, 20));
+        super::require_ok(queue.reschedule(late, 5));
+        super::require_ok(queue.cancel(cancelled));
+
+        assert!(queue.pop_expired(4).is_none());
+        let (event, _, context) = super::require_some(queue.pop_expired(5));
+        assert_eq!(event.handle, late);
+        assert_eq!(context, 30);
+        assert_eq!(queue.cancel(late), Err(TimerQueueError::InvalidHandle));
+        let (event, _, context) = super::require_some(queue.pop_expired(10));
+        assert_eq!(event.handle, early);
+        assert_eq!(context, 10);
+        assert_eq!(queue.next_deadline(), None);
+
+        let stats = queue.stats();
+        assert_eq!(stats.peak_timers, 3);
+        assert_eq!(stats.cancellations, 1);
+        assert_eq!(stats.reschedules, 1);
+        assert_eq!(stats.callbacks, 2);
+    }
+
+    #[test]
+    fn periodic_timer_preserves_phase_and_reports_overruns() {
+        let mut queue = DeadlineQueue::<2>::new();
+        let periodic = super::require_ok(queue.schedule(
+            100,
+            TimerMode::Periodic { interval: 10 },
+            callback,
+            7,
+        ));
+
+        let (event, _, context) = super::require_some(queue.pop_expired(135));
+        assert_eq!(event.handle, periodic);
+        assert_eq!(event.deadline, 100);
+        assert_eq!(event.overruns, 3);
+        assert_eq!(context, 7);
+        assert_eq!(queue.next_deadline(), Some(140));
+        super::require_ok(queue.cancel(periodic));
+        assert_eq!(queue.stats().overruns, 3);
+    }
+
+    #[test]
+    fn preserves_fifo_order_for_equal_deadlines() {
+        let mut queue = DeadlineQueue::<3>::new();
+        for context in 1..=3 {
+            super::require_ok(queue.schedule(10, TimerMode::OneShot, callback, context));
+        }
+        for expected in 1..=3 {
+            let (_, _, context) = super::require_some(queue.pop_expired(10));
+            assert_eq!(context, expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_periodic_intervals() {
+        let mut queue = DeadlineQueue::<2>::new();
+        assert_eq!(
+            queue.schedule(
+                10,
+                TimerMode::Periodic { interval: 0 },
+                callback,
+                0,
+            ),
+            Err(TimerQueueError::InvalidInterval)
+        );
+        assert_eq!(
+            queue.schedule(
+                10,
+                TimerMode::Periodic {
+                    interval: 1u64 << 63,
+                },
+                callback,
+                0,
+            ),
+            Err(TimerQueueError::InvalidInterval)
+        );
+        assert_eq!(queue.stats().schedule_failures, 2);
+        assert_eq!(queue.stats().active_timers, 0);
+    }
+
+    #[test]
+    fn rejects_stale_handles_and_capacity_overflow() {
+        let mut queue = DeadlineQueue::<1>::new();
+        let old = super::require_ok(queue.schedule(1, TimerMode::OneShot, callback, 0));
+        assert_eq!(
+            queue.schedule(2, TimerMode::OneShot, callback, 0),
+            Err(TimerQueueError::Full)
+        );
+        super::require_ok(queue.cancel(old));
+        let replacement = super::require_ok(queue.schedule(3, TimerMode::OneShot, callback, 0));
+        assert_ne!(replacement, old);
+        assert_eq!(queue.cancel(old), Err(TimerQueueError::InvalidHandle));
+
+        let mut other_queue = DeadlineQueue::<1>::with_id(1);
+        assert_eq!(
+            other_queue.cancel(replacement),
+            Err(TimerQueueError::InvalidHandle)
+        );
+    }
+
+    #[test]
+    fn compares_deadlines_across_counter_wraparound() {
+        let mut queue = DeadlineQueue::<2>::new();
+        let before_wrap = super::require_ok(queue.schedule(
+            u64::MAX - 2,
+            TimerMode::OneShot,
+            callback,
+            1,
+        ));
+        let after_wrap =
+            super::require_ok(queue.schedule(3, TimerMode::OneShot, callback, 2));
+
+        assert_eq!(
+            super::require_some(queue.pop_expired(u64::MAX - 1)).0.handle,
+            before_wrap
+        );
+        assert_eq!(super::require_some(queue.pop_expired(3)).0.handle, after_wrap);
+    }
+}
+
+#[cfg(test)]
 mod cpio {
     use hyper::archive::cpio::{Archive, EntryKind, Error};
     use hyper::vm::bundle;

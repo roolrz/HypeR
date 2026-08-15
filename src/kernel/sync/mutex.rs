@@ -1,0 +1,146 @@
+//! FIFO sleeping mutex with direct ownership handoff.
+
+use core::cell::UnsafeCell;
+use core::marker::PhantomData;
+use core::ops::{Deref, DerefMut};
+
+use hyper::sync::InterruptSpinLock;
+
+use super::Error;
+use crate::kernel::task::WaitQueue;
+use crate::kernel::task::scheduler;
+use crate::kernel::task::thread::ThreadId;
+
+type StateLock = InterruptSpinLock<State, crate::arch::LocalInterruptMask>;
+
+struct State {
+    owner: Option<ThreadId>,
+    waiters: WaitQueue,
+}
+
+/// A thread-context mutex. Contended acquisition blocks instead of spinning.
+pub struct Mutex<T: ?Sized> {
+    state: StateLock,
+    value: UnsafeCell<T>,
+}
+
+pub struct MutexGuard<'mutex, T: ?Sized> {
+    mutex: &'mutex Mutex<T>,
+    // A guard must be released by the thread that acquired it.
+    not_send: PhantomData<*mut ()>,
+}
+
+impl<T> Mutex<T> {
+    pub const fn new(value: T) -> Self {
+        Self {
+            state: StateLock::new(State {
+                owner: None,
+                waiters: WaitQueue::new(),
+            }),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+}
+
+impl<T: ?Sized> Mutex<T> {
+    pub fn lock(&self) -> Result<MutexGuard<'_, T>, Error> {
+        scheduler::ensure_sleepable()?;
+        let current = scheduler::current_thread_id()?;
+        let park = self.state.with(|state| match state.owner {
+            None => {
+                state.owner = Some(current);
+                Ok(None)
+            }
+            Some(owner) if owner == current => Err(Error::WouldDeadlock),
+            Some(_) => scheduler::prepare_park_locked(&state.waiters)
+                .map(Some)
+                .map_err(Error::from),
+        })?;
+        if let Some(token) = park {
+            scheduler::complete_park(token);
+        }
+        Ok(MutexGuard {
+            mutex: self,
+            not_send: PhantomData,
+        })
+    }
+
+    pub fn try_lock(&self) -> Result<Option<MutexGuard<'_, T>>, Error> {
+        scheduler::ensure_sleepable()?;
+        let current = scheduler::current_thread_id()?;
+        self.state.with(|state| match state.owner {
+            None => {
+                state.owner = Some(current);
+                Ok(Some(MutexGuard {
+                    mutex: self,
+                    not_send: PhantomData,
+                }))
+            }
+            Some(owner) if owner == current => Err(Error::WouldDeadlock),
+            Some(_) => Ok(None),
+        })
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.state.with(|state| state.owner.is_some())
+    }
+
+    pub fn waiter_count(&self) -> Result<usize, Error> {
+        self.state
+            .with(|state| state.waiters.len().map_err(Error::from))
+    }
+
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
+    fn unlock(&self) -> Result<(), Error> {
+        let current = scheduler::current_thread_id()?;
+        self.state.with(|state| {
+            if state.owner != Some(current) {
+                return Err(Error::NotOwner);
+            }
+            let waiters = &state.waiters;
+            let owner = &mut state.owner;
+            if scheduler::wake_one_with(waiters, |next| *owner = Some(next))?.is_none() {
+                *owner = None;
+            }
+            Ok(())
+        })
+    }
+}
+
+impl<T: ?Sized> Deref for MutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The scheduler assigns one owner and transfers ownership
+        // directly to exactly one FIFO waiter before it becomes runnable.
+        unsafe { &*self.mutex.value.get() }
+    }
+}
+
+impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: A MutexGuard is unique to the current owner.
+        unsafe { &mut *self.mutex.value.get() }
+    }
+}
+
+impl<T: ?Sized> Drop for MutexGuard<'_, T> {
+    fn drop(&mut self) {
+        if let Err(error) = self.mutex.unlock() {
+            crate::pr_crit!("HypeR: sleeping mutex unlock invariant failed: {error:?}");
+            crate::arch::halt()
+        }
+    }
+}
+
+// SAFETY: Ownership is serialized by StateLock and the scheduler handoff.
+unsafe impl<T: ?Sized + Send> Send for Mutex<T> {}
+// SAFETY: Shared access to T is possible only through the unique owner guard.
+unsafe impl<T: ?Sized + Send> Sync for Mutex<T> {}

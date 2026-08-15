@@ -30,6 +30,7 @@ pub use gic::{
 pub use hyper::drivers::power::psci::Error as CpuPowerError;
 pub use interrupts::{
     LocalInterruptMask, disable_all as disable_local_interrupts, enable_irq as enable_local_irq,
+    irq_enabled as local_irq_enabled,
 };
 pub use kaslr::select as select_kaslr_layout;
 pub use memory::{
@@ -117,6 +118,12 @@ pub fn wait_for_interrupt() {
     // SAFETY: WFI only suspends this processing element until an event or
     // interrupt occurs and does not access memory.
     unsafe { core::arch::asm!("wfi", options(nomem, nostack, preserves_flags)) };
+}
+
+/// Suspends until an event or interrupt; paired with `send_event` for work.
+pub fn wait_for_event() {
+    // SAFETY: WFE only affects the current processing element's event state.
+    unsafe { core::arch::asm!("wfe", options(nomem, nostack, preserves_flags)) };
 }
 
 /// Rust continuation used while the architecture bootstrap is still active.

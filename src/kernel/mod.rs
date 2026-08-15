@@ -8,6 +8,7 @@ pub mod device;
 pub mod irq;
 pub mod log;
 pub mod mm;
+pub mod sync;
 pub mod task;
 pub mod time;
 pub mod vm;

@@ -21,6 +21,8 @@ else
 KALLSYMS_STORAGE_SIZE := 786432
 endif
 
+CARGO_FEATURES ?=
+
 KERNEL_ELF := target/$(TARGET)/$(PROFILE)/hyper
 KERNEL_IMAGE := target/$(TARGET)/$(PROFILE)/hyper.img
 KCONFIG_MANIFEST := tools/kconfig/Cargo.toml
@@ -58,7 +60,7 @@ clean-guest-assets:
 	rm -f $(GUEST_OUTPUT)/Image $(GUEST_OUTPUT)/initramfs.cpio.gz $(GUEST_OUTPUT)/alpine.cpio $(HOST_INITRD) $(GUEST_ASSET_STAMP)
 
 build: .config
-	cargo build $(CARGO_PROFILE)
+	cargo build $(CARGO_PROFILE) $(CARGO_FEATURES)
 
 image: build
 	cargo run --quiet --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET) -- $(NM) $(KERNEL_ELF) $(KALLSYMS_BLOB) $(KALLSYMS_STORAGE_SIZE)
@@ -69,6 +71,7 @@ image: build
 check: .config
 	cargo check --lib --bins --target $(TARGET)
 	cargo clippy --target $(TARGET) -- -D warnings
+	cargo clippy --target $(TARGET) --features kernel-self-test -- -D warnings
 	cargo clippy --manifest-path $(HOST_TEST_MANIFEST) --target $(HOST_TARGET) -- -D warnings
 	cargo clippy --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET) -- -D warnings
 	cargo clippy --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET) -- -D warnings
@@ -96,8 +99,12 @@ test-image:
 test-timer: image guest-assets
 	sh tests/qemu/verify-timer.sh $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
+test-timer: CARGO_FEATURES=--features kernel-self-test
+
 test-qemu: image guest-assets
 	sh tests/qemu/verify-smp.sh $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
+
+test-qemu: CARGO_FEATURES=--features kernel-self-test
 
 # Compatibility targets build the image before running the corresponding test.
 verify-image: image

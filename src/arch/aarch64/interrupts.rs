@@ -55,6 +55,20 @@ pub fn enable_irq() {
     };
 }
 
+/// Reports whether ordinary IRQ exceptions are currently unmasked.
+pub fn irq_enabled() -> bool {
+    let state: u64;
+    // SAFETY: Reading DAIF has no side effects and is valid at EL2.
+    unsafe {
+        asm!(
+            "mrs {state}, daif",
+            state = out(reg) state,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    state & registers::SPSR_I == 0
+}
+
 /// Masks every local exception class for irreversible crash handling.
 pub fn disable_all() {
     // SAFETY: Crash handling never restores execution after applying the mask.

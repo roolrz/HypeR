@@ -7,6 +7,10 @@ license = "Apache-2.0"
 description = "A modular, Rust-based type-1 hypervisor kernel"
 publish = false
 
+[features]
+default = []
+kernel-self-test = []
+
 [lib]
 test = false
 bench = false

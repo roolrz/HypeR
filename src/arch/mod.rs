@@ -22,8 +22,8 @@ pub use aarch64::{
     bootstrap_stack_bounds, broadcast_crash_stop, capture_crash_context, crash_stop_interrupt,
     current_cpu_index, current_gic_affinity, current_hardware_id, decode_platform_interrupt,
     disable_local_interrupts, disable_vgic, enable_local_irq, halt, initialize_cpu_power,
-    install_runtime_vectors, is_crash_stop_interrupt, prepare_address_space,
+    install_runtime_vectors, is_crash_stop_interrupt, local_irq_enabled, prepare_address_space,
     secondary_cpu_is_compatible, secondary_entry_physical, select_kaslr_layout, send_event,
     switch_thread_context, validate_runtime_vectors, validate_vgic, validate_vsysreg,
-    vgic_maintenance_state, wait_for_interrupt,
+    vgic_maintenance_state, wait_for_event,
 };

@@ -2,6 +2,9 @@
 
 pub mod scheduler;
 pub mod thread;
+mod wait;
+
+pub use wait::WaitQueue;
 
 /// Creates the bootstrap scheduling context and initial run queue.
 pub(crate) fn initialize() {

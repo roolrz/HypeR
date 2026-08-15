@@ -1,10 +1,4 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PeriodicTimerProperties {
-    pub counter_frequency_hz: u64,
-    pub interval_ticks: u64,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConversionError {
     InvalidFrequency,
     Overflow,
@@ -59,13 +53,4 @@ pub fn ticks_to_nanoseconds(ticks: u64, frequency_hz: u64) -> Result<u64, Conver
 /// period apart.
 pub const fn deadline_reached(current: u64, deadline: u64) -> bool {
     (current.wrapping_sub(deadline) as i64) >= 0
-}
-
-/// Architecture policy for the kernel's per-CPU periodic tick source.
-pub trait PeriodicTimer {
-    type Error;
-
-    fn start(ticks_per_second: u32) -> Result<PeriodicTimerProperties, Self::Error>;
-    fn handle_interrupt() -> Result<(), Self::Error>;
-    fn stop();
 }

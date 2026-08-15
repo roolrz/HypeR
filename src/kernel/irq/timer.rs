@@ -1,7 +1,7 @@
 //! Kernel tick registration and interrupt handling.
 
 use hyper::hal::interrupt::{InterruptId, InterruptTrigger};
-use hyper::hal::timer::{PeriodicTimer, PeriodicTimerProperties};
+use hyper::hal::timer::MonotonicCounter;
 use hyper::platform::{PlatformInterrupt, PlatformInterruptTrigger, TimerInfo, TimerKind};
 use hyper::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
@@ -100,13 +100,14 @@ pub fn initialize(info: TimerInfo, domain: IrqDomainId) -> Result<Capabilities, 
         let _ = super::interrupt::unmap(virtual_interrupt);
         return Err(error.into());
     }
-    let registration = match super::interrupt::register_shared(virtual_interrupt, 0, handle_tick) {
-        Ok(registration) => registration,
-        Err(error) => {
-            let _ = super::interrupt::unmap(virtual_interrupt);
-            return Err(error.into());
-        }
-    };
+    let registration =
+        match super::interrupt::register_shared(virtual_interrupt, 0, handle_host_timer) {
+            Ok(registration) => registration,
+            Err(error) => {
+                let _ = super::interrupt::unmap(virtual_interrupt);
+                return Err(error.into());
+            }
+        };
     let shared_registration =
         match super::interrupt::register_shared(virtual_interrupt, 0, shared_probe) {
             Ok(registration) => registration,
@@ -116,24 +117,12 @@ pub fn initialize(info: TimerInfo, domain: IrqDomainId) -> Result<Capabilities, 
                 return Err(error.into());
             }
         };
-    let PeriodicTimerProperties {
-        counter_frequency_hz,
-        ..
-    } = match crate::arch::ArchitectureTimer::start(TICKS_PER_SECOND) {
-        Ok(properties) => properties,
-        Err(error) => {
-            let _ = super::interrupt::unregister(shared_registration);
-            let _ = super::interrupt::unregister(registration);
-            let _ = super::interrupt::unmap(virtual_interrupt);
-            return Err(error.into());
-        }
-    };
-    if counter_frequency_hz != crate::kernel::time::counter_frequency_hz()? {
-        crate::arch::ArchitectureTimer::stop();
+    let counter_frequency_hz = crate::kernel::time::counter_frequency_hz()?;
+    if let Err(error) = start_local_tick(counter_frequency_hz) {
         let _ = super::interrupt::unregister(shared_registration);
         let _ = super::interrupt::unregister(registration);
         let _ = super::interrupt::unmap(virtual_interrupt);
-        return Err(Error::InconsistentCounterFrequency);
+        return Err(error);
     }
     Ok(Capabilities {
         ticks_per_second: TICKS_PER_SECOND,
@@ -155,12 +144,7 @@ pub fn initialize_local_cpu() -> Result<(), Error> {
     if crate::arch::current_cpu_index() >= MAX_CPUS {
         return Err(Error::InvalidCpuIndex);
     }
-    let properties = crate::arch::ArchitectureTimer::start(TICKS_PER_SECOND)?;
-    if properties.counter_frequency_hz != crate::kernel::time::counter_frequency_hz()? {
-        crate::arch::ArchitectureTimer::stop();
-        return Err(Error::InconsistentCounterFrequency);
-    }
-    Ok(())
+    start_local_tick(crate::kernel::time::counter_frequency_hz()?)
 }
 
 /// Publishes the stable online CPU count used for timer health observation.
@@ -169,6 +153,7 @@ pub fn set_online_cpu_count(count: usize) -> Result<(), Error> {
         return Err(Error::InvalidCpuIndex);
     }
     ONLINE_CPU_COUNT.store(count, Ordering::Release);
+    report_timer_health_once();
     Ok(())
 }
 
@@ -192,20 +177,39 @@ fn handle_guest_virtual_timer(_interrupt: VirtualInterrupt, _context: usize) -> 
     }
 }
 
-fn handle_tick(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
-    if let Err(error) = crate::arch::ArchitectureTimer::handle_interrupt() {
+fn handle_host_timer(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
+    if let Err(error) = crate::kernel::time::handle_timer_interrupt() {
         super::exception::fatal_timer(error);
     }
+    HandlerResult::Handled
+}
+
+fn start_local_tick(counter_frequency_hz: u64) -> Result<(), Error> {
+    if crate::arch::ArchitectureCounter::frequency_hz()? != counter_frequency_hz {
+        return Err(Error::InconsistentCounterFrequency);
+    }
+    let interval = counter_frequency_hz / u64::from(TICKS_PER_SECOND);
+    if interval == 0 {
+        return Err(crate::arch::TimerError::InvalidFrequency.into());
+    }
+    crate::kernel::time::initialize_local_timer_queue()?;
+    let first_deadline = crate::kernel::time::monotonic_ticks().wrapping_add(interval);
+    let _ =
+        crate::kernel::time::schedule_periodic(first_deadline, interval, handle_periodic_tick, 0)?;
+    Ok(())
+}
+
+fn handle_periodic_tick(event: crate::kernel::time::TimerEvent, _context: usize) {
     let cpu = crate::arch::current_cpu_index();
     if cpu >= MAX_CPUS {
         super::exception::fatal_timer(crate::arch::TimerError::InvalidCpuIndex);
     }
-    let tick = TICK_COUNT[cpu].fetch_add(1, Ordering::Relaxed) + 1;
-    if tick == 3 {
+    let periods = event.overruns.saturating_add(1);
+    let previous = TICK_COUNT[cpu].fetch_add(periods, Ordering::Relaxed);
+    if previous < 3 && previous.saturating_add(periods) >= 3 {
         RECURRING_IRQ_OBSERVED[cpu].store(true, Ordering::Release);
         report_timer_health_once();
     }
-    HandlerResult::Handled
 }
 
 fn report_timer_health_once() {

@@ -26,6 +26,30 @@ impl ThreadId {
     }
 }
 
+pub const THREAD_PRIORITY_LEVELS: usize = 32;
+
+/// Fixed scheduler priority. Lower numeric values run first.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ThreadPriority(u8);
+
+impl ThreadPriority {
+    pub const HIGHEST: Self = Self(0);
+    pub const NORMAL: Self = Self(16);
+    pub const LOWEST: Self = Self((THREAD_PRIORITY_LEVELS - 1) as u8);
+
+    pub const fn new(value: u8) -> Option<Self> {
+        if (value as usize) < THREAD_PRIORITY_LEVELS {
+            Some(Self(value))
+        } else {
+            None
+        }
+    }
+
+    pub const fn get(self) -> u8 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ThreadState {
     Dormant,
@@ -34,6 +58,28 @@ pub enum ThreadState {
     Idle,
     Blocked,
     Terminated,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QueueMembership {
+    None,
+    Ready { cpu: usize, priority: u8 },
+    Waiting { queue: usize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct QueueLinks {
+    pub previous: Option<ThreadId>,
+    pub next: Option<ThreadId>,
+    pub membership: QueueMembership,
+}
+
+impl QueueLinks {
+    pub(crate) const EMPTY: Self = Self {
+        previous: None,
+        next: None,
+        membership: QueueMembership::None,
+    };
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,7 +136,9 @@ pub struct Thread {
     id: ThreadId,
     cpu_index: usize,
     name: ThreadName,
+    priority: ThreadPriority,
     state: ThreadState,
+    queue_links: QueueLinks,
     context: crate::arch::ThreadContext,
     kernel_stack: Option<KernelStack>,
     execution: ThreadExecution,
@@ -106,7 +154,9 @@ impl Thread {
             id: ThreadId::BOOTSTRAP,
             cpu_index,
             name,
+            priority: ThreadPriority::NORMAL,
             state: ThreadState::Running,
+            queue_links: QueueLinks::EMPTY,
             context: crate::arch::ThreadContext::empty(),
             kernel_stack: None,
             execution: ThreadExecution::Kernel,
@@ -127,7 +177,9 @@ impl Thread {
             id,
             cpu_index,
             name: ThreadName::new(name)?,
+            priority: ThreadPriority::NORMAL,
             state: ThreadState::Dormant,
+            queue_links: QueueLinks::EMPTY,
             context,
             kernel_stack: Some(stack),
             execution: ThreadExecution::Kernel,
@@ -140,7 +192,9 @@ impl Thread {
             id,
             cpu_index,
             name: ThreadName::new(name)?,
+            priority: ThreadPriority::NORMAL,
             state: ThreadState::Running,
+            queue_links: QueueLinks::EMPTY,
             context: crate::arch::ThreadContext::empty(),
             kernel_stack: Some(KernelStack::allocate(DEFAULT_KERNEL_STACK_SIZE)?),
             execution: ThreadExecution::Kernel,
@@ -196,7 +250,9 @@ impl Thread {
             id,
             cpu_index,
             name: ThreadName::new(name)?,
+            priority: ThreadPriority::NORMAL,
             state: ThreadState::Dormant,
+            queue_links: QueueLinks::EMPTY,
             context: crate::arch::ThreadContext::empty(),
             kernel_stack: Some(KernelStack::allocate(DEFAULT_KERNEL_STACK_SIZE)?),
             execution,
@@ -223,8 +279,24 @@ impl Thread {
         self.state
     }
 
+    pub const fn priority(&self) -> ThreadPriority {
+        self.priority
+    }
+
+    pub(crate) fn set_priority(&mut self, priority: ThreadPriority) {
+        self.priority = priority;
+    }
+
     pub fn set_state(&mut self, state: ThreadState) {
         self.state = state;
+    }
+
+    pub(crate) const fn queue_links(&self) -> QueueLinks {
+        self.queue_links
+    }
+
+    pub(crate) fn set_queue_links(&mut self, links: QueueLinks) {
+        self.queue_links = links;
     }
 
     pub fn context(&self) -> &crate::arch::ThreadContext {

@@ -35,7 +35,7 @@ pub fn fatal_interrupt(reason: &str, interrupt: Option<InterruptId>) -> ! {
     }
 }
 
-pub fn fatal_timer(error: crate::arch::TimerError) -> ! {
+pub fn fatal_timer(error: impl fmt::Debug) -> ! {
     enter_fatal(format_args!("HypeR: fatal timer interrupt: {error:?}"))
 }
 

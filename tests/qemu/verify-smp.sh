@@ -53,11 +53,14 @@ pid=$!
 attempt=0
 while [ "$attempt" -lt 300 ]; do
     if [ "$input_sent" = false ] && grep -q 'HypeR guest: Linux userspace is running' "$log"; then
-        printf 'hyper-console-input\n' >&3
+        # BusyBox ash asks the terminal for the cursor position before reading
+        # its first command. Answer that query, then exercise guest RX.
+        printf '\033[1;1Recho RX_OK\n' >&3
         input_sent=true
     fi
     if grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
         grep -q 'HypeR: scheduler active on bootstrap thread 0' "$log" &&
+        grep -q 'HypeR test: scheduler ready/wait queues and sleeping sync passed' "$log" &&
         grep -q 'HypeR: kallsyms resolved hyper_kallsyms_lookup at 0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR: kernel log ring: 65536 bytes, 0 records dropped' "$log" &&
         grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
@@ -81,7 +84,7 @@ while [ "$attempt" -lt 300 ]; do
         grep -q 'Run /init as init process' "$log" &&
         grep -q 'HypeR guest: /init reached' "$log" &&
         grep -q 'HypeR guest: Linux userspace is running' "$log" &&
-        grep -q 'HypeR guest: console input: hyper-console-input' "$log"; then
+        grep -q '^RX_OK' "$log"; then
         kaslr_base=$(sed -n 's/.*randomized kernel base \(0x[0-9a-f][0-9a-f]*\),.*/\1/p' "$log" | tail -n 1)
         kaslr_offset=$(sed -n 's/.*KASLR offset \(0x[0-9a-f][0-9a-f]*\).*/\1/p' "$log" | tail -n 1)
         kaslr_base_value=$((kaslr_base))

@@ -50,6 +50,7 @@ while [ "$attempt" -lt 300 ]; do
         grep -q 'HypeR: periodic timer IRQs active on 4 CPUs' "$log" &&
         grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
         grep -q 'HypeR: scheduler active on bootstrap thread 0' "$log" &&
+        grep -q 'HypeR test: scheduler ready/wait queues and sleeping sync passed' "$log" &&
         grep -q 'HypeR: Arm Generic Timer: EL2 INTID 26, guest virtual INTID 27 (host VIRQ [0-9][0-9]*), [1-9][0-9]* Hz tick from a [1-9][0-9]* Hz counter' "$log" &&
         grep -q 'HypeR: monotonic clocksource active at [1-9][0-9]* Hz' "$log" &&
         grep -q 'HypeR: virtual architected timer injection validated' "$log" &&

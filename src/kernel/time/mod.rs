@@ -1,5 +1,13 @@
 //! Architecture-independent monotonic timekeeping.
 
+mod timers;
+
+pub use timers::{
+    QueueStats as TimerQueueStats, TimerCallback, TimerEvent, TimerHandle, TimerMode, cancel,
+    local_statistics as timer_statistics, reschedule, schedule_after, schedule_at,
+    schedule_periodic,
+};
+
 use hyper::hal::timer::{
     ConversionError, MonotonicCounter, nanoseconds_to_ticks, ticks_to_nanoseconds,
 };
@@ -13,7 +21,11 @@ pub enum Error {
     Architecture(crate::arch::TimerError),
     Conversion(ConversionError),
     DeadlineTooFar,
+    InvalidCpuIndex,
     NotInitialized,
+    TimerQueue(hyper::time::TimerQueueError),
+    TimerQueueAlreadyInitialized,
+    TimerQueueNotInitialized,
 }
 
 impl From<crate::arch::TimerError> for Error {
@@ -53,6 +65,14 @@ pub(crate) fn initialize_timekeeping() {
         "HypeR: monotonic clocksource active at {} Hz",
         capabilities.counter_frequency_hz
     );
+}
+
+pub(crate) fn initialize_local_timer_queue() -> Result<(), Error> {
+    timers::initialize_local()
+}
+
+pub(crate) fn handle_timer_interrupt() -> Result<usize, Error> {
+    timers::handle_interrupt()
 }
 
 pub fn counter_frequency_hz() -> Result<u64, Error> {
