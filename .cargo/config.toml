@@ -10,6 +10,7 @@ rustflags = [
     "-C", "link-arg=-z",
     "-C", "link-arg=norelro",
     "-C", "link-arg=--pack-dyn-relocs=relr",
+    "-C", "link-arg=--export-dynamic",
     "-C", "relocation-model=pic",
     "-C", "target-feature=+outline-atomics",
     "-C", "force-frame-pointers=yes",

@@ -525,6 +525,58 @@ mod kaslr {
 }
 
 #[cfg(test)]
+mod kallsyms {
+    use hyper::kallsyms::{Error, SymbolTable};
+
+    fn symbol(name: u32, info: u8, section: u16, value: u64, size: u64) -> [u8; 24] {
+        let mut bytes = [0u8; 24];
+        bytes[0..4].copy_from_slice(&name.to_le_bytes());
+        bytes[4] = info;
+        bytes[6..8].copy_from_slice(&section.to_le_bytes());
+        bytes[8..16].copy_from_slice(&value.to_le_bytes());
+        bytes[16..24].copy_from_slice(&size.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn resolves_the_nearest_preceding_runtime_function() {
+        let mut symbols = Vec::new();
+        symbols.extend_from_slice(&symbol(0, 0, 0, 0, 0));
+        symbols.extend_from_slice(&symbol(1, 2, 1, 0x100, 0x40));
+        symbols.extend_from_slice(&symbol(7, 2, 1, 0x180, 0x20));
+        let table = super::require_ok(SymbolTable::new(
+            &symbols,
+            b"\0first\0second\0",
+            0xff00_2000_0000,
+            0x1000,
+        ));
+
+        let resolved = super::require_some(super::require_ok(table.lookup(0xff00_2000_0118)));
+        assert_eq!(resolved.name, "first");
+        assert_eq!(resolved.address, 0xff00_2000_0100);
+        assert_eq!(resolved.size, 0x40);
+        assert_eq!(resolved.offset, 0x18);
+
+        let resolved = super::require_some(super::require_ok(table.lookup(0xff00_2000_0188)));
+        assert_eq!(resolved.name, "second");
+        assert_eq!(resolved.offset, 8);
+        assert!(super::require_ok(table.lookup(0x100)).is_none());
+    }
+
+    #[test]
+    fn rejects_malformed_symbol_metadata() {
+        assert!(matches!(
+            SymbolTable::new(&[0; 23], b"\0", 0, 0x1000),
+            Err(Error::InvalidSymbolTable)
+        ));
+        assert!(matches!(
+            SymbolTable::new(&[0; 24], b"bad", 0, 0x1000),
+            Err(Error::InvalidStringTable)
+        ));
+    }
+}
+
+#[cfg(test)]
 mod kernel_log {
     use hyper::log::{Level, ReadResult, RecordFlags, RingBuffer};
 

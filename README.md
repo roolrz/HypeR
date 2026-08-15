@@ -100,6 +100,22 @@ the physical-to-virtual slide to every RELR location, publishes the writes, and
 branches back to Rust at the randomized alias. Secondary-CPU trampoline address
 recovery uses the selected base rather than a compile-time VA.
 
+## Runtime symbol lookup
+
+The kernel image retains an allocated ELF `.dynsym/.dynstr` pair through lld's
+export-dynamic mode. Linker boundaries keep both tables in the permanent
+read-only image mapping. The architecture-independent `hyper::kallsyms` parser
+validates little-endian ELF64 entries and resolves the nearest preceding
+defined function without allocation, locks, a filesystem, or DWARF.
+
+`kernel::debug::kallsyms::lookup(address)` converts a runtime PC through the
+actual KASLR base and returns the raw symbol name, runtime start, declared size,
+and function offset. `Symbol` formats in `name+offset/size` form. Rust v0 names
+are intentionally returned as stored; demangling is a presentation-layer
+concern and must not make lookup itself allocate. Initialization verifies the
+mechanism by resolving the randomized address of the exported
+`hyper_kallsyms_lookup` entry.
+
 ## Kernel configuration
 
 The root `Kconfig` declares typed kernel options. The in-tree, dependency-free

@@ -2,6 +2,7 @@
 
 mod boot;
 pub mod cpu;
+pub mod debug;
 pub mod device;
 pub mod irq;
 pub mod log;

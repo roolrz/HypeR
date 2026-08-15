@@ -137,6 +137,20 @@ pub fn finish_boot() -> ! {
     if let Err(error) = verify_rust_allocator_interface() {
         boot_failure("Rust allocator interface validation", error);
     }
+    let kallsyms_lookup_address = crate::kernel::debug::kallsyms::lookup as *const () as usize;
+    let kallsyms_symbol = match crate::kernel::debug::kallsyms::lookup(kallsyms_lookup_address) {
+        Ok(Some(symbol)) => symbol,
+        Ok(None) => boot_failure("kallsyms self lookup", "symbol not found"),
+        Err(error) => boot_failure("kallsyms self lookup", error),
+    };
+    if kallsyms_symbol.name != "hyper_kallsyms_lookup" || kallsyms_symbol.offset != 0 {
+        boot_failure("kallsyms self lookup", kallsyms_symbol);
+    }
+    crate::println!(
+        "HypeR: kallsyms resolved {} at {:#x}",
+        kallsyms_symbol.name,
+        kallsyms_symbol.address
+    );
     let scheduler_capabilities = match task::scheduler::initialize() {
         Ok(capabilities) => capabilities,
         Err(error) => boot_failure("scheduler initialization", error),

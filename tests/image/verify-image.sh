@@ -32,6 +32,9 @@ dynamic=$($readobj --dynamic-table "$elf")
 printf '%s\n' "$dynamic" | grep -q ' RELR '
 printf '%s\n' "$dynamic" | grep -q ' RELRSZ '
 printf '%s\n' "$dynamic" | grep -q ' RELRENT '
+printf '%s\n' "$sections" | grep -q 'Name: .dynsym'
+printf '%s\n' "$sections" | grep -q 'Type: SHT_DYNSYM'
+printf '%s\n' "$sections" | grep -q 'Name: .dynstr'
 
 magic=$(dd if="$image" bs=1 skip=56 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
 if [ "$magic" != "41524d64" ]; then
@@ -53,6 +56,10 @@ fi
 symbols=$($nm -a "$elf")
 printf '%s\n' "$symbols" | grep -q '__relr_dyn_start'
 printf '%s\n' "$symbols" | grep -q '__relr_dyn_end'
+printf '%s\n' "$symbols" | grep -q '__kallsyms_symbols_start'
+printf '%s\n' "$symbols" | grep -q '__kallsyms_symbols_end'
+printf '%s\n' "$symbols" | grep -q '__kallsyms_strings_start'
+printf '%s\n' "$symbols" | grep -q '__kallsyms_strings_end'
 printf '%s\n' "$symbols" | grep -q '__aarch64_have_lse_atomics'
 printf '%s\n' "$symbols" | grep -q '__aarch64_cas1_acq_rel'
 
@@ -61,4 +68,7 @@ printf '%s\n' "$instructions" | grep -Eq '[[:space:]]cas(al|a|l)?b[[:space:]]'
 printf '%s\n' "$instructions" | grep -Eq '[[:space:]]ldaxrb[[:space:]]'
 printf '%s\n' "$instructions" | grep -Eq '[[:space:]]stl?xrb[[:space:]]'
 
-echo "verified PIE image, RELA/RELR metadata, Linux header, and runtime atomic paths"
+dynamic_symbols=$($nm -D --defined-only "$elf")
+printf '%s\n' "$dynamic_symbols" | grep -q ' hyper_kallsyms_lookup$'
+
+echo "verified PIE, RELA/RELR, kallsyms, Linux header, and runtime atomic paths"

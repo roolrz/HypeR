@@ -5,6 +5,7 @@ extern crate alloc;
 pub mod config;
 pub mod drivers;
 pub mod hal;
+pub mod kallsyms;
 pub mod log;
 pub mod mm;
 pub mod platform;

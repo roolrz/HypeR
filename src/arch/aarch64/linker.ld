@@ -24,15 +24,6 @@ SECTIONS
     {
         __rodata_start = .;
         *(.rodata .rodata.*)
-        . = ALIGN(4K);
-        __rodata_end = .;
-    }
-
-    .data : ALIGN(4K)
-    {
-        __data_start = .;
-        *(.data .data.*)
-        *(.got .got.*)
     }
 
     .rela.dyn : ALIGN(8)
@@ -54,9 +45,30 @@ SECTIONS
         *(.dynamic)
     }
 
-    .dynsym : ALIGN(8) { *(.dynsym) }
-    .dynstr : ALIGN(1) { *(.dynstr) }
+    .dynsym : ALIGN(8)
+    {
+        __kallsyms_symbols_start = .;
+        *(.dynsym)
+        __kallsyms_symbols_end = .;
+    }
+    .dynstr : ALIGN(1)
+    {
+        __kallsyms_strings_start = .;
+        *(.dynstr)
+        __kallsyms_strings_end = .;
+    }
     .gnu.hash : ALIGN(8) { *(.gnu.hash) }
+    .hash : ALIGN(8) { *(.hash) }
+
+    . = ALIGN(4K);
+    __rodata_end = .;
+
+    .data : ALIGN(4K)
+    {
+        __data_start = .;
+        *(.data .data.*)
+        *(.got .got.*)
+    }
 
     .bss (NOLOAD) : ALIGN(16)
     {
