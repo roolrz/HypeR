@@ -153,14 +153,18 @@ impl BuddyAllocator {
 
     unsafe fn add_interval(&mut self, mut start: u64, end: u64) -> Result<(), BuddyError> {
         while start < end {
-            let remaining_pages = (end - start) / PAGE_SIZE;
+            // A sub-page tail cannot back a buddy block. Callers supply
+            // page-aligned bounds, so this only guards future refactoring
+            // against inserting a block that overruns `end`.
+            let Some(size_order) = floor_log2((end - start) / PAGE_SIZE) else {
+                break;
+            };
             let alignment_order = if start == 0 {
                 MAX_ORDER
             } else {
                 ((start.trailing_zeros() as usize).saturating_sub(12)).min(MAX_ORDER)
             };
-            let size_order = floor_log2(remaining_pages).min(MAX_ORDER);
-            let order = alignment_order.min(size_order);
+            let order = alignment_order.min(size_order.min(MAX_ORDER));
             unsafe { self.push(order, start)? };
             self.free_pages += 1usize << order;
             start = start
@@ -225,8 +229,12 @@ const fn block_size(order: usize) -> u64 {
     PAGE_SIZE << order
 }
 
-fn floor_log2(value: u64) -> usize {
-    (u64::BITS - 1 - value.leading_zeros()) as usize
+/// Returns the largest `n` with `2^n <= value`, or `None` when `value` is zero.
+fn floor_log2(value: u64) -> Option<usize> {
+    if value == 0 {
+        return None;
+    }
+    Some((u64::BITS - 1 - value.leading_zeros()) as usize)
 }
 
 fn align_down(value: u64, alignment: u64) -> u64 {

@@ -1,5 +1,6 @@
 use core::arch::asm;
-use core::ptr::{addr_of, addr_of_mut, read_volatile, write_volatile};
+use core::ptr::addr_of_mut;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 use super::registers;
 
@@ -33,19 +34,29 @@ pub fn initialize() -> AtomicCapabilities {
         (features >> registers::ID_AA64ISAR0_ATOMIC_SHIFT) & registers::ID_AA64ISAR0_ATOMIC_MASK;
     let lse = atomic >= registers::ID_AA64ISAR0_ATOMIC_LSE;
 
-    // SAFETY: compiler-builtins defines this hidden one-byte selector. The
-    // bootstrap is single-threaded and writes it before outlined atomics run.
-    unsafe {
-        write_volatile(addr_of_mut!(__aarch64_have_lse_atomics), u8::from(lse));
-    }
+    // Release ordering publishes the selector to every processing element that
+    // observes it with an acquire load, so a secondary never acts on a stale
+    // value while racing with bootstrap.
+    selector().store(u8::from(lse), Ordering::Release);
     AtomicCapabilities { lse }
 }
 
 pub fn capabilities() -> AtomicCapabilities {
-    // SAFETY: Initialization precedes kernel entry, after which the selector is
-    // immutable and may be observed by diagnostics.
-    let lse = unsafe { read_volatile(addr_of!(__aarch64_have_lse_atomics)) } != 0;
-    AtomicCapabilities { lse }
+    AtomicCapabilities {
+        lse: selector().load(Ordering::Acquire) != 0,
+    }
+}
+
+/// Borrows the compiler-builtins selector as an atomic cell.
+///
+/// The byte is shared mutable state written once by bootstrap and read by every
+/// secondary CPU, so all Rust accesses go through this cell to keep them free of
+/// data races.
+fn selector() -> &'static AtomicU8 {
+    // SAFETY: compiler-builtins defines this hidden one-byte selector with
+    // static lifetime, and AtomicU8 has the same layout as u8. Rust code only
+    // ever touches it through this reference.
+    unsafe { AtomicU8::from_ptr(addr_of_mut!(__aarch64_have_lse_atomics)) }
 }
 
 /// Checks that the calling CPU can execute the globally selected backend.

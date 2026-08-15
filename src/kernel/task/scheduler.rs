@@ -50,6 +50,14 @@ struct CpuScheduler {
     index: usize,
     current: ThreadId,
     idle: Option<ThreadId>,
+    /// Thread this CPU is switching away from while the scheduler lock is
+    /// released.
+    ///
+    /// The outgoing context and kernel stack stay live until
+    /// `aarch64_switch_context` has saved the registers and installed the
+    /// incoming stack pointer, which happens after the lock is dropped. The
+    /// entry keeps `reap_terminated` from freeing that thread in the window.
+    switching_from: Option<ThreadId>,
 }
 
 struct SwitchPair {
@@ -72,6 +80,7 @@ pub fn initialize() -> Result<Capabilities, Error> {
             index: boot_cpu_index,
             current: ThreadId::BOOTSTRAP,
             idle: None,
+            switching_from: None,
         });
         *slot = Some(Scheduler {
             threads,
@@ -111,6 +120,7 @@ pub fn register_secondary_cpu(cpu_index: usize, name: &str) -> Result<usize, Err
             index: cpu_index,
             current: id,
             idle: None,
+            switching_from: None,
         });
         Ok(stack_top)
     })
@@ -211,6 +221,7 @@ fn schedule_once() -> Result<bool, Error> {
     let cpu_index = crate::arch::current_cpu_index();
     let switch = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+        scheduler.finish_switch(cpu_index);
         scheduler.reap_terminated();
         scheduler.prepare_yield(cpu_index)
     })?;
@@ -218,8 +229,9 @@ fn schedule_once() -> Result<bool, Error> {
         return Ok(false);
     };
     // SAFETY: Scheduler-owned Threads are individually heap allocated, so
-    // their context addresses remain stable while registered. The current
-    // thread cannot be reaped, and the next thread owns a mapped stack.
+    // their context addresses remain stable while registered. The outgoing
+    // thread is pinned by this CPU's switching_from entry, and the next
+    // thread owns a mapped stack.
     unsafe { switch_pair(pair) };
     Ok(true)
 }
@@ -227,9 +239,21 @@ fn schedule_once() -> Result<bool, Error> {
 impl Scheduler {
     fn reap_terminated(&mut self) {
         self.threads.retain(|thread| {
-            self.cpus.iter().any(|cpu| cpu.current == thread.id())
+            self.cpus
+                .iter()
+                .any(|cpu| cpu.current == thread.id() || cpu.switching_from == Some(thread.id()))
                 || thread.state() != ThreadState::Terminated
         });
+    }
+
+    /// Releases the outgoing thread recorded by this CPU's last switch.
+    ///
+    /// Reaching scheduler code again proves the CPU already runs on the
+    /// incoming stack, so the previous context and stack are no longer in use.
+    fn finish_switch(&mut self, cpu_index: usize) {
+        if let Ok(cpu_slot) = self.cpu_slot(cpu_index) {
+            self.cpus[cpu_slot].switching_from = None;
+        }
     }
 
     fn prepare_yield(&mut self, cpu_index: usize) -> Result<Option<SwitchPair>, Error> {
@@ -269,6 +293,7 @@ impl Scheduler {
         if self.threads[next_index].state() == ThreadState::Ready {
             self.threads[next_index].set_state(ThreadState::Running);
         }
+        self.cpus[cpu_slot].switching_from = Some(self.threads[current_index].id());
         self.cpus[cpu_slot].current = self.threads[next_index].id();
         let previous = self.threads[current_index].context_mut() as *mut _;
         let next = self.threads[next_index].context() as *const _;
@@ -346,8 +371,9 @@ extern "C" fn kernel_thread_exit() -> ! {
     });
     match result {
         Ok(pair) => {
-            // SAFETY: prepare_exit retains the terminating Thread until another
-            // stack is active and chooses a distinct ready Thread.
+            // SAFETY: prepare_exit records the terminating Thread in the CPU's
+            // switching_from entry, which keeps it alive until another stack is
+            // active, and chooses a distinct ready Thread.
             unsafe { switch_pair(pair) };
             crate::pr_crit!("HypeR: terminated thread context resumed unexpectedly");
         }
