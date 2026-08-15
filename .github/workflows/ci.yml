@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - name: Check formatting and lints
         run: |
@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - name: Run host and configuration tests
         run: make test
@@ -49,7 +49,7 @@ jobs:
       matrix:
         profile: [debug, release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - name: Build kernel image
         run: make image PROFILE=${{ matrix.profile }}
@@ -72,7 +72,7 @@ jobs:
       matrix:
         profile: [debug, release]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - name: Download kernel image
         uses: actions/download-artifact@v4
@@ -92,7 +92,7 @@ jobs:
       matrix:
         cpu: [cortex-a72, max]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: ./.github/actions/setup
       - name: Download debug kernel image
         uses: actions/download-artifact@v4
