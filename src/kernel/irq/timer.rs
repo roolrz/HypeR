@@ -2,8 +2,8 @@
 
 use hyper::hal::interrupt::{InterruptId, InterruptTrigger};
 use hyper::hal::timer::{PeriodicTimer, PeriodicTimerProperties};
-use hyper::platform::{PlatformInterruptTrigger, TimerInfo, TimerKind};
-use hyper::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use hyper::platform::{PlatformInterrupt, PlatformInterruptTrigger, TimerInfo, TimerKind};
+use hyper::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use super::interrupt::{HandlerResult, IrqDomainId, VirtualInterrupt};
 
@@ -17,12 +17,16 @@ static RECURRING_IRQ_OBSERVED: [AtomicBool; MAX_CPUS] =
     [const { AtomicBool::new(false) }; MAX_CPUS];
 static ONLINE_CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_REPORT_PRINTED: AtomicBool = AtomicBool::new(false);
+static VIRTUAL_TIMER_VIRQ: AtomicU32 = AtomicU32::new(u32::MAX);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Interrupt(super::interrupt::Error),
     Timer(crate::arch::TimerError),
+    Time(crate::kernel::time::Error),
     InvalidCpuIndex,
+    InconsistentCounterFrequency,
+    InvalidInterruptTrigger,
 }
 
 impl From<super::interrupt::Error> for Error {
@@ -37,21 +41,51 @@ impl From<crate::arch::TimerError> for Error {
     }
 }
 
+impl From<crate::kernel::time::Error> for Error {
+    fn from(error: crate::kernel::time::Error) -> Self {
+        Self::Time(error)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capabilities {
     pub ticks_per_second: u32,
     pub counter_frequency_hz: u64,
     pub hardware_interrupt: InterruptId,
     pub virtual_interrupt: VirtualInterrupt,
+    pub guest_virtual_interrupt: InterruptId,
+    pub guest_virtual_host_interrupt: VirtualInterrupt,
 }
 
 pub fn initialize(info: TimerInfo, domain: IrqDomainId) -> Result<Capabilities, Error> {
-    let TimerKind::ArmGenericHypervisorPhysical = info.kind;
-    let hardware_interrupt = InterruptId::new(info.interrupt);
-    let trigger = match info.trigger {
+    let TimerKind::ArmGeneric = info.kind;
+    if info.hypervisor_physical.trigger != PlatformInterruptTrigger::Level
+        || info.virtual_timer.trigger != PlatformInterruptTrigger::Level
+    {
+        return Err(Error::InvalidInterruptTrigger);
+    }
+    let PlatformInterrupt { interrupt, trigger } = info.hypervisor_physical;
+    let hardware_interrupt = InterruptId::new(interrupt);
+    let trigger = match trigger {
         PlatformInterruptTrigger::Level => InterruptTrigger::Level,
         PlatformInterruptTrigger::Edge => InterruptTrigger::Edge,
     };
+    let guest_virtual_interrupt = InterruptId::new(info.virtual_timer.interrupt);
+    let guest_virtual_host_interrupt = super::interrupt::map(
+        domain,
+        guest_virtual_interrupt,
+        TIMER_PRIORITY,
+        InterruptTrigger::Level,
+    )?;
+    if let Err(error) = super::interrupt::register_shared(
+        guest_virtual_host_interrupt,
+        0,
+        handle_guest_virtual_timer,
+    ) {
+        let _ = super::interrupt::unmap(guest_virtual_host_interrupt);
+        return Err(error.into());
+    }
+    VIRTUAL_TIMER_VIRQ.store(guest_virtual_host_interrupt.get(), Ordering::Release);
     let virtual_interrupt =
         super::interrupt::map(domain, hardware_interrupt, TIMER_PRIORITY, trigger)?;
     let lifecycle_probe =
@@ -94,12 +128,26 @@ pub fn initialize(info: TimerInfo, domain: IrqDomainId) -> Result<Capabilities, 
             return Err(error.into());
         }
     };
+    if counter_frequency_hz != crate::kernel::time::counter_frequency_hz()? {
+        crate::arch::ArchitectureTimer::stop();
+        let _ = super::interrupt::unregister(shared_registration);
+        let _ = super::interrupt::unregister(registration);
+        let _ = super::interrupt::unmap(virtual_interrupt);
+        return Err(Error::InconsistentCounterFrequency);
+    }
     Ok(Capabilities {
         ticks_per_second: TICKS_PER_SECOND,
         counter_frequency_hz,
         hardware_interrupt,
         virtual_interrupt,
+        guest_virtual_interrupt,
+        guest_virtual_host_interrupt,
     })
+}
+
+pub(crate) fn guest_virtual_host_interrupt() -> Option<VirtualInterrupt> {
+    let interrupt = VIRTUAL_TIMER_VIRQ.load(Ordering::Acquire);
+    (interrupt != u32::MAX).then_some(VirtualInterrupt::from_raw(interrupt))
 }
 
 /// Starts the already-mapped architectural PPI on a secondary CPU.
@@ -107,7 +155,11 @@ pub fn initialize_local_cpu() -> Result<(), Error> {
     if crate::arch::current_cpu_index() >= MAX_CPUS {
         return Err(Error::InvalidCpuIndex);
     }
-    let _properties = crate::arch::ArchitectureTimer::start(TICKS_PER_SECOND)?;
+    let properties = crate::arch::ArchitectureTimer::start(TICKS_PER_SECOND)?;
+    if properties.counter_frequency_hz != crate::kernel::time::counter_frequency_hz()? {
+        crate::arch::ArchitectureTimer::stop();
+        return Err(Error::InconsistentCounterFrequency);
+    }
     Ok(())
 }
 
@@ -122,6 +174,22 @@ pub fn set_online_cpu_count(count: usize) -> Result<(), Error> {
 
 fn shared_probe(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
     HandlerResult::NotHandled
+}
+
+fn handle_guest_virtual_timer(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
+    match crate::kernel::vm::handle_arch_timer_interrupt() {
+        Ok(outcome) if outcome.active && outcome.asserted => HandlerResult::HandledAndMaskLocal,
+        Ok(outcome) if outcome.active => HandlerResult::Handled,
+        Ok(_) => {
+            crate::pr_warn!("HypeR: masked virtual timer PPI without an active vCPU");
+            HandlerResult::HandledAndMaskLocal
+        }
+        Err(error) => {
+            crate::arch::disable_vgic();
+            crate::pr_err!("HypeR: virtual timer injection failed: {error:?}");
+            HandlerResult::HandledAndMaskLocal
+        }
+    }
 }
 
 fn handle_tick(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {

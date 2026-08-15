@@ -1,6 +1,7 @@
 //! Architecture-neutral thread objects and execution payloads.
 
 use alloc::alloc::{alloc_zeroed, dealloc};
+use alloc::boxed::Box;
 use core::alloc::Layout;
 use core::ptr::NonNull;
 
@@ -54,8 +55,8 @@ pub struct VcpuExecution {
 
 pub enum ThreadExecution {
     Kernel,
-    User(UserExecution),
-    Vcpu(VcpuExecution),
+    User(Box<UserExecution>),
+    Vcpu(Box<VcpuExecution>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +71,13 @@ pub enum Error {
     Allocation,
     InvalidStackLayout,
     NameTooLong,
+    Vgic(crate::arch::VgicError),
+}
+
+impl From<crate::arch::VgicError> for Error {
+    fn from(error: crate::arch::VgicError) -> Self {
+        Self::Vgic(error)
+    }
 }
 
 /// A schedulable execution entity.
@@ -150,10 +158,10 @@ impl Thread {
             id,
             cpu_index,
             name,
-            ThreadExecution::User(UserExecution {
+            ThreadExecution::User(try_box(UserExecution {
                 address_space,
                 context,
-            }),
+            })?),
         )
     }
 
@@ -163,17 +171,18 @@ impl Thread {
         name: &str,
         virtual_machine: VirtualMachineId,
         vcpu_id: u32,
-        context: crate::arch::VcpuContext,
+        mut context: crate::arch::VcpuContext,
     ) -> Result<Self, Error> {
+        let _ = context.initialize_vgic()?;
         Self::with_payload(
             id,
             cpu_index,
             name,
-            ThreadExecution::Vcpu(VcpuExecution {
+            ThreadExecution::Vcpu(try_box(VcpuExecution {
                 virtual_machine,
                 vcpu_id,
                 context,
-            }),
+            })?),
         )
     }
 
@@ -234,16 +243,23 @@ impl Thread {
         }
     }
 
-    pub const fn user_execution(&self) -> Option<&UserExecution> {
+    pub fn user_execution(&self) -> Option<&UserExecution> {
         match &self.execution {
-            ThreadExecution::User(execution) => Some(execution),
+            ThreadExecution::User(execution) => Some(execution.as_ref()),
             _ => None,
         }
     }
 
-    pub const fn vcpu_execution(&self) -> Option<&VcpuExecution> {
+    pub fn vcpu_execution(&self) -> Option<&VcpuExecution> {
         match &self.execution {
-            ThreadExecution::Vcpu(execution) => Some(execution),
+            ThreadExecution::Vcpu(execution) => Some(execution.as_ref()),
+            _ => None,
+        }
+    }
+
+    pub fn vcpu_execution_mut(&mut self) -> Option<&mut VcpuExecution> {
+        match &mut self.execution {
+            ThreadExecution::Vcpu(execution) => Some(execution.as_mut()),
             _ => None,
         }
     }
@@ -320,3 +336,16 @@ impl Drop for KernelStack {
 
 // SAFETY: KernelStack owns an allocation and contains no thread-affine state.
 unsafe impl Send for KernelStack {}
+
+fn try_box<T>(value: T) -> Result<Box<T>, Error> {
+    let layout = Layout::new::<T>();
+    // SAFETY: A successful allocation has the exact layout required by T. The
+    // value is initialized before ownership transfers to Box.
+    let pointer =
+        NonNull::new(unsafe { alloc::alloc::alloc(layout) } as *mut T).ok_or(Error::Allocation)?;
+    // SAFETY: pointer is valid, aligned, and uniquely owned for one T.
+    unsafe {
+        pointer.as_ptr().write(value);
+        Ok(Box::from_raw(pointer.as_ptr()))
+    }
+}

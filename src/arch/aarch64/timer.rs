@@ -1,6 +1,9 @@
 use core::arch::asm;
 
-use hyper::hal::timer::{PeriodicTimer, PeriodicTimerProperties};
+use hyper::drivers::timer::arm_generic::{CONTROL_STATUS, VirtualTimerState};
+use hyper::hal::timer::{
+    DeadlineTimer, MonotonicCounter, PeriodicTimer, PeriodicTimerProperties, deadline_reached,
+};
 use hyper::sync::atomic::{AtomicU64, Ordering};
 
 const TIMER_ENABLE: u64 = 1 << 0;
@@ -18,16 +21,57 @@ pub enum Error {
     NotStarted,
 }
 
+/// The physical system counter shared by all processing elements.
+pub struct ArmGenericCounter;
+
+impl MonotonicCounter for ArmGenericCounter {
+    type Error = Error;
+
+    fn frequency_hz() -> Result<u64, Self::Error> {
+        let frequency = counter_frequency();
+        if frequency == 0 {
+            Err(Error::InvalidFrequency)
+        } else {
+            Ok(frequency)
+        }
+    }
+
+    fn read() -> u64 {
+        physical_count()
+    }
+}
+
+pub type VirtualTimerContext = VirtualTimerState;
+
 /// EL2 physical timer backed by CNTHP_EL2 system registers.
 pub struct El2PhysicalTimer;
+
+impl DeadlineTimer for El2PhysicalTimer {
+    type Error = Error;
+
+    fn set_deadline(deadline: u64) -> Result<(), Self::Error> {
+        let _ = current_cpu()?;
+        write_deadline(deadline);
+        write_control(TIMER_ENABLE);
+        Ok(())
+    }
+
+    fn mask() {
+        write_control(TIMER_ENABLE | TIMER_MASK);
+    }
+
+    fn disable() {
+        write_control(0);
+    }
+}
 
 impl PeriodicTimer for El2PhysicalTimer {
     type Error = Error;
 
     fn start(ticks_per_second: u32) -> Result<PeriodicTimerProperties, Self::Error> {
         let cpu = current_cpu()?;
-        let frequency = counter_frequency();
-        if frequency == 0 || ticks_per_second == 0 {
+        let frequency = ArmGenericCounter::frequency_hz()?;
+        if ticks_per_second == 0 {
             return Err(Error::InvalidFrequency);
         }
         let interval = frequency / u64::from(ticks_per_second);
@@ -37,8 +81,7 @@ impl PeriodicTimer for El2PhysicalTimer {
         let deadline = physical_count().wrapping_add(interval);
         INTERVAL[cpu].store(interval, Ordering::Release);
         NEXT_DEADLINE[cpu].store(deadline, Ordering::Release);
-        write_deadline(deadline);
-        write_control(TIMER_ENABLE);
+        Self::set_deadline(deadline)?;
         Ok(PeriodicTimerProperties {
             counter_frequency_hz: frequency,
             interval_ticks: interval,
@@ -54,7 +97,7 @@ impl PeriodicTimer for El2PhysicalTimer {
         let previous = NEXT_DEADLINE[cpu].load(Ordering::Relaxed);
         let now = physical_count();
         let elapsed = now.wrapping_sub(previous);
-        let periods = if now >= previous {
+        let periods = if deadline_reached(now, previous) {
             elapsed / interval + 1
         } else {
             1
@@ -66,7 +109,7 @@ impl PeriodicTimer for El2PhysicalTimer {
     }
 
     fn stop() {
-        write_control(TIMER_ENABLE | TIMER_MASK);
+        Self::disable();
         if let Ok(cpu) = current_cpu() {
             INTERVAL[cpu].store(0, Ordering::Release);
         }
@@ -98,12 +141,80 @@ fn physical_count() -> u64 {
     // SAFETY: CNTPCT_EL0 is readable at EL2 and has no side effects.
     unsafe {
         asm!(
+            "isb",
             "mrs {count}, CNTPCT_EL0",
             count = out(reg) count,
             options(nomem, nostack, preserves_flags)
         );
     }
     count
+}
+
+/// Loads one vCPU's EL1 virtual timer into the current processing element.
+///
+/// # Safety
+///
+/// The caller must prevent concurrent execution of this vCPU and must enter
+/// the guest only after all of its architectural state has been restored.
+pub unsafe fn activate_virtual_timer(context: &VirtualTimerContext) {
+    // Program the offset and comparator before unmasking the timer so stale
+    // state from the previous vCPU cannot assert an interrupt.
+    unsafe {
+        asm!(
+            "msr CNTV_CTL_EL0, xzr",
+            "msr CNTVOFF_EL2, {offset}",
+            "msr CNTV_CVAL_EL0, {compare_value}",
+            "isb",
+            "msr CNTV_CTL_EL0, {control}",
+            "isb",
+            offset = in(reg) context.offset(),
+            compare_value = in(reg) context.compare_value(),
+            control = in(reg) context.writable_control(),
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Saves and disables the current vCPU's EL1 virtual timer.
+///
+/// # Safety
+///
+/// Local IRQs must be masked, and `context` must identify the vCPU currently
+/// loaded on this processing element.
+pub unsafe fn deactivate_virtual_timer(context: &mut VirtualTimerContext) {
+    let offset: u64;
+    let compare_value: u64;
+    let control: u64;
+    unsafe {
+        asm!(
+            "mrs {control}, CNTV_CTL_EL0",
+            "mrs {compare_value}, CNTV_CVAL_EL0",
+            "mrs {offset}, CNTVOFF_EL2",
+            "msr CNTV_CTL_EL0, xzr",
+            "isb",
+            "msr CNTVOFF_EL2, xzr",
+            "isb",
+            control = out(reg) control,
+            compare_value = out(reg) compare_value,
+            offset = out(reg) offset,
+            options(nostack, preserves_flags)
+        );
+    }
+    context.restore_hardware_state(offset, compare_value, control);
+}
+
+/// Reports the live CNTV interrupt output on the current processing element.
+pub fn virtual_timer_interrupt_asserted() -> bool {
+    let control: u64;
+    // SAFETY: CNTV_CTL_EL0 is readable at EL2 and has no side effects.
+    unsafe {
+        asm!(
+            "mrs {control}, CNTV_CTL_EL0",
+            control = out(reg) control,
+            options(nomem, nostack, preserves_flags)
+        );
+    }
+    control & (TIMER_ENABLE | TIMER_MASK | CONTROL_STATUS) == (TIMER_ENABLE | CONTROL_STATUS)
 }
 
 fn write_deadline(deadline: u64) {

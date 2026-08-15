@@ -8,7 +8,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use self::state::BootState;
-use super::{cpu, device, irq, log, mm, task};
+use super::{cpu, device, irq, log, mm, task, time};
 
 pub(crate) mod image;
 mod state;
@@ -183,6 +183,25 @@ pub fn finish_boot() -> ! {
     if let Err(error) = crate::arch::validate_runtime_vectors() {
         boot_failure("runtime exception-vector validation", error);
     }
+    let vgic_capabilities = match irq::vgic::initialize(
+        interrupt_capabilities.root_domain,
+        interrupt_capabilities.maintenance_interrupt,
+    ) {
+        Ok(capabilities) => capabilities,
+        Err(error) => boot_failure("vGIC initialization", error),
+    };
+    crate::println!(
+        "HypeR: vGICv3 active with {} LRs, {} priority bits, {} preemption bits, {} INTID bits, maintenance VIRQ {}",
+        vgic_capabilities.list_registers,
+        vgic_capabilities.priority_bits,
+        vgic_capabilities.preemption_bits,
+        vgic_capabilities.interrupt_id_bits,
+        vgic_capabilities.maintenance_interrupt.get()
+    );
+    let time_capabilities = match time::initialize() {
+        Ok(capabilities) => capabilities,
+        Err(error) => boot_failure("monotonic timekeeping initialization", error),
+    };
     let timer_info = match timer_info {
         Some(info) => info,
         None => boot_failure("timer discovery", "missing architectural timer"),
@@ -192,6 +211,10 @@ pub fn finish_boot() -> ! {
             Ok(capabilities) => capabilities,
             Err(error) => boot_failure("periodic timer initialization", error),
         };
+    if let Err(error) = super::vm::validate_arch_timer(timer_capabilities.guest_virtual_interrupt) {
+        boot_failure("virtual architected timer validation", error);
+    }
+    crate::println!("HypeR: virtual architected timer injection validated");
 
     let platform_bus_report = match device::platform_bus::initialize(linear_dtb, essential.claims())
     {
@@ -258,10 +281,16 @@ pub fn finish_boot() -> ! {
             interrupt_capabilities.interrupt_count
         );
         crate::println!(
-            "HypeR: EL2 timer INTID {} at {} Hz from a {} Hz counter",
+            "HypeR: Arm Generic Timer: EL2 INTID {}, guest virtual INTID {} (host VIRQ {}), {} Hz tick from a {} Hz counter",
             timer_capabilities.hardware_interrupt.get(),
+            timer_capabilities.guest_virtual_interrupt.get(),
+            timer_capabilities.guest_virtual_host_interrupt.get(),
             timer_capabilities.ticks_per_second,
             timer_capabilities.counter_frequency_hz
+        );
+        crate::println!(
+            "HypeR: monotonic clocksource active at {} Hz",
+            time_capabilities.counter_frequency_hz
         );
         crate::println!(
             "HypeR: CPU power interface version {}.{}: on={}, off={}, suspend={}, reset={}",

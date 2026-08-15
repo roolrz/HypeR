@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use hyper::drivers::interrupt::gicv3::{Error as GicError, GicV3};
 use hyper::hal::interrupt::{InterruptController, InterruptId, InterruptTrigger};
-use hyper::platform::InterruptControllerInfo;
+use hyper::platform::{InterruptControllerInfo, PlatformInterrupt};
 use hyper::sync::InterruptSpinLock;
 
 type BootInterruptController =
@@ -44,6 +44,10 @@ pub struct IrqDomainId(u32);
 pub struct VirtualInterrupt(u32);
 
 impl VirtualInterrupt {
+    pub(crate) const fn from_raw(value: u32) -> Self {
+        Self(value)
+    }
+
     pub const fn get(self) -> u32 {
         self.0
     }
@@ -59,6 +63,8 @@ pub struct Registration {
 pub enum HandlerResult {
     Handled,
     NotHandled,
+    HandledAndMaskLocal,
+    HandledAndUnmaskLocal(VirtualInterrupt),
 }
 
 pub type Handler = fn(VirtualInterrupt, usize) -> HandlerResult;
@@ -67,6 +73,7 @@ pub type Handler = fn(VirtualInterrupt, usize) -> HandlerResult;
 pub struct Capabilities {
     pub interrupt_count: u32,
     pub root_domain: IrqDomainId,
+    pub maintenance_interrupt: Option<PlatformInterrupt>,
 }
 
 struct HandlerEntry {
@@ -113,6 +120,7 @@ pub fn initialize(info: InterruptControllerInfo) -> Result<Capabilities, Error> 
         return Err(Error::AlreadyInitialized);
     }
     let InterruptControllerInfo::GicV3(info) = info;
+    let maintenance_interrupt = info.maintenance_interrupt;
     // SAFETY: The architecture MMIO window maps every DTB-discovered device
     // range with Device attributes and the controller has a single owner.
     let mut controller =
@@ -140,6 +148,7 @@ pub fn initialize(info: InterruptControllerInfo) -> Result<Capabilities, Error> 
     Ok(Capabilities {
         interrupt_count,
         root_domain,
+        maintenance_interrupt,
     })
 }
 
@@ -349,6 +358,16 @@ pub fn dispatch() {
     }
 }
 
+/// Enables one already-mapped PPI on the calling CPU.
+pub fn enable_local(interrupt: VirtualInterrupt) -> Result<(), Error> {
+    with_state(|state| state.set_local_enabled(interrupt, true))
+}
+
+/// Disables one already-mapped PPI on the calling CPU.
+pub fn disable_local(interrupt: VirtualInterrupt) -> Result<(), Error> {
+    with_state(|state| state.set_local_enabled(interrupt, false))
+}
+
 impl InterruptState {
     fn mapping_position_by_virtual(&self, interrupt: VirtualInterrupt) -> Option<(usize, usize)> {
         self.domains
@@ -386,32 +405,78 @@ impl InterruptState {
             self.controller.end(hardware);
             return DispatchOutcome::Unmapped(hardware);
         };
-        let mapping = &mut self.domains[domain_index].mappings[mapping_index];
-        let mut handled = false;
-        for entry in &mapping.handlers {
-            handled |=
-                (entry.handler)(mapping.virtual_interrupt, entry.context) == HandlerResult::Handled;
-        }
-        let outcome = if handled {
-            mapping.consecutive_unhandled = 0;
-            DispatchOutcome::Handled
-        } else {
-            mapping.consecutive_unhandled = mapping.consecutive_unhandled.saturating_add(1);
-            if mapping.consecutive_unhandled >= UNHANDLED_QUARANTINE_THRESHOLD
-                && (mapping.enabled || hardware.get() < 32)
-            {
-                let _ = self.controller.disable(hardware);
-                mapping.enabled = false;
-                DispatchOutcome::Quarantined {
-                    hardware,
-                    virtual_interrupt: mapping.virtual_interrupt,
+        let (outcome, mask_local, unmask_local) = {
+            let mapping = &mut self.domains[domain_index].mappings[mapping_index];
+            let mut handled = false;
+            let mut mask_local = false;
+            let mut unmask_local = None;
+            for entry in &mapping.handlers {
+                match (entry.handler)(mapping.virtual_interrupt, entry.context) {
+                    HandlerResult::Handled => handled = true,
+                    HandlerResult::NotHandled => {}
+                    HandlerResult::HandledAndMaskLocal => {
+                        handled = true;
+                        mask_local = true;
+                    }
+                    HandlerResult::HandledAndUnmaskLocal(interrupt) => {
+                        handled = true;
+                        unmask_local = Some(interrupt);
+                    }
                 }
-            } else {
-                DispatchOutcome::Handled
             }
+            let outcome = if handled {
+                mapping.consecutive_unhandled = 0;
+                DispatchOutcome::Handled
+            } else {
+                mapping.consecutive_unhandled = mapping.consecutive_unhandled.saturating_add(1);
+                if mapping.consecutive_unhandled >= UNHANDLED_QUARANTINE_THRESHOLD
+                    && (mapping.enabled || hardware.get() < 32)
+                {
+                    let _ = self.controller.disable(hardware);
+                    mapping.enabled = false;
+                    DispatchOutcome::Quarantined {
+                        hardware,
+                        virtual_interrupt: mapping.virtual_interrupt,
+                    }
+                } else {
+                    DispatchOutcome::Handled
+                }
+            };
+            (outcome, mask_local, unmask_local)
         };
+        if mask_local {
+            let _ = self.controller.disable(hardware);
+        }
+        if let Some(interrupt) = unmask_local
+            && let Some((domain, mapping)) = self.mapping_position_by_virtual(interrupt)
+        {
+            let target = self.domains[domain].mappings[mapping].hardware;
+            if target.get() < 32 {
+                let _ = self.controller.enable(target);
+            }
+        }
         self.controller.end(hardware);
         outcome
+    }
+
+    fn set_local_enabled(
+        &mut self,
+        interrupt: VirtualInterrupt,
+        enabled: bool,
+    ) -> Result<(), Error> {
+        let (domain, mapping) = self
+            .mapping_position_by_virtual(interrupt)
+            .ok_or(Error::InterruptNotMapped)?;
+        let hardware = self.domains[domain].mappings[mapping].hardware;
+        if hardware.get() >= 32 {
+            return Err(Error::LocalInterruptLifecycleRequiresCrossCall);
+        }
+        if enabled {
+            self.controller.enable(hardware)?;
+        } else {
+            self.controller.disable(hardware)?;
+        }
+        Ok(())
     }
 }
 

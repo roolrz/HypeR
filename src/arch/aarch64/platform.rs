@@ -1,7 +1,7 @@
 use hyper::platform::{
     CpuPowerInfo, GicV3Info, InterruptControllerInfo, MAX_GIC_REDISTRIBUTOR_REGIONS, PhysicalRange,
-    PlatformInterruptTrigger, PsciCompatibleVersion, PsciConduit, PsciInfo, RegionList, TimerInfo,
-    TimerKind,
+    PlatformInterrupt, PlatformInterruptTrigger, PsciCompatibleVersion, PsciConduit, PsciInfo,
+    RegionList, TimerInfo, TimerKind,
     fdt::{NodeId, NodeResources, NodeVisitor},
 };
 
@@ -227,22 +227,45 @@ fn discover_gic(
             .insert(region)
             .map_err(|_| Error::InvalidGic)?;
     }
+    let maintenance_interrupt = if node.interrupt_cells.is_empty() {
+        None
+    } else {
+        let descriptor = node
+            .interrupt_cells
+            .get(..3)
+            .ok_or(Error::InvalidInterrupt)?;
+        Some(PlatformInterrupt {
+            interrupt: decode_gic_interrupt(descriptor)?,
+            trigger: decode_gic_trigger(descriptor[2])?,
+        })
+    };
     Ok(InterruptControllerInfo::GicV3(GicV3Info {
         distributor,
         redistributors,
         redistributor_stride: candidate.redistributor_stride,
+        maintenance_interrupt,
     }))
 }
 
 fn discover_timer(node: &NodeResources<'_>) -> Result<TimerInfo, Error> {
-    let descriptor = node
+    let virtual_descriptor = node
+        .interrupt_cells
+        .get(6..9)
+        .ok_or(Error::InvalidInterrupt)?;
+    let hypervisor_descriptor = node
         .interrupt_cells
         .get(9..12)
         .ok_or(Error::InvalidInterrupt)?;
     Ok(TimerInfo {
-        kind: TimerKind::ArmGenericHypervisorPhysical,
-        interrupt: decode_gic_interrupt(descriptor)?,
-        trigger: decode_gic_trigger(descriptor[2])?,
+        kind: TimerKind::ArmGeneric,
+        virtual_timer: PlatformInterrupt {
+            interrupt: decode_gic_interrupt(virtual_descriptor)?,
+            trigger: decode_gic_trigger(virtual_descriptor[2])?,
+        },
+        hypervisor_physical: PlatformInterrupt {
+            interrupt: decode_gic_interrupt(hypervisor_descriptor)?,
+            trigger: decode_gic_trigger(hypervisor_descriptor[2])?,
+        },
     })
 }
 

@@ -17,6 +17,68 @@ fn require_some<T>(value: Option<T>) -> T {
 }
 
 #[cfg(test)]
+mod generic_timer {
+    use hyper::drivers::timer::arm_generic::VirtualTimerState;
+    use hyper::hal::timer::{
+        ConversionError, deadline_reached, nanoseconds_to_ticks, ticks_to_nanoseconds,
+    };
+
+    #[test]
+    fn converts_time_without_early_deadlines() {
+        assert_eq!(super::require_ok(nanoseconds_to_ticks(1, 24_000_000)), 1);
+        assert_eq!(
+            super::require_ok(nanoseconds_to_ticks(1_000_000_000, 24_000_000)),
+            24_000_000
+        );
+        assert_eq!(
+            super::require_ok(ticks_to_nanoseconds(24_000_000, 24_000_000)),
+            1_000_000_000
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_or_unrepresentable_conversions() {
+        assert_eq!(
+            nanoseconds_to_ticks(1, 0),
+            Err(ConversionError::InvalidFrequency)
+        );
+        assert_eq!(
+            nanoseconds_to_ticks(u64::MAX, u64::MAX),
+            Err(ConversionError::Overflow)
+        );
+        assert_eq!(
+            ticks_to_nanoseconds(u64::MAX, 1),
+            Err(ConversionError::Overflow)
+        );
+    }
+
+    #[test]
+    fn compares_deadlines_across_counter_wraparound() {
+        assert!(!deadline_reached(u64::MAX - 2, 1));
+        assert!(deadline_reached(1, 1));
+        assert!(deadline_reached(2, u64::MAX));
+    }
+
+    #[test]
+    fn models_guest_offset_masking_and_level_output() {
+        let mut timer = VirtualTimerState::empty();
+        timer.set_offset(1_000);
+        timer.set_compare_value(250);
+        timer.set_enabled(true);
+
+        assert!(!timer.interrupt_asserted_at(1_249));
+        assert!(timer.interrupt_asserted_at(1_250));
+        timer.set_masked(true);
+        assert!(!timer.interrupt_asserted_at(2_000));
+
+        timer.restore_hardware_state(2_000, 10, 0b111);
+        assert!(timer.enabled());
+        assert!(timer.masked());
+        assert_eq!(timer.writable_control(), 0b11);
+    }
+}
+
+#[cfg(test)]
 mod fdt {
     use std::boxed::Box;
 
@@ -655,6 +717,7 @@ mod kernel_log {
 #[cfg(test)]
 mod psci {
     use core::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Mutex, MutexGuard};
 
     use hyper::drivers::power::psci::{CallWidth, Conduit, Error, Psci};
     use hyper::hal::cpu_power::{CpuHardwareId, CpuPower, ResumeAddress};
@@ -666,6 +729,7 @@ mod psci {
     const PSCI_CPU_ON_64: u32 = 0xc400_0003;
 
     static LAST_FUNCTION: AtomicU32 = AtomicU32::new(0);
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[derive(Clone, Copy)]
     struct Fake32;
@@ -679,6 +743,13 @@ mod psci {
             PSCI_VERSION => 0x0001_0001,
             PSCI_FEATURES => 0,
             _ => 0,
+        }
+    }
+
+    fn test_lock() -> MutexGuard<'static, ()> {
+        match TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
         }
     }
 
@@ -712,6 +783,7 @@ mod psci {
 
     #[test]
     fn selects_smccc32_function_ids_for_a_32_bit_conduit() {
+        let _guard = test_lock();
         let controller = super::require_ok(Psci::initialize(Fake32, PsciCompatibleVersion::V1_0));
         super::require_ok(controller.cpu_on(CpuHardwareId::new(1), ResumeAddress::new(0x8000), 7));
         assert_eq!(LAST_FUNCTION.load(Ordering::Acquire), PSCI_CPU_ON_32);
@@ -727,6 +799,7 @@ mod psci {
 
     #[test]
     fn selects_smccc64_function_ids_for_a_64_bit_conduit() {
+        let _guard = test_lock();
         let controller = super::require_ok(Psci::initialize(Fake64, PsciCompatibleVersion::V1_0));
         super::require_ok(controller.cpu_on(
             CpuHardwareId::new(1),
@@ -867,6 +940,7 @@ mod gicv3 {
             distributor: super::require_some(PhysicalRange::new(DISTRIBUTOR_PHYSICAL, 0x1_0000)),
             redistributors,
             redistributor_stride: None,
+            maintenance_interrupt: None,
         };
         let mut controller = super::require_ok(unsafe {
             GicV3::<TestCpuInterface, TestBarrier>::bind(info, |address| match address {
@@ -913,6 +987,198 @@ mod gicv3 {
         assert_eq!(controller.acknowledge(), Some(interrupt));
         controller.end(interrupt);
         assert_eq!(COMPLETED.load(Ordering::Acquire), 40);
+    }
+}
+
+#[cfg(test)]
+mod vgic {
+    use hyper::drivers::interrupt::vgic::{
+        Error, InterruptGroup, InterruptTrigger, ListEntry, ListState, VirtualCpuId,
+        VirtualInterruptController, VirtualInterruptId,
+    };
+    use hyper::drivers::interrupt::vgicv3::{decode_list_register, encode_list_register};
+
+    fn interrupt(value: u32) -> VirtualInterruptId {
+        super::require_some(VirtualInterruptId::new(value))
+    }
+
+    #[test]
+    fn schedules_pending_interrupts_by_priority_and_cpu() {
+        let mut vgic = super::require_ok(VirtualInterruptController::new(2));
+        let cpu0 = VirtualCpuId::new(0);
+        let cpu1 = VirtualCpuId::new(1);
+        for (id, cpu, priority) in [(27, cpu0, 0x80), (27, cpu1, 0x70), (40, cpu0, 0x20)] {
+            super::require_ok(vgic.configure(
+                interrupt(id),
+                cpu,
+                priority,
+                InterruptGroup::Group1,
+                InterruptTrigger::Level,
+            ));
+            super::require_ok(vgic.set_enabled(interrupt(id), cpu, true));
+            super::require_ok(vgic.inject(interrupt(id), cpu));
+        }
+
+        let mut slots = [None; 2];
+        assert_eq!(super::require_ok(vgic.refill(cpu0, &mut slots)), 2);
+        assert_eq!(slots[0].map(|entry| entry.interrupt), Some(interrupt(40)));
+        assert_eq!(slots[1].map(|entry| entry.interrupt), Some(interrupt(27)));
+
+        let mut other_slots = [None; 1];
+        assert_eq!(super::require_ok(vgic.refill(cpu1, &mut other_slots)), 1);
+        assert_eq!(
+            other_slots[0].map(|entry| entry.interrupt),
+            Some(interrupt(27))
+        );
+    }
+
+    #[test]
+    fn requests_eoi_maintenance_for_a_virtual_timer_ppi() {
+        let mut vgic = super::require_ok(VirtualInterruptController::new(1));
+        let cpu = VirtualCpuId::new(0);
+        let timer = interrupt(27);
+        super::require_ok(vgic.configure(
+            timer,
+            cpu,
+            0x80,
+            InterruptGroup::Group1,
+            InterruptTrigger::Level,
+        ));
+        super::require_ok(vgic.set_maintenance_on_eoi(timer, cpu, true));
+        super::require_ok(vgic.set_enabled(timer, cpu, true));
+        super::require_ok(vgic.inject(timer, cpu));
+        let mut slots = [None; 1];
+        assert_eq!(super::require_ok(vgic.refill(cpu, &mut slots)), 1);
+        assert_eq!(
+            slots[0].map(|entry| entry.request_eoi_maintenance),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn tracks_active_reinjection_and_guest_completion() {
+        let mut vgic = super::require_ok(VirtualInterruptController::new(1));
+        let cpu = VirtualCpuId::new(0);
+        let id = interrupt(48);
+        super::require_ok(vgic.configure(
+            id,
+            cpu,
+            0x40,
+            InterruptGroup::Group1,
+            InterruptTrigger::Level,
+        ));
+        super::require_ok(vgic.set_enabled(id, cpu, true));
+        super::require_ok(vgic.inject(id, cpu));
+
+        let mut slots = [None; 1];
+        assert_eq!(super::require_ok(vgic.refill(cpu, &mut slots)), 1);
+        slots[0] = Some(ListEntry {
+            interrupt: id,
+            priority: 0x40,
+            group: InterruptGroup::Group1,
+            state: ListState::Active,
+            request_eoi_maintenance: true,
+        });
+        super::require_ok(vgic.synchronize(cpu, &slots));
+        super::require_ok(vgic.inject(id, cpu));
+        assert_eq!(super::require_ok(vgic.refill(cpu, &mut slots)), 0);
+        assert_eq!(
+            slots[0].map(|entry| entry.state),
+            Some(ListState::PendingActive)
+        );
+
+        super::require_ok(vgic.synchronize(cpu, &[None]));
+        let snapshot = super::require_ok(vgic.snapshot(id, cpu));
+        assert!(!snapshot.pending);
+        assert!(!snapshot.active);
+        assert!(!snapshot.listed);
+    }
+
+    #[test]
+    fn withdraws_disabled_pending_entries_without_losing_pending_state() {
+        let mut vgic = super::require_ok(VirtualInterruptController::new(1));
+        let cpu = VirtualCpuId::new(0);
+        let id = interrupt(72);
+        super::require_ok(vgic.configure(
+            id,
+            cpu,
+            0x80,
+            InterruptGroup::Group1,
+            InterruptTrigger::Level,
+        ));
+        super::require_ok(vgic.set_enabled(id, cpu, true));
+        super::require_ok(vgic.inject(id, cpu));
+        let mut slots = [None; 1];
+        assert_eq!(super::require_ok(vgic.refill(cpu, &mut slots)), 1);
+
+        super::require_ok(vgic.set_enabled(id, cpu, false));
+        assert_eq!(super::require_ok(vgic.refill(cpu, &mut slots)), 0);
+        assert_eq!(slots, [None]);
+        let snapshot = super::require_ok(vgic.snapshot(id, cpu));
+        assert!(snapshot.pending);
+        assert!(!snapshot.listed);
+
+        super::require_ok(vgic.set_priority(id, cpu, 0x20));
+        super::require_ok(vgic.set_enabled(id, cpu, true));
+        assert_eq!(super::require_ok(vgic.refill(cpu, &mut slots)), 1);
+        assert_eq!(slots[0].map(|entry| entry.priority), Some(0x20));
+    }
+
+    #[test]
+    fn rejects_duplicate_spis_and_malformed_snapshots() {
+        let mut vgic = super::require_ok(VirtualInterruptController::new(2));
+        let cpu0 = VirtualCpuId::new(0);
+        let cpu1 = VirtualCpuId::new(1);
+        let id = interrupt(64);
+        super::require_ok(vgic.configure(
+            id,
+            cpu0,
+            0x80,
+            InterruptGroup::Group1,
+            InterruptTrigger::Edge,
+        ));
+        assert_eq!(
+            vgic.configure(
+                id,
+                cpu1,
+                0x80,
+                InterruptGroup::Group1,
+                InterruptTrigger::Edge,
+            ),
+            Err(Error::AlreadyConfigured)
+        );
+        let duplicate = Some(ListEntry {
+            interrupt: id,
+            priority: 0x80,
+            group: InterruptGroup::Group1,
+            state: ListState::Pending,
+            request_eoi_maintenance: true,
+        });
+        assert_eq!(
+            vgic.synchronize(cpu0, &[duplicate, duplicate]),
+            Err(Error::SnapshotContainsDuplicate)
+        );
+    }
+
+    #[test]
+    fn encodes_the_gicv3_list_register_layout() {
+        let entry = ListEntry {
+            interrupt: interrupt(55),
+            priority: 0xa0,
+            group: InterruptGroup::Group1,
+            state: ListState::PendingActive,
+            request_eoi_maintenance: true,
+        };
+        let encoded = encode_list_register(Some(entry));
+        assert_eq!(
+            encoded,
+            55 | (1 << 41) | (0xa0 << 48) | (1 << 60) | (3 << 62)
+        );
+        assert_eq!(
+            super::require_ok(decode_list_register(encoded)),
+            Some(entry)
+        );
+        assert_eq!(super::require_ok(decode_list_register(0)), None);
     }
 }
 

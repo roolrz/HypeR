@@ -70,10 +70,10 @@ verify: check test
 test-image:
 	sh tests/image/verify-image.sh $(READOBJ) $(NM) $(OBJDUMP) $(KERNEL_ELF) $(KERNEL_IMAGE)
 
-test-timer:
+test-timer: image
 	sh tests/qemu/verify-timer.sh $(QEMU) $(KERNEL_IMAGE) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
-test-qemu:
+test-qemu: image
 	sh tests/qemu/verify-smp.sh $(QEMU) $(KERNEL_IMAGE) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
 # Compatibility targets build the image before running the corresponding test.

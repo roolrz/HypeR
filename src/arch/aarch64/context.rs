@@ -73,7 +73,8 @@ pub struct VcpuContext {
     pub contextidr_el1: u64,
     pub tpidr_el0: u64,
     pub tpidr_el1: u64,
-    pub cntvoff_el2: u64,
+    timer: super::timer::VirtualTimerContext,
+    pub vgic: super::VgicCpuContext,
 }
 
 impl VcpuContext {
@@ -93,8 +94,82 @@ impl VcpuContext {
             contextidr_el1: 0,
             tpidr_el0: 0,
             tpidr_el1: 0,
-            cntvoff_el2: 0,
+            timer: super::timer::VirtualTimerContext::empty(),
+            vgic: super::VgicCpuContext::empty(),
         }
+    }
+
+    /// Prepares the hardware-assisted virtual interrupt interface state.
+    pub fn initialize_vgic(&mut self) -> Result<super::VgicCapabilities, super::VgicError> {
+        super::vgic::initialize_context(&mut self.vgic)
+    }
+
+    /// Sets the guest-visible virtual count to `value` at the supplied
+    /// physical counter instant.
+    pub fn set_virtual_count(&mut self, physical_count: u64, value: u64) {
+        self.timer.set_offset(physical_count.wrapping_sub(value));
+    }
+
+    pub fn virtual_timer_deadline(&self) -> u64 {
+        self.timer.compare_value()
+    }
+
+    pub fn set_virtual_timer_deadline(&mut self, deadline: u64) {
+        self.timer.set_compare_value(deadline);
+    }
+
+    pub fn set_virtual_timer_enabled(&mut self, enabled: bool) {
+        self.timer.set_enabled(enabled);
+    }
+
+    pub fn set_virtual_timer_masked(&mut self, masked: bool) {
+        self.timer.set_masked(masked);
+    }
+
+    pub fn virtual_timer_interrupt_asserted_at(&self, physical_count: u64) -> bool {
+        self.timer.interrupt_asserted_at(physical_count)
+    }
+
+    pub fn virtual_timer_interrupt_asserted_hardware(&self) -> bool {
+        super::timer::virtual_timer_interrupt_asserted()
+    }
+
+    /// Loads this vCPU's GIC virtualization state on the current CPU.
+    ///
+    /// # Safety
+    ///
+    /// No other CPU may run this vCPU, and guest execution must not already be
+    /// active on the calling CPU.
+    pub unsafe fn activate_vgic(&self) -> Result<(), super::VgicError> {
+        unsafe { super::vgic::activate(&self.vgic) }
+    }
+
+    /// Saves this vCPU's GIC virtualization state and disables guest delivery.
+    ///
+    /// # Safety
+    ///
+    /// This context must be the vCPU currently loaded on the calling CPU.
+    pub unsafe fn deactivate_vgic(&mut self) -> Result<(), super::VgicError> {
+        unsafe { super::vgic::deactivate(&mut self.vgic) }
+    }
+
+    /// Loads this vCPU's architectural virtual timer state locally.
+    ///
+    /// # Safety
+    ///
+    /// No other CPU may run this vCPU, and guest execution must not already be
+    /// active on the calling CPU.
+    pub unsafe fn activate_timer(&self) {
+        unsafe { super::timer::activate_virtual_timer(&self.timer) };
+    }
+
+    /// Saves and disables this vCPU's architectural virtual timer locally.
+    ///
+    /// # Safety
+    ///
+    /// Local IRQs must be masked and this must be the active local vCPU.
+    pub unsafe fn deactivate_timer(&mut self) {
+        unsafe { super::timer::deactivate_virtual_timer(&mut self.timer) };
     }
 }
 

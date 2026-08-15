@@ -212,13 +212,13 @@ pub enum PsciCompatibleVersion {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerInfo {
     pub kind: TimerKind,
-    pub interrupt: u32,
-    pub trigger: PlatformInterruptTrigger,
+    pub virtual_timer: PlatformInterrupt,
+    pub hypervisor_physical: PlatformInterrupt,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimerKind {
-    ArmGenericHypervisorPhysical,
+    ArmGeneric,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,6 +237,13 @@ pub struct GicV3Info {
     pub distributor: PhysicalRange,
     pub redistributors: RegionList<MAX_GIC_REDISTRIBUTOR_REGIONS>,
     pub redistributor_stride: Option<u64>,
+    pub maintenance_interrupt: Option<PlatformInterrupt>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PlatformInterrupt {
+    pub interrupt: u32,
+    pub trigger: PlatformInterruptTrigger,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

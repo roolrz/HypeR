@@ -12,6 +12,7 @@ mod psci;
 pub mod registers;
 mod smp;
 mod timer;
+mod vgic;
 
 pub use atomics::{AtomicCapabilities, capabilities as atomic_capabilities};
 pub use barrier::Aarch64Barrier;
@@ -32,7 +33,14 @@ pub use smp::{
     SecondaryBootParameters, current_cpu_index, current_hardware_id, secondary_entry_physical,
     send_event,
 };
-pub use timer::{El2PhysicalTimer, Error as TimerError};
+pub use timer::{ArmGenericCounter, El2PhysicalTimer, Error as TimerError};
+pub use vgic::{
+    Capabilities as VgicCapabilities, CpuContext as VgicCpuContext, Error as VgicError,
+};
+pub use vgic::{
+    disable as disable_vgic, maintenance_state as vgic_maintenance_state,
+    validate_context_switch as validate_vgic,
+};
 
 pub fn initialize_cpu_power(
     info: hyper::platform::CpuPowerInfo,

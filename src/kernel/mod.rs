@@ -8,6 +8,8 @@ pub mod irq;
 pub mod log;
 pub mod mm;
 pub mod task;
+pub mod time;
+pub mod vm;
 
 pub use boot::{boot, finish_boot};
 
