@@ -94,6 +94,7 @@ enum MemoryType {
 pub(super) struct FinalAddressSpace {
     pub root: PhysicalAddress,
     pub stack_top: VirtualAddress,
+    pub kernel_base: u64,
 }
 
 pub struct PageTableBuilder<'allocator> {
@@ -208,6 +209,7 @@ pub(super) unsafe fn build_final_address_space(
     allocator: &mut BootAllocator,
     platform: &PlatformInfo,
     kernel: KernelImageLayout,
+    kernel_base: u64,
 ) -> Result<FinalAddressSpace, Error> {
     let stack = unsafe { allocator.allocate_zeroed_pages(KERNEL_STACK_PAGES, 1)? };
     let stack_size = KERNEL_STACK_PAGES as u64 * PAGE_SIZE;
@@ -235,7 +237,15 @@ pub(super) unsafe fn build_final_address_space(
         }
     }
 
-    unsafe { map_kernel_at(&mut builder, kernel, KERNEL_BASE)? };
+    if kernel_base < KERNEL_BASE
+        || kernel_base
+            .checked_add(kernel.total_size)
+            .filter(|end| *end <= KERNEL_STACK_BASE)
+            .is_none()
+    {
+        return Err(Error::InvalidRange);
+    }
+    unsafe { map_kernel_at(&mut builder, kernel, kernel_base)? };
     unsafe {
         builder.map_range(
             VirtualAddress::new(KERNEL_STACK_BASE),
@@ -247,6 +257,7 @@ pub(super) unsafe fn build_final_address_space(
     Ok(FinalAddressSpace {
         root: builder.root(),
         stack_top: VirtualAddress::new(KERNEL_STACK_BASE + stack_size),
+        kernel_base,
     })
 }
 

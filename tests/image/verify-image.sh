@@ -25,6 +25,14 @@ if [ "$relocation_types" != "R_AARCH64_RELATIVE" ]; then
     exit 1
 fi
 
+sections=$($readobj --sections "$elf")
+printf '%s\n' "$sections" | grep -q 'Name: .relr.dyn'
+printf '%s\n' "$sections" | grep -q 'Type: SHT_RELR'
+dynamic=$($readobj --dynamic-table "$elf")
+printf '%s\n' "$dynamic" | grep -q ' RELR '
+printf '%s\n' "$dynamic" | grep -q ' RELRSZ '
+printf '%s\n' "$dynamic" | grep -q ' RELRENT '
+
 magic=$(dd if="$image" bs=1 skip=56 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
 if [ "$magic" != "41524d64" ]; then
     echo "invalid Linux AArch64 Image magic: $magic" >&2
@@ -43,6 +51,8 @@ if [ $((declared_size % 4096)) -ne 0 ]; then
 fi
 
 symbols=$($nm -a "$elf")
+printf '%s\n' "$symbols" | grep -q '__relr_dyn_start'
+printf '%s\n' "$symbols" | grep -q '__relr_dyn_end'
 printf '%s\n' "$symbols" | grep -q '__aarch64_have_lse_atomics'
 printf '%s\n' "$symbols" | grep -q '__aarch64_cas1_acq_rel'
 
@@ -51,4 +61,4 @@ printf '%s\n' "$instructions" | grep -Eq '[[:space:]]cas(al|a|l)?b[[:space:]]'
 printf '%s\n' "$instructions" | grep -Eq '[[:space:]]ldaxrb[[:space:]]'
 printf '%s\n' "$instructions" | grep -Eq '[[:space:]]stl?xrb[[:space:]]'
 
-echo "verified PIE image, Linux header, and runtime LSE/LL-SC atomic paths"
+echo "verified PIE image, RELA/RELR metadata, Linux header, and runtime atomic paths"

@@ -35,6 +35,10 @@ impl PreparedMemory {
         self.address_space.root_address()
     }
 
+    pub fn kernel_base(&self) -> u64 {
+        self.address_space.kernel_base()
+    }
+
     pub fn reservation_count(&self) -> usize {
         self.allocator.reservations().len()
     }
@@ -67,7 +71,11 @@ impl PreparedMemory {
 ///
 /// Firmware RAM below the architecture's bootstrap-accessible limit must be
 /// writable through the current early mapping.
-pub unsafe fn prepare(platform: &PlatformInfo, dtb_address: u64) -> Result<PreparedMemory, Error> {
+pub unsafe fn prepare(
+    platform: &PlatformInfo,
+    dtb_address: u64,
+    kernel_base: u64,
+) -> Result<PreparedMemory, Error> {
     let image = crate::kernel::boot::image::layout();
     let mut allocator = BootAllocator::new(
         &platform.memory,
@@ -83,8 +91,9 @@ pub unsafe fn prepare(platform: &PlatformInfo, dtb_address: u64) -> Result<Prepa
             .ok_or(BootAllocatorError::InvalidRequest)?,
     )?;
 
-    let address_space =
-        unsafe { crate::arch::prepare_address_space(&mut allocator, platform, image)? };
+    let address_space = unsafe {
+        crate::arch::prepare_address_space(&mut allocator, platform, image, kernel_base)?
+    };
     Ok(PreparedMemory {
         allocator,
         address_space,

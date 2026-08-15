@@ -1,5 +1,9 @@
+use alloc::boxed::Box;
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::drivers::platform::{
+    DriverInstance, DriverServices, PlatformDevice, PlatformDriver, ProbeError,
+};
 use crate::hal::console::Console;
 
 const DATA_REGISTER: usize = 0x000;
@@ -51,3 +55,33 @@ impl Console for Pl011 {
         self.write_register(DATA_REGISTER, u32::from(byte));
     }
 }
+
+impl DriverInstance for Pl011 {}
+
+pub struct Pl011PlatformDriver;
+
+impl PlatformDriver for Pl011PlatformDriver {
+    fn name(&self) -> &'static str {
+        "pl011"
+    }
+
+    fn compatible_table(&self) -> &'static [&'static str] {
+        &["arm,pl011"]
+    }
+
+    fn probe(
+        &self,
+        device: &PlatformDevice,
+        services: &dyn DriverServices,
+    ) -> Result<Box<dyn DriverInstance>, ProbeError> {
+        let registers = device.registers().first().ok_or(ProbeError::Resource)?;
+        let base = services
+            .map_mmio(registers.start())
+            .ok_or(ProbeError::Resource)?;
+        // SAFETY: The platform bus gives one successful driver exclusive
+        // ownership of this translated MMIO resource.
+        Ok(Box::new(unsafe { Pl011::from_mmio_base(base) }))
+    }
+}
+
+pub static PLATFORM_DRIVER: Pl011PlatformDriver = Pl011PlatformDriver;

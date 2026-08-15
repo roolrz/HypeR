@@ -1,3 +1,4 @@
+pub mod chosen;
 pub mod fdt;
 
 pub const MAX_MEMORY_REGIONS: usize = 8;
@@ -238,7 +239,7 @@ pub struct GicV3Info {
     pub redistributor_stride: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConsoleInfo {
     pub kind: ConsoleKind,
     pub base: u64,

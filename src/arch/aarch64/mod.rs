@@ -5,6 +5,7 @@ mod context;
 mod exception;
 mod gic;
 mod interrupts;
+mod kaslr;
 mod memory;
 mod platform;
 mod psci;
@@ -20,6 +21,7 @@ pub use exception::{install_runtime_vectors, validate_runtime_vectors};
 pub use gic::{Aarch64GicCpuInterface, current_gic_affinity};
 pub use hyper::drivers::power::psci::Error as CpuPowerError;
 pub use interrupts::{LocalInterruptMask, enable_irq as enable_local_irq};
+pub use kaslr::select as select_kaslr_layout;
 pub use memory::{
     Aarch64AddressTranslation as ArchitectureAddressTranslation, ActivationContext,
     Error as MemoryError, PreparedAddressSpace,
@@ -54,8 +56,9 @@ pub unsafe fn prepare_address_space(
     allocator: &mut hyper::mm::BootAllocator,
     platform: &hyper::platform::PlatformInfo,
     image: hyper::hal::memory::KernelImageLayout,
+    kernel_base: u64,
 ) -> Result<PreparedAddressSpace, MemoryError> {
-    unsafe { memory::prepare(allocator, platform, image) }
+    unsafe { memory::prepare(allocator, platform, image, kernel_base) }
 }
 
 /// Activates final stage-1 translation and enters the high kernel alias.
@@ -68,7 +71,7 @@ pub unsafe fn activate_memory(context: ActivationContext) -> ! {
     unsafe {
         aarch64_activate_final_address_space(
             context.root.get(),
-            memory::KERNEL_BASE,
+            context.kernel_base,
             context.stack_top.get(),
         )
     }

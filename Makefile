@@ -5,6 +5,7 @@ QEMU ?= qemu-system-aarch64
 QEMU_CPU ?= cortex-a72
 QEMU_CPUS ?= 4
 QEMU_MEMORY ?= 512M
+QEMU_BOOTARGS ?= earlycon=pl011,mmio32,0x09000000
 HOST_TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
 RUST_HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 LLVM_BIN := $(shell rustc --print sysroot)/lib/rustlib/$(RUST_HOST)/bin
@@ -70,10 +71,10 @@ test-image:
 	sh tests/image/verify-image.sh $(READOBJ) $(NM) $(OBJDUMP) $(KERNEL_ELF) $(KERNEL_IMAGE)
 
 test-timer:
-	sh tests/qemu/verify-timer.sh $(QEMU) $(KERNEL_IMAGE) $(QEMU_CPU) $(QEMU_MEMORY)
+	sh tests/qemu/verify-timer.sh $(QEMU) $(KERNEL_IMAGE) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
 test-qemu:
-	sh tests/qemu/verify-smp.sh $(QEMU) $(KERNEL_IMAGE) $(QEMU_CPU) $(QEMU_MEMORY)
+	sh tests/qemu/verify-smp.sh $(QEMU) $(KERNEL_IMAGE) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
 # Compatibility targets build the image before running the corresponding test.
 verify-image: image
@@ -87,7 +88,7 @@ verify-smp: image
 
 run: image
 	$(QEMU) \
-		-machine virt,virtualization=on,gic-version=3 \
+		-machine virt,virtualization=on,gic-version=3,dtb-randomness=on \
 		-cpu $(QEMU_CPU) \
 		-smp $(QEMU_CPUS) \
 		-m $(QEMU_MEMORY) \
@@ -96,6 +97,7 @@ run: image
 		-serial stdio \
 		-monitor none \
 		-no-reboot \
+		-append "$(QEMU_BOOTARGS)" \
 		-kernel $(KERNEL_IMAGE)
 
 clean:

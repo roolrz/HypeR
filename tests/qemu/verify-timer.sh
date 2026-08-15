@@ -2,8 +2,8 @@
 # Exercises recurring timer delivery on the supported four-core QEMU setup.
 set -eu
 
-if [ "$#" -ne 4 ]; then
-    echo "usage: verify-qemu-timer.sh QEMU IMAGE CPU MEMORY" >&2
+if [ "$#" -ne 5 ]; then
+    echo "usage: verify-qemu-timer.sh QEMU IMAGE CPU MEMORY BOOTARGS" >&2
     exit 2
 fi
 
@@ -11,6 +11,7 @@ qemu=$1
 image=$2
 cpu=$3
 memory=$4
+bootargs=$5
 log=$(mktemp -t hyper-qemu-timer.XXXXXX)
 pid=
 
@@ -28,7 +29,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 "$qemu" \
-    -machine virt,virtualization=on,gic-version=3 \
+    -machine virt,virtualization=on,gic-version=3,dtb-randomness=on \
     -cpu "$cpu" \
     -smp 4 \
     -m "$memory" \
@@ -37,6 +38,7 @@ trap 'exit 143' TERM
     -serial stdio \
     -monitor none \
     -no-reboot \
+    -append "$bootargs" \
     -kernel "$image" >"$log" 2>&1 &
 pid=$!
 

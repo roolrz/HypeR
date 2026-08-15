@@ -1,7 +1,7 @@
 use hyper::platform::{
-    ConsoleInfo, ConsoleKind, CpuPowerInfo, GicV3Info, InterruptControllerInfo,
-    MAX_GIC_REDISTRIBUTOR_REGIONS, PhysicalRange, PlatformInterruptTrigger, PsciCompatibleVersion,
-    PsciConduit, PsciInfo, RegionList, TimerInfo, TimerKind,
+    CpuPowerInfo, GicV3Info, InterruptControllerInfo, MAX_GIC_REDISTRIBUTOR_REGIONS, PhysicalRange,
+    PlatformInterruptTrigger, PsciCompatibleVersion, PsciConduit, PsciInfo, RegionList, TimerInfo,
+    TimerKind,
     fdt::{NodeId, NodeResources, NodeVisitor},
 };
 
@@ -10,7 +10,6 @@ const MAX_EARLY_CLAIMS: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
 pub struct EssentialPlatformInfo {
-    pub console: Option<ConsoleInfo>,
     pub cpu_power: Option<CpuPowerInfo>,
     pub interrupt_controller: Option<InterruptControllerInfo>,
     pub timer: Option<TimerInfo>,
@@ -36,7 +35,6 @@ pub enum Error {
 
 #[derive(Clone, Copy)]
 struct Candidate {
-    pl011: bool,
     gic_v3: bool,
     timer: bool,
     psci_legacy: bool,
@@ -48,7 +46,6 @@ struct Candidate {
 
 impl Candidate {
     const EMPTY: Self = Self {
-        pl011: false,
         gic_v3: false,
         timer: false,
         psci_legacy: false,
@@ -73,7 +70,6 @@ impl EssentialDeviceDiscovery {
             nodes: [Candidate::EMPTY; MAX_FDT_DEPTH],
             depth: 0,
             result: EssentialPlatformInfo {
-                console: None,
                 cpu_power: None,
                 interrupt_controller: None,
                 timer: None,
@@ -110,14 +106,6 @@ impl EssentialDeviceDiscovery {
     ) -> Result<(), Error> {
         if !node.enabled {
             return Ok(());
-        }
-        if candidate.pl011 && self.result.console.is_none() {
-            let register = first_register(&node)?;
-            self.result.console = Some(ConsoleInfo {
-                kind: ConsoleKind::Pl011,
-                base: register.start(),
-            });
-            self.claim(node.id)?;
         }
         if candidate.gic_v3 && self.result.interrupt_controller.is_none() {
             self.result.interrupt_controller = Some(discover_gic(&node, candidate)?);
@@ -164,7 +152,6 @@ impl NodeVisitor for EssentialDeviceDiscovery {
         };
         let result = match name {
             "compatible" => {
-                candidate.pl011 = string_list_contains(value, "arm,pl011");
                 candidate.gic_v3 = string_list_contains(value, "arm,gic-v3");
                 candidate.timer = string_list_contains(value, "arm,armv8-timer");
                 candidate.psci_legacy = string_list_contains(value, "arm,psci");

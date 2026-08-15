@@ -3,6 +3,7 @@
 mod address;
 pub mod allocator;
 pub mod boot;
+pub mod kaslr;
 
 pub use address::{PAGE_SIZE, PhysicalAddress, VirtualAddress};
 pub use allocator::{BuddyAllocator, BuddyError, MAX_ORDER, MemoryHandoff};

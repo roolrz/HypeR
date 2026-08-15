@@ -2,8 +2,8 @@
 # Exercises the complete supported four-core QEMU runtime configuration.
 set -eu
 
-if [ "$#" -ne 4 ]; then
-    echo "usage: verify-qemu-smp.sh QEMU IMAGE CPU MEMORY" >&2
+if [ "$#" -ne 5 ]; then
+    echo "usage: verify-qemu-smp.sh QEMU IMAGE CPU MEMORY BOOTARGS" >&2
     exit 2
 fi
 
@@ -11,6 +11,7 @@ qemu=$1
 image=$2
 cpu=$3
 memory=$4
+bootargs=$5
 log=$(mktemp -t hyper-qemu-smp.XXXXXX)
 pid=
 
@@ -28,7 +29,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 "$qemu" \
-    -machine virt,virtualization=on,gic-version=3 \
+    -machine virt,virtualization=on,gic-version=3,dtb-randomness=on \
     -cpu "$cpu" \
     -smp 4 \
     -m "$memory" \
@@ -37,6 +38,7 @@ trap 'exit 143' TERM
     -serial stdio \
     -monitor none \
     -no-reboot \
+    -append "$bootargs" \
     -kernel "$image" >"$log" 2>&1 &
 pid=$!
 
@@ -54,10 +56,22 @@ while [ "$attempt" -lt 100 ]; do
         grep -q 'HypeR: CPU 2 timer tick 1' "$log" &&
         grep -q 'HypeR: CPU 3 timer tick 1' "$log" &&
         grep -q 'HypeR: SMP online: 4/4 discovered CPUs' "$log" &&
+        grep -q 'HypeR: randomized kernel base 0x[0-9a-f][0-9a-f]*, KASLR offset 0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR: transition identity mappings retired' "$log" &&
         grep -q 'HypeR: kernel initialization complete; bootstrap thread becoming idle' "$log" &&
         grep -q 'HypeR: timer tick 100' "$log"; then
-        echo "verified boot, four online CPUs, per-CPU idle, and timer IRQs on QEMU CPU $cpu"
+        kaslr_base=$(sed -n 's/.*randomized kernel base \(0x[0-9a-f][0-9a-f]*\),.*/\1/p' "$log" | tail -n 1)
+        kaslr_offset=$(sed -n 's/.*KASLR offset \(0x[0-9a-f][0-9a-f]*\).*/\1/p' "$log" | tail -n 1)
+        kaslr_base_value=$((kaslr_base))
+        kaslr_offset_value=$((kaslr_offset))
+        if [ $((kaslr_offset_value % 0x200000)) -ne 0 ] ||
+            [ "$kaslr_offset_value" -ge $((512 * 1024 * 1024 * 1024)) ] ||
+            [ "$kaslr_base_value" -ne $((0xff0000000000 + kaslr_offset_value)) ]; then
+            cat "$log" >&2
+            echo "invalid AArch64 KASLR offset: $kaslr_offset" >&2
+            exit 1
+        fi
+        echo "verified KASLR, four online CPUs, per-CPU idle, and timer IRQs on QEMU CPU $cpu"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then

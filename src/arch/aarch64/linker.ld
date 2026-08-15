@@ -42,6 +42,13 @@ SECTIONS
         __rela_dyn_end = .;
     }
 
+    .relr.dyn : ALIGN(8)
+    {
+        __relr_dyn_start = .;
+        *(.relr.dyn)
+        __relr_dyn_end = .;
+    }
+
     .dynamic : ALIGN(8)
     {
         *(.dynamic)

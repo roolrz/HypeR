@@ -3,8 +3,6 @@
 use core::arch::asm;
 use core::ptr::addr_of;
 
-use super::registers::KERNEL_VIRTUAL_BASE;
-
 unsafe extern "C" {
     static aarch64_secondary_entry: u8;
 }
@@ -39,9 +37,12 @@ impl SecondaryBootParameters {
 }
 
 /// Converts the linked secondary trampoline into its loaded physical address.
-pub fn secondary_entry_physical(image_physical_start: u64) -> Option<u64> {
+pub fn secondary_entry_physical(
+    image_physical_start: u64,
+    kernel_virtual_base: u64,
+) -> Option<u64> {
     let virtual_address = addr_of!(aarch64_secondary_entry) as u64;
-    let offset = virtual_address.checked_sub(KERNEL_VIRTUAL_BASE)?;
+    let offset = virtual_address.checked_sub(kernel_virtual_base)?;
     image_physical_start.checked_add(offset)
 }
 

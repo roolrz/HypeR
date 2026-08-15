@@ -1,3 +1,4 @@
+use hyper::platform::ConsoleInfo;
 use hyper::platform::PlatformInfo;
 use hyper::sync::InterruptSpinLock;
 
@@ -6,6 +7,7 @@ use crate::kernel::mm::PreparedMemory;
 pub struct BootState {
     pub platform: PlatformInfo,
     pub essential: crate::arch::EssentialPlatformInfo,
+    pub early_console: Option<ConsoleInfo>,
     pub memory: PreparedMemory,
     pub dtb_address: u64,
     pub image_physical_start: u64,

@@ -21,11 +21,12 @@ mod fdt {
     use std::boxed::Box;
 
     use hyper::{
+        drivers::console,
         drivers::platform::{
             DeviceScanner, DriverInstance, DriverManager, DriverServices, PlatformDevice,
             PlatformDriver, ProbeError,
         },
-        platform::fdt,
+        platform::{chosen, fdt},
     };
 
     const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -78,12 +79,26 @@ mod fdt {
         const INTERRUPTS: u32 = 68;
         const METHOD: u32 = 79;
         const STATUS: u32 = 86;
+        const BOOTARGS: u32 = 93;
+        const KASLR_SEED: u32 = 102;
 
-        let strings = b"#address-cells\0#size-cells\0reg\0compatible\0device_type\0ranges\0no-map\0interrupts\0method\0status\0";
+        let strings = b"#address-cells\0#size-cells\0reg\0compatible\0device_type\0ranges\0no-map\0interrupts\0method\0status\0bootargs\0kaslr-seed\0";
         let mut structure = Vec::new();
         begin_node(&mut structure, b"");
         property(&mut structure, ADDRESS_CELLS, &2u32.to_be_bytes());
         property(&mut structure, SIZE_CELLS, &2u32.to_be_bytes());
+        begin_node(&mut structure, b"chosen");
+        property(
+            &mut structure,
+            BOOTARGS,
+            b"earlycon=pl011,mmio32,0x09000000 loglevel=7\0",
+        );
+        property(
+            &mut structure,
+            KASLR_SEED,
+            &0x0123_4567_89ab_cdef_u64.to_be_bytes(),
+        );
+        push_u32(&mut structure, FDT_END_NODE);
         begin_node(&mut structure, b"memory@40000000");
         property(&mut structure, DEVICE_TYPE, b"memory\0");
         property(
@@ -206,8 +221,23 @@ mod fdt {
     fn discovers_generic_devices_and_translates_resources() {
         let blob = qemu_like_dtb();
         let mut scanner = DeviceScanner::new(&[]);
-        let platform = super::require_ok(fdt::discover_from_bytes_with(&blob, &mut scanner));
+        let mut chosen = chosen::Discovery::new();
+        let platform = {
+            let mut visitors = fdt::VisitorPair::new(&mut scanner, &mut chosen);
+            super::require_ok(fdt::discover_from_bytes_with(&blob, &mut visitors))
+        };
         let devices = super::require_ok(scanner.finish());
+        let chosen = super::require_ok(chosen.finish());
+        let command_line = super::require_some(chosen.command_line());
+        assert_eq!(command_line.value("loglevel"), Some("7"));
+        assert_eq!(chosen.kaslr_seed(), Some(0x0123_4567_89ab_cdef));
+        assert_eq!(
+            super::require_ok(console::early_console(Some(&command_line))),
+            Some(hyper::platform::ConsoleInfo {
+                kind: hyper::platform::ConsoleKind::Pl011,
+                base: 0x0900_0000,
+            })
+        );
 
         let console = super::require_some(
             devices
@@ -263,6 +293,36 @@ mod fdt {
                 0x4100_0000,
                 0x2000,
             ))]
+        );
+    }
+
+    #[test]
+    fn leaves_the_early_console_disabled_without_an_earlycon_argument() {
+        let mut blob = qemu_like_dtb();
+        replace_first(&mut blob, b"earlycon", b"consolex");
+        let mut discovery = chosen::Discovery::new();
+        let _platform = super::require_ok(fdt::discover_from_bytes_with(&blob, &mut discovery));
+        let chosen = super::require_ok(discovery.finish());
+        let command_line = super::require_some(chosen.command_line());
+
+        assert_eq!(
+            super::require_ok(console::early_console(Some(&command_line))),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_an_invalid_early_console_address_without_rejecting_the_dtb() {
+        let mut blob = qemu_like_dtb();
+        replace_first(&mut blob, b"0x09000000", b"not-an-hex");
+        let mut discovery = chosen::Discovery::new();
+        let _platform = super::require_ok(fdt::discover_from_bytes_with(&blob, &mut discovery));
+        let chosen = super::require_ok(discovery.finish());
+        let command_line = super::require_some(chosen.command_line());
+
+        assert_eq!(
+            console::early_console(Some(&command_line)),
+            Err(console::EarlyConsoleError::InvalidAddress)
         );
     }
 
@@ -420,6 +480,47 @@ mod physical_ranges {
                 .is_err()
         );
         assert_eq!(regions.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod kaslr {
+    use hyper::mm::kaslr::{self, Error};
+
+    #[test]
+    fn selects_a_reproducible_aligned_offset_inside_the_window() {
+        let first = super::require_ok(kaslr::select_offset(
+            0x0123_4567_89ab_cdef,
+            0x90000,
+            512 * 1024 * 1024 * 1024,
+            2 * 1024 * 1024,
+        ));
+        let second = super::require_ok(kaslr::select_offset(
+            0x0123_4567_89ab_cdef,
+            0x90000,
+            512 * 1024 * 1024 * 1024,
+            2 * 1024 * 1024,
+        ));
+
+        assert_eq!(first, second);
+        assert_eq!(first % (2 * 1024 * 1024), 0);
+        assert!(first + 0x20_0000 <= 512 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn rejects_invalid_kaslr_geometry() {
+        assert_eq!(
+            kaslr::select_offset(1, 0, 0x4000_0000, 0x20_0000),
+            Err(Error::InvalidImage)
+        );
+        assert_eq!(
+            kaslr::select_offset(1, 0x1000, 0x4000_0000, 0x30_0000),
+            Err(Error::InvalidAlignment)
+        );
+        assert_eq!(
+            kaslr::select_offset(1, 0x8000_0000, 0x4000_0000, 0x20_0000),
+            Err(Error::ImageTooLarge)
+        );
     }
 }
 

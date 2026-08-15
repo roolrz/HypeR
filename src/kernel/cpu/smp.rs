@@ -64,6 +64,7 @@ pub fn initialize(
     platform: &PlatformInfo,
     root: u64,
     image_physical_start: u64,
+    kernel_virtual_base: u64,
 ) -> Result<Capabilities, Error> {
     let boot_hardware_id = crate::arch::current_hardware_id();
     if !platform
@@ -75,8 +76,8 @@ pub fn initialize(
         return Err(Error::BootCpuMissing);
     }
     ONLINE[0].store(true, Ordering::Release);
-    let entry =
-        crate::arch::secondary_entry_physical(image_physical_start).ok_or(Error::InvalidAddress)?;
+    let entry = crate::arch::secondary_entry_physical(image_physical_start, kernel_virtual_base)
+        .ok_or(Error::InvalidAddress)?;
     let mut next_cpu_index = 1usize;
     let mut boot_parameters = Vec::new();
     boot_parameters

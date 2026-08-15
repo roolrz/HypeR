@@ -1,5 +1,5 @@
 use crate::hal::console::Console;
-use crate::platform::{ConsoleInfo, ConsoleKind};
+use crate::platform::{ConsoleInfo, ConsoleKind, chosen::CommandLine};
 
 use super::serial::Pl011;
 
@@ -7,6 +7,59 @@ use super::serial::Pl011;
 #[derive(Clone, Copy)]
 pub enum ConsoleDevice {
     Pl011(Pl011),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EarlyConsoleError {
+    InvalidAddress,
+    MissingAddress,
+    UnsupportedDriver,
+}
+
+/// Parses the explicit-address subset of Linux's `earlycon=` command line.
+///
+/// Supported forms are `earlycon=pl011,<address>` and
+/// `earlycon=pl011,mmio32,<address>`. Firmware is expected to have configured
+/// the UART before entry, so optional serial-format fields are not consumed.
+pub fn early_console(
+    command_line: Option<&CommandLine>,
+) -> Result<Option<ConsoleInfo>, EarlyConsoleError> {
+    let Some(value) = command_line.and_then(|arguments| arguments.value("earlycon")) else {
+        return Ok(None);
+    };
+    if value == "off" {
+        return Ok(None);
+    }
+    let mut fields = value.split(',');
+    if fields.next() != Some("pl011") {
+        return Err(EarlyConsoleError::UnsupportedDriver);
+    }
+    let mut address = fields.next().ok_or(EarlyConsoleError::MissingAddress)?;
+    if matches!(address, "mmio" | "mmio32") {
+        address = fields.next().ok_or(EarlyConsoleError::MissingAddress)?;
+    }
+    let address = parse_address(address).ok_or(EarlyConsoleError::InvalidAddress)?;
+    if address == 0 || address & 3 != 0 {
+        return Err(EarlyConsoleError::InvalidAddress);
+    }
+    Ok(Some(ConsoleInfo {
+        kind: ConsoleKind::Pl011,
+        base: address,
+    }))
+}
+
+fn parse_address(value: &str) -> Option<u64> {
+    let (digits, radix) = match value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+    {
+        Some(digits) => (digits, 16),
+        None => (value, 10),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    u64::from_str_radix(digits, radix).ok()
 }
 
 impl Console for ConsoleDevice {

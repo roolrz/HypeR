@@ -15,7 +15,9 @@ Linux AArch64 boot ABI
     -> architectural assembly entry
     -> Rust entry
     -> flattened device tree discovery
-    -> early platform driver initialization
+    -> optional command-line early console
+    -> essential architecture initialization
+    -> platform driver probing
     -> kernel initialization
     -> idle
 ```
@@ -23,7 +25,8 @@ Linux AArch64 boot ABI
 QEMU passes the DTB address in `x0`, following the Linux AArch64 boot protocol.
 The output is a position-independent raw `Image` with the standard 64-byte
 AArch64 header. Early assembly establishes deterministic EL2 state and a QEMU
-`virt` identity map before Rust discovers the PL011 UART from the DTB.
+`virt` identity map. UART access is not required to reach Rust or initialize
+memory.
 
 ## Requirements
 
@@ -39,6 +42,10 @@ make defconfig
 make image
 make run
 ```
+
+The default QEMU command line adds
+`earlycon=pl011,mmio32,0x09000000` to the generated DTB `/chosen/bootargs`.
+Override `QEMU_BOOTARGS` with an empty value to exercise a silent early boot.
 
 `make run` starts the verified four-CPU configuration. Uniprocessor QEMU is not
 part of the supported or tested platform matrix.
@@ -70,8 +77,28 @@ make verify
 Architectural constants live in `src/arch/aarch64/registers.rs`. The host-side
 build script exports those values to a generated C-style header and invokes
 Clang's integrated assembler for `boot.S`. The raw image is a static PIE; the
-bootstrap applies its `R_AARCH64_RELATIVE` records before accessing Rust static
-data.
+bootstrap decodes its standard ELF RELA and RELR relative relocations before
+accessing Rust static data.
+
+## Kernel address randomization
+
+`CONFIG_RANDOMIZE_BASE=y` enables AArch64 kernel virtual-address randomization.
+The allocation-free `/chosen` visitor reads the firmware-provided 64-bit
+`kaslr-seed`; `nokaslr` on `/chosen/bootargs` disables randomization for a boot.
+Missing or invalid entropy safely selects offset zero.
+
+The architecture supplies a 512 GiB placement window beginning at
+`0x0000_ff00_0000_0000`. The shared KASLR selector mixes the seed and chooses a
+2 MiB-aligned offset that leaves the complete image inside that window. Physical
+image placement is unchanged. Rust builds the final page tables around the
+selected virtual base, then calls the assembly address-space trampoline.
+
+LLVM/lld packs relative relocations into standard `.relr.dyn` metadata. Early
+assembly first applies RELA and RELR using the physical load bias. Before TTBR
+activation, the trampoline applies RELA for the selected virtual base and adds
+the physical-to-virtual slide to every RELR location, publishes the writes, and
+branches back to Rust at the randomized alias. Secondary-CPU trampoline address
+recovery uses the selected base rather than a compile-time VA.
 
 ## Kernel configuration
 
@@ -110,9 +137,9 @@ delivery for a future dmesg-style interface.
 The serial console owns an independent sequence cursor and loglevel filter.
 Only one flusher writes the UART at a time, and neither the ring lock nor the
 console-state lock is held during MMIO output. A pending flag closes the race
-between concurrent producers and the end of a drain pass. Installing the early
-console flushes records accumulated before UART discovery; rebinding PL011 to
-the permanent MMIO mapping preserves the cursor. `CONFIG_CONSOLE_LOGLEVEL`,
+between concurrent producers and the end of a drain pass. Installing the
+optional early console flushes records accumulated before command-line parsing;
+rebinding it to the permanent MMIO mapping preserves the cursor. `CONFIG_CONSOLE_LOGLEVEL`,
 `CONFIG_LOG_BUF_SHIFT`, and `CONFIG_LOG_LINE_MAX` control the default filter,
 ring size, and maximum formatted record length.
 
@@ -126,6 +153,14 @@ Expected serial output begins with:
 ```text
 HypeR: early console initialized
 ```
+
+Early console selection is opt-in. The allocation-free FDT walk copies and
+validates `/chosen/bootargs`; the console layer accepts the Linux-style explicit
+forms `earlycon=pl011,<address>` and
+`earlycon=pl011,mmio32,<address>`. The address must describe a DTB MMIO region
+reachable through the bootstrap map. Missing, disabled, malformed, or
+unsupported `earlycon` settings never prevent the kernel from booting; messages
+remain in the kernel log ring for a later console or dmesg-style reader.
 
 ## Design boundaries
 
@@ -216,7 +251,7 @@ The final non-VHE EL2 address space uses a 48-bit VA and 4 KiB granule:
 | MMIO window | `0x0000_1000_0000_0000 + PA` | Device-nGnRnE, RW, XN |
 | RAM linear map | `0x0000_4000_0000_0000 + PA` | Normal-WB, NX; kernel pages preserve RO/RW |
 | Kernel image | `0x0000_ff00_0000_0000 + offset` | text RX, rodata R+XN, data/BSS RW+XN |
-| Kernel stack | `0x0000_ff00_0100_0000` | Normal-WB, RW, XN |
+| Kernel stack | `0x0000_ff80_0000_0000` | Normal-WB, RW, XN |
 
 After TTBR activation, execution, exception vectors, and the stack move to the
 high kernel mapping. The DTB is scanned again through the linear map after the
@@ -291,7 +326,7 @@ future hypervisor subsystem.
 
 The generic FDT parser does not recognize concrete device compatible strings.
 Before allocation, it emits raw node/property events and translated resources
-to an AArch64 visitor that claims only the console, root interrupt controller,
+to an AArch64 visitor that claims only the root interrupt controller,
 architectural timer, and firmware CPU-power interface required to finish boot.
 
 After allocator handoff, the platform bus walks the DTB a second time and builds
@@ -299,8 +334,10 @@ heap-backed device names, complete compatible tables, properties, MMIO ranges,
 and interrupt cells. Early claims are excluded from normal probing. Platform
 drivers register a name and compatible table; the manager performs matching and
 probe, records deferred and failed devices separately, and owns bound instances
-through suspend, resume, and remove. No ordinary built-in platform drivers are
-registered yet.
+through suspend, resume, and remove. The PL011 UART is the first ordinary
+built-in platform driver and binds through its `arm,pl011` compatibility entry
+only after the allocator is available. Its presence is not a boot requirement,
+and binding a serial device does not implicitly select it as the kernel console.
 
 ## Runtime allocation
 
@@ -391,8 +428,8 @@ map base. AArch64 supplies the direct-map layout through `hal::memory`, while
 activation.
 
 `make verify` also validates that debug and release ELF files contain only
-`R_AARCH64_RELATIVE` dynamic relocations, that each raw image has a valid Linux
-AArch64 header and page-aligned declared memory footprint, and that the linked
-atomic helpers contain both LSE and LL/SC implementations. It boots both the
-baseline `cortex-a72` and feature-rich `max` QEMU CPU models and requires three
-recurring EL2 timer ticks from each.
+relative relocations, carry standard RELR sections and dynamic tags, and produce
+a valid Linux AArch64 Image with a page-aligned declared memory footprint. It
+checks both linked atomic backends, boots the baseline `cortex-a72` and
+feature-rich `max` QEMU CPU models, validates the reported KASLR slide geometry,
+and requires recurring EL2 timer interrupts on every CPU.

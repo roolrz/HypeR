@@ -19,6 +19,10 @@ endmenu
 
 menu "Kernel"
 
+config RANDOMIZE_BASE
+    bool "Randomize the kernel virtual address"
+    default y
+
 config MAX_CPUS
     int "Maximum supported CPU count"
     range 1 256

@@ -93,6 +93,41 @@ _start:
     add     x1, x1, #24
     b       .Lrelocate
 .Lrelocation_done:
+    /*
+     * Decode standard ELF RELR entries. Direct entries select one address;
+     * bitmap entries describe the following 63 pointer-sized locations.
+     */
+    adrp    x1, __relr_dyn_start
+    add     x1, x1, :lo12:__relr_dyn_start
+    adrp    x2, __relr_dyn_end
+    add     x2, x2, :lo12:__relr_dyn_end
+    mov     x4, xzr
+.Lrelr_load_loop:
+    cmp     x1, x2
+    b.hs    .Lrelr_load_done
+    ldr     x3, [x1], #8
+    tbnz    x3, #0, .Lrelr_load_bitmap
+    add     x4, x21, x3
+    ldr     x5, [x4]
+    add     x5, x5, x21
+    str     x5, [x4], #8
+    b       .Lrelr_load_loop
+.Lrelr_load_bitmap:
+    cbz     x4, .Lunsupported_boot
+    lsr     x3, x3, #1
+    mov     x6, #63
+.Lrelr_load_bitmap_loop:
+    tbz     x3, #0, .Lrelr_load_bitmap_next
+    ldr     x5, [x4]
+    add     x5, x5, x21
+    str     x5, [x4]
+.Lrelr_load_bitmap_next:
+    add     x4, x4, #8
+    lsr     x3, x3, #1
+    subs    x6, x6, #1
+    b.ne    .Lrelr_load_bitmap_loop
+    b       .Lrelr_load_loop
+.Lrelr_load_done:
 
     // Initialize EL2 controls before installing translation state.
     ldr     x1, =HCR_EL2_BOOT_VALUE
@@ -218,6 +253,39 @@ aarch64_activate_final_address_space:
     add     x3, x3, #24
     b       .Lvirtual_relocate
 .Lvirtual_relocation_done:
+    // RELR locations contain physical pointers after the load-bias pass.
+    sub     x8, x20, x22
+    adrp    x3, __relr_dyn_start
+    add     x3, x3, :lo12:__relr_dyn_start
+    adrp    x4, __relr_dyn_end
+    add     x4, x4, :lo12:__relr_dyn_end
+    mov     x5, xzr
+.Lvirtual_relr_loop:
+    cmp     x3, x4
+    b.hs    .Lvirtual_relr_done
+    ldr     x6, [x3], #8
+    tbnz    x6, #0, .Lvirtual_relr_bitmap
+    add     x5, x22, x6
+    ldr     x7, [x5]
+    add     x7, x7, x8
+    str     x7, [x5], #8
+    b       .Lvirtual_relr_loop
+.Lvirtual_relr_bitmap:
+    cbz     x5, .Lunsupported_boot
+    lsr     x6, x6, #1
+    mov     x9, #63
+.Lvirtual_relr_bitmap_loop:
+    tbz     x6, #0, .Lvirtual_relr_bitmap_next
+    ldr     x7, [x5]
+    add     x7, x7, x8
+    str     x7, [x5]
+.Lvirtual_relr_bitmap_next:
+    add     x5, x5, #8
+    lsr     x6, x6, #1
+    subs    x9, x9, #1
+    b.ne    .Lvirtual_relr_bitmap_loop
+    b       .Lvirtual_relr_loop
+.Lvirtual_relr_done:
     dsb     ishst
 
     // TCR and MAIR are unchanged; replacing TTBR is therefore atomic here.

@@ -87,6 +87,40 @@ pub trait NodeVisitor {
     fn end_node(&mut self, _node: NodeResources<'_>) {}
 }
 
+/// Forwards one FDT walk to two independent allocation-free consumers.
+pub struct VisitorPair<'a, First, Second> {
+    first: &'a mut First,
+    second: &'a mut Second,
+}
+
+impl<'a, First, Second> VisitorPair<'a, First, Second> {
+    pub const fn new(first: &'a mut First, second: &'a mut Second) -> Self {
+        Self { first, second }
+    }
+}
+
+impl<First: NodeVisitor, Second: NodeVisitor> NodeVisitor for VisitorPair<'_, First, Second> {
+    fn begin_node(&mut self, id: NodeId, name: &str) {
+        self.first.begin_node(id, name);
+        self.second.begin_node(id, name);
+    }
+
+    fn property(&mut self, id: NodeId, name: &str, value: &[u8]) {
+        self.first.property(id, name, value);
+        self.second.property(id, name, value);
+    }
+
+    fn end_node(&mut self, node: NodeResources<'_>) {
+        self.first.end_node(NodeResources {
+            id: node.id,
+            enabled: node.enabled,
+            registers: node.registers,
+            interrupt_cells: node.interrupt_cells,
+        });
+        self.second.end_node(node);
+    }
+}
+
 struct IgnoreNodes;
 
 impl NodeVisitor for IgnoreNodes {}

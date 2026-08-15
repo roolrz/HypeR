@@ -15,6 +15,7 @@ pub struct PreparedAddressSpace {
 pub struct ActivationContext {
     pub(in crate::arch::aarch64) root: hyper::mm::PhysicalAddress,
     pub(in crate::arch::aarch64) stack_top: hyper::mm::VirtualAddress,
+    pub(in crate::arch::aarch64) kernel_base: u64,
 }
 
 impl PreparedAddressSpace {
@@ -22,10 +23,15 @@ impl PreparedAddressSpace {
         self.address_space.root.get()
     }
 
+    pub fn kernel_base(&self) -> u64 {
+        self.address_space.kernel_base
+    }
+
     pub fn activation_context(&self) -> ActivationContext {
         ActivationContext {
             root: self.address_space.root,
             stack_top: self.address_space.stack_top,
+            kernel_base: self.address_space.kernel_base,
         }
     }
 
@@ -44,8 +50,9 @@ pub unsafe fn prepare(
     allocator: &mut BootAllocator,
     platform: &PlatformInfo,
     image: KernelImageLayout,
+    kernel_base: u64,
 ) -> Result<PreparedAddressSpace, Error> {
     let address_space =
-        unsafe { page_table::build_final_address_space(allocator, platform, image)? };
+        unsafe { page_table::build_final_address_space(allocator, platform, image, kernel_base)? };
     Ok(PreparedAddressSpace { address_space })
 }

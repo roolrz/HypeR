@@ -1,7 +1,8 @@
 use hyper::drivers::console;
 use hyper::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use hyper::hal::cache::CacheMaintenance;
-use hyper::platform::{ConsoleInfo, fdt};
+use hyper::hal::memory::AddressTranslation;
+use hyper::platform::{ConsoleInfo, chosen, fdt};
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -16,9 +17,11 @@ mod state;
 pub fn boot(dtb_address: usize) -> ! {
     let image_physical_start = image::layout().physical_start;
     let mut essential_discovery = crate::arch::EssentialDeviceDiscovery::new();
+    let mut chosen_discovery = chosen::Discovery::new();
+    let mut visitors = fdt::VisitorPair::new(&mut essential_discovery, &mut chosen_discovery);
     // SAFETY: The architectural entry receives the DTB address directly from
     // the Linux AArch64 boot ABI and has not repurposed x0.
-    let platform = match unsafe { fdt::discover_with(dtb_address, &mut essential_discovery) } {
+    let platform = match unsafe { fdt::discover_with(dtb_address, &mut visitors) } {
         Ok(platform) => platform,
         Err(error) => boot_failure("platform discovery", error),
     };
@@ -26,21 +29,57 @@ pub fn boot(dtb_address: usize) -> ! {
         Ok(essential) => essential,
         Err(error) => boot_failure("essential-device discovery", error),
     };
+    let chosen = match chosen_discovery.finish() {
+        Ok(chosen) => Some(chosen),
+        Err(error) => {
+            crate::pr_warn!("HypeR: ignoring invalid DTB /chosen properties: {error:?}");
+            None
+        }
+    };
+    let early_console =
+        match console::early_console(chosen.as_ref().and_then(chosen::Properties::command_line)) {
+            Ok(Some(info)) if early_console_is_accessible(&platform, info) => Some(info),
+            Ok(Some(info)) => {
+                crate::pr_warn!(
+                    "HypeR: ignoring inaccessible early console at {:#x}",
+                    info.base
+                );
+                None
+            }
+            Ok(None) => None,
+            Err(error) => {
+                crate::pr_warn!("HypeR: ignoring invalid earlycon argument: {error:?}");
+                None
+            }
+        };
 
-    if let Some(console_info) = essential.console {
+    if let Some(console_info) = early_console {
         install_console(console_info, console_info.base);
         crate::println!("HypeR: early console initialized");
     }
     crate::println!("HypeR: DTB at {:#x}", dtb_address);
 
+    let command_line = chosen.as_ref().and_then(chosen::Properties::command_line);
+    let kaslr_seed = if hyper::config::RANDOMIZE_BASE
+        && !command_line.is_some_and(|arguments| arguments.contains("nokaslr"))
+    {
+        chosen.as_ref().and_then(chosen::Properties::kaslr_seed)
+    } else {
+        None
+    };
+    let kaslr = match crate::arch::select_kaslr_layout(kaslr_seed, image::layout().total_size) {
+        Ok(layout) => layout,
+        Err(error) => boot_failure("KASLR layout selection", error),
+    };
+
     // SAFETY: The architecture established and owns the bootstrap mapping used
     // by its early physical-page allocation policy.
-    let memory = match unsafe { mm::memory::prepare(&platform, dtb_address as u64) } {
-        Ok(memory) => memory,
-        Err(error) => boot_failure("final address-space preparation", error),
-    };
+    let memory =
+        match unsafe { mm::memory::prepare(&platform, dtb_address as u64, kaslr.kernel_base) } {
+            Ok(memory) => memory,
+            Err(error) => boot_failure("final address-space preparation", error),
+        };
     let activation = memory.activation_context();
-    let layout = mm::memory::virtual_memory_layout();
 
     crate::println!(
         "HypeR: discovered {} RAM and {} MMIO regions",
@@ -50,12 +89,13 @@ pub fn boot(dtb_address: usize) -> ! {
     crate::println!(
         "HypeR: root page table at {:#x}; switching to kernel VA {:#x}",
         memory.root_address(),
-        layout.kernel_base
+        memory.kernel_base()
     );
 
     if let Err(error) = state::install(BootState {
         platform,
         essential,
+        early_console,
         memory,
         dtb_address: dtb_address as u64,
         image_physical_start,
@@ -70,8 +110,8 @@ pub fn boot(dtb_address: usize) -> ! {
 
 /// Continues initialization after execution and the stack move to kernel VAs.
 pub fn finish_boot() -> ! {
-    let (essential, dtb_address) = with_boot_state(|state| (state.essential, state.dtb_address));
-    let console_info = essential.console;
+    let (essential, early_console, dtb_address) =
+        with_boot_state(|state| (state.essential, state.early_console, state.dtb_address));
     let cpu_power_info = essential.cpu_power;
     let interrupt_controller_info = essential.interrupt_controller;
     let timer_info = essential.timer;
@@ -79,7 +119,7 @@ pub fn finish_boot() -> ! {
         Some(address) => address,
         None => boot_failure("DTB linear-address translation", dtb_address),
     };
-    if let Some(console_info) = console_info {
+    if let Some(console_info) = early_console {
         let virtual_console = match mm::memory::mmio_address(console_info.base) {
             Some(address) => address,
             None => boot_failure("console MMIO-address translation", console_info.base),
@@ -150,6 +190,7 @@ pub fn finish_boot() -> ! {
             &state.platform,
             state.memory.root_address(),
             state.image_physical_start,
+            state.memory.kernel_base(),
         )
     }) {
         Ok(capabilities) => capabilities,
@@ -176,6 +217,11 @@ pub fn finish_boot() -> ! {
         );
         crate::println!("HypeR: linear map base {:#x}", layout.linear_base);
         crate::println!("HypeR: MMIO map base {:#x}", layout.mmio_base);
+        crate::println!(
+            "HypeR: randomized kernel base {:#x}, KASLR offset {:#x}",
+            state.memory.kernel_base(),
+            state.memory.kernel_base() - layout.kernel_base
+        );
         crate::println!("HypeR: DTB physical address {:#x}", state.dtb_address);
         crate::println!(
             "HypeR: cache line sizes: data {} bytes, instruction {} bytes",
@@ -243,6 +289,24 @@ pub fn finish_boot() -> ! {
     crate::println!("HypeR: kernel initialization complete; bootstrap thread becoming idle");
     crate::arch::enable_local_irq();
     task::scheduler::thread_become_idle()
+}
+
+fn early_console_is_accessible(
+    platform: &hyper::platform::PlatformInfo,
+    info: ConsoleInfo,
+) -> bool {
+    const MINIMUM_REGISTER_WINDOW: u64 = 0x1000;
+    let Some(end) = info.base.checked_add(MINIMUM_REGISTER_WINDOW) else {
+        return false;
+    };
+    if end > crate::arch::ArchitectureAddressTranslation::bootstrap_accessible_limit() {
+        return false;
+    }
+    platform
+        .mmio
+        .as_slice()
+        .iter()
+        .any(|range| range.start() <= info.base && end <= range.end())
 }
 
 fn install_console(console_info: ConsoleInfo, address: u64) {
