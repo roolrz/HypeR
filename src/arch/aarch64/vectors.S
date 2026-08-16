@@ -85,6 +85,19 @@ aarch64_runtime_vectors:
     mrs     x1, sp_el1
     str     x1, [sp, #EXCEPTION_FRAME_SP_EL1_OFFSET]
 
+    // A VHE guest exits with TGE clear. Switch back to the host EL2&0 regime
+    // before any Rust handler accesses host-visible EL1/EL0 register aliases.
+    ldr     x1, [sp, #EXCEPTION_FRAME_VECTOR_OFFSET]
+    cmp     x1, #EXCEPTION_VECTOR_LOWER_AARCH64_SYNC
+    b.lo    .Lhost_regime_active
+    mrs     x1, hcr_el2
+    tst     x1, #HCR_EL2_E2H
+    b.eq    .Lhost_regime_active
+    orr     x1, x1, #HCR_EL2_TGE
+    msr     hcr_el2, x1
+    isb
+.Lhost_regime_active:
+
     stp     q0, q1, [sp, #(EXCEPTION_FRAME_SIMD_OFFSET + 0)]
     stp     q2, q3, [sp, #(EXCEPTION_FRAME_SIMD_OFFSET + 32)]
     stp     q4, q5, [sp, #(EXCEPTION_FRAME_SIMD_OFFSET + 64)]
@@ -130,6 +143,17 @@ aarch64_runtime_vectors:
     mov     x0, x19
     bl      aarch64_exception_dispatch
     mov     sp, x19
+
+    // Lower-EL returns are guest returns. Restore the EL1&0 guest regime while
+    // all temporary state is still contained in the architectural frame.
+    ldr     x1, [sp, #EXCEPTION_FRAME_VECTOR_OFFSET]
+    cmp     x1, #EXCEPTION_VECTOR_LOWER_AARCH64_SYNC
+    b.lo    .Lreturn_regime_ready
+    mrs     x1, hcr_el2
+    bic     x1, x1, #HCR_EL2_TGE
+    msr     hcr_el2, x1
+    isb
+.Lreturn_regime_ready:
 
     ldr     x1, [sp, #EXCEPTION_FRAME_ELR_OFFSET]
     msr     elr_el2, x1

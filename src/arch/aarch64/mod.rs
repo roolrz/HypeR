@@ -4,6 +4,7 @@ mod cache;
 mod context;
 mod exception;
 mod gic_cpu_interface;
+mod host;
 mod interrupt_controller;
 mod interrupts;
 mod kaslr;
@@ -32,6 +33,7 @@ pub use gic_cpu_interface::{
     Aarch64GicCpuInterface, acknowledge_interrupt, broadcast_crash_stop, crash_stop_interrupt,
     current_gic_affinity, end_interrupt, is_crash_stop_interrupt,
 };
+pub use host::mode_name as host_execution_mode_name;
 pub use hyper::drivers::power::psci::Error as CpuPowerError;
 pub use interrupt_controller::{
     Aarch64InterruptController as ArchitectureInterruptController,
@@ -86,7 +88,7 @@ pub fn initialize_cpu_power(
 
 /// Checks that a secondary CPU supports the backend selected by the boot CPU.
 pub fn secondary_cpu_is_compatible() -> bool {
-    atomics::current_cpu_supports_selected_backend()
+    atomics::current_cpu_supports_selected_backend() && host::current_cpu_is_compatible()
 }
 
 pub fn interrupt_is_per_cpu(interrupt: hyper::hal::interrupt::InterruptId) -> bool {
@@ -176,6 +178,7 @@ pub const fn port_io() -> Option<hyper::hal::io::PortIo> {
 #[unsafe(no_mangle)]
 extern "C" fn aarch64_bootstrap(dtb_address: usize) -> ! {
     atomics::initialize();
+    host::initialize();
     crate::kernel::boot::prepare_boot_environment(crate::kernel::boot::ProtocolInputs::from_dtb(
         dtb_address,
     ))

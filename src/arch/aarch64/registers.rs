@@ -72,6 +72,18 @@ define_asm_constants! {
         | HCR_EL2_IMO
         | HCR_EL2_AMO
         | HCR_EL2_TID3;
+    HCR_EL2_VHE_HOST_VALUE = HCR_EL2_BOOT_VALUE | HCR_EL2_E2H | HCR_EL2_TGE;
+
+    // ID_AA64MMFR1_EL1.Virtualization Host Extensions.
+    ID_AA64MMFR1_VH_SHIFT = 8;
+    ID_AA64MMFR1_VH_MASK = 0xf;
+    ID_AA64MMFR1_VH_NONE = 0x0;
+    ID_AA64MMFR1_VH_VHE = 0x1;
+    ID_AA64MMFR1_VH_FIELD_MASK = ID_AA64MMFR1_VH_MASK << ID_AA64MMFR1_VH_SHIFT;
+
+    // VHE redirects CPACR_EL1 accesses to the EL2 host trap controls.
+    CPACR_EL1_FPEN_SHIFT = 20;
+    CPACR_EL1_FPEN_ALL = 3 << CPACR_EL1_FPEN_SHIFT;
 
     // ELF dynamic relocation ABI.
     R_AARCH64_RELATIVE = 1027;

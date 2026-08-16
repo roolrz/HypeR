@@ -46,6 +46,9 @@ pub use imp::{
 #[cfg(target_arch = "x86_64")]
 pub use imp::virtualization_backend_name;
 
+#[cfg(target_arch = "aarch64")]
+pub use imp::host_execution_mode_name;
+
 #[cfg(CONFIG_CRASH_CONSOLE)]
 pub use imp::inspect_stage1_mapping;
 

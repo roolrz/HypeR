@@ -166,6 +166,14 @@ impl VcpuContext {
     /// The caller must exclusively own this stopped vCPU, and lower-EL guest
     /// execution must remain disabled until the rest of its state is loaded.
     pub unsafe fn activate_system_registers(&self) {
+        if super::host::is_vhe() {
+            unsafe { self.activate_system_registers_vhe() };
+        } else {
+            unsafe { self.activate_system_registers_nvhe() };
+        }
+    }
+
+    unsafe fn activate_system_registers_nvhe(&self) {
         // SAFETY: The caller owns the inactive guest context. The final ISB
         // makes all translation and exception state visible before guest entry.
         unsafe {
@@ -220,6 +228,61 @@ impl VcpuContext {
         }
     }
 
+    unsafe fn activate_system_registers_vhe(&self) {
+        // EL1 register names select the VHE host bank. EL12 aliases are the
+        // only safe way to load the guest bank without replacing host state.
+        unsafe {
+            asm!(
+                "msr S3_5_C2_C0_2, {tcr}",
+                "msr S3_5_C2_C0_0, {ttbr0}",
+                "msr S3_5_C2_C0_1, {ttbr1}",
+                "msr S3_5_C10_C2_0, {mair}",
+                "msr S3_5_C10_C3_0, {amair}",
+                "msr S3_5_C1_C0_0, {sctlr}",
+                "msr S3_5_C12_C0_0, {vbar}",
+                "msr S3_5_C1_C0_2, {cpacr}",
+                "msr S3_5_C14_C1_0, {cntkctl}",
+                "msr S3_5_C5_C1_0, {afsr0}",
+                "msr S3_5_C5_C1_1, {afsr1}",
+                "msr S3_5_C13_C0_1, {contextidr}",
+                "msr TPIDR_EL0, {tpidr_el0}",
+                "msr TPIDRRO_EL0, {tpidrro_el0}",
+                "msr TPIDR_EL1, {tpidr_el1}",
+                "msr S3_5_C5_C2_0, {esr}",
+                "msr S3_5_C6_C0_0, {far}",
+                "msr PAR_EL1, {par}",
+                "msr S3_5_C4_C0_1, {elr}",
+                "msr S3_5_C4_C0_0, {spsr}",
+                "msr SP_EL0, {sp_el0}",
+                "msr SP_EL1, {sp_el1}",
+                "isb",
+                sctlr = in(reg) self.sctlr_el1,
+                tcr = in(reg) self.tcr_el1,
+                ttbr0 = in(reg) self.ttbr0_el1,
+                ttbr1 = in(reg) self.ttbr1_el1,
+                mair = in(reg) self.mair_el1,
+                amair = in(reg) self.amair_el1,
+                vbar = in(reg) self.vbar_el1,
+                cpacr = in(reg) self.cpacr_el1,
+                cntkctl = in(reg) self.cntkctl_el1,
+                afsr0 = in(reg) self.afsr0_el1,
+                afsr1 = in(reg) self.afsr1_el1,
+                contextidr = in(reg) self.contextidr_el1,
+                tpidr_el0 = in(reg) self.tpidr_el0,
+                tpidrro_el0 = in(reg) self.tpidrro_el0,
+                tpidr_el1 = in(reg) self.tpidr_el1,
+                esr = in(reg) self.esr_el1,
+                far = in(reg) self.far_el1,
+                par = in(reg) self.par_el1,
+                elr = in(reg) self.elr_el1,
+                spsr = in(reg) self.spsr_el1,
+                sp_el0 = in(reg) self.stack_pointer_el0,
+                sp_el1 = in(reg) self.stack_pointer_el1,
+                options(nostack, preserves_flags)
+            );
+        }
+    }
+
     /// Saves the live guest-owned EL1 system-register bank.
     ///
     /// # Safety
@@ -227,6 +290,14 @@ impl VcpuContext {
     /// This context must be the vCPU currently loaded on the calling CPU, and
     /// guest execution must already have stopped with local IRQs masked.
     pub unsafe fn deactivate_system_registers(&mut self) {
+        if super::host::is_vhe() {
+            unsafe { self.deactivate_system_registers_vhe() };
+        } else {
+            unsafe { self.deactivate_system_registers_nvhe() };
+        }
+    }
+
+    unsafe fn deactivate_system_registers_nvhe(&mut self) {
         // SAFETY: The caller guarantees that the live EL1 bank belongs to this
         // context and cannot change concurrently.
         unsafe {
@@ -251,6 +322,58 @@ impl VcpuContext {
                 "mrs {par}, PAR_EL1",
                 "mrs {elr}, ELR_EL1",
                 "mrs {spsr}, SPSR_EL1",
+                "mrs {sp_el0}, SP_EL0",
+                "mrs {sp_el1}, SP_EL1",
+                sctlr = out(reg) self.sctlr_el1,
+                tcr = out(reg) self.tcr_el1,
+                ttbr0 = out(reg) self.ttbr0_el1,
+                ttbr1 = out(reg) self.ttbr1_el1,
+                mair = out(reg) self.mair_el1,
+                amair = out(reg) self.amair_el1,
+                vbar = out(reg) self.vbar_el1,
+                cpacr = out(reg) self.cpacr_el1,
+                cntkctl = out(reg) self.cntkctl_el1,
+                afsr0 = out(reg) self.afsr0_el1,
+                afsr1 = out(reg) self.afsr1_el1,
+                contextidr = out(reg) self.contextidr_el1,
+                tpidr_el0 = out(reg) self.tpidr_el0,
+                tpidrro_el0 = out(reg) self.tpidrro_el0,
+                tpidr_el1 = out(reg) self.tpidr_el1,
+                esr = out(reg) self.esr_el1,
+                far = out(reg) self.far_el1,
+                par = out(reg) self.par_el1,
+                elr = out(reg) self.elr_el1,
+                spsr = out(reg) self.spsr_el1,
+                sp_el0 = out(reg) self.stack_pointer_el0,
+                sp_el1 = out(reg) self.stack_pointer_el1,
+                options(nomem, nostack, preserves_flags)
+            );
+        }
+    }
+
+    unsafe fn deactivate_system_registers_vhe(&mut self) {
+        unsafe {
+            asm!(
+                "mrs {sctlr}, S3_5_C1_C0_0",
+                "mrs {tcr}, S3_5_C2_C0_2",
+                "mrs {ttbr0}, S3_5_C2_C0_0",
+                "mrs {ttbr1}, S3_5_C2_C0_1",
+                "mrs {mair}, S3_5_C10_C2_0",
+                "mrs {amair}, S3_5_C10_C3_0",
+                "mrs {vbar}, S3_5_C12_C0_0",
+                "mrs {cpacr}, S3_5_C1_C0_2",
+                "mrs {cntkctl}, S3_5_C14_C1_0",
+                "mrs {afsr0}, S3_5_C5_C1_0",
+                "mrs {afsr1}, S3_5_C5_C1_1",
+                "mrs {contextidr}, S3_5_C13_C0_1",
+                "mrs {tpidr_el0}, TPIDR_EL0",
+                "mrs {tpidrro_el0}, TPIDRRO_EL0",
+                "mrs {tpidr_el1}, TPIDR_EL1",
+                "mrs {esr}, S3_5_C5_C2_0",
+                "mrs {far}, S3_5_C6_C0_0",
+                "mrs {par}, PAR_EL1",
+                "mrs {elr}, S3_5_C4_C0_1",
+                "mrs {spsr}, S3_5_C4_C0_0",
                 "mrs {sp_el0}, SP_EL0",
                 "mrs {sp_el1}, SP_EL1",
                 sctlr = out(reg) self.sctlr_el1,

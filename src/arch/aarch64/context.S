@@ -161,6 +161,12 @@ aarch64_capture_crash_context:
 aarch64_enter_guest:
     // Keep the context pointer in x30 until every other guest register is live.
     mov     x30, x0
+    // E2H remains set for VHE, but TGE must be clear while EL1/EL0 belongs to
+    // the guest. On nVHE systems this is an idempotent write of a clear bit.
+    mrs     x1, hcr_el2
+    bic     x1, x1, #HCR_EL2_TGE
+    msr     hcr_el2, x1
+    isb
     ldr     x1, [x30, #VCPU_CONTEXT_PC_OFFSET]
     msr     elr_el2, x1
     ldr     x1, [x30, #VCPU_CONTEXT_PSTATE_OFFSET]

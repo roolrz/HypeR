@@ -354,7 +354,7 @@ kernel image segments are described by `kernel::image`; `kernel::memory` owns
 reservations and hands the allocator to the architecture only while page tables
 are constructed.
 
-The final non-VHE EL2 address space uses a 48-bit VA and 4 KiB granule:
+The final EL2 address space uses a 48-bit VA and 4 KiB granule:
 
 | Region | Virtual address | Mapping policy |
 | --- | ---: | --- |
@@ -363,6 +363,15 @@ The final non-VHE EL2 address space uses a 48-bit VA and 4 KiB granule:
 | Kernel image | `0x0000_ff00_0000_0000 + offset` | text RX, rodata R+XN, data/BSS RW+XN |
 | Bootstrap stack | `0x0000_ff80_0000_1000` | 64 KiB transition stack; unmapped lower guard page |
 | Runtime stack arena | `0x0000_ff80_0020_0000` | Guarded thread and per-CPU exception-stack slots |
+
+The EL2 entry path detects `ID_AA64MMFR1_EL1.VH` on every CPU. A capable
+system runs the host with `HCR_EL2.{E2H,TGE}={1,1}`; the Armv8.0 baseline
+keeps the nVHE regime. Guest entry preserves E2H and clears only TGE. VHE
+world-switch code accesses guest EL1 registers through their EL12 aliases and
+guest virtual timers through EL02 aliases, so host page tables, vectors, and
+timer state never share the redirected register bank. Exception entry restores
+the host regime before calling Rust, while stage-2 TLB maintenance temporarily
+selects the guest regime around the architectural invalidation instruction.
 
 After TTBR activation, execution, exception vectors, and the stack move to the
 high kernel mapping. The DTB is scanned again through the linear map after the
@@ -386,8 +395,9 @@ Thread for each secondary, and starts it through the architecture-neutral
 CPU-power service. Each boot record is cleaned to PoC before CPU_ON because the
 PSCI target begins with data caching disabled. AArch64 supplies a
 position-independent PSCI physical trampoline that installs deterministic EL2
-state, the final TTBR, the high runtime vectors, `TPIDR_EL2`, and the
-secondary's virtual stack before entering Rust.
+state, selects the same VHE or nVHE host regime, installs the final TTBR, the
+high runtime vectors, `TPIDR_EL2`, and the secondary's virtual stack before
+entering Rust.
 
 Each secondary matches and wakes its GICv3 Redistributor, initializes its
 system-register CPU interface, enables registered PPIs, starts its private
@@ -398,7 +408,8 @@ deferred until a stopped-thread hand-off protocol exists, preventing one saved
 context from being selected by two CPUs simultaneously.
 `make test-qemu` boots the image with four host CPUs, verifies all secondary
 idle paths and recurring EL2 timer interrupts, and then requires the
-ramdisk-loaded Linux guest to execute `/init` on both `cortex-a72` and `max`.
+ramdisk-loaded Linux guest to execute `/init` in nVHE mode on `cortex-a72` and
+VHE mode on `max`.
 
 ## Interrupt controller
 
@@ -412,7 +423,8 @@ RWP completion waits, and end-of-interrupt semantics. The AArch64 layer separate
 The boot CPU initializes the shared Distributor and its local interface; every
 secondary initializes its matching Redistributor and local interface. A 2 KiB-aligned runtime EL2 vector table preserves the complete integer
 and SIMD context, dispatches physical IRQs through dynamically allocated IRQ
-domains, and applies an explicit fail-stop policy to other exception classes.
+domains, changes VHE TGE state at the assembly boundary, and applies an
+explicit fail-stop policy to other exception classes.
 A private BRK round trip validates the vector and `eret` path before IRQs are
 unmasked.
 

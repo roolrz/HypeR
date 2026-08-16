@@ -13,6 +13,11 @@ initrd=$3
 cpu=$4
 memory=$5
 bootargs=$6
+case "$cpu" in
+    cortex-a72) host_mode='nVHE' ;;
+    max) host_mode='VHE' ;;
+    *) host_mode='\(nVHE\|VHE\)' ;;
+esac
 temp=$(mktemp -d -t hyper-qemu-smp.XXXXXX)
 log=$temp/output.log
 input=$temp/input
@@ -77,6 +82,7 @@ while [ "$attempt" -lt 300 ]; do
         grep -q 'HypeR: SMP online: 4/4 discovered CPUs' "$log" &&
         grep -q 'HypeR: randomized kernel base 0x[0-9a-f][0-9a-f]*, KASLR offset 0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR: transition identity mappings retired' "$log" &&
+        grep -q "HypeR: AArch64 host execution mode: $host_mode" "$log" &&
         grep -q "HypeR: loaded VM 'alpine' from boot ramdisk: 128 MiB RAM, 1 vCPU(s)" "$log" &&
         grep -q 'HypeR: kernel initialization complete; starting Linux guest' "$log" &&
         grep -q 'HypeR: vCPU 0 running as scheduler thread [1-9][0-9]* on guarded stack 0x[0-9a-f][0-9a-f]*-0x[0-9a-f][0-9a-f]*' "$log" &&

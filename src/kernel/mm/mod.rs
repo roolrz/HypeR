@@ -80,6 +80,11 @@ pub(crate) fn finalize_address_space() {
             "HypeR: atomic RMW backend: {}",
             atomic_capabilities.backend_name()
         );
+        #[cfg(target_arch = "aarch64")]
+        crate::println!(
+            "HypeR: AArch64 host execution mode: {}",
+            crate::arch::host_execution_mode_name()
+        );
         crate::println!(
             "HypeR: {} boot reservations, {} RAM regions, root {:#x}",
             state.memory.reservation_count(),

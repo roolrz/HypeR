@@ -143,24 +143,33 @@ impl Stage2AddressSpace {
     /// must not switch VMIDs without first stopping lower-EL execution.
     pub unsafe fn activate(&self) {
         let vttbr = (u64::from(self.vmid) << registers::VTTBR_EL2_VMID_SHIFT) | self.root.get();
+        // VHE makes TGE select whether guest or host TLBs are targeted. Keep
+        // the temporary guest-regime interval entirely inside this register-
+        // only sequence so host memory accesses cannot observe it.
         // SAFETY: The hierarchy is complete and owned by this address space.
         unsafe {
             asm!(
                 "dsb ishst",
+                "mrs {host_hcr}, HCR_EL2",
+                "orr {host_hcr}, {host_hcr}, {vm}",
                 "msr VTCR_EL2, {vtcr}",
                 "msr VTTBR_EL2, {vttbr}",
+                "msr HCR_EL2, {host_hcr}",
+                "isb",
+                "bic {guest_hcr}, {host_hcr}, {tge}",
+                "msr HCR_EL2, {guest_hcr}",
                 "isb",
                 "tlbi VMALLS12E1IS",
                 "dsb ish",
                 "isb",
-                "mrs {hcr}, HCR_EL2",
-                "orr {hcr}, {hcr}, {vm}",
-                "msr HCR_EL2, {hcr}",
+                "msr HCR_EL2, {host_hcr}",
                 "isb",
                 vtcr = in(reg) registers::VTCR_EL2_GUEST_VALUE,
                 vttbr = in(reg) vttbr,
                 vm = in(reg) registers::HCR_EL2_VM,
-                hcr = out(reg) _,
+                tge = in(reg) registers::HCR_EL2_TGE,
+                host_hcr = out(reg) _,
+                guest_hcr = out(reg) _,
                 options(nostack, preserves_flags)
             );
         }
@@ -308,10 +317,19 @@ unsafe fn invalidate_ipa(ipa: u64) {
     unsafe {
         asm!(
             "dsb ishst",
+            "mrs {host_hcr}, HCR_EL2",
+            "bic {guest_hcr}, {host_hcr}, {tge}",
+            "msr HCR_EL2, {guest_hcr}",
+            "isb",
             "tlbi ipas2e1is, {operand}",
             "dsb ish",
             "isb",
+            "msr HCR_EL2, {host_hcr}",
+            "isb",
             operand = in(reg) operand,
+            tge = in(reg) registers::HCR_EL2_TGE,
+            host_hcr = out(reg) _,
+            guest_hcr = out(reg) _,
             options(nostack, preserves_flags)
         );
     }

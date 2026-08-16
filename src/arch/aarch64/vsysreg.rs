@@ -40,6 +40,9 @@ pub fn validate() -> Result<(), ValidationError> {
     if sanitize_pfr0(u64::MAX) != registers::ID_AA64PFR0_GUEST_BASE {
         return Err(ValidationError::UnsafeFeatureExposure);
     }
+    if sanitize_mmfr1(u64::MAX) & registers::ID_AA64MMFR1_VH_FIELD_MASK != 0 {
+        return Err(ValidationError::UnsafeFeatureExposure);
+    }
     if !validate_translation_fault_decoder() {
         return Err(ValidationError::InvalidDecoder);
     }
@@ -348,7 +351,7 @@ fn read_virtual_register(_context: &VcpuContext, vcpu_id: u32, encoding: Encodin
         registers::SYSREG_ID_AA64ISAR1_EL1 => Some(sanitize_isar1(read_id_aa64isar1_el1())),
         registers::SYSREG_ID_AA64ISAR2_EL1 => Some(sanitize_isar2(read_id_aa64isar2_el1())),
         registers::SYSREG_ID_AA64MMFR0_EL1 => Some(read_id_aa64mmfr0_el1()),
-        registers::SYSREG_ID_AA64MMFR1_EL1 => Some(read_id_aa64mmfr1_el1()),
+        registers::SYSREG_ID_AA64MMFR1_EL1 => Some(sanitize_mmfr1(read_id_aa64mmfr1_el1())),
         registers::SYSREG_ID_AA64MMFR2_EL1 => Some(read_id_aa64mmfr2_el1()),
         registers::SYSREG_CTR_EL0 => Some(read_ctr_el0()),
         registers::SYSREG_DCZID_EL0 => Some(read_dczid_el0()),
@@ -380,9 +383,25 @@ fn inject_undefined(context: &mut VcpuContext, frame: &mut GuestSyncFrame<'_>) -
     context.elr_el1 = saved_pc;
     context.spsr_el1 = saved_pstate;
     // SAFETY: The active-vCPU bridge guarantees this is the guest whose EL1
-    // bank is live on the current CPU. These writes prepare an architecturally
-    // normal EL1 Undefined Instruction exception before EL2 returns.
-    let live_vbar: u64;
+    // bank is live on the current CPU.
+    let live_vbar = unsafe { load_undefined_exception(syndrome, saved_pc, saved_pstate) };
+    context.vbar_el1 = live_vbar;
+    *frame.program_counter = live_vbar.wrapping_add(vector_offset);
+    *frame.processor_state =
+        (saved_pstate & !registers::SPSR_MODE_AND_DAIF_MASK) | registers::SPSR_EL1H_AND_DAIF;
+    GuestSyncAction::Injected
+}
+
+unsafe fn load_undefined_exception(syndrome: u64, elr: u64, spsr: u64) -> u64 {
+    if super::host::is_vhe() {
+        unsafe { load_undefined_exception_vhe(syndrome, elr, spsr) }
+    } else {
+        unsafe { load_undefined_exception_nvhe(syndrome, elr, spsr) }
+    }
+}
+
+unsafe fn load_undefined_exception_nvhe(syndrome: u64, elr: u64, spsr: u64) -> u64 {
+    let vbar: u64;
     unsafe {
         asm!(
             "mrs {vbar}, VBAR_EL1",
@@ -390,18 +409,33 @@ fn inject_undefined(context: &mut VcpuContext, frame: &mut GuestSyncFrame<'_>) -
             "msr FAR_EL1, xzr",
             "msr ELR_EL1, {elr}",
             "msr SPSR_EL1, {spsr}",
-            vbar = out(reg) live_vbar,
+            vbar = out(reg) vbar,
             esr = in(reg) syndrome,
-            elr = in(reg) saved_pc,
-            spsr = in(reg) saved_pstate,
+            elr = in(reg) elr,
+            spsr = in(reg) spsr,
             options(nostack, preserves_flags)
         );
     }
-    context.vbar_el1 = live_vbar;
-    *frame.program_counter = live_vbar.wrapping_add(vector_offset);
-    *frame.processor_state =
-        (saved_pstate & !registers::SPSR_MODE_AND_DAIF_MASK) | registers::SPSR_EL1H_AND_DAIF;
-    GuestSyncAction::Injected
+    vbar
+}
+
+unsafe fn load_undefined_exception_vhe(syndrome: u64, elr: u64, spsr: u64) -> u64 {
+    let vbar: u64;
+    unsafe {
+        asm!(
+            "mrs {vbar}, S3_5_C12_C0_0",
+            "msr S3_5_C5_C2_0, {esr}",
+            "msr S3_5_C6_C0_0, xzr",
+            "msr S3_5_C4_C0_1, {elr}",
+            "msr S3_5_C4_C0_0, {spsr}",
+            vbar = out(reg) vbar,
+            esr = in(reg) syndrome,
+            elr = in(reg) elr,
+            spsr = in(reg) spsr,
+            options(nostack, preserves_flags)
+        );
+    }
+    vbar
 }
 
 const fn virtual_mpidr(vcpu_id: u32) -> u64 {
@@ -432,6 +466,12 @@ fn sanitize_isar2(_value: u64) -> u64 {
     // key registers are part of the vCPU context-switch contract. ISAR2 only
     // reports optional extensions, so zero is a conservative coherent model.
     0
+}
+
+const fn sanitize_mmfr1(value: u64) -> u64 {
+    // Nested virtualization is not part of the guest CPU contract. VHE is an
+    // EL2 implementation feature and must not be advertised to an EL1 guest.
+    value & !registers::ID_AA64MMFR1_VH_FIELD_MASK
 }
 
 macro_rules! read_register {

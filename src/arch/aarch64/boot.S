@@ -146,8 +146,21 @@ aarch64_boot_apply_relocations:
 .type aarch64_boot_initialize_el2, %function
 aarch64_boot_initialize_el2:
     ldr     x1, =HCR_EL2_BOOT_VALUE
+    mrs     x2, id_aa64mmfr1_el1
+    lsr     x2, x2, #ID_AA64MMFR1_VH_SHIFT
+    and     x2, x2, #ID_AA64MMFR1_VH_MASK
+    cbz     x2, .Linitialize_el2_hcr
+    ldr     x1, =HCR_EL2_VHE_HOST_VALUE
+.Linitialize_el2_hcr:
     msr     hcr_el2, x1
+    tst     x1, #HCR_EL2_E2H
+    b.eq    .Linitialize_el2_nvhe_cptr
+    ldr     x2, =CPACR_EL1_FPEN_ALL
+    msr     cpacr_el1, x2
+    b       .Linitialize_el2_cptr_done
+.Linitialize_el2_nvhe_cptr:
     msr     cptr_el2, xzr
+.Linitialize_el2_cptr_done:
     msr     hstr_el2, xzr
     msr     mdcr_el2, xzr
     msr     vttbr_el2, xzr
@@ -354,16 +367,7 @@ aarch64_secondary_entry:
 
     ldr     x1, =SCTLR_EL2_RES1
     msr     sctlr_el2, x1
-    ldr     x1, =HCR_EL2_BOOT_VALUE
-    msr     hcr_el2, x1
-    msr     cptr_el2, xzr
-    msr     hstr_el2, xzr
-    msr     mdcr_el2, xzr
-    msr     vttbr_el2, xzr
-    msr     cntvoff_el2, xzr
-    msr     cnthctl_el2, xzr
-    msr     cnthp_ctl_el2, xzr
-    isb
+    bl      aarch64_boot_initialize_el2
 
     ldr     x1, =MAIR_EL2_BOOT_VALUE
     msr     mair_el2, x1
