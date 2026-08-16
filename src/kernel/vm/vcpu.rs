@@ -58,6 +58,10 @@ fn run_current() -> ! {
         if let Err(error) = super::memory::activate(execution.virtual_machine) {
             crate::kernel::boot::fail("vCPU stage-2 activation", error);
         }
+        // x86 hardware-virtualization entry owns IF/GIF and dispatches host
+        // interrupts through its VM-exit path. Other architectures consume
+        // ordinary lower-EL interrupts while the guest is running.
+        #[cfg(not(target_arch = "x86_64"))]
         crate::arch::enable_local_irq();
         execution.context.enter()
     }

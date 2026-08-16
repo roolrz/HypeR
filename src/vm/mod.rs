@@ -3,3 +3,4 @@
 pub mod bundle;
 pub mod device;
 pub mod interrupt;
+pub mod x86;

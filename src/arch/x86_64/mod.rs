@@ -15,7 +15,10 @@ mod platform;
 pub mod registers;
 mod smp;
 mod stage2;
+mod svm;
+mod svm_registers;
 mod timer;
+mod virtualization;
 mod vmx;
 
 use core::arch::asm;
@@ -164,6 +167,10 @@ pub const fn broadcast_crash_stop() -> bool {
 
 pub fn validate_vsysreg() -> Result<(), guest::ValidationError> {
     guest::validate()
+}
+
+pub fn virtualization_backend_name() -> &'static str {
+    virtualization::backend_name()
 }
 
 pub fn poll_guest_timer(now: u64) {

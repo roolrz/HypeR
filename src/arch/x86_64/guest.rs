@@ -41,12 +41,14 @@ pub enum GuestSyncAction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
-    VmxUnavailable,
-    EptUnavailable,
+    HardwareUnavailable,
+    SecondLevelPagingUnavailable,
+    MissingNextRip,
+    BackendConflict,
 }
 
 pub fn validate() -> Result<(), ValidationError> {
-    super::vmx::validate()
+    super::virtualization::validate().map(|_| ())
 }
 
 pub fn handle_guest_sync(

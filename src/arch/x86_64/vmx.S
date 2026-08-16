@@ -1,3 +1,5 @@
+#include "asm_constants.h"
+
     .section .text, "ax"
     .code64
 
@@ -5,6 +7,7 @@
     .type x86_64_vmlaunch, @function
 x86_64_vmlaunch:
     movq %rdi, %r11
+    fxrstor64 VCPU_CONTEXT_FX_STATE_OFFSET(%r11)
     movq 8(%r11), %rbx
     movq 16(%r11), %rcx
     movq 24(%r11), %rdx
@@ -27,6 +30,8 @@ x86_64_vmlaunch:
     .global x86_64_vmexit_entry
     .type x86_64_vmexit_entry, @function
 x86_64_vmexit_entry:
+    # Guest RFLAGS are held in the VMCS.  Rust and the SysV ABI require DF=0.
+    cld
     pushq %rax
     pushq %rbx
     pushq %rcx

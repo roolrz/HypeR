@@ -63,6 +63,28 @@ pub struct VcpuContext {
     pub instruction_pointer: u64,
     pub flags: u64,
     pub(super) msrs: VcpuMsrState,
+    pub(super) fx_state: VcpuFxState,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C, align(16))]
+pub(super) struct VcpuFxState([u8; 512]);
+
+impl VcpuFxState {
+    const fn initial() -> Self {
+        let mut state = [0; 512];
+        // Architectural x87 control word and MXCSR reset values in FXSAVE
+        // layout. All x87 tags are empty and all data registers are zero.
+        state[0] = 0x7f;
+        state[1] = 0x03;
+        state[24] = 0x80;
+        state[25] = 0x1f;
+        Self(state)
+    }
+
+    pub(super) fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.0.as_mut_ptr()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -90,6 +112,7 @@ impl VcpuContext {
                 kernel_gs_base: 0,
                 tsc_aux: 0,
             },
+            fx_state: VcpuFxState::initial(),
         }
     }
 
@@ -100,7 +123,7 @@ impl VcpuContext {
     }
 
     pub unsafe fn enter(&mut self) -> ! {
-        unsafe { super::vmx::enter(self) }
+        unsafe { super::virtualization::enter(self) }
     }
 }
 
@@ -152,4 +175,5 @@ const _: () = {
             == registers::THREAD_CONTEXT_RIP_OFFSET as usize
     );
     assert!(size_of::<ThreadContext>() == registers::THREAD_CONTEXT_SIZE as usize);
+    assert!(offset_of!(VcpuContext, fx_state) == registers::VCPU_CONTEXT_FX_STATE_OFFSET as usize);
 };

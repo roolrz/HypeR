@@ -43,6 +43,9 @@ pub use imp::{
     validate_runtime_vectors, validate_vsysreg, wait_for_event,
 };
 
+#[cfg(target_arch = "x86_64")]
+pub use imp::virtualization_backend_name;
+
 #[cfg(CONFIG_CRASH_CONSOLE)]
 pub use imp::inspect_stage1_mapping;
 

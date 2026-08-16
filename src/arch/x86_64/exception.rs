@@ -287,6 +287,7 @@ pub fn bootstrap_stack_bounds(stack_pointer: u64) -> Option<(usize, usize)> {
 extern "C" fn x86_64_vector_dispatch(frame: &mut ExceptionFrame) {
     let vector = frame.vector as u32;
     if vector >= 32 {
+        super::virtualization::observe_host_interrupt(vector);
         crate::kernel::irq::interrupt::dispatch(InterruptId::new(vector));
         return;
     }

@@ -167,7 +167,7 @@ jobs:
       - name: Verify x86-64 host SMP and Linux guest init
         run: |
           sudo chmod 666 /dev/kvm
-          QEMU_ACCEL=kvm make test-qemu ARCH=x86_64 QEMU_CPU=host
+          QEMU_ACCEL=kvm make test-qemu ARCH=x86_64 QEMU_CPU=host,+invtsc
       - name: Clean up QEMU processes
         if: always()
         run: |

@@ -108,22 +108,35 @@ printf '%s\n' "$symbols" | grep -q '__kallsyms_strings_end'
 printf '%s\n' "$symbols" | grep -q '__kallsyms_start'
 printf '%s\n' "$symbols" | grep -q '__kallsyms_end'
 
-instructions=$($objdump --disassemble "$elf")
+instructions_file=$(mktemp)
+trap 'rm -f "$instructions_file"' EXIT HUP INT TERM
+$objdump --disassemble "$elf" > "$instructions_file"
 case "$arch" in
     aarch64)
         printf '%s\n' "$symbols" | grep -q '__aarch64_have_lse_atomics'
         printf '%s\n' "$symbols" | grep -q '__aarch64_cas1_acq_rel'
-        printf '%s\n' "$instructions" | grep -Eq '[[:space:]]cas(al|a|l)?b[[:space:]]'
-        printf '%s\n' "$instructions" | grep -Eq '[[:space:]]ldaxrb[[:space:]]'
-        printf '%s\n' "$instructions" | grep -Eq '[[:space:]]stl?xrb[[:space:]]'
+        grep -Eq '[[:space:]]cas(al|a|l)?b[[:space:]]' "$instructions_file"
+        grep -Eq '[[:space:]]ldaxrb[[:space:]]' "$instructions_file"
+        grep -Eq '[[:space:]]stl?xrb[[:space:]]' "$instructions_file"
         ;;
     riscv64)
-        printf '%s\n' "$instructions" | grep -Eq '[[:space:]]amo(add|swap)\.d'
+        grep -Eq '[[:space:]]amo(add|swap)\.d' "$instructions_file"
         ;;
     x86_64)
         printf '%s\n' "$symbols" | grep -q ' x86_64_protected_entry$'
-        printf '%s\n' "$instructions" | grep -Eq '[[:space:]]lock$'
-        printf '%s\n' "$instructions" | grep -Eq '[[:space:]]vm(launch|resume)$'
+        printf '%s\n' "$symbols" | grep -q ' x86_64_vmlaunch$'
+        printf '%s\n' "$symbols" | grep -q ' x86_64_vmexit_entry$'
+        printf '%s\n' "$symbols" | grep -q ' x86_64_svm_run$'
+        grep -Eq '[[:space:]]lock$' "$instructions_file"
+        grep -Eq '[[:space:]]vm(launch|resume)$' "$instructions_file"
+        grep -Eq '[[:space:]]vmx(on|off)[[:space:]]' "$instructions_file"
+        grep -Eq '[[:space:]](vmclear|vmptrld)[[:space:]]' "$instructions_file"
+        grep -Eq '[[:space:]]vm(read|write)q?[[:space:]]' "$instructions_file"
+        grep -Eq '[[:space:]]invept[[:space:]]' "$instructions_file"
+        grep -Eq '[[:space:]]vmrun$' "$instructions_file"
+        grep -Eq '[[:space:]]vmload$' "$instructions_file"
+        grep -Eq '[[:space:]]vmsave$' "$instructions_file"
+        grep -Eq '[[:space:]]fx(save|rstor)64[[:space:]]' "$instructions_file"
         ;;
 esac
 

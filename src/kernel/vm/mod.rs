@@ -51,7 +51,7 @@ pub(crate) fn initialize_virtual_devices(boot: &super::boot::Initialization) {
         if let Err(error) = device::legacy_pc::initialize() {
             super::boot::fail("legacy PC virtual-device initialization", error);
         }
-        crate::println!("HypeR: x86 VMX and legacy PC virtual-device backends initialized");
+        crate::println!("HypeR: legacy PC virtual-device backend initialized");
     }
 }
 
@@ -66,8 +66,10 @@ pub(crate) fn handle_port_io(
 }
 
 #[cfg(target_arch = "x86_64")]
-pub(crate) fn legacy_timer_vector() -> Result<Option<u8>, device::legacy_pc::Error> {
-    device::legacy_pc::timer_vector()
+pub(crate) fn legacy_pending_interrupt(
+    timer_pending: bool,
+) -> Result<Option<hyper::vm::device::x86_legacy::PendingInterrupt>, device::legacy_pc::Error> {
+    device::legacy_pc::pending_interrupt(timer_pending)
 }
 
 /// Routes a byte emitted by guest firmware or a virtual UART to the host log

@@ -2,9 +2,9 @@ use core::ptr::{read_volatile, write_volatile};
 
 use hyper::hal::memory::AddressTranslation;
 use hyper::mm::{PAGE_SIZE, PhysicalAddress};
-use hyper::sync::atomic::{AtomicU64, Ordering};
 
 use super::memory::X86_64AddressTranslation;
+use super::virtualization::Stage2Format;
 
 const LEVEL_SHIFTS: [u64; 4] = [39, 30, 21, 12];
 const EPT_READ: u64 = 1;
@@ -12,22 +12,25 @@ const EPT_WRITE: u64 = 1 << 1;
 const EPT_EXECUTE: u64 = 1 << 2;
 const EPT_MEMORY_WB: u64 = 6 << 3;
 const EPT_ADDRESS_MASK: u64 = 0x000f_ffff_ffff_f000;
+const NPT_PRESENT: u64 = 1;
+const NPT_WRITE: u64 = 1 << 1;
+const NPT_USER: u64 = 1 << 2;
 const GUEST_LIMIT: u64 = 1 << 48;
-static ACTIVE_EPTP: [AtomicU64; hyper::config::MAX_CPUS as usize] =
-    [const { AtomicU64::new(0) }; hyper::config::MAX_CPUS as usize];
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     AddressOverflow,
     Allocation,
+    BackendUnavailable,
     Conflict,
     InvalidAddress,
     InvalidRange,
     InvalidVmid,
+    Invalidation,
 }
 
 pub struct Stage2AddressSpace {
     root: PhysicalAddress,
+    backend: super::virtualization::Backend,
 }
 
 impl Stage2AddressSpace {
@@ -48,7 +51,8 @@ impl Stage2AddressSpace {
             return Err(Error::InvalidVmid);
         }
         let root = allocator(1, 1).ok_or(Error::Allocation)?;
-        Ok(Self { root })
+        let backend = super::virtualization::selected().ok_or(Error::BackendUnavailable)?;
+        Ok(Self { root, backend })
     }
 
     pub const fn root_address(&self) -> u64 {
@@ -62,7 +66,7 @@ impl Stage2AddressSpace {
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         validate_range(ipa, physical, PAGE_SIZE)?;
-        self.map_page(ipa, physical, EPT_MEMORY_WB, allocator)
+        self.map_page(ipa, physical, allocator)
     }
 
     pub unsafe fn map_normal_page_active(
@@ -72,28 +76,24 @@ impl Stage2AddressSpace {
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         self.map_normal_page(ipa, physical, allocator)?;
-        super::vmx::invalidate_ept(self.root.get()).map_err(|_| Error::InvalidAddress)
+        self.invalidate()
     }
 
     pub unsafe fn invalidate_page_active(&self, ipa: u64) -> Result<(), Error> {
         if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= GUEST_LIMIT {
             return Err(Error::InvalidAddress);
         }
-        super::vmx::invalidate_ept(self.root.get()).map_err(|_| Error::InvalidAddress)
+        self.invalidate()
     }
 
     pub unsafe fn activate(&self) {
-        let eptp = self.root.get() | 6 | (3 << 3);
-        if let Some(slot) = ACTIVE_EPTP.get(super::current_cpu_index()) {
-            slot.store(eptp, Ordering::Release);
-        }
+        self.backend.activate_stage2(self.root.get());
     }
 
     fn map_page(
         &mut self,
         ipa: u64,
         physical: u64,
-        memory_type: u64,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         let mut table = self.root;
@@ -102,33 +102,50 @@ impl Stage2AddressSpace {
             let entry = read_entry(table, slot)?;
             table = if entry == 0 {
                 let child = allocator(1, 1).ok_or(Error::Allocation)?;
-                write_entry(
-                    table,
-                    slot,
-                    child.get() | EPT_READ | EPT_WRITE | EPT_EXECUTE,
-                )?;
+                write_entry(table, slot, child.get() | self.table_flags())?;
                 child
-            } else if entry & (EPT_READ | EPT_WRITE | EPT_EXECUTE) != 0 {
+            } else if entry & self.present_flags() != 0 {
                 PhysicalAddress::new(entry & EPT_ADDRESS_MASK)
             } else {
                 return Err(Error::Conflict);
             };
         }
         let slot = index(ipa, 3);
-        let value = physical | EPT_READ | EPT_WRITE | EPT_EXECUTE | memory_type;
+        let value = physical | self.leaf_flags();
         let existing = read_entry(table, slot)?;
         if existing != 0 && existing != value {
             return Err(Error::Conflict);
         }
         write_entry(table, slot, value)
     }
-}
 
-pub fn active_eptp() -> Option<u64> {
-    ACTIVE_EPTP
-        .get(super::current_cpu_index())
-        .map(|slot| slot.load(Ordering::Acquire))
-        .filter(|value| *value != 0)
+    fn table_flags(&self) -> u64 {
+        match self.backend.stage2_format() {
+            Stage2Format::Ept => EPT_READ | EPT_WRITE | EPT_EXECUTE,
+            Stage2Format::Npt => NPT_PRESENT | NPT_WRITE | NPT_USER,
+        }
+    }
+
+    fn leaf_flags(&self) -> u64 {
+        self.table_flags()
+            | match self.backend.stage2_format() {
+                Stage2Format::Ept => EPT_MEMORY_WB,
+                Stage2Format::Npt => 0,
+            }
+    }
+
+    fn present_flags(&self) -> u64 {
+        match self.backend.stage2_format() {
+            Stage2Format::Ept => EPT_READ | EPT_WRITE | EPT_EXECUTE,
+            Stage2Format::Npt => NPT_PRESENT,
+        }
+    }
+
+    fn invalidate(&self) -> Result<(), Error> {
+        self.backend
+            .invalidate_stage2(self.root.get())
+            .map_err(|_| Error::Invalidation)
+    }
 }
 
 fn validate_range(ipa: u64, physical: u64, size: u64) -> Result<(), Error> {

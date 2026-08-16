@@ -41,6 +41,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/arch/x86_64/vectors.S");
     println!("cargo:rerun-if-changed=src/arch/x86_64/ap_trampoline.S");
     println!("cargo:rerun-if-changed=src/arch/x86_64/vmx.S");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/svm.S");
     println!("cargo:rerun-if-changed=src/arch/x86_64/registers.rs");
     println!("cargo:rerun-if-changed=src/arch/x86_64/linker.ld");
     println!("cargo:rerun-if-changed=Kconfig");
@@ -86,6 +87,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ("src/arch/x86_64/vectors.S", "x86_64_vectors.o"),
                 ("src/arch/x86_64/ap_trampoline.S", "x86_64_ap_trampoline.o"),
                 ("src/arch/x86_64/vmx.S", "x86_64_vmx.o"),
+                ("src/arch/x86_64/svm.S", "x86_64_svm.o"),
             ],
         ),
         _ => return Ok(()),

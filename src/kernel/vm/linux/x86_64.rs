@@ -110,7 +110,7 @@ pub(super) fn prepare_context(context: &mut crate::arch::VcpuContext) {
 
 pub(super) fn report_layout(initramfs_range: Option<(u64, u64)>, stage2_root: u64) {
     crate::println!(
-        "HypeR: guest IPA layout: boot params {:#x}, kernel {:#x}, initramfs {:#x}-{:#x}, EPT root {:#x}",
+        "HypeR: guest IPA layout: boot params {:#x}, kernel {:#x}, initramfs {:#x}-{:#x}, stage-2 root {:#x}",
         BOOT_PARAMS_IPA,
         GUEST_KERNEL_IPA,
         initramfs_range.map_or(0, |(start, _)| start),

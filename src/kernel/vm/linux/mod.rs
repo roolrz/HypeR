@@ -143,8 +143,14 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
 
 fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
     #[cfg(target_arch = "x86_64")]
-    if crate::arch::validate_vsysreg().is_err() {
-        return Err(Error::VirtualizationUnavailable);
+    {
+        if crate::arch::validate_vsysreg().is_err() {
+            return Err(Error::VirtualizationUnavailable);
+        }
+        crate::println!(
+            "HypeR: {} guest-execution backend selected",
+            crate::arch::virtualization_backend_name()
+        );
     }
     if guest.guest_type() != "linux" {
         return Err(Error::UnsupportedGuestType);

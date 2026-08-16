@@ -1,7 +1,7 @@
 //! Kernel binding for the reusable legacy-PC virtual-device models.
 
 use hyper::sync::InterruptSpinLock;
-use hyper::vm::device::x86_legacy::{Error as ModelError, LegacyPcDevices};
+use hyper::vm::device::x86_legacy::{Error as ModelError, LegacyPcDevices, PendingInterrupt};
 
 type DeviceLock = InterruptSpinLock<Option<LegacyPcDevices>, crate::arch::LocalInterruptMask>;
 
@@ -43,10 +43,10 @@ pub fn access(port: u16, size: usize, write: bool, value: u32) -> Result<Option<
     Ok(outcome.value)
 }
 
-pub fn timer_vector() -> Result<Option<u8>, Error> {
+pub fn pending_interrupt(timer_pending: bool) -> Result<Option<PendingInterrupt>, Error> {
     DEVICES.with(|slot| {
         slot.as_ref()
-            .map(LegacyPcDevices::timer_vector)
+            .map(|devices| devices.pending_interrupt(timer_pending))
             .ok_or(Error::NotInitialized)
     })
 }
