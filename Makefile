@@ -51,6 +51,7 @@ ifneq ($(wildcard $(UPSTREAM_CLANG)),)
 export CLANG ?= $(UPSTREAM_CLANG)
 endif
 endif
+CLANG ?= clang
 
 KERNEL_OUTPUT := target/$(TARGET)/$(KERNEL_PROFILE)
 KERNEL_ELF := $(KERNEL_OUTPUT)/hyper
