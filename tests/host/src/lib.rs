@@ -17,8 +17,20 @@ fn require_some<T>(value: Option<T>) -> T {
 }
 
 #[cfg(test)]
+mod allocation {
+    #[test]
+    fn fallible_box_supports_values_and_zero_sized_types() {
+        let value = super::require_ok(hyper::mm::try_box(0x4859_5045_u32));
+        assert_eq!(*value, 0x4859_5045);
+
+        let zero_sized = super::require_ok(hyper::mm::try_box(()));
+        assert_eq!(*zero_sized, ());
+    }
+}
+
+#[cfg(test)]
 mod virtual_pl011 {
-    use hyper::drivers::serial::pl011_registers as reg;
+    use hyper::hw::pl011 as reg;
     use hyper::vm::device::pl011::VirtualPl011;
 
     #[test]
@@ -65,12 +77,75 @@ mod virtual_pl011 {
 }
 
 #[cfg(test)]
+mod virtual_legacy_pc {
+    use hyper::vm::device::x86_legacy::LegacyPcDevices;
+
+    #[test]
+    fn keeps_uart_divisor_programming_out_of_the_console_stream() {
+        let mut devices = LegacyPcDevices::new();
+        let _ = super::require_ok(devices.access(0x3fb, 1, true, 0x80));
+        let divisor_low = super::require_ok(devices.access(0x3f8, 1, true, 1));
+        let divisor_high = super::require_ok(devices.access(0x3f9, 1, true, 0));
+        assert_eq!(divisor_low.transmitted, None);
+        assert_eq!(divisor_high.transmitted, None);
+
+        let _ = super::require_ok(devices.access(0x3fb, 1, true, 0x03));
+        let output = super::require_ok(devices.access(0x3f8, 1, true, u32::from(b'X')));
+        assert_eq!(output.transmitted, Some(b'X'));
+        let status = super::require_ok(devices.access(0x3fd, 1, false, 0));
+        assert_eq!(status.value, Some(0x60));
+    }
+
+    #[test]
+    fn routes_the_pit_only_after_the_master_pic_unmasks_irq_zero() {
+        let mut devices = LegacyPcDevices::new();
+        assert_eq!(devices.timer_vector(), None);
+
+        for (port, value) in [(0x20, 0x11), (0x21, 0x20), (0x21, 0x04), (0x21, 0x01)] {
+            let _ = super::require_ok(devices.access(port, 1, true, value));
+        }
+        let _ = super::require_ok(devices.access(0x21, 1, true, 0xfe));
+        assert_eq!(devices.timer_vector(), Some(0x20));
+    }
+
+    #[test]
+    fn returns_an_absent_device_value_for_unimplemented_ports() {
+        let mut devices = LegacyPcDevices::new();
+        let access = super::require_ok(devices.access(0x0cf8, 4, false, 0));
+        assert_eq!(access.value, Some(u32::MAX));
+    }
+}
+
+#[cfg(test)]
 mod ns16550 {
     use hyper::drivers::serial::{
         MmioAccess, Ns16550, Ns16550DataBits, Ns16550FifoTrigger, Ns16550LineConfig, Ns16550Parity,
         Ns16550StopBits,
     };
     use hyper::hal::console::Console;
+    use hyper::hal::io::PortIo;
+    use std::sync::Mutex;
+
+    static PORTS: Mutex<[u8; 8]> = Mutex::new([0; 8]);
+
+    unsafe fn read_port(port: u16) -> u8 {
+        let Ok(ports) = PORTS.lock() else {
+            return 0;
+        };
+        ports
+            .get(usize::from(port.saturating_sub(0x3f8)))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    unsafe fn write_port(port: u16, value: u8) {
+        let Ok(mut ports) = PORTS.lock() else {
+            return;
+        };
+        if let Some(register) = ports.get_mut(usize::from(port.saturating_sub(0x3f8))) {
+            *register = value;
+        }
+    }
 
     #[test]
     fn configures_and_uses_a_byte_wide_register_bank() {
@@ -122,6 +197,32 @@ mod ns16550 {
         super::require_ok(uart.configure(1_843_200, 9_600, line, Ns16550FifoTrigger::OneByte));
         assert_eq!(registers[0], 12);
         assert_eq!(registers[3], 0x1e);
+    }
+
+    #[test]
+    fn uses_an_explicit_port_io_capability() {
+        if let Ok(mut ports) = PORTS.lock() {
+            *ports = [0; 8];
+            ports[5] = 1 << 5;
+        }
+        // SAFETY: The callbacks model exactly one byte access in the owned
+        // eight-port test bank.
+        let io = unsafe { PortIo::new(read_port, write_port) };
+        let uart = super::require_ok(unsafe { Ns16550::from_port(0x3f8, io) });
+        super::require_ok(uart.configure(
+            1_843_200,
+            115_200,
+            Ns16550LineConfig::EIGHT_N_ONE,
+            Ns16550FifoTrigger::OneByte,
+        ));
+        uart.write_byte(b'P');
+        let ports = match PORTS.lock() {
+            Ok(ports) => ports,
+            Err(_) => panic!("test port bank lock was poisoned"),
+        };
+        assert_eq!(ports[0], b'P');
+        assert_eq!(ports[3], 3);
+        assert_eq!(ports[4], 0x0b);
     }
 }
 

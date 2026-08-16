@@ -1,0 +1,155 @@
+use core::mem::{offset_of, size_of};
+
+use super::registers;
+
+pub type KernelThreadEntry = extern "C" fn(usize);
+
+#[repr(C, align(16))]
+pub struct ThreadContext {
+    rbx: u64,
+    rbp: u64,
+    r12: u64,
+    r13: u64,
+    r14: u64,
+    r15: u64,
+    stack_pointer: u64,
+    instruction_pointer: u64,
+}
+
+impl ThreadContext {
+    pub const fn empty() -> Self {
+        Self {
+            rbx: 0,
+            rbp: 0,
+            r12: 0,
+            r13: 0,
+            r14: 0,
+            r15: 0,
+            stack_pointer: 0,
+            instruction_pointer: 0,
+        }
+    }
+
+    pub fn prepare(&mut self, stack_top: usize, entry: KernelThreadEntry, argument: usize) {
+        self.r12 = entry as usize as u64;
+        self.r13 = argument as u64;
+        self.stack_pointer = (stack_top & !15) as u64;
+        self.instruction_pointer = x86_64_thread_trampoline as *const () as usize as u64;
+    }
+}
+
+#[repr(C, align(16))]
+pub struct UserContext {
+    pub general: [u64; 16],
+    pub instruction_pointer: u64,
+    pub flags: u64,
+}
+
+impl UserContext {
+    pub const fn new(instruction_pointer: u64, stack_pointer: u64) -> Self {
+        let mut general = [0; 16];
+        general[4] = stack_pointer;
+        Self {
+            general,
+            instruction_pointer,
+            flags: 2,
+        }
+    }
+}
+
+#[repr(C, align(16))]
+pub struct VcpuContext {
+    pub general: [u64; 16],
+    pub instruction_pointer: u64,
+    pub flags: u64,
+    pub(super) msrs: VcpuMsrState,
+}
+
+#[derive(Clone, Copy)]
+#[repr(C)]
+pub(super) struct VcpuMsrState {
+    pub star: u64,
+    pub lstar: u64,
+    pub cstar: u64,
+    pub sfmask: u64,
+    pub kernel_gs_base: u64,
+    pub tsc_aux: u64,
+}
+
+impl VcpuContext {
+    pub const fn new(instruction_pointer: u64) -> Self {
+        Self {
+            general: [0; 16],
+            instruction_pointer,
+            flags: 2,
+            msrs: VcpuMsrState {
+                star: 0,
+                lstar: 0,
+                cstar: 0,
+                sfmask: 0,
+                kernel_gs_base: 0,
+                tsc_aux: 0,
+            },
+        }
+    }
+
+    pub fn set_virtual_count(&mut self, _guest_count: u64, _host_count: u64) {}
+
+    pub fn initialize_virtual_interrupts(&mut self) -> Result<(), VirtualInterruptError> {
+        Ok(())
+    }
+
+    pub unsafe fn enter(&mut self) -> ! {
+        unsafe { super::vmx::enter(self) }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VirtualInterruptError {
+    NotInitialized,
+}
+
+unsafe extern "C" {
+    fn x86_64_switch_context(previous: *mut ThreadContext, next: *const ThreadContext);
+    fn x86_64_thread_trampoline();
+    fn x86_64_reset_stack_and_enter(
+        bottom: usize,
+        top: usize,
+        watermark: u64,
+        canary: u64,
+        callback: extern "C" fn(usize) -> !,
+        argument: usize,
+    ) -> !;
+}
+
+pub unsafe fn switch_thread_context(previous: &mut ThreadContext, next: &ThreadContext) {
+    unsafe { x86_64_switch_context(previous, next) };
+}
+
+pub unsafe fn reset_stack_and_enter(
+    bottom: usize,
+    top: usize,
+    watermark: u64,
+    canary: u64,
+    callback: extern "C" fn(usize) -> !,
+    argument: usize,
+) -> ! {
+    unsafe { x86_64_reset_stack_and_enter(bottom, top, watermark, canary, callback, argument) }
+}
+
+const _: () = {
+    assert!(offset_of!(ThreadContext, rbx) == registers::THREAD_CONTEXT_RBX_OFFSET as usize);
+    assert!(offset_of!(ThreadContext, rbp) == registers::THREAD_CONTEXT_RBP_OFFSET as usize);
+    assert!(offset_of!(ThreadContext, r12) == registers::THREAD_CONTEXT_R12_OFFSET as usize);
+    assert!(offset_of!(ThreadContext, r13) == registers::THREAD_CONTEXT_R13_OFFSET as usize);
+    assert!(offset_of!(ThreadContext, r14) == registers::THREAD_CONTEXT_R14_OFFSET as usize);
+    assert!(offset_of!(ThreadContext, r15) == registers::THREAD_CONTEXT_R15_OFFSET as usize);
+    assert!(
+        offset_of!(ThreadContext, stack_pointer) == registers::THREAD_CONTEXT_RSP_OFFSET as usize
+    );
+    assert!(
+        offset_of!(ThreadContext, instruction_pointer)
+            == registers::THREAD_CONTEXT_RIP_OFFSET as usize
+    );
+    assert!(size_of::<ThreadContext>() == registers::THREAD_CONTEXT_SIZE as usize);
+};

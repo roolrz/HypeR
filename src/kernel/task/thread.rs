@@ -1,8 +1,6 @@
 //! Architecture-neutral thread objects and execution payloads.
 
 use alloc::boxed::Box;
-use core::alloc::Layout;
-use core::ptr::NonNull;
 
 const THREAD_NAME_CAPACITY: usize = 32;
 
@@ -211,10 +209,13 @@ impl Thread {
             id,
             cpu_index,
             name,
-            ThreadExecution::User(try_box(UserExecution {
-                address_space,
-                context,
-            })?),
+            ThreadExecution::User(
+                hyper::mm::try_box(UserExecution {
+                    address_space,
+                    context,
+                })
+                .map_err(|_| Error::Allocation)?,
+            ),
         )
     }
 
@@ -240,11 +241,14 @@ impl Thread {
             queue_links: QueueLinks::EMPTY,
             context: scheduling_context,
             kernel_stack: Some(stack),
-            execution: ThreadExecution::Vcpu(try_box(VcpuExecution {
-                virtual_machine,
-                vcpu_id,
-                context,
-            })?),
+            execution: ThreadExecution::Vcpu(
+                hyper::mm::try_box(VcpuExecution {
+                    virtual_machine,
+                    vcpu_id,
+                    context,
+                })
+                .map_err(|_| Error::Allocation)?,
+            ),
         })
     }
 
@@ -405,18 +409,5 @@ impl ThreadName {
         // SAFETY: ThreadName is constructed exclusively from validated UTF-8
         // string slices and never exposes mutable access to its byte storage.
         unsafe { core::str::from_utf8_unchecked(bytes) }
-    }
-}
-
-fn try_box<T>(value: T) -> Result<Box<T>, Error> {
-    let layout = Layout::new::<T>();
-    // SAFETY: A successful allocation has the exact layout required by T. The
-    // value is initialized before ownership transfers to Box.
-    let pointer =
-        NonNull::new(unsafe { alloc::alloc::alloc(layout) } as *mut T).ok_or(Error::Allocation)?;
-    // SAFETY: pointer is valid, aligned, and uniquely owned for one T.
-    unsafe {
-        pointer.as_ptr().write(value);
-        Ok(Box::from_raw(pointer.as_ptr()))
     }
 }

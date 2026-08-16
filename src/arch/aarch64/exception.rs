@@ -3,7 +3,6 @@ use core::cell::UnsafeCell;
 use core::mem::{offset_of, size_of};
 use core::ptr::{addr_of, write_volatile};
 
-use hyper::hal::exception::{ExceptionKind, ExceptionOrigin, ExceptionReport};
 use hyper::sync::atomic::{AtomicU64, Ordering};
 
 use super::registers;
@@ -11,6 +10,22 @@ use super::registers;
 static VECTOR_TEST_EXPECTED: AtomicU64 = AtomicU64::new(registers::EXCEPTION_VECTOR_TEST_NONE);
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExceptionOrigin {
+    CurrentSp0,
+    CurrentSpx,
+    LowerAarch64,
+    LowerAarch32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExceptionKind {
+    Synchronous,
+    Irq,
+    Fiq,
+    SystemError,
+}
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -346,13 +361,12 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
 
     let Some((kind, origin)) = decode_vector(frame.vector) else {
         let context = exception_crash_context(frame, frame.sp_el1);
-        crate::kernel::irq::exception::fatal_invalid_vector(
-            frame.vector,
-            frame.esr,
-            frame.elr,
-            frame.far,
-            frame.spsr,
+        crate::kernel::irq::exception::fatal_architecture(
             context,
+            format_args!(
+                "invalid AArch64 vector {}, ESR {:#x}, ELR {:#x}, FAR {:#x}, SPSR {:#x}",
+                frame.vector, frame.esr, frame.elr, frame.far, frame.spsr
+            ),
         );
     };
     if kind == ExceptionKind::Irq {
@@ -389,19 +403,12 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
         (exception_class as u8, syndrome_description(exception_class))
     };
     let context = exception_crash_context(frame, stack_pointer);
-    crate::kernel::irq::exception::fatal(
-        ExceptionReport {
-            origin,
-            kind,
-            architecture_class,
-            description,
-            syndrome: frame.esr,
-            instruction_pointer: frame.elr,
-            fault_address_register: frame.far,
-            status: frame.spsr,
-            stack_pointer,
-        },
+    crate::kernel::irq::exception::fatal_architecture(
         context,
+        format_args!(
+            "fatal {kind:?} from {origin:?}: {description} (EC {architecture_class:#x}, ESR {:#x}, FAR {:#x})",
+            frame.esr, frame.far
+        ),
     )
 }
 

@@ -22,6 +22,7 @@ struct ActiveBinding {
 pub enum Error {
     ActiveVcpuMissing,
     CpuAlreadyActive,
+    InterruptsEnabled,
     InvalidCpu,
 }
 
@@ -36,6 +37,7 @@ pub unsafe fn set(
     execution: &mut VcpuExecution,
     interrupts: &VmInterruptController,
 ) -> Result<(), Error> {
+    ensure_interrupts_masked()?;
     let cpu = current_cpu()?;
     ACTIVE.with(|slots| {
         let slot = slots.get_mut(cpu).ok_or(Error::InvalidCpu)?;
@@ -51,6 +53,7 @@ pub unsafe fn set(
 }
 
 pub fn clear(execution: &mut VcpuExecution) -> Result<(), Error> {
+    ensure_interrupts_masked()?;
     let cpu = current_cpu()?;
     ACTIVE.with(|slots| {
         let slot = slots.get_mut(cpu).ok_or(Error::InvalidCpu)?;
@@ -66,6 +69,7 @@ pub fn clear(execution: &mut VcpuExecution) -> Result<(), Error> {
 pub fn with<R>(
     operation: impl FnOnce(&mut VcpuExecution, &VmInterruptController) -> R,
 ) -> Result<Option<R>, Error> {
+    ensure_interrupts_masked()?;
     let cpu = current_cpu()?;
     let binding = ACTIVE.with(|slots| slots.get(cpu).copied().ok_or(Error::InvalidCpu))?;
     let Some(binding) = binding else {
@@ -75,6 +79,14 @@ pub fn with<R>(
     // associated with this CPU. Exception entry keeps local IRQs masked.
     let (execution, interrupts) = unsafe { binding.objects() };
     Ok(Some(operation(execution, interrupts)))
+}
+
+fn ensure_interrupts_masked() -> Result<(), Error> {
+    if crate::arch::local_irq_enabled() {
+        Err(Error::InterruptsEnabled)
+    } else {
+        Ok(())
+    }
 }
 
 fn current_cpu() -> Result<usize, Error> {

@@ -1,6 +1,9 @@
 //! Initial single-vCPU Linux boot path for the QEMU virtual platform.
 
+#[cfg(not(target_arch = "x86_64"))]
 mod fdt;
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
 use hyper::hal::interrupt::InterruptId;
 use hyper::mm::{BuddyError, PAGE_SIZE};
@@ -13,12 +16,20 @@ use crate::kernel::vm::memory::GuestAddressSpace;
 const GUEST_RAM_IPA: u64 = 0x4000_0000;
 #[cfg(target_arch = "riscv64")]
 const GUEST_RAM_IPA: u64 = 0x8000_0000;
+#[cfg(target_arch = "x86_64")]
+const GUEST_RAM_IPA: u64 = x86_64::GUEST_RAM_IPA;
+#[cfg(not(target_arch = "x86_64"))]
 const GUEST_DTB_IPA: u64 = GUEST_RAM_IPA + 0x0001_0000;
+#[cfg(not(target_arch = "x86_64"))]
 const GUEST_KERNEL_IPA: u64 = GUEST_RAM_IPA + 0x0020_0000;
+#[cfg(target_arch = "x86_64")]
+const GUEST_KERNEL_IPA: u64 = x86_64::GUEST_KERNEL_IPA;
 #[cfg(target_arch = "aarch64")]
 const GUEST_TIMER_INTERRUPT: u32 = 27;
 #[cfg(target_arch = "riscv64")]
 const GUEST_TIMER_INTERRUPT: u32 = 5;
+#[cfg(target_arch = "x86_64")]
+const GUEST_TIMER_INTERRUPT: u32 = x86_64::GUEST_TIMER_INTERRUPT;
 #[cfg(target_arch = "aarch64")]
 const AARCH64_IMAGE_MAGIC_OFFSET: usize = 56;
 #[cfg(target_arch = "aarch64")]
@@ -33,6 +44,7 @@ pub enum Error {
     AddressOverflow,
     Allocation(BuddyError),
     Cache(hyper::hal::cache::CacheError),
+    #[cfg(not(target_arch = "x86_64"))]
     DeviceTree(fdt::Error),
     Interrupts(super::interrupt::Error),
     InvalidKernel,
@@ -44,6 +56,7 @@ pub enum Error {
     UnsupportedGuestType,
     UnsupportedMemorySize,
     UnsupportedVcpuCount,
+    VirtualizationUnavailable,
     Stage2(crate::arch::Stage2Error),
     Vcpu(super::VcpuInterruptError),
 }
@@ -60,6 +73,7 @@ impl From<hyper::hal::cache::CacheError> for Error {
     }
 }
 
+#[cfg(not(target_arch = "x86_64"))]
 impl From<fdt::Error> for Error {
     fn from(error: fdt::Error) -> Self {
         Self::DeviceTree(error)
@@ -128,13 +142,19 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
 }
 
 fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
+    #[cfg(target_arch = "x86_64")]
+    if crate::arch::validate_vsysreg().is_err() {
+        return Err(Error::VirtualizationUnavailable);
+    }
     if guest.guest_type() != "linux" {
         return Err(Error::UnsupportedGuestType);
     }
     let expected_architecture = if cfg!(target_arch = "aarch64") {
         "aarch64"
-    } else {
+    } else if cfg!(target_arch = "riscv64") {
         "riscv64"
+    } else {
+        "x86_64"
     };
     if guest.architecture() != expected_architecture {
         return Err(Error::UnsupportedArchitecture);
@@ -153,6 +173,8 @@ fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
     {
         return Err(Error::InvalidKernel);
     }
+    #[cfg(target_arch = "x86_64")]
+    x86_64::validate_kernel(image)?;
     if guest.vcpu_count() != 1 || guest.vcpu_count() > hyper::config::MAX_CPUS as u32 {
         return Err(Error::UnsupportedVcpuCount);
     }
@@ -168,8 +190,9 @@ fn layout_payload(
     initramfs: Option<&[u8]>,
     guest_ram_size: u64,
 ) -> Result<Option<(u64, u64)>, Error> {
+    let payload_size = guest_kernel_occupied_size(image)?;
     let image_end = GUEST_KERNEL_IPA
-        .checked_add(image.len() as u64)
+        .checked_add(payload_size)
         .ok_or(Error::AddressOverflow)?;
     let initramfs_range = match initramfs {
         Some(bytes) => {
@@ -196,30 +219,36 @@ fn load_payload(
     address_space: &mut GuestAddressSpace,
     initramfs_range: Option<(u64, u64)>,
 ) -> Result<(), Error> {
-    let image = guest.kernel();
-    let initramfs = guest.initramfs();
-    let device_tree = fdt::build(
-        GUEST_RAM_IPA,
-        guest.memory_size(),
-        initramfs_range,
-        guest.command_line(),
-        guest.vcpu_count(),
-    )?;
-    if GUEST_DTB_IPA + device_tree.len() as u64 > GUEST_KERNEL_IPA {
-        return Err(Error::InvalidLayout);
-    }
+    #[cfg(target_arch = "x86_64")]
+    return x86_64::load(guest, address_space, initramfs_range);
 
-    address_space.write(GUEST_KERNEL_IPA, image)?;
-    if let (Some(bytes), Some((start, _))) = (initramfs, initramfs_range) {
-        address_space.write(start, bytes)?;
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let image = guest.kernel();
+        let initramfs = guest.initramfs();
+        let device_tree = fdt::build(
+            GUEST_RAM_IPA,
+            guest.memory_size(),
+            initramfs_range,
+            guest.command_line(),
+            guest.vcpu_count(),
+        )?;
+        if GUEST_DTB_IPA + device_tree.len() as u64 > GUEST_KERNEL_IPA {
+            return Err(Error::InvalidLayout);
+        }
+
+        address_space.write(GUEST_KERNEL_IPA, image)?;
+        if let (Some(bytes), Some((start, _))) = (initramfs, initramfs_range) {
+            address_space.write(start, bytes)?;
+        }
+        address_space.write(GUEST_DTB_IPA, &device_tree)?;
+        address_space.publish_instruction(GUEST_KERNEL_IPA, image.len())?;
+        if let (Some(bytes), Some((start, _))) = (initramfs, initramfs_range) {
+            address_space.publish_data(start, bytes.len())?;
+        }
+        address_space.publish_data(GUEST_DTB_IPA, device_tree.len())?;
+        Ok(())
     }
-    address_space.write(GUEST_DTB_IPA, &device_tree)?;
-    address_space.publish_instruction(GUEST_KERNEL_IPA, image.len())?;
-    if let (Some(bytes), Some((start, _))) = (initramfs, initramfs_range) {
-        address_space.publish_data(start, bytes.len())?;
-    }
-    address_space.publish_data(GUEST_DTB_IPA, device_tree.len())?;
-    Ok(())
 }
 
 fn prepare_boot_vcpu(
@@ -227,7 +256,11 @@ fn prepare_boot_vcpu(
 ) -> Result<(VmInterruptController, crate::arch::VcpuContext), Error> {
     let interrupts =
         VmInterruptController::new(vcpu_count, InterruptId::new(GUEST_TIMER_INTERRUPT))?;
-    let mut context = crate::arch::VcpuContext::new(GUEST_KERNEL_IPA);
+    #[cfg(target_arch = "x86_64")]
+    let entry = GUEST_KERNEL_IPA + 0x200;
+    #[cfg(not(target_arch = "x86_64"))]
+    let entry = GUEST_KERNEL_IPA;
+    let mut context = crate::arch::VcpuContext::new(entry);
     #[cfg(target_arch = "aarch64")]
     {
         context.general[0] = GUEST_DTB_IPA;
@@ -240,6 +273,8 @@ fn prepare_boot_vcpu(
         context.general[10] = 0;
         context.general[11] = GUEST_DTB_IPA;
     }
+    #[cfg(target_arch = "x86_64")]
+    x86_64::prepare_context(&mut context);
     context.set_virtual_count(
         crate::kernel::time::monotonic_ticks(),
         crate::kernel::time::monotonic_ticks(),
@@ -259,6 +294,7 @@ fn report_guest_layout(
         guest.initramfs().map_or(0, |bytes| bytes.len()),
         guest.memory_size() / (1024 * 1024)
     );
+    #[cfg(not(target_arch = "x86_64"))]
     crate::println!(
         "HypeR: guest IPA layout: DTB {:#x}, Image {:#x}, initramfs {:#x}-{:#x}, stage-2 root {:#x}",
         GUEST_DTB_IPA,
@@ -267,11 +303,22 @@ fn report_guest_layout(
         initramfs_range.map_or(0, |(_, end)| end),
         stage2_root
     );
+    #[cfg(target_arch = "x86_64")]
+    x86_64::report_layout(initramfs_range, stage2_root);
     crate::println!(
         "HypeR: guest demand paging: {}/{} pages committed for boot",
         memory.boot_committed_pages,
         memory.addressable_pages
     );
+}
+
+fn guest_kernel_occupied_size(image: &[u8]) -> Result<u64, Error> {
+    #[cfg(target_arch = "x86_64")]
+    return x86_64::occupied_size(image);
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        Ok(image.len() as u64)
+    }
 }
 
 fn align_up(value: u64, alignment: u64) -> Result<u64, Error> {

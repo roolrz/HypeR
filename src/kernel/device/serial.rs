@@ -3,9 +3,9 @@
 use hyper::drivers::platform::PlatformDevice;
 use hyper::drivers::serial::{
     MmioAccess, Ns16550, Ns16550Error, Ns16550FifoTrigger, Pl011, ReceivedByte,
-    pl011_registers as reg,
 };
 use hyper::hal::interrupt::{InterruptId, InterruptTrigger};
+use hyper::hw::pl011 as reg;
 use hyper::platform::{ConsoleInfo, ConsoleKind, ConsoleRegisterAccess, PlatformInterruptTrigger};
 use hyper::sync::InterruptSpinLock;
 use hyper::sync::atomic::{AtomicU64, Ordering};
@@ -126,6 +126,9 @@ unsafe fn bind_runtime_port(
                     MmioAccess::Word { register_shift }
                 }
                 ConsoleRegisterAccess::Native => MmioAccess::BYTE,
+                ConsoleRegisterAccess::Port => {
+                    return Err(Error::Serial(Ns16550Error::InvalidAccess));
+                }
             };
             Ok(RuntimePort::Ns16550(unsafe {
                 Ns16550::from_mmio(mapped_base, access)?

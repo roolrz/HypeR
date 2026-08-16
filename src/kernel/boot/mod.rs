@@ -8,6 +8,24 @@ use super::{irq, log, mm};
 pub(crate) mod image;
 mod state;
 
+#[derive(Clone, Copy)]
+pub(crate) struct ProtocolInputs {
+    pub(crate) dtb_address: usize,
+    pub(crate) command_line: Option<chosen::CommandLine>,
+    pub(crate) initial_ramdisk: Option<hyper::platform::PhysicalRange>,
+}
+
+impl ProtocolInputs {
+    #[cfg(not(target_arch = "x86_64"))]
+    pub(crate) const fn from_dtb(dtb_address: usize) -> Self {
+        Self {
+            dtb_address,
+            command_line: None,
+            initial_ramdisk: None,
+        }
+    }
+}
+
 /// State shared only between the top-level kernel initialization steps.
 ///
 /// Keeping this type small makes dependencies between subsystem entry points
@@ -64,15 +82,23 @@ impl Initialization {
 }
 
 /// Prepares kernel state while executing on the bootstrap mapping.
-pub(crate) fn prepare_boot_environment(dtb_address: usize) -> ! {
+pub(crate) fn prepare_boot_environment(inputs: ProtocolInputs) -> ! {
+    let dtb_address = inputs.dtb_address;
     let image_layout = image::layout();
     let (platform, essential, chosen) = discover_boot_inputs(dtb_address);
     report_chosen_errors(&chosen);
-    let early_console = initialize_early_console(&platform, &chosen);
+    let command_line = inputs.command_line.as_ref().or(chosen.command_line());
+    let early_console = initialize_early_console(&platform, command_line);
     crate::println!("HypeR: DTB at {:#x}", dtb_address);
 
-    let kernel_base = select_kernel_base(&chosen, image_layout.total_size);
-    let initial_ramdisk = select_initial_ramdisk(&platform, &chosen, dtb_address, image_layout);
+    let kernel_base =
+        select_kernel_base(command_line, chosen.kaslr_seed(), image_layout.total_size);
+    let initial_ramdisk = select_initial_ramdisk(
+        &platform,
+        inputs.initial_ramdisk.or(chosen.initial_ramdisk()),
+        dtb_address,
+        image_layout,
+    );
     let memory = prepare_final_memory(&platform, dtb_address, initial_ramdisk, kernel_base);
     let activation = memory.activation_context();
 
@@ -114,8 +140,8 @@ fn discover_boot_inputs(
     let mut essential_discovery = crate::arch::EssentialDeviceDiscovery::new();
     let mut chosen_discovery = chosen::Discovery::new();
     let mut visitors = fdt::VisitorPair::new(&mut essential_discovery, &mut chosen_discovery);
-    // SAFETY: The architectural entry receives the DTB address directly from
-    // the Linux AArch64 boot ABI and has not repurposed x0.
+    // SAFETY: The architecture bootstrap preserved the validated firmware DTB
+    // pointer until this common discovery phase.
     let platform = match unsafe { fdt::discover_with(dtb_address, &mut visitors) } {
         Ok(platform) => platform,
         Err(error) => fail("platform discovery", error),
@@ -143,9 +169,9 @@ fn report_chosen_errors(chosen: &chosen::Properties) {
 
 fn initialize_early_console(
     platform: &hyper::platform::PlatformInfo,
-    chosen: &chosen::Properties,
+    command_line: Option<&chosen::CommandLine>,
 ) -> Option<ConsoleInfo> {
-    let early_console = match console::early_console(chosen.command_line()) {
+    let early_console = match console::early_console(command_line) {
         Ok(Some(info)) if early_console_is_accessible(platform, info) => Some(info),
         Ok(Some(info)) => {
             crate::pr_warn!(
@@ -168,12 +194,15 @@ fn initialize_early_console(
     early_console
 }
 
-fn select_kernel_base(chosen: &chosen::Properties, image_size: u64) -> u64 {
-    let command_line = chosen.command_line();
+fn select_kernel_base(
+    command_line: Option<&chosen::CommandLine>,
+    discovered_seed: Option<u64>,
+    image_size: u64,
+) -> u64 {
     let kaslr_seed = if hyper::config::RANDOMIZE_BASE
         && !command_line.is_some_and(|arguments| arguments.contains("nokaslr"))
     {
-        chosen.kaslr_seed()
+        discovered_seed
     } else {
         None
     };
@@ -186,11 +215,11 @@ fn select_kernel_base(chosen: &chosen::Properties, image_size: u64) -> u64 {
 
 fn select_initial_ramdisk(
     platform: &hyper::platform::PlatformInfo,
-    chosen: &chosen::Properties,
+    discovered: Option<hyper::platform::PhysicalRange>,
     dtb_address: usize,
     image_layout: hyper::hal::memory::KernelImageLayout,
 ) -> hyper::platform::PhysicalRange {
-    match chosen.initial_ramdisk() {
+    match discovered {
         Some(range)
             if initial_ramdisk_is_accessible(platform, range, dtb_address as u64, image_layout) =>
         {
@@ -228,9 +257,12 @@ pub(crate) fn enter_runtime() -> Initialization {
         None => fail("DTB linear-address translation", dtb_address),
     };
     if let Some(console_info) = early_console {
-        let virtual_console = match mm::memory::mmio_address(console_info.base) {
-            Some(address) => address,
-            None => fail("console MMIO-address translation", console_info.base),
+        let virtual_console = match console_info.access {
+            hyper::platform::ConsoleRegisterAccess::Port => console_info.base as usize,
+            _ => match mm::memory::mmio_address(console_info.base) {
+                Some(address) => address,
+                None => fail("console MMIO-address translation", console_info.base),
+            },
         };
         install_console(console_info, virtual_console as u64);
     }
@@ -282,6 +314,10 @@ fn early_console_is_accessible(
                     register_shift
                 }
                 hyper::platform::ConsoleRegisterAccess::Native => 0,
+                hyper::platform::ConsoleRegisterAccess::Port => {
+                    return info.base <= u64::from(u16::MAX - 7)
+                        && crate::arch::port_io().is_some();
+                }
             };
             let Some(window) = 8u64.checked_shl(u32::from(shift)) else {
                 return false;
@@ -308,7 +344,7 @@ fn install_console(console_info: ConsoleInfo, address: u64) {
     };
     // SAFETY: Platform discovery validated the device range and the
     // architecture supplied an address with Device memory attributes.
-    let console = match unsafe { console::bind(console_info, base) } {
+    let console = match unsafe { console::bind(console_info, base, crate::arch::port_io()) } {
         Ok(console) => console,
         Err(error) => fail("console driver binding", error),
     };
@@ -316,6 +352,9 @@ fn install_console(console_info: ConsoleInfo, address: u64) {
 }
 
 pub(crate) fn fail(operation: &str, error: impl core::fmt::Debug) -> ! {
+    if crate::kernel::crash::is_ready() {
+        crate::kernel::crash::fatal(format_args!("HypeR: {operation} failed: {error:?}"));
+    }
     crate::pr_crit!("HypeR: {operation} failed: {error:?}");
     crate::arch::halt()
 }

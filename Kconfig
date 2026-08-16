@@ -10,12 +10,16 @@ config ARCH_RISCV64
     bool "RISC-V 64-bit architecture"
     default n
 
+config ARCH_X86_64
+    bool "x86-64 architecture"
+    default n
+
 endmenu
 
 menu "Platform"
 
-config PLATFORM_QEMU_VIRT
-    bool "QEMU virt platform"
+config PLATFORM_QEMU
+    bool "QEMU platform"
     default y
 
 endmenu

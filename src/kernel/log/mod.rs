@@ -133,6 +133,11 @@ pub fn emergency(arguments: fmt::Arguments<'_>) {
     console::emergency_write(formatted.as_slice());
 }
 
+/// Transfers console ownership to the lock-free fatal-output path.
+pub(crate) fn enter_emergency_mode() {
+    console::enter_emergency_mode();
+}
+
 #[cfg(CONFIG_CRASH_CONSOLE)]
 pub(crate) fn crash_console_available() -> bool {
     console::emergency_available()

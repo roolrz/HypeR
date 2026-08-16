@@ -27,6 +27,7 @@ jobs:
         run: |
           make check
           make check ARCH=riscv64
+          make check ARCH=x86_64
           cargo fmt --all -- --check
           cargo fmt --manifest-path tests/host/Cargo.toml -- --check
           cargo fmt --manifest-path tools/kconfig/Cargo.toml -- --check
@@ -53,6 +54,7 @@ jobs:
         run: |
           make release ARCH=aarch64
           make release ARCH=riscv64
+          make release ARCH=x86_64
       - name: Upload canonical and stripped artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -68,6 +70,11 @@ jobs:
             target/riscv64imac-unknown-none-elf/kernel/hyper.kallsyms
             target/riscv64imac-unknown-none-elf/kernel/hyper.stripped
             target/riscv64imac-unknown-none-elf/kernel/hyper.stripped.img
+            target/x86_64-unknown-none/kernel/hyper
+            target/x86_64-unknown-none/kernel/hyper.img
+            target/x86_64-unknown-none/kernel/hyper.kallsyms
+            target/x86_64-unknown-none/kernel/hyper.stripped
+            target/x86_64-unknown-none/kernel/hyper.stripped.img
           if-no-files-found: error
 
   image-test:
@@ -84,7 +91,10 @@ jobs:
           name: hyper-kernels
           path: target
       - name: Verify image ABI and atomic backends
-        run: make test-image
+        run: |
+          make test-image ARCH=aarch64
+          make test-image ARCH=riscv64
+          make test-image ARCH=x86_64
 
   qemu-boot:
     name: Four-core QEMU (${{ matrix.cpu }})
@@ -141,3 +151,31 @@ jobs:
             sleep 1
           done
           pkill -KILL -x qemu-system-riscv64 2>/dev/null || true
+
+  qemu-x86-64:
+    name: Four-core QEMU x86-64
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [lint, test, build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Install QEMU and DT compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cpio device-tree-compiler qemu-system-x86
+      - name: Verify x86-64 host SMP and Linux guest init
+        run: |
+          sudo chmod 666 /dev/kvm
+          QEMU_ACCEL=kvm make test-qemu ARCH=x86_64 QEMU_CPU=host
+      - name: Clean up QEMU processes
+        if: always()
+        run: |
+          pkill -TERM -x qemu-system-x86_64 2>/dev/null || true
+          for attempt in 1 2 3 4 5; do
+            if ! pgrep -x qemu-system-x86_64 >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          pkill -KILL -x qemu-system-x86_64 2>/dev/null || true

@@ -34,6 +34,7 @@ static EMERGENCY_CONSOLE: AtomicUsize = AtomicUsize::new(0);
 static EMERGENCY_CONSOLE_METADATA: AtomicUsize = AtomicUsize::new(0);
 static FLUSHING: AtomicFlag = AtomicFlag::new(false);
 static FLUSH_REQUESTED: AtomicBool = AtomicBool::new(false);
+static EMERGENCY_MODE: AtomicBool = AtomicBool::new(false);
 
 pub fn install(console: ConsoleDevice) {
     let emergency = console.emergency_handle();
@@ -55,6 +56,9 @@ pub fn loglevel() -> Level {
 
 /// Drains all records eligible for the current console loglevel.
 pub fn flush() {
+    if EMERGENCY_MODE.load(Ordering::Acquire) {
+        return;
+    }
     FLUSH_REQUESTED.store(true, Ordering::Release);
     loop {
         if !FLUSHING.try_acquire() {
@@ -67,6 +71,14 @@ pub fn flush() {
             return;
         }
     }
+}
+
+/// Stops normal ring draining once fatal diagnostics switch to direct output.
+///
+/// Emergency records remain retained for post-mortem readers, but allowing an
+/// unrelated CPU to drain them would print every fatal line a second time.
+pub(super) fn enter_emergency_mode() {
+    EMERGENCY_MODE.store(true, Ordering::Release);
 }
 
 /// Writes a best-effort fatal message without waiting for kernel log locks.
@@ -106,7 +118,7 @@ fn emergency_device() -> Option<ConsoleDevice> {
     };
     // SAFETY: install publishes handles only after binding a permanent MMIO
     // mapping. Crash handling is the sole lock-free user after other CPUs stop.
-    unsafe { ConsoleDevice::from_emergency_handle(handle) }
+    unsafe { ConsoleDevice::from_emergency_handle(handle, crate::arch::port_io()) }
 }
 
 /// Writes one guest-console byte through the selected host console without
@@ -122,6 +134,9 @@ pub(crate) fn write_raw_byte(byte: u8) {
 fn drain() {
     let mut message = [0u8; LOG_LINE_MAX];
     loop {
+        if EMERGENCY_MODE.load(Ordering::Acquire) {
+            return;
+        }
         let (device, sequence, maximum_level) =
             CONSOLE.with(|state| (state.device, state.next_sequence, state.maximum_level));
         let Some(device) = device else {

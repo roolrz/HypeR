@@ -15,6 +15,14 @@ DEFCONFIG := configs/qemu_riscv64_defconfig
 QEMU_BOOTARGS ?= earlycon=uart8250,mmio,0x10000000
 QEMU_TEST_SCRIPT := tests/qemu/verify-riscv64.sh
 QEMU_TIMER_SCRIPT := tests/qemu/verify-riscv64.sh
+else ifeq ($(ARCH),x86_64)
+TARGET := x86_64-unknown-none
+QEMU ?= qemu-system-x86_64
+QEMU_CPU ?= max
+DEFCONFIG := configs/qemu_x86_64_defconfig
+QEMU_BOOTARGS ?= earlycon=uart8250,io,0x3f8
+QEMU_TEST_SCRIPT := tests/qemu/verify-x86_64.sh
+QEMU_TIMER_SCRIPT := tests/qemu/verify-x86_64.sh
 else
 $(error unsupported ARCH '$(ARCH)')
 endif
@@ -33,6 +41,7 @@ OBJCOPY ?= $(LLVM_BIN)/llvm-objcopy
 READOBJ ?= $(LLVM_BIN)/llvm-readobj
 NM ?= $(LLVM_BIN)/llvm-nm
 OBJDUMP ?= $(LLVM_BIN)/llvm-objdump
+DTC ?= dtc
 
 CARGO_FEATURES ?=
 
@@ -48,6 +57,10 @@ KERNEL_ELF := $(KERNEL_OUTPUT)/hyper
 KERNEL_IMAGE := $(KERNEL_OUTPUT)/hyper.img
 KERNEL_STRIPPED_ELF := $(KERNEL_OUTPUT)/hyper.stripped
 KERNEL_STRIPPED_IMAGE := $(KERNEL_OUTPUT)/hyper.stripped.img
+X86_SETUP_OBJECT := $(KERNEL_OUTPUT)/x86-setup.o
+X86_SETUP_IMAGE := $(KERNEL_OUTPUT)/x86-setup.bin
+X86_PAYLOAD_IMAGE := $(KERNEL_OUTPUT)/hyper.payload
+X86_HOST_DTB := $(KERNEL_OUTPUT)/x86_64-host.dtb
 KCONFIG_MANIFEST := tools/kconfig/Cargo.toml
 KALLSYMS_MANIFEST := tools/kallsyms/Cargo.toml
 KALLSYMS_BLOB := $(KERNEL_OUTPUT)/hyper.kallsyms
@@ -58,9 +71,12 @@ GUEST_OUTPUT := target/guest/$(ARCH)
 ifeq ($(ARCH),aarch64)
 GUEST_FETCH := tools/guest/fetch-alpine-aarch64.sh
 GUEST_ASSET_STAMP := $(GUEST_OUTPUT)/.alpine-3.23.5.stamp
-else
+else ifeq ($(ARCH),riscv64)
 GUEST_FETCH := tools/guest/fetch-alpine-riscv64.sh
 GUEST_ASSET_STAMP := $(GUEST_OUTPUT)/.alpine-3.24.1.stamp
+else
+GUEST_FETCH := tools/guest/fetch-alpine-x86_64.sh
+GUEST_ASSET_STAMP := $(GUEST_OUTPUT)/.alpine-3.23.5.stamp
 endif
 HOST_INITRD := $(GUEST_OUTPUT)/hypervisor-initrd.cpio
 
@@ -92,6 +108,10 @@ $(GUEST_ASSET_STAMP): $(GUEST_FETCH) tools/guest/init tools/guest/boot.conf tool
 
 guest-assets: $(GUEST_ASSET_STAMP)
 
+$(X86_HOST_DTB): tests/qemu/x86_64-host.dts
+	mkdir -p $(KERNEL_OUTPUT)
+	$(DTC) -q -I dts -O dtb -o $@ $<
+
 clean-guest-assets:
 	rm -f $(GUEST_OUTPUT)/Image $(GUEST_OUTPUT)/initramfs.cpio.gz $(GUEST_OUTPUT)/alpine.cpio $(HOST_INITRD) $(GUEST_ASSET_STAMP)
 
@@ -106,14 +126,20 @@ image: build
 	mv $(KALLSYMS_FINAL_BLOB) $(KALLSYMS_BLOB)
 	$(OBJCOPY) --update-section=.kallsyms=$(KALLSYMS_BLOB) $(KERNEL_ELF) $(KALLSYMS_ELF)
 	mv $(KALLSYMS_ELF) $(KERNEL_ELF)
-	$(OBJCOPY) --output-target=binary $(KERNEL_ELF) $(KERNEL_IMAGE)
+	$(if $(filter x86_64,$(ARCH)),$(OBJCOPY) --output-target=binary $(KERNEL_ELF) $(X86_PAYLOAD_IMAGE),$(OBJCOPY) --output-target=binary $(KERNEL_ELF) $(KERNEL_IMAGE))
+	$(if $(filter x86_64,$(ARCH)),$(CLANG) -target i386-none-elf -c src/arch/x86_64/setup.S -o $(X86_SETUP_OBJECT),true)
+	$(if $(filter x86_64,$(ARCH)),$(OBJCOPY) --only-section=.setup --output-target=binary $(X86_SETUP_OBJECT) $(X86_SETUP_IMAGE),true)
+	$(if $(filter x86_64,$(ARCH)),cp $(X86_SETUP_IMAGE) $(KERNEL_IMAGE),true)
+	$(if $(filter x86_64,$(ARCH)),dd if=$(X86_PAYLOAD_IMAGE) of=$(KERNEL_IMAGE) bs=2560 seek=1 conv=notrunc status=none,true)
 
 # The distributable ELF is a debug-section-stripped copy of the canonical ELF.
 # No separate release compilation or link exists, and allocated bytes must
 # therefore produce an identical raw Image.
 release: image
 	$(OBJCOPY) --strip-debug $(KERNEL_ELF) $(KERNEL_STRIPPED_ELF)
-	$(OBJCOPY) --output-target=binary $(KERNEL_STRIPPED_ELF) $(KERNEL_STRIPPED_IMAGE)
+	$(if $(filter x86_64,$(ARCH)),$(OBJCOPY) --output-target=binary $(KERNEL_STRIPPED_ELF) $(X86_PAYLOAD_IMAGE),$(OBJCOPY) --output-target=binary $(KERNEL_STRIPPED_ELF) $(KERNEL_STRIPPED_IMAGE))
+	$(if $(filter x86_64,$(ARCH)),cp $(X86_SETUP_IMAGE) $(KERNEL_STRIPPED_IMAGE),true)
+	$(if $(filter x86_64,$(ARCH)),dd if=$(X86_PAYLOAD_IMAGE) of=$(KERNEL_STRIPPED_IMAGE) bs=2560 seek=1 conv=notrunc status=none,true)
 	cmp $(KERNEL_IMAGE) $(KERNEL_STRIPPED_IMAGE)
 
 check: prepare-config
@@ -137,10 +163,10 @@ verify: check test
 	$(if $(filter aarch64,$(ARCH)),$(MAKE) test-qemu ARCH=$(ARCH) QEMU_CPU=cortex-a72,$(MAKE) test-qemu ARCH=$(ARCH))
 	$(if $(filter aarch64,$(ARCH)),$(MAKE) test-qemu ARCH=$(ARCH) QEMU_CPU=max,true)
 	$(MAKE) release
-	$(if $(filter aarch64,$(ARCH)),$(MAKE) test-image,true)
+	$(MAKE) test-image ARCH=$(ARCH)
 
 test-image:
-	sh tests/image/verify-image.sh $(READOBJ) $(NM) $(OBJDUMP) $(KERNEL_ELF) $(KERNEL_IMAGE) $(KALLSYMS_BLOB)
+	sh tests/image/verify-image.sh $(ARCH) $(READOBJ) $(NM) $(OBJDUMP) $(KERNEL_ELF) $(KERNEL_IMAGE) $(KALLSYMS_BLOB)
 
 test-timer: image guest-assets
 	sh $(QEMU_TIMER_SCRIPT) $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
@@ -162,7 +188,21 @@ verify-boot: image
 verify-smp: image
 	$(MAKE) test-qemu ARCH=$(ARCH) QEMU_CPU=$(QEMU_CPU)
 
-run: image guest-assets
+run: image guest-assets $(if $(filter x86_64,$(ARCH)),$(X86_HOST_DTB))
+	$(if $(filter x86_64,$(ARCH)),$(QEMU) \
+		-machine q35,accel=tcg \
+		-cpu $(QEMU_CPU) \
+		-smp $(QEMU_CPUS) \
+		-m $(QEMU_MEMORY) \
+		-nodefaults \
+		-display none \
+		-serial stdio \
+		-monitor none \
+		-no-reboot \
+		-append "$(QEMU_BOOTARGS)" \
+		-initrd $(HOST_INITRD) \
+		-dtb $(X86_HOST_DTB) \
+		-kernel $(KERNEL_IMAGE),\
 	$(if $(filter riscv64,$(ARCH)),$(QEMU) \
 		-machine virt \
 		-cpu $(QEMU_CPU) \
@@ -188,7 +228,7 @@ run: image guest-assets
 		-no-reboot \
 		-append "$(QEMU_BOOTARGS)" \
 		-initrd $(HOST_INITRD) \
-		-kernel $(KERNEL_IMAGE))
+		-kernel $(KERNEL_IMAGE)))
 
 clean:
 	cargo clean

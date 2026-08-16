@@ -174,6 +174,37 @@ pub fn initialize(info: TimerInfo, domain: IrqDomainId) -> Result<Capabilities, 
     })
 }
 
+#[cfg(target_arch = "x86_64")]
+pub fn initialize(info: TimerInfo, domain: IrqDomainId) -> Result<Capabilities, Error> {
+    if info.kind != TimerKind::X86TscDeadline
+        || info.hypervisor_physical.trigger != PlatformInterruptTrigger::Edge
+    {
+        return Err(Error::UnsupportedTimer);
+    }
+    let hardware_interrupt = InterruptId::new(info.hypervisor_physical.interrupt);
+    let virtual_interrupt = super::interrupt::map(
+        domain,
+        hardware_interrupt,
+        TIMER_PRIORITY,
+        InterruptTrigger::Edge,
+    )?;
+    let registration = super::interrupt::register_shared(virtual_interrupt, 0, handle_host_timer)?;
+    let counter_frequency_hz = crate::kernel::time::counter_frequency_hz()?;
+    if let Err(error) = start_local_tick(counter_frequency_hz) {
+        let _ = super::interrupt::unregister(registration);
+        let _ = super::interrupt::unmap(virtual_interrupt);
+        return Err(error);
+    }
+    Ok(Capabilities {
+        ticks_per_second: TICKS_PER_SECOND,
+        counter_frequency_hz,
+        hardware_interrupt,
+        virtual_interrupt,
+        guest_virtual_interrupt: InterruptId::new(info.virtual_timer.interrupt),
+        guest_virtual_host_interrupt: virtual_interrupt,
+    })
+}
+
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn guest_virtual_host_interrupt() -> Option<VirtualInterrupt> {
     let interrupt = VIRTUAL_TIMER_VIRQ.load(Ordering::Acquire);

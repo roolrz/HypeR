@@ -1,7 +1,7 @@
 //! Architecture-neutral fatal-crash coordination and diagnostics.
 
 use core::cell::UnsafeCell;
-use core::fmt;
+use core::fmt::{self, Write};
 use core::hint::spin_loop;
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
@@ -21,11 +21,14 @@ const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
 const NO_CRASH_OWNER: usize = usize::MAX;
 const STOP_WAIT_LIMIT: usize = 10_000_000;
 const MAX_BACKTRACE_DEPTH: usize = 32;
+const CRASH_REASON_CAPACITY: usize = 512;
 
 static CRASH_OWNER: AtomicUsize = AtomicUsize::new(NO_CRASH_OWNER);
+static CRASH_READY: AtomicBool = AtomicBool::new(false);
 static CRASH_IPI_READY: AtomicBool = AtomicBool::new(false);
 static STOPPED_CPUS: AtomicUsize = AtomicUsize::new(0);
 static CPU_CONTEXTS: [CrashSlot; MAX_CPUS] = [const { CrashSlot::new() }; MAX_CPUS];
+static CRASH_PAYLOADS: [CrashPayloadSlot; MAX_CPUS] = [const { CrashPayloadSlot::new() }; MAX_CPUS];
 
 struct CrashSlot {
     published: AtomicBool,
@@ -66,6 +69,7 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) {
     monitor::initialize();
 
     let Some(hardware_interrupt) = crate::arch::crash_stop_interrupt() else {
+        CRASH_READY.store(true, Ordering::Release);
         crate::println!("HypeR: crash-stop cross-call is unavailable on this platform");
         return;
     };
@@ -82,7 +86,13 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) {
         super::boot::fail("crash-stop interrupt registration", error);
     }
     CRASH_IPI_READY.store(true, Ordering::Release);
+    CRASH_READY.store(true, Ordering::Release);
     crate::println!("HypeR: crash-stop IPI and CPU state capture initialized");
+}
+
+/// Reports whether fatal failures can safely enter the coordinated crash path.
+pub(crate) fn is_ready() -> bool {
+    CRASH_READY.load(Ordering::Acquire)
 }
 
 fn crash_stop_interrupt(
@@ -103,26 +113,6 @@ pub fn panic(info: &PanicInfo<'_>) -> ! {
     enter(
         crate::arch::capture_crash_context(),
         format_args!("Kernel panic - not syncing: {info}"),
-    )
-}
-
-/// Handles a fatal architectural exception with its exact interrupted frame.
-#[cfg(target_arch = "aarch64")]
-pub(crate) fn fatal_exception(
-    report: hyper::hal::exception::ExceptionReport,
-    context: CrashContext,
-) -> ! {
-    enter(
-        context,
-        format_args!(
-            "fatal {:?} from {:?}: {} (EC {:#x}, ESR {:#x}, FAR {:#x})",
-            report.kind,
-            report.origin,
-            report.description,
-            report.architecture_class,
-            report.syndrome,
-            report.fault_address_register
-        ),
     )
 }
 
@@ -167,25 +157,97 @@ extern "C" fn stop_this_cpu_on_emergency_stack(argument: usize) -> ! {
 }
 
 fn enter(context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
-    let mut payload = CrashPayload { context, reason };
-    // SAFETY: payload remains live on the abandoned stack and fatal handling
-    // permanently owns control after switching to the emergency stack.
-    unsafe {
-        crate::arch::run_on_emergency_stack(
-            enter_on_emergency_stack,
-            (&mut payload as *mut CrashPayload<'_>) as usize,
-        )
+    let mut owned_reason = CrashReason::new();
+    let _ = owned_reason.write_fmt(reason);
+    crate::arch::disable_local_interrupts();
+    let cpu = crate::arch::current_cpu_index();
+    let Some(slot) = CRASH_PAYLOADS.get(cpu) else {
+        crate::arch::halt();
+    };
+    let payload = CrashPayload {
+        context,
+        reason: owned_reason,
+    };
+    let Some(argument) = slot.publish(payload) else {
+        super::log::emergency(format_args!(
+            "RECURSIVE KERNEL PANIC on CPU {cpu}; payload slot already occupied"
+        ));
+        crate::arch::halt();
+    };
+    // SAFETY: The per-CPU static payload remains immutable after publication,
+    // and fatal handling permanently owns control after switching stacks.
+    unsafe { crate::arch::run_on_emergency_stack(enter_on_emergency_stack, argument) }
+}
+
+struct CrashPayload {
+    context: CrashContext,
+    reason: CrashReason,
+}
+
+struct CrashPayloadSlot {
+    occupied: AtomicBool,
+    payload: UnsafeCell<MaybeUninit<CrashPayload>>,
+}
+
+impl CrashPayloadSlot {
+    const fn new() -> Self {
+        Self {
+            occupied: AtomicBool::new(false),
+            payload: UnsafeCell::new(MaybeUninit::uninit()),
+        }
+    }
+
+    fn publish(&self, payload: CrashPayload) -> Option<usize> {
+        self.occupied
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        // SAFETY: The successful transition grants this CPU the only write,
+        // and the slot is never reclaimed after fatal handling begins.
+        unsafe { (*self.payload.get()).write(payload) };
+        Some(self.payload.get() as usize)
     }
 }
 
-struct CrashPayload<'reason> {
-    context: CrashContext,
-    reason: fmt::Arguments<'reason>,
+// SAFETY: `occupied` grants single-writer ownership and published payloads are
+// immutable for the remainder of the fail-stop execution.
+unsafe impl Sync for CrashPayloadSlot {}
+
+struct CrashReason {
+    bytes: [u8; CRASH_REASON_CAPACITY],
+    length: usize,
+}
+
+impl CrashReason {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; CRASH_REASON_CAPACITY],
+            length: 0,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        // SAFETY: fmt::Write accepts UTF-8 input and copies only complete
+        // strings into the initialized prefix.
+        unsafe { core::str::from_utf8_unchecked(&self.bytes[..self.length]) }
+    }
+}
+
+impl fmt::Write for CrashReason {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let available = CRASH_REASON_CAPACITY - self.length;
+        let mut copied = available.min(value.len());
+        while !value.is_char_boundary(copied) {
+            copied -= 1;
+        }
+        self.bytes[self.length..self.length + copied].copy_from_slice(&value.as_bytes()[..copied]);
+        self.length += copied;
+        Ok(())
+    }
 }
 
 extern "C" fn enter_on_emergency_stack(argument: usize) -> ! {
     // SAFETY: enter passes one live payload and this callback never returns.
-    let payload = unsafe { &*(argument as *const CrashPayload<'_>) };
+    let payload = unsafe { &*(argument as *const CrashPayload) };
     crate::arch::disable_local_interrupts();
     let cpu = crate::arch::current_cpu_index();
     match CRASH_OWNER.compare_exchange(NO_CRASH_OWNER, cpu, Ordering::AcqRel, Ordering::Acquire) {
@@ -199,13 +261,21 @@ extern "C" fn enter_on_emergency_stack(argument: usize) -> ! {
             super::log::emergency(format_args!(
                 "RECURSIVE KERNEL PANIC on CPU {cpu}; diagnostics aborted"
             ));
+            super::log::emergency(format_args!(
+                "recursive context: vector {:#x}, syndrome {:#x}, PC {:#x}, fault address {:#x}",
+                payload.context.exception_vector,
+                payload.context.syndrome,
+                payload.context.program_counter,
+                payload.context.fault_address
+            ));
             crate::arch::halt()
         }
     }
 
+    super::log::enter_emergency_mode();
     publish_current_cpu(payload.context);
     let stop = stop_other_cpus();
-    emit_banner(cpu, payload.reason, stop);
+    emit_banner(cpu, payload.reason.as_str(), stop);
     dump_cpu_states(cpu);
     #[cfg(CONFIG_CRASH_CONSOLE)]
     if super::log::crash_console_available() {
@@ -257,7 +327,7 @@ fn stop_other_cpus() -> StopResult {
     }
 }
 
-fn emit_banner(cpu: usize, reason: fmt::Arguments<'_>, stop: StopResult) {
+fn emit_banner(cpu: usize, reason: &str, stop: StopResult) {
     super::log::emergency(format_args!(
         "============================================================"
     ));
@@ -266,7 +336,7 @@ fn emit_banner(cpu: usize, reason: fmt::Arguments<'_>, stop: StopResult) {
         "============================================================"
     ));
     super::log::emergency(format_args!("BUG: fatal kernel failure on CPU {cpu}"));
-    super::log::emergency(reason);
+    super::log::emergency(format_args!("{reason}"));
     if stop.expected == 0 {
         super::log::emergency(format_args!("SMP: no other online CPUs"));
     } else if !stop.sent {
@@ -315,6 +385,11 @@ fn dump_cpu_header(
         "CPU {cpu}: {role}, hart ID {:#x}, SSTATUS {:#x}",
         context.hardware_id, context.interrupt_mask
     ));
+    #[cfg(target_arch = "x86_64")]
+    super::log::emergency(format_args!(
+        "CPU {cpu}: {role}, APIC ID {:#x}, RFLAGS {:#x}",
+        context.hardware_id, context.interrupt_mask
+    ));
     match task {
         Some(task) => {
             super::log::emergency(format_args!(
@@ -348,6 +423,8 @@ fn dump_registers(context: &CrashContext) {
     dump_general_registers(context, 31);
     #[cfg(target_arch = "riscv64")]
     dump_general_registers(context, 32);
+    #[cfg(target_arch = "x86_64")]
+    dump_general_registers(context, 16);
     emit_symbolized("PC", context.program_counter, context.program_counter);
     super::log::emergency(format_args!(
         "SP: {:#018x}  STATUS: {:#018x}",
@@ -356,6 +433,8 @@ fn dump_registers(context: &CrashContext) {
     #[cfg(target_arch = "aarch64")]
     dump_architecture_registers(context);
     #[cfg(target_arch = "riscv64")]
+    dump_architecture_registers(context);
+    #[cfg(target_arch = "x86_64")]
     dump_architecture_registers(context);
 }
 
@@ -421,6 +500,21 @@ fn dump_architecture_registers(context: &CrashContext) {
     ));
 }
 
+#[cfg(target_arch = "x86_64")]
+fn dump_architecture_registers(context: &CrashContext) {
+    if context.has_exception_frame() {
+        super::log::emergency(format_args!(
+            "vector: {:#x}  error: {:#018x}  CR2: {:#018x}",
+            context.exception_vector, context.syndrome, context.fault_address
+        ));
+    } else {
+        super::log::emergency(format_args!(
+            "origin: software panic (no architectural exception frame)"
+        ));
+    }
+    super::log::emergency(format_args!("CR3: {:#018x}", context.cr3));
+}
+
 #[cfg(target_arch = "riscv64")]
 fn dump_architecture_registers(context: &CrashContext) {
     if context.has_exception_frame() {
@@ -478,6 +572,8 @@ fn dump_backtrace(
     const FRAME_POINTER_REGISTER: usize = 29;
     #[cfg(target_arch = "riscv64")]
     const FRAME_POINTER_REGISTER: usize = 8;
+    #[cfg(target_arch = "x86_64")]
+    const FRAME_POINTER_REGISTER: usize = 10;
     if !context.general_is_valid(FRAME_POINTER_REGISTER) {
         super::log::emergency(format_args!("  frame pointer unavailable"));
         return;
@@ -504,7 +600,7 @@ fn stack_bounds(
         .or_else(|| super::mm::stack::exception_stack_bounds(cpu, stack_pointer as usize))
 }
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 fn walk_frame_chain(mut frame: usize, bottom: usize, top: usize) {
     for depth in 1..MAX_BACKTRACE_DEPTH {
         if frame & 0xf != 0 || frame < bottom || frame.checked_add(16).is_none_or(|end| end > top) {

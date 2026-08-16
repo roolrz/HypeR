@@ -74,7 +74,9 @@ pub fn initialize_cpu_power(
 ) -> Result<ArchitectureCpuPower, CpuPowerError> {
     match info {
         hyper::platform::CpuPowerInfo::Sbi(_) => sbi::bind(),
-        hyper::platform::CpuPowerInfo::Psci(_) => Err(CpuPowerError::NotSupported),
+        hyper::platform::CpuPowerInfo::Psci(_) | hyper::platform::CpuPowerInfo::X86Apic(_) => {
+            Err(CpuPowerError::NotSupported)
+        }
     }
 }
 
@@ -131,6 +133,10 @@ pub fn wait_for_event() {
     unsafe { asm!("wfi", options(nomem, nostack)) }
 }
 
+pub const fn port_io() -> Option<hyper::hal::io::PortIo> {
+    None
+}
+
 pub unsafe fn run_on_emergency_stack(callback: extern "C" fn(usize) -> !, argument: usize) -> ! {
     unsafe { exception::run_on_emergency_stack(callback, argument) }
 }
@@ -154,5 +160,7 @@ pub fn take_guest_timer_wakeup() -> Option<u64> {
 #[unsafe(no_mangle)]
 extern "C" fn riscv64_bootstrap(hart_id: usize, dtb_address: usize) -> ! {
     smp::initialize_boot_hart(hart_id as u64);
-    crate::kernel::prepare_boot_environment(dtb_address)
+    crate::kernel::boot::prepare_boot_environment(crate::kernel::boot::ProtocolInputs::from_dtb(
+        dtb_address,
+    ))
 }

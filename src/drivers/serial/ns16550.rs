@@ -7,6 +7,7 @@ use crate::drivers::platform::{
     DriverInstance, DriverServices, PlatformDevice, PlatformDriver, ProbeError,
 };
 use crate::hal::console::Console;
+use crate::hal::io::PortIo;
 
 const RBR_THR_DLL: usize = 0;
 const IER_DLM: usize = 1;
@@ -226,7 +227,13 @@ impl ModemStatus {
 #[derive(Clone, Copy)]
 pub struct Ns16550 {
     base: usize,
-    access: MmioAccess,
+    access: RegisterAccess,
+}
+
+#[derive(Clone, Copy)]
+enum RegisterAccess {
+    Mmio(MmioAccess),
+    Port(PortIo),
 }
 
 impl Ns16550 {
@@ -238,7 +245,7 @@ impl Ns16550 {
     pub const unsafe fn from_mmio_base(base: usize) -> Self {
         Self {
             base,
-            access: MmioAccess::BYTE,
+            access: RegisterAccess::Mmio(MmioAccess::BYTE),
         }
     }
 
@@ -258,15 +265,36 @@ impl Ns16550 {
         if base.checked_add(last).is_none() {
             return Err(Error::AddressOverflow);
         }
-        Ok(Self { base, access })
+        Ok(Self {
+            base,
+            access: RegisterAccess::Mmio(access),
+        })
+    }
+
+    /// Creates a handle for an isolated I/O-port register bank.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own all eight consecutive ports beginning at `base`.
+    pub const unsafe fn from_port(base: u16, io: PortIo) -> Result<Self, Error> {
+        if base > u16::MAX - 7 {
+            return Err(Error::AddressOverflow);
+        }
+        Ok(Self {
+            base: base as usize,
+            access: RegisterAccess::Port(io),
+        })
     }
 
     pub const fn mmio_base(self) -> usize {
         self.base
     }
 
-    pub const fn mmio_access(self) -> MmioAccess {
-        self.access
+    pub const fn mmio_access(self) -> Option<MmioAccess> {
+        match self.access {
+            RegisterAccess::Mmio(access) => Some(access),
+            RegisterAccess::Port(_) => None,
+        }
     }
 
     pub fn configure(
@@ -422,26 +450,31 @@ impl Ns16550 {
         let _ = self.read(MSR);
     }
 
-    fn register_address(&self, register: usize) -> usize {
-        self.base + (register << self.access.register_shift())
-    }
-
     fn read(&self, register: usize) -> u8 {
-        let address = self.register_address(register);
         unsafe {
             match self.access {
-                MmioAccess::Byte { .. } => read_volatile(address as *const u8),
-                MmioAccess::Word { .. } => read_volatile(address as *const u32) as u8,
+                RegisterAccess::Mmio(MmioAccess::Byte { register_shift }) => {
+                    read_volatile((self.base + (register << register_shift)) as *const u8)
+                }
+                RegisterAccess::Mmio(MmioAccess::Word { register_shift }) => {
+                    read_volatile((self.base + (register << register_shift)) as *const u32) as u8
+                }
+                RegisterAccess::Port(io) => io.read((self.base + register) as u16),
             }
         }
     }
 
     fn write(&self, register: usize, value: u8) {
-        let address = self.register_address(register);
         unsafe {
             match self.access {
-                MmioAccess::Byte { .. } => write_volatile(address as *mut u8, value),
-                MmioAccess::Word { .. } => write_volatile(address as *mut u32, u32::from(value)),
+                RegisterAccess::Mmio(MmioAccess::Byte { register_shift }) => {
+                    write_volatile((self.base + (register << register_shift)) as *mut u8, value)
+                }
+                RegisterAccess::Mmio(MmioAccess::Word { register_shift }) => write_volatile(
+                    (self.base + (register << register_shift)) as *mut u32,
+                    u32::from(value),
+                ),
+                RegisterAccess::Port(io) => io.write((self.base + register) as u16, value),
             }
         }
     }
@@ -506,7 +539,9 @@ impl PlatformDriver for Ns16550PlatformDriver {
         // SAFETY: Successful probing transfers this complete translated MMIO
         // resource to one platform-driver instance.
         let uart = unsafe { Ns16550::from_mmio(base, access) }.map_err(|_| ProbeError::Resource)?;
-        Ok(Box::new(uart))
+        let instance: Box<dyn DriverInstance> =
+            crate::mm::try_box(uart).map_err(|_| ProbeError::Resource)?;
+        Ok(instance)
     }
 }
 

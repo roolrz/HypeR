@@ -1,4 +1,5 @@
 use crate::hal::console::Console;
+use crate::hal::io::PortIo;
 use crate::platform::{ConsoleInfo, ConsoleKind, ConsoleRegisterAccess, chosen::CommandLine};
 
 use super::serial::{MmioAccess, Ns16550, Ns16550Error, Pl011};
@@ -41,7 +42,7 @@ pub fn early_console(
     let mut fields = value.split(',');
     let driver = fields.next().ok_or(EarlyConsoleError::UnsupportedDriver)?;
     let mut address = fields.next().ok_or(EarlyConsoleError::MissingAddress)?;
-    let access = matches!(address, "mmio" | "mmio32").then_some(address);
+    let access = matches!(address, "mmio" | "mmio32" | "io").then_some(address);
     if access.is_some() {
         address = fields.next().ok_or(EarlyConsoleError::MissingAddress)?;
     }
@@ -53,7 +54,9 @@ pub fn early_console(
         "pl011" => (ConsoleKind::Pl011, ConsoleRegisterAccess::Native),
         "uart8250" | "ns16550" => (
             ConsoleKind::Ns16550,
-            if access == Some("mmio32") {
+            if access == Some("io") {
+                ConsoleRegisterAccess::Port
+            } else if access == Some("mmio32") {
                 ConsoleRegisterAccess::Mmio32 { register_shift: 2 }
             } else {
                 ConsoleRegisterAccess::Mmio8 { register_shift: 0 }
@@ -108,13 +111,14 @@ impl ConsoleDevice {
                 metadata: 1,
             },
             Self::Ns16550(device) => {
-                let (width, shift) = match device.mmio_access() {
-                    MmioAccess::Byte { register_shift } => (0, register_shift),
-                    MmioAccess::Word { register_shift } => (1, register_shift),
+                let (kind, shift) = match device.mmio_access() {
+                    Some(MmioAccess::Byte { register_shift }) => (2, register_shift),
+                    Some(MmioAccess::Word { register_shift }) => (6, register_shift),
+                    None => (3, 0),
                 };
                 EmergencyConsoleHandle {
                     base: device.mmio_base(),
-                    metadata: 2 | (width << 2) | ((shift as usize) << 3),
+                    metadata: kind | ((shift as usize) << 3),
                 }
             }
         }
@@ -126,7 +130,10 @@ impl ConsoleDevice {
     ///
     /// The encoded MMIO mapping must still be valid and exclusively owned by
     /// the console subsystem.
-    pub const unsafe fn from_emergency_handle(handle: EmergencyConsoleHandle) -> Option<Self> {
+    pub unsafe fn from_emergency_handle(
+        handle: EmergencyConsoleHandle,
+        port_io: Option<PortIo>,
+    ) -> Option<Self> {
         match handle.metadata & 3 {
             1 => Some(Self::Pl011(unsafe { Pl011::from_mmio_base(handle.base) })),
             2 => {
@@ -145,6 +152,13 @@ impl ConsoleDevice {
                     Err(_) => None,
                 }
             }
+            3 => match (u16::try_from(handle.base), port_io) {
+                (Ok(base), Some(io)) => match unsafe { Ns16550::from_port(base, io) } {
+                    Ok(device) => Some(Self::Ns16550(device)),
+                    Err(_) => None,
+                },
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -156,7 +170,11 @@ impl ConsoleDevice {
 ///
 /// `mapped_base` must map the register range described by `info` with Device
 /// memory attributes, and that range must have a single driver owner.
-pub unsafe fn bind(info: ConsoleInfo, mapped_base: usize) -> Result<ConsoleDevice, Ns16550Error> {
+pub unsafe fn bind(
+    info: ConsoleInfo,
+    mapped_base: usize,
+    port_io: Option<PortIo>,
+) -> Result<ConsoleDevice, Ns16550Error> {
     match info.kind {
         ConsoleKind::Pl011 => {
             // SAFETY: The caller transfers the validated MMIO range to the
@@ -166,6 +184,11 @@ pub unsafe fn bind(info: ConsoleInfo, mapped_base: usize) -> Result<ConsoleDevic
             }))
         }
         ConsoleKind::Ns16550 => {
+            if info.access == ConsoleRegisterAccess::Port {
+                let port = u16::try_from(info.base).map_err(|_| Ns16550Error::InvalidAccess)?;
+                let io = port_io.ok_or(Ns16550Error::InvalidAccess)?;
+                return unsafe { Ns16550::from_port(port, io) }.map(ConsoleDevice::Ns16550);
+            }
             let access = match info.access {
                 ConsoleRegisterAccess::Mmio8 { register_shift } => {
                     MmioAccess::Byte { register_shift }
@@ -174,6 +197,7 @@ pub unsafe fn bind(info: ConsoleInfo, mapped_base: usize) -> Result<ConsoleDevic
                     MmioAccess::Word { register_shift }
                 }
                 ConsoleRegisterAccess::Native => MmioAccess::BYTE,
+                ConsoleRegisterAccess::Port => return Err(Ns16550Error::InvalidAccess),
             };
             // SAFETY: The caller transfers the validated MMIO mapping.
             unsafe { Ns16550::from_mmio(mapped_base, access) }.map(ConsoleDevice::Ns16550)

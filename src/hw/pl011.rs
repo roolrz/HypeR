@@ -2,7 +2,7 @@
 //!
 //! Offsets and bit definitions follow Arm DDI 0183G. Keeping the complete
 //! device register vocabulary here avoids scattering hardware literals across
-//! the physical driver and virtual device model.
+//! physical drivers and virtual device models.
 
 pub const DR: usize = 0x000;
 pub const RSR_ECR: usize = 0x004;

@@ -191,10 +191,16 @@ impl Default for CpuList {
 pub enum CpuPowerInfo {
     Psci(PsciInfo),
     Sbi(SbiInfo),
+    X86Apic(X86ApicInfo),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SbiInfo;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct X86ApicInfo {
+    pub tsc_frequency: u64,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PsciInfo {
@@ -225,6 +231,7 @@ pub struct TimerInfo {
 pub enum TimerKind {
     ArmGeneric,
     RiscvSupervisor,
+    X86TscDeadline,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -237,7 +244,11 @@ pub enum PlatformInterruptTrigger {
 pub enum InterruptControllerInfo {
     GicV3(GicV3Info),
     Plic(PlicInfo),
+    X2Apic(X2ApicInfo),
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct X2ApicInfo;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PlicInfo {
@@ -272,6 +283,7 @@ pub struct ConsoleInfo {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConsoleRegisterAccess {
     Native,
+    Port,
     Mmio8 { register_shift: u8 },
     Mmio32 { register_shift: u8 },
 }

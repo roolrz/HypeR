@@ -7,6 +7,7 @@ pub mod config;
 pub mod debug;
 pub mod drivers;
 pub mod hal;
+pub mod hw;
 pub mod log;
 pub mod mm;
 pub mod platform;

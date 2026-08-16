@@ -58,7 +58,9 @@ impl Scheduler {
         }
         let mut threads = Vec::new();
         threads.try_reserve(1).map_err(|_| Error::Allocation)?;
-        threads.push(Some(Box::new(Thread::bootstrap(boot_cpu))));
+        threads.push(Some(
+            hyper::mm::try_box(Thread::bootstrap(boot_cpu)).map_err(|_| Error::Allocation)?,
+        ));
         let mut cpus = Vec::new();
         cpus.try_reserve(1).map_err(|_| Error::Allocation)?;
         cpus.push(CpuScheduler::new(boot_cpu, ThreadId::BOOTSTRAP));
@@ -86,7 +88,8 @@ impl Scheduler {
         }
         self.reserve_thread_and_cpu()?;
         let id = self.next_thread_id()?;
-        let thread = Box::new(Thread::secondary_bootstrap(id, cpu, name)?);
+        let thread = hyper::mm::try_box(Thread::secondary_bootstrap(id, cpu, name)?)
+            .map_err(|_| Error::Allocation)?;
         let virtual_top = thread.kernel_stack_top().ok_or(Error::Allocation)?;
         let physical_top = thread
             .kernel_stack_physical_top()
@@ -111,7 +114,8 @@ impl Scheduler {
         self.cpu_slot(cpu)?;
         self.threads.try_reserve(1).map_err(|_| Error::Allocation)?;
         let id = self.next_thread_id()?;
-        let mut thread = Box::new(Thread::kernel(id, cpu, name, entry, argument)?);
+        let mut thread = hyper::mm::try_box(Thread::kernel(id, cpu, name, entry, argument)?)
+            .map_err(|_| Error::Allocation)?;
         thread.set_priority(priority);
         self.register_thread(thread)?;
         Ok(id)
@@ -129,7 +133,7 @@ impl Scheduler {
         self.cpu_slot(cpu)?;
         self.threads.try_reserve(1).map_err(|_| Error::Allocation)?;
         let id = self.next_thread_id()?;
-        let thread = Box::new(Thread::vcpu(
+        let thread = hyper::mm::try_box(Thread::vcpu(
             id,
             cpu,
             name,
@@ -137,7 +141,8 @@ impl Scheduler {
             vcpu_id,
             context,
             entry,
-        )?);
+        )?)
+        .map_err(|_| Error::Allocation)?;
         self.register_thread(thread)?;
         Ok(id)
     }

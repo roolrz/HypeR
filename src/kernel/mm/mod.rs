@@ -1,6 +1,5 @@
 //! Kernel memory policy layered over reusable memory-management mechanisms.
 
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 use hyper::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use hyper::hal::cache::CacheMaintenance;
@@ -131,14 +130,19 @@ pub(crate) fn report_statistics(reason: &str) {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AllocatorSmokeError {
+    Allocation,
     BoxValue,
     VectorContents,
     VectorLength,
 }
 
 fn verify_rust_allocator_interface() -> Result<(), AllocatorSmokeError> {
-    let boxed = Box::new(0x0048_5950_4552_u64);
-    let mut vector = Vec::with_capacity(1024);
+    let boxed =
+        hyper::mm::try_box(0x0048_5950_4552_u64).map_err(|_| AllocatorSmokeError::Allocation)?;
+    let mut vector = Vec::new();
+    vector
+        .try_reserve_exact(1024)
+        .map_err(|_| AllocatorSmokeError::Allocation)?;
     for value in 0..1024u64 {
         vector.push(value);
     }

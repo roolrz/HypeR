@@ -190,7 +190,7 @@ fn emulate_sbi(vcpu_id: u32, frame: &mut GuestSyncFrame<'_>) {
             return;
         }
         1 => {
-            crate::kernel::log::console::write_raw_byte(arguments[0] as u8);
+            crate::kernel::vm::write_guest_console_byte(arguments[0] as u8);
             frame.trap.general[10] = SBI_SUCCESS;
             return;
         }

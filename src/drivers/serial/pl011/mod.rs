@@ -8,9 +8,7 @@ use crate::drivers::platform::{
 };
 use crate::hal::console::Console;
 
-pub mod registers;
-
-use registers as reg;
+use crate::hw::pl011 as reg;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -414,7 +412,10 @@ impl PlatformDriver for Pl011PlatformDriver {
             .ok_or(ProbeError::Resource)?;
         // SAFETY: The platform bus gives one successful driver ownership of
         // this translated MMIO resource.
-        Ok(Box::new(unsafe { Pl011::from_mmio_base(base) }))
+        let instance: Box<dyn DriverInstance> =
+            crate::mm::try_box(unsafe { Pl011::from_mmio_base(base) })
+                .map_err(|_| ProbeError::Resource)?;
+        Ok(instance)
     }
 }
 

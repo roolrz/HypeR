@@ -18,8 +18,8 @@ mod vgic;
 mod vsysreg;
 
 pub use atomics::{AtomicCapabilities, capabilities as atomic_capabilities};
-pub use barrier::Aarch64Barrier;
-pub use cache::Aarch64Cache;
+pub use barrier::Aarch64Barrier as ArchitectureBarrier;
+pub use cache::Aarch64Cache as ArchitectureCache;
 pub use context::{
     ThreadContext, UserContext, VcpuContext, reset_stack_and_enter, run_on_emergency_stack,
     switch_thread_context,
@@ -55,7 +55,11 @@ pub use smp::{
     send_event,
 };
 pub use stage2::{Error as Stage2Error, Stage2AddressSpace};
-pub use timer::{ArmGenericCounter, El2PhysicalTimer, Error as TimerError};
+pub use timer::{
+    ArmGenericCounter as ArchitectureCounter, El2PhysicalTimer as ArchitectureTimer,
+    Error as TimerError,
+};
+pub use vgic::Error as VirtualInterruptError;
 pub use vgic::{
     Capabilities as VgicCapabilities, CpuContext as VgicCpuContext, Error as VgicError,
 };
@@ -74,7 +78,9 @@ pub fn initialize_cpu_power(
 ) -> Result<ArchitectureCpuPower, CpuPowerError> {
     match info {
         hyper::platform::CpuPowerInfo::Psci(info) => psci::bind(info),
-        hyper::platform::CpuPowerInfo::Sbi(_) => Err(CpuPowerError::NotSupported),
+        hyper::platform::CpuPowerInfo::Sbi(_) | hyper::platform::CpuPowerInfo::X86Apic(_) => {
+            Err(CpuPowerError::NotSupported)
+        }
     }
 }
 
@@ -158,6 +164,10 @@ pub fn wait_for_event() {
     unsafe { core::arch::asm!("wfe", options(nomem, nostack, preserves_flags)) };
 }
 
+pub const fn port_io() -> Option<hyper::hal::io::PortIo> {
+    None
+}
+
 /// Rust continuation used while the architecture bootstrap is still active.
 ///
 /// This is not the kernel entry: the permanent address space and stack are
@@ -166,7 +176,9 @@ pub fn wait_for_event() {
 #[unsafe(no_mangle)]
 extern "C" fn aarch64_bootstrap(dtb_address: usize) -> ! {
     atomics::initialize();
-    crate::kernel::prepare_boot_environment(dtb_address)
+    crate::kernel::boot::prepare_boot_environment(crate::kernel::boot::ProtocolInputs::from_dtb(
+        dtb_address,
+    ))
 }
 
 pub fn poll_guest_timer(_now: u64) {}

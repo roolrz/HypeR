@@ -367,7 +367,11 @@ impl Stage2PagePool {
     }
 
     fn allocate_zeroed(&mut self, pages: usize, alignment_pages: usize) -> Option<PhysicalAddress> {
-        if pages == 0 || !pages.is_power_of_two() || alignment_pages != pages {
+        if pages == 0
+            || !pages.is_power_of_two()
+            || alignment_pages != pages
+            || self.pages.len() == self.pages.capacity()
+        {
             return None;
         }
         let order = pages.trailing_zeros() as usize;

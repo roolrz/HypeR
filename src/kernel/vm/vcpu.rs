@@ -273,6 +273,36 @@ impl VcpuExecution {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
+impl VcpuExecution {
+    /// Publishes the local active-vCPU binding before VMX guest entry.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclusively own this pinned vCPU and keep interrupts
+    /// masked until the VMCS has been activated.
+    pub unsafe fn activate_virtual_hardware(
+        &mut self,
+        interrupts: &VmInterruptController,
+    ) -> Result<(), VcpuInterruptError> {
+        unsafe { super::active_vcpu::set(self, interrupts)? };
+        Ok(())
+    }
+
+    /// Removes the local active-vCPU binding after VMX guest execution.
+    ///
+    /// # Safety
+    ///
+    /// This must be the vCPU currently bound to the calling physical CPU.
+    pub unsafe fn deactivate_virtual_hardware(
+        &mut self,
+        _interrupts: &VmInterruptController,
+    ) -> Result<(), VcpuInterruptError> {
+        super::active_vcpu::clear(self)?;
+        Ok(())
+    }
+}
+
 #[cfg(target_arch = "aarch64")]
 pub(super) fn deliver_software_interrupt(
     execution: &mut VcpuExecution,

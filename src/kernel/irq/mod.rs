@@ -31,14 +31,21 @@ pub(crate) fn initialize_exceptions() {
     if let Err(error) = crate::arch::validate_runtime_vectors() {
         super::boot::fail("runtime exception-vector validation", error);
     }
-    if let Err(error) = crate::arch::validate_vsysreg() {
-        super::boot::fail("guest system-register emulation validation", error);
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        if let Err(error) = crate::arch::validate_vsysreg() {
+            super::boot::fail("guest system-register emulation validation", error);
+        }
+        crate::println!("HypeR: guest synchronous trap and vSysReg emulation validated");
     }
-    crate::println!("HypeR: guest synchronous trap and vSysReg emulation validated");
+    #[cfg(target_arch = "x86_64")]
+    crate::println!("HypeR: runtime exception vectors validated");
 }
 
 /// Activates the interrupt-controller virtualization backend.
 pub(crate) fn initialize_virtualization(boot: &super::boot::Initialization) {
+    #[cfg(target_arch = "x86_64")]
+    let _ = boot;
     #[cfg(target_arch = "riscv64")]
     {
         let _ = boot;

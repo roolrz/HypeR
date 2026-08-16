@@ -4,7 +4,7 @@ use hyper::hal::interrupt::{
 };
 use hyper::platform::InterruptControllerInfo;
 
-use super::{Aarch64Barrier, Aarch64GicCpuInterface};
+use super::{Aarch64GicCpuInterface, barrier::Aarch64Barrier};
 
 type Controller = GicV3<Aarch64GicCpuInterface, Aarch64Barrier>;
 

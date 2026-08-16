@@ -10,6 +10,9 @@ mod aarch64_registers;
 #[allow(dead_code)]
 #[path = "src/arch/riscv64/registers.rs"]
 mod riscv64_registers;
+#[allow(dead_code)]
+#[path = "src/arch/x86_64/registers.rs"]
+mod x86_64_registers;
 // The build script uses only validation and export; the host configurator uses
 // the interactive and serialization portions of the shared implementation.
 #[allow(dead_code)]
@@ -33,6 +36,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/arch/riscv64/cache.S");
     println!("cargo:rerun-if-changed=src/arch/riscv64/registers.rs");
     println!("cargo:rerun-if-changed=src/arch/riscv64/linker.ld");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/boot.S");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/context.S");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/vectors.S");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/ap_trampoline.S");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/vmx.S");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/registers.rs");
+    println!("cargo:rerun-if-changed=src/arch/x86_64/linker.ld");
     println!("cargo:rerun-if-changed=Kconfig");
     println!("cargo:rerun-if-env-changed=HYPER_CONFIG");
     println!("cargo:rerun-if-env-changed=HYPER_KALLSYMS_BLOB");
@@ -65,6 +75,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ("src/arch/riscv64/context.S", "riscv64_context.o"),
                 ("src/arch/riscv64/guest.S", "riscv64_guest.o"),
                 ("src/arch/riscv64/cache.S", "riscv64_cache.o"),
+            ],
+        ),
+        "x86_64-unknown-none" => (
+            "x86_64-none-elf",
+            x86_64_registers::ASM_CONSTANTS,
+            &[
+                ("src/arch/x86_64/boot.S", "x86_64_boot.o"),
+                ("src/arch/x86_64/context.S", "x86_64_context.o"),
+                ("src/arch/x86_64/vectors.S", "x86_64_vectors.o"),
+                ("src/arch/x86_64/ap_trampoline.S", "x86_64_ap_trampoline.o"),
+                ("src/arch/x86_64/vmx.S", "x86_64_vmx.o"),
             ],
         ),
         _ => return Ok(()),
@@ -172,16 +193,18 @@ fn validate_architecture_configuration(
 ) -> Result<(), Box<dyn Error>> {
     let aarch64 = configuration.value("ARCH_AARCH64") == Some("y");
     let riscv64 = configuration.value("ARCH_RISCV64") == Some("y");
-    if aarch64 == riscv64 {
+    let x86_64 = configuration.value("ARCH_X86_64") == Some("y");
+    if usize::from(aarch64) + usize::from(riscv64) + usize::from(x86_64) != 1 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "exactly one of CONFIG_ARCH_AARCH64 and CONFIG_ARCH_RISCV64 must be enabled",
+            "exactly one architecture configuration must be enabled",
         )
         .into());
     }
     let matches_target = match target {
         "aarch64-unknown-none" => aarch64,
         "riscv64imac-unknown-none-elf" => riscv64,
+        "x86_64-unknown-none" => x86_64,
         _ => true,
     };
     if !matches_target {

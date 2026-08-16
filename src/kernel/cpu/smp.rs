@@ -1,7 +1,5 @@
 //! Architecture-neutral SMP startup policy built on firmware CPU power calls.
 
-use alloc::boxed::Box;
-use alloc::format;
 use alloc::vec::Vec;
 use core::hint::spin_loop;
 
@@ -106,14 +104,14 @@ pub fn initialize(
             return Err(Error::CpuIndexOverflow);
         }
         super::super::mm::stack::prepare_cpu(cpu_index)?;
-        let name = format!("idle/{cpu_index}");
-        let stack = super::super::task::scheduler::register_secondary_cpu(cpu_index, &name)?;
-        let mut parameters = Box::new(crate::arch::SecondaryBootParameters::new(
+        let stack = super::super::task::scheduler::register_secondary_cpu(cpu_index, "idle")?;
+        let mut parameters = hyper::mm::try_box(crate::arch::SecondaryBootParameters::new(
             root,
             stack.physical_top,
             stack.virtual_top as u64,
             cpu_index,
-        ));
+        ))
+        .map_err(|_| Error::Allocation)?;
         let context = super::super::mm::memory::linear_physical_address(
             (&mut *parameters) as *mut _ as usize,
         )

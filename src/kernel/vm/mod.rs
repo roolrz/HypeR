@@ -3,7 +3,6 @@
 mod active_vcpu;
 #[cfg(target_arch = "aarch64")]
 mod arch_timer;
-#[cfg(target_arch = "aarch64")]
 mod device;
 mod interrupt;
 mod linux;
@@ -46,6 +45,36 @@ pub(crate) fn initialize_virtual_devices(boot: &super::boot::Initialization) {
         let _ = boot;
         crate::println!("HypeR: RISC-V guest SBI and virtual timer backend initialized");
     }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let _ = boot;
+        if let Err(error) = device::legacy_pc::initialize() {
+            super::boot::fail("legacy PC virtual-device initialization", error);
+        }
+        crate::println!("HypeR: x86 VMX and legacy PC virtual-device backends initialized");
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn handle_port_io(
+    port: u16,
+    size: usize,
+    write: bool,
+    value: u32,
+) -> Result<Option<u32>, device::legacy_pc::Error> {
+    device::legacy_pc::access(port, size, write, value)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(crate) fn legacy_timer_vector() -> Result<Option<u8>, device::legacy_pc::Error> {
+    device::legacy_pc::timer_vector()
+}
+
+/// Routes a byte emitted by guest firmware or a virtual UART to the host log
+/// backend. Architecture exit decoding must not depend on logging internals.
+#[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
+pub(crate) fn write_guest_console_byte(byte: u8) {
+    crate::kernel::log::console::write_raw_byte(byte);
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -54,6 +83,11 @@ pub(crate) fn receive_console_input(byte: u8) -> Result<(), device::console::Err
 }
 
 #[cfg(target_arch = "riscv64")]
+pub(crate) fn receive_console_input(_byte: u8) -> Result<(), ()> {
+    Err(())
+}
+
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn receive_console_input(_byte: u8) -> Result<(), ()> {
     Err(())
 }
@@ -117,6 +151,11 @@ pub(crate) fn handle_guest_sync(frame: &mut crate::arch::GuestSyncFrame<'_>) -> 
                         crate::arch::GuestSyncAction::Unhandled
                     }
                 };
+                #[cfg(target_arch = "x86_64")]
+                {
+                    let _ = (execution, interrupts, request);
+                    return crate::arch::GuestSyncAction::Unhandled;
+                }
             }
             crate::arch::GuestSyncAction::Unhandled => {}
             _ => return action,
@@ -185,6 +224,11 @@ pub(crate) fn handle_guest_sync(frame: &mut crate::arch::GuestSyncFrame<'_>) -> 
                     action
                 }
             }
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            let _ = interrupts;
+            action
         }
     }) {
         Ok(Some(crate::arch::GuestSyncAction::Resume | crate::arch::GuestSyncAction::Injected)) => {

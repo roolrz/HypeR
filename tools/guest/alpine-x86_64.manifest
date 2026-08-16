@@ -1,0 +1,8 @@
+format=hyper-vm-v1
+type=linux
+architecture=x86_64
+memory=134217728
+vcpus=1
+command_line=console=ttyS0 earlycon=uart8250,io,0x3f8 rdinit=/init loglevel=7 noapic nolapic maxcpus=1
+kernel=kernel/Image
+initramfs=initramfs/initramfs.cpio.gz

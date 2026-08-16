@@ -123,6 +123,7 @@ pub fn initialize(info: InterruptControllerInfo) -> Result<Capabilities, Error> 
     let maintenance_interrupt = match info {
         InterruptControllerInfo::GicV3(info) => info.maintenance_interrupt,
         InterruptControllerInfo::Plic(_) => None,
+        InterruptControllerInfo::X2Apic(_) => None,
     };
     // SAFETY: The architecture MMIO window maps every DTB-discovered device
     // range with Device attributes and the controller has a single owner.

@@ -77,16 +77,16 @@ a decimal byte count, at least 64 MiB, page aligned, and a power of two.
 `vcpus` must be nonzero. The package parser preserves `type`, `architecture`,
 and `vcpus` without applying the current machine's execution limits. This keeps
 the storage ABI independent from a particular runner or host configuration.
-The current AArch64 and RISC-V Linux runners support one vCPU and contiguous RAM
-from 64 MiB through 1 GiB, and report distinct runtime errors for other valid
-bundles.
+The current AArch64, RISC-V, and x86-64 Linux runners support one vCPU and
+contiguous RAM from 64 MiB through 1 GiB, and report distinct runtime errors
+for other valid bundles.
 
 The package layer verifies that selected archive entries are unique regular
 files. The selected runner then validates guest-specific requirements; the
 selected Linux runner requires the standard `ARMd` or RISC-V `RSC\x05` Image
-magic. HypeR does not
-decompress the guest initramfs: Linux receives those bytes and handles its own
-supported compression formats.
+magic, or a 64-bit relocatable x86 bzImage header with the configured preferred
+load address. HypeR does not decompress the guest initramfs: Linux receives
+those bytes and handles its own supported compression formats.
 
 ## Integrity and licensing
 

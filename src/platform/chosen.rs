@@ -50,6 +50,16 @@ impl CommandLine {
         Ok(command_line)
     }
 
+    pub fn parse(value: &str) -> Result<Self, Error> {
+        if value.len() > MAX_COMMAND_LINE_SIZE {
+            return Err(Error::TooLong);
+        }
+        let mut command_line = Self::EMPTY;
+        command_line.bytes[..value.len()].copy_from_slice(value.as_bytes());
+        command_line.length = value.len();
+        Ok(command_line)
+    }
+
     pub fn as_str(&self) -> &str {
         // SAFETY: Construction validates UTF-8 and only copies those bytes.
         unsafe { str::from_utf8_unchecked(&self.bytes[..self.length]) }

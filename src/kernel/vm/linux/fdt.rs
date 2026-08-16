@@ -1,6 +1,7 @@
-//! Linux-format device tree for the initial AArch64 virtual platform.
+//! Linux-format device tree for FDT-booted virtual platforms.
 
-use alloc::{format, vec::Vec};
+use alloc::vec::Vec;
+use core::fmt::{self, Write};
 
 const FDT_MAGIC: u32 = 0xd00d_feed;
 const FDT_BEGIN_NODE: u32 = 1;
@@ -20,6 +21,7 @@ const APB_CLOCK_PHANDLE: u32 = 3;
 pub enum Error {
     Allocation,
     AddressOverflow,
+    NameTooLong,
     NameOffsetOverflow,
 }
 
@@ -61,7 +63,7 @@ pub fn build(
     builder.property_u32("#address-cells", 2)?;
     builder.property_u32("#size-cells", 0)?;
     for index in 0..vcpu_count {
-        builder.begin_node(&format!("cpu@{index:x}"))?;
+        begin_hex_node(&mut builder, "cpu@", u64::from(index))?;
         builder.property_string("device_type", "cpu")?;
         builder.property_string("compatible", "arm,armv8")?;
         builder.property_string("enable-method", "psci")?;
@@ -148,7 +150,7 @@ pub fn build(
     }
     builder.end_node()?;
 
-    builder.begin_node(&format!("memory@{memory_base:x}"))?;
+    begin_hex_node(&mut builder, "memory@", memory_base)?;
     builder.property_string("device_type", "memory")?;
     builder.property_u64_pair("reg", memory_base, memory_size)?;
     builder.end_node()?;
@@ -158,7 +160,7 @@ pub fn build(
     builder.property_u32("#size-cells", 0)?;
     builder.property_u32("timebase-frequency", 10_000_000)?;
     for index in 0..vcpu_count {
-        builder.begin_node(&format!("cpu@{index:x}"))?;
+        begin_hex_node(&mut builder, "cpu@", u64::from(index))?;
         builder.property_string("device_type", "cpu")?;
         builder.property_string("compatible", "riscv")?;
         builder.property_string("status", "okay")?;
@@ -201,6 +203,42 @@ fn fixed_clock(
     builder.property_u32("clock-frequency", frequency)?;
     builder.property_u32("phandle", phandle)?;
     builder.end_node()
+}
+
+fn begin_hex_node(builder: &mut Builder, prefix: &str, value: u64) -> Result<(), Error> {
+    let mut name = NodeName::<32>::new();
+    write!(&mut name, "{prefix}{value:x}").map_err(|_| Error::NameTooLong)?;
+    builder.begin_node(name.as_str())
+}
+
+struct NodeName<const CAPACITY: usize> {
+    bytes: [u8; CAPACITY],
+    length: usize,
+}
+
+impl<const CAPACITY: usize> NodeName<CAPACITY> {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; CAPACITY],
+            length: 0,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        // SAFETY: fmt::Write only accepts UTF-8 strings and copies them
+        // without modification into the initialized prefix.
+        unsafe { core::str::from_utf8_unchecked(&self.bytes[..self.length]) }
+    }
+}
+
+impl<const CAPACITY: usize> fmt::Write for NodeName<CAPACITY> {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let end = self.length.checked_add(value.len()).ok_or(fmt::Error)?;
+        let destination = self.bytes.get_mut(self.length..end).ok_or(fmt::Error)?;
+        destination.copy_from_slice(value.as_bytes());
+        self.length = end;
+        Ok(())
+    }
 }
 
 struct Builder {

@@ -1,8 +1,8 @@
 # HypeR
 
 HypeR is an experimental, modular type-1 hypervisor kernel written in Rust.
-AArch64 remains tier 1; an initial RISC-V 64-bit port also runs on QEMU's
-`virt` machine and boots a Linux guest through `/init`. The kernel is
+AArch64 remains tier 1. Secondary RISC-V 64-bit and x86-64 ports exercise the
+same kernel/HAL boundaries and boot Linux guests through `/init`. The kernel is
 `no_std` and `no_main`; assembly is restricted to architectural entry and
 low-level state transitions that Rust cannot express safely.
 
@@ -35,10 +35,11 @@ memory.
 
 ## Requirements
 
-- Rust 1.97.1 with `rust-src`, `llvm-tools`, `aarch64-unknown-none`, and
-  `riscv64imac-unknown-none-elf`
+- Rust 1.97.1 with `rust-src`, `llvm-tools`, `aarch64-unknown-none`,
+  `riscv64imac-unknown-none-elf`, and `x86_64-unknown-none`
 - LLVM toolchain (Rust uses LLVM's integrated assembler and bundled linker)
-- QEMU with `qemu-system-aarch64` and, for RISC-V, `qemu-system-riscv64`
+- QEMU with `qemu-system-aarch64`, `qemu-system-riscv64`, and
+  `qemu-system-x86_64`
 - GNU Make (optional)
 
 Build and run:
@@ -57,13 +58,22 @@ make image ARCH=riscv64
 make run ARCH=riscv64
 ```
 
+Select the x86-64 QEMU `q35` port explicitly:
+
+```sh
+make defconfig ARCH=x86_64
+make image ARCH=x86_64
+make run ARCH=x86_64
+```
+
 The default QEMU command line adds
 `earlycon=pl011,mmio32,0x09000000` to the generated DTB `/chosen/bootargs`.
 Override `QEMU_BOOTARGS` with an empty value to exercise a silent early boot.
 
 `make image` builds HypeR without embedding a guest. `make guest-assets`
-downloads a checksum-pinned Alpine AArch64 kernel and initramfs and creates the
-nested CPIO boot ramdisk used by CI. `make run` passes that ramdisk separately,
+downloads a checksum-pinned Alpine kernel and initramfs for the selected
+architecture and creates the nested CPIO boot ramdisk used by CI. `make run`
+passes that ramdisk separately,
 matching the standard U-Boot `/chosen/linux,initrd-*` handoff. The format is
 specified in `docs/vm-bundle.md`. The initial guest exposes one vCPU;
 uniprocessor HypeR boot is not part of the supported or tested platform matrix.
@@ -82,12 +92,13 @@ raw Images.
 ## Continuous integration
 
 GitHub Actions runs independent required-quality stages for formatting and
-Clippy on both architectures, host unit tests, canonical bare-metal builds,
+Clippy on all three architectures, host unit tests, canonical bare-metal builds,
 image ABI validation, AArch64 QEMU tests on the `cortex-a72` and `max` CPU
-models, and a four-hart RISC-V QEMU test. Runtime tests require the
-ramdisk-loaded Linux guest to initialize GICv3 and the virtual Arm timer and
-execute `/init`. Build artifacts contain both the ELF image used for debugging
-and the raw HypeR Image.
+models, a four-hart RISC-V QEMU test, and an x86-64 KVM/nested-VMX test.
+Architecture-appropriate runtime tests require the ramdisk-loaded Linux guest
+to execute `/init`; AArch64 additionally validates GICv3 and its virtual timer.
+Build artifacts contain both the ELF image used for debugging and the raw
+HypeR Image.
 
 The workflow installs the toolchain pinned by `rust-toolchain.toml`, grants only
 read access to repository contents, cancels superseded runs on the same ref,
@@ -140,6 +151,15 @@ assembly objects compiled by Clang with the soft-float ABI. This prevents LLVM
 from emitting F/D instructions in ordinary kernel code while still allowing a
 guest RV64GC context to save and restore all floating-point registers. See
 `docs/riscv64.md` for the execution contract and current limitations.
+
+## x86-64 profile
+
+The x86-64 host profile uses QEMU `q35`, four CPUs, x2APIC, an invariant TSC,
+and VMX/EPT for guest execution. TSC-deadline is preferred; an x2APIC one-shot
+fallback keeps host tests operational under TCG, which does not implement VMX
+or TSC-deadline. Linux guest entry follows the x86 64-bit boot protocol and
+uses `boot_params`/E820 rather than an FDT. See `docs/x86_64.md` for the exact
+host, VMX, guest-loader, and test contracts.
 
 ## Runtime symbol lookup
 

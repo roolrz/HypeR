@@ -12,5 +12,3 @@ pub mod sync;
 pub mod task;
 pub mod time;
 pub mod vm;
-
-pub(crate) use boot::prepare_boot_environment;

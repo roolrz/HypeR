@@ -246,12 +246,11 @@ fn fatal_trap(frame: &TrapFrame) -> ! {
     context.syndrome = frame.scause;
     context.fault_address = frame.stval;
     context.exception_vector = frame.scause;
-    crate::kernel::irq::exception::fatal_invalid_vector(
-        frame.scause,
-        frame.scause,
-        frame.sepc,
-        frame.stval,
-        frame.sstatus,
+    crate::kernel::irq::exception::fatal_architecture(
         context,
+        format_args!(
+            "fatal RISC-V trap: scause {:#x}, sepc {:#x}, stval {:#x}, sstatus {:#x}",
+            frame.scause, frame.sepc, frame.stval, frame.sstatus
+        ),
     )
 }

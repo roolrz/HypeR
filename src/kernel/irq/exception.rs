@@ -2,29 +2,10 @@
 
 use core::fmt;
 
-#[cfg(target_arch = "aarch64")]
-use hyper::hal::exception::ExceptionReport;
 use hyper::hal::interrupt::InterruptId;
 
-#[cfg(target_arch = "aarch64")]
-pub fn fatal(report: ExceptionReport, context: crate::arch::CrashContext) -> ! {
-    crate::kernel::crash::fatal_exception(report, context)
-}
-
-pub fn fatal_invalid_vector(
-    vector: u64,
-    syndrome: u64,
-    instruction_pointer: u64,
-    fault_address: u64,
-    status: u64,
-    context: crate::arch::CrashContext,
-) -> ! {
-    crate::kernel::crash::fatal_context(
-        context,
-        format_args!(
-            "invalid exception vector {vector}, ESR {syndrome:#x}, IP {instruction_pointer:#x}, FAR {fault_address:#x}, PSTATE {status:#x}"
-        ),
-    )
+pub fn fatal_architecture(context: crate::arch::CrashContext, reason: fmt::Arguments<'_>) -> ! {
+    crate::kernel::crash::fatal_context(context, reason)
 }
 
 pub fn fatal_interrupt(reason: &str, interrupt: Option<InterruptId>) -> ! {

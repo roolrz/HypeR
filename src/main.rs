@@ -14,8 +14,8 @@ use core::panic::PanicInfo;
 
 /// Primary kernel entry after architecture initialization is complete.
 ///
-/// AArch64 enters here only after relocation, permanent page-table activation,
-/// VBAR relocation, and the switch to the final kernel stack.
+/// Every architecture enters here only after relocation, permanent stage-1
+/// translation, runtime exception entry, and the final kernel stack are active.
 #[unsafe(no_mangle)]
 extern "C" fn start_kernel() -> ! {
     let mut boot = crate::kernel::boot::enter_runtime();
