@@ -1,8 +1,8 @@
-//! Guest console device model and host byte-stream backend routing.
+//! Guest console service and host byte-stream backend routing.
 
-use hyper::drivers::interrupt::vgic::VirtualInterruptId;
-use hyper::drivers::serial::{VirtualPl011, VirtualPl011Error};
 use hyper::sync::InterruptSpinLock;
+use hyper::vm::device::pl011::{VirtualPl011, VirtualPl011Error};
+use hyper::vm::interrupt::VirtualInterruptId;
 
 use crate::arch::GuestDataAccess;
 
@@ -20,7 +20,7 @@ pub enum Error {
     InvalidInterrupt,
     Model(VirtualPl011Error),
     NotInitialized,
-    Vcpu(super::VcpuInterruptError),
+    Vcpu(super::super::VcpuInterruptError),
 }
 
 impl From<VirtualPl011Error> for Error {
@@ -29,8 +29,8 @@ impl From<VirtualPl011Error> for Error {
     }
 }
 
-impl From<super::VcpuInterruptError> for Error {
-    fn from(error: super::VcpuInterruptError) -> Self {
+impl From<super::super::VcpuInterruptError> for Error {
+    fn from(error: super::super::VcpuInterruptError) -> Self {
         Self::Vcpu(error)
     }
 }
@@ -80,6 +80,6 @@ pub fn receive(byte: u8) -> Result<(), Error> {
 
 fn update_interrupt(asserted: bool) -> Result<(), Error> {
     let interrupt = VirtualInterruptId::new(INTERRUPT).ok_or(Error::InvalidInterrupt)?;
-    let _ = super::vcpu::update_active_device_interrupt(interrupt, asserted)?;
+    let _ = super::super::vcpu::update_active_device_interrupt(interrupt, asserted)?;
     Ok(())
 }

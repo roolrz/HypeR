@@ -3,6 +3,7 @@
 pub(crate) mod exception;
 pub(crate) mod interrupt;
 pub(crate) mod timer;
+#[cfg(target_arch = "aarch64")]
 pub(crate) mod vgic;
 
 /// Initializes the root interrupt controller and kernel IRQ domain.
@@ -16,7 +17,7 @@ pub(crate) fn initialize_controller(boot: &mut super::boot::Initialization) {
         Err(error) => super::boot::fail("interrupt-controller initialization", error),
     };
     crate::println!(
-        "HypeR: GICv3 initialized with {} interrupt IDs; local IRQs remain masked",
+        "HypeR: interrupt controller initialized with {} interrupt IDs; local IRQs remain masked",
         capabilities.interrupt_count
     );
     boot.set_interrupts(capabilities);
@@ -38,20 +39,28 @@ pub(crate) fn initialize_exceptions() {
 
 /// Activates the interrupt-controller virtualization backend.
 pub(crate) fn initialize_virtualization(boot: &super::boot::Initialization) {
-    let interrupts = boot.interrupts();
-    let capabilities =
-        match vgic::initialize(interrupts.root_domain, interrupts.maintenance_interrupt) {
-            Ok(capabilities) => capabilities,
-            Err(error) => super::boot::fail("vGIC initialization", error),
-        };
-    crate::println!(
-        "HypeR: vGICv3 active with {} LRs, {} priority bits, {} preemption bits, {} INTID bits, maintenance VIRQ {}",
-        capabilities.list_registers,
-        capabilities.priority_bits,
-        capabilities.preemption_bits,
-        capabilities.interrupt_id_bits,
-        capabilities.maintenance_interrupt.get()
-    );
+    #[cfg(target_arch = "riscv64")]
+    {
+        let _ = boot;
+        crate::println!("HypeR: RISC-V virtual interrupt injection uses H-extension HVIP state");
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let interrupts = boot.interrupts();
+        let capabilities =
+            match vgic::initialize(interrupts.root_domain, interrupts.maintenance_interrupt) {
+                Ok(capabilities) => capabilities,
+                Err(error) => super::boot::fail("vGIC initialization", error),
+            };
+        crate::println!(
+            "HypeR: vGICv3 active with {} LRs, {} priority bits, {} preemption bits, {} INTID bits, maintenance VIRQ {}",
+            capabilities.list_registers,
+            capabilities.priority_bits,
+            capabilities.preemption_bits,
+            capabilities.interrupt_id_bits,
+            capabilities.maintenance_interrupt.get()
+        );
+    }
 }
 
 /// Starts the periodic kernel timer and publishes its guest-visible mapping.
@@ -65,7 +74,7 @@ pub(crate) fn initialize_timer(boot: &mut super::boot::Initialization) {
         Err(error) => super::boot::fail("periodic timer initialization", error),
     };
     crate::println!(
-        "HypeR: Arm Generic Timer: EL2 INTID {}, guest virtual INTID {} (host VIRQ {}), {} Hz tick from a {} Hz counter",
+        "HypeR: architectural timer: host INTID {}, guest INTID {} (host VIRQ {}), {} Hz tick from a {} Hz counter",
         capabilities.hardware_interrupt.get(),
         capabilities.guest_virtual_interrupt.get(),
         capabilities.guest_virtual_host_interrupt.get(),

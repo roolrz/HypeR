@@ -2,9 +2,11 @@
 
 use core::fmt;
 
+#[cfg(target_arch = "aarch64")]
 use hyper::hal::exception::ExceptionReport;
 use hyper::hal::interrupt::InterruptId;
 
+#[cfg(target_arch = "aarch64")]
 pub fn fatal(report: ExceptionReport, context: crate::arch::CrashContext) -> ! {
     crate::kernel::crash::fatal_exception(report, context)
 }

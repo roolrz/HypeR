@@ -1,12 +1,28 @@
-ARCH := aarch64
-TARGET := $(ARCH)-unknown-none
-KERNEL_PROFILE := kernel
-CARGO_PROFILE := --profile $(KERNEL_PROFILE)
+ARCH ?= aarch64
+ifeq ($(ARCH),aarch64)
+TARGET := aarch64-unknown-none
 QEMU ?= qemu-system-aarch64
 QEMU_CPU ?= cortex-a72
+DEFCONFIG := configs/qemu_aarch64_defconfig
+QEMU_BOOTARGS ?= earlycon=pl011,mmio32,0x09000000
+QEMU_TEST_SCRIPT := tests/qemu/verify-smp.sh
+QEMU_TIMER_SCRIPT := tests/qemu/verify-timer.sh
+else ifeq ($(ARCH),riscv64)
+TARGET := riscv64imac-unknown-none-elf
+QEMU ?= qemu-system-riscv64
+QEMU_CPU ?= rv64
+DEFCONFIG := configs/qemu_riscv64_defconfig
+QEMU_BOOTARGS ?= earlycon=uart8250,mmio,0x10000000
+QEMU_TEST_SCRIPT := tests/qemu/verify-riscv64.sh
+QEMU_TIMER_SCRIPT := tests/qemu/verify-riscv64.sh
+else
+$(error unsupported ARCH '$(ARCH)')
+endif
+KERNEL_PROFILE := kernel
+CARGO_PROFILE := --profile $(KERNEL_PROFILE)
+CARGO_KERNEL := cargo build --target $(TARGET) $(CARGO_PROFILE) $(CARGO_FEATURES)
 QEMU_CPUS ?= 4
 QEMU_MEMORY ?= 512M
-QEMU_BOOTARGS ?= earlycon=pl011,mmio32,0x09000000
 HOST_TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
 RUST_HOST := $(shell rustc -vV | sed -n 's/^host: //p')
 LLVM_BIN := $(shell rustc --print sysroot)/lib/rustlib/$(RUST_HOST)/bin
@@ -16,6 +32,13 @@ NM ?= $(LLVM_BIN)/llvm-nm
 OBJDUMP ?= $(LLVM_BIN)/llvm-objdump
 
 CARGO_FEATURES ?=
+
+ifeq ($(shell uname -s),Darwin)
+UPSTREAM_CLANG := /opt/homebrew/opt/llvm/bin/clang
+ifneq ($(wildcard $(UPSTREAM_CLANG)),)
+export CLANG ?= $(UPSTREAM_CLANG)
+endif
+endif
 
 KERNEL_OUTPUT := target/$(TARGET)/$(KERNEL_PROFILE)
 KERNEL_ELF := $(KERNEL_OUTPUT)/hyper
@@ -28,14 +51,24 @@ KALLSYMS_BLOB := $(KERNEL_OUTPUT)/hyper.kallsyms
 KALLSYMS_FINAL_BLOB := $(KERNEL_OUTPUT)/hyper.kallsyms.final
 KALLSYMS_ELF := $(KERNEL_OUTPUT)/hyper.with-kallsyms
 HOST_TEST_MANIFEST := tests/host/Cargo.toml
-DEFCONFIG := configs/qemu_aarch64_defconfig
-GUEST_OUTPUT := target/guest
+GUEST_OUTPUT := target/guest/$(ARCH)
+ifeq ($(ARCH),aarch64)
+GUEST_FETCH := tools/guest/fetch-alpine-aarch64.sh
 GUEST_ASSET_STAMP := $(GUEST_OUTPUT)/.alpine-3.23.5.stamp
+else
+GUEST_FETCH := tools/guest/fetch-alpine-riscv64.sh
+GUEST_ASSET_STAMP := $(GUEST_OUTPUT)/.alpine-3.24.1.stamp
+endif
 HOST_INITRD := $(GUEST_OUTPUT)/hypervisor-initrd.cpio
 
-.PHONY: all config defconfig olddefconfig guest-assets clean-guest-assets build image release check test test-image test-timer test-qemu verify verify-image verify-boot verify-smp run clean
+.PHONY: all prepare-config config defconfig olddefconfig guest-assets clean-guest-assets build image release check test test-image test-timer test-qemu verify verify-image verify-boot verify-smp run clean
 
 all: image
+
+prepare-config:
+	@if ! grep -q '^CONFIG_ARCH_$(shell echo $(ARCH) | tr a-z A-Z)=y$$' .config 2>/dev/null; then \
+		cargo run --quiet --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET) -- defconfig $(DEFCONFIG) .config; \
+	fi
 
 .config: Kconfig $(DEFCONFIG) $(KCONFIG_MANIFEST) tools/kconfig/src/lib.rs tools/kconfig/src/main.rs
 	cargo run --quiet --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET) -- defconfig $(DEFCONFIG) .config
@@ -49,20 +82,20 @@ olddefconfig:
 config:
 	cargo run --quiet --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET) -- config .config .config
 
-$(GUEST_ASSET_STAMP): tools/guest/fetch-alpine.sh tools/guest/init tools/guest/boot.conf tools/guest/alpine.manifest
-	sh tools/guest/fetch-alpine.sh
+$(GUEST_ASSET_STAMP): $(GUEST_FETCH) tools/guest/init tools/guest/boot.conf tools/guest/alpine-$(ARCH).manifest
+	sh $(GUEST_FETCH)
 
 guest-assets: $(GUEST_ASSET_STAMP)
 
 clean-guest-assets:
 	rm -f $(GUEST_OUTPUT)/Image $(GUEST_OUTPUT)/initramfs.cpio.gz $(GUEST_OUTPUT)/alpine.cpio $(HOST_INITRD) $(GUEST_ASSET_STAMP)
 
-build: .config
-	HYPER_KALLSYMS_BLOB= cargo build $(CARGO_PROFILE) $(CARGO_FEATURES)
+build: prepare-config
+	HYPER_KALLSYMS_BLOB= $(CARGO_KERNEL)
 
 image: build
 	cargo run --quiet --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET) -- $(NM) $(KERNEL_ELF) $(KALLSYMS_BLOB)
-	HYPER_KALLSYMS_BLOB=$(abspath $(KALLSYMS_BLOB)) cargo build $(CARGO_PROFILE) $(CARGO_FEATURES)
+	HYPER_KALLSYMS_BLOB=$(abspath $(KALLSYMS_BLOB)) $(CARGO_KERNEL)
 	cargo run --quiet --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET) -- $(NM) $(KERNEL_ELF) $(KALLSYMS_FINAL_BLOB)
 	test "$$(wc -c < $(KALLSYMS_BLOB))" -eq "$$(wc -c < $(KALLSYMS_FINAL_BLOB))"
 	mv $(KALLSYMS_FINAL_BLOB) $(KALLSYMS_BLOB)
@@ -78,7 +111,7 @@ release: image
 	$(OBJCOPY) --output-target=binary $(KERNEL_STRIPPED_ELF) $(KERNEL_STRIPPED_IMAGE)
 	cmp $(KERNEL_IMAGE) $(KERNEL_STRIPPED_IMAGE)
 
-check: .config
+check: prepare-config
 	cargo check --lib --bins --target $(TARGET)
 	cargo clippy --target $(TARGET) -- -D warnings
 	cargo clippy --target $(TARGET) --features kernel-self-test -- -D warnings
@@ -86,7 +119,7 @@ check: .config
 	cargo clippy --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET) -- -D warnings
 	cargo clippy --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET) -- -D warnings
 
-test: .config
+test: prepare-config
 	cargo test --manifest-path $(HOST_TEST_MANIFEST) --target $(HOST_TARGET)
 	cargo test --manifest-path $(KCONFIG_MANIFEST) --target $(HOST_TARGET)
 	cargo test --manifest-path $(KALLSYMS_MANIFEST) --target $(HOST_TARGET)
@@ -96,21 +129,21 @@ verify: check test
 	cargo fmt --manifest-path $(HOST_TEST_MANIFEST) -- --check
 	cargo fmt --manifest-path $(KCONFIG_MANIFEST) -- --check
 	cargo fmt --manifest-path $(KALLSYMS_MANIFEST) -- --check
-	$(MAKE) test-qemu QEMU_CPU=cortex-a72
-	$(MAKE) test-qemu QEMU_CPU=max
+	$(if $(filter aarch64,$(ARCH)),$(MAKE) test-qemu ARCH=$(ARCH) QEMU_CPU=cortex-a72,$(MAKE) test-qemu ARCH=$(ARCH))
+	$(if $(filter aarch64,$(ARCH)),$(MAKE) test-qemu ARCH=$(ARCH) QEMU_CPU=max,true)
 	$(MAKE) release
-	$(MAKE) test-image
+	$(if $(filter aarch64,$(ARCH)),$(MAKE) test-image,true)
 
 test-image:
 	sh tests/image/verify-image.sh $(READOBJ) $(NM) $(OBJDUMP) $(KERNEL_ELF) $(KERNEL_IMAGE) $(KALLSYMS_BLOB)
 
 test-timer: image guest-assets
-	sh tests/qemu/verify-timer.sh $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
+	sh $(QEMU_TIMER_SCRIPT) $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
 test-timer: CARGO_FEATURES=--features kernel-self-test
 
 test-qemu: image guest-assets
-	sh tests/qemu/verify-smp.sh $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
+	sh $(QEMU_TEST_SCRIPT) $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
 test-qemu: CARGO_FEATURES=--features kernel-self-test
 
@@ -119,12 +152,25 @@ verify-image: image
 	$(MAKE) test-image
 
 verify-boot: image
-	$(MAKE) test-timer QEMU_CPU=$(QEMU_CPU)
+	$(MAKE) test-timer ARCH=$(ARCH) QEMU_CPU=$(QEMU_CPU)
 
 verify-smp: image
-	$(MAKE) test-qemu QEMU_CPU=$(QEMU_CPU)
+	$(MAKE) test-qemu ARCH=$(ARCH) QEMU_CPU=$(QEMU_CPU)
 
 run: image guest-assets
+	$(if $(filter riscv64,$(ARCH)),$(QEMU) \
+		-machine virt \
+		-cpu $(QEMU_CPU) \
+		-smp $(QEMU_CPUS) \
+		-m $(QEMU_MEMORY) \
+		-nodefaults \
+		-display none \
+		-serial stdio \
+		-monitor none \
+		-no-reboot \
+		-append "$(QEMU_BOOTARGS)" \
+		-initrd $(HOST_INITRD) \
+		-kernel $(KERNEL_IMAGE),\
 	$(QEMU) \
 		-machine virt,virtualization=on,gic-version=3,dtb-randomness=on \
 		-cpu $(QEMU_CPU) \
@@ -137,7 +183,7 @@ run: image guest-assets
 		-no-reboot \
 		-append "$(QEMU_BOOTARGS)" \
 		-initrd $(HOST_INITRD) \
-		-kernel $(KERNEL_IMAGE)
+		-kernel $(KERNEL_IMAGE))
 
 clean:
 	cargo clean

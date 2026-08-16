@@ -1,7 +1,8 @@
 # HypeR
 
-HypeR is an experimental, modular type-1 hypervisor kernel written in Rust. The
-current tier-1 target is AArch64, running on QEMU's `virt` machine. The kernel is
+HypeR is an experimental, modular type-1 hypervisor kernel written in Rust.
+AArch64 remains tier 1; an initial RISC-V 64-bit port also runs on QEMU's
+`virt` machine and boots a Linux guest through `/init`. The kernel is
 `no_std` and `no_main`; assembly is restricted to architectural entry and
 low-level state transitions that Rust cannot express safely.
 
@@ -34,9 +35,10 @@ memory.
 
 ## Requirements
 
-- Rust 1.97.1 with `rust-src`, `llvm-tools`, and `aarch64-unknown-none`
+- Rust 1.97.1 with `rust-src`, `llvm-tools`, `aarch64-unknown-none`, and
+  `riscv64imac-unknown-none-elf`
 - LLVM toolchain (Rust uses LLVM's integrated assembler and bundled linker)
-- QEMU with `qemu-system-aarch64`
+- QEMU with `qemu-system-aarch64` and, for RISC-V, `qemu-system-riscv64`
 - GNU Make (optional)
 
 Build and run:
@@ -45,6 +47,14 @@ Build and run:
 make defconfig
 make image
 make run
+```
+
+Select the RISC-V port explicitly:
+
+```sh
+make defconfig ARCH=riscv64
+make image ARCH=riscv64
+make run ARCH=riscv64
 ```
 
 The default QEMU command line adds
@@ -72,8 +82,9 @@ raw Images.
 ## Continuous integration
 
 GitHub Actions runs independent required-quality stages for formatting and
-Clippy, host unit tests, the canonical bare-metal build, image ABI validation,
-and four-core QEMU boot tests on the `cortex-a72` and `max` CPU models. Runtime
+Clippy on both architectures, host unit tests, canonical bare-metal builds,
+image ABI validation, AArch64 QEMU tests on the `cortex-a72` and `max` CPU
+models, and a four-hart RISC-V QEMU test. Runtime
 tests require the ramdisk-loaded Linux guest to initialize GICv3 and the
 virtual Arm timer and execute `/init`. Build artifacts contain both the ELF
 image used for debugging and the raw HypeR Image.
@@ -112,6 +123,22 @@ activation, the trampoline applies RELA for the selected virtual base and adds
 the physical-to-virtual slide to every RELR location, publishes the writes, and
 branches back to Rust at the randomized alias. Secondary-CPU trampoline address
 recovery uses the selected base rather than a compile-time VA.
+
+## RISC-V profile
+
+The initial RISC-V host profile is RV64GC with the H extension, Sv39 for HS
+translation, Sv39x4 for guest-stage translation, and SSTC for direct guest
+timer compare. Firmware must provide SBI base, TIME, IPI, RFENCE, HSM, and SRST
+services. The supported board profile is QEMU `virt` with OpenSBI, the legacy
+PLIC binding, ACLINT-backed supervisor timers, and an NS16550 early console.
+The DTB is validated for SSTC before the kernel enables the guest timer path.
+
+Rust kernel code retains the built-in `riscv64imac-unknown-none-elf` baseline;
+H-extension and floating-point instructions are isolated in architecture
+assembly objects compiled by Clang with the soft-float ABI. This prevents LLVM
+from emitting F/D instructions in ordinary kernel code while still allowing a
+guest RV64GC context to save and restore all floating-point registers. See
+`docs/riscv64.md` for the execution contract and current limitations.
 
 ## Runtime symbol lookup
 
@@ -251,6 +278,8 @@ boot allocator, image/DTB reservations, and runtime-allocator handoff. The HAL
 describes bootstrap reachability, permanent virtual layout, and physical-to-
 virtual translation. AArch64 retains only its concrete layout values, page-table
 format, mapping construction, TLB maintenance, and address-space activation.
+The RISC-V port follows the same contract with private Sv39/Sv39x4 formats;
+GIC/vGIC and Arm timer models are no longer compiled into that target.
 
 No GPL-licensed code is incorporated into the Apache-2.0 HypeR source. The
 generated, ignored guest payload is an external Linux/Alpine binary with its
@@ -395,6 +424,12 @@ reset, notification, and interrupt handling. That transport should be shared by
 console, block, and network devices; implementing a console-only subset would
 create an incompatible protocol island and would not help the planned Linux
 storage/network driver-domain design.
+
+Virtual device state and virtual interrupt scheduling live under `src/vm`;
+`src/drivers` contains only physical devices and firmware interfaces. The
+physical NS16550 driver supports byte- and word-wide MMIO with explicit
+register shift, line and baud programming, FIFOs, receive error reporting,
+modem state, and interrupt control.
 
 ## Platform driver model
 

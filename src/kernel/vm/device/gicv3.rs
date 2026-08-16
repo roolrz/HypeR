@@ -1,10 +1,8 @@
-//! Minimal GICv3 distributor and Redistributor MMIO model for Linux boot.
+//! GICv3 distributor and Redistributor MMIO service for Linux guests.
 
-use hyper::drivers::interrupt::vgic::{
-    InterruptGroup, InterruptTrigger, VirtualCpuId, VirtualInterruptId,
-};
+use hyper::vm::interrupt::{InterruptGroup, InterruptTrigger, VirtualCpuId, VirtualInterruptId};
 
-use super::VmInterruptController;
+use super::super::VmInterruptController;
 
 pub const DISTRIBUTOR_BASE: u64 = 0x0800_0000;
 pub const DISTRIBUTOR_SIZE: u64 = 0x0001_0000;
@@ -16,11 +14,11 @@ const GICR_SGI_BASE: u64 = 0x0001_0000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidAccess,
-    Model(hyper::drivers::interrupt::vgic::Error),
+    Model(hyper::vm::interrupt::Error),
 }
 
-impl From<hyper::drivers::interrupt::vgic::Error> for Error {
-    fn from(error: hyper::drivers::interrupt::vgic::Error) -> Self {
+impl From<hyper::vm::interrupt::Error> for Error {
+    fn from(error: hyper::vm::interrupt::Error) -> Self {
         Self::Model(error)
     }
 }
@@ -400,7 +398,7 @@ fn bitmap(
     offset: u64,
     base: u64,
     range: (u32, u32),
-    predicate: impl Fn(hyper::drivers::interrupt::vgic::InterruptSnapshot) -> bool,
+    predicate: impl Fn(hyper::vm::interrupt::InterruptSnapshot) -> bool,
 ) -> Result<u64, Error> {
     let register = ((offset - base) / 4) as u32;
     let mut value = 0;
@@ -421,11 +419,11 @@ fn apply_bitmap(
     value: u64,
     range: (u32, u32),
     operation: impl Fn(
-        &mut hyper::drivers::interrupt::vgic::VirtualInterruptController,
+        &mut hyper::vm::interrupt::VirtualInterruptController,
         VirtualInterruptId,
         VirtualCpuId,
         bool,
-    ) -> Result<(), hyper::drivers::interrupt::vgic::Error>,
+    ) -> Result<(), hyper::vm::interrupt::Error>,
 ) -> Result<(), Error> {
     let register = ((offset - base) / 4) as u32;
     interrupts.with(|controller| {
@@ -448,7 +446,7 @@ fn snapshot(
     interrupts: &VmInterruptController,
     vcpu: VirtualCpuId,
     id: u32,
-) -> Result<hyper::drivers::interrupt::vgic::InterruptSnapshot, Error> {
+) -> Result<hyper::vm::interrupt::InterruptSnapshot, Error> {
     let interrupt = VirtualInterruptId::new(id).ok_or(Error::InvalidAccess)?;
     interrupts
         .with(|controller| controller.snapshot(interrupt, target_for(id, vcpu)))

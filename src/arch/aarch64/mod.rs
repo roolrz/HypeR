@@ -4,6 +4,7 @@ mod cache;
 mod context;
 mod exception;
 mod gic;
+mod interrupt_controller;
 mod interrupts;
 mod kaslr;
 mod memory;
@@ -32,6 +33,10 @@ pub use gic::{
     current_gic_affinity, end_interrupt, is_crash_stop_interrupt,
 };
 pub use hyper::drivers::power::psci::Error as CpuPowerError;
+pub use interrupt_controller::{
+    Aarch64InterruptController as ArchitectureInterruptController,
+    Error as InterruptControllerError,
+};
 pub use interrupts::{
     LocalInterruptMask, disable_all as disable_local_interrupts, enable_irq as enable_local_irq,
     irq_enabled as local_irq_enabled,
@@ -67,12 +72,25 @@ pub fn initialize_cpu_power(
 ) -> Result<ArchitectureCpuPower, CpuPowerError> {
     match info {
         hyper::platform::CpuPowerInfo::Psci(info) => psci::bind(info),
+        hyper::platform::CpuPowerInfo::Sbi(_) => Err(CpuPowerError::NotSupported),
     }
 }
 
 /// Checks that a secondary CPU supports the backend selected by the boot CPU.
 pub fn secondary_cpu_is_compatible() -> bool {
     atomics::current_cpu_supports_selected_backend()
+}
+
+pub fn interrupt_is_per_cpu(interrupt: hyper::hal::interrupt::InterruptId) -> bool {
+    interrupt.get() < 32
+}
+
+pub fn register_secondary_hardware_id(_cpu_index: usize, _hardware_id: u64) -> bool {
+    true
+}
+
+pub fn prepare_timekeeping(_platform: &EssentialPlatformInfo) -> Result<(), TimerError> {
+    Ok(())
 }
 
 unsafe extern "C" {
@@ -139,4 +157,9 @@ pub fn wait_for_event() {
 extern "C" fn aarch64_bootstrap(dtb_address: usize) -> ! {
     atomics::initialize();
     crate::kernel::prepare_boot_environment(dtb_address)
+}
+
+pub fn poll_guest_timer(_now: u64) {}
+pub const fn take_guest_timer_wakeup() -> Option<u64> {
+    None
 }

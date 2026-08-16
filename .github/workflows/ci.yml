@@ -26,6 +26,7 @@ jobs:
       - name: Check formatting and lints
         run: |
           make check
+          make check ARCH=riscv64
           cargo fmt --all -- --check
           cargo fmt --manifest-path tests/host/Cargo.toml -- --check
           cargo fmt --manifest-path tools/kconfig/Cargo.toml -- --check
@@ -49,17 +50,24 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
       - name: Build and verify stripped delivery copy
-        run: make release
+        run: |
+          make release ARCH=aarch64
+          make release ARCH=riscv64
       - name: Upload canonical and stripped artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: hyper-aarch64-kernel
+          name: hyper-kernels
           path: |
             target/aarch64-unknown-none/kernel/hyper
             target/aarch64-unknown-none/kernel/hyper.img
             target/aarch64-unknown-none/kernel/hyper.kallsyms
             target/aarch64-unknown-none/kernel/hyper.stripped
             target/aarch64-unknown-none/kernel/hyper.stripped.img
+            target/riscv64imac-unknown-none-elf/kernel/hyper
+            target/riscv64imac-unknown-none-elf/kernel/hyper.img
+            target/riscv64imac-unknown-none-elf/kernel/hyper.kallsyms
+            target/riscv64imac-unknown-none-elf/kernel/hyper.stripped
+            target/riscv64imac-unknown-none-elf/kernel/hyper.stripped.img
           if-no-files-found: error
 
   image-test:
@@ -73,8 +81,8 @@ jobs:
       - name: Download kernel image
         uses: actions/download-artifact@v4
         with:
-          name: hyper-aarch64-kernel
-          path: target/aarch64-unknown-none/kernel
+          name: hyper-kernels
+          path: target
       - name: Verify image ABI and atomic backends
         run: make test-image
 
@@ -107,3 +115,29 @@ jobs:
             sleep 1
           done
           pkill -KILL -x qemu-system-aarch64 2>/dev/null || true
+
+  qemu-riscv64:
+    name: Four-hart QEMU RISC-V
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: [lint, test, build]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cpio qemu-system-misc
+      - name: Verify RISC-V host SMP and Linux guest init
+        run: make test-qemu ARCH=riscv64 QEMU_CPU=rv64
+      - name: Clean up QEMU processes
+        if: always()
+        run: |
+          pkill -TERM -x qemu-system-riscv64 2>/dev/null || true
+          for attempt in 1 2 3 4 5; do
+            if ! pgrep -x qemu-system-riscv64 >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          pkill -KILL -x qemu-system-riscv64 2>/dev/null || true

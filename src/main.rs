@@ -29,7 +29,7 @@ extern "C" fn start_kernel() -> ! {
     crate::kernel::crash::initialize(&boot);
     crate::kernel::irq::initialize_exceptions();
     crate::kernel::irq::initialize_virtualization(&boot);
-    crate::kernel::time::initialize_timekeeping();
+    crate::kernel::time::initialize_timekeeping(&boot);
     crate::kernel::irq::initialize_timer(&mut boot);
 
     crate::kernel::vm::initialize_virtual_devices(&boot);

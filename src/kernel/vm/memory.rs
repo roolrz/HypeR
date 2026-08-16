@@ -92,7 +92,7 @@ impl GuestAddressSpace {
 
         let table_capacity = Stage2AddressSpace::required_table_pages(ipa_base, size)?;
         let mut table_pages = Stage2PagePool::with_capacity(table_capacity)?;
-        let mut allocate_table = || table_pages.allocate_zeroed();
+        let mut allocate_table = |pages, alignment| table_pages.allocate_zeroed(pages, alignment);
         let vmid = u16::try_from(virtual_machine.0).map_err(|_| Error::InvalidVmid)?;
         let stage2 = Stage2AddressSpace::new(vmid, &mut allocate_table)?;
         Ok(Self {
@@ -212,7 +212,8 @@ impl GuestAddressSpace {
         // the permanent writable linear map.
         unsafe { write_bytes(virtual_address as *mut u8, 0, PAGE_SIZE as usize) };
         let ipa = self.page_ipa(page_index)?;
-        let mut allocate_table = || self.table_pages.allocate_zeroed();
+        let mut allocate_table =
+            |pages, alignment| self.table_pages.allocate_zeroed(pages, alignment);
         if active {
             // SAFETY: Called only from a lower-EL translation fault while this
             // VM is active, under the address-space lock.
@@ -365,12 +366,16 @@ impl Stage2PagePool {
         Ok(Self { pages })
     }
 
-    fn allocate_zeroed(&mut self) -> Option<PhysicalAddress> {
-        let page = PageBlock::allocate_for(0, PageOwner::PageTable).ok()?;
+    fn allocate_zeroed(&mut self, pages: usize, alignment_pages: usize) -> Option<PhysicalAddress> {
+        if pages == 0 || !pages.is_power_of_two() || alignment_pages != pages {
+            return None;
+        }
+        let order = pages.trailing_zeros() as usize;
+        let page = PageBlock::allocate_for(order, PageOwner::PageTable).ok()?;
         let physical = page.physical();
         let virtual_address = linear_address(physical).ok()?;
         // SAFETY: This new table page is exclusive and permanently mapped.
-        unsafe { write_bytes(virtual_address as *mut u8, 0, PAGE_SIZE as usize) };
+        unsafe { write_bytes(virtual_address as *mut u8, 0, pages * PAGE_SIZE as usize) };
         self.pages.push(page);
         Some(physical)
     }

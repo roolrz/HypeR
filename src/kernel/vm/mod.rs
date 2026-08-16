@@ -1,15 +1,17 @@
 //! Virtual-machine execution policy.
 
 mod active_vcpu;
+#[cfg(target_arch = "aarch64")]
 mod arch_timer;
-mod console;
-mod gicv3;
+#[cfg(target_arch = "aarch64")]
+mod device;
 mod interrupt;
 mod linux;
 pub mod memory;
 mod runtime;
 mod vcpu;
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) use arch_timer::{handle_interrupt as handle_arch_timer_interrupt, handle_maintenance};
 pub use hyper::vm::bundle::{Error as VmBundleError, VmBundle};
 pub use interrupt::{Error as VmInterruptError, VmInterruptController};
@@ -28,18 +30,32 @@ pub fn boot_linux(
 
 /// Validates the guest-visible devices needed before loading the first VM.
 pub(crate) fn initialize_virtual_devices(boot: &super::boot::Initialization) {
-    if let Err(error) = validate_arch_timer(boot.timer().guest_virtual_interrupt) {
-        super::boot::fail("virtual architected timer validation", error);
+    #[cfg(target_arch = "aarch64")]
+    {
+        if let Err(error) = validate_arch_timer(boot.timer().guest_virtual_interrupt) {
+            super::boot::fail("virtual architected timer validation", error);
+        }
+        if let Err(error) = device::console::initialize() {
+            super::boot::fail("virtual console initialization", error);
+        }
+        crate::println!("HypeR: virtual architected timer injection validated");
+        crate::println!("HypeR: virtual PL011 console initialized (host UART backend)");
     }
-    if let Err(error) = console::initialize() {
-        super::boot::fail("virtual console initialization", error);
+    #[cfg(target_arch = "riscv64")]
+    {
+        let _ = boot;
+        crate::println!("HypeR: RISC-V guest SBI and virtual timer backend initialized");
     }
-    crate::println!("HypeR: virtual architected timer injection validated");
-    crate::println!("HypeR: virtual PL011 console initialized (host UART backend)");
 }
 
-pub(crate) fn receive_console_input(byte: u8) -> Result<(), console::Error> {
-    console::receive(byte)
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn receive_console_input(byte: u8) -> Result<(), device::console::Error> {
+    device::console::receive(byte)
+}
+
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn receive_console_input(_byte: u8) -> Result<(), ()> {
+    Err(())
 }
 
 /// Loads the default VM bundle from the boot ramdisk and enters the guest.
@@ -80,8 +96,20 @@ pub(crate) fn handle_guest_sync(frame: &mut crate::arch::GuestSyncFrame<'_>) -> 
     match active_vcpu::with(|execution, interrupts| {
         let action =
             crate::arch::handle_guest_sync(&mut execution.context, execution.vcpu_id, frame);
+        if let Some(deadline) = crate::arch::take_guest_timer_wakeup()
+            && let Err(error) = crate::kernel::time::request_hardware_wakeup(deadline)
+        {
+            crate::pr_err!("HypeR: failed to arm guest timer wakeup: {error:?}");
+            return crate::arch::GuestSyncAction::Unhandled;
+        }
         match action {
             crate::arch::GuestSyncAction::SoftwareInterrupt(request) => {
+                #[cfg(target_arch = "riscv64")]
+                {
+                    let _ = request;
+                    return crate::arch::GuestSyncAction::Unhandled;
+                }
+                #[cfg(target_arch = "aarch64")]
                 return match vcpu::deliver_software_interrupt(execution, interrupts, request) {
                     Ok(()) => crate::arch::GuestSyncAction::Resume,
                     Err(error) => {
@@ -108,45 +136,54 @@ pub(crate) fn handle_guest_sync(frame: &mut crate::arch::GuestSyncFrame<'_>) -> 
                 }
             }
         }
-        let Some(access) = frame.data_access() else {
-            return action;
-        };
-        if console::handles(access.address) {
-            return match console::access(access) {
+        #[cfg(target_arch = "riscv64")]
+        {
+            let _ = interrupts;
+            action
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let Some(access) = frame.data_access() else {
+                return action;
+            };
+            if device::console::handles(access.address) {
+                return match device::console::access(access) {
+                    Ok(value) => {
+                        frame.complete_data_access(access, value);
+                        crate::arch::GuestSyncAction::Resume
+                    }
+                    Err(error) => {
+                        crate::pr_err!(
+                            "HypeR: unsupported guest console access at {:#x}: {error:?}",
+                            access.address
+                        );
+                        action
+                    }
+                };
+            }
+            if !device::gicv3::handles(access.address) {
+                return action;
+            }
+            let vcpu = VirtualCpuId::new(execution.vcpu_id);
+            let result = if access.write {
+                device::gicv3::write(interrupts, vcpu, access.address, access.size, access.value)
+                    .map(|()| None)
+            } else {
+                device::gicv3::read(interrupts, vcpu, access.address, access.size).map(Some)
+            };
+            match result {
                 Ok(value) => {
                     frame.complete_data_access(access, value);
                     crate::arch::GuestSyncAction::Resume
                 }
                 Err(error) => {
                     crate::pr_err!(
-                        "HypeR: unsupported guest console access at {:#x}: {error:?}",
-                        access.address
+                        "HypeR: unsupported guest GIC access at {:#x}, FAR {:#x}: {error:?}",
+                        access.address,
+                        frame.fault_address()
                     );
                     action
                 }
-            };
-        }
-        if !gicv3::handles(access.address) {
-            return action;
-        }
-        let vcpu = VirtualCpuId::new(execution.vcpu_id);
-        let result = if access.write {
-            gicv3::write(interrupts, vcpu, access.address, access.size, access.value).map(|()| None)
-        } else {
-            gicv3::read(interrupts, vcpu, access.address, access.size).map(Some)
-        };
-        match result {
-            Ok(value) => {
-                frame.complete_data_access(access, value);
-                crate::arch::GuestSyncAction::Resume
-            }
-            Err(error) => {
-                crate::pr_err!(
-                    "HypeR: unsupported guest GIC access at {:#x}, FAR {:#x}: {error:?}",
-                    access.address,
-                    frame.fault_address()
-                );
-                action
             }
         }
     }) {
@@ -162,25 +199,29 @@ pub(crate) fn handle_guest_sync(frame: &mut crate::arch::GuestSyncFrame<'_>) -> 
     }
 }
 
-use hyper::drivers::interrupt::vgic::VirtualCpuId;
+#[cfg(target_arch = "aarch64")]
 use hyper::hal::interrupt::InterruptId;
+#[cfg(target_arch = "aarch64")]
+use hyper::vm::interrupt::VirtualCpuId;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(target_arch = "aarch64")]
 pub enum ValidationError {
     ActiveBridge(arch_timer::Error),
     Context(crate::arch::VgicError),
     Interrupts(interrupt::Error),
-    Model(hyper::drivers::interrupt::vgic::Error),
+    Model(hyper::vm::interrupt::Error),
     StateMismatch,
     Vcpu(vcpu::VcpuInterruptError),
 }
 
+#[cfg(target_arch = "aarch64")]
 pub fn validate_arch_timer(timer_interrupt: InterruptId) -> Result<(), ValidationError> {
     let interrupts =
         VmInterruptController::new(1, timer_interrupt).map_err(ValidationError::Interrupts)?;
     let mut context = crate::arch::VcpuContext::new(0);
     let _ = context
-        .initialize_vgic()
+        .initialize_virtual_interrupts()
         .map_err(ValidationError::Context)?;
     let now = crate::kernel::time::monotonic_ticks();
     context.set_virtual_count(now, now);

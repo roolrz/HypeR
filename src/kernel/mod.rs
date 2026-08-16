@@ -18,6 +18,8 @@ pub(crate) use boot::prepare_boot_environment;
 // Stable facades for existing kernel callers. New internal code should prefer
 // the subsystem-qualified paths above.
 pub use device::cpu_power;
-pub(crate) use irq::{exception, interrupt};
+pub(crate) use irq::exception;
+#[cfg(target_arch = "aarch64")]
+pub(crate) use irq::interrupt;
 pub use mm::{allocator, memory};
 pub use task::{scheduler, thread};

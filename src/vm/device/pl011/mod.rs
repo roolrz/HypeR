@@ -1,6 +1,6 @@
 //! Architecture-neutral PL011 device model for a virtual machine.
 
-use super::pl011::registers as reg;
+use crate::drivers::serial::pl011_registers as reg;
 
 const FIFO_CAPACITY: usize = 32;
 

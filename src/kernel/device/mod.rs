@@ -44,17 +44,20 @@ pub(crate) fn initialize_driver_framework(boot: &super::boot::Initialization) {
     );
 }
 
-/// Promotes the early PL011 to an interrupt-driven input console.
+/// Promotes a supported early console to interrupt-driven runtime ownership.
 pub(crate) fn initialize_console_input(boot: &super::boot::Initialization) {
     match serial::initialize(boot) {
         Ok(Some(capabilities)) => crate::println!(
-            "HypeR: PL011 runtime input active: INTID {}, VIRQ {}",
+            "HypeR: {} runtime input active: INTID {}, VIRQ {}",
+            capabilities.driver,
             capabilities.hardware_interrupt,
             capabilities.virtual_interrupt
         ),
-        Ok(None) => crate::pr_warn!("HypeR: no early PL011 selected; console input disabled"),
+        Ok(None) => crate::pr_warn!(
+            "HypeR: selected early console has no runtime input driver; console input disabled"
+        ),
         Err(error) => crate::pr_warn!(
-            "HypeR: PL011 remains output-only; runtime input unavailable: {error:?}"
+            "HypeR: early console remains output-only; runtime input unavailable: {error:?}"
         ),
     }
 }

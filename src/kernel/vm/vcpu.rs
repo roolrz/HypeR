@@ -1,8 +1,7 @@
 //! vCPU interrupt-interface activation and reconciliation.
 
-use hyper::drivers::interrupt::vgic::{
-    VirtualCpuId, VirtualInterruptController, VirtualInterruptId,
-};
+#[cfg(target_arch = "aarch64")]
+use hyper::vm::interrupt::{VirtualCpuId, VirtualInterruptController, VirtualInterruptId};
 
 use super::VmInterruptController;
 use crate::kernel::task::thread::{ThreadId, VcpuExecution, VirtualMachineId};
@@ -67,9 +66,13 @@ fn run_current() -> ! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VcpuInterruptError {
     Active(super::active_vcpu::Error),
+    #[cfg(target_arch = "aarch64")]
     Architecture(crate::arch::VgicError),
+    #[cfg(target_arch = "aarch64")]
     Bridge(super::arch_timer::Error),
-    Controller(hyper::drivers::interrupt::vgic::Error),
+    #[cfg(target_arch = "aarch64")]
+    Controller(hyper::vm::interrupt::Error),
+    #[cfg(target_arch = "aarch64")]
     HostInterrupt,
 }
 
@@ -79,18 +82,21 @@ impl From<super::active_vcpu::Error> for VcpuInterruptError {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 impl From<crate::arch::VgicError> for VcpuInterruptError {
     fn from(error: crate::arch::VgicError) -> Self {
         Self::Architecture(error)
     }
 }
 
-impl From<hyper::drivers::interrupt::vgic::Error> for VcpuInterruptError {
-    fn from(error: hyper::drivers::interrupt::vgic::Error) -> Self {
+#[cfg(target_arch = "aarch64")]
+impl From<hyper::vm::interrupt::Error> for VcpuInterruptError {
+    fn from(error: hyper::vm::interrupt::Error) -> Self {
         Self::Controller(error)
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 impl From<super::arch_timer::Error> for VcpuInterruptError {
     fn from(error: super::arch_timer::Error) -> Self {
         Self::Bridge(error)
@@ -104,6 +110,7 @@ impl VcpuExecution {
     ///
     /// The caller must keep both objects pinned, own this stopped vCPU
     /// exclusively, and keep local IRQs masked until entering the guest.
+    #[cfg(target_arch = "aarch64")]
     pub unsafe fn activate_virtual_hardware(
         &mut self,
         interrupts: &VmInterruptController,
@@ -121,7 +128,7 @@ impl VcpuExecution {
             let vcpu = VirtualCpuId::new(self.vcpu_id);
             controller.synchronize(vcpu, self.context.vgic.slots())?;
             let _ = controller.refill(vcpu, self.context.vgic.slots_mut())?;
-            Ok::<(), hyper::drivers::interrupt::vgic::Error>(())
+            Ok::<(), hyper::vm::interrupt::Error>(())
         });
         if let Err(error) = result {
             unsafe { self.context.deactivate_timer() };
@@ -151,6 +158,7 @@ impl VcpuExecution {
     ///
     /// Local IRQs must be masked and this must be the active local vCPU paired
     /// with the same VM interrupt controller used for activation.
+    #[cfg(target_arch = "aarch64")]
     pub unsafe fn deactivate_virtual_hardware(
         &mut self,
         interrupts: &VmInterruptController,
@@ -182,6 +190,7 @@ impl VcpuExecution {
     ///
     /// The caller must own this stopped vCPU exclusively and must not enable
     /// guest execution until all remaining architectural state is restored.
+    #[cfg(target_arch = "aarch64")]
     pub unsafe fn activate_timer(&self) {
         unsafe { self.context.activate_timer() };
     }
@@ -191,6 +200,7 @@ impl VcpuExecution {
     /// # Safety
     ///
     /// Local IRQs must be masked and this must be the active local vCPU.
+    #[cfg(target_arch = "aarch64")]
     pub unsafe fn deactivate_timer(&mut self) {
         unsafe { self.context.deactivate_timer() };
     }
@@ -201,6 +211,7 @@ impl VcpuExecution {
     ///
     /// The caller must own this stopped vCPU and the matching VM interrupt
     /// controller exclusively until the corresponding deactivation.
+    #[cfg(target_arch = "aarch64")]
     pub unsafe fn activate_vgic(
         &mut self,
         controller: &mut VirtualInterruptController,
@@ -217,6 +228,7 @@ impl VcpuExecution {
     /// # Safety
     ///
     /// This must be the vCPU whose virtual interface is active locally.
+    #[cfg(target_arch = "aarch64")]
     pub unsafe fn deactivate_vgic(
         &mut self,
         controller: &mut VirtualInterruptController,
@@ -228,6 +240,40 @@ impl VcpuExecution {
     }
 }
 
+#[cfg(target_arch = "riscv64")]
+impl VcpuExecution {
+    /// Publishes the local active-vCPU binding before entering virtual mode.
+    ///
+    /// # Safety
+    ///
+    /// The caller must exclusively own this pinned vCPU and keep local
+    /// interrupts masked until guest entry completes.
+    pub unsafe fn activate_virtual_hardware(
+        &mut self,
+        interrupts: &VmInterruptController,
+    ) -> Result<(), VcpuInterruptError> {
+        unsafe { self.context.activate_system_registers() };
+        unsafe { super::active_vcpu::set(self, interrupts)? };
+        Ok(())
+    }
+
+    /// Removes the local active-vCPU binding after leaving virtual mode.
+    ///
+    /// # Safety
+    ///
+    /// This must be the vCPU currently bound to the calling CPU, with local
+    /// interrupts masked throughout deactivation.
+    pub unsafe fn deactivate_virtual_hardware(
+        &mut self,
+        _interrupts: &VmInterruptController,
+    ) -> Result<(), VcpuInterruptError> {
+        super::active_vcpu::clear(self)?;
+        unsafe { self.context.deactivate_system_registers() };
+        Ok(())
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
 pub(super) fn deliver_software_interrupt(
     execution: &mut VcpuExecution,
     interrupts: &VmInterruptController,
@@ -244,7 +290,7 @@ pub(super) fn deliver_software_interrupt(
     let Some(interrupt) = VirtualInterruptId::new(((request >> INTERRUPT_SHIFT) & 0xf) as u32)
     else {
         return Err(VcpuInterruptError::Controller(
-            hyper::drivers::interrupt::vgic::Error::NotConfigured,
+            hyper::vm::interrupt::Error::NotConfigured,
         ));
     };
     let target_list = request & TARGET_LIST_MASK;
@@ -281,7 +327,7 @@ pub(super) fn deliver_software_interrupt(
             }
         }
         let _ = controller.refill(current, execution.context.vgic.slots_mut())?;
-        Ok::<(), hyper::drivers::interrupt::vgic::Error>(())
+        Ok::<(), hyper::vm::interrupt::Error>(())
     });
     if let Err(error) = result {
         crate::arch::disable_vgic();
@@ -292,6 +338,7 @@ pub(super) fn deliver_software_interrupt(
     Ok(())
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(super) fn update_active_device_interrupt(
     interrupt: VirtualInterruptId,
     asserted: bool,
@@ -305,6 +352,7 @@ pub(super) fn update_active_device_interrupt(
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 fn update_device_interrupt(
     execution: &mut VcpuExecution,
     interrupts: &VmInterruptController,
@@ -323,7 +371,7 @@ fn update_device_interrupt(
             controller.clear_pending(interrupt, vcpu)?;
         }
         let _ = controller.refill(vcpu, execution.context.vgic.slots_mut())?;
-        Ok::<(), hyper::drivers::interrupt::vgic::Error>(())
+        Ok::<(), hyper::vm::interrupt::Error>(())
     });
     if let Err(error) = result {
         crate::arch::disable_vgic();
@@ -334,6 +382,7 @@ fn update_device_interrupt(
     Ok(())
 }
 
+#[cfg(target_arch = "aarch64")]
 fn set_host_timer_enabled(enabled: bool) -> Result<(), VcpuInterruptError> {
     let interrupt = crate::kernel::irq::timer::guest_virtual_host_interrupt()
         .ok_or(VcpuInterruptError::HostInterrupt)?;

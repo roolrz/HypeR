@@ -2,8 +2,8 @@
 
 use core::arch::asm;
 
-use hyper::drivers::interrupt::vgic::{InterruptGroup, ListEntry, ListState, VirtualInterruptId};
-use hyper::drivers::interrupt::vgicv3::{decode_list_register, encode_list_register};
+use hyper::vm::interrupt::gicv3::{decode_list_register, encode_list_register};
+use hyper::vm::interrupt::{InterruptGroup, ListEntry, ListState, VirtualInterruptId};
 
 use super::registers;
 

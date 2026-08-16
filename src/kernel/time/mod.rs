@@ -56,7 +56,10 @@ pub fn initialize() -> Result<Capabilities, Error> {
 }
 
 /// Initializes and reports the kernel monotonic clock source.
-pub(crate) fn initialize_timekeeping() {
+pub(crate) fn initialize_timekeeping(boot: &super::boot::Initialization) {
+    if let Err(error) = crate::arch::prepare_timekeeping(boot.essential()) {
+        super::boot::fail("architecture clocksource preparation", error);
+    }
     let capabilities = match initialize() {
         Ok(capabilities) => capabilities,
         Err(error) => super::boot::fail("monotonic timekeeping initialization", error),
@@ -73,6 +76,10 @@ pub(crate) fn initialize_local_timer_queue() -> Result<(), Error> {
 
 pub(crate) fn handle_timer_interrupt() -> Result<usize, Error> {
     timers::handle_interrupt()
+}
+
+pub(crate) fn request_hardware_wakeup(deadline: u64) -> Result<(), Error> {
+    timers::request_hardware_wakeup(deadline)
 }
 
 pub fn counter_frequency_hz() -> Result<u64, Error> {

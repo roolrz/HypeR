@@ -138,6 +138,21 @@ pub(super) fn handle_interrupt() -> Result<usize, super::Error> {
     Ok(callbacks)
 }
 
+pub(super) fn request_hardware_wakeup(deadline: u64) -> Result<(), super::Error> {
+    let cpu = current_cpu()?;
+    TIMERS[cpu].with(|timers| {
+        ensure_initialized(timers)?;
+        let earlier = timers
+            .queue
+            .next_deadline()
+            .is_none_or(|next| (deadline.wrapping_sub(next) as i64) < 0);
+        if earlier {
+            crate::arch::ArchitectureTimer::set_deadline(deadline)?;
+        }
+        Ok(())
+    })
+}
+
 fn current_cpu() -> Result<usize, super::Error> {
     let cpu = crate::arch::current_cpu_index();
     (cpu < MAX_CPUS)

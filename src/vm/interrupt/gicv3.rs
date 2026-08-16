@@ -1,6 +1,6 @@
 //! GICv3 hardware list-register encoding shared by architecture backends.
 
-use super::vgic::{InterruptGroup, ListEntry, ListState, VirtualInterruptId};
+use super::{InterruptGroup, ListEntry, ListState, VirtualInterruptId};
 
 const LR_VIRTUAL_ID_MASK: u64 = u32::MAX as u64;
 const LR_EOI_MAINTENANCE: u64 = 1 << 41;

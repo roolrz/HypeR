@@ -115,12 +115,12 @@ pub enum ExecutionKind {
 pub enum Error {
     Allocation,
     NameTooLong,
-    Vgic(crate::arch::VgicError),
+    VirtualInterrupt(crate::arch::VirtualInterruptError),
 }
 
-impl From<crate::arch::VgicError> for Error {
-    fn from(error: crate::arch::VgicError) -> Self {
-        Self::Vgic(error)
+impl From<crate::arch::VirtualInterruptError> for Error {
+    fn from(error: crate::arch::VirtualInterruptError) -> Self {
+        Self::VirtualInterrupt(error)
     }
 }
 
@@ -129,7 +129,8 @@ impl From<crate::arch::VgicError> for Error {
 /// Every thread owns a kernel scheduling context and, except for the bootstrap
 /// thread, a private kernel stack. User and vCPU architectural state is an
 /// attached execution payload; it is deliberately separate from the context
-/// used while the scheduler and exception handlers execute at EL2.
+/// used while the scheduler and exception handlers execute in the host
+/// hypervisor privilege domain.
 pub struct Thread {
     id: ThreadId,
     cpu_index: usize,
@@ -226,7 +227,7 @@ impl Thread {
         mut context: crate::arch::VcpuContext,
         entry: KernelThreadEntry,
     ) -> Result<Self, Error> {
-        let _ = context.initialize_vgic()?;
+        context.initialize_virtual_interrupts()?;
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
         let mut scheduling_context = crate::arch::ThreadContext::empty();
         scheduling_context.prepare(stack.top(), entry, 0);

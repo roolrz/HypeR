@@ -58,12 +58,12 @@ impl Stage2AddressSpace {
 
     pub fn new(
         vmid: u16,
-        allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<Self, Error> {
         if vmid == 0 {
             return Err(Error::InvalidVmid);
         }
-        let root = allocator().ok_or(Error::Allocation)?;
+        let root = allocator(1, 1).ok_or(Error::Allocation)?;
         validate_table(root)?;
         Ok(Self { root, vmid })
     }
@@ -78,7 +78,7 @@ impl Stage2AddressSpace {
         ipa: u64,
         physical: u64,
         size: u64,
-        allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         self.map_range(ipa, physical, size, MemoryType::Normal, allocator)
     }
@@ -87,7 +87,7 @@ impl Stage2AddressSpace {
         &mut self,
         ipa: u64,
         physical: u64,
-        allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         validate_page(ipa, physical)?;
         self.map_leaf(ipa, physical, 2, MemoryType::Normal, allocator)
@@ -104,7 +104,7 @@ impl Stage2AddressSpace {
         &mut self,
         ipa: u64,
         physical: u64,
-        allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         self.map_normal_page(ipa, physical, allocator)?;
         unsafe { invalidate_ipa(ipa) };
@@ -130,7 +130,7 @@ impl Stage2AddressSpace {
         ipa: u64,
         physical: u64,
         size: u64,
-        allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         self.map_range(ipa, physical, size, MemoryType::Device, allocator)
     }
@@ -172,7 +172,7 @@ impl Stage2AddressSpace {
         physical: u64,
         size: u64,
         memory: MemoryType,
-        allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         validate_range(ipa, physical, size)?;
 
@@ -194,7 +194,7 @@ impl Stage2AddressSpace {
         physical: u64,
         leaf_level: usize,
         memory: MemoryType,
-        allocator: &mut impl FnMut() -> Option<PhysicalAddress>,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         let mut table = self.root;
         for level in 0..leaf_level {
@@ -205,7 +205,7 @@ impl Stage2AddressSpace {
             {
                 PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT)
             } else if entry == 0 {
-                let child = allocator().ok_or(Error::Allocation)?;
+                let child = allocator(1, 1).ok_or(Error::Allocation)?;
                 validate_table(child)?;
                 write_entry(
                     table,

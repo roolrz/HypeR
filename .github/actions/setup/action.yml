@@ -1,5 +1,5 @@
 name: Set up HypeR toolchain
-description: Install the pinned Rust toolchain and AArch64 bare-metal target
+description: Install the pinned Rust toolchain and bare-metal targets
 
 runs:
   using: composite
@@ -18,5 +18,6 @@ runs:
           --component llvm-tools \
           --component rust-src \
           --component rustfmt \
-          --target aarch64-unknown-none
+          --target aarch64-unknown-none \
+          --target riscv64imac-unknown-none-elf
         rustup default "$toolchain"

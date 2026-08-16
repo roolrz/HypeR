@@ -27,7 +27,10 @@ struct PlatformBusState {
 }
 
 static PLATFORM_BUS: KernelSpinLock<Option<PlatformBusState>> = KernelSpinLock::new(None);
-static BUILTIN_DRIVERS: &[&dyn PlatformDriver] = &[&hyper::drivers::serial::PLATFORM_DRIVER];
+static BUILTIN_DRIVERS: &[&dyn PlatformDriver] = &[
+    &hyper::drivers::serial::PL011_PLATFORM_DRIVER,
+    &hyper::drivers::serial::NS16550_PLATFORM_DRIVER,
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {

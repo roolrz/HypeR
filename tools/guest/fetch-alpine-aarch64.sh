@@ -9,7 +9,7 @@ initramfs_sha256=df5281b4c36f812d0507e219e31a8a7482e0b4175097e292b75c7872c441295
 zboot_payload_offset=51832
 
 root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
-output=$root/target/guest
+output=$root/target/guest/aarch64
 cache=${TMPDIR:-/tmp}/hyper-guest-cache-$version
 work=$(mktemp -d "${TMPDIR:-/tmp}/hyper-guest.XXXXXX")
 
@@ -58,7 +58,7 @@ mkdir "$work/root"
 mv "$output/initramfs.cpio.gz.tmp" "$output/initramfs.cpio.gz"
 
 mkdir -p "$work/vm/kernel" "$work/vm/initramfs"
-cp "$root/tools/guest/alpine.manifest" "$work/vm/manifest"
+cp "$root/tools/guest/alpine-aarch64.manifest" "$work/vm/manifest"
 cp "$output/Image" "$work/vm/kernel/Image"
 cp "$output/initramfs.cpio.gz" "$work/vm/initramfs/initramfs.cpio.gz"
 (

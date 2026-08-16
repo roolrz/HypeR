@@ -123,7 +123,9 @@ impl VcpuContext {
     }
 
     /// Prepares the hardware-assisted virtual interrupt interface state.
-    pub fn initialize_vgic(&mut self) -> Result<super::VgicCapabilities, super::VgicError> {
+    pub fn initialize_virtual_interrupts(
+        &mut self,
+    ) -> Result<super::VgicCapabilities, super::VgicError> {
         super::vgic::initialize_context(&mut self.vgic)
     }
 

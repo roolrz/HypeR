@@ -2,13 +2,13 @@
 
 use alloc::vec::Vec;
 
-use hyper::drivers::interrupt::gicv3::{Error as GicError, GicV3};
-use hyper::hal::interrupt::{InterruptController, InterruptId, InterruptTrigger};
+use hyper::hal::interrupt::{
+    InterruptController, InterruptId, InterruptTrigger, KernelInterruptController,
+};
 use hyper::platform::{InterruptControllerInfo, PlatformInterrupt};
 use hyper::sync::InterruptSpinLock;
 
-type BootInterruptController =
-    GicV3<crate::arch::GicCpuInterface, crate::arch::ArchitectureBarrier>;
+type BootInterruptController = crate::arch::ArchitectureInterruptController;
 type InterruptLock = InterruptSpinLock<Option<InterruptState>, crate::arch::LocalInterruptMask>;
 
 const UNHANDLED_QUARANTINE_THRESHOLD: u32 = 8;
@@ -21,7 +21,7 @@ pub enum Error {
     AlreadyInitialized,
     DomainBusy,
     DomainNotFound,
-    Gic(GicError),
+    Controller(crate::arch::InterruptControllerError),
     HandlerNotFound,
     InterruptAlreadyMapped,
     InterruptNotMapped,
@@ -31,9 +31,9 @@ pub enum Error {
     NumericExhaustion,
 }
 
-impl From<GicError> for Error {
-    fn from(error: GicError) -> Self {
-        Self::Gic(error)
+impl From<crate::arch::InterruptControllerError> for Error {
+    fn from(error: crate::arch::InterruptControllerError) -> Self {
+        Self::Controller(error)
     }
 }
 
@@ -44,6 +44,7 @@ pub struct IrqDomainId(u32);
 pub struct VirtualInterrupt(u32);
 
 impl VirtualInterrupt {
+    #[cfg(target_arch = "aarch64")]
     pub(crate) const fn from_raw(value: u32) -> Self {
         Self(value)
     }
@@ -64,6 +65,7 @@ pub enum HandlerResult {
     Handled,
     NotHandled,
     HandledAndMaskLocal,
+    #[cfg(target_arch = "aarch64")]
     HandledAndUnmaskLocal(VirtualInterrupt),
 }
 
@@ -118,15 +120,14 @@ pub fn initialize(info: InterruptControllerInfo) -> Result<Capabilities, Error> 
     if INTERRUPTS.with(|slot| slot.is_some()) {
         return Err(Error::AlreadyInitialized);
     }
-    let InterruptControllerInfo::GicV3(info) = info;
-    let maintenance_interrupt = info.maintenance_interrupt;
+    let maintenance_interrupt = match info {
+        InterruptControllerInfo::GicV3(info) => info.maintenance_interrupt,
+        InterruptControllerInfo::Plic(_) => None,
+    };
     // SAFETY: The architecture MMIO window maps every DTB-discovered device
     // range with Device attributes and the controller has a single owner.
-    let mut controller =
+    let controller =
         unsafe { BootInterruptController::bind(info, crate::kernel::mm::memory::mmio_address)? };
-    // SAFETY: Boot runs on one CPU with DAIF masked. No other component can
-    // access the controller before it is installed in this lock.
-    unsafe { controller.initialize(crate::arch::current_gic_affinity())? };
     let interrupt_count = controller.interrupt_count();
     INTERRUPTS.with(|slot| {
         if slot.is_some() {
@@ -151,7 +152,7 @@ pub fn initialize(info: InterruptControllerInfo) -> Result<Capabilities, Error> 
     })
 }
 
-/// Initializes the calling secondary CPU's local GIC state and PPIs.
+/// Initializes the calling secondary CPU's local interrupt-controller state.
 pub fn initialize_local_cpu() -> Result<(), Error> {
     with_state(|state| {
         let InterruptState {
@@ -161,9 +162,9 @@ pub fn initialize_local_cpu() -> Result<(), Error> {
         } = state;
         // SAFETY: The shared Distributor is active, this CPU still has IRQs
         // masked, and each Redistributor is private to its matching affinity.
-        unsafe { controller.initialize_local(crate::arch::current_gic_affinity())? };
+        unsafe { controller.initialize_local()? };
         for mapping in domains.iter().flat_map(|domain| domain.mappings.iter()) {
-            if mapping.enabled && mapping.hardware.get() < 32 {
+            if mapping.enabled && controller.is_per_cpu(mapping.hardware) {
                 controller.configure(mapping.hardware, mapping.priority, mapping.trigger)?;
                 controller.enable(mapping.hardware)?;
             }
@@ -362,12 +363,23 @@ pub fn dispatch(hardware: InterruptId) {
     }
 }
 
+/// Claims one pending source from a memory-mapped controller CPU context.
+/// Architecture trap entry uses this only for external-interrupt causes.
+#[cfg(target_arch = "riscv64")]
+pub(crate) fn acknowledge_external() -> Option<InterruptId> {
+    with_state(|state| Ok(state.controller.acknowledge()))
+        .ok()
+        .flatten()
+}
+
 /// Enables one already-mapped PPI on the calling CPU.
+#[cfg(target_arch = "aarch64")]
 pub fn enable_local(interrupt: VirtualInterrupt) -> Result<(), Error> {
     with_state(|state| state.set_local_enabled(interrupt, true))
 }
 
 /// Disables one already-mapped PPI on the calling CPU.
+#[cfg(target_arch = "aarch64")]
 pub fn disable_local(interrupt: VirtualInterrupt) -> Result<(), Error> {
     with_state(|state| state.set_local_enabled(interrupt, false))
 }
@@ -410,6 +422,7 @@ impl InterruptState {
             let mapping = &mut self.domains[domain_index].mappings[mapping_index];
             let mut handled = false;
             let mut mask_local = false;
+            #[allow(unused_mut)]
             let mut unmask_local = None;
             for entry in &mapping.handlers {
                 match (entry.handler)(mapping.virtual_interrupt, entry.context) {
@@ -419,6 +432,7 @@ impl InterruptState {
                         handled = true;
                         mask_local = true;
                     }
+                    #[cfg(target_arch = "aarch64")]
                     HandlerResult::HandledAndUnmaskLocal(interrupt) => {
                         handled = true;
                         unmask_local = Some(interrupt);
@@ -431,7 +445,7 @@ impl InterruptState {
             } else {
                 mapping.consecutive_unhandled = mapping.consecutive_unhandled.saturating_add(1);
                 if mapping.consecutive_unhandled >= UNHANDLED_QUARANTINE_THRESHOLD
-                    && (mapping.enabled || hardware.get() < 32)
+                    && (mapping.enabled || self.controller.is_per_cpu(hardware))
                 {
                     let _ = self.controller.disable(hardware);
                     mapping.enabled = false;
@@ -452,7 +466,7 @@ impl InterruptState {
             && let Some((domain, mapping)) = self.mapping_position_by_virtual(interrupt)
         {
             let target = self.domains[domain].mappings[mapping].hardware;
-            if target.get() < 32 {
+            if self.controller.is_per_cpu(target) {
                 let _ = self.controller.enable(target);
             }
         }
@@ -460,6 +474,7 @@ impl InterruptState {
         outcome
     }
 
+    #[cfg(target_arch = "aarch64")]
     fn set_local_enabled(
         &mut self,
         interrupt: VirtualInterrupt,
@@ -469,7 +484,7 @@ impl InterruptState {
             .mapping_position_by_virtual(interrupt)
             .ok_or(Error::InterruptNotMapped)?;
         let hardware = self.domains[domain].mappings[mapping].hardware;
-        if hardware.get() >= 32 {
+        if !self.controller.is_per_cpu(hardware) {
             return Err(Error::LocalInterruptLifecycleRequiresCrossCall);
         }
         if enabled {
@@ -495,8 +510,9 @@ fn reserve_one<T>(entries: &mut Vec<T>) -> Result<(), Error> {
 }
 
 fn require_local_lifecycle_available(interrupt: InterruptId) -> Result<(), Error> {
-    if interrupt.get() < 32 && crate::kernel::cpu::online_cpu_count() > 1 {
-        return Err(Error::LocalInterruptLifecycleRequiresCrossCall);
+    if crate::arch::interrupt_is_per_cpu(interrupt) && crate::kernel::cpu::online_cpu_count() > 1 {
+        Err(Error::LocalInterruptLifecycleRequiresCrossCall)
+    } else {
+        Ok(())
     }
-    Ok(())
 }

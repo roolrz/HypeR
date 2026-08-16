@@ -106,18 +106,21 @@ pub fn current_gic_affinity() -> u32 {
 }
 
 /// Returns the architecture-reserved emergency stop interrupt.
-pub const fn crash_stop_interrupt() -> InterruptId {
-    InterruptId::new(registers::GIC_CRASH_STOP_SGI as u32)
+pub const fn crash_stop_interrupt() -> Option<InterruptId> {
+    Some(InterruptId::new(registers::GIC_CRASH_STOP_SGI as u32))
 }
 
 /// Tests whether an acknowledged interrupt is the emergency stop IPI.
 pub fn is_crash_stop_interrupt(interrupt: InterruptId) -> bool {
-    interrupt == crash_stop_interrupt()
+    crash_stop_interrupt() == Some(interrupt)
 }
 
 /// Sends the emergency stop SGI to every participating PE except self.
 pub fn broadcast_crash_stop() -> bool {
-    broadcast_sgi(crash_stop_interrupt())
+    let Some(interrupt) = crash_stop_interrupt() else {
+        return false;
+    };
+    broadcast_sgi(interrupt)
 }
 
 fn broadcast_sgi(interrupt: InterruptId) -> bool {

@@ -2,8 +2,12 @@
 
 use hyper::hal::interrupt::{InterruptId, InterruptTrigger};
 use hyper::hal::timer::MonotonicCounter;
-use hyper::platform::{PlatformInterrupt, PlatformInterruptTrigger, TimerInfo, TimerKind};
-use hyper::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+#[cfg(target_arch = "aarch64")]
+use hyper::platform::PlatformInterrupt;
+use hyper::platform::{PlatformInterruptTrigger, TimerInfo, TimerKind};
+#[cfg(target_arch = "aarch64")]
+use hyper::sync::atomic::AtomicU32;
+use hyper::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use super::interrupt::{HandlerResult, IrqDomainId, VirtualInterrupt};
 
@@ -17,6 +21,7 @@ static RECURRING_IRQ_OBSERVED: [AtomicBool; MAX_CPUS] =
     [const { AtomicBool::new(false) }; MAX_CPUS];
 static ONLINE_CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
 static ACTIVE_REPORT_PRINTED: AtomicBool = AtomicBool::new(false);
+#[cfg(target_arch = "aarch64")]
 static VIRTUAL_TIMER_VIRQ: AtomicU32 = AtomicU32::new(u32::MAX);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,7 +31,9 @@ pub enum Error {
     Time(crate::kernel::time::Error),
     InvalidCpuIndex,
     InconsistentCounterFrequency,
+    #[cfg(target_arch = "aarch64")]
     InvalidInterruptTrigger,
+    UnsupportedTimer,
 }
 
 impl From<super::interrupt::Error> for Error {
@@ -57,8 +64,11 @@ pub struct Capabilities {
     pub guest_virtual_host_interrupt: VirtualInterrupt,
 }
 
+#[cfg(target_arch = "aarch64")]
 pub fn initialize(info: TimerInfo, domain: IrqDomainId) -> Result<Capabilities, Error> {
-    let TimerKind::ArmGeneric = info.kind;
+    if info.kind != TimerKind::ArmGeneric {
+        return Err(Error::UnsupportedTimer);
+    }
     if info.hypervisor_physical.trigger != PlatformInterruptTrigger::Level
         || info.virtual_timer.trigger != PlatformInterruptTrigger::Level
     {
@@ -134,6 +144,37 @@ pub fn initialize(info: TimerInfo, domain: IrqDomainId) -> Result<Capabilities, 
     })
 }
 
+#[cfg(target_arch = "riscv64")]
+pub fn initialize(info: TimerInfo, domain: IrqDomainId) -> Result<Capabilities, Error> {
+    if info.kind != TimerKind::RiscvSupervisor
+        || info.hypervisor_physical.trigger != PlatformInterruptTrigger::Level
+    {
+        return Err(Error::UnsupportedTimer);
+    }
+    let hardware_interrupt = InterruptId::new(info.hypervisor_physical.interrupt);
+    let virtual_interrupt = super::interrupt::map(
+        domain,
+        hardware_interrupt,
+        TIMER_PRIORITY,
+        InterruptTrigger::Level,
+    )?;
+    let registration = super::interrupt::register_shared(virtual_interrupt, 0, handle_host_timer)?;
+    if let Err(error) = start_local_tick(crate::kernel::time::counter_frequency_hz()?) {
+        let _ = super::interrupt::unregister(registration);
+        let _ = super::interrupt::unmap(virtual_interrupt);
+        return Err(error);
+    }
+    Ok(Capabilities {
+        ticks_per_second: TICKS_PER_SECOND,
+        counter_frequency_hz: crate::kernel::time::counter_frequency_hz()?,
+        hardware_interrupt,
+        virtual_interrupt,
+        guest_virtual_interrupt: InterruptId::new(5),
+        guest_virtual_host_interrupt: virtual_interrupt,
+    })
+}
+
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn guest_virtual_host_interrupt() -> Option<VirtualInterrupt> {
     let interrupt = VIRTUAL_TIMER_VIRQ.load(Ordering::Acquire);
     (interrupt != u32::MAX).then_some(VirtualInterrupt::from_raw(interrupt))
@@ -157,10 +198,12 @@ pub fn set_online_cpu_count(count: usize) -> Result<(), Error> {
     Ok(())
 }
 
+#[cfg(target_arch = "aarch64")]
 fn shared_probe(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
     HandlerResult::NotHandled
 }
 
+#[cfg(target_arch = "aarch64")]
 fn handle_guest_virtual_timer(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
     match crate::kernel::vm::handle_arch_timer_interrupt() {
         Ok(outcome) if outcome.active && outcome.asserted => HandlerResult::HandledAndMaskLocal,
@@ -181,6 +224,7 @@ fn handle_host_timer(_interrupt: VirtualInterrupt, _context: usize) -> HandlerRe
     if let Err(error) = crate::kernel::time::handle_timer_interrupt() {
         super::exception::fatal_timer(error);
     }
+    crate::arch::poll_guest_timer(crate::kernel::time::monotonic_ticks());
     HandlerResult::Handled
 }
 

@@ -6,6 +6,7 @@ pub const MAX_RESERVED_REGIONS: usize = 32;
 pub const MAX_MMIO_REGIONS: usize = 64;
 pub const MAX_NO_MAP_REGIONS: usize = 32;
 pub const MAX_GIC_REDISTRIBUTOR_REGIONS: usize = 4;
+pub const MAX_PLIC_CONTEXTS: usize = MAX_CPUS;
 pub const MAX_CPUS: usize = crate::config::MAX_CPUS as usize;
 
 /// A half-open physical address interval `[start, start + size)`.
@@ -189,7 +190,11 @@ impl Default for CpuList {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CpuPowerInfo {
     Psci(PsciInfo),
+    Sbi(SbiInfo),
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SbiInfo;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PsciInfo {
@@ -219,6 +224,7 @@ pub struct TimerInfo {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TimerKind {
     ArmGeneric,
+    RiscvSupervisor,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -230,6 +236,16 @@ pub enum PlatformInterruptTrigger {
 #[derive(Clone, Copy, Debug)]
 pub enum InterruptControllerInfo {
     GicV3(GicV3Info),
+    Plic(PlicInfo),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct PlicInfo {
+    pub registers: PhysicalRange,
+    pub source_count: u32,
+    /// Supervisor context index indexed by the firmware hardware-thread ID.
+    pub supervisor_contexts: [u32; MAX_PLIC_CONTEXTS],
+    pub context_count: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -250,9 +266,18 @@ pub struct PlatformInterrupt {
 pub struct ConsoleInfo {
     pub kind: ConsoleKind,
     pub base: u64,
+    pub access: ConsoleRegisterAccess,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConsoleRegisterAccess {
+    Native,
+    Mmio8 { register_shift: u8 },
+    Mmio32 { register_shift: u8 },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ConsoleKind {
     Pl011,
+    Ns16550,
 }

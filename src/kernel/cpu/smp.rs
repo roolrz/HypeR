@@ -102,6 +102,9 @@ pub fn initialize(
         }
         let cpu_index = next_cpu_index;
         next_cpu_index += 1;
+        if !crate::arch::register_secondary_hardware_id(cpu_index, cpu.hardware_id) {
+            return Err(Error::CpuIndexOverflow);
+        }
         super::super::mm::stack::prepare_cpu(cpu_index)?;
         let name = format!("idle/{cpu_index}");
         let stack = super::super::task::scheduler::register_secondary_cpu(cpu_index, &name)?;
@@ -160,7 +163,9 @@ pub fn secondary_entry(cpu_index: usize) -> ! {
         crate::arch::halt()
     }
     if let Err(error) = super::super::irq::interrupt::initialize_local_cpu() {
-        crate::pr_crit!("HypeR: CPU {cpu_index} local GIC initialization failed: {error:?}");
+        crate::pr_crit!(
+            "HypeR: CPU {cpu_index} local interrupt-controller initialization failed: {error:?}"
+        );
         crate::arch::halt()
     }
     if let Err(error) = super::super::irq::timer::initialize_local_cpu() {
@@ -183,7 +188,7 @@ extern "C" fn enter_clean_idle(cpu_index: usize) -> ! {
     ONLINE[cpu_index].store(true, Ordering::Release);
     crate::arch::send_event();
     crate::println!(
-        "HypeR: CPU {cpu_index} online, MPIDR affinity {:#x}; entering idle",
+        "HypeR: CPU {cpu_index} online, hardware ID {:#x}; entering idle",
         crate::arch::current_hardware_id()
     );
     crate::arch::enable_local_irq();

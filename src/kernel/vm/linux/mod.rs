@@ -9,12 +9,24 @@ use super::{VmBundle, VmInterruptController};
 use crate::kernel::task::thread::{ThreadId, VirtualMachineId};
 use crate::kernel::vm::memory::GuestAddressSpace;
 
+#[cfg(target_arch = "aarch64")]
 const GUEST_RAM_IPA: u64 = 0x4000_0000;
+#[cfg(target_arch = "riscv64")]
+const GUEST_RAM_IPA: u64 = 0x8000_0000;
 const GUEST_DTB_IPA: u64 = GUEST_RAM_IPA + 0x0001_0000;
 const GUEST_KERNEL_IPA: u64 = GUEST_RAM_IPA + 0x0020_0000;
+#[cfg(target_arch = "aarch64")]
 const GUEST_TIMER_INTERRUPT: u32 = 27;
+#[cfg(target_arch = "riscv64")]
+const GUEST_TIMER_INTERRUPT: u32 = 5;
+#[cfg(target_arch = "aarch64")]
 const AARCH64_IMAGE_MAGIC_OFFSET: usize = 56;
+#[cfg(target_arch = "aarch64")]
 const AARCH64_IMAGE_HEADER_SIZE: usize = 64;
+#[cfg(target_arch = "riscv64")]
+const RISCV_IMAGE_MAGIC_OFFSET: usize = 56;
+#[cfg(target_arch = "riscv64")]
+const RISCV_IMAGE_HEADER_SIZE: usize = 64;
 
 #[derive(Debug)]
 pub enum Error {
@@ -119,12 +131,25 @@ fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
     if guest.guest_type() != "linux" {
         return Err(Error::UnsupportedGuestType);
     }
-    if guest.architecture() != "aarch64" {
+    let expected_architecture = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "riscv64"
+    };
+    if guest.architecture() != expected_architecture {
         return Err(Error::UnsupportedArchitecture);
     }
     let image = guest.kernel();
+    #[cfg(target_arch = "aarch64")]
     if image.len() < AARCH64_IMAGE_HEADER_SIZE
         || image.get(AARCH64_IMAGE_MAGIC_OFFSET..AARCH64_IMAGE_MAGIC_OFFSET + 4) != Some(b"ARMd")
+    {
+        return Err(Error::InvalidKernel);
+    }
+    #[cfg(target_arch = "riscv64")]
+    if image.len() < RISCV_IMAGE_HEADER_SIZE
+        || image.get(RISCV_IMAGE_MAGIC_OFFSET..RISCV_IMAGE_MAGIC_OFFSET + 4)
+            != Some(&[0x52, 0x53, 0x43, 0x05])
     {
         return Err(Error::InvalidKernel);
     }
@@ -203,10 +228,18 @@ fn prepare_boot_vcpu(
     let interrupts =
         VmInterruptController::new(vcpu_count, InterruptId::new(GUEST_TIMER_INTERRUPT))?;
     let mut context = crate::arch::VcpuContext::new(GUEST_KERNEL_IPA);
-    context.general[0] = GUEST_DTB_IPA;
-    context.general[1] = 0;
-    context.general[2] = 0;
-    context.general[3] = 0;
+    #[cfg(target_arch = "aarch64")]
+    {
+        context.general[0] = GUEST_DTB_IPA;
+        context.general[1] = 0;
+        context.general[2] = 0;
+        context.general[3] = 0;
+    }
+    #[cfg(target_arch = "riscv64")]
+    {
+        context.general[10] = 0;
+        context.general[11] = GUEST_DTB_IPA;
+    }
     context.set_virtual_count(
         crate::kernel::time::monotonic_ticks(),
         crate::kernel::time::monotonic_ticks(),

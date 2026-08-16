@@ -18,7 +18,8 @@ fn require_some<T>(value: Option<T>) -> T {
 
 #[cfg(test)]
 mod virtual_pl011 {
-    use hyper::drivers::serial::{VirtualPl011, pl011_registers as reg};
+    use hyper::vm::device::pl011::VirtualPl011;
+    use hyper::drivers::serial::pl011_registers as reg;
 
     #[test]
     fn exposes_primecell_identity_and_transmits_bytes() {
@@ -60,6 +61,67 @@ mod virtual_pl011 {
             0
         );
         assert!(status.interrupt_asserted);
+    }
+}
+
+#[cfg(test)]
+mod ns16550 {
+    use hyper::drivers::serial::{
+        MmioAccess, Ns16550, Ns16550DataBits, Ns16550FifoTrigger, Ns16550LineConfig,
+        Ns16550Parity, Ns16550StopBits,
+    };
+    use hyper::hal::console::Console;
+
+    #[test]
+    fn configures_and_uses_a_byte_wide_register_bank() {
+        let mut registers = [0u8; 8];
+        registers[5] = (1 << 5) | (1 << 6);
+        // SAFETY: The test array remains alive and exclusively owned for the
+        // complete lifetime of the UART handle.
+        let uart = unsafe { Ns16550::from_mmio_base(registers.as_mut_ptr() as usize) };
+        super::require_ok(uart.configure(
+            24_000_000,
+            115_200,
+            Ns16550LineConfig::EIGHT_N_ONE,
+            Ns16550FifoTrigger::FourteenBytes,
+        ));
+
+        assert_eq!(registers[0], 13);
+        assert_eq!(registers[3], 3);
+        assert_eq!(registers[2], 0xc7);
+        assert_eq!(registers[4], 0x0b);
+        registers[5] = 1 | (1 << 1) | (1 << 5);
+        registers[0] = b'R';
+        let received = super::require_some(uart.try_read());
+        assert_eq!(received.byte, b'R');
+        assert!(received.overrun_error);
+        assert!(received.has_error());
+        registers[5] = 1 << 5;
+        assert!(uart.try_write(b'T'));
+        assert_eq!(registers[0], b'T');
+    }
+
+    #[test]
+    fn honors_word_access_and_register_shift() {
+        let mut registers = [0u32; 8];
+        registers[5] = 1 << 5;
+        // SAFETY: The aligned word array models one word-spaced MMIO bank.
+        let uart = super::require_ok(unsafe {
+            Ns16550::from_mmio(registers.as_mut_ptr() as usize, MmioAccess::WORD)
+        });
+        uart.write_byte(b'W');
+        assert_eq!(registers[0], u32::from(b'W'));
+        uart.write_scratch(0x5a);
+        assert_eq!(uart.read_scratch(), 0x5a);
+
+        let line = Ns16550LineConfig {
+            data_bits: Ns16550DataBits::Seven,
+            stop_bits: Ns16550StopBits::Two,
+            parity: Ns16550Parity::Even,
+        };
+        super::require_ok(uart.configure(1_843_200, 9_600, line, Ns16550FifoTrigger::OneByte));
+        assert_eq!(registers[0], 12);
+        assert_eq!(registers[3], 0x1e);
     }
 }
 
@@ -698,6 +760,7 @@ mod fdt {
             Some(hyper::platform::ConsoleInfo {
                 kind: hyper::platform::ConsoleKind::Pl011,
                 base: 0x0900_0000,
+                access: hyper::platform::ConsoleRegisterAccess::Native,
             })
         );
 
@@ -1472,11 +1535,11 @@ mod gicv3 {
 
 #[cfg(test)]
 mod vgic {
-    use hyper::drivers::interrupt::vgic::{
+    use hyper::vm::interrupt::{
         Error, InterruptGroup, InterruptTrigger, ListEntry, ListState, VirtualCpuId,
         VirtualInterruptController, VirtualInterruptId,
     };
-    use hyper::drivers::interrupt::vgicv3::{decode_list_register, encode_list_register};
+    use hyper::vm::interrupt::gicv3::{decode_list_register, encode_list_register};
 
     fn interrupt(value: u32) -> VirtualInterruptId {
         super::require_some(VirtualInterruptId::new(value))

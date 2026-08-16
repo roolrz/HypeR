@@ -43,6 +43,7 @@ impl Initialization {
         self.interrupts = Some(capabilities);
     }
 
+    #[cfg(target_arch = "aarch64")]
     pub(crate) fn timer(&self) -> irq::timer::Capabilities {
         self.timer
             .unwrap_or_else(|| fail("timer capability access", "timer not initialized"))
@@ -269,8 +270,23 @@ fn early_console_is_accessible(
     platform: &hyper::platform::PlatformInfo,
     info: ConsoleInfo,
 ) -> bool {
-    const MINIMUM_REGISTER_WINDOW: u64 = 0x1000;
-    let Some(end) = info.base.checked_add(MINIMUM_REGISTER_WINDOW) else {
+    let register_window = match info.kind {
+        hyper::platform::ConsoleKind::Pl011 => 0x1000,
+        hyper::platform::ConsoleKind::Ns16550 => {
+            let shift = match info.access {
+                hyper::platform::ConsoleRegisterAccess::Mmio8 { register_shift }
+                | hyper::platform::ConsoleRegisterAccess::Mmio32 { register_shift } => {
+                    register_shift
+                }
+                hyper::platform::ConsoleRegisterAccess::Native => 0,
+            };
+            let Some(window) = 8u64.checked_shl(u32::from(shift)) else {
+                return false;
+            };
+            window
+        }
+    };
+    let Some(end) = info.base.checked_add(register_window) else {
         return false;
     };
     if end > crate::arch::ArchitectureAddressTranslation::bootstrap_accessible_limit() {
@@ -289,7 +305,11 @@ fn install_console(console_info: ConsoleInfo, address: u64) {
     };
     // SAFETY: Platform discovery validated the device range and the
     // architecture supplied an address with Device memory attributes.
-    log::console::install(unsafe { console::bind(console_info, base) });
+    let console = match unsafe { console::bind(console_info, base) } {
+        Ok(console) => console,
+        Err(error) => fail("console driver binding", error),
+    };
+    log::console::install(console);
 }
 
 pub(crate) fn fail(operation: &str, error: impl core::fmt::Debug) -> ! {

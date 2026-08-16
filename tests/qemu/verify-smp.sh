@@ -66,14 +66,14 @@ while [ "$attempt" -lt 300 ]; do
         grep -q 'HypeR: kernel log ring: 65536 bytes, 0 records dropped' "$log" &&
         grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
         grep -q 'HypeR: vGICv3 active with [1-9][0-9]* LRs, [5-8] priority bits, [5-7] preemption bits, \(16\|24\) INTID bits, maintenance VIRQ [0-9][0-9]*' "$log" &&
-        grep -q 'HypeR: Arm Generic Timer: EL2 INTID 26, guest virtual INTID 27 (host VIRQ [0-9][0-9]*), [1-9][0-9]* Hz tick from a [1-9][0-9]* Hz counter' "$log" &&
+        grep -q 'HypeR: architectural timer: host INTID 26, guest INTID 27 (host VIRQ [0-9][0-9]*), [1-9][0-9]* Hz tick from a [1-9][0-9]* Hz counter' "$log" &&
         grep -q 'HypeR: monotonic clocksource active at [1-9][0-9]* Hz' "$log" &&
         grep -q 'HypeR: virtual architected timer injection validated' "$log" &&
         grep -q 'HypeR: guest synchronous trap and vSysReg emulation validated' "$log" &&
         grep -q 'HypeR: platform bus: .* bound, .* unmatched, .* deferred, .* failed' "$log" &&
-        grep -q 'HypeR: CPU 1 online, MPIDR affinity 0x1; entering idle' "$log" &&
-        grep -q 'HypeR: CPU 2 online, MPIDR affinity 0x2; entering idle' "$log" &&
-        grep -q 'HypeR: CPU 3 online, MPIDR affinity 0x3; entering idle' "$log" &&
+        grep -q 'HypeR: CPU 1 online, hardware ID 0x1; entering idle' "$log" &&
+        grep -q 'HypeR: CPU 2 online, hardware ID 0x2; entering idle' "$log" &&
+        grep -q 'HypeR: CPU 3 online, hardware ID 0x3; entering idle' "$log" &&
         grep -q 'HypeR: SMP online: 4/4 discovered CPUs' "$log" &&
         grep -q 'HypeR: randomized kernel base 0x[0-9a-f][0-9a-f]*, KASLR offset 0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR: transition identity mappings retired' "$log" &&

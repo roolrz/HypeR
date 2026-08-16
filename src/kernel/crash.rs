@@ -7,7 +7,9 @@ use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 use core::ptr::read_volatile;
 
-use hyper::hal::interrupt::{InterruptId, InterruptTrigger};
+#[cfg(target_arch = "aarch64")]
+use hyper::hal::interrupt::InterruptId;
+use hyper::hal::interrupt::InterruptTrigger;
 use hyper::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::arch::CrashContext;
@@ -57,9 +59,13 @@ unsafe impl Sync for CrashSlot {}
 
 /// Reserves and installs the all-but-self crash-stop interrupt.
 pub(crate) fn initialize(boot: &super::boot::Initialization) {
+    let Some(hardware_interrupt) = crate::arch::crash_stop_interrupt() else {
+        crate::println!("HypeR: crash-stop cross-call is unavailable on this platform");
+        return;
+    };
     let interrupt = match super::irq::interrupt::map(
         boot.interrupts().root_domain,
-        crate::arch::crash_stop_interrupt(),
+        hardware_interrupt,
         0,
         InterruptTrigger::Edge,
     ) {
@@ -80,6 +86,7 @@ fn crash_stop_interrupt(
     super::irq::interrupt::HandlerResult::Handled
 }
 
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn is_stop_interrupt(interrupt: InterruptId) -> bool {
     CRASH_IPI_READY.load(Ordering::Acquire) && crate::arch::is_crash_stop_interrupt(interrupt)
 }
@@ -94,6 +101,7 @@ pub fn panic(info: &PanicInfo<'_>) -> ! {
 }
 
 /// Handles a fatal architectural exception with its exact interrupted frame.
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn fatal_exception(
     report: hyper::hal::exception::ExceptionReport,
     context: CrashContext,
@@ -123,6 +131,7 @@ pub(crate) fn fatal_context(context: CrashContext, arguments: fmt::Arguments<'_>
 }
 
 /// Publishes a remote CPU's exact IRQ frame and permanently stops that CPU.
+#[cfg(target_arch = "aarch64")]
 pub(crate) fn stop_this_cpu(context: CrashContext) -> ! {
     let mut payload = StopPayload { context };
     // SAFETY: payload remains live on the abandoned stack and the callback
@@ -135,10 +144,12 @@ pub(crate) fn stop_this_cpu(context: CrashContext) -> ! {
     }
 }
 
+#[cfg(target_arch = "aarch64")]
 struct StopPayload {
     context: CrashContext,
 }
 
+#[cfg(target_arch = "aarch64")]
 extern "C" fn stop_this_cpu_on_emergency_stack(argument: usize) -> ! {
     // SAFETY: stop_this_cpu passes one live payload and the callback never
     // returns to outlive it.
@@ -277,9 +288,15 @@ fn dump_cpu_header(
     context: CrashContext,
     task: Option<super::task::scheduler::CrashTaskSnapshot>,
 ) {
+    #[cfg(target_arch = "aarch64")]
     super::log::emergency(format_args!(
         "CPU {cpu}: {role}, MPIDR {:#x}, CurrentEL {:#x}, DAIF {:#x}",
         context.hardware_id, context.current_el, context.interrupt_mask
+    ));
+    #[cfg(target_arch = "riscv64")]
+    super::log::emergency(format_args!(
+        "CPU {cpu}: {role}, hart ID {:#x}, SSTATUS {:#x}",
+        context.hardware_id, context.interrupt_mask
     ));
     match task {
         Some(task) => {
@@ -310,7 +327,48 @@ fn dump_cpu_header(
 }
 
 fn dump_registers(context: &CrashContext) {
-    for base in (0..28).step_by(4) {
+    #[cfg(target_arch = "aarch64")]
+    dump_general_registers(context, 31);
+    #[cfg(target_arch = "riscv64")]
+    dump_general_registers(context, 32);
+    emit_symbolized("PC", context.program_counter, context.program_counter);
+    super::log::emergency(format_args!(
+        "SP: {:#018x}  STATUS: {:#018x}",
+        context.stack_pointer, context.processor_state
+    ));
+    #[cfg(target_arch = "aarch64")]
+    dump_architecture_registers(context);
+    #[cfg(target_arch = "riscv64")]
+    dump_architecture_registers(context);
+}
+
+fn dump_general_registers(context: &CrashContext, register_count: usize) {
+    for base in (0..register_count).step_by(4) {
+        let remaining = register_count - base;
+        if remaining < 4 {
+            match remaining {
+                1 => super::log::emergency(format_args!(
+                    "x{base:02}: {}",
+                    RegisterValue::new(context, base)
+                )),
+                2 => super::log::emergency(format_args!(
+                    "x{base:02}: {}  x{:02}: {}",
+                    RegisterValue::new(context, base),
+                    base + 1,
+                    RegisterValue::new(context, base + 1)
+                )),
+                3 => super::log::emergency(format_args!(
+                    "x{base:02}: {}  x{:02}: {}  x{:02}: {}",
+                    RegisterValue::new(context, base),
+                    base + 1,
+                    RegisterValue::new(context, base + 1),
+                    base + 2,
+                    RegisterValue::new(context, base + 2)
+                )),
+                _ => {}
+            }
+            break;
+        }
         super::log::emergency(format_args!(
             "x{base:02}: {}  x{:02}: {}  x{:02}: {}  x{:02}: {}",
             RegisterValue::new(context, base),
@@ -322,17 +380,10 @@ fn dump_registers(context: &CrashContext) {
             RegisterValue::new(context, base + 3)
         ));
     }
-    super::log::emergency(format_args!(
-        "x28: {}  x29: {}  x30: {}",
-        RegisterValue::new(context, 28),
-        RegisterValue::new(context, 29),
-        RegisterValue::new(context, 30)
-    ));
-    emit_symbolized("PC", context.program_counter, context.program_counter);
-    super::log::emergency(format_args!(
-        "SP: {:#018x}  PSTATE: {:#018x}",
-        context.stack_pointer, context.processor_state
-    ));
+}
+
+#[cfg(target_arch = "aarch64")]
+fn dump_architecture_registers(context: &CrashContext) {
     if context.has_exception_frame() {
         super::log::emergency(format_args!(
             "ESR: {:#018x}  FAR: {:#018x}  vector: {:#x}",
@@ -350,6 +401,28 @@ fn dump_registers(context: &CrashContext) {
     super::log::emergency(format_args!(
         "VBAR_EL2: {:#018x}  HCR_EL2: {:#018x}",
         context.vbar_el2, context.hcr_el2
+    ));
+}
+
+#[cfg(target_arch = "riscv64")]
+fn dump_architecture_registers(context: &CrashContext) {
+    if context.has_exception_frame() {
+        super::log::emergency(format_args!(
+            "SCAUSE: {:#018x}  STVAL: {:#018x}",
+            context.syndrome, context.fault_address
+        ));
+    } else {
+        super::log::emergency(format_args!(
+            "origin: software panic (no architectural exception frame)"
+        ));
+    }
+    super::log::emergency(format_args!(
+        "SATP: {:#018x}  STVEC: {:#018x}",
+        context.satp, context.stvec
+    ));
+    super::log::emergency(format_args!(
+        "HSTATUS: {:#018x}  HGATP: {:#018x}",
+        context.hstatus, context.hgatp
     ));
 }
 
@@ -384,7 +457,11 @@ fn dump_backtrace(
 ) {
     super::log::emergency(format_args!("CPU {cpu} Call trace:"));
     emit_trace_entry(0, context.program_counter, context.program_counter);
-    if !context.general_is_valid(29) {
+    #[cfg(target_arch = "aarch64")]
+    const FRAME_POINTER_REGISTER: usize = 29;
+    #[cfg(target_arch = "riscv64")]
+    const FRAME_POINTER_REGISTER: usize = 8;
+    if !context.general_is_valid(FRAME_POINTER_REGISTER) {
         super::log::emergency(format_args!("  frame pointer unavailable"));
         return;
     }
@@ -392,7 +469,11 @@ fn dump_backtrace(
         super::log::emergency(format_args!("  stack bounds unavailable; unwind stopped"));
         return;
     };
-    walk_frame_chain(context.general[29] as usize, bottom, top);
+    walk_frame_chain(
+        context.general[FRAME_POINTER_REGISTER] as usize,
+        bottom,
+        top,
+    );
 }
 
 fn stack_bounds(
@@ -406,6 +487,7 @@ fn stack_bounds(
         .or_else(|| super::mm::stack::exception_stack_bounds(cpu, stack_pointer as usize))
 }
 
+#[cfg(target_arch = "aarch64")]
 fn walk_frame_chain(mut frame: usize, bottom: usize, top: usize) {
     for depth in 1..MAX_BACKTRACE_DEPTH {
         if frame & 0xf != 0 || frame < bottom || frame.checked_add(16).is_none_or(|end| end > top) {
@@ -420,6 +502,39 @@ fn walk_frame_chain(mut frame: usize, bottom: usize, top: usize) {
             (
                 read_volatile(frame as *const usize),
                 read_volatile((frame + core::mem::size_of::<usize>()) as *const usize),
+            )
+        };
+        if link == 0 {
+            return;
+        }
+        emit_trace_entry(depth, link as u64, (link as u64).saturating_sub(4));
+        if previous <= frame {
+            return;
+        }
+        frame = previous;
+    }
+    super::log::emergency(format_args!(
+        "  backtrace truncated at {MAX_BACKTRACE_DEPTH} entries"
+    ));
+}
+
+#[cfg(target_arch = "riscv64")]
+fn walk_frame_chain(mut frame: usize, bottom: usize, top: usize) {
+    const RECORD_SIZE: usize = 2 * core::mem::size_of::<usize>();
+    for depth in 1..MAX_BACKTRACE_DEPTH {
+        if frame & 0xf != 0 || frame < bottom + RECORD_SIZE || frame > top {
+            super::log::emergency(format_args!(
+                "  invalid frame pointer {frame:#x}; unwind stopped"
+            ));
+            return;
+        }
+        let record = frame - RECORD_SIZE;
+        // SAFETY: The frame is aligned and the standard RISC-V frame record
+        // lies entirely inside the pinned current kernel stack.
+        let (previous, link) = unsafe {
+            (
+                read_volatile(record as *const usize),
+                read_volatile((record + core::mem::size_of::<usize>()) as *const usize),
             )
         };
         if link == 0 {

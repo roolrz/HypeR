@@ -9,8 +9,11 @@ const FDT_PROP: u32 = 3;
 const FDT_END: u32 = 9;
 const HEADER_SIZE: usize = 40;
 
+#[cfg(target_arch = "aarch64")]
 const GIC_PHANDLE: u32 = 1;
+#[cfg(target_arch = "aarch64")]
 const UART_CLOCK_PHANDLE: u32 = 2;
+#[cfg(target_arch = "aarch64")]
 const APB_CLOCK_PHANDLE: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -20,6 +23,7 @@ pub enum Error {
     NameOffsetOverflow,
 }
 
+#[cfg(target_arch = "aarch64")]
 pub fn build(
     memory_base: u64,
     memory_size: u64,
@@ -104,10 +108,13 @@ pub fn build(
     builder.property_string_list("compatible", &["arm,pl011", "arm,primecell"])?;
     builder.property_u64_pair(
         "reg",
-        super::super::console::BASE,
-        super::super::console::SIZE,
+        super::super::device::console::BASE,
+        super::super::device::console::SIZE,
     )?;
-    builder.property_cells("interrupts", &[0, super::super::console::INTERRUPT - 32, 4])?;
+    builder.property_cells(
+        "interrupts",
+        &[0, super::super::device::console::INTERRUPT - 32, 4],
+    )?;
     builder.property_cells("clocks", &[UART_CLOCK_PHANDLE, APB_CLOCK_PHANDLE])?;
     builder.property_string_list("clock-names", &["uartclk", "apb_pclk"])?;
     builder.end_node()?;
@@ -116,6 +123,72 @@ pub fn build(
     builder.finish()
 }
 
+#[cfg(target_arch = "riscv64")]
+pub fn build(
+    memory_base: u64,
+    memory_size: u64,
+    initramfs: Option<(u64, u64)>,
+    command_line: &str,
+    vcpu_count: u32,
+) -> Result<Vec<u8>, Error> {
+    const CPU_INTC_PHANDLE: u32 = 0x10;
+
+    let mut builder = Builder::new();
+    builder.begin_node("")?;
+    builder.property_u32("#address-cells", 2)?;
+    builder.property_u32("#size-cells", 2)?;
+    builder.property_string("compatible", "hyper,riscv-virtual-machine")?;
+    builder.property_string("model", "HypeR RISC-V virtual machine")?;
+
+    builder.begin_node("chosen")?;
+    builder.property_string("bootargs", command_line)?;
+    if let Some((start, end)) = initramfs {
+        builder.property_u64_cells("linux,initrd-start", start)?;
+        builder.property_u64_cells("linux,initrd-end", end)?;
+    }
+    builder.end_node()?;
+
+    builder.begin_node(&format!("memory@{memory_base:x}"))?;
+    builder.property_string("device_type", "memory")?;
+    builder.property_u64_pair("reg", memory_base, memory_size)?;
+    builder.end_node()?;
+
+    builder.begin_node("cpus")?;
+    builder.property_u32("#address-cells", 1)?;
+    builder.property_u32("#size-cells", 0)?;
+    builder.property_u32("timebase-frequency", 10_000_000)?;
+    for index in 0..vcpu_count {
+        builder.begin_node(&format!("cpu@{index:x}"))?;
+        builder.property_string("device_type", "cpu")?;
+        builder.property_string("compatible", "riscv")?;
+        builder.property_string("status", "okay")?;
+        builder.property_u32("reg", index)?;
+        builder.property_string("riscv,isa", "rv64imafdc")?;
+        builder.property_string("riscv,isa-base", "rv64i")?;
+        builder.property_string_list(
+            "riscv,isa-extensions",
+            &["i", "m", "a", "f", "d", "c", "zicsr", "zifencei"],
+        )?;
+        builder.property_string("mmu-type", "riscv,sv39")?;
+        builder.begin_node("interrupt-controller")?;
+        builder.property_empty("interrupt-controller")?;
+        builder.property_u32("#interrupt-cells", 1)?;
+        builder.property_string("compatible", "riscv,cpu-intc")?;
+        builder.property_u32("phandle", CPU_INTC_PHANDLE + index)?;
+        builder.end_node()?;
+        builder.end_node()?;
+    }
+    builder.end_node()?;
+
+    builder.begin_node("sbi")?;
+    builder.property_string("compatible", "riscv,sbi")?;
+    builder.end_node()?;
+
+    builder.end_node()?;
+    builder.finish()
+}
+
+#[cfg(target_arch = "aarch64")]
 fn fixed_clock(
     builder: &mut Builder,
     name: &str,

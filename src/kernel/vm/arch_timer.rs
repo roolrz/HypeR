@@ -1,6 +1,6 @@
 //! Running-vCPU bridge for the Arm virtual timer and vGIC.
 
-use hyper::drivers::interrupt::vgic::{Error as VgicError, VirtualCpuId};
+use hyper::vm::interrupt::{Error as VgicError, VirtualCpuId};
 
 use super::{VmInterruptController, active_vcpu};
 use crate::kernel::task::thread::VcpuExecution;
@@ -148,7 +148,7 @@ fn update_model(
 }
 
 fn set_timer_level(
-    controller: &mut hyper::drivers::interrupt::vgic::VirtualInterruptController,
+    controller: &mut hyper::vm::interrupt::VirtualInterruptController,
     interrupts: &VmInterruptController,
     vcpu: VirtualCpuId,
     asserted: bool,

@@ -39,3 +39,26 @@ pub trait InterruptController {
     fn acknowledge(&self) -> Option<InterruptId>;
     fn end(&self, interrupt: InterruptId);
 }
+
+/// Operations required by the kernel IRQ-domain policy in addition to the
+/// generic acknowledge/enable lifecycle.
+pub trait KernelInterruptController: InterruptController {
+    fn interrupt_count(&self) -> u32;
+    fn configure(
+        &mut self,
+        interrupt: InterruptId,
+        priority: u8,
+        trigger: InterruptTrigger,
+    ) -> Result<(), Self::Error>;
+
+    /// Returns whether state for this source must be installed on every CPU.
+    fn is_per_cpu(&self, interrupt: InterruptId) -> bool;
+
+    /// Initializes controller state private to the calling secondary CPU.
+    ///
+    /// # Safety
+    ///
+    /// Shared controller initialization must be complete and local interrupts
+    /// must remain masked.
+    unsafe fn initialize_local(&mut self) -> Result<(), Self::Error>;
+}
