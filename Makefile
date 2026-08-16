@@ -20,7 +20,7 @@ $(error unsupported ARCH '$(ARCH)')
 endif
 KERNEL_PROFILE := kernel
 CARGO_PROFILE := --profile $(KERNEL_PROFILE)
-CARGO_KERNEL := cargo build --target $(TARGET) $(CARGO_PROFILE) $(CARGO_FEATURES)
+CARGO_KERNEL = cargo build --target $(TARGET) $(CARGO_PROFILE) $(CARGO_FEATURES)
 QEMU_CPUS ?= 4
 QEMU_MEMORY ?= 512M
 HOST_TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')

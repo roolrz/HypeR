@@ -65,7 +65,7 @@ fn read_symbols(nm: &Path, elf: &Path) -> Result<Vec<FunctionSymbol>, Box<dyn Er
         let size = u32::from_str_radix(size, 16)?;
         if size != 0 {
             symbols.push(FunctionSymbol {
-                name: name.to_owned(),
+                name: normalize_symbol_name(name).to_owned(),
                 address,
                 size,
             });
@@ -74,6 +74,17 @@ fn read_symbols(nm: &Path, elf: &Path) -> Result<Vec<FunctionSymbol>, Box<dyn Er
     symbols.sort_unstable_by(compare_symbols);
     symbols.dedup_by(|later, earlier| later.address == earlier.address);
     Ok(symbols)
+}
+
+fn normalize_symbol_name(name: &str) -> &str {
+    let Some((base, suffix)) = name.rsplit_once(".llvm.") else {
+        return name;
+    };
+    if !base.is_empty() && !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        base
+    } else {
+        name
+    }
 }
 
 fn compare_symbols(left: &FunctionSymbol, right: &FunctionSymbol) -> Ordering {
@@ -135,4 +146,30 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) -> Result<(), Box<dyn 
         .ok_or("u64 output outside symbol image")?
         .copy_from_slice(&value.to_le_bytes());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_symbol_name;
+
+    #[test]
+    fn removes_an_llvm_private_numeric_suffix() {
+        assert_eq!(
+            normalize_symbol_name("hyper_exception_entry.llvm.6145726293629873893"),
+            "hyper_exception_entry"
+        );
+    }
+
+    #[test]
+    fn preserves_names_without_an_exact_llvm_private_suffix() {
+        for name in [
+            "hyper_exception_entry",
+            "hyper_exception_entry.llvm.",
+            ".llvm.1234",
+            "hyper_exception_entry.llvm.internal",
+            "hyper_exception_entry.llvm.1234.tail",
+        ] {
+            assert_eq!(normalize_symbol_name(name), name);
+        }
+    }
 }
