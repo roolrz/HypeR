@@ -13,9 +13,18 @@ initrd=$3
 cpu=$4
 memory=$5
 bootargs=$6
+timeout_seconds=${QEMU_BOOT_TIMEOUT_SECONDS:-180}
 temp=$(mktemp -d -t hyper-qemu-riscv64.XXXXXX)
 log=$temp/output.log
 pid=
+
+case "$timeout_seconds" in
+    ''|*[!0-9]*|0)
+        echo "QEMU_BOOT_TIMEOUT_SECONDS must be a positive integer" >&2
+        exit 2
+        ;;
+esac
+attempt_limit=$((timeout_seconds * 10))
 
 magic=$(dd if="$image" bs=1 skip=56 count=4 2>/dev/null | od -An -tx1 | tr -d ' \n')
 if [ "$magic" != "52534305" ]; then
@@ -52,7 +61,7 @@ trap 'exit 143' TERM
 pid=$!
 
 attempt=0
-while [ "$attempt" -lt 600 ]; do
+while [ "$attempt" -lt "$attempt_limit" ]; do
     if grep -q 'HypeR: early console initialized' "$log" &&
         grep -q 'HypeR: interrupt controller initialized with [1-9][0-9]* interrupt IDs' "$log" &&
         grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
@@ -77,5 +86,5 @@ while [ "$attempt" -lt 600 ]; do
 done
 
 cat "$log" >&2
-echo "timed out waiting for the RISC-V Linux guest to reach /init" >&2
+echo "timed out after ${timeout_seconds}s waiting for the RISC-V Linux guest to reach /init" >&2
 exit 1
