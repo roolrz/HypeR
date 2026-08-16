@@ -9,7 +9,7 @@ archive_sha256=9c364c26b233a8f7e2a56647cdd5e346b09c4070879fe8ea73011c130a92f023
 kernel_sha256=dc2f8add0afaecba3b75a0157d82317a7f09b555cad1c233f68ce82697255d76
 initramfs_sha256=d63639ef0e8c9cff9d835bae4ce75ce52552af710016debe9721cad7aaf74bd1
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 output=$root/target/guest/riscv64
 cache=${TMPDIR:-/tmp}/hyper-guest-cache-$version-riscv64
 work=$(mktemp -d "${TMPDIR:-/tmp}/hyper-riscv64-guest.XXXXXX")

@@ -7,7 +7,7 @@ base=https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/x86_64/netboot-$versio
 kernel_sha256=a49cf19ae5fa6470b215da782c47aed10c6d395414386b687df772946095241f
 initramfs_sha256=23eaf73bdf3122b842834ff29d46ae1ba1c4bffc88d242b1b85f446ad515d598
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 output=$root/target/guest/x86_64
 cache=${TMPDIR:-/tmp}/hyper-guest-cache-$version-x86_64
 work=$(mktemp -d "${TMPDIR:-/tmp}/hyper-x86_64-guest.XXXXXX")

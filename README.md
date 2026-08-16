@@ -91,22 +91,35 @@ raw Images.
 
 ## Continuous integration
 
-GitHub Actions runs independent required-quality stages for formatting and
-Clippy on all three architectures, host unit tests, canonical bare-metal builds,
-image ABI validation, AArch64 QEMU tests on the `cortex-a72` and `max` CPU
-models, a four-hart RISC-V QEMU test, and an x86-64 KVM/nested-VMX test.
-Architecture-appropriate runtime tests require the ramdisk-loaded Linux guest
-to execute `/init`; AArch64 additionally validates GICv3 and its virtual timer.
-Build artifacts contain both the ELF image used for debugging and the raw
-HypeR Image.
+GitHub Actions follows architecture-specific acceptance contracts. Shared
+quality jobs run formatting, ShellCheck, host unit tests, Kconfig tests, and
+kallsyms tests. AArch64 receives Clippy, canonical and self-test builds,
+stripped Image identity checks, ELF/Image ABI checks, and a five-case QEMU
+matrix. That matrix covers one and four CPUs in nVHE/LL-SC and VHE/LSE modes
+plus a two-CPU constrained-memory case. Every case requires the scheduler/sync
+and guarded-stack kernel tests, SMP admission, GICv3/vGIC, host and guest
+timers, virtual system registers, PL011 receive, KASLR geometry, allocator
+ownership, lazy guest demand paging, and Linux userspace.
+
+RISC-V has one runtime contract: the ramdisk-loaded Linux guest must boot and
+hand control to `/init`. x86-64 currently has a compile and link contract only;
+CI deliberately does not depend on `/dev/kvm`, VMX, or SVM execution. The
+detailed mapping and stable local entry points live in
+`tests/ci/README.md`. Failed QEMU jobs upload their complete serial logs, while
+the AArch64 build job publishes debugger-friendly ELF files and raw Images.
 
 The workflow installs the toolchain pinned by `rust-toolchain.toml`, grants only
 read access to repository contents, cancels superseded runs on the same ref,
-and always terminates QEMU processes before releasing a runner. The equivalent
-complete local validation is:
+and always terminates QEMU processes before releasing a runner. The complete
+local validation remains `make verify` for the selected architecture.
+Individual CI contracts can also be reproduced without reading workflow YAML:
 
 ```sh
-make verify
+sh tests/ci/run.sh quality
+sh tests/ci/run.sh aarch64-build
+QEMU_CPU=max QEMU_CPUS=4 sh tests/ci/run.sh aarch64-qemu
+sh tests/ci/run.sh riscv64-qemu
+sh tests/ci/run.sh x86_64-build
 ```
 
 Architectural constants live in `src/arch/aarch64/registers.rs`. The host-side

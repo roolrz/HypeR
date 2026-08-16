@@ -16,166 +16,154 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  lint:
-    name: Format and Clippy
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
-      - name: Check formatting and lints
-        run: |
-          make check
-          make check ARCH=riscv64
-          make check ARCH=x86_64
-          cargo fmt --all -- --check
-          cargo fmt --manifest-path tests/host/Cargo.toml -- --check
-          cargo fmt --manifest-path tools/kconfig/Cargo.toml -- --check
-          cargo fmt --manifest-path tools/kallsyms/Cargo.toml -- --check
-
-  test:
-    name: Host tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
-      - name: Run host and configuration tests
-        run: make test
-
-  build:
-    name: Build canonical kernel
-    runs-on: ubuntu-latest
+  quality:
+    name: Source and host-test quality
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - name: Build and verify stripped delivery copy
+      - name: Install script analysis
         run: |
-          make release ARCH=aarch64
-          make release ARCH=riscv64
-          make release ARCH=x86_64
-      - name: Upload canonical and stripped artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: hyper-kernels
-          path: |
-            target/aarch64-unknown-none/kernel/hyper
-            target/aarch64-unknown-none/kernel/hyper.img
-            target/aarch64-unknown-none/kernel/hyper.kallsyms
-            target/aarch64-unknown-none/kernel/hyper.stripped
-            target/aarch64-unknown-none/kernel/hyper.stripped.img
-            target/riscv64imac-unknown-none-elf/kernel/hyper
-            target/riscv64imac-unknown-none-elf/kernel/hyper.img
-            target/riscv64imac-unknown-none-elf/kernel/hyper.kallsyms
-            target/riscv64imac-unknown-none-elf/kernel/hyper.stripped
-            target/riscv64imac-unknown-none-elf/kernel/hyper.stripped.img
-            target/x86_64-unknown-none/kernel/hyper
-            target/x86_64-unknown-none/kernel/hyper.img
-            target/x86_64-unknown-none/kernel/hyper.kallsyms
-            target/x86_64-unknown-none/kernel/hyper.stripped
-            target/x86_64-unknown-none/kernel/hyper.stripped.img
-          if-no-files-found: error
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends shellcheck
+      - name: Check shell test infrastructure
+        run: sh tests/ci/run.sh scripts
+      - name: Check formatting and host-side behavior
+        run: sh tests/ci/run.sh quality
 
-  image-test:
-    name: Image tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    needs: build
+  aarch64-build:
+    name: AArch64 build and image contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: quality
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - name: Download kernel image
-        uses: actions/download-artifact@v4
+      - name: Build production and self-test images
+        run: sh tests/ci/run.sh aarch64-build
+      - name: Upload AArch64 images
+        uses: actions/upload-artifact@v4
         with:
-          name: hyper-kernels
-          path: target
-      - name: Verify image ABI and atomic backends
-        run: |
-          make test-image ARCH=aarch64
-          make test-image ARCH=riscv64
-          make test-image ARCH=x86_64
+          name: aarch64-kernels
+          path: target/ci/aarch64
+          if-no-files-found: error
+          retention-days: 7
 
-  qemu-boot:
-    name: Four-core QEMU (${{ matrix.cpu }})
-    runs-on: ubuntu-latest
+  aarch64-qemu:
+    name: AArch64 ${{ matrix.name }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    needs: [lint, test, build, image-test]
+    needs: aarch64-build
     strategy:
       fail-fast: false
       matrix:
-        cpu: [cortex-a72, max]
+        include:
+          - name: nVHE-UP
+            cpu: cortex-a72
+            cpus: 1
+            memory: 512M
+            host_mode: nVHE
+            atomic_backend: LL/SC
+          - name: nVHE-SMP
+            cpu: cortex-a72
+            cpus: 4
+            memory: 512M
+            host_mode: nVHE
+            atomic_backend: LL/SC
+          - name: VHE-UP
+            cpu: max
+            cpus: 1
+            memory: 512M
+            host_mode: VHE
+            atomic_backend: LSE
+          - name: VHE-SMP
+            cpu: max
+            cpus: 4
+            memory: 512M
+            host_mode: VHE
+            atomic_backend: LSE
+          - name: VHE-constrained-memory
+            cpu: max
+            cpus: 2
+            memory: 256M
+            host_mode: VHE
+            atomic_backend: LSE
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup
-      - name: Install QEMU
+      - name: Restore pinned AArch64 guest input
+        uses: actions/cache@v4
+        with:
+          path: target/guest/aarch64
+          key: guest-aarch64-${{ hashFiles('tools/guest/alpine-aarch64.manifest', 'tools/guest/fetch-alpine-aarch64.sh', 'tools/guest/init', 'tools/guest/boot.conf') }}
+      - name: Download AArch64 self-test image
+        uses: actions/download-artifact@v4
+        with:
+          name: aarch64-kernels
+          path: target/ci/aarch64
+      - name: Install AArch64 QEMU
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends cpio qemu-system-arm
-      - name: Verify host SMP and Linux guest init
-        run: make test-qemu QEMU_CPU=${{ matrix.cpu }}
-      - name: Clean up QEMU processes
+      - name: Verify AArch64 runtime feature contract
+        env:
+          QEMU_CPU: ${{ matrix.cpu }}
+          QEMU_CPUS: ${{ matrix.cpus }}
+          QEMU_MEMORY: ${{ matrix.memory }}
+          QEMU_EXPECT_HOST_MODE: ${{ matrix.host_mode }}
+          QEMU_EXPECT_ATOMIC_BACKEND: ${{ matrix.atomic_backend }}
+          QEMU_TEST_LOG: target/ci/logs/aarch64-${{ matrix.name }}.log
+        run: sh tests/ci/run.sh aarch64-qemu
+      - name: Clean up AArch64 QEMU
         if: always()
-        run: |
-          pkill -TERM -x qemu-system-aarch64 2>/dev/null || true
-          for attempt in 1 2 3 4 5; do
-            if ! pgrep -x qemu-system-aarch64 >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 1
-          done
-          pkill -KILL -x qemu-system-aarch64 2>/dev/null || true
+        run: sh tests/ci/cleanup-qemu.sh aarch64
+      - name: Upload AArch64 serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aarch64-${{ matrix.name }}-log
+          path: target/ci/logs/aarch64-${{ matrix.name }}.log
+          if-no-files-found: warn
+          retention-days: 7
 
-  qemu-riscv64:
-    name: Four-hart QEMU RISC-V
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    needs: [lint, test, build]
+  riscv64-qemu:
+    name: RISC-V Linux guest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: quality
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - name: Install QEMU
+      - name: Restore pinned RISC-V guest input
+        uses: actions/cache@v4
+        with:
+          path: target/guest/riscv64
+          key: guest-riscv64-${{ hashFiles('tools/guest/alpine-riscv64.manifest', 'tools/guest/fetch-alpine-riscv64.sh', 'tools/guest/init', 'tools/guest/boot.conf') }}
+      - name: Install RISC-V QEMU
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends cpio qemu-system-misc
-      - name: Verify RISC-V host SMP and Linux guest init
-        run: make test-qemu ARCH=riscv64 QEMU_CPU=rv64
-      - name: Clean up QEMU processes
+      - name: Require the RISC-V Linux guest to launch init
+        run: sh tests/ci/run.sh riscv64-qemu
+      - name: Clean up RISC-V QEMU
         if: always()
-        run: |
-          pkill -TERM -x qemu-system-riscv64 2>/dev/null || true
-          for attempt in 1 2 3 4 5; do
-            if ! pgrep -x qemu-system-riscv64 >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 1
-          done
-          pkill -KILL -x qemu-system-riscv64 2>/dev/null || true
+        run: sh tests/ci/cleanup-qemu.sh riscv64
+      - name: Upload RISC-V serial log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: riscv64-linux-log
+          path: target/ci/logs/riscv64.log
+          if-no-files-found: warn
+          retention-days: 7
 
-  qemu-x86-64:
-    name: Four-core QEMU x86-64
-    runs-on: ubuntu-latest
-    timeout-minutes: 25
-    needs: [lint, test, build]
+  x86_64-build:
+    name: x86-64 compile contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    needs: quality
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup
-      - name: Install QEMU and DT compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends cpio device-tree-compiler qemu-system-x86
-      - name: Verify x86-64 host SMP and Linux guest init
-        run: |
-          sudo chmod 666 /dev/kvm
-          QEMU_ACCEL=kvm make test-qemu ARCH=x86_64 QEMU_CPU=host,+invtsc
-      - name: Clean up QEMU processes
-        if: always()
-        run: |
-          pkill -TERM -x qemu-system-x86_64 2>/dev/null || true
-          for attempt in 1 2 3 4 5; do
-            if ! pgrep -x qemu-system-x86_64 >/dev/null 2>&1; then
-              exit 0
-            fi
-            sleep 1
-          done
-          pkill -KILL -x qemu-system-x86_64 2>/dev/null || true
+      - name: Compile and link x86-64
+        run: sh tests/ci/run.sh x86_64-build

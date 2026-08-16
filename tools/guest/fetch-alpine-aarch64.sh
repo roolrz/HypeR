@@ -8,7 +8,7 @@ kernel_sha256=1a2fa67cb25a2fa9065818712d50d0d543526818b3c6b43695e54deaca33d66d
 initramfs_sha256=df5281b4c36f812d0507e219e31a8a7482e0b4175097e292b75c7872c441295c
 zboot_payload_offset=51832
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 output=$root/target/guest/aarch64
 cache=${TMPDIR:-/tmp}/hyper-guest-cache-$version
 work=$(mktemp -d "${TMPDIR:-/tmp}/hyper-guest.XXXXXX")

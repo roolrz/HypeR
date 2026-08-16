@@ -4,6 +4,16 @@ description: Install the pinned Rust toolchain and bare-metal targets
 runs:
   using: composite
   steps:
+    - name: Cache Cargo downloads
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/index
+          ~/.cargo/git/db
+        key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          cargo-${{ runner.os }}-
     - name: Install Rust toolchain
       shell: bash
       run: |

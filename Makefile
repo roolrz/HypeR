@@ -81,7 +81,7 @@ GUEST_ASSET_STAMP := $(GUEST_OUTPUT)/.alpine-3.23.5.stamp
 endif
 HOST_INITRD := $(GUEST_OUTPUT)/hypervisor-initrd.cpio
 
-.PHONY: all prepare-config config defconfig olddefconfig guest-assets clean-guest-assets build image release check test test-image test-timer test-qemu verify verify-image verify-boot verify-smp run clean
+.PHONY: all prepare-config config defconfig olddefconfig guest-assets clean-guest-assets build image release check test test-image test-timer test-qemu verify verify-runtime verify-image verify-boot verify-smp run clean
 
 all: image
 
@@ -161,10 +161,19 @@ verify: check test
 	cargo fmt --manifest-path $(HOST_TEST_MANIFEST) -- --check
 	cargo fmt --manifest-path $(KCONFIG_MANIFEST) -- --check
 	cargo fmt --manifest-path $(KALLSYMS_MANIFEST) -- --check
-	$(if $(filter aarch64,$(ARCH)),$(MAKE) test-qemu ARCH=$(ARCH) QEMU_CPU=cortex-a72,$(MAKE) test-qemu ARCH=$(ARCH))
-	$(if $(filter aarch64,$(ARCH)),$(MAKE) test-qemu ARCH=$(ARCH) QEMU_CPU=max,true)
+	$(MAKE) verify-runtime ARCH=$(ARCH)
 	$(MAKE) release
 	$(MAKE) test-image ARCH=$(ARCH)
+
+verify-runtime:
+ifeq ($(ARCH),aarch64)
+	$(MAKE) test-qemu ARCH=aarch64 QEMU_CPU=cortex-a72
+	$(MAKE) test-qemu ARCH=aarch64 QEMU_CPU=max
+else ifeq ($(ARCH),riscv64)
+	$(MAKE) test-qemu ARCH=riscv64
+else
+	@echo "$(ARCH) has no runtime acceptance contract"
+endif
 
 test-image:
 	sh tests/image/verify-image.sh $(ARCH) $(READOBJ) $(NM) $(OBJDUMP) $(KERNEL_ELF) $(KERNEL_IMAGE) $(KALLSYMS_BLOB)
@@ -175,7 +184,7 @@ test-timer: image guest-assets
 test-timer: CARGO_FEATURES=--features kernel-self-test
 
 test-qemu: image guest-assets
-	sh $(QEMU_TEST_SCRIPT) $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
+	QEMU_CPUS=$(QEMU_CPUS) sh $(QEMU_TEST_SCRIPT) $(QEMU) $(KERNEL_IMAGE) $(HOST_INITRD) $(QEMU_CPU) $(QEMU_MEMORY) "$(QEMU_BOOTARGS)"
 
 test-qemu: CARGO_FEATURES=--features kernel-self-test
 

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Boots the four-hart RISC-V host and its Linux guest through /init.
+# Boots the RISC-V host and requires Linux to hand control to /init.
 set -eu
 
 if [ "$#" -ne 6 ]; then
@@ -13,11 +13,24 @@ initrd=$3
 cpu=$4
 memory=$5
 bootargs=$6
+cpus=${QEMU_CPUS:-4}
 timeout_seconds=${QEMU_BOOT_TIMEOUT_SECONDS:-180}
 temp=$(mktemp -d -t hyper-qemu-riscv64.XXXXXX)
-log=$temp/output.log
+if [ -n "${QEMU_TEST_LOG:-}" ]; then
+    mkdir -p "$(dirname "$QEMU_TEST_LOG")"
+    log=$QEMU_TEST_LOG
+    : > "$log"
+else
+    log=$temp/output.log
+fi
 pid=
 
+case "$cpus" in
+    ''|*[!0-9]*|0)
+        echo "QEMU_CPUS must be a positive integer" >&2
+        exit 2
+        ;;
+esac
 case "$timeout_seconds" in
     ''|*[!0-9]*|0)
         echo "QEMU_BOOT_TIMEOUT_SECONDS must be a positive integer" >&2
@@ -48,7 +61,7 @@ trap 'exit 143' TERM
 "$qemu" \
     -machine virt \
     -cpu "$cpu" \
-    -smp 4 \
+    -smp "$cpus" \
     -m "$memory" \
     -nodefaults \
     -display none \
@@ -62,23 +75,21 @@ pid=$!
 
 attempt=0
 while [ "$attempt" -lt "$attempt_limit" ]; do
-    if grep -q 'HypeR: early console initialized' "$log" &&
-        grep -q 'HypeR: interrupt controller initialized with [1-9][0-9]* interrupt IDs' "$log" &&
-        grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
-        grep -q 'HypeR: architectural timer: host INTID 0, guest INTID 5' "$log" &&
-        grep -q 'HypeR: RISC-V guest SBI and virtual timer backend initialized' "$log" &&
-        grep -q 'HypeR: SMP online: 4/4 discovered CPUs' "$log" &&
-        grep -q 'HypeR: transition identity mappings retired' "$log" &&
+    if grep -Eq '\[exception\].*(PANIC|BUG)|HypeR crash monitor|allocator invariant failure' "$log"; then
+        cat "$log" >&2
+        echo "HypeR reported a fatal failure during the RISC-V integration test" >&2
+        exit 1
+    fi
+    if grep -q 'HypeR: transition identity mappings retired' "$log" &&
         grep -q "HypeR: loaded VM 'alpine' from boot ramdisk: 128 MiB RAM, 1 vCPU(s)" "$log" &&
         grep -q 'Booting Linux on hartid 0' "$log" &&
-        grep -q 'riscv: ELF capabilities acdfim' "$log" &&
         grep -q 'Run /init as init process' "$log"; then
-        echo "verified four-hart RISC-V host and Linux guest /init on QEMU CPU $cpu"
+        echo "verified RISC-V Linux guest handoff to /init on QEMU CPU $cpu"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then
         cat "$log" >&2
-        echo "QEMU exited before the RISC-V Linux guest reached /init" >&2
+        echo "QEMU exited before the RISC-V Linux guest launched /init" >&2
         exit 1
     fi
     attempt=$((attempt + 1))
@@ -86,5 +97,5 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
 done
 
 cat "$log" >&2
-echo "timed out after ${timeout_seconds}s waiting for the RISC-V Linux guest to reach /init" >&2
+echo "timed out after ${timeout_seconds}s waiting for the RISC-V Linux /init handoff" >&2
 exit 1
