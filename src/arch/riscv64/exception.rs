@@ -213,8 +213,10 @@ extern "C" fn dispatch_trap(frame: &mut TrapFrame) {
     const INTERRUPT: u64 = 1 << 63;
     const SUPERVISOR_TIMER: u64 = 5;
     const SUPERVISOR_EXTERNAL: u64 = 9;
+    const SUPERVISOR_SOFTWARE: u64 = 1;
     if frame.scause & INTERRUPT != 0 {
         match frame.scause & !INTERRUPT {
+            SUPERVISOR_SOFTWARE => super::interrupts::clear_software_interrupt(),
             SUPERVISOR_TIMER => crate::kernel::irq::interrupt::dispatch(InterruptId::new(0)),
             SUPERVISOR_EXTERNAL => {
                 if let Some(interrupt) = crate::kernel::irq::interrupt::acknowledge_external() {

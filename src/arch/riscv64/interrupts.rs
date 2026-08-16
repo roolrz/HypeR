@@ -48,3 +48,12 @@ pub fn disable_all() {
         )
     };
 }
+
+pub fn enable_kernel_sources() {
+    let mask = (registers::SIE_SSIE | registers::SIE_SEIE) as usize;
+    unsafe { asm!("csrs sie, {mask}", mask = in(reg) mask, options(nomem, nostack)) };
+}
+
+pub fn clear_software_interrupt() {
+    unsafe { asm!("csrci sip, 2", options(nomem, nostack)) };
+}

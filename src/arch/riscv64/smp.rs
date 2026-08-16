@@ -1,9 +1,10 @@
 use core::arch::asm;
 use core::ptr::addr_of;
-use hyper::sync::atomic::{AtomicU64, Ordering};
+use hyper::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
 static HART_IDS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
+static HART_ONLINE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
 unsafe extern "C" {
     static riscv64_secondary_entry: u8;
@@ -56,6 +57,29 @@ pub fn current_hardware_id() -> u64 {
 pub fn initialize_boot_hart(hart_id: u64) {
     unsafe { asm!("mv tp, zero", options(nomem, nostack)) };
     HART_IDS[0].store(hart_id, Ordering::Release);
+    HART_ONLINE[0].store(true, Ordering::Release);
+}
+
+pub fn mark_current_hart_online() {
+    if let Some(online) = HART_ONLINE.get(current_cpu_index()) {
+        online.store(true, Ordering::Release);
+    }
+}
+
+pub fn for_each_online_remote_hart(
+    mut operation: impl FnMut(u64) -> Result<(), super::sbi::Error>,
+) -> Result<(), super::sbi::Error> {
+    let current = current_cpu_index();
+    for (cpu, online) in HART_ONLINE.iter().enumerate() {
+        if cpu == current || !online.load(Ordering::Acquire) {
+            continue;
+        }
+        let hart_id = HART_IDS[cpu].load(Ordering::Acquire);
+        if hart_id != u64::MAX {
+            operation(hart_id)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn register_hart(cpu_index: usize, hart_id: u64) -> bool {
@@ -66,7 +90,6 @@ pub fn register_hart(cpu_index: usize, hart_id: u64) -> bool {
 }
 
 pub fn send_event() {
-    // There is no architectural SEV equivalent. Pending interrupts and the
-    // scheduler's bounded polling provide the wakeup mechanism for now.
-    unsafe { asm!("fence rw, rw", options(nostack)) };
+    unsafe { asm!("fence iorw, iorw", options(nostack)) };
+    let _ = for_each_online_remote_hart(super::sbi::send_ipi);
 }

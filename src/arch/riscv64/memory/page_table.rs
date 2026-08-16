@@ -27,6 +27,7 @@ pub enum Error {
     InvalidAddress,
     InvalidRange,
     RuntimeAllocation,
+    RemoteFence(super::super::sbi::Error),
 }
 
 impl From<BootAllocatorError> for Error {
@@ -267,7 +268,7 @@ pub(super) fn map_runtime_stack(
             allocate,
         )?;
     }
-    flush_tlb();
+    flush_tlb()?;
     Ok(StackMapping {
         guard_page,
         bottom,
@@ -286,7 +287,7 @@ pub(super) fn unmap_runtime_stack(
         let (table, slot) = walk_leaf(root, address)?;
         runtime_write(table, slot, 0)?;
     }
-    flush_tlb();
+    flush_tlb()?;
     Ok(())
 }
 
@@ -362,7 +363,7 @@ pub(super) fn retire_identity_mappings(
     for &range in platform.mmio.as_slice() {
         retire_identity_range(root, align_down(range.start()), align_up(range.end())?)?;
     }
-    flush_tlb();
+    flush_tlb()?;
     Ok(())
 }
 
@@ -503,9 +504,15 @@ fn runtime_pointer(table: PhysicalAddress) -> Result<usize, Error> {
     usize::try_from(LINEAR_BASE + table.get()).map_err(|_| Error::InvalidAddress)
 }
 
-fn flush_tlb() {
-    // SAFETY: This orders page-table stores before a local translation flush.
+fn flush_tlb() -> Result<(), Error> {
+    // SAFETY: Publish page-table stores before invalidating this hart. SFENCE.VMA
+    // is local, so SBI RFENCE synchronously executes it on every other online
+    // hart that can retain translations from this shared address space.
     unsafe { asm!("fence rw, rw", "sfence.vma", options(nostack)) };
+    super::super::smp::for_each_online_remote_hart(|hart_id| {
+        super::super::sbi::remote_sfence_vma(hart_id, 0, usize::MAX)
+    })
+    .map_err(Error::RemoteFence)
 }
 
 fn range(start: u64, size: u64) -> Result<PhysicalRange, Error> {

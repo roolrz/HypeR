@@ -1,7 +1,9 @@
 //! Platform-Level Interrupt Controller for supervisor-mode RISC-V kernels.
 
+use core::marker::PhantomData;
 use core::ptr::{read_volatile, write_volatile};
 
+use crate::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use crate::hal::interrupt::{
     InterruptController, InterruptId, InterruptTrigger, KernelInterruptController,
 };
@@ -25,15 +27,16 @@ pub enum Error {
     UnsupportedTrigger,
 }
 
-pub struct Plic {
+pub struct Plic<B: Barrier> {
     base: usize,
     source_count: u32,
     contexts: [u32; MAX_PLIC_CONTEXTS],
     context_count: usize,
     hardware_id: fn() -> u64,
+    barrier: PhantomData<B>,
 }
 
-impl Plic {
+impl<B: Barrier> Plic<B> {
     /// Binds a PLIC to one permanent MMIO mapping.
     ///
     /// # Safety
@@ -53,6 +56,7 @@ impl Plic {
             contexts: info.supervisor_contexts,
             context_count: info.context_count,
             hardware_id,
+            barrier: PhantomData,
         };
         unsafe { controller.initialize_local()? };
         Ok(controller)
@@ -101,13 +105,13 @@ impl Plic {
             .checked_add(ENABLE_BASE + context * ENABLE_STRIDE + word * 4)
             .ok_or(Error::AddressOverflow)? as *mut u32;
         unsafe {
-            let mut value = read_volatile(register);
+            let mut value = read_mmio::<B>(register);
             if enabled {
                 value |= 1 << (source % 32);
             } else {
                 value &= !(1 << (source % 32));
             }
-            write_volatile(register, value);
+            write_mmio::<B>(register, value);
         }
         Ok(())
     }
@@ -151,7 +155,7 @@ fn validate_register_range(info: PlicInfo) -> Result<(), Error> {
     Ok(())
 }
 
-impl InterruptController for Plic {
+impl<B: Barrier> InterruptController for Plic<B> {
     type Error = Error;
 
     fn enable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error> {
@@ -164,7 +168,7 @@ impl InterruptController for Plic {
 
     fn acknowledge(&self) -> Option<InterruptId> {
         let context = self.context().ok()?;
-        let source = unsafe { read_volatile((context + CONTEXT_CLAIM) as *const u32) };
+        let source = unsafe { read_mmio::<B>((context + CONTEXT_CLAIM) as *const u32) };
         (source != 0 && source <= self.source_count).then_some(InterruptId::new(source))
     }
 
@@ -173,12 +177,12 @@ impl InterruptController for Plic {
             return;
         }
         if let Ok(context) = self.context() {
-            unsafe { write_volatile((context + CONTEXT_CLAIM) as *mut u32, interrupt.get()) };
+            unsafe { write_mmio::<B>((context + CONTEXT_CLAIM) as *mut u32, interrupt.get()) };
         }
     }
 }
 
-impl KernelInterruptController for Plic {
+impl<B: Barrier> KernelInterruptController for Plic<B> {
     fn interrupt_count(&self) -> u32 {
         self.source_count.saturating_add(1)
     }
@@ -197,7 +201,7 @@ impl KernelInterruptController for Plic {
             return Err(Error::UnsupportedTrigger);
         }
         unsafe {
-            write_volatile(
+            write_mmio::<B>(
                 (self.base + PRIORITY_BASE + source as usize * 4) as *mut u32,
                 1,
             )
@@ -211,7 +215,20 @@ impl KernelInterruptController for Plic {
 
     unsafe fn initialize_local(&mut self) -> Result<(), Self::Error> {
         let context = self.context()?;
-        unsafe { write_volatile((context + CONTEXT_THRESHOLD) as *mut u32, 0) };
+        unsafe { write_mmio::<B>((context + CONTEXT_THRESHOLD) as *mut u32, 0) };
         Ok(())
     }
+}
+
+unsafe fn read_mmio<B: Barrier>(register: *const u32) -> u32 {
+    B::data_memory(BarrierDomain::FullSystem, BarrierAccess::All);
+    let value = unsafe { read_volatile(register) };
+    B::data_memory(BarrierDomain::FullSystem, BarrierAccess::All);
+    value
+}
+
+unsafe fn write_mmio<B: Barrier>(register: *mut u32, value: u32) {
+    B::data_memory(BarrierDomain::FullSystem, BarrierAccess::All);
+    unsafe { write_volatile(register, value) };
+    B::data_memory(BarrierDomain::FullSystem, BarrierAccess::All);
 }

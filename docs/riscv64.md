@@ -8,21 +8,22 @@ than every historical RISC-V board:
 - RV64GC host execution with the H extension
 - Sv39 HS address translation and Sv39x4 guest-stage translation
 - SSTC supervisor timer compare for guest virtual timers
+- Zicbom cache-block management with a DT-described CBO block size
 - SBI base, TIME, IPI, RFENCE, HSM, and SRST firmware services
 - QEMU `virt`, OpenSBI, PLIC, ACLINT timers, and NS16550 early console
 - four host harts and one Linux guest vCPU
 
-HypeR validates the firmware DTB for PLIC, timebase, and SSTC data before using
-those facilities. Missing mandatory virtualization or timer facilities are a
+HypeR validates every enabled hart for H, F, D, SSTC, and Zicbom and requires a
+consistent `riscv,cbom-block-size`. Missing mandatory facilities are a
 boot-time platform error; silently selecting a weaker execution model would
 make guest behavior depend on accidental QEMU defaults.
 
 The Rust target remains `riscv64imac-unknown-none-elf`. Ordinary Rust kernel
 code therefore has a conservative soft-float baseline. Clang compiles the
 small architecture assembly set with RV64GC+H but `-mabi=lp64`, keeping object
-ABIs compatible while isolating H, F, and D instructions. Guest floating-point
-state is initialized deterministically and has an explicit save/restore
-context.
+ABIs compatible while isolating H, F, D, and Zicbom instructions. Guest
+floating-point state is initialized deterministically and has an explicit
+save/restore context.
 
 ## Architecture boundaries
 
@@ -65,5 +66,10 @@ artifacts and are not part of the Apache-2.0 source tree.
   block, or network device.
 - Guest WFI currently traps to HS and resumes cooperatively. A scheduler-aware
   blocked-vCPU path is required before guest timeslicing.
-- Cache maintenance assumes QEMU's coherent platform. Real non-coherent RISC-V
-  platforms need a discoverable cache-block-management or platform backend.
+- Stage-1 and active stage-2 invalidation use SBI RFENCE for every other online
+  hart; local `SFENCE.VMA` and `HFENCE.GVMA` are never treated as shootdowns.
+- Cache publication and invalidation use Zicbom CBOs bracketed by full
+  memory-and-I/O fences. Firmware must permit HS-mode CBO execution through the
+  corresponding environment configuration.
+- PLIC and NS16550 are the only current host devices; a platform-specific cache
+  maintenance backend for hardware without Zicbom is not implemented.

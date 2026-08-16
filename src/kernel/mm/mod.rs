@@ -79,11 +79,7 @@ pub(crate) fn finalize_address_space() {
         );
         crate::println!(
             "HypeR: atomic RMW backend: {}",
-            if atomic_capabilities.lse {
-                "LSE"
-            } else {
-                "LL/SC"
-            }
+            atomic_capabilities.backend_name()
         );
         crate::println!(
             "HypeR: {} boot reservations, {} RAM regions, root {:#x}",

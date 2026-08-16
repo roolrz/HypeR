@@ -4,7 +4,7 @@ use hyper::hal::interrupt::{
 };
 use hyper::platform::InterruptControllerInfo;
 
-pub struct Riscv64InterruptController(Plic);
+pub struct Riscv64InterruptController(Plic<super::barrier::Riscv64Barrier>);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -78,6 +78,8 @@ impl KernelInterruptController for Riscv64InterruptController {
     }
 
     unsafe fn initialize_local(&mut self) -> Result<(), Self::Error> {
-        unsafe { self.0.initialize_local() }.map_err(Into::into)
+        unsafe { self.0.initialize_local() }.map_err(Error::from)?;
+        super::interrupts::enable_kernel_sources();
+        Ok(())
     }
 }

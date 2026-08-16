@@ -220,6 +220,9 @@ fn prepare_final_memory(
 pub(crate) fn enter_runtime() -> Initialization {
     let (essential, early_console, dtb_address) =
         with_boot_state(|state| (state.essential, state.early_console, state.dtb_address));
+    if let Err(error) = crate::arch::prepare_cache(&essential) {
+        fail("cache initialization", error);
+    }
     let linear_dtb = match mm::memory::linear_address(dtb_address) {
         Some(address) => address,
         None => fail("DTB linear-address translation", dtb_address),

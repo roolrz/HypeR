@@ -30,6 +30,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/arch/riscv64/trap.S");
     println!("cargo:rerun-if-changed=src/arch/riscv64/context.S");
     println!("cargo:rerun-if-changed=src/arch/riscv64/guest.S");
+    println!("cargo:rerun-if-changed=src/arch/riscv64/cache.S");
     println!("cargo:rerun-if-changed=src/arch/riscv64/registers.rs");
     println!("cargo:rerun-if-changed=src/arch/riscv64/linker.ld");
     println!("cargo:rerun-if-changed=Kconfig");
@@ -63,6 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 ("src/arch/riscv64/trap.S", "riscv64_trap.o"),
                 ("src/arch/riscv64/context.S", "riscv64_context.o"),
                 ("src/arch/riscv64/guest.S", "riscv64_guest.o"),
+                ("src/arch/riscv64/cache.S", "riscv64_cache.o"),
             ],
         ),
         _ => return Ok(()),
@@ -72,7 +74,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         let object_path = output_directory.join(object_name);
         compile_assembly(
             clang_target,
-            (target == "riscv64imac-unknown-none-elf").then_some("rv64imafdc_h_zicsr_zifencei"),
+            (target == "riscv64imac-unknown-none-elf")
+                .then_some("rv64imafdc_h_zicsr_zifencei_zicbom"),
             source,
             &output_directory,
             &object_path,

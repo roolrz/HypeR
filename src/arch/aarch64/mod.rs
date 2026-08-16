@@ -91,7 +91,15 @@ pub fn register_secondary_hardware_id(_cpu_index: usize, _hardware_id: u64) -> b
     true
 }
 
+pub fn mark_current_cpu_online() {}
+
 pub fn prepare_timekeeping(_platform: &EssentialPlatformInfo) -> Result<(), TimerError> {
+    Ok(())
+}
+
+pub fn prepare_cache(
+    _platform: &EssentialPlatformInfo,
+) -> Result<(), hyper::hal::cache::CacheError> {
     Ok(())
 }
 

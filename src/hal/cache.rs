@@ -2,6 +2,8 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheError {
     AddressOverflow,
+    InvalidLineSize,
+    NotInitialized,
 }
 
 /// Architecture policy for cache maintenance by virtual address.

@@ -14,6 +14,7 @@ pub struct EssentialPlatformInfo {
     pub interrupt_controller: Option<InterruptControllerInfo>,
     pub timer: Option<TimerInfo>,
     pub timebase_frequency: u64,
+    pub cache_block_size: usize,
     claims: [Option<NodeId>; MAX_CLAIMS],
     claim_count: usize,
 }
@@ -33,6 +34,9 @@ pub enum Error {
     MissingPlic,
     MissingSstc,
     MissingTimebase,
+    MissingZicbom,
+    InvalidCacheBlockSize,
+    InconsistentCacheBlockSize,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +48,8 @@ struct Candidate {
     hypervisor_extension: bool,
     single_precision: bool,
     double_precision: bool,
+    cache_block_management: bool,
+    cache_block_size: Option<u32>,
 }
 
 impl Candidate {
@@ -55,6 +61,8 @@ impl Candidate {
         hypervisor_extension: false,
         single_precision: false,
         double_precision: false,
+        cache_block_management: false,
+        cache_block_size: None,
     };
 }
 
@@ -64,6 +72,7 @@ pub struct EssentialDeviceDiscovery {
     plic: Option<(NodeId, PhysicalRange, u32)>,
     timebase_frequency: Option<u64>,
     enabled_cpu_count: usize,
+    cache_block_size: Option<u32>,
     error: Option<Error>,
 }
 
@@ -75,6 +84,7 @@ impl EssentialDeviceDiscovery {
             plic: None,
             timebase_frequency: None,
             enabled_cpu_count: 0,
+            cache_block_size: None,
             error: None,
         }
     }
@@ -117,6 +127,10 @@ impl EssentialDeviceDiscovery {
                 },
             }),
             timebase_frequency: frequency,
+            cache_block_size: usize::try_from(
+                self.cache_block_size.ok_or(Error::InvalidCacheBlockSize)?,
+            )
+            .map_err(|_| Error::InvalidCacheBlockSize)?,
             claims: [Some(plic_node), None, None, None, None, None, None, None],
             claim_count: 1,
         })
@@ -171,15 +185,23 @@ impl NodeVisitor for EssentialDeviceDiscovery {
                 candidate.single_precision |= base.contains(&b'f');
                 candidate.double_precision |= base.contains(&b'd');
                 candidate.supervisor_timer_compare |= value
-                    .split(|byte| *byte == b'_')
+                    .split(|byte| *byte == b'_' || *byte == 0)
                     .any(|extension| extension.starts_with(b"sstc"));
+                candidate.cache_block_management |= value
+                    .split(|byte| *byte == b'_' || *byte == 0)
+                    .any(|extension| extension.starts_with(b"zicbom"));
             }
             "riscv,isa-extensions" => {
                 candidate.supervisor_timer_compare |= string_list_contains(value, "sstc");
                 candidate.hypervisor_extension |= string_list_contains(value, "h");
                 candidate.single_precision |= string_list_contains(value, "f");
                 candidate.double_precision |= string_list_contains(value, "d");
+                candidate.cache_block_management |= string_list_contains(value, "zicbom");
             }
+            "riscv,cbom-block-size" => match read_u32(value) {
+                Ok(value) => candidate.cache_block_size = Some(value),
+                Err(error) => self.error = Some(error),
+            },
             _ => {}
         }
     }
@@ -205,6 +227,26 @@ impl NodeVisitor for EssentialDeviceDiscovery {
             {
                 self.error = Some(Error::MissingRequiredIsa);
                 return;
+            }
+            if !candidate.cache_block_management {
+                self.error = Some(Error::MissingZicbom);
+                return;
+            }
+            let Some(block_size) = candidate.cache_block_size else {
+                self.error = Some(Error::InvalidCacheBlockSize);
+                return;
+            };
+            if block_size == 0 || !block_size.is_power_of_two() {
+                self.error = Some(Error::InvalidCacheBlockSize);
+                return;
+            }
+            match self.cache_block_size {
+                Some(previous) if previous != block_size => {
+                    self.error = Some(Error::InconsistentCacheBlockSize);
+                    return;
+                }
+                Some(_) => {}
+                None => self.cache_block_size = Some(block_size),
             }
             self.enabled_cpu_count = self.enabled_cpu_count.saturating_add(1);
         }

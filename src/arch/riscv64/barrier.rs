@@ -19,15 +19,12 @@ impl Barrier for Riscv64Barrier {
     }
 }
 
-fn fence(access: BarrierAccess) {
-    // RISC-V FENCE has no Arm-style shareability domains. HypeR supports only
-    // coherent application-class platforms, so the full predecessor/successor
-    // sets provide the portable interpretation of the HAL contract.
-    unsafe {
-        match access {
-            BarrierAccess::Reads => asm!("fence r, r", options(nostack)),
-            BarrierAccess::Writes => asm!("fence w, w", options(nostack)),
-            BarrierAccess::All => asm!("fence rw, rw", options(nostack)),
-        }
-    }
+fn fence(_access: BarrierAccess) {
+    // RISC-V FENCE has no Arm-style shareability domains. Include both memory
+    // and device-I/O sets: platform MMIO may be classified as I/O rather than
+    // ordinary reads and writes by the execution environment.
+    // The HAL access classes follow Arm's DMB/DSB semantics, which do not map
+    // exactly onto RISC-V predecessor/successor sets. A full fence is the
+    // conservative portable implementation for every class.
+    unsafe { asm!("fence iorw, iorw", options(nostack)) }
 }

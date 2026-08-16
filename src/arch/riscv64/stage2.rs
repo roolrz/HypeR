@@ -20,6 +20,7 @@ pub enum Error {
     InvalidAddress,
     InvalidRange,
     InvalidVmid,
+    RemoteFence(super::sbi::Error),
 }
 
 pub struct Stage2AddressSpace {
@@ -92,16 +93,14 @@ impl Stage2AddressSpace {
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         self.map_normal_page(ipa, physical, allocator)?;
-        unsafe { invalidate(self.vmid) };
-        Ok(())
+        unsafe { invalidate(self.vmid) }
     }
 
     pub unsafe fn invalidate_page_active(&self, ipa: u64) -> Result<(), Error> {
         if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= registers::STAGE2_IPA_LIMIT {
             return Err(Error::InvalidAddress);
         }
-        unsafe { invalidate(self.vmid) };
-        Ok(())
+        unsafe { invalidate(self.vmid) }
     }
 
     #[allow(dead_code)]
@@ -224,8 +223,12 @@ fn covering_regions(start: u64, end: u64, span: u64) -> Result<usize, Error> {
     usize::try_from(last - first + 1).map_err(|_| Error::AddressOverflow)
 }
 
-unsafe fn invalidate(vmid: u16) {
+unsafe fn invalidate(vmid: u16) -> Result<(), Error> {
     unsafe { riscv64_invalidate_stage2_vmid(usize::from(vmid)) };
+    super::smp::for_each_online_remote_hart(|hart_id| {
+        super::sbi::remote_hfence_gvma_vmid(hart_id, vmid)
+    })
+    .map_err(Error::RemoteFence)
 }
 
 unsafe extern "C" {

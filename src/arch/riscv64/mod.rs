@@ -58,11 +58,15 @@ pub use timer::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AtomicCapabilities {
-    pub lse: bool,
+pub struct AtomicCapabilities;
+
+impl AtomicCapabilities {
+    pub const fn backend_name(self) -> &'static str {
+        "RV64A AMO/LR-SC"
+    }
 }
 pub const fn atomic_capabilities() -> AtomicCapabilities {
-    AtomicCapabilities { lse: false }
+    AtomicCapabilities
 }
 
 pub fn initialize_cpu_power(
@@ -83,8 +87,16 @@ pub fn interrupt_is_per_cpu(interrupt: hyper::hal::interrupt::InterruptId) -> bo
 pub fn register_secondary_hardware_id(cpu_index: usize, hardware_id: u64) -> bool {
     smp::register_hart(cpu_index, hardware_id)
 }
+pub fn mark_current_cpu_online() {
+    smp::mark_current_hart_online();
+}
 pub fn prepare_timekeeping(platform: &EssentialPlatformInfo) -> Result<(), TimerError> {
     timer::set_frequency(platform.timebase_frequency)
+}
+pub fn prepare_cache(
+    platform: &EssentialPlatformInfo,
+) -> Result<(), hyper::hal::cache::CacheError> {
+    cache::initialize(platform.cache_block_size)
 }
 
 pub unsafe fn prepare_address_space(

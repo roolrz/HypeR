@@ -9,6 +9,8 @@ const EID_BASE: usize = 0x10;
 const EID_TIME: usize = 0x5449_4d45;
 const EID_HSM: usize = 0x0048_534d;
 const EID_SRST: usize = 0x5352_5354;
+const EID_RFENCE: usize = 0x5246_4e43;
+const EID_IPI: usize = 0x0073_5049;
 
 const FID_BASE_GET_SPEC_VERSION: usize = 0;
 const FID_BASE_PROBE_EXTENSION: usize = 3;
@@ -18,6 +20,9 @@ const FID_HSM_HART_STOP: usize = 1;
 const FID_HSM_HART_STATUS: usize = 2;
 const FID_HSM_HART_SUSPEND: usize = 3;
 const FID_SRST_RESET: usize = 0;
+const FID_RFENCE_REMOTE_SFENCE_VMA: usize = 1;
+const FID_RFENCE_REMOTE_HFENCE_GVMA_VMID: usize = 3;
+const FID_IPI_SEND_IPI: usize = 0;
 
 const SBI_SUCCESS: isize = 0;
 const SBI_ERR_FAILED: isize = -1;
@@ -62,7 +67,7 @@ pub fn bind() -> Result<Sbi, Error> {
     if major == 0 && minor < 2 {
         return Err(Error::UnsupportedVersion);
     }
-    if !probe(EID_HSM)? || !probe(EID_TIME)? {
+    if !probe(EID_HSM)? || !probe(EID_TIME)? || !probe(EID_RFENCE)? || !probe(EID_IPI)? {
         return Err(Error::MissingRequiredExtension);
     }
     Ok(Sbi {
@@ -76,6 +81,41 @@ pub fn bind() -> Result<Sbi, Error> {
             system_reset: probe(EID_SRST)?,
         },
     })
+}
+
+pub fn send_ipi(hart_id: u64) -> Result<(), Error> {
+    let hart_mask_base = usize::try_from(hart_id).map_err(|_| Error::InvalidParameter)?;
+    call(EID_IPI, FID_IPI_SEND_IPI, [1, hart_mask_base, 0, 0, 0, 0]).map(|_| ())
+}
+
+pub fn remote_sfence_vma(hart_id: u64, start: usize, size: usize) -> Result<(), Error> {
+    remote_fence(FID_RFENCE_REMOTE_SFENCE_VMA, hart_id, start, size, 0)
+}
+
+pub fn remote_hfence_gvma_vmid(hart_id: u64, vmid: u16) -> Result<(), Error> {
+    remote_fence(
+        FID_RFENCE_REMOTE_HFENCE_GVMA_VMID,
+        hart_id,
+        0,
+        usize::MAX,
+        usize::from(vmid),
+    )
+}
+
+fn remote_fence(
+    function: usize,
+    hart_id: u64,
+    start: usize,
+    size: usize,
+    argument: usize,
+) -> Result<(), Error> {
+    let hart_mask_base = usize::try_from(hart_id).map_err(|_| Error::InvalidParameter)?;
+    call(
+        EID_RFENCE,
+        function,
+        [1, hart_mask_base, start, size, argument, 0],
+    )
+    .map(|_| ())
 }
 
 pub fn set_timer(deadline: u64) -> Result<(), Error> {

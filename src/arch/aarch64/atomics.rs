@@ -12,7 +12,13 @@ unsafe extern "C" {
 /// Runtime atomic capabilities selected for the admitted processing elements.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AtomicCapabilities {
-    pub lse: bool,
+    lse: bool,
+}
+
+impl AtomicCapabilities {
+    pub const fn backend_name(self) -> &'static str {
+        if self.lse { "LSE" } else { "LL/SC" }
+    }
 }
 
 /// Selects the fastest atomic backend supported by the boot CPU.

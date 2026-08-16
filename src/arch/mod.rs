@@ -34,11 +34,12 @@ pub use aarch64::{
     current_cpu_index, current_hardware_id, decode_platform_interrupt, disable_local_interrupts,
     disable_vgic, enable_local_irq, halt, initialize_cpu_power, install_exception_stacks,
     install_runtime_vectors, interrupt_is_per_cpu, is_crash_stop_interrupt, local_irq_enabled,
-    poll_guest_timer, prepare_address_space, prepare_timekeeping, register_secondary_hardware_id,
-    reset_stack_and_enter, run_on_emergency_stack, secondary_cpu_is_compatible,
-    secondary_entry_physical, select_kaslr_layout, send_event, switch_thread_context,
-    take_guest_timer_wakeup, validate_runtime_vectors, validate_vgic, validate_vsysreg,
-    vgic_maintenance_state, wait_for_event,
+    mark_current_cpu_online, poll_guest_timer, prepare_address_space, prepare_cache,
+    prepare_timekeeping, register_secondary_hardware_id, reset_stack_and_enter,
+    run_on_emergency_stack, secondary_cpu_is_compatible, secondary_entry_physical,
+    select_kaslr_layout, send_event, switch_thread_context, take_guest_timer_wakeup,
+    validate_runtime_vectors, validate_vgic, validate_vsysreg, vgic_maintenance_state,
+    wait_for_event,
 };
 #[cfg(target_arch = "riscv64")]
 pub use riscv64::{
@@ -52,10 +53,11 @@ pub use riscv64::{
     crash_stop_interrupt, current_cpu_index, current_hardware_id, decode_platform_interrupt,
     disable_local_interrupts, enable_local_irq, halt, initialize_cpu_power,
     install_exception_stacks, install_runtime_vectors, interrupt_is_per_cpu, local_irq_enabled,
-    poll_guest_timer, prepare_address_space, prepare_timekeeping, register_secondary_hardware_id,
-    reset_stack_and_enter, run_on_emergency_stack, secondary_cpu_is_compatible,
-    secondary_entry_physical, select_kaslr_layout, send_event, switch_thread_context,
-    take_guest_timer_wakeup, validate_runtime_vectors, validate_vsysreg, wait_for_event,
+    mark_current_cpu_online, poll_guest_timer, prepare_address_space, prepare_cache,
+    prepare_timekeeping, register_secondary_hardware_id, reset_stack_and_enter,
+    run_on_emergency_stack, secondary_cpu_is_compatible, secondary_entry_physical,
+    select_kaslr_layout, send_event, switch_thread_context, take_guest_timer_wakeup,
+    validate_runtime_vectors, validate_vsysreg, wait_for_event,
 };
 
 #[cfg(all(target_arch = "aarch64", CONFIG_CRASH_CONSOLE))]

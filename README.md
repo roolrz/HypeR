@@ -126,12 +126,13 @@ recovery uses the selected base rather than a compile-time VA.
 
 ## RISC-V profile
 
-The initial RISC-V host profile is RV64GC with the H extension, Sv39 for HS
-translation, Sv39x4 for guest-stage translation, and SSTC for direct guest
-timer compare. Firmware must provide SBI base, TIME, IPI, RFENCE, HSM, and SRST
-services. The supported board profile is QEMU `virt` with OpenSBI, the legacy
-PLIC binding, ACLINT-backed supervisor timers, and an NS16550 early console.
-The DTB is validated for SSTC before the kernel enables the guest timer path.
+The initial RISC-V host profile is RV64GC with the H, SSTC, and Zicbom
+extensions, Sv39 for HS translation, and Sv39x4 for guest-stage translation.
+Firmware must provide SBI base, TIME, IPI, RFENCE, HSM, and SRST services. The
+supported board profile is QEMU `virt` with OpenSBI, the legacy PLIC binding,
+ACLINT-backed supervisor timers, and an NS16550 early console. Every enabled
+hart is validated independently, including a consistent DT-described CBO block
+size, before the kernel enables cache maintenance or guest timers.
 
 Rust kernel code retains the built-in `riscv64imac-unknown-none-elf` baseline;
 H-extension and floating-point instructions are isolated in architecture

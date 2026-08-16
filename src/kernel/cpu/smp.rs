@@ -121,8 +121,8 @@ pub fn initialize(
 
         // SAFETY: The parameter record is fully initialized, remains owned by
         // this boot path, and is not modified until the secondary has consumed
-        // it. Cleaning to PoC is required because PSCI starts the secondary
-        // with data caching disabled.
+        // it. Publish dirty cache lines before firmware starts a CPU that may
+        // not yet participate in the boot CPU's coherent cache domain.
         unsafe {
             crate::arch::ArchitectureCache::publish_data_range(
                 (&*parameters) as *const _ as usize,
@@ -185,6 +185,7 @@ pub fn secondary_entry(cpu_index: usize) -> ! {
 }
 
 extern "C" fn enter_clean_idle(cpu_index: usize) -> ! {
+    crate::arch::mark_current_cpu_online();
     ONLINE[cpu_index].store(true, Ordering::Release);
     crate::arch::send_event();
     crate::println!(
