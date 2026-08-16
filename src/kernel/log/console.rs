@@ -71,14 +71,7 @@ pub fn flush() {
 
 /// Writes a best-effort fatal message without waiting for kernel log locks.
 pub(super) fn emergency_write(message: &[u8]) {
-    let metadata = EMERGENCY_CONSOLE_METADATA.load(Ordering::Acquire);
-    let handle = EmergencyConsoleHandle {
-        base: EMERGENCY_CONSOLE.load(Ordering::Relaxed),
-        metadata,
-    };
-    // SAFETY: install publishes handles only after binding a permanent MMIO
-    // mapping. Crash handling is the sole lock-free writer to that device.
-    let Some(device) = (unsafe { ConsoleDevice::from_emergency_handle(handle) }) else {
+    let Some(device) = emergency_device() else {
         return;
     };
     device.write_bytes(b"<0>[exception] ");
@@ -86,6 +79,34 @@ pub(super) fn emergency_write(message: &[u8]) {
     if !message.ends_with(b"\n") {
         device.write_bytes(b"\n");
     }
+}
+
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub(super) fn emergency_available() -> bool {
+    emergency_device().is_some()
+}
+
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub(super) fn emergency_write_raw(bytes: &[u8]) {
+    if let Some(device) = emergency_device() {
+        device.write_bytes(bytes);
+    }
+}
+
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub(super) fn emergency_read_raw() -> Option<u8> {
+    emergency_device().and_then(|device| device.try_read_byte())
+}
+
+fn emergency_device() -> Option<ConsoleDevice> {
+    let metadata = EMERGENCY_CONSOLE_METADATA.load(Ordering::Acquire);
+    let handle = EmergencyConsoleHandle {
+        base: EMERGENCY_CONSOLE.load(Ordering::Relaxed),
+        metadata,
+    };
+    // SAFETY: install publishes handles only after binding a permanent MMIO
+    // mapping. Crash handling is the sole lock-free user after other CPUs stop.
+    unsafe { ConsoleDevice::from_emergency_handle(handle) }
 }
 
 /// Writes one guest-console byte through the selected host console without

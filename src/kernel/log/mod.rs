@@ -133,6 +133,21 @@ pub fn emergency(arguments: fmt::Arguments<'_>) {
     console::emergency_write(formatted.as_slice());
 }
 
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub(crate) fn crash_console_available() -> bool {
+    console::emergency_available()
+}
+
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub(crate) fn crash_console_write(bytes: &[u8]) {
+    console::emergency_write_raw(bytes);
+}
+
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub(crate) fn crash_console_read() -> Option<u8> {
+    console::emergency_read_raw()
+}
+
 #[macro_export]
 macro_rules! printk {
     ($level:expr, $($argument:tt)*) => {{

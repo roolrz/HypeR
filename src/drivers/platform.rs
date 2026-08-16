@@ -63,6 +63,10 @@ impl PlatformDevice {
         &self.properties
     }
 
+    /// Returns an unnormalized firmware property.
+    ///
+    /// Core binding data such as `compatible` and `interrupts` is exposed by
+    /// dedicated accessors and is not duplicated in this collection.
     pub fn property(&self, name: &str) -> Option<&[u8]> {
         self.properties
             .iter()
@@ -145,6 +149,9 @@ impl<'a> DeviceScanner<'a> {
                 let raw: [u8; 4] = cell.try_into().map_err(|_| ScanError::MalformedProperty)?;
                 builder.interrupt_cells.push(u32::from_be_bytes(raw));
             }
+        }
+        if matches!(name, "compatible" | "interrupts") {
+            return Ok(());
         }
         builder
             .properties
@@ -324,7 +331,8 @@ impl DriverManager {
         services: &dyn DriverServices,
     ) -> ProbeReport {
         let mut report = ProbeReport::default();
-        for device in devices {
+        let mut deferred = Vec::new();
+        for (index, device) in devices.iter().enumerate() {
             if self
                 .bindings
                 .iter()
@@ -332,43 +340,107 @@ impl DriverManager {
             {
                 continue;
             }
-            let driver = self.drivers.iter().copied().find(|driver| {
-                driver
-                    .compatible_table()
-                    .iter()
-                    .any(|compatible| device.is_compatible(compatible))
-            });
-            let Some(driver) = driver else {
+            let Some(driver) = self.matching_driver(device) else {
                 report.unmatched += 1;
                 continue;
             };
-            match driver.probe(device, services) {
-                Ok(instance) => {
-                    if self.bindings.try_reserve(1).is_err() {
+            match self.bind(driver, device, services) {
+                Ok(()) => report.bound += 1,
+                Err(ProbeError::Deferred) => {
+                    if deferred.try_reserve(1).is_ok() {
+                        deferred.push(index);
+                    } else {
                         report.failed += 1;
-                        continue;
                     }
-                    self.bindings.push(Binding {
-                        device_id: device.id(),
-                        driver_name: driver.name(),
-                        instance,
-                        suspended: false,
-                    });
-                    report.bound += 1;
                 }
-                Err(ProbeError::Deferred) => report.deferred += 1,
                 Err(_) => report.failed += 1,
             }
         }
+        self.retry_deferred(devices, services, deferred, &mut report);
         report
     }
 
-    pub fn suspend_all(&mut self) -> Result<(), ProbeError> {
-        for binding in self.bindings.iter_mut().rev() {
-            if !binding.suspended {
-                binding.instance.suspend()?;
-                binding.suspended = true;
+    fn retry_deferred(
+        &mut self,
+        devices: &[PlatformDevice],
+        services: &dyn DriverServices,
+        mut deferred: Vec<usize>,
+        report: &mut ProbeReport,
+    ) {
+        while !deferred.is_empty() {
+            let mut next = Vec::new();
+            if next.try_reserve_exact(deferred.len()).is_err() {
+                report.failed += deferred.len();
+                return;
             }
+            let mut progress = false;
+            for index in deferred {
+                let Some(device) = devices.get(index) else {
+                    report.failed += 1;
+                    continue;
+                };
+                let Some(driver) = self.matching_driver(device) else {
+                    report.unmatched += 1;
+                    continue;
+                };
+                match self.bind(driver, device, services) {
+                    Ok(()) => {
+                        report.bound += 1;
+                        progress = true;
+                    }
+                    Err(ProbeError::Deferred) => next.push(index),
+                    Err(_) => report.failed += 1,
+                }
+            }
+            if !progress {
+                report.deferred += next.len();
+                return;
+            }
+            deferred = next;
+        }
+    }
+
+    fn matching_driver(&self, device: &PlatformDevice) -> Option<&'static dyn PlatformDriver> {
+        self.drivers.iter().copied().find(|driver| {
+            driver
+                .compatible_table()
+                .iter()
+                .any(|compatible| device.is_compatible(compatible))
+        })
+    }
+
+    fn bind(
+        &mut self,
+        driver: &'static dyn PlatformDriver,
+        device: &PlatformDevice,
+        services: &dyn DriverServices,
+    ) -> Result<(), ProbeError> {
+        let instance = driver.probe(device, services)?;
+        self.bindings
+            .try_reserve(1)
+            .map_err(|_| ProbeError::Resource)?;
+        self.bindings.push(Binding {
+            device_id: device.id(),
+            driver_name: driver.name(),
+            instance,
+            suspended: false,
+        });
+        Ok(())
+    }
+
+    pub fn suspend_all(&mut self) -> Result<(), ProbeError> {
+        for index in (0..self.bindings.len()).rev() {
+            if self.bindings[index].suspended {
+                continue;
+            }
+            if let Err(error) = self.bindings[index].instance.suspend() {
+                // Restore the pre-suspend state on a best-effort basis.
+                // Per-binding state makes a later resume retry safe even if
+                // rollback itself encounters a device failure.
+                let _ = self.resume_all();
+                return Err(error);
+            }
+            self.bindings[index].suspended = true;
         }
         Ok(())
     }

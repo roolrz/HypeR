@@ -1,6 +1,6 @@
 //! RAII ownership for physically contiguous kernel page allocations.
 
-use hyper::mm::heap::PageOwner;
+use hyper::mm::allocator::heap::PageOwner;
 use hyper::mm::{BuddyError, PhysicalAddress};
 
 /// A live buddy allocation returned to the kernel by the global page allocator.

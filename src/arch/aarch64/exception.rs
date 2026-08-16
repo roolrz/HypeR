@@ -346,7 +346,7 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
 
     let Some((kind, origin)) = decode_vector(frame.vector) else {
         let context = exception_crash_context(frame, frame.sp_el1);
-        crate::kernel::exception::fatal_invalid_vector(
+        crate::kernel::irq::exception::fatal_invalid_vector(
             frame.vector,
             frame.esr,
             frame.elr,
@@ -365,7 +365,7 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
             let context = exception_crash_context(frame, stack_pointer);
             crate::kernel::crash::stop_this_cpu(context)
         }
-        crate::kernel::interrupt::dispatch(interrupt);
+        crate::kernel::irq::interrupt::dispatch(interrupt);
         return;
     }
     if kind == ExceptionKind::Synchronous && origin == ExceptionOrigin::LowerAarch64 {
@@ -389,7 +389,7 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
         (exception_class as u8, syndrome_description(exception_class))
     };
     let context = exception_crash_context(frame, stack_pointer);
-    crate::kernel::exception::fatal(
+    crate::kernel::irq::exception::fatal(
         ExceptionReport {
             origin,
             kind,

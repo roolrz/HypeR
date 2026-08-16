@@ -15,7 +15,7 @@ pub use memory::PreparedMemory;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MemoryStats {
     pub boot: hyper::mm::BootMemoryStats,
-    pub runtime: hyper::mm::heap::HeapStats,
+    pub runtime: hyper::mm::allocator::heap::HeapStats,
 }
 
 /// Returns a lock-consistent allocator snapshot once memory initialization is complete.

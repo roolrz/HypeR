@@ -2,7 +2,7 @@
 
 use core::ptr::{read_volatile, write_bytes, write_volatile};
 
-use hyper::mm::heap::PageOwner;
+use hyper::mm::allocator::heap::PageOwner;
 use hyper::mm::{BuddyError, PAGE_SIZE, PhysicalAddress};
 use hyper::sync::InterruptSpinLock;
 

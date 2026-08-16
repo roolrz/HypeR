@@ -1,14 +1,12 @@
 //! Runtime ownership of the physical UART selected as the early console.
 
-use hyper::drivers::platform::{DeviceScanner, PlatformDevice, ScanError};
+use hyper::drivers::platform::PlatformDevice;
 use hyper::drivers::serial::{
     MmioAccess, Ns16550, Ns16550Error, Ns16550FifoTrigger, Pl011, ReceivedByte,
     pl011_registers as reg,
 };
 use hyper::hal::interrupt::{InterruptId, InterruptTrigger};
-use hyper::platform::{
-    ConsoleInfo, ConsoleKind, ConsoleRegisterAccess, PlatformInterruptTrigger, fdt,
-};
+use hyper::platform::{ConsoleInfo, ConsoleKind, ConsoleRegisterAccess, PlatformInterruptTrigger};
 use hyper::sync::InterruptSpinLock;
 use hyper::sync::atomic::{AtomicU64, Ordering};
 
@@ -47,21 +45,19 @@ impl RuntimeReceivedByte {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Capabilities {
-    pub driver: &'static str,
-    pub hardware_interrupt: u32,
-    pub virtual_interrupt: u32,
+pub(super) struct Capabilities {
+    pub(super) driver: &'static str,
+    pub(super) hardware_interrupt: u32,
+    pub(super) virtual_interrupt: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Error {
+pub(super) enum Error {
     AlreadyInitialized,
-    Fdt(fdt::Error),
     Interrupt(interrupt::Error),
     InvalidInterrupt,
     MissingDevice,
     Serial(Ns16550Error),
-    Scan(ScanError),
 }
 
 impl From<interrupt::Error> for Error {
@@ -76,13 +72,14 @@ impl From<Ns16550Error> for Error {
     }
 }
 
-pub fn initialize(
+pub(super) fn initialize(
     boot: &super::super::boot::Initialization,
+    devices: &[PlatformDevice],
 ) -> Result<Option<Capabilities>, Error> {
     let Some(console) = boot.early_console() else {
         return Ok(None);
     };
-    let device = discover(boot.linear_dtb(), console)?;
+    let device = discover(devices, console)?;
     let platform_interrupt = crate::arch::decode_platform_interrupt(device.interrupt_cells())
         .map_err(|_| Error::InvalidInterrupt)?;
     let trigger = match platform_interrupt.trigger {
@@ -96,13 +93,9 @@ pub fn initialize(
     install(port, platform_interrupt.interrupt, trigger, boot)
 }
 
-fn discover(linear_dtb: usize, console: ConsoleInfo) -> Result<PlatformDevice, Error> {
-    let mut scanner = DeviceScanner::new(&[]);
-    // SAFETY: The DTB is retained in the permanent linear mapping.
-    unsafe { fdt::discover_with(linear_dtb, &mut scanner) }.map_err(Error::Fdt)?;
-    let devices = scanner.finish().map_err(Error::Scan)?;
+fn discover(devices: &[PlatformDevice], console: ConsoleInfo) -> Result<&PlatformDevice, Error> {
     devices
-        .into_iter()
+        .iter()
         .find(|device| {
             let compatible = match console.kind {
                 ConsoleKind::Pl011 => device.is_compatible("arm,pl011"),

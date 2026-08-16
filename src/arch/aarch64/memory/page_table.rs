@@ -2,6 +2,8 @@ use core::arch::asm;
 use core::ptr::{read_volatile, write_bytes, write_volatile};
 
 use hyper::hal::memory::KernelImageLayout;
+#[cfg(CONFIG_CRASH_CONSOLE)]
+use hyper::hal::memory::{Stage1Mapping, Stage1MemoryType};
 use hyper::mm::{BootAllocator, BootAllocatorError, PAGE_SIZE, PhysicalAddress, VirtualAddress};
 use hyper::platform::{PhysicalRange, PlatformInfo};
 
@@ -341,6 +343,53 @@ pub(super) fn runtime_address_is_mapped(
         table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
     }
     Ok(false)
+}
+
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub(super) fn inspect_runtime_mapping(
+    root: PhysicalAddress,
+    address: u64,
+) -> Result<Option<Stage1Mapping>, Error> {
+    if address >= registers::STAGE1_VA_LIMIT {
+        return Err(Error::InvalidAddress);
+    }
+    let mut table = root;
+    for (level, size) in registers::STAGE1_LEVEL_SIZES_4K.iter().copied().enumerate() {
+        let entry = read_runtime_entry(table, table_index(address, level))?;
+        if entry == 0 {
+            return Ok(None);
+        }
+        let kind = entry & registers::TRANSLATION_DESC_TYPE_MASK;
+        let leaf = (level < 3 && kind == registers::STAGE1_DESC_BLOCK)
+            || (level == 3 && kind == registers::STAGE1_DESC_TABLE_OR_PAGE);
+        if leaf {
+            let physical_start =
+                entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT & !(size - 1);
+            let attribute = entry & registers::STAGE1_DESC_ATTR_INDEX_MASK;
+            return Ok(Some(Stage1Mapping {
+                virtual_start: address & !(size - 1),
+                physical_start,
+                size,
+                readable: true,
+                writable: entry & registers::STAGE1_DESC_AP_READ_ONLY == 0,
+                executable: entry
+                    & (registers::STAGE1_DESC_PXN | registers::STAGE1_DESC_EXECUTE_NEVER)
+                    == 0,
+                memory_type: if attribute == registers::STAGE1_DESC_ATTR_NORMAL {
+                    Stage1MemoryType::Normal
+                } else if attribute == registers::STAGE1_DESC_ATTR_DEVICE {
+                    Stage1MemoryType::Device
+                } else {
+                    Stage1MemoryType::Unknown
+                },
+            }));
+        }
+        if kind != registers::STAGE1_DESC_TABLE_OR_PAGE {
+            return Ok(None);
+        }
+        table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
+    }
+    Ok(None)
 }
 
 fn stack_slot_range(slot: usize, pages: usize) -> Result<(usize, usize, usize), Error> {

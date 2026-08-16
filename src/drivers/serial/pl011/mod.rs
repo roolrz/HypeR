@@ -1,3 +1,5 @@
+//! ARM PrimeCell PL011 serial controller driver.
+
 use alloc::boxed::Box;
 use core::ptr::{read_volatile, write_volatile};
 

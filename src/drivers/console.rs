@@ -92,6 +92,14 @@ impl Console for ConsoleDevice {
 }
 
 impl ConsoleDevice {
+    #[cfg(CONFIG_CRASH_CONSOLE)]
+    pub fn try_read_byte(&self) -> Option<u8> {
+        match self {
+            Self::Pl011(device) => device.try_read().map(|received| received.byte),
+            Self::Ns16550(device) => device.try_read().map(|received| received.byte),
+        }
+    }
+
     /// Encodes a lock-free handle retained by fatal console paths.
     pub const fn emergency_handle(self) -> EmergencyConsoleHandle {
         match self {

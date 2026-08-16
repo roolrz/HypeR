@@ -2,6 +2,8 @@ use core::arch::asm;
 use core::ptr::{read_volatile, write_bytes, write_volatile};
 
 use hyper::hal::memory::KernelImageLayout;
+#[cfg(CONFIG_CRASH_CONSOLE)]
+use hyper::hal::memory::{Stage1Mapping, Stage1MemoryType};
 use hyper::mm::{BootAllocator, BootAllocatorError, PAGE_SIZE, PhysicalAddress, VirtualAddress};
 use hyper::platform::{PhysicalRange, PlatformInfo};
 
@@ -307,6 +309,36 @@ pub(super) fn runtime_address_is_mapped(
         table = PhysicalAddress::new(pte_address(entry));
     }
     Ok(false)
+}
+
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub(super) fn inspect_runtime_mapping(
+    root: PhysicalAddress,
+    address: u64,
+) -> Result<Option<Stage1Mapping>, Error> {
+    if !canonical(address) {
+        return Err(Error::InvalidAddress);
+    }
+    let mut table = root;
+    for (level, size) in LEVEL_SIZES.iter().copied().enumerate() {
+        let entry = runtime_read(table, index(address, level))?;
+        if entry & registers::PTE_VALID == 0 {
+            return Ok(None);
+        }
+        if entry & (registers::PTE_READ | registers::PTE_EXECUTE) != 0 {
+            return Ok(Some(Stage1Mapping {
+                virtual_start: address & !(size - 1),
+                physical_start: pte_address(entry) & !(size - 1),
+                size,
+                readable: entry & registers::PTE_READ != 0,
+                writable: entry & registers::PTE_WRITE != 0,
+                executable: entry & registers::PTE_EXECUTE != 0,
+                memory_type: Stage1MemoryType::Unknown,
+            }));
+        }
+        table = PhysicalAddress::new(pte_address(entry));
+    }
+    Ok(None)
 }
 
 pub(super) fn retire_identity_mappings(

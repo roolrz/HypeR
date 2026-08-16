@@ -1,3 +1,5 @@
+//! AArch64 system-register glue for the reusable GICv3 driver.
+
 use core::arch::asm;
 
 use hyper::drivers::interrupt::gicv3::CpuInterface;

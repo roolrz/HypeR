@@ -39,6 +39,8 @@ pub use interrupts::{
     irq_enabled as local_irq_enabled,
 };
 pub use kaslr::select as select_kaslr_layout;
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub use memory::inspect_mapping as inspect_stage1_mapping;
 pub use memory::{
     ActivationContext, Error as MemoryError, PreparedAddressSpace,
     Riscv64AddressTranslation as ArchitectureAddressTranslation, StackMapping,

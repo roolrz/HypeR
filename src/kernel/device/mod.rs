@@ -1,7 +1,7 @@
 //! Kernel device-service orchestration.
 
 pub mod cpu_power;
-pub(crate) mod platform_bus;
+mod platform_bus;
 mod serial;
 
 /// Selects and activates the firmware CPU power-management interface.
@@ -25,28 +25,13 @@ pub(crate) fn initialize_cpu_power(boot: &super::boot::Initialization) {
     );
 }
 
-/// Enumerates platform devices and binds all built-in drivers.
-pub(crate) fn initialize_driver_framework(boot: &super::boot::Initialization) {
-    let report = match platform_bus::initialize(
-        boot.linear_dtb(),
-        boot.essential().claims(),
-        boot.early_console().map(|console| console.base),
-    ) {
+/// Enumerates platform devices, promotes earlycon, and binds built-in drivers.
+pub(crate) fn initialize_platform_devices(boot: &super::boot::Initialization) {
+    let report = match platform_bus::initialize(boot) {
         Ok(report) => report,
         Err(error) => super::boot::fail("driver-framework initialization", error),
     };
-    crate::println!(
-        "HypeR: platform bus: {} bound, {} unmatched, {} deferred, {} failed",
-        report.bound,
-        report.unmatched,
-        report.deferred,
-        report.failed
-    );
-}
-
-/// Promotes a supported early console to interrupt-driven runtime ownership.
-pub(crate) fn initialize_console_input(boot: &super::boot::Initialization) {
-    match serial::initialize(boot) {
+    match report.console {
         Ok(Some(capabilities)) => crate::println!(
             "HypeR: {} runtime input active: INTID {}, VIRQ {}",
             capabilities.driver,
@@ -60,4 +45,11 @@ pub(crate) fn initialize_console_input(boot: &super::boot::Initialization) {
             "HypeR: early console remains output-only; runtime input unavailable: {error:?}"
         ),
     }
+    crate::println!(
+        "HypeR: platform bus: {} bound, {} unmatched, {} deferred, {} failed",
+        report.drivers.bound,
+        report.drivers.unmatched,
+        report.drivers.deferred,
+        report.drivers.failed
+    );
 }

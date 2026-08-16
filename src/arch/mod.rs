@@ -57,3 +57,8 @@ pub use riscv64::{
     secondary_entry_physical, select_kaslr_layout, send_event, switch_thread_context,
     take_guest_timer_wakeup, validate_runtime_vectors, validate_vsysreg, wait_for_event,
 };
+
+#[cfg(all(target_arch = "aarch64", CONFIG_CRASH_CONSOLE))]
+pub use aarch64::inspect_stage1_mapping;
+#[cfg(all(target_arch = "riscv64", CONFIG_CRASH_CONSOLE))]
+pub use riscv64::inspect_stage1_mapping;

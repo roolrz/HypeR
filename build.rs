@@ -33,13 +33,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/arch/riscv64/registers.rs");
     println!("cargo:rerun-if-changed=src/arch/riscv64/linker.ld");
     println!("cargo:rerun-if-changed=Kconfig");
-    println!("cargo:rerun-if-changed=.config");
+    println!("cargo:rerun-if-env-changed=HYPER_CONFIG");
     println!("cargo:rerun-if-env-changed=HYPER_KALLSYMS_BLOB");
     println!("cargo:rustc-check-cfg=cfg(hyper_embed_kallsyms)");
 
     let output_directory = PathBuf::from(env::var("OUT_DIR")?);
     let target = env::var("TARGET")?;
-    export_kernel_configuration(&output_directory, &target)?;
+    let configuration_path = kernel_configuration_path()?;
+    println!("cargo:rerun-if-changed={}", configuration_path.display());
+    export_kernel_configuration(&output_directory, &target, &configuration_path)?;
     configure_kallsyms_embedding()?;
 
     let header_path = output_directory.join("asm_constants.h");
@@ -80,6 +82,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn kernel_configuration_path() -> Result<PathBuf, Box<dyn Error>> {
+    match env::var_os("HYPER_CONFIG") {
+        Some(path) if !path.is_empty() => Ok(PathBuf::from(path)),
+        Some(_) | None => Ok(PathBuf::from(".config")),
+    }
+}
+
 fn configure_kallsyms_embedding() -> Result<(), Box<dyn Error>> {
     let Some(path) = env::var_os("HYPER_KALLSYMS_BLOB").filter(|path| !path.is_empty()) else {
         return Ok(());
@@ -97,18 +106,20 @@ fn configure_kallsyms_embedding() -> Result<(), Box<dyn Error>> {
 fn export_kernel_configuration(
     output_directory: &Path,
     target: &str,
+    configuration_path: &Path,
 ) -> Result<(), Box<dyn Error>> {
     let (schema, configuration) =
-        kconfig::load_and_validate(Path::new("Kconfig"), Path::new(".config")).map_err(
-            |error| {
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("invalid kernel configuration: {error}; run `make defconfig`"),
-                )
-            },
-        )?;
+        kconfig::load_and_validate(Path::new("Kconfig"), configuration_path).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "invalid kernel configuration {}: {error}; run `make defconfig`",
+                    configuration_path.display()
+                ),
+            )
+        })?;
     validate_architecture_configuration(&configuration, target)?;
-    let mut rust_source = String::from("// Generated from .config. Do not edit.\n\n");
+    let mut rust_source = String::from("// Generated kernel configuration. Do not edit.\n\n");
     for symbol in &schema.symbols {
         let rust_name = format!("CONFIG_{}", symbol.name);
         let value = configuration.value(&symbol.name).ok_or_else(|| {
@@ -173,7 +184,7 @@ fn validate_architecture_configuration(
     if !matches_target {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("kernel architecture in .config does not match target {target}"),
+            format!("kernel architecture configuration does not match target {target}"),
         )
         .into());
     }

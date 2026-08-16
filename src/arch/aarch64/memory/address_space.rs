@@ -1,4 +1,6 @@
 use hyper::hal::memory::KernelImageLayout;
+#[cfg(CONFIG_CRASH_CONSOLE)]
+use hyper::hal::memory::Stage1Mapping;
 use hyper::mm::{BootAllocator, PhysicalAddress};
 use hyper::platform::PlatformInfo;
 
@@ -23,6 +25,11 @@ pub struct StackMapping {
     pub guard_page: usize,
     pub bottom: usize,
     pub top: usize,
+}
+
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub fn inspect_mapping(root: u64, address: usize) -> Result<Option<Stage1Mapping>, Error> {
+    page_table::inspect_runtime_mapping(PhysicalAddress::new(root), address as u64)
 }
 
 impl PreparedAddressSpace {

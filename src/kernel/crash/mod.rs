@@ -14,6 +14,9 @@ use hyper::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::arch::CrashContext;
 
+#[cfg(CONFIG_CRASH_CONSOLE)]
+mod monitor;
+
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
 const NO_CRASH_OWNER: usize = usize::MAX;
 const STOP_WAIT_LIMIT: usize = 10_000_000;
@@ -59,6 +62,9 @@ unsafe impl Sync for CrashSlot {}
 
 /// Reserves and installs the all-but-self crash-stop interrupt.
 pub(crate) fn initialize(boot: &super::boot::Initialization) {
+    #[cfg(CONFIG_CRASH_CONSOLE)]
+    monitor::initialize();
+
     let Some(hardware_interrupt) = crate::arch::crash_stop_interrupt() else {
         crate::println!("HypeR: crash-stop cross-call is unavailable on this platform");
         return;
@@ -201,6 +207,17 @@ extern "C" fn enter_on_emergency_stack(argument: usize) -> ! {
     let stop = stop_other_cpus();
     emit_banner(cpu, payload.reason, stop);
     dump_cpu_states(cpu);
+    #[cfg(CONFIG_CRASH_CONSOLE)]
+    if super::log::crash_console_available() {
+        super::log::emergency(format_args!(
+            "crash console enabled; entering interactive monitor"
+        ));
+        monitor::run(cpu, stop);
+    } else {
+        super::log::emergency(format_args!(
+            "crash console enabled but no emergency console is available"
+        ));
+    }
     super::log::emergency(format_args!(
         "---[ end HypeR kernel panic - system halted ]---"
     ));

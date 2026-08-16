@@ -526,6 +526,7 @@ mod cpio {
 #[cfg(test)]
 mod fdt {
     use std::boxed::Box;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use hyper::{
         drivers::console,
@@ -977,6 +978,34 @@ mod fdt {
 
     static TEST_DRIVER: TestDriver = TestDriver;
 
+    struct DeferredDriver;
+
+    static DEFERRED_PROBES: AtomicUsize = AtomicUsize::new(0);
+
+    impl PlatformDriver for DeferredDriver {
+        fn name(&self) -> &'static str {
+            "deferred-pl011"
+        }
+
+        fn compatible_table(&self) -> &'static [&'static str] {
+            &["arm,pl011"]
+        }
+
+        fn probe(
+            &self,
+            _device: &PlatformDevice,
+            _services: &dyn DriverServices,
+        ) -> Result<Box<dyn DriverInstance>, ProbeError> {
+            if DEFERRED_PROBES.fetch_add(1, Ordering::Relaxed) == 0 {
+                Err(ProbeError::Deferred)
+            } else {
+                Ok(Box::new(TestInstance))
+            }
+        }
+    }
+
+    static DEFERRED_DRIVER: DeferredDriver = DeferredDriver;
+
     #[test]
     fn matches_and_binds_a_registered_platform_driver() {
         let blob = qemu_like_dtb();
@@ -995,6 +1024,29 @@ mod fdt {
         assert_eq!(report.bound, 1);
         assert_eq!(manager.binding_driver(console.id()), Some("test-pl011"));
         assert!(super::require_ok(manager.remove(console.id())));
+    }
+
+    #[test]
+    fn retries_deferred_platform_devices_until_probe_progress_stops() {
+        DEFERRED_PROBES.store(0, Ordering::Relaxed);
+        let blob = qemu_like_dtb();
+        let mut scanner = DeviceScanner::new(&[]);
+        let _platform = super::require_ok(fdt::discover_from_bytes_with(&blob, &mut scanner));
+        let devices = super::require_ok(scanner.finish());
+        let console = super::require_some(
+            devices
+                .iter()
+                .find(|device| device.is_compatible("arm,pl011")),
+        );
+        let mut manager = DriverManager::new();
+        super::require_ok(manager.register(&DEFERRED_DRIVER));
+
+        let report = manager.probe_devices(&devices, &TestServices);
+
+        assert_eq!(report.bound, 1);
+        assert_eq!(report.deferred, 0);
+        assert_eq!(DEFERRED_PROBES.load(Ordering::Relaxed), 2);
+        assert_eq!(manager.binding_driver(console.id()), Some("deferred-pl011"));
     }
 }
 
@@ -1833,7 +1885,7 @@ mod runtime_allocators {
     use std::alloc::{Layout, alloc_zeroed, dealloc};
 
     use hyper::hal::interrupt::InterruptMask;
-    use hyper::mm::heap::{KernelGlobalAllocator, PageOwner, SlabAllocator};
+    use hyper::mm::allocator::heap::{KernelGlobalAllocator, PageOwner, SlabAllocator};
     use hyper::mm::{BootAllocator, BuddyAllocator, PAGE_SIZE};
     use hyper::platform::{MAX_MEMORY_REGIONS, MAX_RESERVED_REGIONS, PhysicalRange, RegionList};
 

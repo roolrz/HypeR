@@ -338,9 +338,9 @@ pub fn dispatch(hardware: InterruptId) {
     let outcome = match with_state(|state| Ok(state.dispatch_one(hardware))) {
         Ok(outcome) => outcome,
         Err(Error::NotInitialized) => {
-            crate::kernel::exception::fatal_interrupt("controller not initialized", None)
+            crate::kernel::irq::exception::fatal_interrupt("controller not initialized", None)
         }
-        Err(error) => crate::kernel::exception::fatal_interrupt_state(error),
+        Err(error) => crate::kernel::irq::exception::fatal_interrupt_state(error),
     };
     match outcome {
         DispatchOutcome::Handled => {}

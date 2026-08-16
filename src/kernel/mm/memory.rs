@@ -84,7 +84,7 @@ impl PreparedMemory {
     pub fn initialize_global_allocator(
         &self,
         allocator: &GlobalAllocator,
-    ) -> Result<(), hyper::mm::heap::InitError> {
+    ) -> Result<(), hyper::mm::allocator::heap::InitError> {
         let layout = virtual_memory_layout();
         // SAFETY: The architecture address space permanently maps every DTB
         // RAM region at `linear_base + PA` as writable normal memory.

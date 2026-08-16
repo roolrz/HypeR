@@ -51,6 +51,10 @@ config EMERGENCY_STACK_SIZE_KB
     range 16 128
     default 32
 
+config CRASH_CONSOLE
+    bool "Interactive crash console"
+    default n
+
 config TIMER_HZ
     int "Kernel timer frequency"
     range 10 10000

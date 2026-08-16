@@ -3,7 +3,7 @@ mod barrier;
 mod cache;
 mod context;
 mod exception;
-mod gic;
+mod gic_cpu_interface;
 mod interrupt_controller;
 mod interrupts;
 mod kaslr;
@@ -28,7 +28,7 @@ pub use exception::{
     CrashContext, capture_crash_context, install_exception_stacks, install_runtime_vectors,
     validate_runtime_vectors,
 };
-pub use gic::{
+pub use gic_cpu_interface::{
     Aarch64GicCpuInterface, acknowledge_interrupt, broadcast_crash_stop, crash_stop_interrupt,
     current_gic_affinity, end_interrupt, is_crash_stop_interrupt,
 };
@@ -42,6 +42,8 @@ pub use interrupts::{
     irq_enabled as local_irq_enabled,
 };
 pub use kaslr::select as select_kaslr_layout;
+#[cfg(CONFIG_CRASH_CONSOLE)]
+pub use memory::inspect_mapping as inspect_stage1_mapping;
 pub use memory::{
     Aarch64AddressTranslation as ArchitectureAddressTranslation, ActivationContext,
     Error as MemoryError, PreparedAddressSpace, StackMapping, bootstrap_stack_bounds,

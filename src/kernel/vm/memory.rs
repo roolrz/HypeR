@@ -4,7 +4,7 @@ use core::ptr::{copy_nonoverlapping, write_bytes};
 
 use alloc::vec::Vec;
 use hyper::hal::cache::CacheMaintenance;
-use hyper::mm::heap::PageOwner;
+use hyper::mm::allocator::heap::PageOwner;
 use hyper::mm::{BuddyError, PAGE_SIZE, PhysicalAddress};
 use hyper::sync::InterruptSpinLock;
 

@@ -27,7 +27,14 @@ rustc-demangle = { version = "0.1.28", default-features = false }
 
 [lints.clippy]
 expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
 unwrap_used = "deny"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
 
 [profile.kernel]
 inherits = "release"

@@ -1,6 +1,6 @@
 //! Kernel ownership and fault policy for the Rust global allocator.
 
-use hyper::mm::heap::KernelGlobalAllocator;
+use hyper::mm::allocator::heap::KernelGlobalAllocator;
 
 pub type GlobalAllocator = KernelGlobalAllocator<crate::arch::LocalInterruptMask>;
 

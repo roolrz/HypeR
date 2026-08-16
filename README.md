@@ -84,10 +84,10 @@ raw Images.
 GitHub Actions runs independent required-quality stages for formatting and
 Clippy on both architectures, host unit tests, canonical bare-metal builds,
 image ABI validation, AArch64 QEMU tests on the `cortex-a72` and `max` CPU
-models, and a four-hart RISC-V QEMU test. Runtime
-tests require the ramdisk-loaded Linux guest to initialize GICv3 and the
-virtual Arm timer and execute `/init`. Build artifacts contain both the ELF
-image used for debugging and the raw HypeR Image.
+models, and a four-hart RISC-V QEMU test. Runtime tests require the
+ramdisk-loaded Linux guest to initialize GICv3 and the virtual Arm timer and
+execute `/init`. Build artifacts contain both the ELF image used for debugging
+and the raw HypeR Image.
 
 The workflow installs the toolchain pinned by `rust-toolchain.toml`, grants only
 read access to repository contents, cancels superseded runs on the same ref,
@@ -170,10 +170,13 @@ host configurator supports boolean, integer, and string symbols, defaults,
 integer ranges, and simple boolean dependencies. It writes a Linux-style
 `.config`; the default fragment is `configs/qemu_aarch64_defconfig`.
 
-During every build, `build.rs` validates `.config` against `Kconfig` and exports
-each symbol to Rust. Enabled booleans become custom predicates such as
-`cfg(CONFIG_ARCH_AARCH64)`. Integer and string symbols become value predicates,
-for example `cfg(CONFIG_TIMER_HZ = "100")`. All symbols are registered through
+During every build, `build.rs` validates the selected configuration against
+`Kconfig` and exports each symbol to Rust. `CONFIG_FILE` can select a tracked
+configuration without replacing `.config`, allowing automated or out-of-tree
+builds to keep their configuration isolated. Enabled booleans become custom
+predicates such as `cfg(CONFIG_ARCH_AARCH64)`. Integer and string symbols
+become value predicates, for example `cfg(CONFIG_TIMER_HZ = "100")`. All
+symbols are registered through
 `rustc-check-cfg`, so misspelled or undeclared uses are rejected by Clippy.
 Values are also available through `env!("CONFIG_...")` and typed constants in
 `hyper::config`. The timer tick rate is already sourced from
@@ -182,6 +185,15 @@ Values are also available through `env!("CONFIG_...")` and typed constants in
 Cargo features are intentionally not generated from `.config`: Cargo resolves
 features before executing `build.rs`, so dynamically deriving them there would
 be too late to affect dependency or feature resolution.
+
+`CONFIG_CRASH_CONSOLE=y` compiles an allocation-free interactive monitor into
+the fatal path. After the crash owner stops the other CPUs and prints their
+captured state, the monitor polls the selected emergency UART with interrupts
+disabled. It can inspect CPU contexts, call traces, configured memory regions,
+live stage-1 mappings, and bounded RAM contents. The default configuration
+disables it, and all monitor code, command strings, UART input glue, and live
+mapping inspection code are omitted from the resulting image. See
+`docs/crash-console.md` for commands and safety constraints.
 
 ## Kernel logging
 

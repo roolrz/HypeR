@@ -33,22 +33,27 @@ static BUILTIN_DRIVERS: &[&dyn PlatformDriver] = &[
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Error {
+pub(super) enum Error {
     AlreadyInitialized,
     DriverRegistration(ProbeError),
     Fdt(fdt::Error),
     Scan(ScanError),
 }
 
-pub fn initialize(
-    linear_dtb: usize,
-    claims: &[Option<fdt::NodeId>],
-    reserved_console_base: Option<u64>,
-) -> Result<ProbeReport, Error> {
-    let mut scanner = DeviceScanner::new(claims);
+pub(super) struct InitializationReport {
+    pub(super) drivers: ProbeReport,
+    pub(super) console: Result<Option<super::serial::Capabilities>, super::serial::Error>,
+}
+
+pub(super) fn initialize(
+    boot: &super::super::boot::Initialization,
+) -> Result<InitializationReport, Error> {
+    let mut scanner = DeviceScanner::new(boot.essential().claims());
     // SAFETY: The DTB reservation remains in the permanent RAM linear map.
-    unsafe { fdt::discover_with(linear_dtb, &mut scanner) }.map_err(Error::Fdt)?;
+    unsafe { fdt::discover_with(boot.linear_dtb(), &mut scanner) }.map_err(Error::Fdt)?;
     let mut devices = scanner.finish().map_err(Error::Scan)?;
+    let console = super::serial::initialize(boot, &devices);
+    let reserved_console_base = boot.early_console().map(|console| console.base);
     devices.retain(|device| {
         reserved_console_base.is_none_or(|reserved| {
             device.registers().first().map(|range| range.start()) != Some(reserved)
@@ -60,7 +65,7 @@ pub fn initialize(
             .register(driver)
             .map_err(Error::DriverRegistration)?;
     }
-    let report = manager.probe_devices(&devices, &KernelDriverServices);
+    let drivers = manager.probe_devices(&devices, &KernelDriverServices);
     PLATFORM_BUS.with(|slot| {
         if slot.is_some() {
             return Err(Error::AlreadyInitialized);
@@ -69,6 +74,6 @@ pub fn initialize(
             _devices: devices,
             _manager: manager,
         });
-        Ok(report)
+        Ok(InitializationReport { drivers, console })
     })
 }

@@ -33,8 +33,7 @@ extern "C" fn start_kernel() -> ! {
     crate::kernel::irq::initialize_timer(&mut boot);
 
     crate::kernel::vm::initialize_virtual_devices(&boot);
-    crate::kernel::device::initialize_console_input(&boot);
-    crate::kernel::device::initialize_driver_framework(&boot);
+    crate::kernel::device::initialize_platform_devices(&boot);
     crate::kernel::cpu::initialize(&mut boot);
 
     #[cfg(feature = "kernel-self-test")]

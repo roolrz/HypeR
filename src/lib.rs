@@ -13,7 +13,3 @@ pub mod platform;
 pub mod sync;
 pub mod time;
 pub mod vm;
-
-// Preserve the original public path while `debug::kallsyms` is the canonical
-// module location.
-pub use debug::kallsyms;
