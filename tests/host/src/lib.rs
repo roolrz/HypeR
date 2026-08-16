@@ -18,8 +18,8 @@ fn require_some<T>(value: Option<T>) -> T {
 
 #[cfg(test)]
 mod virtual_pl011 {
-    use hyper::vm::device::pl011::VirtualPl011;
     use hyper::drivers::serial::pl011_registers as reg;
+    use hyper::vm::device::pl011::VirtualPl011;
 
     #[test]
     fn exposes_primecell_identity_and_transmits_bytes() {
@@ -67,8 +67,8 @@ mod virtual_pl011 {
 #[cfg(test)]
 mod ns16550 {
     use hyper::drivers::serial::{
-        MmioAccess, Ns16550, Ns16550DataBits, Ns16550FifoTrigger, Ns16550LineConfig,
-        Ns16550Parity, Ns16550StopBits,
+        MmioAccess, Ns16550, Ns16550DataBits, Ns16550FifoTrigger, Ns16550LineConfig, Ns16550Parity,
+        Ns16550StopBits,
     };
     use hyper::hal::console::Console;
 
@@ -1535,11 +1535,11 @@ mod gicv3 {
 
 #[cfg(test)]
 mod vgic {
+    use hyper::vm::interrupt::gicv3::{decode_list_register, encode_list_register};
     use hyper::vm::interrupt::{
         Error, InterruptGroup, InterruptTrigger, ListEntry, ListState, VirtualCpuId,
         VirtualInterruptController, VirtualInterruptId,
     };
-    use hyper::vm::interrupt::gicv3::{decode_list_register, encode_list_register};
 
     fn interrupt(value: u32) -> VirtualInterruptId {
         super::require_some(VirtualInterruptId::new(value))
