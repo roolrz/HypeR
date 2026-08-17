@@ -7,8 +7,8 @@ use crate::platform::{
     fdt::{NodeId, NodeResources, NodeVisitor},
 };
 
-#[derive(Debug)]
 /// A firmware property retained for a discovered platform device.
+#[derive(Debug)]
 pub struct DeviceProperty {
     name: String,
     value: Vec<u8>,
@@ -26,8 +26,8 @@ impl DeviceProperty {
     }
 }
 
-#[derive(Debug)]
 /// Resources discovered for one unclaimed, enabled platform device.
+#[derive(Debug)]
 pub struct PlatformDevice {
     id: NodeId,
     name: String,
@@ -87,8 +87,8 @@ impl PlatformDevice {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Errors reported while scanning platform devices from firmware data.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScanError {
     /// Memory could not be reserved for copied firmware data.
     Allocation,
@@ -270,8 +270,8 @@ fn copy_string(value: &str) -> Result<String, ScanError> {
     Ok(result)
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Errors returned when registering, probing, or managing a driver.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProbeError {
     /// The driver requires another device to bind first.
     Deferred,
@@ -330,8 +330,8 @@ struct Binding {
     suspended: bool,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 /// The outcome of a platform-device probing pass.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProbeReport {
     /// Number of devices successfully bound to a driver.
     pub bound: usize,
