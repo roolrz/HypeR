@@ -1,4 +1,4 @@
-//! AArch64 guest synchronous-trap and virtual system-register handling.
+//! `AArch64` guest synchronous-trap and virtual system-register handling.
 
 use core::arch::asm;
 

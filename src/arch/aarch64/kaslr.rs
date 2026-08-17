@@ -1,4 +1,4 @@
-//! AArch64 kernel virtual-address randomization policy.
+//! `AArch64` kernel virtual-address randomization policy.
 
 use super::memory::KERNEL_BASE;
 

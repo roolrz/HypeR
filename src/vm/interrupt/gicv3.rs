@@ -1,4 +1,4 @@
-//! GICv3 hardware list-register encoding shared by architecture backends.
+//! `GICv3` hardware list-register encoding shared by architecture backends.
 
 use super::{InterruptGroup, ListEntry, ListState, VirtualInterruptId};
 

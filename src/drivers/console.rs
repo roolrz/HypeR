@@ -1,3 +1,5 @@
+//! Early-console discovery and safe driver binding.
+
 use crate::hal::console::Console;
 use crate::hal::io::PortIo;
 use crate::platform::{ConsoleInfo, ConsoleKind, ConsoleRegisterAccess, chosen::CommandLine};
@@ -7,20 +9,29 @@ use super::serial::{MmioAccess, Ns16550, Ns16550Error, Pl011};
 /// A platform-selected early console driver.
 #[derive(Clone, Copy)]
 pub enum ConsoleDevice {
+    /// An ARM `PrimeCell` PL011 UART.
     Pl011(Pl011),
+    /// An NS16550-compatible UART.
     Ns16550(Ns16550),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Errors returned while parsing an `earlycon` command-line option.
 pub enum EarlyConsoleError {
+    /// The supplied register address was absent, malformed, or unaligned.
     InvalidAddress,
+    /// The selected console driver did not include a register address.
     MissingAddress,
+    /// The selected console driver is not supported.
     UnsupportedDriver,
 }
 
 #[derive(Clone, Copy)]
+/// Encoded console state that remains usable in fatal paths.
 pub struct EmergencyConsoleHandle {
+    /// The mapped UART base address.
     pub base: usize,
+    /// Driver-specific encoding of the access mode.
     pub metadata: usize,
 }
 
@@ -96,6 +107,7 @@ impl Console for ConsoleDevice {
 
 impl ConsoleDevice {
     #[cfg(CONFIG_CRASH_CONSOLE)]
+    /// Attempts to read one byte without blocking.
     pub fn try_read_byte(&self) -> Option<u8> {
         match self {
             Self::Pl011(device) => device.try_read().map(|received| received.byte),

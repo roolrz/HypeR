@@ -64,7 +64,7 @@ pub(crate) fn online_cpu_count() -> usize {
         .count()
 }
 
-/// Starts every enabled CPU described by firmware, up to CONFIG_MAX_CPUS.
+/// Starts every enabled CPU described by firmware, up to `CONFIG_MAX_CPUS`.
 pub fn initialize(
     platform: &PlatformInfo,
     root: u64,

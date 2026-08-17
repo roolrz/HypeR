@@ -33,7 +33,7 @@ impl MonotonicCounter for ArmGenericCounter {
 
 pub type VirtualTimerContext = VirtualTimerState;
 
-/// EL2 physical timer backed by CNTHP_EL2 system registers.
+/// EL2 physical timer backed by `CNTHP_EL2` system registers.
 pub struct El2PhysicalTimer;
 
 impl DeadlineTimer for El2PhysicalTimer {

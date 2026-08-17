@@ -1,4 +1,4 @@
-//! AArch64 CPU identity and PSCI secondary-entry ABI.
+//! `AArch64` CPU identity and PSCI secondary-entry ABI.
 
 use core::arch::asm;
 use core::ptr::addr_of;
@@ -48,7 +48,7 @@ pub fn secondary_entry_physical(
     image_physical_start.checked_add(offset)
 }
 
-/// Returns the logical CPU index installed in TPIDR_EL2 by the entry path.
+/// Returns the logical CPU index installed in `TPIDR_EL2` by the entry path.
 pub fn current_cpu_index() -> usize {
     let index: u64;
     // SAFETY: TPIDR_EL2 is private to the current EL2 processing element.

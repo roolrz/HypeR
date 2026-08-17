@@ -1,4 +1,4 @@
-//! AArch64 GICv3 virtualization system-register backend.
+//! `AArch64` `GICv3` virtualization system-register backend.
 
 use core::arch::asm;
 

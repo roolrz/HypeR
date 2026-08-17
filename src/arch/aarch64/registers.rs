@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-//! AArch64 architectural register, syndrome, and descriptor definitions.
+//! `AArch64` architectural register, syndrome, and descriptor definitions.
 //!
 //! This module is the single source of truth for values defined by the Arm
 //! architecture. `build.rs` evaluates [`ASM_CONSTANTS`] on the host and
@@ -491,7 +491,7 @@ pub const MPIDR_LINEAR_AFF3_MASK: u64 = 0xff00_0000;
 // GICv3 permits up to sixteen virtual list registers.
 pub const ICH_MAX_LIST_REGISTERS: usize = 16;
 
-/// Architecturally required SCTLR_EL1 reset policy for an AArch64 guest.
+/// Architecturally required `SCTLR_EL1` reset policy for an `AArch64` guest.
 pub const SCTLR_EL1_GUEST_RESET_VALUE: u64 =
     SCTLR_LSMAOE | SCTLR_NTLSMD | SCTLR_SPAN | SCTLR_EIS | SCTLR_TSCXT | SCTLR_EOS;
 
@@ -506,7 +506,7 @@ pub const PSCI_FEATURES: u64 = 0x8400_000a;
 pub const PSCI_VERSION_1_0: u64 = 0x0001_0000;
 pub const PSCI_TOS_NOT_PRESENT: u64 = 2;
 
-/// Encoding of an AArch64 system register in an MRS/MSR instruction.
+/// Encoding of an `AArch64` system register in an `MRS`/`MSR` instruction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SystemRegisterEncoding {
     pub op0: u8,

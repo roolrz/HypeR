@@ -23,7 +23,7 @@ impl From<GicError> for Error {
 }
 
 impl Aarch64InterruptController {
-    /// Binds and initializes the firmware-selected GICv3 instance.
+    /// Binds and initializes the firmware-selected `GICv3` instance.
     ///
     /// # Safety
     ///

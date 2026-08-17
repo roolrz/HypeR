@@ -1,4 +1,4 @@
-//! PrimeCell UART (PL011) programmer's model.
+//! `PrimeCell` UART (PL011) programmer's model.
 //!
 //! Offsets and bit definitions follow Arm DDI 0183G. Keeping the complete
 //! device register vocabulary here avoids scattering hardware literals across

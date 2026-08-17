@@ -1,4 +1,4 @@
-//! AArch64 system-register glue for the reusable GICv3 driver.
+//! `AArch64` system-register glue for the reusable `GICv3` driver.
 
 use core::arch::asm;
 
@@ -7,7 +7,7 @@ use hyper::hal::interrupt::InterruptId;
 
 use super::registers;
 
-/// AArch64 implementation of the GICv3 system-register CPU interface.
+/// `AArch64` implementation of the `GICv3` system-register CPU interface.
 pub struct Aarch64GicCpuInterface;
 
 impl CpuInterface for Aarch64GicCpuInterface {

@@ -26,6 +26,8 @@ bench = false
 rustc-demangle = { version = "0.1.28", default-features = false }
 
 [lints.clippy]
+doc_markdown = "deny"
+empty_docs = "deny"
 expect_used = "deny"
 panic = "deny"
 todo = "deny"

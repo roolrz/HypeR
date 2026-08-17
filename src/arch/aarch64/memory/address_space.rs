@@ -78,7 +78,7 @@ impl PreparedAddressSpace {
     }
 }
 
-/// Builds the AArch64 final EL2 address space from kernel-owned boot memory.
+/// Builds the `AArch64` final EL2 address space from kernel-owned boot memory.
 ///
 /// # Safety
 ///

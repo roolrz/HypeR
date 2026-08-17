@@ -1,4 +1,4 @@
-//! Slab heap and Rust GlobalAlloc adapter.
+//! Slab heap and Rust `GlobalAlloc` adapter.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::hint::spin_loop;

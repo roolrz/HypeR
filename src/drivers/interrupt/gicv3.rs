@@ -44,7 +44,7 @@ const GICR_CTLR_RWP: u32 = 1 << 3;
 const SPURIOUS_INTERRUPT_MIN: u32 = 1020;
 const DEFAULT_PRIORITY: u8 = 0xa0;
 
-/// Architecture bridge for the GICv3 system-register CPU interface.
+/// Architecture bridge for the `GICv3` system-register CPU interface.
 pub trait CpuInterface {
     /// Enables the local GIC system-register interface for the current CPU.
     ///
@@ -81,7 +81,7 @@ impl MappedRegion {
     const EMPTY: Self = Self { base: 0, size: 0 };
 }
 
-/// GICv3 Distributor and per-CPU Redistributor state.
+/// `GICv3` Distributor and per-CPU Redistributor state.
 pub struct GicV3<Cpu, MemoryBarrier> {
     distributor: MappedRegion,
     redistributors: [MappedRegion; MAX_GIC_REDISTRIBUTOR_REGIONS],

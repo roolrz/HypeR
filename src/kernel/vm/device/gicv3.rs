@@ -1,4 +1,4 @@
-//! GICv3 distributor and Redistributor MMIO service for Linux guests.
+//! `GICv3` distributor and Redistributor MMIO service for Linux guests.
 
 use hyper::vm::interrupt::{InterruptGroup, InterruptTrigger, VirtualCpuId, VirtualInterruptId};
 

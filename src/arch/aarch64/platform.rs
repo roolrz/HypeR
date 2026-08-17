@@ -56,7 +56,7 @@ impl Candidate {
     };
 }
 
-/// Allocation-free AArch64 matching for devices required before driver probing.
+/// Allocation-free `AArch64` matching for devices required before driver probing.
 pub struct EssentialDeviceDiscovery {
     nodes: [Candidate; MAX_FDT_DEPTH],
     depth: usize,

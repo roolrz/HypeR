@@ -1,7 +1,7 @@
 //! Portable atomic primitives supplied by Rust's `core` library.
 //!
 //! LLVM lowers these operations to the target's supported instruction set. The
-//! AArch64 build uses outlined atomics: EL2 runtime feature discovery selects
+//! `AArch64` build uses outlined atomics: EL2 runtime feature discovery selects
 //! LSE on capable CPUs while retaining LL/SC for the minimal Armv8-A target.
 //! Only stable `core` atomic types are exported; Rust does not yet stabilize its
 //! 128-bit integer atomic API.

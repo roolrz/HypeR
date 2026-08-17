@@ -2,7 +2,7 @@ use core::arch::asm;
 
 use hyper::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 
-/// AArch64 implementation of the architecture-neutral barrier contract.
+/// `AArch64` implementation of the architecture-neutral barrier contract.
 pub struct Aarch64Barrier;
 
 macro_rules! execute_barrier {

@@ -6,7 +6,7 @@ use hyper::hal::cache::{CacheError, CacheMaintenance};
 use super::barrier::Aarch64Barrier;
 use super::registers;
 
-/// AArch64 cache maintenance using virtual-address operations at EL2.
+/// `AArch64` cache maintenance using virtual-address operations at EL2.
 pub struct Aarch64Cache;
 
 impl CacheMaintenance for Aarch64Cache {

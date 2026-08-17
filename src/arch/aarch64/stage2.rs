@@ -1,4 +1,4 @@
-//! AArch64 stage-2 translation tables and activation.
+//! `AArch64` stage-2 translation tables and activation.
 
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};

@@ -1,4 +1,4 @@
-//! ARM PrimeCell PL011 serial controller driver.
+//! ARM `PrimeCell` PL011 serial controller driver.
 
 use alloc::boxed::Box;
 use core::ptr::{read_volatile, write_volatile};
@@ -135,7 +135,7 @@ impl InterruptStatus {
     }
 }
 
-/// MMIO access to one physical Arm PrimeCell PL011 UART.
+/// MMIO access to one physical Arm `PrimeCell` PL011 UART.
 ///
 /// The value is a shareable handle rather than exclusive mutable state. The
 /// console and serial-input layers may each retain a handle, but must coordinate

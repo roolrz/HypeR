@@ -4,7 +4,7 @@ use hyper::hal::interrupt::InterruptMask;
 
 use super::registers;
 
-/// Local AArch64 interrupt-mask policy used by IRQ-safe kernel locks.
+/// Local `AArch64` interrupt-mask policy used by IRQ-safe kernel locks.
 pub struct LocalInterruptMask;
 
 impl InterruptMask for LocalInterruptMask {
@@ -41,7 +41,7 @@ impl InterruptMask for LocalInterruptMask {
     }
 }
 
-/// Enables local IRQ exceptions while leaving FIQ, SError, and debug masked.
+/// Enables local IRQ exceptions while leaving FIQ, `SError`, and debug masked.
 ///
 /// Runtime vectors and the interrupt dispatcher must be installed first.
 pub fn enable_irq() {
