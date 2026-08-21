@@ -1,0 +1,531 @@
+use core::convert::Infallible;
+use hyper::drivers::console;
+use hyper::drivers::platform::{MmioResource, PermanentMmioMapping};
+use hyper::hal::memory::AddressTranslation;
+use hyper::platform::{ConsoleInfo, chosen, fdt};
+
+use self::state::BootState;
+use super::{irq, log, mm};
+
+pub(crate) mod image;
+mod state;
+
+pub enum ConsoleError {
+    Address(u64),
+    Driver(console::BindError),
+}
+
+pub enum PreparationError {
+    BootState(state::Error),
+    Chosen(chosen::Error),
+    Console(ConsoleError),
+    Essential(crate::arch::platform::DiscoveryError),
+    InitialRamdiskInvalid(hyper::platform::PhysicalRange),
+    InitialRamdiskMissing,
+    Kaslr(crate::arch::platform::KaslrError),
+    Memory(mm::memory::Error),
+    Platform(fdt::Error),
+}
+
+impl core::fmt::Debug for PreparationError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let (stage, error): (&str, Option<&dyn core::fmt::Debug>) = match self {
+            Self::BootState(error) => ("boot-state", Some(error)),
+            Self::Chosen(error) => ("chosen", Some(error)),
+            Self::Console(error) => ("console", Some(error)),
+            Self::Essential(error) => ("essential-devices", Some(error)),
+            Self::InitialRamdiskInvalid(range) => ("initial-ramdisk", Some(range)),
+            Self::InitialRamdiskMissing => ("initial-ramdisk-missing", None),
+            Self::Kaslr(error) => ("kaslr", Some(error)),
+            Self::Memory(error) => ("memory", Some(error)),
+            Self::Platform(error) => ("platform", Some(error)),
+        };
+        format_error(formatter, "PreparationError", stage, error)
+    }
+}
+
+pub enum RuntimeError {
+    Cache(hyper::hal::cache::CacheError),
+    Console(ConsoleError),
+    DtbMapping(u64),
+}
+
+impl core::fmt::Debug for ConsoleError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Address(address) => {
+                format_error(formatter, "ConsoleError", "address", Some(address))
+            }
+            Self::Driver(error) => format_error(formatter, "ConsoleError", "driver", Some(error)),
+        }
+    }
+}
+
+impl core::fmt::Debug for RuntimeError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Cache(error) => format_error(formatter, "RuntimeError", "cache", Some(error)),
+            Self::Console(error) => format_error(formatter, "RuntimeError", "console", Some(error)),
+            Self::DtbMapping(address) => {
+                format_error(formatter, "RuntimeError", "dtb-mapping", Some(address))
+            }
+        }
+    }
+}
+
+fn format_error(
+    formatter: &mut core::fmt::Formatter<'_>,
+    kind: &str,
+    stage: &str,
+    error: Option<&dyn core::fmt::Debug>,
+) -> core::fmt::Result {
+    let mut report = formatter.debug_struct(kind);
+    report.field("stage", &stage);
+    if let Some(error) = error {
+        report.field("error", error);
+    }
+    report.finish()
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ProtocolInputs {
+    pub(crate) dtb_address: usize,
+    pub(crate) command_line: Option<chosen::CommandLine>,
+    pub(crate) initial_ramdisk: Option<hyper::platform::PhysicalRange>,
+}
+
+impl ProtocolInputs {
+    pub(crate) const fn new(
+        dtb_address: usize,
+        command_line: Option<chosen::CommandLine>,
+        initial_ramdisk: Option<hyper::platform::PhysicalRange>,
+    ) -> Self {
+        Self {
+            dtb_address,
+            command_line,
+            initial_ramdisk,
+        }
+    }
+}
+
+/// State shared only between the top-level kernel initialization steps.
+///
+/// Keeping this type small makes dependencies between subsystem entry points
+/// explicit without exposing the full early-boot state to every subsystem.
+pub(crate) struct Initialization {
+    essential: crate::arch::platform::EssentialInfo,
+    early_console: Option<ConsoleInfo>,
+    early_console_mapping: Option<PermanentMmioMapping>,
+    linear_dtb: usize,
+    interrupts: Option<irq::interrupt::Capabilities>,
+    timer: Option<irq::timer::Capabilities>,
+    cpus: Option<super::cpu::Capabilities>,
+}
+
+impl Initialization {
+    pub(crate) fn maps_mmio(&self, resource: MmioResource) -> bool {
+        with_boot_state(|state| {
+            state
+                .platform
+                .mmio
+                .as_slice()
+                .iter()
+                .any(|mapped| mapped.start() <= resource.start() && resource.end() <= mapped.end())
+        })
+    }
+
+    pub(crate) fn essential(&self) -> &crate::arch::platform::EssentialInfo {
+        &self.essential
+    }
+
+    pub(crate) const fn linear_dtb(&self) -> usize {
+        self.linear_dtb
+    }
+
+    pub(crate) const fn early_console(&self) -> Option<ConsoleInfo> {
+        self.early_console
+    }
+
+    /// Returns the permanent MMIO capability installed while promoting
+    /// earlycon. Port-I/O consoles do not have an MMIO capability.
+    pub(crate) const fn early_console_mapping(&self) -> Option<PermanentMmioMapping> {
+        self.early_console_mapping
+    }
+
+    pub(crate) fn interrupts(&self) -> irq::interrupt::Capabilities {
+        self.interrupts
+            .unwrap_or_else(|| fail("interrupt capability access", "controller not initialized"))
+    }
+
+    pub(crate) fn set_interrupts(&mut self, capabilities: irq::interrupt::Capabilities) {
+        self.interrupts = Some(capabilities);
+    }
+
+    pub(crate) fn timer(&self) -> irq::timer::Capabilities {
+        self.timer
+            .unwrap_or_else(|| fail("timer capability access", "timer not initialized"))
+    }
+
+    pub(crate) fn set_timer(&mut self, capabilities: irq::timer::Capabilities) {
+        self.timer = Some(capabilities);
+    }
+
+    pub(crate) fn cpus(&self) -> super::cpu::Capabilities {
+        self.cpus
+            .unwrap_or_else(|| fail("CPU capability access", "SMP not initialized"))
+    }
+
+    pub(crate) fn set_cpus(&mut self, capabilities: super::cpu::Capabilities) {
+        self.cpus = Some(capabilities);
+    }
+}
+
+/// Prepares kernel state while executing on the bootstrap mapping.
+pub(crate) fn prepare_boot_environment(inputs: ProtocolInputs) -> ! {
+    match try_prepare_boot_environment(inputs) {
+        Ok(never) => match never {},
+        Err(error) => fail("boot environment preparation", error),
+    }
+}
+
+fn try_prepare_boot_environment(inputs: ProtocolInputs) -> Result<Infallible, PreparationError> {
+    let dtb_address = inputs.dtb_address;
+    let image_layout = image::layout();
+    let (platform, essential, chosen) = discover_boot_inputs(dtb_address)?;
+    report_chosen_errors(&chosen);
+    let command_line = inputs.command_line.as_ref().or(chosen.command_line());
+    let early_console = initialize_early_console(&platform, command_line)?;
+    crate::println!("HypeR: DTB at {:#x}", dtb_address);
+
+    let kernel_base =
+        select_kernel_base(command_line, chosen.kaslr_seed(), image_layout.total_size)?;
+    let initial_ramdisk = select_initial_ramdisk(
+        &platform,
+        inputs.initial_ramdisk.or(chosen.initial_ramdisk()),
+        dtb_address,
+        image_layout,
+    )?;
+    let memory = prepare_final_memory(&platform, dtb_address, initial_ramdisk, kernel_base)?;
+    let activation = memory.activation_context();
+
+    crate::println!(
+        "HypeR: discovered {} RAM and {} MMIO regions",
+        platform.memory.len(),
+        platform.mmio.len()
+    );
+    crate::println!(
+        "HypeR: root page table at {:#x}; switching to kernel VA {:#x}",
+        memory.root_address(),
+        memory.kernel_base()
+    );
+
+    state::install(BootState {
+        platform,
+        essential,
+        early_console,
+        memory,
+        dtb_address: dtb_address as u64,
+        image_physical_start: image_layout.physical_start,
+        initial_ramdisk,
+    })
+    .map_err(PreparationError::BootState)?;
+
+    // SAFETY: The prepared hierarchy is retained in global boot state and the
+    // activation context was issued by the active architecture implementation.
+    unsafe { crate::arch::memory::activate(activation) }
+}
+
+fn discover_boot_inputs(
+    dtb_address: usize,
+) -> Result<
+    (
+        hyper::platform::PlatformInfo,
+        crate::arch::platform::EssentialInfo,
+        chosen::Properties,
+    ),
+    PreparationError,
+> {
+    let mut essential_discovery = crate::arch::platform::EssentialDiscovery::new();
+    let mut chosen_discovery = chosen::Discovery::new();
+    let mut visitors = fdt::VisitorPair::new(&mut essential_discovery, &mut chosen_discovery);
+    // SAFETY: The architecture bootstrap preserved the validated firmware DTB
+    // pointer until this common discovery phase.
+    let platform = match unsafe { fdt::discover_with(dtb_address, &mut visitors) } {
+        Ok(platform) => platform,
+        Err(fdt::WalkError::Fdt(error)) => return Err(PreparationError::Platform(error)),
+        Err(fdt::WalkError::Visitor(fdt::VisitorPairError::First(error))) => {
+            return Err(PreparationError::Essential(error));
+        }
+        Err(fdt::WalkError::Visitor(fdt::VisitorPairError::Second(error))) => {
+            return Err(PreparationError::Chosen(error));
+        }
+    };
+    let essential = essential_discovery
+        .finish()
+        .map_err(PreparationError::Essential)?;
+    let chosen = chosen_discovery
+        .finish()
+        .map_err(PreparationError::Chosen)?;
+
+    Ok((platform, essential, chosen))
+}
+
+fn report_chosen_errors(chosen: &chosen::Properties) {
+    if let Some(error) = chosen.command_line_error() {
+        crate::pr_warn!("HypeR: ignoring invalid DTB bootargs: {error:?}");
+    }
+    if let Some(error) = chosen.kaslr_seed_error() {
+        crate::pr_warn!("HypeR: ignoring invalid DTB kaslr-seed: {error:?}");
+    }
+}
+
+fn initialize_early_console(
+    platform: &hyper::platform::PlatformInfo,
+    command_line: Option<&chosen::CommandLine>,
+) -> Result<Option<ConsoleInfo>, PreparationError> {
+    let early_console = match console::early_console(command_line) {
+        Ok(Some(info)) if early_console_is_accessible(platform, info) => Some(info),
+        Ok(Some(info)) => {
+            crate::pr_warn!(
+                "HypeR: ignoring inaccessible early console at {:#x}",
+                info.base
+            );
+            None
+        }
+        Ok(None) => None,
+        Err(error) => {
+            crate::pr_warn!("HypeR: ignoring invalid earlycon argument: {error:?}");
+            None
+        }
+    };
+
+    if let Some(console_info) = early_console {
+        install_bootstrap_console(console_info).map_err(PreparationError::Console)?;
+        crate::println!("HypeR: early console initialized");
+    }
+    Ok(early_console)
+}
+
+fn select_kernel_base(
+    command_line: Option<&chosen::CommandLine>,
+    discovered_seed: Option<u64>,
+    image_size: u64,
+) -> Result<u64, PreparationError> {
+    let kaslr_seed = if hyper::config::RANDOMIZE_BASE
+        && !command_line.is_some_and(|arguments| arguments.contains("nokaslr"))
+    {
+        discovered_seed
+    } else {
+        None
+    };
+    crate::arch::platform::select_kernel_base(kaslr_seed, image_size)
+        .map_err(PreparationError::Kaslr)
+}
+
+fn select_initial_ramdisk(
+    platform: &hyper::platform::PlatformInfo,
+    discovered: Option<hyper::platform::PhysicalRange>,
+    dtb_address: usize,
+    image_layout: hyper::hal::memory::KernelImageLayout,
+) -> Result<hyper::platform::PhysicalRange, PreparationError> {
+    let range = discovered.ok_or(PreparationError::InitialRamdiskMissing)?;
+    if !initial_ramdisk_is_accessible(platform, range, dtb_address as u64, image_layout) {
+        return Err(PreparationError::InitialRamdiskInvalid(range));
+    }
+    Ok(range)
+}
+
+fn prepare_final_memory(
+    platform: &hyper::platform::PlatformInfo,
+    dtb_address: usize,
+    initial_ramdisk: hyper::platform::PhysicalRange,
+    kernel_base: u64,
+) -> Result<mm::PreparedMemory, PreparationError> {
+    // SAFETY: The architecture established and owns the bootstrap mapping used
+    // by its early physical-page allocation policy.
+    unsafe { mm::memory::prepare(platform, dtb_address as u64, initial_ramdisk, kernel_base) }
+        .map_err(PreparationError::Memory)
+}
+
+/// Enters architecture-independent initialization on the permanent mappings.
+pub(crate) fn enter_runtime() -> Result<Initialization, RuntimeError> {
+    let (platform, essential, early_console, dtb_address) = with_boot_state(|state| {
+        (
+            state.platform,
+            state.essential,
+            state.early_console,
+            state.dtb_address,
+        )
+    });
+    let early_console_mapping = match early_console {
+        Some(console_info) => {
+            // The bootstrap identity map has already been retired. Remove its
+            // stale handle before any fallible runtime operation can log, then
+            // publish only a handle backed by the permanent device mapping.
+            log::console::retire_bootstrap();
+            promote_early_console(&platform, console_info).map_err(RuntimeError::Console)?
+        }
+        None => None,
+    };
+    crate::arch::memory::prepare_cache(&essential).map_err(RuntimeError::Cache)?;
+    let linear_dtb =
+        mm::memory::linear_address(dtb_address).ok_or(RuntimeError::DtbMapping(dtb_address))?;
+
+    Ok(Initialization {
+        essential,
+        early_console,
+        early_console_mapping,
+        linear_dtb,
+        interrupts: None,
+        timer: None,
+        cpus: None,
+    })
+}
+
+fn initial_ramdisk_is_accessible(
+    platform: &hyper::platform::PlatformInfo,
+    range: hyper::platform::PhysicalRange,
+    dtb_address: u64,
+    image: hyper::hal::memory::KernelImageLayout,
+) -> bool {
+    let in_ram = platform
+        .memory
+        .as_slice()
+        .iter()
+        .any(|memory| memory.start() <= range.start() && range.end() <= memory.end());
+    let excluded = platform
+        .no_map
+        .as_slice()
+        .iter()
+        .any(|reserved| reserved.overlaps(range));
+    let overlaps_dtb = hyper::platform::PhysicalRange::new(dtb_address, platform.dtb_size)
+        .is_none_or(|dtb| dtb.overlaps(range));
+    let overlaps_image =
+        hyper::platform::PhysicalRange::new(image.physical_start, image.total_size)
+            .is_none_or(|kernel| kernel.overlaps(range));
+    in_ram && !excluded && !overlaps_dtb && !overlaps_image
+}
+
+fn early_console_is_accessible(
+    platform: &hyper::platform::PlatformInfo,
+    info: ConsoleInfo,
+) -> bool {
+    if info.access == hyper::platform::ConsoleRegisterAccess::Port {
+        return info.base <= u64::from(u16::MAX - 7) && crate::arch::platform::port_io().is_some();
+    }
+    let Some(register_window) = early_console_register_window(info) else {
+        return false;
+    };
+    let Some(end) = info.base.checked_add(register_window) else {
+        return false;
+    };
+    if end > crate::arch::memory::AddressTranslation::bootstrap_accessible_limit() {
+        return false;
+    }
+    platform
+        .mmio
+        .as_slice()
+        .iter()
+        .any(|range| range.start() <= info.base && end <= range.end())
+}
+
+fn early_console_mmio_resource(
+    platform: &hyper::platform::PlatformInfo,
+    info: ConsoleInfo,
+) -> Option<MmioResource> {
+    let size = early_console_register_window(info)?;
+    let resource = hyper::platform::PhysicalRange::new(info.base, size)?;
+    platform
+        .mmio
+        .as_slice()
+        .iter()
+        .any(|range| range.start() <= resource.start() && resource.end() <= range.end())
+        .then(|| {
+            // SAFETY: Discovery classified the containing translated interval
+            // as MMIO, and earlycon policy assigns this exact UART window to
+            // the selected console.
+            unsafe { MmioResource::from_physical_range(resource) }
+        })
+}
+
+fn early_console_register_window(info: ConsoleInfo) -> Option<u64> {
+    match info.kind {
+        hyper::platform::ConsoleKind::Pl011 => Some(0x1000),
+        hyper::platform::ConsoleKind::Ns16550 => match info.access {
+            hyper::platform::ConsoleRegisterAccess::Mmio8 { register_shift } => 1u64
+                .checked_shl(u32::from(register_shift))
+                .and_then(|stride| 7u64.checked_mul(stride))
+                .and_then(|last| last.checked_add(1)),
+            hyper::platform::ConsoleRegisterAccess::Mmio32 { register_shift } => 1u64
+                .checked_shl(u32::from(register_shift))
+                .and_then(|stride| 7u64.checked_mul(stride))
+                .and_then(|last| last.checked_add(core::mem::size_of::<u32>() as u64)),
+            hyper::platform::ConsoleRegisterAccess::Native => Some(8),
+            hyper::platform::ConsoleRegisterAccess::Port => None,
+        },
+    }
+}
+
+fn install_bootstrap_console(console_info: ConsoleInfo) -> Result<(), ConsoleError> {
+    let base =
+        usize::try_from(console_info.base).map_err(|_| ConsoleError::Address(console_info.base))?;
+    // SAFETY: Platform discovery validated the device range and the
+    // architecture bootstrap maps it with Device memory attributes. This
+    // handle is replaced immediately after the permanent stage-1 switch.
+    let console =
+        unsafe { console::bind_bootstrap(console_info, base, crate::arch::platform::port_io()) }
+            .map_err(ConsoleError::Driver)?;
+    log::console::install(console);
+    Ok(())
+}
+
+/// Replaces the bootstrap identity-mapped console handle with one backed by
+/// the permanent stage-1 capability. Runtime serial input borrows this same
+/// mapping, so promotion is the single mapping publication point.
+fn promote_early_console(
+    platform: &hyper::platform::PlatformInfo,
+    console_info: ConsoleInfo,
+) -> Result<Option<PermanentMmioMapping>, ConsoleError> {
+    let mapping = if console_info.access == hyper::platform::ConsoleRegisterAccess::Port {
+        None
+    } else {
+        let resource = early_console_mmio_resource(platform, console_info)
+            .ok_or(ConsoleError::Address(console_info.base))?;
+        let virtual_start = mm::memory::mmio_address(resource.start())
+            .ok_or(ConsoleError::Address(resource.start()))?;
+        // SAFETY: Final stage-1 construction permanently maps every platform
+        // MMIO range with Device attributes.
+        Some(
+            unsafe {
+                PermanentMmioMapping::new(
+                    resource,
+                    hyper::mm::VirtualAddress::new(virtual_start as u64),
+                )
+            }
+            .map_err(|_| ConsoleError::Address(resource.start()))?,
+        )
+    };
+    let console = console::bind(console_info, mapping, crate::arch::platform::port_io())
+        .map_err(ConsoleError::Driver)?;
+    log::console::install(console);
+    Ok(mapping)
+}
+
+pub(crate) fn fail(operation: &str, error: impl core::fmt::Debug) -> ! {
+    if crate::kernel::crash::is_ready() {
+        crate::kernel::crash::fatal(format_args!("HypeR: {operation} failed: {error:?}"));
+    }
+    crate::pr_crit!("HypeR: {operation} failed: {error:?}");
+    crate::arch::cpu::halt()
+}
+
+pub(crate) fn with_boot_state<R>(operation: impl FnOnce(&BootState) -> R) -> R {
+    match state::with(operation) {
+        Ok(result) => result,
+        Err(error) => fail("boot-state access", error),
+    }
+}
+
+pub(crate) fn try_with_boot_state<R>(operation: impl FnOnce(&BootState) -> R) -> Option<R> {
+    state::with(operation).ok()
+}

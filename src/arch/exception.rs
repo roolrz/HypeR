@@ -1,0 +1,67 @@
+//! Selected-architecture exception and fail-stop mechanisms.
+//!
+//! Kernel crash and IRQ policy owns the decision to stop or resume. This
+//! facade exposes only machine context capture, vector installation, emergency
+//! stack entry, and crash-stop delivery. Raw exception entry remains in the
+//! selected backend and reaches policy through the named kernel entry adapters.
+
+use hyper::cpu::CpuIndex;
+
+pub(crate) use super::imp::{CrashContext, RuntimeVectorError};
+
+pub(crate) use super::imp::{
+    bootstrap_stack_bounds, broadcast_crash_stop, capture_crash_context, crash_stop_interrupt,
+    is_crash_stop_interrupt, validate_runtime_vectors,
+};
+
+/// Publishes the pinned exception stacks belonging to one logical CPU.
+///
+/// # Safety
+///
+/// Both ranges must be nonempty, ABI-aligned, exclusively reserved stack
+/// mappings which remain pinned and writable for the CPU's online lifetime.
+/// The target CPU must not enter runtime exceptions until publication
+/// completes, and its slot may be installed only once.
+#[inline]
+pub(crate) unsafe fn install_exception_stacks(
+    cpu: CpuIndex,
+    irq: (usize, usize),
+    emergency: (usize, usize),
+) -> Result<(), ()> {
+    // SAFETY: The facade preserves both backend range/lifetime contracts and
+    // passes an index already validated against the common CPU-slot capacity.
+    unsafe { super::imp::install_exception_stacks(cpu.get(), irq, emergency) }
+}
+
+/// Installs the selected architecture's permanent runtime exception vectors.
+///
+/// # Safety
+///
+/// The final executable kernel mapping and a valid exception stack must be
+/// active. Kernel entry services must be initialized and local interrupts must
+/// remain masked until installation and validation complete. Any backend
+/// one-time installation requirement must also be upheld.
+#[inline]
+pub(crate) unsafe fn install_runtime_vectors() {
+    // SAFETY: This facade preserves the selected backend's mapping, entry
+    // service, interrupt-state, and one-time publication requirements.
+    unsafe { super::imp::install_runtime_vectors() }
+}
+
+/// Permanently invokes fatal handling on the current CPU's emergency stack.
+///
+/// # Safety
+///
+/// The current CPU's emergency stack must be installed, pinned, and not
+/// already active. Local interrupts must be masked. `argument` must remain
+/// valid until `callback` stops the CPU, and the callback must not retain any
+/// reference into the abandoned stack.
+#[inline]
+pub(crate) unsafe fn run_on_emergency_stack(
+    callback: extern "C" fn(usize) -> !,
+    argument: usize,
+) -> ! {
+    // SAFETY: The facade forwards the strict common emergency-stack lifetime,
+    // exclusivity, interrupt-state, and callback argument contract.
+    unsafe { super::imp::run_on_emergency_stack(callback, argument) }
+}

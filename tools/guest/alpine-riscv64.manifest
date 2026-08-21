@@ -1,0 +1,8 @@
+format=hyper-vm-v1
+type=linux
+architecture=riscv64
+memory=134217728
+vcpus=1
+command_line=earlycon=sbi keep_bootcon rdinit=/init loglevel=7
+kernel=kernel/Image
+initramfs=initramfs/initramfs.cpio.gz

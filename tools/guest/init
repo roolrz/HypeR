@@ -1,0 +1,12 @@
+#!/usr/bin/sh
+# Deterministic first-userspace process for the hypervisor boot integration.
+
+export PATH=/usr/bin:/usr/sbin:/bin:/sbin
+/usr/bin/busybox mount -t proc proc /proc
+/usr/bin/busybox mount -t sysfs sysfs /sys
+/usr/bin/busybox mount -t devtmpfs devtmpfs /dev
+
+echo "HypeR guest: /init reached"
+echo "HypeR guest: Linux userspace is running"
+
+/usr/bin/busybox sh

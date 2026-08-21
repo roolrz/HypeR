@@ -1,0 +1,44 @@
+//! Selected-architecture hardware virtualization mechanisms.
+//!
+//! Kernel VM policy owns VM publication, vCPU scheduling, demand paging, and
+//! exit disposition. This facade selects stage-2 translation, vCPU entry,
+//! virtual interrupt, guest timer, and architecture-local exit mechanisms.
+//! Linux image formats and boot ABI policy deliberately remain outside it.
+
+pub use super::imp::{
+    VcpuInterruptError, VmInterruptController as InterruptController,
+    VmInterruptError as InterruptError,
+};
+
+pub(crate) use super::imp::{
+    GuestValidationError as RegisterValidationError,
+    InterruptVirtualizationError as InterruptInitializationError, Stage2AddressSpace, Stage2Error,
+    VcpuContext, VirtualDeviceInitializationError as DeviceError, VirtualInterruptError,
+};
+
+pub(crate) use super::imp::{
+    enable_interrupts_for_guest_entry as enable_interrupts_for_entry,
+    handle_guest_virtual_timer_interrupt as handle_virtual_timer_interrupt,
+    initialize_interrupt_virtualization as initialize_interrupts,
+    initialize_virtual_devices as initialize_devices, poll_guest_timer as poll_timer,
+    take_guest_timer_wakeup as take_timer_wakeup, validate_vsysreg as validate_register_interface,
+};
+
+#[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) use super::imp::{
+    complete_guest_mmio_access as complete_legacy_mmio,
+    decode_guest_mmio_access as decode_legacy_mmio,
+    update_guest_device_interrupt as update_legacy_device_interrupt,
+};
+
+/// Compatibility vocabulary for architecture-owned raw exit frames.
+///
+/// Frame ownership remains with the backend entry path and kernel policy may
+/// borrow it only for one synchronous dispatch. New exit classes must use
+/// owned events from `hyper::vm::exit` instead of extending this interface.
+pub(crate) use super::imp::{
+    GuestSyncAction as LegacySyncAction, GuestSyncFrame as LegacySyncFrame,
+    deliver_guest_software_interrupt as deliver_legacy_software_interrupt,
+    handle_guest_device_access as handle_legacy_device_access,
+    handle_guest_sync as decode_legacy_sync,
+};
