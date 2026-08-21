@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Pure Intel VMX capability and exit decoding.
 
 pub const VMX_REGION_MEMORY_TYPE_WB: u8 = 6;

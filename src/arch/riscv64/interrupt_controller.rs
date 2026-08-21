@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 use hyper::drivers::interrupt::plic::{Error as PlicError, Plic};
 use hyper::hal::interrupt::{
     InterruptController, InterruptId, InterruptPriority, InterruptTrigger,

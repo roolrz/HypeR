@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-CPU software timers multiplexed onto one architectural comparator.
 
 use hyper::cpu::{CpuIndex, PerCpu};

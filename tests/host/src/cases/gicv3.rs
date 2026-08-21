@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! GICv3 CPU-interface initialization through explicit hardware capabilities.
 
 use core::ptr::{read_volatile, write_volatile};

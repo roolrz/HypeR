@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::mm::{PhysicalAddress, VirtualAddress};
 
 /// Linker-derived physical layout of the loaded kernel image.

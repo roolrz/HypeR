@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fatal-crash ownership, CPU stopping, and emergency-stack transitions.
 //!
 //! This module owns the fail-stop control flow. It never allocates, blocks on

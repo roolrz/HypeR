@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Kernel log production, retention, and reader API.
 
 use core::fmt::{self, Write};

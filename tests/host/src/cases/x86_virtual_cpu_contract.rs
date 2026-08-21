@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Architecture-independent x86 vCPU, VMX, CPUID, and MSR contracts.
 
 use hyper::vm::x86::vmx::{

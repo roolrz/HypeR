@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 # Exercises recurring timer delivery on the supported four-core QEMU setup.
 set -eu
 

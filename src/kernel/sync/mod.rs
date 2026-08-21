@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Scheduler-aware synchronization for kernel thread context.
 
 mod mutex;

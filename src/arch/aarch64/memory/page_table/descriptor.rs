@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! `AArch64` EL2 stage-1 descriptor encoding and classification.
 //!
 //! This module owns the architectural bit layout for table, block, and page

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 use core::fmt;
 
 /// Minimal byte-oriented output contract used during early kernel startup.

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Architecture-facing representation of synchronous x86 guest exits.
 //!
 //! VMX and SVM own their machine state and place only owned, decoded facts in

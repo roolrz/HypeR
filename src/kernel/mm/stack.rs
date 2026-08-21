@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Guarded virtual kernel stacks and per-CPU exception-stack ownership.
 
 use core::ptr::{read_volatile, write_bytes, write_volatile};

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 roolrz
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # HypeR
 
 [![CI](https://github.com/roolrz/HypeR/actions/workflows/ci.yml/badge.svg)](https://github.com/roolrz/HypeR/actions/workflows/ci.yml)
@@ -309,6 +314,8 @@ Before opening a pull request:
    architecture. Run the relevant QEMU contract when runtime behavior changes.
 6. Do not add GPL-derived implementation code. New dependencies require
    explicit `no_std`, maintenance, and license review.
+7. Preserve the SPDX copyright and Apache-2.0 header in every new tracked text
+   file. Cargo-generated lockfiles and the complete `LICENSE` text are exempt.
 
 Small, coherent changes with a clear migration seam are preferred over broad
 rewrites. [Open an issue](https://github.com/roolrz/HypeR/issues) before

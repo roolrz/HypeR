@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Allocation-free interactive diagnostics after fatal crash coordination.
 //!
 //! The monitor reads snapshots already published by the crash owner and never

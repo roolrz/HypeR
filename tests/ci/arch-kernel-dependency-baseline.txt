@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 # Temporary src/arch -> crate::kernel references.
 # Format: source file, explicit kernel contract path, reference count.
 # Remove or lower an entry with the code that resolves the dependency; never raise one.

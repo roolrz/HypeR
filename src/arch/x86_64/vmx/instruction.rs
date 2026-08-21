@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Privileged Intel VMX instruction boundary.
 //!
 //! Callers own VMX lifecycle and VMCS field policy. This module only binds

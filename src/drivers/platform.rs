@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Platform-device discovery and driver lifecycle management.
 
 use alloc::{boxed::Box, string::String, vec::Vec};

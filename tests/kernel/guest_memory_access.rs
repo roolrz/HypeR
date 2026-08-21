@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Exercises checked copies through sparse stage-2 guest memory.
 
 use hyper::mm::PAGE_SIZE;

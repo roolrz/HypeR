@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! `AArch64` stage-2 translation tables and activation.
 
 use core::arch::asm;

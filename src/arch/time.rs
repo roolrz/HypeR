@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Selected-architecture monotonic time mechanisms.
 //!
 //! Kernel timekeeping owns clock and timer policy. This facade selects the

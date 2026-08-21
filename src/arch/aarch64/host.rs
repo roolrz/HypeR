@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Runtime selection and world-switch controls for the EL2 host regime.
 
 use core::arch::asm;

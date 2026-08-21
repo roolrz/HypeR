@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 # Last-resort runner cleanup; normal test scripts already reap their QEMU child.
 set -eu
 

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Virtual-machine execution policy.
 
 pub(crate) mod active_vcpu;

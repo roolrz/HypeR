@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 # Acquires the pinned external x86-64 Linux payload used by QEMU integration.
 set -eu
 

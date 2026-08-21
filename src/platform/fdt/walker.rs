@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fallible orchestration of validated FDT tokens and borrowed visitor events.
 //!
 //! The walker owns event ordering and error provenance. Token framing belongs

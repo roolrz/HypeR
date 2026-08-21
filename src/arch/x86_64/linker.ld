@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 roolrz
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 OUTPUT_ARCH(i386:x86-64)
 ENTRY(x86_64_protected_entry)
 

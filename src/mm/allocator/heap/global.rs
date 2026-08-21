@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Synchronized publication and Rust global-allocation ABI adapter.
 //!
 //! This module owns the interrupt-masking lock and the one-time transition from

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 roolrz
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
     .section .setup, "ax"
     .code16
     .org 0x1f1

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! PL011 device model for an `AArch64` virtual machine.
 
 use crate::hw::pl011 as reg;

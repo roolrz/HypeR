@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! RISC-V architectural constants shared with assembly startup code.
 
 pub const R_RISCV_RELATIVE: u64 = 3;

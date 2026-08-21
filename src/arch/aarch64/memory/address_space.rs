@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 use hyper::hal::memory::KernelImageLayout;
 #[cfg(CONFIG_CRASH_CONSOLE)]
 use hyper::hal::memory::Stage1Mapping;

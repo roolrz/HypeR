@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Selected-architecture CPU identity, lifecycle, and power mechanisms.
 //!
 //! Kernel CPU policy assigns logical indices and chooses when processors

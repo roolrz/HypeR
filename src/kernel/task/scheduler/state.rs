@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Scheduler-owned thread registry, CPU state, and lifecycle transitions.
 
 use alloc::boxed::Box;

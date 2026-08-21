@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 #![deny(clippy::missing_safety_doc, clippy::undocumented_unsafe_blocks)]
 
 mod barrier;

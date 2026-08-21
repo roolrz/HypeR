@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 use hyper::drivers::interrupt::gicv3::{Error as GicError, GicV3};
 use hyper::hal::interrupt::{
     InterruptController, InterruptId, InterruptPriority, InterruptTrigger,

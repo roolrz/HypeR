@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Optional crash-monitor lifecycle adapter.
 //!
 //! This module is the only coordination-to-monitor edge. It keeps feature

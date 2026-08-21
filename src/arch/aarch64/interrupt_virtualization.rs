@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! `GICv3` virtualization ownership at the architecture/kernel IRQ boundary.
 
 use hyper::hal::interrupt::{InterruptId, InterruptPriority, InterruptTrigger};

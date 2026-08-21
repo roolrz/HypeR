@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Runtime symbol lookup, demangling, and malformed-table rejection.
 
 use hyper::debug::kallsyms::{

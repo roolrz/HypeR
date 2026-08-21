@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! `AArch64` system-register glue for the reusable `GICv3` driver.
 
 use core::arch::asm;

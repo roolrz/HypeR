@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Running-vCPU bridge for the Arm virtual timer and vGIC.
 
 use hyper::vm::interrupt::{Error as VgicError, VirtualCpuId};

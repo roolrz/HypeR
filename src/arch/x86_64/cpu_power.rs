@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 use core::arch::asm;
 use core::ptr::{copy_nonoverlapping, read_volatile, write_volatile};
 

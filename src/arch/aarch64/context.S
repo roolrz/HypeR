@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 roolrz
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 /* AAPCS64 cooperative kernel-thread context switch. */
 
 #include "asm_constants.h"
@@ -161,14 +166,16 @@ aarch64_capture_crash_context:
 .global aarch64_enter_guest
 .type aarch64_enter_guest, %function
 aarch64_enter_guest:
-    // Keep the context pointer in x30 until every other guest register is live.
+    // Keep the context pointer in x30 while the VHE host translation regime is
+    // active. The heap may live in the host-only lower VA range, so no context
+    // load is permitted after TGE is cleared.
     mov     x30, x0
-    // E2H remains set for VHE, but TGE must be clear while EL1/EL0 belongs to
-    // the guest. On nVHE systems this is an idempotent write of a clear bit.
-    mrs     x1, hcr_el2
-    bic     x1, x1, #HCR_EL2_TGE
-    msr     hcr_el2, x1
-    isb
+
+    // FAR_EL2 is overwritten by any subsequent fault, making it a safe
+    // register-only shuttle for the guest link register across the final HCR
+    // switch. This avoids dereferencing a host pointer in the guest regime.
+    ldr     x1, [x30, #VCPU_CONTEXT_X30_OFFSET]
+    msr     far_el2, x1
     ldr     x1, [x30, #VCPU_CONTEXT_PC_OFFSET]
     msr     elr_el2, x1
     ldr     x1, [x30, #VCPU_CONTEXT_PSTATE_OFFSET]
@@ -188,6 +195,14 @@ aarch64_enter_guest:
     ldp     x24, x25, [x30, #(VCPU_CONTEXT_X0_OFFSET + 192)]
     ldp     x26, x27, [x30, #(VCPU_CONTEXT_X0_OFFSET + 208)]
     ldp     x28, x29, [x30, #(VCPU_CONTEXT_X0_OFFSET + 224)]
-    ldr     x30, [x30, #VCPU_CONTEXT_X30_OFFSET]
+
+    // E2H remains set for VHE, but TGE must be clear while EL1/EL0 belongs to
+    // the guest. On nVHE systems this is an idempotent write of a clear bit.
+    // Only register operations may follow until ERET.
+    mrs     x30, hcr_el2
+    bic     x30, x30, #HCR_EL2_TGE
+    msr     hcr_el2, x30
+    isb
+    mrs     x30, far_el2
     eret
 .size aarch64_enter_guest, . - aarch64_enter_guest

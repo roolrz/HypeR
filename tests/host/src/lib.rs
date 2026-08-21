@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Host-side tests for architecture-independent HypeR mechanisms.
 //!
 //! Each test module follows a production subsystem or a distinct hardware or

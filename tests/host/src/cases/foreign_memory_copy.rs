@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Checked copies across a bounded foreign-address-space window.
 
 use hyper::mm::{ForeignCopyError, ForeignMemory, copy_from_foreign, copy_to_foreign};

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 # Validates the built ELF and raw Linux Image without rebuilding either file.
 set -eu
 
@@ -133,6 +136,25 @@ case "$arch" in
         grep -Eq '[[:space:]]cas(al|a|l)?b[[:space:]]' "$instructions_file"
         grep -Eq '[[:space:]]ldaxrb[[:space:]]' "$instructions_file"
         grep -Eq '[[:space:]]stl?xrb[[:space:]]' "$instructions_file"
+        if ! awk '
+            /<aarch64_enter_guest>:/ { in_entry = 1; next }
+            in_entry && /^$/ { exit }
+            in_entry {
+                instruction = tolower($0)
+                if (instruction ~ /msr[[:space:]]+hcr_el2/) {
+                    guest_regime = 1
+                } else if (guest_regime && instruction ~ /[[:space:]]ld(p|r)[[:space:]]/) {
+                    exit 1
+                } else if (guest_regime && instruction ~ /[[:space:]]eret/) {
+                    valid_entry = 1
+                    exit
+                }
+            }
+            END { exit valid_entry ? 0 : 1 }
+        ' "$instructions_file"; then
+            echo "AArch64 guest entry accesses memory after selecting the guest regime" >&2
+            exit 1
+        fi
         ;;
     riscv64)
         grep -Eq '[[:space:]]amo(add|swap)\.d' "$instructions_file"

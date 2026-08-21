@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Guard-page, watermark, thread-stack, and IRQ-stack integration tests.
 
 use core::hint::{black_box, spin_loop};

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Runtime `AArch64` address-size capability selection.
 //!
 //! Build-time values describe the address-space policy. The boot CPU then

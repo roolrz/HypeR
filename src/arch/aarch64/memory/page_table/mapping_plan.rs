@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Validated construction plan for the final EL2 stage-1 address space.
 //!
 //! This module decides which firmware ranges and kernel image segments receive

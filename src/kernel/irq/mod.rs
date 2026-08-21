@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Exception, interrupt-domain, and kernel-timer policy.
 
 use hyper::sync::atomic::{AtomicBool, Ordering};

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! RISC-V Linux Image boot convention for virtual machines.
 
 use crate::arch::guest::{Error, PayloadLoadError, PayloadMemory, PayloadRange};

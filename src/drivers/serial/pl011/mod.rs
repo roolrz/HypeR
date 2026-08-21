@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! ARM `PrimeCell` PL011 serial controller driver.
 
 use alloc::boxed::Box;

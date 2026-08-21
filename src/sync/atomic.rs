@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Portable atomic primitives supplied by Rust's `core` library.
 //!
 //! LLVM lowers these operations to the target's supported instruction set. The

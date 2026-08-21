@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Allocation-free parser for the SVR4 `newc` CPIO format.
 
 use core::str;

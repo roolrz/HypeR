@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Allocation-free discovery of Linux-style DTB `/chosen` properties.
 
 use core::str;

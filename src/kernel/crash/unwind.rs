@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bounded frame-chain validation and symbol lookup for frozen CPUs.
 //!
 //! This module reads only a crash snapshot and a pinned stopped-CPU stack. It

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Guest-visible placement of the `GICv3` on the reference virtual board.
 
 pub const DISTRIBUTOR_BASE: u32 = 0x0800_0000;

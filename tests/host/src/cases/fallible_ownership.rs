@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Ownership and destruction behavior of fallible allocation helpers.
 
 use std::sync::atomic::{AtomicUsize, Ordering};

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Linux-format device tree for FDT-booted virtual platforms.
 
 use alloc::vec::Vec;

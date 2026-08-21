@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 /// Failure reported before issuing cache maintenance operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheError {

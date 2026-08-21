@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 roolrz
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Crash console
 
 `CONFIG_CRASH_CONSOLE=y` adds an interactive, allocation-free monitor to the

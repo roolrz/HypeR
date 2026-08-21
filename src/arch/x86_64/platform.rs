@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 use hyper::platform::{
     CpuPowerInfo, InterruptControllerInfo, PlatformInterrupt, PlatformInterruptTrigger, TimerInfo,
     TimerKind, X2ApicInfo, X86ApicInfo,

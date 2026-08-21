@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Sv39x4 guest-stage translation for the RISC-V hypervisor extension.
 
 use core::ptr::{read_volatile, write_volatile};

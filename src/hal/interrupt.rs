@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 /// Architecture policy used by locks that must be safe against local IRQs.
 ///
 /// Implementations must restore the exact interrupt mask captured by

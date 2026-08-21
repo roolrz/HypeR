@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Register-addressing backend for physical NS16550-compatible UARTs.
 //!
 //! This module is the only layer that turns integer MMIO addresses or port-I/O

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Register models for the initial x86 legacy PC virtual board.
 const COM1_BASE: u16 = 0x3f8;
 const MASTER_PIC_COMMAND: u16 = 0x20;

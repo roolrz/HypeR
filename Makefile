@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 ARCH ?= aarch64
 ifeq ($(ARCH),aarch64)
 TARGET := aarch64-unknown-none

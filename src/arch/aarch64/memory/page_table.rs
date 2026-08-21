@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Stage-1 page-table ownership, walking, and mutation.
 //!
 //! This module owns boot-time table allocation and live hierarchy mutation.

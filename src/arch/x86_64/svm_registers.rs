@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! AMD SVM MSR, VMCB, intercept, and exit-code definitions.
 
 pub(super) const MSR_VM_CR: u32 = 0xc001_0114;

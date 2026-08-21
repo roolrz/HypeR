@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bounded FDT blob and structure-token validation.
 //!
 //! This module owns byte bounds, header offsets, and token framing. It does not

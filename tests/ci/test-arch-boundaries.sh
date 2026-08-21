@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 # Exercise dependency-ratchet cases that are easy to weaken accidentally.
 set -eu
 

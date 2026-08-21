@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 roolrz
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * AArch64 position-independent bootstrap for the Linux kernel boot ABI.
  *
  * This is the only assembly startup path. It establishes deterministic EL2

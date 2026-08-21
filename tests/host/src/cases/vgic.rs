@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Virtual GIC pending, active, maintenance, and snapshot semantics.
 
 use hyper::vm::interrupt::gicv3::{decode_list_register, encode_list_register};

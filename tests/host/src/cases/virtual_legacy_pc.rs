@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Legacy x86 virtual-device composition and interrupt routing.
 
 use hyper::vm::x86::device::legacy_pc::{InterruptSource, LegacyPcDevices};

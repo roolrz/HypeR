@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! `AArch64` CPU identity and PSCI secondary-entry ABI.
 
 use core::arch::asm;

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Runtime selection between the Intel VMX and AMD SVM backends.
 
 use hyper::sync::atomic::{AtomicU8, Ordering};

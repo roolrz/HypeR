@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Selected-architecture host interrupt mechanisms.
 //!
 //! Kernel IRQ policy owns domains, handler lifetimes, routing, and failure

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Device-tree discovery, boot-property, and platform matching contracts.
 
 use std::boxed::Box;

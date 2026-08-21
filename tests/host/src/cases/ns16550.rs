@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! NS16550 register-width, stride, MMIO, and port-I/O contracts.
 
 use hyper::drivers::platform::{MmioResource, PermanentMmioMapping};

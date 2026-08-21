@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! `PrimeCell` UART (PL011) programmer's model.
 //!
 //! Offsets and bit definitions follow Arm DDI 0183G. Keeping the complete

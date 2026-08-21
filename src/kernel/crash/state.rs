@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Lock-free crash-state publication and debugger-visible storage.
 //!
 //! This module owns the single-writer slots inspected after a fatal stop. It

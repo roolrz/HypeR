@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Allocation-free lookup over an in-image ELF dynamic symbol table.
 
 const ELF64_SYMBOL_SIZE: usize = 24;

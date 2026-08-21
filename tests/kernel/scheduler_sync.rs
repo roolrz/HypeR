@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Real-context scheduler, wait-queue, Mutex, and Semaphore tests.
 
 use hyper::sync::atomic::{AtomicUsize, Ordering};

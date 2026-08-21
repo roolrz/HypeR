@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Platform-bus binding and lifecycle for unclaimed NS16550 UARTs.
 //!
 //! This layer interprets FDT binding properties and acquires mapping

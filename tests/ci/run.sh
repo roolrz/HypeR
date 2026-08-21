@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 # Stable local entry points used by GitHub Actions.
 set -eu
 
@@ -40,6 +43,7 @@ case "${1:-}" in
             echo "ripgrep is required for the source-quality suite" >&2
             exit 2
         }
+        sh tests/ci/check-license-headers.sh
         sh tests/ci/test-boot-stack-contract.sh
         sh tests/ci/check-boot-stack-contract.sh
         sh tests/ci/test-arch-facades.sh

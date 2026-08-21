@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Installed virtual-machine identity and aggregate ownership.
 //!
 //! The registry is the single publication point for guest address spaces and

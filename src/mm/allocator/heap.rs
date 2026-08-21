@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Runtime heap mechanisms and allocation accounting.
 //!
 //! This module owns slab, large-allocation, and direct-page metadata over one

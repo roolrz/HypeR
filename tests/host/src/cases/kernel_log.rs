@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Kernel log ring-buffer record and wraparound behavior.
 
 use hyper::log::{Level, ReadResult, RecordFlags, RingBuffer};

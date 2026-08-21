@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Intel VMX lifecycle, VMCS policy, and VM-exit mechanism.
 //!
 //! Per-CPU VMXON/VMCS/MSR storage remains here because its exclusive ownership

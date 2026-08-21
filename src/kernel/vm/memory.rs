@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Guest-physical memory ownership and stage-2 demand paging.
 
 use core::ptr::{copy_nonoverlapping, write_bytes};

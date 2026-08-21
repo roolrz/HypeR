@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! `AArch64` guest synchronous-trap and virtual system-register handling.
 
 use core::arch::asm;

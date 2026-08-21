@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! NS16550-compatible UART register model and controller operations.
 //!
 //! This facade owns hardware-independent UART semantics and delegates physical

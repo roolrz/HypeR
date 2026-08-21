@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Bare-metal integration tests compiled only by `kernel-self-test`.
 
 mod guest_memory_access;

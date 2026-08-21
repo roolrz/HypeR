@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Lock wrapper that composes local interrupt masking with a raw spin lock.
 
 use core::marker::PhantomData;

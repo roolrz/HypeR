@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Narrow upward adapters for architecture exception and guest-exit entry.
 //!
 //! Raw frames and machine decoding remain below `arch`. These adapters are the

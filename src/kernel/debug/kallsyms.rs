@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Runtime binding for the linker-provided kernel symbol table.
 
 use core::ptr::addr_of;

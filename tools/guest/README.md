@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 roolrz
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # External Linux guest test payload
 
 `make guest-assets` downloads the checksum-pinned Alpine Linux guest selected

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 #[cfg(all(target_arch = "aarch64", not(CONFIG_ARCH_AARCH64)))]
 compile_error!("the AArch64 target requires CONFIG_ARCH_AARCH64=y");
 

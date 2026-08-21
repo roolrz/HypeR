@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 CONFIG_ARCH_AARCH64=y
 CONFIG_ARM64_VA_BITS=48
 CONFIG_ARM64_PA_BITS=48

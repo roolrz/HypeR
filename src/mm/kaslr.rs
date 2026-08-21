@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Architecture-neutral KASLR offset selection.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

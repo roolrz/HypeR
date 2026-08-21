@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 use core::arch::asm;
 use core::mem::{offset_of, size_of};
 use core::ptr::addr_of;

@@ -1,4 +1,7 @@
 #!/bin/sh
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 # Keep target selection at the architecture facade instead of scattering it
 # through kernel subsystems and drivers.
 set -eu

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Selected-architecture Linux guest boot ABI.
 //!
 //! Kernel VM policy owns bundle selection, VM publication, memory sizing, and

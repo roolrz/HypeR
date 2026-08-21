@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-VM interrupt topology for x86 hardware virtualization.
 
 use hyper::vm::interrupt::VirtualInterruptId;

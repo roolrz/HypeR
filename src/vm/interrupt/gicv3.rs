@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! `GICv3` hardware list-register encoding shared by architecture backends.
 
 use super::{InterruptGroup, ListEntry, ListState, VirtualInterruptId};

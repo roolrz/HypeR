@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! RISC-V guest-exit decoding and the initial supervisor binary interface.
 
 use core::arch::asm;

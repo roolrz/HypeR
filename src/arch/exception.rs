@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Selected-architecture exception and fail-stop mechanisms.
 //!
 //! Kernel crash and IRQ policy owns the decision to stop or resume. This

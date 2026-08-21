@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Architecture-neutral logical CPU identity and per-CPU storage.
 //!
 //! This module distinguishes a validated kernel CPU slot from firmware CPU

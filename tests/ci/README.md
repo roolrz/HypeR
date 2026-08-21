@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 roolrz
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # CI test policy
 
 The scripts in this directory are the stable boundary between GitHub Actions
@@ -34,6 +39,10 @@ artifacts must agree on the minimum.
 
 `test-boot-stack-contract.sh` verifies that comments and duplicate declarations
 cannot satisfy this source ratchet.
+
+`check-license-headers.sh` requires every project-authored tracked text file to
+carry SPDX copyright and Apache-2.0 identifiers. The complete license text and
+Cargo-generated lockfiles are intentionally exempt.
 
 `check-arch-facades.sh` prevents migrated CPU-lifecycle, Linux guest-ABI,
 host-interrupt, host-memory, host-platform, host-time, and

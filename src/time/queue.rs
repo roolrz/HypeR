@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Fixed-capacity indexed deadline heap.
 
 use crate::hal::timer::deadline_reached;

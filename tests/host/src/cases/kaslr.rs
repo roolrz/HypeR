@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Reproducible KASLR offset selection and geometry validation.
 
 use hyper::mm::kaslr::{self, Error};

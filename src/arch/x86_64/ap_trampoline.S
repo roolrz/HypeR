@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 roolrz
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
     .section .text.ap_trampoline, "ax"
     .code16
     .global x86_64_ap_trampoline_start

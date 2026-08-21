@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Architecture-neutral fatal-crash facade.
 //!
 //! Crash policy coordinates a single diagnostic owner, freezes other CPUs,

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! PSCI conduit selection and firmware-call ABI encoding.
 
 use core::sync::atomic::{AtomicU32, Ordering};

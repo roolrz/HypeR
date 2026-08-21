@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Intrusive FIFO primitives and per-CPU priority ready queues.
 
 use alloc::boxed::Box;

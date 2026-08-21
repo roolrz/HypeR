@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-VM interrupt topology for the RISC-V H-extension backend.
 
 use hyper::vm::interrupt::VirtualInterruptId;

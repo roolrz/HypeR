@@ -1,4 +1,7 @@
 #!/usr/bin/sh
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
 # Deterministic first-userspace process for the hypervisor boot integration.
 
 export PATH=/usr/bin:/usr/sbin:/bin:/sbin

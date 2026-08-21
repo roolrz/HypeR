@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! `GICv3` distributor and Redistributor service for the reference VM board.
 //!
 //! This module contains guest-visible register policy only. The reusable

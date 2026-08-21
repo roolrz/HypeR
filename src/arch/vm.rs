@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Selected-architecture hardware virtualization mechanisms.
 //!
 //! Kernel VM policy owns VM publication, vCPU scheduling, demand paging, and

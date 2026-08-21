@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! VM-owned virtual-device instances and host bindings.
 //!
 //! Reusable register models live under [`hyper::vm`]. This service owns one

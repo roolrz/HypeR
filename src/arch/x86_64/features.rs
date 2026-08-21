@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 use core::arch::x86_64::__cpuid_count;
 
 pub fn running_under_qemu_tcg() -> bool {

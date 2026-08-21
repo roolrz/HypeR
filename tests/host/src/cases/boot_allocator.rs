@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
 //! Early page-allocation range, reservation, and accounting contracts.
 
 use hyper::mm::{BootAllocator, BootAllocatorError, PAGE_SIZE};

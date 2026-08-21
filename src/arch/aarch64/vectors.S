@@ -1,4 +1,9 @@
 /*
+ * SPDX-FileCopyrightText: 2026 roolrz
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/*
  * Runtime AArch64 EL2 exception vectors.
  *
  * Each slot preserves the interrupted integer and SIMD state before entering
