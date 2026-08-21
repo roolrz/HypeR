@@ -1,0 +1,94 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
+//! RISC-V architectural constants shared with assembly startup code.
+
+pub const R_RISCV_RELATIVE: u64 = 3;
+pub const SATP_MODE_SV39: u64 = 8 << 60;
+pub const SSTATUS_SIE: u64 = 1 << 1;
+pub const SSTATUS_SPIE: u64 = 1 << 5;
+pub const SSTATUS_SPP: u64 = 1 << 8;
+pub const SIE_SSIE: u64 = 1 << 1;
+pub const SIE_STIE: u64 = 1 << 5;
+pub const SIE_SEIE: u64 = 1 << 9;
+
+// Hypervisor-extension controls used when entering a VS-mode guest.
+pub const HEDELEG_GUEST_VALUE: u64 = 0x0000_b1ff;
+pub const HIDELEG_GUEST_VALUE: u64 = 0x0000_0444;
+pub const HCOUNTEREN_GUEST_VALUE: u64 = 1 << 1;
+pub const HSTATUS_SPV: u64 = 1 << 7;
+pub const HSTATUS_SPVP: u64 = 1 << 8;
+pub const HSTATUS_VTVM: u64 = 1 << 20;
+pub const HSTATUS_VTW: u64 = 1 << 21;
+pub const HSTATUS_VTSR: u64 = 1 << 22;
+pub const HSTATUS_VSXL_64: u64 = 2 << 32;
+pub const HSTATUS_GUEST_CLEAR: u64 = HSTATUS_VTVM | HSTATUS_VTSR | (3 << 32);
+pub const HSTATUS_GUEST_SET: u64 = HSTATUS_SPV | HSTATUS_SPVP | HSTATUS_VTW | HSTATUS_VSXL_64;
+pub const SSTATUS_GUEST_SPP: u64 = 1 << 8;
+
+pub const PAGE_SHIFT: u64 = 12;
+pub const PAGE_SIZE: u64 = 1 << PAGE_SHIFT;
+pub const PHYSICAL_ADDRESS_LIMIT: u64 = 1 << 56;
+pub const SV39_ADDRESS_MASK: u64 = (1 << 39) - 1;
+pub const SV39_KERNEL_BASE: u64 = 0xffff_ffc0_0000_0000;
+pub const SV39_LINEAR_BASE: u64 = 0xffff_ffd0_0000_0000;
+pub const SV39_MMIO_BASE: u64 = 0xffff_ffe0_0000_0000;
+pub const SV39_STACK_BASE: u64 = 0xffff_fff0_0000_0000;
+
+pub const PTE_VALID: u64 = 1 << 0;
+pub const PTE_READ: u64 = 1 << 1;
+pub const PTE_WRITE: u64 = 1 << 2;
+pub const PTE_EXECUTE: u64 = 1 << 3;
+pub const PTE_USER: u64 = 1 << 4;
+pub const PTE_GLOBAL: u64 = 1 << 5;
+pub const PTE_ACCESSED: u64 = 1 << 6;
+pub const PTE_DIRTY: u64 = 1 << 7;
+pub const PTE_PPN_SHIFT: u64 = 10;
+
+pub const HGATP_MODE_SV39X4: u64 = 8 << 60;
+pub const HGATP_VMID_SHIFT: u64 = 44;
+pub const HGATP_VMID_MASK: u64 = 0x3fff << HGATP_VMID_SHIFT;
+pub const STAGE2_IPA_LIMIT: u64 = 1 << 41;
+pub const THREAD_CONTEXT_S0_OFFSET: u64 = 0;
+pub const THREAD_CONTEXT_RA_OFFSET: u64 = 96;
+pub const THREAD_CONTEXT_SP_OFFSET: u64 = 104;
+pub const THREAD_CONTEXT_SIZE: u64 = 112;
+pub const VCPU_GENERAL_OFFSET: u64 = 0;
+pub const VCPU_PC_OFFSET: u64 = 256;
+pub const VCPU_VSSTATUS_OFFSET: u64 = 264;
+pub const VCPU_VSIE_OFFSET: u64 = 272;
+pub const VCPU_VSTVEC_OFFSET: u64 = 280;
+pub const VCPU_VSSCRATCH_OFFSET: u64 = 288;
+pub const VCPU_VSEPC_OFFSET: u64 = 296;
+pub const VCPU_VSCAUSE_OFFSET: u64 = 304;
+pub const VCPU_VSTVAL_OFFSET: u64 = 312;
+pub const VCPU_VSATP_OFFSET: u64 = 320;
+pub const VCPU_FLOATING_OFFSET: u64 = 328;
+pub const VCPU_FCSR_OFFSET: u64 = 584;
+
+pub const ASM_CONSTANTS: &[(&str, u64)] = &[
+    ("R_RISCV_RELATIVE", R_RISCV_RELATIVE),
+    ("SATP_MODE_SV39", SATP_MODE_SV39),
+    ("HEDELEG_GUEST_VALUE", HEDELEG_GUEST_VALUE),
+    ("HIDELEG_GUEST_VALUE", HIDELEG_GUEST_VALUE),
+    ("HCOUNTEREN_GUEST_VALUE", HCOUNTEREN_GUEST_VALUE),
+    ("HSTATUS_GUEST_CLEAR", HSTATUS_GUEST_CLEAR),
+    ("HSTATUS_GUEST_SET", HSTATUS_GUEST_SET),
+    ("SSTATUS_GUEST_SPP", SSTATUS_GUEST_SPP),
+    ("PAGE_SHIFT", PAGE_SHIFT),
+    ("THREAD_CONTEXT_S0_OFFSET", THREAD_CONTEXT_S0_OFFSET),
+    ("THREAD_CONTEXT_RA_OFFSET", THREAD_CONTEXT_RA_OFFSET),
+    ("THREAD_CONTEXT_SP_OFFSET", THREAD_CONTEXT_SP_OFFSET),
+    ("VCPU_GENERAL_OFFSET", VCPU_GENERAL_OFFSET),
+    ("VCPU_PC_OFFSET", VCPU_PC_OFFSET),
+    ("VCPU_VSSTATUS_OFFSET", VCPU_VSSTATUS_OFFSET),
+    ("VCPU_VSIE_OFFSET", VCPU_VSIE_OFFSET),
+    ("VCPU_VSTVEC_OFFSET", VCPU_VSTVEC_OFFSET),
+    ("VCPU_VSSCRATCH_OFFSET", VCPU_VSSCRATCH_OFFSET),
+    ("VCPU_VSEPC_OFFSET", VCPU_VSEPC_OFFSET),
+    ("VCPU_VSCAUSE_OFFSET", VCPU_VSCAUSE_OFFSET),
+    ("VCPU_VSTVAL_OFFSET", VCPU_VSTVAL_OFFSET),
+    ("VCPU_VSATP_OFFSET", VCPU_VSATP_OFFSET),
+    ("VCPU_FLOATING_OFFSET", VCPU_FLOATING_OFFSET),
+    ("VCPU_FCSR_OFFSET", VCPU_FCSR_OFFSET),
+];

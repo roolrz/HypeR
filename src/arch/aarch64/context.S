@@ -1,0 +1,208 @@
+/*
+ * SPDX-FileCopyrightText: 2026 roolrz
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* AAPCS64 cooperative kernel-thread context switch. */
+
+#include "asm_constants.h"
+
+.section .text.context, "ax"
+
+.global aarch64_switch_context
+.type aarch64_switch_context, %function
+aarch64_switch_context:
+    stp     x19, x20, [x0, #(THREAD_CONTEXT_X19_OFFSET + 0)]
+    stp     x21, x22, [x0, #(THREAD_CONTEXT_X19_OFFSET + 16)]
+    stp     x23, x24, [x0, #(THREAD_CONTEXT_X19_OFFSET + 32)]
+    stp     x25, x26, [x0, #(THREAD_CONTEXT_X19_OFFSET + 48)]
+    stp     x27, x28, [x0, #(THREAD_CONTEXT_X19_OFFSET + 64)]
+    stp     x29, x30, [x0, #THREAD_CONTEXT_X29_OFFSET]
+    mov     x2, sp
+    str     x2, [x0, #THREAD_CONTEXT_SP_OFFSET]
+    stp     d8, d9, [x0, #(THREAD_CONTEXT_D8_OFFSET + 0)]
+    stp     d10, d11, [x0, #(THREAD_CONTEXT_D8_OFFSET + 16)]
+    stp     d12, d13, [x0, #(THREAD_CONTEXT_D8_OFFSET + 32)]
+    stp     d14, d15, [x0, #(THREAD_CONTEXT_D8_OFFSET + 48)]
+    mrs     x2, fpcr
+    str     x2, [x0, #THREAD_CONTEXT_FPCR_OFFSET]
+    mrs     x2, fpsr
+    str     x2, [x0, #THREAD_CONTEXT_FPSR_OFFSET]
+
+    ldp     x19, x20, [x1, #(THREAD_CONTEXT_X19_OFFSET + 0)]
+    ldp     x21, x22, [x1, #(THREAD_CONTEXT_X19_OFFSET + 16)]
+    ldp     x23, x24, [x1, #(THREAD_CONTEXT_X19_OFFSET + 32)]
+    ldp     x25, x26, [x1, #(THREAD_CONTEXT_X19_OFFSET + 48)]
+    ldp     x27, x28, [x1, #(THREAD_CONTEXT_X19_OFFSET + 64)]
+    ldp     x29, x30, [x1, #THREAD_CONTEXT_X29_OFFSET]
+    ldr     x2, [x1, #THREAD_CONTEXT_SP_OFFSET]
+    mov     sp, x2
+    ldp     d8, d9, [x1, #(THREAD_CONTEXT_D8_OFFSET + 0)]
+    ldp     d10, d11, [x1, #(THREAD_CONTEXT_D8_OFFSET + 16)]
+    ldp     d12, d13, [x1, #(THREAD_CONTEXT_D8_OFFSET + 32)]
+    ldp     d14, d15, [x1, #(THREAD_CONTEXT_D8_OFFSET + 48)]
+    ldr     x2, [x1, #THREAD_CONTEXT_FPCR_OFFSET]
+    msr     fpcr, x2
+    ldr     x2, [x1, #THREAD_CONTEXT_FPSR_OFFSET]
+    msr     fpsr, x2
+    ret
+.size aarch64_switch_context, . - aarch64_switch_context
+
+.global aarch64_thread_trampoline
+.type aarch64_thread_trampoline, %function
+aarch64_thread_trampoline:
+    mov     x0, x20
+    blr     x19
+    bl      kernel_thread_exit
+    b       .
+.size aarch64_thread_trampoline, . - aarch64_thread_trampoline
+
+/*
+ * Abandons the current call chain, refills one stack in place, and enters a
+ * non-returning continuation at its clean top.
+ *
+ * x0 = mapped bottom, x1 = top, x2 = watermark word, x3 = canary,
+ * x4 = callback, x5 = callback argument
+ */
+.global aarch64_reset_stack_and_enter
+.type aarch64_reset_stack_and_enter, %function
+aarch64_reset_stack_and_enter:
+    mov     sp, x1
+    mov     x29, xzr
+    mov     x30, xzr
+    str     x3, [x0], #8
+.Lreset_stack_watermark:
+    cmp     x0, x1
+    b.hs    .Lreset_stack_enter
+    str     x2, [x0], #8
+    b       .Lreset_stack_watermark
+.Lreset_stack_enter:
+    mov     x0, x5
+    blr     x4
+.Lreset_stack_halt:
+    msr     daifset, #0xf
+    wfe
+    b       .Lreset_stack_halt
+.size aarch64_reset_stack_and_enter, . - aarch64_reset_stack_and_enter
+
+/* Permanently transfers fatal handling onto this CPU's emergency stack. */
+.global aarch64_run_on_emergency_stack
+.type aarch64_run_on_emergency_stack, %function
+aarch64_run_on_emergency_stack:
+    mov     x19, x0
+    mov     x20, x1
+    mrs     x2, tpidr_el2
+    adrp    x3, AARCH64_EMERGENCY_STACK_BOUNDS
+    add     x3, x3, :lo12:AARCH64_EMERGENCY_STACK_BOUNDS
+    add     x3, x3, x2, lsl #4
+    add     x6, x3, #8
+    ldar    x5, [x6]
+    ldr     x4, [x3]
+    cbz     x5, .Lemergency_current_stack
+    mov     x6, sp
+    cmp     x6, x4
+    b.lo    .Lemergency_switch
+    cmp     x6, x5
+    b.ls    .Lemergency_current_stack
+.Lemergency_switch:
+    mov     sp, x5
+    mov     x29, xzr
+.Lemergency_current_stack:
+    mov     x0, x20
+    blr     x19
+.Lemergency_halt:
+    msr     daifset, #0xf
+    wfe
+    b       .Lemergency_halt
+.size aarch64_run_on_emergency_stack, . - aarch64_run_on_emergency_stack
+
+/* Captures a best-effort kernel register image for software panic paths. */
+.global aarch64_capture_crash_context
+.type aarch64_capture_crash_context, %function
+aarch64_capture_crash_context:
+    stp     x1, x2, [x0, #(CRASH_CONTEXT_X0_OFFSET + 8)]
+    stp     x3, x4, [x0, #(CRASH_CONTEXT_X0_OFFSET + 24)]
+    stp     x5, x6, [x0, #(CRASH_CONTEXT_X0_OFFSET + 40)]
+    stp     x7, x8, [x0, #(CRASH_CONTEXT_X0_OFFSET + 56)]
+    stp     x9, x10, [x0, #(CRASH_CONTEXT_X0_OFFSET + 72)]
+    stp     x11, x12, [x0, #(CRASH_CONTEXT_X0_OFFSET + 88)]
+    stp     x13, x14, [x0, #(CRASH_CONTEXT_X0_OFFSET + 104)]
+    stp     x15, x16, [x0, #(CRASH_CONTEXT_X0_OFFSET + 120)]
+    stp     x17, x18, [x0, #(CRASH_CONTEXT_X0_OFFSET + 136)]
+    stp     x19, x20, [x0, #(CRASH_CONTEXT_X0_OFFSET + 152)]
+    stp     x21, x22, [x0, #(CRASH_CONTEXT_X0_OFFSET + 168)]
+    stp     x23, x24, [x0, #(CRASH_CONTEXT_X0_OFFSET + 184)]
+    stp     x25, x26, [x0, #(CRASH_CONTEXT_X0_OFFSET + 200)]
+    stp     x27, x28, [x0, #(CRASH_CONTEXT_X0_OFFSET + 216)]
+    stp     x29, x30, [x0, #(CRASH_CONTEXT_X0_OFFSET + 232)]
+    mov     x1, sp
+    str     x1, [x0, #CRASH_CONTEXT_SP_OFFSET]
+    str     x30, [x0, #CRASH_CONTEXT_PC_OFFSET]
+    mrs     x1, nzcv
+    mrs     x2, daif
+    orr     x1, x1, x2
+    mrs     x2, CurrentEL
+    add     x3, x2, #1
+    orr     x1, x1, x3
+    str     x1, [x0, #CRASH_CONTEXT_PSTATE_OFFSET]
+    mrs     x1, mpidr_el1
+    str     x1, [x0, #CRASH_CONTEXT_MPIDR_OFFSET]
+    str     x2, [x0, #CRASH_CONTEXT_CURRENT_EL_OFFSET]
+    mrs     x1, daif
+    str     x1, [x0, #CRASH_CONTEXT_DAIF_OFFSET]
+    mrs     x1, sctlr_el2
+    str     x1, [x0, #CRASH_CONTEXT_SCTLR_EL2_OFFSET]
+    mrs     x1, tcr_el2
+    str     x1, [x0, #CRASH_CONTEXT_TCR_EL2_OFFSET]
+    mrs     x1, ttbr0_el2
+    str     x1, [x0, #CRASH_CONTEXT_TTBR0_EL2_OFFSET]
+    mrs     x1, vbar_el2
+    str     x1, [x0, #CRASH_CONTEXT_VBAR_EL2_OFFSET]
+    mrs     x1, hcr_el2
+    str     x1, [x0, #CRASH_CONTEXT_HCR_EL2_OFFSET]
+    ret
+.size aarch64_capture_crash_context, . - aarch64_capture_crash_context
+
+.global aarch64_enter_guest
+.type aarch64_enter_guest, %function
+aarch64_enter_guest:
+    // Keep the context pointer in x30 while the VHE host translation regime is
+    // active. The heap may live in the host-only lower VA range, so no context
+    // load is permitted after TGE is cleared.
+    mov     x30, x0
+
+    // FAR_EL2 is overwritten by any subsequent fault, making it a safe
+    // register-only shuttle for the guest link register across the final HCR
+    // switch. This avoids dereferencing a host pointer in the guest regime.
+    ldr     x1, [x30, #VCPU_CONTEXT_X30_OFFSET]
+    msr     far_el2, x1
+    ldr     x1, [x30, #VCPU_CONTEXT_PC_OFFSET]
+    msr     elr_el2, x1
+    ldr     x1, [x30, #VCPU_CONTEXT_PSTATE_OFFSET]
+    msr     spsr_el2, x1
+    ldp     x0, x1, [x30, #(VCPU_CONTEXT_X0_OFFSET + 0)]
+    ldp     x2, x3, [x30, #(VCPU_CONTEXT_X0_OFFSET + 16)]
+    ldp     x4, x5, [x30, #(VCPU_CONTEXT_X0_OFFSET + 32)]
+    ldp     x6, x7, [x30, #(VCPU_CONTEXT_X0_OFFSET + 48)]
+    ldp     x8, x9, [x30, #(VCPU_CONTEXT_X0_OFFSET + 64)]
+    ldp     x10, x11, [x30, #(VCPU_CONTEXT_X0_OFFSET + 80)]
+    ldp     x12, x13, [x30, #(VCPU_CONTEXT_X0_OFFSET + 96)]
+    ldp     x14, x15, [x30, #(VCPU_CONTEXT_X0_OFFSET + 112)]
+    ldp     x16, x17, [x30, #(VCPU_CONTEXT_X0_OFFSET + 128)]
+    ldp     x18, x19, [x30, #(VCPU_CONTEXT_X0_OFFSET + 144)]
+    ldp     x20, x21, [x30, #(VCPU_CONTEXT_X0_OFFSET + 160)]
+    ldp     x22, x23, [x30, #(VCPU_CONTEXT_X0_OFFSET + 176)]
+    ldp     x24, x25, [x30, #(VCPU_CONTEXT_X0_OFFSET + 192)]
+    ldp     x26, x27, [x30, #(VCPU_CONTEXT_X0_OFFSET + 208)]
+    ldp     x28, x29, [x30, #(VCPU_CONTEXT_X0_OFFSET + 224)]
+
+    // E2H remains set for VHE, but TGE must be clear while EL1/EL0 belongs to
+    // the guest. On nVHE systems this is an idempotent write of a clear bit.
+    // Only register operations may follow until ERET.
+    mrs     x30, hcr_el2
+    bic     x30, x30, #HCR_EL2_TGE
+    msr     hcr_el2, x30
+    isb
+    mrs     x30, far_el2
+    eret
+.size aarch64_enter_guest, . - aarch64_enter_guest

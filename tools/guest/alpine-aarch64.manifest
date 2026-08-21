@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
+format=hyper-vm-v1
+type=linux
+architecture=aarch64
+memory=134217728
+vcpus=1
+command_line=console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init loglevel=7
+kernel=kernel/Image
+initramfs=initramfs/initramfs.cpio.gz
