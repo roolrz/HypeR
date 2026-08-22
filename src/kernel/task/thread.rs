@@ -9,8 +9,20 @@ use hyper::cpu::CpuIndex;
 const THREAD_NAME_CAPACITY: usize = 32;
 
 use crate::kernel::mm::{AddressSpaceId, stack::KernelStack};
+use crate::kernel::task::policy::{
+    SchedulingClass, SchedulingPolicy, ThreadPlacement, ThreadPriority,
+};
 
 pub type KernelThreadEntry = extern "C" fn(usize);
+
+/// Queue position to use if a running FIFO thread must leave the CPU after a
+/// priority change. The value is replaced by every subsequent priority change
+/// and consumed by the next scheduling decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DeferredFifoPlacement {
+    Head,
+    Tail,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ThreadId(u64);
@@ -27,31 +39,6 @@ impl ThreadId {
         self.0
     }
 }
-/// The scheduler accepts the complete `u8` priority namespace.
-///
-/// Ready threads remain intrusive; this constant only sizes the per-priority
-/// queue heads and the bitmap used to find the highest-priority non-empty
-/// queue. It does not limit the number of runnable threads.
-pub const THREAD_PRIORITY_LEVELS: usize = u8::MAX as usize + 1;
-
-/// Fixed scheduler priority. Lower numeric values run first.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-pub struct ThreadPriority(u8);
-
-impl ThreadPriority {
-    pub const HIGHEST: Self = Self(0);
-    pub const NORMAL: Self = Self(128);
-    pub const LOWEST: Self = Self(u8::MAX);
-
-    pub const fn new(value: u8) -> Self {
-        Self(value)
-    }
-
-    pub const fn get(self) -> u8 {
-        self.0
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ThreadState {
     Dormant,
@@ -185,9 +172,10 @@ impl From<crate::arch::vm::VirtualInterruptError> for Error {
 /// hypervisor privilege domain.
 pub struct Thread {
     id: ThreadId,
-    cpu_index: CpuIndex,
+    placement: ThreadPlacement,
     name: ThreadName,
-    priority: ThreadPriority,
+    scheduling: SchedulingPolicy,
+    deferred_fifo_placement: Option<DeferredFifoPlacement>,
     state: ThreadState,
     queue_links: QueueLinks,
     context: crate::arch::context::ThreadContext,
@@ -203,9 +191,10 @@ impl Thread {
         };
         Self {
             id: ThreadId::BOOTSTRAP,
-            cpu_index,
+            placement: ThreadPlacement::pinned(cpu_index),
             name,
-            priority: ThreadPriority::NORMAL,
+            scheduling: SchedulingPolicy::fifo(ThreadPriority::NORMAL),
+            deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
             context: crate::arch::context::ThreadContext::empty(),
@@ -226,9 +215,10 @@ impl Thread {
         context.prepare(stack.top(), entry, argument);
         Ok(Self {
             id,
-            cpu_index,
+            placement: ThreadPlacement::movable(cpu_index),
             name: ThreadName::new(name)?,
-            priority: ThreadPriority::NORMAL,
+            scheduling: SchedulingPolicy::fifo(ThreadPriority::NORMAL),
+            deferred_fifo_placement: None,
             state: ThreadState::Dormant,
             queue_links: QueueLinks::EMPTY,
             context,
@@ -245,9 +235,10 @@ impl Thread {
     ) -> Result<Self, Error> {
         Ok(Self {
             id,
-            cpu_index,
+            placement: ThreadPlacement::pinned(cpu_index),
             name: ThreadName::new(name)?,
-            priority: ThreadPriority::NORMAL,
+            scheduling: SchedulingPolicy::fifo(ThreadPriority::NORMAL),
+            deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
             context: crate::arch::context::ThreadContext::empty(),
@@ -271,9 +262,10 @@ impl Thread {
         scheduling_context.prepare(stack.top(), entry, 0);
         Ok(Self {
             id,
-            cpu_index,
+            placement: ThreadPlacement::prefer(cpu_index),
             name: ThreadName::new(name)?,
-            priority: ThreadPriority::NORMAL,
+            scheduling: SchedulingPolicy::fifo(ThreadPriority::NORMAL),
+            deferred_fifo_placement: None,
             state: ThreadState::Dormant,
             queue_links: QueueLinks::EMPTY,
             context: scheduling_context,
@@ -298,7 +290,12 @@ impl Thread {
     /// Context migration requires a stopped-thread hand-off protocol and is
     /// deliberately not implicit in the shared scheduler run queue.
     pub const fn cpu_index(&self) -> CpuIndex {
-        self.cpu_index
+        self.placement.assigned_cpu()
+    }
+
+    /// Checks the placement constraint independently of current assignment.
+    pub(super) const fn can_run_on(&self, cpu: CpuIndex) -> bool {
+        self.placement.affinity().contains(cpu)
     }
 
     pub fn name(&self) -> &str {
@@ -309,16 +306,51 @@ impl Thread {
         self.state
     }
 
-    pub const fn priority(&self) -> ThreadPriority {
-        self.priority
+    pub(crate) const fn scheduling_policy(&self) -> SchedulingPolicy {
+        self.scheduling
     }
 
-    pub(super) fn set_priority(&mut self, priority: ThreadPriority) {
-        self.priority = priority;
+    pub(crate) const fn scheduling_class(&self) -> SchedulingClass {
+        self.scheduling.class()
+    }
+
+    pub const fn priority(&self) -> Option<ThreadPriority> {
+        self.scheduling.priority()
+    }
+
+    pub(super) fn set_priority(&mut self, priority: ThreadPriority) -> bool {
+        if self.scheduling_class() != SchedulingClass::FixedPriority {
+            return false;
+        }
+        self.scheduling = SchedulingPolicy::fifo(priority);
+        true
+    }
+
+    pub(super) fn set_deferred_fifo_placement(&mut self, placement: Option<DeferredFifoPlacement>) {
+        self.deferred_fifo_placement = placement;
+    }
+
+    pub(super) const fn deferred_fifo_placement(&self) -> Option<DeferredFifoPlacement> {
+        self.deferred_fifo_placement
+    }
+
+    pub(super) fn become_idle(&mut self) {
+        self.scheduling = SchedulingPolicy::Idle;
+        self.state = ThreadState::Idle;
     }
 
     pub(super) fn set_state(&mut self, state: ThreadState) {
         self.state = state;
+    }
+
+    pub(super) fn mark_running_on(&mut self, cpu: CpuIndex) -> bool {
+        let Some(placement) = self.placement.mark_running(cpu) else {
+            return false;
+        };
+        self.placement = placement;
+        self.deferred_fifo_placement = None;
+        self.state = ThreadState::Running;
+        true
     }
 
     pub(super) const fn queue_links(&self) -> QueueLinks {

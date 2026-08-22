@@ -27,6 +27,9 @@ pub(crate) use super::imp::{
     take_guest_timer_wakeup as take_timer_wakeup, validate_vsysreg as validate_register_interface,
 };
 
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use super::imp::guest_execution_available;
+
 #[cfg(CONFIG_ARCH_AARCH64)]
 pub(crate) use super::imp::{
     complete_guest_mmio_access as complete_legacy_mmio,

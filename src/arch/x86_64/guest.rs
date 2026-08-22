@@ -45,7 +45,11 @@ pub enum ValidationError {
 }
 
 pub(super) fn validate() -> Result<(), ValidationError> {
-    super::virtualization::validate().map(|_| ())
+    // VM-exit backends decode their machine-owned frames before constructing
+    // GuestSyncFrame, so the common trap interface has no runtime hardware
+    // dependency to validate here. Backend selection belongs to Linux guest
+    // admission, not host exception-vector initialization.
+    Ok(())
 }
 
 pub(crate) fn handle_guest_sync(

@@ -24,7 +24,7 @@ pub(crate) const fn linux_guest_architecture() -> &'static str {
 }
 
 pub(crate) fn validate_linux_host() -> Result<(), Error> {
-    if super::validate_vsysreg().is_err() {
+    if !super::guest_execution_available() {
         return Err(Error::VirtualizationUnavailable);
     }
     Ok(())

@@ -15,6 +15,9 @@ pub(super) enum Error {
 
 pub(super) fn run() -> Result<(), Error> {
     crate::kernel::vm::registry::verify_reservation_rollback().map_err(Error::Registry)?;
+    if !crate::arch::vm::guest_execution_available() {
+        return Ok(());
+    }
 
     let before = crate::kernel::task::scheduler::statistics().map_err(Error::Scheduler)?;
     let reservation = crate::kernel::vm::registry::reserve().map_err(Error::Registry)?;

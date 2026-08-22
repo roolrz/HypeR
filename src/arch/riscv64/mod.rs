@@ -226,6 +226,10 @@ pub const fn broadcast_crash_stop() -> bool {
 pub fn validate_vsysreg() -> Result<(), guest::ValidationError> {
     guest::validate()
 }
+
+pub const fn guest_execution_available() -> bool {
+    true
+}
 pub fn poll_guest_timer(now: u64) {
     guest::poll_virtual_timer(now)
 }

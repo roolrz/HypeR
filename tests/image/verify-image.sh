@@ -174,6 +174,20 @@ case "$arch" in
         grep -Eq '[[:space:]]vmload$' "$instructions_file"
         grep -Eq '[[:space:]]vmsave$' "$instructions_file"
         grep -Eq '[[:space:]]fx(save|rstor)64[[:space:]]' "$instructions_file"
+        if ! awk '
+            /<x86_64_vector_common>:/ { in_vector = 1; next }
+            in_vector && /^$/ { exit }
+            in_vector && /fxsave64/ { saved = 1; next }
+            in_vector && saved && /callq?[[:space:]].*<x86_64_vector_dispatch>/ {
+                dispatched = 1
+                next
+            }
+            in_vector && dispatched && /fxrstor64/ { restored = 1; exit }
+            END { exit saved && dispatched && restored ? 0 : 1 }
+        ' "$instructions_file"; then
+            echo "x86-64 IRQ entry does not preserve SSE state around Rust dispatch" >&2
+            exit 1
+        fi
         ;;
 esac
 

@@ -46,8 +46,18 @@ x86_64_vector_common:
     pushq %r15
     movq %rsp, %rdi
     movq %rsp, %r12
+
+    /*
+     * Rust's x86-64 ABI may use XMM registers in any interrupt handler. The
+     * interrupted context therefore owns the complete legacy x87/SSE image,
+     * including MXCSR. Keep the FXSAVE area below the exact integer frame so
+     * ExceptionFrame layout and crash capture remain unchanged.
+     */
     andq $-16, %rsp
+    subq $512, %rsp
+    fxsave64 (%rsp)
     call x86_64_vector_dispatch
+    fxrstor64 (%rsp)
     movq %r12, %rsp
     popq %r15
     popq %r14

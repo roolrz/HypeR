@@ -105,6 +105,10 @@ pub(crate) use vsysreg::{
 };
 pub use vsysreg::{ValidationError as GuestValidationError, validate as validate_vsysreg};
 
+pub const fn guest_execution_available() -> bool {
+    true
+}
+
 pub fn initialize_cpu_power(
     info: hyper::platform::CpuPowerInfo,
 ) -> Result<ArchitectureCpuPower, CpuPowerError> {

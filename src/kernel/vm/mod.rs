@@ -69,7 +69,13 @@ pub(crate) fn start_default() -> Result<Infallible, StartError> {
         guest.vcpu_count()
     );
     crate::println!("HypeR: kernel initialization complete; starting Linux guest");
-    let vcpu = boot_linux(guest).map_err(StartError::Linux)?;
+    let vcpu = match boot_linux(guest) {
+        Ok(vcpu) => vcpu,
+        Err(error) => {
+            crate::pr_err!("HypeR: Linux guest boot failed: {error:?}");
+            return Err(StartError::Linux(error));
+        }
+    };
     crate::println!("HypeR: Linux boot vCPU scheduled as thread {}", vcpu.get());
     super::task::scheduler::thread_become_idle()
 }
