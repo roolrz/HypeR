@@ -11,7 +11,7 @@
 use core::marker::PhantomData;
 
 use hyper::cpu::{CpuIndex, PerCpu};
-use hyper::sync::atomic::{AtomicU32, Ordering};
+use hyper::sync::atomic::{AtomicU32, Ordering, compiler_fence};
 
 use super::reschedule::PendingReschedule;
 
@@ -139,8 +139,11 @@ pub(super) fn take_pending_locked(cpu: CpuIndex) -> Result<bool, Error> {
 pub(crate) fn can_reschedule(cpu: CpuIndex) -> Result<bool, Error> {
     let state = &PREEMPTION[cpu];
     ensure_online(state)?;
-    Ok(state.disable_depth.load(Ordering::Acquire) == 0
-        && state.irq_depth.load(Ordering::Acquire) == 0)
+    // Depth ownership is CPU-local. Guard/IRQ boundary compiler fences order
+    // protected accesses; these atomics provide nesting and overflow safety,
+    // not inter-CPU memory publication.
+    Ok(state.disable_depth.load(Ordering::Relaxed) == 0
+        && state.irq_depth.load(Ordering::Relaxed) == 0)
 }
 
 /// Disables asynchronous preemption on the calling CPU.
@@ -153,6 +156,7 @@ pub(crate) fn disable() -> Result<PreemptionGuard, Error> {
     let state = &PREEMPTION[cpu];
     ensure_online(state)?;
     increment(&state.disable_depth, Error::DisableDepthOverflow)?;
+    compiler_fence(Ordering::SeqCst);
     Ok(PreemptionGuard {
         cpu,
         active: true,
@@ -180,6 +184,7 @@ impl PreemptionGuard {
         if current_cpu()? != self.cpu {
             return Err(Error::WrongCpu);
         }
+        compiler_fence(Ordering::SeqCst);
         let previous = decrement(
             &PREEMPTION[self.cpu].disable_depth,
             Error::DisableDepthUnderflow,
@@ -204,6 +209,7 @@ pub(crate) fn enter_irq() -> Result<IrqGuard, Error> {
     let state = &PREEMPTION[cpu];
     ensure_online(state)?;
     increment(&state.irq_depth, Error::IrqDepthOverflow)?;
+    compiler_fence(Ordering::SeqCst);
     Ok(IrqGuard {
         cpu,
         active: true,
@@ -230,6 +236,7 @@ impl IrqGuard {
         if current_cpu()? != self.cpu {
             return Err(Error::WrongCpu);
         }
+        compiler_fence(Ordering::SeqCst);
         let previous = decrement(&PREEMPTION[self.cpu].irq_depth, Error::IrqDepthUnderflow)?;
         self.active = false;
         Ok(previous == 1)
@@ -249,7 +256,7 @@ fn increment(counter: &AtomicU32, overflow: Error) -> Result<(), Error> {
     let mut current = counter.load(Ordering::Relaxed);
     loop {
         let next = current.checked_add(1).ok_or(overflow)?;
-        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed) {
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return Ok(()),
             Err(observed) => current = observed,
         }
@@ -261,7 +268,7 @@ fn decrement(counter: &AtomicU32, underflow: Error) -> Result<u32, Error> {
     let mut current = counter.load(Ordering::Relaxed);
     loop {
         let next = current.checked_sub(1).ok_or(underflow)?;
-        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed) {
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
             Ok(_) => return Ok(current),
             Err(observed) => current = observed,
         }

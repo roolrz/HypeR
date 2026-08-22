@@ -13,7 +13,7 @@ use crate::kernel::task::policy::{SchedulingClass, ThreadPriority};
 use crate::kernel::task::thread::{
     DeferredFifoPlacement, KernelThreadEntry, QueueMembership, Thread, ThreadId, ThreadState,
 };
-use crate::kernel::task::wait::WaitQueue;
+use crate::kernel::task::wait::{ThreadQueue, WaitQueue};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ReadyOutcome {
@@ -29,6 +29,7 @@ pub(super) struct Scheduler {
     threads: Vec<Option<Box<Thread>>>,
     cpus: Vec<CpuScheduler>,
     cpu_slots: PerCpu<Option<usize>>,
+    terminated: ThreadQueue,
     next_id: u64,
     context_switches: u64,
 }
@@ -101,6 +102,7 @@ impl Scheduler {
             threads,
             cpus,
             cpu_slots,
+            terminated: ThreadQueue::new(),
             next_id: 1,
             context_switches: 0,
         })
@@ -257,9 +259,15 @@ impl Scheduler {
         }
         let cpu_slot = self.cpu_slot(cpu)?;
         let current = self.cpus[cpu_slot].current;
-        let Some(ready_priority) = self.cpus[cpu_slot].run_queue.highest_priority() else {
+        let candidate = self.cpus[cpu_slot]
+            .run_queue
+            .peek_highest(&self.threads, cpu)?;
+        let Some((expected_next, ready_priority)) = candidate else {
             let _ = super::super::preempt::take_pending_locked(cpu)?;
             if self.thread(current)?.state() == ThreadState::Running {
+                // Deferred placement orders current only against peers present
+                // at the priority-change decision. If none remains eligible,
+                // future peers must arrive behind the still-running current.
                 self.thread_mut(current)?.set_deferred_fifo_placement(None);
             }
             return Ok(None);
@@ -297,6 +305,9 @@ impl Scheduler {
         let next = self
             .dequeue_ready(cpu_slot)?
             .ok_or(Error::CurrentThreadMissing)?;
+        if next != expected_next {
+            return Err(Error::QueueCorrupted);
+        }
         self.prepare_switch(cpu_slot, current, next).map(Some)
     }
 
@@ -304,17 +315,35 @@ impl Scheduler {
         let cpu_slot = self.cpu_slot(cpu)?;
         let current = self.cpus[cpu_slot].current;
         match self.thread(current)?.state() {
-            ThreadState::Running => self.enqueue_ready(current)?,
+            ThreadState::Running => {
+                let current_priority = self
+                    .thread(current)?
+                    .priority()
+                    .ok_or(Error::InvalidThreadState)?;
+                let candidate = self.cpus[cpu_slot]
+                    .run_queue
+                    .peek_highest(&self.threads, cpu)?;
+                let Some((expected_next, ready_priority)) = candidate else {
+                    return Ok(None);
+                };
+                if ready_priority > current_priority {
+                    return Ok(None);
+                }
+                self.enqueue_ready(current)?;
+                let next = self
+                    .dequeue_ready(cpu_slot)?
+                    .ok_or(Error::CurrentThreadMissing)?;
+                if next != expected_next {
+                    return Err(Error::QueueCorrupted);
+                }
+                return self.prepare_switch(cpu_slot, current, next).map(Some);
+            }
             ThreadState::Idle => {}
             _ => return Err(Error::InvalidThreadState),
         }
         let Some(next) = self.dequeue_ready(cpu_slot)? else {
             return Ok(None);
         };
-        if next == current {
-            self.thread_mut(current)?.set_state(ThreadState::Running);
-            return Ok(None);
-        }
         self.prepare_switch(cpu_slot, current, next).map(Some)
     }
 
@@ -342,6 +371,12 @@ impl Scheduler {
     pub fn prepare_exit(&mut self, cpu: CpuIndex) -> Result<PreparedContextSwitch, Error> {
         let cpu_slot = self.cpu_slot(cpu)?;
         let current = self.cpus[cpu_slot].current;
+        queue::push(
+            &mut self.threads,
+            &mut self.terminated,
+            current,
+            QueueMembership::Terminated,
+        )?;
         self.thread_mut(current)?.set_state(ThreadState::Terminated);
         let next = self
             .dequeue_ready(cpu_slot)?
@@ -447,20 +482,30 @@ impl Scheduler {
         }
     }
 
-    pub fn reap_terminated(&mut self) {
-        for index in 0..self.threads.len() {
-            let Some(thread) = self.threads[index].as_ref() else {
-                continue;
-            };
-            let id = thread.id();
+    pub fn reap_terminated(&mut self) -> Result<(), Error> {
+        let mut candidate = self.terminated.head;
+        while let Some(id) = candidate {
+            let links = self.thread(id)?.queue_links();
+            candidate = links.next;
             let pinned = self
                 .cpus
                 .iter()
                 .any(|cpu| cpu.current == id || cpu.switching_from == Some(id));
-            if !pinned && thread.state() == ThreadState::Terminated {
+            if !pinned {
+                if self.thread(id)?.state() != ThreadState::Terminated {
+                    return Err(Error::QueueCorrupted);
+                }
+                queue::remove(
+                    &mut self.threads,
+                    &mut self.terminated,
+                    id,
+                    QueueMembership::Terminated,
+                )?;
+                let index = usize::try_from(id.get()).map_err(|_| Error::ThreadNotFound)?;
                 self.threads[index] = None;
             }
         }
+        Ok(())
     }
 
     pub fn statistics(&self) -> Statistics {

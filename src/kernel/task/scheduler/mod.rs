@@ -429,7 +429,7 @@ pub(crate) fn prepare_park_locked(wait_queue: &WaitQueue) -> Result<ParkToken, E
     SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         scheduler.finish_switch(cpu);
-        scheduler.reap_terminated();
+        scheduler.reap_terminated()?;
         scheduler.prepare_park(cpu, wait_queue).map(ParkToken)
     })
 }
@@ -527,7 +527,7 @@ fn prepare_schedule() -> Result<Option<PreparedContextSwitch>, Error> {
     SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         scheduler.finish_switch(cpu);
-        scheduler.reap_terminated();
+        scheduler.reap_terminated()?;
         scheduler.prepare_yield(cpu)
     })
 }

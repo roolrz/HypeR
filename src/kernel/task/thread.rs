@@ -54,6 +54,7 @@ pub(crate) enum QueueMembership {
     None,
     Ready { cpu: CpuIndex, priority: u8 },
     Waiting { queue: usize },
+    Terminated,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

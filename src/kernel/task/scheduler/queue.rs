@@ -39,6 +39,15 @@ impl CpuRunQueue {
             .map(|priority| ThreadPriority::new(priority as u8))
     }
 
+    /// Validates and returns the next runnable thread without mutating queues.
+    pub fn peek_highest(
+        &self,
+        threads: &[Option<Box<Thread>>],
+        cpu: CpuIndex,
+    ) -> Result<Option<(ThreadId, ThreadPriority)>, Error> {
+        self.fixed_priority.peek_highest(threads, cpu)
+    }
+
     pub fn enqueue(
         &mut self,
         threads: &mut [Option<Box<Thread>>],
@@ -109,6 +118,28 @@ impl FixedPriorityFifo {
 
     pub const fn len(&self) -> usize {
         self.len
+    }
+
+    fn peek_highest(
+        &self,
+        threads: &[Option<Box<Thread>>],
+        cpu: CpuIndex,
+    ) -> Result<Option<(ThreadId, ThreadPriority)>, Error> {
+        let Some(priority) = self.highest_ready_priority() else {
+            return Ok(None);
+        };
+        let queue = &self.queues[priority];
+        let id = queue.head.ok_or(Error::QueueCorrupted)?;
+        let links = thread_ref(threads, id)?.queue_links();
+        let membership = QueueMembership::Ready {
+            cpu,
+            priority: priority as u8,
+        };
+        if links.membership != membership || queue.len == 0 {
+            return Err(Error::QueueCorrupted);
+        }
+        validate_neighbors(threads, queue, links, id)?;
+        Ok(Some((id, ThreadPriority::new(priority as u8))))
     }
 
     pub fn enqueue(

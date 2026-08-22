@@ -147,6 +147,7 @@ fn exercise_fifo_preemption_points() -> Result<(), Error> {
     scheduler::set_thread_priority(scheduler::current_thread_id()?, ThreadPriority::LOWEST)?;
     exercise_running_priority_changes(0, 3)?;
     exercise_running_priority_changes(1, 2)?;
+    exercise_running_priority_changes(2, 3)?;
     scheduler::set_thread_priority(scheduler::current_thread_id()?, ThreadPriority::NORMAL)?;
     Ok(())
 }
@@ -170,10 +171,11 @@ extern "C" fn fifo_priority_change(mode: usize) {
         Ok(id) => id,
         Err(_) => return record_fifo_failure(1),
     };
+    let equal_expected = if mode == 2 { 3 } else { 1 };
     let equal = match scheduler::kthread_create_with_priority(
         "fifo-priority-peer",
         fifo_peer,
-        1,
+        equal_expected,
         ThreadPriority::new(64),
     ) {
         Ok(id) => id,
@@ -200,11 +202,35 @@ extern "C" fn fifo_priority_change(mode: usize) {
         {
             return record_fifo_failure(5);
         }
-    } else if scheduler::set_thread_priority(current, ThreadPriority::new(200)).is_err()
-        || scheduler::set_thread_priority(current, ThreadPriority::new(64)).is_err()
-        || !matches!(scheduler::cond_resched(), Ok(true))
-    {
-        return record_fifo_failure(6);
+    } else if mode == 1 {
+        if scheduler::set_thread_priority(current, ThreadPriority::new(200)).is_err()
+            || scheduler::set_thread_priority(current, ThreadPriority::new(64)).is_err()
+            || !matches!(scheduler::cond_resched(), Ok(true))
+        {
+            return record_fifo_failure(6);
+        }
+    } else {
+        if scheduler::set_thread_priority(current, ThreadPriority::new(64)).is_err()
+            || scheduler::set_thread_priority(equal, ThreadPriority::new(200)).is_err()
+            || !matches!(scheduler::cond_resched(), Ok(false))
+        {
+            return record_fifo_failure(7);
+        }
+        let future_equal = match scheduler::kthread_create_with_priority(
+            "fifo-future-peer",
+            fifo_peer,
+            1,
+            ThreadPriority::new(64),
+        ) {
+            Ok(id) => id,
+            Err(_) => return record_fifo_failure(8),
+        };
+        if scheduler::thread_ready(future_equal).is_err()
+            || !matches!(scheduler::cond_resched(), Ok(false))
+            || scheduler::yield_now().is_err()
+        {
+            return record_fifo_failure(9);
+        }
     }
     fifo_peer(2);
 }

@@ -142,6 +142,10 @@ still fixed after creation: migration requires a stopped-thread handoff which
 removes the thread from its source queue before publishing it on the target.
 Run queues store stable `ThreadId` values and do not own Thread allocations, so
 future per-CPU queue locks and load selection need not move object ownership.
+Exited threads enter a scheduler-owned intrusive reclamation queue. Reaping
+therefore scales with pending exits rather than the lifetime `ThreadId` space,
+and releases an allocation only after no CPU retains it as a current or
+switching-from thread.
 
 Per-CPU preemption state coalesces higher-priority and remote-wakeup requests,
 tracks explicit disable guards and IRQ nesting, and is online before the local
