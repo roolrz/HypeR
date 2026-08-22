@@ -105,6 +105,7 @@ pub(crate) use vsysreg::{
 };
 pub use vsysreg::{ValidationError as GuestValidationError, validate as validate_vsysreg};
 
+#[cfg(feature = "kernel-self-test")]
 pub const fn guest_execution_available() -> bool {
     true
 }

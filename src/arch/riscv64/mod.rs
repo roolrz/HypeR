@@ -227,6 +227,7 @@ pub fn validate_vsysreg() -> Result<(), guest::ValidationError> {
     guest::validate()
 }
 
+#[cfg(feature = "kernel-self-test")]
 pub const fn guest_execution_available() -> bool {
     true
 }
