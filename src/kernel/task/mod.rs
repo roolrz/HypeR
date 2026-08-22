@@ -5,6 +5,9 @@
 
 use hyper::sync::atomic::{AtomicBool, Ordering};
 
+pub(crate) mod policy;
+pub(crate) mod preempt;
+mod reschedule;
 pub mod scheduler;
 pub mod thread;
 mod wait;

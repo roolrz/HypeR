@@ -245,6 +245,10 @@ pub fn validate_vsysreg() -> Result<(), guest::ValidationError> {
     guest::validate()
 }
 
+pub fn guest_execution_available() -> bool {
+    virtualization::validate().is_ok()
+}
+
 pub fn virtualization_backend_name() -> &'static str {
     virtualization::backend_name()
 }

@@ -75,6 +75,12 @@ mod psci;
 #[path = "cases/runtime_allocators.rs"]
 mod runtime_allocators;
 #[cfg(test)]
+#[path = "cases/scheduler_policy.rs"]
+mod scheduler_policy;
+#[cfg(test)]
+#[path = "cases/scheduler_requests.rs"]
+mod scheduler_requests;
+#[cfg(test)]
 #[path = "cases/software_timers.rs"]
 mod software_timers;
 #[cfg(test)]

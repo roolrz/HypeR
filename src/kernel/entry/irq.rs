@@ -21,11 +21,24 @@ pub(crate) enum Action {
 /// interrupts must remain masked. Dispatch is allocation-free but invokes
 /// registered interrupt-safe handlers under the IRQ registry lock.
 pub(crate) fn dispatch(interrupt: InterruptId) -> Action {
-    if crate::kernel::crash::is_stop_interrupt(interrupt) {
+    let irq = match crate::kernel::task::preempt::enter_irq() {
+        Ok(irq) => irq,
+        Err(error) => {
+            crate::kernel::irq::exception::fatal_interrupt(error.description(), Some(interrupt))
+        }
+    };
+    let action = if crate::kernel::crash::is_stop_interrupt(interrupt) {
         Action::Stop
     } else {
         crate::kernel::irq::interrupt::dispatch(interrupt);
         Action::Resume
+    };
+    match irq.complete() {
+        Ok(()) => action,
+        Err(_) => crate::kernel::irq::exception::fatal_interrupt(
+            "failed to complete IRQ preemption accounting",
+            Some(interrupt),
+        ),
     }
 }
 

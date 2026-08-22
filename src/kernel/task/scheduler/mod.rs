@@ -9,8 +9,10 @@ mod state;
 use hyper::cpu::CpuIndex;
 use hyper::sync::InterruptSpinLock;
 
-use self::state::{Scheduler, SwitchPair};
-use super::thread::{KernelThreadEntry, ThreadId, ThreadPriority, ThreadState, VcpuExecution};
+use self::state::{PreparedContextSwitch, Scheduler};
+use super::thread::{KernelThreadEntry, ThreadId, ThreadState, VcpuExecution};
+
+pub use super::policy::ThreadPriority;
 use super::wait::WaitQueue;
 
 type SchedulerLock = InterruptSpinLock<Option<Scheduler>, crate::arch::irq::LocalMask>;
@@ -96,13 +98,32 @@ pub enum Error {
     QueueCorrupted,
     CannotBlockIdle,
     CannotSleepWithInterruptsMasked,
+    CannotSleepWithPreemptionDisabled,
     InvalidThreadState,
     IdleThreadAlreadyInstalled,
     InvalidIdleTransition,
     CpuAlreadyRegistered,
     CpuNotRegistered,
     InvalidCpuIndex,
+    PreemptionUnavailable,
+    PreemptionInvariant,
     Thread(super::thread::Error),
+}
+
+impl From<super::preempt::Error> for Error {
+    fn from(error: super::preempt::Error) -> Self {
+        match error {
+            super::preempt::Error::Offline | super::preempt::Error::InvalidCpu => {
+                Self::PreemptionUnavailable
+            }
+            super::preempt::Error::AlreadyOnline
+            | super::preempt::Error::DisableDepthOverflow
+            | super::preempt::Error::DisableDepthUnderflow
+            | super::preempt::Error::IrqDepthOverflow
+            | super::preempt::Error::IrqDepthUnderflow
+            | super::preempt::Error::WrongCpu => Self::PreemptionInvariant,
+        }
+    }
 }
 
 impl From<super::thread::Error> for Error {
@@ -132,6 +153,8 @@ pub(crate) struct CurrentVcpu {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Statistics {
     pub threads: usize,
+    pub fixed_priority_class_threads: usize,
+    pub idle_class_threads: usize,
     pub ready: usize,
     pub running: usize,
     pub blocked: usize,
@@ -149,18 +172,27 @@ pub(crate) struct CrashTaskSnapshot {
     pub stack_statistics: Option<crate::kernel::mm::stack::StackStatistics>,
 }
 
-pub(crate) struct ParkToken(SwitchPair);
+#[must_use = "parking is committed only after the prepared context switch is consumed"]
+pub(crate) struct ParkToken(PreparedContextSwitch);
 
 pub fn initialize() -> Result<Capabilities, Error> {
-    SCHEDULER.with(|slot| {
+    let cpu = current_cpu()?;
+    if SCHEDULER.with(|slot| slot.is_some()) {
+        return Err(Error::AlreadyInitialized);
+    }
+    let scheduler = Scheduler::new(cpu)?;
+    let preemption = super::preempt::prepare_cpu(cpu)?;
+    let capabilities = SCHEDULER.with(|slot| {
         if slot.is_some() {
             return Err(Error::AlreadyInitialized);
         }
-        *slot = Some(Scheduler::new(current_cpu()?)?);
+        *slot = Some(scheduler);
         Ok(Capabilities {
             bootstrap_thread: ThreadId::BOOTSTRAP,
         })
-    })
+    })?;
+    preemption.commit();
+    Ok(capabilities)
 }
 
 pub fn current_thread_id() -> Result<ThreadId, Error> {
@@ -207,11 +239,14 @@ pub(crate) fn crash_snapshot(cpu: usize) -> Option<CrashTaskSnapshot> {
 }
 
 pub fn register_secondary_cpu(cpu: CpuIndex, name: &str) -> Result<SecondaryStack, Error> {
-    SCHEDULER.with(|slot| {
+    let preemption = super::preempt::prepare_cpu(cpu)?;
+    let stack = SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
             .register_secondary(cpu, name)
-    })
+    })?;
+    preemption.commit();
+    Ok(stack)
 }
 
 pub fn kthread_create(
@@ -267,30 +302,76 @@ pub(crate) fn current_vcpu() -> Result<CurrentVcpu, Error> {
 
 /// Enqueues a dormant thread on its owning CPU's priority ready queue.
 pub fn thread_ready(id: ThreadId) -> Result<bool, Error> {
-    let changed =
+    let outcome =
         SCHEDULER.with(|slot| slot.as_mut().ok_or(Error::NotInitialized)?.make_ready(id))?;
-    if changed {
-        crate::arch::cpu::send_event();
-    }
-    Ok(changed)
+    publish_ready_outcome(outcome)?;
+    Ok(outcome.changed)
 }
 
 pub fn set_thread_priority(id: ThreadId, priority: ThreadPriority) -> Result<(), Error> {
-    SCHEDULER.with(|slot| {
+    let target = SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
             .change_priority(id, priority)
-    })
+    })?;
+    if let Some(cpu) = target {
+        request_reschedule(cpu)?;
+    }
+    Ok(())
 }
 
 pub fn yield_now() -> Result<(), Error> {
     ensure_sleepable()?;
     if let Some(pair) = prepare_schedule()? {
-        // SAFETY: prepare_schedule pins both scheduler-owned contexts across
-        // the interval where the scheduler lock is released.
-        unsafe { switch_pair(pair) };
+        pair.activate();
     }
     Ok(())
+}
+
+/// Reconsiders the current FIFO thread at an explicit safe point.
+///
+/// Unlike `yield_now`, this does not rotate equal-priority FIFO peers. It
+/// switches only when a pending request corresponds to a higher-priority ready
+/// thread, or when idle has runnable work.
+pub fn cond_resched() -> Result<bool, Error> {
+    ensure_sleepable()?;
+    let cpu = current_cpu()?;
+    if !super::preempt::pending(cpu)? || !super::preempt::can_reschedule(cpu)? {
+        return Ok(false);
+    }
+    let pair = SCHEDULER.with(|slot| {
+        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+        scheduler.finish_switch(cpu);
+        scheduler.prepare_preemption(cpu)
+    })?;
+    let Some(pair) = pair else {
+        return Ok(false);
+    };
+    pair.activate();
+    Ok(true)
+}
+
+/// Capability proving that the current thread cannot pass a preemption point.
+///
+/// The guard is CPU-local. It may protect a bounded CPU-local borrow but must
+/// not cross a blocking operation or guest entry.
+#[must_use = "dropping the guard restores preemption without scheduling"]
+pub struct PreemptionGuard(super::preempt::PreemptionGuard);
+
+/// Prevents asynchronous scheduling while CPU-local state is borrowed.
+pub fn preempt_disable() -> Result<PreemptionGuard, Error> {
+    super::preempt::disable()
+        .map(PreemptionGuard)
+        .map_err(Into::into)
+}
+
+/// Releases a preemption guard and immediately observes deferred requests.
+pub fn preempt_enable_and_reschedule(guard: PreemptionGuard) -> Result<bool, Error> {
+    if guard.0.release()? {
+        cond_resched()
+    } else {
+        Ok(false)
+    }
 }
 
 pub fn thread_become_idle() -> ! {
@@ -325,9 +406,7 @@ pub(crate) fn run_idle_loop() -> ! {
     loop {
         match prepare_schedule() {
             Ok(Some(pair)) => {
-                // SAFETY: The scheduler pins both contexts until this CPU
-                // completes a later scheduler entry on the incoming stack.
-                unsafe { switch_pair(pair) };
+                pair.activate();
             }
             Ok(None) => crate::arch::cpu::wait_for_event(),
             Err(error) => {
@@ -350,15 +429,13 @@ pub(crate) fn prepare_park_locked(wait_queue: &WaitQueue) -> Result<ParkToken, E
     SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         scheduler.finish_switch(cpu);
-        scheduler.reap_terminated();
+        scheduler.reap_terminated()?;
         scheduler.prepare_park(cpu, wait_queue).map(ParkToken)
     })
 }
 
 pub(crate) fn complete_park(token: ParkToken) {
-    // SAFETY: prepare_park moved the outgoing thread to a wait queue and pins
-    // it through switching_from until execution continues on another stack.
-    unsafe { switch_pair(token.0) };
+    token.0.activate();
 }
 
 pub(crate) fn wake_one(wait_queue: &WaitQueue) -> Result<Option<ThreadId>, Error> {
@@ -372,27 +449,41 @@ pub(crate) fn wake_one_with(
     let awakened = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         let Some(id) = scheduler.dequeue_waiter(wait_queue)? else {
-            return Ok::<Option<ThreadId>, Error>(None);
+            return Ok::<Option<(ThreadId, state::ReadyOutcome)>, Error>(None);
         };
         before_ready(id);
-        scheduler.make_ready_from_wait(id)?;
-        Ok::<Option<ThreadId>, Error>(Some(id))
+        let outcome = scheduler.make_ready_from_wait(id)?;
+        Ok::<Option<(ThreadId, state::ReadyOutcome)>, Error>(Some((id, outcome)))
     })?;
-    notify_awakened(usize::from(awakened.is_some()));
-    Ok(awakened)
+    if let Some((_, outcome)) = awakened {
+        publish_ready_outcome(outcome)?;
+    }
+    Ok(awakened.map(|(id, _)| id))
 }
 
 pub(crate) fn wake_all(wait_queue: &WaitQueue) -> Result<usize, Error> {
-    let count = SCHEDULER.with(|slot| {
+    let (count, targets) = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         let mut count = 0usize;
+        let mut targets = [false; hyper::cpu::MAX_CPUS];
         while let Some(id) = scheduler.dequeue_waiter(wait_queue)? {
-            scheduler.make_ready_from_wait(id)?;
+            let outcome = scheduler.make_ready_from_wait(id)?;
+            if outcome.should_preempt {
+                targets[outcome.target_cpu.get()] = true;
+            }
             count += 1;
         }
-        Ok::<usize, Error>(count)
+        Ok::<_, Error>((count, targets))
     })?;
-    notify_awakened(count);
+    for (index, requested) in targets.into_iter().enumerate() {
+        if requested {
+            let cpu = CpuIndex::new(index).ok_or(Error::InvalidCpuIndex)?;
+            request_reschedule(cpu)?;
+        }
+    }
+    if count != 0 {
+        crate::arch::cpu::send_event();
+    }
     Ok(count)
 }
 
@@ -405,32 +496,40 @@ pub(crate) fn waiter_count(wait_queue: &WaitQueue) -> Result<usize, Error> {
 }
 
 pub(crate) fn ensure_sleepable() -> Result<(), Error> {
-    if crate::arch::irq::local_enabled() {
-        Ok(())
-    } else {
-        Err(Error::CannotSleepWithInterruptsMasked)
+    if !crate::arch::irq::local_enabled() {
+        return Err(Error::CannotSleepWithInterruptsMasked);
     }
+    let cpu = current_cpu()?;
+    super::preempt::can_reschedule(cpu)?
+        .then_some(())
+        .ok_or(Error::CannotSleepWithPreemptionDisabled)
 }
 
-fn notify_awakened(count: usize) {
-    if count != 0 {
+fn publish_ready_outcome(outcome: state::ReadyOutcome) -> Result<(), Error> {
+    if outcome.should_preempt {
+        request_reschedule(outcome.target_cpu)?;
+    } else if outcome.changed {
         crate::arch::cpu::send_event();
     }
+    Ok(())
 }
 
-fn prepare_schedule() -> Result<Option<SwitchPair>, Error> {
+fn request_reschedule(cpu: CpuIndex) -> Result<(), Error> {
+    super::preempt::request(cpu)?;
+    // This is an idle wakeup only. A targeted reschedule IPI will replace it
+    // when an architecture can enter the safe IRQ-tail continuation seam.
+    crate::arch::cpu::send_event();
+    Ok(())
+}
+
+fn prepare_schedule() -> Result<Option<PreparedContextSwitch>, Error> {
     let cpu = current_cpu()?;
     SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         scheduler.finish_switch(cpu);
-        scheduler.reap_terminated();
+        scheduler.reap_terminated()?;
         scheduler.prepare_yield(cpu)
     })
-}
-
-unsafe fn switch_pair(pair: SwitchPair) {
-    // SAFETY: Scheduler queues contain only pinned, scheduler-owned Threads.
-    unsafe { crate::arch::context::switch_thread_context(&mut *pair.previous, &*pair.next) };
 }
 
 #[unsafe(no_mangle)]
@@ -449,9 +548,7 @@ extern "C" fn kernel_thread_exit() -> ! {
     });
     match result {
         Ok(pair) => {
-            // SAFETY: prepare_exit pins the terminating context until another
-            // stack is installed and a later scheduler entry reaps it.
-            unsafe { switch_pair(pair) };
+            pair.activate();
             crate::pr_crit!("HypeR: terminated thread context resumed unexpectedly");
         }
         Err(error) => crate::pr_crit!("HypeR: thread exit failed: {error:?}"),

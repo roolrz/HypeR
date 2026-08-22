@@ -255,7 +255,8 @@ keep AArch64 healthy and preserve buildable secondary architectures.
 
 ### 4. Mature kernel execution
 
-- add preemption, guest timeslicing, CPU affinity, and controlled migration;
+- complete AArch64 IRQ-tail and vCPU preemption, then add controlled migration
+  and load balancing over the existing affinity and placement metadata;
 - strengthen power-management, suspend/resume, and CPU hotplug lifecycles;
 - expand diagnostics, tracing, crash analysis, and management interfaces;
 - validate ordering, cache maintenance, and interrupt behavior on physical

@@ -125,6 +125,38 @@ Use `pub(crate)` by default. Add a public interface only for a demonstrated
 consumer, and prefer domain types for addresses, identifiers, units, and
 lifecycle states when interchange would be unsafe.
 
+## Scheduling boundary
+
+The scheduler owns stable pinned `Thread` allocations, lifecycle transitions,
+per-CPU run queues, placement metadata, and reschedule decisions. Its static
+policy set currently contains `FixedPriority` and `Idle`; the only runnable
+policy is cooperative fixed-priority FIFO. Lower numeric priorities run first.
+A higher-priority ready thread becomes eligible immediately and switches at an
+explicit safe point. Equal-priority wakeups do not request a switch or rotate
+the running FIFO thread, while an explicit yield moves it to the tail of its
+priority queue. Idle threads never enter an ordinary run queue.
+
+Ordinary kernel threads carry movable placement policy, vCPU threads initially
+prefer their creating CPU, and bootstrap/idle threads are pinned. Assignment is
+still fixed after creation: migration requires a stopped-thread handoff which
+removes the thread from its source queue before publishing it on the target.
+Run queues store stable `ThreadId` values and do not own Thread allocations, so
+future per-CPU queue locks and load selection need not move object ownership.
+Exited threads enter a scheduler-owned intrusive reclamation queue. Reaping
+therefore scales with pending exits rather than the lifetime `ThreadId` space,
+and releases an allocation only after no CPU retains it as a current or
+switching-from thread.
+
+Per-CPU preemption state coalesces higher-priority and remote-wakeup requests,
+tracks explicit disable guards and IRQ nesting, and is online before the local
+timer can deliver interrupts. IRQ handlers only publish requests and finish
+accounting; they do not call the scheduler or switch stacks. The current safe
+consumer is `cond_resched`, which never rotates equal-priority FIFO peers.
+Asynchronous IRQ-tail preemption is currently unavailable. It will remain
+disabled until an architecture can retain a thread-owned continuation and fully
+deactivate an active vCPU. AArch64 is the first target for that continuation
+contract; secondary architectures must qualify independently.
+
 ## Current migration debt
 
 The present tree still contains direct `src/arch -> crate::kernel` references,

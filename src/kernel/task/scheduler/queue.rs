@@ -7,24 +7,110 @@ use alloc::boxed::Box;
 use hyper::cpu::CpuIndex;
 
 use super::Error;
-use crate::kernel::task::thread::{
-    QueueLinks, QueueMembership, THREAD_PRIORITY_LEVELS, Thread, ThreadId, ThreadState,
-};
+use crate::kernel::task::policy::{PRIORITY_LEVELS, SchedulingClass, ThreadPriority};
+use crate::kernel::task::thread::{QueueLinks, QueueMembership, Thread, ThreadId, ThreadState};
 use crate::kernel::task::wait::ThreadQueue;
 
 const PRIORITIES_PER_BITMAP_WORD: usize = u64::BITS as usize;
-const PRIORITY_BITMAP_WORDS: usize = THREAD_PRIORITY_LEVELS.div_ceil(PRIORITIES_PER_BITMAP_WORD);
+const PRIORITY_BITMAP_WORDS: usize = PRIORITY_LEVELS.div_ceil(PRIORITIES_PER_BITMAP_WORD);
 
-pub(super) struct ReadyQueues {
-    queues: [ThreadQueue; THREAD_PRIORITY_LEVELS],
+/// Runnable classes owned by one CPU.
+///
+/// Idle is intentionally absent: its Thread is selected only when every
+/// runnable class is empty.
+pub(super) struct CpuRunQueue {
+    fixed_priority: FixedPriorityFifo,
+}
+
+impl CpuRunQueue {
+    pub const fn new() -> Self {
+        Self {
+            fixed_priority: FixedPriorityFifo::new(),
+        }
+    }
+
+    pub const fn len(&self) -> usize {
+        self.fixed_priority.len()
+    }
+
+    pub fn highest_priority(&self) -> Option<ThreadPriority> {
+        self.fixed_priority
+            .highest_ready_priority()
+            .map(|priority| ThreadPriority::new(priority as u8))
+    }
+
+    /// Validates and returns the next runnable thread without mutating queues.
+    pub fn peek_highest(
+        &self,
+        threads: &[Option<Box<Thread>>],
+        cpu: CpuIndex,
+    ) -> Result<Option<(ThreadId, ThreadPriority)>, Error> {
+        self.fixed_priority.peek_highest(threads, cpu)
+    }
+
+    pub fn enqueue(
+        &mut self,
+        threads: &mut [Option<Box<Thread>>],
+        id: ThreadId,
+        cpu: CpuIndex,
+    ) -> Result<(), Error> {
+        let thread = thread_ref(threads, id)?;
+        let Some(priority) = thread.priority() else {
+            return Err(Error::InvalidThreadState);
+        };
+        if thread.scheduling_class() != SchedulingClass::FixedPriority {
+            return Err(Error::InvalidThreadState);
+        }
+        self.fixed_priority
+            .enqueue(threads, id, cpu, priority.get())
+    }
+
+    pub fn enqueue_front(
+        &mut self,
+        threads: &mut [Option<Box<Thread>>],
+        id: ThreadId,
+        cpu: CpuIndex,
+    ) -> Result<(), Error> {
+        let thread = thread_ref(threads, id)?;
+        let Some(priority) = thread.priority() else {
+            return Err(Error::InvalidThreadState);
+        };
+        if thread.scheduling_class() != SchedulingClass::FixedPriority {
+            return Err(Error::InvalidThreadState);
+        }
+        self.fixed_priority
+            .enqueue_front(threads, id, cpu, priority.get())
+    }
+
+    pub fn dequeue(
+        &mut self,
+        threads: &mut [Option<Box<Thread>>],
+        cpu: CpuIndex,
+    ) -> Result<Option<ThreadId>, Error> {
+        self.fixed_priority.dequeue(threads, cpu)
+    }
+
+    pub fn remove(
+        &mut self,
+        threads: &mut [Option<Box<Thread>>],
+        id: ThreadId,
+        cpu: CpuIndex,
+        priority: u8,
+    ) -> Result<(), Error> {
+        self.fixed_priority.remove(threads, id, cpu, priority)
+    }
+}
+
+struct FixedPriorityFifo {
+    queues: [ThreadQueue; PRIORITY_LEVELS],
     bitmap: [u64; PRIORITY_BITMAP_WORDS],
     len: usize,
 }
 
-impl ReadyQueues {
+impl FixedPriorityFifo {
     pub const fn new() -> Self {
         Self {
-            queues: [ThreadQueue::new(); THREAD_PRIORITY_LEVELS],
+            queues: [ThreadQueue::new(); PRIORITY_LEVELS],
             bitmap: [0; PRIORITY_BITMAP_WORDS],
             len: 0,
         }
@@ -32,6 +118,28 @@ impl ReadyQueues {
 
     pub const fn len(&self) -> usize {
         self.len
+    }
+
+    fn peek_highest(
+        &self,
+        threads: &[Option<Box<Thread>>],
+        cpu: CpuIndex,
+    ) -> Result<Option<(ThreadId, ThreadPriority)>, Error> {
+        let Some(priority) = self.highest_ready_priority() else {
+            return Ok(None);
+        };
+        let queue = &self.queues[priority];
+        let id = queue.head.ok_or(Error::QueueCorrupted)?;
+        let links = thread_ref(threads, id)?.queue_links();
+        let membership = QueueMembership::Ready {
+            cpu,
+            priority: priority as u8,
+        };
+        if links.membership != membership || queue.len == 0 {
+            return Err(Error::QueueCorrupted);
+        }
+        validate_neighbors(threads, queue, links, id)?;
+        Ok(Some((id, ThreadPriority::new(priority as u8))))
     }
 
     pub fn enqueue(
@@ -43,6 +151,26 @@ impl ReadyQueues {
     ) -> Result<(), Error> {
         let membership = QueueMembership::Ready { cpu, priority };
         push(
+            threads,
+            &mut self.queues[usize::from(priority)],
+            id,
+            membership,
+        )?;
+        self.mark_non_empty(priority);
+        self.len += 1;
+        thread_mut(threads, id)?.set_state(ThreadState::Ready);
+        Ok(())
+    }
+
+    fn enqueue_front(
+        &mut self,
+        threads: &mut [Option<Box<Thread>>],
+        id: ThreadId,
+        cpu: CpuIndex,
+        priority: u8,
+    ) -> Result<(), Error> {
+        let membership = QueueMembership::Ready { cpu, priority };
+        push_front(
             threads,
             &mut self.queues[usize::from(priority)],
             id,
@@ -110,6 +238,32 @@ impl ReadyQueues {
             word * PRIORITIES_PER_BITMAP_WORD + self.bitmap[word].trailing_zeros() as usize
         })
     }
+}
+
+fn push_front(
+    threads: &mut [Option<Box<Thread>>],
+    queue: &mut ThreadQueue,
+    id: ThreadId,
+    membership: QueueMembership,
+) -> Result<(), Error> {
+    if thread_ref(threads, id)?.queue_links().membership != QueueMembership::None {
+        return Err(Error::ThreadAlreadyQueued);
+    }
+    if let Some(head) = queue.head {
+        let mut links = thread_ref(threads, head)?.queue_links();
+        links.previous = Some(id);
+        thread_mut(threads, head)?.set_queue_links(links);
+    } else {
+        queue.tail = Some(id);
+    }
+    thread_mut(threads, id)?.set_queue_links(QueueLinks {
+        previous: None,
+        next: queue.head,
+        membership,
+    });
+    queue.head = Some(id);
+    queue.len += 1;
+    Ok(())
 }
 
 pub(super) fn push(
