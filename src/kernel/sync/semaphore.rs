@@ -32,18 +32,25 @@ impl Semaphore {
 
     pub fn acquire(&self) -> Result<(), Error> {
         scheduler::ensure_sleepable()?;
-        let park = self.state.with(|state| {
-            if state.permits != 0 {
-                state.permits -= 1;
-                Ok(None)
-            } else {
-                scheduler::prepare_park_locked(&state.waiters)
-                    .map(Some)
-                    .map_err(Error::from)
-            }
-        })?;
-        if let Some(token) = park {
-            scheduler::complete_park(token);
+        // SAFETY: The retained mask is transferred immediately into the
+        // CPU-pinned park transition or dropped before this function proceeds.
+        let (park, interrupt_mask) = unsafe {
+            self.state.with_mask_retained(|state| {
+                if state.permits != 0 {
+                    state.permits -= 1;
+                    Ok(None)
+                } else {
+                    scheduler::prepare_park_locked(&state.waiters)
+                        .map(Some)
+                        .map_err(Error::from)
+                }
+            })
+        };
+        let park = park?;
+        if let Some(commit) = park {
+            scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask));
+        } else {
+            drop(interrupt_mask);
         }
         Ok(())
     }

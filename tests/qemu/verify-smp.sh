@@ -148,6 +148,7 @@ runtime_contract_is_ready() {
         grep -q 'HypeR: page owners: guest [1-9][0-9]* (peak [1-9][0-9]*), page tables [1-9][0-9]*, kernel [1-9][0-9]*, heap [1-9][0-9]*' "$log" &&
         grep -q 'HypeR: kernel initialization complete; starting Linux guest' "$log" &&
         grep -q 'HypeR: vCPU 0 running as scheduler thread [1-9][0-9]* on guarded stack 0x[0-9a-f][0-9a-f]*-0x[0-9a-f][0-9a-f]*' "$log" &&
+        grep -q 'HypeR test: AArch64 IRQ-tail Fair vCPU preemption passed' "$log" &&
         grep -q "HypeR: periodic timer IRQs active on $cpus CPUs" "$log" &&
         grep -q 'Booting Linux on physical CPU' "$log" &&
         grep -q 'arch_timer: cp15 timer running at .* (virt).' "$log" &&

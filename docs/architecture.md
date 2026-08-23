@@ -128,13 +128,21 @@ lifecycle states when interchange would be unsafe.
 ## Scheduling boundary
 
 The scheduler owns stable pinned `Thread` allocations, lifecycle transitions,
-per-CPU run queues, placement metadata, and reschedule decisions. Its static
-policy set currently contains `FixedPriority` and `Idle`; the only runnable
-policy is cooperative fixed-priority FIFO. Lower numeric priorities run first.
-A higher-priority ready thread becomes eligible immediately and switches at an
-explicit safe point. Equal-priority wakeups do not request a switch or rotate
-the running FIFO thread, while an explicit yield moves it to the tail of its
-priority queue. Idle threads never enter an ordinary run queue.
+per-CPU run queues, placement metadata, tick accounting, and reschedule
+decisions. Its closed class order is `RealTime > Fair > Idle`. Real-time work
+uses fixed-priority FIFO, where lower numeric priorities run first and equal-
+priority threads do not rotate on a timer tick. Ordinary kernel and vCPU
+threads default to Fair. Fair currently uses a replaceable round-robin backend;
+`CONFIG_SCHED_FAIR_QUANTUM_MS` selects its quantum, rounded up to at least one
+`CONFIG_TIMER_HZ` tick. The public Fair policy deliberately exposes no RR-
+specific parameters so a CFS- or EEVDF-like backend can replace it.
+
+Each runnable class owns a distinct intrusive queue. Explicit FIFO and Fair
+policy-transition APIs move a ready thread between queues under the global
+scheduler lock. A Fair slice expiry moves the running thread to its class tail
+only when a Fair peer is ready. Voluntary yield replenishes the slice, while
+blocking and interruption by real-time work retain its remainder. Idle threads
+never enter an ordinary run queue.
 
 Ordinary kernel threads carry movable placement policy and may retain an
 explicit `CpuMask`; creation prefers the calling CPU when admitted, then the
@@ -161,15 +169,28 @@ release/acquire completion handshake proves that the callback no longer
 borrows it. Blocked-thread migration is not yet supported; a future migration
 handoff must also move or remotely cancel the owning CPU's timer.
 
-Per-CPU preemption state coalesces higher-priority and remote-wakeup requests,
+Per-CPU preemption state coalesces class, quantum, and remote-wakeup requests,
 tracks explicit disable guards and IRQ nesting, and is online before the local
-timer can deliver interrupts. IRQ handlers only publish requests and finish
-accounting; they do not call the scheduler or switch stacks. The current safe
-consumer is `cond_resched`, which never rotates equal-priority FIFO peers.
-Asynchronous IRQ-tail preemption is currently unavailable. It will remain
-disabled until an architecture can retain a thread-owned continuation and fully
-deactivate an active vCPU. AArch64 is the first target for that continuation
-contract; secondary architectures must qualify independently.
+timer can deliver interrupts. IRQ handlers only account time and publish
+requests. AArch64 consumes them after the outermost IRQ has completed, on the
+interrupted Thread's stack. An interrupted vCPU is fully deactivated before the
+scheduler switch and reactivated only when that same continuation resumes.
+`cond_resched` provides the corresponding cooperative safe point.
+
+Every scheduling transition owns a CPU-affine interrupt-mask guard from before
+the scheduler publishes `current = next` until the suspended continuation
+resumes. Blocking primitives transfer the outer synchronization lock's mask
+into their park token, so releasing that lock cannot expose a logical/machine
+owner mismatch. Architecture Thread contexts save and restore DAIF, SSTATUS.SIE,
+or RFLAGS.IF at the final machine handoff. A continuation holding a transition
+guard therefore cannot migrate; future migration must occur only after the
+guard has restored on its owning CPU.
+
+RISC-V and x86-64 currently retain cooperative scheduling: their exception
+entry does not yet provide the private-stack continuation and complete vCPU
+deactivation contract required for asynchronous IRQ-tail switching. Each
+architecture must qualify this boundary independently rather than inheriting
+the AArch64 capability through a misleading common interface.
 
 ## Current migration debt
 

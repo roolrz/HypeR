@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Intrusive FIFO primitives and per-CPU priority ready queues.
+//! Intrusive primitives and class-aware per-CPU ready queues.
+//!
+//! Class ordering is resolved here, while each class owns its queue policy.
+//! The scheduler state machine never compares parameters from unrelated
+//! scheduling classes.
 
 use alloc::boxed::Box;
 use hyper::cpu::CpuIndex;
 
 use super::Error;
-use crate::kernel::task::policy::{PRIORITY_LEVELS, SchedulingClass, ThreadPriority};
+use crate::kernel::task::policy::{PRIORITY_LEVELS, SchedulingPolicy, ThreadPriority};
 use crate::kernel::task::thread::{QueueLinks, QueueMembership, Thread, ThreadId, ThreadState};
 use crate::kernel::task::wait::ThreadQueue;
 
@@ -19,33 +23,50 @@ const PRIORITY_BITMAP_WORDS: usize = PRIORITY_LEVELS.div_ceil(PRIORITIES_PER_BIT
 /// Idle is intentionally absent: its Thread is selected only when every
 /// runnable class is empty.
 pub(super) struct CpuRunQueue {
-    fixed_priority: FixedPriorityFifo,
+    realtime: FixedPriorityFifo,
+    fair: FairQueue,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ReadyThread {
+    pub id: ThreadId,
+    pub policy: SchedulingPolicy,
 }
 
 impl CpuRunQueue {
     pub const fn new() -> Self {
         Self {
-            fixed_priority: FixedPriorityFifo::new(),
+            realtime: FixedPriorityFifo::new(),
+            fair: FairQueue::new(),
         }
     }
 
     pub const fn len(&self) -> usize {
-        self.fixed_priority.len()
+        self.realtime.len() + self.fair.len()
     }
 
-    pub fn highest_priority(&self) -> Option<ThreadPriority> {
-        self.fixed_priority
-            .highest_ready_priority()
-            .map(|priority| ThreadPriority::new(priority as u8))
+    pub const fn has_fair_threads(&self) -> bool {
+        self.fair.len() != 0
     }
 
-    /// Validates and returns the next runnable thread without mutating queues.
-    pub fn peek_highest(
+    /// Validates and returns the next runnable thread in class order.
+    pub fn peek_next(
         &self,
         threads: &[Option<Box<Thread>>],
         cpu: CpuIndex,
-    ) -> Result<Option<(ThreadId, ThreadPriority)>, Error> {
-        self.fixed_priority.peek_highest(threads, cpu)
+    ) -> Result<Option<ReadyThread>, Error> {
+        if let Some((id, priority)) = self.realtime.peek_highest(threads, cpu)? {
+            return Ok(Some(ReadyThread {
+                id,
+                policy: SchedulingPolicy::fifo(priority),
+            }));
+        }
+        self.fair.peek(threads, cpu).map(|candidate| {
+            candidate.map(|id| ReadyThread {
+                id,
+                policy: SchedulingPolicy::fair(),
+            })
+        })
     }
 
     pub fn enqueue(
@@ -55,14 +76,13 @@ impl CpuRunQueue {
         cpu: CpuIndex,
     ) -> Result<(), Error> {
         let thread = thread_ref(threads, id)?;
-        let Some(priority) = thread.priority() else {
-            return Err(Error::InvalidThreadState);
-        };
-        if thread.scheduling_class() != SchedulingClass::FixedPriority {
-            return Err(Error::InvalidThreadState);
+        match thread.scheduling_policy() {
+            SchedulingPolicy::Fifo { priority } => {
+                self.realtime.enqueue(threads, id, cpu, priority.get())
+            }
+            SchedulingPolicy::Fair => self.fair.enqueue(threads, id, cpu),
+            SchedulingPolicy::Idle => Err(Error::InvalidThreadState),
         }
-        self.fixed_priority
-            .enqueue(threads, id, cpu, priority.get())
     }
 
     pub fn enqueue_front(
@@ -72,14 +92,14 @@ impl CpuRunQueue {
         cpu: CpuIndex,
     ) -> Result<(), Error> {
         let thread = thread_ref(threads, id)?;
-        let Some(priority) = thread.priority() else {
-            return Err(Error::InvalidThreadState);
-        };
-        if thread.scheduling_class() != SchedulingClass::FixedPriority {
-            return Err(Error::InvalidThreadState);
+        match thread.scheduling_policy() {
+            SchedulingPolicy::Fifo { priority } => {
+                self.realtime
+                    .enqueue_front(threads, id, cpu, priority.get())
+            }
+            SchedulingPolicy::Fair => self.fair.enqueue_front(threads, id, cpu),
+            SchedulingPolicy::Idle => Err(Error::InvalidThreadState),
         }
-        self.fixed_priority
-            .enqueue_front(threads, id, cpu, priority.get())
     }
 
     pub fn dequeue(
@@ -87,7 +107,10 @@ impl CpuRunQueue {
         threads: &mut [Option<Box<Thread>>],
         cpu: CpuIndex,
     ) -> Result<Option<ThreadId>, Error> {
-        self.fixed_priority.dequeue(threads, cpu)
+        if let Some(id) = self.realtime.dequeue(threads, cpu)? {
+            return Ok(Some(id));
+        }
+        self.fair.dequeue(threads, cpu)
     }
 
     pub fn remove(
@@ -95,9 +118,112 @@ impl CpuRunQueue {
         threads: &mut [Option<Box<Thread>>],
         id: ThreadId,
         cpu: CpuIndex,
-        priority: u8,
+        membership: QueueMembership,
     ) -> Result<(), Error> {
-        self.fixed_priority.remove(threads, id, cpu, priority)
+        match membership {
+            QueueMembership::ReadyRealTime {
+                cpu: member_cpu,
+                priority,
+            } if member_cpu == cpu => self.realtime.remove(threads, id, cpu, priority),
+            QueueMembership::ReadyFair { cpu: member_cpu } if member_cpu == cpu => {
+                self.fair.remove(threads, id, cpu)
+            }
+            _ => Err(Error::QueueCorrupted),
+        }
+    }
+}
+
+/// Initial backend for the fair scheduling class.
+///
+/// This FIFO contains only ready threads. Running-thread slice accounting is
+/// owned by scheduler state, so replacing this backend does not affect generic
+/// intrusive queue or context-switch machinery.
+struct FairQueue {
+    queue: ThreadQueue,
+}
+
+impl FairQueue {
+    const fn new() -> Self {
+        Self {
+            queue: ThreadQueue::new(),
+        }
+    }
+
+    const fn len(&self) -> usize {
+        self.queue.len
+    }
+
+    fn peek(
+        &self,
+        threads: &[Option<Box<Thread>>],
+        cpu: CpuIndex,
+    ) -> Result<Option<ThreadId>, Error> {
+        let Some(id) = self.queue.head else {
+            if self.queue.len == 0 && self.queue.tail.is_none() {
+                return Ok(None);
+            }
+            return Err(Error::QueueCorrupted);
+        };
+        let links = thread_ref(threads, id)?.queue_links();
+        if self.queue.len == 0 || links.membership != (QueueMembership::ReadyFair { cpu }) {
+            return Err(Error::QueueCorrupted);
+        }
+        validate_neighbors(threads, &self.queue, links, id)?;
+        Ok(Some(id))
+    }
+
+    fn enqueue(
+        &mut self,
+        threads: &mut [Option<Box<Thread>>],
+        id: ThreadId,
+        cpu: CpuIndex,
+    ) -> Result<(), Error> {
+        push(
+            threads,
+            &mut self.queue,
+            id,
+            QueueMembership::ReadyFair { cpu },
+        )?;
+        thread_mut(threads, id)?.set_state(ThreadState::Ready);
+        Ok(())
+    }
+
+    fn enqueue_front(
+        &mut self,
+        threads: &mut [Option<Box<Thread>>],
+        id: ThreadId,
+        cpu: CpuIndex,
+    ) -> Result<(), Error> {
+        push_front(
+            threads,
+            &mut self.queue,
+            id,
+            QueueMembership::ReadyFair { cpu },
+        )?;
+        thread_mut(threads, id)?.set_state(ThreadState::Ready);
+        Ok(())
+    }
+
+    fn dequeue(
+        &mut self,
+        threads: &mut [Option<Box<Thread>>],
+        cpu: CpuIndex,
+    ) -> Result<Option<ThreadId>, Error> {
+        pop(threads, &mut self.queue, QueueMembership::ReadyFair { cpu })
+    }
+
+    fn remove(
+        &mut self,
+        threads: &mut [Option<Box<Thread>>],
+        id: ThreadId,
+        cpu: CpuIndex,
+    ) -> Result<(), Error> {
+        remove(
+            threads,
+            &mut self.queue,
+            id,
+            QueueMembership::ReadyFair { cpu },
+        )
     }
 }
 
@@ -131,7 +257,7 @@ impl FixedPriorityFifo {
         let queue = &self.queues[priority];
         let id = queue.head.ok_or(Error::QueueCorrupted)?;
         let links = thread_ref(threads, id)?.queue_links();
-        let membership = QueueMembership::Ready {
+        let membership = QueueMembership::ReadyRealTime {
             cpu,
             priority: priority as u8,
         };
@@ -149,7 +275,7 @@ impl FixedPriorityFifo {
         cpu: CpuIndex,
         priority: u8,
     ) -> Result<(), Error> {
-        let membership = QueueMembership::Ready { cpu, priority };
+        let membership = QueueMembership::ReadyRealTime { cpu, priority };
         push(
             threads,
             &mut self.queues[usize::from(priority)],
@@ -169,7 +295,7 @@ impl FixedPriorityFifo {
         cpu: CpuIndex,
         priority: u8,
     ) -> Result<(), Error> {
-        let membership = QueueMembership::Ready { cpu, priority };
+        let membership = QueueMembership::ReadyRealTime { cpu, priority };
         push_front(
             threads,
             &mut self.queues[usize::from(priority)],
@@ -190,7 +316,7 @@ impl FixedPriorityFifo {
         let Some(priority) = self.highest_ready_priority() else {
             return Ok(None);
         };
-        let membership = QueueMembership::Ready {
+        let membership = QueueMembership::ReadyRealTime {
             cpu,
             priority: priority as u8,
         };
@@ -211,7 +337,12 @@ impl FixedPriorityFifo {
         priority: u8,
     ) -> Result<(), Error> {
         let queue = &mut self.queues[usize::from(priority)];
-        remove(threads, queue, id, QueueMembership::Ready { cpu, priority })?;
+        remove(
+            threads,
+            queue,
+            id,
+            QueueMembership::ReadyRealTime { cpu, priority },
+        )?;
         self.len -= 1;
         if queue.len == 0 {
             self.mark_empty(priority);

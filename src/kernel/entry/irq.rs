@@ -11,6 +11,8 @@ use hyper::hal::interrupt::InterruptId;
 pub(crate) enum Action {
     /// Complete exception return after ordinary IRQ dispatch.
     Resume,
+    /// Reconsider scheduling after returning to the interrupted Thread stack.
+    ResumeWithPreemption,
     /// Capture the interrupted architecture frame and stop this CPU.
     Stop,
 }
@@ -34,12 +36,76 @@ pub(crate) fn dispatch(interrupt: InterruptId) -> Action {
         Action::Resume
     };
     match irq.complete() {
-        Ok(()) => action,
+        Ok(true)
+            if action == Action::Resume
+                && match crate::kernel::task::preempt::should_reschedule_after_irq() {
+                    Ok(pending) => pending,
+                    Err(error) => crate::kernel::irq::exception::fatal_interrupt(
+                        error.description(),
+                        Some(interrupt),
+                    ),
+                } =>
+        {
+            Action::ResumeWithPreemption
+        }
+        Ok(_) => action,
         Err(_) => crate::kernel::irq::exception::fatal_interrupt(
             "failed to complete IRQ preemption accounting",
             Some(interrupt),
         ),
     }
+}
+
+/// Runs the outermost interrupt-exit scheduling point on a Thread-owned stack.
+///
+/// Local interrupts must remain masked and architecture entry must have
+/// completed interrupt acknowledgement before calling this adapter. No raw
+/// exception-frame reference crosses this boundary. If the interrupted Thread
+/// owns an active vCPU, its local virtual hardware is unpublished and saved
+/// before the scheduler commits a switch, then restored by the same suspended
+/// continuation before architecture exception return.
+#[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) fn preemption_tail() {
+    let current_vcpu = match crate::kernel::task::scheduler::current_vcpu_if_present() {
+        Ok(current) => current,
+        Err(error) => fail_preemption_tail("failed to identify interrupted Thread", error),
+    };
+
+    if let Some(current) = current_vcpu {
+        // SAFETY: The scheduler supplied its pinned current-vCPU owner pointer.
+        // IRQ dispatch has returned, so no active-vCPU callback borrow remains,
+        // and local interrupts stay masked across unpublication and save.
+        if let Err(error) = unsafe { (&mut *current.execution).deactivate_virtual_hardware() } {
+            fail_vcpu_tail("failed to deactivate interrupted vCPU", error)
+        }
+    }
+
+    if let Err(error) = crate::kernel::task::scheduler::cond_resched_from_irq_tail() {
+        fail_preemption_tail("IRQ-tail scheduling failed", error)
+    }
+
+    if let Some(current) = current_vcpu {
+        // SAFETY: This continuation can resume only when its pinned vCPU Thread
+        // is current again. The preceding deactivation removed all local
+        // architectural ownership, and interrupts are still masked.
+        if let Err(error) = unsafe {
+            crate::kernel::task::thread::VcpuExecution::activate_virtual_hardware(current.execution)
+        } {
+            fail_vcpu_tail("failed to reactivate interrupted vCPU", error)
+        }
+    }
+}
+
+#[cfg(CONFIG_ARCH_AARCH64)]
+fn fail_preemption_tail(operation: &str, error: crate::kernel::task::scheduler::Error) -> ! {
+    crate::pr_crit!("HypeR: {operation}: {error:?}");
+    crate::arch::cpu::halt()
+}
+
+#[cfg(CONFIG_ARCH_AARCH64)]
+fn fail_vcpu_tail(operation: &str, error: crate::arch::vm::VcpuInterruptError) -> ! {
+    crate::pr_crit!("HypeR: {operation}: {error:?}");
+    crate::arch::cpu::halt()
 }
 
 /// Claims and dispatches one external controller interrupt, when pending.

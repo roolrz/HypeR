@@ -6,5 +6,5 @@
 mod interrupt;
 mod spin;
 
-pub use interrupt::InterruptSpinLock;
+pub use interrupt::{InterruptMaskGuard, InterruptSpinLock};
 pub use spin::SpinLock;

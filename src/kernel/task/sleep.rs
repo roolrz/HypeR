@@ -168,16 +168,21 @@ fn sleep_until_future(deadline: u64) -> Result<(), SleepError> {
         sleep.context(),
     )?;
 
-    let park = sleep.record.with(|record| {
-        if record.expired {
-            Ok(None)
-        } else {
-            scheduler::prepare_park_locked(&record.waiters).map(Some)
-        }
-    });
+    // SAFETY: The retained mask is transferred immediately into the CPU-pinned
+    // park transition or dropped before timer cleanup can continue.
+    let (park, interrupt_mask) = unsafe {
+        sleep.record.with_mask_retained(|record| {
+            if record.expired {
+                Ok(None)
+            } else {
+                scheduler::prepare_park_locked(&record.waiters).map(Some)
+            }
+        })
+    };
     let park = match park {
         Ok(park) => park,
         Err(error) => {
+            drop(interrupt_mask);
             return match crate::kernel::time::cancel(timer) {
                 Ok(()) => Err(SleepError::Scheduler(error)),
                 Err(
@@ -213,8 +218,10 @@ fn sleep_until_future(deadline: u64) -> Result<(), SleepError> {
         }
     };
 
-    if let Some(token) = park {
-        scheduler::complete_park(token);
+    if let Some(commit) = park {
+        scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask));
+    } else {
+        drop(interrupt_mask);
     }
     // A remote CPU may run the awakened thread before the callback returns.
     // Its release store is the lifetime boundary for the raw timer context.

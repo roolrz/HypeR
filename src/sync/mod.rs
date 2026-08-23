@@ -6,4 +6,4 @@
 pub mod atomic;
 pub mod lock;
 
-pub use lock::{InterruptSpinLock, SpinLock};
+pub use lock::{InterruptMaskGuard, InterruptSpinLock, SpinLock};

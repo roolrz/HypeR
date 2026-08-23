@@ -424,7 +424,8 @@ extern "C" fn x86_64_vector_dispatch(frame: &mut ExceptionFrame) {
     if vector >= 32 {
         super::virtualization::observe_host_interrupt(vector);
         match crate::kernel::entry::irq::dispatch(InterruptId::new(vector)) {
-            crate::kernel::entry::irq::Action::Resume => {}
+            crate::kernel::entry::irq::Action::Resume
+            | crate::kernel::entry::irq::Action::ResumeWithPreemption => {}
             crate::kernel::entry::irq::Action::Stop => {
                 crate::kernel::entry::irq::stop(exception_crash_context(frame))
             }

@@ -218,6 +218,10 @@ fn handle_periodic_tick(event: crate::kernel::time::TimerEvent, _context: usize)
     };
     let periods = event.overruns.saturating_add(1);
     let previous = TICK_COUNT[cpu].fetch_add(periods, Ordering::Relaxed);
+    if let Err(error) = crate::kernel::task::scheduler::account_tick(periods) {
+        crate::pr_crit!("HypeR: scheduler tick accounting failed: {error:?}");
+        crate::arch::cpu::halt()
+    }
     if previous < 3 && previous.saturating_add(periods) >= 3 {
         RECURRING_IRQ_OBSERVED[cpu].store(true, Ordering::Release);
         report_timer_health_once();

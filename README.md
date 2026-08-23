@@ -69,7 +69,10 @@ The current foundation includes:
 - permanent stage-1 mappings, guest stage-2 translation, boot allocation,
   buddy allocation, slab allocation, and Rust's global allocator interface;
 - SMP startup with a scheduler-owned idle thread on every admitted CPU;
-- intrusive, allocation-free ready queues and kernel/user/vCPU thread payloads;
+- class-aware, intrusive ready queues with RT FIFO and a replaceable Fair
+  class whose initial backend is time-sliced round-robin;
+- safe AArch64 IRQ-tail preemption, including deactivation and resumption of
+  scheduler-owned vCPU continuations;
 - IRQ domains and shared handler registration, GICv3/vGIC, PLIC, x2APIC, host
   and virtual architectural timers;
 - PSCI and SBI CPU-power backends;
@@ -83,8 +86,9 @@ The current foundation includes:
 
 This list describes implemented foundations, not a claim of production
 completeness. In particular, device assignment, strong guest isolation policy,
-preemptive scheduling, broad hardware discovery, stable management APIs, and a
-general-purpose virtual I/O stack are still under development.
+cross-architecture asynchronous preemption, scheduler migration and load
+balancing, broad hardware discovery, stable management APIs, and a general-
+purpose virtual I/O stack are still under development.
 
 ## Architecture
 
@@ -255,8 +259,8 @@ keep AArch64 healthy and preserve buildable secondary architectures.
 
 ### 4. Mature kernel execution
 
-- complete AArch64 IRQ-tail and vCPU preemption, then add controlled migration
-  and load balancing over the existing affinity and placement metadata;
+- qualify IRQ-tail and vCPU preemption on secondary architectures, then add
+  controlled migration and load balancing over existing affinity metadata;
 - strengthen power-management, suspend/resume, and CPU hotplug lifecycles;
 - expand diagnostics, tracing, crash analysis, and management interfaces;
 - validate ordering, cache maintenance, and interrupt behavior on physical

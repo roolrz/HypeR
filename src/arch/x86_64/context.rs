@@ -17,6 +17,7 @@ pub struct ThreadContext {
     r15: u64,
     stack_pointer: u64,
     instruction_pointer: u64,
+    interrupt_enable: u64,
 }
 
 impl ThreadContext {
@@ -30,6 +31,7 @@ impl ThreadContext {
             r15: 0,
             stack_pointer: 0,
             instruction_pointer: 0,
+            interrupt_enable: 1 << 9,
         }
     }
 
@@ -38,6 +40,11 @@ impl ThreadContext {
         self.r13 = argument as u64;
         self.stack_pointer = (stack_top & !15) as u64;
         self.instruction_pointer = x86_64_thread_trampoline as *const () as usize as u64;
+    }
+
+    pub fn prepare_vcpu(&mut self, stack_top: usize, entry: KernelThreadEntry, argument: usize) {
+        self.prepare(stack_top, entry, argument);
+        self.interrupt_enable = 0;
     }
 }
 
@@ -197,6 +204,9 @@ const _: () = {
     assert!(
         offset_of!(ThreadContext, instruction_pointer)
             == registers::THREAD_CONTEXT_RIP_OFFSET as usize
+    );
+    assert!(
+        offset_of!(ThreadContext, interrupt_enable) == registers::THREAD_CONTEXT_IF_OFFSET as usize
     );
     assert!(size_of::<ThreadContext>() == registers::THREAD_CONTEXT_SIZE as usize);
     assert!(offset_of!(VcpuContext, fx_state) == registers::VCPU_CONTEXT_FX_STATE_OFFSET as usize);

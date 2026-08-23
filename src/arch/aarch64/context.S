@@ -28,6 +28,8 @@ aarch64_switch_context:
     str     x2, [x0, #THREAD_CONTEXT_FPCR_OFFSET]
     mrs     x2, fpsr
     str     x2, [x0, #THREAD_CONTEXT_FPSR_OFFSET]
+    mrs     x2, daif
+    str     x2, [x0, #THREAD_CONTEXT_DAIF_OFFSET]
 
     ldp     x19, x20, [x1, #(THREAD_CONTEXT_X19_OFFSET + 0)]
     ldp     x21, x22, [x1, #(THREAD_CONTEXT_X19_OFFSET + 16)]
@@ -45,6 +47,8 @@ aarch64_switch_context:
     msr     fpcr, x2
     ldr     x2, [x1, #THREAD_CONTEXT_FPSR_OFFSET]
     msr     fpsr, x2
+    ldr     x2, [x1, #THREAD_CONTEXT_DAIF_OFFSET]
+    msr     daif, x2
     ret
 .size aarch64_switch_context, . - aarch64_switch_context
 
