@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Real-context scheduler, wait-queue, Mutex, and Semaphore tests.
+//!
+//! The worker-backed cases use static state because the boot self-test suite is
+//! intentionally one-shot and a completion semaphore is not a thread join.
 
 use hyper::cpu::CpuIndex;
 use hyper::sync::atomic::{AtomicUsize, Ordering};
@@ -12,6 +15,17 @@ use crate::kernel::task::scheduler::{self, CpuMask, ThreadPriority};
 
 static FIFO_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static FIFO_FAILURE: AtomicUsize = AtomicUsize::new(0);
+static POLICY_DONE: Semaphore = Semaphore::new(0);
+
+struct FairRotationState {
+    ran: AtomicUsize,
+    done: Semaphore,
+}
+
+static FAIR_ROTATION: FairRotationState = FairRotationState {
+    ran: AtomicUsize::new(0),
+    done: Semaphore::new(0),
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
@@ -62,10 +76,7 @@ impl SyncState {
     }
 }
 
-struct ConsumerArgument {
-    state: *const SyncState,
-    index: usize,
-}
+static SYNC_STATE: SyncState = SyncState::new();
 
 struct WaitState {
     queue: WaitQueue,
@@ -87,10 +98,7 @@ impl WaitState {
     }
 }
 
-struct WaitArgument {
-    state: *const WaitState,
-    index: usize,
-}
+static WAIT_STATE: WaitState = WaitState::new();
 
 pub(super) fn run() -> Result<(), Error> {
     exercise_nonblocking_paths()?;
@@ -100,7 +108,7 @@ pub(super) fn run() -> Result<(), Error> {
     exercise_fifo_preemption_points()?;
     exercise_mutex_and_semaphore_handoff()?;
     exercise_wait_queue_wake_all()?;
-    let stats = scheduler::statistics()?;
+    let stats = quiesce_test_threads()?;
     if stats.ready != 0
         || stats.blocked != 0
         || stats.real_time_class_threads + stats.fair_class_threads + stats.idle_class_threads
@@ -112,36 +120,91 @@ pub(super) fn run() -> Result<(), Error> {
     Ok(())
 }
 
+/// Drives completed test workers through exit and scheduler reclamation.
+///
+/// A completion semaphore publishes the worker's last shared-state access; it
+/// is not a thread join. IRQ-tail preemption may resume the parent before the
+/// worker returns through the entry trampoline. Quiescence therefore requires
+/// that no ready, blocked, dormant, or terminated test Thread remains.
+fn quiesce_test_threads() -> Result<scheduler::Statistics, Error> {
+    const MAX_REAP_PASSES: usize = 64;
+
+    for _ in 0..MAX_REAP_PASSES {
+        scheduler::yield_now()?;
+        let stats = scheduler::statistics()?;
+        if stats.ready == 0 && stats.blocked == 0 && stats.threads == stats.running + stats.idle {
+            return Ok(stats);
+        }
+    }
+    Err(Error::StateMismatch)
+}
+
+fn wait_for_completions(semaphore: &Semaphore, mut remaining: usize) -> Result<(), Error> {
+    const MAX_PROGRESS_PASSES: usize = 64;
+
+    for pass in 0..=MAX_PROGRESS_PASSES {
+        while remaining != 0 && semaphore.try_acquire() {
+            remaining -= 1;
+        }
+        if remaining == 0 {
+            return Ok(());
+        }
+        if pass == MAX_PROGRESS_PASSES {
+            break;
+        }
+        scheduler::yield_now()?;
+    }
+    Err(Error::StateMismatch)
+}
+
 fn exercise_policy_transitions() -> Result<(), Error> {
     FIFO_SEQUENCE.store(0, Ordering::Release);
 
+    let guard = scheduler::preempt_disable()?;
     let dormant =
-        scheduler::kthread_create_fifo("policy-dormant", fifo_peer, 1, ThreadPriority::HIGHEST)?;
+        scheduler::kthread_create_fifo("policy-dormant", policy_peer, 1, ThreadPriority::HIGHEST)?;
     scheduler::set_thread_fair_policy(dormant)?;
     scheduler::thread_ready(dormant)?;
-    if scheduler::cond_resched()? {
+    if FIFO_SEQUENCE.load(Ordering::Acquire) != 0 {
         return Err(Error::StateMismatch);
     }
-    scheduler::yield_now()?;
+    drop(guard);
+    let _ = scheduler::cond_resched()?;
+    wait_for_completions(&POLICY_DONE, 1)?;
+    if FIFO_SEQUENCE.load(Ordering::Acquire) != 1 {
+        return Err(Error::StateMismatch);
+    }
+    let _ = quiesce_test_threads()?;
 
-    let ready = scheduler::kthread_create("policy-ready", fifo_peer, 2)?;
+    let guard = scheduler::preempt_disable()?;
+    let ready = scheduler::kthread_create("policy-ready", policy_peer, 2)?;
     scheduler::thread_ready(ready)?;
     scheduler::set_thread_fifo_policy(ready, ThreadPriority::HIGHEST)?;
     scheduler::set_thread_fair_policy(ready)?;
-    if scheduler::cond_resched()? {
+    if FIFO_SEQUENCE.load(Ordering::Acquire) != 1 {
         return Err(Error::StateMismatch);
     }
-    scheduler::yield_now()?;
+    drop(guard);
+    let _ = scheduler::cond_resched()?;
+    wait_for_completions(&POLICY_DONE, 1)?;
+    if FIFO_SEQUENCE.load(Ordering::Acquire) != 2 {
+        return Err(Error::StateMismatch);
+    }
+    let _ = quiesce_test_threads()?;
 
     let current = scheduler::current_thread_id()?;
     scheduler::set_thread_fifo_policy(current, ThreadPriority::HIGHEST)?;
     let peer =
-        scheduler::kthread_create_fifo("policy-running", fifo_peer, 3, ThreadPriority::NORMAL)?;
+        scheduler::kthread_create_fifo("policy-running", policy_peer, 3, ThreadPriority::NORMAL)?;
     scheduler::thread_ready(peer)?;
+    let switches = scheduler::statistics()?.context_switches;
     scheduler::set_thread_fair_policy(current)?;
-    if !scheduler::cond_resched()? {
+    let _ = scheduler::cond_resched()?;
+    if scheduler::statistics()?.context_switches == switches {
         return Err(Error::StateMismatch);
     }
+    wait_for_completions(&POLICY_DONE, 1)?;
+    let _ = quiesce_test_threads()?;
 
     if FIFO_SEQUENCE.load(Ordering::Acquire) != 3 {
         return Err(Error::StateMismatch);
@@ -150,23 +213,44 @@ fn exercise_policy_transitions() -> Result<(), Error> {
 }
 
 fn exercise_fair_rotation() -> Result<(), Error> {
-    FIFO_SEQUENCE.store(0, Ordering::Release);
-    let first = scheduler::kthread_create("fair-peer/0", fifo_peer, 1)?;
-    let second = scheduler::kthread_create("fair-peer/1", fifo_peer, 2)?;
+    FAIR_ROTATION.ran.store(0, Ordering::Release);
+    let _ = scheduler::cond_resched()?;
+    let guard = scheduler::preempt_disable()?;
+    let first = scheduler::kthread_create("fair-peer/0", fair_rotation_peer, 1 << 0)?;
+    let second = scheduler::kthread_create("fair-peer/1", fair_rotation_peer, 1 << 1)?;
     scheduler::thread_ready(first)?;
     scheduler::thread_ready(second)?;
 
     // A Fair wakeup does not immediately displace an equal-class thread. One
-    // deliberately oversized charge expires the private backend quantum; the
-    // safe point must then rotate both peers in FIFO order.
-    if scheduler::cond_resched()? {
+    // deliberately oversized charge expires the private backend quantum while
+    // preemption remains deferred; releasing the guard must let both peers
+    // run. Completion order is deliberately not asserted because a timer may
+    // preempt either Fair worker after dispatch.
+    if FAIR_ROTATION.ran.load(Ordering::Acquire) != 0 {
         return Err(Error::StateMismatch);
     }
+    let switches = scheduler::statistics()?.context_switches;
     scheduler::account_tick(u64::MAX)?;
-    if !scheduler::cond_resched()? || FIFO_SEQUENCE.load(Ordering::Acquire) != 2 {
+    let _ = scheduler::preempt_enable_and_reschedule(guard)?;
+    if scheduler::statistics()?.context_switches == switches {
         return Err(Error::StateMismatch);
     }
+    wait_for_completions(&FAIR_ROTATION.done, 2)?;
+    if FAIR_ROTATION.ran.load(Ordering::Acquire) != 0b11 {
+        return Err(Error::StateMismatch);
+    }
+    let _ = quiesce_test_threads()?;
     Ok(())
+}
+
+extern "C" fn fair_rotation_peer(bit: usize) {
+    FAIR_ROTATION.ran.fetch_or(bit, Ordering::AcqRel);
+    let _ = FAIR_ROTATION.done.release();
+}
+
+extern "C" fn policy_peer(expected: usize) {
+    fifo_peer(expected);
+    let _ = POLICY_DONE.release();
 }
 
 fn exercise_affinity_creation() -> Result<(), Error> {
@@ -265,7 +349,8 @@ fn exercise_fifo_preemption_points() -> Result<(), Error> {
     scheduler::set_thread_fifo_policy(first, ThreadPriority::NORMAL)?;
     scheduler::thread_ready(higher)?;
 
-    if !scheduler::cond_resched()? || FIFO_SEQUENCE.load(Ordering::Acquire) != 1 {
+    let _ = scheduler::cond_resched()?;
+    if FIFO_SEQUENCE.load(Ordering::Acquire) != 1 {
         return Err(Error::StateMismatch);
     }
     scheduler::yield_now()?;
@@ -316,8 +401,12 @@ extern "C" fn fifo_priority_change(mode: usize) {
         Ok(id) => id,
         Err(_) => return record_fifo_failure(2),
     };
+    let guard = match scheduler::preempt_disable() {
+        Ok(guard) => guard,
+        Err(_) => return record_fifo_failure(3),
+    };
     if scheduler::thread_ready(equal).is_err() {
-        return record_fifo_failure(3);
+        return record_fifo_failure(4);
     }
 
     if mode == 0 {
@@ -328,28 +417,28 @@ extern "C" fn fifo_priority_change(mode: usize) {
             ThreadPriority::new(200),
         ) {
             Ok(id) => id,
-            Err(_) => return record_fifo_failure(4),
+            Err(_) => return record_fifo_failure(5),
         };
         if scheduler::thread_ready(lower).is_err()
             || scheduler::set_thread_fifo_policy(current, ThreadPriority::new(64)).is_err()
             || scheduler::set_thread_fifo_policy(current, ThreadPriority::new(200)).is_err()
-            || !matches!(scheduler::cond_resched(), Ok(true))
+            || scheduler::preempt_enable_and_reschedule(guard).is_err()
         {
-            return record_fifo_failure(5);
+            return record_fifo_failure(6);
         }
     } else if mode == 1 {
         if scheduler::set_thread_fifo_policy(current, ThreadPriority::new(200)).is_err()
             || scheduler::set_thread_fifo_policy(current, ThreadPriority::new(64)).is_err()
-            || !matches!(scheduler::cond_resched(), Ok(true))
+            || scheduler::preempt_enable_and_reschedule(guard).is_err()
         {
-            return record_fifo_failure(6);
+            return record_fifo_failure(7);
         }
     } else {
         if scheduler::set_thread_fifo_policy(current, ThreadPriority::new(64)).is_err()
             || scheduler::set_thread_fifo_policy(equal, ThreadPriority::new(200)).is_err()
-            || !matches!(scheduler::cond_resched(), Ok(false))
+            || !matches!(scheduler::preempt_enable_and_reschedule(guard), Ok(false))
         {
-            return record_fifo_failure(7);
+            return record_fifo_failure(8);
         }
         let future_equal = match scheduler::kthread_create_fifo(
             "fifo-future-peer",
@@ -358,13 +447,13 @@ extern "C" fn fifo_priority_change(mode: usize) {
             ThreadPriority::new(64),
         ) {
             Ok(id) => id,
-            Err(_) => return record_fifo_failure(8),
+            Err(_) => return record_fifo_failure(9),
         };
         if scheduler::thread_ready(future_equal).is_err()
             || !matches!(scheduler::cond_resched(), Ok(false))
             || scheduler::yield_now().is_err()
         {
-            return record_fifo_failure(9);
+            return record_fifo_failure(10);
         }
     }
     fifo_peer(2);
@@ -408,28 +497,11 @@ fn exercise_nonblocking_paths() -> Result<(), Error> {
 }
 
 fn exercise_mutex_and_semaphore_handoff() -> Result<(), Error> {
-    let state = SyncState::new();
-    let arguments = [
-        ConsumerArgument {
-            state: &state,
-            index: 0,
-        },
-        ConsumerArgument {
-            state: &state,
-            index: 1,
-        },
-    ];
-    let producer = scheduler::kthread_create("sync-producer", producer, (&state as *const _) as _)?;
-    let first = scheduler::kthread_create(
-        "sync-consumer/0",
-        consumer,
-        (&arguments[0] as *const _) as _,
-    )?;
-    let second = scheduler::kthread_create(
-        "sync-consumer/1",
-        consumer,
-        (&arguments[1] as *const _) as _,
-    )?;
+    let state = &SYNC_STATE;
+    let producer = scheduler::kthread_create("sync-producer", producer, 0)?;
+    let first = scheduler::kthread_create("sync-consumer/0", consumer, 0)?;
+    let second = scheduler::kthread_create("sync-consumer/1", consumer, 1)?;
+    let guard = scheduler::preempt_disable()?;
     scheduler::thread_ready(producer)?;
     if !scheduler::thread_ready(first)? || scheduler::thread_ready(first)? {
         return Err(Error::StateMismatch);
@@ -437,12 +509,13 @@ fn exercise_mutex_and_semaphore_handoff() -> Result<(), Error> {
     scheduler::thread_ready(second)?;
     scheduler::set_thread_fifo_policy(first, ThreadPriority::HIGHEST)?;
     scheduler::set_thread_fifo_policy(second, ThreadPriority::HIGHEST)?;
+    drop(guard);
     scheduler::yield_now()?;
     for _ in 0..3 {
         state.done.acquire()?;
     }
     scheduler::yield_now()?;
-    verify_sync_state(&state)
+    verify_sync_state(state)
 }
 
 fn verify_sync_state(state: &SyncState) -> Result<(), Error> {
@@ -461,9 +534,8 @@ fn verify_sync_state(state: &SyncState) -> Result<(), Error> {
     }
 }
 
-extern "C" fn producer(argument: usize) {
-    // SAFETY: The parent waits for all three completion handoffs.
-    let state = unsafe { &*(argument as *const SyncState) };
+extern "C" fn producer(_argument: usize) {
+    let state = &SYNC_STATE;
     let Ok(mut value) = state.value.lock() else {
         state.fail(1);
         let _ = state.done.release();
@@ -489,58 +561,50 @@ extern "C" fn producer(argument: usize) {
 }
 
 extern "C" fn consumer(argument: usize) {
-    // SAFETY: The parent retains both argument records until completion.
-    let argument = unsafe { &*(argument as *const ConsumerArgument) };
-    // SAFETY: ConsumerArgument points to the parent's SyncState, which remains
-    // pinned until every consumer signals completion.
-    let state = unsafe { &*argument.state };
+    let state = &SYNC_STATE;
+    let Some(order_slot) = state.consumer_order.get(argument) else {
+        state.fail(6);
+        let _ = state.done.release();
+        return;
+    };
     if state.gate.acquire().is_err() {
-        state.fail(6 + argument.index);
+        state.fail(7 + argument);
     } else {
         if !matches!(state.value.try_lock(), Ok(None)) {
-            state.fail(8 + argument.index);
+            state.fail(9 + argument);
         }
         match state.value.lock() {
             Ok(mut value) => {
                 *value += 1;
                 let order = state.next_order.fetch_add(1, Ordering::AcqRel);
-                state.consumer_order[argument.index].store(order, Ordering::Release);
+                order_slot.store(order, Ordering::Release);
             }
-            Err(_) => state.fail(10 + argument.index),
+            Err(_) => state.fail(11 + argument),
         }
     }
     if state.done.release().is_err() {
-        state.fail(12 + argument.index);
+        state.fail(13 + argument);
     }
 }
 
 fn exercise_wait_queue_wake_all() -> Result<(), Error> {
-    let state = WaitState::new();
-    let arguments = [
-        WaitArgument {
-            state: &state,
-            index: 0,
-        },
-        WaitArgument {
-            state: &state,
-            index: 1,
-        },
-    ];
-    for (index, argument) in arguments.iter().enumerate() {
-        let id = scheduler::kthread_create(
+    let state = &WAIT_STATE;
+    let guard = scheduler::preempt_disable()?;
+    for index in 0..2 {
+        let id = scheduler::kthread_create_fifo(
             if index == 0 { "waiter/0" } else { "waiter/1" },
             waiter,
-            (argument as *const WaitArgument) as usize,
+            index,
+            ThreadPriority::NORMAL,
         )?;
         scheduler::thread_ready(id)?;
     }
-    scheduler::yield_now()?;
+    let _ = scheduler::preempt_enable_and_reschedule(guard)?;
     if state.queue.len()? != 2 || state.queue.wake_all()? != 2 {
         return Err(Error::StateMismatch);
     }
     scheduler::yield_now()?;
-    state.done.acquire()?;
-    state.done.acquire()?;
+    wait_for_completions(&state.done, 2)?;
     scheduler::yield_now()?;
     let observed = [
         state.observed[0].load(Ordering::Acquire),
@@ -553,16 +617,17 @@ fn exercise_wait_queue_wake_all() -> Result<(), Error> {
 }
 
 extern "C" fn waiter(argument: usize) {
-    // SAFETY: The parent waits for both waiter completions.
-    let argument = unsafe { &*(argument as *const WaitArgument) };
-    // SAFETY: WaitArgument retains the pinned parent WaitState until this
-    // worker publishes completion.
-    let state = unsafe { &*argument.state };
+    let state = &WAIT_STATE;
+    let Some(observed) = state.observed.get(argument) else {
+        state.worker_error.store(3, Ordering::Release);
+        let _ = state.done.release();
+        return;
+    };
     if state.queue.wait().is_err() {
         state.worker_error.store(1, Ordering::Release);
     } else {
         let order = state.order.fetch_add(1, Ordering::AcqRel);
-        state.observed[argument.index].store(order, Ordering::Release);
+        observed.store(order, Ordering::Release);
     }
     if state.done.release().is_err() {
         state.worker_error.store(2, Ordering::Release);
