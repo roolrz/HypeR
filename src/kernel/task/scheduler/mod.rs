@@ -439,15 +439,35 @@ pub fn thread_ready(id: ThreadId) -> Result<bool, Error> {
 ///
 /// Calling this for a Fair thread is an explicit class transition into RT.
 pub fn set_thread_fifo_policy(id: ThreadId, priority: ThreadPriority) -> Result<(), Error> {
-    let target = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .set_fifo_policy(id, priority)
-    })?;
+    let target = update_thread_fifo_policy(id, priority)?;
     if let Some(cpu) = target {
         request_reschedule(cpu)?;
     }
     Ok(())
+}
+
+fn update_thread_fifo_policy(
+    id: ThreadId,
+    priority: ThreadPriority,
+) -> Result<Option<CpuIndex>, Error> {
+    SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .set_fifo_policy(id, priority)
+    })
+}
+
+/// Applies FIFO policy and reports whether the transition requested a switch.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn set_thread_fifo_policy_for_test(
+    id: ThreadId,
+    priority: ThreadPriority,
+) -> Result<bool, Error> {
+    let target = update_thread_fifo_policy(id, priority)?;
+    if let Some(cpu) = target {
+        request_reschedule(cpu)?;
+    }
+    Ok(target.is_some())
 }
 
 /// Assigns a thread to the ordinary Fair scheduling class.

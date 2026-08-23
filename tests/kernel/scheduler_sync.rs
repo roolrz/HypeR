@@ -209,6 +209,27 @@ fn exercise_policy_transitions() -> Result<(), Error> {
     if FIFO_SEQUENCE.load(Ordering::Acquire) != 3 {
         return Err(Error::StateMismatch);
     }
+
+    let guard = scheduler::preempt_disable()?;
+    let candidate = scheduler::kthread_create_fifo(
+        "policy-fair-to-fifo",
+        policy_peer,
+        4,
+        ThreadPriority::NORMAL,
+    )?;
+    scheduler::thread_ready(candidate)?;
+    if !scheduler::set_thread_fifo_policy_for_test(current, ThreadPriority::LOWEST)?
+        || FIFO_SEQUENCE.load(Ordering::Acquire) != 3
+    {
+        return Err(Error::StateMismatch);
+    }
+    let _ = scheduler::preempt_enable_and_reschedule(guard)?;
+    wait_for_completions(&POLICY_DONE, 1)?;
+    if FIFO_SEQUENCE.load(Ordering::Acquire) != 4 {
+        return Err(Error::StateMismatch);
+    }
+    let _ = quiesce_test_threads()?;
+    scheduler::set_thread_fair_policy(current)?;
     Ok(())
 }
 

@@ -530,36 +530,33 @@ impl Scheduler {
             {
                 return Err(Error::InvalidThreadState);
             }
-            let Some(old) = old else {
-                return Ok(None);
-            };
-            if old == priority {
+            if state != ThreadState::Running {
                 return Ok(None);
             }
-            if state == ThreadState::Running {
-                self.thread_mut(id)?.set_deferred_fifo_placement(None);
-            }
+            self.thread_mut(id)?.set_deferred_fifo_placement(None);
             let thread = self.thread(id)?;
             let cpu = thread.cpu_index();
             let ready = self.cpus[self.cpu_slot(cpu)?]
                 .run_queue
                 .peek_next(&self.threads, cpu)?;
-            let should_reschedule = state == ThreadState::Running
-                && ready.is_some_and(|ready| {
-                    matches!(
-                        ready.policy,
-                        SchedulingPolicy::Fifo { priority: ready }
-                            if ready < priority || (priority < old && ready == priority)
-                    )
-                });
+            let should_reschedule = ready.is_some_and(|ready| match old {
+                Some(old) => matches!(
+                    ready.policy,
+                    SchedulingPolicy::Fifo { priority: ready }
+                        if ready < priority || (priority < old && ready == priority)
+                ),
+                None => SchedulingPolicy::fifo(priority).is_preempted_by(ready.policy),
+            });
             if should_reschedule {
-                let placement = if priority < old {
-                    DeferredFifoPlacement::Tail
-                } else {
-                    DeferredFifoPlacement::Head
-                };
-                self.thread_mut(id)?
-                    .set_deferred_fifo_placement(Some(placement));
+                if let Some(old) = old {
+                    let placement = if priority < old {
+                        DeferredFifoPlacement::Tail
+                    } else {
+                        DeferredFifoPlacement::Head
+                    };
+                    self.thread_mut(id)?
+                        .set_deferred_fifo_placement(Some(placement));
+                }
                 Ok(Some(cpu))
             } else {
                 Ok(None)
