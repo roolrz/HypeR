@@ -71,6 +71,25 @@ fn placement_requires_assignment_to_satisfy_affinity() {
     assert_eq!(running.last_cpu(), Some(cpu1));
     assert_eq!(movable.mark_running(cpu0), None);
 
+    let constrained_affinity = CpuMask::EMPTY.with_cpu(cpu0).with_cpu(cpu1);
+    let constrained = crate::require_some(ThreadPlacement::movable_with_affinity(
+        cpu1,
+        constrained_affinity,
+    ));
+    assert_eq!(constrained.assigned_cpu(), cpu1);
+    assert_eq!(constrained.affinity(), constrained_affinity);
+    assert_eq!(constrained.policy(), PlacementPolicy::Movable);
+    assert_eq!(
+        ThreadPlacement::movable_with_affinity(cpu1, CpuMask::single(cpu0)),
+        None
+    );
+
+    assert!(CpuMask::EMPTY.is_empty());
+    assert_eq!(
+        constrained_affinity.without_cpu(cpu0),
+        CpuMask::single(cpu1)
+    );
+
     let preferred = ThreadPlacement::prefer(cpu0);
     assert_eq!(preferred.policy(), PlacementPolicy::Prefer(cpu0));
 }

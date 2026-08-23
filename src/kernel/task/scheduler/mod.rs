@@ -12,7 +12,7 @@ use hyper::sync::InterruptSpinLock;
 use self::state::{PreparedContextSwitch, Scheduler};
 use super::thread::{KernelThreadEntry, ThreadId, ThreadState, VcpuExecution};
 
-pub use super::policy::ThreadPriority;
+pub use super::policy::{CpuMask, ThreadPriority};
 use super::wait::WaitQueue;
 
 type SchedulerLock = InterruptSpinLock<Option<Scheduler>, crate::arch::irq::LocalMask>;
@@ -105,6 +105,8 @@ pub enum Error {
     CpuAlreadyRegistered,
     CpuNotRegistered,
     InvalidCpuIndex,
+    EmptyCpuAffinity,
+    NoRegisteredCpuInAffinity,
     PreemptionUnavailable,
     PreemptionInvariant,
     Thread(super::thread::Error),
@@ -254,7 +256,33 @@ pub fn kthread_create(
     entry: KernelThreadEntry,
     argument: usize,
 ) -> Result<ThreadId, Error> {
-    kthread_create_with_priority(name, entry, argument, ThreadPriority::NORMAL)
+    kthread_create_with_priority_and_affinity(
+        name,
+        entry,
+        argument,
+        ThreadPriority::NORMAL,
+        CpuMask::ALL,
+    )
+}
+
+/// Creates a dormant kernel thread constrained to `affinity`.
+///
+/// The scheduler prefers the calling CPU when it is admitted and registered;
+/// otherwise it deterministically selects the lowest-numbered registered CPU
+/// in the mask. The complete mask is retained for future migration policy.
+pub fn kthread_create_with_affinity(
+    name: &str,
+    entry: KernelThreadEntry,
+    argument: usize,
+    affinity: CpuMask,
+) -> Result<ThreadId, Error> {
+    kthread_create_with_priority_and_affinity(
+        name,
+        entry,
+        argument,
+        ThreadPriority::NORMAL,
+        affinity,
+    )
 }
 
 pub fn kthread_create_with_priority(
@@ -263,12 +291,42 @@ pub fn kthread_create_with_priority(
     argument: usize,
     priority: ThreadPriority,
 ) -> Result<ThreadId, Error> {
+    kthread_create_with_priority_and_affinity(name, entry, argument, priority, CpuMask::ALL)
+}
+
+/// Creates a dormant kernel thread with explicit scheduling and CPU policy.
+pub fn kthread_create_with_priority_and_affinity(
+    name: &str,
+    entry: KernelThreadEntry,
+    argument: usize,
+    priority: ThreadPriority,
+    affinity: CpuMask,
+) -> Result<ThreadId, Error> {
     let cpu = current_cpu()?;
     SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
-            .create_kernel_thread(cpu, name, entry, argument, priority)
+            .create_kernel_thread(cpu, affinity, name, entry, argument, priority)
     })
+}
+
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn thread_placement(id: ThreadId) -> Result<(CpuIndex, CpuMask), Error> {
+    SCHEDULER.with(|slot| {
+        let thread = slot.as_ref().ok_or(Error::NotInitialized)?.thread(id)?;
+        Ok((thread.cpu_index(), thread.affinity()))
+    })
+}
+
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn discard_dormant_kernel_thread(id: ThreadId) -> Result<(), Error> {
+    let thread = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .take_dormant_kernel_thread(id)
+    })?;
+    drop(thread);
+    Ok(())
 }
 
 pub(in crate::kernel) fn vcpu_create(

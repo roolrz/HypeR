@@ -3,17 +3,19 @@
 
 //! Real-context scheduler, wait-queue, Mutex, and Semaphore tests.
 
+use hyper::cpu::CpuIndex;
 use hyper::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::kernel::sync::{Mutex, Semaphore};
 use crate::kernel::task::WaitQueue;
-use crate::kernel::task::scheduler::{self, ThreadPriority};
+use crate::kernel::task::scheduler::{self, CpuMask, ThreadPriority};
 
 static FIFO_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 static FIFO_FAILURE: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
+    Affinity(usize),
     Scheduler(scheduler::Error),
     Synchronization(crate::kernel::sync::Error),
     Worker(usize),
@@ -92,6 +94,7 @@ struct WaitArgument {
 
 pub(super) fn run() -> Result<(), Error> {
     exercise_nonblocking_paths()?;
+    exercise_affinity_creation()?;
     exercise_fifo_preemption_points()?;
     exercise_mutex_and_semaphore_handoff()?;
     exercise_wait_queue_wake_all()?;
@@ -105,6 +108,71 @@ pub(super) fn run() -> Result<(), Error> {
     }
     Ok(())
 }
+
+fn exercise_affinity_creation() -> Result<(), Error> {
+    let current = crate::kernel::cpu::current_index().ok_or(Error::Affinity(1))?;
+    if current != CpuIndex::BOOT {
+        return Err(Error::Affinity(2));
+    }
+    let online_cpus = crate::kernel::cpu::online_cpu_count();
+    let remote = if online_cpus > 1 {
+        CpuIndex::new(1)
+    } else {
+        None
+    };
+    let local_affinity = remote.map_or(CpuMask::single(current), |remote| {
+        CpuMask::EMPTY.with_cpu(current).with_cpu(remote)
+    });
+    let local = scheduler::kthread_create_with_affinity(
+        "affinity-local",
+        affinity_local_worker,
+        0,
+        local_affinity,
+    )?;
+    if scheduler::thread_placement(local)? != (current, local_affinity) {
+        return Err(Error::Affinity(4));
+    }
+    scheduler::thread_ready(local)?;
+    scheduler::yield_now()?;
+
+    if let Some(remote) = remote {
+        let remote_only = CpuMask::single(remote);
+        let remote_thread = scheduler::kthread_create_with_affinity(
+            "affinity-remote",
+            affinity_local_worker,
+            0,
+            remote_only,
+        )?;
+        if scheduler::thread_placement(remote_thread)? != (remote, remote_only) {
+            return Err(Error::Affinity(5));
+        }
+        scheduler::discard_dormant_kernel_thread(remote_thread)?;
+    }
+
+    if !matches!(
+        scheduler::kthread_create_with_affinity("affinity-empty", fifo_peer, 0, CpuMask::EMPTY),
+        Err(scheduler::Error::EmptyCpuAffinity)
+    ) {
+        return Err(Error::Affinity(7));
+    }
+
+    if let Some(unregistered) = CpuIndex::new(online_cpus)
+        && !matches!(
+            scheduler::kthread_create_with_affinity(
+                "affinity-offline",
+                fifo_peer,
+                0,
+                CpuMask::single(unregistered)
+            ),
+            Err(scheduler::Error::NoRegisteredCpuInAffinity)
+        )
+    {
+        return Err(Error::Affinity(8));
+    }
+    Ok(())
+}
+
+extern "C" fn affinity_local_worker(_argument: usize) {}
 
 fn exercise_fifo_preemption_points() -> Result<(), Error> {
     FIFO_SEQUENCE.store(0, Ordering::Release);

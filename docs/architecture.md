@@ -136,16 +136,30 @@ explicit safe point. Equal-priority wakeups do not request a switch or rotate
 the running FIFO thread, while an explicit yield moves it to the tail of its
 priority queue. Idle threads never enter an ordinary run queue.
 
-Ordinary kernel threads carry movable placement policy, vCPU threads initially
-prefer their creating CPU, and bootstrap/idle threads are pinned. Assignment is
-still fixed after creation: migration requires a stopped-thread handoff which
-removes the thread from its source queue before publishing it on the target.
+Ordinary kernel threads carry movable placement policy and may retain an
+explicit `CpuMask`; creation prefers the calling CPU when admitted, then the
+lowest-numbered registered CPU in the mask. Empty masks and masks with no
+registered CPU are rejected. vCPU threads initially prefer their creating CPU,
+and bootstrap/idle threads are pinned. Assignment is still fixed after
+creation: migration requires a stopped-thread handoff which removes the thread
+from its source queue before publishing it on the target.
+The kernel always builds the SMP-capable scheduler and per-CPU infrastructure;
+the same image remains valid when firmware admits only the boot CPU. There is
+no separate uniprocessor configuration or single-CPU scheduler implementation.
 Run queues store stable `ThreadId` values and do not own Thread allocations, so
 future per-CPU queue locks and load selection need not move object ownership.
 Exited threads enter a scheduler-owned intrusive reclamation queue. Reaping
 therefore scales with pending exits rather than the lifetime `ThreadId` space,
 and releases an allocation only after no CPU retains it as a current or
 switching-from thread.
+
+Deadline sleeps compose one local-CPU timer with a private scheduler wait
+queue. An IRQ-safe record lock linearizes expiry against parking, so expiry
+before the thread becomes blocked is retained instead of lost. The timer's raw
+callback context has a heap-stable address and remains owned until a final
+release/acquire completion handshake proves that the callback no longer
+borrows it. Blocked-thread migration is not yet supported; a future migration
+handoff must also move or remotely cancel the owning CPU's timer.
 
 Per-CPU preemption state coalesces higher-priority and remote-wakeup requests,
 tracks explicit disable guards and IRQ nesting, and is online before the local

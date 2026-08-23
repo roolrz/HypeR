@@ -9,9 +9,11 @@ pub(crate) mod policy;
 pub(crate) mod preempt;
 mod reschedule;
 pub mod scheduler;
+mod sleep;
 pub mod thread;
 mod wait;
 
+pub use sleep::{SleepError, sleep_for, sleep_until};
 pub use wait::WaitQueue;
 
 static READY: AtomicBool = AtomicBool::new(false);
