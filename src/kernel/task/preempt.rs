@@ -146,6 +146,15 @@ pub(crate) fn can_reschedule(cpu: CpuIndex) -> Result<bool, Error> {
         && state.irq_depth.load(Ordering::Relaxed) == 0)
 }
 
+/// Tests whether an outermost IRQ exit has deferred scheduling work.
+///
+/// The caller must complete its [`IrqGuard`] first. The scheduler lock later
+/// serializes the final decision and consumes the coalesced request.
+pub(crate) fn should_reschedule_after_irq() -> Result<bool, Error> {
+    let cpu = current_cpu()?;
+    Ok(pending(cpu)? && can_reschedule(cpu)?)
+}
+
 /// Disables asynchronous preemption on the calling CPU.
 ///
 /// Dropping the guard only restores accounting. Call
@@ -224,9 +233,12 @@ pub(crate) struct IrqGuard {
 }
 
 impl IrqGuard {
-    /// Completes IRQ accounting without entering the scheduler.
-    pub(crate) fn complete(mut self) -> Result<(), Error> {
-        self.complete_inner().map(|_| ())
+    /// Completes IRQ accounting and reports an outermost IRQ exit.
+    ///
+    /// Only the outermost exit may enter the architecture IRQ-tail scheduling
+    /// seam. A nested exit still has an IRQ-stack owner above it.
+    pub(crate) fn complete(mut self) -> Result<bool, Error> {
+        self.complete_inner()
     }
 
     fn complete_inner(&mut self) -> Result<bool, Error> {

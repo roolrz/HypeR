@@ -4,6 +4,8 @@
 //! Bare-metal integration tests compiled only by `kernel-self-test`.
 
 mod guest_memory_access;
+#[cfg(CONFIG_ARCH_AARCH64)]
+mod irq_tail_preemption;
 mod scheduler_sync;
 mod stack_model;
 mod startup_readiness;
@@ -21,6 +23,8 @@ pub(crate) fn run() {
     let guest_memory_result = guest_execution.then(guest_memory_access::run);
     let user_memory_result = user_memory_access::run();
     let vm_registry_result = vm_registry::run();
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    let irq_tail_probe_result = irq_tail_preemption::install();
     crate::arch::irq::disable_local();
     if let Err(error) = result {
         crate::kernel::boot::fail("kernel scheduler/sync tests", error);
@@ -42,6 +46,10 @@ pub(crate) fn run() {
     }
     if let Err(error) = vm_registry_result {
         crate::kernel::boot::fail("kernel VM registry tests", error);
+    }
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    if let Err(error) = irq_tail_probe_result {
+        crate::kernel::boot::fail("AArch64 IRQ-tail preemption probe installation", error);
     }
     crate::println!("HypeR test: scheduler ready/wait queues and sleeping sync passed");
     crate::println!("HypeR test: guarded thread, IRQ, and emergency stacks passed");

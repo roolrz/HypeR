@@ -7,15 +7,29 @@ mod queue;
 mod state;
 
 use hyper::cpu::CpuIndex;
-use hyper::sync::InterruptSpinLock;
+use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
 
 use self::state::{PreparedContextSwitch, Scheduler};
 use super::thread::{KernelThreadEntry, ThreadId, ThreadState, VcpuExecution};
 
+use super::policy::SchedulingPolicy;
 pub use super::policy::{CpuMask, ThreadPriority};
 use super::wait::WaitQueue;
 
+/// Scheduler ticks granted by the initial Fair round-robin backend.
+///
+/// Milliseconds are rounded up so every configured nonzero quantum spans at
+/// least one periodic scheduler tick. Kconfig bounds make the product exact.
+const CONFIGURED_FAIR_QUANTUM_TICKS: u64 =
+    (hyper::config::SCHED_FAIR_QUANTUM_MS as u64 * hyper::config::TIMER_HZ as u64).div_ceil(1_000);
+const FAIR_QUANTUM_TICKS: u64 = if CONFIGURED_FAIR_QUANTUM_TICKS == 0 {
+    1
+} else {
+    CONFIGURED_FAIR_QUANTUM_TICKS
+};
+
 type SchedulerLock = InterruptSpinLock<Option<Scheduler>, crate::arch::irq::LocalMask>;
+type TransitionMask = InterruptMaskGuard<crate::arch::irq::LocalMask>;
 
 static SCHEDULER: SchedulerLock = InterruptSpinLock::new(None);
 
@@ -99,6 +113,7 @@ pub enum Error {
     CannotBlockIdle,
     CannotSleepWithInterruptsMasked,
     CannotSleepWithPreemptionDisabled,
+    IrqTailRequiresInterruptsMasked,
     InvalidThreadState,
     IdleThreadAlreadyInstalled,
     InvalidIdleTransition,
@@ -155,7 +170,8 @@ pub(crate) struct CurrentVcpu {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Statistics {
     pub threads: usize,
-    pub fixed_priority_class_threads: usize,
+    pub real_time_class_threads: usize,
+    pub fair_class_threads: usize,
     pub idle_class_threads: usize,
     pub ready: usize,
     pub running: usize,
@@ -174,8 +190,29 @@ pub(crate) struct CrashTaskSnapshot {
     pub stack_statistics: Option<crate::kernel::mm::stack::StackStatistics>,
 }
 
+#[must_use = "a committed park must retain its IRQ mask through context handoff"]
+pub(crate) struct ParkCommit(PreparedContextSwitch);
+
 #[must_use = "parking is committed only after the prepared context switch is consumed"]
-pub(crate) struct ParkToken(PreparedContextSwitch);
+pub(crate) struct ParkToken(PreparedTransition);
+
+struct PreparedTransition {
+    switch: PreparedContextSwitch,
+    interrupt_mask: TransitionMask,
+}
+
+impl PreparedTransition {
+    fn activate(self) {
+        let Self {
+            switch,
+            interrupt_mask,
+        } = self;
+        switch.activate();
+        // Assembly resumes this continuation with the switch-boundary mask;
+        // the guard restores the state it owned before scheduler commit.
+        drop(interrupt_mask);
+    }
+}
 
 pub fn initialize() -> Result<Capabilities, Error> {
     let cpu = current_cpu()?;
@@ -256,11 +293,11 @@ pub fn kthread_create(
     entry: KernelThreadEntry,
     argument: usize,
 ) -> Result<ThreadId, Error> {
-    kthread_create_with_priority_and_affinity(
+    kthread_create_with_policy_and_affinity(
         name,
         entry,
         argument,
-        ThreadPriority::NORMAL,
+        SchedulingPolicy::fair(),
         CpuMask::ALL,
     )
 }
@@ -276,37 +313,54 @@ pub fn kthread_create_with_affinity(
     argument: usize,
     affinity: CpuMask,
 ) -> Result<ThreadId, Error> {
-    kthread_create_with_priority_and_affinity(
+    kthread_create_with_policy_and_affinity(
         name,
         entry,
         argument,
-        ThreadPriority::NORMAL,
+        SchedulingPolicy::fair(),
         affinity,
     )
 }
 
-pub fn kthread_create_with_priority(
+/// Creates a dormant real-time FIFO kernel thread.
+pub fn kthread_create_fifo(
     name: &str,
     entry: KernelThreadEntry,
     argument: usize,
     priority: ThreadPriority,
 ) -> Result<ThreadId, Error> {
-    kthread_create_with_priority_and_affinity(name, entry, argument, priority, CpuMask::ALL)
+    kthread_create_fifo_with_affinity(name, entry, argument, priority, CpuMask::ALL)
 }
 
-/// Creates a dormant kernel thread with explicit scheduling and CPU policy.
-pub fn kthread_create_with_priority_and_affinity(
+/// Creates a dormant real-time FIFO kernel thread with explicit affinity.
+pub fn kthread_create_fifo_with_affinity(
     name: &str,
     entry: KernelThreadEntry,
     argument: usize,
     priority: ThreadPriority,
     affinity: CpuMask,
 ) -> Result<ThreadId, Error> {
+    kthread_create_with_policy_and_affinity(
+        name,
+        entry,
+        argument,
+        SchedulingPolicy::fifo(priority),
+        affinity,
+    )
+}
+
+fn kthread_create_with_policy_and_affinity(
+    name: &str,
+    entry: KernelThreadEntry,
+    argument: usize,
+    policy: SchedulingPolicy,
+    affinity: CpuMask,
+) -> Result<ThreadId, Error> {
     let cpu = current_cpu()?;
     SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
-            .create_kernel_thread(cpu, affinity, name, entry, argument, priority)
+            .create_kernel_thread(cpu, affinity, name, entry, argument, policy)
     })
 }
 
@@ -358,6 +412,21 @@ pub(crate) fn current_vcpu() -> Result<CurrentVcpu, Error> {
     })
 }
 
+/// Returns the pinned vCPU payload when the current Thread owns one.
+///
+/// This does not borrow or publish the execution. The raw owner pointer is
+/// consumed only by the masked architecture IRQ-tail continuation, where the
+/// current Thread cannot change before the scheduler transaction begins.
+#[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) fn current_vcpu_if_present() -> Result<Option<CurrentVcpu>, Error> {
+    let cpu = current_cpu()?;
+    SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .current_vcpu_if_present(cpu)
+    })
+}
+
 /// Enqueues a dormant thread on its owning CPU's priority ready queue.
 pub fn thread_ready(id: ThreadId) -> Result<bool, Error> {
     let outcome =
@@ -366,14 +435,72 @@ pub fn thread_ready(id: ThreadId) -> Result<bool, Error> {
     Ok(outcome.changed)
 }
 
-pub fn set_thread_priority(id: ThreadId, priority: ThreadPriority) -> Result<(), Error> {
+/// Assigns or updates a thread's real-time FIFO policy.
+///
+/// Calling this for a Fair thread is an explicit class transition into RT.
+pub fn set_thread_fifo_policy(id: ThreadId, priority: ThreadPriority) -> Result<(), Error> {
+    let target = update_thread_fifo_policy(id, priority)?;
+    if let Some(cpu) = target {
+        request_reschedule(cpu)?;
+    }
+    Ok(())
+}
+
+fn update_thread_fifo_policy(
+    id: ThreadId,
+    priority: ThreadPriority,
+) -> Result<Option<CpuIndex>, Error> {
+    SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .set_fifo_policy(id, priority)
+    })
+}
+
+/// Applies FIFO policy and reports whether the transition requested a switch.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn set_thread_fifo_policy_for_test(
+    id: ThreadId,
+    priority: ThreadPriority,
+) -> Result<bool, Error> {
+    let target = update_thread_fifo_policy(id, priority)?;
+    if let Some(cpu) = target {
+        request_reschedule(cpu)?;
+    }
+    Ok(target.is_some())
+}
+
+/// Assigns a thread to the ordinary Fair scheduling class.
+///
+/// Ready threads are moved atomically between class queues. Lowering a running
+/// RT FIFO thread to Fair publishes a deferred preemption request when RT work
+/// is already ready; the caller never switches inside this operation.
+pub fn set_thread_fair_policy(id: ThreadId) -> Result<(), Error> {
     let target = SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
-            .change_priority(id, priority)
+            .set_fair_policy(id)
     })?;
     if let Some(cpu) = target {
         request_reschedule(cpu)?;
+    }
+    Ok(())
+}
+
+/// Charges periodic scheduler ticks and publishes a deferred Fair preemption.
+///
+/// This function is allocation-free and may run in IRQ context. It never
+/// switches directly; the architecture IRQ-tail continuation consumes the
+/// coalesced request after completing interrupt accounting.
+pub(crate) fn account_tick(elapsed_ticks: u64) -> Result<(), Error> {
+    let cpu = current_cpu()?;
+    let should_reschedule = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .account_tick(cpu, elapsed_ticks)
+    })?;
+    if should_reschedule {
+        super::preempt::request(cpu)?;
     }
     Ok(())
 }
@@ -386,17 +513,40 @@ pub fn yield_now() -> Result<(), Error> {
     Ok(())
 }
 
-/// Reconsiders the current FIFO thread at an explicit safe point.
+/// Reconsiders the current thread at an explicit safe point.
 ///
-/// Unlike `yield_now`, this does not rotate equal-priority FIFO peers. It
-/// switches only when a pending request corresponds to a higher-priority ready
-/// thread, or when idle has runnable work.
+/// Unlike `yield_now`, this rotates Fair peers only after slice expiry and
+/// never rotates equal-priority RT FIFO peers.
 pub fn cond_resched() -> Result<bool, Error> {
     ensure_sleepable()?;
+    cond_resched_inner()
+}
+
+/// Reconsiders scheduling from an outermost architecture IRQ continuation.
+///
+/// IRQ accounting and controller completion must already be complete. This
+/// operation is AArch64-only until secondary architectures provide equivalent
+/// private-stack exception continuations and interrupt-state context transfer.
+#[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) fn cond_resched_from_irq_tail() -> Result<bool, Error> {
+    if crate::arch::irq::local_enabled() {
+        return Err(Error::IrqTailRequiresInterruptsMasked);
+    }
+    let cpu = current_cpu()?;
+    if !super::preempt::can_reschedule(cpu)? {
+        return Ok(false);
+    }
+    cond_resched_inner()
+}
+
+fn cond_resched_inner() -> Result<bool, Error> {
     let cpu = current_cpu()?;
     if !super::preempt::pending(cpu)? || !super::preempt::can_reschedule(cpu)? {
         return Ok(false);
     }
+    // SAFETY: This CPU-pinned scheduler continuation owns the outer transition
+    // mask until `PreparedTransition::activate` resumes it and drops the guard.
+    let interrupt_mask = unsafe { TransitionMask::acquire() };
     let pair = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         scheduler.finish_switch(cpu);
@@ -405,7 +555,11 @@ pub fn cond_resched() -> Result<bool, Error> {
     let Some(pair) = pair else {
         return Ok(false);
     };
-    pair.activate();
+    PreparedTransition {
+        switch: pair,
+        interrupt_mask,
+    }
+    .activate();
     Ok(true)
 }
 
@@ -477,18 +631,30 @@ pub(crate) fn run_idle_loop() -> ! {
 
 pub(crate) fn prepare_park(wait_queue: &WaitQueue) -> Result<ParkToken, Error> {
     ensure_sleepable()?;
-    prepare_park_locked(wait_queue)
+    // SAFETY: The park token keeps this CPU-pinned continuation's outer mask
+    // live through the switch and restores it only after the continuation resumes.
+    let interrupt_mask = unsafe { TransitionMask::acquire() };
+    let commit = prepare_park_locked(wait_queue)?;
+    Ok(retain_park_mask(commit, interrupt_mask))
 }
 
 /// Prepares a park after the caller checked sleepability and then acquired an
 /// IRQ-masking synchronization-object lock.
-pub(crate) fn prepare_park_locked(wait_queue: &WaitQueue) -> Result<ParkToken, Error> {
+pub(crate) fn prepare_park_locked(wait_queue: &WaitQueue) -> Result<ParkCommit, Error> {
     let cpu = current_cpu()?;
     SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         scheduler.finish_switch(cpu);
         scheduler.reap_terminated()?;
-        scheduler.prepare_park(cpu, wait_queue).map(ParkToken)
+        scheduler.prepare_park(cpu, wait_queue).map(ParkCommit)
+    })
+}
+
+/// Binds a synchronization lock's retained interrupt mask to a committed park.
+pub(crate) fn retain_park_mask(commit: ParkCommit, interrupt_mask: TransitionMask) -> ParkToken {
+    ParkToken(PreparedTransition {
+        switch: commit.0,
+        interrupt_mask,
     })
 }
 
@@ -580,14 +746,21 @@ fn request_reschedule(cpu: CpuIndex) -> Result<(), Error> {
     Ok(())
 }
 
-fn prepare_schedule() -> Result<Option<PreparedContextSwitch>, Error> {
+fn prepare_schedule() -> Result<Option<PreparedTransition>, Error> {
     let cpu = current_cpu()?;
-    SCHEDULER.with(|slot| {
+    // SAFETY: This CPU-pinned scheduler continuation owns the outer transition
+    // mask until `PreparedTransition::activate` resumes it and drops the guard.
+    let interrupt_mask = unsafe { TransitionMask::acquire() };
+    let switch = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         scheduler.finish_switch(cpu);
         scheduler.reap_terminated()?;
         scheduler.prepare_yield(cpu)
-    })
+    })?;
+    Ok(switch.map(|switch| PreparedTransition {
+        switch,
+        interrupt_mask,
+    }))
 }
 
 #[unsafe(no_mangle)]
@@ -599,6 +772,9 @@ extern "C" fn kernel_thread_exit() -> ! {
             crate::arch::cpu::halt()
         }
     };
+    // SAFETY: The exiting continuation is CPU-pinned and transfers this outer
+    // mask directly into the non-returning prepared context transition.
+    let interrupt_mask = unsafe { TransitionMask::acquire() };
     let result = SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
@@ -606,7 +782,11 @@ extern "C" fn kernel_thread_exit() -> ! {
     });
     match result {
         Ok(pair) => {
-            pair.activate();
+            PreparedTransition {
+                switch: pair,
+                interrupt_mask,
+            }
+            .activate();
             crate::pr_crit!("HypeR: terminated thread context resumed unexpectedly");
         }
         Err(error) => crate::pr_crit!("HypeR: thread exit failed: {error:?}"),

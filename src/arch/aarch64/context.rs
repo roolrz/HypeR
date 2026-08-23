@@ -17,6 +17,7 @@ pub struct ThreadContext {
     simd_callee_saved: [u64; 8],
     fpcr: u64,
     fpsr: u64,
+    interrupt_mask: u64,
 }
 
 impl ThreadContext {
@@ -29,6 +30,9 @@ impl ThreadContext {
             simd_callee_saved: [0; 8],
             fpcr: 0,
             fpsr: 0,
+            // Runtime kernel Threads begin with IRQ enabled while debug,
+            // SError, and FIQ remain masked, matching enable_irq().
+            interrupt_mask: registers::SPSR_D | registers::SPSR_A | registers::SPSR_F,
         }
     }
 
@@ -37,6 +41,16 @@ impl ThreadContext {
         self.callee_saved[1] = argument as u64;
         self.link_register = aarch64_thread_trampoline as *const () as usize as u64;
         self.stack_pointer = (stack_top & !(registers::STACK_ALIGNMENT_MASK as usize)) as u64;
+    }
+
+    /// Prepares a vCPU bootstrap continuation with IRQ masked.
+    ///
+    /// The scheduler publishes the vCPU as current before its trampoline can
+    /// publish active virtual hardware. Keeping IRQ masked closes that first-
+    /// run ownership gap; the vCPU run loop controls guest-entry unmasking.
+    pub fn prepare_vcpu(&mut self, stack_top: usize, entry: KernelThreadEntry, argument: usize) {
+        self.prepare(stack_top, entry, argument);
+        self.interrupt_mask |= registers::SPSR_I;
     }
 }
 
@@ -556,6 +570,9 @@ const _: () = {
     );
     assert!(offset_of!(ThreadContext, fpcr) == registers::THREAD_CONTEXT_FPCR_OFFSET as usize);
     assert!(offset_of!(ThreadContext, fpsr) == registers::THREAD_CONTEXT_FPSR_OFFSET as usize);
+    assert!(
+        offset_of!(ThreadContext, interrupt_mask) == registers::THREAD_CONTEXT_DAIF_OFFSET as usize
+    );
     assert!(size_of::<ThreadContext>() == 192);
     assert!(offset_of!(VcpuContext, general) == registers::VCPU_CONTEXT_X0_OFFSET as usize);
     assert!(

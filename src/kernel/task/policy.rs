@@ -5,9 +5,12 @@
 //!
 //! This module describes policy inputs without owning runnable queues or
 //! performing context switches. The initial closed policy set contains a
-//! cooperative fixed-priority FIFO class plus a non-runnable idle class. Placement
-//! records current assignment separately from affinity and placement policy so
-//! a future stopped-thread handoff can move a Thread without changing identity.
+//! real-time FIFO, fair, and non-runnable idle classes. The fair class owns no
+//! algorithm-specific public parameters: its initial round-robin backend can be
+//! replaced without changing Thread construction or scheduler clients.
+//! Placement records current assignment separately from affinity and placement
+//! policy so a future stopped-thread handoff can move a Thread without changing
+//! identity.
 
 use hyper::cpu::{CpuIndex, MAX_CPUS};
 
@@ -38,8 +41,10 @@ impl ThreadPriority {
 /// Closed set of scheduling classes supported by this kernel image.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchedulingClass {
-    /// Fixed-priority runnable policies.
-    FixedPriority,
+    /// Fixed-priority real-time policies, ordered ahead of fair work.
+    RealTime,
+    /// Ordinary time-sharing work.
+    Fair,
     /// Per-CPU fallback execution which is never inserted into a run queue.
     Idle,
 }
@@ -50,7 +55,7 @@ pub enum SchedulingClass {
 /// fixed priority to an idle thread.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchedulingPolicy {
-    /// Cooperative fixed-priority FIFO scheduling.
+    /// Fixed-priority real-time FIFO scheduling.
     ///
     /// A higher-priority ready thread becomes eligible immediately, but the
     /// switch occurs only at an explicit safe point. Equal-priority wakeups do
@@ -61,6 +66,12 @@ pub enum SchedulingPolicy {
     Fifo {
         priority: ThreadPriority,
     },
+    /// Ordinary time-sharing scheduling.
+    ///
+    /// The initial implementation is round-robin. No backend-specific
+    /// parameter is exposed through this policy so a future weighted fair
+    /// algorithm can preserve the public thread-creation contract.
+    Fair,
     Idle,
 }
 
@@ -69,9 +80,14 @@ impl SchedulingPolicy {
         Self::Fifo { priority }
     }
 
+    pub const fn fair() -> Self {
+        Self::Fair
+    }
+
     pub const fn class(self) -> SchedulingClass {
         match self {
-            Self::Fifo { .. } => SchedulingClass::FixedPriority,
+            Self::Fifo { .. } => SchedulingClass::RealTime,
+            Self::Fair => SchedulingClass::Fair,
             Self::Idle => SchedulingClass::Idle,
         }
     }
@@ -79,21 +95,24 @@ impl SchedulingPolicy {
     pub const fn priority(self) -> Option<ThreadPriority> {
         match self {
             Self::Fifo { priority } => Some(priority),
-            Self::Idle => None,
+            Self::Fair | Self::Idle => None,
         }
     }
 
-    /// Decides whether a newly ready FIFO thread outranks `self`.
+    /// Decides whether a newly ready thread's class or RT priority outranks
+    /// `self`. Equal-class Fair rotation remains an implementation decision of
+    /// the Fair scheduler backend.
     pub const fn is_preempted_by(self, candidate: Self) -> bool {
         match (self, candidate) {
-            (Self::Idle, Self::Fifo { .. }) => true,
+            (Self::Idle, Self::Fifo { .. } | Self::Fair) => true,
+            (Self::Fair, Self::Fifo { .. }) => true,
             (
                 Self::Fifo { priority: current },
                 Self::Fifo {
                     priority: candidate,
                 },
             ) => candidate.0 < current.0,
-            (_, Self::Idle) => false,
+            (_, Self::Fair | Self::Idle) => false,
         }
     }
 }

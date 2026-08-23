@@ -412,7 +412,9 @@ pub fn validate_runtime_vectors() -> Result<(), ValidationError> {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
+extern "C" fn aarch64_exception_dispatch(
+    frame: &mut ExceptionFrame,
+) -> Option<unsafe extern "C" fn()> {
     let exception_class = (frame.esr >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK;
     if matches!(
         frame.vector,
@@ -429,7 +431,7 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
             .is_ok()
     {
         frame.elr = frame.elr.wrapping_add(4);
-        return;
+        return None;
     }
 
     let Some((kind, origin)) = decode_vector(frame.vector) else {
@@ -443,11 +445,9 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
         );
     };
     if kind == ExceptionKind::Irq {
-        let Some(interrupt) = super::acknowledge_interrupt() else {
-            return;
-        };
+        let interrupt = super::acknowledge_interrupt()?;
         match crate::kernel::entry::irq::dispatch(interrupt) {
-            crate::kernel::entry::irq::Action::Resume => {}
+            crate::kernel::entry::irq::Action::Resume { postlude } => return postlude,
             crate::kernel::entry::irq::Action::Stop => {
                 super::end_interrupt(interrupt);
                 let stack_pointer = interrupted_stack_pointer(frame, origin);
@@ -455,14 +455,15 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
                 crate::kernel::entry::irq::stop(context)
             }
         }
-        return;
     }
     if kind == ExceptionKind::Synchronous && origin == ExceptionOrigin::LowerAarch64 {
         let physical_address = guest_physical_address(frame.far);
         let memory_fault = super::decode_guest_memory_fault(frame.esr, physical_address);
         if let Some(fault) = memory_fault {
             match crate::kernel::entry::vmexit::dispatch_memory_fault(fault) {
-                crate::kernel::entry::vmexit::MemoryFaultAction::Retry => return,
+                crate::kernel::entry::vmexit::MemoryFaultAction::Retry => {
+                    return None;
+                }
                 crate::kernel::entry::vmexit::MemoryFaultAction::Forward => {}
                 crate::kernel::entry::vmexit::MemoryFaultAction::Stop => {
                     let stack_pointer = interrupted_stack_pointer(frame, origin);
@@ -489,7 +490,7 @@ extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) {
             crate::kernel::entry::vmexit::dispatch_legacy(&mut guest_frame)
         };
         if handled {
-            return;
+            return None;
         }
     }
 

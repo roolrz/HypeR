@@ -12,6 +12,7 @@ pub struct ThreadContext {
     callee_saved: [u64; 12],
     return_address: u64,
     stack_pointer: u64,
+    interrupt_enable: u64,
 }
 
 impl ThreadContext {
@@ -20,6 +21,7 @@ impl ThreadContext {
             callee_saved: [0; 12],
             return_address: 0,
             stack_pointer: 0,
+            interrupt_enable: registers::SSTATUS_SIE,
         }
     }
 
@@ -28,6 +30,11 @@ impl ThreadContext {
         self.callee_saved[1] = argument as u64;
         self.return_address = riscv64_thread_trampoline as *const () as usize as u64;
         self.stack_pointer = (stack_top & !15) as u64;
+    }
+
+    pub fn prepare_vcpu(&mut self, stack_top: usize, entry: KernelThreadEntry, argument: usize) {
+        self.prepare(stack_top, entry, argument);
+        self.interrupt_enable = 0;
     }
 }
 
@@ -210,6 +217,10 @@ const _: () = {
     );
     assert!(
         offset_of!(ThreadContext, stack_pointer) == registers::THREAD_CONTEXT_SP_OFFSET as usize
+    );
+    assert!(
+        offset_of!(ThreadContext, interrupt_enable)
+            == registers::THREAD_CONTEXT_SIE_OFFSET as usize
     );
     assert!(size_of::<ThreadContext>() == registers::THREAD_CONTEXT_SIZE as usize);
     assert!(offset_of!(VcpuContext, general) == registers::VCPU_GENERAL_OFFSET as usize);

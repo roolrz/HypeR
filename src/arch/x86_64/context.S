@@ -20,6 +20,10 @@ x86_64_switch_context:
     movq %rsp, THREAD_CONTEXT_RSP_OFFSET(%rdi)
     leaq .Lswitch_return(%rip), %rax
     movq %rax, THREAD_CONTEXT_RIP_OFFSET(%rdi)
+    pushfq
+    popq %rax
+    andq $0x200, %rax
+    movq %rax, THREAD_CONTEXT_IF_OFFSET(%rdi)
 
     movq THREAD_CONTEXT_RBX_OFFSET(%rsi), %rbx
     movq THREAD_CONTEXT_RBP_OFFSET(%rsi), %rbp
@@ -28,6 +32,13 @@ x86_64_switch_context:
     movq THREAD_CONTEXT_R14_OFFSET(%rsi), %r14
     movq THREAD_CONTEXT_R15_OFFSET(%rsi), %r15
     movq THREAD_CONTEXT_RSP_OFFSET(%rsi), %rsp
+    movq THREAD_CONTEXT_IF_OFFSET(%rsi), %rax
+    testq %rax, %rax
+    jz .Lswitch_irq_disabled
+    sti
+    jmp *THREAD_CONTEXT_RIP_OFFSET(%rsi)
+.Lswitch_irq_disabled:
+    cli
     jmp *THREAD_CONTEXT_RIP_OFFSET(%rsi)
 .Lswitch_return:
     ret

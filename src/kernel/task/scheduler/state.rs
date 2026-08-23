@@ -9,7 +9,7 @@ use hyper::cpu::{CpuIndex, PerCpu};
 
 use super::queue::{self, CpuRunQueue};
 use super::{CurrentVcpu, Error, SecondaryStack, Statistics};
-use crate::kernel::task::policy::{CpuMask, SchedulingClass, ThreadPriority};
+use crate::kernel::task::policy::{CpuMask, SchedulingClass, SchedulingPolicy, ThreadPriority};
 use crate::kernel::task::thread::{
     DeferredFifoPlacement, KernelThreadEntry, QueueMembership, Thread, ThreadId, ThreadState,
 };
@@ -144,7 +144,7 @@ impl Scheduler {
         name: &str,
         entry: KernelThreadEntry,
         argument: usize,
-        priority: ThreadPriority,
+        policy: SchedulingPolicy,
     ) -> Result<ThreadId, Error> {
         let cpu = self.select_cpu(preferred_cpu, affinity)?;
         self.threads.try_reserve(1).map_err(|_| Error::Allocation)?;
@@ -152,7 +152,7 @@ impl Scheduler {
         let mut thread =
             hyper::mm::try_box(Thread::kernel(id, cpu, affinity, name, entry, argument)?)
                 .map_err(|_| Error::Allocation)?;
-        if !thread.set_priority(priority) {
+        if !thread.set_scheduling_policy(policy) {
             return Err(Error::InvalidThreadState);
         }
         self.register_thread(thread)?;
@@ -243,6 +243,27 @@ impl Scheduler {
         })
     }
 
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    pub fn current_vcpu_if_present(&mut self, cpu: CpuIndex) -> Result<Option<CurrentVcpu>, Error> {
+        let id = self.current_thread(cpu)?;
+        let thread = self.thread_mut(id)?;
+        if !matches!(thread.state(), ThreadState::Running | ThreadState::Idle) {
+            return Err(Error::InvalidThreadState);
+        }
+        if thread.execution_kind() != crate::kernel::task::thread::ExecutionKind::Vcpu {
+            return Ok(None);
+        }
+        let stack = thread.kernel_stack_bounds().ok_or(Error::Allocation)?;
+        let execution = thread
+            .vcpu_execution_mut()
+            .ok_or(Error::InvalidThreadState)?;
+        Ok(Some(CurrentVcpu {
+            thread: id,
+            execution: execution as *mut _,
+            stack,
+        }))
+    }
+
     pub fn make_ready(&mut self, id: ThreadId) -> Result<ReadyOutcome, Error> {
         let cpu = self.thread(id)?.cpu_index();
         match self.thread(id)?.state() {
@@ -280,7 +301,7 @@ impl Scheduler {
         })
     }
 
-    /// Selects a higher-priority FIFO thread at a cooperative safe point.
+    /// Selects work made eligible by a class preemption or Fair slice expiry.
     ///
     /// A preempted FIFO thread is returned to the head of its own priority
     /// queue. Equal-priority peers therefore cannot overtake it merely because
@@ -296,8 +317,8 @@ impl Scheduler {
         let current = self.cpus[cpu_slot].current;
         let candidate = self.cpus[cpu_slot]
             .run_queue
-            .peek_highest(&self.threads, cpu)?;
-        let Some((expected_next, ready_priority)) = candidate else {
+            .peek_next(&self.threads, cpu)?;
+        let Some(candidate) = candidate else {
             let _ = super::super::preempt::take_pending_locked(cpu)?;
             if self.thread(current)?.state() == ThreadState::Running {
                 // Deferred placement orders current only against peers present
@@ -307,40 +328,55 @@ impl Scheduler {
             }
             return Ok(None);
         };
-        let placement = match self.thread(current)?.state() {
+        let enqueue_front = match self.thread(current)?.state() {
             ThreadState::Idle => None,
             ThreadState::Running => {
-                let current_priority = self
-                    .thread(current)?
-                    .priority()
-                    .ok_or(Error::InvalidThreadState)?;
-                let placement = self.thread(current)?.deferred_fifo_placement();
-                if ready_priority > current_priority
-                    || (ready_priority == current_priority
-                        && placement != Some(DeferredFifoPlacement::Tail))
+                let current_policy = self.thread(current)?.scheduling_policy();
+                let deferred = self.thread(current)?.deferred_fifo_placement();
+                let fair_rotation = current_policy == SchedulingPolicy::Fair
+                    && candidate.policy == SchedulingPolicy::Fair
+                    && self.thread(current)?.fair_slice_expired();
+                let fifo_deferred_rotation = matches!(
+                    (current_policy, candidate.policy, deferred),
+                    (
+                        SchedulingPolicy::Fifo { priority: current },
+                        SchedulingPolicy::Fifo { priority: ready },
+                        Some(DeferredFifoPlacement::Tail),
+                    ) if current == ready
+                );
+                if !current_policy.is_preempted_by(candidate.policy)
+                    && !fair_rotation
+                    && !fifo_deferred_rotation
                 {
                     let _ = super::super::preempt::take_pending_locked(cpu)?;
                     self.thread_mut(current)?.set_deferred_fifo_placement(None);
                     return Ok(None);
                 }
-                Some(placement.unwrap_or(DeferredFifoPlacement::Head))
+                if fair_rotation {
+                    self.thread_mut(current)?
+                        .replenish_fair_slice(super::FAIR_QUANTUM_TICKS);
+                    Some(false)
+                } else {
+                    Some(deferred != Some(DeferredFifoPlacement::Tail))
+                }
             }
             _ => return Err(Error::InvalidThreadState),
         };
         if !super::super::preempt::take_pending_locked(cpu)? {
             return Ok(None);
         }
-        if let Some(placement) = placement {
+        if let Some(enqueue_front) = enqueue_front {
             self.thread_mut(current)?.set_deferred_fifo_placement(None);
-            match placement {
-                DeferredFifoPlacement::Head => self.enqueue_ready_front(current)?,
-                DeferredFifoPlacement::Tail => self.enqueue_ready(current)?,
+            if enqueue_front {
+                self.enqueue_ready_front(current)?;
+            } else {
+                self.enqueue_ready(current)?;
             }
         }
         let next = self
             .dequeue_ready(cpu_slot)?
             .ok_or(Error::CurrentThreadMissing)?;
-        if next != expected_next {
+        if next != candidate.id {
             return Err(Error::QueueCorrupted);
         }
         self.prepare_switch(cpu_slot, current, next).map(Some)
@@ -351,24 +387,34 @@ impl Scheduler {
         let current = self.cpus[cpu_slot].current;
         match self.thread(current)?.state() {
             ThreadState::Running => {
-                let current_priority = self
-                    .thread(current)?
-                    .priority()
-                    .ok_or(Error::InvalidThreadState)?;
                 let candidate = self.cpus[cpu_slot]
                     .run_queue
-                    .peek_highest(&self.threads, cpu)?;
-                let Some((expected_next, ready_priority)) = candidate else {
+                    .peek_next(&self.threads, cpu)?;
+                let Some(candidate) = candidate else {
                     return Ok(None);
                 };
-                if ready_priority > current_priority {
+                let current_policy = self.thread(current)?.scheduling_policy();
+                let can_yield_to = match (current_policy, candidate.policy) {
+                    (SchedulingPolicy::Fair, _) => true,
+                    (
+                        SchedulingPolicy::Fifo { priority: current },
+                        SchedulingPolicy::Fifo { priority: ready },
+                    ) => ready <= current,
+                    (SchedulingPolicy::Fifo { .. }, SchedulingPolicy::Fair) => false,
+                    (SchedulingPolicy::Idle, _) | (_, SchedulingPolicy::Idle) => false,
+                };
+                if !can_yield_to {
                     return Ok(None);
+                }
+                if current_policy == SchedulingPolicy::Fair {
+                    self.thread_mut(current)?
+                        .replenish_fair_slice(super::FAIR_QUANTUM_TICKS);
                 }
                 self.enqueue_ready(current)?;
                 let next = self
                     .dequeue_ready(cpu_slot)?
                     .ok_or(Error::CurrentThreadMissing)?;
-                if next != expected_next {
+                if next != candidate.id {
                     return Err(Error::QueueCorrupted);
                 }
                 return self.prepare_switch(cpu_slot, current, next).map(Some);
@@ -435,7 +481,7 @@ impl Scheduler {
         )
     }
 
-    pub fn change_priority(
+    pub fn set_fifo_policy(
         &mut self,
         id: ThreadId,
         priority: ThreadPriority,
@@ -445,12 +491,15 @@ impl Scheduler {
             return Err(Error::TerminatedThread);
         }
         let links = self.thread(id)?.queue_links();
-        if let QueueMembership::Ready { cpu, priority: old } = links.membership {
+        if let QueueMembership::ReadyRealTime { cpu, priority: old } = links.membership {
             if old == priority.get() {
                 return Ok(None);
             }
-            self.remove_ready(id, cpu, old)?;
-            if !self.thread_mut(id)?.set_priority(priority) {
+            self.remove_ready(id, cpu, links.membership)?;
+            if !self
+                .thread_mut(id)?
+                .set_scheduling_policy(SchedulingPolicy::fifo(priority))
+            {
                 return Err(Error::InvalidThreadState);
             }
             if priority.get() < old {
@@ -459,40 +508,106 @@ impl Scheduler {
                 self.enqueue_ready_front(id)?;
             }
             Ok(self.ready_thread_preempts(id)?.then_some(cpu))
+        } else if let QueueMembership::ReadyFair { cpu } = links.membership {
+            self.remove_ready(id, cpu, links.membership)?;
+            if !self
+                .thread_mut(id)?
+                .set_scheduling_policy(SchedulingPolicy::fifo(priority))
+            {
+                return Err(Error::InvalidThreadState);
+            }
+            self.enqueue_ready(id)?;
+            Ok(self.ready_thread_preempts(id)?.then_some(cpu))
         } else {
-            let old = self
-                .thread(id)?
-                .priority()
-                .ok_or(Error::InvalidThreadState)?;
-            if old == priority {
+            let previous_policy = self.thread(id)?.scheduling_policy();
+            let old = previous_policy.priority();
+            if previous_policy == SchedulingPolicy::fifo(priority) {
                 return Ok(None);
             }
-            self.thread_mut(id)?
-                .set_priority(priority)
-                .then_some(())
-                .ok_or(Error::InvalidThreadState)?;
-            if state == ThreadState::Running {
-                self.thread_mut(id)?.set_deferred_fifo_placement(None);
+            if !self
+                .thread_mut(id)?
+                .set_scheduling_policy(SchedulingPolicy::fifo(priority))
+            {
+                return Err(Error::InvalidThreadState);
             }
+            if state != ThreadState::Running {
+                return Ok(None);
+            }
+            self.thread_mut(id)?.set_deferred_fifo_placement(None);
             let thread = self.thread(id)?;
             let cpu = thread.cpu_index();
-            let ready = self.cpus[self.cpu_slot(cpu)?].run_queue.highest_priority();
-            let should_reschedule = state == ThreadState::Running
-                && ready
-                    .is_some_and(|ready| ready < priority || (priority < old && ready == priority));
+            let ready = self.cpus[self.cpu_slot(cpu)?]
+                .run_queue
+                .peek_next(&self.threads, cpu)?;
+            let should_reschedule = ready.is_some_and(|ready| match old {
+                Some(old) => matches!(
+                    ready.policy,
+                    SchedulingPolicy::Fifo { priority: ready }
+                        if ready < priority || (priority < old && ready == priority)
+                ),
+                None => SchedulingPolicy::fifo(priority).is_preempted_by(ready.policy),
+            });
             if should_reschedule {
-                let placement = if priority < old {
-                    DeferredFifoPlacement::Tail
-                } else {
-                    DeferredFifoPlacement::Head
-                };
-                self.thread_mut(id)?
-                    .set_deferred_fifo_placement(Some(placement));
+                if let Some(old) = old {
+                    let placement = if priority < old {
+                        DeferredFifoPlacement::Tail
+                    } else {
+                        DeferredFifoPlacement::Head
+                    };
+                    self.thread_mut(id)?
+                        .set_deferred_fifo_placement(Some(placement));
+                }
                 Ok(Some(cpu))
             } else {
                 Ok(None)
             }
         }
+    }
+
+    /// Moves a non-idle thread into the Fair scheduling class.
+    ///
+    /// Ready membership is transferred between class queues while the global
+    /// scheduler lock is held. A running RT thread lowered to Fair requests a
+    /// scheduling decision only when ready RT work now outranks it.
+    pub fn set_fair_policy(&mut self, id: ThreadId) -> Result<Option<CpuIndex>, Error> {
+        let state = self.thread(id)?.state();
+        if state == ThreadState::Terminated {
+            return Err(Error::TerminatedThread);
+        }
+        if self.thread(id)?.scheduling_policy() == SchedulingPolicy::Fair {
+            return Ok(None);
+        }
+
+        let membership = self.thread(id)?.queue_links().membership;
+        if let QueueMembership::ReadyRealTime { cpu, .. } = membership {
+            self.remove_ready(id, cpu, membership)?;
+            if !self
+                .thread_mut(id)?
+                .set_scheduling_policy(SchedulingPolicy::fair())
+            {
+                return Err(Error::InvalidThreadState);
+            }
+            self.enqueue_ready(id)?;
+            return Ok(self.ready_thread_preempts(id)?.then_some(cpu));
+        }
+
+        if !self
+            .thread_mut(id)?
+            .set_scheduling_policy(SchedulingPolicy::fair())
+        {
+            return Err(Error::InvalidThreadState);
+        }
+        if state != ThreadState::Running {
+            return Ok(None);
+        }
+
+        let cpu = self.thread(id)?.cpu_index();
+        let candidate = self.cpus[self.cpu_slot(cpu)?]
+            .run_queue
+            .peek_next(&self.threads, cpu)?;
+        Ok(candidate
+            .is_some_and(|ready| SchedulingPolicy::Fair.is_preempted_by(ready.policy))
+            .then_some(cpu))
     }
 
     pub fn install_current_as_idle(&mut self, cpu: CpuIndex) -> Result<(usize, usize), Error> {
@@ -509,6 +624,35 @@ impl Scheduler {
         thread.become_idle();
         self.cpus[cpu_slot].idle = Some(current);
         Ok(stack)
+    }
+
+    /// Charges elapsed scheduler ticks to the running Fair entity.
+    ///
+    /// This IRQ-safe operation changes no run-queue membership. It reports a
+    /// scheduling request only when a peer is already ready; otherwise the
+    /// sole runnable Fair entity receives a fresh slice immediately.
+    pub fn account_tick(&mut self, cpu: CpuIndex, elapsed: u64) -> Result<bool, Error> {
+        let cpu_slot = self.cpu_slot(cpu)?;
+        let current = self.cpus[cpu_slot].current;
+        match self.thread(current)?.state() {
+            ThreadState::Idle => Ok(false),
+            ThreadState::Running => {
+                if !self
+                    .thread_mut(current)?
+                    .account_fair_ticks(elapsed, super::FAIR_QUANTUM_TICKS)
+                {
+                    return Ok(false);
+                }
+                if self.cpus[cpu_slot].run_queue.has_fair_threads() {
+                    Ok(true)
+                } else {
+                    self.thread_mut(current)?
+                        .replenish_fair_slice(super::FAIR_QUANTUM_TICKS);
+                    Ok(false)
+                }
+            }
+            _ => Err(Error::InvalidThreadState),
+        }
     }
 
     pub fn finish_switch(&mut self, cpu: CpuIndex) {
@@ -551,7 +695,8 @@ impl Scheduler {
         for thread in self.threads.iter().flatten() {
             stats.threads += 1;
             match thread.scheduling_class() {
-                SchedulingClass::FixedPriority => stats.fixed_priority_class_threads += 1,
+                SchedulingClass::RealTime => stats.real_time_class_threads += 1,
+                SchedulingClass::Fair => stats.fair_class_threads += 1,
                 SchedulingClass::Idle => stats.idle_class_threads += 1,
             }
             match thread.state() {
@@ -588,6 +733,10 @@ impl Scheduler {
         {
             return Err(Error::InvalidThreadState);
         }
+        if self.thread(next)?.fair_slice_expired() {
+            self.thread_mut(next)?
+                .replenish_fair_slice(super::FAIR_QUANTUM_TICKS);
+        }
         self.cpus[cpu_slot].switching_from = Some(current);
         self.cpus[cpu_slot].current = next;
         self.context_switches = self.context_switches.saturating_add(1);
@@ -603,7 +752,7 @@ impl Scheduler {
     fn enqueue_ready(&mut self, id: ThreadId) -> Result<(), Error> {
         let thread = self.thread(id)?;
         let cpu = thread.cpu_index();
-        if thread.scheduling_class() != SchedulingClass::FixedPriority || !thread.can_run_on(cpu) {
+        if thread.scheduling_class() == SchedulingClass::Idle || !thread.can_run_on(cpu) {
             return Err(Error::InvalidThreadState);
         }
         let cpu_slot = self.cpu_slot(cpu)?;
@@ -614,7 +763,7 @@ impl Scheduler {
     fn enqueue_ready_front(&mut self, id: ThreadId) -> Result<(), Error> {
         let thread = self.thread(id)?;
         let cpu = thread.cpu_index();
-        if thread.scheduling_class() != SchedulingClass::FixedPriority || !thread.can_run_on(cpu) {
+        if thread.scheduling_class() == SchedulingClass::Idle || !thread.can_run_on(cpu) {
             return Err(Error::InvalidThreadState);
         }
         let cpu_slot = self.cpu_slot(cpu)?;
@@ -641,10 +790,17 @@ impl Scheduler {
         cpus[cpu_slot].run_queue.dequeue(threads, cpu)
     }
 
-    fn remove_ready(&mut self, id: ThreadId, cpu: CpuIndex, priority: u8) -> Result<(), Error> {
+    fn remove_ready(
+        &mut self,
+        id: ThreadId,
+        cpu: CpuIndex,
+        membership: QueueMembership,
+    ) -> Result<(), Error> {
         let cpu_slot = self.cpu_slot(cpu)?;
         let (threads, cpus) = (&mut self.threads, &mut self.cpus);
-        cpus[cpu_slot].run_queue.remove(threads, id, cpu, priority)
+        cpus[cpu_slot]
+            .run_queue
+            .remove(threads, id, cpu, membership)
     }
 
     fn enqueue_waiter(&mut self, wait_queue: &WaitQueue, id: ThreadId) -> Result<(), Error> {

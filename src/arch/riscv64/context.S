@@ -24,6 +24,9 @@ riscv64_switch_context:
     sd s11, 88(a0)
     sd ra, THREAD_CONTEXT_RA_OFFSET(a0)
     sd sp, THREAD_CONTEXT_SP_OFFSET(a0)
+    csrr t0, sstatus
+    andi t0, t0, 2
+    sd t0, THREAD_CONTEXT_SIE_OFFSET(a0)
     ld s0, 0(a1)
     ld s1, 8(a1)
     ld s2, 16(a1)
@@ -38,6 +41,12 @@ riscv64_switch_context:
     ld s11, 88(a1)
     ld ra, THREAD_CONTEXT_RA_OFFSET(a1)
     ld sp, THREAD_CONTEXT_SP_OFFSET(a1)
+    ld t0, THREAD_CONTEXT_SIE_OFFSET(a1)
+    beqz t0, .Lswitch_irq_disabled
+    csrsi sstatus, 2
+    ret
+.Lswitch_irq_disabled:
+    csrci sstatus, 2
     ret
 .size riscv64_switch_context, . - riscv64_switch_context
 

@@ -52,7 +52,8 @@ pub enum ThreadState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum QueueMembership {
     None,
-    Ready { cpu: CpuIndex, priority: u8 },
+    ReadyRealTime { cpu: CpuIndex, priority: u8 },
+    ReadyFair { cpu: CpuIndex },
     Waiting { queue: usize },
     Terminated,
 }
@@ -177,12 +178,28 @@ pub struct Thread {
     placement: ThreadPlacement,
     name: ThreadName,
     scheduling: SchedulingPolicy,
+    fair_runtime: FairRuntime,
     deferred_fifo_placement: Option<DeferredFifoPlacement>,
     state: ThreadState,
     queue_links: QueueLinks,
     context: crate::arch::context::ThreadContext,
     kernel_stack: Option<KernelStack>,
     execution: ThreadExecution,
+}
+
+/// Runtime owned by the replaceable Fair scheduling implementation.
+///
+/// A zero slice denotes a new or expired entity. Scheduler policy replenishes
+/// it only when the entity is selected or continues without a ready peer. A
+/// voluntary yield resets the slice; blocking and RT-class interruption retain
+/// it so neither event grants an unbounded succession of fresh quanta.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FairRuntime {
+    slice_remaining: u64,
+}
+
+impl FairRuntime {
+    const NEW: Self = Self { slice_remaining: 0 };
 }
 
 impl Thread {
@@ -195,7 +212,8 @@ impl Thread {
             id: ThreadId::BOOTSTRAP,
             placement: ThreadPlacement::pinned(cpu_index),
             name,
-            scheduling: SchedulingPolicy::fifo(ThreadPriority::NORMAL),
+            scheduling: SchedulingPolicy::fair(),
+            fair_runtime: FairRuntime::NEW,
             deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
@@ -222,7 +240,8 @@ impl Thread {
             id,
             placement,
             name: ThreadName::new(name)?,
-            scheduling: SchedulingPolicy::fifo(ThreadPriority::NORMAL),
+            scheduling: SchedulingPolicy::fair(),
+            fair_runtime: FairRuntime::NEW,
             deferred_fifo_placement: None,
             state: ThreadState::Dormant,
             queue_links: QueueLinks::EMPTY,
@@ -242,7 +261,8 @@ impl Thread {
             id,
             placement: ThreadPlacement::pinned(cpu_index),
             name: ThreadName::new(name)?,
-            scheduling: SchedulingPolicy::fifo(ThreadPriority::NORMAL),
+            scheduling: SchedulingPolicy::fair(),
+            fair_runtime: FairRuntime::NEW,
             deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
@@ -264,12 +284,13 @@ impl Thread {
         context.initialize_virtual_interrupts()?;
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
         let mut scheduling_context = crate::arch::context::ThreadContext::empty();
-        scheduling_context.prepare(stack.top(), entry, 0);
+        scheduling_context.prepare_vcpu(stack.top(), entry, 0);
         Ok(Self {
             id,
             placement: ThreadPlacement::prefer(cpu_index),
             name: ThreadName::new(name)?,
-            scheduling: SchedulingPolicy::fifo(ThreadPriority::NORMAL),
+            scheduling: SchedulingPolicy::fair(),
+            fair_runtime: FairRuntime::NEW,
             deferred_fifo_placement: None,
             state: ThreadState::Dormant,
             queue_links: QueueLinks::EMPTY,
@@ -328,12 +349,34 @@ impl Thread {
         self.scheduling.priority()
     }
 
-    pub(super) fn set_priority(&mut self, priority: ThreadPriority) -> bool {
-        if self.scheduling_class() != SchedulingClass::FixedPriority {
+    pub(super) fn set_scheduling_policy(&mut self, policy: SchedulingPolicy) -> bool {
+        if self.scheduling_class() == SchedulingClass::Idle {
             return false;
         }
-        self.scheduling = SchedulingPolicy::fifo(priority);
+        self.scheduling = policy;
+        self.fair_runtime = FairRuntime::NEW;
+        self.deferred_fifo_placement = None;
         true
+    }
+
+    pub(super) fn account_fair_ticks(&mut self, elapsed: u64, quantum: u64) -> bool {
+        if self.scheduling_class() != SchedulingClass::Fair {
+            return false;
+        }
+        if self.fair_runtime.slice_remaining == 0 {
+            self.fair_runtime.slice_remaining = quantum;
+        }
+        self.fair_runtime.slice_remaining =
+            self.fair_runtime.slice_remaining.saturating_sub(elapsed);
+        self.fair_runtime.slice_remaining == 0
+    }
+
+    pub(super) fn replenish_fair_slice(&mut self, quantum: u64) {
+        self.fair_runtime.slice_remaining = quantum;
+    }
+
+    pub(super) fn fair_slice_expired(&self) -> bool {
+        self.scheduling_class() == SchedulingClass::Fair && self.fair_runtime.slice_remaining == 0
     }
 
     pub(super) fn set_deferred_fifo_placement(&mut self, placement: Option<DeferredFifoPlacement>) {

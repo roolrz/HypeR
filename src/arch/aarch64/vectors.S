@@ -150,6 +150,13 @@ aarch64_runtime_vectors:
     mov     x0, x19
     bl      aarch64_exception_dispatch
     mov     sp, x19
+    cbz     x0, .Lexception_tail_complete
+    // The dispatcher has completed IRQ accounting and EOI. Scheduling is
+    // permitted only after returning from the per-CPU IRQ stack to the
+    // interrupted Thread's private stack; its complete frame remains pinned
+    // above this call chain until the continuation resumes.
+    blr     x0
+.Lexception_tail_complete:
 
     // Lower-EL returns are guest returns. Restore the EL1&0 guest regime while
     // all temporary state is still contained in the architectural frame.

@@ -15,8 +15,10 @@ use policy::{
 fn scheduling_profiles_encode_only_class_relevant_parameters() {
     assert_eq!(policy::PRIORITY_LEVELS, 256);
     let fifo = SchedulingPolicy::fifo(ThreadPriority::NORMAL);
-    assert_eq!(fifo.class(), SchedulingClass::FixedPriority);
+    assert_eq!(fifo.class(), SchedulingClass::RealTime);
     assert_eq!(fifo.priority(), Some(ThreadPriority::NORMAL));
+    assert_eq!(SchedulingPolicy::fair().class(), SchedulingClass::Fair);
+    assert_eq!(SchedulingPolicy::fair().priority(), None);
     assert_eq!(SchedulingPolicy::Idle.class(), SchedulingClass::Idle);
     assert_eq!(SchedulingPolicy::Idle.priority(), None);
     assert!(ThreadPriority::HIGHEST < ThreadPriority::NORMAL);
@@ -30,6 +32,9 @@ fn scheduling_profiles_encode_only_class_relevant_parameters() {
     assert!(current.is_preempted_by(higher));
     assert!(!current.is_preempted_by(equal));
     assert!(!current.is_preempted_by(lower));
+    assert!(SchedulingPolicy::fair().is_preempted_by(current));
+    assert!(!current.is_preempted_by(SchedulingPolicy::fair()));
+    assert!(!SchedulingPolicy::fair().is_preempted_by(SchedulingPolicy::fair()));
     assert!(SchedulingPolicy::Idle.is_preempted_by(current));
     assert!(!current.is_preempted_by(SchedulingPolicy::Idle));
 }
