@@ -7,6 +7,7 @@ mod guest_memory_access;
 mod scheduler_sync;
 mod stack_model;
 mod startup_readiness;
+mod thread_sleep;
 mod user_memory_access;
 mod vm_registry;
 
@@ -14,6 +15,7 @@ pub(crate) fn run() {
     crate::arch::irq::enable_local();
     let result = scheduler_sync::run();
     let stack_result = stack_model::run();
+    let sleep_result = thread_sleep::run();
     let readiness_result = startup_readiness::run();
     let guest_execution = crate::arch::vm::guest_execution_available();
     let guest_memory_result = guest_execution.then(guest_memory_access::run);
@@ -25,6 +27,9 @@ pub(crate) fn run() {
     }
     if let Err(error) = stack_result {
         crate::kernel::boot::fail("kernel stack-model tests", error);
+    }
+    if let Err(error) = sleep_result {
+        crate::kernel::boot::fail("kernel thread-sleep tests", error);
     }
     if let Err(error) = readiness_result {
         crate::kernel::boot::fail("kernel startup-readiness tests", error);
@@ -40,6 +45,7 @@ pub(crate) fn run() {
     }
     crate::println!("HypeR test: scheduler ready/wait queues and sleeping sync passed");
     crate::println!("HypeR test: guarded thread, IRQ, and emergency stacks passed");
+    crate::println!("HypeR test: deadline-based thread sleep passed");
     crate::println!("HypeR test: fatal-path readiness contract passed");
     if guest_execution {
         crate::println!("HypeR test: checked stage-2 guest-memory copies passed");

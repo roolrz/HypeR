@@ -155,6 +155,7 @@ pub enum ExecutionKind {
 pub enum Error {
     Allocation,
     NameTooLong,
+    InvalidPlacement,
     VirtualInterrupt(crate::arch::vm::VirtualInterruptError),
 }
 
@@ -207,6 +208,7 @@ impl Thread {
     pub(super) fn kernel(
         id: ThreadId,
         cpu_index: CpuIndex,
+        affinity: crate::kernel::task::policy::CpuMask,
         name: &str,
         entry: KernelThreadEntry,
         argument: usize,
@@ -214,9 +216,11 @@ impl Thread {
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
         let mut context = crate::arch::context::ThreadContext::empty();
         context.prepare(stack.top(), entry, argument);
+        let placement = ThreadPlacement::movable_with_affinity(cpu_index, affinity)
+            .ok_or(Error::InvalidPlacement)?;
         Ok(Self {
             id,
-            placement: ThreadPlacement::movable(cpu_index),
+            placement,
             name: ThreadName::new(name)?,
             scheduling: SchedulingPolicy::fifo(ThreadPriority::NORMAL),
             deferred_fifo_placement: None,
@@ -292,6 +296,11 @@ impl Thread {
     /// deliberately not implicit in the shared scheduler run queue.
     pub const fn cpu_index(&self) -> CpuIndex {
         self.placement.assigned_cpu()
+    }
+
+    #[cfg(feature = "kernel-self-test")]
+    pub(super) const fn affinity(&self) -> crate::kernel::task::policy::CpuMask {
+        self.placement.affinity()
     }
 
     /// Checks the placement constraint independently of current assignment.

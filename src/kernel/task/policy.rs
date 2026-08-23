@@ -120,10 +120,28 @@ impl CpuMask {
         self.words[index / CPUS_PER_MASK_WORD] & (1u64 << (index % CPUS_PER_MASK_WORD)) != 0
     }
 
+    pub const fn is_empty(self) -> bool {
+        let mut word = 0;
+        while word < CPU_MASK_WORDS {
+            if self.words[word] != 0 {
+                return false;
+            }
+            word += 1;
+        }
+        true
+    }
+
     /// Adds one allowed CPU and returns the enlarged immutable value.
     pub const fn with_cpu(mut self, cpu: CpuIndex) -> Self {
         let index = cpu.get();
         self.words[index / CPUS_PER_MASK_WORD] |= 1u64 << (index % CPUS_PER_MASK_WORD);
+        self
+    }
+
+    /// Removes one allowed CPU and returns the reduced immutable value.
+    pub const fn without_cpu(mut self, cpu: CpuIndex) -> Self {
+        let index = cpu.get();
+        self.words[index / CPUS_PER_MASK_WORD] &= !(1u64 << (index % CPUS_PER_MASK_WORD));
         self
     }
 
@@ -198,12 +216,27 @@ impl ThreadPlacement {
     }
 
     /// Creates an initially assigned but migration-capable placement.
+    #[cfg(test)]
     pub const fn movable(cpu: CpuIndex) -> Self {
         Self {
             assigned_cpu: cpu,
             affinity: CpuMask::ALL,
             policy: PlacementPolicy::Movable,
             last_cpu: None,
+        }
+    }
+
+    /// Creates a migration-capable placement constrained by `affinity`.
+    pub const fn movable_with_affinity(cpu: CpuIndex, affinity: CpuMask) -> Option<Self> {
+        if affinity.contains(cpu) {
+            Some(Self {
+                assigned_cpu: cpu,
+                affinity,
+                policy: PlacementPolicy::Movable,
+                last_cpu: None,
+            })
+        } else {
+            None
         }
     }
 

@@ -9,7 +9,7 @@ use hyper::cpu::{CpuIndex, PerCpu};
 
 use super::queue::{self, CpuRunQueue};
 use super::{CurrentVcpu, Error, SecondaryStack, Statistics};
-use crate::kernel::task::policy::{SchedulingClass, ThreadPriority};
+use crate::kernel::task::policy::{CpuMask, SchedulingClass, ThreadPriority};
 use crate::kernel::task::thread::{
     DeferredFifoPlacement, KernelThreadEntry, QueueMembership, Thread, ThreadId, ThreadState,
 };
@@ -139,22 +139,44 @@ impl Scheduler {
 
     pub fn create_kernel_thread(
         &mut self,
-        cpu: CpuIndex,
+        preferred_cpu: CpuIndex,
+        affinity: CpuMask,
         name: &str,
         entry: KernelThreadEntry,
         argument: usize,
         priority: ThreadPriority,
     ) -> Result<ThreadId, Error> {
-        self.cpu_slot(cpu)?;
+        let cpu = self.select_cpu(preferred_cpu, affinity)?;
         self.threads.try_reserve(1).map_err(|_| Error::Allocation)?;
         let id = self.next_thread_id()?;
-        let mut thread = hyper::mm::try_box(Thread::kernel(id, cpu, name, entry, argument)?)
-            .map_err(|_| Error::Allocation)?;
+        let mut thread =
+            hyper::mm::try_box(Thread::kernel(id, cpu, affinity, name, entry, argument)?)
+                .map_err(|_| Error::Allocation)?;
         if !thread.set_priority(priority) {
             return Err(Error::InvalidThreadState);
         }
         self.register_thread(thread)?;
         Ok(id)
+    }
+
+    /// Selects an admitted registered CPU, retaining creator locality where possible.
+    ///
+    /// If the preferred CPU is unavailable or excluded, the lowest-numbered
+    /// registered CPU in the mask provides a stable fallback. This is an
+    /// initial assignment only; load balancing may replace the policy later.
+    fn select_cpu(&self, preferred_cpu: CpuIndex, affinity: CpuMask) -> Result<CpuIndex, Error> {
+        if affinity.is_empty() {
+            return Err(Error::EmptyCpuAffinity);
+        }
+        if affinity.contains(preferred_cpu) && self.cpu_slots[preferred_cpu].is_some() {
+            return Ok(preferred_cpu);
+        }
+        self.cpus
+            .iter()
+            .map(|cpu| cpu.index)
+            .filter(|cpu| affinity.contains(*cpu))
+            .min()
+            .ok_or(Error::NoRegisteredCpuInAffinity)
     }
 
     pub fn create_vcpu_thread(
@@ -176,6 +198,19 @@ impl Scheduler {
     }
 
     pub fn take_dormant_vcpu(&mut self, id: ThreadId) -> Result<Box<Thread>, Error> {
+        self.take_dormant_thread(id, crate::kernel::task::thread::ExecutionKind::Vcpu)
+    }
+
+    #[cfg(feature = "kernel-self-test")]
+    pub fn take_dormant_kernel_thread(&mut self, id: ThreadId) -> Result<Box<Thread>, Error> {
+        self.take_dormant_thread(id, crate::kernel::task::thread::ExecutionKind::Kernel)
+    }
+
+    fn take_dormant_thread(
+        &mut self,
+        id: ThreadId,
+        execution: crate::kernel::task::thread::ExecutionKind,
+    ) -> Result<Box<Thread>, Error> {
         let index = usize::try_from(id.get()).map_err(|_| Error::ThreadNotFound)?;
         let thread = self
             .threads
@@ -184,7 +219,7 @@ impl Scheduler {
             .ok_or(Error::ThreadNotFound)?;
         if thread.state() != ThreadState::Dormant
             || thread.queue_links().membership != QueueMembership::None
-            || thread.execution_kind() != crate::kernel::task::thread::ExecutionKind::Vcpu
+            || thread.execution_kind() != execution
         {
             return Err(Error::InvalidThreadState);
         }
