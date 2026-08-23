@@ -6,13 +6,21 @@
 use hyper::hal::interrupt::InterruptId;
 
 /// Kernel action selected for an acknowledged physical interrupt.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 #[must_use]
 pub(crate) enum Action {
     /// Complete exception return after ordinary IRQ dispatch.
-    Resume,
-    /// Reconsider scheduling after returning to the interrupted Thread stack.
-    ResumeWithPreemption,
+    Resume {
+        /// Optional work which must run on the interrupted Thread stack.
+        ///
+        /// # Safety
+        ///
+        /// The architecture entry path must complete interrupt
+        /// acknowledgement, restore the interrupted Thread's private stack,
+        /// keep local interrupts masked, and retain no raw-frame borrow before
+        /// invoking this callback exactly once before exception return.
+        postlude: Option<unsafe extern "C" fn()>,
+    },
     /// Capture the interrupted architecture frame and stop this CPU.
     Stop,
 }
@@ -33,11 +41,11 @@ pub(crate) fn dispatch(interrupt: InterruptId) -> Action {
         Action::Stop
     } else {
         crate::kernel::irq::interrupt::dispatch(interrupt);
-        Action::Resume
+        Action::Resume { postlude: None }
     };
     match irq.complete() {
         Ok(true)
-            if action == Action::Resume
+            if matches!(action, Action::Resume { .. })
                 && match crate::kernel::task::preempt::should_reschedule_after_irq() {
                     Ok(pending) => pending,
                     Err(error) => crate::kernel::irq::exception::fatal_interrupt(
@@ -46,7 +54,9 @@ pub(crate) fn dispatch(interrupt: InterruptId) -> Action {
                     ),
                 } =>
         {
-            Action::ResumeWithPreemption
+            Action::Resume {
+                postlude: preemption_postlude(),
+            }
         }
         Ok(_) => action,
         Err(_) => crate::kernel::irq::exception::fatal_interrupt(
@@ -65,7 +75,7 @@ pub(crate) fn dispatch(interrupt: InterruptId) -> Action {
 /// before the scheduler commits a switch, then restored by the same suspended
 /// continuation before architecture exception return.
 #[cfg(CONFIG_ARCH_AARCH64)]
-pub(crate) fn preemption_tail() {
+fn preemption_tail() {
     let current_vcpu = match crate::kernel::task::scheduler::current_vcpu_if_present() {
         Ok(current) => current,
         Err(error) => fail_preemption_tail("failed to identify interrupted Thread", error),
@@ -93,6 +103,32 @@ pub(crate) fn preemption_tail() {
         } {
             fail_vcpu_tail("failed to reactivate interrupted vCPU", error)
         }
+    }
+}
+
+/// Runs the kernel-selected `AArch64` interrupt postlude.
+///
+/// # Safety
+///
+/// The caller must satisfy the postlude contract documented by
+/// [`Action::Resume`].
+#[cfg(CONFIG_ARCH_AARCH64)]
+unsafe extern "C" fn aarch64_preemption_postlude() {
+    preemption_tail();
+}
+
+#[inline]
+fn preemption_postlude() -> Option<unsafe extern "C" fn()> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        Some(aarch64_preemption_postlude)
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        // Secondary architectures retain the pending request until a
+        // cooperative scheduling point; they do not yet provide an IRQ-tail
+        // context-switch contract.
+        None
     }
 }
 

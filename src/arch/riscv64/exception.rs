@@ -366,8 +366,11 @@ fn fatal_trap(frame: &TrapFrame) -> ! {
 
 fn dispatch_irq_action(frame: &TrapFrame, action: crate::kernel::entry::irq::Action) {
     match action {
-        crate::kernel::entry::irq::Action::Resume
-        | crate::kernel::entry::irq::Action::ResumeWithPreemption => {}
+        crate::kernel::entry::irq::Action::Resume { postlude } => {
+            // This architecture retains the request for a cooperative point
+            // until it provides a qualified IRQ-tail continuation.
+            let _ = postlude;
+        }
         crate::kernel::entry::irq::Action::Stop => {
             crate::kernel::entry::irq::stop(trap_crash_context(frame))
         }

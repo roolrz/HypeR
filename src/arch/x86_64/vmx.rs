@@ -877,8 +877,11 @@ fn handle_external_interrupt() {
     if info & INTERRUPTION_VALID != 0 {
         let vector = info as u32 & 0xff;
         match crate::kernel::entry::irq::dispatch(hyper::hal::interrupt::InterruptId::new(vector)) {
-            crate::kernel::entry::irq::Action::Resume
-            | crate::kernel::entry::irq::Action::ResumeWithPreemption => {}
+            crate::kernel::entry::irq::Action::Resume { postlude } => {
+                // VM exits remain cooperative until x86 provides a qualified
+                // IRQ-tail continuation and vCPU teardown boundary.
+                let _ = postlude;
+            }
             crate::kernel::entry::irq::Action::Stop => {
                 crate::kernel::entry::irq::stop(crate::arch::exception::capture_crash_context())
             }
