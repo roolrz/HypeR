@@ -26,14 +26,17 @@ pub struct InterruptSpinLock<T, M: InterruptMask> {
 /// masked until the architecture context handoff is complete.
 ///
 /// The guard is CPU-affine and therefore neither `Send` nor `Sync`. It must be
-/// destroyed on the CPU that acquired it, in strict reverse acquisition order.
-/// A scheduler may suspend a continuation that owns the guard only while that
-/// Thread remains assigned to the same CPU; future migration must first end
-/// the transition and restore its owned interrupt state.
+/// destroyed on the CPU that acquired it, in strict reverse acquisition order
+/// within one active continuation and mask-state lineage. A scheduler may
+/// suspend a continuation that owns the guard only while that Thread remains
+/// assigned to the same CPU; future migration must first end the transition
+/// and restore its owned interrupt state.
 pub struct InterruptMaskGuard<M: InterruptMask> {
     state: M::State,
     policy: PhantomData<fn() -> M>,
-    not_send: PhantomData<*mut ()>,
+    // Raw pointers implement neither Send nor Sync, making mask ownership
+    // explicitly CPU-affine without depending on the policy's auto traits.
+    cpu_affine: PhantomData<*mut ()>,
 }
 
 impl<M: InterruptMask> InterruptMaskGuard<M> {
@@ -42,14 +45,14 @@ impl<M: InterruptMask> InterruptMaskGuard<M> {
     /// # Safety
     ///
     /// The returned guard must be dropped on this CPU in strict reverse order
-    /// with every other live interrupt-mask guard. If its continuation is
+    /// within its continuation's mask-state lineage. If its continuation is
     /// suspended, the scheduler must keep that continuation on this CPU until
     /// the guard has restored its state.
     pub unsafe fn acquire() -> Self {
         Self {
             state: M::save_and_disable(),
             policy: PhantomData,
-            not_send: PhantomData,
+            cpu_affine: PhantomData,
         }
     }
 }
@@ -86,7 +89,7 @@ impl<T, M: InterruptMask> InterruptSpinLock<T, M> {
     /// # Safety
     ///
     /// The caller assumes ownership of the returned guard and must drop it on
-    /// this CPU in strict reverse order with every other live mask guard. A
+    /// this CPU in strict reverse order within its mask-state lineage. A
     /// continuation carrying it across a context switch must remain CPU-pinned.
     pub unsafe fn with_mask_retained<R>(
         &self,

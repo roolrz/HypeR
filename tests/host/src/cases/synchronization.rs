@@ -6,8 +6,8 @@
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use hyper::hal::interrupt::InterruptMask;
-use hyper::sync::InterruptSpinLock;
 use hyper::sync::atomic::{AtomicFlag, AtomicU64, Ordering as AtomicOrdering, fence};
+use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
 
 static MASK_DEPTH: AtomicUsize = AtomicUsize::new(0);
 
@@ -24,6 +24,21 @@ impl InterruptMask for TestInterruptMask {
         MASK_DEPTH.store(state, Ordering::SeqCst);
     }
 }
+
+// Inference is unique only while InterruptMaskGuard implements neither auto
+// trait. If it becomes Send or Sync, the corresponding conditional impl makes
+// this marker selection ambiguous and compilation fails.
+const _: fn() = || {
+    trait AmbiguousIfImpl<Marker: ?Sized> {
+        fn marker() {}
+    }
+
+    impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+    impl<T: ?Sized + Send> AmbiguousIfImpl<dyn Send> for T {}
+    impl<T: ?Sized + Sync> AmbiguousIfImpl<dyn Sync> for T {}
+
+    let _ = <InterruptMaskGuard<TestInterruptMask> as AmbiguousIfImpl<_>>::marker;
+};
 
 #[test]
 fn interrupt_lock_restores_the_previous_mask_state() {
