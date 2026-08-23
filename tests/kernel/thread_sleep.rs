@@ -5,7 +5,7 @@
 
 use hyper::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use crate::kernel::task::{SleepError, sleep_for, sleep_until};
+use crate::kernel::task::{SleepError, sleep_ms, sleep_ns, sleep_s, sleep_until, sleep_us};
 
 const TEST_SLEEP_NS: u64 = 2_000_000;
 
@@ -76,7 +76,7 @@ pub(super) fn run() -> Result<(), Error> {
     sleep_until(expired)?;
 
     crate::arch::irq::disable_local();
-    let masked = sleep_for(TEST_SLEEP_NS);
+    let masked = sleep_ns(TEST_SLEEP_NS);
     crate::arch::irq::enable_local();
     if masked
         != Err(SleepError::Scheduler(
@@ -87,7 +87,7 @@ pub(super) fn run() -> Result<(), Error> {
     }
 
     let guard = crate::kernel::task::scheduler::preempt_disable()?;
-    let preempt_disabled = sleep_for(TEST_SLEEP_NS);
+    let preempt_disabled = sleep_ns(TEST_SLEEP_NS);
     drop(guard);
     if preempt_disabled
         != Err(SleepError::Scheduler(
@@ -98,9 +98,16 @@ pub(super) fn run() -> Result<(), Error> {
     }
 
     crate::arch::irq::disable_local();
-    let zero = sleep_for(0);
+    let zero =
+        sleep_ns(0).is_ok() && sleep_us(0).is_ok() && sleep_ms(0).is_ok() && sleep_s(0).is_ok();
     crate::arch::irq::enable_local();
-    if zero.is_err() {
+    if !zero {
+        return Err(Error::UnexpectedSleepResult);
+    }
+    if sleep_us(u64::MAX) != Err(SleepError::DurationOverflow)
+        || sleep_ms(u64::MAX) != Err(SleepError::DurationOverflow)
+        || sleep_s(u64::MAX) != Err(SleepError::DurationOverflow)
+    {
         return Err(Error::UnexpectedSleepResult);
     }
     Ok(())
@@ -120,9 +127,9 @@ extern "C" fn sleep_worker(context: usize) {
     };
     // A near-immediate timeout stresses expiry before or around the park
     // linearization point without relying on that race for correctness.
-    if sleep_for(1).is_err() {
+    if sleep_ns(1).is_err() {
         observation.error.store(2, Ordering::Relaxed);
-    } else if sleep_for(TEST_SLEEP_NS).is_err() {
+    } else if sleep_ns(TEST_SLEEP_NS).is_err() {
         observation.error.store(3, Ordering::Relaxed);
     } else {
         match crate::kernel::time::monotonic_nanoseconds() {

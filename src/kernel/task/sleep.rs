@@ -21,6 +21,10 @@ use super::wait::WaitQueue;
 
 type SleepLock = InterruptSpinLock<SleepRecord, crate::arch::irq::LocalMask>;
 
+const NANOSECONDS_PER_MICROSECOND: u64 = 1_000;
+const NANOSECONDS_PER_MILLISECOND: u64 = 1_000_000;
+const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
+
 struct SleepRecord {
     expired: bool,
     sleeper: ThreadId,
@@ -58,6 +62,7 @@ impl Sleep {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SleepError {
     Allocation,
+    DurationOverflow,
     Scheduler(scheduler::Error),
     Time(crate::kernel::time::Error),
     TimerCleanup {
@@ -80,11 +85,54 @@ impl From<crate::kernel::time::Error> for SleepError {
 
 /// Blocks the calling thread for at least `nanoseconds` of monotonic time.
 ///
+/// A zero duration returns immediately. A nonzero sleep requires a schedulable
+/// thread context with local interrupts and preemption enabled. The thread is
+/// bound to its current CPU's timer queue while blocked.
+pub fn sleep_ns(nanoseconds: u64) -> Result<(), SleepError> {
+    sleep_for(nanoseconds)
+}
+
+/// Blocks the calling thread for at least `microseconds` of monotonic time.
+///
+/// The context requirements are the same as for [`sleep_ns`]. Returns
+/// [`SleepError::DurationOverflow`] when the duration cannot be represented in
+/// nanoseconds.
+pub fn sleep_us(microseconds: u64) -> Result<(), SleepError> {
+    sleep_for_scaled(microseconds, NANOSECONDS_PER_MICROSECOND)
+}
+
+/// Blocks the calling thread for at least `milliseconds` of monotonic time.
+///
+/// The context requirements are the same as for [`sleep_ns`]. Returns
+/// [`SleepError::DurationOverflow`] when the duration cannot be represented in
+/// nanoseconds.
+pub fn sleep_ms(milliseconds: u64) -> Result<(), SleepError> {
+    sleep_for_scaled(milliseconds, NANOSECONDS_PER_MILLISECOND)
+}
+
+/// Blocks the calling thread for at least `seconds` of monotonic time.
+///
+/// The context requirements are the same as for [`sleep_ns`]. Returns
+/// [`SleepError::DurationOverflow`] when the duration cannot be represented in
+/// nanoseconds.
+pub fn sleep_s(seconds: u64) -> Result<(), SleepError> {
+    sleep_for_scaled(seconds, NANOSECONDS_PER_SECOND)
+}
+
+fn sleep_for_scaled(duration: u64, nanoseconds_per_unit: u64) -> Result<(), SleepError> {
+    let nanoseconds = duration
+        .checked_mul(nanoseconds_per_unit)
+        .ok_or(SleepError::DurationOverflow)?;
+    sleep_for(nanoseconds)
+}
+
+/// Blocks the calling thread for a duration expressed in nanoseconds.
+///
 /// A zero duration returns immediately. The sleep is bound to the calling
 /// CPU's timer queue; the current scheduler does not migrate blocked threads.
 /// Recoverable allocation, timer setup, and scheduler rejection errors are
 /// reported without leaving a live timer or a blocked thread behind.
-pub fn sleep_for(nanoseconds: u64) -> Result<(), SleepError> {
+fn sleep_for(nanoseconds: u64) -> Result<(), SleepError> {
     if nanoseconds == 0 {
         return Ok(());
     }

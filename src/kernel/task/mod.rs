@@ -13,7 +13,7 @@ mod sleep;
 pub mod thread;
 mod wait;
 
-pub use sleep::{SleepError, sleep_for, sleep_until};
+pub use sleep::{SleepError, sleep_ms, sleep_ns, sleep_s, sleep_until, sleep_us};
 pub use wait::WaitQueue;
 
 static READY: AtomicBool = AtomicBool::new(false);
