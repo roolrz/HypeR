@@ -29,7 +29,6 @@ mod vm_vcpu;
 mod vsysreg;
 
 pub use atomics::{AtomicCapabilities, capabilities as atomic_capabilities};
-pub use barrier::Aarch64Barrier as ArchitectureBarrier;
 pub use cache::Aarch64Cache as ArchitectureCache;
 pub use context::{
     ThreadContext, UserContext, VcpuContext, reset_stack_and_enter, run_on_emergency_stack,

@@ -69,6 +69,9 @@ mod ns16550;
 #[path = "cases/physical_ranges.rs"]
 mod physical_ranges;
 #[cfg(test)]
+#[path = "cases/plic.rs"]
+mod plic;
+#[cfg(test)]
 #[path = "cases/psci.rs"]
 mod psci;
 #[cfg(test)]

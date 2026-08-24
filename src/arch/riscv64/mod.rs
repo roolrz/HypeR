@@ -27,7 +27,6 @@ use core::arch::asm;
 
 pub type InterruptVirtualizationError = core::convert::Infallible;
 
-pub use barrier::Riscv64Barrier as ArchitectureBarrier;
 pub use cache::Riscv64Cache as ArchitectureCache;
 pub use context::{
     ThreadContext, UserContext, VcpuContext, VirtualInterruptError, reset_stack_and_enter,

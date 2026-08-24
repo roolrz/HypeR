@@ -3,8 +3,6 @@
 
 //! Intrusive physical-page buddy allocator.
 
-use core::ptr::{read_volatile, write_volatile};
-
 use crate::platform::{MAX_MEMORY_REGIONS, PhysicalRange, RegionList};
 
 use crate::mm::boot::MAX_BOOT_RESERVATIONS;
@@ -267,15 +265,17 @@ impl BuddyAllocator {
     fn read_next(&self, physical: u64) -> Result<u64, BuddyError> {
         let pointer = self.pointer(physical)? as *const u64;
         // SAFETY: from_handoff establishes a writable direct map for every
-        // managed page; free-list nodes always point into those pages.
-        Ok(unsafe { read_volatile(pointer) })
+        // managed page; free-list nodes always point to initialized metadata
+        // in those pages. Allocator locking, not volatile access, orders this
+        // ordinary cacheable memory between CPUs.
+        Ok(unsafe { pointer.read() })
     }
 
     fn write_next(&self, physical: u64, next: u64) -> Result<(), BuddyError> {
         let pointer = self.pointer(physical)? as *mut u64;
         // SAFETY: The allocator exclusively owns every free block and the
         // direct-map contract from construction remains valid.
-        unsafe { write_volatile(pointer, next) };
+        unsafe { pointer.write(next) };
         Ok(())
     }
 

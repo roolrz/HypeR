@@ -4,7 +4,6 @@
 //! Kernel memory policy layered over reusable memory-management mechanisms.
 
 use alloc::vec::Vec;
-use hyper::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use hyper::hal::cache::CacheMaintenance;
 use hyper::sync::atomic::{AtomicBool, Ordering};
 
@@ -89,7 +88,6 @@ pub(crate) fn finalize_address_space() -> Result<(), FinalizationError> {
     }
 
     let layout = memory::virtual_memory_layout();
-    crate::arch::memory::Barrier::data_memory(BarrierDomain::FullSystem, BarrierAccess::All);
     let data_cache_line = crate::arch::memory::Cache::data_line_size();
     let instruction_cache_line = crate::arch::memory::Cache::instruction_line_size();
     let atomic_capabilities: crate::arch::memory::AtomicCapabilities =
