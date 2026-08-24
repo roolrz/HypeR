@@ -95,7 +95,12 @@ pub fn register_hart(cpu_index: usize, hart_id: u64) -> bool {
 }
 
 pub fn send_event() {
-    // SAFETY: FENCE has no pointer operands and publishes state before remote IPIs.
-    unsafe { asm!("fence iorw, iorw", options(nostack)) };
+    // Release publication orders state before its atomic flag, but does not
+    // order that flag before the firmware's later IPI write. Order the flag's
+    // memory write before either a memory-backed or I/O-backed interrupt-
+    // controller output. FENCE ordering applies to later explicit accesses by
+    // this hart across the ECALL privilege transition.
+    // SAFETY: FENCE has no pointer operands and is valid in HS mode.
+    unsafe { asm!("fence w, ow", options(nostack)) };
     let _ = for_each_online_remote_hart(super::sbi::send_ipi);
 }

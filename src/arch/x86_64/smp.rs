@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-use core::arch::asm;
 use hyper::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
@@ -75,6 +74,7 @@ pub fn mark_current_cpu_online() {
 }
 
 pub fn send_event() {
-    // SAFETY: MFENCE has no pointer operands and publishes state before polling CPUs.
-    unsafe { asm!("mfence", options(nostack)) };
+    // Callers publish wake conditions through Release atomics or lock release.
+    // A targeted reschedule IPI is not implemented yet, so there is no
+    // architecture event to emit here and no additional memory fence is needed.
 }

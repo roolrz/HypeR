@@ -44,8 +44,13 @@ impl AtomicFlag {
         self.value.store(false, Ordering::Release);
     }
 
-    pub fn is_acquired(&self, ordering: Ordering) -> bool {
-        self.value.load(ordering)
+    /// Returns a non-synchronizing snapshot of the ownership bit.
+    ///
+    /// This observation does not grant ownership and must not be used to read
+    /// data protected by the flag. Keeping the ordering internal also avoids
+    /// accepting `Release` or `AcqRel`, which are invalid for atomic loads.
+    pub fn is_acquired(&self) -> bool {
+        self.value.load(Ordering::Relaxed)
     }
 }
 

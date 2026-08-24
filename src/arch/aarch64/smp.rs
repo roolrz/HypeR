@@ -85,7 +85,11 @@ pub fn current_hardware_id() -> u64 {
 
 /// Wakes processing elements waiting in WFE after publishing shared state.
 pub fn send_event() {
-    // SAFETY: SEV affects only event-register state and orders no memory by
-    // itself; callers publish shared state with release semantics first.
-    unsafe { asm!("sev", options(nostack, preserves_flags)) };
+    // A release store orders memory accesses but does not make the non-memory
+    // SEV wait for that store to become visible. Complete prior shared-memory
+    // stores before sending the one-shot event, otherwise a waiter can wake,
+    // observe stale state, and sleep again after consuming the only event.
+    // SAFETY: Shared kernel state is Inner Shareable. DSB ISHST completes only
+    // prior stores in that domain; SEV then updates event-register state.
+    unsafe { asm!("dsb ishst", "sev", options(nostack, preserves_flags)) };
 }

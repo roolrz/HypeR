@@ -165,7 +165,9 @@ pub(crate) fn disable() -> Result<PreemptionGuard, Error> {
     let state = &PREEMPTION[cpu];
     ensure_online(state)?;
     increment(&state.disable_depth, Error::DisableDepthOverflow)?;
-    compiler_fence(Ordering::SeqCst);
+    // Do not let protected accesses move above the local preemption boundary.
+    // CPU-local depth accounting needs no hardware fence or global ordering.
+    compiler_fence(Ordering::Acquire);
     Ok(PreemptionGuard {
         cpu,
         active: true,
@@ -193,7 +195,10 @@ impl PreemptionGuard {
         if current_cpu()? != self.cpu {
             return Err(Error::WrongCpu);
         }
-        compiler_fence(Ordering::SeqCst);
+        // Complete protected accesses before making this continuation
+        // preemptible again. This is a compiler boundary, not inter-CPU
+        // publication; the scheduler lock supplies that synchronization.
+        compiler_fence(Ordering::Release);
         let previous = decrement(
             &PREEMPTION[self.cpu].disable_depth,
             Error::DisableDepthUnderflow,
@@ -218,7 +223,9 @@ pub(crate) fn enter_irq() -> Result<IrqGuard, Error> {
     let state = &PREEMPTION[cpu];
     ensure_online(state)?;
     increment(&state.irq_depth, Error::IrqDepthOverflow)?;
-    compiler_fence(Ordering::SeqCst);
+    // Interrupt entry is a one-way compiler boundary for the interrupted
+    // continuation. Architecture exception entry owns the hardware ordering.
+    compiler_fence(Ordering::Acquire);
     Ok(IrqGuard {
         cpu,
         active: true,
@@ -248,7 +255,9 @@ impl IrqGuard {
         if current_cpu()? != self.cpu {
             return Err(Error::WrongCpu);
         }
-        compiler_fence(Ordering::SeqCst);
+        // Keep IRQ-handler accesses before the outermost-exit decision without
+        // imposing a hardware barrier on every interrupt.
+        compiler_fence(Ordering::Release);
         let previous = decrement(&PREEMPTION[self.cpu].irq_depth, Error::IrqDepthUnderflow)?;
         self.active = false;
         Ok(previous == 1)

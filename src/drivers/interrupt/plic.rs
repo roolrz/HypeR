@@ -125,7 +125,7 @@ impl<B: Barrier> Plic<B> {
         } else {
             value &= !(1 << (source % 32));
         }
-        write_mmio::<B>(register, value);
+        write_control_mmio::<B>(register, value);
         Ok(())
     }
 }
@@ -190,7 +190,7 @@ impl<B: Barrier> InterruptController for Plic<B> {
             return;
         }
         if let Ok(context) = self.context() {
-            write_mmio::<B>((context + CONTEXT_CLAIM) as *mut u32, interrupt.get());
+            write_completion_mmio::<B>((context + CONTEXT_CLAIM) as *mut u32, interrupt.get());
         }
     }
 }
@@ -213,7 +213,7 @@ impl<B: Barrier> KernelInterruptController for Plic<B> {
         if trigger != InterruptTrigger::Level {
             return Err(Error::UnsupportedTrigger);
         }
-        write_mmio::<B>(
+        write_control_mmio::<B>(
             (self.base + PRIORITY_BASE + source as usize * 4) as *mut u32,
             plic_priority(priority),
         );
@@ -226,24 +226,44 @@ impl<B: Barrier> KernelInterruptController for Plic<B> {
 
     unsafe fn initialize_local(&mut self) -> Result<(), Self::Error> {
         let context = self.context()?;
-        write_mmio::<B>((context + CONTEXT_THRESHOLD) as *mut u32, 0);
+        write_control_mmio::<B>((context + CONTEXT_THRESHOLD) as *mut u32, 0);
         Ok(())
     }
 }
 
 fn read_mmio<B: Barrier>(register: *const u32) -> u32 {
+    // Order a preceding completion/configuration access before a later claim
+    // or read-modify-write. PLIC mappings may occupy the RISC-V I/O domain,
+    // so an ordinary atomic acquire is not a substitute for this boundary.
     B::data_memory(BarrierDomain::FullSystem, BarrierAccess::All);
     // SAFETY: Plic validates the DT register extent at binding and every
     // caller derives an aligned register pointer within that owned mapping.
     let value = unsafe { read_volatile(register) };
-    B::data_memory(BarrierDomain::FullSystem, BarrierAccess::All);
+    // Only the completed input/read must precede following accesses. A load
+    // barrier is sufficient; a full read/write fence would over-serialize the
+    // hart after every interrupt claim.
+    B::data_memory(BarrierDomain::FullSystem, BarrierAccess::Reads);
     value
 }
 
-fn write_mmio<B: Barrier>(register: *mut u32, value: u32) {
-    B::data_memory(BarrierDomain::FullSystem, BarrierAccess::All);
+fn write_control_mmio<B: Barrier>(register: *mut u32, value: u32) {
+    write_mmio::<B>(register, value, BarrierAccess::Writes);
+}
+
+fn write_completion_mmio<B: Barrier>(register: *mut u32, value: u32) {
+    write_mmio::<B>(register, value, BarrierAccess::All);
+}
+
+fn write_mmio<B: Barrier>(register: *mut u32, value: u32, preceding: BarrierAccess) {
+    // PLIC completion may follow status/data reads from the interrupting
+    // device, while configuration and enable writes need only order earlier
+    // memory writes/device outputs. The closed wrappers above select the
+    // weakest correct predecessor set for each operation.
+    B::data_memory(BarrierDomain::FullSystem, preceding);
     // SAFETY: The pointer is an aligned writable PLIC register derived from
     // the constructor-validated permanent mapping.
     unsafe { write_volatile(register, value) };
-    B::data_memory(BarrierDomain::FullSystem, BarrierAccess::All);
+    // Preserve the PLIC output before later device/CSR outputs, including
+    // interrupt-enable changes, without unnecessarily constraining reads.
+    B::data_memory(BarrierDomain::FullSystem, BarrierAccess::Writes);
 }

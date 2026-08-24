@@ -59,9 +59,9 @@ fn atomic_flag_and_counter_use_explicit_ordering() {
     let flag = AtomicFlag::default();
     assert!(flag.try_acquire());
     assert!(!flag.try_acquire());
-    assert!(flag.is_acquired(AtomicOrdering::Relaxed));
+    assert!(flag.is_acquired());
     flag.release();
-    assert!(!flag.is_acquired(AtomicOrdering::Acquire));
+    assert!(!flag.is_acquired());
 
     let counter = AtomicU64::new(40);
     assert_eq!(counter.fetch_add(2, AtomicOrdering::AcqRel), 40);
