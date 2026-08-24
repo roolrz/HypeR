@@ -10,7 +10,7 @@
 
 use core::fmt;
 
-use crate::arch::exception::CrashContext;
+use crate::hal::exception::CrashContext;
 
 /// Frozen result of the crash owner's bounded remote-stop attempt.
 #[derive(Clone, Copy)]

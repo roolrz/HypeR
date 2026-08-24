@@ -13,12 +13,12 @@ fn reschedule_requests_coalesce_and_survive_a_completed_take() {
     let pending = PendingReschedule::new();
     assert!(!pending.is_pending());
 
-    pending.publish();
-    pending.publish();
+    assert!(pending.publish());
+    assert!(!pending.publish());
     assert!(pending.is_pending());
     assert!(pending.take());
     assert!(!pending.take());
 
-    pending.publish();
+    assert!(pending.publish());
     assert!(pending.take());
 }

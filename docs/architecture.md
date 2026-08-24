@@ -24,16 +24,21 @@ Dependencies normally flow downward through these layers:
    kernel state.
 4. Architecture-neutral mechanisms in `mm`, `sync`, `time`, `log`, `archive`,
    and similar modules provide reusable implementation building blocks.
-5. HAL facades describe narrow capabilities consumed by policy. They neither
-   discover devices nor own selected-backend state.
+5. Architecture-neutral HAL contracts describe reusable capabilities. The
+   binary-only selected HAL binds those contracts and narrow kernel-facing
+   operations to exactly one architecture backend; it owns neither kernel
+   policy nor discoverable-device lifecycle.
 6. Architecture, platform, firmware, and physical-driver implementations
    execute machine operations and access registers, instructions, MMIO, or
    assembly.
 
-`src/arch` selects one backend and exposes topical machine mechanisms. Policy
-code must use that facade rather than importing `arch::aarch64`,
-`arch::riscv64`, or `arch::x86_64` directly. AArch64 remains Tier 1: a common
-interface must not hide behavior required for its correctness or diagnosis.
+`src/arch` selects one backend and exposes topical machine mechanisms only to
+`src/hal/selected`. The kernel, architecture-neutral implementation modules,
+and kernel self-tests consume `crate::hal`; they must not import any
+`crate::arch` path. `main.rs` path-maps `hal/selected/mod.rs` into the binary as
+`crate::hal`, so the binding is statically selected without making it part of
+the reusable library HAL. AArch64 remains Tier 1: a common interface must not
+hide behavior required for its correctness or diagnosis.
 
 ## Placement rules
 
@@ -44,8 +49,9 @@ interface must not hide behavior required for its correctness or diagnosis.
 - `arch` owns context and exception ABIs, page-table and register encodings,
   instruction execution, CPU-specific behavior, and hardware virtualization
   entry/exit mechanics.
-- `hal` owns capability contracts, not discovery, policy, or global mutable
-  state.
+- `hyper::hal` owns reusable capability contracts. `hal::selected` is a thin,
+  one-way binary adapter: it may depend on `arch`, but never on `kernel`, and
+  must not acquire policy ownership or create an alternate entry path.
 - `drivers` owns discoverable physical devices and firmware protocols. Virtual
   devices are VM services or reusable VM models, not physical drivers.
 - Early boot code must state which runtime facilities are unavailable. It must
@@ -55,42 +61,47 @@ Architecture-defined data layouts may remain portable and host-testable. The
 operation which applies such a layout to hardware belongs to the selected
 backend.
 
-## Selected architecture facades
+## Selected binary HAL
 
-The selected backend currently exposes nine enforced topical facades:
+The selected binary HAL exposes eleven enforced capability modules:
 
-- `arch::context` owns schedulable register images, context switching, and the
+- `hal::context` owns schedulable register images, context switching, and the
   final stack-reset transition; task lifecycle and stack mapping remain kernel
   policy;
-- `arch::cpu` owns typed logical/hardware CPU identity conversion, secondary
+- `hal::cpu` owns typed logical/hardware CPU identity conversion, secondary
   entry mechanisms, processor lifecycle events, and firmware power binding;
-- `arch::exception` owns exception-vector installation, crash-context capture,
+- `hal::exception` owns exception-vector installation, crash-context capture,
   emergency-stack entry, and crash-stop delivery; stop/resume decisions remain
   behind the kernel entry adapters;
-- `arch::guest` owns the selected Linux guest boot ABI: guest architecture
+- `hal::guest` owns the selected Linux guest boot ABI: guest architecture
   identity, typed IPA layout, image validation/loading, boot context, and
   guest-layout diagnostics. Generic VM bundle parsing remains in `vm`, while
-  hardware execution remains in `arch::vm`;
-- `arch::irq` owns local interrupt masking, host-controller construction,
-  and platform interrupt decoding;
-- `arch::memory` owns host stage-1 construction and activation, address
-  translation, local execution protection, cache maintenance, barriers, and
-  atomic-operation capability reporting;
-- `arch::platform` owns allocation-free essential-device discovery,
+  hardware execution remains in `hal::vm`;
+- `hal::irq` owns ordinary reversible local masking, fail-stop source masking,
+  host-controller construction, platform interrupt decoding, and targeted
+  reschedule notification;
+- `hal::memory` owns host stage-1 construction and activation, address
+  translation, local execution protection, and synchronous shared stage-1
+  invalidation;
+- `hal::cache` owns cache geometry and explicit data/instruction publication,
+  while `hal::atomic` exposes immutable runtime atomic-backend diagnostics;
+- `hal::platform` owns allocation-free essential-device discovery,
   architecture KASLR geometry, optional host port I/O, and runtime
   architecture diagnostics;
-- `arch::time` owns the monotonic counter, one-shot comparator, and validated
+- `hal::time` owns the monotonic counter, one-shot comparator, and validated
   kernel timer description;
-- `arch::vm` owns stage-2 translation, vCPU entry, virtual interrupt hardware,
+- `hal::vm` owns stage-2 translation, vCPU entry, virtual interrupt hardware,
   guest timer integration, and architecture-local exit completion. Reusable
   device models live in `vm`; each installed VM owns its mutable instances in
   `kernel::vm::device`. Its
   explicitly named `LegacySyncFrame` path is temporary; new exits cross the
   entry adapter as owned `hyper::vm::exit` events.
 
-Policy code and kernel self-tests must not return to the removed flat forms of
-these contracts. `tests/ci/check-arch-facades.sh` enforces both call paths and
-root-facade exports while the remaining domains migrate independently.
+Only files below `src/hal/selected` may call the topical `crate::arch`
+facades. Conversely, no selected-HAL file may call `crate::kernel`. The rule
+also rejects grouped imports, relative paths, and crate-root aliases rather
+than checking only familiar symbol names. `tests/ci/check-arch-facades.sh`
+enforces both directions for production code and kernel self-tests.
 
 Allocation-free FDT discovery currently keeps its bounded collector scratch on
 the active boot stack. Linker bootstrap stacks and post-translation CPU0 boot
@@ -124,6 +135,20 @@ lifecycle transition has one owner and one publication point.
 Use `pub(crate)` by default. Add a public interface only for a demonstrated
 consumer, and prefer domain types for addresses, identifiers, units, and
 lifecycle states when interchange would be unsafe.
+
+Top-level runtime startup invokes one lifecycle entry per subsystem rather
+than sequencing that subsystem's internal stages. `kernel::irq::initialize`
+publishes host interrupt delivery, `kernel::time::initialize` owns the
+clocksource and architectural tick, and `kernel::vm::initialize` activates
+hardware virtualization and guest-visible devices. Host timekeeping retains
+only the firmware-derived guest-timer source description; VM initialization
+owns its host IRQ mapping, handler, rollback, and final publication. Physical-
+device setup has two deliberate phases: `device::early_initialize` installs
+boot-critical firmware services, while `device::platform_device_initialize`
+binds discoverable devices after the core runtime services exist. CPU topology
+owns its immutable participation count; timer diagnostics observe that
+published state instead of receiving a count forwarded by the kernel entry
+path.
 
 ## Scheduling boundary
 
@@ -171,11 +196,27 @@ handoff must also move or remotely cancel the owning CPU's timer.
 
 Per-CPU preemption state coalesces class, quantum, and remote-wakeup requests,
 tracks explicit disable guards and IRQ nesting, and is online before the local
-timer can deliver interrupts. IRQ handlers only account time and publish
-requests. AArch64 consumes them after the outermost IRQ has completed, on the
-interrupted Thread's stack. An interrupted vCPU is fully deactivated before the
-scheduler switch and reactivated only when that same continuation resumes.
-`cond_resched` provides the corresponding cooperative safe point.
+timer can deliver interrupts. The pending bit is the durable scheduling
+condition, not the IPI: Release publication follows ready-queue publication,
+Acquire observation precedes the scheduling decision, and consumption occurs
+only under the scheduler lock. Its `false -> true` publisher owns target
+notification; later publishers coalesce until the target consumes the bit.
+When a request is made inside an interrupt on its owning CPU, the active
+outermost IRQ already supplies the notification and avoids a redundant
+self-IPI. Remote callers never inspect target-local IRQ depth.
+
+A targeted reschedule interrupt is only a prompt to evaluate the pending bit.
+Its permanent kernel handler does not schedule or own scheduler state;
+controller completion and outermost IRQ accounting precede the scheduling
+decision. AArch64 qualifies this complete IRQ-tail seam and consumes requests
+on the interrupted Thread's stack. An interrupted vCPU is fully deactivated
+before the scheduler switch and reactivated only when that same continuation
+resumes. `cond_resched` provides the corresponding cooperative safe point.
+Logical CPU routing is validated before scheduler registration. An interrupt
+sent during secondary bring-up may precede physical online state, but the
+secondary's first idle-loop iteration checks its ready queue before waiting.
+Runtime CPU offline and hotplug remain unsupported and may not assume that
+bootstrap exception.
 
 Every scheduling transition owns a CPU-affine interrupt-mask guard from before
 the scheduler publishes `current = next` until the suspended continuation
@@ -188,21 +229,29 @@ guard has restored on its owning CPU.
 
 RISC-V and x86-64 currently retain cooperative scheduling: their exception
 entry does not yet provide the private-stack continuation and complete vCPU
-deactivation contract required for asynchronous IRQ-tail switching. Each
-architecture must qualify this boundary independently rather than inheriting
-the AArch64 capability through a misleading common interface.
+deactivation contract required for asynchronous IRQ-tail switching. Both can
+send a targeted wake prompt—an SBI software interrupt on RISC-V and a fixed
+x2APIC IPI on x86-64—while retaining the pending request for a later
+cooperative point. Each architecture must qualify the IRQ-tail boundary
+independently rather than inheriting the AArch64 capability through a
+misleading common interface.
 
 ## Current migration debt
 
 The present tree still contains direct `src/arch -> crate::kernel` references,
-including the narrow exception/VM-exit entry adapters and some remaining boot,
-timing, and hardware-virtualization integration. The
-architecture-boundary CI check records this debt by source file and explicit
-kernel contract path, rejecting a new, substituted, or increased dependency. A
-migration that removes references must lower the baseline in the same change so
-the improvement cannot regress. This lexical ratchet cannot prove the complete
-Rust module graph; privacy and review must also reject indirect re-exports that
-hide an upward dependency.
+including the narrow exception/VM-exit entry adapters and some remaining boot
+and hardware-virtualization integration. This raw entry path is distinct from
+the selected HAL: architecture entry code must use explicitly named
+`kernel::entry` adapters, while ordinary downward calls use `crate::hal`.
+
+The architecture-boundary CI check records the remaining raw upward debt by
+source file and exact kernel contract path, rejecting a new, substituted, or
+increased dependency. A migration that removes references must lower the
+baseline in the same change so the improvement cannot regress. Architecture
+code also may not hide logging dependencies behind the crate logging macros.
+This lexical ratchet cannot prove the complete Rust module graph; privacy and
+review must also reject macro expansion or indirect re-exports that conceal an
+upward dependency.
 
 This ratchet is not an approved dependency direction. It is a temporary
 migration guard until typed exception and VM-exit adapters replace the direct

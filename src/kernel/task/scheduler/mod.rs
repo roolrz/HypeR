@@ -28,8 +28,8 @@ const FAIR_QUANTUM_TICKS: u64 = if CONFIGURED_FAIR_QUANTUM_TICKS == 0 {
     CONFIGURED_FAIR_QUANTUM_TICKS
 };
 
-type SchedulerLock = InterruptSpinLock<Option<Scheduler>, crate::arch::irq::LocalMask>;
-type TransitionMask = InterruptMaskGuard<crate::arch::irq::LocalMask>;
+type SchedulerLock = InterruptSpinLock<Option<Scheduler>, crate::hal::irq::LocalMask>;
+type TransitionMask = InterruptMaskGuard<crate::hal::irq::LocalMask>;
 
 static SCHEDULER: SchedulerLock = InterruptSpinLock::new(None);
 
@@ -88,7 +88,7 @@ impl Drop for DormantVcpuThread {
                     "HypeR: dormant vCPU {} rollback failed: {error:?}",
                     self.thread.get()
                 );
-                crate::arch::cpu::halt()
+                crate::hal::cpu::halt()
             }
         };
         // Drop the stack, architecture context, and raw VM binding only after
@@ -387,7 +387,7 @@ pub(in crate::kernel) fn vcpu_create(
     name: &str,
     vm: crate::kernel::vm::registry::VmBinding,
     vcpu_id: u32,
-    context: crate::arch::vm::VcpuContext,
+    context: crate::hal::vm::VcpuContext,
     entry: KernelThreadEntry,
 ) -> Result<DormantVcpuThread, Error> {
     let cpu = current_cpu()?;
@@ -500,7 +500,10 @@ pub(crate) fn account_tick(elapsed_ticks: u64) -> Result<(), Error> {
             .account_tick(cpu, elapsed_ticks)
     })?;
     if should_reschedule {
-        super::preempt::request(cpu)?;
+        // The real timer path is already inside IRQ accounting, so the common
+        // request helper suppresses a redundant self-IPI. Keeping the generic
+        // path also makes direct accounting calls prompt a scheduling point.
+        request_reschedule(cpu)?;
     }
     Ok(())
 }
@@ -529,7 +532,7 @@ pub fn cond_resched() -> Result<bool, Error> {
 /// private-stack exception continuations and interrupt-state context transfer.
 #[cfg(CONFIG_ARCH_AARCH64)]
 pub(crate) fn cond_resched_from_irq_tail() -> Result<bool, Error> {
-    if crate::arch::irq::local_enabled() {
+    if crate::hal::irq::local_enabled() {
         return Err(Error::IrqTailRequiresInterruptsMasked);
     }
     let cpu = current_cpu()?;
@@ -587,12 +590,12 @@ pub fn preempt_enable_and_reschedule(guard: PreemptionGuard) -> Result<bool, Err
 }
 
 pub fn thread_become_idle() -> ! {
-    crate::arch::irq::disable_local();
+    crate::hal::irq::mask_local();
     let stack = match install_current_idle() {
         Ok(stack) => stack,
         Err(error) => {
             crate::pr_crit!("HypeR: idle-thread installation failed: {error:?}");
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
     };
     // SAFETY: The current Thread exclusively owns this newly installed stack,
@@ -610,7 +613,7 @@ pub(crate) fn install_current_idle() -> Result<(usize, usize), Error> {
 }
 
 extern "C" fn enter_clean_idle(_argument: usize) -> ! {
-    crate::arch::irq::enable_local();
+    crate::hal::irq::enable_local();
     run_idle_loop()
 }
 
@@ -620,10 +623,10 @@ pub(crate) fn run_idle_loop() -> ! {
             Ok(Some(pair)) => {
                 pair.activate();
             }
-            Ok(None) => crate::arch::cpu::wait_for_event(),
+            Ok(None) => crate::hal::cpu::wait_for_event(),
             Err(error) => {
                 crate::pr_crit!("HypeR: idle scheduling failed: {error:?}");
-                crate::arch::cpu::halt()
+                crate::hal::cpu::halt()
             }
         }
     }
@@ -706,7 +709,7 @@ pub(crate) fn wake_all(wait_queue: &WaitQueue) -> Result<usize, Error> {
         }
     }
     if count != 0 {
-        crate::arch::cpu::send_event();
+        crate::hal::cpu::send_event();
     }
     Ok(count)
 }
@@ -720,7 +723,7 @@ pub(crate) fn waiter_count(wait_queue: &WaitQueue) -> Result<usize, Error> {
 }
 
 pub(crate) fn ensure_sleepable() -> Result<(), Error> {
-    if !crate::arch::irq::local_enabled() {
+    if !crate::hal::irq::local_enabled() {
         return Err(Error::CannotSleepWithInterruptsMasked);
     }
     let cpu = current_cpu()?;
@@ -733,16 +736,19 @@ fn publish_ready_outcome(outcome: state::ReadyOutcome) -> Result<(), Error> {
     if outcome.should_preempt {
         request_reschedule(outcome.target_cpu)?;
     } else if outcome.changed {
-        crate::arch::cpu::send_event();
+        crate::hal::cpu::send_event();
     }
     Ok(())
 }
 
 fn request_reschedule(cpu: CpuIndex) -> Result<(), Error> {
-    super::preempt::request(cpu)?;
-    // This is an idle wakeup only. A targeted reschedule IPI will replace it
-    // when an architecture can enter the safe IRQ-tail continuation seam.
-    crate::arch::cpu::send_event();
+    // Determine local IRQ ownership before arming the coalesced request. Once
+    // the pending bit elects this caller as notifier, notification must not
+    // fail in a way which leaves later publishers suppressed behind that bit.
+    let notify = super::preempt::notification_required(cpu)?;
+    if super::preempt::request(cpu)? && notify {
+        super::super::irq::reschedule::notify(cpu);
+    }
     Ok(())
 }
 
@@ -769,7 +775,7 @@ extern "C" fn kernel_thread_exit() -> ! {
         Ok(cpu) => cpu,
         Err(error) => {
             crate::pr_crit!("HypeR: thread exit on invalid CPU: {error:?}");
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
     };
     // SAFETY: The exiting continuation is CPU-pinned and transfers this outer
@@ -791,7 +797,7 @@ extern "C" fn kernel_thread_exit() -> ! {
         }
         Err(error) => crate::pr_crit!("HypeR: thread exit failed: {error:?}"),
     }
-    crate::arch::cpu::halt()
+    crate::hal::cpu::halt()
 }
 
 fn current_cpu() -> Result<CpuIndex, Error> {

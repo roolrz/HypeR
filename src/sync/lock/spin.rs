@@ -34,12 +34,23 @@ impl<T> SpinLock<T> {
     }
 
     pub fn with<R>(&self, operation: impl FnOnce(&mut T) -> R) -> R {
+        self.with_relax(operation, spin_loop)
+    }
+
+    /// Runs `operation` after acquiring the lock, invoking `relax` after every
+    /// failed acquisition so an enclosing synchronization policy can make
+    /// architecture-required progress.
+    pub(super) fn with_relax<R>(
+        &self,
+        operation: impl FnOnce(&mut T) -> R,
+        mut relax: impl FnMut(),
+    ) -> R {
         while self
             .locked
             .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
             .is_err()
         {
-            spin_loop();
+            relax();
         }
 
         let release = LockRelease(&self.locked);

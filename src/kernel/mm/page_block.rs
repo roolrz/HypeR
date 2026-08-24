@@ -59,7 +59,7 @@ impl Drop for PageBlock {
                 self.physical.get(),
                 self.order
             );
-            crate::arch::cpu::halt();
+            crate::hal::cpu::halt();
         }
     }
 }

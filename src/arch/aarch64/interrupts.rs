@@ -56,7 +56,25 @@ pub fn enable_irq() {
     unsafe {
         asm!(
             "msr daifclr, #{irq}",
-            irq = const registers::DAIFCLR_IRQ,
+            irq = const registers::DAIF_IRQ,
+            options(nostack, preserves_flags)
+        )
+    };
+}
+
+/// Masks ordinary local IRQ exceptions without changing other exception masks.
+///
+/// This operation pairs with [`enable_irq`] across controlled context-entry
+/// transitions. IRQ-safe lexical critical sections must use
+/// [`LocalInterruptMask`] so they restore the exact prior state.
+pub fn mask_irq() {
+    // SAFETY: DAIFSet with immediate 2 sets only the IRQ mask bit. This
+    // instruction remains a compiler memory boundary because interrupt
+    // handlers may observe ordinary memory around the transition.
+    unsafe {
+        asm!(
+            "msr daifset, #{irq}",
+            irq = const registers::DAIF_IRQ,
             options(nostack, preserves_flags)
         )
     };

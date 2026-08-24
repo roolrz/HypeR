@@ -5,6 +5,7 @@
 
 use core::arch::asm;
 
+use hyper::cpu::CpuIndex;
 use hyper::drivers::interrupt::gicv3::CpuInterface;
 use hyper::hal::interrupt::InterruptId;
 
@@ -117,6 +118,69 @@ pub fn current_gic_affinity() -> u32 {
 /// Returns the architecture-reserved emergency stop interrupt.
 pub const fn crash_stop_interrupt() -> Option<InterruptId> {
     Some(InterruptId::new(registers::GIC_CRASH_STOP_SGI as u32))
+}
+
+/// Returns the architecture-reserved scheduler reschedule interrupt.
+pub const fn reschedule_interrupt() -> Option<InterruptId> {
+    Some(InterruptId::new(registers::GIC_RESCHEDULE_SGI as u32))
+}
+
+/// Prompts one logical CPU to evaluate its pending reschedule state.
+///
+/// The durable condition is the scheduler's coalesced pending flag; this SGI
+/// only causes prompt IRQ-tail evaluation. `false` reports an unavailable CPU
+/// affinity or an Aff0 value that requires unsupported range selection, so the
+/// caller can retain the pending flag and use a broader wakeup mechanism.
+pub fn notify_reschedule(cpu: CpuIndex) -> bool {
+    let Some(affinity) = super::smp::gic_affinity(cpu.get()) else {
+        return false;
+    };
+    let Some(value) = targeted_sgi_value(
+        InterruptId::new(registers::GIC_RESCHEDULE_SGI as u32),
+        affinity,
+    ) else {
+        return false;
+    };
+
+    // The scheduler publishes the pending flag with Release ordering. DSB
+    // ISHST completes prior stores before the GIC observes the SGI write, so a
+    // target cannot consume the one-shot interrupt and then observe stale
+    // shared state. ICC_SGI1R_EL1 does not change instruction context, so no
+    // post-write ISB is required.
+    // SAFETY: The GICv3 system-register interface is initialized before the
+    // reschedule interrupt is registered or any secondary becomes schedulable.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "msr ICC_SGI1R_EL1, {value}",
+            value = in(reg) value,
+            options(nostack, preserves_flags)
+        );
+    }
+    true
+}
+
+fn targeted_sgi_value(interrupt: InterruptId, affinity: u32) -> Option<u64> {
+    if interrupt.get() >= 16 {
+        return None;
+    }
+    let affinity_0 = affinity & 0xff;
+    // Range selection requires both Distributor and CPU-interface RSS
+    // support. The current profile deliberately rejects that topology rather
+    // than writing an implementation-defined RS value or misrouting the SGI.
+    if affinity_0 >= 16 {
+        return None;
+    }
+    let affinity_1 = (affinity >> 8) & 0xff;
+    let affinity_2 = (affinity >> 16) & 0xff;
+    let affinity_3 = (affinity >> 24) & 0xff;
+    Some(
+        (u64::from(affinity_3) << registers::ICC_SGI1R_AFF3_SHIFT)
+            | (u64::from(affinity_2) << registers::ICC_SGI1R_AFF2_SHIFT)
+            | (u64::from(interrupt.get()) << registers::ICC_SGI1R_INTID_SHIFT)
+            | (u64::from(affinity_1) << registers::ICC_SGI1R_AFF1_SHIFT)
+            | (1u64 << affinity_0),
+    )
 }
 
 /// Tests whether an acknowledged interrupt is the emergency stop IPI.

@@ -876,6 +876,14 @@ fn handle_external_interrupt() {
     let info = read_vmcs(VMCS_EXIT_INTERRUPT_INFO);
     if info & INTERRUPTION_VALID != 0 {
         let vector = info as u32 & 0xff;
+        // VMX reports host external interrupts directly in the VM-exit
+        // information field instead of entering through the IDT. Consume
+        // architecture-private vectors here before VM or kernel policy sees
+        // them. The private handler completes the local APIC interrupt, so
+        // this path must not dispatch or acknowledge it again.
+        if super::tlb::handle_interrupt(vector) {
+            return;
+        }
         match crate::kernel::entry::irq::dispatch(hyper::hal::interrupt::InterruptId::new(vector)) {
             crate::kernel::entry::irq::Action::Resume { postlude } => {
                 // VM exits remain cooperative until x86 provides a qualified

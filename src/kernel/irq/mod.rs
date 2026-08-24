@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exception, interrupt-domain, and kernel-timer policy.
+//! Host exception entry, interrupt domains, and cross-call transport.
+//!
+//! Device and timer subsystems own their interrupt handlers and lifecycle;
+//! this module supplies the controller, routing, and dispatch mechanisms they
+//! consume.
 
 use hyper::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) mod exception;
 pub mod interrupt;
-pub mod timer;
+pub(crate) mod reschedule;
 
 pub use interrupt::acknowledge_external;
 
@@ -16,16 +20,37 @@ static EXCEPTIONS_READY: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InitializationError {
     Controller(interrupt::Error),
-    GuestRegisters(crate::arch::vm::RegisterValidationError),
     MissingController,
-    MissingTimer,
-    RuntimeVectors(crate::arch::exception::RuntimeVectorError),
-    Timer(timer::Error),
-    Virtualization(crate::arch::vm::InterruptInitializationError),
+    RuntimeVectors(crate::hal::exception::RuntimeVectorError),
+    Reschedule(reschedule::Error),
+}
+
+/// Initializes host interrupt delivery before interrupt consumers are started.
+///
+/// The scheduler already owns its per-CPU pending state at this point. This
+/// subsystem owns the transport lifecycle: controller publication, runtime
+/// exception entry, and the permanent reschedule cross-call mapping. Local
+/// interrupts remain masked and no secondary CPU is admitted until all three
+/// stages are ready.
+pub(crate) fn initialize(
+    boot: &mut super::boot::Initialization,
+) -> Result<(), InitializationError> {
+    initialize_controller(boot)?;
+    initialize_exceptions()?;
+    reschedule::initialize(boot.interrupts().root_domain).map_err(InitializationError::Reschedule)
+}
+
+/// Observes reschedule-SGI dispatch for the bare-metal runtime proof.
+#[cfg(all(
+    feature = "kernel-self-test",
+    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64)
+))]
+pub(crate) fn reschedule_delivery_count_for_test(cpu: hyper::cpu::CpuIndex) -> usize {
+    reschedule::delivery_count_for_test(cpu)
 }
 
 /// Initializes the root interrupt controller and kernel IRQ domain.
-pub(crate) fn initialize_controller(
+fn initialize_controller(
     boot: &mut super::boot::Initialization,
 ) -> Result<(), InitializationError> {
     let info = boot
@@ -41,62 +66,17 @@ pub(crate) fn initialize_controller(
     Ok(())
 }
 
-/// Installs the permanent exception vectors and validates guest trap handling.
-pub(crate) fn initialize_exceptions() -> Result<(), InitializationError> {
+/// Installs and validates the permanent runtime exception vectors.
+fn initialize_exceptions() -> Result<(), InitializationError> {
     // SAFETY: The final RX kernel mapping, stack, console, and interrupt
-    // controller are active. IRQ delivery remains masked until timer setup.
-    unsafe { crate::arch::exception::install_runtime_vectors() };
-    crate::arch::exception::validate_runtime_vectors()
+    // controller are active. IRQ delivery remains masked until runtime activation.
+    unsafe { crate::hal::exception::install_runtime_vectors() };
+    crate::hal::exception::validate_runtime_vectors()
         .map_err(InitializationError::RuntimeVectors)?;
-    crate::arch::vm::validate_register_interface().map_err(InitializationError::GuestRegisters)?;
     EXCEPTIONS_READY.store(true, Ordering::Release);
-    crate::println!("HypeR: guest synchronous trap and vSysReg emulation validated");
     Ok(())
 }
 
 pub(crate) fn exceptions_ready() -> bool {
     EXCEPTIONS_READY.load(Ordering::Acquire)
-}
-
-/// Activates the interrupt-controller virtualization backend.
-pub(crate) fn initialize_virtualization(
-    boot: &super::boot::Initialization,
-) -> Result<(), InitializationError> {
-    let interrupts = boot.interrupts();
-    crate::arch::vm::initialize_interrupts(interrupts.root_domain, interrupts.maintenance_interrupt)
-        .map_err(InitializationError::Virtualization)
-}
-
-/// Starts the periodic kernel timer and publishes its guest-visible mapping.
-pub(crate) fn initialize_timer(
-    boot: &mut super::boot::Initialization,
-) -> Result<(), InitializationError> {
-    let info = boot
-        .essential()
-        .timer()
-        .ok_or(InitializationError::MissingTimer)?;
-    let capabilities = timer::initialize(info, boot.interrupts().root_domain)
-        .map_err(InitializationError::Timer)?;
-    crate::println!(
-        "HypeR: architectural timer: host INTID {}, guest INTID {} (host VIRQ {}), {} Hz tick from a {} Hz counter",
-        capabilities.hardware_interrupt.get(),
-        capabilities.guest_virtual_interrupt.get(),
-        capabilities.guest_virtual_host_interrupt.get(),
-        capabilities.ticks_per_second,
-        capabilities.counter_frequency_hz
-    );
-    crate::println!(
-        "HypeR: timer mapped to dynamic VIRQ {}",
-        capabilities.virtual_interrupt.get()
-    );
-    crate::println!("HypeR: dynamically owned per-CPU software timer queues active");
-    boot.set_timer(capabilities);
-    Ok(())
-}
-
-/// Updates IRQ/timer policy after all secondary CPUs are online.
-pub(crate) fn publish_online_cpu_count(
-    boot: &super::boot::Initialization,
-) -> Result<(), InitializationError> {
-    timer::set_online_cpu_count(boot.cpus().online_cpus).map_err(InitializationError::Timer)
 }

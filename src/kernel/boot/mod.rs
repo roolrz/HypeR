@@ -4,11 +4,10 @@
 use core::convert::Infallible;
 use hyper::drivers::console;
 use hyper::drivers::platform::{MmioResource, PermanentMmioMapping};
-use hyper::hal::memory::AddressTranslation;
 use hyper::platform::{ConsoleInfo, chosen, fdt};
 
 use self::state::BootState;
-use super::{irq, log, mm};
+use super::{irq, log, mm, time};
 
 pub(crate) mod image;
 mod state;
@@ -22,10 +21,11 @@ pub enum PreparationError {
     BootState(state::Error),
     Chosen(chosen::Error),
     Console(ConsoleError),
-    Essential(crate::arch::platform::DiscoveryError),
+    Essential(crate::hal::platform::DiscoveryError),
     InitialRamdiskInvalid(hyper::platform::PhysicalRange),
     InitialRamdiskMissing,
-    Kaslr(crate::arch::platform::KaslrError),
+    Kaslr(crate::hal::platform::KaslrError),
+    MemoryActivationUnavailable,
     Memory(mm::memory::Error),
     Platform(fdt::Error),
 }
@@ -40,6 +40,7 @@ impl core::fmt::Debug for PreparationError {
             Self::InitialRamdiskInvalid(range) => ("initial-ramdisk", Some(range)),
             Self::InitialRamdiskMissing => ("initial-ramdisk-missing", None),
             Self::Kaslr(error) => ("kaslr", Some(error)),
+            Self::MemoryActivationUnavailable => ("memory-activation-unavailable", None),
             Self::Memory(error) => ("memory", Some(error)),
             Self::Platform(error) => ("platform", Some(error)),
         };
@@ -116,13 +117,12 @@ impl ProtocolInputs {
 /// Keeping this type small makes dependencies between subsystem entry points
 /// explicit without exposing the full early-boot state to every subsystem.
 pub(crate) struct Initialization {
-    essential: crate::arch::platform::EssentialInfo,
+    essential: crate::hal::platform::EssentialInfo,
     early_console: Option<ConsoleInfo>,
     early_console_mapping: Option<PermanentMmioMapping>,
     linear_dtb: usize,
     interrupts: Option<irq::interrupt::Capabilities>,
-    timer: Option<irq::timer::Capabilities>,
-    cpus: Option<super::cpu::Capabilities>,
+    timer: Option<time::Capabilities>,
 }
 
 impl Initialization {
@@ -137,7 +137,7 @@ impl Initialization {
         })
     }
 
-    pub(crate) fn essential(&self) -> &crate::arch::platform::EssentialInfo {
+    pub(crate) fn essential(&self) -> &crate::hal::platform::EssentialInfo {
         &self.essential
     }
 
@@ -164,22 +164,13 @@ impl Initialization {
         self.interrupts = Some(capabilities);
     }
 
-    pub(crate) fn timer(&self) -> irq::timer::Capabilities {
+    pub(crate) fn timer(&self) -> time::Capabilities {
         self.timer
             .unwrap_or_else(|| fail("timer capability access", "timer not initialized"))
     }
 
-    pub(crate) fn set_timer(&mut self, capabilities: irq::timer::Capabilities) {
+    pub(crate) fn set_timer(&mut self, capabilities: time::Capabilities) {
         self.timer = Some(capabilities);
-    }
-
-    pub(crate) fn cpus(&self) -> super::cpu::Capabilities {
-        self.cpus
-            .unwrap_or_else(|| fail("CPU capability access", "SMP not initialized"))
-    }
-
-    pub(crate) fn set_cpus(&mut self, capabilities: super::cpu::Capabilities) {
-        self.cpus = Some(capabilities);
     }
 }
 
@@ -208,8 +199,10 @@ fn try_prepare_boot_environment(inputs: ProtocolInputs) -> Result<Infallible, Pr
         dtb_address,
         image_layout,
     )?;
-    let memory = prepare_final_memory(&platform, dtb_address, initial_ramdisk, kernel_base)?;
-    let activation = memory.activation_context();
+    let mut memory = prepare_final_memory(&platform, dtb_address, initial_ramdisk, kernel_base)?;
+    let activation = memory
+        .take_activation_context()
+        .ok_or(PreparationError::MemoryActivationUnavailable)?;
 
     crate::println!(
         "HypeR: discovered {} RAM and {} MMIO regions",
@@ -233,9 +226,10 @@ fn try_prepare_boot_environment(inputs: ProtocolInputs) -> Result<Infallible, Pr
     })
     .map_err(PreparationError::BootState)?;
 
-    // SAFETY: The prepared hierarchy is retained in global boot state and the
-    // activation context was issued by the active architecture implementation.
-    unsafe { crate::arch::memory::activate(activation) }
+    // SAFETY: The prepared hierarchy is retained in immutable global boot
+    // state. `activation` is its unique transition token and cannot be issued
+    // again after that publication.
+    unsafe { crate::hal::memory::activate(activation) }
 }
 
 fn discover_boot_inputs(
@@ -243,12 +237,12 @@ fn discover_boot_inputs(
 ) -> Result<
     (
         hyper::platform::PlatformInfo,
-        crate::arch::platform::EssentialInfo,
+        crate::hal::platform::EssentialInfo,
         chosen::Properties,
     ),
     PreparationError,
 > {
-    let mut essential_discovery = crate::arch::platform::EssentialDiscovery::new();
+    let mut essential_discovery = crate::hal::platform::EssentialDiscovery::new();
     let mut chosen_discovery = chosen::Discovery::new();
     let mut visitors = fdt::VisitorPair::new(&mut essential_discovery, &mut chosen_discovery);
     // SAFETY: The architecture bootstrap preserved the validated firmware DTB
@@ -321,7 +315,7 @@ fn select_kernel_base(
     } else {
         None
     };
-    crate::arch::platform::select_kernel_base(kaslr_seed, image_size)
+    crate::hal::platform::select_kernel_base(kaslr_seed, image_size)
         .map_err(PreparationError::Kaslr)
 }
 
@@ -370,7 +364,7 @@ pub(crate) fn enter_runtime() -> Result<Initialization, RuntimeError> {
         }
         None => None,
     };
-    crate::arch::memory::prepare_cache(&essential).map_err(RuntimeError::Cache)?;
+    crate::hal::cache::prepare(&essential).map_err(RuntimeError::Cache)?;
     let linear_dtb =
         mm::memory::linear_address(dtb_address).ok_or(RuntimeError::DtbMapping(dtb_address))?;
 
@@ -381,7 +375,6 @@ pub(crate) fn enter_runtime() -> Result<Initialization, RuntimeError> {
         linear_dtb,
         interrupts: None,
         timer: None,
-        cpus: None,
     })
 }
 
@@ -414,7 +407,7 @@ fn early_console_is_accessible(
     info: ConsoleInfo,
 ) -> bool {
     if info.access == hyper::platform::ConsoleRegisterAccess::Port {
-        return info.base <= u64::from(u16::MAX - 7) && crate::arch::platform::port_io().is_some();
+        return info.base <= u64::from(u16::MAX - 7) && crate::hal::platform::port_io().is_some();
     }
     let Some(register_window) = early_console_register_window(info) else {
         return false;
@@ -422,7 +415,7 @@ fn early_console_is_accessible(
     let Some(end) = info.base.checked_add(register_window) else {
         return false;
     };
-    if end > crate::arch::memory::AddressTranslation::bootstrap_accessible_limit() {
+    if end > crate::hal::memory::bootstrap_accessible_limit() {
         return false;
     }
     platform
@@ -476,7 +469,7 @@ fn install_bootstrap_console(console_info: ConsoleInfo) -> Result<(), ConsoleErr
     // architecture bootstrap maps it with Device memory attributes. This
     // handle is replaced immediately after the permanent stage-1 switch.
     let console =
-        unsafe { console::bind_bootstrap(console_info, base, crate::arch::platform::port_io()) }
+        unsafe { console::bind_bootstrap(console_info, base, crate::hal::platform::port_io()) }
             .map_err(ConsoleError::Driver)?;
     log::console::install(console);
     Ok(())
@@ -508,7 +501,7 @@ fn promote_early_console(
             .map_err(|_| ConsoleError::Address(resource.start()))?,
         )
     };
-    let console = console::bind(console_info, mapping, crate::arch::platform::port_io())
+    let console = console::bind(console_info, mapping, crate::hal::platform::port_io())
         .map_err(ConsoleError::Driver)?;
     log::console::install(console);
     Ok(mapping)
@@ -519,7 +512,7 @@ pub(crate) fn fail(operation: &str, error: impl core::fmt::Debug) -> ! {
         crate::kernel::crash::fatal(format_args!("HypeR: {operation} failed: {error:?}"));
     }
     crate::pr_crit!("HypeR: {operation} failed: {error:?}");
-    crate::arch::cpu::halt()
+    crate::hal::cpu::halt()
 }
 
 pub(crate) fn with_boot_state<R>(operation: impl FnOnce(&BootState) -> R) -> R {

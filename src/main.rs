@@ -7,6 +7,8 @@
 extern crate alloc;
 
 mod arch;
+#[path = "hal/selected/mod.rs"]
+mod hal;
 pub mod kernel;
 
 #[cfg(feature = "kernel-self-test")]
@@ -26,8 +28,8 @@ enum KernelStartError {
     Memory(crate::kernel::mm::InitializationError),
     MemoryFinalization(crate::kernel::mm::FinalizationError),
     Scheduler(crate::kernel::task::scheduler::Error),
-    Time(crate::kernel::time::Error),
-    VirtualDevices(crate::kernel::vm::InitializationError),
+    Time(crate::kernel::time::InitializationError),
+    VirtualMachineInitialization(crate::kernel::vm::InitializationError),
     VirtualMachine(crate::kernel::vm::StartError),
 }
 
@@ -53,8 +55,8 @@ impl_kernel_start_error! {
     Memory(crate::kernel::mm::InitializationError),
     MemoryFinalization(crate::kernel::mm::FinalizationError),
     Scheduler(crate::kernel::task::scheduler::Error),
-    Time(crate::kernel::time::Error),
-    VirtualDevices(crate::kernel::vm::InitializationError),
+    Time(crate::kernel::time::InitializationError),
+    VirtualMachineInitialization(crate::kernel::vm::InitializationError),
     VirtualMachine(crate::kernel::vm::StartError),
 }
 
@@ -71,7 +73,7 @@ impl core::fmt::Debug for KernelStartError {
             Self::MemoryFinalization(error) => ("memory-finalization", error),
             Self::Scheduler(error) => ("scheduler", error),
             Self::Time(error) => ("time", error),
-            Self::VirtualDevices(error) => ("virtual-devices", error),
+            Self::VirtualMachineInitialization(error) => ("virtual-machine-initialization", error),
             Self::VirtualMachine(error) => ("virtual-machine", error),
         };
         formatter
@@ -95,19 +97,15 @@ extern "C" fn start_kernel() -> ! {
         crate::kernel::debug::initialize()?;
         crate::kernel::task::initialize()?;
 
-        crate::kernel::device::initialize_cpu_power(&boot)?;
-        crate::kernel::irq::initialize_controller(&mut boot)?;
-        crate::kernel::irq::initialize_exceptions()?;
+        crate::kernel::device::early_initialize(&boot)?;
+        crate::kernel::irq::initialize(&mut boot)?;
         crate::kernel::crash::initialize(&boot)?;
-        crate::kernel::irq::initialize_virtualization(&boot)?;
-        crate::kernel::time::initialize_timekeeping(&boot)?;
-        crate::kernel::irq::initialize_timer(&mut boot)?;
+        crate::kernel::time::initialize(&mut boot)?;
+        crate::kernel::vm::initialize(&boot)?;
 
-        crate::kernel::vm::initialize_virtual_devices(&boot)?;
-        crate::kernel::device::initialize_platform_devices(&boot)?;
-        crate::kernel::cpu::initialize(&mut boot)?;
+        crate::kernel::device::platform_device_initialize(&boot)?;
+        crate::kernel::cpu::initialize()?;
 
-        crate::kernel::irq::publish_online_cpu_count(&boot)?;
         crate::kernel::mm::finalize_address_space()?;
 
         #[cfg(feature = "kernel-self-test")]
@@ -128,12 +126,12 @@ extern "C" fn start_kernel() -> ! {
 /// Rust kernel entry used by secondary CPUs after architectural setup.
 #[unsafe(no_mangle)]
 extern "C" fn start_secondary_cpu(cpu_index: usize) -> ! {
-    if !crate::arch::cpu::secondary_is_compatible() {
-        crate::arch::cpu::halt()
+    if !crate::hal::cpu::secondary_is_compatible() {
+        crate::hal::cpu::halt()
     }
-    crate::arch::memory::enable_local_protection();
-    if !crate::arch::memory::local_protection_enabled() {
-        crate::arch::cpu::halt()
+    crate::hal::memory::enable_local_protection();
+    if !crate::hal::memory::local_protection_enabled() {
+        crate::hal::cpu::halt()
     }
     crate::kernel::cpu::secondary_entry(cpu_index)
 }

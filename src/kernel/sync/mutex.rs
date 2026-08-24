@@ -14,7 +14,7 @@ use crate::kernel::task::WaitQueue;
 use crate::kernel::task::scheduler;
 use crate::kernel::task::thread::ThreadId;
 
-type StateLock = InterruptSpinLock<State, crate::arch::irq::LocalMask>;
+type StateLock = InterruptSpinLock<State, crate::hal::irq::LocalMask>;
 
 struct State {
     owner: Option<ThreadId>,
@@ -145,7 +145,7 @@ impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
         if let Err(error) = self.mutex.unlock() {
             crate::pr_crit!("HypeR: sleeping mutex unlock invariant failed: {error:?}");
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
     }
 }

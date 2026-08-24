@@ -14,11 +14,16 @@ impl PendingReschedule {
     }
 
     /// Publishes queue changes performed before this call to the target CPU.
-    pub fn publish(&self) {
+    ///
+    /// Returns `true` only for the publisher which transitions the request
+    /// from clear to pending. That publisher owns notification of the target;
+    /// later publishers coalesce behind the same pending request.
+    pub fn publish(&self) -> bool {
         // Use an RMW so concurrent publishers form one release sequence. The
         // scheduler lock remains the authority for queue-state visibility;
-        // this atomic only preserves the notification edge.
-        self.0.swap(true, Ordering::Release);
+        // this atomic preserves the notification edge and elects exactly one
+        // notifier for each clear-to-pending interval.
+        !self.0.swap(true, Ordering::Release)
     }
 
     /// Observes whether at least one request has been published.

@@ -6,7 +6,7 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
     Device(crate::kernel::vm::device::Error),
-    Interrupts(crate::arch::vm::InterruptError),
+    Interrupts(crate::hal::vm::InterruptError),
     Memory(crate::kernel::vm::memory::Error),
     Registry(crate::kernel::vm::registry::Error),
     Scheduler(crate::kernel::task::scheduler::Error),
@@ -15,7 +15,7 @@ pub(super) enum Error {
 
 pub(super) fn run() -> Result<(), Error> {
     crate::kernel::vm::registry::verify_reservation_rollback().map_err(Error::Registry)?;
-    if !crate::arch::vm::guest_execution_available() {
+    if !crate::hal::vm::guest_execution_available() {
         return Ok(());
     }
 
@@ -23,13 +23,13 @@ pub(super) fn run() -> Result<(), Error> {
     let reservation = crate::kernel::vm::registry::reserve().map_err(Error::Registry)?;
     let address_space = crate::kernel::vm::memory::GuestAddressSpace::new(
         reservation.hardware_vmid(),
-        crate::arch::guest::linux_abi().ram_base().get(),
+        crate::hal::guest::linux_abi().ram_base().get(),
         2 * hyper::mm::PAGE_SIZE,
     )
     .map_err(Error::Memory)?;
     let interrupts = crate::kernel::vm::VmInterruptController::new(
         1,
-        crate::arch::guest::linux_abi().timer_interrupt(),
+        crate::hal::guest::linux_abi().timer_interrupt(),
     )
     .map_err(Error::Interrupts)?;
     let devices = crate::kernel::vm::device::prepare().map_err(Error::Device)?;
@@ -41,7 +41,7 @@ pub(super) fn run() -> Result<(), Error> {
     )
     .map_err(Error::Registry)?;
     let prepared = builder
-        .prepare_boot_vcpu(0, crate::arch::guest::prepare_linux_vcpu_context())
+        .prepare_boot_vcpu(0, crate::hal::guest::prepare_linux_vcpu_context())
         .map_err(Error::Scheduler)?;
     drop(prepared);
     let after = crate::kernel::task::scheduler::statistics().map_err(Error::Scheduler)?;

@@ -6,7 +6,6 @@
 use core::ptr::{copy_nonoverlapping, write_bytes};
 
 use alloc::vec::Vec;
-use hyper::hal::cache::CacheMaintenance;
 use hyper::mm::allocator::heap::PageOwner;
 use hyper::mm::{
     BuddyError, ForeignCopyError, ForeignMemory, PAGE_SIZE, PhysicalAddress, copy_from_foreign,
@@ -15,7 +14,7 @@ use hyper::mm::{
 use hyper::vm::exit::{GuestMemoryFault, MemoryAccess};
 
 use super::registry::{HardwareVmid, VmId};
-use crate::arch::vm::{Stage2AddressSpace, Stage2Error};
+use crate::hal::vm::{Stage2AddressSpace, Stage2Error};
 use crate::kernel::mm::page_block::PageBlock;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -264,9 +263,9 @@ impl GuestAddressSpace {
             // until the stage-2 hierarchy is installed and activated.
             unsafe {
                 if instruction {
-                    crate::arch::memory::Cache::publish_instruction_range(address, chunk)
+                    crate::hal::cache::publish_instruction_range(address, chunk)
                 } else {
-                    crate::arch::memory::Cache::publish_data_range(address, chunk)
+                    crate::hal::cache::publish_data_range(address, chunk)
                 }
             }
             .map_err(Error::from)?;
@@ -352,7 +351,7 @@ impl ForeignMemory for GuestAddressSpace {
     }
 }
 
-impl crate::arch::guest::PayloadMemory for GuestAddressSpace {
+impl crate::hal::guest::PayloadMemory for GuestAddressSpace {
     type Error = Error;
 
     fn copy_to(

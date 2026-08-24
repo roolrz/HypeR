@@ -66,10 +66,6 @@ impl CpuContext {
     pub fn slots_mut(&mut self) -> &mut [Option<ListEntry>] {
         &mut self.list_registers[..usize::from(self.list_register_count)]
     }
-
-    pub const fn list_register_count(&self) -> u8 {
-        self.list_register_count
-    }
 }
 
 impl Default for CpuContext {

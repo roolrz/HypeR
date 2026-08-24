@@ -13,7 +13,6 @@ static FREQUENCY: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidFrequency,
-    InvalidCpuIndex,
     Firmware(sbi::Error),
 }
 

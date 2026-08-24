@@ -6,8 +6,8 @@
 mod smp;
 
 pub(crate) use hyper::cpu::CpuIndex;
-pub(crate) use smp::online_cpu_count;
 pub use smp::{Capabilities, Error, secondary_entry};
+pub(crate) use smp::{online_cpu_count, participating_cpu_count};
 
 /// Reads and validates the executing CPU's logical kernel index.
 ///
@@ -16,11 +16,11 @@ pub use smp::{Capabilities, Error, secondary_entry};
 /// directly rather than an ornamental guard.
 #[inline]
 pub(crate) fn current_index() -> Option<CpuIndex> {
-    crate::arch::cpu::current_index()
+    crate::hal::cpu::current_index()
 }
 
 /// Starts secondary CPUs and waits for their local kernel state to come online.
-pub(crate) fn initialize(boot: &mut super::boot::Initialization) -> Result<(), Error> {
+pub(crate) fn initialize() -> Result<(), Error> {
     let (platform, root, image_physical_start, kernel_base) =
         super::boot::with_boot_state(|state| {
             (
@@ -36,6 +36,5 @@ pub(crate) fn initialize(boot: &mut super::boot::Initialization) -> Result<(), E
         capabilities.online_cpus,
         capabilities.discovered_cpus
     );
-    boot.set_cpus(capabilities);
     Ok(())
 }

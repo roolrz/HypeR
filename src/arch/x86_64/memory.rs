@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-use core::arch::asm;
 use core::ptr::{read_volatile, write_bytes, write_volatile};
 
 use hyper::hal::memory::{AddressTranslation, KernelImageLayout, VirtualMemoryLayout};
@@ -113,7 +112,7 @@ impl PreparedAddressSpace {
     /// concurrently walk or use the mappings being retired.
     pub unsafe fn retire_identity_mappings(&self, _platform: &PlatformInfo) -> Result<(), Error> {
         runtime_write(self.root, 0, 0)?;
-        flush_local_tlb();
+        super::tlb::flush_all_online();
         Ok(())
     }
 
@@ -143,7 +142,7 @@ impl PreparedAddressSpace {
                 )?
             };
         }
-        flush_local_tlb();
+        super::tlb::flush_all_online();
         Ok(StackMapping {
             guard_page,
             bottom,
@@ -163,7 +162,7 @@ impl PreparedAddressSpace {
             let (table, index) = walk_leaf(self.root, bottom as u64 + page as u64 * PAGE_SIZE)?;
             runtime_write(table, index, 0)?;
         }
-        flush_local_tlb();
+        super::tlb::flush_all_online();
         Ok(())
     }
 
@@ -506,14 +505,6 @@ fn runtime_write(table: PhysicalAddress, slot: usize, value: u64) -> Result<(), 
     // SAFETY: Internal callers serialize mutation of a live table and slot.
     unsafe { write_volatile((runtime_pointer(table)? as *mut u64).add(slot), value) };
     Ok(())
-}
-
-fn flush_local_tlb() {
-    let root: usize;
-    // SAFETY: Reading CR3 is valid at CPL0 and has no pointer operands.
-    unsafe { asm!("mov {}, cr3", out(reg) root, options(nostack)) };
-    // SAFETY: Rewriting the active valid CR3 flushes local translations.
-    unsafe { asm!("mov cr3, {}", in(reg) root, options(nostack)) };
 }
 
 fn range(start: u64, size: u64) -> Result<PhysicalRange, Error> {

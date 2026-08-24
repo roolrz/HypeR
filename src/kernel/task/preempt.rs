@@ -111,12 +111,26 @@ impl Drop for CpuPreemptionReservation {
 ///
 /// Release ordering makes scheduler queue publication visible before the
 /// target CPU observes the request with Acquire ordering. Requests coalesce;
-/// clearing occurs only while the scheduler lock serializes the decision.
-pub(crate) fn request(cpu: CpuIndex) -> Result<(), Error> {
+/// clearing occurs only while the scheduler lock serializes the decision. A
+/// `true` result grants this caller responsibility for notifying the target.
+pub(crate) fn request(cpu: CpuIndex) -> Result<bool, Error> {
     let state = &PREEMPTION[cpu];
     ensure_online(state)?;
-    state.pending.publish();
-    Ok(())
+    Ok(state.pending.publish())
+}
+
+/// Reports whether a published request needs an explicit target notification.
+///
+/// The active outer interrupt already guarantees IRQ-tail evaluation for a
+/// request targeting this CPU. Remote callers must never inspect another
+/// CPU's locally owned IRQ depth and always require a cross-call.
+pub(crate) fn notification_required(cpu: CpuIndex) -> Result<bool, Error> {
+    let state = &PREEMPTION[cpu];
+    ensure_online(state)?;
+    if current_cpu()? != cpu {
+        return Ok(true);
+    }
+    Ok(state.irq_depth.load(Ordering::Relaxed) == 0)
 }
 
 pub(crate) fn pending(cpu: CpuIndex) -> Result<bool, Error> {
@@ -212,7 +226,7 @@ impl Drop for PreemptionGuard {
     fn drop(&mut self) {
         if let Err(error) = self.release_inner() {
             crate::pr_crit!("HypeR: invalid preemption guard release: {error:?}");
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
     }
 }
@@ -268,7 +282,7 @@ impl Drop for IrqGuard {
     fn drop(&mut self) {
         if let Err(error) = self.complete_inner() {
             crate::pr_crit!("HypeR: invalid IRQ accounting release: {error:?}");
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
     }
 }

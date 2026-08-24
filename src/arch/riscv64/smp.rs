@@ -3,6 +3,7 @@
 
 use core::arch::asm;
 use core::ptr::addr_of;
+use hyper::cpu::CpuIndex;
 use hyper::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
@@ -58,11 +59,14 @@ pub fn current_hardware_id() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-pub fn initialize_boot_hart(hart_id: u64) {
+pub fn initialize_boot_hart(hart_id: u64) -> bool {
     // SAFETY: Early boot owns TP before installing the boot-hart CPU index.
     unsafe { asm!("mv tp, zero", options(nomem, nostack)) };
-    HART_IDS[0].store(hart_id, Ordering::Release);
+    if !publish_hart_id(&HART_IDS[0], hart_id) {
+        return false;
+    }
     HART_ONLINE[0].store(true, Ordering::Release);
+    true
 }
 
 pub fn mark_current_hart_online() {
@@ -88,10 +92,20 @@ pub fn for_each_online_remote_hart(
 }
 
 pub fn register_hart(cpu_index: usize, hart_id: u64) -> bool {
-    HART_IDS.get(cpu_index).is_some_and(|slot| {
-        slot.store(hart_id, Ordering::Release);
-        true
-    })
+    let Some(slot) = HART_IDS.get(cpu_index) else {
+        return false;
+    };
+    publish_hart_id(slot, hart_id)
+}
+
+fn publish_hart_id(slot: &AtomicU64, hart_id: u64) -> bool {
+    if hart_id == u64::MAX {
+        return false;
+    }
+    // Boot is the sole route-registration owner. The CAS makes each logical
+    // route immutable after publication and rejects accidental re-entry.
+    slot.compare_exchange(u64::MAX, hart_id, Ordering::Release, Ordering::Relaxed)
+        .is_ok()
 }
 
 pub fn send_event() {
@@ -103,4 +117,22 @@ pub fn send_event() {
     // SAFETY: FENCE has no pointer operands and is valid in HS mode.
     unsafe { asm!("fence w, ow", options(nostack)) };
     let _ = for_each_online_remote_hart(super::sbi::send_ipi);
+}
+
+/// Sends a wake-only reschedule prompt to one registered hart.
+///
+/// RISC-V retains the request for a cooperative scheduling point until its
+/// trap backend gains the same qualified IRQ-tail continuation as `AArch64`.
+pub fn notify_reschedule(cpu: CpuIndex) -> bool {
+    let Some(hart_id) = HART_IDS.get(cpu.get()).map(|id| id.load(Ordering::Acquire)) else {
+        return false;
+    };
+    if hart_id == u64::MAX {
+        return false;
+    }
+    // Order the pending-state write before either a memory-backed or I/O-backed
+    // interrupt-controller output performed by the SBI implementation.
+    // SAFETY: FENCE has no pointer operands and is valid in HS mode.
+    unsafe { asm!("fence w, ow", options(nostack)) };
+    super::sbi::send_ipi(hart_id).is_ok()
 }

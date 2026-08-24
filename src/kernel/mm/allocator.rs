@@ -5,7 +5,7 @@
 
 use hyper::mm::allocator::heap::KernelGlobalAllocator;
 
-pub type GlobalAllocator = KernelGlobalAllocator<crate::arch::irq::LocalMask>;
+pub type GlobalAllocator = KernelGlobalAllocator<crate::hal::irq::LocalMask>;
 
 #[global_allocator]
 pub static GLOBAL_ALLOCATOR: GlobalAllocator = GlobalAllocator::new();

@@ -3,7 +3,7 @@
 
 //! Kernel memory initialization and architecture handoff policy.
 
-use hyper::hal::memory::{AddressTranslation, VirtualMemoryLayout};
+use hyper::hal::memory::VirtualMemoryLayout;
 use hyper::mm::{BootAllocator, BootAllocatorError, BootMemoryStats, PhysicalAddress};
 use hyper::platform::{PhysicalRange, PlatformInfo};
 
@@ -12,7 +12,7 @@ use super::allocator::GlobalAllocator;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Allocator(BootAllocatorError),
-    AddressSpace(crate::arch::memory::Error),
+    AddressSpace(crate::hal::memory::Error),
 }
 
 impl From<BootAllocatorError> for Error {
@@ -21,8 +21,8 @@ impl From<BootAllocatorError> for Error {
     }
 }
 
-impl From<crate::arch::memory::Error> for Error {
-    fn from(error: crate::arch::memory::Error) -> Self {
+impl From<crate::hal::memory::Error> for Error {
+    fn from(error: crate::hal::memory::Error) -> Self {
         Self::AddressSpace(error)
     }
 }
@@ -30,7 +30,7 @@ impl From<crate::arch::memory::Error> for Error {
 /// Kernel-owned boot-memory state and its architecture address space.
 pub struct PreparedMemory {
     allocator: BootAllocator,
-    address_space: crate::arch::memory::PreparedAddressSpace,
+    address_space: crate::hal::memory::PreparedAddressSpace,
 }
 
 impl PreparedMemory {
@@ -50,8 +50,14 @@ impl PreparedMemory {
         self.allocator.stats()
     }
 
-    pub fn activation_context(&self) -> crate::arch::memory::ActivationContext {
-        self.address_space.activation_context()
+    /// Takes the one-shot final-address-space transition token.
+    ///
+    /// This requires exclusive access available only before `PreparedMemory`
+    /// enters immutable boot state. A second call returns `None`.
+    pub(crate) fn take_activation_context(
+        &mut self,
+    ) -> Option<crate::hal::memory::ActivationContext> {
+        self.address_space.take_activation_context()
     }
 
     /// # Safety
@@ -77,7 +83,7 @@ impl PreparedMemory {
         physical: PhysicalAddress,
         pages: usize,
         allocate_table: &mut dyn FnMut() -> Option<PhysicalAddress>,
-    ) -> Result<crate::arch::memory::StackMapping, Error> {
+    ) -> Result<crate::hal::memory::StackMapping, Error> {
         // SAFETY: The caller guarantees the table allocator's ownership,
         // zeroing, alignment, lifetime, and serialized mutation requirements.
         unsafe {
@@ -134,7 +140,7 @@ pub unsafe fn prepare(
     let mut allocator = BootAllocator::new(
         &platform.memory,
         &platform.reserved,
-        crate::arch::memory::AddressTranslation::bootstrap_accessible_limit(),
+        crate::hal::memory::bootstrap_accessible_limit(),
     )?;
     allocator.reserve(
         PhysicalRange::new(image.physical_start, image.total_size)
@@ -149,7 +155,7 @@ pub unsafe fn prepare(
     // SAFETY: This function's caller guarantees bootstrap-accessible writable
     // RAM, while `allocator` exclusively reserves every returned table page.
     let address_space =
-        unsafe { crate::arch::memory::prepare(&mut allocator, platform, image, kernel_base)? };
+        unsafe { crate::hal::memory::prepare(&mut allocator, platform, image, kernel_base)? };
     Ok(PreparedMemory {
         allocator,
         address_space,
@@ -157,19 +163,19 @@ pub unsafe fn prepare(
 }
 
 pub fn virtual_memory_layout() -> VirtualMemoryLayout {
-    crate::arch::memory::AddressTranslation::layout()
+    crate::hal::memory::virtual_memory_layout()
 }
 
 pub fn linear_address(physical: u64) -> Option<usize> {
-    translated_address(crate::arch::memory::AddressTranslation::linear_address(
-        PhysicalAddress::new(physical),
-    ))
+    translated_address(crate::hal::memory::linear_address(PhysicalAddress::new(
+        physical,
+    )))
 }
 
 pub fn mmio_address(physical: u64) -> Option<usize> {
-    translated_address(crate::arch::memory::AddressTranslation::mmio_address(
-        PhysicalAddress::new(physical),
-    ))
+    translated_address(crate::hal::memory::mmio_address(PhysicalAddress::new(
+        physical,
+    )))
 }
 
 /// Converts an address in the permanent RAM linear map back to a PA.

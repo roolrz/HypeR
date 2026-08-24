@@ -6,6 +6,8 @@
 mod guest_memory_access;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod irq_tail_preemption;
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
+mod reschedule_ipi;
 mod scheduler_sync;
 mod stack_model;
 mod startup_readiness;
@@ -14,18 +16,24 @@ mod user_memory_access;
 mod vm_registry;
 
 pub(crate) fn run() {
-    crate::arch::irq::enable_local();
+    crate::hal::irq::enable_local();
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
+    let reschedule_ipi_result = reschedule_ipi::run();
     let result = scheduler_sync::run();
     let stack_result = stack_model::run();
     let sleep_result = thread_sleep::run();
     let readiness_result = startup_readiness::run();
-    let guest_execution = crate::arch::vm::guest_execution_available();
+    let guest_execution = crate::hal::vm::guest_execution_available();
     let guest_memory_result = guest_execution.then(guest_memory_access::run);
     let user_memory_result = user_memory_access::run();
     let vm_registry_result = vm_registry::run();
     #[cfg(CONFIG_ARCH_AARCH64)]
     let irq_tail_probe_result = irq_tail_preemption::install();
-    crate::arch::irq::disable_local();
+    crate::hal::irq::mask_local();
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
+    if let Err(error) = reschedule_ipi_result {
+        crate::kernel::boot::fail("reschedule IPI runtime proof", error);
+    }
     if let Err(error) = result {
         crate::kernel::boot::fail("kernel scheduler/sync tests", error);
     }

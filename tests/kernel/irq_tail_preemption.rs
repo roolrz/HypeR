@@ -31,7 +31,7 @@ extern "C" fn run_probe(_argument: usize) {
     for _ in 0..PREEMPTION_ROUNDS {
         if let Err(error) = scheduler::yield_now() {
             crate::pr_crit!("HypeR test: AArch64 IRQ-tail probe yield failed: {error:?}");
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
     }
     crate::println!("HypeR test: AArch64 IRQ-tail Fair vCPU preemption passed");

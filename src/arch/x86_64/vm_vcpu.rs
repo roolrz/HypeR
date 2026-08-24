@@ -1,20 +1,51 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! x86 vCPU hardware activation.
+//! x86 vCPU hardware-state mechanisms.
 
-use super::VmInterruptController;
-use crate::kernel::task::thread::VcpuExecution;
-use crate::kernel::vm::active_vcpu;
+use super::{GuestSyncAction, GuestSyncFrame, VcpuContext, VmInterruptController};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Active(active_vcpu::Error),
     UnsupportedSoftwareInterrupt,
 }
 
+/// Admits a stopped vCPU for selected-backend entry.
+///
+/// x86 VMX/SVM loads the guest machine state in the final entry backend, so
+/// this phase has no local register bank to load.
+///
+/// # Safety
+///
+/// The caller must exclusively own the pinned stopped context and keep local
+/// interrupts masked until guest entry.
+pub const unsafe fn activate(
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
+    _interrupts: &VmInterruptController,
+    _physical_count: u64,
+) -> Result<bool, Error> {
+    Ok(false)
+}
+
+/// Completes selected-backend detachment after an x86 VM exit.
+///
+/// # Safety
+///
+/// The caller must exclusively own the stopped context and keep local
+/// interrupts masked through the surrounding scheduler transaction.
+pub const unsafe fn deactivate(
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
+    _interrupts: &VmInterruptController,
+    _physical_count: u64,
+) -> Result<(), Error> {
+    Ok(())
+}
+
 pub(crate) fn deliver_software_interrupt(
-    _execution: &mut VcpuExecution,
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
     _interrupts: &VmInterruptController,
     _request: u64,
 ) -> Result<(), Error> {
@@ -22,41 +53,33 @@ pub(crate) fn deliver_software_interrupt(
 }
 
 pub(crate) fn handle_guest_device_access(
-    _execution: &mut VcpuExecution,
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
     _interrupts: &VmInterruptController,
-    _frame: &mut super::GuestSyncFrame<'_>,
-    fallback: super::GuestSyncAction,
-) -> super::GuestSyncAction {
+    _frame: &mut GuestSyncFrame<'_>,
+    fallback: GuestSyncAction,
+) -> GuestSyncAction {
     fallback
 }
 
-impl From<active_vcpu::Error> for Error {
-    fn from(error: active_vcpu::Error) -> Self {
-        Self::Active(error)
-    }
+pub const fn handle_virtual_timer_interrupt(
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
+    _interrupts: &VmInterruptController,
+) -> Result<bool, Error> {
+    Ok(false)
 }
 
-impl VcpuExecution {
-    /// Binds the stopped vCPU to the current processor's virtualization state.
-    ///
-    /// # Safety
-    ///
-    /// `execution` must be non-null, aligned, pinned, and exclusively owned by
-    /// the caller for the guest-run lifetime. Local interrupts must be masked.
-    pub unsafe fn activate_virtual_hardware(execution: *mut Self) -> Result<(), Error> {
-        // SAFETY: The scheduler-origin pointer is valid, exclusive, and pinned
-        // for the active run as required by this method's contract.
-        unsafe { active_vcpu::set_raw(execution)? };
-        Ok(())
-    }
-
-    /// Removes the vCPU binding from the current processor.
-    ///
-    /// # Safety
-    ///
-    /// The caller must own the active vCPU and keep interrupts masked.
-    pub unsafe fn deactivate_virtual_hardware(&mut self) -> Result<(), Error> {
-        active_vcpu::clear(self)?;
-        Ok(())
-    }
+pub const fn handle_maintenance_interrupt(
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
+    _interrupts: &VmInterruptController,
+) -> Result<bool, Error> {
+    Ok(false)
 }
+
+pub const fn maintenance_interrupt_pending() -> bool {
+    false
+}
+
+pub const fn quiesce_virtual_interrupt_delivery() {}

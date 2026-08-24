@@ -265,12 +265,6 @@ fn set_timer(vcpu_id: u32, deadline: u64) {
     };
 }
 
-pub(super) fn take_timer_wakeup() -> Option<u64> {
-    None
-}
-
-pub(super) fn poll_virtual_timer(_now: u64) {}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
     InvalidGuestMemoryFaultDecoder,

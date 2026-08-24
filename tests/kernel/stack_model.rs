@@ -20,6 +20,8 @@ pub(super) enum Error {
     IrqCallbackMissing,
     IrqStackMismatch,
     PageAccounting,
+    #[cfg(CONFIG_ARCH_X86_64)]
+    ShootdownMissing,
     Scheduler(scheduler::Error),
     Stack(stack::Error),
     StackUsageMissing,
@@ -78,6 +80,8 @@ fn validate_cpu_exception_stacks() -> Result<(), Error> {
 }
 
 fn validate_thread_stack() -> Result<(), Error> {
+    #[cfg(CONFIG_ARCH_X86_64)]
+    let shootdown_baseline = crate::hal::memory::stage1_shootdown_count_for_test();
     let baseline_pages = crate::kernel::mm::statistics()
         .ok_or(Error::PageAccounting)?
         .runtime
@@ -119,6 +123,10 @@ fn validate_thread_stack() -> Result<(), Error> {
         .pages;
     if final_pages != baseline_pages {
         return Err(Error::PageAccounting);
+    }
+    #[cfg(CONFIG_ARCH_X86_64)]
+    if crate::hal::memory::stage1_shootdown_count_for_test() <= shootdown_baseline {
+        return Err(Error::ShootdownMissing);
     }
     Ok(())
 }

@@ -59,9 +59,3 @@ pub(crate) fn handle_guest_sync(
 ) -> GuestSyncAction {
     GuestSyncAction::Unhandled
 }
-
-pub(super) fn poll_virtual_timer(_now: u64) {}
-
-pub(super) fn take_timer_wakeup() -> Option<u64> {
-    None
-}

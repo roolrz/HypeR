@@ -4,7 +4,6 @@
 //! Per-CPU software timers multiplexed onto one architectural comparator.
 
 use hyper::cpu::{CpuIndex, PerCpu};
-use hyper::hal::timer::DeadlineTimer;
 use hyper::sync::InterruptSpinLock;
 use hyper::time::{OwnedDeadlineQueue, PendingTimer, TimerQueueError};
 
@@ -13,7 +12,7 @@ pub use hyper::time::{QueueStats, TimerCallback, TimerEvent, TimerHandle, TimerM
 /// Bound one interrupt's callback work without imposing a timer storage cap.
 const MAX_CALLBACKS_PER_INTERRUPT: usize = 64;
 
-type TimerLock = InterruptSpinLock<ProcessorTimers, crate::arch::irq::LocalMask>;
+type TimerLock = InterruptSpinLock<ProcessorTimers, crate::hal::irq::LocalMask>;
 
 static TIMERS: PerCpu<TimerLock> =
     PerCpu::new([const { TimerLock::new(ProcessorTimers::new()) }; hyper::cpu::MAX_CPUS]);
@@ -38,7 +37,7 @@ pub(super) fn initialize_local() -> Result<(), super::Error> {
         if timers.initialized {
             return Err(super::Error::TimerQueueAlreadyInitialized);
         }
-        crate::arch::time::Timer::disable();
+        crate::hal::time::disable_local_timer();
         timers.queue.initialize_id(cpu.get())?;
         timers.initialized = true;
         Ok(())
@@ -129,7 +128,7 @@ pub fn local_statistics() -> Option<QueueStats> {
 
 pub(super) fn handle_interrupt() -> Result<usize, super::Error> {
     let cpu = current_cpu()?;
-    crate::arch::time::Timer::mask();
+    crate::hal::time::mask_local_timer();
     let mut callbacks = 0;
     while callbacks < MAX_CALLBACKS_PER_INTERRUPT {
         let expired = TIMERS[cpu].with(|timers| {
@@ -149,21 +148,6 @@ pub(super) fn handle_interrupt() -> Result<usize, super::Error> {
     Ok(callbacks)
 }
 
-pub(super) fn request_hardware_wakeup(deadline: u64) -> Result<(), super::Error> {
-    let cpu = current_cpu()?;
-    TIMERS[cpu].with(|timers| {
-        ensure_initialized(timers)?;
-        let earlier = timers
-            .queue
-            .next_deadline()
-            .is_none_or(|next| (deadline.wrapping_sub(next) as i64) < 0);
-        if earlier {
-            crate::arch::time::Timer::set_deadline(deadline)?;
-        }
-        Ok(())
-    })
-}
-
 fn current_cpu() -> Result<CpuIndex, super::Error> {
     crate::kernel::cpu::current_index().ok_or(super::Error::InvalidCpuIndex)
 }
@@ -178,8 +162,8 @@ fn ensure_initialized(timers: &ProcessorTimers) -> Result<(), super::Error> {
 
 fn program_next(queue: &OwnedDeadlineQueue) -> Result<(), super::Error> {
     match queue.next_deadline() {
-        Some(deadline) => crate::arch::time::Timer::set_deadline(deadline)?,
-        None => crate::arch::time::Timer::disable(),
+        Some(deadline) => crate::hal::time::program_deadline(deadline)?,
+        None => crate::hal::time::disable_local_timer(),
     }
     Ok(())
 }

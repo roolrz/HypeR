@@ -11,7 +11,7 @@ use hyper::log::{Level, ReadResult, Record, RecordFlags};
 use hyper::sync::InterruptSpinLock;
 use hyper::sync::atomic::{AtomicBool, AtomicFlag, AtomicUsize, Ordering};
 
-type KernelSpinLock<T> = InterruptSpinLock<T, crate::arch::irq::LocalMask>;
+type KernelSpinLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
 const LOG_LINE_MAX: usize = hyper::config::LOG_LINE_MAX as usize;
 const CONSOLE_LOGLEVEL: Level = configured_console_level();
@@ -167,7 +167,7 @@ fn emergency_device() -> Option<ConsoleDevice> {
     // SAFETY: install publishes only a currently live bootstrap or permanent
     // mapping, and retirement clears the snapshot before invalidating the
     // bootstrap address. Crash handling is the sole lock-free consumer.
-    unsafe { ConsoleDevice::from_emergency_handle(handle, crate::arch::platform::port_io()) }
+    unsafe { ConsoleDevice::from_emergency_handle(handle, crate::hal::platform::port_io()) }
 }
 
 /// Writes one guest-console byte through the selected host console without

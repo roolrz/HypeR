@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Kernel device-service orchestration.
+//! Kernel physical-device initialization policy.
+//!
+//! Boot-critical firmware services are activated before interrupt setup;
+//! discoverable platform devices bind later through the driver framework.
 
 pub mod cpu_power;
 mod platform_bus;
@@ -14,8 +17,8 @@ pub(crate) enum InitializationError {
     MissingCpuPower,
 }
 
-/// Selects and activates the firmware CPU power-management interface.
-pub(crate) fn initialize_cpu_power(
+/// Initializes boot-critical firmware interfaces before host interrupts.
+pub(crate) fn early_initialize(
     boot: &super::boot::Initialization,
 ) -> Result<(), InitializationError> {
     let info = boot
@@ -36,7 +39,7 @@ pub(crate) fn initialize_cpu_power(
 }
 
 /// Enumerates platform devices, promotes earlycon, and binds built-in drivers.
-pub(crate) fn initialize_platform_devices(
+pub(crate) fn platform_device_initialize(
     boot: &super::boot::Initialization,
 ) -> Result<(), InitializationError> {
     let report = platform_bus::initialize(boot).map_err(InitializationError::DriverFramework)?;
