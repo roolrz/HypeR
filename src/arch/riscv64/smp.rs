@@ -4,11 +4,20 @@
 use core::arch::asm;
 use core::ptr::addr_of;
 use hyper::cpu::CpuIndex;
-use hyper::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use hyper::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
 static HART_IDS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
 static HART_ONLINE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static KERNEL_RPC_REASONS: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
+
+pub fn publish_kernel_rpc(cpu: CpuIndex, reasons: u8) -> bool {
+    KERNEL_RPC_REASONS[cpu.get()].fetch_or(reasons, Ordering::Release) == 0
+}
+
+pub fn take_kernel_rpc() -> u8 {
+    KERNEL_RPC_REASONS[super::current_cpu_index()].swap(0, Ordering::Acquire)
+}
 
 unsafe extern "C" {
     static riscv64_secondary_entry: u8;

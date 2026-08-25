@@ -6,7 +6,7 @@
 use core::arch::asm;
 use core::ptr::addr_of;
 
-use hyper::sync::atomic::{AtomicU64, Ordering};
+use hyper::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use super::registers;
 
@@ -20,6 +20,15 @@ const UNKNOWN_GIC_AFFINITY: u64 = u64::MAX;
 /// later sends a targeted SGI after observing scheduler CPU availability.
 static CPU_GIC_AFFINITIES: [AtomicU64; MAX_CPUS] =
     [const { AtomicU64::new(UNKNOWN_GIC_AFFINITY) }; MAX_CPUS];
+static KERNEL_RPC_REASONS: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
+
+pub fn publish_kernel_rpc(cpu: hyper::cpu::CpuIndex, reasons: u8) -> bool {
+    KERNEL_RPC_REASONS[cpu.get()].fetch_or(reasons, Ordering::Release) == 0
+}
+
+pub fn take_kernel_rpc() -> u8 {
+    KERNEL_RPC_REASONS[super::current_cpu_index()].swap(0, Ordering::Acquire)
+}
 
 unsafe extern "C" {
     static aarch64_secondary_entry: u8;

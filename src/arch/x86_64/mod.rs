@@ -109,6 +109,11 @@ pub const fn atomic_capabilities() -> AtomicCapabilities {
     AtomicCapabilities
 }
 
+pub fn service_stage1_tlb_shootdown() -> bool {
+    tlb::service_pending();
+    true
+}
+
 /// x86-64 enables NXE before long mode and final page tables contain no
 /// writable executable leaves, so no additional per-CPU transition is needed.
 pub fn enable_local_memory_protection() {}
@@ -248,6 +253,22 @@ pub const fn reschedule_interrupt() -> Option<hyper::hal::interrupt::InterruptId
     Some(hyper::hal::interrupt::InterruptId::new(
         platform::RESCHEDULE_VECTOR,
     ))
+}
+
+pub const fn kernel_rpc_interrupt() -> Option<hyper::hal::interrupt::InterruptId> {
+    Some(hyper::hal::interrupt::InterruptId::new(
+        platform::KERNEL_RPC_VECTOR,
+    ))
+}
+
+pub const fn arm_kernel_rpc_source() {}
+
+pub fn notify_kernel_rpc(cpu: hyper::cpu::CpuIndex, reasons: u8) -> bool {
+    smp::notify_kernel_rpc(cpu, reasons)
+}
+
+pub fn take_kernel_rpc_reasons() -> u8 {
+    smp::take_kernel_rpc()
 }
 pub const fn is_crash_stop_interrupt(_interrupt: hyper::hal::interrupt::InterruptId) -> bool {
     false

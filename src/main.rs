@@ -26,7 +26,7 @@ enum KernelStartError {
     Device(crate::kernel::device::InitializationError),
     Interrupt(crate::kernel::irq::InitializationError),
     Memory(crate::kernel::mm::InitializationError),
-    MemoryFinalization(crate::kernel::mm::FinalizationError),
+    MemorySealing(crate::kernel::mm::FinalizationError),
     Scheduler(crate::kernel::task::scheduler::Error),
     Time(crate::kernel::time::InitializationError),
     VirtualMachineInitialization(crate::kernel::vm::InitializationError),
@@ -53,7 +53,7 @@ impl_kernel_start_error! {
     Device(crate::kernel::device::InitializationError),
     Interrupt(crate::kernel::irq::InitializationError),
     Memory(crate::kernel::mm::InitializationError),
-    MemoryFinalization(crate::kernel::mm::FinalizationError),
+    MemorySealing(crate::kernel::mm::FinalizationError),
     Scheduler(crate::kernel::task::scheduler::Error),
     Time(crate::kernel::time::InitializationError),
     VirtualMachineInitialization(crate::kernel::vm::InitializationError),
@@ -70,7 +70,7 @@ impl core::fmt::Debug for KernelStartError {
             Self::Device(error) => ("device", error),
             Self::Interrupt(error) => ("interrupt", error),
             Self::Memory(error) => ("memory", error),
-            Self::MemoryFinalization(error) => ("memory-finalization", error),
+            Self::MemorySealing(error) => ("memory-sealing", error),
             Self::Scheduler(error) => ("scheduler", error),
             Self::Time(error) => ("time", error),
             Self::VirtualMachineInitialization(error) => ("virtual-machine-initialization", error),
@@ -93,20 +93,20 @@ extern "C" fn start_kernel() -> ! {
     let result: Result<Infallible, KernelStartError> = (|| {
         let mut boot = crate::kernel::boot::enter_runtime()?;
 
+        crate::kernel::device::early_initialize(&boot)?;
+
         crate::kernel::mm::initialize()?;
         crate::kernel::debug::initialize()?;
         crate::kernel::task::initialize()?;
 
-        crate::kernel::device::early_initialize(&boot)?;
         crate::kernel::irq::initialize(&mut boot)?;
         crate::kernel::crash::initialize(&boot)?;
         crate::kernel::time::initialize(&mut boot)?;
-        crate::kernel::vm::initialize(&boot)?;
+        crate::kernel::cpu::initialize()?;
+        crate::kernel::mm::seal_address_space()?;
 
         crate::kernel::device::platform_device_initialize(&boot)?;
-        crate::kernel::cpu::initialize()?;
-
-        crate::kernel::mm::finalize_address_space()?;
+        crate::kernel::vm::initialize(&boot)?;
 
         #[cfg(feature = "kernel-self-test")]
         crate::kernel_tests::run();

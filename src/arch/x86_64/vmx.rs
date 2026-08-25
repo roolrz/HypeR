@@ -881,7 +881,9 @@ fn handle_external_interrupt() {
         // architecture-private vectors here before VM or kernel policy sees
         // them. The private handler completes the local APIC interrupt, so
         // this path must not dispatch or acknowledge it again.
-        if super::tlb::handle_interrupt(vector) {
+        if vector == super::platform::KERNEL_RPC_VECTOR {
+            crate::arch::irq::service_kernel_rpc();
+            super::interrupt_controller::end_local_interrupt();
             return;
         }
         match crate::kernel::entry::irq::dispatch(hyper::hal::interrupt::InterruptId::new(vector)) {

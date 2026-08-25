@@ -44,6 +44,10 @@ static CPU_STACKS: StackLock<PerCpu<CpuStacks>> = StackLock::new(PerCpu::new(
     [const { CpuStacks::new() }; hyper::cpu::MAX_CPUS],
 ));
 
+pub(crate) fn serialize_stage1_mutation<R>(operation: impl FnOnce() -> R) -> R {
+    STACK_SLOTS.with(|_| operation())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StackKind {
     Thread,

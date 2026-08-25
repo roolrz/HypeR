@@ -46,6 +46,14 @@ impl InterruptMask for LocalInterruptMask {
             );
         }
     }
+
+    fn wait_for_lock_owner() {
+        // SGIs cannot be taken with DAIF.I set. Drain the durable mailbox
+        // through its opaque poll-safe callback so synchronous RPC cannot be
+        // blocked by a target contending on an IRQ-safe lock.
+        crate::arch::irq::service_kernel_rpc();
+        core::hint::spin_loop();
+    }
 }
 
 /// Enables local IRQ exceptions while leaving FIQ, `SError`, and debug masked.

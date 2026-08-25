@@ -176,8 +176,9 @@ define_asm_constants! {
     CRASH_CONTEXT_SIZE = 368;
 
     // Physical SGIs reserved by the host kernel.
-    GIC_RESCHEDULE_SGI = 14;
-    GIC_CRASH_STOP_SGI = 15;
+    GIC_KERNEL_RPC_SGI = 8;
+    GIC_RESCHEDULE_SGI = 9;
+    GIC_CRASH_STOP_SGI = 10;
     // ICC_SGI1R_EL1 affinity-routing fields.
     ICC_SGI1R_AFF1_SHIFT = 16;
     ICC_SGI1R_INTID_SHIFT = 24;

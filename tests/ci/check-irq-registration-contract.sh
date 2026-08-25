@@ -47,6 +47,18 @@ LC_ALL=C rg -q 'pub fn unregister\(registration: Registration\) -> Result<\(\), 
     exit 1
 }
 
+LC_ALL=C rg -q 'pub fn discard_prepared\(prepared: PreparedRegistration\) -> Result<\(\), DiscardFailure>' \
+    "$source_file" || {
+    echo "discard_prepared must return its exclusive capability on failure" >&2
+    exit 1
+}
+
+LC_ALL=C rg -q -U 'pub struct DiscardFailure \{[^}]*prepared: PreparedRegistration' \
+    "$source_file" || {
+    echo "DiscardFailure must preserve the prepared mapping capability" >&2
+    exit 1
+}
+
 LC_ALL=C rg -q 'pub fn retain_permanently\(self\)' "$source_file" || {
     echo "permanent IRQ ownership must remain an explicit conversion" >&2
     exit 1

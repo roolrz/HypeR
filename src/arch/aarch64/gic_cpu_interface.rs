@@ -125,6 +125,36 @@ pub const fn reschedule_interrupt() -> Option<InterruptId> {
     Some(InterruptId::new(registers::GIC_RESCHEDULE_SGI as u32))
 }
 
+pub const fn kernel_rpc_interrupt() -> Option<InterruptId> {
+    Some(InterruptId::new(registers::GIC_KERNEL_RPC_SGI as u32))
+}
+
+pub fn notify_kernel_rpc(cpu: CpuIndex, reasons: u8) -> bool {
+    if !super::smp::publish_kernel_rpc(cpu, reasons) {
+        return true;
+    }
+    let Some(affinity) = super::smp::gic_affinity(cpu.get()) else {
+        return false;
+    };
+    let Some(interrupt) = kernel_rpc_interrupt() else {
+        return false;
+    };
+    let Some(value) = targeted_sgi_value(interrupt, affinity) else {
+        return false;
+    };
+    // SAFETY: SGI 8 is reserved for this transport, controller setup is
+    // complete, and route publication preceded admission of the target CPU.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "msr ICC_SGI1R_EL1, {value}",
+            value = in(reg) value,
+            options(nostack, preserves_flags)
+        );
+    }
+    true
+}
+
 /// Prompts one logical CPU to evaluate its pending reschedule state.
 ///
 /// The durable condition is the scheduler's coalesced pending flag; this SGI

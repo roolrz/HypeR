@@ -2,12 +2,21 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use hyper::cpu::CpuIndex;
-use hyper::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use hyper::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
 static APIC_IDS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(u64::MAX) }; MAX_CPUS];
 static ONLINE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static RESCHEDULE_ENABLED: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+static KERNEL_RPC_REASONS: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
+
+pub fn publish_kernel_rpc(cpu: CpuIndex, reasons: u8) -> bool {
+    KERNEL_RPC_REASONS[cpu.get()].fetch_or(reasons, Ordering::Release) == 0
+}
+
+pub fn take_kernel_rpc() -> u8 {
+    KERNEL_RPC_REASONS[current_cpu_index()].swap(0, Ordering::Acquire)
+}
 
 #[repr(C, align(64))]
 pub struct SecondaryBootParameters {
@@ -160,5 +169,28 @@ pub fn notify_reschedule(cpu: CpuIndex) -> bool {
     super::interrupt_controller::send_fixed_ipi(
         apic_id,
         hyper::hal::interrupt::InterruptId::new(super::platform::RESCHEDULE_VECTOR),
+    )
+}
+
+pub fn notify_kernel_rpc(cpu: CpuIndex, reasons: u8) -> bool {
+    if !publish_kernel_rpc(cpu, reasons) {
+        return true;
+    }
+    let index = cpu.get();
+    let Some(route) = APIC_IDS.get(index) else {
+        return false;
+    };
+    let Some(online) = ONLINE.get(index) else {
+        return false;
+    };
+    if !online.load(Ordering::Acquire) {
+        return false;
+    }
+    let Ok(apic_id) = u32::try_from(route.load(Ordering::Acquire)) else {
+        return false;
+    };
+    super::interrupt_controller::send_fixed_ipi(
+        apic_id,
+        hyper::hal::interrupt::InterruptId::new(super::platform::KERNEL_RPC_VECTOR),
     )
 }

@@ -73,12 +73,14 @@ pub(crate) fn is_ready() -> bool {
 }
 
 /// Removes bootstrap-only mappings and reports the permanent memory layout.
-pub(crate) fn finalize_address_space() -> Result<(), FinalizationError> {
-    super::boot::with_boot_state(|state| {
-        // SAFETY: SMP initialization has moved every online CPU to permanent
-        // high mappings, and finalization runs once before normal scheduling
-        // can introduce any concurrent stage-1 mutation.
-        unsafe { state.memory.retire_identity_mappings(&state.platform) }
+pub(crate) fn seal_address_space() -> Result<(), FinalizationError> {
+    stack::serialize_stage1_mutation(|| {
+        super::boot::with_boot_state(|state| {
+            // SAFETY: SMP initialization moved the frozen participating set to
+            // permanent high mappings. STACK_SLOTS is the sole runtime stage-1
+            // mutation lock and excludes stack map/unmap while aliases retire.
+            unsafe { state.memory.retire_identity_mappings(&state.platform) }
+        })
     })
     .map_err(FinalizationError::IdentityMappings)?;
     crate::hal::memory::enable_local_protection();

@@ -32,7 +32,7 @@ impl InterruptMask for LocalInterruptMask {
         // A fixed-delivery shootdown IPI cannot arrive while IF is clear. Poll
         // the architecture generation while contending so a CPU blocked behind
         // the shootdown initiator can acknowledge without acquiring any lock.
-        super::tlb::service_pending();
+        crate::arch::irq::service_kernel_rpc();
         core::hint::spin_loop();
     }
 }

@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-use hyper::drivers::interrupt::gicv3::{Error as GicError, GicV3};
+use hyper::drivers::interrupt::gicv3::{Error as GicError, GicV3, GicV3Local};
 use hyper::hal::interrupt::{
     InterruptController, InterruptId, InterruptPriority, InterruptTrigger,
-    KernelInterruptController,
+    KernelInterruptController, LocalInterruptController,
 };
 use hyper::platform::InterruptControllerInfo;
 
@@ -13,6 +13,30 @@ use super::{Aarch64GicCpuInterface, barrier::Aarch64Barrier};
 type Controller = GicV3<Aarch64GicCpuInterface, Aarch64Barrier>;
 
 pub struct Aarch64InterruptController(Controller);
+pub struct Aarch64LocalInterruptController(GicV3Local<Aarch64GicCpuInterface, Aarch64Barrier>);
+
+impl LocalInterruptController for Aarch64LocalInterruptController {
+    type Error = Error;
+
+    fn configure(
+        &self,
+        interrupt: InterruptId,
+        priority: InterruptPriority,
+        trigger: InterruptTrigger,
+    ) -> Result<(), Error> {
+        self.0
+            .configure(interrupt, priority, trigger)
+            .map_err(Into::into)
+    }
+
+    fn enable(&self, interrupt: InterruptId) -> Result<(), Error> {
+        self.0.enable(interrupt).map_err(Into::into)
+    }
+
+    fn disable(&self, interrupt: InterruptId) -> Result<(), Error> {
+        self.0.disable(interrupt).map_err(Into::into)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -71,6 +95,8 @@ impl InterruptController for Aarch64InterruptController {
 }
 
 impl KernelInterruptController for Aarch64InterruptController {
+    type Local = Aarch64LocalInterruptController;
+
     fn interrupt_count(&self) -> u32 {
         self.0.interrupt_count()
     }
@@ -90,9 +116,17 @@ impl KernelInterruptController for Aarch64InterruptController {
         interrupt.get() < 32
     }
 
-    unsafe fn initialize_local(&mut self) -> Result<(), Self::Error> {
+    fn local_controller(&self) -> Result<Self::Local, Self::Error> {
+        self.0
+            .local_controller()
+            .map(Aarch64LocalInterruptController)
+            .map_err(Into::into)
+    }
+
+    unsafe fn initialize_local(&mut self) -> Result<Self::Local, Self::Error> {
         // SAFETY: The trait caller owns this CPU's redistributor/interface and
         // invokes local initialization with interrupts masked.
-        unsafe { self.0.initialize_local(super::current_gic_affinity()) }.map_err(Into::into)
+        unsafe { self.0.initialize_local(super::current_gic_affinity()) }.map_err(Error::from)?;
+        self.local_controller()
     }
 }

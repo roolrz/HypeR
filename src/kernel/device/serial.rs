@@ -24,7 +24,7 @@ static RECEIVE_ERRORS: AtomicU64 = AtomicU64::new(0);
 struct RuntimeConsole {
     port: RuntimePort,
     // The console owns this capability for its entire installed lifetime.
-    _interrupt_registration: Registration,
+    _interrupt_registration: Option<Registration>,
 }
 
 #[derive(Clone, Copy)]
@@ -148,20 +148,45 @@ fn install(
     }
     port.disable_interrupts();
     let interrupt_id = InterruptId::new(hardware_interrupt);
-    let (virtual_interrupt, registration) = boot.interrupts().root_domain.register_shared_mapping(
+    let prepared = boot.interrupts().root_domain.prepare_shared_mapping(
         interrupt_id,
         InterruptPriority::Normal,
         trigger,
         0,
         handle_interrupt,
     )?;
+    let virtual_interrupt = prepared.interrupt();
     HOST_CONSOLE.with(|slot| {
         *slot = Some(RuntimeConsole {
             port,
-            _interrupt_registration: registration,
+            _interrupt_registration: None,
         });
     });
     port.enable_runtime_input();
+    let registration = match crate::kernel::irq::interrupt::activate(prepared) {
+        Ok(registration) => registration,
+        Err(failure) => {
+            let (error, prepared) = failure.into_parts();
+            port.disable_interrupts();
+            HOST_CONSOLE.with(|slot| *slot = None);
+            if let Err(discard) = crate::kernel::irq::interrupt::discard_prepared(prepared) {
+                let (discard_error, _prepared) = discard.into_parts();
+                crate::kernel::crash::fatal(format_args!(
+                    "HypeR: serial IRQ activation rollback failed: {discard_error:?}"
+                ));
+            }
+            return Err(Error::Interrupt(error));
+        }
+    };
+    HOST_CONSOLE.with(|slot| {
+        let Some(runtime) = slot.as_mut() else {
+            registration.retain_permanently();
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: published runtime console disappeared before IRQ activation"
+            ));
+        };
+        runtime._interrupt_registration = Some(registration);
+    });
     Ok(Some(Capabilities {
         driver: port.name(),
         hardware_interrupt,

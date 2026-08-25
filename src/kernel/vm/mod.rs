@@ -54,6 +54,10 @@ pub fn boot_linux(
 /// Initializes hardware virtualization and guest-visible platform devices.
 pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), InitializationError> {
     crate::hal::vm::validate_register_interface().map_err(InitializationError::Registers)?;
+    // Prepared physical mappings must remain non-deliverable until every VM
+    // dependency below is published. Quiesce virtual delivery before exposing
+    // their disabled handler records to the IRQ registry.
+    crate::hal::vm::quiesce_virtual_interrupt_delivery();
     let interrupts = boot.interrupts();
     let guest_timer = boot.timer().guest_timer;
     let binding = timer::prepare(
@@ -99,7 +103,7 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
             maintenance.get(),
         );
     }
-    binding.retain_permanently();
+    binding.activate().map_err(InitializationError::Timer)?;
     crate::println!("HypeR: guest synchronous trap and vSysReg emulation validated");
     Ok(())
 }

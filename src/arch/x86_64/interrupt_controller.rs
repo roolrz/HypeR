@@ -5,7 +5,7 @@ use core::arch::asm;
 
 use hyper::hal::interrupt::{
     InterruptController, InterruptId, InterruptPriority, InterruptTrigger,
-    KernelInterruptController,
+    KernelInterruptController, LocalInterruptController,
 };
 use hyper::platform::InterruptControllerInfo;
 
@@ -32,6 +32,46 @@ pub enum Error {
 }
 
 pub struct X2ApicController;
+pub struct X2ApicLocalController;
+
+impl LocalInterruptController for X2ApicLocalController {
+    type Error = Error;
+
+    fn configure(
+        &self,
+        interrupt: InterruptId,
+        _priority: InterruptPriority,
+        trigger: InterruptTrigger,
+    ) -> Result<(), Error> {
+        if matches!(
+            interrupt.get(),
+            super::platform::TIMER_VECTOR
+                | super::platform::RESCHEDULE_VECTOR
+                | super::platform::KERNEL_RPC_VECTOR
+        ) && trigger == InterruptTrigger::Edge
+        {
+            Ok(())
+        } else {
+            Err(Error::InvalidInterrupt)
+        }
+    }
+
+    fn enable(&self, interrupt: InterruptId) -> Result<(), Error> {
+        if interrupt.get() == super::platform::KERNEL_RPC_VECTOR {
+            return Ok(());
+        }
+        let mut controller = X2ApicController;
+        controller.enable(interrupt)
+    }
+
+    fn disable(&self, interrupt: InterruptId) -> Result<(), Error> {
+        if interrupt.get() == super::platform::KERNEL_RPC_VECTOR {
+            return Ok(());
+        }
+        let mut controller = X2ApicController;
+        controller.disable(interrupt)
+    }
+}
 
 impl X2ApicController {
     pub unsafe fn bind(
@@ -100,6 +140,8 @@ impl InterruptController for X2ApicController {
 }
 
 impl KernelInterruptController for X2ApicController {
+    type Local = X2ApicLocalController;
+
     fn interrupt_count(&self) -> u32 {
         256
     }
@@ -124,16 +166,22 @@ impl KernelInterruptController for X2ApicController {
     fn is_per_cpu(&self, interrupt: InterruptId) -> bool {
         matches!(
             interrupt.get(),
-            super::platform::TIMER_VECTOR | super::platform::RESCHEDULE_VECTOR
+            super::platform::TIMER_VECTOR
+                | super::platform::RESCHEDULE_VECTOR
+                | super::platform::KERNEL_RPC_VECTOR
         )
     }
 
-    unsafe fn initialize_local(&mut self) -> Result<(), Self::Error> {
+    fn local_controller(&self) -> Result<Self::Local, Self::Error> {
+        Ok(X2ApicLocalController)
+    }
+
+    unsafe fn initialize_local(&mut self) -> Result<Self::Local, Self::Error> {
         let mut base = read_msr(IA32_APIC_BASE);
         base |= APIC_BASE_ENABLE | APIC_BASE_X2APIC;
         write_msr(IA32_APIC_BASE, base);
         write_msr(X2APIC_SIVR, APIC_SOFTWARE_ENABLE | SPURIOUS_VECTOR);
-        Ok(())
+        Ok(X2ApicLocalController)
     }
 }
 

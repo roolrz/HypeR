@@ -9,6 +9,12 @@ use hyper::platform::{
 
 pub const TIMER_VECTOR: u32 = 0xef;
 pub const RESCHEDULE_VECTOR: u32 = 0xf0;
+pub const KERNEL_RPC_VECTOR: u32 = 0xf1;
+
+const _: () = assert!(KERNEL_RPC_VECTOR >= 32);
+const _: () = assert!(KERNEL_RPC_VECTOR < 0xff);
+const _: () = assert!(KERNEL_RPC_VECTOR != TIMER_VECTOR);
+const _: () = assert!(KERNEL_RPC_VECTOR != RESCHEDULE_VECTOR);
 
 #[derive(Clone, Copy, Debug)]
 pub struct EssentialPlatformInfo {

@@ -30,6 +30,10 @@ pub(crate) fn prepare_cache(
     super::imp::prepare_cache(platform.as_backend())
 }
 
+pub(crate) fn service_stage1_tlb_shootdown() -> bool {
+    super::imp::service_stage1_tlb_shootdown()
+}
+
 #[cfg(CONFIG_CRASH_CONSOLE)]
 pub(crate) use super::imp::inspect_stage1_mapping;
 

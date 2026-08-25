@@ -99,6 +99,10 @@ pub const fn atomic_capabilities() -> AtomicCapabilities {
     AtomicCapabilities
 }
 
+pub const fn service_stage1_tlb_shootdown() -> bool {
+    true
+}
+
 /// Sv39 permissions directly encode the kernel's RX/R/XN split; there is no
 /// AArch64-style global WXN control to enable on each hart.
 pub fn enable_local_memory_protection() {}
@@ -219,6 +223,21 @@ pub const fn crash_stop_interrupt() -> Option<hyper::hal::interrupt::InterruptId
 }
 pub const fn reschedule_interrupt() -> Option<hyper::hal::interrupt::InterruptId> {
     None
+}
+pub const fn kernel_rpc_interrupt() -> Option<hyper::hal::interrupt::InterruptId> {
+    None
+}
+pub fn arm_kernel_rpc_source() {
+    interrupts::enable_software_interrupt_source();
+}
+pub fn notify_kernel_rpc(cpu: hyper::cpu::CpuIndex, reasons: u8) -> bool {
+    if !smp::publish_kernel_rpc(cpu, reasons) {
+        return true;
+    }
+    notify_reschedule(cpu)
+}
+pub fn take_kernel_rpc_reasons() -> u8 {
+    smp::take_kernel_rpc()
 }
 pub const fn is_crash_stop_interrupt(_interrupt: hyper::hal::interrupt::InterruptId) -> bool {
     false
