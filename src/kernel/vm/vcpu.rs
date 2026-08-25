@@ -60,7 +60,7 @@ fn try_run_current() -> Result<Infallible, RunError> {
     unsafe {
         super::memory::activate(&*vm).map_err(RunError::Memory)?;
         activate(execution).map_err(RunError::VirtualHardware)?;
-        crate::hal::vm::enable_interrupts_for_entry();
+        crate::hal::vm::prepare_interrupts_for_entry();
         // No Rust reference to VcpuExecution or VcpuContext is live here. VM
         // exits and asynchronous guest exceptions may therefore reconstruct
         // short-lived exclusive references from the published raw owner token.

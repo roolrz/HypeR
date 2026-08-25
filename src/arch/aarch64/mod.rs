@@ -184,9 +184,15 @@ pub fn initialize_virtual_devices(
     Ok(())
 }
 
-pub fn enable_interrupts_for_guest_entry() {
-    enable_local_irq();
-}
+/// Applies the local interrupt state required immediately before guest entry.
+///
+/// `AArch64` must keep IRQs masked until `ERET`. Once `ELR_EL2` and `SPSR_EL2`
+/// contain guest state, an IRQ taken by the entry trampoline would overwrite
+/// those registers with its host return state. The exception tail could then
+/// save that host state as the guest context and resume through a corrupted
+/// entry transaction. Interrupts routed to EL2 remain able to preempt the
+/// lower-EL guest after `ERET`.
+pub const fn prepare_interrupts_for_guest_entry() {}
 
 unsafe extern "C" {
     fn aarch64_activate_final_address_space(

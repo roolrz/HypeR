@@ -60,8 +60,12 @@ pub(crate) fn set_virtual_count(context: &mut VcpuContext, physical: u64, value:
     context.set_virtual_count(physical, value);
 }
 
-pub(crate) fn enable_interrupts_for_entry() {
-    crate::arch::vm::enable_interrupts_for_entry();
+/// Applies the selected architecture's local interrupt state for guest entry.
+///
+/// Callers must not assume this unmasks interrupts. In particular, `AArch64`
+/// keeps IRQs masked across the non-atomic EL2-to-guest context transaction.
+pub(crate) fn prepare_interrupts_for_entry() {
+    crate::arch::vm::prepare_interrupts_for_entry();
 }
 
 /// Activates the local machine state for a stopped vCPU.
