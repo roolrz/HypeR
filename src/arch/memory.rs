@@ -32,3 +32,6 @@ pub(crate) fn prepare_cache(
 
 #[cfg(CONFIG_CRASH_CONSOLE)]
 pub(crate) use super::imp::inspect_stage1_mapping;
+
+#[cfg(all(CONFIG_ARCH_X86_64, feature = "kernel-self-test"))]
+pub(crate) use super::imp::stage1_shootdown_count_for_test;

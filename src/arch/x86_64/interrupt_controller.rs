@@ -13,6 +13,7 @@ const IA32_APIC_BASE: u32 = 0x1b;
 const APIC_BASE_ENABLE: u64 = 1 << 11;
 const APIC_BASE_X2APIC: u64 = 1 << 10;
 const X2APIC_EOI: u32 = 0x80b;
+const X2APIC_ICR: u32 = 0x830;
 const X2APIC_SIVR: u32 = 0x80f;
 const X2APIC_LVT_TIMER: u32 = 0x832;
 const X2APIC_TIMER_INITIAL_COUNT: u32 = 0x838;
@@ -26,6 +27,7 @@ const SPURIOUS_VECTOR: u64 = 0xff;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Unsupported,
+    InvalidCpu,
     InvalidInterrupt,
 }
 
@@ -67,6 +69,11 @@ impl InterruptController for X2ApicController {
             );
             return Ok(());
         }
+        if interrupt.get() == super::platform::RESCHEDULE_VECTOR {
+            return super::smp::set_reschedule_enabled(true)
+                .then_some(())
+                .ok_or(Error::InvalidCpu);
+        }
         Err(Error::InvalidInterrupt)
     }
 
@@ -74,6 +81,11 @@ impl InterruptController for X2ApicController {
         if interrupt.get() == super::platform::TIMER_VECTOR {
             mask_timer();
             return Ok(());
+        }
+        if interrupt.get() == super::platform::RESCHEDULE_VECTOR {
+            return super::smp::set_reschedule_enabled(false)
+                .then_some(())
+                .ok_or(Error::InvalidCpu);
         }
         Err(Error::InvalidInterrupt)
     }
@@ -98,7 +110,11 @@ impl KernelInterruptController for X2ApicController {
         _priority: InterruptPriority,
         trigger: InterruptTrigger,
     ) -> Result<(), Self::Error> {
-        if interrupt.get() == super::platform::TIMER_VECTOR && trigger == InterruptTrigger::Edge {
+        if matches!(
+            interrupt.get(),
+            super::platform::TIMER_VECTOR | super::platform::RESCHEDULE_VECTOR
+        ) && trigger == InterruptTrigger::Edge
+        {
             Ok(())
         } else {
             Err(Error::InvalidInterrupt)
@@ -106,7 +122,10 @@ impl KernelInterruptController for X2ApicController {
     }
 
     fn is_per_cpu(&self, interrupt: InterruptId) -> bool {
-        interrupt.get() == super::platform::TIMER_VECTOR
+        matches!(
+            interrupt.get(),
+            super::platform::TIMER_VECTOR | super::platform::RESCHEDULE_VECTOR
+        )
     }
 
     unsafe fn initialize_local(&mut self) -> Result<(), Self::Error> {
@@ -155,6 +174,41 @@ pub fn end_timer_calibration() -> u32 {
     let elapsed = u32::MAX.wrapping_sub(timer_current_count());
     write_msr(X2APIC_TIMER_INITIAL_COUNT, 0);
     elapsed
+}
+
+/// Sends one fixed-delivery interrupt to a physical x2APIC destination.
+///
+/// The x2APIC APIC-register form of WRMSR may complete before older stores
+/// become globally visible. Intel SDM Vol. 3A, x2APIC MSR Access, prescribes
+/// MFENCE;LFENCE as the non-serializing-instruction alternative; that exact
+/// sequence orders a published kernel condition before the target observes
+/// this one-shot prompt. No fence is needed after the ICR write.
+pub fn send_fixed_ipi(target: u32, interrupt: InterruptId) -> bool {
+    let vector = interrupt.get();
+    if !(32..SPURIOUS_VECTOR as u32).contains(&vector) {
+        return false;
+    }
+    let value = (u64::from(target) << 32) | u64::from(vector);
+    // SAFETY: Controller binding selected x2APIC mode before any reschedule
+    // route is enabled. The destination is a published physical x2APIC ID and
+    // the vector excludes architectural exceptions and the spurious vector.
+    unsafe {
+        asm!(
+            "mfence",
+            "lfence",
+            "wrmsr",
+            in("ecx") X2APIC_ICR,
+            in("eax") value as u32,
+            in("edx") (value >> 32) as u32,
+            options(nostack),
+        )
+    };
+    true
+}
+
+/// Completes one architecture-private local interrupt.
+pub(super) fn end_local_interrupt() {
+    write_msr(X2APIC_EOI, 0);
 }
 
 fn read_msr(msr: u32) -> u64 {

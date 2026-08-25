@@ -13,6 +13,7 @@ pub(crate) use super::imp::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DescriptionError {
+    #[cfg(CONFIG_ARCH_AARCH64)]
     InvalidInterruptTrigger,
     UnsupportedTimer,
 }

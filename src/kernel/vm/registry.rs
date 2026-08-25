@@ -27,8 +27,8 @@ use super::device::VirtualDeviceSet;
 use super::memory::GuestAddressSpace;
 use crate::kernel::task::thread::ThreadId;
 
-type RegistryLock = InterruptSpinLock<VmRegistry, crate::arch::irq::LocalMask>;
-type AddressSpaceLock = InterruptSpinLock<GuestAddressSpace, crate::arch::irq::LocalMask>;
+type RegistryLock = InterruptSpinLock<VmRegistry, crate::hal::irq::LocalMask>;
+type AddressSpaceLock = InterruptSpinLock<GuestAddressSpace, crate::hal::irq::LocalMask>;
 
 static REGISTRY: RegistryLock = InterruptSpinLock::new(VmRegistry::new());
 
@@ -190,7 +190,7 @@ impl VmBuilder {
     pub(crate) fn prepare_boot_vcpu(
         mut self,
         vcpu_id: u32,
-        context: crate::arch::vm::VcpuContext,
+        context: crate::hal::vm::VcpuContext,
     ) -> Result<PreparedVm, crate::kernel::task::scheduler::Error> {
         let dormant = super::vcpu::create_thread(self.vcpu_binding(), vcpu_id, context)?;
         // SAFETY: PreparedVm takes ownership of the rollback capability and

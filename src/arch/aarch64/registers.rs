@@ -29,7 +29,7 @@ define_asm_constants! {
     // Exception levels and interrupt masks used by entry assembly.
     CURRENT_EL_EL2 = 0x8;
     DAIFSET_ALL = 0xf;
-    DAIFCLR_IRQ = 0x2;
+    DAIF_IRQ = 0x2;
 
     // HCR_EL2.
     HCR_EL2_VM = 1 << 0;
@@ -175,10 +175,15 @@ define_asm_constants! {
     CRASH_CONTEXT_HCR_EL2_OFFSET = 360;
     CRASH_CONTEXT_SIZE = 368;
 
-    // ICC_SGI1R_EL1 fields used for emergency all-but-self IPIs.
+    // Physical SGIs reserved by the host kernel.
+    GIC_RESCHEDULE_SGI = 14;
     GIC_CRASH_STOP_SGI = 15;
+    // ICC_SGI1R_EL1 affinity-routing fields.
+    ICC_SGI1R_AFF1_SHIFT = 16;
     ICC_SGI1R_INTID_SHIFT = 24;
+    ICC_SGI1R_AFF2_SHIFT = 32;
     ICC_SGI1R_IRM = 1 << 40;
+    ICC_SGI1R_AFF3_SHIFT = 48;
     GIC_SPURIOUS_INTERRUPT_MIN = 1020;
 
     // Kernel thread and vCPU context ABIs shared with context.S.

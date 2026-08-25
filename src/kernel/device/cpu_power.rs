@@ -10,7 +10,7 @@ use hyper::platform::CpuPowerInfo;
 use hyper::sync::InterruptSpinLock;
 
 type CpuPowerLock =
-    InterruptSpinLock<Option<crate::arch::cpu::PowerController>, crate::arch::irq::LocalMask>;
+    InterruptSpinLock<Option<crate::hal::cpu::PowerController>, crate::hal::irq::LocalMask>;
 
 static CPU_POWER: CpuPowerLock = InterruptSpinLock::new(None);
 
@@ -18,11 +18,11 @@ static CPU_POWER: CpuPowerLock = InterruptSpinLock::new(None);
 pub enum Error {
     AlreadyInitialized,
     NotInitialized,
-    Architecture(crate::arch::cpu::PowerError),
+    Architecture(crate::hal::cpu::PowerError),
 }
 
-impl From<crate::arch::cpu::PowerError> for Error {
-    fn from(error: crate::arch::cpu::PowerError) -> Self {
+impl From<crate::hal::cpu::PowerError> for Error {
+    fn from(error: crate::hal::cpu::PowerError) -> Self {
         Self::Architecture(error)
     }
 }
@@ -32,7 +32,7 @@ pub fn initialize(info: CpuPowerInfo) -> Result<CpuPowerCapabilities, Error> {
         if slot.is_some() {
             return Err(Error::AlreadyInitialized);
         }
-        let controller = crate::arch::cpu::initialize_power(info)?;
+        let controller = crate::hal::cpu::initialize_power(info)?;
         let capabilities = controller.capabilities();
         *slot = Some(controller);
         Ok(capabilities)
@@ -96,7 +96,7 @@ pub fn system_reset() -> Result<(), Error> {
     controller()?.system_reset().map_err(Error::from)
 }
 
-fn controller() -> Result<crate::arch::cpu::PowerController, Error> {
+fn controller() -> Result<crate::hal::cpu::PowerController, Error> {
     CPU_POWER.with(|slot| {
         let controller = *slot.as_ref().ok_or(Error::NotInitialized)?;
         Ok(controller)

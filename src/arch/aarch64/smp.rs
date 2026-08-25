@@ -6,7 +6,20 @@
 use core::arch::asm;
 use core::ptr::addr_of;
 
+use hyper::sync::atomic::{AtomicU64, Ordering};
+
 use super::registers;
+
+const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
+const UNKNOWN_GIC_AFFINITY: u64 = u64::MAX;
+
+/// Logical-CPU to GIC affinity routing information.
+///
+/// Firmware CPU identifiers are registered by the boot CPU before the target
+/// is started. A Release store publishes each completed entry to any CPU that
+/// later sends a targeted SGI after observing scheduler CPU availability.
+static CPU_GIC_AFFINITIES: [AtomicU64; MAX_CPUS] =
+    [const { AtomicU64::new(UNKNOWN_GIC_AFFINITY) }; MAX_CPUS];
 
 unsafe extern "C" {
     static aarch64_secondary_entry: u8;
@@ -81,6 +94,74 @@ pub fn current_hardware_id() -> u64 {
     let affinity_0_to_2 = mpidr & registers::MPIDR_AFF0_TO_2_MASK;
     let affinity_3 = (mpidr >> registers::MPIDR_AFF3_SHIFT) & registers::MPIDR_AFF3_MASK;
     affinity_0_to_2 | (affinity_3 << registers::MPIDR_AFF3_SHIFT)
+}
+
+/// Records the boot CPU's logical-to-GIC affinity association.
+pub fn initialize_boot_cpu() -> bool {
+    let Some(affinity) = hardware_id_to_gic_affinity(current_hardware_id()) else {
+        return false;
+    };
+    if affinity & 0xff >= 16 {
+        return false;
+    }
+    publish_gic_affinity(&CPU_GIC_AFFINITIES[0], affinity)
+}
+
+/// Records one firmware-described secondary CPU for targeted SGI routing.
+pub fn register_cpu(cpu_index: usize, hardware_id: u64) -> bool {
+    let Some(slot) = CPU_GIC_AFFINITIES.get(cpu_index) else {
+        return false;
+    };
+    let Some(affinity) = hardware_id_to_gic_affinity(hardware_id) else {
+        return false;
+    };
+    // Without GIC range-selector support, ICC_SGI1R_EL1 can address only
+    // Aff0[3:0]. Reject the CPU before scheduler publication rather than
+    // admitting a target which can never receive a prompt reschedule IPI.
+    if affinity & 0xff >= 16 {
+        return false;
+    }
+    // The boot CPU is the sole registration owner, so duplicate validation
+    // needs no inter-CPU synchronization. The final CAS publishes the route.
+    if CPU_GIC_AFFINITIES
+        .iter()
+        .enumerate()
+        .any(|(index, registered)| {
+            index != cpu_index && registered.load(Ordering::Relaxed) == u64::from(affinity)
+        })
+    {
+        return false;
+    }
+    publish_gic_affinity(slot, affinity)
+}
+
+/// Returns the GIC affinity published for one logical CPU.
+pub fn gic_affinity(cpu_index: usize) -> Option<u32> {
+    let affinity = CPU_GIC_AFFINITIES.get(cpu_index)?.load(Ordering::Acquire);
+    (affinity != UNKNOWN_GIC_AFFINITY).then_some(affinity as u32)
+}
+
+fn hardware_id_to_gic_affinity(hardware_id: u64) -> Option<u32> {
+    let affinity_mask = registers::MPIDR_AFF0_TO_2_MASK
+        | (registers::MPIDR_AFF3_MASK << registers::MPIDR_AFF3_SHIFT);
+    if hardware_id & !affinity_mask != 0 {
+        return None;
+    }
+    let affinity_0_to_2 = hardware_id & registers::MPIDR_AFF0_TO_2_MASK;
+    let affinity_3 = (hardware_id >> registers::MPIDR_AFF3_SHIFT) & registers::MPIDR_AFF3_MASK;
+    Some((affinity_0_to_2 | (affinity_3 << registers::GIC_AFF3_SHIFT)) as u32)
+}
+
+fn publish_gic_affinity(slot: &AtomicU64, affinity: u32) -> bool {
+    // A logical CPU route is immutable after publication. Replacing a live
+    // affinity could redirect an in-flight or later SGI to a different PE.
+    slot.compare_exchange(
+        UNKNOWN_GIC_AFFINITY,
+        u64::from(affinity),
+        Ordering::Release,
+        Ordering::Relaxed,
+    )
+    .is_ok()
 }
 
 /// Wakes processing elements waiting in WFE after publishing shared state.

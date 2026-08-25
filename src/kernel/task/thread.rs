@@ -75,13 +75,13 @@ impl QueueLinks {
 
 pub struct UserExecution {
     pub address_space: AddressSpaceId,
-    pub context: crate::arch::context::UserContext,
+    pub context: crate::hal::context::UserContext,
 }
 
 pub struct VcpuExecution {
     vm: VcpuVm,
-    pub vcpu_id: u32,
-    pub context: crate::arch::vm::VcpuContext,
+    pub(crate) vcpu_id: u32,
+    pub(crate) hardware: crate::hal::vm::VcpuHardwareState,
 }
 
 enum VcpuVm {
@@ -126,7 +126,7 @@ impl VcpuExecution {
     // architecture-neutral so kernel policy contains no target cfg.
     #[allow(dead_code)]
     pub(crate) unsafe fn for_timer_validation(
-        context: crate::arch::vm::VcpuContext,
+        hardware: crate::hal::vm::VcpuHardwareState,
         interrupts: &crate::kernel::vm::VmInterruptController,
     ) -> Self {
         Self {
@@ -134,7 +134,7 @@ impl VcpuExecution {
                 interrupts: core::ptr::from_ref(interrupts).expose_provenance(),
             },
             vcpu_id: 0,
-            context,
+            hardware,
         }
     }
 }
@@ -157,11 +157,11 @@ pub enum Error {
     Allocation,
     NameTooLong,
     InvalidPlacement,
-    VirtualInterrupt(crate::arch::vm::VirtualInterruptError),
+    VirtualInterrupt(crate::hal::vm::VirtualInterruptError),
 }
 
-impl From<crate::arch::vm::VirtualInterruptError> for Error {
-    fn from(error: crate::arch::vm::VirtualInterruptError) -> Self {
+impl From<crate::hal::vm::VirtualInterruptError> for Error {
+    fn from(error: crate::hal::vm::VirtualInterruptError) -> Self {
         Self::VirtualInterrupt(error)
     }
 }
@@ -182,7 +182,7 @@ pub struct Thread {
     deferred_fifo_placement: Option<DeferredFifoPlacement>,
     state: ThreadState,
     queue_links: QueueLinks,
-    context: crate::arch::context::ThreadContext,
+    context: crate::hal::context::ThreadContext,
     kernel_stack: Option<KernelStack>,
     execution: ThreadExecution,
 }
@@ -217,7 +217,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
-            context: crate::arch::context::ThreadContext::empty(),
+            context: crate::hal::context::ThreadContext::empty(),
             kernel_stack: None,
             execution: ThreadExecution::Kernel,
         }
@@ -232,7 +232,7 @@ impl Thread {
         argument: usize,
     ) -> Result<Self, Error> {
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
-        let mut context = crate::arch::context::ThreadContext::empty();
+        let mut context = crate::hal::context::ThreadContext::empty();
         context.prepare(stack.top(), entry, argument);
         let placement = ThreadPlacement::movable_with_affinity(cpu_index, affinity)
             .ok_or(Error::InvalidPlacement)?;
@@ -266,7 +266,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
-            context: crate::arch::context::ThreadContext::empty(),
+            context: crate::hal::context::ThreadContext::empty(),
             kernel_stack: Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
             execution: ThreadExecution::Kernel,
         })
@@ -278,12 +278,13 @@ impl Thread {
         name: &str,
         vm: crate::kernel::vm::registry::VmBinding,
         vcpu_id: u32,
-        mut context: crate::arch::vm::VcpuContext,
+        context: crate::hal::vm::VcpuContext,
         entry: KernelThreadEntry,
     ) -> Result<Self, Error> {
-        context.initialize_virtual_interrupts()?;
+        let mut hardware = crate::hal::vm::VcpuHardwareState::new(context);
+        crate::hal::vm::initialize_vcpu_interrupts(&mut hardware)?;
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
-        let mut scheduling_context = crate::arch::context::ThreadContext::empty();
+        let mut scheduling_context = crate::hal::context::ThreadContext::empty();
         scheduling_context.prepare_vcpu(stack.top(), entry, 0);
         Ok(Self {
             id,
@@ -300,7 +301,7 @@ impl Thread {
                 hyper::mm::try_box(VcpuExecution {
                     vm: VcpuVm::Installed(vm),
                     vcpu_id,
-                    context,
+                    hardware,
                 })
                 .map_err(|_| Error::Allocation)?,
             ),
@@ -414,11 +415,11 @@ impl Thread {
         self.queue_links = links;
     }
 
-    pub fn context(&self) -> &crate::arch::context::ThreadContext {
+    pub fn context(&self) -> &crate::hal::context::ThreadContext {
         &self.context
     }
 
-    pub(super) fn context_mut(&mut self) -> &mut crate::arch::context::ThreadContext {
+    pub(super) fn context_mut(&mut self) -> &mut crate::hal::context::ThreadContext {
         &mut self.context
     }
 

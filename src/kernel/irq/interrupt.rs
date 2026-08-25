@@ -12,8 +12,8 @@ use hyper::hal::interrupt::{
 use hyper::platform::{InterruptControllerInfo, PlatformInterrupt};
 use hyper::sync::InterruptSpinLock;
 
-type BootInterruptController = crate::arch::irq::Controller;
-type InterruptLock = InterruptSpinLock<Option<InterruptState>, crate::arch::irq::LocalMask>;
+type BootInterruptController = crate::hal::irq::Controller;
+type InterruptLock = InterruptSpinLock<Option<InterruptState>, crate::hal::irq::LocalMask>;
 
 const UNHANDLED_QUARANTINE_THRESHOLD: u32 = 8;
 
@@ -25,7 +25,7 @@ pub enum Error {
     AlreadyInitialized,
     DomainBusy,
     DomainNotFound,
-    Controller(crate::arch::irq::ControllerError),
+    Controller(crate::hal::irq::ControllerError),
     HandlerNotFound,
     InterruptAlreadyMapped,
     InterruptNotMapped,
@@ -35,8 +35,8 @@ pub enum Error {
     NumericExhaustion,
 }
 
-impl From<crate::arch::irq::ControllerError> for Error {
-    fn from(error: crate::arch::irq::ControllerError) -> Self {
+impl From<crate::hal::irq::ControllerError> for Error {
+    fn from(error: crate::hal::irq::ControllerError) -> Self {
         Self::Controller(error)
     }
 }

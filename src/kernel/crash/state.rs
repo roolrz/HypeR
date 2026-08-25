@@ -15,7 +15,7 @@ use core::mem::MaybeUninit;
 use hyper::cpu::CpuIndex;
 use hyper::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use crate::arch::exception::CrashContext;
+use crate::hal::exception::CrashContext;
 
 pub(super) const MAX_CPUS: usize = hyper::cpu::MAX_CPUS;
 const NO_CRASH_OWNER: usize = usize::MAX;

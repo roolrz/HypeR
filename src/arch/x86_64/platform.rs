@@ -8,6 +8,7 @@ use hyper::platform::{
 };
 
 pub const TIMER_VECTOR: u32 = 0xef;
+pub const RESCHEDULE_VECTOR: u32 = 0xf0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct EssentialPlatformInfo {

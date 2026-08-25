@@ -1,20 +1,52 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! RISC-V vCPU hardware activation.
+//! RISC-V vCPU hardware-state mechanisms.
 
-use super::VmInterruptController;
-use crate::kernel::task::thread::VcpuExecution;
-use crate::kernel::vm::active_vcpu;
+use super::{GuestSyncAction, GuestSyncFrame, VcpuContext, VmInterruptController};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Active(active_vcpu::Error),
     UnsupportedSoftwareInterrupt,
 }
 
+/// Loads one exclusively owned stopped vCPU into the current hart.
+///
+/// # Safety
+///
+/// `context` must be pinned and exclusively owned, no vCPU may already be
+/// active on this hart, and local interrupts must be masked.
+pub unsafe fn activate(
+    context: &mut VcpuContext,
+    _vcpu_id: u32,
+    _interrupts: &VmInterruptController,
+    _physical_count: u64,
+) -> Result<bool, Error> {
+    // SAFETY: The caller grants exclusive ownership of the stopped context.
+    unsafe { context.activate_system_registers() };
+    Ok(false)
+}
+
+/// Saves the current hart's guest state into its exclusively owned context.
+///
+/// # Safety
+///
+/// `context` must own the active local vCPU and local interrupts must remain
+/// masked until the save completes.
+pub unsafe fn deactivate(
+    context: &mut VcpuContext,
+    _vcpu_id: u32,
+    _interrupts: &VmInterruptController,
+    _physical_count: u64,
+) -> Result<(), Error> {
+    // SAFETY: The caller identifies this context as the active local vCPU.
+    unsafe { context.deactivate_system_registers() };
+    Ok(())
+}
+
 pub(crate) fn deliver_software_interrupt(
-    _execution: &mut VcpuExecution,
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
     _interrupts: &VmInterruptController,
     _request: u64,
 ) -> Result<(), Error> {
@@ -22,45 +54,33 @@ pub(crate) fn deliver_software_interrupt(
 }
 
 pub(crate) fn handle_guest_device_access(
-    _execution: &mut VcpuExecution,
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
     _interrupts: &VmInterruptController,
-    _frame: &mut super::GuestSyncFrame<'_>,
-    fallback: super::GuestSyncAction,
-) -> super::GuestSyncAction {
+    _frame: &mut GuestSyncFrame<'_>,
+    fallback: GuestSyncAction,
+) -> GuestSyncAction {
     fallback
 }
 
-impl From<active_vcpu::Error> for Error {
-    fn from(error: active_vcpu::Error) -> Self {
-        Self::Active(error)
-    }
+pub const fn handle_virtual_timer_interrupt(
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
+    _interrupts: &VmInterruptController,
+) -> Result<bool, Error> {
+    Ok(false)
 }
 
-impl VcpuExecution {
-    /// Loads the stopped vCPU into the current hart's virtualization state.
-    ///
-    /// # Safety
-    ///
-    /// `execution` must be non-null, aligned, pinned, and exclusively owned by
-    /// the caller for the guest-run lifetime. Local interrupts must be masked.
-    pub unsafe fn activate_virtual_hardware(execution: *mut Self) -> Result<(), Error> {
-        // SAFETY: The caller guarantees `execution` is valid and exclusive.
-        // This temporary context reference ends before the raw pointer is published.
-        unsafe { (*execution).context.activate_system_registers() };
-        // SAFETY: The scheduler-origin pointer remains pinned for the active run.
-        unsafe { active_vcpu::set_raw(execution)? };
-        Ok(())
-    }
-
-    /// Saves the current hart's virtualization state into the active vCPU.
-    ///
-    /// # Safety
-    ///
-    /// The caller must own the active vCPU and keep interrupts masked.
-    pub unsafe fn deactivate_virtual_hardware(&mut self) -> Result<(), Error> {
-        active_vcpu::clear(self)?;
-        // SAFETY: This method's contract identifies `self` as the active owned vCPU.
-        unsafe { self.context.deactivate_system_registers() };
-        Ok(())
-    }
+pub const fn handle_maintenance_interrupt(
+    _context: &mut VcpuContext,
+    _vcpu_id: u32,
+    _interrupts: &VmInterruptController,
+) -> Result<bool, Error> {
+    Ok(false)
 }
+
+pub const fn maintenance_interrupt_pending() -> bool {
+    false
+}
+
+pub const fn quiesce_virtual_interrupt_delivery() {}

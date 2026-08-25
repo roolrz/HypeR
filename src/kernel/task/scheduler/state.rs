@@ -46,8 +46,8 @@ struct CpuScheduler {
 
 #[must_use = "a prepared context switch must be consumed by the architecture boundary"]
 pub(super) struct PreparedContextSwitch {
-    previous: *mut crate::arch::context::ThreadContext,
-    next: *const crate::arch::context::ThreadContext,
+    previous: *mut crate::hal::context::ThreadContext,
+    next: *const crate::hal::context::ThreadContext,
     armed: bool,
 }
 
@@ -61,7 +61,7 @@ impl PreparedContextSwitch {
         // SAFETY: Scheduler queues contain only pinned, scheduler-owned
         // Threads. switching_from retains the outgoing allocation until the
         // resumed continuation next enters the scheduler.
-        unsafe { crate::arch::context::switch_thread_context(&mut *self.previous, &*self.next) };
+        unsafe { crate::hal::context::switch_thread_context(&mut *self.previous, &*self.next) };
     }
 }
 
@@ -69,7 +69,7 @@ impl Drop for PreparedContextSwitch {
     fn drop(&mut self) {
         if self.armed {
             crate::pr_crit!("HypeR: prepared context switch was not activated");
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
     }
 }
@@ -185,7 +185,7 @@ impl Scheduler {
         name: &str,
         vm: crate::kernel::vm::registry::VmBinding,
         vcpu_id: u32,
-        context: crate::arch::vm::VcpuContext,
+        context: crate::hal::vm::VcpuContext,
         entry: KernelThreadEntry,
     ) -> Result<ThreadId, Error> {
         self.cpu_slot(cpu)?;

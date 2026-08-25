@@ -117,6 +117,14 @@ kaslr_geometry_is_valid() {
         [ "$kaslr_base_value" -eq $((kernel_region_base + kaslr_offset_value)) ]
 }
 
+reschedule_ipi_proof_is_valid() {
+    if [ "$cpus" -gt 1 ]; then
+        grep -q 'HypeR test: targeted reschedule IPI delivery and EOI passed' "$log"
+    else
+        grep -q 'HypeR test: targeted reschedule IPI skipped (one CPU online)' "$log"
+    fi
+}
+
 runtime_contract_is_ready() {
     grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
         grep -q "HypeR: atomic RMW backend: $atomic_backend" "$log" &&
@@ -125,13 +133,15 @@ runtime_contract_is_ready() {
         grep -q 'HypeR test: scheduler ready/wait queues and sleeping sync passed' "$log" &&
         grep -q 'HypeR test: guarded thread, IRQ, and emergency stacks passed' "$log" &&
         grep -q 'HypeR test: fatal-path readiness contract passed' "$log" &&
+        reschedule_ipi_proof_is_valid &&
         grep -q 'HypeR test: checked stage-2 guest-memory copies passed' "$log" &&
         grep -q 'HypeR test: checked application-memory copies passed' "$log" &&
         grep -q 'HypeR: kallsyms resolved hyper_kallsyms_lookup at 0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR: kernel log ring: 65536 bytes, 0 records dropped' "$log" &&
         grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
         grep -q 'HypeR: vGICv3 active with [1-9][0-9]* LRs, [5-8] priority bits, [5-7] preemption bits, \(16\|24\) INTID bits, maintenance VIRQ [0-9][0-9]*' "$log" &&
-        grep -q 'HypeR: architectural timer: host INTID 26, guest INTID 27 (host VIRQ [0-9][0-9]*), [1-9][0-9]* Hz tick from a [1-9][0-9]* Hz counter' "$log" &&
+        grep -q 'HypeR: architectural timer: host INTID 26, guest INTID 27, [1-9][0-9]* Hz tick from a [1-9][0-9]* Hz counter' "$log" &&
+        grep -q 'HypeR: guest architectural timer mapped to host VIRQ [0-9][0-9]*' "$log" &&
         grep -q 'HypeR: monotonic clocksource active at [1-9][0-9]* Hz' "$log" &&
         grep -q 'HypeR: virtual architected timer injection validated' "$log" &&
         grep -q 'HypeR: guest synchronous trap and vSysReg emulation validated' "$log" &&

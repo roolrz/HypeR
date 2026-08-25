@@ -41,7 +41,8 @@ pub use exception::{
 };
 pub use gic_cpu_interface::{
     Aarch64GicCpuInterface, acknowledge_interrupt, broadcast_crash_stop, crash_stop_interrupt,
-    current_gic_affinity, end_interrupt, is_crash_stop_interrupt,
+    current_gic_affinity, end_interrupt, is_crash_stop_interrupt, notify_reschedule,
+    reschedule_interrupt,
 };
 pub use host::mode_name as host_execution_mode_name;
 pub use hyper::drivers::power::psci::Error as CpuPowerError;
@@ -49,12 +50,13 @@ pub use interrupt_controller::{
     Aarch64InterruptController as ArchitectureInterruptController,
     Error as InterruptControllerError,
 };
+pub(crate) use interrupt_virtualization::description as interrupt_virtualization_description;
 pub use interrupt_virtualization::{
     Error as InterruptVirtualizationError, initialize as initialize_interrupt_virtualization,
 };
 pub use interrupts::{
-    LocalInterruptMask, disable_all as disable_local_interrupts, enable_irq as enable_local_irq,
-    irq_enabled as local_irq_enabled,
+    LocalInterruptMask, disable_all as disable_all_interrupts, enable_irq as enable_local_irq,
+    irq_enabled as local_irq_enabled, mask_irq as mask_local_irq,
 };
 pub use kaslr::{Error as KaslrError, select as select_kaslr_layout};
 pub(crate) use linux::{
@@ -95,8 +97,13 @@ pub use vgic::{
 pub use vm_interrupt::{Error as VmInterruptError, VmInterruptController};
 pub use vm_vcpu::Error as VcpuInterruptError;
 pub(crate) use vm_vcpu::{
+    activate as activate_vcpu_hardware, deactivate as deactivate_vcpu_hardware,
     deliver_software_interrupt as deliver_guest_software_interrupt, handle_guest_device_access,
-    update_guest_device_interrupt,
+    handle_maintenance_interrupt as handle_virtualization_maintenance_interrupt,
+    handle_virtual_timer_interrupt as handle_guest_virtual_timer_interrupt,
+    inject_timer_for_validation,
+    maintenance_interrupt_pending as virtualization_maintenance_pending,
+    quiesce_virtual_interrupt_delivery, update_guest_device_interrupt,
 };
 pub(crate) use vsysreg::{
     GuestSyncAction, GuestSyncFrame, complete_guest_mmio_access, decode_guest_memory_fault,
@@ -127,8 +134,8 @@ pub fn secondary_cpu_is_compatible() -> bool {
         && host::current_cpu_is_compatible()
 }
 
-pub fn register_secondary_hardware_id(_cpu_index: usize, _hardware_id: u64) -> bool {
-    true
+pub fn register_secondary_hardware_id(cpu_index: usize, hardware_id: u64) -> bool {
+    smp::register_cpu(cpu_index, hardware_id)
 }
 
 pub fn mark_current_cpu_online() {}
@@ -163,24 +170,6 @@ pub fn decode_kernel_timer(
     })
 }
 
-pub fn handle_guest_virtual_timer_interrupt() -> crate::kernel::irq::interrupt::HandlerResult {
-    use crate::kernel::irq::interrupt::HandlerResult;
-
-    match vm_timer::handle_interrupt() {
-        Ok(outcome) if outcome.active && outcome.asserted => HandlerResult::HandledAndMaskLocal,
-        Ok(outcome) if outcome.active => HandlerResult::Handled,
-        Ok(_) => {
-            crate::pr_warn!("HypeR: masked virtual timer PPI without an active vCPU");
-            HandlerResult::HandledAndMaskLocal
-        }
-        Err(error) => {
-            disable_vgic();
-            crate::pr_err!("HypeR: virtual timer injection failed: {error:?}");
-            HandlerResult::HandledAndMaskLocal
-        }
-    }
-}
-
 pub use vm_vcpu::InitializationError as VirtualDeviceInitializationError;
 
 pub const GUEST_CONSOLE_BASE: u64 = hyper::vm::aarch64::device::pl011::REFERENCE_BASE;
@@ -188,10 +177,10 @@ pub const GUEST_CONSOLE_SIZE: u64 = hyper::vm::aarch64::device::pl011::REFERENCE
 pub const GUEST_CONSOLE_INTERRUPT: u32 = hyper::vm::aarch64::device::pl011::REFERENCE_INTERRUPT;
 
 pub fn initialize_virtual_devices(
-    timer_interrupt: hyper::hal::interrupt::InterruptId,
+    _timer_interrupt: hyper::hal::interrupt::InterruptId,
+    host_timer_interrupt: Option<hyper::hal::interrupt::HostInterruptBinding>,
 ) -> Result<(), VirtualDeviceInitializationError> {
-    vm_vcpu::validate_arch_timer(timer_interrupt)?;
-    crate::println!("HypeR: virtual architected timer injection validated");
+    host_timer_interrupt.ok_or(vm_vcpu::InitializationError::MissingHostTimerInterrupt)?;
     Ok(())
 }
 
@@ -278,6 +267,9 @@ extern "C" fn aarch64_bootstrap(dtb_address: usize) -> ! {
     address::initialize().unwrap_or_else(|_| halt());
     atomics::initialize();
     host::initialize();
+    if !smp::initialize_boot_cpu() {
+        halt()
+    }
     crate::kernel::boot::prepare_boot_environment(crate::kernel::boot::ProtocolInputs::new(
         dtb_address,
         None,
@@ -304,9 +296,4 @@ pub(crate) fn describe_runtime(mut emit: impl FnMut(core::fmt::Arguments<'_>)) {
         address.intermediate_physical_address_bits,
         address.stage2_levels(),
     ));
-}
-
-pub fn poll_guest_timer(_now: u64) {}
-pub const fn take_guest_timer_wakeup() -> Option<u64> {
-    None
 }

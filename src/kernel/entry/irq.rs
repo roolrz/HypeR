@@ -85,7 +85,8 @@ fn preemption_tail() {
         // SAFETY: The scheduler supplied its pinned current-vCPU owner pointer.
         // IRQ dispatch has returned, so no active-vCPU callback borrow remains,
         // and local interrupts stay masked across unpublication and save.
-        if let Err(error) = unsafe { (&mut *current.execution).deactivate_virtual_hardware() } {
+        if let Err(error) = unsafe { crate::kernel::vm::vcpu::deactivate(&mut *current.execution) }
+        {
             fail_vcpu_tail("failed to deactivate interrupted vCPU", error)
         }
     }
@@ -98,9 +99,7 @@ fn preemption_tail() {
         // SAFETY: This continuation can resume only when its pinned vCPU Thread
         // is current again. The preceding deactivation removed all local
         // architectural ownership, and interrupts are still masked.
-        if let Err(error) = unsafe {
-            crate::kernel::task::thread::VcpuExecution::activate_virtual_hardware(current.execution)
-        } {
+        if let Err(error) = unsafe { crate::kernel::vm::vcpu::activate(current.execution) } {
             fail_vcpu_tail("failed to reactivate interrupted vCPU", error)
         }
     }
@@ -135,13 +134,13 @@ fn preemption_postlude() -> Option<unsafe extern "C" fn()> {
 #[cfg(CONFIG_ARCH_AARCH64)]
 fn fail_preemption_tail(operation: &str, error: crate::kernel::task::scheduler::Error) -> ! {
     crate::pr_crit!("HypeR: {operation}: {error:?}");
-    crate::arch::cpu::halt()
+    crate::hal::cpu::halt()
 }
 
 #[cfg(CONFIG_ARCH_AARCH64)]
-fn fail_vcpu_tail(operation: &str, error: crate::arch::vm::VcpuInterruptError) -> ! {
+fn fail_vcpu_tail(operation: &str, error: crate::kernel::vm::vcpu::HardwareTransitionError) -> ! {
     crate::pr_crit!("HypeR: {operation}: {error:?}");
-    crate::arch::cpu::halt()
+    crate::hal::cpu::halt()
 }
 
 /// Claims and dispatches one external controller interrupt, when pending.
@@ -158,6 +157,6 @@ pub(crate) fn claim_and_dispatch_external() -> Option<Action> {
 }
 
 /// Publishes a remote CPU's exact interrupt snapshot and stops that CPU.
-pub(crate) fn stop(context: crate::arch::exception::CrashContext) -> ! {
+pub(crate) fn stop(context: crate::hal::exception::CrashContext) -> ! {
     crate::kernel::crash::stop_this_cpu(context)
 }

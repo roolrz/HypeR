@@ -19,7 +19,7 @@ use super::scheduler;
 use super::thread::ThreadId;
 use super::wait::WaitQueue;
 
-type SleepLock = InterruptSpinLock<SleepRecord, crate::arch::irq::LocalMask>;
+type SleepLock = InterruptSpinLock<SleepRecord, crate::hal::irq::LocalMask>;
 
 const NANOSECONDS_PER_MICROSECOND: u64 = 1_000;
 const NANOSECONDS_PER_MILLISECOND: u64 = 1_000_000;
@@ -212,7 +212,7 @@ fn sleep_until_future(deadline: u64) -> Result<(), SleepError> {
                         "HypeR: failed to retire thread sleep timer after park error: \
                          park={error:?} timer={timer:?}"
                     );
-                    crate::arch::cpu::halt()
+                    crate::hal::cpu::halt()
                 }
             };
         }
@@ -246,6 +246,6 @@ fn expire_sleep(_event: crate::kernel::time::TimerEvent, context: usize) {
         // The sleeping thread may otherwise remain blocked forever, and the
         // callback context could never be reclaimed safely.
         crate::pr_crit!("HypeR: thread sleep wakeup failed: {error:?}");
-        crate::arch::cpu::halt()
+        crate::hal::cpu::halt()
     }
 }

@@ -39,6 +39,18 @@ pub fn enable_irq() {
     unsafe { asm!("csrsi sstatus, 2", options(nostack)) };
 }
 
+/// Masks ordinary local interrupt delivery while preserving source enables.
+///
+/// This operation pairs with [`enable_irq`] across controlled context-entry
+/// transitions. It deliberately leaves `sie` unchanged so timer, software,
+/// and external sources resume when the global SIE bit is restored.
+pub fn mask_irq() {
+    // SAFETY: SSTATUS.SIE is writable in HS mode. Keep the compiler memory
+    // clobber because an interrupt handler may observe ordinary memory around
+    // this transition.
+    unsafe { asm!("csrci sstatus, 2", options(nostack)) };
+}
+
 pub fn irq_enabled() -> bool {
     let status: usize;
     // SAFETY: Reading SSTATUS is valid in HS mode and has no memory operands.

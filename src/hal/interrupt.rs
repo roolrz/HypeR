@@ -10,6 +10,15 @@ pub trait InterruptMask {
 
     fn save_and_disable() -> Self::State;
     fn restore(state: Self::State);
+
+    /// Makes architecture-required progress while an IRQ-safe lock is contended.
+    ///
+    /// Implementations must remain allocation-free and must not call kernel
+    /// policy or acquire another lock. Architectures without an urgent masked
+    /// service retain the ordinary processor spin hint.
+    fn wait_for_lock_owner() {
+        core::hint::spin_loop();
+    }
 }
 
 /// Architecture-independent hardware interrupt number.
@@ -17,6 +26,24 @@ pub trait InterruptMask {
 pub struct InterruptId(u32);
 
 impl InterruptId {
+    pub const fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+/// Kernel IRQ-domain binding consumed by an architecture mechanism.
+///
+/// This is distinct from a physical [`InterruptId`] and from a guest-visible
+/// interrupt number. Kernel IRQ policy creates the binding; architecture code
+/// may use it only through the narrow service which received it.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct HostInterruptBinding(u32);
+
+impl HostInterruptBinding {
     pub const fn new(value: u32) -> Self {
         Self(value)
     }

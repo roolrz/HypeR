@@ -1,0 +1,50 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
+//! Selected schedulable-context and stack-transition capabilities.
+//!
+//! Task policy owns thread lifecycle, stacks, and pinning. This facade selects
+//! the architecture register image and the machine transitions operating on
+//! that scheduler-owned state.
+
+pub(crate) use crate::arch::context::{ThreadContext, UserContext};
+
+/// Switches between two pinned scheduler-owned machine contexts.
+///
+/// # Safety
+///
+/// Both contexts and their associated stacks must remain pinned and
+/// exclusively scheduler-owned until control eventually switches back.
+/// `next` must contain a context prepared for the selected architecture.
+#[inline]
+pub(crate) unsafe fn switch_thread_context(previous: &mut ThreadContext, next: &ThreadContext) {
+    // SAFETY: The selected architecture facade receives the same pinned,
+    // exclusively scheduler-owned contexts and prepared-state guarantee.
+    unsafe { crate::arch::context::switch_thread_context(previous, next) }
+}
+
+/// Abandons the current call chain and enters a continuation on a clean stack.
+///
+/// # Safety
+///
+/// `bottom..top` must be a nonempty, exclusively owned, writable stack range
+/// satisfying the selected architecture's ABI alignment. Local interrupts
+/// must be masked, no live value on the abandoned stack may be used again, and
+/// `callback` must not return.
+#[inline]
+pub(crate) unsafe fn reset_stack_and_enter(
+    bottom: usize,
+    top: usize,
+    watermark: u64,
+    canary: u64,
+    callback: extern "C" fn(usize) -> !,
+    argument: usize,
+) -> ! {
+    // SAFETY: The selected architecture facade receives the same stack range,
+    // lifetime, mask-state, and non-returning callback guarantees.
+    unsafe {
+        crate::arch::context::reset_stack_and_enter(
+            bottom, top, watermark, canary, callback, argument,
+        )
+    }
+}

@@ -74,7 +74,7 @@ pub(crate) fn dispatch_memory_fault(fault: GuestMemoryFault) -> MemoryFaultActio
 /// policy borrows it only for this call and cannot retain the frame. Dispatch
 /// may enter the explicit guest-memory slow path, which can allocate pages and
 /// update active second-stage translation tables.
-pub(crate) fn dispatch_legacy(frame: &mut crate::arch::vm::LegacySyncFrame<'_>) -> bool {
+pub(crate) fn dispatch_legacy(frame: &mut crate::hal::vm::LegacySyncFrame<'_>) -> bool {
     crate::kernel::vm::handle_guest_sync(frame)
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn dispatch_legacy(frame: &mut crate::arch::vm::LegacySyncFrame<'_>) 
 /// non-RAM access. The memory event is not dispatched a second time.
 #[allow(dead_code)]
 pub(crate) fn dispatch_legacy_after_memory_fault(
-    frame: &mut crate::arch::vm::LegacySyncFrame<'_>,
+    frame: &mut crate::hal::vm::LegacySyncFrame<'_>,
 ) -> bool {
     crate::kernel::vm::handle_guest_sync_after_memory_fault(frame)
 }

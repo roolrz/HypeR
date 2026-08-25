@@ -9,7 +9,7 @@ use hyper::sync::InterruptSpinLock;
 use super::VmInterruptController;
 use crate::kernel::task::thread::VcpuExecution;
 
-type ActiveLock = InterruptSpinLock<PerCpu<Option<ActiveBinding>>, crate::arch::irq::LocalMask>;
+type ActiveLock = InterruptSpinLock<PerCpu<Option<ActiveBinding>>, crate::hal::irq::LocalMask>;
 
 static ACTIVE: ActiveLock = InterruptSpinLock::new(PerCpu::new([None; hyper::cpu::MAX_CPUS]));
 
@@ -129,7 +129,7 @@ impl Drop for ActiveBorrow {
 }
 
 fn ensure_interrupts_masked() -> Result<(), Error> {
-    if crate::arch::irq::local_enabled() {
+    if crate::hal::irq::local_enabled() {
         Err(Error::InterruptsEnabled)
     } else {
         Ok(())

@@ -14,7 +14,7 @@ use hyper::{
     sync::InterruptSpinLock,
 };
 
-type KernelSpinLock<T> = InterruptSpinLock<T, crate::arch::irq::LocalMask>;
+type KernelSpinLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
 struct KernelDriverServices<'a> {
     boot: &'a super::super::boot::Initialization,

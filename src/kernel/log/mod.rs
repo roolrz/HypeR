@@ -10,7 +10,7 @@ use hyper::sync::InterruptSpinLock;
 
 pub(crate) mod console;
 
-type KernelSpinLock<T> = InterruptSpinLock<T, crate::arch::irq::LocalMask>;
+type KernelSpinLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
 const LOG_BUFFER_SIZE: usize = 1usize << hyper::config::LOG_BUF_SHIFT as usize;
 const LOG_LINE_MAX: usize = hyper::config::LOG_LINE_MAX as usize;

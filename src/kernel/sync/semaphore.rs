@@ -9,7 +9,7 @@ use super::Error;
 use crate::kernel::task::WaitQueue;
 use crate::kernel::task::scheduler;
 
-type StateLock = InterruptSpinLock<State, crate::arch::irq::LocalMask>;
+type StateLock = InterruptSpinLock<State, crate::hal::irq::LocalMask>;
 
 struct State {
     permits: usize,

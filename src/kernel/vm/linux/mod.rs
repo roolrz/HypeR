@@ -16,7 +16,7 @@ pub enum Error {
     Allocation(BuddyError),
     Cache(hyper::hal::cache::CacheError),
     DeviceTree(hyper::vm::fdt::Error),
-    Interrupts(crate::arch::vm::InterruptError),
+    Interrupts(crate::hal::vm::InterruptError),
     Devices(crate::kernel::vm::device::Error),
     InvalidKernel,
     InvalidLayout,
@@ -28,7 +28,7 @@ pub enum Error {
     UnsupportedMemorySize,
     UnsupportedVcpuCount,
     VirtualizationUnavailable,
-    Stage2(crate::arch::vm::Stage2Error),
+    Stage2(crate::hal::vm::Stage2Error),
     Vcpu(crate::kernel::vm::VcpuInterruptError),
 }
 
@@ -50,29 +50,29 @@ impl From<hyper::vm::fdt::Error> for Error {
     }
 }
 
-impl From<crate::arch::guest::Error> for Error {
-    fn from(error: crate::arch::guest::Error) -> Self {
+impl From<crate::hal::guest::Error> for Error {
+    fn from(error: crate::hal::guest::Error) -> Self {
         match error {
-            crate::arch::guest::Error::AddressOverflow => Self::AddressOverflow,
-            crate::arch::guest::Error::DeviceTree(error) => Self::DeviceTree(error),
-            crate::arch::guest::Error::InvalidKernel => Self::InvalidKernel,
-            crate::arch::guest::Error::InvalidLayout => Self::InvalidLayout,
-            crate::arch::guest::Error::VirtualizationUnavailable => Self::VirtualizationUnavailable,
+            crate::hal::guest::Error::AddressOverflow => Self::AddressOverflow,
+            crate::hal::guest::Error::DeviceTree(error) => Self::DeviceTree(error),
+            crate::hal::guest::Error::InvalidKernel => Self::InvalidKernel,
+            crate::hal::guest::Error::InvalidLayout => Self::InvalidLayout,
+            crate::hal::guest::Error::VirtualizationUnavailable => Self::VirtualizationUnavailable,
         }
     }
 }
 
-impl From<crate::arch::guest::PayloadLoadError<crate::kernel::vm::memory::Error>> for Error {
-    fn from(error: crate::arch::guest::PayloadLoadError<crate::kernel::vm::memory::Error>) -> Self {
+impl From<crate::hal::guest::PayloadLoadError<crate::kernel::vm::memory::Error>> for Error {
+    fn from(error: crate::hal::guest::PayloadLoadError<crate::kernel::vm::memory::Error>) -> Self {
         match error {
-            crate::arch::guest::PayloadLoadError::Abi(error) => error.into(),
-            crate::arch::guest::PayloadLoadError::Memory(error) => Self::Memory(error),
+            crate::hal::guest::PayloadLoadError::Abi(error) => error.into(),
+            crate::hal::guest::PayloadLoadError::Memory(error) => Self::Memory(error),
         }
     }
 }
 
-impl From<crate::arch::vm::Stage2Error> for Error {
-    fn from(error: crate::arch::vm::Stage2Error) -> Self {
+impl From<crate::hal::vm::Stage2Error> for Error {
+    fn from(error: crate::hal::vm::Stage2Error) -> Self {
         Self::Stage2(error)
     }
 }
@@ -95,8 +95,8 @@ impl From<crate::kernel::task::scheduler::Error> for Error {
     }
 }
 
-impl From<crate::arch::vm::InterruptError> for Error {
-    fn from(error: crate::arch::vm::InterruptError) -> Self {
+impl From<crate::hal::vm::InterruptError> for Error {
+    fn from(error: crate::hal::vm::InterruptError) -> Self {
         Self::Interrupts(error)
     }
 }
@@ -115,7 +115,7 @@ impl From<crate::kernel::vm::VcpuInterruptError> for Error {
 
 pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     validate_guest(&guest)?;
-    let abi = crate::arch::guest::linux_abi();
+    let abi = crate::hal::guest::linux_abi();
     let image = guest.kernel();
     let initramfs = guest.initramfs();
     let reservation = crate::kernel::vm::registry::reserve()?;
@@ -127,7 +127,14 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     )?;
     let initramfs_range = layout_payload(image, initramfs, guest.memory_size())?;
 
-    crate::arch::guest::load_linux_payload(&guest, &mut address_space, initramfs_range)?;
+    crate::hal::guest::load_linux_payload(&guest, &mut address_space, initramfs_range)?;
+    // The scheduler assigns the boot vCPU to this loader CPU and has no vCPU
+    // migration handoff, so it remains effectively pinned here. Code
+    // publication is complete; perform local instruction synchronization once
+    // before the vCPU can become runnable. Future migration must synchronize
+    // on the destination as part of its handoff, including a remote FENCE.I
+    // protocol on RISC-V.
+    crate::hal::cache::synchronize_instruction_execution();
     address_space.finish_boot_loading();
     let stage2_root = address_space.root_address();
     let guest_memory = address_space.statistics();
@@ -148,17 +155,17 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
 }
 
 fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
-    crate::arch::guest::validate_linux_host()?;
-    crate::arch::guest::describe_linux_host(|description| {
+    crate::hal::guest::validate_linux_host()?;
+    crate::hal::guest::describe_linux_host(|description| {
         crate::println!("{description}");
     });
     if guest.guest_type() != "linux" {
         return Err(Error::UnsupportedGuestType);
     }
-    if guest.architecture() != crate::arch::guest::linux_abi().architecture() {
+    if guest.architecture() != crate::hal::guest::linux_abi().architecture() {
         return Err(Error::UnsupportedArchitecture);
     }
-    crate::arch::guest::validate_linux_kernel(guest.kernel())?;
+    crate::hal::guest::validate_linux_kernel(guest.kernel())?;
     if guest.vcpu_count() != 1 || guest.vcpu_count() > hyper::config::MAX_CPUS as u32 {
         return Err(Error::UnsupportedVcpuCount);
     }
@@ -173,9 +180,9 @@ fn layout_payload(
     image: &[u8],
     initramfs: Option<&[u8]>,
     guest_ram_size: u64,
-) -> Result<Option<crate::arch::guest::PayloadRange>, Error> {
-    let abi = crate::arch::guest::linux_abi();
-    let payload_size = crate::arch::guest::linux_kernel_occupied_size(image)?;
+) -> Result<Option<crate::hal::guest::PayloadRange>, Error> {
+    let abi = crate::hal::guest::linux_abi();
+    let payload_size = crate::hal::guest::linux_kernel_occupied_size(image)?;
     let image_end = abi
         .kernel_load()
         .get()
@@ -184,11 +191,10 @@ fn layout_payload(
     let initramfs_range = match initramfs {
         Some(bytes) => {
             let start = align_up(image_end, 2 * 1024 * 1024)?;
-            let end = start
-                .checked_add(bytes.len() as u64)
-                .ok_or(Error::AddressOverflow)?;
+            let length = u64::try_from(bytes.len()).map_err(|_| Error::AddressOverflow)?;
+            let end = start.checked_add(length).ok_or(Error::AddressOverflow)?;
             Some(
-                crate::arch::guest::PayloadRange::new(
+                crate::hal::guest::PayloadRange::new(
                     hyper::vm::exit::GuestPhysicalAddress::new(start),
                     hyper::vm::exit::GuestPhysicalAddress::new(end),
                 )
@@ -211,13 +217,12 @@ fn layout_payload(
 
 fn prepare_boot_vcpu(
     vcpu_count: u32,
-) -> Result<(VmInterruptController, crate::arch::vm::VcpuContext), Error> {
-    let interrupts = VmInterruptController::new(
-        vcpu_count,
-        crate::arch::guest::linux_abi().timer_interrupt(),
-    )?;
-    let mut context = crate::arch::guest::prepare_linux_vcpu_context();
-    context.set_virtual_count(
+) -> Result<(VmInterruptController, crate::hal::vm::VcpuContext), Error> {
+    let interrupts =
+        VmInterruptController::new(vcpu_count, crate::hal::guest::linux_abi().timer_interrupt())?;
+    let mut context = crate::hal::guest::prepare_linux_vcpu_context();
+    crate::hal::vm::set_virtual_count(
+        &mut context,
         crate::kernel::time::monotonic_ticks(),
         crate::kernel::time::monotonic_ticks(),
     );
@@ -226,7 +231,7 @@ fn prepare_boot_vcpu(
 
 fn report_guest_layout(
     guest: &VmBundle<'_>,
-    initramfs_range: Option<crate::arch::guest::PayloadRange>,
+    initramfs_range: Option<crate::hal::guest::PayloadRange>,
     stage2_root: u64,
     memory: crate::kernel::vm::memory::GuestMemoryStats,
 ) {
@@ -236,7 +241,7 @@ fn report_guest_layout(
         guest.initramfs().map_or(0, |bytes| bytes.len()),
         guest.memory_size() / (1024 * 1024)
     );
-    crate::arch::guest::describe_linux_layout(initramfs_range, stage2_root, |description| {
+    crate::hal::guest::describe_linux_layout(initramfs_range, stage2_root, |description| {
         crate::println!("{description}");
     });
     crate::println!(

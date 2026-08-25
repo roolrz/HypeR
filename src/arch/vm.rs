@@ -22,9 +22,10 @@ pub(crate) use super::imp::{
 pub(crate) use super::imp::{
     enable_interrupts_for_guest_entry as enable_interrupts_for_entry,
     handle_guest_virtual_timer_interrupt as handle_virtual_timer_interrupt,
+    handle_virtualization_maintenance_interrupt as handle_maintenance_interrupt,
     initialize_interrupt_virtualization as initialize_interrupts,
-    initialize_virtual_devices as initialize_devices, poll_guest_timer as poll_timer,
-    take_guest_timer_wakeup as take_timer_wakeup, validate_vsysreg as validate_register_interface,
+    initialize_virtual_devices as initialize_devices, interrupt_virtualization_description,
+    quiesce_virtual_interrupt_delivery, validate_vsysreg as validate_register_interface,
 };
 
 #[cfg(feature = "kernel-self-test")]
@@ -48,3 +49,11 @@ pub(crate) use super::imp::{
     handle_guest_device_access as handle_legacy_device_access,
     handle_guest_sync as decode_legacy_sync,
 };
+
+pub(crate) use super::imp::{
+    activate_vcpu_hardware, deactivate_vcpu_hardware,
+    virtualization_maintenance_pending as maintenance_interrupt_pending,
+};
+
+#[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) use super::imp::inject_timer_for_validation;

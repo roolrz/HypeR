@@ -75,9 +75,9 @@ pub(super) fn run() -> Result<(), Error> {
     let expired = crate::kernel::time::monotonic_ticks().wrapping_sub(1);
     sleep_until(expired)?;
 
-    crate::arch::irq::disable_local();
+    crate::hal::irq::mask_local();
     let masked = sleep_ns(TEST_SLEEP_NS);
-    crate::arch::irq::enable_local();
+    crate::hal::irq::enable_local();
     if masked
         != Err(SleepError::Scheduler(
             crate::kernel::task::scheduler::Error::CannotSleepWithInterruptsMasked,
@@ -97,10 +97,10 @@ pub(super) fn run() -> Result<(), Error> {
         return Err(Error::UnexpectedSleepResult);
     }
 
-    crate::arch::irq::disable_local();
+    crate::hal::irq::mask_local();
     let zero =
         sleep_ns(0).is_ok() && sleep_us(0).is_ok() && sleep_ms(0).is_ok() && sleep_s(0).is_ok();
-    crate::arch::irq::enable_local();
+    crate::hal::irq::enable_local();
     if !zero {
         return Err(Error::UnexpectedSleepResult);
     }

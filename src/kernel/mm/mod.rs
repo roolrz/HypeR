@@ -4,7 +4,6 @@
 //! Kernel memory policy layered over reusable memory-management mechanisms.
 
 use alloc::vec::Vec;
-use hyper::hal::cache::CacheMaintenance;
 use hyper::sync::atomic::{AtomicBool, Ordering};
 
 pub mod allocator;
@@ -82,16 +81,15 @@ pub(crate) fn finalize_address_space() -> Result<(), FinalizationError> {
         unsafe { state.memory.retire_identity_mappings(&state.platform) }
     })
     .map_err(FinalizationError::IdentityMappings)?;
-    crate::arch::memory::enable_local_protection();
+    crate::hal::memory::enable_local_protection();
     if !memory_protection_active() {
         return Err(FinalizationError::MemoryProtection);
     }
 
     let layout = memory::virtual_memory_layout();
-    let data_cache_line = crate::arch::memory::Cache::data_line_size();
-    let instruction_cache_line = crate::arch::memory::Cache::instruction_line_size();
-    let atomic_capabilities: crate::arch::memory::AtomicCapabilities =
-        crate::arch::memory::atomic_capabilities();
+    let data_cache_line = crate::hal::cache::data_line_size();
+    let instruction_cache_line = crate::hal::cache::instruction_line_size();
+    let atomic_capabilities = crate::hal::atomic::capabilities();
     super::boot::with_boot_state(|state| {
         crate::println!("HypeR: final address space active");
         crate::println!("HypeR: transition identity mappings retired");
@@ -112,7 +110,7 @@ pub(crate) fn finalize_address_space() -> Result<(), FinalizationError> {
             "HypeR: atomic RMW backend: {}",
             atomic_capabilities.backend_name()
         );
-        crate::arch::platform::describe_runtime(|description| {
+        crate::hal::platform::describe_runtime(|description| {
             crate::println!("{description}");
         });
         crate::println!(
@@ -127,7 +125,7 @@ pub(crate) fn finalize_address_space() -> Result<(), FinalizationError> {
 }
 
 pub(crate) fn memory_protection_active() -> bool {
-    crate::arch::memory::local_protection_enabled()
+    crate::hal::memory::local_protection_enabled()
 }
 
 pub(crate) fn report_statistics(reason: &str) {

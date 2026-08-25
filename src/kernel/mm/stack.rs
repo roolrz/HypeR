@@ -34,8 +34,11 @@ const _: () = {
     assert!(EMERGENCY_STACK_BYTES <= 64 * PAGE_SIZE as usize);
 };
 
-type StackLock<T> = InterruptSpinLock<T, crate::arch::irq::LocalMask>;
+type StackLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
+// This is the sole runtime stage-1 mutation and virtual-slot allocator lock.
+// On x86 its IRQ-mask policy services pending shootdowns while contended, so a
+// CPU already executing with IF clear cannot block a synchronous invalidation.
 static STACK_SLOTS: StackLock<StackSlots> = StackLock::new(StackSlots::new());
 static CPU_STACKS: StackLock<PerCpu<CpuStacks>> = StackLock::new(PerCpu::new(
     [const { CpuStacks::new() }; hyper::cpu::MAX_CPUS],
@@ -128,7 +131,7 @@ pub(crate) struct KernelStack {
     block: PageBlock,
     slot: usize,
     pages: usize,
-    mapping: crate::arch::memory::StackMapping,
+    mapping: crate::hal::memory::StackMapping,
     kind: StackKind,
 }
 
@@ -199,7 +202,7 @@ impl Drop for KernelStack {
                 "HypeR: failed to unmap kernel stack {}: {error:?}",
                 self.slot
             );
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
     }
 }
@@ -225,7 +228,7 @@ pub(crate) fn prepare_cpu(cpu: CpuIndex) -> Result<(), Error> {
         // after publication and remain pinned for the CPU lifetime. SMP does
         // not start the target CPU until this function returns successfully.
         unsafe {
-            crate::arch::exception::install_exception_stacks(cpu, irq.bounds(), emergency.bounds())
+            crate::hal::exception::install_exception_stacks(cpu, irq.bounds(), emergency.bounds())
         }
         .map_err(|_| Error::ArchitectureRejectedStack)?;
         CPU_STACKS.with(|stacks| {
@@ -296,7 +299,7 @@ pub(crate) unsafe fn reset_and_enter(
     // SAFETY: The caller supplies an exclusive destination stack and
     // permanently abandons the current call chain before it is refilled.
     unsafe {
-        crate::arch::context::reset_stack_and_enter(
+        crate::hal::context::reset_stack_and_enter(
             bounds.0,
             bounds.1,
             WATERMARK_WORD,
@@ -327,7 +330,7 @@ fn map_stack(
     slot: usize,
     physical: PhysicalAddress,
     pages: usize,
-) -> Result<crate::arch::memory::StackMapping, Error> {
+) -> Result<crate::hal::memory::StackMapping, Error> {
     crate::kernel::boot::with_boot_state(|state| {
         // SAFETY: allocate_page_table returns exclusive, zeroed, aligned
         // PageTable-owned pages from the permanent linear map. They are never
@@ -381,10 +384,7 @@ fn initialize_watermark(bottom: usize, top: usize) {
     }
 }
 
-fn stack_statistics(
-    kind: StackKind,
-    mapping: crate::arch::memory::StackMapping,
-) -> StackStatistics {
+fn stack_statistics(kind: StackKind, mapping: crate::hal::memory::StackMapping) -> StackStatistics {
     // SAFETY: Stack mappings remain live while their owning KernelStack exists.
     let canary = unsafe { read_volatile(mapping.bottom as *const u64) };
     let watermark = mapping.bottom + core::mem::size_of::<u64>();

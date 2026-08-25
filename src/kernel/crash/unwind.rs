@@ -7,7 +7,7 @@
 //! does not coordinate CPUs or publish state. Every unsafe frame read remains
 //! behind architecture validation, and traversal is bounded and allocation-free.
 
-use crate::arch::exception::CrashContext;
+use crate::hal::exception::CrashContext;
 
 const MAX_BACKTRACE_DEPTH: usize = 32;
 
@@ -40,7 +40,7 @@ fn stack_bounds(
 ) -> Option<(usize, usize)> {
     task.and_then(|task| task.stack)
         .filter(|(bottom, top)| *bottom <= stack_pointer as usize && stack_pointer as usize <= *top)
-        .or_else(|| crate::arch::exception::bootstrap_stack_bounds(stack_pointer))
+        .or_else(|| crate::hal::exception::bootstrap_stack_bounds(stack_pointer))
         .or_else(|| super::super::mm::stack::exception_stack_bounds(cpu, stack_pointer as usize))
 }
 

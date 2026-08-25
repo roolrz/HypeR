@@ -152,20 +152,12 @@ impl VcpuContext {
         self.timer.set_offset(physical_count.wrapping_sub(value));
     }
 
-    pub fn virtual_timer_deadline(&self) -> u64 {
-        self.timer.compare_value()
-    }
-
     pub fn set_virtual_timer_deadline(&mut self, deadline: u64) {
         self.timer.set_compare_value(deadline);
     }
 
     pub fn set_virtual_timer_enabled(&mut self, enabled: bool) {
         self.timer.set_enabled(enabled);
-    }
-
-    pub fn set_virtual_timer_masked(&mut self, masked: bool) {
-        self.timer.set_masked(masked);
     }
 
     pub fn virtual_timer_interrupt_asserted_at(&self, physical_count: u64) -> bool {

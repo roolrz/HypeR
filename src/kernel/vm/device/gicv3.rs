@@ -5,7 +5,7 @@
 //!
 //! This module contains guest-visible register policy only. The reusable
 //! interrupt model remains in `hyper::vm::interrupt`, while list-register and
-//! vCPU hardware mechanisms remain in `arch::aarch64`.
+//! vCPU hardware mechanisms remain behind the selected VM HAL.
 
 use hyper::vm::aarch64::device::gicv3::{
     DISTRIBUTOR_BASE, DISTRIBUTOR_SIZE, REDISTRIBUTOR_BASE, REDISTRIBUTOR_SIZE,

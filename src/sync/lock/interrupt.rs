@@ -75,7 +75,7 @@ impl<T, M: InterruptMask> InterruptSpinLock<T, M> {
         // SAFETY: This lexical guard cannot escape, and nested `with` calls
         // necessarily destroy their guards before this one.
         let restore = unsafe { InterruptMaskGuard::<M>::acquire() };
-        let result = self.lock.with(operation);
+        let result = self.lock.with_relax(operation, M::wait_for_lock_owner);
         drop(restore);
         result
     }
@@ -98,7 +98,7 @@ impl<T, M: InterruptMask> InterruptSpinLock<T, M> {
         // SAFETY: The caller accepts the retained guard's CPU and nesting
         // obligations stated by this method.
         let restore = unsafe { InterruptMaskGuard::<M>::acquire() };
-        let result = self.lock.with(operation);
+        let result = self.lock.with_relax(operation, M::wait_for_lock_owner);
         (result, restore)
     }
 

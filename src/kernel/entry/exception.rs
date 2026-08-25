@@ -10,9 +10,6 @@ use core::fmt;
 /// Exception entry must call this with local interrupts masked. The raw
 /// architecture frame remains owned by the backend; `context` is an owned
 /// diagnostic snapshot and this function never returns.
-pub(crate) fn fatal(
-    context: crate::arch::exception::CrashContext,
-    reason: fmt::Arguments<'_>,
-) -> ! {
+pub(crate) fn fatal(context: crate::hal::exception::CrashContext, reason: fmt::Arguments<'_>) -> ! {
     crate::kernel::crash::fatal_context(context, reason)
 }

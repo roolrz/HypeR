@@ -480,11 +480,11 @@ fn run_self_test(owner: usize, stop: StopSummary) {
 fn inspect_mapping(
     snapshot: MemorySnapshot,
     address: usize,
-) -> Result<Option<Stage1Mapping>, crate::arch::memory::Error> {
+) -> Result<Option<Stage1Mapping>, crate::hal::memory::Error> {
     // SAFETY: MemorySnapshot is published from the permanently installed boot
     // address space. Its root and all page-table pages remain pinned and
     // linearly accessible throughout crash-console execution.
-    unsafe { crate::arch::memory::inspect_stage1_mapping(snapshot.root, address) }
+    unsafe { crate::hal::memory::inspect_stage1_mapping(snapshot.root, address) }
 }
 
 fn report_test(name: &str, result: bool, passed: &mut usize, failed: &mut usize) {

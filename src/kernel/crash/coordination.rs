@@ -14,7 +14,7 @@ use core::panic::PanicInfo;
 
 use hyper::hal::interrupt::{InterruptId, InterruptPriority, InterruptTrigger};
 
-use crate::arch::exception::CrashContext;
+use crate::hal::exception::CrashContext;
 
 const STOP_WAIT_TIMEOUT_NS: u64 = 100_000_000;
 const STOP_WAIT_FALLBACK_ITERATIONS: usize = 10_000_000;
@@ -40,7 +40,7 @@ pub(crate) fn initialize(
     validate_prerequisites()?;
     super::console::initialize();
 
-    let Some(hardware_interrupt) = crate::arch::exception::crash_stop_interrupt() else {
+    let Some(hardware_interrupt) = crate::hal::exception::crash_stop_interrupt() else {
         super::state::mark_ready();
         crate::println!("HypeR: crash-stop cross-call is unavailable on this platform");
         return Ok(());
@@ -96,21 +96,21 @@ fn crash_stop_interrupt(
 }
 
 pub fn is_stop_interrupt(interrupt: InterruptId) -> bool {
-    super::state::ipi_ready() && crate::arch::exception::is_crash_stop_interrupt(interrupt)
+    super::state::ipi_ready() && crate::hal::exception::is_crash_stop_interrupt(interrupt)
 }
 
 /// Handles a Rust panic without delegating crash policy to the log subsystem.
 #[unsafe(export_name = "kernel_crash_panic")]
 pub fn panic(info: &PanicInfo<'_>) -> ! {
     enter(
-        crate::arch::exception::capture_crash_context(),
+        crate::hal::exception::capture_crash_context(),
         format_args!("Kernel panic - not syncing: {info}"),
     )
 }
 
 /// Handles fatal kernel failures that do not already carry an exception frame.
 pub(crate) fn fatal(arguments: fmt::Arguments<'_>) -> ! {
-    enter(crate::arch::exception::capture_crash_context(), arguments)
+    enter(crate::hal::exception::capture_crash_context(), arguments)
 }
 
 /// Handles a fatal failure that already has an architecture snapshot.
@@ -124,7 +124,7 @@ pub fn stop_this_cpu(context: CrashContext) -> ! {
     // SAFETY: payload remains live on the abandoned stack and the callback
     // never returns after switching to the per-CPU emergency stack.
     unsafe {
-        crate::arch::exception::run_on_emergency_stack(
+        crate::hal::exception::run_on_emergency_stack(
             stop_this_cpu_on_emergency_stack,
             (&mut payload as *mut StopPayload) as usize,
         )
@@ -139,18 +139,18 @@ extern "C" fn stop_this_cpu_on_emergency_stack(argument: usize) -> ! {
     // SAFETY: stop_this_cpu passes one live payload and the callback never
     // returns to outlive it.
     let payload = unsafe { &*(argument as *const StopPayload) };
-    crate::arch::irq::disable_local();
+    crate::hal::irq::disable_all_sources();
     publish_current_cpu(payload.context);
     super::state::mark_cpu_stopped();
-    crate::arch::cpu::halt()
+    crate::hal::cpu::halt()
 }
 
 fn enter(context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
     let mut owned_reason = super::state::CrashReason::new();
     let _ = owned_reason.write_fmt(reason);
-    crate::arch::irq::disable_local();
+    crate::hal::irq::disable_all_sources();
     let Some(cpu) = super::super::cpu::current_index() else {
-        crate::arch::cpu::halt();
+        crate::hal::cpu::halt();
     };
     let payload = super::state::CrashPayload::new(context, owned_reason);
     let Some(argument) = super::state::publish_payload(cpu, payload) else {
@@ -160,7 +160,7 @@ fn enter(context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
                 cpu.get()
             ));
         }
-        crate::arch::cpu::halt();
+        crate::hal::cpu::halt();
     };
     if !is_ready() {
         // Keep the failing CPU at a stable inspection point. In particular,
@@ -168,27 +168,27 @@ fn enter(context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
         // reason this panic was raised.
         super::state::publish_context(cpu, context);
         super::state::mark_early_stopped();
-        crate::arch::cpu::halt();
+        crate::hal::cpu::halt();
     }
     // SAFETY: The per-CPU static payload remains immutable after publication,
     // and fatal handling permanently owns control after switching stacks.
-    unsafe { crate::arch::exception::run_on_emergency_stack(enter_on_emergency_stack, argument) }
+    unsafe { crate::hal::exception::run_on_emergency_stack(enter_on_emergency_stack, argument) }
 }
 
 extern "C" fn enter_on_emergency_stack(argument: usize) -> ! {
     // SAFETY: enter passes the unchanged argument returned by publish_payload,
     // and this callback never returns beyond the permanent slot lifetime.
     let payload = unsafe { super::state::payload_from_argument(argument) };
-    crate::arch::irq::disable_local();
+    crate::hal::irq::disable_all_sources();
     let Some(cpu) = super::super::cpu::current_index() else {
-        crate::arch::cpu::halt();
+        crate::hal::cpu::halt();
     };
     match super::state::claim_owner(cpu) {
         super::state::OwnerClaim::Acquired => {}
         super::state::OwnerClaim::OwnedByOther => {
             super::state::publish_context(cpu, *payload.context());
             super::state::mark_cpu_stopped();
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
         super::state::OwnerClaim::Recursive => {
             super::super::log::emergency(format_args!(
@@ -202,7 +202,7 @@ extern "C" fn enter_on_emergency_stack(argument: usize) -> ! {
                 payload.context().program_counter,
                 payload.context().fault_address
             ));
-            crate::arch::cpu::halt()
+            crate::hal::cpu::halt()
         }
     }
 
@@ -215,7 +215,7 @@ extern "C" fn enter_on_emergency_stack(argument: usize) -> ! {
     super::super::log::emergency(format_args!(
         "---[ end HypeR kernel panic - system halted ]---"
     ));
-    crate::arch::cpu::halt()
+    crate::hal::cpu::halt()
 }
 
 fn publish_current_cpu(context: CrashContext) {
@@ -226,9 +226,8 @@ fn publish_current_cpu(context: CrashContext) {
 
 fn stop_other_cpus() -> super::report::StopSummary {
     let expected = super::super::cpu::online_cpu_count().saturating_sub(1);
-    let sent = expected != 0
-        && super::state::ipi_ready()
-        && crate::arch::exception::broadcast_crash_stop();
+    let sent =
+        expected != 0 && super::state::ipi_ready() && crate::hal::exception::broadcast_crash_stop();
     if sent
         && super::super::time::spin_wait_until(STOP_WAIT_TIMEOUT_NS, || {
             super::state::stopped_cpu_count() >= expected

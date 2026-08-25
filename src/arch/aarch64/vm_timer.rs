@@ -7,20 +7,11 @@ use hyper::vm::interrupt::{Error as VgicError, VirtualCpuId};
 
 use super::VmInterruptController;
 use super::vgic::{self, Error as VgicArchitectureError};
-use crate::kernel::task::thread::VcpuExecution;
-use crate::kernel::vm::active_vcpu;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Active(active_vcpu::Error),
     VgicArchitecture(VgicArchitectureError),
     VgicModel(VgicError),
-}
-
-impl From<active_vcpu::Error> for Error {
-    fn from(error: active_vcpu::Error) -> Self {
-        Self::Active(error)
-    }
 }
 
 impl From<VgicArchitectureError> for Error {
@@ -35,118 +26,51 @@ impl From<VgicError> for Error {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct MaintenanceOutcome {
-    pub handled: bool,
-    pub timer_deasserted: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InterruptOutcome {
-    pub active: bool,
-    pub asserted: bool,
-}
-
 pub fn reconcile_saved(
-    execution: &mut VcpuExecution,
+    context: &mut super::VcpuContext,
+    vcpu_id: u32,
     interrupts: &VmInterruptController,
     physical_count: u64,
 ) -> Result<(), Error> {
-    let asserted = execution
-        .context
-        .virtual_timer_interrupt_asserted_at(physical_count);
-    update_model(execution, interrupts, asserted)
+    let asserted = context.virtual_timer_interrupt_asserted_at(physical_count);
+    update_model(vcpu_id, interrupts, asserted)
 }
 
-/// Converts a live CNTV PPI into a level interrupt in the active vGIC.
-pub fn handle_interrupt() -> Result<InterruptOutcome, Error> {
-    let Some(result) = active_vcpu::with(|execution, interrupts| {
-        let asserted = execution
-            .context
-            .virtual_timer_interrupt_asserted_hardware();
-        refresh_running_vgic(execution, interrupts, asserted)?;
-        Ok::<InterruptOutcome, Error>(InterruptOutcome {
-            active: true,
-            asserted,
-        })
-    })?
-    else {
-        return Ok(InterruptOutcome {
-            active: false,
-            asserted: false,
-        });
-    };
-    result
-}
-
-pub(super) fn inject_active_for_validation() -> Result<bool, Error> {
-    let Some(result) = active_vcpu::with(|execution, interrupts| {
-        refresh_running_vgic(execution, interrupts, true)
-    })?
-    else {
-        return Ok(false);
-    };
-    result?;
-    Ok(true)
-}
-
-/// Reconciles guest EOI progress and reports when the physical PPI can rearm.
-pub fn handle_maintenance() -> Result<MaintenanceOutcome, Error> {
-    let Some(result) = active_vcpu::with(|execution, interrupts| {
-        let asserted = execution
-            .context
-            .virtual_timer_interrupt_asserted_hardware();
-        refresh_running_vgic(execution, interrupts, asserted)?;
-        Ok::<MaintenanceOutcome, Error>(MaintenanceOutcome {
-            handled: true,
-            timer_deasserted: !asserted,
-        })
-    })?
-    else {
-        return Ok(MaintenanceOutcome {
-            handled: false,
-            timer_deasserted: false,
-        });
-    };
-    result
-}
-
-fn refresh_running_vgic(
-    execution: &mut VcpuExecution,
+pub fn refresh_running_vgic(
+    context: &mut super::VcpuContext,
+    vcpu_id: u32,
     interrupts: &VmInterruptController,
     timer_asserted: bool,
 ) -> Result<(), Error> {
     // SAFETY: The active binding identifies the vCPU whose hardware interface
     // is loaded on this CPU, and IRQ entry has masked local interrupts.
-    unsafe { execution.context.deactivate_vgic()? };
+    if let Err(error) = unsafe { context.deactivate_vgic() } {
+        vgic::disable();
+        return Err(error.into());
+    }
     let result = interrupts.with(|controller| {
-        let vcpu = VirtualCpuId::new(execution.vcpu_id);
-        controller.synchronize(vcpu, execution.context.vgic.slots())?;
+        let vcpu = VirtualCpuId::new(vcpu_id);
+        controller.synchronize(vcpu, context.vgic.slots())?;
         set_timer_level(controller, interrupts, vcpu, timer_asserted)?;
-        let _ = controller.refill(vcpu, execution.context.vgic.slots_mut())?;
+        let _ = controller.refill(vcpu, context.vgic.slots_mut())?;
         Ok::<(), VgicError>(())
     });
     result.inspect_err(|_| {
         vgic::disable();
     })?;
     // SAFETY: The complete model has been reconciled into this vCPU's slots.
-    unsafe { execution.context.activate_vgic()? };
+    unsafe { context.activate_vgic()? };
     Ok(())
 }
 
 fn update_model(
-    execution: &mut VcpuExecution,
+    vcpu_id: u32,
     interrupts: &VmInterruptController,
     asserted: bool,
 ) -> Result<(), Error> {
     interrupts
         .with(|controller| {
-            set_timer_level(
-                controller,
-                interrupts,
-                VirtualCpuId::new(execution.vcpu_id),
-                asserted,
-            )
+            set_timer_level(controller, interrupts, VirtualCpuId::new(vcpu_id), asserted)
         })
         .map_err(Into::into)
 }

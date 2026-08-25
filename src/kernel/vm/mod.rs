@@ -1,18 +1,22 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Virtual-machine execution policy.
+//! Virtual-machine initialization and execution policy.
+//!
+//! This subsystem owns hardware-virtualization validation, virtual interrupt
+//! activation, guest-visible devices, VM publication, and vCPU orchestration.
 
 pub(crate) mod active_vcpu;
 pub(crate) mod device;
 pub(crate) mod linux;
 pub mod memory;
 pub(crate) mod registry;
+mod timer;
 pub(crate) mod vcpu;
 
 use core::convert::Infallible;
 
-pub use crate::arch::vm::{
+pub use crate::hal::vm::{
     InterruptController as VmInterruptController, InterruptError as VmInterruptError,
 };
 pub use hyper::vm::bundle::{Error as VmBundleError, VmBundle};
@@ -20,7 +24,14 @@ pub use linux::Error as LinuxBootError;
 pub use registry::VmId;
 pub use vcpu::{RunError as VcpuRunError, VcpuInterruptError};
 
-pub(crate) type InitializationError = crate::arch::vm::DeviceError;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InitializationError {
+    Devices(crate::hal::vm::DeviceError),
+    Interrupts(crate::hal::vm::InterruptInitializationError),
+    Registers(crate::hal::vm::RegisterValidationError),
+    Timer(timer::Error),
+    TimerValidation(timer::ValidationError),
+}
 
 #[derive(Debug)]
 pub enum StartError {
@@ -40,11 +51,57 @@ pub fn boot_linux(
     linux::boot(guest)
 }
 
-/// Validates the guest-visible devices needed before loading the first VM.
-pub(crate) fn initialize_virtual_devices(
-    boot: &super::boot::Initialization,
-) -> Result<(), InitializationError> {
-    crate::arch::vm::initialize_devices(boot.timer().guest_virtual_interrupt)
+/// Initializes hardware virtualization and guest-visible platform devices.
+pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), InitializationError> {
+    crate::hal::vm::validate_register_interface().map_err(InitializationError::Registers)?;
+    let interrupts = boot.interrupts();
+    let guest_timer = boot.timer().guest_timer;
+    let binding = timer::prepare(
+        guest_timer,
+        interrupts.root_domain,
+        interrupts.maintenance_interrupt,
+    )
+    .map_err(InitializationError::Timer)?;
+    if let Some(interrupt) = binding.host_interrupt() {
+        crate::println!(
+            "HypeR: guest architectural timer mapped to host VIRQ {}",
+            interrupt.get()
+        );
+    }
+    if let Err(error) =
+        crate::hal::vm::initialize_devices(guest_timer.interrupt, binding.host_interrupt())
+    {
+        binding.rollback();
+        return Err(InitializationError::Devices(error));
+    }
+    match timer::validate_hardware(guest_timer.interrupt) {
+        Ok(true) => crate::println!("HypeR: virtual architected timer injection validated"),
+        Ok(false) => {}
+        Err(error) => {
+            binding.rollback();
+            return Err(InitializationError::TimerValidation(error));
+        }
+    }
+    if let Err(error) = crate::hal::vm::initialize_interrupts(binding.host_interrupt()) {
+        binding.rollback();
+        return Err(InitializationError::Interrupts(error));
+    }
+    if let (Some(description), Some(maintenance)) = (
+        crate::hal::vm::interrupt_virtualization_description(),
+        binding.maintenance_interrupt(),
+    ) {
+        crate::println!(
+            "HypeR: vGICv3 active with {} LRs, {} priority bits, {} preemption bits, {} INTID bits, maintenance VIRQ {}",
+            description.list_registers,
+            description.priority_bits,
+            description.preemption_bits,
+            description.interrupt_id_bits,
+            maintenance.get(),
+        );
+    }
+    binding.retain_permanently();
+    crate::println!("HypeR: guest synchronous trap and vSysReg emulation validated");
+    Ok(())
 }
 
 /// Loads the default VM bundle from the boot ramdisk and enters the guest.
@@ -80,54 +137,51 @@ pub(crate) fn start_default() -> Result<Infallible, StartError> {
     super::task::scheduler::thread_become_idle()
 }
 
-pub(crate) fn handle_guest_sync(frame: &mut crate::arch::vm::LegacySyncFrame<'_>) -> bool {
+pub(crate) fn handle_guest_sync(frame: &mut crate::hal::vm::LegacySyncFrame<'_>) -> bool {
     handle_guest_sync_inner(frame, true)
 }
 
 /// Continues architecture-local exit decoding after typed memory policy has
 /// already classified the fault as outside guest RAM.
 pub(crate) fn handle_guest_sync_after_memory_fault(
-    frame: &mut crate::arch::vm::LegacySyncFrame<'_>,
+    frame: &mut crate::hal::vm::LegacySyncFrame<'_>,
 ) -> bool {
     handle_guest_sync_inner(frame, false)
 }
 
 fn handle_guest_sync_inner(
-    frame: &mut crate::arch::vm::LegacySyncFrame<'_>,
+    frame: &mut crate::hal::vm::LegacySyncFrame<'_>,
     resolve_memory_fault: bool,
 ) -> bool {
     match active_vcpu::with(|execution, interrupts| {
         let action =
-            crate::arch::vm::decode_legacy_sync(&mut execution.context, execution.vcpu_id, frame);
-        if let Some(deadline) = crate::arch::vm::take_timer_wakeup()
-            && let Err(error) = crate::kernel::time::request_hardware_wakeup(deadline)
-        {
-            crate::pr_err!("HypeR: failed to arm guest timer wakeup: {error:?}");
-            return crate::arch::vm::LegacySyncAction::Unhandled;
-        }
+            crate::hal::vm::decode_legacy_sync(&mut execution.hardware, execution.vcpu_id, frame);
         match action {
-            crate::arch::vm::LegacySyncAction::SoftwareInterrupt(request) => {
-                return match crate::arch::vm::deliver_legacy_software_interrupt(
-                    execution, interrupts, request,
+            crate::hal::vm::LegacySyncAction::SoftwareInterrupt(request) => {
+                return match crate::hal::vm::deliver_legacy_software_interrupt(
+                    &mut execution.hardware,
+                    execution.vcpu_id,
+                    interrupts,
+                    request,
                 ) {
-                    Ok(()) => crate::arch::vm::LegacySyncAction::Resume,
+                    Ok(()) => crate::hal::vm::LegacySyncAction::Resume,
                     Err(error) => {
                         crate::pr_err!(
                             "HypeR: failed to deliver guest software interrupt: {error:?}"
                         );
-                        crate::arch::vm::LegacySyncAction::Unhandled
+                        crate::hal::vm::LegacySyncAction::Unhandled
                     }
                 };
             }
-            crate::arch::vm::LegacySyncAction::Unhandled => {}
+            crate::hal::vm::LegacySyncAction::Unhandled => {}
             _ => return action,
         }
         if resolve_memory_fault && let Some(fault) = frame.guest_memory_fault() {
             let Some(vm) = execution.vm_binding() else {
-                return crate::arch::vm::LegacySyncAction::Unhandled;
+                return crate::hal::vm::LegacySyncAction::Unhandled;
             };
             match memory::resolve_guest_memory_fault(vm, fault) {
-                Ok(true) => return crate::arch::vm::LegacySyncAction::Resume,
+                Ok(true) => return crate::hal::vm::LegacySyncAction::Resume,
                 Ok(false) => {}
                 Err(error) => {
                     crate::pr_err!(
@@ -136,21 +190,27 @@ fn handle_guest_sync_inner(
                         fault.access(),
                         fault.during_guest_page_walk()
                     );
-                    return crate::arch::vm::LegacySyncAction::Unhandled;
+                    return crate::hal::vm::LegacySyncAction::Unhandled;
                 }
             }
         }
         if let Some(device_action) = device::handle_legacy_mmio(execution, interrupts, frame) {
             return device_action;
         }
-        crate::arch::vm::handle_legacy_device_access(execution, interrupts, frame, action)
+        crate::hal::vm::handle_legacy_device_access(
+            &mut execution.hardware,
+            execution.vcpu_id,
+            interrupts,
+            frame,
+            action,
+        )
     }) {
         Ok(Some(
-            crate::arch::vm::LegacySyncAction::Resume | crate::arch::vm::LegacySyncAction::Injected,
+            crate::hal::vm::LegacySyncAction::Resume | crate::hal::vm::LegacySyncAction::Injected,
         )) => true,
         Ok(Some(
-            crate::arch::vm::LegacySyncAction::SoftwareInterrupt(_)
-            | crate::arch::vm::LegacySyncAction::Unhandled,
+            crate::hal::vm::LegacySyncAction::SoftwareInterrupt(_)
+            | crate::hal::vm::LegacySyncAction::Unhandled,
         ))
         | Ok(None)
         | Err(_) => false,

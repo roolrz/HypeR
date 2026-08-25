@@ -56,9 +56,10 @@ pub(crate) unsafe fn install_runtime_vectors() {
 /// # Safety
 ///
 /// The current CPU's emergency stack must be installed, pinned, and not
-/// already active. Local interrupts must be masked. `argument` must remain
-/// valid until `callback` stops the CPU, and the callback must not retain any
-/// reference into the abandoned stack.
+/// already active. Local interrupts must be masked. `argument` and any storage
+/// it identifies must remain mapped and unreused until `callback` stops the
+/// CPU. The callback must not publish a borrow of abandoned-stack storage or
+/// allow one to escape the permanent fail-stop continuation.
 #[inline]
 pub(crate) unsafe fn run_on_emergency_stack(
     callback: extern "C" fn(usize) -> !,

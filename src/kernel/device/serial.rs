@@ -15,7 +15,7 @@ use hyper::sync::atomic::{AtomicU64, Ordering};
 
 use crate::kernel::irq::interrupt::{self, HandlerResult, Registration, VirtualInterrupt};
 
-type ConsoleLock = InterruptSpinLock<Option<RuntimeConsole>, crate::arch::irq::LocalMask>;
+type ConsoleLock = InterruptSpinLock<Option<RuntimeConsole>, crate::hal::irq::LocalMask>;
 const MAX_DRAIN: usize = 32;
 
 static HOST_CONSOLE: ConsoleLock = InterruptSpinLock::new(None);
@@ -82,7 +82,7 @@ pub(super) fn initialize(
         return Ok(None);
     };
     let device = discover(devices, console)?;
-    let platform_interrupt = crate::arch::irq::decode_platform(device.interrupt_cells())
+    let platform_interrupt = crate::hal::irq::decode_platform(device.interrupt_cells())
         .map_err(|_| Error::InvalidInterrupt)?;
     let trigger = match platform_interrupt.trigger {
         PlatformInterruptTrigger::Level => InterruptTrigger::Level,

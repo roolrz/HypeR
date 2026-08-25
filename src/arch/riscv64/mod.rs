@@ -44,8 +44,8 @@ pub use interrupt_controller::{
     Riscv64InterruptController as ArchitectureInterruptController,
 };
 pub use interrupts::{
-    LocalInterruptMask, disable_all as disable_local_interrupts, enable_irq as enable_local_irq,
-    irq_enabled as local_irq_enabled,
+    LocalInterruptMask, disable_all as disable_all_interrupts, enable_irq as enable_local_irq,
+    irq_enabled as local_irq_enabled, mask_irq as mask_local_irq,
 };
 pub use kaslr::{Error as KaslrError, select as select_kaslr_layout};
 pub(crate) use linux::{
@@ -66,8 +66,8 @@ pub use platform::{
 };
 pub use sbi::{Error as CpuPowerError, Sbi as ArchitectureCpuPower};
 pub use smp::{
-    SecondaryBootParameters, current_cpu_index, current_hardware_id, secondary_entry_physical,
-    send_event,
+    SecondaryBootParameters, current_cpu_index, current_hardware_id, notify_reschedule,
+    secondary_entry_physical, send_event,
 };
 pub use stage2::{Error as Stage2Error, Stage2AddressSpace};
 pub use timer::{
@@ -77,7 +77,12 @@ pub use timer::{
 pub use vm_interrupt::{Error as VmInterruptError, VmInterruptController};
 pub use vm_vcpu::Error as VcpuInterruptError;
 pub(crate) use vm_vcpu::{
+    activate as activate_vcpu_hardware, deactivate as deactivate_vcpu_hardware,
     deliver_software_interrupt as deliver_guest_software_interrupt, handle_guest_device_access,
+    handle_maintenance_interrupt as handle_virtualization_maintenance_interrupt,
+    handle_virtual_timer_interrupt as handle_guest_virtual_timer_interrupt,
+    maintenance_interrupt_pending as virtualization_maintenance_pending,
+    quiesce_virtual_interrupt_delivery,
 };
 
 pub type VirtualDeviceInitializationError = core::convert::Infallible;
@@ -146,14 +151,10 @@ pub fn decode_kernel_timer(
     })
 }
 
-pub fn handle_guest_virtual_timer_interrupt() -> crate::kernel::irq::interrupt::HandlerResult {
-    crate::kernel::irq::interrupt::HandlerResult::NotHandled
-}
-
 pub fn initialize_virtual_devices(
     _timer_interrupt: hyper::hal::interrupt::InterruptId,
+    _host_timer_interrupt: Option<hyper::hal::interrupt::HostInterruptBinding>,
 ) -> Result<(), VirtualDeviceInitializationError> {
-    crate::println!("HypeR: RISC-V guest SBI and virtual timer backend initialized");
     Ok(())
 }
 
@@ -216,6 +217,9 @@ pub const fn port_io() -> Option<hyper::hal::io::PortIo> {
 pub const fn crash_stop_interrupt() -> Option<hyper::hal::interrupt::InterruptId> {
     None
 }
+pub const fn reschedule_interrupt() -> Option<hyper::hal::interrupt::InterruptId> {
+    None
+}
 pub const fn is_crash_stop_interrupt(_interrupt: hyper::hal::interrupt::InterruptId) -> bool {
     false
 }
@@ -230,16 +234,11 @@ pub fn validate_vsysreg() -> Result<(), guest::ValidationError> {
 pub const fn guest_execution_available() -> bool {
     true
 }
-pub fn poll_guest_timer(now: u64) {
-    guest::poll_virtual_timer(now)
-}
-pub fn take_guest_timer_wakeup() -> Option<u64> {
-    guest::take_timer_wakeup()
-}
-
 #[unsafe(no_mangle)]
 extern "C" fn riscv64_bootstrap(hart_id: usize, dtb_address: usize) -> ! {
-    smp::initialize_boot_hart(hart_id as u64);
+    if !smp::initialize_boot_hart(hart_id as u64) {
+        halt()
+    }
     crate::kernel::boot::prepare_boot_environment(crate::kernel::boot::ProtocolInputs::new(
         dtb_address,
         None,
@@ -250,9 +249,11 @@ extern "C" fn riscv64_bootstrap(hart_id: usize, dtb_address: usize) -> ! {
 pub(crate) fn describe_runtime(_emit: impl FnMut(core::fmt::Arguments<'_>)) {}
 
 pub fn initialize_interrupt_virtualization(
-    _domain: crate::kernel::irq::interrupt::IrqDomainId,
-    _maintenance: Option<hyper::platform::PlatformInterrupt>,
+    _host_timer_interrupt: Option<hyper::hal::interrupt::HostInterruptBinding>,
 ) -> Result<(), InterruptVirtualizationError> {
-    crate::println!("HypeR: RISC-V virtual interrupt injection uses H-extension HVIP state");
     Ok(())
+}
+
+pub const fn interrupt_virtualization_description() -> Option<(u8, u8, u8, u8)> {
+    None
 }

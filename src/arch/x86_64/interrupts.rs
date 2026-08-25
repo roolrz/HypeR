@@ -27,12 +27,26 @@ impl InterruptMask for LocalInterruptMask {
             unsafe { asm!("sti", options(nostack)) };
         }
     }
+
+    fn wait_for_lock_owner() {
+        // A fixed-delivery shootdown IPI cannot arrive while IF is clear. Poll
+        // the architecture generation while contending so a CPU blocked behind
+        // the shootdown initiator can acknowledge without acquiring any lock.
+        super::tlb::service_pending();
+        core::hint::spin_loop();
+    }
 }
 
 pub fn enable_irq() {
     super::timer::prepare_interrupt_enable();
     // SAFETY: Interrupt state is initialized and STI is valid at CPL0.
     unsafe { asm!("sti", options(nostack)) };
+}
+
+/// Masks ordinary local maskable interrupts until [`enable_irq`] is called.
+pub fn mask_irq() {
+    // SAFETY: CLI is valid at CPL0 and remains a compiler memory boundary.
+    unsafe { asm!("cli", options(nostack)) };
 }
 
 pub fn irq_enabled() -> bool {
@@ -45,6 +59,8 @@ pub fn irq_enabled() -> bool {
 }
 
 pub fn disable_all() {
-    // SAFETY: CLI is valid at CPL0 and remains a compiler memory boundary.
-    unsafe { asm!("cli", options(nostack)) };
+    // x86 has no instruction which masks NMI or machine-check delivery. Fatal
+    // entry owns those paths separately; CLI provides the strongest ordinary
+    // local-interrupt mask available here.
+    mask_irq();
 }

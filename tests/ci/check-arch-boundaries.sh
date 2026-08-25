@@ -32,6 +32,18 @@ if [ -n "$obfuscated" ]; then
     exit 1
 fi
 
+# The public logging macros currently enter kernel logging policy. Invoking
+# them from architecture mechanism code hides an upward dependency from the
+# explicit crate::kernel baseline below, so keep that shortcut unavailable.
+hidden_kernel_logging=$(LC_ALL=C rg -n -U --glob '*.rs' \
+    'crate\s*::\s*(?:print|println|pr_[A-Za-z_][A-Za-z0-9_]*)\s*!|use\s+crate\s*::\s*(?:print|println|pr_[A-Za-z_][A-Za-z0-9_]*)\s*(?:;|\s+as\s+)|use\s+crate\s*::\s*\{[^;}]*\b(?:print|println|pr_[A-Za-z_][A-Za-z0-9_]*)\b|use\s+crate\s*::\s*\{[^;}]*\bself\s+as\s+|extern\s+crate\s+self\s+as\s+' \
+    src/arch || true)
+if [ -n "$hidden_kernel_logging" ]; then
+    echo "architecture code must not call kernel logging macros:" >&2
+    printf '%s\n' "$hidden_kernel_logging" >&2
+    exit 1
+fi
+
 entry_policy_bypass=$(LC_ALL=C rg -n -U --glob '*.rs' \
     'crate::kernel::(?:crash::(?:fatal(?:_context)?|is_stop_interrupt|stop_this_cpu)|irq::(?:acknowledge_external|exception::[A-Za-z_][A-Za-z0-9_]*|interrupt::dispatch)|vm::(?:handle_guest_sync(?:_after_memory_fault)?|memory::resolve_guest_memory_fault))' \
     src/arch || true)
@@ -47,6 +59,17 @@ architecture_device_owner=$(LC_ALL=C rg -n --glob '*.rs' \
 if [ -n "$architecture_device_owner" ]; then
     echo "mutable virtual-device instances belong to the owning kernel VM aggregate:" >&2
     printf '%s\n' "$architecture_device_owner" >&2
+    exit 1
+fi
+
+time_owned_vm_policy=
+if [ -d src/kernel/time ]; then
+    time_owned_vm_policy=$(LC_ALL=C rg -n --glob '*.rs' \
+        'crate::arch::vm' src/kernel/time || true)
+fi
+if [ -n "$time_owned_vm_policy" ]; then
+    echo "guest timer policy belongs to kernel VM, not host timekeeping:" >&2
+    printf '%s\n' "$time_owned_vm_policy" >&2
     exit 1
 fi
 
