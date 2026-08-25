@@ -1,12 +1,147 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::mm::{PhysicalAddress, VirtualAddress};
+
 /// Failure reported before issuing cache maintenance operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheError {
     AddressOverflow,
     InvalidLineSize,
     NotInitialized,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PublicationLayoutError {
+    AddressOverflow,
+    EmptyPayload,
+    InvalidAlignment,
+    OutsideOwnedRange,
+    VirtualAliasMisaligned,
+}
+
+/// A cache-publication range valid through physical and linear-map aliases.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationLayout {
+    physical_address: PhysicalAddress,
+    virtual_address: VirtualAddress,
+    published_size: usize,
+}
+
+impl PublicationLayout {
+    /// Places one payload inside an exclusively owned aliased range.
+    ///
+    /// `physical_start` and `virtual_start` must identify the same first byte
+    /// of a contiguous `owned_size` range. Physical alignment is established
+    /// first for an external consumer of that address. The corresponding
+    /// virtual alias is then independently validated before it can be used to
+    /// construct a typed pointer or issue virtual-address cache maintenance.
+    pub fn new(
+        physical_start: PhysicalAddress,
+        virtual_start: VirtualAddress,
+        owned_size: usize,
+        payload_size: usize,
+        payload_alignment: usize,
+        cache_line_size: usize,
+    ) -> Result<Self, PublicationLayoutError> {
+        let physical_start = physical_start.get();
+        let virtual_start = virtual_start
+            .as_usize()
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        if payload_size == 0 {
+            return Err(PublicationLayoutError::EmptyPayload);
+        }
+        if payload_alignment == 0
+            || !payload_alignment.is_power_of_two()
+            || cache_line_size == 0
+            || !cache_line_size.is_power_of_two()
+        {
+            return Err(PublicationLayoutError::InvalidAlignment);
+        }
+        let alignment = payload_alignment.max(cache_line_size);
+        let physical_alignment =
+            u64::try_from(alignment).map_err(|_| PublicationLayoutError::AddressOverflow)?;
+        let owned_size_u64 =
+            u64::try_from(owned_size).map_err(|_| PublicationLayoutError::AddressOverflow)?;
+        physical_start
+            .checked_add(owned_size_u64)
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        virtual_start
+            .checked_add(owned_size)
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        let physical_address = align_up_u64(physical_start, physical_alignment)
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        let offset = physical_address
+            .checked_sub(physical_start)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        let virtual_address = virtual_start
+            .checked_add(offset)
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        if !virtual_address.is_multiple_of(alignment) {
+            return Err(PublicationLayoutError::VirtualAliasMisaligned);
+        }
+        let published_size = align_up(payload_size, cache_line_size)
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        let published_size_u64 =
+            u64::try_from(published_size).map_err(|_| PublicationLayoutError::AddressOverflow)?;
+        physical_address
+            .checked_add(published_size_u64)
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        virtual_address
+            .checked_add(published_size)
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        let published_end = offset
+            .checked_add(published_size)
+            .ok_or(PublicationLayoutError::AddressOverflow)?;
+        if published_end > owned_size {
+            return Err(PublicationLayoutError::OutsideOwnedRange);
+        }
+        let virtual_address =
+            u64::try_from(virtual_address).map_err(|_| PublicationLayoutError::AddressOverflow)?;
+        Ok(Self {
+            physical_address: PhysicalAddress::new(physical_address),
+            virtual_address: VirtualAddress::new(virtual_address),
+            published_size,
+        })
+    }
+
+    pub const fn physical_address(self) -> PhysicalAddress {
+        self.physical_address
+    }
+
+    pub const fn virtual_address(self) -> VirtualAddress {
+        self.virtual_address
+    }
+
+    pub const fn published_size(self) -> usize {
+        self.published_size
+    }
+}
+
+fn align_up(value: usize, alignment: usize) -> Option<usize> {
+    value
+        .checked_add(alignment - 1)
+        .map(|rounded| rounded & !(alignment - 1))
+}
+
+fn align_up_u64(value: u64, alignment: u64) -> Option<u64> {
+    value
+        .checked_add(alignment - 1)
+        .map(|rounded| rounded & !(alignment - 1))
+}
+
+/// Tests whether cache-line rounding stays inside a page-granular owner.
+///
+/// Kernel-owned pages are aligned to `page_size`. A nonzero power-of-two line
+/// no larger than that page therefore divides every page boundary, so rounding
+/// a page-local range cannot touch an adjacent allocation.
+pub const fn page_ownership_supports_line(line_size: usize, page_size: usize) -> bool {
+    line_size != 0
+        && page_size != 0
+        && line_size.is_power_of_two()
+        && page_size.is_power_of_two()
+        && line_size <= page_size
 }
 
 /// Architecture policy for cache maintenance by virtual address.

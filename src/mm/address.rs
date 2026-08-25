@@ -33,4 +33,8 @@ impl VirtualAddress {
     pub const fn get(self) -> u64 {
         self.0
     }
+
+    pub fn as_usize(self) -> Option<usize> {
+        usize::try_from(self.0).ok()
+    }
 }
