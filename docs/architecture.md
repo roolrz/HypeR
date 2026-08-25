@@ -150,6 +150,48 @@ owns its immutable participation count; timer diagnostics observe that
 published state instead of receiving a count forwarded by the kernel entry
 path.
 
+The concrete startup order is boot-critical CPU power, memory/allocator,
+debug and scheduler, host IRQ/crash/time, one-shot SMP admission, stage-1
+address-space sealing, platform drivers, complete VM initialization, and VM
+bring-up. Sealing takes the same mutation lock as guarded-stack map/unmap and
+retires identity aliases only after every admitted CPU entered permanent high
+mappings.
+
+SMP admission publishes a `FrozenTopology` once. `HypeR` has no CPU hotplug:
+late replicated-local transactions snapshot this immutable participant set. A
+future hotplug implementation must either join the in-flight snapshot or
+replay every live local mapping before publishing a new CPU online.
+
+## Kernel RPC and replicated-local IRQs
+
+Crash-stop and scheduler reschedule retain dedicated emergency semantics. All
+other cross-CPU work shares one Kernel RPC doorbell: AArch64 SGI 8, x86 vector
+`0xf1`, or RISC-V SSIP. Per-CPU Release-published reason bits coalesce the
+doorbell while typed users retain independent generation/acknowledgement
+mailboxes. The acquire-swap dispatcher drains reasons until stable zero and
+services stage-1 shootdown before IRQ lifecycle work. Polling progress hooks
+drain the same dispatcher without EOI; a real exception entry performs EOI
+exactly once. Thus x86 stage-1 shootdown retains its lock-free generation
+protocol without consuming another vector or sharing IRQ-administration locks.
+
+Every CPU owns an immutable typed local-controller capability in its per-CPU
+slot. RPC work can touch only that CPU's Redistributor, local APIC, or synthetic
+local source; it cannot access shared Distributor or IRQ-domain administration
+state.
+
+Late IRQ installation is explicitly two phase. `prepare_shared_mapping`
+publishes a non-dispatchable handler record and configures the source disabled
+on every frozen participant. The owner must quiesce the source and clear any
+pending condition first. After publishing all handler dependencies with
+Release ordering, `activate` marks the record dispatchable before enabling it
+on every CPU. Final-handler removal remains dispatchable until all CPUs
+acknowledge disable. A rejected activation is compensated across the complete
+original target set. A rejected final disable enters fail-stop because
+independently masked local sources prevent reconstructing the exact prior
+per-CPU state. Route failure, timeout, generation exhaustion, or failed
+compensation is likewise ambiguous and enters fail-stop while the mapping and
+handler context remain pinned.
+
 ## Scheduling boundary
 
 The scheduler owns stable pinned `Thread` allocations, lifecycle transitions,

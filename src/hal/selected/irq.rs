@@ -10,12 +10,13 @@
 //! capability facade.
 
 use hyper::cpu::CpuIndex;
-use hyper::hal::interrupt::InterruptId;
+use hyper::hal::interrupt::{InterruptId, KernelRpcReasons};
 use hyper::platform::PlatformInterrupt;
 
 pub(crate) type Controller = crate::arch::irq::Controller;
 pub(crate) type ControllerError = crate::arch::irq::ControllerError;
 pub(crate) type LocalMask = crate::arch::irq::LocalMask;
+pub(crate) type KernelRpcServiceError = crate::arch::irq::KernelRpcServiceError;
 
 /// Selected platform interrupt descriptor could not be decoded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,4 +66,24 @@ pub(crate) fn reschedule_interrupt() -> Option<InterruptId> {
 /// architecture-neutral wake fallback.
 pub(crate) fn notify_reschedule(cpu: CpuIndex) -> bool {
     crate::arch::irq::notify_reschedule(cpu)
+}
+
+pub(crate) fn kernel_rpc_interrupt() -> Option<InterruptId> {
+    crate::arch::irq::kernel_rpc_interrupt()
+}
+
+pub(crate) fn arm_kernel_rpc_source() {
+    crate::arch::irq::arm_kernel_rpc_source();
+}
+
+pub(crate) fn notify_kernel_rpc(cpu: CpuIndex, reasons: KernelRpcReasons) -> bool {
+    crate::arch::irq::notify_kernel_rpc(cpu, reasons.bits())
+}
+
+pub(crate) fn take_kernel_rpc_reasons() -> KernelRpcReasons {
+    KernelRpcReasons::from_bits(crate::arch::irq::take_kernel_rpc_reasons())
+}
+
+pub(crate) fn install_kernel_rpc_service(callback: fn()) -> Result<(), KernelRpcServiceError> {
+    crate::arch::irq::install_kernel_rpc_service(callback)
 }

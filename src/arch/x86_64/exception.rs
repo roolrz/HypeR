@@ -422,7 +422,9 @@ pub fn bootstrap_stack_bounds(stack_pointer: u64) -> Option<(usize, usize)> {
 extern "C" fn x86_64_vector_dispatch(frame: &mut ExceptionFrame) {
     let vector = frame.vector as u32;
     if vector >= 32 {
-        if super::tlb::handle_interrupt(vector) {
+        if vector == super::platform::KERNEL_RPC_VECTOR {
+            crate::arch::irq::service_kernel_rpc();
+            super::interrupt_controller::end_local_interrupt();
             return;
         }
         super::virtualization::observe_host_interrupt(vector);

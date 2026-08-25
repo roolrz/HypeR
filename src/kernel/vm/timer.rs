@@ -12,7 +12,9 @@ use hyper::hal::interrupt::{
 use hyper::platform::{PlatformInterrupt, PlatformInterruptTrigger};
 use hyper::sync::atomic::{AtomicU32, Ordering};
 
-use crate::kernel::irq::interrupt::{HandlerResult, IrqDomainId, Registration, VirtualInterrupt};
+use crate::kernel::irq::interrupt::{
+    HandlerResult, IrqDomainId, PreparedRegistration, VirtualInterrupt,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -33,39 +35,104 @@ const NO_HOST_TIMER: u32 = u32::MAX;
 static HOST_TIMER_INTERRUPT: AtomicU32 = AtomicU32::new(NO_HOST_TIMER);
 
 pub(super) struct PreparedBinding {
-    mapping: Option<(VirtualInterrupt, Registration)>,
-    maintenance: Option<(VirtualInterrupt, Registration)>,
+    mapping: Option<PreparedRegistration>,
+    maintenance: Option<PreparedRegistration>,
 }
 
 impl PreparedBinding {
     pub(super) const fn host_interrupt(&self) -> Option<HostInterruptBinding> {
         match self.mapping.as_ref() {
-            Some((interrupt, _)) => Some(HostInterruptBinding::new(interrupt.get())),
+            Some(prepared) => Some(HostInterruptBinding::new(prepared.interrupt().get())),
             None => None,
         }
     }
 
     pub(super) const fn maintenance_interrupt(&self) -> Option<VirtualInterrupt> {
         match self.maintenance.as_ref() {
-            Some((interrupt, _)) => Some(*interrupt),
+            Some(prepared) => Some(prepared.interrupt()),
             None => None,
         }
     }
 
-    pub(super) fn retain_permanently(self) {
+    pub(super) fn activate(self) -> Result<(), Error> {
         let host_timer = self.host_interrupt().map(HostInterruptBinding::get);
-        if let Some((_, registration)) = self.mapping {
+        // Maintenance may refer to the timer VIRQ in its handler context, but
+        // both handlers were Release-published while disabled by `prepare`.
+        // Keep every activation capability until the complete group commits.
+        let PreparedBinding {
+            mapping: prepared_mapping,
+            maintenance: prepared_maintenance,
+        } = self;
+        let mapping = match activate_one(prepared_mapping) {
+            Ok(registration) => registration,
+            Err(error) => {
+                rollback_mapping(prepared_maintenance);
+                return Err(error);
+            }
+        };
+        let maintenance = match activate_one(prepared_maintenance) {
+            Ok(registration) => registration,
+            Err(error) => {
+                rollback_active_mapping(mapping);
+                return Err(error);
+            }
+        };
+        if let Some(registration) = mapping {
             registration.retain_permanently();
         }
-        if let Some((_, registration)) = self.maintenance {
+        if let Some(registration) = maintenance {
             registration.retain_permanently();
         }
         HOST_TIMER_INTERRUPT.store(host_timer.unwrap_or(NO_HOST_TIMER), Ordering::Release);
+        Ok(())
     }
 
     pub(super) fn rollback(self) {
         rollback_mapping(self.mapping);
         rollback_mapping(self.maintenance);
+    }
+}
+
+fn activate_one(
+    prepared: Option<PreparedRegistration>,
+) -> Result<Option<crate::kernel::irq::interrupt::Registration>, Error> {
+    let Some(prepared) = prepared else {
+        return Ok(None);
+    };
+    match crate::kernel::irq::interrupt::activate(prepared) {
+        Ok(registration) => Ok(Some(registration)),
+        Err(failure) => {
+            let (error, prepared) = failure.into_parts();
+            if let Err(discard) = crate::kernel::irq::interrupt::discard_prepared(prepared) {
+                let (discard_error, _prepared) = discard.into_parts();
+                crate::kernel::crash::fatal(format_args!(
+                    "HypeR: guest timer IRQ activation rollback failed: {discard_error:?}"
+                ));
+            }
+            Err(Error::Interrupt(error))
+        }
+    }
+}
+
+fn rollback_active_mapping(registration: Option<crate::kernel::irq::interrupt::Registration>) {
+    let Some(registration) = registration else {
+        return;
+    };
+    crate::hal::vm::quiesce_virtual_interrupt_delivery();
+    let interrupt = registration.interrupt();
+    match crate::kernel::irq::interrupt::unregister(registration) {
+        Ok(()) => {
+            if let Err(error) = crate::kernel::irq::interrupt::unmap(interrupt) {
+                crate::pr_warn!("HypeR: active guest timer IRQ unmap failed: {error:?}");
+            }
+        }
+        Err(failure) => {
+            let (error, registration) = failure.into_parts();
+            crate::pr_warn!(
+                "HypeR: retaining active guest timer IRQ after rollback failed: {error:?}"
+            );
+            registration.retain_permanently();
+        }
     }
 }
 
@@ -135,21 +202,15 @@ pub(super) fn validate_hardware(
     validation.map(|()| true)
 }
 
-fn rollback_mapping(mapping: Option<(VirtualInterrupt, Registration)>) {
-    let Some((interrupt, registration)) = mapping else {
+fn rollback_mapping(mapping: Option<PreparedRegistration>) {
+    let Some(prepared) = mapping else {
         return;
     };
-    match crate::kernel::irq::interrupt::unregister(registration) {
-        Ok(()) => {
-            if let Err(error) = crate::kernel::irq::interrupt::unmap(interrupt) {
-                crate::pr_warn!("HypeR: guest timer IRQ mapping rollback failed: {error:?}");
-            }
-        }
-        Err(failure) => {
-            let (error, registration) = failure.into_parts();
-            crate::pr_warn!("HypeR: retaining guest timer IRQ after rollback failed: {error:?}");
-            registration.retain_permanently();
-        }
+    if let Err(failure) = crate::kernel::irq::interrupt::discard_prepared(prepared) {
+        let (error, _prepared) = failure.into_parts();
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: guest timer IRQ preparation rollback failed: {error:?}"
+        ));
     }
 }
 
@@ -161,7 +222,7 @@ pub(super) fn prepare(
     let mapping = if source.requires_host_mapping {
         Some(
             domain
-                .register_shared_mapping(
+                .prepare_shared_mapping(
                     source.interrupt,
                     InterruptPriority::Normal,
                     InterruptTrigger::Level,
@@ -176,7 +237,7 @@ pub(super) fn prepare(
     // Zero represents an absent timer mapping, so encode an allocated VIRQ as
     // raw + 1. VIRQ zero is valid and must not collide with the sentinel.
     let maintenance_context = match mapping.as_ref() {
-        Some((interrupt, _)) => usize::try_from(interrupt.get())
+        Some(prepared) => usize::try_from(prepared.interrupt().get())
             .ok()
             .and_then(|raw| raw.checked_add(1))
             .ok_or(Error::InvalidHandlerContext),
@@ -190,7 +251,7 @@ pub(super) fn prepare(
         }
     };
     let maintenance = match maintenance {
-        Some(interrupt) => match domain.register_shared_mapping(
+        Some(interrupt) => match domain.prepare_shared_mapping(
             InterruptId::new(interrupt.interrupt),
             InterruptPriority::High,
             match interrupt.trigger {

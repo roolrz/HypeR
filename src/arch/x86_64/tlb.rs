@@ -11,15 +11,8 @@
 use core::arch::asm;
 
 use hyper::cpu::{CpuIndex, MAX_CPUS};
-use hyper::hal::interrupt::InterruptId;
+use hyper::hal::interrupt::{InterruptId, KernelRpcReasons};
 use hyper::sync::atomic::{AtomicU64, Ordering};
-
-pub(super) const SHOOTDOWN_VECTOR: u32 = 0xf1;
-
-const _: () = assert!(SHOOTDOWN_VECTOR >= 32);
-const _: () = assert!(SHOOTDOWN_VECTOR < 0xff);
-const _: () = assert!(SHOOTDOWN_VECTOR != super::platform::TIMER_VECTOR);
-const _: () = assert!(SHOOTDOWN_VECTOR != super::platform::RESCHEDULE_VECTOR);
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 static REQUESTED_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -50,7 +43,11 @@ pub(super) fn flush_all_online() {
     let mut targets = [false; MAX_CPUS];
     super::smp::for_each_online_remote_cpu(current, |cpu, apic_id| {
         targets[cpu.get()] = true;
-        if !super::interrupt_controller::send_fixed_ipi(apic_id, InterruptId::new(SHOOTDOWN_VECTOR))
+        if super::smp::publish_kernel_rpc(cpu, KernelRpcReasons::STAGE1_TLB_SHOOTDOWN.bits())
+            && !super::interrupt_controller::send_fixed_ipi(
+                apic_id,
+                InterruptId::new(super::platform::KERNEL_RPC_VECTOR),
+            )
         {
             // The compile-time vector checks and validated APIC route make this
             // unreachable. Continuing would permit use-after-unmap through a
@@ -64,6 +61,7 @@ pub(super) fn flush_all_online() {
             continue;
         }
         while ACKNOWLEDGED_GENERATION[cpu].load(Ordering::Acquire) != generation {
+            crate::arch::irq::service_kernel_rpc();
             core::hint::spin_loop();
         }
     }
@@ -103,17 +101,6 @@ pub(super) fn service_pending() {
     }
     flush_local();
     ACKNOWLEDGED_GENERATION[cpu.get()].store(generation, Ordering::Release);
-}
-
-/// Consumes the architecture-private shootdown vector before kernel IRQ policy.
-pub(super) fn handle_interrupt(vector: u32) -> bool {
-    if vector != SHOOTDOWN_VECTOR {
-        return false;
-    }
-
-    service_pending();
-    super::interrupt_controller::end_local_interrupt();
-    true
 }
 
 fn current_cpu_or_halt() -> CpuIndex {

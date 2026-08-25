@@ -202,6 +202,10 @@ pub(crate) fn local_protection_enabled() -> bool {
     crate::arch::memory::local_protection_enabled()
 }
 
+pub(crate) fn service_stage1_tlb_shootdown() -> bool {
+    crate::arch::memory::service_stage1_tlb_shootdown()
+}
+
 #[cfg(all(CONFIG_ARCH_X86_64, feature = "kernel-self-test"))]
 pub(crate) fn stage1_shootdown_count_for_test() -> u64 {
     crate::arch::memory::stage1_shootdown_count_for_test()

@@ -6,7 +6,7 @@ use core::ptr::{read_volatile, write_volatile};
 
 use crate::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use crate::hal::interrupt::{
-    InterruptController, InterruptId, InterruptPriority, InterruptTrigger,
+    InterruptController, InterruptId, InterruptPriority, InterruptTrigger, LocalInterruptController,
 };
 use crate::platform::{GicV3Info, MAX_GIC_REDISTRIBUTOR_REGIONS};
 
@@ -106,6 +106,95 @@ pub struct GicV3<Cpu, MemoryBarrier> {
     marker: PhantomData<(Cpu, MemoryBarrier)>,
 }
 
+#[derive(Clone, Copy)]
+pub struct GicV3Local<Cpu, MemoryBarrier> {
+    redistributor: usize,
+    interrupt_count: u32,
+    marker: PhantomData<(Cpu, MemoryBarrier)>,
+}
+
+impl<Cpu: CpuInterface, MemoryBarrier: Barrier> LocalInterruptController
+    for GicV3Local<Cpu, MemoryBarrier>
+{
+    type Error = Error;
+
+    fn configure(
+        &self,
+        interrupt: InterruptId,
+        priority: InterruptPriority,
+        trigger: InterruptTrigger,
+    ) -> Result<(), Error> {
+        let id = self.validate(interrupt)?;
+        if id < 16 && trigger != InterruptTrigger::Edge {
+            return Err(Error::InvalidInterrupt);
+        }
+        let base = self
+            .redistributor
+            .checked_add(SGI_BASE_OFFSET)
+            .ok_or(Error::AddressOverflow)?;
+        write_u8(base, GICD_IPRIORITYR + id as usize, gic_priority(priority));
+        if id >= 16 {
+            let offset = GICD_ICFGR + ((id / 16) as usize * 4);
+            let bit = 1u32 << (((id % 16) * 2) + 1);
+            let mut value = read_u32(base, offset);
+            match trigger {
+                InterruptTrigger::Level => value &= !bit,
+                InterruptTrigger::Edge => value |= bit,
+            }
+            write_u32(base, offset, value);
+        }
+        self.finish()
+    }
+
+    fn enable(&self, interrupt: InterruptId) -> Result<(), Error> {
+        self.set_enabled(interrupt, true)
+    }
+
+    fn disable(&self, interrupt: InterruptId) -> Result<(), Error> {
+        self.set_enabled(interrupt, false)
+    }
+}
+
+impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3Local<Cpu, MemoryBarrier> {
+    fn validate(&self, interrupt: InterruptId) -> Result<u32, Error> {
+        let id = interrupt.get();
+        (id < 32 && id < self.interrupt_count)
+            .then_some(id)
+            .ok_or(Error::InvalidInterrupt)
+    }
+
+    fn set_enabled(&self, interrupt: InterruptId, enabled: bool) -> Result<(), Error> {
+        let id = self.validate(interrupt)?;
+        let base = self
+            .redistributor
+            .checked_add(SGI_BASE_OFFSET)
+            .ok_or(Error::AddressOverflow)?;
+        write_u32(
+            base,
+            if enabled {
+                GICD_ISENABLER
+            } else {
+                GICD_ICENABLER
+            },
+            1 << id,
+        );
+        self.finish()
+    }
+
+    fn finish(&self) -> Result<(), Error> {
+        let mut remaining = REGISTER_POLL_LIMIT;
+        while read_u32(self.redistributor, GICR_CTLR) & GICR_CTLR_RWP != 0 {
+            if remaining == 0 {
+                return Err(Error::RegisterTimeout);
+            }
+            remaining -= 1;
+            core::hint::spin_loop();
+        }
+        MemoryBarrier::data_synchronization(BarrierDomain::FullSystem, BarrierAccess::All);
+        Ok(())
+    }
+}
+
 impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
     /// Binds DTB-discovered register ranges to architecture-provided mappings.
     ///
@@ -185,6 +274,14 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
 
     pub const fn interrupt_count(&self) -> u32 {
         self.interrupt_count
+    }
+
+    pub fn local_controller(&self) -> Result<GicV3Local<Cpu, MemoryBarrier>, Error> {
+        Ok(GicV3Local {
+            redistributor: self.current_redistributor()?,
+            interrupt_count: self.interrupt_count,
+            marker: PhantomData,
+        })
     }
 
     pub fn configure(

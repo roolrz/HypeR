@@ -328,7 +328,10 @@ extern "C" fn dispatch_trap(frame: &mut TrapFrame) {
     const SUPERVISOR_SOFTWARE: u64 = 1;
     if frame.scause & INTERRUPT != 0 {
         match frame.scause & !INTERRUPT {
-            SUPERVISOR_SOFTWARE => super::interrupts::clear_software_interrupt(),
+            SUPERVISOR_SOFTWARE => {
+                super::interrupts::clear_software_interrupt();
+                crate::arch::irq::service_kernel_rpc();
+            }
             SUPERVISOR_TIMER => {
                 dispatch_irq_action(
                     frame,

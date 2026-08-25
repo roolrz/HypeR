@@ -9,6 +9,7 @@
 
 use hyper::sync::atomic::{AtomicBool, Ordering};
 
+pub(crate) mod cross_call;
 pub(crate) mod exception;
 pub mod interrupt;
 pub(crate) mod reschedule;
@@ -20,6 +21,7 @@ static EXCEPTIONS_READY: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InitializationError {
     Controller(interrupt::Error),
+    KernelRpcService(crate::hal::irq::KernelRpcServiceError),
     MissingController,
     RuntimeVectors(crate::hal::exception::RuntimeVectorError),
     Reschedule(reschedule::Error),
@@ -36,6 +38,9 @@ pub(crate) fn initialize(
     boot: &mut super::boot::Initialization,
 ) -> Result<(), InitializationError> {
     initialize_controller(boot)?;
+    crate::hal::irq::install_kernel_rpc_service(cross_call::service)
+        .map_err(InitializationError::KernelRpcService)?;
+    interrupt::initialize_local_rpc_transport().map_err(InitializationError::Controller)?;
     initialize_exceptions()?;
     reschedule::initialize(boot.interrupts().root_domain).map_err(InitializationError::Reschedule)
 }

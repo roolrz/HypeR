@@ -23,6 +23,21 @@ static ONLINE: PerCpu<AtomicBool> =
     PerCpu::new([const { AtomicBool::new(false) }; hyper::cpu::MAX_CPUS]);
 static PARTICIPATING_CPU_COUNT: AtomicUsize = AtomicUsize::new(0);
 
+/// Immutable CPU set admitted by the one-shot boot protocol.
+///
+/// `HypeR` currently has no CPU hotplug. Late replicated-local state may snapshot
+/// this token because no CPU can join after its Release publication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FrozenTopology {
+    count: usize,
+}
+
+impl FrozenTopology {
+    pub(crate) const fn count(self) -> usize {
+        self.count
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Allocation,
@@ -236,6 +251,10 @@ pub(crate) fn online_cpu_count() -> usize {
 pub(crate) fn participating_cpu_count() -> Option<usize> {
     let count = PARTICIPATING_CPU_COUNT.load(Ordering::Acquire);
     (count != 0).then_some(count)
+}
+
+pub(crate) fn frozen_topology() -> Option<FrozenTopology> {
+    participating_cpu_count().map(|count| FrozenTopology { count })
 }
 
 /// Starts every enabled CPU described by firmware, up to `CONFIG_MAX_CPUS`.

@@ -41,9 +41,13 @@ pub use exception::{
 };
 pub use gic_cpu_interface::{
     Aarch64GicCpuInterface, acknowledge_interrupt, broadcast_crash_stop, crash_stop_interrupt,
-    current_gic_affinity, end_interrupt, is_crash_stop_interrupt, notify_reschedule,
-    reschedule_interrupt,
+    current_gic_affinity, end_interrupt, is_crash_stop_interrupt, kernel_rpc_interrupt,
+    notify_kernel_rpc, notify_reschedule, reschedule_interrupt,
 };
+pub fn take_kernel_rpc_reasons() -> u8 {
+    smp::take_kernel_rpc()
+}
+pub const fn arm_kernel_rpc_source() {}
 pub use host::mode_name as host_execution_mode_name;
 pub use hyper::drivers::power::psci::Error as CpuPowerError;
 pub use interrupt_controller::{
@@ -261,6 +265,10 @@ pub fn wait_for_event() {
 
 pub const fn port_io() -> Option<hyper::hal::io::PortIo> {
     None
+}
+
+pub const fn service_stage1_tlb_shootdown() -> bool {
+    true
 }
 
 /// Rust continuation used while the architecture bootstrap is still active.

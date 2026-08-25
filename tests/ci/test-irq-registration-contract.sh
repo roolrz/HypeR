@@ -40,3 +40,8 @@ expect_rejection "registrations without #[must_use] must be rejected"
 cp "$root/src/kernel/irq/interrupt.rs" "$source_file"
 printf '\nimpl Drop for Registration { fn drop(&mut self) {} }\n' >>"$source_file"
 expect_rejection "implicit IRQ unregistration from Drop must be rejected"
+
+cp "$root/src/kernel/irq/interrupt.rs" "$source_file"
+sed 's/Result<(), DiscardFailure>/Result<(), Error>/' "$source_file" >"$fixture/modified.rs"
+mv "$fixture/modified.rs" "$source_file"
+expect_rejection "discard failure without capability recovery must be rejected"

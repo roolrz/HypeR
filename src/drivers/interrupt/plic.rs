@@ -9,7 +9,7 @@ use core::ptr::{read_volatile, write_volatile};
 use crate::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use crate::hal::interrupt::{
     InterruptController, InterruptId, InterruptPriority, InterruptTrigger,
-    KernelInterruptController,
+    KernelInterruptController, LocalInterruptController,
 };
 use crate::platform::{MAX_PLIC_CONTEXTS, PlicInfo};
 
@@ -47,6 +47,39 @@ pub struct Plic<B: Barrier> {
     context_count: usize,
     hardware_id: fn() -> u64,
     barrier: PhantomData<B>,
+}
+
+pub struct PlicLocal<B: Barrier>(PhantomData<B>);
+
+impl<B: Barrier> LocalInterruptController for PlicLocal<B> {
+    type Error = Error;
+
+    fn configure(
+        &self,
+        interrupt: InterruptId,
+        _priority: InterruptPriority,
+        _trigger: InterruptTrigger,
+    ) -> Result<(), Error> {
+        (interrupt.get() == TIMER_INTERRUPT)
+            .then_some(())
+            .ok_or(Error::InvalidInterrupt)
+    }
+
+    fn enable(&self, interrupt: InterruptId) -> Result<(), Error> {
+        self.configure(
+            interrupt,
+            InterruptPriority::Normal,
+            InterruptTrigger::Level,
+        )
+    }
+
+    fn disable(&self, interrupt: InterruptId) -> Result<(), Error> {
+        self.configure(
+            interrupt,
+            InterruptPriority::Normal,
+            InterruptTrigger::Level,
+        )
+    }
 }
 
 impl<B: Barrier> Plic<B> {
@@ -196,6 +229,8 @@ impl<B: Barrier> InterruptController for Plic<B> {
 }
 
 impl<B: Barrier> KernelInterruptController for Plic<B> {
+    type Local = PlicLocal<B>;
+
     fn interrupt_count(&self) -> u32 {
         self.source_count.saturating_add(1)
     }
@@ -224,10 +259,15 @@ impl<B: Barrier> KernelInterruptController for Plic<B> {
         interrupt.get() == TIMER_INTERRUPT
     }
 
-    unsafe fn initialize_local(&mut self) -> Result<(), Self::Error> {
+    fn local_controller(&self) -> Result<Self::Local, Self::Error> {
+        self.context()?;
+        Ok(PlicLocal(PhantomData))
+    }
+
+    unsafe fn initialize_local(&mut self) -> Result<Self::Local, Self::Error> {
         let context = self.context()?;
         write_control_mmio::<B>((context + CONTEXT_THRESHOLD) as *mut u32, 0);
-        Ok(())
+        Ok(PlicLocal(PhantomData))
     }
 }
 

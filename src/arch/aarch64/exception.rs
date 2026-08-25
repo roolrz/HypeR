@@ -446,6 +446,11 @@ extern "C" fn aarch64_exception_dispatch(
     };
     if kind == ExceptionKind::Irq {
         let interrupt = super::acknowledge_interrupt()?;
+        if Some(interrupt) == super::kernel_rpc_interrupt() {
+            crate::arch::irq::service_kernel_rpc();
+            super::end_interrupt(interrupt);
+            return None;
+        }
         match crate::kernel::entry::irq::dispatch(interrupt) {
             crate::kernel::entry::irq::Action::Resume { postlude } => return postlude,
             crate::kernel::entry::irq::Action::Stop => {

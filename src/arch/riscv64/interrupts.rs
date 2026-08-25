@@ -32,6 +32,13 @@ impl InterruptMask for LocalInterruptMask {
             unsafe { asm!("csrsi sstatus, 2", options(nostack)) };
         }
     }
+
+    fn wait_for_lock_owner() {
+        // SSIP cannot be taken with SSTATUS.SIE clear. Polling consumes the
+        // durable reason; the later physical trap is only a redundant prompt.
+        crate::arch::irq::service_kernel_rpc();
+        core::hint::spin_loop();
+    }
 }
 
 pub fn enable_irq() {
@@ -63,10 +70,26 @@ pub fn disable_all() {
     unsafe { asm!("csrci sstatus, 2", "csrw sie, zero", options(nostack)) };
 }
 
-pub fn enable_kernel_sources() {
-    let mask = (registers::SIE_SSIE | registers::SIE_SEIE) as usize;
-    // SAFETY: SIE is writable in HS mode and the mask names supported sources.
-    unsafe { asm!("csrs sie, {mask}", mask = in(reg) mask, options(nostack)) };
+pub fn enable_software_interrupt_source() {
+    // SAFETY: SIE is writable in HS mode and SSIE is the Kernel RPC source.
+    unsafe {
+        asm!(
+            "csrs sie, {mask}",
+            mask = in(reg) registers::SIE_SSIE as usize,
+            options(nostack)
+        )
+    };
+}
+
+pub fn enable_external_interrupt_source() {
+    // SAFETY: SIE is writable in HS mode and SEIE gates the local PLIC context.
+    unsafe {
+        asm!(
+            "csrs sie, {mask}",
+            mask = in(reg) registers::SIE_SEIE as usize,
+            options(nostack)
+        )
+    };
 }
 
 pub fn clear_software_interrupt() {
