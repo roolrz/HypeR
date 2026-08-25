@@ -30,6 +30,9 @@ mod allocation;
 #[path = "cases/boot_allocator.rs"]
 mod boot_allocator;
 #[cfg(test)]
+#[path = "cases/cache_publication.rs"]
+mod cache_publication;
+#[cfg(test)]
 #[path = "cases/cpio.rs"]
 mod cpio;
 #[cfg(test)]

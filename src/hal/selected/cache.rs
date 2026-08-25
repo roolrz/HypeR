@@ -26,7 +26,7 @@ fn valid_page_subdivision(line_size: usize) -> bool {
     let Ok(page_size) = usize::try_from(hyper::mm::PAGE_SIZE) else {
         return false;
     };
-    line_size != 0 && line_size.is_power_of_two() && line_size <= page_size
+    hyper::hal::cache::page_ownership_supports_line(line_size, page_size)
 }
 
 pub(crate) fn data_line_size() -> usize {

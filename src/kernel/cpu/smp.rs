@@ -9,7 +9,7 @@ use core::mem::{align_of, size_of};
 use core::ptr::NonNull;
 
 use hyper::cpu::{CpuIndex, PerCpu};
-use hyper::hal::cache::CacheError;
+use hyper::hal::cache::{CacheError, PublicationLayout};
 use hyper::hal::cpu_power::CpuHardwareId;
 use hyper::mm::PAGE_SIZE;
 use hyper::platform::PlatformInfo;
@@ -117,38 +117,27 @@ impl SecondaryBootHandoff {
         let order = usize::try_from(allocated_pages.trailing_zeros())
             .map_err(|_| Error::InvalidHandoffLayout)?;
         let block = PageBlock::allocate(order).map_err(|_| Error::Allocation)?;
-        let physical_start = block.physical().get();
-        let block_start = super::super::mm::memory::linear_address(physical_start)
-            .ok_or(Error::InvalidAddress)?;
-        let physical_alignment =
-            u64::try_from(placement_alignment).map_err(|_| Error::InvalidHandoffLayout)?;
-        let context =
-            align_up_u64(physical_start, physical_alignment).ok_or(Error::InvalidHandoffLayout)?;
-        let offset = context
-            .checked_sub(physical_start)
-            .and_then(|offset| usize::try_from(offset).ok())
-            .ok_or(Error::InvalidHandoffLayout)?;
-        let parameters_address = block_start
-            .checked_add(offset)
-            .ok_or(Error::InvalidHandoffLayout)?;
-        // The trampoline consumes the physical record while Rust initializes
-        // it through the linear alias. Both addresses must satisfy the record
-        // alignment and cache-line boundary.
-        if !parameters_address.is_multiple_of(placement_alignment) {
-            return Err(Error::InvalidHandoffLayout);
-        }
+        let physical_start = block.physical();
+        let block_start =
+            crate::hal::memory::linear_address(physical_start).ok_or(Error::InvalidAddress)?;
         let block_size = page_size
             .checked_mul(allocated_pages)
             .ok_or(Error::InvalidHandoffLayout)?;
-        let block_end = block_start
-            .checked_add(block_size)
-            .ok_or(Error::InvalidHandoffLayout)?;
-        let published_end = parameters_address
-            .checked_add(published_size)
-            .ok_or(Error::InvalidHandoffLayout)?;
-        if published_end > block_end {
-            return Err(Error::InvalidHandoffLayout);
-        }
+        let layout = PublicationLayout::new(
+            physical_start,
+            block_start,
+            block_size,
+            parameter_size,
+            align_of::<crate::hal::cpu::SecondaryBootParameters>(),
+            line_size,
+        )
+        .map_err(|_| Error::InvalidHandoffLayout)?;
+        let context = layout.physical_address().get();
+        let parameters_address = layout
+            .virtual_address()
+            .as_usize()
+            .ok_or(Error::InvalidAddress)?;
+        let published_size = layout.published_size();
         let pointer: NonNull<crate::hal::cpu::SecondaryBootParameters> =
             NonNull::new(core::ptr::with_exposed_provenance_mut(parameters_address))
                 .ok_or(Error::InvalidHandoffLayout)?;
@@ -163,7 +152,7 @@ impl SecondaryBootHandoff {
         // SAFETY: `handoff` uniquely owns every complete cache line intersecting
         // this record. No secondary can observe or modify it before CPU_ON.
         unsafe {
-            crate::hal::cache::publish_data_range(parameters_address, parameter_size)?;
+            crate::hal::cache::publish_data_range(parameters_address, published_size)?;
         }
         Ok(handoff)
     }
@@ -230,12 +219,6 @@ impl Drop for SecondaryBootHandoffs {
 }
 
 fn align_up(value: usize, alignment: usize) -> Option<usize> {
-    value
-        .checked_add(alignment - 1)
-        .map(|rounded| rounded & !(alignment - 1))
-}
-
-fn align_up_u64(value: u64, alignment: u64) -> Option<u64> {
     value
         .checked_add(alignment - 1)
         .map(|rounded| rounded & !(alignment - 1))
