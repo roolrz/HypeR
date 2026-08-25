@@ -174,7 +174,7 @@ pub fn initialize_virtual_devices(
     Ok(())
 }
 
-pub const fn enable_interrupts_for_guest_entry() {}
+pub const fn prepare_interrupts_for_guest_entry() {}
 
 /// Builds the permanent host address space while using bootstrap mappings.
 ///

@@ -170,6 +170,9 @@ aarch64_capture_crash_context:
 .global aarch64_enter_guest
 .type aarch64_enter_guest, %function
 aarch64_enter_guest:
+    // Local IRQs must stay masked until ERET. An IRQ in this trampoline would
+    // replace the guest ELR_EL2/SPSR_EL2 with its host return state; vCPU
+    // deactivation would then persist that host state as the guest context.
     // Keep the context pointer in x30 while the VHE host translation regime is
     // active. The heap may live in the host-only lower VA range, so no context
     // load is permitted after TGE is cleared.

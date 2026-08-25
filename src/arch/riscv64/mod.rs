@@ -158,7 +158,7 @@ pub fn initialize_virtual_devices(
     Ok(())
 }
 
-pub fn enable_interrupts_for_guest_entry() {
+pub fn prepare_interrupts_for_guest_entry() {
     enable_local_irq();
 }
 
