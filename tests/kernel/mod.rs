@@ -3,6 +3,8 @@
 
 //! Bare-metal integration tests compiled only by `kernel-self-test`.
 
+#[cfg(CONFIG_ARCH_AARCH64)]
+mod guest_entry_irq;
 mod guest_memory_access;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod irq_tail_preemption;
@@ -30,6 +32,8 @@ pub(crate) fn run() {
     #[cfg(CONFIG_ARCH_AARCH64)]
     let irq_tail_probe_result = irq_tail_preemption::install();
     crate::hal::irq::mask_local();
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    let guest_entry_irq_result = guest_entry_irq::run();
     #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
     if let Err(error) = reschedule_ipi_result {
         crate::kernel::boot::fail("reschedule IPI runtime proof", error);
@@ -59,10 +63,16 @@ pub(crate) fn run() {
     if let Err(error) = irq_tail_probe_result {
         crate::kernel::boot::fail("AArch64 IRQ-tail preemption probe installation", error);
     }
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    if let Err(error) = guest_entry_irq_result {
+        crate::kernel::boot::fail("AArch64 guest-entry IRQ mask contract", error);
+    }
     crate::println!("HypeR test: scheduler ready/wait queues and sleeping sync passed");
     crate::println!("HypeR test: guarded thread, IRQ, and emergency stacks passed");
     crate::println!("HypeR test: deadline-based thread sleep passed");
     crate::println!("HypeR test: fatal-path readiness contract passed");
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    crate::println!("HypeR test: AArch64 guest-entry IRQ mask contract passed");
     if guest_execution {
         crate::println!("HypeR test: checked stage-2 guest-memory copies passed");
     } else {

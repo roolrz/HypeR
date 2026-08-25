@@ -474,7 +474,8 @@ impl VcpuContext {
     ///
     /// `context` must be non-null, aligned, pinned, and exclusively owned by
     /// the active vCPU. Stage-2 translation and every guest-owned architectural
-    /// context must be active on this CPU. No Rust reference to the context may
+    /// context must be active on this CPU. Local IRQs must remain masked until
+    /// the assembly path executes `ERET`. No Rust reference to the context may
     /// remain live: exception reentry mutates it before this call can return.
     pub unsafe fn enter(context: *mut Self) -> ! {
         // SAFETY: The caller established every architectural ownership and

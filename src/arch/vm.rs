@@ -20,11 +20,11 @@ pub(crate) use super::imp::{
 };
 
 pub(crate) use super::imp::{
-    enable_interrupts_for_guest_entry as enable_interrupts_for_entry,
     handle_guest_virtual_timer_interrupt as handle_virtual_timer_interrupt,
     handle_virtualization_maintenance_interrupt as handle_maintenance_interrupt,
     initialize_interrupt_virtualization as initialize_interrupts,
     initialize_virtual_devices as initialize_devices, interrupt_virtualization_description,
+    prepare_interrupts_for_guest_entry as prepare_interrupts_for_entry,
     quiesce_virtual_interrupt_delivery, validate_vsysreg as validate_register_interface,
 };
 
