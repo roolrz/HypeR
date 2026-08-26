@@ -47,7 +47,11 @@ write_valid_fixture() {
         '    boot_parameters.release();' \
         '}' \
         'extern "C" fn enter_clean_idle(cpu_index: CpuIndex) {' \
-        '    ONLINE[cpu_index].store(true, Ordering::Release);' \
+        '    run_idle_loop_after(publish_current_online);' \
+        '}' \
+        'fn publish_current_online() {' \
+        '    let cpu = cpu_index();' \
+        '    ONLINE[cpu].store(true, Ordering::Release);' \
         '}' \
         >"$fixture/src/kernel/cpu/smp.rs"
     printf '%s\n' \
@@ -115,7 +119,10 @@ mutate 'the boot CPU must acquire secondary completion' \
     's/online.load(Ordering::Acquire)/online.load(Ordering::Relaxed)/'
 mutate 'the secondary must release-publish handoff consumption' \
     src/kernel/cpu/smp.rs \
-    's/ONLINE\[cpu_index\].store(true, Ordering::Release)/ONLINE[cpu_index].store(true, Ordering::Relaxed)/'
+    's/ONLINE\[cpu\].store(true, Ordering::Release)/ONLINE[cpu].store(true, Ordering::Relaxed)/'
+mutate 'the secondary must publish from its first scheduler observation' \
+    src/kernel/cpu/smp.rs \
+    's/run_idle_loop_after(publish_current_online)/run_idle_loop()/'
 mutate 'the all-online path must reclaim retained handoffs' \
     src/kernel/cpu/smp.rs \
     's/boot_parameters.release()/boot_parameters.retain()/'

@@ -56,9 +56,13 @@ pub(crate) fn send_event() {
     crate::arch::cpu::send_event();
 }
 
+/// Waits after scheduler work was checked with local interrupts masked.
+///
+/// The selected architecture must close its check-to-sleep race and return
+/// with interrupts still masked so the caller can restore exact guard state.
 #[inline]
-pub(crate) fn wait_for_event() {
-    crate::arch::cpu::wait_for_event();
+pub(crate) fn wait_for_interrupt_masked() {
+    crate::arch::cpu::wait_for_interrupt_masked();
 }
 
 #[inline]

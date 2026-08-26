@@ -9,8 +9,7 @@
 //! algorithm-specific public parameters: its initial round-robin backend can be
 //! replaced without changing Thread construction or scheduler clients.
 //! Placement records current assignment separately from affinity and placement
-//! policy so a future stopped-thread handoff can move a Thread without changing
-//! identity.
+//! policy so the scheduler can move a stopped Thread without changing identity.
 
 use hyper::cpu::{CpuIndex, MAX_CPUS};
 
@@ -197,8 +196,7 @@ impl ThreadPlacement {
     /// Assigns a thread to one CPU admitted by `affinity`.
     ///
     /// Constructing placement does not migrate a live Thread. Scheduler code
-    /// may install a different value only under a future stopped-thread
-    /// handoff protocol.
+    /// may install a different value only under its stopped-thread handoff.
     #[cfg(test)]
     pub const fn new(
         assigned_cpu: CpuIndex,
@@ -277,8 +275,7 @@ impl ThreadPlacement {
         self.affinity
     }
 
-    #[cfg(test)]
-    pub const fn policy(self) -> PlacementPolicy {
+    pub(crate) const fn policy(self) -> PlacementPolicy {
         self.policy
     }
 
@@ -292,6 +289,35 @@ impl ThreadPlacement {
             return None;
         }
         self.last_cpu = Some(cpu);
+        Some(self)
+    }
+
+    /// Replaces a movable Thread's affinity while retaining its assignment.
+    pub(crate) const fn with_affinity(mut self, affinity: CpuMask) -> Option<Self> {
+        if !matches!(self.policy, PlacementPolicy::Movable)
+            || affinity.is_empty()
+            || !affinity.contains(self.assigned_cpu)
+        {
+            return None;
+        }
+        self.affinity = affinity;
+        Some(self)
+    }
+
+    /// Atomically changes affinity and stopped assignment.
+    pub(crate) const fn reassign_with_affinity(
+        mut self,
+        cpu: CpuIndex,
+        affinity: CpuMask,
+    ) -> Option<Self> {
+        if !matches!(self.policy, PlacementPolicy::Movable)
+            || affinity.is_empty()
+            || !affinity.contains(cpu)
+        {
+            return None;
+        }
+        self.assigned_cpu = cpu;
+        self.affinity = affinity;
         Some(self)
     }
 }

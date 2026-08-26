@@ -20,10 +20,27 @@ x86_64_switch_context:
     movq %rsp, THREAD_CONTEXT_RSP_OFFSET(%rdi)
     leaq .Lswitch_return(%rip), %rax
     movq %rax, THREAD_CONTEXT_RIP_OFFSET(%rdi)
-    pushfq
-    popq %rax
-    andq $0x200, %rax
-    movq %rax, THREAD_CONTEXT_IF_OFFSET(%rdi)
+    # Retain only IF from the guard's complete saved RFLAGS value.
+    andq $0x200, %rdx
+    movq %rdx, THREAD_CONTEXT_IF_OFFSET(%rdi)
+
+    # Completion runs on the incoming stack while IF remains clear. %r12 was
+    # saved above and is preserved by the callback until next state is loaded.
+    movq %rsi, %r12
+    movq THREAD_CONTEXT_RSP_OFFSET(%r12), %rsp
+    subq $8, %rsp
+    call *%rcx
+    addq $8, %rsp
+
+    # The x86 timer backend may need to re-arm a deferred deadline before IF
+    # becomes visible. r12 retains the next-context pointer across this call.
+    cmpq $0, THREAD_CONTEXT_IF_OFFSET(%r12)
+    je .Lswitch_timer_ready
+    subq $8, %rsp
+    call x86_64_prepare_context_interrupt_enable
+    addq $8, %rsp
+.Lswitch_timer_ready:
+    movq %r12, %rsi
 
     movq THREAD_CONTEXT_RBX_OFFSET(%rsi), %rbx
     movq THREAD_CONTEXT_RBP_OFFSET(%rsi), %rbp
@@ -31,7 +48,6 @@ x86_64_switch_context:
     movq THREAD_CONTEXT_R13_OFFSET(%rsi), %r13
     movq THREAD_CONTEXT_R14_OFFSET(%rsi), %r14
     movq THREAD_CONTEXT_R15_OFFSET(%rsi), %r15
-    movq THREAD_CONTEXT_RSP_OFFSET(%rsi), %rsp
     movq THREAD_CONTEXT_IF_OFFSET(%rsi), %rax
     testq %rax, %rax
     jz .Lswitch_irq_disabled
@@ -47,6 +63,7 @@ x86_64_switch_context:
     .global x86_64_thread_trampoline
     .type x86_64_thread_trampoline, @function
 x86_64_thread_trampoline:
+    addq $8, %rsp
     movq %r13, %rdi
     call *%r12
     call kernel_thread_exit

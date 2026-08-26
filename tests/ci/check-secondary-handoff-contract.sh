@@ -14,7 +14,6 @@ fixture=$(mktemp -d "${TMPDIR:-/tmp}/hyper-secondary-handoff-check.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
 sed -n '/^pub fn initialize(/,/^}/p' "$source" >"$fixture/initialize.rs"
-sed -n '/^extern "C" fn enter_clean_idle(/,/^}/p' "$source" >"$fixture/enter-clean-idle.rs"
 
 require_in() {
     checked_source=$1
@@ -56,8 +55,11 @@ require \
 require_in "$fixture/initialize.rs" \
     'online\.load\(Ordering::Acquire\)' \
     'the boot CPU must acquire secondary handoff consumption'
-require_in "$fixture/enter-clean-idle.rs" \
-    'ONLINE\[cpu_index\]\.store\(true, Ordering::Release\)' \
+require \
+    '(?s)extern "C" fn enter_clean_idle\(.*?run_idle_loop_after\(publish_current_online\)' \
+    'secondary admission must publish from its first scheduler-locked idle observation'
+require \
+    '(?s)fn publish_current_online\(.*?ONLINE\[cpu\]\.store\(true, Ordering::Release\)' \
     'secondaries must release-publish completion after consuming the handoff'
 require_in "$fixture/initialize.rs" \
     '(?s)online\.load\(Ordering::Acquire\).*?boot_parameters\.release\(\);' \

@@ -3,7 +3,7 @@
 
 //! Deadline-based blocking for schedulable host threads.
 //!
-//! Each sleep owns a private wait queue and one local-CPU timer. The sleep
+//! Each sleep owns a private wait queue and one source-CPU timer. The sleep
 //! record lock linearizes timer expiry with parking, while a completion flag
 //! keeps the timer callback's raw context alive until the callback has made its
 //! final access. This module chooses blocking policy; the timer and scheduler
@@ -86,8 +86,9 @@ impl From<crate::kernel::time::Error> for SleepError {
 /// Blocks the calling thread for at least `nanoseconds` of monotonic time.
 ///
 /// A zero duration returns immediately. A nonzero sleep requires a schedulable
-/// thread context with local interrupts and preemption enabled. The thread is
-/// bound to its current CPU's timer queue while blocked.
+/// thread context with local interrupts and preemption enabled. The timer
+/// remains on its source CPU while the blocked Thread may be reassigned.
+/// Expiry wakes the Thread on its then-current scheduler assignment.
 pub fn sleep_ns(nanoseconds: u64) -> Result<(), SleepError> {
     sleep_for(nanoseconds)
 }
@@ -128,10 +129,11 @@ fn sleep_for_scaled(duration: u64, nanoseconds_per_unit: u64) -> Result<(), Slee
 
 /// Blocks the calling thread for a duration expressed in nanoseconds.
 ///
-/// A zero duration returns immediately. The sleep is bound to the calling
-/// CPU's timer queue; the current scheduler does not migrate blocked threads.
+/// A zero duration returns immediately. The timer remains on the calling CPU's
+/// queue, but `FrozenTopology` keeps that queue alive and scheduler wakeup reads
+/// the blocked Thread's current assignment under the global scheduler lock.
 /// Recoverable allocation, timer setup, and scheduler rejection errors are
-/// reported without leaving a live timer or a blocked thread behind.
+/// reported without leaving a live timer or a blocked Thread behind.
 fn sleep_for(nanoseconds: u64) -> Result<(), SleepError> {
     if nanoseconds == 0 {
         return Ok(());
@@ -168,8 +170,8 @@ fn sleep_until_future(deadline: u64) -> Result<(), SleepError> {
         sleep.context(),
     )?;
 
-    // SAFETY: The retained mask is transferred immediately into the CPU-pinned
-    // park transition or dropped before timer cleanup can continue.
+    // SAFETY: The retained mask is consumed into the saved machine context at
+    // the final park boundary or dropped before timer cleanup can continue.
     let (park, interrupt_mask) = unsafe {
         sleep.record.with_mask_retained(|record| {
             if record.expired {

@@ -10,7 +10,7 @@ const THREAD_NAME_CAPACITY: usize = 32;
 
 use crate::kernel::mm::{AddressSpaceId, stack::KernelStack};
 use crate::kernel::task::policy::{
-    SchedulingClass, SchedulingPolicy, ThreadPlacement, ThreadPriority,
+    CpuMask, SchedulingClass, SchedulingPolicy, ThreadPlacement, ThreadPriority,
 };
 
 pub type KernelThreadEntry = extern "C" fn(usize);
@@ -46,6 +46,8 @@ pub enum ThreadState {
     Running,
     Idle,
     Blocked,
+    /// Source switch is committed and may still execute; target publication awaits switch-tail.
+    Migrating,
     Terminated,
 }
 
@@ -63,6 +65,13 @@ pub(crate) struct QueueLinks {
     pub previous: Option<ThreadId>,
     pub next: Option<ThreadId>,
     pub membership: QueueMembership,
+}
+
+/// Placement change retained by a Thread until its source context is stopped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MigrationRequest {
+    pub target: CpuIndex,
+    pub affinity: CpuMask,
 }
 
 impl QueueLinks {
@@ -182,6 +191,7 @@ pub struct Thread {
     deferred_fifo_placement: Option<DeferredFifoPlacement>,
     state: ThreadState,
     queue_links: QueueLinks,
+    pending_migration: Option<MigrationRequest>,
     context: crate::hal::context::ThreadContext,
     kernel_stack: Option<KernelStack>,
     execution: ThreadExecution,
@@ -217,6 +227,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
+            pending_migration: None,
             context: crate::hal::context::ThreadContext::empty(),
             kernel_stack: None,
             execution: ThreadExecution::Kernel,
@@ -245,6 +256,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Dormant,
             queue_links: QueueLinks::EMPTY,
+            pending_migration: None,
             context,
             kernel_stack: Some(stack),
             execution: ThreadExecution::Kernel,
@@ -266,6 +278,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
+            pending_migration: None,
             context: crate::hal::context::ThreadContext::empty(),
             kernel_stack: Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
             execution: ThreadExecution::Kernel,
@@ -295,6 +308,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Dormant,
             queue_links: QueueLinks::EMPTY,
+            pending_migration: None,
             context: scheduling_context,
             kernel_stack: Some(stack),
             execution: ThreadExecution::Vcpu(
@@ -314,15 +328,17 @@ impl Thread {
 
     /// Returns the CPU that owns this thread's scheduling context.
     ///
-    /// Context migration requires a stopped-thread hand-off protocol and is
-    /// deliberately not implicit in the shared scheduler run queue.
+    /// Assignment changes only through the scheduler's stopped-thread handoff.
     pub const fn cpu_index(&self) -> CpuIndex {
         self.placement.assigned_cpu()
     }
 
-    #[cfg(feature = "kernel-self-test")]
     pub(super) const fn affinity(&self) -> crate::kernel::task::policy::CpuMask {
         self.placement.affinity()
+    }
+
+    pub(super) const fn placement_policy(&self) -> crate::kernel::task::policy::PlacementPolicy {
+        self.placement.policy()
     }
 
     /// Checks the placement constraint independently of current assignment.
@@ -407,12 +423,54 @@ impl Thread {
         true
     }
 
+    pub(super) fn replace_affinity(
+        &mut self,
+        affinity: crate::kernel::task::policy::CpuMask,
+    ) -> bool {
+        let Some(placement) = self.placement.with_affinity(affinity) else {
+            return false;
+        };
+        self.placement = placement;
+        true
+    }
+
+    /// Applies an affinity and assignment change after the context is stopped.
+    pub(super) fn reassign_stopped_with_affinity(
+        &mut self,
+        cpu: CpuIndex,
+        affinity: crate::kernel::task::policy::CpuMask,
+    ) -> bool {
+        let Some(placement) = self.placement.reassign_with_affinity(cpu, affinity) else {
+            return false;
+        };
+        self.placement = placement;
+        true
+    }
+
     pub(super) const fn queue_links(&self) -> QueueLinks {
         self.queue_links
     }
 
     pub(super) fn set_queue_links(&mut self, links: QueueLinks) {
         self.queue_links = links;
+    }
+
+    pub(super) const fn pending_migration(&self) -> Option<MigrationRequest> {
+        self.pending_migration
+    }
+
+    pub(super) fn request_migration(&mut self, request: MigrationRequest) -> bool {
+        match self.pending_migration {
+            Some(existing) => existing == request,
+            None => {
+                self.pending_migration = Some(request);
+                true
+            }
+        }
+    }
+
+    pub(super) fn take_migration_request(&mut self) -> Option<MigrationRequest> {
+        self.pending_migration.take()
     }
 
     pub fn context(&self) -> &crate::hal::context::ThreadContext {

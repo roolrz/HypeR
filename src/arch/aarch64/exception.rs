@@ -358,9 +358,39 @@ pub unsafe fn install_runtime_vectors() {
     }
 }
 
+/// Installs the already-published runtime vector table on the current CPU.
+///
+/// # Safety
+///
+/// The current CPU must own an installed exception stack, execute from the
+/// permanent kernel mapping, and keep local interrupts masked until the vector
+/// has been validated.
+pub unsafe fn install_local_runtime_vectors() {
+    // SAFETY: VBAR_EL2 is CPU-local; the caller supplies this CPU's lifetime
+    // and interrupt-mask prerequisites.
+    unsafe { install_runtime_vectors() }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
     ExceptionDidNotReturn,
+    NotInstalled,
+}
+
+/// Validates the vector base local to the calling CPU without raising a trap.
+pub fn validate_local_runtime_vectors() -> Result<(), ValidationError> {
+    let installed: usize;
+    // SAFETY: VBAR_EL2 is readable at EL2 and has no memory operands.
+    unsafe {
+        asm!(
+            "mrs {installed}, VBAR_EL2",
+            installed = out(reg) installed,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+    (installed == addr_of!(aarch64_runtime_vectors) as usize)
+        .then_some(())
+        .ok_or(ValidationError::NotInstalled)
 }
 
 pub fn validate_runtime_vectors() -> Result<(), ValidationError> {

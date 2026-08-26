@@ -365,6 +365,17 @@ fn install_local_descriptors() {
     };
 }
 
+/// Installs the immutable runtime IDT and this CPU's descriptor state.
+///
+/// # Safety
+///
+/// The global IDT must already be published, this CPU's TSS and exception
+/// stacks must be installed, and local interrupts must remain masked until the
+/// local descriptor state has been validated.
+pub unsafe fn install_local_runtime_vectors() {
+    install_local_vectors();
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
     NotInstalled,
@@ -373,6 +384,20 @@ pub enum ValidationError {
 pub fn validate_runtime_vectors() -> Result<(), ValidationError> {
     INSTALLED
         .load(Ordering::Acquire)
+        .then_some(())
+        .ok_or(ValidationError::NotInstalled)
+}
+
+/// Validates the IDT descriptor local to the calling CPU.
+pub fn validate_local_runtime_vectors() -> Result<(), ValidationError> {
+    let mut pointer = DescriptorTablePointer { limit: 0, base: 0 };
+    // SAFETY: SIDT stores the calling CPU's descriptor into live local storage.
+    unsafe { asm!("sidt [{}]", in(reg) &mut pointer, options(nostack)) };
+    // SAFETY: `pointer` is initialized above; unaligned access is required for
+    // the packed architectural descriptor representation.
+    let installed_base = unsafe { core::ptr::addr_of!(pointer.base).read_unaligned() };
+    let expected_base = core::ptr::addr_of!(IDT.0) as u64;
+    (installed_base == expected_base)
         .then_some(())
         .ok_or(ValidationError::NotInstalled)
 }

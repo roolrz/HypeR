@@ -35,7 +35,8 @@ pub use context::{
 pub use exception::ValidationError as RuntimeVectorError;
 pub use exception::{
     CrashContext, bootstrap_stack_bounds, capture_crash_context, install_exception_stacks,
-    install_runtime_vectors, run_on_emergency_stack, validate_runtime_vectors,
+    install_local_runtime_vectors, install_runtime_vectors, run_on_emergency_stack,
+    validate_local_runtime_vectors, validate_runtime_vectors,
 };
 pub use guest::ValidationError as GuestValidationError;
 pub(crate) use guest::{GuestSyncAction, GuestSyncFrame, handle_guest_sync};
@@ -209,8 +210,16 @@ pub fn halt() -> ! {
         unsafe { asm!("wfi", options(nostack)) }
     }
 }
-pub fn wait_for_event() {
-    // SAFETY: WFI is valid in HS mode and must remain a compiler memory boundary.
+/// Waits for a locally enabled interrupt while SSTATUS.SIE remains clear.
+///
+/// RISC-V requires WFI to resume for a locally enabled pending interrupt
+/// regardless of the global SIE bit. The interrupt remains pending until the
+/// caller restores its exact saved mask state.
+pub fn wait_for_interrupt_masked() {
+    // SAFETY: WFI is valid in HS mode and remains a compiler memory boundary.
+    // A locally enabled pending source resumes WFI even while SSTATUS.SIE is
+    // clear, so the outer mask closes the queue-check-to-sleep race without an
+    // interrupt-enabled window before the wait instruction.
     unsafe { asm!("wfi", options(nostack)) }
 }
 

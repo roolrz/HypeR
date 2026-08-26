@@ -30,6 +30,8 @@ const FAIR_QUANTUM_TICKS: u64 = if CONFIGURED_FAIR_QUANTUM_TICKS == 0 {
 
 type SchedulerLock = InterruptSpinLock<Option<Scheduler>, crate::hal::irq::LocalMask>;
 type TransitionMask = InterruptMaskGuard<crate::hal::irq::LocalMask>;
+type TransitionMaskState =
+    <crate::hal::irq::LocalMask as hyper::hal::interrupt::InterruptMask>::State;
 
 static SCHEDULER: SchedulerLock = InterruptSpinLock::new(None);
 
@@ -122,6 +124,10 @@ pub enum Error {
     InvalidCpuIndex,
     EmptyCpuAffinity,
     NoRegisteredCpuInAffinity,
+    CpuNotAllowed,
+    MigrationUnsupported,
+    MigrationInProgress,
+    ThreadTransitionInProgress,
     PreemptionUnavailable,
     PreemptionInvariant,
     Thread(super::thread::Error),
@@ -176,9 +182,23 @@ pub struct Statistics {
     pub ready: usize,
     pub running: usize,
     pub blocked: usize,
+    pub migrating: usize,
     pub idle: usize,
     pub context_switches: u64,
     pub per_cpu_ready: [usize; hyper::config::MAX_CPUS as usize],
+}
+
+/// Completion state of an explicit scheduler placement change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MigrationStatus {
+    /// Assignment and any ready-queue membership already moved to the target.
+    Completed,
+    /// Asynchronous source-context handoff was accepted.
+    ///
+    /// IRQ-tail preemption may complete the handoff before the requesting call
+    /// returns. This status is therefore not a completion token; callers which
+    /// need observation must query placement or use a higher-level handshake.
+    Pending,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,10 +227,11 @@ impl PreparedTransition {
             switch,
             interrupt_mask,
         } = self;
-        switch.activate();
-        // Assembly resumes this continuation with the switch-boundary mask;
-        // the guard restores the state it owned before scheduler commit.
-        drop(interrupt_mask);
+        // SAFETY: The architecture switch stores this exact state into the
+        // outgoing ThreadContext before changing stacks. Its incoming tail
+        // retires source ownership before the state can be restored.
+        let restore_state = unsafe { interrupt_mask.into_restore_state() };
+        switch.activate(restore_state);
     }
 }
 
@@ -251,8 +272,13 @@ pub fn thread_stack_statistics(
     id: ThreadId,
 ) -> Result<Option<crate::kernel::mm::stack::StackStatistics>, Error> {
     SCHEDULER.with(|slot| {
-        let thread = slot.as_ref().ok_or(Error::NotInitialized)?.thread(id)?;
-        if matches!(thread.state(), ThreadState::Running | ThreadState::Idle) {
+        let scheduler = slot.as_ref().ok_or(Error::NotInitialized)?;
+        let thread = scheduler.thread(id)?;
+        if matches!(
+            thread.state(),
+            ThreadState::Running | ThreadState::Idle | ThreadState::Migrating
+        ) || !scheduler.context_is_stopped(id)?
+        {
             return Err(Error::InvalidThreadState);
         }
         Ok(thread.kernel_stack_statistics())
@@ -306,7 +332,7 @@ pub fn kthread_create(
 ///
 /// The scheduler prefers the calling CPU when it is admitted and registered;
 /// otherwise it deterministically selects the lowest-numbered registered CPU
-/// in the mask. The complete mask is retained for future migration policy.
+/// in the mask. Explicit migration and affinity updates retain this constraint.
 pub fn kthread_create_with_affinity(
     name: &str,
     entry: KernelThreadEntry,
@@ -435,6 +461,37 @@ pub fn thread_ready(id: ThreadId) -> Result<bool, Error> {
     Ok(outcome.changed)
 }
 
+/// Moves a kernel Thread to one allowed registered CPU.
+///
+/// Dormant, Ready, and fully stopped Blocked Threads move synchronously. A
+/// running or switch-in-flight Thread returns [`MigrationStatus::Pending`]
+/// when deferred handoff is accepted; target publication occurs only after the
+/// source context is saved and may finish before the caller observes the return.
+/// Idle, bootstrap, user, and vCPU Threads do not currently expose a safe
+/// migration contract and are rejected.
+pub fn migrate_thread(id: ThreadId, target: CpuIndex) -> Result<MigrationStatus, Error> {
+    let outcome = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .migrate_thread(id, target)
+    })?;
+    publish_migration_outcome(outcome)
+}
+
+/// Replaces a kernel Thread's CPU affinity and migrates it when required.
+///
+/// The affinity update and assignment change are one scheduler transaction.
+/// If the current assignment remains allowed, the Thread keeps its run-queue
+/// position. Otherwise the completion semantics match [`migrate_thread`].
+pub fn set_thread_affinity(id: ThreadId, affinity: CpuMask) -> Result<MigrationStatus, Error> {
+    let outcome = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .set_thread_affinity(id, affinity)
+    })?;
+    publish_migration_outcome(outcome)
+}
+
 /// Assigns or updates a thread's real-time FIFO policy.
 ///
 /// Calling this for a Fair thread is an explicit class transition into RT.
@@ -547,12 +604,11 @@ fn cond_resched_inner() -> Result<bool, Error> {
     if !super::preempt::pending(cpu)? || !super::preempt::can_reschedule(cpu)? {
         return Ok(false);
     }
-    // SAFETY: This CPU-pinned scheduler continuation owns the outer transition
-    // mask until `PreparedTransition::activate` resumes it and drops the guard.
+    // SAFETY: This continuation transfers the exact prior interrupt state into
+    // its saved ThreadContext at the final machine-switch boundary.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
     let pair = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.finish_switch(cpu);
         scheduler.prepare_preemption(cpu)
     })?;
     let Some(pair) = pair else {
@@ -618,24 +674,60 @@ extern "C" fn enter_clean_idle(_argument: usize) -> ! {
 }
 
 pub(crate) fn run_idle_loop() -> ! {
+    run_idle_loop_inner(None)
+}
+
+/// Enters the idle loop and publishes secondary readiness at its first queue check.
+pub(crate) fn run_idle_loop_after(ready: fn()) -> ! {
+    run_idle_loop_inner(Some(ready))
+}
+
+fn run_idle_loop_inner(mut ready: Option<fn()>) -> ! {
     loop {
-        match prepare_schedule() {
-            Ok(Some(pair)) => {
-                pair.activate();
-            }
-            Ok(None) => crate::hal::cpu::wait_for_event(),
-            Err(error) => {
-                crate::pr_crit!("HypeR: idle scheduling failed: {error:?}");
-                crate::hal::cpu::halt()
-            }
+        if let Err(error) = idle_wait_or_schedule(ready.take()) {
+            crate::pr_crit!("HypeR: idle scheduling failed: {error:?}");
+            crate::hal::cpu::halt()
         }
     }
 }
 
+/// Closes the idle queue-check-to-sleep window under one interrupt mask.
+fn idle_wait_or_schedule(ready: Option<fn()>) -> Result<(), Error> {
+    let cpu = current_cpu()?;
+    // SAFETY: The guard remains on this CPU. It is either consumed directly
+    // into an outgoing context or dropped after the architecture returns from
+    // its masked idle wait.
+    let interrupt_mask = unsafe { TransitionMask::acquire() };
+    let switch = SCHEDULER.with(|slot| {
+        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+        scheduler.reap_terminated()?;
+        let switch = scheduler.prepare_yield(cpu)?;
+        // The callback must be allocation-free and must not re-enter the
+        // scheduler. Publish only after the first queue observation completed
+        // successfully, while retaining the lock that excludes a boot-side
+        // enqueue between admission and that observation.
+        if let Some(ready) = ready {
+            ready();
+        }
+        Ok::<Option<PreparedContextSwitch>, Error>(switch)
+    })?;
+    if let Some(switch) = switch {
+        PreparedTransition {
+            switch,
+            interrupt_mask,
+        }
+        .activate();
+    } else {
+        crate::hal::cpu::wait_for_interrupt_masked();
+        drop(interrupt_mask);
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare_park(wait_queue: &WaitQueue) -> Result<ParkToken, Error> {
     ensure_sleepable()?;
-    // SAFETY: The park token keeps this CPU-pinned continuation's outer mask
-    // live through the switch and restores it only after the continuation resumes.
+    // SAFETY: The park token retains the outer mask until its exact saved state
+    // is consumed into the outgoing ThreadContext at the machine-switch boundary.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
     let commit = prepare_park_locked(wait_queue)?;
     Ok(retain_park_mask(commit, interrupt_mask))
@@ -647,7 +739,6 @@ pub(crate) fn prepare_park_locked(wait_queue: &WaitQueue) -> Result<ParkCommit, 
     let cpu = current_cpu()?;
     SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.finish_switch(cpu);
         scheduler.reap_terminated()?;
         scheduler.prepare_park(cpu, wait_queue).map(ParkCommit)
     })
@@ -741,6 +832,16 @@ fn publish_ready_outcome(outcome: state::ReadyOutcome) -> Result<(), Error> {
     Ok(())
 }
 
+fn publish_migration_outcome(outcome: state::MigrationOutcome) -> Result<MigrationStatus, Error> {
+    if let Some(ready) = outcome.target_ready {
+        publish_ready_outcome(ready)?;
+    }
+    if let Some(source) = outcome.source_reschedule {
+        request_reschedule(source)?;
+    }
+    Ok(outcome.status)
+}
+
 fn request_reschedule(cpu: CpuIndex) -> Result<(), Error> {
     // Determine local IRQ ownership before arming the coalesced request. Once
     // the pending bit elects this caller as notifier, notification must not
@@ -754,12 +855,11 @@ fn request_reschedule(cpu: CpuIndex) -> Result<(), Error> {
 
 fn prepare_schedule() -> Result<Option<PreparedTransition>, Error> {
     let cpu = current_cpu()?;
-    // SAFETY: This CPU-pinned scheduler continuation owns the outer transition
-    // mask until `PreparedTransition::activate` resumes it and drops the guard.
+    // SAFETY: This continuation transfers the exact prior interrupt state into
+    // its saved ThreadContext at the final machine-switch boundary.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
     let switch = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.finish_switch(cpu);
         scheduler.reap_terminated()?;
         scheduler.prepare_yield(cpu)
     })?;
@@ -802,4 +902,28 @@ extern "C" fn kernel_thread_exit() -> ! {
 
 fn current_cpu() -> Result<CpuIndex, Error> {
     crate::kernel::cpu::current_index().ok_or(Error::InvalidCpuIndex)
+}
+
+/// Completes source ownership on the incoming stack with interrupts masked.
+extern "C" fn finish_context_switch_tail() {
+    let result = current_cpu().and_then(|cpu| {
+        SCHEDULER.with(|slot| {
+            slot.as_mut()
+                .ok_or(Error::NotInitialized)?
+                .complete_incoming_switch(cpu)
+        })
+    });
+    match result {
+        Ok(Some(outcome)) => {
+            if let Err(error) = publish_ready_outcome(outcome) {
+                crate::pr_crit!("HypeR: switch-tail migration publication failed: {error:?}");
+                crate::hal::cpu::halt()
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            crate::pr_crit!("HypeR: incoming context-switch completion failed: {error:?}");
+            crate::hal::cpu::halt()
+        }
+    }
 }

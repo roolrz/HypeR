@@ -53,8 +53,8 @@ impl<T: ?Sized> Mutex<T> {
     pub fn lock(&self) -> Result<MutexGuard<'_, T>, Error> {
         scheduler::ensure_sleepable()?;
         let current = scheduler::current_thread_id()?;
-        // SAFETY: The retained mask is transferred immediately into the
-        // CPU-pinned park transition or dropped before this function proceeds.
+        // SAFETY: The retained mask is consumed into the saved machine context
+        // at the final park boundary or dropped before this function proceeds.
         let (park, interrupt_mask) = unsafe {
             self.state.with_mask_retained(|state| match state.owner {
                 None => {

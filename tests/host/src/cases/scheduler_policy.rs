@@ -84,6 +84,22 @@ fn placement_requires_assignment_to_satisfy_affinity() {
     assert_eq!(constrained.assigned_cpu(), cpu1);
     assert_eq!(constrained.affinity(), constrained_affinity);
     assert_eq!(constrained.policy(), PlacementPolicy::Movable);
+    let narrowed = crate::require_some(constrained.with_affinity(CpuMask::single(cpu1)));
+    assert_eq!(narrowed.assigned_cpu(), cpu1);
+    assert_eq!(narrowed.affinity(), CpuMask::single(cpu1));
+    assert_eq!(constrained.with_affinity(CpuMask::single(cpu0)), None);
+    let migrated =
+        crate::require_some(constrained.reassign_with_affinity(cpu0, CpuMask::single(cpu0)));
+    assert_eq!(migrated.assigned_cpu(), cpu0);
+    assert_eq!(migrated.affinity(), CpuMask::single(cpu0));
+    assert_eq!(
+        constrained.reassign_with_affinity(cpu1, CpuMask::single(cpu0)),
+        None
+    );
+    assert_eq!(
+        pinned.reassign_with_affinity(cpu0, CpuMask::single(cpu0)),
+        None
+    );
     assert_eq!(
         ThreadPlacement::movable_with_affinity(cpu1, CpuMask::single(cpu0)),
         None

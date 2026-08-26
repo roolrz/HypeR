@@ -214,10 +214,14 @@ never enter an ordinary run queue.
 Ordinary kernel threads carry movable placement policy and may retain an
 explicit `CpuMask`; creation prefers the calling CPU when admitted, then the
 lowest-numbered registered CPU in the mask. Empty masks and masks with no
-registered CPU are rejected. vCPU threads initially prefer their creating CPU,
-and bootstrap/idle threads are pinned. Assignment is still fixed after
-creation: migration requires a stopped-thread handoff which removes the thread
-from its source queue before publishing it on the target.
+registered CPU are rejected. Explicit migration and affinity updates move
+dormant, ready, and fully stopped blocked kernel threads synchronously under the
+global scheduler lock. A running or switch-in-flight thread retains the request
+on its own `Thread`; the source CPU commits a switch and the incoming switch tail
+publishes target membership only after assembly has saved the complete source
+context. vCPU and future user threads do not yet have certified execution-state
+migration hooks, while bootstrap and idle threads remain pinned. Automatic load
+selection and balancing are deliberately separate future policy.
 The kernel always builds the SMP-capable scheduler and per-CPU infrastructure;
 the same image remains valid when firmware admits only the boot CPU. There is
 no separate uniprocessor configuration or single-CPU scheduler implementation.
@@ -228,13 +232,17 @@ therefore scales with pending exits rather than the lifetime `ThreadId` space,
 and releases an allocation only after no CPU retains it as a current or
 switching-from thread.
 
-Deadline sleeps compose one local-CPU timer with a private scheduler wait
+Deadline sleeps compose one source-CPU timer with a private scheduler wait
 queue. An IRQ-safe record lock linearizes expiry against parking, so expiry
 before the thread becomes blocked is retained instead of lost. The timer's raw
 callback context has a heap-stable address and remains owned until a final
 release/acquire completion handshake proves that the callback no longer
-borrows it. Blocked-thread migration is not yet supported; a future migration
-handoff must also move or remotely cancel the owning CPU's timer.
+borrows it. The immutable admitted topology keeps the source timer queue alive
+when its blocked thread migrates. Expiry later takes the global scheduler lock,
+observes the thread's new assignment, and enqueues and notifies that target; no
+timer transfer or remote cancellation is required for the current sleep model.
+Future blockers which retain genuine CPU-local resources must expose a typed
+migration pin rather than relying on the generic `Blocked` state.
 
 Per-CPU preemption state coalesces class, quantum, and remote-wakeup requests,
 tracks explicit disable guards and IRQ nesting, and is online before the local
@@ -256,18 +264,33 @@ before the scheduler switch and reactivated only when that same continuation
 resumes. `cond_resched` provides the corresponding cooperative safe point.
 Logical CPU routing is validated before scheduler registration. An interrupt
 sent during secondary bring-up may precede physical online state, but the
-secondary's first idle-loop iteration checks its ready queue before waiting.
+secondary first installs and validates its CPU-local vector register (VBAR_EL2,
+STVEC, or IDTR), then initializes local IRQ and timer state. Its first
+scheduler-locked idle observation publishes online only after the fallible
+queue check succeeds, so the boot CPU cannot reclaim the handoff or enqueue
+work into an admitted CPU which has not completed exception entry setup.
 Runtime CPU offline and hotplug remain unsupported and may not assume that
 bootstrap exception.
 
-Every scheduling transition owns a CPU-affine interrupt-mask guard from before
-the scheduler publishes `current = next` until the suspended continuation
-resumes. Blocking primitives transfer the outer synchronization lock's mask
-into their park token, so releasing that lock cannot expose a logical/machine
-owner mismatch. Architecture Thread contexts save and restore DAIF, SSTATUS.SIE,
-or RFLAGS.IF at the final machine handoff. A continuation holding a transition
-guard therefore cannot migrate; future migration must occur only after the
-guard has restored on its owning CPU.
+Idle entry uses one interrupt-mask ownership interval for its final run-queue
+check and architecture wait. RISC-V and AArch64 execute WFI with local delivery
+masked so a newly pending interrupt wakes the CPU but remains pending until the
+saved mask is restored. x86 uses `STI; HLT; CLI`, whose interrupt shadow makes
+the enable-and-sleep boundary atomic. This prevents a wake IPI from being
+handled between an empty-queue observation and sleep.
+
+Every scheduling transition masks interrupts before the scheduler publishes
+`current = next`. Blocking primitives transfer the outer synchronization lock's
+mask into their park token, so releasing that lock cannot expose a logical/
+machine owner mismatch. At the final infallible boundary the transition
+consumes the CPU-affine guard and supplies its exact saved state to assembly;
+the guard itself never survives on a suspended stack. Assembly saves that state
+in the outgoing `ThreadContext`, changes to the incoming stack, and invokes a
+common completion callback while interrupts remain masked. The callback retires
+source `switching_from` ownership and applies any Thread-owned migration request
+before assembly restores incoming DAIF, SSTATUS.SIE, or RFLAGS.IF. Passing raw
+context pointers across this boundary avoids retaining Rust references while
+the callback re-enters scheduler ownership.
 
 RISC-V and x86-64 currently retain cooperative scheduling: their exception
 entry does not yet provide the private-stack continuation and complete vCPU

@@ -27,6 +27,12 @@ pub(crate) enum InitializationError {
     Reschedule(reschedule::Error),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalInitializationError {
+    Controller(interrupt::Error),
+    RuntimeVectors(crate::hal::exception::RuntimeVectorError),
+}
+
 /// Initializes host interrupt delivery before interrupt consumers are started.
 ///
 /// The scheduler already owns its per-CPU pending state at this point. This
@@ -80,6 +86,19 @@ fn initialize_exceptions() -> Result<(), InitializationError> {
         .map_err(InitializationError::RuntimeVectors)?;
     EXCEPTIONS_READY.store(true, Ordering::Release);
     Ok(())
+}
+
+/// Installs exception entry and interrupt-controller state local to a secondary CPU.
+///
+/// The global vector table, IRQ domain, and controller are immutable before
+/// SMP admission. Local interrupts remain masked throughout this operation.
+pub(crate) fn initialize_local_cpu() -> Result<(), LocalInitializationError> {
+    // SAFETY: SMP prepared this CPU's pinned exception stacks before CPU_ON;
+    // the permanent executable mapping is active and IRQs remain masked.
+    unsafe { crate::hal::exception::install_local_runtime_vectors() };
+    crate::hal::exception::validate_local_runtime_vectors()
+        .map_err(LocalInitializationError::RuntimeVectors)?;
+    interrupt::initialize_local_cpu().map_err(LocalInitializationError::Controller)
 }
 
 pub(crate) fn exceptions_ready() -> bool {

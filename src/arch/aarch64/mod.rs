@@ -36,8 +36,8 @@ pub use context::{
 };
 pub use exception::ValidationError as RuntimeVectorError;
 pub use exception::{
-    CrashContext, capture_crash_context, install_exception_stacks, install_runtime_vectors,
-    validate_runtime_vectors,
+    CrashContext, capture_crash_context, install_exception_stacks, install_local_runtime_vectors,
+    install_runtime_vectors, validate_local_runtime_vectors, validate_runtime_vectors,
 };
 pub use gic_cpu_interface::{
     Aarch64GicCpuInterface, acknowledge_interrupt, broadcast_crash_stop, crash_stop_interrupt,
@@ -257,10 +257,15 @@ pub fn wait_for_interrupt() {
     unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) };
 }
 
-/// Suspends until an event or interrupt; paired with `send_event` for work.
-pub fn wait_for_event() {
-    // SAFETY: WFE only affects the current processing element's event state.
-    unsafe { core::arch::asm!("wfe", options(nostack, preserves_flags)) };
+/// Waits for an interrupt after scheduler work was checked with IRQs masked.
+///
+/// Keeping DAIF masked across the queue check and WFI closes the idle
+/// lost-wakeup window. A pending IRQ wakes WFI and remains pending until the
+/// caller restores its exact saved mask state.
+pub fn wait_for_interrupt_masked() {
+    // SAFETY: WFI is valid at EL2. The caller keeps local exceptions masked,
+    // so an interrupt can wake this CPU without entering its handler here.
+    unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) };
 }
 
 pub const fn port_io() -> Option<hyper::hal::io::PortIo> {

@@ -131,6 +131,11 @@ runtime_contract_is_ready() {
         grep -q "HypeR: AArch64 address space: $va_bits-bit VA/4 levels, $pa_bits-bit PA (CPU [0-9][0-9]-bit), 39-bit IPA/3 levels" "$log" &&
         grep -q 'HypeR: scheduler active on bootstrap thread 0' "$log" &&
         grep -q 'HypeR test: scheduler ready/wait queues and sleeping sync passed' "$log" &&
+        if [ "$cpus" -gt 1 ]; then
+            grep -q 'HypeR test: cross-CPU thread migration passed' "$log"
+        else
+            grep -q 'HypeR test: cross-CPU thread migration skipped (one CPU online)' "$log"
+        fi &&
         grep -q 'HypeR test: guarded thread, IRQ, and emergency stacks passed' "$log" &&
         grep -q 'HypeR test: fatal-path readiness contract passed' "$log" &&
         reschedule_ipi_proof_is_valid &&

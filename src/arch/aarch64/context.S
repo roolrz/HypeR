@@ -12,6 +12,9 @@
 .global aarch64_switch_context
 .type aarch64_switch_context, %function
 aarch64_switch_context:
+    // x2 is the exact interrupt state owned by the outgoing continuation.
+    // Save it before x2 becomes scratch for the remaining context fields.
+    str     x2, [x0, #THREAD_CONTEXT_DAIF_OFFSET]
     stp     x19, x20, [x0, #(THREAD_CONTEXT_X19_OFFSET + 0)]
     stp     x21, x22, [x0, #(THREAD_CONTEXT_X19_OFFSET + 16)]
     stp     x23, x24, [x0, #(THREAD_CONTEXT_X19_OFFSET + 32)]
@@ -28,8 +31,13 @@ aarch64_switch_context:
     str     x2, [x0, #THREAD_CONTEXT_FPCR_OFFSET]
     mrs     x2, fpsr
     str     x2, [x0, #THREAD_CONTEXT_FPSR_OFFSET]
-    mrs     x2, daif
-    str     x2, [x0, #THREAD_CONTEXT_DAIF_OFFSET]
+    // Run completion on the incoming stack before restoring its interrupt
+    // state. x19 is already saved above and the callback preserves it.
+    mov     x19, x1
+    ldr     x2, [x19, #THREAD_CONTEXT_SP_OFFSET]
+    mov     sp, x2
+    blr     x3
+    mov     x1, x19
 
     ldp     x19, x20, [x1, #(THREAD_CONTEXT_X19_OFFSET + 0)]
     ldp     x21, x22, [x1, #(THREAD_CONTEXT_X19_OFFSET + 16)]
@@ -37,8 +45,6 @@ aarch64_switch_context:
     ldp     x25, x26, [x1, #(THREAD_CONTEXT_X19_OFFSET + 48)]
     ldp     x27, x28, [x1, #(THREAD_CONTEXT_X19_OFFSET + 64)]
     ldp     x29, x30, [x1, #THREAD_CONTEXT_X29_OFFSET]
-    ldr     x2, [x1, #THREAD_CONTEXT_SP_OFFSET]
-    mov     sp, x2
     ldp     d8, d9, [x1, #(THREAD_CONTEXT_D8_OFFSET + 0)]
     ldp     d10, d11, [x1, #(THREAD_CONTEXT_D8_OFFSET + 16)]
     ldp     d12, d13, [x1, #(THREAD_CONTEXT_D8_OFFSET + 32)]

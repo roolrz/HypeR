@@ -486,7 +486,12 @@ impl VcpuContext {
 }
 
 unsafe extern "C" {
-    fn aarch64_switch_context(previous: *mut ThreadContext, next: *const ThreadContext);
+    fn aarch64_switch_context(
+        previous: *mut ThreadContext,
+        next: *const ThreadContext,
+        previous_interrupt_state: u64,
+        completion: extern "C" fn(),
+    );
     fn aarch64_thread_trampoline();
     fn aarch64_enter_guest(context: *mut u8) -> !;
     fn aarch64_reset_stack_and_enter(
@@ -504,12 +509,19 @@ unsafe extern "C" {
 ///
 /// # Safety
 ///
-/// Both contexts must remain pinned until this call eventually returns on the
-/// previous context. `next` must own a valid mapped kernel stack.
-pub unsafe fn switch_thread_context(previous: &mut ThreadContext, next: &ThreadContext) {
+/// Both pointers must be valid pinned scheduler contexts, `previous` must be
+/// uniquely writable, and `next` must own a valid mapped kernel stack. No Rust
+/// reference may remain live because `completion` re-enters scheduler ownership.
+/// Local exceptions must be masked; the callback must neither block nor switch.
+pub unsafe fn switch_thread_context(
+    previous: *mut ThreadContext,
+    next: *const ThreadContext,
+    previous_interrupt_state: u64,
+    completion: extern "C" fn(),
+) {
     // SAFETY: The caller pins both contexts and guarantees `next` owns a valid
     // mapped stack until control eventually switches back.
-    unsafe { aarch64_switch_context(previous, next) };
+    unsafe { aarch64_switch_context(previous, next, previous_interrupt_state, completion) };
 }
 
 /// Abandons the current call chain and enters a continuation on a clean stack.

@@ -71,6 +71,8 @@ The current foundation includes:
 - SMP startup with a scheduler-owned idle thread on every admitted CPU;
 - class-aware, intrusive ready queues with RT FIFO and a replaceable Fair
   class whose initial backend is time-sliced round-robin;
+- explicit affinity-controlled kernel-Thread migration with source-context
+  completion before target publication, including blocked sleep wakeup;
 - safe AArch64 IRQ-tail preemption, including deactivation and resumption of
   scheduler-owned vCPU continuations;
 - IRQ domains and shared handler registration, GICv3/vGIC, PLIC, x2APIC, host
@@ -86,9 +88,9 @@ The current foundation includes:
 
 This list describes implemented foundations, not a claim of production
 completeness. In particular, device assignment, strong guest isolation policy,
-cross-architecture asynchronous preemption, scheduler migration and load
-balancing, broad hardware discovery, stable management APIs, and a general-
-purpose virtual I/O stack are still under development.
+cross-architecture asynchronous preemption, controlled vCPU migration,
+automatic load balancing, broad hardware discovery, stable management APIs,
+and a general-purpose virtual I/O stack are still under development.
 
 ## Architecture
 

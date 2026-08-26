@@ -21,16 +21,15 @@ pub struct InterruptSpinLock<T, M: InterruptMask> {
 
 /// Ownership of one saved local-interrupt state.
 ///
-/// The guard may outlive the lock acquisition that created it, allowing a
-/// scheduler transition to release a spin lock while keeping interrupts
-/// masked until the architecture context handoff is complete.
+/// The guard may outlive the lock acquisition that created it. A scheduler
+/// transition must consume it with [`Self::into_restore_state`] before the
+/// machine handoff; the CPU-affine guard itself must never remain on a
+/// suspended Thread stack.
 ///
 /// The guard is CPU-affine and therefore neither `Send` nor `Sync`. It must be
 /// destroyed on the CPU that acquired it, in strict reverse acquisition order
-/// within one active continuation and mask-state lineage. A scheduler may
-/// suspend a continuation that owns the guard only while that Thread remains
-/// assigned to the same CPU; future migration must first end the transition
-/// and restore its owned interrupt state.
+/// within one active continuation and mask-state lineage unless its state is
+/// transferred into the scheduler-owned machine context as documented below.
 pub struct InterruptMaskGuard<M: InterruptMask> {
     state: M::State,
     policy: PhantomData<fn() -> M>,
@@ -54,6 +53,21 @@ impl<M: InterruptMask> InterruptMaskGuard<M> {
             policy: PhantomData,
             cpu_affine: PhantomData,
         }
+    }
+
+    /// Transfers restoration ownership to a machine context.
+    ///
+    /// # Safety
+    ///
+    /// The caller must arrange for the returned state to be installed as the
+    /// continuation's interrupt state before that continuation can execute
+    /// again. It must not also restore the state on the calling CPU. The mask
+    /// policy must permit its saved state to follow that continuation to any
+    /// CPU on which the scheduler may resume it.
+    pub unsafe fn into_restore_state(self) -> M::State {
+        let state = self.state;
+        core::mem::forget(self);
+        state
     }
 }
 
@@ -83,14 +97,14 @@ impl<T, M: InterruptMask> InterruptSpinLock<T, M> {
     /// Releases the lock but transfers interrupt restoration to the caller.
     ///
     /// This is intended for lock-to-scheduler handoff. The returned guard must
-    /// remain live across the machine context switch until the original
-    /// continuation resumes, or be dropped when no transition is needed.
+    /// be dropped when no transition is needed or consumed into the outgoing
+    /// machine context immediately before a context switch.
     ///
     /// # Safety
     ///
     /// The caller assumes ownership of the returned guard and must drop it on
-    /// this CPU in strict reverse order within its mask-state lineage. A
-    /// continuation carrying it across a context switch must remain CPU-pinned.
+    /// this CPU in strict reverse order within its mask-state lineage, or use
+    /// [`InterruptMaskGuard::into_restore_state`] under that method's contract.
     pub unsafe fn with_mask_retained<R>(
         &self,
         operation: impl FnOnce(&mut T) -> R,

@@ -38,7 +38,11 @@ impl ThreadContext {
     pub fn prepare(&mut self, stack_top: usize, entry: KernelThreadEntry, argument: usize) {
         self.r12 = entry as usize as u64;
         self.r13 = argument as u64;
-        self.stack_pointer = (stack_top & !15) as u64;
+        // Context-switch completion uses the incoming stack before the fresh
+        // trampoline. Match a normal SysV function-entry stack so that the
+        // assembly tail can issue an aligned call for both fresh and resumed
+        // contexts.
+        self.stack_pointer = ((stack_top & !15) - 8) as u64;
         self.instruction_pointer = x86_64_thread_trampoline as *const () as usize as u64;
     }
 
@@ -150,7 +154,12 @@ pub enum VirtualInterruptError {
 }
 
 unsafe extern "C" {
-    fn x86_64_switch_context(previous: *mut ThreadContext, next: *const ThreadContext);
+    fn x86_64_switch_context(
+        previous: *mut ThreadContext,
+        next: *const ThreadContext,
+        previous_interrupt_state: usize,
+        completion: extern "C" fn(),
+    );
     fn x86_64_thread_trampoline();
     fn x86_64_reset_stack_and_enter(
         bottom: usize,
@@ -166,11 +175,24 @@ unsafe extern "C" {
 ///
 /// # Safety
 ///
-/// Both contexts and their stacks must be pinned and exclusively scheduler
-/// owned. `next` must contain a previously saved or freshly prepared context.
-pub unsafe fn switch_thread_context(previous: &mut ThreadContext, next: &ThreadContext) {
+/// Both pointers must be valid pinned scheduler contexts, `previous` must be
+/// uniquely writable, and `next` must contain a saved or prepared context. No
+/// Rust reference may remain live because `completion` re-enters scheduler
+/// ownership. Local interrupts must be masked and the callback must not switch.
+pub unsafe fn switch_thread_context(
+    previous: *mut ThreadContext,
+    next: *const ThreadContext,
+    previous_interrupt_state: usize,
+    completion: extern "C" fn(),
+) {
     // SAFETY: The caller establishes ownership and lifetime for both contexts.
-    unsafe { x86_64_switch_context(previous, next) };
+    unsafe { x86_64_switch_context(previous, next, previous_interrupt_state, completion) };
+}
+
+/// Restores the timer side of the local interrupt-enable contract.
+#[unsafe(no_mangle)]
+extern "C" fn x86_64_prepare_context_interrupt_enable() {
+    super::timer::prepare_interrupt_enable();
 }
 
 /// Resets a stack and transfers control to `callback`.
