@@ -9,7 +9,7 @@
 use hyper::cpu::CpuIndex;
 use hyper::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::kernel::sync::{Mutex, Semaphore};
+use crate::kernel::sync::{Completion, Mutex, Semaphore};
 use crate::kernel::task::WaitQueue;
 use crate::kernel::task::scheduler::{self, CpuMask, ThreadPriority};
 
@@ -100,6 +100,26 @@ impl WaitState {
 
 static WAIT_STATE: WaitState = WaitState::new();
 
+struct CompletionState {
+    event: Completion,
+    done: Semaphore,
+    observed: AtomicUsize,
+    worker_error: AtomicUsize,
+}
+
+impl CompletionState {
+    const fn new() -> Self {
+        Self {
+            event: Completion::new(),
+            done: Semaphore::new(0),
+            observed: AtomicUsize::new(0),
+            worker_error: AtomicUsize::new(0),
+        }
+    }
+}
+
+static COMPLETION_STATE: CompletionState = CompletionState::new();
+
 pub(super) fn run() -> Result<(), Error> {
     exercise_nonblocking_paths()?;
     exercise_affinity_creation()?;
@@ -107,6 +127,7 @@ pub(super) fn run() -> Result<(), Error> {
     exercise_policy_transitions()?;
     exercise_fifo_preemption_points()?;
     exercise_mutex_and_semaphore_handoff()?;
+    exercise_completion_events()?;
     exercise_wait_queue_wake_all()?;
     let stats = quiesce_test_threads()?;
     if stats.ready != 0
@@ -514,7 +535,68 @@ fn exercise_nonblocking_paths() -> Result<(), Error> {
         return Err(Error::StateMismatch);
     }
     drop(guard);
+
+    let completion = Completion::new();
+    if completion.is_complete() || completion.try_wait() {
+        return Err(Error::StateMismatch);
+    }
+    completion.complete()?;
+    if !completion.is_complete() || !completion.try_wait() || completion.try_wait() {
+        return Err(Error::StateMismatch);
+    }
+    completion.complete_all()?;
+    if !completion.try_wait() || !completion.try_wait() {
+        return Err(Error::StateMismatch);
+    }
     Ok(())
+}
+
+fn exercise_completion_events() -> Result<(), Error> {
+    let state = &COMPLETION_STATE;
+    let guard = scheduler::preempt_disable()?;
+    for index in 0..2 {
+        let name = if index == 0 {
+            "completion/0"
+        } else {
+            "completion/1"
+        };
+        let waiter =
+            scheduler::kthread_create_fifo(name, completion_waiter, index, ThreadPriority::NORMAL)?;
+        scheduler::thread_ready(waiter)?;
+    }
+    let _ = scheduler::preempt_enable_and_reschedule(guard)?;
+    if state.event.waiter_count()? != 2 {
+        return Err(Error::StateMismatch);
+    }
+
+    state.event.complete()?;
+    if state.event.waiter_count()? != 1 {
+        return Err(Error::StateMismatch);
+    }
+    state.event.complete_all()?;
+    scheduler::yield_now()?;
+    wait_for_completions(&state.done, 2)?;
+    if state.observed.load(Ordering::Acquire) != 0b11
+        || state.worker_error.load(Ordering::Acquire) != 0
+        || !state.event.is_complete()
+    {
+        return Err(Error::StateMismatch);
+    }
+    Ok(())
+}
+
+extern "C" fn completion_waiter(argument: usize) {
+    let state = &COMPLETION_STATE;
+    if state.event.wait().is_err() {
+        state.worker_error.store(1, Ordering::Release);
+    } else if let Some(bit) = [0b01usize, 0b10].get(argument).copied() {
+        state.observed.fetch_or(bit, Ordering::AcqRel);
+    } else {
+        state.worker_error.store(2, Ordering::Release);
+    }
+    if state.done.release().is_err() {
+        state.worker_error.store(3, Ordering::Release);
+    }
 }
 
 fn exercise_mutex_and_semaphore_handoff() -> Result<(), Error> {

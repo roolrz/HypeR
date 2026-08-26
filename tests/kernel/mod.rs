@@ -17,6 +17,7 @@ mod thread_migration;
 mod thread_sleep;
 mod user_memory_access;
 mod vm_registry;
+mod wait_arbitration;
 
 pub(crate) fn run() {
     crate::hal::irq::enable_local();
@@ -26,6 +27,7 @@ pub(crate) fn run() {
     let stack_result = stack_model::run();
     let sleep_result = thread_sleep::run();
     let migration_result = thread_migration::run();
+    let wait_arbitration_result = wait_arbitration::run();
     let readiness_result = startup_readiness::run();
     let guest_execution = crate::hal::vm::guest_execution_available();
     let guest_memory_result = guest_execution.then(guest_memory_access::run);
@@ -52,6 +54,9 @@ pub(crate) fn run() {
     if let Err(error) = migration_result {
         crate::kernel::boot::fail("kernel thread-migration tests", error);
     }
+    if let Err(error) = wait_arbitration_result {
+        crate::kernel::boot::fail("kernel wait-arbitration tests", error);
+    }
     if let Err(error) = readiness_result {
         crate::kernel::boot::fail("kernel startup-readiness tests", error);
     }
@@ -75,6 +80,7 @@ pub(crate) fn run() {
     crate::println!("HypeR test: scheduler ready/wait queues and sleeping sync passed");
     crate::println!("HypeR test: guarded thread, IRQ, and emergency stacks passed");
     crate::println!("HypeR test: deadline-based thread sleep passed");
+    crate::println!("HypeR test: race-safe wait arbitration passed");
     crate::println!("HypeR test: fatal-path readiness contract passed");
     #[cfg(CONFIG_ARCH_AARCH64)]
     crate::println!("HypeR test: AArch64 guest-entry IRQ mask contract passed");

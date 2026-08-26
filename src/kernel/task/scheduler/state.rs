@@ -16,7 +16,10 @@ use crate::kernel::task::thread::{
     DeferredFifoPlacement, ExecutionKind, KernelThreadEntry, MigrationRequest, QueueMembership,
     Thread, ThreadId, ThreadState,
 };
-use crate::kernel::task::wait::{ThreadQueue, WaitQueue};
+use crate::kernel::task::wait::{
+    PendingResolution, ThreadQueue, WaitMobility, WaitOutcome, WaitQueue, WaitRecordError,
+    WaitTicket,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ReadyOutcome {
@@ -30,6 +33,19 @@ pub(super) struct MigrationOutcome {
     pub status: MigrationStatus,
     pub source_reschedule: Option<CpuIndex>,
     pub target_ready: Option<ReadyOutcome>,
+}
+
+pub(super) enum PreparedWait {
+    Park {
+        switch: PreparedContextSwitch,
+        ticket: WaitTicket,
+    },
+    Completed(WaitOutcome),
+}
+
+pub(super) struct ResolvedWait {
+    pub won: bool,
+    pub ready: Option<ReadyOutcome>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -385,6 +401,9 @@ impl Scheduler {
         if !plan.affinity.contains(plan.target) || self.cpu_slots[plan.target].is_none() {
             return Err(Error::NoRegisteredCpuInAffinity);
         }
+        if !thread.wait_record().permits_assignment(plan.target) {
+            return Err(Error::MigrationBlockedByCpuLocalWait);
+        }
         if thread.state() == ThreadState::Terminated {
             return Err(Error::TerminatedThread);
         }
@@ -627,30 +646,256 @@ impl Scheduler {
         self.prepare_switch(cpu_slot, current, next).map(Some)
     }
 
-    pub fn prepare_park(
+    pub fn arm_wait(&mut self, cpu: CpuIndex, mobility: WaitMobility) -> Result<WaitTicket, Error> {
+        let cpu_slot = self.cpu_slot(cpu)?;
+        let current = self.cpus[cpu_slot].current;
+        let thread = self.thread(current)?;
+        if thread.state() != ThreadState::Running {
+            return Err(Error::CannotBlockIdle);
+        }
+        if mobility == WaitMobility::CpuLocal && thread.pending_migration().is_some() {
+            return Err(Error::MigrationInProgress);
+        }
+        self.thread_mut(current)?
+            .wait_record_mut()
+            .arm(current, mobility, cpu)
+            .map_err(Error::from)
+    }
+
+    pub fn finish_unqueued_wait(
+        &mut self,
+        cpu: CpuIndex,
+        ticket: WaitTicket,
+    ) -> Result<Option<WaitOutcome>, Error> {
+        let current = self.current_thread(cpu)?;
+        if current != ticket.thread() {
+            return Err(Error::InvalidWaitRegistration);
+        }
+        self.thread_mut(current)?
+            .wait_record_mut()
+            .finish_unqueued(ticket)
+            .map_err(Error::from)
+    }
+
+    pub fn finish_completed_wait(
+        &mut self,
+        cpu: CpuIndex,
+        ticket: WaitTicket,
+    ) -> Result<WaitOutcome, Error> {
+        let current = self.current_thread(cpu)?;
+        if current != ticket.thread() {
+            return Err(Error::InvalidWaitRegistration);
+        }
+        self.thread_mut(current)?
+            .wait_record_mut()
+            .finish_completed(ticket)
+            .map_err(Error::from)
+    }
+
+    pub fn prepare_registered_park(
         &mut self,
         cpu: CpuIndex,
         wait_queue: &WaitQueue,
-    ) -> Result<PreparedContextSwitch, Error> {
+        ticket: WaitTicket,
+    ) -> Result<PreparedWait, Error> {
         let cpu_slot = self.cpu_slot(cpu)?;
         let current = self.cpus[cpu_slot].current;
+        if current != ticket.thread() {
+            return Err(Error::InvalidWaitRegistration);
+        }
         if self.thread(current)?.state() != ThreadState::Running {
             return Err(Error::CannotBlockIdle);
         }
-        self.enqueue_waiter(wait_queue, current)?;
-        let next = match self.dequeue_ready(cpu_slot)?.or(self.cpus[cpu_slot].idle) {
+        match self
+            .thread(current)?
+            .wait_record()
+            .pending_resolution(ticket)?
+        {
+            PendingResolution::Armed => {}
+            PendingResolution::AlreadyCompleted => {
+                let outcome = self
+                    .thread_mut(current)?
+                    .wait_record_mut()
+                    .finish_unqueued(ticket)?
+                    .ok_or(Error::InvalidWaitRegistration)?;
+                return Ok(PreparedWait::Completed(outcome));
+            }
+            PendingResolution::Queued { .. } | PendingResolution::Stale => {
+                return Err(Error::InvalidWaitRegistration);
+            }
+        }
+        if self.cpus[cpu_slot].switching_from.is_some() {
+            return Err(Error::ThreadTransitionInProgress);
+        }
+        self.enqueue_waiter(wait_queue, current, ticket)?;
+        let ready = match self.dequeue_ready(cpu_slot) {
+            Ok(ready) => ready,
+            Err(error) => scheduler_invariant(error),
+        };
+        let next = match ready.or(self.cpus[cpu_slot].idle) {
             Some(id) => id,
-            None => return self.rollback_failed_park(wait_queue, current),
+            None => return self.rollback_failed_park(wait_queue, current, ticket),
         };
         if next == current {
-            return self.rollback_failed_park(wait_queue, current);
+            return self.rollback_failed_park(wait_queue, current, ticket);
         }
-        self.prepare_switch(cpu_slot, current, next)
+        let switch = match self.prepare_switch(cpu_slot, current, next) {
+            Ok(switch) => switch,
+            Err(error) => scheduler_invariant(error),
+        };
+        Ok(PreparedWait::Park { switch, ticket })
+    }
+
+    pub fn resolve_wait(
+        &mut self,
+        ticket: WaitTicket,
+        outcome: WaitOutcome,
+    ) -> Result<ResolvedWait, Error> {
+        let pending = match self.thread(ticket.thread()) {
+            Ok(thread) => thread.wait_record().pending_resolution(ticket)?,
+            Err(Error::ThreadNotFound) => {
+                return Ok(ResolvedWait {
+                    won: false,
+                    ready: None,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        match pending {
+            PendingResolution::Stale | PendingResolution::AlreadyCompleted => Ok(ResolvedWait {
+                won: false,
+                ready: None,
+            }),
+            PendingResolution::Armed => {
+                let thread = match self.thread_mut(ticket.thread()) {
+                    Ok(thread) => thread,
+                    Err(error) => scheduler_invariant(error),
+                };
+                let completion = thread.wait_record_mut().complete(ticket, outcome);
+                if completion.is_err() {
+                    scheduler_invariant(Error::InvalidWaitRegistration);
+                }
+                Ok(ResolvedWait {
+                    won: true,
+                    ready: None,
+                })
+            }
+            PendingResolution::Queued { queue } => {
+                // SAFETY: a queued wait owns a live reference to its WaitQueue
+                // until the same scheduler-lock transaction unlinks it.
+                let wait_queue =
+                    unsafe { &*core::ptr::with_exposed_provenance::<WaitQueue>(queue) };
+                if let Err(error) = self.remove_waiter(wait_queue, ticket.thread()) {
+                    scheduler_invariant(error);
+                }
+                let thread = match self.thread_mut(ticket.thread()) {
+                    Ok(thread) => thread,
+                    Err(error) => scheduler_invariant(error),
+                };
+                let completion = thread.wait_record_mut().complete(ticket, outcome);
+                if completion.is_err() {
+                    scheduler_invariant(Error::InvalidWaitRegistration);
+                }
+                let ready = match self.make_ready_from_wait(ticket.thread()) {
+                    Ok(ready) => ready,
+                    Err(error) => scheduler_invariant(error),
+                };
+                Ok(ResolvedWait {
+                    won: true,
+                    ready: Some(ready),
+                })
+            }
+        }
+    }
+
+    pub fn cancel_waiter(
+        &mut self,
+        wait_queue: &WaitQueue,
+        id: ThreadId,
+    ) -> Result<ResolvedWait, Error> {
+        let thread = match self.thread(id) {
+            Ok(thread) => thread,
+            Err(Error::ThreadNotFound) => {
+                return Ok(ResolvedWait {
+                    won: false,
+                    ready: None,
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(ticket) = thread
+            .wait_record()
+            .queued_ticket(id, wait_queue.identity())
+        else {
+            if thread.queue_links().membership
+                == (QueueMembership::Waiting {
+                    queue: wait_queue.identity(),
+                })
+            {
+                return Err(Error::QueueCorrupted);
+            }
+            return Ok(ResolvedWait {
+                won: false,
+                ready: None,
+            });
+        };
+        self.resolve_wait(ticket, WaitOutcome::Cancelled)
+    }
+
+    pub fn notify_one_with(
+        &mut self,
+        wait_queue: &WaitQueue,
+        before_ready: impl FnOnce(ThreadId),
+    ) -> Result<Option<(ThreadId, ReadyOutcome)>, Error> {
+        // SAFETY: all WaitQueue state is serialized by this scheduler lock.
+        let queue = unsafe { &mut *wait_queue.state_pointer() };
+        let Some(id) = queue.head else {
+            if queue.len == 0 && queue.tail.is_none() {
+                return Ok(None);
+            }
+            return Err(Error::QueueCorrupted);
+        };
+        let ticket = self
+            .thread(id)?
+            .wait_record()
+            .queued_ticket(id, wait_queue.identity())
+            .ok_or(Error::QueueCorrupted)?;
+        let popped = queue::pop(
+            &mut self.threads,
+            queue,
+            QueueMembership::Waiting {
+                queue: wait_queue.identity(),
+            },
+        );
+        match popped {
+            Ok(Some(popped)) if popped == id => {}
+            Ok(_) => scheduler_invariant(Error::QueueCorrupted),
+            Err(error) => scheduler_invariant(error),
+        }
+        let thread = match self.thread_mut(id) {
+            Ok(thread) => thread,
+            Err(error) => scheduler_invariant(error),
+        };
+        let completion = thread
+            .wait_record_mut()
+            .complete(ticket, WaitOutcome::Notified);
+        if completion.is_err() {
+            scheduler_invariant(Error::InvalidWaitRegistration);
+        }
+        before_ready(id);
+        let ready = match self.make_ready_from_wait(id) {
+            Ok(ready) => ready,
+            Err(error) => scheduler_invariant(error),
+        };
+        Ok(Some((id, ready)))
     }
 
     pub fn prepare_exit(&mut self, cpu: CpuIndex) -> Result<PreparedContextSwitch, Error> {
         let cpu_slot = self.cpu_slot(cpu)?;
         let current = self.cpus[cpu_slot].current;
+        if !self.thread(current)?.wait_record().is_idle() {
+            return Err(Error::InvalidWaitRegistration);
+        }
         queue::push(
             &mut self.threads,
             &mut self.terminated,
@@ -666,18 +911,6 @@ impl Scheduler {
             return Err(Error::CurrentThreadMissing);
         }
         self.prepare_switch(cpu_slot, current, next)
-    }
-
-    pub fn dequeue_waiter(&mut self, wait_queue: &WaitQueue) -> Result<Option<ThreadId>, Error> {
-        let membership = QueueMembership::Waiting {
-            queue: wait_queue.identity(),
-        };
-        // SAFETY: Every caller holds the global scheduler lock exclusively.
-        queue::pop(
-            &mut self.threads,
-            unsafe { &mut *wait_queue.state_pointer() },
-            membership,
-        )
     }
 
     pub fn set_fifo_policy(
@@ -1131,14 +1364,27 @@ impl Scheduler {
             .remove(threads, id, cpu, membership)
     }
 
-    fn enqueue_waiter(&mut self, wait_queue: &WaitQueue, id: ThreadId) -> Result<(), Error> {
+    fn enqueue_waiter(
+        &mut self,
+        wait_queue: &WaitQueue,
+        id: ThreadId,
+        ticket: WaitTicket,
+    ) -> Result<(), Error> {
         let membership = QueueMembership::Waiting {
             queue: wait_queue.identity(),
         };
         // SAFETY: Every caller holds the global scheduler lock exclusively.
         let queue = unsafe { &mut *wait_queue.state_pointer() };
-        queue::push(&mut self.threads, queue, id, membership)?;
-        self.thread_mut(id)?.set_state(ThreadState::Blocked);
+        self.thread_mut(id)?
+            .wait_record_mut()
+            .queue(ticket, wait_queue.identity())?;
+        if let Err(error) = queue::push(&mut self.threads, queue, id, membership) {
+            scheduler_invariant(error);
+        }
+        match self.thread_mut(id) {
+            Ok(thread) => thread.set_state(ThreadState::Blocked),
+            Err(error) => scheduler_invariant(error),
+        }
         Ok(())
     }
 
@@ -1159,9 +1405,19 @@ impl Scheduler {
         &mut self,
         wait_queue: &WaitQueue,
         current: ThreadId,
-    ) -> Result<PreparedContextSwitch, Error> {
-        self.remove_waiter(wait_queue, current)?;
-        self.thread_mut(current)?.set_state(ThreadState::Running);
+        ticket: WaitTicket,
+    ) -> Result<PreparedWait, Error> {
+        if let Err(error) = self.remove_waiter(wait_queue, current) {
+            scheduler_invariant(error);
+        }
+        let thread = match self.thread_mut(current) {
+            Ok(thread) => thread,
+            Err(error) => scheduler_invariant(error),
+        };
+        if thread.wait_record_mut().rollback_queued(ticket).is_err() {
+            scheduler_invariant(Error::InvalidWaitRegistration);
+        }
+        thread.set_state(ThreadState::Running);
         Err(Error::CurrentThreadMissing)
     }
 
@@ -1191,4 +1447,20 @@ impl Scheduler {
         self.threads.try_reserve(1).map_err(|_| Error::Allocation)?;
         self.cpus.try_reserve(1).map_err(|_| Error::Allocation)
     }
+}
+
+impl From<WaitRecordError> for Error {
+    fn from(error: WaitRecordError) -> Self {
+        match error {
+            WaitRecordError::GenerationExhausted => Self::WaitGenerationExhausted,
+            WaitRecordError::RegistrationMismatch | WaitRecordError::InvalidPhase => {
+                Self::InvalidWaitRegistration
+            }
+        }
+    }
+}
+
+fn scheduler_invariant(error: Error) -> ! {
+    crate::pr_crit!("HypeR: scheduler wait invariant failed: {error:?}");
+    crate::hal::cpu::halt()
 }

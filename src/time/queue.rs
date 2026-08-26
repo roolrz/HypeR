@@ -45,6 +45,15 @@ impl TimerHandle {
             None
         }
     }
+
+    /// Returns the identity of the queue that owns this timer.
+    ///
+    /// Queue ownership is stable for the lifetime of a handle. Higher-level
+    /// per-CPU timer services use it to retire a timer after the requesting
+    /// thread has migrated away from the CPU on which the timer was armed.
+    pub const fn queue_id(self) -> usize {
+        self.queue_id
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

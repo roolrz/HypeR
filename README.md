@@ -72,7 +72,10 @@ The current foundation includes:
 - class-aware, intrusive ready queues with RT FIFO and a replaceable Fair
   class whose initial backend is time-sliced round-robin;
 - explicit affinity-controlled kernel-Thread migration with source-context
-  completion before target publication, including blocked sleep wakeup;
+  completion before target publication, including blocked waiters;
+- generation-tagged, allocation-free wait arbitration across notification,
+  timeout, and cancellation, with counted Completion, sleeping Mutex and
+  Semaphore primitives, and migration-safe deadline waits;
 - safe AArch64 IRQ-tail preemption, including deactivation and resumption of
   scheduler-owned vCPU continuations;
 - IRQ domains and shared handler registration, GICv3/vGIC, PLIC, x2APIC, host
