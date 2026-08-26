@@ -13,6 +13,7 @@ mod reschedule_ipi;
 mod scheduler_sync;
 mod stack_model;
 mod startup_readiness;
+mod thread_migration;
 mod thread_sleep;
 mod user_memory_access;
 mod vm_registry;
@@ -24,6 +25,7 @@ pub(crate) fn run() {
     let result = scheduler_sync::run();
     let stack_result = stack_model::run();
     let sleep_result = thread_sleep::run();
+    let migration_result = thread_migration::run();
     let readiness_result = startup_readiness::run();
     let guest_execution = crate::hal::vm::guest_execution_available();
     let guest_memory_result = guest_execution.then(guest_memory_access::run);
@@ -46,6 +48,9 @@ pub(crate) fn run() {
     }
     if let Err(error) = sleep_result {
         crate::kernel::boot::fail("kernel thread-sleep tests", error);
+    }
+    if let Err(error) = migration_result {
+        crate::kernel::boot::fail("kernel thread-migration tests", error);
     }
     if let Err(error) = readiness_result {
         crate::kernel::boot::fail("kernel startup-readiness tests", error);

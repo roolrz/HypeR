@@ -14,7 +14,7 @@ pub(crate) use super::imp::{CrashContext, RuntimeVectorError};
 
 pub(crate) use super::imp::{
     bootstrap_stack_bounds, broadcast_crash_stop, capture_crash_context, crash_stop_interrupt,
-    is_crash_stop_interrupt, validate_runtime_vectors,
+    is_crash_stop_interrupt, validate_local_runtime_vectors, validate_runtime_vectors,
 };
 
 /// Publishes the pinned exception stacks belonging to one logical CPU.
@@ -49,6 +49,20 @@ pub(crate) unsafe fn install_runtime_vectors() {
     // SAFETY: This facade preserves the selected backend's mapping, entry
     // service, interrupt-state, and one-time publication requirements.
     unsafe { super::imp::install_runtime_vectors() }
+}
+
+/// Installs already-published runtime vector state on the calling CPU.
+///
+/// # Safety
+///
+/// The global vector representation must be immutable and published. This CPU
+/// must own installed exception stacks and keep local interrupts masked until
+/// its local vector state has been validated.
+#[inline]
+pub(crate) unsafe fn install_local_runtime_vectors() {
+    // SAFETY: The facade preserves the selected backend's per-CPU stack,
+    // mapping, publication, and interrupt-mask requirements.
+    unsafe { super::imp::install_local_runtime_vectors() }
 }
 
 /// Permanently invokes fatal handling on the current CPU's emergency stack.

@@ -8,10 +8,13 @@ use alloc::vec::Vec;
 use hyper::cpu::{CpuIndex, PerCpu};
 
 use super::queue::{self, CpuRunQueue};
-use super::{CurrentVcpu, Error, SecondaryStack, Statistics};
-use crate::kernel::task::policy::{CpuMask, SchedulingClass, SchedulingPolicy, ThreadPriority};
+use super::{CurrentVcpu, Error, MigrationStatus, SecondaryStack, Statistics};
+use crate::kernel::task::policy::{
+    CpuMask, PlacementPolicy, SchedulingClass, SchedulingPolicy, ThreadPriority,
+};
 use crate::kernel::task::thread::{
-    DeferredFifoPlacement, KernelThreadEntry, QueueMembership, Thread, ThreadId, ThreadState,
+    DeferredFifoPlacement, ExecutionKind, KernelThreadEntry, MigrationRequest, QueueMembership,
+    Thread, ThreadId, ThreadState,
 };
 use crate::kernel::task::wait::{ThreadQueue, WaitQueue};
 
@@ -20,6 +23,18 @@ pub(super) struct ReadyOutcome {
     pub changed: bool,
     pub target_cpu: CpuIndex,
     pub should_preempt: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct MigrationOutcome {
+    pub status: MigrationStatus,
+    pub source_reschedule: Option<CpuIndex>,
+    pub target_ready: Option<ReadyOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SwitchingContext {
+    thread: ThreadId,
 }
 
 pub(super) struct Scheduler {
@@ -41,7 +56,7 @@ struct CpuScheduler {
     run_queue: CpuRunQueue,
     /// Outgoing context whose registers/stack may still be in use between
     /// dropping the scheduler lock and completing the assembly switch.
-    switching_from: Option<ThreadId>,
+    switching_from: Option<SwitchingContext>,
 }
 
 #[must_use = "a prepared context switch must be consumed by the architecture boundary"]
@@ -56,12 +71,20 @@ impl PreparedContextSwitch {
     ///
     /// The scheduler transaction is already committed, so this is the sole
     /// operation which can disarm the fail-stop Drop path.
-    pub(super) fn activate(mut self) {
+    pub(super) fn activate(mut self, previous_interrupt_state: super::TransitionMaskState) {
         self.armed = false;
         // SAFETY: Scheduler queues contain only pinned, scheduler-owned
-        // Threads. switching_from retains the outgoing allocation until the
-        // resumed continuation next enters the scheduler.
-        unsafe { crate::hal::context::switch_thread_context(&mut *self.previous, &*self.next) };
+        // Threads. The assembly path saves `previous_interrupt_state`, changes
+        // to the incoming stack, and completes switching_from ownership before
+        // it restores the incoming interrupt state.
+        unsafe {
+            crate::hal::context::switch_thread_context(
+                self.previous,
+                self.next,
+                previous_interrupt_state,
+                super::finish_context_switch_tail,
+            )
+        };
     }
 }
 
@@ -110,6 +133,17 @@ impl Scheduler {
 
     pub fn current_thread(&self, cpu: CpuIndex) -> Result<ThreadId, Error> {
         Ok(self.cpus[self.cpu_slot(cpu)?].current)
+    }
+
+    /// Reports whether no CPU owns or may still be saving this context.
+    pub fn context_is_stopped(&self, id: ThreadId) -> Result<bool, Error> {
+        let _ = self.thread(id)?;
+        Ok(!self.cpus.iter().any(|cpu| {
+            cpu.current == id
+                || cpu
+                    .switching_from
+                    .is_some_and(|switching| switching.thread == id)
+        }))
     }
 
     pub fn register_secondary(
@@ -281,6 +315,7 @@ impl Scheduler {
                 target_cpu: cpu,
                 should_preempt: false,
             }),
+            ThreadState::Migrating => Err(Error::MigrationInProgress),
             ThreadState::Terminated => Err(Error::TerminatedThread),
         }
     }
@@ -301,6 +336,155 @@ impl Scheduler {
         })
     }
 
+    pub fn migrate_thread(
+        &mut self,
+        id: ThreadId,
+        target: CpuIndex,
+    ) -> Result<MigrationOutcome, Error> {
+        self.cpu_slot(target)?;
+        let thread = self.thread(id)?;
+        if !thread.can_run_on(target) {
+            return Err(Error::CpuNotAllowed);
+        }
+        let plan = MigrationRequest {
+            target,
+            affinity: thread.affinity(),
+        };
+        self.request_migration(id, plan)
+    }
+
+    pub fn set_thread_affinity(
+        &mut self,
+        id: ThreadId,
+        affinity: CpuMask,
+    ) -> Result<MigrationOutcome, Error> {
+        if affinity.is_empty() {
+            return Err(Error::EmptyCpuAffinity);
+        }
+        let assigned = self.thread(id)?.cpu_index();
+        let target = if affinity.contains(assigned) {
+            assigned
+        } else {
+            self.select_cpu(assigned, affinity)?
+        };
+        self.request_migration(id, MigrationRequest { target, affinity })
+    }
+
+    /// Changes placement only after proving that no CPU can still use stale context.
+    fn request_migration(
+        &mut self,
+        id: ThreadId,
+        plan: MigrationRequest,
+    ) -> Result<MigrationOutcome, Error> {
+        let thread = self.thread(id)?;
+        if thread.execution_kind() != ExecutionKind::Kernel
+            || thread.placement_policy() != PlacementPolicy::Movable
+        {
+            return Err(Error::MigrationUnsupported);
+        }
+        if !plan.affinity.contains(plan.target) || self.cpu_slots[plan.target].is_none() {
+            return Err(Error::NoRegisteredCpuInAffinity);
+        }
+        if thread.state() == ThreadState::Terminated {
+            return Err(Error::TerminatedThread);
+        }
+
+        let state = self.thread(id)?.state();
+        let source = self.thread(id)?.cpu_index();
+        if let Some(existing) = self.thread(id)?.pending_migration() {
+            if existing != plan {
+                return Err(Error::MigrationInProgress);
+            }
+            return Ok(MigrationOutcome {
+                status: MigrationStatus::Pending,
+                source_reschedule: (state == ThreadState::Running).then_some(source),
+                target_ready: None,
+            });
+        }
+        // An affinity-only update retains assignment and cannot expose the
+        // outgoing context on another CPU. Applying it in place also preserves
+        // the Thread's exact ready-queue position.
+        if source == plan.target {
+            if !self.thread_mut(id)?.replace_affinity(plan.affinity) {
+                return Err(Error::InvalidThreadState);
+            }
+            return Ok(MigrationOutcome {
+                status: MigrationStatus::Completed,
+                source_reschedule: None,
+                target_ready: None,
+            });
+        }
+
+        // The scheduler transaction precedes the assembly context save. Any
+        // state reached through `switching_from` is therefore still source-CPU
+        // owned even if a concurrent wake has already made it Ready. Retain the
+        // request on that exact Thread for its incoming tail to consume.
+        if self
+            .cpus
+            .iter()
+            .filter_map(|cpu| cpu.switching_from)
+            .any(|switching| switching.thread == id)
+        {
+            if !self.thread_mut(id)?.request_migration(plan) {
+                return Err(Error::MigrationInProgress);
+            }
+            return Ok(MigrationOutcome {
+                status: MigrationStatus::Pending,
+                source_reschedule: None,
+                target_ready: None,
+            });
+        }
+
+        match state {
+            ThreadState::Dormant | ThreadState::Blocked => {
+                if state == ThreadState::Blocked
+                    && !matches!(
+                        self.thread(id)?.queue_links().membership,
+                        QueueMembership::Waiting { .. }
+                    )
+                {
+                    return Err(Error::QueueCorrupted);
+                }
+                if !self
+                    .thread_mut(id)?
+                    .reassign_stopped_with_affinity(plan.target, plan.affinity)
+                {
+                    return Err(Error::InvalidThreadState);
+                }
+                Ok(MigrationOutcome {
+                    status: MigrationStatus::Completed,
+                    source_reschedule: None,
+                    target_ready: None,
+                })
+            }
+            ThreadState::Ready => {
+                let ready = self.move_ready_thread(id, plan)?;
+                Ok(MigrationOutcome {
+                    status: MigrationStatus::Completed,
+                    source_reschedule: None,
+                    target_ready: Some(ready),
+                })
+            }
+            ThreadState::Running => {
+                let cpu_slot = self.cpu_slot(source)?;
+                if self.cpus[cpu_slot].current != id {
+                    return Err(Error::InvalidThreadState);
+                }
+                if !self.thread_mut(id)?.request_migration(plan) {
+                    return Err(Error::MigrationInProgress);
+                }
+                Ok(MigrationOutcome {
+                    status: MigrationStatus::Pending,
+                    source_reschedule: Some(source),
+                    target_ready: None,
+                })
+            }
+            ThreadState::Migrating => Err(Error::MigrationInProgress),
+            ThreadState::Idle => Err(Error::MigrationUnsupported),
+            ThreadState::Terminated => Err(Error::TerminatedThread),
+        }
+    }
+
     /// Selects work made eligible by a class preemption or Fair slice expiry.
     ///
     /// A preempted FIFO thread is returned to the head of its own priority
@@ -315,6 +499,12 @@ impl Scheduler {
         }
         let cpu_slot = self.cpu_slot(cpu)?;
         let current = self.cpus[cpu_slot].current;
+        if self.thread(current)?.pending_migration().is_some() {
+            if !super::super::preempt::take_pending_locked(cpu)? {
+                return Err(Error::PreemptionInvariant);
+            }
+            return self.prepare_running_migration(cpu_slot, current).map(Some);
+        }
         let candidate = self.cpus[cpu_slot]
             .run_queue
             .peek_next(&self.threads, cpu)?;
@@ -385,6 +575,15 @@ impl Scheduler {
     pub fn prepare_yield(&mut self, cpu: CpuIndex) -> Result<Option<PreparedContextSwitch>, Error> {
         let cpu_slot = self.cpu_slot(cpu)?;
         let current = self.cpus[cpu_slot].current;
+        // A cooperative yield is a complete scheduling observation. Consume
+        // its request epoch while the scheduler lock also serializes queue and
+        // migration state. A publisher arriving after this point creates a new
+        // epoch and must notify again, closing repeated idle-wakeup cycles on
+        // architectures without IRQ-tail preemption.
+        let _ = super::super::preempt::take_pending_locked(cpu)?;
+        if self.thread(current)?.pending_migration().is_some() {
+            return self.prepare_running_migration(cpu_slot, current).map(Some);
+        }
         match self.thread(current)?.state() {
             ThreadState::Running => {
                 let candidate = self.cpus[cpu_slot]
@@ -655,10 +854,20 @@ impl Scheduler {
         }
     }
 
-    pub fn finish_switch(&mut self, cpu: CpuIndex) {
-        if let Ok(cpu_slot) = self.cpu_slot(cpu) {
-            self.cpus[cpu_slot].switching_from = None;
-        }
+    /// Retires source-CPU context ownership from the incoming switch tail.
+    pub fn complete_incoming_switch(
+        &mut self,
+        cpu: CpuIndex,
+    ) -> Result<Option<ReadyOutcome>, Error> {
+        let cpu_slot = self.cpu_slot(cpu)?;
+        let switching = self.cpus[cpu_slot]
+            .switching_from
+            .take()
+            .ok_or(Error::PreemptionInvariant)?;
+        let Some(plan) = self.thread_mut(switching.thread)?.take_migration_request() else {
+            return Ok(None);
+        };
+        self.complete_migration(switching.thread, plan)
     }
 
     pub fn reap_terminated(&mut self) -> Result<(), Error> {
@@ -666,11 +875,7 @@ impl Scheduler {
         while let Some(id) = candidate {
             let links = self.thread(id)?.queue_links();
             candidate = links.next;
-            let pinned = self
-                .cpus
-                .iter()
-                .any(|cpu| cpu.current == id || cpu.switching_from == Some(id));
-            if !pinned {
+            if self.context_is_stopped(id)? {
                 if self.thread(id)?.state() != ThreadState::Terminated {
                     return Err(Error::QueueCorrupted);
                 }
@@ -703,6 +908,7 @@ impl Scheduler {
                 ThreadState::Ready => stats.ready += 1,
                 ThreadState::Running => stats.running += 1,
                 ThreadState::Blocked => stats.blocked += 1,
+                ThreadState::Migrating => stats.migrating += 1,
                 ThreadState::Idle => stats.idle += 1,
                 ThreadState::Dormant | ThreadState::Terminated => {}
             }
@@ -728,6 +934,9 @@ impl Scheduler {
         next: ThreadId,
     ) -> Result<PreparedContextSwitch, Error> {
         let target_cpu = self.cpus[cpu_slot].index;
+        if self.cpus[cpu_slot].switching_from.is_some() {
+            return Err(Error::ThreadTransitionInProgress);
+        }
         if self.thread(next)?.state() == ThreadState::Ready
             && !self.thread_mut(next)?.mark_running_on(target_cpu)
         {
@@ -737,7 +946,7 @@ impl Scheduler {
             self.thread_mut(next)?
                 .replenish_fair_slice(super::FAIR_QUANTUM_TICKS);
         }
-        self.cpus[cpu_slot].switching_from = Some(current);
+        self.cpus[cpu_slot].switching_from = Some(SwitchingContext { thread: current });
         self.cpus[cpu_slot].current = next;
         self.context_switches = self.context_switches.saturating_add(1);
         let previous = self.thread_mut(current)?.context_mut() as *mut _;
@@ -747,6 +956,125 @@ impl Scheduler {
             next,
             armed: true,
         })
+    }
+
+    fn prepare_running_migration(
+        &mut self,
+        cpu_slot: usize,
+        current: ThreadId,
+    ) -> Result<PreparedContextSwitch, Error> {
+        if self.thread(current)?.state() != ThreadState::Running
+            || self.thread(current)?.pending_migration().is_none()
+        {
+            return Err(Error::InvalidThreadState);
+        }
+        let next = self
+            .dequeue_ready(cpu_slot)?
+            .or(self.cpus[cpu_slot].idle)
+            .ok_or(Error::CurrentThreadMissing)?;
+        if next == current {
+            return Err(Error::InvalidThreadState);
+        }
+        self.thread_mut(current)?.set_state(ThreadState::Migrating);
+        self.prepare_switch(cpu_slot, current, next)
+    }
+
+    fn complete_migration(
+        &mut self,
+        id: ThreadId,
+        plan: MigrationRequest,
+    ) -> Result<Option<ReadyOutcome>, Error> {
+        match self.thread(id)?.state() {
+            ThreadState::Ready => self.move_ready_thread(id, plan).map(Some),
+            ThreadState::Blocked => {
+                if !matches!(
+                    self.thread(id)?.queue_links().membership,
+                    QueueMembership::Waiting { .. }
+                ) {
+                    return Err(Error::QueueCorrupted);
+                }
+                if !self
+                    .thread_mut(id)?
+                    .reassign_stopped_with_affinity(plan.target, plan.affinity)
+                {
+                    return Err(Error::InvalidThreadState);
+                }
+                Ok(None)
+            }
+            ThreadState::Migrating => {
+                if self.thread(id)?.queue_links().membership != QueueMembership::None
+                    || !self
+                        .thread_mut(id)?
+                        .reassign_stopped_with_affinity(plan.target, plan.affinity)
+                {
+                    return Err(Error::InvalidThreadState);
+                }
+                self.enqueue_ready(id)?;
+                Ok(Some(ReadyOutcome {
+                    changed: true,
+                    target_cpu: plan.target,
+                    should_preempt: self.ready_thread_preempts(id)?,
+                }))
+            }
+            // Exit won the race with a remote migration publication. The
+            // Thread will be reclaimed after this same tail releases source
+            // ownership, so no target assignment is published.
+            ThreadState::Terminated => Ok(None),
+            _ => Err(Error::InvalidThreadState),
+        }
+    }
+
+    fn move_ready_thread(
+        &mut self,
+        id: ThreadId,
+        plan: MigrationRequest,
+    ) -> Result<ReadyOutcome, Error> {
+        let source = self.thread(id)?.cpu_index();
+        let old_affinity = self.thread(id)?.affinity();
+        let membership = self.thread(id)?.queue_links().membership;
+        if !matches!(
+            membership,
+            QueueMembership::ReadyRealTime { cpu, .. } | QueueMembership::ReadyFair { cpu }
+                if cpu == source
+        ) {
+            return Err(Error::QueueCorrupted);
+        }
+        self.remove_ready(id, source, membership)?;
+        if !self
+            .thread_mut(id)?
+            .reassign_stopped_with_affinity(plan.target, plan.affinity)
+        {
+            self.restore_ready_migration(id, source, old_affinity);
+            return Err(Error::InvalidThreadState);
+        }
+        if let Err(error) = self.enqueue_ready(id) {
+            self.restore_ready_migration(id, source, old_affinity);
+            return Err(error);
+        }
+        Ok(ReadyOutcome {
+            changed: true,
+            target_cpu: plan.target,
+            should_preempt: self.ready_thread_preempts(id)?,
+        })
+    }
+
+    fn restore_ready_migration(&mut self, id: ThreadId, cpu: CpuIndex, affinity: CpuMask) {
+        let restored = self
+            .thread_mut(id)
+            .and_then(|thread| {
+                thread
+                    .reassign_stopped_with_affinity(cpu, affinity)
+                    .then_some(())
+                    .ok_or(Error::InvalidThreadState)
+            })
+            .and_then(|()| self.enqueue_ready(id));
+        if let Err(error) = restored {
+            crate::pr_crit!(
+                "HypeR: ready-thread migration rollback failed for {}: {error:?}",
+                id.get()
+            );
+            crate::hal::cpu::halt()
+        }
     }
 
     fn enqueue_ready(&mut self, id: ThreadId) -> Result<(), Error> {

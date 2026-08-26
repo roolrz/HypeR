@@ -153,7 +153,12 @@ impl VcpuContext {
 pub enum VirtualInterruptError {}
 
 unsafe extern "C" {
-    fn riscv64_switch_context(previous: *mut ThreadContext, next: *const ThreadContext);
+    fn riscv64_switch_context(
+        previous: *mut ThreadContext,
+        next: *const ThreadContext,
+        previous_interrupt_state: usize,
+        completion: extern "C" fn(),
+    );
     fn riscv64_thread_trampoline();
     fn riscv64_reset_stack_and_enter(
         bottom: usize,
@@ -173,11 +178,18 @@ unsafe extern "C" {
 ///
 /// # Safety
 ///
-/// Both contexts and their stacks must be pinned and exclusively scheduler
-/// owned. `next` must contain a previously saved or freshly prepared context.
-pub unsafe fn switch_thread_context(previous: &mut ThreadContext, next: &ThreadContext) {
+/// Both pointers must be valid pinned scheduler contexts, `previous` must be
+/// uniquely writable, and `next` must contain a saved or prepared context. No
+/// Rust reference may remain live because `completion` re-enters scheduler
+/// ownership. Local interrupts must be masked and the callback must not switch.
+pub unsafe fn switch_thread_context(
+    previous: *mut ThreadContext,
+    next: *const ThreadContext,
+    previous_interrupt_state: usize,
+    completion: extern "C" fn(),
+) {
     // SAFETY: The caller establishes ownership and lifetime for both contexts.
-    unsafe { riscv64_switch_context(previous, next) };
+    unsafe { riscv64_switch_context(previous, next, previous_interrupt_state, completion) };
 }
 
 /// Resets a stack and transfers control to `callback`.

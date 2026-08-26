@@ -20,6 +20,8 @@ sed -n '/^    fn set_local_enabled(/,/^    }/p' "$interrupt" >"$fixture/local-en
 sed -n '/^fn synchronize_local_lifecycle(/,/^}/p' "$interrupt" >"$fixture/synchronize.rs"
 sed -n '/^fn install(/,/^}/p' src/kernel/device/serial.rs >"$fixture/serial-install.rs"
 sed -n '/^pub(crate) fn initialize(/,/^}/p' src/kernel/vm/mod.rs >"$fixture/vm-initialize.rs"
+sed -n '/^pub fn wait_for_interrupt_masked(/,/^}/p' \
+    src/arch/riscv64/mod.rs >"$fixture/riscv-masked-wait.rs"
 
 require() {
     pattern=$1
@@ -104,6 +106,12 @@ require 'pub fn arm_kernel_rpc_source\(\) \{[[:space:]]*interrupts::enable_softw
     src/arch/riscv64/mod.rs 'the RISC-V boot hart must arm SSIE through the generic transport hook'
 require 'mask = in\(reg\) registers::SIE_SSIE as usize' src/arch/riscv64/interrupts.rs \
     'the RISC-V Kernel RPC hook must enable the supervisor software source'
+require 'asm!\("wfi", options\(nostack\)\)' "$fixture/riscv-masked-wait.rs" \
+    'the RISC-V masked idle wait must use WFI while SSTATUS.SIE remains clear'
+if LC_ALL=C rg -q 'csrsi[[:space:]]+sstatus' "$fixture/riscv-masked-wait.rs"; then
+    echo 'the RISC-V masked idle wait must not open an interrupt window before WFI' >&2
+    exit 1
+fi
 affinity_checks=$(LC_ALL=C rg -c 'affinity & 0xff >= 16' src/arch/aarch64/smp.rs)
 if [ "$affinity_checks" -ne 2 ]; then
     echo "boot and secondary AArch64 CPUs must reject unreachable SGI affinities" >&2

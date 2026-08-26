@@ -41,7 +41,8 @@ qemu_pid=$!
 
 deadline=$(( $(date +%s) + ${QEMU_BOOT_TIMEOUT_SECONDS:-180} ))
 while kill -0 "$qemu_pid" 2>/dev/null; do
-    if grep -q "HypeR guest: /init reached" "$output"; then
+    if grep -q 'HypeR test: cross-CPU thread migration passed' "$output" &&
+        grep -q "HypeR guest: /init reached" "$output"; then
         cat "$output"
         exit 0
     fi

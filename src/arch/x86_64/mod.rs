@@ -43,7 +43,8 @@ pub use cpu_power::{Error as CpuPowerError, X2ApicCpuPower as ArchitectureCpuPow
 pub use exception::ValidationError as RuntimeVectorError;
 pub use exception::{
     CrashContext, bootstrap_stack_bounds, capture_crash_context, install_exception_stacks,
-    install_runtime_vectors, run_on_emergency_stack, validate_runtime_vectors,
+    install_local_runtime_vectors, install_runtime_vectors, run_on_emergency_stack,
+    validate_local_runtime_vectors, validate_runtime_vectors,
 };
 pub use guest::ValidationError as GuestValidationError;
 pub(crate) use guest::{GuestSyncAction, GuestSyncFrame, handle_guest_sync};
@@ -224,9 +225,15 @@ pub fn halt() -> ! {
     }
 }
 
-pub fn wait_for_event() {
-    // SAFETY: HLT is valid at CPL0 and must not move memory across interrupt wakeup.
-    unsafe { asm!("hlt", options(nostack)) };
+/// Atomically enables maskable interrupts for HLT and returns with IF clear.
+///
+/// The scheduler checks its run queue with IF clear. STI's interrupt shadow
+/// extends through the following HLT, so an interrupt cannot be handled in the
+/// check-to-sleep window and then leave this CPU asleep with runnable work.
+pub fn wait_for_interrupt_masked() {
+    // SAFETY: STI, HLT, and CLI are valid at CPL0. The caller enters with IF
+    // clear and restores the exact prior state after this function returns.
+    unsafe { asm!("sti", "hlt", "cli", options(nostack)) };
 }
 
 pub const fn port_io() -> Option<hyper::hal::io::PortIo> {

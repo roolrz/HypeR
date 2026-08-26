@@ -7,20 +7,37 @@
 //! the architecture register image and the machine transitions operating on
 //! that scheduler-owned state.
 
+pub(crate) use crate::arch::context::SwitchCompletion;
 pub(crate) use crate::arch::context::{ThreadContext, UserContext};
 
 /// Switches between two pinned scheduler-owned machine contexts.
 ///
 /// # Safety
 ///
-/// Both contexts and their associated stacks must remain pinned and
-/// exclusively scheduler-owned until control eventually switches back.
-/// `next` must contain a context prepared for the selected architecture.
+/// Both pointers must be non-null, aligned scheduler-owned contexts whose
+/// stacks remain pinned until control eventually switches back. `previous`
+/// must be uniquely writable and `next` must contain a prepared context. No
+/// Rust reference may remain live because `completion` re-enters the scheduler.
+/// Local interrupts must be masked. The outgoing interrupt state must come
+/// from the consumed transition guard, and `completion` must neither block nor
+/// switch while it runs on the incoming stack before interrupt restoration.
 #[inline]
-pub(crate) unsafe fn switch_thread_context(previous: &mut ThreadContext, next: &ThreadContext) {
+pub(crate) unsafe fn switch_thread_context(
+    previous: *mut ThreadContext,
+    next: *const ThreadContext,
+    previous_interrupt_state: <crate::hal::irq::LocalMask as hyper::hal::interrupt::InterruptMask>::State,
+    completion: SwitchCompletion,
+) {
     // SAFETY: The selected architecture facade receives the same pinned,
     // exclusively scheduler-owned contexts and prepared-state guarantee.
-    unsafe { crate::arch::context::switch_thread_context(previous, next) }
+    unsafe {
+        crate::arch::context::switch_thread_context(
+            previous,
+            next,
+            previous_interrupt_state,
+            completion,
+        )
+    }
 }
 
 /// Abandons the current call chain and enters a continuation on a clean stack.

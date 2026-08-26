@@ -246,15 +246,39 @@ pub unsafe fn install_runtime_vectors() {
     VECTOR_INSTALLED.store(address as u64, Ordering::Release);
 }
 
+/// Installs the already-published runtime trap vector on the current hart.
+///
+/// # Safety
+///
+/// The current hart must own an installed exception stack, execute from the
+/// permanent kernel mapping, and keep local interrupts masked until the vector
+/// has been validated.
+pub unsafe fn install_local_runtime_vectors() {
+    // SAFETY: STVEC is hart-local; the caller supplies this hart's lifetime and
+    // interrupt-mask prerequisites.
+    unsafe { install_runtime_vectors() }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
     NotInstalled,
 }
 
 pub fn validate_runtime_vectors() -> Result<(), ValidationError> {
-    (VECTOR_INSTALLED.load(Ordering::Acquire) != 0)
+    let expected = VECTOR_INSTALLED.load(Ordering::Acquire);
+    let installed: usize;
+    // SAFETY: STVEC is a readable hart-local supervisor CSR.
+    unsafe {
+        asm!("csrr {installed}, stvec", installed = out(reg) installed, options(nomem, nostack))
+    };
+    (expected != 0 && installed == expected as usize)
         .then_some(())
         .ok_or(ValidationError::NotInstalled)
+}
+
+/// Validates the trap-vector state local to the calling hart.
+pub fn validate_local_runtime_vectors() -> Result<(), ValidationError> {
+    validate_runtime_vectors()
 }
 
 /// Transfers control to `callback` on the current hart's emergency stack.

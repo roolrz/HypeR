@@ -52,7 +52,7 @@ pub enum Error {
     InvalidAddress,
     InvalidCpuIndex,
     InvalidTopology,
-    LocalInterrupt(super::super::irq::interrupt::Error),
+    LocalInterrupt(super::super::irq::LocalInitializationError),
     LocalTimer(super::super::time::TickError),
     Time(super::super::time::Error),
     Stack(super::super::mm::stack::Error),
@@ -386,7 +386,7 @@ fn try_secondary_entry(cpu_index: usize) -> Result<Infallible, Error> {
     if super::current_index() != Some(cpu_index) {
         return Err(Error::InvalidCpuIndex);
     }
-    super::super::irq::interrupt::initialize_local_cpu().map_err(Error::LocalInterrupt)?;
+    super::super::irq::initialize_local_cpu().map_err(Error::LocalInterrupt)?;
     super::super::time::initialize_local_cpu().map_err(Error::LocalTimer)?;
     let stack = super::super::task::scheduler::install_current_idle()?;
     // SAFETY: This CPU still has local interrupts masked, `stack` belongs to
@@ -402,16 +402,23 @@ extern "C" fn enter_clean_idle(cpu_index: usize) -> ! {
         crate::hal::cpu::halt()
     }
     crate::hal::cpu::mark_current_online();
-    // Architecture entry consumed every handoff field before branching into
-    // Rust. Release publication therefore permits the boot CPU's Acquire wait
-    // to reclaim the dedicated record only after all such reads completed.
-    ONLINE[cpu_index].store(true, Ordering::Release);
-    crate::hal::cpu::send_event();
+    crate::hal::irq::enable_local();
     crate::println!(
         "HypeR: CPU {} online, hardware ID {:#x}; entering idle",
         cpu_index.get(),
         crate::hal::cpu::current_hardware_id().get()
     );
-    crate::hal::irq::enable_local();
-    super::super::task::scheduler::run_idle_loop()
+    super::super::task::scheduler::run_idle_loop_after(publish_current_online)
+}
+
+/// Publishes scheduler readiness from the first protected idle observation.
+///
+/// The scheduler invokes this callback with local IRQs masked and its global
+/// lock held. A boot CPU that observes the Release store cannot enqueue work
+/// until that first queue check completes, closing the secondary-online race.
+fn publish_current_online() {
+    let Some(cpu) = super::current_index() else {
+        crate::hal::cpu::halt()
+    };
+    ONLINE[cpu].store(true, Ordering::Release);
 }

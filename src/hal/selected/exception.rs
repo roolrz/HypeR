@@ -77,9 +77,28 @@ pub(crate) unsafe fn install_runtime_vectors() {
     unsafe { crate::arch::exception::install_runtime_vectors() }
 }
 
+/// Installs the selected runtime vector state on the calling secondary CPU.
+///
+/// # Safety
+///
+/// The global vector representation must already be immutable and published.
+/// The calling CPU must own installed exception stacks and keep local
+/// interrupts masked through validation.
+#[inline]
+pub(crate) unsafe fn install_local_runtime_vectors() {
+    // SAFETY: The selected backend receives the same per-CPU stack, mapping,
+    // publication, and interrupt-mask guarantees.
+    unsafe { crate::arch::exception::install_local_runtime_vectors() }
+}
+
 #[inline]
 pub(crate) fn validate_runtime_vectors() -> Result<(), RuntimeVectorError> {
     crate::arch::exception::validate_runtime_vectors()
+}
+
+#[inline]
+pub(crate) fn validate_local_runtime_vectors() -> Result<(), RuntimeVectorError> {
+    crate::arch::exception::validate_local_runtime_vectors()
 }
 
 /// Permanently invokes fatal handling on the current CPU's emergency stack.

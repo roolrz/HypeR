@@ -36,8 +36,14 @@ mutate() {
     source_file=$2
     expression=$3
     copy_sources
+    before=$(cksum "$fixture/$source_file")
     sed "$expression" "$fixture/$source_file" >"$fixture/mutated"
     mv "$fixture/mutated" "$fixture/$source_file"
+    after=$(cksum "$fixture/$source_file")
+    if [ "$before" = "$after" ]; then
+        echo "mutation did not change $source_file: $description" >&2
+        exit 1
+    fi
     if check >/dev/null 2>&1; then
         echo "$description" >&2
         exit 1
@@ -72,9 +78,13 @@ mutate 'RISC-V masked RPC progress mutation was accepted' src/arch/riscv64/inter
 mutate 'unknown RPC reasons were silently accepted' src/kernel/irq/cross_call.rs \
     's/reasons.has_unknown()/false/'
 mutate 'reserved Kernel RPC mappings were accepted' src/kernel/irq/interrupt.rs \
-    '0,/reject_reserved_interrupt(hardware)?;/s//accept_interrupt(hardware)?;/'
+    's/reject_reserved_interrupt(hardware)?;/accept_interrupt(hardware)?;/'
 mutate 'RISC-V boot-hart SSIE arming was omitted' src/arch/riscv64/mod.rs \
     's/interrupts::enable_software_interrupt_source()/interrupts::leave_software_interrupt_masked()/'
+mutate 'RISC-V masked idle WFI was replaced' src/arch/riscv64/mod.rs \
+    's/asm!("wfi", options(nostack))/asm!("nop", options(nostack))/'
+mutate 'RISC-V masked idle wait opened SIE before WFI' src/arch/riscv64/mod.rs \
+    's/asm!("wfi", options(nostack))/asm!("csrsi sstatus, 2", "wfi", options(nostack))/'
 mutate 'AArch64 unreachable secondary route was admitted' src/arch/aarch64/smp.rs \
     '/pub fn register_cpu/,/^}/s/affinity & 0xff >= 16/false/'
 mutate 'serial activation-before-source mutation was accepted' src/kernel/device/serial.rs \
