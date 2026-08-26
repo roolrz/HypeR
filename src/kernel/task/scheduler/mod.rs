@@ -6,6 +6,9 @@
 mod queue;
 mod state;
 
+use alloc::rc::Rc;
+use core::marker::PhantomData;
+
 use hyper::cpu::CpuIndex;
 use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
 
@@ -14,7 +17,7 @@ use super::thread::{KernelThreadEntry, ThreadId, ThreadState, VcpuExecution};
 
 use super::policy::SchedulingPolicy;
 pub use super::policy::{CpuMask, ThreadPriority};
-use super::wait::WaitQueue;
+use super::wait::{WaitMobility, WaitOutcome, WaitQueue, WaitTicket};
 
 /// Scheduler ticks granted by the initial Fair round-robin backend.
 ///
@@ -128,6 +131,9 @@ pub enum Error {
     MigrationUnsupported,
     MigrationInProgress,
     ThreadTransitionInProgress,
+    WaitGenerationExhausted,
+    InvalidWaitRegistration,
+    MigrationBlockedByCpuLocalWait,
     PreemptionUnavailable,
     PreemptionInvariant,
     Thread(super::thread::Error),
@@ -211,10 +217,63 @@ pub(crate) struct CrashTaskSnapshot {
 }
 
 #[must_use = "a committed park must retain its IRQ mask through context handoff"]
-pub(crate) struct ParkCommit(PreparedContextSwitch);
+pub(crate) struct ParkCommit {
+    switch: PreparedContextSwitch,
+    ticket: WaitTicket,
+}
 
 #[must_use = "parking is committed only after the prepared context switch is consumed"]
-pub(crate) struct ParkToken(PreparedTransition);
+pub(crate) struct ParkToken {
+    transition: PreparedTransition,
+    ticket: WaitTicket,
+}
+
+/// Armed current-Thread wait which must be finished or committed to a park.
+#[must_use = "an armed wait registration must be finished or parked"]
+pub(crate) struct WaitRegistration {
+    ticket: WaitTicket,
+    active: bool,
+    // Registrations belong to the Thread continuation which armed them.
+    not_send_or_sync: PhantomData<Rc<()>>,
+}
+
+impl WaitRegistration {
+    pub(crate) const fn ticket(&self) -> WaitTicket {
+        self.ticket
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for WaitRegistration {
+    fn drop(&mut self) {
+        if self.active {
+            crate::pr_crit!(
+                "HypeR: wait registration for Thread {} was abandoned",
+                self.ticket.thread().get()
+            );
+            crate::hal::cpu::halt()
+        }
+    }
+}
+
+pub(crate) enum PrepareWait {
+    Park(ParkCommit),
+    Completed(WaitOutcome),
+}
+
+pub(crate) enum PreparedWait {
+    Park(ParkToken),
+    Completed(WaitOutcome),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResolveWait {
+    pub won: bool,
+    pub made_ready: bool,
+}
 
 struct PreparedTransition {
     switch: PreparedContextSwitch,
@@ -729,31 +788,119 @@ pub(crate) fn prepare_park(wait_queue: &WaitQueue) -> Result<ParkToken, Error> {
     // SAFETY: The park token retains the outer mask until its exact saved state
     // is consumed into the outgoing ThreadContext at the machine-switch boundary.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
-    let commit = prepare_park_locked(wait_queue)?;
-    Ok(retain_park_mask(commit, interrupt_mask))
+    let registration = begin_wait(WaitMobility::Migratable)?;
+    match prepare_registered_park_locked(wait_queue, registration)? {
+        PrepareWait::Park(commit) => Ok(retain_park_mask(commit, interrupt_mask)),
+        PrepareWait::Completed(_) => Err(Error::InvalidWaitRegistration),
+    }
 }
 
-/// Prepares a park after the caller checked sleepability and then acquired an
-/// IRQ-masking synchronization-object lock.
-pub(crate) fn prepare_park_locked(wait_queue: &WaitQueue) -> Result<ParkCommit, Error> {
+/// Arms a generation-qualified wait owned by the current Thread.
+pub(crate) fn begin_wait(mobility: WaitMobility) -> Result<WaitRegistration, Error> {
     let cpu = current_cpu()?;
-    SCHEDULER.with(|slot| {
+    let ticket = SCHEDULER.with(|slot| {
+        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+        scheduler.arm_wait(cpu, mobility)
+    })?;
+    Ok(WaitRegistration {
+        ticket,
+        active: true,
+        not_send_or_sync: PhantomData,
+    })
+}
+
+/// Consumes an unqueued registration under its condition-object lock.
+///
+/// `None` means no resolver won and the caller may consume the protected
+/// condition. `Some` means timeout/cancellation already won and condition
+/// state must remain untouched.
+pub(crate) fn finish_wait(
+    mut registration: WaitRegistration,
+) -> Result<Option<WaitOutcome>, Error> {
+    let cpu = current_cpu()?;
+    let result = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .finish_unqueued_wait(cpu, registration.ticket)
+    });
+    if result.is_ok() {
+        registration.disarm();
+    }
+    result
+}
+
+/// Atomically queues an armed registration or consumes an earlier resolution.
+///
+/// The caller holds the condition object's IRQ-masking lock, closing the
+/// condition-check-to-park window. Queue membership and the embedded wait
+/// record are published in one scheduler-lock transaction.
+pub(crate) fn prepare_registered_park_locked(
+    wait_queue: &WaitQueue,
+    mut registration: WaitRegistration,
+) -> Result<PrepareWait, Error> {
+    let cpu = current_cpu()?;
+    let result = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         scheduler.reap_terminated()?;
-        scheduler.prepare_park(cpu, wait_queue).map(ParkCommit)
-    })
+        match scheduler.prepare_registered_park(cpu, wait_queue, registration.ticket)? {
+            state::PreparedWait::Park { switch, ticket } => {
+                Ok(PrepareWait::Park(ParkCommit { switch, ticket }))
+            }
+            state::PreparedWait::Completed(outcome) => Ok(PrepareWait::Completed(outcome)),
+        }
+    });
+    if matches!(&result, Ok(_) | Err(Error::CurrentThreadMissing)) {
+        // CurrentThreadMissing is the one recoverable prepare failure: state
+        // rolled queue membership and WaitRecord back to Idle before return.
+        registration.disarm();
+    }
+    result
+}
+
+/// Closes the registration-to-park boundary for a wait without an enclosing
+/// condition-object lock.
+pub(crate) fn prepare_registered_park(
+    wait_queue: &WaitQueue,
+    registration: WaitRegistration,
+) -> Result<PreparedWait, Error> {
+    // SAFETY: either the committed park consumes this exact mask state, or the
+    // already-completed path drops it before returning to the caller.
+    let interrupt_mask = unsafe { TransitionMask::acquire() };
+    match prepare_registered_park_locked(wait_queue, registration)? {
+        PrepareWait::Park(commit) => {
+            Ok(PreparedWait::Park(retain_park_mask(commit, interrupt_mask)))
+        }
+        PrepareWait::Completed(outcome) => {
+            drop(interrupt_mask);
+            Ok(PreparedWait::Completed(outcome))
+        }
+    }
 }
 
 /// Binds a synchronization lock's retained interrupt mask to a committed park.
 pub(crate) fn retain_park_mask(commit: ParkCommit, interrupt_mask: TransitionMask) -> ParkToken {
-    ParkToken(PreparedTransition {
-        switch: commit.0,
-        interrupt_mask,
-    })
+    ParkToken {
+        transition: PreparedTransition {
+            switch: commit.switch,
+            interrupt_mask,
+        },
+        ticket: commit.ticket,
+    }
 }
 
-pub(crate) fn complete_park(token: ParkToken) {
-    token.0.activate();
+pub(crate) fn complete_park(token: ParkToken) -> WaitOutcome {
+    token.transition.activate();
+    let result = current_cpu().and_then(|cpu| {
+        SCHEDULER.with(|slot| {
+            slot.as_mut()
+                .ok_or(Error::NotInitialized)?
+                .finish_completed_wait(cpu, token.ticket)
+        })
+    });
+    match result {
+        Ok(outcome) => outcome,
+        Err(error) => scheduler_invariant("committed wait completion", error),
+    }
 }
 
 pub(crate) fn wake_one(wait_queue: &WaitQueue) -> Result<Option<ThreadId>, Error> {
@@ -766,15 +913,10 @@ pub(crate) fn wake_one_with(
 ) -> Result<Option<ThreadId>, Error> {
     let awakened = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        let Some(id) = scheduler.dequeue_waiter(wait_queue)? else {
-            return Ok::<Option<(ThreadId, state::ReadyOutcome)>, Error>(None);
-        };
-        before_ready(id);
-        let outcome = scheduler.make_ready_from_wait(id)?;
-        Ok::<Option<(ThreadId, state::ReadyOutcome)>, Error>(Some((id, outcome)))
+        scheduler.notify_one_with(wait_queue, before_ready)
     })?;
     if let Some((_, outcome)) = awakened {
-        publish_ready_outcome(outcome)?;
+        publish_committed_ready(outcome);
     }
     Ok(awakened.map(|(id, _)| id))
 }
@@ -784,8 +926,7 @@ pub(crate) fn wake_all(wait_queue: &WaitQueue) -> Result<usize, Error> {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
         let mut count = 0usize;
         let mut targets = [false; hyper::cpu::MAX_CPUS];
-        while let Some(id) = scheduler.dequeue_waiter(wait_queue)? {
-            let outcome = scheduler.make_ready_from_wait(id)?;
+        while let Some((_, outcome)) = scheduler.notify_one_with(wait_queue, |_| {})? {
             if outcome.should_preempt {
                 targets[outcome.target_cpu.get()] = true;
             }
@@ -795,14 +936,53 @@ pub(crate) fn wake_all(wait_queue: &WaitQueue) -> Result<usize, Error> {
     })?;
     for (index, requested) in targets.into_iter().enumerate() {
         if requested {
-            let cpu = CpuIndex::new(index).ok_or(Error::InvalidCpuIndex)?;
-            request_reschedule(cpu)?;
+            let Some(cpu) = CpuIndex::new(index) else {
+                scheduler_invariant("wait-all CPU publication", Error::InvalidCpuIndex);
+            };
+            if let Err(error) = request_reschedule(cpu) {
+                scheduler_invariant("wait-all ready publication", error);
+            }
         }
     }
     if count != 0 {
         crate::hal::cpu::send_event();
     }
     Ok(count)
+}
+
+/// Attempts exact-ticket timeout or cancellation arbitration.
+///
+/// Stale tickets and already-completed registrations are clean losers. A
+/// queued winner is made runnable under the scheduler lock; reschedule/event
+/// publication happens only after releasing that lock.
+pub(crate) fn resolve_wait(ticket: WaitTicket, outcome: WaitOutcome) -> Result<ResolveWait, Error> {
+    if outcome == WaitOutcome::Notified {
+        return Err(Error::InvalidWaitRegistration);
+    }
+    let resolved = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .resolve_wait(ticket, outcome)
+    })?;
+    if let Some(ready) = resolved.ready {
+        publish_committed_ready(ready);
+    }
+    Ok(ResolveWait {
+        won: resolved.won,
+        made_ready: resolved.ready.is_some(),
+    })
+}
+
+pub(crate) fn cancel_waiter(wait_queue: &WaitQueue, id: ThreadId) -> Result<bool, Error> {
+    let resolved = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .cancel_waiter(wait_queue, id)
+    })?;
+    if let Some(ready) = resolved.ready {
+        publish_committed_ready(ready);
+    }
+    Ok(resolved.won)
 }
 
 pub(crate) fn waiter_count(wait_queue: &WaitQueue) -> Result<usize, Error> {
@@ -832,6 +1012,12 @@ fn publish_ready_outcome(outcome: state::ReadyOutcome) -> Result<(), Error> {
     Ok(())
 }
 
+fn publish_committed_ready(outcome: state::ReadyOutcome) {
+    if let Err(error) = publish_ready_outcome(outcome) {
+        scheduler_invariant("committed ready publication", error);
+    }
+}
+
 fn publish_migration_outcome(outcome: state::MigrationOutcome) -> Result<MigrationStatus, Error> {
     if let Some(ready) = outcome.target_ready {
         publish_ready_outcome(ready)?;
@@ -840,6 +1026,11 @@ fn publish_migration_outcome(outcome: state::MigrationOutcome) -> Result<Migrati
         request_reschedule(source)?;
     }
     Ok(outcome.status)
+}
+
+fn scheduler_invariant(operation: &str, error: Error) -> ! {
+    crate::pr_crit!("HypeR: {operation} invariant failed: {error:?}");
+    crate::hal::cpu::halt()
 }
 
 fn request_reschedule(cpu: CpuIndex) -> Result<(), Error> {

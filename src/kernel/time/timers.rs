@@ -93,14 +93,21 @@ pub fn schedule_periodic(
     )
 }
 
-/// Cancels a timer owned by the calling CPU.
+/// Cancels a timer on the queue identified by its handle.
+///
+/// A Thread may resume on a different CPU from the one on which it armed a
+/// timer. Cancellation therefore follows the handle back to its source queue.
+/// Only the source CPU can update its architectural comparator: remote
+/// cancellation may leave an obsolete earlier deadline programmed, causing at
+/// most one harmless timer interrupt which then programs the next deadline.
 pub fn cancel(handle: TimerHandle) -> Result<(), super::Error> {
-    let cpu = current_cpu()?;
-    let (result, retired) = TIMERS[cpu].with(|timers| {
+    let current = current_cpu()?;
+    let owner = CpuIndex::new(handle.queue_id()).ok_or(super::Error::InvalidCpuIndex)?;
+    let (result, retired) = TIMERS[owner].with(|timers| {
         ensure_initialized(timers)?;
         let previous = timers.queue.next_deadline();
         let retired = timers.queue.cancel(handle)?;
-        let result = if timers.queue.next_deadline() != previous {
+        let result = if owner == current && timers.queue.next_deadline() != previous {
             program_next(&timers.queue)
         } else {
             Ok(())

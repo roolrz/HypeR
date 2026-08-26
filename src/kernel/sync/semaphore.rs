@@ -6,8 +6,8 @@
 use hyper::sync::InterruptSpinLock;
 
 use super::Error;
-use crate::kernel::task::WaitQueue;
 use crate::kernel::task::scheduler;
+use crate::kernel::task::{WaitMobility, WaitQueue};
 
 type StateLock = InterruptSpinLock<State, crate::hal::irq::LocalMask>;
 
@@ -40,19 +40,28 @@ impl Semaphore {
                     state.permits -= 1;
                     Ok(None)
                 } else {
-                    scheduler::prepare_park_locked(&state.waiters)
+                    let registration = scheduler::begin_wait(WaitMobility::Migratable)?;
+                    scheduler::prepare_registered_park_locked(&state.waiters, registration)
                         .map(Some)
                         .map_err(Error::from)
                 }
             })
         };
         let park = park?;
-        if let Some(commit) = park {
-            scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask));
-        } else {
+        let Some(prepared) = park else {
             drop(interrupt_mask);
-        }
-        Ok(())
+            return Ok(());
+        };
+        let outcome = match prepared {
+            scheduler::PrepareWait::Park(commit) => {
+                scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask))
+            }
+            scheduler::PrepareWait::Completed(outcome) => {
+                drop(interrupt_mask);
+                outcome
+            }
+        };
+        super::expect_notification(outcome)
     }
 
     /// Attempts acquisition without sleeping and is safe in IRQ context.

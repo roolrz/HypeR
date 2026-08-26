@@ -12,6 +12,7 @@ use crate::kernel::mm::{AddressSpaceId, stack::KernelStack};
 use crate::kernel::task::policy::{
     CpuMask, SchedulingClass, SchedulingPolicy, ThreadPlacement, ThreadPriority,
 };
+use crate::kernel::task::wait::WaitRecord;
 
 pub type KernelThreadEntry = extern "C" fn(usize);
 
@@ -191,6 +192,7 @@ pub struct Thread {
     deferred_fifo_placement: Option<DeferredFifoPlacement>,
     state: ThreadState,
     queue_links: QueueLinks,
+    wait: WaitRecord,
     pending_migration: Option<MigrationRequest>,
     context: crate::hal::context::ThreadContext,
     kernel_stack: Option<KernelStack>,
@@ -227,6 +229,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
+            wait: WaitRecord::NEW,
             pending_migration: None,
             context: crate::hal::context::ThreadContext::empty(),
             kernel_stack: None,
@@ -256,6 +259,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Dormant,
             queue_links: QueueLinks::EMPTY,
+            wait: WaitRecord::NEW,
             pending_migration: None,
             context,
             kernel_stack: Some(stack),
@@ -278,6 +282,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Running,
             queue_links: QueueLinks::EMPTY,
+            wait: WaitRecord::NEW,
             pending_migration: None,
             context: crate::hal::context::ThreadContext::empty(),
             kernel_stack: Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
@@ -308,6 +313,7 @@ impl Thread {
             deferred_fifo_placement: None,
             state: ThreadState::Dormant,
             queue_links: QueueLinks::EMPTY,
+            wait: WaitRecord::NEW,
             pending_migration: None,
             context: scheduling_context,
             kernel_stack: Some(stack),
@@ -453,6 +459,14 @@ impl Thread {
 
     pub(super) fn set_queue_links(&mut self, links: QueueLinks) {
         self.queue_links = links;
+    }
+
+    pub(super) const fn wait_record(&self) -> &WaitRecord {
+        &self.wait
+    }
+
+    pub(super) const fn wait_record_mut(&mut self) -> &mut WaitRecord {
+        &mut self.wait
     }
 
     pub(super) const fn pending_migration(&self) -> Option<MigrationRequest> {

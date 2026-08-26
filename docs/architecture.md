@@ -232,17 +232,29 @@ therefore scales with pending exits rather than the lifetime `ThreadId` space,
 and releases an allocation only after no CPU retains it as a current or
 switching-from thread.
 
-Deadline sleeps compose one source-CPU timer with a private scheduler wait
-queue. An IRQ-safe record lock linearizes expiry against parking, so expiry
-before the thread becomes blocked is retained instead of lost. The timer's raw
-callback context has a heap-stable address and remains owned until a final
-release/acquire completion handshake proves that the callback no longer
-borrows it. The immutable admitted topology keeps the source timer queue alive
-when its blocked thread migrates. Expiry later takes the global scheduler lock,
-observes the thread's new assignment, and enqueues and notifies that target; no
-timer transfer or remote cancellation is required for the current sleep model.
-Future blockers which retain genuine CPU-local resources must expose a typed
-migration pin rather than relying on the generic `Blocked` state.
+Every `Thread` embeds one generation-tagged wait record. Its
+`Idle -> Armed -> Queued -> Completed -> Idle` transaction and intrusive queue
+links are updated under the global scheduler lock, so notification, timeout,
+and cancellation select exactly one terminal `WaitOutcome`. A resolver which
+arrives while the wait is only Armed records its result for the caller instead
+of losing the event; a stale generation cannot resolve a later wait on the same
+queue. Queueing and wakeup allocate no memory. Condition-based primitives hold
+their own IRQ-masking state lock across the condition check and queue
+publication; Mutex and Semaphore preserve direct handoff, while Completion
+provides counted and permanent-complete states.
+
+Timed waits allocate their timer and callback owner before queue publication,
+then use the same wait transaction. The callback context remains heap-stable
+until cancellation succeeds or a release/acquire handshake proves that an
+already-detached callback has returned. A timer stays on the CPU which armed
+it even if the blocked Thread migrates. Early notification or cancellation
+uses the handle's queue identity to retire it from that source CPU; remote
+retirement deliberately leaves an obsolete earlier comparator programmed and
+therefore causes at most one harmless timer interrupt before the source
+programs its next deadline. Sleep is policy over this common timed-wait path.
+Waits are migratable by default. A blocker retaining genuine CPU-local state
+must arm with `CpuLocal` mobility, which rejects reassignment in both Armed and
+Queued phases rather than relying on the generic `Blocked` state.
 
 Per-CPU preemption state coalesces class, quantum, and remote-wakeup requests,
 tracks explicit disable guards and IRQ nesting, and is online before the local

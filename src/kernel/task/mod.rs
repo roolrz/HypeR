@@ -11,10 +11,15 @@ mod reschedule;
 pub mod scheduler;
 mod sleep;
 pub mod thread;
+mod timeout;
 mod wait;
 
 pub use sleep::{SleepError, sleep_ms, sleep_ns, sleep_s, sleep_until, sleep_us};
-pub use wait::WaitQueue;
+pub use timeout::TimedWaitError;
+pub(crate) use wait::WaitMobility;
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use wait::WaitTicket;
+pub use wait::{WaitOutcome, WaitQueue};
 
 static READY: AtomicBool = AtomicBool::new(false);
 
