@@ -133,14 +133,12 @@ fn preemption_postlude() -> Option<unsafe extern "C" fn()> {
 
 #[cfg(CONFIG_ARCH_AARCH64)]
 fn fail_preemption_tail(operation: &str, error: crate::kernel::task::scheduler::Error) -> ! {
-    crate::pr_crit!("HypeR: {operation}: {error:?}");
-    crate::hal::cpu::halt()
+    crate::kernel::crash::fatal(format_args!("HypeR: {operation}: {error:?}"))
 }
 
 #[cfg(CONFIG_ARCH_AARCH64)]
 fn fail_vcpu_tail(operation: &str, error: crate::kernel::vm::vcpu::HardwareTransitionError) -> ! {
-    crate::pr_crit!("HypeR: {operation}: {error:?}");
-    crate::hal::cpu::halt()
+    crate::kernel::crash::fatal(format_args!("HypeR: {operation}: {error:?}"))
 }
 
 /// Claims and dispatches one external controller interrupt, when pending.

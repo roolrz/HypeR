@@ -191,13 +191,9 @@ pub(super) fn validate_hardware(
     // SAFETY: This remains the active validation vCPU with IRQs masked.
     match unsafe { super::vcpu::deactivate(&mut execution) } {
         Ok(()) => {}
-        Err(super::vcpu::HardwareTransitionError::Active(error)) => {
-            crate::pr_crit!(
-                "HypeR: timer validation cannot clear active vCPU publication: {error:?}"
-            );
-            crate::hal::cpu::halt()
-        }
-        Err(error) => return Err(ValidationError::Hardware(error)),
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: timer validation cannot retire active vCPU hardware: {error:?}"
+        )),
     }
     validation.map(|()| true)
 }

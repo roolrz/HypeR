@@ -4,8 +4,8 @@
 use core::arch::asm;
 
 use hyper::hal::interrupt::{
-    InterruptController, InterruptId, InterruptPriority, InterruptTrigger,
-    KernelInterruptController, LocalInterruptController,
+    InterruptController, InterruptId, InterruptPriority, InterruptTransitionError,
+    InterruptTrigger, KernelInterruptController, LocalInterruptController,
 };
 use hyper::platform::InterruptControllerInfo;
 
@@ -56,7 +56,7 @@ impl LocalInterruptController for X2ApicLocalController {
         }
     }
 
-    fn enable(&self, interrupt: InterruptId) -> Result<(), Error> {
+    fn enable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Error>> {
         if interrupt.get() == super::platform::KERNEL_RPC_VECTOR {
             return Ok(());
         }
@@ -64,7 +64,7 @@ impl LocalInterruptController for X2ApicLocalController {
         controller.enable(interrupt)
     }
 
-    fn disable(&self, interrupt: InterruptId) -> Result<(), Error> {
+    fn disable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Error>> {
         if interrupt.get() == super::platform::KERNEL_RPC_VECTOR {
             return Ok(());
         }
@@ -101,7 +101,10 @@ fn mask_legacy_pic() {
 impl InterruptController for X2ApicController {
     type Error = Error;
 
-    fn enable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error> {
+    fn enable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>> {
         if interrupt.get() == super::platform::TIMER_VECTOR {
             write_msr(
                 X2APIC_LVT_TIMER,
@@ -112,12 +115,17 @@ impl InterruptController for X2ApicController {
         if interrupt.get() == super::platform::RESCHEDULE_VECTOR {
             return super::smp::set_reschedule_enabled(true)
                 .then_some(())
-                .ok_or(Error::InvalidCpu);
+                .ok_or(InterruptTransitionError::NotApplied(Error::InvalidCpu));
         }
-        Err(Error::InvalidInterrupt)
+        Err(InterruptTransitionError::NotApplied(
+            Error::InvalidInterrupt,
+        ))
     }
 
-    fn disable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error> {
+    fn disable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>> {
         if interrupt.get() == super::platform::TIMER_VECTOR {
             mask_timer();
             return Ok(());
@@ -125,9 +133,11 @@ impl InterruptController for X2ApicController {
         if interrupt.get() == super::platform::RESCHEDULE_VECTOR {
             return super::smp::set_reschedule_enabled(false)
                 .then_some(())
-                .ok_or(Error::InvalidCpu);
+                .ok_or(InterruptTransitionError::NotApplied(Error::InvalidCpu));
         }
-        Err(Error::InvalidInterrupt)
+        Err(InterruptTransitionError::NotApplied(
+            Error::InvalidInterrupt,
+        ))
     }
 
     fn acknowledge(&self) -> Option<InterruptId> {

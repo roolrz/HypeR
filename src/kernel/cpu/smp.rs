@@ -374,10 +374,9 @@ pub fn initialize(
 pub fn secondary_entry(cpu_index: usize) -> ! {
     match try_secondary_entry(cpu_index) {
         Ok(never) => match never {},
-        Err(error) => {
-            crate::pr_crit!("HypeR: CPU {cpu_index} initialization failed: {error:?}");
-            crate::hal::cpu::halt()
-        }
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: CPU {cpu_index} initialization failed: {error:?}"
+        )),
     }
 }
 

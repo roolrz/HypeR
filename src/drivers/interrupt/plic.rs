@@ -8,8 +8,8 @@ use core::ptr::{read_volatile, write_volatile};
 
 use crate::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use crate::hal::interrupt::{
-    InterruptController, InterruptId, InterruptPriority, InterruptTrigger,
-    KernelInterruptController, LocalInterruptController,
+    InterruptController, InterruptId, InterruptPriority, InterruptTransitionError,
+    InterruptTrigger, KernelInterruptController, LocalInterruptController,
 };
 use crate::platform::{MAX_PLIC_CONTEXTS, PlicInfo};
 
@@ -65,20 +65,22 @@ impl<B: Barrier> LocalInterruptController for PlicLocal<B> {
             .ok_or(Error::InvalidInterrupt)
     }
 
-    fn enable(&self, interrupt: InterruptId) -> Result<(), Error> {
+    fn enable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Error>> {
         self.configure(
             interrupt,
             InterruptPriority::Normal,
             InterruptTrigger::Level,
         )
+        .map_err(InterruptTransitionError::NotApplied)
     }
 
-    fn disable(&self, interrupt: InterruptId) -> Result<(), Error> {
+    fn disable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Error>> {
         self.configure(
             interrupt,
             InterruptPriority::Normal,
             InterruptTrigger::Level,
         )
+        .map_err(InterruptTransitionError::NotApplied)
     }
 }
 
@@ -204,12 +206,26 @@ fn validate_register_range(info: PlicInfo) -> Result<(), Error> {
 impl<B: Barrier> InterruptController for Plic<B> {
     type Error = Error;
 
-    fn enable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error> {
-        self.update_enable(self.validate(interrupt)?, true)
+    fn enable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>> {
+        let source = self
+            .validate(interrupt)
+            .map_err(InterruptTransitionError::NotApplied)?;
+        self.update_enable(source, true)
+            .map_err(InterruptTransitionError::NotApplied)
     }
 
-    fn disable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error> {
-        self.update_enable(self.validate(interrupt)?, false)
+    fn disable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>> {
+        let source = self
+            .validate(interrupt)
+            .map_err(InterruptTransitionError::NotApplied)?;
+        self.update_enable(source, false)
+            .map_err(InterruptTransitionError::NotApplied)
     }
 
     fn acknowledge(&self) -> Option<InterruptId> {

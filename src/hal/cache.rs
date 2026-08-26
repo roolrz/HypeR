@@ -189,6 +189,34 @@ pub trait CacheMaintenance {
     /// `synchronize_instruction_execution` after observing publication.
     unsafe fn publish_instruction_range(start: usize, length: usize) -> Result<(), CacheError>;
 
+    /// Publishes a stable set of newly written instruction ranges as one
+    /// cache-maintenance transaction.
+    ///
+    /// Architectures may enumerate `ranges` more than once so that all data
+    /// lines can be cleaned before any instruction lines are invalidated. The
+    /// enumerator must therefore yield the same ranges, in the same ownership
+    /// state, on every invocation. A default implementation preserves the
+    /// single-range behavior for architectures without a batched primitive.
+    ///
+    /// # Safety
+    ///
+    /// Every yielded range must satisfy [`Self::publish_instruction_range`]'s
+    /// mapping, ownership, and execution-exclusion contract for the complete
+    /// transaction, including every enumeration pass.
+    unsafe fn publish_instruction_ranges(
+        mut ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
+    ) -> Result<(), CacheError> {
+        let mut result = Ok(());
+        ranges(&mut |start, length| {
+            if result.is_ok() {
+                // SAFETY: The batch contract applies the single-range safety
+                // requirements to every range yielded by the enumerator.
+                result = unsafe { Self::publish_instruction_range(start, length) };
+            }
+        });
+        result
+    }
+
     /// Performs the local context synchronization required before executing
     /// instructions published by another CPU.
     fn synchronize_instruction_execution();

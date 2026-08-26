@@ -6,10 +6,10 @@
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use hyper::drivers::interrupt::gicv3::{CpuInterface, GicV3};
+use hyper::drivers::interrupt::gicv3::{CpuInterface, Error as GicError, GicV3};
 use hyper::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use hyper::hal::interrupt::{
-    InterruptController, InterruptId, InterruptPriority, InterruptTrigger,
+    InterruptController, InterruptId, InterruptPriority, InterruptTransitionError, InterruptTrigger,
 };
 use hyper::platform::{GicV3Info, MAX_GIC_REDISTRIBUTOR_REGIONS, PhysicalRange, RegionList};
 
@@ -144,6 +144,53 @@ fn initializes_and_configures_the_boot_cpu_interface() {
         unsafe { read_volatile(distributor_base.wrapping_add(0x184) as *const u32) },
         1 << 8
     );
+
+    assert_eq!(
+        controller.enable(InterruptId::new(64)),
+        Err(InterruptTransitionError::NotApplied(
+            GicError::InvalidInterrupt
+        ))
+    );
+    // A stuck RWP bit is observed only after the enable command is written.
+    // The typed result must therefore prohibit registry rollback as though no
+    // hardware transition had occurred.
+    // SAFETY: GICD_CTLR and GICD_ISENABLER1 are aligned and contained in the
+    // exclusively owned distributor test bank.
+    unsafe {
+        write_volatile(distributor_base as *mut u32, 1 << 31);
+        write_volatile(distributor_base.wrapping_add(0x104) as *mut u32, 0);
+    }
+    assert_eq!(
+        controller.enable(interrupt),
+        Err(InterruptTransitionError::AppliedOrUnknown(
+            GicError::RegisterTimeout
+        ))
+    );
+    assert_eq!(
+        // SAFETY: The live aligned register bank is unchanged during this read.
+        unsafe { read_volatile(distributor_base.wrapping_add(0x104) as *const u32) },
+        1 << 8
+    );
+    // A disable command has the same commit point: failure to observe RWP
+    // completion cannot prove that delivery remained enabled.
+    // SAFETY: GICD_CTLR and GICD_ICENABLER1 are aligned and contained in the
+    // exclusively owned distributor test bank.
+    unsafe {
+        write_volatile(distributor_base.wrapping_add(0x184) as *mut u32, 0);
+    }
+    assert_eq!(
+        controller.disable(interrupt),
+        Err(InterruptTransitionError::AppliedOrUnknown(
+            GicError::RegisterTimeout
+        ))
+    );
+    assert_eq!(
+        // SAFETY: The live aligned register bank is unchanged during this read.
+        unsafe { read_volatile(distributor_base.wrapping_add(0x184) as *const u32) },
+        1 << 8
+    );
+    // SAFETY: Restore the synthetic completion state before controller drop.
+    unsafe { write_volatile(distributor_base as *mut u32, 0) };
     assert_eq!(controller.acknowledge(), Some(interrupt));
     controller.end(interrupt);
     assert_eq!(COMPLETED.load(Ordering::Acquire), 40);

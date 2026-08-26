@@ -46,8 +46,38 @@ impl CacheMaintenance for Riscv64Cache {
     }
 
     unsafe fn publish_instruction_range(start: usize, length: usize) -> Result<(), CacheError> {
-        // SAFETY: The trait contract guarantees the range; cleaning precedes FENCE.I.
-        unsafe { maintain_range(start, length, riscv64_cbo_clean)? };
+        if length == 0 {
+            return Ok(());
+        }
+        // SAFETY: The stable one-range enumerator inherits the mapping and
+        // ownership guarantees of the single-range contract.
+        unsafe { Self::publish_instruction_ranges(|visit| visit(start, length)) }
+    }
+
+    unsafe fn publish_instruction_ranges(
+        mut ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
+    ) -> Result<(), CacheError> {
+        let block_size = initialized_block_size()?;
+        // CBO.CLEAN operations are ordered as writes. This path publishes only
+        // CPU-written instruction memory, so memory predecessor/successor sets
+        // suffice; MMIO ordering belongs to the generic data/device helpers.
+        // One pair orders the whole batch instead of fencing each guest page.
+        // SAFETY: FENCE has no pointer operands and is valid in HS mode.
+        unsafe { asm!("fence rw, rw", options(nostack)) };
+        let mut result = Ok(());
+        ranges(&mut |start, length| {
+            if result.is_ok() {
+                // SAFETY: The batch contract guarantees every rounded block is
+                // accessible and exclusively owned through this transaction.
+                result = unsafe {
+                    maintain_range_unfenced(start, length, block_size, riscv64_cbo_clean)
+                };
+            }
+        });
+        // Complete any clean already issued even if a later range overflowed.
+        // SAFETY: FENCE has no pointer operands and is valid in HS mode.
+        unsafe { asm!("fence rw, rw", options(nostack)) };
+        result?;
         // SAFETY: FENCE.I has no pointer operands and is valid in HS mode.
         unsafe { asm!("fence.i", options(nostack)) };
         Ok(())
@@ -69,10 +99,34 @@ unsafe fn maintain_range(
     length: usize,
     operation: unsafe extern "C" fn(usize),
 ) -> Result<(), CacheError> {
+    let block_size = initialized_block_size()?;
+    // CBOs are ordered as writes or device outputs. Full fences also order
+    // ordinary memory and MMIO around ownership transfers to other agents.
+    // SAFETY: FENCE has no pointer operands and orders accesses before the CBOs.
+    unsafe { asm!("fence iorw, iorw", options(nostack)) };
+    // SAFETY: The caller guarantees the rounded blocks are accessible and the
+    // operation is one of this module's cache-block routines.
+    unsafe { maintain_range_unfenced(start, length, block_size, operation)? };
+    // SAFETY: FENCE has no pointer operands and orders the completed CBOs.
+    unsafe { asm!("fence iorw, iorw", options(nostack)) };
+    Ok(())
+}
+
+fn initialized_block_size() -> Result<usize, CacheError> {
     let block_size = BLOCK_SIZE.load(Ordering::Acquire);
     if block_size == 0 {
-        return Err(CacheError::NotInitialized);
+        Err(CacheError::NotInitialized)
+    } else {
+        Ok(block_size)
     }
+}
+
+unsafe fn maintain_range_unfenced(
+    start: usize,
+    length: usize,
+    block_size: usize,
+    operation: unsafe extern "C" fn(usize),
+) -> Result<(), CacheError> {
     let end = start
         .checked_add(length)
         .ok_or(CacheError::AddressOverflow)?;
@@ -84,21 +138,14 @@ unsafe fn maintain_range(
         .checked_add(block_size - 1)
         .map(|value| value & !(block_size - 1))
         .ok_or(CacheError::AddressOverflow)?;
-
-    // CBOs are ordered as writes or device outputs. Full fences also order
-    // ordinary memory and MMIO around ownership transfers to other agents.
-    // SAFETY: FENCE has no pointer operands and orders accesses before the CBOs.
-    unsafe { asm!("fence iorw, iorw", options(nostack)) };
     while address < rounded_end {
-        // SAFETY: The caller guarantees the rounded blocks are accessible and
+        // SAFETY: The caller guarantees this rounded block is accessible and
         // `operation` is one of this module's CBO assembly routines.
         unsafe { operation(address) };
         address = address
             .checked_add(block_size)
             .ok_or(CacheError::AddressOverflow)?;
     }
-    // SAFETY: FENCE has no pointer operands and orders the completed CBOs.
-    unsafe { asm!("fence iorw, iorw", options(nostack)) };
     Ok(())
 }
 

@@ -3,8 +3,8 @@
 
 use hyper::drivers::interrupt::plic::{Error as PlicError, Plic, PlicLocal};
 use hyper::hal::interrupt::{
-    InterruptController, InterruptId, InterruptPriority, InterruptTrigger,
-    KernelInterruptController, LocalInterruptController,
+    InterruptController, InterruptId, InterruptPriority, InterruptTransitionError,
+    InterruptTrigger, KernelInterruptController, LocalInterruptController,
 };
 use hyper::platform::InterruptControllerInfo;
 
@@ -25,12 +25,16 @@ impl LocalInterruptController for Riscv64LocalInterruptController {
             .map_err(Into::into)
     }
 
-    fn enable(&self, interrupt: InterruptId) -> Result<(), Error> {
-        self.0.enable(interrupt).map_err(Into::into)
+    fn enable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Error>> {
+        self.0
+            .enable(interrupt)
+            .map_err(|error| error.map(Into::into))
     }
 
-    fn disable(&self, interrupt: InterruptId) -> Result<(), Error> {
-        self.0.disable(interrupt).map_err(Into::into)
+    fn disable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Error>> {
+        self.0
+            .disable(interrupt)
+            .map_err(|error| error.map(Into::into))
     }
 }
 
@@ -69,12 +73,22 @@ impl Riscv64InterruptController {
 impl InterruptController for Riscv64InterruptController {
     type Error = Error;
 
-    fn enable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error> {
-        self.0.enable(interrupt).map_err(Into::into)
+    fn enable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>> {
+        self.0
+            .enable(interrupt)
+            .map_err(|error| error.map(Into::into))
     }
 
-    fn disable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error> {
-        self.0.disable(interrupt).map_err(Into::into)
+    fn disable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>> {
+        self.0
+            .disable(interrupt)
+            .map_err(|error| error.map(Into::into))
     }
 
     fn acknowledge(&self) -> Option<InterruptId> {

@@ -75,7 +75,8 @@ pub(crate) fn prepare_interrupts_for_entry() {
 /// `state` must be pinned and exclusively owned by the stopped vCPU. No guest
 /// may execute concurrently, and local interrupts must remain masked. A caller
 /// which can proceed to guest entry must activate the selected second-stage
-/// hierarchy before entry; machine-state-only validation need not do so.
+/// hierarchy before entry; machine-state-only validation need not do so. An
+/// error must leave local vCPU hardware detached so ownership can be released.
 pub(crate) unsafe fn activate_hardware(
     state: &mut VcpuHardwareState,
     vcpu_id: u32,

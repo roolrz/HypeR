@@ -24,6 +24,9 @@ fn require_some<T>(value: Option<T>) -> T {
 }
 
 #[cfg(test)]
+#[path = "cases/aarch64_cache.rs"]
+mod aarch64_cache;
+#[cfg(test)]
 #[path = "cases/allocation.rs"]
 mod allocation;
 #[cfg(test)]
@@ -89,6 +92,9 @@ mod scheduler_requests;
 #[cfg(test)]
 #[path = "cases/software_timers.rs"]
 mod software_timers;
+#[cfg(test)]
+#[path = "cases/stage2_mapping.rs"]
+mod stage2_mapping;
 #[cfg(test)]
 #[path = "cases/synchronization.rs"]
 mod synchronization;

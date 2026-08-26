@@ -201,11 +201,10 @@ impl Drop for KernelStack {
             }
             result
         });
-        if let Err(error) = result {
-            crate::pr_crit!(
-                "HypeR: failed to unmap kernel stack {}: {error:?}",
-                self.slot
-            );
+        if result.is_err() {
+            // Destruction may occur under arbitrary allocator or scheduler
+            // locks. Diagnostics could deadlock while a partially unmapped
+            // stack owner is being released.
             crate::hal::cpu::halt()
         }
     }

@@ -16,8 +16,7 @@ use core::hint::spin_loop;
 
 pub use timers::{
     QueueStats as TimerQueueStats, TimerCallback, TimerEvent, TimerHandle, TimerMode, cancel,
-    local_statistics as timer_statistics, reschedule, schedule_after, schedule_at,
-    schedule_periodic,
+    local_statistics as timer_statistics, schedule_after, schedule_at, schedule_periodic,
 };
 
 use hyper::hal::interrupt::InterruptId;

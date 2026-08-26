@@ -20,7 +20,11 @@
 
 use alloc::boxed::Box;
 
+use hyper::cpu::CpuIndex;
 use hyper::sync::InterruptSpinLock;
+use hyper::vm::translation::{
+    ExclusiveExecution, ExecutionClaim, ExecutionError, ExecutionReleaseFailure,
+};
 
 use super::VmInterruptController;
 use super::device::VirtualDeviceSet;
@@ -45,6 +49,12 @@ const MAX_VIRTUAL_MACHINES: usize = 64;
 pub struct VmId {
     slot: u32,
     generation: u32,
+}
+
+impl VmId {
+    const fn execution_owner(self) -> u64 {
+        ((self.generation as u64) << 32) | self.slot as u64
+    }
 }
 
 /// Non-cloneable vCPU capability for one fixed VM allocation.
@@ -88,6 +98,34 @@ impl VmBinding {
         let machine =
             unsafe { &*core::ptr::with_exposed_provenance::<VirtualMachine>(self.machine) };
         machine.address_space.with(operation)
+    }
+
+    /// Claims this VM's currently single active execution interval.
+    ///
+    /// The capability is intentionally independent of vCPU identity: current
+    /// construction installs one boot vCPU, and the invariant remains safe if
+    /// additional vCPU objects are added before VM-wide shootdown support.
+    pub(in crate::kernel) fn claim_execution(
+        &self,
+        cpu: CpuIndex,
+    ) -> Result<ExecutionClaim, ExecutionError> {
+        // SAFETY: The fixed-allocation and non-removal contract is identical
+        // to `interrupts`; ExclusiveExecution contains only atomic state.
+        let machine =
+            unsafe { &*core::ptr::with_exposed_provenance::<VirtualMachine>(self.machine) };
+        machine.execution.claim(cpu)
+    }
+
+    pub(in crate::kernel) fn release_execution(
+        &self,
+        claim: ExecutionClaim,
+        current_cpu: CpuIndex,
+    ) -> Result<(), ExecutionReleaseFailure> {
+        // SAFETY: See `claim_execution`. Consuming the non-cloneable claim
+        // makes one successful release the only valid transition.
+        let machine =
+            unsafe { &*core::ptr::with_exposed_provenance::<VirtualMachine>(self.machine) };
+        machine.execution.release(claim, current_cpu)
     }
 }
 
@@ -164,6 +202,7 @@ impl VmBuilder {
         let machine = hyper::mm::try_box(VirtualMachine {
             id,
             address_space: InterruptSpinLock::new(address_space),
+            execution: ExclusiveExecution::new(id.execution_owner()),
             interrupts,
             devices,
             boot_vcpu: None,
@@ -263,6 +302,7 @@ impl InstalledVm {
 struct VirtualMachine {
     id: VmId,
     address_space: AddressSpaceLock,
+    execution: ExclusiveExecution,
     interrupts: VmInterruptController,
     // RISC-V currently has no emulated devices, but the aggregate retains the
     // zero-sized set so adding one does not change VM lifecycle ownership.

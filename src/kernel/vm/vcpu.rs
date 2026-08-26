@@ -40,12 +40,12 @@ fn try_run_current() -> Result<Infallible, RunError> {
     // SAFETY: The scheduler-origin pointer identifies its pinned current vCPU.
     // The binding pointer targets a field in that pinned allocation and is
     // converted to a scoped reference only before active publication below.
-    let (vm, virtual_machine, vcpu_id) = unsafe {
+    let (virtual_machine, vcpu_id) = unsafe {
         let execution_ref = &*execution;
         let vm = execution_ref
             .vm_binding()
             .ok_or(RunError::MissingVmBinding)?;
-        (core::ptr::from_ref(vm), vm.id(), execution_ref.vcpu_id)
+        (vm.id(), execution_ref.vcpu_id)
     };
     crate::println!(
         "HypeR: vCPU {} running as scheduler thread {} on guarded stack {:#x}-{:#x}; VM {:?}",
@@ -58,7 +58,6 @@ fn try_run_current() -> Result<Infallible, RunError> {
     // SAFETY: This current scheduler Thread exclusively owns the stopped vCPU,
     // the installed VM aggregate is pinned, and local interrupts remain masked.
     unsafe {
-        super::memory::activate(&*vm).map_err(RunError::Memory)?;
         activate(execution).map_err(RunError::VirtualHardware)?;
         crate::hal::vm::prepare_interrupts_for_entry();
         // No Rust reference to VcpuExecution or VcpuContext is live here. VM
@@ -69,14 +68,14 @@ fn try_run_current() -> Result<Infallible, RunError> {
     }
 }
 
-/// Activates local hardware, then publishes the pinned execution for exception
-/// callbacks. Publication is last so callbacks cannot observe partial state.
+/// Claims VM execution, selects the current mapping epoch, activates local
+/// hardware, then publishes the pinned execution for exception callbacks.
+/// Publication is last so callbacks cannot observe partial state.
 ///
 /// # Safety
 ///
 /// `execution` must be the scheduler-origin, non-null, aligned, pinned, and
-/// exclusively owned current-vCPU pointer. Local interrupts must be masked and
-/// the owning VM's second-stage hierarchy must already be active.
+/// exclusively owned current-vCPU pointer. Local interrupts must be masked.
 pub(crate) unsafe fn activate(
     execution: *mut crate::kernel::task::thread::VcpuExecution,
 ) -> Result<(), HardwareTransitionError> {
@@ -86,20 +85,44 @@ pub(crate) unsafe fn activate(
     {
         // SAFETY: The caller supplies the valid, pinned, exclusive pointer.
         let execution = unsafe { &mut *execution };
+        let cpu =
+            crate::kernel::cpu::current_index().ok_or(HardwareTransitionError::InvalidExecution)?;
+        let claimed = execution
+            .claim_execution(cpu)
+            .map_err(HardwareTransitionError::Execution)?;
+        if claimed {
+            let Some(binding) = execution.vm_binding() else {
+                release_execution_or_fail(execution);
+                return Err(HardwareTransitionError::InvalidExecution);
+            };
+            // SAFETY: The exclusive execution claim above proves that no other
+            // CPU can execute this VM while the current CPU selects its
+            // mapping epoch. The stopped vCPU and masked IRQ requirements are
+            // inherited from this function.
+            if let Err(error) = unsafe { super::memory::activate(binding) } {
+                release_execution_or_fail(execution);
+                return Err(HardwareTransitionError::Memory(error));
+            }
+        }
         let interrupts = core::ptr::from_ref(execution.interrupts());
         // SAFETY: The VM binding keeps the controller fixed and live; this
         // reference ends before raw active-vCPU publication.
         let interrupts = unsafe { &*interrupts };
         // SAFETY: The caller owns this stopped vCPU with IRQs masked.
-        let timer_asserted = unsafe {
+        let timer_asserted = match unsafe {
             crate::hal::vm::activate_hardware(
                 &mut execution.hardware,
                 execution.vcpu_id,
                 interrupts,
                 crate::kernel::time::monotonic_ticks(),
             )
-        }
-        .map_err(HardwareTransitionError::Hardware)?;
+        } {
+            Ok(asserted) => asserted,
+            Err(error) => {
+                release_execution_or_fail(execution);
+                return Err(HardwareTransitionError::Hardware(error));
+            }
+        };
         if let Err(timer) = super::timer::set_host_timer_enabled(!timer_asserted) {
             // SAFETY: Publication has not occurred, hardware is active, and
             // the caller still owns this stopped execution with IRQs masked.
@@ -112,8 +135,14 @@ pub(crate) unsafe fn activate(
                 )
             };
             return match rollback {
-                Ok(()) => Err(HardwareTransitionError::Timer(timer)),
-                Err(hardware) => Err(HardwareTransitionError::TimerRollback { timer, hardware }),
+                Ok(()) => {
+                    release_execution_or_fail(execution);
+                    Err(HardwareTransitionError::Timer(timer))
+                }
+                Err(hardware) => fatal_ambiguous_hardware(
+                    "timer rollback could not detach vCPU hardware",
+                    hardware,
+                ),
             };
         }
     }
@@ -134,16 +163,24 @@ pub(crate) unsafe fn activate(
                 crate::kernel::time::monotonic_ticks(),
             )
         };
-        let timer = super::timer::set_host_timer_enabled(true);
-        return match (rollback, timer) {
-            (Ok(()), Ok(())) => Err(HardwareTransitionError::Active(publication)),
-            (Ok(()), Err(timer)) => {
-                Err(HardwareTransitionError::TimerRollbackAfterPublication { publication, timer })
-            }
-            (Err(hardware), _) => Err(HardwareTransitionError::Rollback {
-                publication,
+        return match rollback {
+            Ok(()) => match super::timer::set_host_timer_enabled(true) {
+                Ok(()) => {
+                    release_execution_or_fail(execution);
+                    Err(HardwareTransitionError::Active(publication))
+                }
+                Err(timer) => {
+                    release_execution_or_fail(execution);
+                    Err(HardwareTransitionError::TimerRollbackAfterPublication {
+                        publication,
+                        timer,
+                    })
+                }
+            },
+            Err(hardware) => fatal_ambiguous_hardware(
+                "publication rollback could not detach vCPU hardware",
                 hardware,
-            }),
+            ),
         };
     }
     Ok(())
@@ -163,32 +200,50 @@ pub(crate) unsafe fn deactivate(
     // SAFETY: The retained VM binding keeps the controller fixed and live.
     let interrupts = unsafe { &*interrupts };
     // SAFETY: Publication is gone, guest execution stopped, and IRQs are masked.
-    unsafe {
+    if let Err(error) = unsafe {
         crate::hal::vm::deactivate_hardware(
             &mut execution.hardware,
             execution.vcpu_id,
             interrupts,
             crate::kernel::time::monotonic_ticks(),
         )
+    } {
+        // Active callback publication is already gone, but local hardware may
+        // still refer to this execution. Retain its claim and stop globally.
+        fatal_ambiguous_hardware("could not detach active vCPU hardware", error);
     }
-    .map_err(HardwareTransitionError::Hardware)?;
+    release_execution_or_fail(execution);
     super::timer::set_host_timer_enabled(true).map_err(HardwareTransitionError::Timer)
+}
+
+fn release_execution_or_fail(execution: &mut crate::kernel::task::thread::VcpuExecution) {
+    let Some(cpu) = crate::kernel::cpu::current_index() else {
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: vCPU execution capability release has no registered CPU"
+        ));
+    };
+    if let Err(error) = execution.release_execution(cpu) {
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: vCPU execution capability release failed: {error:?}"
+        ));
+    }
+}
+
+fn fatal_ambiguous_hardware(
+    operation: &'static str,
+    error: crate::hal::vm::VcpuInterruptError,
+) -> ! {
+    crate::kernel::crash::fatal(format_args!("HypeR: {operation}: {error:?}"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HardwareTransitionError {
     Active(super::active_vcpu::Error),
     Hardware(crate::hal::vm::VcpuInterruptError),
+    Execution(hyper::vm::translation::ExecutionError),
     InvalidExecution,
-    Rollback {
-        publication: super::active_vcpu::Error,
-        hardware: crate::hal::vm::VcpuInterruptError,
-    },
+    Memory(super::memory::Error),
     Timer(super::timer::Error),
-    TimerRollback {
-        timer: super::timer::Error,
-        hardware: crate::hal::vm::VcpuInterruptError,
-    },
     TimerRollbackAfterPublication {
         publication: super::active_vcpu::Error,
         timer: super::timer::Error,

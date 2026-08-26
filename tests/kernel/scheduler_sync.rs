@@ -355,6 +355,23 @@ fn exercise_affinity_creation() -> Result<(), Error> {
     {
         return Err(Error::Affinity(8));
     }
+
+    let before = scheduler::kthread_create("reservation-before", fifo_peer, 0)?;
+    scheduler::discard_dormant_kernel_thread(before)?;
+    if scheduler::kthread_create(
+        "this-thread-name-is-deliberately-longer-than-the-fixed-capacity",
+        fifo_peer,
+        0,
+    )
+    .is_ok()
+    {
+        return Err(Error::Affinity(9));
+    }
+    let after = scheduler::kthread_create("reservation-after", fifo_peer, 0)?;
+    if after.get() <= before.get() + 1 {
+        return Err(Error::Affinity(10));
+    }
+    scheduler::discard_dormant_kernel_thread(after)?;
     Ok(())
 }
 

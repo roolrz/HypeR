@@ -8,8 +8,8 @@ use core::cell::UnsafeCell;
 
 use hyper::cpu::PerCpu;
 use hyper::hal::interrupt::{
-    InterruptController, InterruptId, InterruptPriority, InterruptTrigger,
-    KernelInterruptController, LocalInterruptController,
+    InterruptController, InterruptId, InterruptPriority, InterruptTransitionError,
+    InterruptTrigger, KernelInterruptController, LocalInterruptController,
 };
 use hyper::platform::{InterruptControllerInfo, PlatformInterrupt};
 use hyper::sync::InterruptSpinLock;
@@ -117,15 +117,17 @@ impl VirtualInterrupt {
 
 /// Exclusive capability to remove one registered IRQ handler.
 ///
-/// The capability has no implicit `Drop` behavior because dropping it may occur
-/// while an unrelated lock is held or while local interrupts cannot safely be
-/// changed. Its owner must either pass it to [`unregister`] or explicitly call
-/// [`Registration::retain_permanently`] for a kernel-lifetime handler.
+/// Dropping an armed capability is a fatal ownership violation. `Drop` never
+/// acquires the IRQ registry lock or changes hardware state because destruction
+/// may occur while an unrelated lock is held. Its owner must either pass it to
+/// [`unregister`] or explicitly call [`Registration::retain_permanently`] for a
+/// kernel-lifetime handler.
 #[must_use = "an IRQ registration must be owned, unregistered, or explicitly retained permanently"]
 #[derive(Debug, Eq, PartialEq)]
 pub struct Registration {
     id: u64,
     interrupt: VirtualInterrupt,
+    armed: bool,
 }
 
 #[must_use = "a prepared IRQ mapping must be activated or explicitly discarded"]
@@ -137,6 +139,10 @@ pub struct PreparedRegistration {
 impl PreparedRegistration {
     pub const fn interrupt(&self) -> VirtualInterrupt {
         self.registration.interrupt
+    }
+
+    fn disarm(&mut self) {
+        self.registration.disarm();
     }
 }
 
@@ -165,8 +171,23 @@ impl ActivationFailure {
 }
 
 impl Registration {
+    const fn new(id: u64, interrupt: VirtualInterrupt) -> Self {
+        Self {
+            id,
+            interrupt,
+            armed: true,
+        }
+    }
+
     pub(crate) const fn interrupt(&self) -> VirtualInterrupt {
         self.interrupt
+    }
+
+    fn disarm(&mut self) {
+        if !self.armed {
+            crate::hal::cpu::halt()
+        }
+        self.armed = false;
     }
 
     /// Relinquishes the unregister capability for a kernel-lifetime handler.
@@ -175,7 +196,20 @@ impl Registration {
     /// handler entry until shutdown, and `HypeR` currently has no global IRQ
     /// teardown phase. Subsystems with a shorter lifetime must store this
     /// capability in their owning state instead.
-    pub fn retain_permanently(self) {}
+    pub fn retain_permanently(mut self) {
+        self.disarm();
+    }
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        if self.armed {
+            // Destruction can run under an arbitrary lock and interrupt-mask
+            // state. Do not attempt implicit unregistration or diagnostics;
+            // either could deadlock while the live callback loses its owner.
+            crate::hal::cpu::halt()
+        }
+    }
 }
 
 /// An unsuccessful unregister operation that preserves its capability.
@@ -265,6 +299,61 @@ enum DispatchOutcome {
         virtual_interrupt: VirtualInterrupt,
     },
     Unmapped(InterruptId),
+    TransitionAmbiguous {
+        operation: &'static str,
+        error: crate::hal::irq::ControllerError,
+    },
+}
+
+enum TransitionFailure {
+    NotApplied(Error),
+    AppliedOrUnknown(crate::hal::irq::ControllerError),
+}
+
+impl From<Error> for TransitionFailure {
+    fn from(error: Error) -> Self {
+        Self::NotApplied(error)
+    }
+}
+
+fn classify_transition(
+    result: Result<(), InterruptTransitionError<crate::hal::irq::ControllerError>>,
+) -> Result<(), TransitionFailure> {
+    result.map_err(|error| match error {
+        InterruptTransitionError::NotApplied(error) => {
+            TransitionFailure::NotApplied(Error::Controller(error))
+        }
+        InterruptTransitionError::AppliedOrUnknown(error) => {
+            TransitionFailure::AppliedOrUnknown(error)
+        }
+    })
+}
+
+fn resolve_transition<ResultValue>(
+    result: Result<ResultValue, TransitionFailure>,
+    operation: &'static str,
+) -> Result<ResultValue, Error> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(TransitionFailure::NotApplied(error)) => Err(error),
+        Err(TransitionFailure::AppliedOrUnknown(error)) => {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: interrupt-controller {operation} reached an ambiguous commit state: {error:?}"
+            ))
+        }
+    }
+}
+
+fn dispatch_transition(
+    result: Result<(), TransitionFailure>,
+    operation: &'static str,
+) -> Option<DispatchOutcome> {
+    match result {
+        Ok(()) | Err(TransitionFailure::NotApplied(_)) => None,
+        Err(TransitionFailure::AppliedOrUnknown(error)) => {
+            Some(DispatchOutcome::TransitionAmbiguous { operation, error })
+        }
+    }
 }
 
 pub fn initialize(info: InterruptControllerInfo) -> Result<Capabilities, Error> {
@@ -276,27 +365,34 @@ pub fn initialize(info: InterruptControllerInfo) -> Result<Capabilities, Error> 
         InterruptControllerInfo::Plic(_) => None,
         InterruptControllerInfo::X2Apic(_) => None,
     };
+    let root_domain = IrqDomainId(0);
+    let mut domains = Vec::new();
+    reserve_one(&mut domains)?;
+    domains.push(IrqDomain {
+        id: root_domain,
+        mappings: Vec::new(),
+    });
     // SAFETY: The architecture MMIO window maps every DTB-discovered device
     // range with Device attributes and the controller has a single owner.
     let controller =
         unsafe { BootInterruptController::bind(info, crate::kernel::mm::memory::mmio_address)? };
     let interrupt_count = controller.interrupt_count();
+    // The root domain and all fallible storage are complete before this single
+    // publication. Consumers can therefore never observe a controller without
+    // the domain capability returned below.
     INTERRUPTS.with(|slot| {
         if slot.is_some() {
             return Err(Error::AlreadyInitialized);
         }
         *slot = Some(InterruptState {
             controller,
-            domains: Vec::new(),
-            next_domain: 0,
+            domains,
+            next_domain: 1,
             next_virtual_interrupt: 0,
             next_registration: 0,
         });
         Ok(())
     })?;
-    let lifecycle_probe = create_domain()?;
-    destroy_domain(lifecycle_probe)?;
-    let root_domain = create_domain()?;
     Ok(Capabilities {
         interrupt_count,
         root_domain,
@@ -307,7 +403,7 @@ pub fn initialize(info: InterruptControllerInfo) -> Result<Capabilities, Error> 
 /// Initializes the calling secondary CPU's local interrupt-controller state.
 pub fn initialize_local_cpu() -> Result<(), Error> {
     let cpu = crate::kernel::cpu::current_index().ok_or(Error::NotInitialized)?;
-    with_state(|state| {
+    let initialized = with_transition_state(|state| {
         let InterruptState {
             controller,
             domains,
@@ -315,19 +411,22 @@ pub fn initialize_local_cpu() -> Result<(), Error> {
         } = state;
         // SAFETY: The shared Distributor is active, this CPU still has IRQs
         // masked, and each Redistributor is private to its matching affinity.
-        let local = unsafe { controller.initialize_local()? };
+        let local = unsafe { controller.initialize_local().map_err(Error::from)? };
         LOCAL_CONTROLLERS[cpu].install(local)?;
         let local = LOCAL_CONTROLLERS[cpu].get().ok_or(Error::NotInitialized)?;
         for mapping in domains.iter().flat_map(|domain| domain.mappings.iter()) {
             if controller.is_per_cpu(mapping.hardware) {
-                local.configure(mapping.hardware, mapping.priority, mapping.trigger)?;
+                local
+                    .configure(mapping.hardware, mapping.priority, mapping.trigger)
+                    .map_err(Error::from)?;
                 if mapping.enabled_by_registry {
-                    local.enable(mapping.hardware)?;
+                    classify_transition(local.enable(mapping.hardware))?;
                 }
             }
         }
         Ok(())
-    })?;
+    });
+    resolve_transition(initialized, "secondary local-route replay")?;
     initialize_local_rpc_transport()
 }
 
@@ -350,7 +449,10 @@ pub(crate) fn initialize_local_rpc_transport() -> Result<(), Error> {
                 InterruptTrigger::Edge,
             )
             .map_err(Error::from)?;
-        controller.enable(interrupt).map_err(Error::from)
+        resolve_transition(
+            classify_transition(controller.enable(interrupt)),
+            "kernel RPC source enable",
+        )
     }
 }
 
@@ -447,7 +549,7 @@ impl IrqDomainId {
     ) -> Result<PreparedRegistration, Error> {
         reject_reserved_interrupt(hardware)?;
         let _transaction = LocalLifecycleTransaction::acquire()?;
-        let (prepared, late) = with_state(|state| {
+        let (mut prepared, late) = with_state(|state| {
             if state
                 .domains
                 .iter()
@@ -477,10 +579,7 @@ impl IrqDomainId {
                 state.controller.configure(hardware, priority, trigger)?;
             }
             let virtual_interrupt = VirtualInterrupt(state.next_virtual_interrupt);
-            let registration = Registration {
-                id: state.next_registration,
-                interrupt: virtual_interrupt,
-            };
+            let registration = Registration::new(state.next_registration, virtual_interrupt);
             handlers.push(HandlerEntry {
                 id: registration.id,
                 context,
@@ -508,7 +607,12 @@ impl IrqDomainId {
                 LocalLifecycleOperation::Configure,
             )
         {
-            let _ = remove_prepared_mapping(&prepared);
+            if let Err(rollback) = remove_prepared_mapping(&prepared) {
+                crate::kernel::crash::fatal(format_args!(
+                    "HypeR: prepared IRQ configuration rollback failed: {rollback:?}"
+                ));
+            }
+            prepared.disarm();
             return Err(error);
         }
         Ok(prepared)
@@ -536,14 +640,14 @@ impl IrqDomainId {
         if crate::kernel::cpu::frozen_topology().is_some() {
             return Err(Error::BootPhaseOnly);
         }
-        with_state(|state| {
+        let installed = with_transition_state(|state| {
             if state
                 .domains
                 .iter()
                 .flat_map(|domain| domain.mappings.iter())
                 .any(|mapping| mapping.hardware == hardware)
             {
-                return Err(Error::InterruptAlreadyMapped);
+                return Err(TransitionFailure::NotApplied(Error::InterruptAlreadyMapped));
             }
             let domain_index = state
                 .domains
@@ -562,14 +666,14 @@ impl IrqDomainId {
             let mut handlers = Vec::new();
             reserve_one(&mut handlers)?;
             require_local_lifecycle_available(&state.controller, hardware)?;
-            state.controller.configure(hardware, priority, trigger)?;
-            state.controller.enable(hardware)?;
+            state
+                .controller
+                .configure(hardware, priority, trigger)
+                .map_err(Error::from)?;
+            classify_transition(state.controller.enable(hardware))?;
 
             let virtual_interrupt = VirtualInterrupt(state.next_virtual_interrupt);
-            let registration = Registration {
-                id: state.next_registration,
-                interrupt: virtual_interrupt,
-            };
+            let registration = Registration::new(state.next_registration, virtual_interrupt);
             handlers.push(HandlerEntry {
                 id: registration.id,
                 context,
@@ -588,7 +692,8 @@ impl IrqDomainId {
                 lifecycle: MappingLifecycle::Active,
             });
             Ok((virtual_interrupt, registration))
-        })
+        });
+        resolve_transition(installed, "boot IRQ mapping enable")
     }
 }
 
@@ -620,17 +725,15 @@ pub fn activate(prepared: PreparedRegistration) -> Result<Registration, Activati
     let enabled = if late {
         synchronize_local_lifecycle(hardware, priority, trigger, LocalLifecycleOperation::Enable)
     } else {
-        with_state(|state| {
-            state.controller.enable(hardware)?;
-            Ok(())
-        })
+        resolve_transition(
+            with_transition_state(|state| {
+                classify_transition(state.controller.enable(hardware))?;
+                Ok(())
+            }),
+            "IRQ activation enable",
+        )
     };
     if let Err(error) = enabled {
-        if !late && crate::kernel::cpu::frozen_topology().is_some() {
-            crate::kernel::crash::fatal(format_args!(
-                "HypeR: ambiguous late IRQ activation failure: {error:?}"
-            ));
-        }
         if let Err(commit_error) = with_state(|state| {
             let (domain, mapping) = state
                 .mapping_position_by_virtual(prepared.registration.interrupt)
@@ -662,7 +765,7 @@ pub fn activate(prepared: PreparedRegistration) -> Result<Registration, Activati
     Ok(registration)
 }
 
-pub fn discard_prepared(prepared: PreparedRegistration) -> Result<(), DiscardFailure> {
+pub fn discard_prepared(mut prepared: PreparedRegistration) -> Result<(), DiscardFailure> {
     let _transaction = match LocalLifecycleTransaction::acquire() {
         Ok(transaction) => transaction,
         Err(error) => return Err(DiscardFailure { error, prepared }),
@@ -670,6 +773,7 @@ pub fn discard_prepared(prepared: PreparedRegistration) -> Result<(), DiscardFai
     if let Err(error) = remove_prepared_mapping(&prepared) {
         return Err(DiscardFailure { error, prepared });
     }
+    prepared.disarm();
     Ok(())
 }
 
@@ -721,7 +825,7 @@ pub fn register_shared(
     context: usize,
     handler: Handler,
 ) -> Result<Registration, Error> {
-    with_state(|state| {
+    let installed = with_transition_state(|state| {
         let (domain_index, mapping_index) = state
             .mapping_position_by_virtual(interrupt)
             .ok_or(Error::InterruptNotMapped)?;
@@ -735,20 +839,17 @@ pub fn register_shared(
             MappingLifecycle::Prepared | MappingLifecycle::Active
         ) || (mapping.lifecycle == MappingLifecycle::Prepared && !mapping.handlers.is_empty())
         {
-            return Err(Error::MappingBusy);
+            return Err(TransitionFailure::NotApplied(Error::MappingBusy));
         }
         reserve_one(&mut mapping.handlers)?;
         if !mapping.enabled_by_registry {
             require_local_lifecycle_available(&state.controller, mapping.hardware)?;
-            state.controller.enable(mapping.hardware)?;
+            classify_transition(state.controller.enable(mapping.hardware))?;
             mapping.enabled_by_registry = true;
             mapping.consecutive_unhandled = 0;
             mapping.lifecycle = MappingLifecycle::Active;
         }
-        let registration = Registration {
-            id: state.next_registration,
-            interrupt,
-        };
+        let registration = Registration::new(state.next_registration, interrupt);
         state.next_registration = next_registration;
         mapping.handlers.push(HandlerEntry {
             id: registration.id,
@@ -756,7 +857,8 @@ pub fn register_shared(
             handler,
         });
         Ok(registration)
-    })
+    });
+    resolve_transition(installed, "shared IRQ enable")
 }
 
 /// Removes exactly the handler identified by `registration`.
@@ -768,7 +870,7 @@ pub fn register_shared(
 /// must first quiesce the device source and clear its pending condition. The
 /// controller disable prevents new delivery but cannot retract an already
 /// latched edge before the same hardware interrupt is reused by another owner.
-pub fn unregister(registration: Registration) -> Result<(), UnregisterFailure> {
+pub fn unregister(mut registration: Registration) -> Result<(), UnregisterFailure> {
     let _transaction = match LocalLifecycleTransaction::acquire() {
         Ok(transaction) => transaction,
         Err(error) => {
@@ -778,13 +880,13 @@ pub fn unregister(registration: Registration) -> Result<(), UnregisterFailure> {
             });
         }
     };
-    let prepared = with_state(|state| {
+    let prepared = with_transition_state(|state| {
         let (domain_index, mapping_index) = state
             .mapping_position_by_virtual(registration.interrupt)
             .ok_or(Error::InterruptNotMapped)?;
         let mapping = &mut state.domains[domain_index].mappings[mapping_index];
         if mapping.lifecycle != MappingLifecycle::Active {
-            return Err(Error::MappingBusy);
+            return Err(TransitionFailure::NotApplied(Error::MappingBusy));
         }
         let handler_index = mapping
             .handlers
@@ -800,14 +902,14 @@ pub fn unregister(registration: Registration) -> Result<(), UnregisterFailure> {
         }
         if mapping.handlers.len() == 1 && mapping.enabled_by_registry {
             require_local_lifecycle_available(&state.controller, mapping.hardware)?;
-            state.controller.disable(mapping.hardware)?;
+            classify_transition(state.controller.disable(mapping.hardware))?;
             mapping.enabled_by_registry = false;
             mapping.lifecycle = MappingLifecycle::Prepared;
         }
         mapping.handlers.swap_remove(handler_index);
         Ok(None)
     });
-    let details = match prepared {
+    let details = match resolve_transition(prepared, "final IRQ handler disable") {
         Ok(details) => details,
         Err(error) => {
             return Err(UnregisterFailure {
@@ -816,46 +918,54 @@ pub fn unregister(registration: Registration) -> Result<(), UnregisterFailure> {
             });
         }
     };
-    let Some((hardware, priority, trigger)) = details else {
-        return Ok(());
-    };
-    if let Err(error) = synchronize_local_lifecycle(
-        hardware,
-        priority,
-        trigger,
-        LocalLifecycleOperation::Disable,
-    ) {
-        let _ = with_state(|state| {
+    if let Some((hardware, priority, trigger)) = details {
+        if let Err(error) = synchronize_local_lifecycle(
+            hardware,
+            priority,
+            trigger,
+            LocalLifecycleOperation::Disable,
+        ) {
+            if let Err(rollback) = with_state(|state| {
+                let (domain, mapping) = state
+                    .mapping_position_by_virtual(registration.interrupt)
+                    .ok_or(Error::InterruptNotMapped)?;
+                state.domains[domain].mappings[mapping].lifecycle = MappingLifecycle::Active;
+                Ok(())
+            }) {
+                crate::kernel::crash::fatal(format_args!(
+                    "HypeR: failed IRQ deactivation rollback lost registry state: {rollback:?}"
+                ));
+            }
+            return Err(UnregisterFailure {
+                error,
+                registration,
+            });
+        }
+        if let Err(error) = with_state(|state| {
             let (domain, mapping) = state
                 .mapping_position_by_virtual(registration.interrupt)
                 .ok_or(Error::InterruptNotMapped)?;
-            state.domains[domain].mappings[mapping].lifecycle = MappingLifecycle::Active;
+            let mapping = &mut state.domains[domain].mappings[mapping];
+            let handler = mapping
+                .handlers
+                .iter()
+                .position(|entry| entry.id == registration.id)
+                .ok_or(Error::HandlerNotFound)?;
+            mapping.handlers.swap_remove(handler);
+            mapping.enabled_by_registry = false;
+            mapping.lifecycle = MappingLifecycle::Prepared;
             Ok(())
-        });
-        return Err(UnregisterFailure {
-            error,
-            registration,
-        });
+        }) {
+            // Hardware disable is already globally visible. Returning an
+            // apparently retryable token would hide an ambiguous committed
+            // state, so an impossible registry mismatch is fail-stop.
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: disabled IRQ removal lost registry state: {error:?}"
+            ));
+        }
     }
-    with_state(|state| {
-        let (domain, mapping) = state
-            .mapping_position_by_virtual(registration.interrupt)
-            .ok_or(Error::InterruptNotMapped)?;
-        let mapping = &mut state.domains[domain].mappings[mapping];
-        let handler = mapping
-            .handlers
-            .iter()
-            .position(|entry| entry.id == registration.id)
-            .ok_or(Error::HandlerNotFound)?;
-        mapping.handlers.swap_remove(handler);
-        mapping.enabled_by_registry = false;
-        mapping.lifecycle = MappingLifecycle::Prepared;
-        Ok(())
-    })
-    .map_err(|error| UnregisterFailure {
-        error,
-        registration,
-    })
+    registration.disarm();
+    Ok(())
 }
 
 /// Dispatches an interrupt already acknowledged by architecture exception entry.
@@ -893,6 +1003,11 @@ pub fn dispatch(hardware: InterruptId) {
                 hardware.get()
             );
         }
+        DispatchOutcome::TransitionAmbiguous { operation, error } => {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: IRQ dispatch {operation} reached an ambiguous commit state: {error:?}"
+            ));
+        }
     }
 }
 
@@ -906,12 +1021,18 @@ pub fn acknowledge_external() -> Option<InterruptId> {
 
 /// Enables one already-mapped PPI on the calling CPU.
 pub fn enable_local(interrupt: VirtualInterrupt) -> Result<(), Error> {
-    with_state(|state| state.set_local_enabled(interrupt, true))
+    resolve_transition(
+        with_transition_state(|state| state.set_local_enabled(interrupt, true)),
+        "local IRQ enable",
+    )
 }
 
 /// Disables one already-mapped PPI on the calling CPU.
 pub fn disable_local(interrupt: VirtualInterrupt) -> Result<(), Error> {
-    with_state(|state| state.set_local_enabled(interrupt, false))
+    resolve_transition(
+        with_transition_state(|state| state.set_local_enabled(interrupt, false)),
+        "local IRQ disable",
+    )
 }
 
 impl InterruptState {
@@ -944,8 +1065,11 @@ impl InterruptState {
     fn dispatch_one(&mut self, hardware: InterruptId) -> DispatchOutcome {
         let Some((domain_index, mapping_index)) = self.mapping_position_by_hardware(hardware)
         else {
-            let _ = self.controller.disable(hardware);
+            let transition = classify_transition(self.controller.disable(hardware));
             self.controller.end(hardware);
+            if let Some(outcome) = dispatch_transition(transition, "unmapped-source disable") {
+                return outcome;
+            }
             return DispatchOutcome::Unmapped(hardware);
         };
         if self.domains[domain_index].mappings[mapping_index].lifecycle
@@ -953,8 +1077,11 @@ impl InterruptState {
         {
             let virtual_interrupt =
                 self.domains[domain_index].mappings[mapping_index].virtual_interrupt;
-            let _ = self.set_hardware_enabled(hardware, false);
+            let transition = self.set_hardware_enabled(hardware, false);
             self.controller.end(hardware);
+            if let Some(outcome) = dispatch_transition(transition, "prepared-source disable") {
+                return outcome;
+            }
             return DispatchOutcome::Prepared {
                 hardware,
                 virtual_interrupt,
@@ -1005,11 +1132,23 @@ impl InterruptState {
             let quarantine = matches!(outcome, DispatchOutcome::Quarantined { .. });
             (outcome, mask_local, unmask_local, quarantine)
         };
-        if quarantine {
-            let _ = self.set_hardware_enabled(hardware, false);
+        if quarantine
+            && let Some(ambiguous) = dispatch_transition(
+                self.set_hardware_enabled(hardware, false),
+                "quarantined-source disable",
+            )
+        {
+            self.controller.end(hardware);
+            return ambiguous;
         }
-        if mask_local {
-            let _ = self.set_hardware_enabled(hardware, false);
+        if mask_local
+            && let Some(ambiguous) = dispatch_transition(
+                self.set_hardware_enabled(hardware, false),
+                "handler-requested local disable",
+            )
+        {
+            self.controller.end(hardware);
+            return ambiguous;
         }
         if let Some(interrupt) = unmask_local
             && let Some((domain, mapping)) = self.mapping_position_by_virtual(interrupt)
@@ -1019,8 +1158,14 @@ impl InterruptState {
                 return DispatchOutcome::Handled;
             }
             let target = self.domains[domain].mappings[mapping].hardware;
-            if self.controller.is_per_cpu(target) {
-                let _ = self.set_hardware_enabled(target, true);
+            if self.controller.is_per_cpu(target)
+                && let Some(ambiguous) = dispatch_transition(
+                    self.set_hardware_enabled(target, true),
+                    "handler-requested local enable",
+                )
+            {
+                self.controller.end(hardware);
+                return ambiguous;
             }
         }
         self.controller.end(hardware);
@@ -1031,34 +1176,44 @@ impl InterruptState {
         &mut self,
         interrupt: VirtualInterrupt,
         enabled: bool,
-    ) -> Result<(), Error> {
+    ) -> Result<(), TransitionFailure> {
         let (domain, mapping) = self
             .mapping_position_by_virtual(interrupt)
-            .ok_or(Error::InterruptNotMapped)?;
+            .ok_or(Error::InterruptNotMapped)
+            .map_err(TransitionFailure::from)?;
         let hardware = self.domains[domain].mappings[mapping].hardware;
         if self.domains[domain].mappings[mapping].lifecycle != MappingLifecycle::Active {
-            return Err(Error::MappingBusy);
+            return Err(Error::MappingBusy.into());
         }
         if !self.controller.is_per_cpu(hardware) {
-            return Err(Error::LocalInterruptLifecycleRequiresCrossCall);
+            return Err(Error::LocalInterruptLifecycleRequiresCrossCall.into());
         }
         self.set_hardware_enabled(hardware, enabled)
     }
 
-    fn set_hardware_enabled(&mut self, hardware: InterruptId, enabled: bool) -> Result<(), Error> {
+    fn set_hardware_enabled(
+        &mut self,
+        hardware: InterruptId,
+        enabled: bool,
+    ) -> Result<(), TransitionFailure> {
         if !self.controller.is_per_cpu(hardware) {
             return if enabled {
-                self.controller.enable(hardware).map_err(Error::from)
+                classify_transition(self.controller.enable(hardware))
             } else {
-                self.controller.disable(hardware).map_err(Error::from)
+                classify_transition(self.controller.disable(hardware))
             };
         }
-        let cpu = crate::kernel::cpu::current_index().ok_or(Error::NotInitialized)?;
-        let controller = LOCAL_CONTROLLERS[cpu].get().ok_or(Error::NotInitialized)?;
+        let cpu = crate::kernel::cpu::current_index()
+            .ok_or(Error::NotInitialized)
+            .map_err(TransitionFailure::from)?;
+        let controller = LOCAL_CONTROLLERS[cpu]
+            .get()
+            .ok_or(Error::NotInitialized)
+            .map_err(TransitionFailure::from)?;
         if enabled {
-            controller.enable(hardware).map_err(Error::from)
+            classify_transition(controller.enable(hardware))
         } else {
-            controller.disable(hardware).map_err(Error::from)
+            classify_transition(controller.disable(hardware))
         }
     }
 }
@@ -1068,6 +1223,17 @@ fn with_state<R>(
 ) -> Result<R, Error> {
     INTERRUPTS.with(|slot| {
         let state = slot.as_mut().ok_or(Error::NotInitialized)?;
+        operation(state)
+    })
+}
+
+fn with_transition_state<R>(
+    operation: impl FnOnce(&mut InterruptState) -> Result<R, TransitionFailure>,
+) -> Result<R, TransitionFailure> {
+    INTERRUPTS.with(|slot| {
+        let state = slot
+            .as_mut()
+            .ok_or(TransitionFailure::NotApplied(Error::NotInitialized))?;
         operation(state)
     })
 }
@@ -1112,6 +1278,11 @@ fn synchronize_local_lifecycle(
         &targets,
     )
     .map_err(|_| Error::LocalInterruptLifecycleBusy)?;
+    if let Some(cpu) = forward.ambiguous_cpu {
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: local IRQ lifecycle operation reached an ambiguous commit state on CPU {cpu}"
+        ));
+    }
     let Some(rejected) = forward.rejected_cpu else {
         return Ok(());
     };
@@ -1134,6 +1305,11 @@ fn synchronize_local_lifecycle(
             &targets,
         )
         .map_err(|_| Error::LocalInterruptLifecyclePoisoned)?;
+        if let Some(cpu) = rollback.ambiguous_cpu {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: local IRQ lifecycle rollback reached an ambiguous commit state on CPU {cpu}"
+            ));
+        }
         if rollback.rejected_cpu.is_some() {
             crate::kernel::crash::fatal(format_args!(
                 "HypeR: local IRQ lifecycle rollback was rejected"
@@ -1143,25 +1319,47 @@ fn synchronize_local_lifecycle(
     Err(Error::LocalInterruptCrossCallFailed(rejected))
 }
 
+pub(super) enum LocalLifecycleApply {
+    Applied,
+    Rejected,
+    AppliedOrUnknown,
+}
+
 pub(super) fn apply_local_irq_lifecycle(
     hardware: InterruptId,
     priority: InterruptPriority,
     trigger: InterruptTrigger,
     operation: LocalLifecycleOperation,
-) -> bool {
+) -> LocalLifecycleApply {
     let Some(cpu) = crate::kernel::cpu::current_index() else {
-        return false;
+        return LocalLifecycleApply::Rejected;
     };
-    {
-        let Some(controller) = LOCAL_CONTROLLERS[cpu].get() else {
-            return false;
-        };
-        match operation {
-            LocalLifecycleOperation::Configure => controller.configure(hardware, priority, trigger),
-            LocalLifecycleOperation::Enable => controller.enable(hardware),
-            LocalLifecycleOperation::Disable => controller.disable(hardware),
+    let Some(controller) = LOCAL_CONTROLLERS[cpu].get() else {
+        return LocalLifecycleApply::Rejected;
+    };
+    match operation {
+        // Configuration runs while the route is disabled. A partial priority
+        // or trigger write can be overwritten by a later prepare attempt and
+        // therefore remains a recoverable rejection.
+        LocalLifecycleOperation::Configure => {
+            if controller.configure(hardware, priority, trigger).is_ok() {
+                LocalLifecycleApply::Applied
+            } else {
+                LocalLifecycleApply::Rejected
+            }
         }
-        .is_ok()
+        LocalLifecycleOperation::Enable => classify_local_transition(controller.enable(hardware)),
+        LocalLifecycleOperation::Disable => classify_local_transition(controller.disable(hardware)),
+    }
+}
+
+fn classify_local_transition(
+    result: Result<(), InterruptTransitionError<crate::hal::irq::ControllerError>>,
+) -> LocalLifecycleApply {
+    match result {
+        Ok(()) => LocalLifecycleApply::Applied,
+        Err(InterruptTransitionError::NotApplied(_)) => LocalLifecycleApply::Rejected,
+        Err(InterruptTransitionError::AppliedOrUnknown(_)) => LocalLifecycleApply::AppliedOrUnknown,
     }
 }
 

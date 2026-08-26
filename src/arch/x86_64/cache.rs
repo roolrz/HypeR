@@ -62,6 +62,17 @@ impl CacheMaintenance for X86_64Cache {
         Ok(())
     }
 
+    unsafe fn publish_instruction_ranges(
+        mut ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
+    ) -> Result<(), CacheError> {
+        // Enumerate once so the owner can validate every discontiguous range;
+        // coherent x86 caches need no address-directed maintenance here.
+        ranges(&mut |_, _| {});
+        // One serializing instruction completes publication for the batch.
+        super::barrier::X86_64Barrier::instruction_synchronization();
+        Ok(())
+    }
+
     fn synchronize_instruction_execution() {
         super::barrier::X86_64Barrier::instruction_synchronization();
     }

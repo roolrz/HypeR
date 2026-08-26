@@ -158,8 +158,10 @@ impl<T: ?Sized> DerefMut for MutexGuard<'_, T> {
 
 impl<T: ?Sized> Drop for MutexGuard<'_, T> {
     fn drop(&mut self) {
-        if let Err(error) = self.mutex.unlock() {
-            crate::pr_crit!("HypeR: sleeping mutex unlock invariant failed: {error:?}");
+        if self.mutex.unlock().is_err() {
+            // Drop can run beneath arbitrary subsystem locks. Diagnostics may
+            // deadlock while mutex ownership is inconsistent, so fail closed
+            // without acquiring another lock.
             crate::hal::cpu::halt()
         }
     }

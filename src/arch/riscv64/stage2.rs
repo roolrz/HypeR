@@ -6,6 +6,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
 use hyper::mm::{PAGE_SIZE, PhysicalAddress};
+use hyper::vm::translation::{ActiveMappingError, publish_active_mapping};
 
 use super::memory::Riscv64AddressTranslation;
 use super::registers;
@@ -23,7 +24,6 @@ pub enum Error {
     InvalidAddress,
     InvalidRange,
     InvalidVmid,
-    RemoteFence(super::sbi::Error),
 }
 
 pub struct Stage2AddressSpace {
@@ -117,11 +117,19 @@ impl Stage2AddressSpace {
         ipa: u64,
         physical: u64,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
-    ) -> Result<(), Error> {
-        // SAFETY: This function has the same allocator and serialization contract.
-        unsafe { self.map_normal_page(ipa, physical, allocator)? };
-        // SAFETY: The caller guarantees this VMID is the active address space.
-        unsafe { invalidate(self.vmid) }
+    ) -> Result<(), ActiveMappingError<Error>> {
+        publish_active_mapping(
+            self,
+            |stage2| {
+                // SAFETY: This function has the same allocator and
+                // serialization contract.
+                unsafe { stage2.map_normal_page(ipa, physical, allocator) }
+            },
+            |stage2| {
+                // SAFETY: The caller guarantees this VMID is active.
+                unsafe { invalidate(ipa, stage2.vmid) }
+            },
+        )
     }
 
     pub unsafe fn invalidate_page_active(&self, ipa: u64) -> Result<(), Error> {
@@ -129,7 +137,7 @@ impl Stage2AddressSpace {
             return Err(Error::InvalidAddress);
         }
         // SAFETY: The caller guarantees this VMID is the active address space.
-        unsafe { invalidate(self.vmid) }
+        unsafe { invalidate(ipa, self.vmid) }
     }
 
     #[allow(dead_code)]
@@ -266,16 +274,19 @@ fn covering_regions(start: u64, end: u64, span: u64) -> Result<usize, Error> {
     usize::try_from(last - first + 1).map_err(|_| Error::AddressOverflow)
 }
 
-unsafe fn invalidate(vmid: u16) -> Result<(), Error> {
-    // SAFETY: The caller guarantees this VMID is active and invalidation is serialized.
-    unsafe { riscv64_invalidate_stage2_vmid(usize::from(vmid)) };
-    super::smp::for_each_online_remote_hart(|hart_id| {
-        super::sbi::remote_hfence_gvma_vmid(hart_id, vmid)
-    })
-    .map_err(Error::RemoteFence)
+unsafe fn invalidate(ipa: u64, vmid: u16) -> Result<(), Error> {
+    let start = usize::try_from(ipa).map_err(|_| Error::InvalidAddress)?;
+    // The exclusive execution claim proves that only this hart can consume the
+    // active VMID. A future migration observes the incremented translation
+    // epoch and performs a full local activation fence on its destination, so
+    // broadcasting an SBI remote fence on every demand fault is unnecessary.
+    // SAFETY: The caller guarantees this VMID is active and invalidation is
+    // serialized.
+    unsafe { riscv64_invalidate_stage2_page(start >> 2, usize::from(vmid)) };
+    Ok(())
 }
 
 unsafe extern "C" {
     fn riscv64_activate_stage2(value: u64);
-    fn riscv64_invalidate_stage2_vmid(vmid: usize);
+    fn riscv64_invalidate_stage2_page(guest_physical_operand: usize, vmid: usize);
 }

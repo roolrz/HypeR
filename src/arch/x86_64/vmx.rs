@@ -256,6 +256,8 @@ static HOST_MSR_LISTS: MsrLists = MsrLists(UnsafeCell::new(
 static VMX_ACTIVE: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 static ACTIVE_CONTEXT: [AtomicUsize; MAX_CPUS] = [const { AtomicUsize::new(0) }; MAX_CPUS];
 static ACTIVE_EPTP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static EPT_INVALIDATION_PENDING: [AtomicBool; MAX_CPUS] =
+    [const { AtomicBool::new(false) }; MAX_CPUS];
 static TIMER_PENDING: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
 
 #[repr(C)]
@@ -365,6 +367,12 @@ fn prepare_vmcs(context: &VcpuContext) -> Result<(), Error> {
     vmptrld(vmcs_pa)?;
 
     let eptp = active_eptp().ok_or(Error::InvalidAddress)?;
+    if EPT_INVALIDATION_PENDING[cpu].swap(false, Ordering::AcqRel) {
+        // VMXON must precede INVEPT. Stage-2 activation can occur before this
+        // CPU has entered VMX operation, so it records the required flush and
+        // the first safe pre-entry point consumes it here.
+        invept_single_context(eptp)?;
+    }
     write_controls(eptp)?;
     write_guest_state(context)?;
     write_host_state()?;
@@ -1054,10 +1062,12 @@ fn descriptor_base(gdt: u64, selector: u16) -> Result<u64, Error> {
 
 pub(super) fn activate_ept(root: u64) {
     let eptp = root | 6 | (3 << 3);
-    let Some(slot) = ACTIVE_EPTP.get(super::current_cpu_index()) else {
+    let cpu = super::current_cpu_index();
+    let Some(slot) = ACTIVE_EPTP.get(cpu) else {
         crate::kernel::boot::fail("VMX EPT CPU lookup", Error::InvalidCpu);
     };
     slot.store(eptp, Ordering::Release);
+    EPT_INVALIDATION_PENDING[cpu].store(true, Ordering::Release);
 }
 
 pub(super) fn invalidate_ept(root: u64) -> Result<(), Error> {

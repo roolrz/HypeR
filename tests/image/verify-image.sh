@@ -136,6 +136,8 @@ case "$arch" in
         grep -Eq '[[:space:]]cas(al|a|l)?b[[:space:]]' "$instructions_file"
         grep -Eq '[[:space:]]ldaxrb[[:space:]]' "$instructions_file"
         grep -Eq '[[:space:]]stl?xrb[[:space:]]' "$instructions_file"
+        grep -Eq '[[:space:]]ic[[:space:]]+ivau,' "$instructions_file"
+        grep -Eq '[[:space:]]ic[[:space:]]+ialluis' "$instructions_file"
         if ! awk '
             /<aarch64_enter_guest>:/ { in_entry = 1; next }
             in_entry && /^$/ { exit }
@@ -158,6 +160,7 @@ case "$arch" in
         ;;
     riscv64)
         grep -Eq '[[:space:]]amo(add|swap)\.d' "$instructions_file"
+        grep -Eq '[[:space:]]hfence\.gvma[[:space:]]+a0,[[:space:]]*a1' "$instructions_file"
         ;;
     x86_64)
         printf '%s\n' "$symbols" | grep -q ' x86_64_protected_entry$'

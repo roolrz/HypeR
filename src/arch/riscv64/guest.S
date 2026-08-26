@@ -102,13 +102,13 @@ riscv64_activate_stage2:
     ret
 .size riscv64_activate_stage2, . - riscv64_activate_stage2
 
-.global riscv64_invalidate_stage2_vmid
-.type riscv64_invalidate_stage2_vmid, @function
-riscv64_invalidate_stage2_vmid:
+.global riscv64_invalidate_stage2_page
+.type riscv64_invalidate_stage2_page, @function
+riscv64_invalidate_stage2_page:
     fence rw, rw
-    hfence.gvma zero, a0
+    hfence.gvma a0, a1
     ret
-.size riscv64_invalidate_stage2_vmid, . - riscv64_invalidate_stage2_vmid
+.size riscv64_invalidate_stage2_page, . - riscv64_invalidate_stage2_page
 
 .global riscv64_load_guest_floating_point
 .type riscv64_load_guest_floating_point, @function
