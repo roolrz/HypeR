@@ -59,8 +59,8 @@ mutate 'activation without Enabling publication was accepted' src/kernel/irq/int
     '/^pub fn activate(/,/^}/s/MappingLifecycle::Enabling/MappingLifecycle::Prepared/'
 mutate 'activation before cross-CPU enable was accepted' src/kernel/irq/interrupt.rs \
     '/^pub fn activate(/,/^}/s/LocalLifecycleOperation::Enable/LocalLifecycleOperation::Configure/'
-mutate 'compensated local rejection was still made fatal' src/kernel/irq/interrupt.rs \
-    '/^pub fn activate(/,/^}/s/if !late && crate::kernel::cpu::frozen_topology()/if crate::kernel::cpu::frozen_topology()/'
+mutate 'compensated local rejection lost its recoverable activation path' src/kernel/irq/interrupt.rs \
+    '/^pub fn activate(/,/^}/s/if let Err(error) = enabled/if let Ok(error) = enabled/'
 mutate 'final removal without Disabling publication was accepted' src/kernel/irq/interrupt.rs \
     '/^pub fn unregister(/,/^}/s/MappingLifecycle::Disabling/MappingLifecycle::Active/'
 mutate 'Prepared dispatch mutation was accepted' src/kernel/irq/interrupt.rs \

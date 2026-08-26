@@ -47,18 +47,18 @@ impl Drop for PageBlock {
     fn drop(&mut self) {
         // SAFETY: PageBlock is the unique owner of this exact buddy block and
         // relinquishes it exactly once from Drop.
-        if let Err(error) = unsafe {
+        if unsafe {
             super::allocator::GLOBAL_ALLOCATOR.deallocate_pages_for(
                 self.physical,
                 self.order,
                 self.owner,
             )
-        } {
-            crate::pr_crit!(
-                "HypeR: failed to release page block at {:#x}, order {}: {error:?}",
-                self.physical.get(),
-                self.order
-            );
+        }
+        .is_err()
+        {
+            // Page owners can be dropped beneath unrelated subsystem locks.
+            // Keep this allocator invariant path free of diagnostics and
+            // further lock acquisition.
             crate::hal::cpu::halt();
         }
     }

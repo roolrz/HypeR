@@ -59,7 +59,7 @@ require_order "$fixture/activate.rs" 'MappingLifecycle::Enabling' \
 require_order "$fixture/activate.rs" 'LocalLifecycleOperation::Enable' \
     'MappingLifecycle::Active' \
     'activation may commit Active only after all CPUs acknowledge enable'
-require 'if !late && crate::kernel::cpu::frozen_topology\(\)\.is_some\(\)' \
+require 'if let Err\(error\) = enabled' \
     "$fixture/activate.rs" \
     'a compensated replicated-local rejection must return its activation capability'
 require 'mapping\]\.lifecycle = MappingLifecycle::Prepared' "$fixture/activate.rs" \
@@ -71,9 +71,9 @@ require_order "$fixture/unregister.rs" 'LocalLifecycleOperation::Disable' \
     'mapping\.handlers\.swap_remove\(handler\)' \
     'the final late handler may be removed only after all CPUs acknowledge disable'
 
-require 'lifecycle[[:space:]]*== MappingLifecycle::Prepared[[:space:]]*\{[^}]*set_hardware_enabled\(hardware, false\)[^}]*controller\.end\(hardware\)[^}]*return DispatchOutcome::Prepared' \
+require '(?s)lifecycle[[:space:]]*== MappingLifecycle::Prepared[[:space:]]*\{.*set_hardware_enabled\(hardware, false\).*controller\.end\(hardware\).*return DispatchOutcome::Prepared' \
     "$fixture/dispatch.rs" 'Prepared IRQ delivery must be masked and EOIed without calling handlers'
-require 'lifecycle != MappingLifecycle::Active[[:space:]]*\{[[:space:]]*return Err\(Error::MappingBusy\)' \
+require 'lifecycle != MappingLifecycle::Active[[:space:]]*\{[[:space:]]*return Err\(Error::MappingBusy\.into\(\)\)|lifecycle != MappingLifecycle::Active[[:space:]]*\{[[:space:]]*return Err\(TransitionFailure::NotApplied\(Error::MappingBusy\)\)' \
     "$fixture/local-enable.rs" 'local mask control must reject non-Active mappings'
 
 require 'let targets = \[true; hyper::cpu::MAX_CPUS\]' "$fixture/synchronize.rs" \

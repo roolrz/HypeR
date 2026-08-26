@@ -53,18 +53,31 @@ pub fn schedule_at(
     let cpu = current_cpu()?;
     TIMERS[cpu].with(|timers| ensure_initialized(timers))?;
     let pending = PendingTimer::try_new(deadline, mode, callback, context)?;
-    let (result, retired) = TIMERS[cpu].with(|timers| {
+    let (result, retired, rollback_failed) = TIMERS[cpu].with(|timers| {
         let previous = timers.queue.next_deadline();
         let handle = timers.queue.insert(pending);
         if timers.queue.next_deadline() != previous
             && let Err(error) = program_next(&timers.queue)
         {
-            let retired = timers.queue.cancel(handle).ok();
-            return (Err(error), retired);
+            let retired = match timers.queue.cancel(handle) {
+                Ok(retired) => Some(retired),
+                // The exact handle was inserted while this lock was held. If
+                // rollback cannot find it, returning would abandon a possibly
+                // live callback context. Report the invariant only after the
+                // timer lock and local interrupt mask have been released.
+                Err(_) => return (Err(error), None, true),
+            };
+            return (Err(error), retired, false);
         }
-        (Ok(handle), None)
+        (Ok(handle), None, false)
     });
     drop(retired);
+    if rollback_failed {
+        // The caller that supplied `context` cannot observe a return, so its
+        // callback owner remains live while coordinated crash handling stops
+        // every CPU that could consume the corrupt timer queue.
+        crate::kernel::crash::fatal(format_args!("HypeR: exact timer insertion rollback failed"));
+    }
     result
 }
 
@@ -116,16 +129,6 @@ pub fn cancel(handle: TimerHandle) -> Result<(), super::Error> {
     })?;
     drop(retired);
     result
-}
-
-/// Changes a timer deadline without changing its callback or periodic mode.
-pub fn reschedule(handle: TimerHandle, deadline: u64) -> Result<(), super::Error> {
-    let cpu = current_cpu()?;
-    TIMERS[cpu].with(|timers| {
-        ensure_initialized(timers)?;
-        timers.queue.reschedule(handle, deadline)?;
-        program_next(&timers.queue)
-    })
 }
 
 pub fn local_statistics() -> Option<QueueStats> {

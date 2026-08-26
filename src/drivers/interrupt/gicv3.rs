@@ -6,7 +6,8 @@ use core::ptr::{read_volatile, write_volatile};
 
 use crate::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use crate::hal::interrupt::{
-    InterruptController, InterruptId, InterruptPriority, InterruptTrigger, LocalInterruptController,
+    InterruptController, InterruptId, InterruptPriority, InterruptTransitionError,
+    InterruptTrigger, LocalInterruptController,
 };
 use crate::platform::{GicV3Info, MAX_GIC_REDISTRIBUTOR_REGIONS};
 
@@ -146,11 +147,11 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> LocalInterruptController
         self.finish()
     }
 
-    fn enable(&self, interrupt: InterruptId) -> Result<(), Error> {
+    fn enable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Error>> {
         self.set_enabled(interrupt, true)
     }
 
-    fn disable(&self, interrupt: InterruptId) -> Result<(), Error> {
+    fn disable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Error>> {
         self.set_enabled(interrupt, false)
     }
 }
@@ -163,12 +164,18 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3Local<Cpu, MemoryBarrier> {
             .ok_or(Error::InvalidInterrupt)
     }
 
-    fn set_enabled(&self, interrupt: InterruptId, enabled: bool) -> Result<(), Error> {
-        let id = self.validate(interrupt)?;
+    fn set_enabled(
+        &self,
+        interrupt: InterruptId,
+        enabled: bool,
+    ) -> Result<(), InterruptTransitionError<Error>> {
+        let id = self
+            .validate(interrupt)
+            .map_err(InterruptTransitionError::NotApplied)?;
         let base = self
             .redistributor
             .checked_add(SGI_BASE_OFFSET)
-            .ok_or(Error::AddressOverflow)?;
+            .ok_or(InterruptTransitionError::NotApplied(Error::AddressOverflow))?;
         write_u32(
             base,
             if enabled {
@@ -179,6 +186,7 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3Local<Cpu, MemoryBarrier> {
             1 << id,
         );
         self.finish()
+            .map_err(InterruptTransitionError::AppliedOrUnknown)
     }
 
     fn finish(&self) -> Result<(), Error> {
@@ -464,14 +472,21 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
 impl<Cpu: CpuInterface, MemoryBarrier: Barrier> InterruptController for GicV3<Cpu, MemoryBarrier> {
     type Error = Error;
 
-    fn enable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error> {
-        let id = self.validate_configurable(interrupt)?;
+    fn enable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>> {
+        let id = self
+            .validate_configurable(interrupt)
+            .map_err(InterruptTransitionError::NotApplied)?;
         let (base, local_id, redistributor) = if id < 32 {
-            let redistributor = self.current_redistributor()?;
+            let redistributor = self
+                .current_redistributor()
+                .map_err(InterruptTransitionError::NotApplied)?;
             (
                 redistributor
                     .checked_add(SGI_BASE_OFFSET)
-                    .ok_or(Error::AddressOverflow)?,
+                    .ok_or(InterruptTransitionError::NotApplied(Error::AddressOverflow))?,
                 id,
                 Some(redistributor),
             )
@@ -480,19 +495,27 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> InterruptController for GicV3<Cp
         };
         let offset = (local_id / 32) as usize * 4;
         write_u32(base, GICD_ISENABLER + offset, 1 << (local_id % 32));
-        self.wait_for_write(redistributor)?;
+        self.wait_for_write(redistributor)
+            .map_err(InterruptTransitionError::AppliedOrUnknown)?;
         MemoryBarrier::data_synchronization(BarrierDomain::FullSystem, BarrierAccess::All);
         Ok(())
     }
 
-    fn disable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error> {
-        let id = self.validate_configurable(interrupt)?;
+    fn disable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>> {
+        let id = self
+            .validate_configurable(interrupt)
+            .map_err(InterruptTransitionError::NotApplied)?;
         let (base, local_id, redistributor) = if id < 32 {
-            let redistributor = self.current_redistributor()?;
+            let redistributor = self
+                .current_redistributor()
+                .map_err(InterruptTransitionError::NotApplied)?;
             (
                 redistributor
                     .checked_add(SGI_BASE_OFFSET)
-                    .ok_or(Error::AddressOverflow)?,
+                    .ok_or(InterruptTransitionError::NotApplied(Error::AddressOverflow))?,
                 id,
                 Some(redistributor),
             )
@@ -501,7 +524,8 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> InterruptController for GicV3<Cp
         };
         let offset = (local_id / 32) as usize * 4;
         write_u32(base, GICD_ICENABLER + offset, 1 << (local_id % 32));
-        self.wait_for_write(redistributor)?;
+        self.wait_for_write(redistributor)
+            .map_err(InterruptTransitionError::AppliedOrUnknown)?;
         MemoryBarrier::data_synchronization(BarrierDomain::FullSystem, BarrierAccess::All);
         Ok(())
     }

@@ -6,14 +6,16 @@
 mod queue;
 mod state;
 
+use alloc::boxed::Box;
 use alloc::rc::Rc;
+use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use hyper::cpu::CpuIndex;
 use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
 
-use self::state::{PreparedContextSwitch, Scheduler};
-use super::thread::{KernelThreadEntry, ThreadId, ThreadState, VcpuExecution};
+use self::state::{PreparedContextSwitch, Scheduler, ThreadReservation};
+use super::thread::{KernelThreadEntry, Thread, ThreadId, ThreadState, VcpuExecution};
 
 use super::policy::SchedulingPolicy;
 pub use super::policy::{CpuMask, ThreadPriority};
@@ -88,11 +90,9 @@ impl Drop for DormantVcpuThread {
                 // Continuing would let the VM transaction release the
                 // allocation referenced by this scheduler-owned Thread. This
                 // is a soundness boundary, so a violated rollback invariant is
-                // fatal in release builds as well as debug builds.
-                crate::pr_crit!(
-                    "HypeR: dormant vCPU {} rollback failed: {error:?}",
-                    self.thread.get()
-                );
+                // fatal in release builds as well as debug builds. Drop can
+                // run under arbitrary locks, so diagnostics are unsafe here.
+                let _ = error;
                 crate::hal::cpu::halt()
             }
         };
@@ -250,10 +250,9 @@ impl WaitRegistration {
 impl Drop for WaitRegistration {
     fn drop(&mut self) {
         if self.active {
-            crate::pr_crit!(
-                "HypeR: wait registration for Thread {} was abandoned",
-                self.ticket.thread().get()
-            );
+            // This linear owner can be abandoned from arbitrary lock/IRQ
+            // context. Do not enter diagnostics while scheduler state still
+            // retains the registered wait.
             crate::hal::cpu::halt()
         }
     }
@@ -364,11 +363,16 @@ pub(crate) fn crash_snapshot(cpu: usize) -> Option<CrashTaskSnapshot> {
 
 pub fn register_secondary_cpu(cpu: CpuIndex, name: &str) -> Result<SecondaryStack, Error> {
     let preemption = super::preempt::prepare_cpu(cpu)?;
-    let stack = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .register_secondary(cpu, name)
-    })?;
+    let reservation = reserve_thread(|scheduler| scheduler.reserve_secondary(cpu))?;
+    let thread =
+        match prepare_boxed_thread(Thread::secondary_bootstrap(reservation.id(), cpu, name)) {
+            Ok(thread) => thread,
+            Err(error) => {
+                abandon_reservation(reservation)?;
+                return Err(error);
+            }
+        };
+    let stack = publish_secondary(reservation, thread)?;
     preemption.commit();
     Ok(stack)
 }
@@ -442,11 +446,29 @@ fn kthread_create_with_policy_and_affinity(
     affinity: CpuMask,
 ) -> Result<ThreadId, Error> {
     let cpu = current_cpu()?;
-    SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .create_kernel_thread(cpu, affinity, name, entry, argument, policy)
-    })
+    let reservation = reserve_thread(|scheduler| scheduler.reserve_kernel_thread(cpu, affinity))?;
+    let id = reservation.id();
+    let mut thread = match prepare_boxed_thread(Thread::kernel(
+        id,
+        reservation.cpu(),
+        affinity,
+        name,
+        entry,
+        argument,
+    )) {
+        Ok(thread) => thread,
+        Err(error) => {
+            abandon_reservation(reservation)?;
+            return Err(error);
+        }
+    };
+    if !thread.set_scheduling_policy(policy) {
+        abandon_reservation(reservation)?;
+        drop(thread);
+        return Err(Error::InvalidThreadState);
+    }
+    publish_thread(reservation, thread)?;
+    Ok(id)
 }
 
 #[cfg(feature = "kernel-self-test")]
@@ -468,6 +490,16 @@ pub(crate) fn discard_dormant_kernel_thread(id: ThreadId) -> Result<(), Error> {
     Ok(())
 }
 
+/// Ensures the next self-test Thread reservation cannot grow registry backing.
+///
+/// Runtime callers use the normal fallible growth path. Stack accounting tests
+/// call this only after exercising dormant Thread destruction so persistent
+/// scheduler metadata is outside their page-ownership measurement window.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn prepare_thread_accounting_probe() -> Result<(), Error> {
+    ensure_thread_registry_capacity()
+}
+
 pub(in crate::kernel) fn vcpu_create(
     name: &str,
     vm: crate::kernel::vm::registry::VmBinding,
@@ -476,15 +508,137 @@ pub(in crate::kernel) fn vcpu_create(
     entry: KernelThreadEntry,
 ) -> Result<DormantVcpuThread, Error> {
     let cpu = current_cpu()?;
-    let thread = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .create_vcpu_thread(cpu, name, vm, vcpu_id, context, entry)
-    })?;
+    let reservation = reserve_thread(|scheduler| scheduler.reserve_vcpu_thread(cpu))?;
+    let id = reservation.id();
+    let thread = match prepare_boxed_thread(Thread::vcpu(
+        id,
+        reservation.cpu(),
+        name,
+        vm,
+        vcpu_id,
+        context,
+        entry,
+    )) {
+        Ok(thread) => thread,
+        Err(error) => {
+            abandon_reservation(reservation)?;
+            return Err(error);
+        }
+    };
+    publish_thread(reservation, thread)?;
     Ok(DormantVcpuThread {
-        thread,
+        thread: id,
         rollback: true,
     })
+}
+
+fn prepare_boxed_thread(
+    thread: Result<Thread, super::thread::Error>,
+) -> Result<Box<Thread>, Error> {
+    hyper::mm::try_box(thread?).map_err(|_| Error::Allocation)
+}
+
+/// Grows the identity registry without allocating while the scheduler lock is held.
+fn ensure_thread_registry_capacity() -> Result<(), Error> {
+    loop {
+        let target = SCHEDULER.with(|slot| {
+            slot.as_ref()
+                .ok_or(Error::NotInitialized)
+                .map(Scheduler::registry_growth_target)
+        })?;
+        let Some(target) = target else {
+            return Ok(());
+        };
+        let mut replacement = Vec::new();
+        replacement
+            .try_reserve(target)
+            .map_err(|_| Error::Allocation)?;
+        let unused = SCHEDULER.with(|slot| {
+            slot.as_mut()
+                .ok_or(Error::NotInitialized)
+                .map(|scheduler| scheduler.install_registry_storage(replacement))
+        })?;
+        drop(unused);
+    }
+}
+
+fn reserve_thread(
+    reserve: impl Fn(&mut Scheduler) -> Result<ThreadReservation, Error>,
+) -> Result<ThreadReservation, Error> {
+    loop {
+        ensure_thread_registry_capacity()?;
+        match SCHEDULER.with(|slot| reserve(slot.as_mut().ok_or(Error::NotInitialized)?)) {
+            // Another CPU may consume the last slot between capacity check and
+            // reservation. Grow/retry without exposing a partial identity.
+            Err(Error::Allocation) => {}
+            result => return result,
+        }
+    }
+}
+
+fn publish_thread(mut reservation: ThreadReservation, thread: Box<Thread>) -> Result<(), Error> {
+    let (result, retired) = SCHEDULER.with(|slot| match slot.as_mut() {
+        Some(scheduler) => {
+            let result = match scheduler.publish_thread(&reservation, thread) {
+                Ok(()) => Ok(()),
+                Err((error, thread)) => match scheduler.abandon_reservation(&reservation) {
+                    Ok(()) => Err((error, thread)),
+                    Err(_) => crate::hal::cpu::halt(),
+                },
+            };
+            (result, true)
+        }
+        None => (Err((Error::NotInitialized, thread)), false),
+    });
+    if retired {
+        reservation.disarm();
+    }
+    match result {
+        Ok(()) => Ok(()),
+        Err((error, thread)) => {
+            drop(thread);
+            Err(error)
+        }
+    }
+}
+
+fn publish_secondary(
+    mut reservation: ThreadReservation,
+    thread: Box<Thread>,
+) -> Result<SecondaryStack, Error> {
+    let (result, retired) = SCHEDULER.with(|slot| match slot.as_mut() {
+        Some(scheduler) => {
+            let result = match scheduler.publish_secondary(&reservation, thread) {
+                Ok(stack) => Ok(stack),
+                Err((error, thread)) => match scheduler.abandon_reservation(&reservation) {
+                    Ok(()) => Err((error, thread)),
+                    Err(_) => crate::hal::cpu::halt(),
+                },
+            };
+            (result, true)
+        }
+        None => (Err((Error::NotInitialized, thread)), false),
+    });
+    if retired {
+        reservation.disarm();
+    }
+    match result {
+        Ok(stack) => Ok(stack),
+        Err((error, thread)) => {
+            drop(thread);
+            Err(error)
+        }
+    }
+}
+
+fn abandon_reservation(mut reservation: ThreadReservation) -> Result<(), Error> {
+    SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .abandon_reservation(&reservation)
+    })?;
+    reservation.disarm();
+    Ok(())
 }
 
 /// Returns the pinned vCPU payload owned by the calling CPU's current Thread.
@@ -708,10 +862,9 @@ pub fn thread_become_idle() -> ! {
     crate::hal::irq::mask_local();
     let stack = match install_current_idle() {
         Ok(stack) => stack,
-        Err(error) => {
-            crate::pr_crit!("HypeR: idle-thread installation failed: {error:?}");
-            crate::hal::cpu::halt()
-        }
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: idle-thread installation failed: {error:?}"
+        )),
     };
     // SAFETY: The current Thread exclusively owns this newly installed stack,
     // local interrupts are masked, and the idle continuation never returns.
@@ -744,8 +897,7 @@ pub(crate) fn run_idle_loop_after(ready: fn()) -> ! {
 fn run_idle_loop_inner(mut ready: Option<fn()>) -> ! {
     loop {
         if let Err(error) = idle_wait_or_schedule(ready.take()) {
-            crate::pr_crit!("HypeR: idle scheduling failed: {error:?}");
-            crate::hal::cpu::halt()
+            crate::kernel::crash::fatal(format_args!("HypeR: idle scheduling failed: {error:?}"));
         }
     }
 }
@@ -753,13 +905,13 @@ fn run_idle_loop_inner(mut ready: Option<fn()>) -> ! {
 /// Closes the idle queue-check-to-sleep window under one interrupt mask.
 fn idle_wait_or_schedule(ready: Option<fn()>) -> Result<(), Error> {
     let cpu = current_cpu()?;
+    reap_terminated_threads()?;
     // SAFETY: The guard remains on this CPU. It is either consumed directly
     // into an outgoing context or dropped after the architecture returns from
     // its masked idle wait.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
     let switch = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.reap_terminated()?;
         let switch = scheduler.prepare_yield(cpu)?;
         // The callback must be allocation-free and must not re-enter the
         // scheduler. Publish only after the first queue observation completed
@@ -841,7 +993,6 @@ pub(crate) fn prepare_registered_park_locked(
     let cpu = current_cpu()?;
     let result = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.reap_terminated()?;
         match scheduler.prepare_registered_park(cpu, wait_queue, registration.ticket)? {
             state::PreparedWait::Park { switch, ticket } => {
                 Ok(PrepareWait::Park(ParkCommit { switch, ticket }))
@@ -1029,8 +1180,11 @@ fn publish_migration_outcome(outcome: state::MigrationOutcome) -> Result<Migrati
 }
 
 fn scheduler_invariant(operation: &str, error: Error) -> ! {
-    crate::pr_crit!("HypeR: {operation} invariant failed: {error:?}");
-    crate::hal::cpu::halt()
+    // Callers cross this boundary only after releasing the scheduler lock, so
+    // coordinated crash-stop can freeze sibling CPUs and preserve snapshots.
+    crate::kernel::crash::fatal(format_args!(
+        "HypeR: {operation} invariant failed: {error:?}"
+    ))
 }
 
 fn request_reschedule(cpu: CpuIndex) -> Result<(), Error> {
@@ -1046,12 +1200,12 @@ fn request_reschedule(cpu: CpuIndex) -> Result<(), Error> {
 
 fn prepare_schedule() -> Result<Option<PreparedTransition>, Error> {
     let cpu = current_cpu()?;
+    reap_terminated_threads()?;
     // SAFETY: This continuation transfers the exact prior interrupt state into
     // its saved ThreadContext at the final machine-switch boundary.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
     let switch = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.reap_terminated()?;
         scheduler.prepare_yield(cpu)
     })?;
     Ok(switch.map(|switch| PreparedTransition {
@@ -1060,14 +1214,29 @@ fn prepare_schedule() -> Result<Option<PreparedTransition>, Error> {
     }))
 }
 
+/// Detaches one stopped Thread at a time, then releases its owned resources
+/// without holding the global IRQ-masking scheduler lock.
+fn reap_terminated_threads() -> Result<(), Error> {
+    loop {
+        let thread = SCHEDULER.with(|slot| {
+            slot.as_mut()
+                .ok_or(Error::NotInitialized)?
+                .detach_terminated()
+        })?;
+        let Some(thread) = thread else {
+            return Ok(());
+        };
+        drop(thread);
+    }
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn kernel_thread_exit() -> ! {
     let cpu = match current_cpu() {
         Ok(cpu) => cpu,
-        Err(error) => {
-            crate::pr_crit!("HypeR: thread exit on invalid CPU: {error:?}");
-            crate::hal::cpu::halt()
-        }
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: thread exit on invalid CPU: {error:?}"
+        )),
     };
     // SAFETY: The exiting continuation is CPU-pinned and transfers this outer
     // mask directly into the non-returning prepared context transition.
@@ -1084,11 +1253,14 @@ extern "C" fn kernel_thread_exit() -> ! {
                 interrupt_mask,
             }
             .activate();
-            crate::pr_crit!("HypeR: terminated thread context resumed unexpectedly");
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: terminated thread context resumed unexpectedly"
+            ));
         }
-        Err(error) => crate::pr_crit!("HypeR: thread exit failed: {error:?}"),
+        Err(error) => {
+            crate::kernel::crash::fatal(format_args!("HypeR: thread exit failed: {error:?}"))
+        }
     }
-    crate::hal::cpu::halt()
 }
 
 fn current_cpu() -> Result<CpuIndex, Error> {
@@ -1107,14 +1279,14 @@ extern "C" fn finish_context_switch_tail() {
     match result {
         Ok(Some(outcome)) => {
             if let Err(error) = publish_ready_outcome(outcome) {
-                crate::pr_crit!("HypeR: switch-tail migration publication failed: {error:?}");
-                crate::hal::cpu::halt()
+                crate::kernel::crash::fatal(format_args!(
+                    "HypeR: switch-tail migration publication failed: {error:?}"
+                ));
             }
         }
         Ok(None) => {}
-        Err(error) => {
-            crate::pr_crit!("HypeR: incoming context-switch completion failed: {error:?}");
-            crate::hal::cpu::halt()
-        }
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: incoming context-switch completion failed: {error:?}"
+        )),
     }
 }

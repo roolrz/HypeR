@@ -82,6 +82,12 @@ fn validate_cpu_exception_stacks() -> Result<(), Error> {
 fn validate_thread_stack() -> Result<(), Error> {
     #[cfg(CONFIG_ARCH_X86_64)]
     let shootdown_baseline = crate::hal::memory::stage1_shootdown_count_for_test();
+    // Exercise dormant ownership retirement, then move any persistent Thread
+    // registry growth before the stack-only accounting window. Registry slots
+    // intentionally outlive individual Threads and are not stack leakage.
+    let warmup = scheduler::kthread_create("stack-accounting-warmup", stack_worker, 0)?;
+    scheduler::discard_dormant_kernel_thread(warmup)?;
+    scheduler::prepare_thread_accounting_probe()?;
     let baseline_pages = crate::kernel::mm::statistics()
         .ok_or(Error::PageAccounting)?
         .runtime

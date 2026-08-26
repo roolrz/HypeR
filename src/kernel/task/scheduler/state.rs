@@ -13,8 +13,8 @@ use crate::kernel::task::policy::{
     CpuMask, PlacementPolicy, SchedulingClass, SchedulingPolicy, ThreadPriority,
 };
 use crate::kernel::task::thread::{
-    DeferredFifoPlacement, ExecutionKind, KernelThreadEntry, MigrationRequest, QueueMembership,
-    Thread, ThreadId, ThreadState,
+    DeferredFifoPlacement, ExecutionKind, MigrationRequest, QueueMembership, Thread, ThreadId,
+    ThreadState,
 };
 use crate::kernel::task::wait::{
     PendingResolution, ThreadQueue, WaitMobility, WaitOutcome, WaitQueue, WaitRecordError,
@@ -33,6 +33,38 @@ pub(super) struct MigrationOutcome {
     pub status: MigrationStatus,
     pub source_reschedule: Option<CpuIndex>,
     pub target_ready: Option<ReadyOutcome>,
+}
+
+#[must_use = "a thread reservation must be published or explicitly abandoned"]
+pub(super) struct ThreadReservation {
+    id: ThreadId,
+    cpu: CpuIndex,
+    armed: bool,
+}
+
+impl ThreadReservation {
+    pub const fn id(&self) -> ThreadId {
+        self.id
+    }
+
+    pub const fn cpu(&self) -> CpuIndex {
+        self.cpu
+    }
+
+    pub fn disarm(&mut self) {
+        if !self.armed {
+            crate::hal::cpu::halt()
+        }
+        self.armed = false;
+    }
+}
+
+impl Drop for ThreadReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            crate::hal::cpu::halt()
+        }
+    }
 }
 
 pub(super) enum PreparedWait {
@@ -60,6 +92,7 @@ pub(super) struct Scheduler {
     threads: Vec<Option<Box<Thread>>>,
     cpus: Vec<CpuScheduler>,
     cpu_slots: PerCpu<Option<usize>>,
+    cpu_reservations: PerCpu<bool>,
     terminated: ThreadQueue,
     next_id: u64,
     context_switches: u64,
@@ -107,7 +140,9 @@ impl PreparedContextSwitch {
 impl Drop for PreparedContextSwitch {
     fn drop(&mut self) {
         if self.armed {
-            crate::pr_crit!("HypeR: prepared context switch was not activated");
+            // Drop may run while scheduler or architecture transition locks
+            // are held. Diagnostics could deadlock before preserving the
+            // committed context-switch state.
             crate::hal::cpu::halt()
         }
     }
@@ -133,7 +168,8 @@ impl Scheduler {
             hyper::mm::try_box(Thread::bootstrap(boot_cpu)).map_err(|_| Error::Allocation)?,
         ));
         let mut cpus = Vec::new();
-        cpus.try_reserve(1).map_err(|_| Error::Allocation)?;
+        cpus.try_reserve(hyper::cpu::MAX_CPUS)
+            .map_err(|_| Error::Allocation)?;
         cpus.push(CpuScheduler::new(boot_cpu, ThreadId::BOOTSTRAP));
         let mut cpu_slots = PerCpu::new([None; hyper::cpu::MAX_CPUS]);
         cpu_slots[boot_cpu] = Some(0);
@@ -141,6 +177,7 @@ impl Scheduler {
             threads,
             cpus,
             cpu_slots,
+            cpu_reservations: PerCpu::new([false; hyper::cpu::MAX_CPUS]),
             terminated: ThreadQueue::new(),
             next_id: 1,
             context_switches: 0,
@@ -149,6 +186,22 @@ impl Scheduler {
 
     pub fn current_thread(&self, cpu: CpuIndex) -> Result<ThreadId, Error> {
         Ok(self.cpus[self.cpu_slot(cpu)?].current)
+    }
+
+    pub fn registry_growth_target(&self) -> Option<usize> {
+        (self.threads.len() == self.threads.capacity())
+            .then(|| self.threads.capacity().saturating_mul(2).max(16))
+    }
+
+    pub fn install_registry_storage(
+        &mut self,
+        mut replacement: Vec<Option<Box<Thread>>>,
+    ) -> Vec<Option<Box<Thread>>> {
+        if replacement.capacity() > self.threads.capacity() {
+            replacement.append(&mut self.threads);
+            core::mem::swap(&mut replacement, &mut self.threads);
+        }
+        replacement
     }
 
     /// Reports whether no CPU owns or may still be saving this context.
@@ -162,51 +215,58 @@ impl Scheduler {
         }))
     }
 
-    pub fn register_secondary(
-        &mut self,
-        cpu: CpuIndex,
-        name: &str,
-    ) -> Result<SecondaryStack, Error> {
-        if self.cpu_slots[cpu].is_some() {
+    pub fn reserve_secondary(&mut self, cpu: CpuIndex) -> Result<ThreadReservation, Error> {
+        if self.cpu_slots[cpu].is_some() || self.cpu_reservations[cpu] {
             return Err(Error::CpuAlreadyRegistered);
         }
-        self.reserve_thread_and_cpu()?;
-        let id = self.next_thread_id()?;
-        let thread = hyper::mm::try_box(Thread::secondary_bootstrap(id, cpu, name)?)
-            .map_err(|_| Error::Allocation)?;
-        let virtual_top = thread.kernel_stack_top().ok_or(Error::Allocation)?;
-        let physical_top = thread
-            .kernel_stack_physical_top()
-            .ok_or(Error::Allocation)?;
-        self.register_thread(thread)?;
-        self.cpus.push(CpuScheduler::new(cpu, id));
-        self.cpu_slots[cpu] = Some(self.cpus.len() - 1);
+        let reservation = self.reserve_thread_slot(cpu)?;
+        self.cpu_reservations[cpu] = true;
+        Ok(reservation)
+    }
+
+    pub fn publish_secondary(
+        &mut self,
+        reservation: &ThreadReservation,
+        thread: Box<Thread>,
+    ) -> Result<SecondaryStack, (Error, Box<Thread>)> {
+        if !self.cpu_reservations[reservation.cpu] || self.cpu_slots[reservation.cpu].is_some() {
+            return Err((Error::InvalidThreadState, thread));
+        }
+        let Some(virtual_top) = thread.kernel_stack_top() else {
+            return Err((Error::Allocation, thread));
+        };
+        let Some(physical_top) = thread.kernel_stack_physical_top() else {
+            return Err((Error::Allocation, thread));
+        };
+        self.publish_thread(reservation, thread)?;
+        self.cpus
+            .push(CpuScheduler::new(reservation.cpu, reservation.id));
+        self.cpu_slots[reservation.cpu] = Some(self.cpus.len() - 1);
+        self.cpu_reservations[reservation.cpu] = false;
         Ok(SecondaryStack {
             physical_top,
             virtual_top,
         })
     }
 
-    pub fn create_kernel_thread(
+    pub fn abandon_reservation(&mut self, reservation: &ThreadReservation) -> Result<(), Error> {
+        let index = usize::try_from(reservation.id.get()).map_err(|_| Error::ThreadNotFound)?;
+        if !matches!(self.threads.get(index), Some(None)) {
+            return Err(Error::InvalidThreadState);
+        }
+        if self.cpu_reservations[reservation.cpu] {
+            self.cpu_reservations[reservation.cpu] = false;
+        }
+        Ok(())
+    }
+
+    pub fn reserve_kernel_thread(
         &mut self,
         preferred_cpu: CpuIndex,
         affinity: CpuMask,
-        name: &str,
-        entry: KernelThreadEntry,
-        argument: usize,
-        policy: SchedulingPolicy,
-    ) -> Result<ThreadId, Error> {
+    ) -> Result<ThreadReservation, Error> {
         let cpu = self.select_cpu(preferred_cpu, affinity)?;
-        self.threads.try_reserve(1).map_err(|_| Error::Allocation)?;
-        let id = self.next_thread_id()?;
-        let mut thread =
-            hyper::mm::try_box(Thread::kernel(id, cpu, affinity, name, entry, argument)?)
-                .map_err(|_| Error::Allocation)?;
-        if !thread.set_scheduling_policy(policy) {
-            return Err(Error::InvalidThreadState);
-        }
-        self.register_thread(thread)?;
-        Ok(id)
+        self.reserve_thread_slot(cpu)
     }
 
     /// Selects an admitted registered CPU, retaining creator locality where possible.
@@ -229,22 +289,27 @@ impl Scheduler {
             .ok_or(Error::NoRegisteredCpuInAffinity)
     }
 
-    pub fn create_vcpu_thread(
-        &mut self,
-        cpu: CpuIndex,
-        name: &str,
-        vm: crate::kernel::vm::registry::VmBinding,
-        vcpu_id: u32,
-        context: crate::hal::vm::VcpuContext,
-        entry: KernelThreadEntry,
-    ) -> Result<ThreadId, Error> {
+    pub fn reserve_vcpu_thread(&mut self, cpu: CpuIndex) -> Result<ThreadReservation, Error> {
         self.cpu_slot(cpu)?;
-        self.threads.try_reserve(1).map_err(|_| Error::Allocation)?;
-        let id = self.next_thread_id()?;
-        let thread = hyper::mm::try_box(Thread::vcpu(id, cpu, name, vm, vcpu_id, context, entry)?)
-            .map_err(|_| Error::Allocation)?;
-        self.register_thread(thread)?;
-        Ok(id)
+        self.reserve_thread_slot(cpu)
+    }
+
+    pub fn publish_thread(
+        &mut self,
+        reservation: &ThreadReservation,
+        thread: Box<Thread>,
+    ) -> Result<(), (Error, Box<Thread>)> {
+        let Ok(index) = usize::try_from(reservation.id.get()) else {
+            return Err((Error::IdentifierExhausted, thread));
+        };
+        if thread.id() != reservation.id
+            || thread.cpu_index() != reservation.cpu
+            || !matches!(self.threads.get(index), Some(None))
+        {
+            return Err((Error::InvalidThreadState, thread));
+        }
+        self.threads[index] = Some(thread);
+        Ok(())
     }
 
     pub fn take_dormant_vcpu(&mut self, id: ThreadId) -> Result<Box<Thread>, Error> {
@@ -1103,7 +1168,7 @@ impl Scheduler {
         self.complete_migration(switching.thread, plan)
     }
 
-    pub fn reap_terminated(&mut self) -> Result<(), Error> {
+    pub fn detach_terminated(&mut self) -> Result<Option<Box<Thread>>, Error> {
         let mut candidate = self.terminated.head;
         while let Some(id) = candidate {
             let links = self.thread(id)?.queue_links();
@@ -1119,10 +1184,13 @@ impl Scheduler {
                     QueueMembership::Terminated,
                 )?;
                 let index = usize::try_from(id.get()).map_err(|_| Error::ThreadNotFound)?;
-                self.threads[index] = None;
+                return self.threads[index]
+                    .take()
+                    .map(Some)
+                    .ok_or(Error::ThreadNotFound);
             }
         }
-        Ok(())
+        Ok(None)
     }
 
     pub fn statistics(&self) -> Statistics {
@@ -1301,11 +1369,10 @@ impl Scheduler {
                     .ok_or(Error::InvalidThreadState)
             })
             .and_then(|()| self.enqueue_ready(id));
-        if let Err(error) = restored {
-            crate::pr_crit!(
-                "HypeR: ready-thread migration rollback failed for {}: {error:?}",
-                id.get()
-            );
+        if restored.is_err() {
+            // The global scheduler lock is held and queue state is no longer
+            // recoverable. Diagnostics or coordinated crash entry could
+            // reacquire scheduler-adjacent locks, so fail closed in place.
             crate::hal::cpu::halt()
         }
     }
@@ -1425,27 +1492,25 @@ impl Scheduler {
         self.cpu_slots[cpu].ok_or(Error::CpuNotRegistered)
     }
 
-    fn next_thread_id(&self) -> Result<ThreadId, Error> {
+    fn reserve_thread_slot(&mut self, cpu: CpuIndex) -> Result<ThreadReservation, Error> {
+        if self.threads.len() == self.threads.capacity() {
+            return Err(Error::Allocation);
+        }
         let id = ThreadId::from_scheduler_index(self.next_id);
         let index = usize::try_from(self.next_id).map_err(|_| Error::IdentifierExhausted)?;
         if index != self.threads.len() || self.next_id == u64::MAX {
             return Err(Error::IdentifierExhausted);
         }
-        Ok(id)
-    }
-
-    fn register_thread(&mut self, thread: Box<Thread>) -> Result<(), Error> {
-        if thread.id() != self.next_thread_id()? {
-            return Err(Error::IdentifierExhausted);
-        }
-        self.threads.push(Some(thread));
+        self.threads.push(None);
+        // Reservation failure leaves this slot as a tombstone. Identity values
+        // are observable system-wide once published, so the namespace is
+        // monotonic and never rolls back or reuses an earlier value.
         self.next_id += 1;
-        Ok(())
-    }
-
-    fn reserve_thread_and_cpu(&mut self) -> Result<(), Error> {
-        self.threads.try_reserve(1).map_err(|_| Error::Allocation)?;
-        self.cpus.try_reserve(1).map_err(|_| Error::Allocation)
+        Ok(ThreadReservation {
+            id,
+            cpu,
+            armed: true,
+        })
     }
 }
 
@@ -1460,7 +1525,9 @@ impl From<WaitRecordError> for Error {
     }
 }
 
-fn scheduler_invariant(error: Error) -> ! {
-    crate::pr_crit!("HypeR: scheduler wait invariant failed: {error:?}");
+fn scheduler_invariant(_error: Error) -> ! {
+    // Every caller holds the global scheduler lock after a committed queue or
+    // wait-record mutation. Diagnostics could deadlock and returning would
+    // expose inconsistent shared state, so retain the lock and fail closed.
     crate::hal::cpu::halt()
 }

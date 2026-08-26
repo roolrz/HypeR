@@ -224,8 +224,9 @@ impl PreemptionGuard {
 
 impl Drop for PreemptionGuard {
     fn drop(&mut self) {
-        if let Err(error) = self.release_inner() {
-            crate::pr_crit!("HypeR: invalid preemption guard release: {error:?}");
+        if self.release_inner().is_err() {
+            // Guard destruction may occur under arbitrary locks. Logging can
+            // deadlock before preserving the non-preemptible fail-stop state.
             crate::hal::cpu::halt()
         }
     }
@@ -280,8 +281,9 @@ impl IrqGuard {
 
 impl Drop for IrqGuard {
     fn drop(&mut self) {
-        if let Err(error) = self.complete_inner() {
-            crate::pr_crit!("HypeR: invalid IRQ accounting release: {error:?}");
+        if self.complete_inner().is_err() {
+            // IRQ-exit accounting is still live and Drop may hold unrelated
+            // locks, so this invariant path must remain diagnostics-free.
             crate::hal::cpu::halt()
         }
     }

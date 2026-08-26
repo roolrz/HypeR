@@ -49,19 +49,24 @@ pub(crate) unsafe fn publish_data_range(start: usize, length: usize) -> Result<(
     unsafe { crate::arch::memory::Cache::publish_data_range(start, length) }
 }
 
-/// Publishes newly written instructions to the instruction-coherence domain.
+/// Publishes a stable collection of instruction ranges as one transaction.
+///
+/// The architecture may invoke `ranges` more than once. Each invocation must
+/// yield the same mapped, exclusively owned ranges while execution and
+/// modification remain excluded for the complete call.
 ///
 /// # Safety
 ///
-/// The range must be mapped and writable before this call, with concurrent
-/// execution and modification excluded. Every CPU that later executes it must
-/// perform [`synchronize_instruction_execution`] after observing publication.
-pub(crate) unsafe fn publish_instruction_range(
-    start: usize,
-    length: usize,
+/// Every yielded range must remain mapped and writable, with concurrent
+/// execution and modification excluded across every enumeration pass. Every
+/// CPU that later executes it must call [`synchronize_instruction_execution`]
+/// after observing publication.
+pub(crate) unsafe fn publish_instruction_ranges(
+    ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
 ) -> Result<(), CacheError> {
-    // SAFETY: The facade forwards mapping, ownership, and execution exclusion.
-    unsafe { crate::arch::memory::Cache::publish_instruction_range(start, length) }
+    // SAFETY: The facade forwards the stable-enumeration, mapping, ownership,
+    // and execution-exclusion guarantees unchanged.
+    unsafe { crate::arch::memory::Cache::publish_instruction_ranges(ranges) }
 }
 
 /// Completes local instruction-stream synchronization after code publication.

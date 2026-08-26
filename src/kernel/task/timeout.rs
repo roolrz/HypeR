@@ -11,6 +11,7 @@
 
 use core::hint::spin_loop;
 
+use alloc::boxed::Box;
 use hyper::hal::timer::deadline_reached;
 use hyper::sync::atomic::{AtomicBool, Ordering};
 
@@ -39,6 +40,50 @@ impl TimeoutContext {
             spin_loop();
         }
     }
+}
+
+/// Linear owner of one queued timer and its raw callback context.
+///
+/// The timer queue borrows `context` through an exposed pointer. This owner may
+/// be destroyed only after exact-handle cancellation or callback completion has
+/// ended that borrow.
+#[must_use = "an armed timeout must be retired before its callback owner is dropped"]
+struct ArmedTimeout {
+    timer: Option<crate::kernel::time::TimerHandle>,
+    context: Box<TimeoutContext>,
+}
+
+impl ArmedTimeout {
+    const fn new(timer: crate::kernel::time::TimerHandle, context: Box<TimeoutContext>) -> Self {
+        Self {
+            timer: Some(timer),
+            context,
+        }
+    }
+
+    fn retire(mut self, disposition: Retirement) -> Result<(), TimedWaitError> {
+        let Some(timer) = self.timer.take() else {
+            crate::hal::cpu::halt()
+        };
+        retire_timeout(timer, &self.context, disposition)
+    }
+}
+
+impl Drop for ArmedTimeout {
+    fn drop(&mut self) {
+        if self.timer.is_some() {
+            // Destruction may occur under an arbitrary lock or interrupt-mask
+            // state. Logging could deadlock before protecting the callback
+            // context, so this fail-stop boundary performs no diagnostics.
+            crate::hal::cpu::halt()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Retirement {
+    CallbackCompleted,
+    CancelOrJoin,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -96,12 +141,29 @@ impl WaitQueue {
                 return Err(error.into());
             }
         };
+        let timeout = ArmedTimeout::new(timer, timeout);
 
-        let outcome = match scheduler::prepare_registered_park(self, registration)? {
+        let prepared = match scheduler::prepare_registered_park(self, registration) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                // prepare_registered_park may restore local IRQs before this
+                // branch runs. `timeout` still owns the Box throughout that
+                // window, so expiry may safely complete as a losing resolver;
+                // retirement then either cancels or joins that callback.
+                timeout.retire(Retirement::CancelOrJoin)?;
+                return Err(error.into());
+            }
+        };
+        let outcome = match prepared {
             scheduler::PreparedWait::Park(token) => scheduler::complete_park(token),
             scheduler::PreparedWait::Completed(outcome) => outcome,
         };
-        retire_timeout(timer, &timeout, outcome)?;
+        let retirement = if outcome == WaitOutcome::TimedOut {
+            Retirement::CallbackCompleted
+        } else {
+            Retirement::CancelOrJoin
+        };
+        timeout.retire(retirement)?;
         Ok(outcome)
     }
 
@@ -117,8 +179,9 @@ fn finish_unscheduled(registration: scheduler::WaitRegistration) {
         Ok(None) => {}
         Ok(Some(outcome)) => wait_invariant("unscheduled wait was resolved", Some(outcome)),
         Err(error) => {
-            crate::pr_crit!("HypeR: unscheduled wait cleanup failed: {error:?}");
-            crate::hal::cpu::halt()
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: unscheduled wait cleanup failed: {error:?}"
+            ));
         }
     }
 }
@@ -126,9 +189,9 @@ fn finish_unscheduled(registration: scheduler::WaitRegistration) {
 fn retire_timeout(
     timer: crate::kernel::time::TimerHandle,
     timeout: &TimeoutContext,
-    outcome: WaitOutcome,
+    disposition: Retirement,
 ) -> Result<(), TimedWaitError> {
-    if outcome == WaitOutcome::TimedOut {
+    if disposition == Retirement::CallbackCompleted {
         timeout.wait_for_callback();
         return Ok(());
     }
@@ -154,8 +217,12 @@ fn retire_timeout(
             if timeout.callback_complete.load(Ordering::Acquire) {
                 return Err(TimedWaitError::TimerCleanup(error));
             }
-            crate::pr_crit!("HypeR: failed to retire timed wait callback: {error:?}");
-            crate::hal::cpu::halt()
+            // The owner remains live because this path never returns. Use the
+            // lock-independent crash coordinator so no other CPU can continue
+            // against an ambiguous timer lifecycle.
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: timed wait retirement failed before proven detach: {error:?}"
+            ));
         }
     }
 }
@@ -168,18 +235,29 @@ fn expire_wait(_event: crate::kernel::time::TimerEvent, context: usize) {
         Some(ticket) => scheduler::resolve_wait(ticket, WaitOutcome::TimedOut),
         None => Err(scheduler::Error::InvalidWaitRegistration),
     };
-    timeout.callback_complete.store(true, Ordering::Release);
     match result {
-        Ok(resolution) if !resolution.made_ready || resolution.won => {}
+        Ok(resolution) if !resolution.made_ready || resolution.won => {
+            // Publish completion only after classifying a benign winning or
+            // stale losing callback. Publishing it on an invariant failure
+            // could let the waiter retire the Box and continue before global
+            // crash coordination has stopped every CPU.
+            timeout.callback_complete.store(true, Ordering::Release);
+        }
         Ok(_) => wait_invariant("timeout published Ready without winning", None),
         Err(error) => {
-            crate::pr_crit!("HypeR: timed wait resolution failed: {error:?}");
-            crate::hal::cpu::halt()
+            // A scheduler error is not a benign stale losing callback. Leave
+            // completion unpublished so the raw owner cannot be retired, then
+            // stop every CPU before any waiter can continue against invalid
+            // scheduler state.
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: timed wait resolution failed: {error:?}"
+            ));
         }
     }
 }
 
 fn wait_invariant(message: &str, outcome: Option<WaitOutcome>) -> ! {
-    crate::pr_crit!("HypeR: timed wait invariant failed: {message}; outcome={outcome:?}");
-    crate::hal::cpu::halt()
+    crate::kernel::crash::fatal(format_args!(
+        "HypeR: timed wait invariant failed: {message}; outcome={outcome:?}"
+    ))
 }

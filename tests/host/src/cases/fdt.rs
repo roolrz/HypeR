@@ -4,7 +4,7 @@
 //! Device-tree discovery, boot-property, and platform matching contracts.
 
 use std::boxed::Box;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use hyper::{
     drivers::console,
@@ -596,6 +596,49 @@ impl PlatformDriver for DeferredDriver {
 
 static DEFERRED_DRIVER: DeferredDriver = DeferredDriver;
 
+static LIFECYCLE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static LIFECYCLE_ACTIVATIONS: AtomicUsize = AtomicUsize::new(0);
+static LIFECYCLE_REMOVALS: AtomicUsize = AtomicUsize::new(0);
+
+struct LifecycleInstance;
+
+impl DriverInstance for LifecycleInstance {
+    fn activate(&mut self) -> Result<(), ProbeError> {
+        LIFECYCLE_ACTIVATIONS.fetch_add(1, Ordering::Relaxed);
+        LIFECYCLE_ACTIVE.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn remove(&mut self) -> Result<(), ProbeError> {
+        LIFECYCLE_REMOVALS.fetch_add(1, Ordering::Relaxed);
+        LIFECYCLE_ACTIVE.store(false, Ordering::Release);
+        Ok(())
+    }
+}
+
+struct LifecycleDriver;
+
+impl PlatformDriver for LifecycleDriver {
+    fn name(&self) -> &'static str {
+        "lifecycle-pl011"
+    }
+
+    fn compatible_table(&self) -> &'static [&'static str] {
+        &["arm,pl011"]
+    }
+
+    fn probe(
+        &self,
+        _device: &PlatformDevice,
+        _services: &dyn DriverServices,
+    ) -> Result<Box<dyn DriverInstance>, ProbeError> {
+        assert!(!LIFECYCLE_ACTIVE.load(Ordering::Acquire));
+        Ok(Box::new(LifecycleInstance))
+    }
+}
+
+static LIFECYCLE_DRIVER: LifecycleDriver = LifecycleDriver;
+
 #[test]
 fn matches_and_binds_a_registered_platform_driver() {
     let blob = qemu_like_dtb();
@@ -637,4 +680,30 @@ fn retries_deferred_platform_devices_until_probe_progress_stops() {
     assert_eq!(report.deferred, 0);
     assert_eq!(DEFERRED_PROBES.load(Ordering::Relaxed), 2);
     assert_eq!(manager.binding_driver(console.id()), Some("deferred-pl011"));
+    crate::require_ok(manager.retire_all());
+}
+
+#[test]
+fn owns_driver_before_activation_and_retires_it_before_manager_drop() {
+    LIFECYCLE_ACTIVE.store(false, Ordering::Release);
+    LIFECYCLE_ACTIVATIONS.store(0, Ordering::Relaxed);
+    LIFECYCLE_REMOVALS.store(0, Ordering::Relaxed);
+    let blob = qemu_like_dtb();
+    let mut scanner = DeviceScanner::new(&[]);
+    let _platform = crate::require_ok(fdt::discover_from_bytes_with(&blob, &mut scanner));
+    let devices = crate::require_ok(scanner.finish());
+
+    {
+        let mut manager = DriverManager::new();
+        crate::require_ok(manager.register(&LIFECYCLE_DRIVER));
+        let report = manager.probe_devices(&devices, &TestServices);
+        assert_eq!(report.bound, 1);
+        assert!(LIFECYCLE_ACTIVE.load(Ordering::Acquire));
+        assert_eq!(LIFECYCLE_ACTIVATIONS.load(Ordering::Relaxed), 1);
+        assert_eq!(LIFECYCLE_REMOVALS.load(Ordering::Relaxed), 0);
+        crate::require_ok(manager.retire_all());
+    }
+
+    assert!(!LIFECYCLE_ACTIVE.load(Ordering::Acquire));
+    assert_eq!(LIFECYCLE_REMOVALS.load(Ordering::Relaxed), 1);
 }

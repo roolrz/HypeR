@@ -394,9 +394,26 @@ impl Console for Pl011 {
 }
 
 impl DriverInstance for Pl011 {
+    fn activate(&mut self) -> Result<(), ProbeError> {
+        // Generic platform binding does not own a serial-input consumer or IRQ
+        // registration. Remaining quiescent is therefore its active state.
+        self.disable_interrupts();
+        Ok(())
+    }
+
     fn suspend(&mut self) -> Result<(), ProbeError> {
         self.disable_interrupts();
         self.wait_until_idle();
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), ProbeError> {
+        self.disable_interrupts();
+        Ok(())
+    }
+
+    fn remove(&mut self) -> Result<(), ProbeError> {
+        self.disable_interrupts();
         Ok(())
     }
 }
@@ -422,6 +439,10 @@ impl PlatformDriver for Pl011PlatformDriver {
             .map_mmio(*registers)
             .map_err(|_| ProbeError::Resource)?;
         let uart = Pl011::from_mapped_mmio(mapping).map_err(|_| ProbeError::Resource)?;
+        // Firmware may have left receive/error sources enabled. Probe must
+        // return a quiescent instance because manager ownership is not yet
+        // published and no handler context exists for this generic binding.
+        uart.disable_interrupts();
         let instance: Box<dyn DriverInstance> =
             crate::mm::try_box(uart).map_err(|_| ProbeError::Resource)?;
         Ok(instance)

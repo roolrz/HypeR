@@ -7,6 +7,7 @@ use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 use hyper::mm::{PAGE_SIZE, PhysicalAddress};
+use hyper::vm::translation::{ActiveMappingError, publish_active_mapping};
 
 use super::{address, memory, registers};
 
@@ -115,8 +116,8 @@ impl Stage2AddressSpace {
         self.map_leaf(ipa, physical, 2, MemoryType::Normal, allocator)
     }
 
-    /// Adds a 4 KiB mapping while this VMID is active, then invalidates stale
-    /// combined stage-1/stage-2 translations for the faulting IPA.
+    /// Adds a 4 KiB invalid-to-valid mapping while this VMID is active, then
+    /// publishes that new leaf to the guest translation regime.
     ///
     /// # Safety
     ///
@@ -129,17 +130,24 @@ impl Stage2AddressSpace {
         ipa: u64,
         physical: u64,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
-    ) -> Result<(), Error> {
-        // SAFETY: This method inherits the allocator and serialization
-        // requirements in addition to requiring the hierarchy to be active.
-        unsafe { self.map_normal_page(ipa, physical, allocator)? };
-        // SAFETY: The caller guarantees that this hierarchy and VMID are live
-        // on the current CPU while the newly valid descriptor is invalidated.
-        unsafe { invalidate_ipa(ipa) };
-        Ok(())
+    ) -> Result<(), ActiveMappingError<Error>> {
+        publish_active_mapping(
+            self,
+            |stage2| {
+                // SAFETY: This method inherits the allocator and serialization
+                // requirements in addition to requiring the hierarchy active.
+                unsafe { stage2.map_normal_page(ipa, physical, allocator) }
+            },
+            |_| {
+                // SAFETY: The caller guarantees this VMID remains active while
+                // the new descriptor is published to the guest regime.
+                unsafe { publish_new_leaf() };
+                Ok(())
+            },
+        )
     }
 
-    /// Invalidates a previously cached translation for one active guest page.
+    /// Reissues new-leaf publication for one unchanged active guest page.
     ///
     /// # Safety
     ///
@@ -149,8 +157,9 @@ impl Stage2AddressSpace {
             return Err(Error::InvalidAddress);
         }
         // SAFETY: The method contract guarantees that this address space is
-        // selected by the current CPU's VTTBR_EL2.
-        unsafe { invalidate_ipa(ipa) };
+        // selected by the current CPU's VTTBR_EL2. Current callers use this
+        // only as recovery after a fault on an unchanged valid leaf.
+        unsafe { invalidate_existing_ipa(ipa) };
         Ok(())
     }
 
@@ -357,10 +366,24 @@ fn covering_regions(start: u64, end: u64, span: u64) -> Result<usize, Error> {
     usize::try_from(last - first + 1).map_err(|_| Error::AddressOverflow)
 }
 
-unsafe fn invalidate_ipa(ipa: u64) {
+/// Publishes one invalid-to-valid leaf for the active VMID.
+///
+/// Translation faults are not cached, so this path does not invalidate the
+/// guest's complete stage-1 regime. Descriptor replacement and unmapping must
+/// use [`invalidate_replaced_ipa`] instead.
+unsafe fn publish_new_leaf() {
+    // Translation faults are not cached, so invalid-to-valid publication only
+    // has to make the descriptor store visible before guest retry. ERET is the
+    // context-synchronization event for the faulting processing element.
+    // SAFETY: DSB has no pointer operand and orders the serialized table write.
+    unsafe { asm!("dsb ishst", options(nostack, preserves_flags)) };
+}
+
+/// Invalidates one unchanged valid leaf after an unexpected repeated fault.
+unsafe fn invalidate_existing_ipa(ipa: u64) {
     let operand = ipa >> registers::TLBI_IPAS2E1_IPA_SHIFT;
-    // SAFETY: The caller guarantees the current VTTBR_EL2 selects the address
-    // space whose invalid-to-valid descriptor was just published.
+    // SAFETY: The caller guarantees the current VTTBR_EL2 selects this address
+    // space and keeps it active until the page-address invalidation completes.
     unsafe {
         asm!(
             "dsb ishst",
@@ -369,6 +392,42 @@ unsafe fn invalidate_ipa(ipa: u64) {
             "msr HCR_EL2, {guest_hcr}",
             "isb",
             "tlbi ipas2e1is, {operand}",
+            "dsb ish",
+            "isb",
+            "msr HCR_EL2, {host_hcr}",
+            "isb",
+            operand = in(reg) operand,
+            tge = in(reg) registers::HCR_EL2_TGE,
+            host_hcr = out(reg) _,
+            guest_hcr = out(reg) _,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Invalidates an existing stage-2 mapping and any guest stage-1 translations
+/// which could have walked through its previous physical page.
+///
+/// This is intentionally separate from new-leaf publication: flushing the
+/// complete guest stage-1 regime on every demand-zero fault would add needless
+/// hot-path cost. Future replacement/unmap operations must call this helper
+/// after publishing their descriptor update.
+#[allow(dead_code)]
+unsafe fn invalidate_replaced_ipa(ipa: u64) {
+    let operand = ipa >> registers::TLBI_IPAS2E1_IPA_SHIFT;
+    // SAFETY: The caller guarantees that VTTBR_EL2 selects the updated address
+    // space. HCR.TGE is cleared while guest-regime TLBIs execute, then restored
+    // only after both invalidations complete in the inner-shareable domain.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "mrs {host_hcr}, HCR_EL2",
+            "bic {guest_hcr}, {host_hcr}, {tge}",
+            "msr HCR_EL2, {guest_hcr}",
+            "isb",
+            "tlbi ipas2e1is, {operand}",
+            "dsb ish",
+            "tlbi vmalle1is",
             "dsb ish",
             "isb",
             "msr HCR_EL2, {host_hcr}",

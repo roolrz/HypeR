@@ -65,6 +65,14 @@ require_occurrences 'super::active_vcpu::clear\(' 1 \
     'active-vCPU ownership must have one teardown seam'
 
 require_order "$fixture/activate.rs" \
+    'claim_execution\(' \
+    'super::memory::activate\(' \
+    'exclusive VM execution must be claimed before stage-2 activation'
+require_order "$fixture/activate.rs" \
+    'super::memory::activate\(' \
+    'crate::hal::vm::activate_hardware\(' \
+    'the current mapping epoch must be active before vCPU hardware'
+require_order "$fixture/activate.rs" \
     'crate::hal::vm::activate_hardware\(' \
     'super::timer::set_host_timer_enabled\(!timer_asserted\)' \
     'hardware must be active before the host timer is programmed'
@@ -73,14 +81,20 @@ require_order "$fixture/activate.rs" \
     'super::active_vcpu::set_raw\(' \
     'the active vCPU must be published only after timer programming succeeds'
 require_in "$fixture/activate.rs" \
-    'crate::hal::vm::activate_hardware\([^;]*\)[[:space:]]*\}[[:space:]]*\.map_err\(HardwareTransitionError::Hardware\)\?;' \
-    'hardware activation failure must propagate before any later state changes'
+    '(?s)Err\(error\)[[:space:]]*=>[[:space:]]*\{[[:space:]]*release_execution_or_fail\(execution\);[[:space:]]*return Err\(HardwareTransitionError::Hardware\(error\)\);' \
+    'hardware activation failure must release VM execution before returning'
 require_in "$fixture/activate.rs" \
     'if let Err\(timer\) = super::timer::set_host_timer_enabled\(!timer_asserted\)[^}]*deactivate_hardware\([^;]*\)[[:space:]]*\};[[:space:]]*return match rollback' \
     'timer-programming failure must detach hardware before returning'
+ambiguous_rollbacks=$(rg -o 'Err\(hardware\) => fatal_ambiguous_hardware' \
+    "$fixture/activate.rs" 2>/dev/null | wc -l | tr -d ' ')
+if [ "$ambiguous_rollbacks" -ne 2 ]; then
+    echo 'both ambiguous activation rollbacks must fail-stop while retaining VM execution' >&2
+    exit 1
+fi
 require_in "$fixture/activate.rs" \
-    '(?s)if let Err\(publication\) = unsafe \{ super::active_vcpu::set_raw\(execution\) \}.*?deactivate_hardware\([^;]*\)[[:space:]]*\};[[:space:]]*let timer = super::timer::set_host_timer_enabled\(true\);[[:space:]]*return match \(rollback, timer\)' \
-    'publication failure must detach hardware and restore the host timer'
+    '(?s)if let Err\(publication\) = unsafe \{ super::active_vcpu::set_raw\(execution\) \}.*?deactivate_hardware\([^;]*\)[[:space:]]*\};[[:space:]]*return match rollback.*?Ok\(\(\)\) => match super::timer::set_host_timer_enabled\(true\).*?Err\(hardware\) => fatal_ambiguous_hardware' \
+    'publication failure must detach hardware before restoring the host timer'
 
 require_order "$fixture/deactivate.rs" \
     'super::active_vcpu::clear\(' \
@@ -88,11 +102,15 @@ require_order "$fixture/deactivate.rs" \
     'teardown must remove callback visibility before detaching hardware'
 require_order "$fixture/deactivate.rs" \
     'crate::hal::vm::deactivate_hardware\(' \
+    'release_execution_or_fail\(' \
+    'VM execution must remain claimed until architecture hardware is detached'
+require_order "$fixture/deactivate.rs" \
+    'release_execution_or_fail\(' \
     'super::timer::set_host_timer_enabled\(true\)' \
-    'teardown must restore the host timer only after hardware is detached'
+    'teardown must release VM execution before restoring the host timer'
 require_in "$fixture/deactivate.rs" \
     'super::active_vcpu::clear\(execution\)\.map_err\(HardwareTransitionError::Active\)\?;' \
     'active-vCPU removal failure must stop teardown immediately'
 require_in "$fixture/deactivate.rs" \
-    'crate::hal::vm::deactivate_hardware\([^;]*\)[[:space:]]*\}[[:space:]]*\.map_err\(HardwareTransitionError::Hardware\)\?;' \
-    'hardware-detach failure must stop teardown before timer restoration'
+    '(?s)if let Err\(error\) = unsafe \{.*?crate::hal::vm::deactivate_hardware\(.*?\)[[:space:]]*\}[[:space:]]*\{.*?fatal_ambiguous_hardware\(.*?error\);.*?\}[[:space:]]*release_execution_or_fail\(execution\);' \
+    'ambiguous hardware detach must fail-stop while retaining VM execution'

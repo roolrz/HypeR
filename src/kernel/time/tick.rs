@@ -156,8 +156,9 @@ fn handle_periodic_tick(event: crate::kernel::time::TimerEvent, _context: usize)
     let periods = event.overruns.saturating_add(1);
     let previous = TICK_COUNT[cpu].fetch_add(periods, Ordering::Relaxed);
     if let Err(error) = crate::kernel::task::scheduler::account_tick(periods) {
-        crate::pr_crit!("HypeR: scheduler tick accounting failed: {error:?}");
-        crate::hal::cpu::halt()
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: scheduler tick accounting failed: {error:?}"
+        ));
     }
     if previous.saturating_add(periods) >= 3 {
         if previous < 3 {

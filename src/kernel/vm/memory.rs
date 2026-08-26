@@ -6,16 +6,28 @@
 use core::ptr::{copy_nonoverlapping, write_bytes};
 
 use alloc::vec::Vec;
+use hyper::cpu::PerCpu;
 use hyper::mm::allocator::heap::PageOwner;
 use hyper::mm::{
     BuddyError, ForeignCopyError, ForeignMemory, PAGE_SIZE, PhysicalAddress, copy_from_foreign,
     copy_to_foreign,
 };
+use hyper::sync::atomic::{AtomicU64, Ordering};
 use hyper::vm::exit::{GuestMemoryFault, MemoryAccess};
+use hyper::vm::translation::{ActiveMappingError, residency_is_current};
 
 use super::registry::{HardwareVmid, VmId};
 use crate::hal::vm::{Stage2AddressSpace, Stage2Error};
 use crate::kernel::mm::page_block::PageBlock;
+
+static ACTIVE_STAGE2_ROOT: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
+static ACTIVE_STAGE2_EPOCH: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
+static ACTIVE_INSTRUCTION_ROOT: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
+static ACTIVE_INSTRUCTION_EPOCH: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -24,6 +36,8 @@ pub enum Error {
     Cache(hyper::hal::cache::CacheError),
     InvalidRange,
     MetadataAllocation,
+    InvalidCpu,
+    Poisoned,
     Registry(super::registry::Error),
     Stage2(Stage2Error),
 }
@@ -92,6 +106,9 @@ pub(crate) struct GuestAddressSpace {
     page_walk_faults: u64,
     repeated_faults: u64,
     failed_faults: u64,
+    poisoned: bool,
+    translation_epoch: u64,
+    instruction_epoch: AtomicU64,
     stage2: Stage2AddressSpace,
     table_pages: Stage2PagePool,
 }
@@ -130,16 +147,23 @@ impl GuestAddressSpace {
             page_walk_faults: 0,
             repeated_faults: 0,
             failed_faults: 0,
+            poisoned: false,
+            // Epoch zero is reserved for per-CPU residency slots which have
+            // never activated or synchronized a guest address space.
+            translation_epoch: 1,
+            instruction_epoch: AtomicU64::new(1),
             stage2,
             table_pages,
         })
     }
 
     pub fn copy_from(&mut self, ipa: u64, destination: &mut [u8]) -> Result<(), Error> {
+        self.ensure_healthy()?;
         copy_from_foreign(self, ipa, destination).map_err(Error::from)
     }
 
     pub fn copy_to(&mut self, ipa: u64, source: &[u8]) -> Result<(), Error> {
+        self.ensure_healthy()?;
         copy_to_foreign(self, ipa, source).map_err(Error::from)
     }
 
@@ -148,7 +172,24 @@ impl GuestAddressSpace {
     }
 
     pub fn publish_instruction(&self, ipa: u64, length: usize) -> Result<(), Error> {
-        self.publish_range(ipa, length, true)
+        self.publish_range(ipa, length, true)?;
+        if length == 0 {
+            return Ok(());
+        }
+        // Cache maintenance and instruction-byte stores happen-before a CPU
+        // which observes this epoch during a later activation.
+        if self
+            .instruction_epoch
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |epoch| {
+                epoch.checked_add(1)
+            })
+            .is_err()
+        {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: guest instruction publication epoch exhausted"
+            ));
+        }
+        Ok(())
     }
 
     pub fn publish_data(&self, ipa: u64, length: usize) -> Result<(), Error> {
@@ -175,6 +216,7 @@ impl GuestAddressSpace {
     }
 
     fn resolve_guest_memory_fault(&mut self, fault: GuestMemoryFault) -> Result<bool, Error> {
+        self.ensure_healthy()?;
         let Some(page_index) = self.page_index(fault.address().get()) else {
             return Ok(false);
         };
@@ -202,6 +244,7 @@ impl GuestAddressSpace {
     }
 
     fn commit_page(&mut self, page_index: usize, active: bool) -> Result<(), Error> {
+        self.ensure_healthy()?;
         if self.pages.get(page_index).is_none() {
             return Err(Error::InvalidRange);
         }
@@ -217,13 +260,17 @@ impl GuestAddressSpace {
         let ipa = self.page_ipa(page_index)?;
         let mut allocate_table =
             |pages, alignment| self.table_pages.allocate_zeroed(pages, alignment);
-        if active {
+        let committed_error = if active {
             // SAFETY: Called only from a lower-EL translation fault while this
             // VM is active, under the address-space lock.
-            unsafe {
+            match unsafe {
                 self.stage2
-                    .map_normal_page_active(ipa, physical.get(), &mut allocate_table)?
-            };
+                    .map_normal_page_active(ipa, physical.get(), &mut allocate_table)
+            } {
+                Ok(()) => None,
+                Err(ActiveMappingError::BeforeInstall(error)) => return Err(error.into()),
+                Err(ActiveMappingError::InstalledButInvalidationFailed(error)) => Some(error),
+            }
         } else {
             // SAFETY: Stage2PagePool preserves the allocation contract stated
             // at construction, and &mut self plus the owning VM's
@@ -232,9 +279,32 @@ impl GuestAddressSpace {
                 self.stage2
                     .map_normal_page(ipa, physical.get(), &mut allocate_table)?
             };
-        }
+            None
+        };
+        // Publication commits physical ownership even when the subsequent
+        // invalidation fails. Store the owner before reporting that failure so
+        // the live descriptor can never point at a page returned to the buddy.
         self.pages[page_index] = Some(page);
         self.committed_pages += 1;
+        self.translation_epoch = match self.translation_epoch.checked_add(1) {
+            Some(epoch) => epoch,
+            None => {
+                self.poisoned = true;
+                crate::kernel::crash::fatal(format_args!("HypeR: stage-2 mapping epoch exhausted"));
+            }
+        };
+        if let Some(error) = committed_error {
+            self.poisoned = true;
+            // The single-active execution lease excludes a concurrent vCPU,
+            // but a failed local invalidation still leaves architectural state
+            // ambiguous. Ownership is retained above before global fail-stop.
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: committed stage-2 mapping invalidation failed: {error:?}"
+            ));
+        }
+        if active {
+            publish_current_residency(self.stage2.root_address(), self.translation_epoch);
+        }
         Ok(())
     }
 
@@ -249,6 +319,50 @@ impl GuestAddressSpace {
     }
 
     fn publish_range(&self, ipa: u64, length: usize, instruction: bool) -> Result<(), Error> {
+        self.ensure_healthy()?;
+        self.validate_access(ipa, length)?;
+        if length == 0 {
+            return Ok(());
+        }
+        if !instruction {
+            return self.visit_range_chunks(ipa, length, |address, chunk| {
+                // SAFETY: Loading owns the VM and no vCPU can observe these
+                // pages until the stage-2 hierarchy is installed and active.
+                unsafe { crate::hal::cache::publish_data_range(address, chunk) }
+                    .map_err(Error::from)
+            });
+        }
+
+        let mut walk_error = None;
+        // SAFETY: Loading owns every committed page and excludes guest
+        // execution and modification for the complete, potentially two-pass
+        // transaction. The immutable page set yields identical ranges on each
+        // architecture-requested enumeration.
+        let cache_result = unsafe {
+            crate::hal::cache::publish_instruction_ranges(|visit| {
+                if walk_error.is_some() {
+                    return;
+                }
+                if let Err(error) = self.visit_range_chunks(ipa, length, |address, chunk| {
+                    visit(address, chunk);
+                    Ok(())
+                }) {
+                    walk_error = Some(error);
+                }
+            })
+        };
+        if let Some(error) = walk_error {
+            return Err(error);
+        }
+        cache_result.map_err(Error::from)
+    }
+
+    fn visit_range_chunks(
+        &self,
+        ipa: u64,
+        length: usize,
+        mut visit: impl FnMut(usize, usize) -> Result<(), Error>,
+    ) -> Result<(), Error> {
         let mut offset = self.validate_access(ipa, length)?;
         let mut published = 0;
         while published < length {
@@ -259,16 +373,7 @@ impl GuestAddressSpace {
                 .checked_add(page_offset)
                 .ok_or(Error::AddressOverflow)?;
             let chunk = (PAGE_SIZE as usize - page_offset).min(length - published);
-            // SAFETY: Loading owns the VM and no vCPU can observe these pages
-            // until the stage-2 hierarchy is installed and activated.
-            unsafe {
-                if instruction {
-                    crate::hal::cache::publish_instruction_range(address, chunk)
-                } else {
-                    crate::hal::cache::publish_data_range(address, chunk)
-                }
-            }
-            .map_err(Error::from)?;
+            visit(address, chunk)?;
             published += chunk;
             offset += chunk;
         }
@@ -290,6 +395,14 @@ impl GuestAddressSpace {
         self.ipa_base
             .checked_add(offset)
             .ok_or(Error::AddressOverflow)
+    }
+
+    fn ensure_healthy(&self) -> Result<(), Error> {
+        if self.poisoned {
+            Err(Error::Poisoned)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -383,14 +496,59 @@ impl crate::hal::guest::PayloadMemory for GuestAddressSpace {
 ///
 /// # Safety
 ///
-/// The caller must own the stopped vCPU carrying `vm`.
+/// The caller must own the stopped vCPU carrying `vm`, retain this VM's
+/// exclusive execution claim, and keep local interrupts masked.
 pub(in crate::kernel) unsafe fn activate(vm: &super::registry::VmBinding) -> Result<(), Error> {
     vm.with_address_space(|address_space| {
-        // SAFETY: The caller owns the stopped vCPU, and the installed address
-        // space is pinned in the VM registry for the active guest lifetime.
-        unsafe { address_space.stage2.activate() };
-    });
-    Ok(())
+        address_space.ensure_healthy()?;
+        let cpu = crate::kernel::cpu::current_index().ok_or(Error::InvalidCpu)?;
+        let root = address_space.stage2.root_address();
+        let epoch = address_space.translation_epoch;
+        if !residency_is_current(
+            ACTIVE_STAGE2_ROOT[cpu].load(Ordering::Relaxed),
+            ACTIVE_STAGE2_EPOCH[cpu].load(Ordering::Relaxed),
+            root,
+            epoch,
+        ) {
+            // SAFETY: The caller owns the stopped vCPU, and the installed
+            // address space is pinned in the VM registry for the active guest
+            // lifetime. Architecture activation includes any local
+            // invalidation required before this CPU may consume the current
+            // mapping epoch.
+            unsafe { address_space.stage2.activate() };
+            ACTIVE_STAGE2_ROOT[cpu].store(root, Ordering::Relaxed);
+            ACTIVE_STAGE2_EPOCH[cpu].store(epoch, Ordering::Relaxed);
+        }
+
+        let instruction_epoch = address_space.instruction_epoch.load(Ordering::Acquire);
+        if !residency_is_current(
+            ACTIVE_INSTRUCTION_ROOT[cpu].load(Ordering::Relaxed),
+            ACTIVE_INSTRUCTION_EPOCH[cpu].load(Ordering::Relaxed),
+            root,
+            instruction_epoch,
+        ) {
+            // FENCE.I is hart-local on RISC-V; AArch64 and x86 likewise require
+            // a local instruction synchronization event before entering a
+            // newly published instruction stream on this CPU.
+            crate::hal::cache::synchronize_instruction_execution();
+            ACTIVE_INSTRUCTION_ROOT[cpu].store(root, Ordering::Relaxed);
+            ACTIVE_INSTRUCTION_EPOCH[cpu].store(instruction_epoch, Ordering::Relaxed);
+        }
+        Ok(())
+    })
+}
+
+fn publish_current_residency(root: u64, epoch: u64) {
+    let Some(cpu) = crate::kernel::cpu::current_index() else {
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: active stage-2 mapping has no registered CPU owner"
+        ));
+    };
+    // Active mapping publication already completed the architecture-local
+    // invalidation. Updating this CPU-private observation avoids repeating a
+    // whole-context activation at the following IRQ-tail resume.
+    ACTIVE_STAGE2_ROOT[cpu].store(root, Ordering::Relaxed);
+    ACTIVE_STAGE2_EPOCH[cpu].store(epoch, Ordering::Relaxed);
 }
 
 pub(in crate::kernel) fn resolve_guest_memory_fault(

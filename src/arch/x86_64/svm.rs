@@ -101,6 +101,10 @@ pub(super) fn activate_npt(root: u64) {
         crate::kernel::boot::fail("SVM NPT CPU lookup", Error::InvalidCpu);
     };
     slot.store(root, Ordering::Release);
+    // The selected ASID is reused across VM address spaces. Defer the flush
+    // until the VMCB is prepared so activation is valid both before and after
+    // this CPU enters SVM operation.
+    tlb_pending().store(true, Ordering::Release);
 }
 
 pub(super) fn invalidate_npt() {
@@ -158,7 +162,14 @@ fn write_control_area(vmcb: &mut Page) -> Result<(), Error> {
     vmcb.write_u64(VMCB_IOPM_BASE, kernel_physical(iopm.0.as_ptr() as usize)?);
     vmcb.write_u64(VMCB_MSRPM_BASE, kernel_physical(msrpm.0.as_ptr() as usize)?);
     vmcb.write_u32(VMCB_ASID, 1);
-    vmcb.write_u8(VMCB_TLB_CONTROL, 1);
+    vmcb.write_u8(
+        VMCB_TLB_CONTROL,
+        if tlb_pending().swap(false, Ordering::AcqRel) {
+            1
+        } else {
+            0
+        },
+    );
     vmcb.write_u32(VMCB_INT_CONTROL, V_INTR_MASKING);
     vmcb.write_u64(VMCB_NESTED_CONTROL, 1);
     let root = active_npt_root().ok_or(Error::InvalidAddress)?;
@@ -233,7 +244,10 @@ extern "C" fn x86_64_svm_exit_dispatch(context: &mut VcpuContext) {
     }
     prepare_guest_interrupt(vmcb);
     if tlb_pending().swap(false, Ordering::AcqRel) {
-        vmcb.write_u8(VMCB_TLB_CONTROL, 3);
+        // Full flush is supported without AMD's optional FlushByAsid feature.
+        // HypeR currently reuses ASID 1, so the wider operation is required on
+        // processors which do not advertise that extension.
+        vmcb.write_u8(VMCB_TLB_CONTROL, 1);
     }
     vmcb.write_u32(VMCB_CLEAN_BITS, 0);
 }

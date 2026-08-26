@@ -5,6 +5,7 @@ use core::ptr::{read_volatile, write_volatile};
 
 use hyper::hal::memory::AddressTranslation;
 use hyper::mm::{PAGE_SIZE, PhysicalAddress};
+use hyper::vm::translation::{ActiveMappingError, publish_active_mapping};
 
 use super::memory::X86_64AddressTranslation;
 use super::virtualization::Stage2Format;
@@ -88,17 +89,38 @@ impl Stage2AddressSpace {
         unsafe { self.map_page(ipa, physical, allocator) }
     }
 
+    /// Installs and publishes one mapping in the active EPT or NPT hierarchy.
+    ///
+    /// # Safety
+    ///
+    /// In addition to [`Self::map_normal_page`]'s requirements, the caller
+    /// must guarantee that no sibling vCPU can retain translations for this
+    /// address space. The current kernel admission policy enforces one vCPU
+    /// per VM. Supporting concurrent vCPUs requires residency tracking and a
+    /// synchronous remote INVEPT or NPT shootdown before relaxing that policy.
     pub unsafe fn map_normal_page_active(
         &mut self,
         ipa: u64,
         physical: u64,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
-    ) -> Result<(), Error> {
-        // SAFETY: This function has the same allocator and serialization contract.
-        unsafe { self.map_normal_page(ipa, physical, allocator)? };
-        self.invalidate()
+    ) -> Result<(), ActiveMappingError<Error>> {
+        publish_active_mapping(
+            self,
+            |stage2| {
+                // SAFETY: This function has the same allocator and
+                // serialization contract.
+                unsafe { stage2.map_normal_page(ipa, physical, allocator) }
+            },
+            Stage2AddressSpace::invalidate,
+        )
     }
 
+    /// Invalidates a page after a repeated fault in the active hierarchy.
+    ///
+    /// # Safety
+    ///
+    /// The active address space must satisfy the single-running-vCPU contract
+    /// documented by [`Self::map_normal_page_active`].
     pub unsafe fn invalidate_page_active(&self, ipa: u64) -> Result<(), Error> {
         if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= GUEST_LIMIT {
             return Err(Error::InvalidAddress);

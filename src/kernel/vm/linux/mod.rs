@@ -128,13 +128,9 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     let initramfs_range = layout_payload(image, initramfs, guest.memory_size())?;
 
     crate::hal::guest::load_linux_payload(&guest, &mut address_space, initramfs_range)?;
-    // The scheduler assigns the boot vCPU to this loader CPU and has no vCPU
-    // migration handoff, so it remains effectively pinned here. Code
-    // publication is complete; perform local instruction synchronization once
-    // before the vCPU can become runnable. Future migration must synchronize
-    // on the destination as part of its handoff, including a remote FENCE.I
-    // protocol on RISC-V.
-    crate::hal::cache::synchronize_instruction_execution();
+    // Instruction publication precedes this handoff. Each CPU observes the
+    // address space's instruction epoch and performs its local synchronization
+    // before the vCPU enters there, including after migration.
     address_space.finish_boot_loading();
     let stage2_root = address_space.root_address();
     let guest_memory = address_space.statistics();
@@ -166,6 +162,10 @@ fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
         return Err(Error::UnsupportedArchitecture);
     }
     crate::hal::guest::validate_linux_kernel(guest.kernel())?;
+    // This is also the current VM execution invariant: address-space
+    // activation handles migration residency, while one exclusive execution
+    // claim prevents concurrent sibling vCPUs until synchronous VM-wide
+    // shootdown is implemented.
     if guest.vcpu_count() != 1 || guest.vcpu_count() > hyper::config::MAX_CPUS as u32 {
         return Err(Error::UnsupportedVcpuCount);
     }

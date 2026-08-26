@@ -17,6 +17,7 @@ const PENDING: u8 = 1;
 const WORKING: u8 = 2;
 const APPLIED: u8 = 3;
 const REJECTED: u8 = 4;
+const APPLIED_OR_UNKNOWN: u8 = 5;
 
 static OWNER: AtomicBool = AtomicBool::new(false);
 static READY: AtomicBool = AtomicBool::new(false);
@@ -49,6 +50,7 @@ pub(crate) enum KernelRpc {
 
 pub(crate) struct Outcome {
     pub(crate) rejected_cpu: Option<usize>,
+    pub(crate) ambiguous_cpu: Option<usize>,
 }
 
 struct Owner;
@@ -131,6 +133,7 @@ pub(crate) fn execute(
     }
     READY.store(false, Ordering::Release);
     let mut rejected_cpu = None;
+    let mut ambiguous_cpu = None;
     for (index, targeted) in targets.iter().copied().enumerate().take(count) {
         if !targeted {
             continue;
@@ -140,11 +143,23 @@ pub(crate) fn execute(
         };
         match STATUS[cpu].load(Ordering::Acquire) {
             APPLIED => {}
-            REJECTED if rejected_cpu.is_none() => rejected_cpu = Some(index),
+            REJECTED => {
+                if rejected_cpu.is_none() {
+                    rejected_cpu = Some(index);
+                }
+            }
+            APPLIED_OR_UNKNOWN => {
+                if ambiguous_cpu.is_none() {
+                    ambiguous_cpu = Some(index);
+                }
+            }
             _ => poison("kernel RPC completion state is inconsistent"),
         }
     }
-    Ok(Outcome { rejected_cpu })
+    Ok(Outcome {
+        rejected_cpu,
+        ambiguous_cpu,
+    })
 }
 
 pub(crate) fn service() {
@@ -179,7 +194,7 @@ fn service_local_irq_mailbox() {
         return;
     }
     let generation = GENERATION.load(Ordering::Acquire);
-    let applied = match decode() {
+    let outcome = match decode() {
         KernelRpc::LocalIrqLifecycle {
             hardware,
             priority,
@@ -187,7 +202,12 @@ fn service_local_irq_mailbox() {
             operation,
         } => super::interrupt::apply_local_irq_lifecycle(hardware, priority, trigger, operation),
     };
-    STATUS[cpu].store(if applied { APPLIED } else { REJECTED }, Ordering::Relaxed);
+    let status = match outcome {
+        super::interrupt::LocalLifecycleApply::Applied => APPLIED,
+        super::interrupt::LocalLifecycleApply::Rejected => REJECTED,
+        super::interrupt::LocalLifecycleApply::AppliedOrUnknown => APPLIED_OR_UNKNOWN,
+    };
+    STATUS[cpu].store(status, Ordering::Relaxed);
     ACK[cpu].store(generation, Ordering::Release);
 }
 

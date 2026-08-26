@@ -24,7 +24,6 @@ const FID_HSM_HART_STATUS: usize = 2;
 const FID_HSM_HART_SUSPEND: usize = 3;
 const FID_SRST_RESET: usize = 0;
 const FID_RFENCE_REMOTE_SFENCE_VMA: usize = 1;
-const FID_RFENCE_REMOTE_HFENCE_GVMA_VMID: usize = 3;
 const FID_IPI_SEND_IPI: usize = 0;
 
 const SBI_SUCCESS: isize = 0;
@@ -93,16 +92,6 @@ pub fn send_ipi(hart_id: u64) -> Result<(), Error> {
 
 pub fn remote_sfence_vma(hart_id: u64, start: usize, size: usize) -> Result<(), Error> {
     remote_fence(FID_RFENCE_REMOTE_SFENCE_VMA, hart_id, start, size, 0)
-}
-
-pub fn remote_hfence_gvma_vmid(hart_id: u64, vmid: u16) -> Result<(), Error> {
-    remote_fence(
-        FID_RFENCE_REMOTE_HFENCE_GVMA_VMID,
-        hart_id,
-        0,
-        usize::MAX,
-        usize::from(vmid),
-    )
 }
 
 fn remote_fence(

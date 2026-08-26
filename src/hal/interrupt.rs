@@ -99,12 +99,43 @@ pub enum InterruptPriority {
     Low,
 }
 
+/// Failure phase for an interrupt-controller enable or disable transition.
+///
+/// Register interfaces such as `GICv3` can report a completion timeout only
+/// after the command write is visible. Callers must not treat that state like
+/// validation failure: the route may already have changed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterruptTransitionError<Error> {
+    /// Validation failed before any enable-state register was written.
+    NotApplied(Error),
+    /// The command was written, but its final hardware state is not proven.
+    AppliedOrUnknown(Error),
+}
+
+impl<Error> InterruptTransitionError<Error> {
+    pub fn map<Mapped>(
+        self,
+        map: impl FnOnce(Error) -> Mapped,
+    ) -> InterruptTransitionError<Mapped> {
+        match self {
+            Self::NotApplied(error) => InterruptTransitionError::NotApplied(map(error)),
+            Self::AppliedOrUnknown(error) => InterruptTransitionError::AppliedOrUnknown(map(error)),
+        }
+    }
+}
+
 /// Common interrupt-controller operations used by kernel policy.
 pub trait InterruptController {
     type Error;
 
-    fn enable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error>;
-    fn disable(&mut self, interrupt: InterruptId) -> Result<(), Self::Error>;
+    fn enable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>>;
+    fn disable(
+        &mut self,
+        interrupt: InterruptId,
+    ) -> Result<(), InterruptTransitionError<Self::Error>>;
     fn acknowledge(&self) -> Option<InterruptId>;
     fn end(&self, interrupt: InterruptId);
 }
@@ -117,14 +148,19 @@ pub trait InterruptController {
 pub trait LocalInterruptController {
     type Error;
 
+    /// Programs a route which the caller keeps disabled.
+    ///
+    /// Failure may leave priority or trigger fields partially updated. Because
+    /// delivery remains disabled, callers may recover by overwriting the full
+    /// configuration before a later enable transition.
     fn configure(
         &self,
         interrupt: InterruptId,
         priority: InterruptPriority,
         trigger: InterruptTrigger,
     ) -> Result<(), Self::Error>;
-    fn enable(&self, interrupt: InterruptId) -> Result<(), Self::Error>;
-    fn disable(&self, interrupt: InterruptId) -> Result<(), Self::Error>;
+    fn enable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Self::Error>>;
+    fn disable(&self, interrupt: InterruptId) -> Result<(), InterruptTransitionError<Self::Error>>;
 }
 
 /// Operations required by the kernel IRQ-domain policy in addition to the
@@ -133,6 +169,12 @@ pub trait KernelInterruptController: InterruptController {
     type Local: LocalInterruptController<Error = Self::Error>;
 
     fn interrupt_count(&self) -> u32;
+    /// Programs a route which the caller keeps disabled.
+    ///
+    /// Unlike [`InterruptController::enable`] and
+    /// [`InterruptController::disable`], a partial configuration write cannot
+    /// expose a callback. The caller must overwrite the complete configuration
+    /// before enabling a route whose configuration returned an error.
     fn configure(
         &mut self,
         interrupt: InterruptId,

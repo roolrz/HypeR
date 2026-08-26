@@ -90,6 +90,7 @@ pub struct UserExecution {
 
 pub struct VcpuExecution {
     vm: VcpuVm,
+    active_execution: Option<hyper::vm::translation::ExecutionClaim>,
     pub(crate) vcpu_id: u32,
     pub(crate) hardware: crate::hal::vm::VcpuHardwareState,
 }
@@ -123,6 +124,55 @@ impl VcpuExecution {
         }
     }
 
+    /// Claims the installed VM's exclusive execution interval.
+    ///
+    /// Timer validation has no installed address space and therefore requires
+    /// no claim. Returning `true` tells the caller that release is mandatory.
+    pub(crate) fn claim_execution(
+        &mut self,
+        cpu: CpuIndex,
+    ) -> Result<bool, hyper::vm::translation::ExecutionError> {
+        if self.active_execution.is_some() {
+            return Err(hyper::vm::translation::ExecutionError::AlreadyActive);
+        }
+        let VcpuVm::Installed(binding) = &self.vm else {
+            return Ok(false);
+        };
+        let claim = binding.claim_execution(cpu)?;
+        self.active_execution = Some(claim);
+        Ok(true)
+    }
+
+    /// Releases the execution capability after guest hardware is stopped.
+    pub(crate) fn release_execution(
+        &mut self,
+        cpu: CpuIndex,
+    ) -> Result<(), hyper::vm::translation::ExecutionError> {
+        let Some(claim) = self.active_execution.take() else {
+            return match self.vm {
+                VcpuVm::Installed(_) => Err(hyper::vm::translation::ExecutionError::NotActiveOwner),
+                VcpuVm::TimerValidation { .. } => Ok(()),
+            };
+        };
+        let binding = match &self.vm {
+            VcpuVm::Installed(binding) => binding,
+            VcpuVm::TimerValidation { .. } => {
+                // Preserve the linear claim even on this impossible binding
+                // mismatch so the caller can cross a controlled fail-stop.
+                self.active_execution = Some(claim);
+                return Err(hyper::vm::translation::ExecutionError::WrongAddressSpace);
+            }
+        };
+        match binding.release_execution(claim, cpu) {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                let error = failure.error();
+                self.active_execution = Some(failure.into_claim());
+                Err(error)
+            }
+        }
+    }
+
     /// Builds the non-runnable execution used by architecture timer checks.
     ///
     /// This execution may activate and deactivate local virtual hardware, but
@@ -143,8 +193,19 @@ impl VcpuExecution {
             vm: VcpuVm::TimerValidation {
                 interrupts: core::ptr::from_ref(interrupts).expose_provenance(),
             },
+            active_execution: None,
             vcpu_id: 0,
             hardware,
+        }
+    }
+}
+
+impl Drop for VcpuExecution {
+    fn drop(&mut self) {
+        if self.active_execution.is_some() {
+            // Destruction cannot safely stop architecture hardware or prove
+            // guest execution quiescent. Fail closed without taking locks.
+            crate::hal::cpu::halt()
         }
     }
 }
@@ -320,6 +381,7 @@ impl Thread {
             execution: ThreadExecution::Vcpu(
                 hyper::mm::try_box(VcpuExecution {
                     vm: VcpuVm::Installed(vm),
+                    active_execution: None,
                     vcpu_id,
                     hardware,
                 })

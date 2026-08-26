@@ -4,6 +4,7 @@
 //! Platform-device discovery and driver lifecycle management.
 
 use alloc::{boxed::Box, string::String, vec::Vec};
+use core::mem::ManuallyDrop;
 
 use crate::mm::VirtualAddress;
 use crate::platform::{
@@ -416,6 +417,15 @@ pub trait DriverServices {
 
 /// A bound platform-driver instance.
 pub trait DriverInstance: Send {
+    /// Makes a fully prepared instance externally active.
+    ///
+    /// The driver manager owns the instance before calling this method. Probe
+    /// must leave interrupt sources, DMA, and externally callable callbacks
+    /// quiesced; a failed activation must remain safe for [`Self::remove`].
+    fn activate(&mut self) -> Result<(), ProbeError> {
+        Ok(())
+    }
+
     /// Suspends the device before a system-wide low-power transition.
     fn suspend(&mut self) -> Result<(), ProbeError> {
         Ok(())
@@ -430,8 +440,9 @@ pub trait DriverInstance: Send {
     ///
     /// Permanent stage-1 mappings are not released because the memory manager
     /// does not currently support device unmapping. The default is valid only
-    /// for instances whose probe did not enable hardware or publish callbacks;
-    /// active drivers must override it and quiesce those resources first.
+    /// for instances whose activation did not enable hardware or publish
+    /// callbacks; active drivers must override it and quiesce those resources
+    /// first.
     fn remove(&mut self) -> Result<(), ProbeError> {
         Ok(())
     }
@@ -445,7 +456,13 @@ pub trait PlatformDriver: Sync {
     /// Returns the device tree compatible strings supported by this driver.
     fn compatible_table(&self) -> &'static [&'static str];
 
-    /// Binds this driver to a discovered device.
+    /// Prepares a quiescent instance for a discovered device.
+    ///
+    /// Returning `Ok` transfers every acquired resource to the instance, but
+    /// must not yet expose DMA or callbacks. Returning `Err` must roll back all
+    /// resources acquired by that attempt. The manager reserves ownership
+    /// storage before calling probe and invokes [`DriverInstance::activate`]
+    /// only after the instance is owned by a binding.
     fn probe(
         &self,
         device: &PlatformDevice,
@@ -457,7 +474,14 @@ struct Binding {
     device_id: NodeId,
     driver_name: &'static str,
     instance: Box<dyn DriverInstance>,
-    suspended: bool,
+    lifecycle: BindingLifecycle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BindingLifecycle {
+    Prepared,
+    Active,
+    Suspended,
 }
 
 /// The outcome of a platform-device probing pass.
@@ -474,9 +498,19 @@ pub struct ProbeReport {
 }
 
 /// Registry of platform drivers and their bound instances.
+#[must_use = "installed driver bindings require explicit retirement or permanent retention"]
 pub struct DriverManager {
     drivers: Vec<&'static dyn PlatformDriver>,
     bindings: Vec<Binding>,
+}
+
+/// A driver manager installed in kernel-lifetime storage.
+///
+/// This type deliberately has no teardown API. Runtime owners which require a
+/// finite lifetime must retain [`DriverManager`] and use explicit removal.
+#[must_use = "a permanent driver manager must be moved into permanent storage"]
+pub struct PermanentDriverManager {
+    _manager: ManuallyDrop<DriverManager>,
 }
 
 impl DriverManager {
@@ -600,17 +634,30 @@ impl DriverManager {
         device: &PlatformDevice,
         services: &dyn DriverServices,
     ) -> Result<(), ProbeError> {
-        let instance = driver.probe(device, services)?;
+        // Reserve the publication slot before probe can acquire resources.
+        // Once probe succeeds, insertion is infallible and the manager owns
+        // the instance before any activation can expose callbacks or DMA.
         self.bindings
             .try_reserve(1)
             .map_err(|_| ProbeError::Resource)?;
+        let instance = driver.probe(device, services)?;
         self.bindings.push(Binding {
             device_id: device.id(),
             driver_name: driver.name(),
             instance,
-            suspended: false,
+            lifecycle: BindingLifecycle::Prepared,
         });
-        Ok(())
+        let index = self.bindings.len() - 1;
+        match self.bindings[index].instance.activate() {
+            Ok(()) => {
+                self.bindings[index].lifecycle = BindingLifecycle::Active;
+                Ok(())
+            }
+            Err(error) => {
+                self.retire_failed_binding(index);
+                Err(error)
+            }
+        }
     }
 
     /// Suspends bound instances in reverse binding order.
@@ -620,8 +667,10 @@ impl DriverManager {
     /// Returns the error from the first instance that fails to suspend.
     pub fn suspend_all(&mut self) -> Result<(), ProbeError> {
         for index in (0..self.bindings.len()).rev() {
-            if self.bindings[index].suspended {
-                continue;
+            match self.bindings[index].lifecycle {
+                BindingLifecycle::Suspended => continue,
+                BindingLifecycle::Active => {}
+                BindingLifecycle::Prepared => return Err(ProbeError::Driver(-2)),
             }
             if let Err(error) = self.bindings[index].instance.suspend() {
                 // Restore the pre-suspend state on a best-effort basis.
@@ -630,7 +679,7 @@ impl DriverManager {
                 let _ = self.resume_all();
                 return Err(error);
             }
-            self.bindings[index].suspended = true;
+            self.bindings[index].lifecycle = BindingLifecycle::Suspended;
         }
         Ok(())
     }
@@ -642,9 +691,11 @@ impl DriverManager {
     /// Returns the error from the first instance that fails to resume.
     pub fn resume_all(&mut self) -> Result<(), ProbeError> {
         for binding in &mut self.bindings {
-            if binding.suspended {
+            if binding.lifecycle == BindingLifecycle::Suspended {
                 binding.instance.resume()?;
-                binding.suspended = false;
+                binding.lifecycle = BindingLifecycle::Active;
+            } else if binding.lifecycle == BindingLifecycle::Prepared {
+                return Err(ProbeError::Driver(-2));
             }
         }
         Ok(())
@@ -670,6 +721,25 @@ impl DriverManager {
         Ok(true)
     }
 
+    /// Explicitly retires every installed instance in reverse binding order.
+    ///
+    /// Failure preserves the failing instance and every earlier binding so the
+    /// owner can retry from a context where device teardown is permitted.
+    pub fn retire_all(&mut self) -> Result<(), ProbeError> {
+        while let Some(index) = self.bindings.len().checked_sub(1) {
+            self.bindings[index].instance.remove()?;
+            let _ = self.bindings.pop();
+        }
+        Ok(())
+    }
+
+    /// Converts all installed bindings to explicit kernel-lifetime ownership.
+    pub fn retain_permanently(self) -> PermanentDriverManager {
+        PermanentDriverManager {
+            _manager: ManuallyDrop::new(self),
+        }
+    }
+
     /// Returns the driver name bound to `device_id`, if any.
     pub fn binding_driver(&self, device_id: NodeId) -> Option<&'static str> {
         self.bindings
@@ -677,10 +747,62 @@ impl DriverManager {
             .find(|binding| binding.device_id == device_id)
             .map(|binding| binding.driver_name)
     }
+
+    /// Retires an instance whose activation failed after manager ownership was
+    /// established.
+    ///
+    /// A failed remove cannot justify dropping callback context which hardware
+    /// might still reach. The rollback helper therefore retains the exact
+    /// instance on a fail-stop stack rather than returning ambiguous state.
+    fn retire_failed_binding(&mut self, index: usize) {
+        let binding = self.bindings.remove(index);
+        rollback_or_fail_stop(binding.instance);
+    }
 }
 
 impl Default for DriverManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for DriverManager {
+    fn drop(&mut self) {
+        if !self.bindings.is_empty() {
+            // Drop can run under unrelated locks or with IRQs masked, so it
+            // must neither invoke arbitrary driver teardown nor diagnostics.
+            // Silently leaking would hide a missed ownership transition. A
+            // manager with live bindings must instead be installed for the
+            // kernel lifetime or retired explicitly before destruction.
+            ownership_violation()
+        }
+    }
+}
+
+impl Drop for PermanentDriverManager {
+    fn drop(&mut self) {
+        // Static kernel ownership has no destruction phase. Reaching Drop
+        // means a supposedly permanent owner was abandoned; do not call
+        // drivers or diagnostics from an unknown lock/IRQ context.
+        ownership_violation()
+    }
+}
+
+fn rollback_or_fail_stop(mut instance: Box<dyn DriverInstance>) {
+    if instance.remove().is_err() {
+        // The device may retain a raw callback context or DMA reference into
+        // the instance. Returning would let the kernel continue beside an
+        // ambiguously active device, while dropping would violate memory
+        // safety. Keep the owner live on this fail-stop stack instead.
+        ownership_violation()
+    }
+}
+
+fn ownership_violation() -> ! {
+    // This architecture-neutral crate cannot enter kernel crash policy. The
+    // loop is reserved for impossible linear-ownership violations and must not
+    // acquire locks, allocate, or discard the live owner on its stack.
+    loop {
+        core::hint::spin_loop();
     }
 }
