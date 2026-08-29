@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Compiler-checked source of truth for the experimental `HypeR` Native ABI.
+//! Compiler-checked source of truth for the `HypeR` Native ABI.
 //!
 //! This module deliberately depends only on `core`. Host tools, build scripts,
 //! and the kernel may include it directly without acquiring a parser or schema
@@ -10,13 +10,17 @@
 
 #![allow(dead_code)]
 
-pub const EXPERIMENTAL_ABI_REVISION: u64 = 0;
+/// Pre-release ABI revision.
+///
+/// `HypeR` does not start ABI versioning until the project explicitly publishes
+/// its first supported userspace ABI. Keep this value at zero during
+/// pre-release development, regardless of schema changes.
+pub const ABI_REVISION: u64 = 0;
 pub const SYSCALL_ARGUMENT_REGISTERS: usize = 6;
 pub const SYSCALL_RESULT_REGISTERS: usize = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AbiSchema {
-    pub publication: PublicationState,
     pub revision: u64,
     pub features: &'static [Feature],
     pub object_kinds: &'static [ObjectKind],
@@ -26,30 +30,21 @@ pub struct AbiSchema {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PublicationState {
-    Experimental,
-    Published,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Feature {
     pub bit: u8,
     pub name: &'static str,
-    pub stability: PublicationState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectKind {
     pub value: u32,
     pub name: &'static str,
-    pub stability: PublicationState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Right {
     pub bit: u8,
     pub name: &'static str,
-    pub stability: PublicationState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -58,7 +53,6 @@ pub struct Record {
     pub fields: &'static [Field],
     pub size: u16,
     pub alignment: u8,
-    pub stability: PublicationState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -94,8 +88,6 @@ impl FieldKind {
 pub struct Syscall {
     pub number: u32,
     pub name: &'static str,
-    pub introduced: u64,
-    pub stability: PublicationState,
     pub feature: FeatureGate,
     pub arguments: &'static [Argument],
     pub results: &'static [ResultValue],
@@ -232,7 +224,6 @@ pub enum FlagPolicy {
 pub const FEATURES: &[Feature] = &[Feature {
     bit: 0,
     name: "core",
-    stability: PublicationState::Experimental,
 }];
 
 const RIGHT_DUPLICATE_BIT: u8 = 0;
@@ -241,104 +232,84 @@ const RIGHT_INSPECT_BIT: u8 = 3;
 pub const OBJECT_KINDS: &[ObjectKind] = &[ObjectKind {
     value: 0,
     name: "none",
-    stability: PublicationState::Experimental,
 }];
 
 pub const RIGHTS: &[Right] = &[
     Right {
         bit: RIGHT_DUPLICATE_BIT,
         name: "duplicate",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 1,
         name: "transfer",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 2,
         name: "wait",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: RIGHT_INSPECT_BIT,
         name: "inspect",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 4,
         name: "read",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 5,
         name: "write",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 6,
         name: "map",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 7,
         name: "execute",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 8,
         name: "resize",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 9,
         name: "pin",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 10,
         name: "start",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 11,
         name: "request_stop",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 12,
         name: "run_vcpu",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 13,
         name: "inject_interrupt",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 14,
         name: "grant_memory",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 15,
         name: "assign_device",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 16,
         name: "map_dma",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 17,
         name: "ack_interrupt",
-        stability: PublicationState::Experimental,
     },
     Right {
         bit: 18,
         name: "revoke",
-        stability: PublicationState::Experimental,
     },
 ];
 
@@ -387,14 +358,12 @@ pub const RECORDS: &[Record] = &[
         fields: HANDLE_INFO_FIELDS,
         size: 16,
         alignment: 8,
-        stability: PublicationState::Experimental,
     },
     Record {
         name: "object_basic_info",
         fields: OBJECT_BASIC_INFO_FIELDS,
         size: 16,
         alignment: 8,
-        stability: PublicationState::Experimental,
     },
 ];
 
@@ -531,8 +500,6 @@ pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 0,
         name: "abi_query",
-        introduced: 0,
-        stability: PublicationState::Experimental,
         feature: FeatureGate::Core,
         arguments: NO_ARGUMENTS,
         results: ABI_QUERY_RESULTS,
@@ -546,8 +513,6 @@ pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 1,
         name: "handle_close",
-        introduced: 0,
-        stability: PublicationState::Experimental,
         feature: FeatureGate::Core,
         arguments: HANDLE_CLOSE_ARGUMENTS,
         results: &[],
@@ -561,8 +526,6 @@ pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 2,
         name: "handle_duplicate",
-        introduced: 0,
-        stability: PublicationState::Experimental,
         feature: FeatureGate::Core,
         arguments: HANDLE_DUPLICATE_ARGUMENTS,
         results: HANDLE_DUPLICATE_RESULTS,
@@ -576,8 +539,6 @@ pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 3,
         name: "handle_replace",
-        introduced: 0,
-        stability: PublicationState::Experimental,
         feature: FeatureGate::Core,
         arguments: HANDLE_REPLACE_ARGUMENTS,
         results: HANDLE_REPLACE_RESULTS,
@@ -591,8 +552,6 @@ pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 4,
         name: "handle_get_info",
-        introduced: 0,
-        stability: PublicationState::Experimental,
         feature: FeatureGate::Core,
         arguments: HANDLE_GET_INFO_ARGUMENTS,
         results: &[],
@@ -606,8 +565,6 @@ pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 5,
         name: "object_get_basic_info",
-        introduced: 0,
-        stability: PublicationState::Experimental,
         feature: FeatureGate::Core,
         arguments: OBJECT_GET_BASIC_INFO_ARGUMENTS,
         results: &[],
@@ -621,8 +578,7 @@ pub const SYSCALLS: &[Syscall] = &[
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
-    publication: PublicationState::Experimental,
-    revision: EXPERIMENTAL_ABI_REVISION,
+    revision: ABI_REVISION,
     features: FEATURES,
     object_kinds: OBJECT_KINDS,
     rights: RIGHTS,

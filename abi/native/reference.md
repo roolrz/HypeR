@@ -3,12 +3,11 @@ SPDX-FileCopyrightText: 2026 roolrz
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# Experimental HypeR Native ABI reference
+# HypeR Native ABI reference
 
 This file is generated from `abi/native/schema.rs`. Do not edit it directly.
-The ABI is unpublished; every name, number, and layout remains provisional.
 
-Experimental ABI revision: `0`.
+ABI revision: `0`.
 
 ## Syscalls
 

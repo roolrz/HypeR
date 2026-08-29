@@ -55,9 +55,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/arch/x86_64/linker.ld");
     println!("cargo:rerun-if-changed=Kconfig");
     println!("cargo:rerun-if-changed=abi/native/schema.rs");
-    println!("cargo:rerun-if-changed=abi/native/experimental.rs");
-    println!("cargo:rerun-if-changed=abi/native/experimental-reference.md");
-    println!("cargo:rerun-if-changed=abi/native/include/hyper/experimental_native.h");
+    println!("cargo:rerun-if-changed=abi/native/generated.rs");
+    println!("cargo:rerun-if-changed=abi/native/reference.md");
+    println!("cargo:rerun-if-changed=abi/native/include/hyper/native.h");
     println!("cargo:rerun-if-changed=tools/abi/src/lib.rs");
     println!("cargo:rerun-if-env-changed=HYPER_CONFIG");
     println!("cargo:rerun-if-env-changed=HYPER_KALLSYMS_BLOB");

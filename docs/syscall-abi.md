@@ -7,9 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 
 This document defines the target boundary between the HypeR kernel and
 untrusted userspace. It is normative for new userspace, capability, process,
-IPC, and compatibility work. No syscall number or binary layout described here
-is stable yet; stability begins only when an ABI revision is deliberately
-published.
+IPC, and compatibility work. HypeR is pre-release, so no syscall number or
+binary layout described here carries a compatibility guarantee yet.
 
 The immediate goal is a native EL0 environment capable of hosting HypeR's VMM.
 The same boundary must later support Linux and FreeBSD application binaries
@@ -255,7 +254,7 @@ a schema library.
 
 Each syscall declaration records at least:
 
-- permanent number, public name, introduced ABI revision, and feature gate;
+- assigned number, public name, and feature gate;
 - ordered argument and result shapes;
 - handle object kind, required rights, consume/borrow/produce semantics, and
   resulting rights;
@@ -271,10 +270,10 @@ checked into the SDK-facing locations where appropriate; CI regenerates it and
 rejects drift. Semantic validation remains in named handlers and is not hidden
 inside an unreviewable generated wrapper.
 
-An ABI revision is explicit process-image metadata. Until revision 1 is
-published, the loader rejects unknown revisions and the project may change the
-experimental ABI. Publication requires a compatibility policy and frozen
-generated reference, not merely a release tag.
+The ABI revision field is reserved process-image metadata. Its value remains
+zero throughout pre-release development: schema changes do not increment it.
+ABI versioning and compatibility policy begin only after an explicit project
+decision to publish a supported userspace ABI.
 
 ## Objects, handles, and rights
 
@@ -428,7 +427,7 @@ are quiescent. Ordinary handle owners do not gain sponsor-revocation authority.
 Closing the final ResourceDomain control handle requests the same asynchronous
 revocation; terminal observation is published only after quiescence.
 
-There is no native `channel_call` in ABI revision 1. Request/reply libraries use
+The initial native surface has no `channel_call`. Request/reply libraries use
 transaction IDs, Channel operations, and WaitSet. Any future kernel-assisted
 call returns an explicit cancellable operation.
 
@@ -586,9 +585,9 @@ uses differential tests which run identical binaries on Linux and HypeR.
 
 ## Target Native object and syscall surface
 
-The target revision-1 surface is intentionally broad enough for a real EL0 VMM
-and service runtime. Names are design identifiers; numbers and final signatures
-are assigned only through the schema review.
+The planned Native surface is intentionally broad enough for a real EL0 VMM and
+service runtime. Names are design identifiers; numbers and final signatures are
+assigned only through schema review.
 
 | Family | Objects and representative calls |
 | --- | --- |
@@ -736,14 +735,13 @@ AArch64 validation before the corresponding feature is declared stable.
 The direction above is settled; these details require implementation proofs
 before they become ABI:
 
-- the exact Native rights bit allocation and first published ABI revision;
+- the exact Native rights bit allocation;
 - the nVHE maximum user address and whether any foreign personality requires
   the EL1 relay fallback;
 - the exact x86-64 secondary result registers;
-- whether revision 1 includes a dedicated SharedQueue or BackendSession for
-  large asynchronous workloads;
+- whether the initial surface includes a dedicated SharedQueue or BackendSession
+  for large asynchronous workloads;
 - the complete priority-inheritance atomic-wait contract; and
-- how many older Native ABI revisions a stable kernel image will support
-  concurrently.
+- the compatibility policy to adopt when ABI versioning eventually begins.
 
-These questions remain outside the published ABI until resolved.
+These questions remain outside the current ABI design until resolved.

@@ -8,7 +8,7 @@ use std::process::Command;
 #[test]
 fn generated_c_header_satisfies_c_and_cpp_layout_assertions() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let header = manifest.join("../../abi/native/include/hyper/experimental_native.h");
+    let header = manifest.join("../../abi/native/include/hyper/native.h");
     let compiler = env::var_os("CLANG").unwrap_or_else(|| "clang".into());
     let c_status = Command::new(&compiler)
         .args(["-std=c11", "-x", "c", "-fsyntax-only"])

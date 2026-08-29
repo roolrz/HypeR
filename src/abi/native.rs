@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Experimental `HypeR` Native syscall values and owned entry payloads.
+//! `HypeR` Native syscall values and owned entry payloads.
 
-include!("../../abi/native/experimental.rs");
+include!("../../abi/native/generated.rs");
 
 /// Architecture-neutral copy of one Native syscall request.
 ///
@@ -12,14 +12,14 @@ include!("../../abi/native/experimental.rs");
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeInvocation {
     number: u64,
-    arguments: [u64; HYPER_EXPERIMENTAL_SYSCALL_ARGUMENT_REGISTERS],
+    arguments: [u64; HYPER_NATIVE_SYSCALL_ARGUMENT_REGISTERS],
     call_site: u64,
 }
 
 impl NativeInvocation {
     pub const fn new(
         number: u64,
-        arguments: [u64; HYPER_EXPERIMENTAL_SYSCALL_ARGUMENT_REGISTERS],
+        arguments: [u64; HYPER_NATIVE_SYSCALL_ARGUMENT_REGISTERS],
         call_site: u64,
     ) -> Self {
         Self {
@@ -33,7 +33,7 @@ impl NativeInvocation {
         self.number
     }
 
-    pub const fn arguments(&self) -> &[u64; HYPER_EXPERIMENTAL_SYSCALL_ARGUMENT_REGISTERS] {
+    pub const fn arguments(&self) -> &[u64; HYPER_NATIVE_SYSCALL_ARGUMENT_REGISTERS] {
         &self.arguments
     }
 
@@ -48,30 +48,30 @@ impl NativeInvocation {
 /// stale register contents or provisional capability values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct NativeResult {
-    status: HyperExperimentalStatus,
-    values: [u64; HYPER_EXPERIMENTAL_SYSCALL_RESULT_REGISTERS],
+    status: HyperNativeStatus,
+    values: [u64; HYPER_NATIVE_SYSCALL_RESULT_REGISTERS],
 }
 
 impl NativeResult {
     pub const fn new(
-        status: HyperExperimentalStatus,
-        values: [u64; HYPER_EXPERIMENTAL_SYSCALL_RESULT_REGISTERS],
+        status: HyperNativeStatus,
+        values: [u64; HYPER_NATIVE_SYSCALL_RESULT_REGISTERS],
     ) -> Self {
         Self {
             status,
             values: if status == 0 {
                 values
             } else {
-                [0; HYPER_EXPERIMENTAL_SYSCALL_RESULT_REGISTERS]
+                [0; HYPER_NATIVE_SYSCALL_RESULT_REGISTERS]
             },
         }
     }
 
-    pub const fn status(&self) -> HyperExperimentalStatus {
+    pub const fn status(&self) -> HyperNativeStatus {
         self.status
     }
 
-    pub const fn values(&self) -> &[u64; HYPER_EXPERIMENTAL_SYSCALL_RESULT_REGISTERS] {
+    pub const fn values(&self) -> &[u64; HYPER_NATIVE_SYSCALL_RESULT_REGISTERS] {
         &self.values
     }
 }

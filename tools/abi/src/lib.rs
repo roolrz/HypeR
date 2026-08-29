@@ -17,9 +17,9 @@ use schema::{
     ProducedObject, ProducedRights, ValueKind,
 };
 
-const GENERATED_RUST: &str = "abi/native/experimental.rs";
-const GENERATED_C: &str = "abi/native/include/hyper/experimental_native.h";
-const GENERATED_REFERENCE: &str = "abi/native/experimental-reference.md";
+const GENERATED_RUST: &str = "abi/native/generated.rs";
+const GENERATED_C: &str = "abi/native/include/hyper/native.h";
+const GENERATED_REFERENCE: &str = "abi/native/reference.md";
 
 #[derive(Debug)]
 pub enum Error {
@@ -61,16 +61,8 @@ pub struct GeneratedFiles {
 }
 
 pub fn validate(schema: &AbiSchema) -> Result<(), Error> {
-    match schema.publication {
-        schema::PublicationState::Experimental if schema.revision != 0 => {
-            return invalid("an experimental schema must use unpublished revision zero");
-        }
-        schema::PublicationState::Published => {
-            return invalid(
-                "published ABI rendering is not implemented; retain the experimental namespace",
-            );
-        }
-        schema::PublicationState::Experimental => {}
+    if schema.revision != 0 {
+        return invalid("pre-release ABI revision must remain zero");
     }
     validate_features(schema)?;
     validate_object_kinds(schema)?;
@@ -107,7 +99,6 @@ fn validate_features(schema: &AbiSchema) -> Result<(), Error> {
     let mut names = BTreeSet::new();
     for feature in schema.features {
         validate_identifier("feature", feature.name)?;
-        validate_declaration_stability(schema, "feature", feature.name, feature.stability)?;
         if feature.bit >= 64 {
             return invalid(format!(
                 "feature {} uses bit {} outside u64",
@@ -138,7 +129,6 @@ fn validate_object_kinds(schema: &AbiSchema) -> Result<(), Error> {
     let mut names = BTreeSet::new();
     for object in schema.object_kinds {
         validate_identifier("object kind", object.name)?;
-        validate_declaration_stability(schema, "object kind", object.name, object.stability)?;
         if !values.insert(object.value) {
             return invalid(format!(
                 "object-kind value {} is declared more than once",
@@ -169,7 +159,6 @@ fn validate_rights(schema: &AbiSchema) -> Result<u64, Error> {
     let mut mask = 0u64;
     for right in schema.rights {
         validate_identifier("right", right.name)?;
-        validate_declaration_stability(schema, "right", right.name, right.stability)?;
         if right.bit >= 64 {
             return invalid(format!(
                 "right {} uses bit {} outside u64",
@@ -194,7 +183,6 @@ fn validate_records(schema: &AbiSchema) -> Result<(), Error> {
     let mut names = BTreeSet::new();
     for record in schema.records {
         validate_identifier("record", record.name)?;
-        validate_declaration_stability(schema, "record", record.name, record.stability)?;
         if !names.insert(record.name) {
             return invalid(format!("record {} is declared more than once", record.name));
         }
@@ -273,16 +261,9 @@ fn validate_syscalls(schema: &AbiSchema, supported_rights: u64) -> Result<(), Er
             ));
         }
         if previous_number.is_some_and(|previous| syscall.number <= previous) {
-            return invalid("syscall declarations must be ordered by permanent number");
+            return invalid("syscall declarations must be ordered by number");
         }
         previous_number = Some(syscall.number);
-        if syscall.introduced > schema.revision {
-            return invalid(format!(
-                "syscall {} was introduced after the schema revision",
-                syscall.name
-            ));
-        }
-        validate_declaration_stability(schema, "syscall", syscall.name, syscall.stability)?;
         match syscall.feature {
             FeatureGate::Core => {}
             FeatureGate::Named(name)
@@ -501,23 +482,6 @@ fn validate_identifier(domain: &str, identifier: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn validate_declaration_stability(
-    schema: &AbiSchema,
-    domain: &str,
-    name: &str,
-    stability: schema::PublicationState,
-) -> Result<(), Error> {
-    if schema.publication == schema::PublicationState::Experimental
-        && stability != schema::PublicationState::Experimental
-    {
-        invalid(format!(
-            "{domain} {name} cannot be published by an experimental schema"
-        ))
-    } else {
-        Ok(())
-    }
-}
-
 fn invalid<T>(message: impl Into<String>) -> Result<T, Error> {
     Err(Error::InvalidSchema(message.into()))
 }
@@ -526,31 +490,30 @@ fn render_rust(schema: &AbiSchema) -> String {
     let mut output = String::from(
         "// SPDX-FileCopyrightText: 2026 roolrz\n\
          // SPDX-License-Identifier: Apache-2.0\n\n\
-         // Generated from abi/native/schema.rs. Do not edit.\n\
-         // This ABI is experimental and unpublished. Names, numbers, and layouts may change.\n\n",
+         // Generated from abi/native/schema.rs. Do not edit.\n\n",
     );
     let _ = writeln!(
         output,
-        "pub const HYPER_EXPERIMENTAL_ABI_REVISION: u64 = {};",
+        "pub const HYPER_NATIVE_ABI_REVISION: u64 = {};",
         schema.revision
     );
     let _ = writeln!(
         output,
-        "pub const HYPER_EXPERIMENTAL_SYSCALL_ARGUMENT_REGISTERS: usize = {};",
+        "pub const HYPER_NATIVE_SYSCALL_ARGUMENT_REGISTERS: usize = {};",
         schema::SYSCALL_ARGUMENT_REGISTERS
     );
     let _ = writeln!(
         output,
-        "pub const HYPER_EXPERIMENTAL_SYSCALL_RESULT_REGISTERS: usize = {};",
+        "pub const HYPER_NATIVE_SYSCALL_RESULT_REGISTERS: usize = {};",
         schema::SYSCALL_RESULT_REGISTERS
     );
     output.push_str(
-        "pub type HyperExperimentalHandle = u64;\n\
-         pub type HyperExperimentalStatus = i64;\n\n",
+        "pub type HyperNativeHandle = u64;\n\
+         pub type HyperNativeStatus = i64;\n\n",
     );
     render_rust_constants(
         &mut output,
-        "HYPER_EXPERIMENTAL_FEATURE",
+        "HYPER_NATIVE_FEATURE",
         schema
             .features
             .iter()
@@ -558,7 +521,7 @@ fn render_rust(schema: &AbiSchema) -> String {
     );
     render_rust_u32_constants(
         &mut output,
-        "HYPER_EXPERIMENTAL_OBJECT",
+        "HYPER_NATIVE_OBJECT",
         schema
             .object_kinds
             .iter()
@@ -566,7 +529,7 @@ fn render_rust(schema: &AbiSchema) -> String {
     );
     render_rust_constants(
         &mut output,
-        "HYPER_EXPERIMENTAL_RIGHT",
+        "HYPER_NATIVE_RIGHT",
         schema
             .rights
             .iter()
@@ -578,11 +541,11 @@ fn render_rust(schema: &AbiSchema) -> String {
         .fold(0u64, |mask, right| mask | (1u64 << right.bit));
     let _ = writeln!(
         output,
-        "pub const HYPER_EXPERIMENTAL_RIGHTS_MASK: u64 = {rights_mask};\n"
+        "pub const HYPER_NATIVE_RIGHTS_MASK: u64 = {rights_mask};\n"
     );
     render_rust_constants(
         &mut output,
-        "HYPER_EXPERIMENTAL_SYS",
+        "HYPER_NATIVE_SYS",
         schema
             .syscalls
             .iter()
@@ -591,7 +554,7 @@ fn render_rust(schema: &AbiSchema) -> String {
     for record in schema.records {
         let rust_name = upper_camel(record.name);
         output.push_str("#[repr(C)]\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
-        let _ = writeln!(output, "pub struct HyperExperimental{rust_name} {{");
+        let _ = writeln!(output, "pub struct HyperNative{rust_name} {{");
         let mut cursor = 0u16;
         let mut padding = 0usize;
         for field in record.fields {
@@ -621,18 +584,18 @@ fn render_rust(schema: &AbiSchema) -> String {
         output.push_str("}\n");
         let _ = writeln!(
             output,
-            "const _: () = assert!(core::mem::size_of::<HyperExperimental{rust_name}>() == {});",
+            "const _: () = assert!(core::mem::size_of::<HyperNative{rust_name}>() == {});",
             record.size
         );
         let _ = writeln!(
             output,
-            "const _: () = assert!(core::mem::align_of::<HyperExperimental{rust_name}>() == {});",
+            "const _: () = assert!(core::mem::align_of::<HyperNative{rust_name}>() == {});",
             record.alignment
         );
         for field in record.fields {
             let _ = writeln!(
                 output,
-                "const _: () = assert!(core::mem::offset_of!(HyperExperimental{rust_name}, {}) == {});",
+                "const _: () = assert!(core::mem::offset_of!(HyperNative{rust_name}, {}) == {});",
                 field.name, field.offset
             );
         }
@@ -679,12 +642,9 @@ fn render_c(schema: &AbiSchema) -> String {
     output.push_str(" * SPDX-License-Identifier: Apache-2.0\n");
     output.push_str(" *\n");
     output.push_str(" * Generated from abi/native/schema.rs. Do not edit.\n");
-    output.push_str(
-        " * This ABI is experimental and unpublished. Names, numbers, and layouts may change.\n",
-    );
     output.push_str(" */\n\n");
-    output.push_str("#ifndef HYPER_EXPERIMENTAL_NATIVE_H\n");
-    output.push_str("#define HYPER_EXPERIMENTAL_NATIVE_H\n\n");
+    output.push_str("#ifndef HYPER_NATIVE_H\n");
+    output.push_str("#define HYPER_NATIVE_H\n\n");
     output.push_str("#include <stddef.h>\n#include <stdint.h>\n\n");
     output.push_str("#if defined(__cplusplus)\n");
     output.push_str("#define HYPER_ABI_STATIC_ASSERT static_assert\n");
@@ -695,26 +655,26 @@ fn render_c(schema: &AbiSchema) -> String {
     output.push_str("#endif\n\n");
     let _ = writeln!(
         output,
-        "#define HYPER_EXPERIMENTAL_ABI_REVISION UINT64_C({})",
+        "#define HYPER_NATIVE_ABI_REVISION UINT64_C({})",
         schema.revision
     );
     let _ = writeln!(
         output,
-        "#define HYPER_EXPERIMENTAL_SYSCALL_ARGUMENT_REGISTERS UINT32_C({})",
+        "#define HYPER_NATIVE_SYSCALL_ARGUMENT_REGISTERS UINT32_C({})",
         schema::SYSCALL_ARGUMENT_REGISTERS
     );
     let _ = writeln!(
         output,
-        "#define HYPER_EXPERIMENTAL_SYSCALL_RESULT_REGISTERS UINT32_C({})",
+        "#define HYPER_NATIVE_SYSCALL_RESULT_REGISTERS UINT32_C({})",
         schema::SYSCALL_RESULT_REGISTERS
     );
     output.push_str(
-        "\ntypedef uint64_t hyper_experimental_handle_t;\n\
-         typedef int64_t hyper_experimental_status_t;\n\n",
+        "\ntypedef uint64_t hyper_native_handle_t;\n\
+         typedef int64_t hyper_native_status_t;\n\n",
     );
     render_c_constants(
         &mut output,
-        "HYPER_EXPERIMENTAL_FEATURE",
+        "HYPER_NATIVE_FEATURE",
         schema
             .features
             .iter()
@@ -722,7 +682,7 @@ fn render_c(schema: &AbiSchema) -> String {
     );
     render_c_u32_constants(
         &mut output,
-        "HYPER_EXPERIMENTAL_OBJECT",
+        "HYPER_NATIVE_OBJECT",
         schema
             .object_kinds
             .iter()
@@ -730,7 +690,7 @@ fn render_c(schema: &AbiSchema) -> String {
     );
     render_c_constants(
         &mut output,
-        "HYPER_EXPERIMENTAL_RIGHT",
+        "HYPER_NATIVE_RIGHT",
         schema
             .rights
             .iter()
@@ -742,22 +702,18 @@ fn render_c(schema: &AbiSchema) -> String {
         .fold(0u64, |mask, right| mask | (1u64 << right.bit));
     let _ = writeln!(
         output,
-        "#define HYPER_EXPERIMENTAL_RIGHTS_MASK UINT64_C({rights_mask})\n"
+        "#define HYPER_NATIVE_RIGHTS_MASK UINT64_C({rights_mask})\n"
     );
     render_c_constants(
         &mut output,
-        "HYPER_EXPERIMENTAL_SYS",
+        "HYPER_NATIVE_SYS",
         schema
             .syscalls
             .iter()
             .map(|value| (value.name, u64::from(value.number))),
     );
     for record in schema.records {
-        let _ = writeln!(
-            output,
-            "typedef struct hyper_experimental_{}_t {{",
-            record.name
-        );
+        let _ = writeln!(output, "typedef struct hyper_native_{}_t {{", record.name);
         let mut cursor = 0u16;
         let mut padding = 0usize;
         for field in record.fields {
@@ -779,28 +735,28 @@ fn render_c(schema: &AbiSchema) -> String {
                 record.size - cursor
             );
         }
-        let _ = writeln!(output, "}} hyper_experimental_{}_t;", record.name);
+        let _ = writeln!(output, "}} hyper_native_{}_t;", record.name);
         let _ = writeln!(
             output,
-            "HYPER_ABI_STATIC_ASSERT(sizeof(hyper_experimental_{}_t) == {}, \"{} size\");",
+            "HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_{}_t) == {}, \"{} size\");",
             record.name, record.size, record.name
         );
         let _ = writeln!(
             output,
-            "HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_experimental_{}_t) == {}, \"{} alignment\");",
+            "HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_{}_t) == {}, \"{} alignment\");",
             record.name, record.alignment, record.name
         );
         for field in record.fields {
             let _ = writeln!(
                 output,
-                "HYPER_ABI_STATIC_ASSERT(offsetof(hyper_experimental_{}_t, {}) == {}, \"{}.{} offset\");",
+                "HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_{}_t, {}) == {}, \"{}.{} offset\");",
                 record.name, field.name, field.offset, record.name, field.name
             );
         }
         output.push('\n');
     }
     output.push_str("#undef HYPER_ABI_ALIGNOF\n#undef HYPER_ABI_STATIC_ASSERT\n\n");
-    output.push_str("#endif /* HYPER_EXPERIMENTAL_NATIVE_H */\n");
+    output.push_str("#endif /* HYPER_NATIVE_H */\n");
     output
 }
 
@@ -840,15 +796,10 @@ fn render_reference(schema: &AbiSchema) -> String {
          SPDX-FileCopyrightText: 2026 roolrz\n\
          SPDX-License-Identifier: Apache-2.0\n\
          -->\n\n\
-         # Experimental HypeR Native ABI reference\n\n\
-         This file is generated from `abi/native/schema.rs`. Do not edit it directly.\n\
-         The ABI is unpublished; every name, number, and layout remains provisional.\n\n",
+         # HypeR Native ABI reference\n\n\
+         This file is generated from `abi/native/schema.rs`. Do not edit it directly.\n\n",
     );
-    let _ = writeln!(
-        output,
-        "Experimental ABI revision: `{}`.\n",
-        schema.revision
-    );
+    let _ = writeln!(output, "ABI revision: `{}`.\n", schema.revision);
     output.push_str(
         "## Syscalls\n\n\
          | Number | Name | Arguments | Results | Capability effects | User memory | Execution | Audit |\n\
@@ -1128,14 +1079,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_published_output_until_a_stable_namespace_exists() {
+    fn rejects_nonzero_revision_during_pre_release_development() {
         let candidate = AbiSchema {
-            publication: schema::PublicationState::Published,
             revision: 1,
             ..schema::NATIVE_ABI
         };
         assert!(
-            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("not implemented"))
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("must remain zero"))
         );
     }
 
@@ -1145,7 +1095,6 @@ mod tests {
             vec![schema::ObjectKind {
                 value: 1,
                 name: "none",
-                stability: schema::PublicationState::Experimental,
             }]
             .into_boxed_slice(),
         );

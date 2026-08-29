@@ -76,8 +76,8 @@ The current foundation includes:
 - generation-tagged, allocation-free wait arbitration across notification,
   timeout, and cancellation, with counted Completion, sleeping Mutex and
   Semaphore primitives, and migration-safe deadline waits;
-- an unpublished revision-zero Native ABI schema which generates checked Rust
-  and C layouts, provisional syscall metadata, and an auditable reference;
+- a pre-release Native ABI schema which generates checked Rust and C layouts,
+  syscall metadata, and an auditable reference;
 - a compiled capability foundation with fallible shared objects, schema-owned
   rights, 64-bit generation handles, detached unpublished slot transactions,
   deferred close, and allocation-free iterative teardown;
@@ -178,7 +178,7 @@ Useful targets:
 
 | Command | Purpose |
 | --- | --- |
-| `make generate-abi` | Regenerate the in-tree experimental Native ABI artifacts |
+| `make generate-abi` | Regenerate the in-tree Native ABI artifacts |
 | `make image ARCH=<arch>` | Build the canonical ELF and delivery image |
 | `make guest-assets ARCH=<arch>` | Download and package the pinned Linux guest inputs |
 | `make check ARCH=<arch>` | Run target checks and Clippy, including kernel self-test builds |
@@ -330,7 +330,7 @@ secondary architectures.
 | `src/arch/` | Architecture entry, context, page-table, exception, and virtualization mechanisms |
 | `src/hal/` | Narrow architecture-neutral capability contracts |
 | `src/kernel/` | Runtime ownership, policy, scheduling, IRQ, memory, devices, and VM orchestration |
-| `abi/native/` | Experimental Native ABI schema and generated Rust, C, and reference artifacts |
+| `abi/native/` | Native ABI schema and generated Rust, C, and reference artifacts |
 | `src/vm/` | Reusable VM packages, guest-visible models, and architecture-neutral virtualization vocabulary |
 | `src/drivers/` | Physical devices and firmware-interface drivers |
 | `src/platform/` | Firmware parsing and immutable platform description |
