@@ -22,6 +22,8 @@ pub mod registers;
 mod smp;
 mod stage2;
 mod timer;
+mod user;
+mod user_contract;
 mod vgic;
 mod vm_interrupt;
 mod vm_timer;
@@ -31,7 +33,7 @@ mod vsysreg;
 pub use atomics::{AtomicCapabilities, capabilities as atomic_capabilities};
 pub use cache::Aarch64Cache as ArchitectureCache;
 pub use context::{
-    ThreadContext, UserContext, VcpuContext, reset_stack_and_enter, run_on_emergency_stack,
+    ThreadContext, VcpuContext, reset_stack_and_enter, run_on_emergency_stack,
     switch_thread_context,
 };
 pub use exception::ValidationError as RuntimeVectorError;
@@ -90,6 +92,7 @@ pub use timer::{
     ArmGenericCounter as ArchitectureCounter, El2PhysicalTimer as ArchitectureTimer,
     Error as TimerError,
 };
+pub use user::{UserExecutionCapabilities, UserMachineContractError, execution_capabilities};
 pub use vgic::Error as VirtualInterruptError;
 pub use vgic::{
     Capabilities as VgicCapabilities, CpuContext as VgicCpuContext, Error as VgicError,

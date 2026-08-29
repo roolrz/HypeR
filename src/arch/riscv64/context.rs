@@ -39,25 +39,6 @@ impl ThreadContext {
 }
 
 #[repr(C, align(16))]
-pub struct UserContext {
-    pub general: [u64; 32],
-    pub program_counter: u64,
-    pub status: u64,
-}
-
-impl UserContext {
-    pub const fn new(program_counter: u64, stack_pointer: u64) -> Self {
-        let mut general = [0; 32];
-        general[2] = stack_pointer;
-        Self {
-            general,
-            program_counter,
-            status: 0,
-        }
-    }
-}
-
-#[repr(C, align(16))]
 pub struct VcpuContext {
     pub general: [u64; 32],
     pub program_counter: u64,

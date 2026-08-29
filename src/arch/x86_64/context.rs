@@ -53,25 +53,6 @@ impl ThreadContext {
 }
 
 #[repr(C, align(16))]
-pub struct UserContext {
-    pub general: [u64; 16],
-    pub instruction_pointer: u64,
-    pub flags: u64,
-}
-
-impl UserContext {
-    pub const fn new(instruction_pointer: u64, stack_pointer: u64) -> Self {
-        let mut general = [0; 16];
-        general[4] = stack_pointer;
-        Self {
-            general,
-            instruction_pointer,
-            flags: 2,
-        }
-    }
-}
-
-#[repr(C, align(16))]
 pub struct VcpuContext {
     pub general: [u64; 16],
     pub instruction_pointer: u64,

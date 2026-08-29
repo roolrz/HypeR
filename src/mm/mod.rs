@@ -12,6 +12,6 @@ pub mod kaslr;
 
 pub use access::{ForeignCopyError, ForeignMemory, copy_from_foreign, copy_to_foreign};
 pub use address::{PAGE_SIZE, PhysicalAddress, VirtualAddress};
-pub use allocation::{AllocationError, try_box};
+pub use allocation::{AllocationError, FallibleArc, try_box};
 pub use allocator::{BuddyAllocator, BuddyError, BuddyStats, MAX_ORDER, MemoryHandoff};
 pub use boot::{BootAllocator, BootAllocatorError, BootMemoryStats};

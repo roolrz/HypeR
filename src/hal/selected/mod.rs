@@ -17,4 +17,5 @@ pub(crate) mod irq;
 pub(crate) mod memory;
 pub(crate) mod platform;
 pub(crate) mod time;
+pub(crate) mod user;
 pub(crate) mod vm;

@@ -7,7 +7,7 @@
 //! architecture register images and the machine operations which initialize or
 //! switch them. Stack ownership and mapping remain kernel memory policy.
 
-pub(crate) use super::imp::{ThreadContext, UserContext};
+pub(crate) use super::imp::ThreadContext;
 
 pub(crate) type SwitchCompletion = extern "C" fn();
 
