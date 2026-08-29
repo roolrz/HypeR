@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "hyper-abi"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+
+[lints.clippy]
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+
+[workspace]

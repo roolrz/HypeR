@@ -8,7 +8,7 @@ use hyper::cpu::CpuIndex;
 
 const THREAD_NAME_CAPACITY: usize = 32;
 
-use crate::kernel::mm::{AddressSpaceId, stack::KernelStack};
+use crate::kernel::mm::stack::KernelStack;
 use crate::kernel::task::policy::{
     CpuMask, SchedulingClass, SchedulingPolicy, ThreadPlacement, ThreadPriority,
 };
@@ -81,11 +81,6 @@ impl QueueLinks {
         next: None,
         membership: QueueMembership::None,
     };
-}
-
-pub struct UserExecution {
-    pub address_space: AddressSpaceId,
-    pub context: crate::hal::context::UserContext,
 }
 
 pub struct VcpuExecution {
@@ -212,14 +207,12 @@ impl Drop for VcpuExecution {
 
 pub enum ThreadExecution {
     Kernel,
-    User(Box<UserExecution>),
     Vcpu(Box<VcpuExecution>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionKind {
     Kernel,
-    User,
     Vcpu,
 }
 
@@ -240,10 +233,11 @@ impl From<crate::hal::vm::VirtualInterruptError> for Error {
 /// A schedulable execution entity.
 ///
 /// Every thread owns a kernel scheduling context and, except for the bootstrap
-/// thread, a private kernel stack. User and vCPU architectural state is an
-/// attached execution payload; it is deliberately separate from the context
-/// used while the scheduler and exception handlers execute in the host
-/// hypervisor privilege domain.
+/// thread, a private kernel stack. vCPU architectural state is an attached
+/// execution payload; it is deliberately separate from the context used while
+/// the scheduler and exception handlers execute in the host hypervisor
+/// privilege domain. A future user execution payload must strongly own its
+/// Process and prepared address space before it becomes a Thread variant.
 pub struct Thread {
     id: ThreadId,
     placement: ThreadPlacement,
@@ -560,15 +554,7 @@ impl Thread {
     pub const fn execution_kind(&self) -> ExecutionKind {
         match self.execution {
             ThreadExecution::Kernel => ExecutionKind::Kernel,
-            ThreadExecution::User(_) => ExecutionKind::User,
             ThreadExecution::Vcpu(_) => ExecutionKind::Vcpu,
-        }
-    }
-
-    pub fn user_execution(&self) -> Option<&UserExecution> {
-        match &self.execution {
-            ThreadExecution::User(execution) => Some(execution.as_ref()),
-            _ => None,
         }
     }
 

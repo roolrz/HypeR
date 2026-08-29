@@ -73,6 +73,9 @@ define_asm_constants! {
         | HCR_EL2_TID3;
     HCR_EL2_VHE_HOST_VALUE = HCR_EL2_BOOT_VALUE | HCR_EL2_E2H | HCR_EL2_TGE;
 
+    // Translation-table base address-space identifier fields.
+    TTBR_ASID_SHIFT = 48;
+
     // ID_AA64MMFR1_EL1.Virtualization Host Extensions.
     ID_AA64MMFR1_VH_SHIFT = 8;
     ID_AA64MMFR1_VH_MASK = 0xf;

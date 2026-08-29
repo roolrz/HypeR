@@ -125,6 +125,45 @@ allocation or blocking, frame aliasing and lifetime, and hot-path costs. Other
 architecture mechanism code must not call kernel logging, boot failure,
 scheduling, IRQ dispatch, or VM policy directly.
 
+## Native userspace boundary
+
+Native user entry follows the same policy-above-mechanism rule without reusing
+the vCPU world switch. Complete trap frames, translation registers, return
+regimes, and user-context encoding remain architecture-private. The upward
+adapter receives an owned syscall invocation and returns a fixed-width result;
+it never passes a Rust frame reference into code which can allocate, block,
+preempt, or migrate.
+
+The selected `hal::user` facade currently exposes only inert machine-capability
+discovery. It deliberately provides no activation or entry operation. The
+completed facade will own opaque prepared user address spaces, activation and
+deactivation, entry and return, architecture user-address limits, and the
+selected local invalidation mechanism. Process lifetime, handles, rights,
+syscall numbers, ELF policy, compatibility routing, and resource accounting
+remain in the kernel. The earlier identity-only `UserExecution` scaffold was
+removed; a runnable replacement must strongly own its Process and prepared
+address space.
+
+AArch64 requires two independently validated implementations behind that
+facade. VHE uses the host EL2&0 translation regime. The preferred nVHE spike
+uses direct EL0, `HCR_EL2.TGE`, and a per-process stage-2 address space; it must
+not reuse the VM subsystem's current single-active-vCPU execution lease because
+one process may execute Threads concurrently on several CPUs. User stage-2
+therefore needs its own resident-CPU set, mapping epoch, shootdown
+acknowledgement, VMID generation, and reuse-retirement protocol. An EL1 relay
+is a compatibility fallback only if the stage-2-only proof cannot provide a
+required ABI semantic.
+
+The kernel exposes one Native ABI. Linux and FreeBSD are initially isolated
+EL0 supervisor domains selected transactionally with the process image; foreign
+syscalls are not translated into Native syscall calls. The route may later add
+one separately audited whole-personality kernel engine, but may not split one
+personality syscall-by-syscall across two semantic owners.
+
+The complete object, capability, IPC, ABI, supervised-execution, AArch64 proof,
+and implementation contracts are normative in the [userspace and syscall
+architecture](syscall-abi.md).
+
 ## Construction and publication
 
 Resources follow `prepare -> validate -> publish`. Construction happens in

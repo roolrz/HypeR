@@ -7,6 +7,15 @@
 //! lifecycle contract. Keep shared helpers here deliberately small so tests do
 //! not acquire a second framework of their own.
 
+extern crate alloc;
+
+#[cfg(test)]
+#[path = "../../../src/arch/aarch64/user_contract.rs"]
+mod aarch64_user_contract_model;
+#[cfg(test)]
+#[path = "../../../src/arch/aarch64/registers.rs"]
+mod registers;
+
 #[cfg(test)]
 fn require_ok<T, E: core::fmt::Debug>(result: Result<T, E>) -> T {
     match result {
@@ -27,6 +36,9 @@ fn require_some<T>(value: Option<T>) -> T {
 #[path = "cases/aarch64_cache.rs"]
 mod aarch64_cache;
 #[cfg(test)]
+#[path = "cases/aarch64_user_contract.rs"]
+mod aarch64_user_contract;
+#[cfg(test)]
 #[path = "cases/allocation.rs"]
 mod allocation;
 #[cfg(test)]
@@ -35,6 +47,9 @@ mod boot_allocator;
 #[cfg(test)]
 #[path = "cases/cache_publication.rs"]
 mod cache_publication;
+#[cfg(test)]
+#[path = "cases/capability_core.rs"]
+mod capability_core;
 #[cfg(test)]
 #[path = "cases/cpio.rs"]
 mod cpio;
@@ -68,6 +83,9 @@ mod kernel_log;
 #[cfg(test)]
 #[path = "cases/mmio_resources.rs"]
 mod mmio_resources;
+#[cfg(test)]
+#[path = "cases/native_abi.rs"]
+mod native_abi;
 #[cfg(test)]
 #[path = "cases/ns16550.rs"]
 mod ns16550;

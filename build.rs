@@ -21,6 +21,12 @@ mod x86_64_registers;
 #[allow(dead_code)]
 #[path = "tools/kconfig/src/lib.rs"]
 mod kconfig;
+// Kernel builds consume generated Rust ABI values. Including the generator's
+// drift checker here prevents a direct Cargo build from silently compiling
+// bindings which no longer match the schema.
+#[allow(dead_code)]
+#[path = "tools/abi/src/lib.rs"]
+mod native_abi;
 
 type AssemblySource<'a> = (&'a str, &'a str);
 type ArchitectureBuild<'a> = (&'a str, &'a [(&'a str, u64)], &'a [AssemblySource<'a>]);
@@ -48,9 +54,17 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=src/arch/x86_64/registers.rs");
     println!("cargo:rerun-if-changed=src/arch/x86_64/linker.ld");
     println!("cargo:rerun-if-changed=Kconfig");
+    println!("cargo:rerun-if-changed=abi/native/schema.rs");
+    println!("cargo:rerun-if-changed=abi/native/generated.rs");
+    println!("cargo:rerun-if-changed=abi/native/reference.md");
+    println!("cargo:rerun-if-changed=abi/native/include/hyper/native.h");
+    println!("cargo:rerun-if-changed=tools/abi/src/lib.rs");
     println!("cargo:rerun-if-env-changed=HYPER_CONFIG");
     println!("cargo:rerun-if-env-changed=HYPER_KALLSYMS_BLOB");
     println!("cargo:rustc-check-cfg=cfg(hyper_embed_kallsyms)");
+
+    let repository = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
+    native_abi::check_repository_outputs(&repository)?;
 
     let output_directory = PathBuf::from(env::var("OUT_DIR")?);
     let target = env::var("TARGET")?;

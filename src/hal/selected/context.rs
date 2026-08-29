@@ -8,7 +8,7 @@
 //! that scheduler-owned state.
 
 pub(crate) use crate::arch::context::SwitchCompletion;
-pub(crate) use crate::arch::context::{ThreadContext, UserContext};
+pub(crate) use crate::arch::context::ThreadContext;
 
 /// Switches between two pinned scheduler-owned machine contexts.
 ///

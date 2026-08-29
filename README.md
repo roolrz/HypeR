@@ -76,6 +76,11 @@ The current foundation includes:
 - generation-tagged, allocation-free wait arbitration across notification,
   timeout, and cancellation, with counted Completion, sleeping Mutex and
   Semaphore primitives, and migration-safe deadline waits;
+- a pre-release Native ABI schema which generates checked Rust and C layouts,
+  syscall metadata, and an auditable reference;
+- a compiled capability foundation with fallible shared objects, schema-owned
+  rights, 64-bit generation handles, detached unpublished slot transactions,
+  deferred close, and allocation-free iterative teardown;
 - safe AArch64 IRQ-tail preemption, including deactivation and resumption of
   scheduler-owned vCPU continuations;
 - IRQ domains and shared handler registration, GICv3/vGIC, PLIC, x2APIC, host
@@ -90,7 +95,8 @@ The current foundation includes:
   optional allocation-free crash console.
 
 This list describes implemented foundations, not a claim of production
-completeness. In particular, device assignment, strong guest isolation policy,
+completeness. In particular, runnable isolated native userspace, a published
+capability syscall ABI, device assignment, strong guest isolation policy,
 cross-architecture asynchronous preemption, controlled vCPU migration,
 automatic load balancing, broad hardware discovery, stable management APIs,
 and a general-purpose virtual I/O stack are still under development.
@@ -100,8 +106,10 @@ and a general-purpose virtual I/O stack are still under development.
 HypeR keeps policy above mechanism:
 
 ```text
-kernel entry and initialization policy
-    -> kernel services: task, IRQ, time, memory, crash, device
+native EL0 VMM, services, and future compatibility supervisors
+    -> versioned syscall and capability boundary
+    -> kernel user-entry adapters and services
+    -> kernel policy: task, IRQ, time, memory, crash, device
     -> kernel VM policy: lifecycle, vCPU orchestration, resource ownership
     -> reusable VM formats, guest ABI, events, and device models
     -> architecture-neutral mechanisms and HAL capabilities
@@ -123,7 +131,9 @@ direct architecture-to-kernel dependencies while the remaining raw-frame exit
 classes are migrated independently.
 
 Read [the architecture guide](docs/architecture.md) for the normative boundary
-rules and migration constraints.
+rules and migration constraints. The planned process, capability, syscall, and
+foreign-ABI boundary is specified separately in the [userspace and syscall
+design](docs/syscall-abi.md).
 
 ## Quick start
 
@@ -168,10 +178,11 @@ Useful targets:
 
 | Command | Purpose |
 | --- | --- |
+| `make generate-abi` | Regenerate the in-tree Native ABI artifacts |
 | `make image ARCH=<arch>` | Build the canonical ELF and delivery image |
 | `make guest-assets ARCH=<arch>` | Download and package the pinned Linux guest inputs |
 | `make check ARCH=<arch>` | Run target checks and Clippy, including kernel self-test builds |
-| `make test ARCH=<arch>` | Run host, Kconfig, and kallsyms tests |
+| `make test ARCH=<arch>` | Run host, Kconfig, kallsyms, and Native ABI tests |
 | `make test-image ARCH=<arch>` | Verify the ELF, relocation, image, and architecture contract |
 | `make test-qemu ARCH=<arch>` | Run the architecture's QEMU acceptance test where supported |
 | `make verify ARCH=<arch>` | Run the complete local contract for the selected architecture |
@@ -230,8 +241,10 @@ exact coverage and supported runtime expectations.
 
 ## Roadmap
 
-The roadmap describes direction rather than release promises. Each stage must
-keep AArch64 healthy and preserve buildable secondary architectures.
+The roadmap describes direction rather than release promises. Adjacent work may
+overlap, but a later stage must not bypass an ownership or isolation prerequisite
+from an earlier one. Every stage keeps AArch64 healthy and preserves buildable
+secondary architectures.
 
 ### 1. Complete typed architecture entry
 
@@ -243,7 +256,21 @@ keep AArch64 healthy and preserve buildable secondary architectures.
   can reach an unregistered entry service;
 - keep raw frames and backend-specific state private to architecture entry.
 
-### 2. Extend VM lifetime and topology
+### 2. Establish native EL0 and the capability ABI
+
+- prove the AArch64 VHE host-EL0 and nVHE stage-2-only execution paths before
+  publishing a binary ABI, retaining a minimal EL1 relay only as a justified
+  compatibility fallback;
+- add Process, UserThread, user-address-space, generational handle, typed-right,
+  ResourceDomain, and TaskGroup ownership;
+- generate direct syscall dispatch, Rust/C bindings, architecture stubs, vDSO
+  exports, layouts, and reference documentation from one checked schema;
+- provide VMO/VMAR, Channel/Event/WaitSet, time, atomic-wait, and safe user-copy
+  primitives sufficient for a real service runtime.
+- complete cooperative Thread/Process stop, join, cancellation, and fault
+  containment before admitting multi-Thread processes or atomic exec.
+
+### 3. Extend VM lifetime and topology
 
 - replace the current non-removable binding with allocator-safe VM leases and
   cross-CPU vCPU retirement;
@@ -252,17 +279,33 @@ keep AArch64 healthy and preserve buildable secondary architectures.
   registries;
 - add explicit pause, resume, shutdown, and resource-accounting lifecycles.
 
-### 3. Expand platform and device breadth
+### 4. Move VMM policy to native userspace
 
-- extend the existing owned MMIO/IRQ model to DMA, IOMMU, and firmware
-  resources;
-- resolve generic FDT phandles, `interrupt-map`, and
-  `interrupts-extended` without moving binding policy into the parser;
-- add a reusable virtio-mmio transport before virtio console, block, and
-  network devices;
-- develop IOMMU and device-assignment foundations without weakening isolation.
+- expose VM, vCPU, guest-memory, interrupt, and lifecycle operations through
+  typed capabilities without duplicating the kernel VM registry;
+- start a native EL0 VMM and move bundle selection, VM construction policy, and
+  management orchestration out of EL2;
+- retain architecture entry, translation, IRQ, and world-switch mechanisms
+  behind the selected HAL.
 
-### 4. Mature kernel execution
+### 5. Build device-isolation resources
+
+- extend the existing owned MMIO/IRQ model to DMA, IOMMU, firmware, and
+  physical-memory authorities;
+- implement revocable MemoryGrant, DeviceLease, DmaMapping, and
+  InterruptSession lifecycles with fail-closed teardown;
+- resolve generic FDT phandles, `interrupt-map`, and `interrupts-extended`
+  without moving binding policy into the parser.
+
+### 6. Add the transitional Linux driver domain
+
+- run Linux as an untrusted driver-domain VM, never as HypeR's host OS;
+- introduce a bounded copy-based backend transport before shared zero-copy
+  queues, then add virtio block and network frontends;
+- require stage-2 and IOMMU confinement before assigning physical devices or
+  permitting DMA into granted memory.
+
+### 7. Mature kernel execution
 
 - qualify IRQ-tail and vCPU preemption on secondary architectures, then add
   controlled migration and load balancing over existing affinity metadata;
@@ -271,13 +314,14 @@ keep AArch64 healthy and preserve buildable secondary architectures.
 - validate ordering, cache maintenance, and interrupt behavior on physical
   AArch64 hardware.
 
-### 5. Build the hybrid-kernel personality
+### 8. Add foreign binary personalities
 
-- introduce isolated userspace processes and a stable syscall boundary;
-- develop a Linux application binary compatibility personality in the spirit
-  of a hybrid kernel rather than running every service inside the hypervisor;
-- keep compatibility policy separate from the scheduler, architecture, and VM
-  mechanisms it consumes.
+- add a supervised execution route which is immutable for each installed
+  ProcessImage and prove it first with a small alternate test ABI;
+- implement Linux and FreeBSD compatibility supervisors with private fd,
+  signal, credential, VFS, restart, auxiliary-vector, and vDSO policy;
+- keep the route extensible for a future whole-personality in-kernel engine,
+  while rejecting per-syscall mixing of kernel and supervisor semantics.
 
 ## Repository guide
 
@@ -286,16 +330,18 @@ keep AArch64 healthy and preserve buildable secondary architectures.
 | `src/arch/` | Architecture entry, context, page-table, exception, and virtualization mechanisms |
 | `src/hal/` | Narrow architecture-neutral capability contracts |
 | `src/kernel/` | Runtime ownership, policy, scheduling, IRQ, memory, devices, and VM orchestration |
+| `abi/native/` | Native ABI schema and generated Rust, C, and reference artifacts |
 | `src/vm/` | Reusable VM packages, guest-visible models, and architecture-neutral virtualization vocabulary |
 | `src/drivers/` | Physical devices and firmware-interface drivers |
 | `src/platform/` | Firmware parsing and immutable platform description |
 | `src/mm/`, `src/sync/`, `src/time/` | Reusable allocation, synchronization, and timing mechanisms |
 | `tests/` | Host tests, kernel self-tests, image verification, QEMU acceptance, and CI contracts |
-| `tools/` | Kconfig, kallsyms, and guest-payload tooling |
+| `tools/` | Native ABI, Kconfig, kallsyms, and guest-payload tooling |
 
 Further documentation:
 
 - [Architecture boundaries](docs/architecture.md)
+- [Userspace and syscall architecture](docs/syscall-abi.md)
 - [VM bundle format](docs/vm-bundle.md)
 - [RISC-V execution profile](docs/riscv64.md)
 - [x86-64 execution profile](docs/x86_64.md)

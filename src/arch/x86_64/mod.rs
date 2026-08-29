@@ -36,8 +36,7 @@ pub type InterruptVirtualizationError = core::convert::Infallible;
 
 pub use cache::X86_64Cache as ArchitectureCache;
 pub use context::{
-    ThreadContext, UserContext, VcpuContext, VirtualInterruptError, reset_stack_and_enter,
-    switch_thread_context,
+    ThreadContext, VcpuContext, VirtualInterruptError, reset_stack_and_enter, switch_thread_context,
 };
 pub use cpu_power::{Error as CpuPowerError, X2ApicCpuPower as ArchitectureCpuPower};
 pub use exception::ValidationError as RuntimeVectorError;
