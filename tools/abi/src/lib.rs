@@ -65,10 +65,39 @@ pub fn validate(schema: &AbiSchema) -> Result<(), Error> {
         return invalid("pre-release ABI revision must remain zero");
     }
     validate_features(schema)?;
+    validate_statuses(schema)?;
     validate_object_kinds(schema)?;
     let supported_rights = validate_rights(schema)?;
     validate_records(schema)?;
     validate_syscalls(schema, supported_rights)
+}
+
+fn validate_statuses(schema: &AbiSchema) -> Result<(), Error> {
+    let mut values = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    for status in schema.statuses {
+        validate_identifier("status", status.name)?;
+        if status.value > 0 {
+            return invalid(format!(
+                "status {} uses positive value {}",
+                status.name, status.value
+            ));
+        }
+        if !values.insert(status.value) {
+            return invalid(format!(
+                "status value {} is declared more than once",
+                status.value
+            ));
+        }
+        if !names.insert(status.name) {
+            return invalid(format!("status {} is declared more than once", status.name));
+        }
+    }
+    match schema.statuses.iter().find(|status| status.name == "ok") {
+        Some(status) if status.value == 0 => Ok(()),
+        Some(_) => invalid("the ok status must retain value zero"),
+        None => invalid("the ok status is missing"),
+    }
 }
 
 pub fn generate(schema: &AbiSchema) -> Result<GeneratedFiles, Error> {
@@ -519,6 +548,14 @@ fn render_rust(schema: &AbiSchema) -> String {
             .iter()
             .map(|value| (value.name, 1u64 << value.bit)),
     );
+    render_rust_i64_constants(
+        &mut output,
+        "HYPER_NATIVE_STATUS",
+        schema
+            .statuses
+            .iter()
+            .map(|value| (value.name, value.value)),
+    );
     render_rust_u32_constants(
         &mut output,
         "HYPER_NATIVE_OBJECT",
@@ -637,6 +674,21 @@ fn render_rust_u32_constants<'a>(
     output.push('\n');
 }
 
+fn render_rust_i64_constants<'a>(
+    output: &mut String,
+    prefix: &str,
+    values: impl Iterator<Item = (&'a str, i64)>,
+) {
+    for (name, value) in values {
+        let _ = writeln!(
+            output,
+            "pub const {prefix}_{}: HyperNativeStatus = {value};",
+            upper_snake(name)
+        );
+    }
+    output.push('\n');
+}
+
 fn render_c(schema: &AbiSchema) -> String {
     let mut output = String::from("/* SPDX-FileCopyrightText: 2026 roolrz\n");
     output.push_str(" * SPDX-License-Identifier: Apache-2.0\n");
@@ -679,6 +731,14 @@ fn render_c(schema: &AbiSchema) -> String {
             .features
             .iter()
             .map(|value| (value.name, 1u64 << value.bit)),
+    );
+    render_c_i64_constants(
+        &mut output,
+        "HYPER_NATIVE_STATUS",
+        schema
+            .statuses
+            .iter()
+            .map(|value| (value.name, value.value)),
     );
     render_c_u32_constants(
         &mut output,
@@ -790,6 +850,22 @@ fn render_c_u32_constants<'a>(
     output.push('\n');
 }
 
+fn render_c_i64_constants<'a>(
+    output: &mut String,
+    prefix: &str,
+    values: impl Iterator<Item = (&'a str, i64)>,
+) {
+    for (name, value) in values {
+        let rendered = if value < 0 {
+            format!("(-INT64_C({}))", value.unsigned_abs())
+        } else {
+            format!("INT64_C({value})")
+        };
+        let _ = writeln!(output, "#define {prefix}_{} {rendered}", upper_snake(name));
+    }
+    output.push('\n');
+}
+
 fn render_reference(schema: &AbiSchema) -> String {
     let mut output = String::from(
         "<!--\n\
@@ -800,6 +876,11 @@ fn render_reference(schema: &AbiSchema) -> String {
          This file is generated from `abi/native/schema.rs`. Do not edit it directly.\n\n",
     );
     let _ = writeln!(output, "ABI revision: `{}`.\n", schema.revision);
+    output.push_str("## Status values\n\n| Value | Name |\n| ---: | --- |\n");
+    for status in schema.statuses {
+        let _ = writeln!(output, "| {} | `{}` |", status.value, status.name);
+    }
+    output.push('\n');
     output.push_str(
         "## Syscalls\n\n\
          | Number | Name | Arguments | Results | Capability effects | User memory | Execution | Audit |\n\
@@ -1104,6 +1185,30 @@ mod tests {
         };
         assert!(
             matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("reserved value zero"))
+        );
+    }
+
+    #[test]
+    fn reserves_zero_for_success_and_rejects_positive_statuses() {
+        let statuses = Box::leak(
+            vec![
+                schema::Status {
+                    value: 0,
+                    name: "ok",
+                },
+                schema::Status {
+                    value: 1,
+                    name: "invalid",
+                },
+            ]
+            .into_boxed_slice(),
+        );
+        let candidate = AbiSchema {
+            statuses,
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("positive value"))
         );
     }
 }

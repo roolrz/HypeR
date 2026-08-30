@@ -40,10 +40,12 @@ impl InterruptId {
 pub struct KernelRpcReasons(u8);
 
 impl KernelRpcReasons {
-    const KNOWN_BITS: u8 = Self::LOCAL_IRQ_LIFECYCLE.0 | Self::STAGE1_TLB_SHOOTDOWN.0;
+    const KNOWN_BITS: u8 =
+        Self::LOCAL_IRQ_LIFECYCLE.0 | Self::STAGE1_TLB_SHOOTDOWN.0 | Self::USER_ADDRESS_SPACE.0;
     pub const NONE: Self = Self(0);
     pub const LOCAL_IRQ_LIFECYCLE: Self = Self(1 << 0);
     pub const STAGE1_TLB_SHOOTDOWN: Self = Self(1 << 1);
+    pub const USER_ADDRESS_SPACE: Self = Self(1 << 2);
 
     pub const fn bits(self) -> u8 {
         self.0

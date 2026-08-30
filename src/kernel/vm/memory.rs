@@ -16,7 +16,7 @@ use hyper::sync::atomic::{AtomicU64, Ordering};
 use hyper::vm::exit::{GuestMemoryFault, MemoryAccess};
 use hyper::vm::translation::{ActiveMappingError, residency_is_current};
 
-use super::registry::{HardwareVmid, VmId};
+use super::registry::VmId;
 use crate::hal::vm::{Stage2AddressSpace, Stage2Error};
 use crate::kernel::mm::page_block::PageBlock;
 
@@ -111,11 +111,26 @@ pub(crate) struct GuestAddressSpace {
     instruction_epoch: AtomicU64,
     stage2: Stage2AddressSpace,
     table_pages: Stage2PagePool,
+    identifier: Stage2Identifier,
+}
+
+pub(crate) type Stage2IdentifierReservation =
+    crate::kernel::mm::translation_id::IdentifierReservation<
+        crate::kernel::mm::translation_id::Stage2Vmid,
+    >;
+type ActiveStage2Identifier = crate::kernel::mm::translation_id::ActiveIdentifier<
+    crate::kernel::mm::translation_id::Stage2Vmid,
+>;
+
+enum Stage2Identifier {
+    Reserved(Option<Stage2IdentifierReservation>),
+    Active(ActiveStage2Identifier),
+    Poisoned,
 }
 
 impl GuestAddressSpace {
     pub(crate) fn new(
-        hardware_vmid: HardwareVmid,
+        hardware_vmid: Stage2IdentifierReservation,
         ipa_base: u64,
         size: u64,
     ) -> Result<Self, Error> {
@@ -133,7 +148,11 @@ impl GuestAddressSpace {
         // aligned PageBlocks from writable RAM in the permanent linear map.
         // `table_pages` retains every block for at least as long as `stage2`,
         // and this not-yet-published address space has exclusive mutation.
-        let stage2 = unsafe { Stage2AddressSpace::new(hardware_vmid.get(), &mut allocate_table)? };
+        let identifier = hardware_vmid.value();
+        // SAFETY: The consumed reservation is the unique construction
+        // authority for this VMID, while `tables` retains every allocated
+        // hierarchy page through GuestAddressSpace retirement.
+        let stage2 = unsafe { Stage2AddressSpace::new(identifier, &mut allocate_table)? };
         Ok(Self {
             ipa_base,
             size,
@@ -154,7 +173,27 @@ impl GuestAddressSpace {
             instruction_epoch: AtomicU64::new(1),
             stage2,
             table_pages,
+            identifier: Stage2Identifier::Reserved(Some(hardware_vmid)),
         })
+    }
+
+    pub(super) fn activate_identifier_for_install(&mut self) -> Result<(), super::registry::Error> {
+        let previous = core::mem::replace(&mut self.identifier, Stage2Identifier::Poisoned);
+        let Stage2Identifier::Reserved(Some(reservation)) = previous else {
+            return Err(super::registry::Error::InvalidReservation);
+        };
+        let active = reservation
+            .activate()
+            .map_err(|_| super::registry::Error::IdentityExhausted)?;
+        self.identifier = Stage2Identifier::Active(active);
+        Ok(())
+    }
+
+    fn active_identifier(&self) -> Result<&ActiveStage2Identifier, Error> {
+        match &self.identifier {
+            Stage2Identifier::Active(identifier) => Ok(identifier),
+            Stage2Identifier::Reserved(_) | Stage2Identifier::Poisoned => Err(Error::Poisoned),
+        }
     }
 
     pub fn copy_from(&mut self, ipa: u64, destination: &mut [u8]) -> Result<(), Error> {
@@ -501,6 +540,9 @@ impl crate::hal::guest::PayloadMemory for GuestAddressSpace {
 pub(in crate::kernel) unsafe fn activate(vm: &super::registry::VmBinding) -> Result<(), Error> {
     vm.with_address_space(|address_space| {
         address_space.ensure_healthy()?;
+        if address_space.active_identifier()?.value() == 0 {
+            return Err(Error::Poisoned);
+        }
         let cpu = crate::kernel::cpu::current_index().ok_or(Error::InvalidCpu)?;
         let root = address_space.stage2.root_address();
         let epoch = address_space.translation_epoch;

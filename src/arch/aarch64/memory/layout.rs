@@ -7,7 +7,17 @@ use hyper::mm::{PhysicalAddress, VirtualAddress};
 const ADDRESS_SPACE_SIZE: u64 = super::super::address::STAGE1_VA_LIMIT;
 const KERNEL_REGION_SIZE: u64 = 1 << 40;
 
-pub(super) const MMIO_BASE: u64 = ADDRESS_SPACE_SIZE >> 4;
+/// Exclusive upper bound of native-user VA authority in the VHE host root.
+///
+/// The host keeps MMIO, the linear map, and the kernel image above this point
+/// in the same lower `TTBR0_EL2` address space. A process root may share those
+/// privileged subtrees, but must never create user mappings that reach them.
+const STAGE1_L0_SPAN: u64 = 1 << 39;
+pub(in crate::arch::aarch64) const MMIO_BASE: u64 = if ADDRESS_SPACE_SIZE >> 4 < STAGE1_L0_SPAN {
+    STAGE1_L0_SPAN
+} else {
+    ADDRESS_SPACE_SIZE >> 4
+};
 pub(in crate::arch::aarch64) const LINEAR_BASE: u64 = ADDRESS_SPACE_SIZE >> 2;
 pub(in crate::arch::aarch64) const KERNEL_BASE: u64 = ADDRESS_SPACE_SIZE - KERNEL_REGION_SIZE;
 pub(super) const KERNEL_STACK_BASE: u64 = KERNEL_BASE + super::super::kaslr::WINDOW_SIZE;
@@ -16,6 +26,7 @@ const BOOTSTRAP_ACCESSIBLE_LIMIT: u64 = 0x1_0000_0000;
 
 const _: () = {
     assert!(MMIO_BASE < LINEAR_BASE);
+    assert!(MMIO_BASE.is_multiple_of(STAGE1_L0_SPAN));
     assert!(LINEAR_BASE < KERNEL_BASE);
     assert!(KERNEL_STACK_ARENA_BASE < ADDRESS_SPACE_SIZE);
 };

@@ -9,3 +9,4 @@ pub mod interrupt;
 pub mod io;
 pub mod memory;
 pub mod timer;
+pub mod user;

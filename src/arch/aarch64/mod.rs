@@ -24,6 +24,8 @@ mod stage2;
 mod timer;
 mod user;
 mod user_contract;
+mod user_entry;
+mod user_machine;
 mod vgic;
 mod vm_interrupt;
 mod vm_timer;
@@ -92,7 +94,23 @@ pub use timer::{
     ArmGenericCounter as ArchitectureCounter, El2PhysicalTimer as ArchitectureTimer,
     Error as TimerError,
 };
-pub use user::{UserExecutionCapabilities, UserMachineContractError, execution_capabilities};
+pub use user::{UserMachineContractError, user_address_limit};
+pub(crate) use user::{assert_kernel_pan, uses_vhe_translation as user_uses_vhe_translation};
+pub(crate) use user::{copy_from_exposed, copy_to_exposed};
+pub(crate) use user_entry::{
+    CompletionFailure as UserCompletionFailure, Error as UserEntryError,
+    ReturnCapability as UserReturnCapability, UserContext, UserExit, run_user,
+};
+pub(crate) use user_machine::{
+    Error as UserAddressSpaceError, LocalActivation as UserLocalActivation,
+    LocalIdentity as UserLocalIdentity, LocalOperation as UserLocalOperation,
+    LocalRequest as UserLocalRequest, MappingPage as UserMappingPage,
+    PreparedAddressSpace as PreparedUserAddressSpace, activate_local as activate_user_local,
+    deactivate_local as deactivate_user_local,
+    local_identity_is_active as user_local_identity_is_active,
+    prepare_nvhe as prepare_nvhe_user_address_space, prepare_vhe as prepare_vhe_user_address_space,
+    service_local_request as service_user_local_request,
+};
 pub use vgic::Error as VirtualInterruptError;
 pub use vgic::{
     Capabilities as VgicCapabilities, CpuContext as VgicCpuContext, Error as VgicError,
@@ -138,7 +156,9 @@ pub fn initialize_cpu_power(
 pub fn secondary_cpu_is_compatible() -> bool {
     address::current_cpu_is_compatible()
         && atomics::current_cpu_supports_selected_backend()
+        && cache::current_cpu_is_compatible()
         && host::current_cpu_is_compatible()
+        && user::current_cpu_is_compatible()
 }
 
 pub fn register_secondary_hardware_id(cpu_index: usize, hardware_id: u64) -> bool {
@@ -154,7 +174,7 @@ pub fn prepare_timekeeping(_platform: &EssentialPlatformInfo) -> Result<(), Time
 pub fn prepare_cache(
     _platform: &EssentialPlatformInfo,
 ) -> Result<(), hyper::hal::cache::CacheError> {
-    Ok(())
+    cache::prepare_boot_cpu()
 }
 
 pub fn decode_kernel_timer(

@@ -140,6 +140,12 @@ ProcessImage
   vDSO and shared-page selection
 ```
 
+The current pre-release subset stores machine ABI, ABI family, revision,
+execution route, and the initial entry, stack, and TLS values. Its address space
+is owned separately by `Process`. Multi-view address-space sets, vDSO and shared
+page selection, loader metadata, and `PreparedExec` publication remain target
+contracts rather than implemented fields.
+
 The route is selected by a trusted loader from ELF class, machine, endianness,
 ABI notes, interpreter, launch manifest, and policy. ELF branding is an
 untrusted classification hint; it never grants authority. Unknown or ambiguous
@@ -185,15 +191,18 @@ For Native calls, the architecture entry adapter:
 5. consumes an architecture-private, exactly-once return capability to encode
    `NativeResult` into the same Thread's frame.
 
-The return capability is `!Copy + !Send + !Sync`, is bound to the Thread,
-ProcessImage generation, pinned stack, and frame generation, and is consumed
-exactly once. Blocking, preemption, and migration may suspend the entry stack,
-but no `&mut` frame is passed into code that can block. Dropping an armed return
-owner enters a lock-, allocation-, and diagnostic-free fail-stop. Exit,
-termination, and successful exec consume it explicitly. Architecture result
-encoding is proven infallible before a syscall may publish new capabilities;
-an impossible post-publication encoding failure retains the capabilities and
-enters fail-stop rather than attempting rollback.
+The return capability is linear and bound to the exact stopped `UserContext`
+plus its Thread, ProcessImage generation, and run generation. Machine-active
+CPU pinning and translation ownership end before policy dispatch; a separate
+stopped-run token keeps that logical generation occupied until completion.
+This makes the stopped continuation migratable without exporting or retaining
+the raw exception frame. Blocking, preemption, and migration may suspend the
+kernel continuation, but no frame reference is passed into code that can
+block. Dropping an armed return owner enters a lock-, allocation-, and
+diagnostic-free fail-stop. Exit, termination, and successful exec consume it
+explicitly. Architecture result encoding is proven infallible before a syscall
+may publish new capabilities; an impossible post-publication encoding failure
+retains the capabilities and enters fail-stop rather than attempting rollback.
 
 For a foreign restricted Thread, entry produces a `RestrictedExit` reason and
 switches that Thread into its supervisor view. The private frame is never
@@ -236,10 +245,10 @@ size and offset assertions. Extensible records have an explicit size only when
 older and newer layouts can be interpreted safely. Unknown strict flags are
 rejected; a field is flexible only when its schema says so.
 
-The direct trap ABI and the vDSO symbol ABI are both supported. The vDSO
-provides recommended C-compatible wrappers and optimized time or shared-page
-operations, but the kernel never checks that a syscall instruction originated
-there. Each ABI family owns its own vDSO and opaque shared-page protocol.
+The direct trap ABI is implemented first. A future vDSO will provide recommended
+C-compatible wrappers and optimized time or shared-page operations, but the
+kernel will never check that a syscall instruction originated there. Each ABI
+family owns its own vDSO and opaque shared-page protocol.
 
 Native blocking calls use absolute monotonic deadlines and an explicit infinite
 sentinel. They report cancellation rather than silently rewinding the PC.
@@ -263,12 +272,13 @@ Each syscall declaration records at least:
 - blocking, cancellation, restart, no-return, and audit classes; and
 - strict or flexible flag behavior.
 
-Generation produces kernel dispatch wrappers and metadata, Rust and C
-bindings, architecture constants and stubs, vDSO exports, layout assertions,
-an ABI reference, and number/name compatibility tests. Generated source is
-checked into the SDK-facing locations where appropriate; CI regenerates it and
-rejects drift. Semantic validation remains in named handlers and is not hidden
-inside an unreviewable generated wrapper.
+The current generator produces Rust values, a C constants-and-layout header,
+syscall metadata, layout assertions, an ABI reference, and compatibility tests.
+It is intended to generate kernel dispatch wrappers, architecture stubs, and
+vDSO exports as those layers are introduced. Generated source is checked into
+the SDK-facing locations where appropriate; CI regenerates it and rejects
+drift. Semantic validation remains in named handlers and is not hidden inside
+an unreviewable generated wrapper.
 
 The ABI revision field is reserved process-image metadata. Its value remains
 zero throughout pre-release development: schema changes do not increment it.
@@ -622,11 +632,12 @@ is active. Returning to a vCPU clears the host-user regime explicitly.
 Exception code must never infer the return regime merely from a lower-EL
 vector.
 
-On nVHE, the required implementation spike is direct EL0 with `TGE=1`, `DC=1`,
+On nVHE, the current AArch64 proof enters EL0 directly with `TGE=1`, `DC=1`,
 stage-1 translation forced off, and a per-process stage-2 root/VMID. SVC,
-faults, and physical interrupts route directly to EL2. User VA equals IPA. The
-acceptance contract covers address width, tagged-address behavior, cache
-defaults, and Linux ABI address semantics.
+faults, and physical interrupts route directly to EL2. User VA equals IPA. QEMU
+exercises this mechanism, while the acceptance contract still requires physical
+qualification of address width, tagged-address behavior, cache defaults, and
+Linux ABI address semantics.
 
 The user stage-2 implementation cannot reuse the VM registry's current
 single-active-vCPU execution claim: Threads in one Process may run concurrently
@@ -658,11 +669,20 @@ If stage-2-only execution cannot supply required foreign ABI semantics, that
 route may use a small immutable EL1 stage-1 relay. Kernel policy sees only
 opaque prepared/active user address spaces regardless of backend.
 
-RISC-V and x86-64 implement the same semantic contracts through their native
-U/S and ring-3 mechanisms. They do not define the common abstraction by erasing
+RISC-V and x86-64 must eventually implement the same semantic contracts through
+their native U/S and ring-3 mechanisms; native-user entry currently remains
+unsupported on both. They do not define the common abstraction by erasing
 AArch64's world-regime and translation differences.
 
 ## Implementation plan and acceptance gates
+
+The current checkpoint implements much of the Phase 1 capability mechanics and
+a narrow AArch64 Phase 2 proof. The proof maps a raw instruction sequence,
+executes `abi_query`, contains a breakpoint fault, joins its Thread and Process,
+and retires the ownership graph. The architecture-neutral dispatcher implements
+syscalls 0 through 5: ABI query, handle close, duplicate, replace, handle info,
+and object basic info. It is not a static PIE loader, general runtime, init
+process, vDSO, blocking syscall path, or secondary-architecture entry.
 
 ### Phase 0: prove the boundary
 
@@ -684,17 +704,18 @@ AArch64's world-regime and translation differences.
 
 ### Phase 2: first native process
 
-- implement Process/UserThread/UserAddressSpace ownership, complete cooperative
-  stop/join/cancellation and fault containment, and AArch64 entry;
-- run an embedded static PIE EL0 program through direct syscalls, not a vDSO
-  requirement; and
+- extend the implemented Process/UserThread ownership, cooperative stop/join,
+  fault containment, retirement, and AArch64 entry with blocking cancellation,
+  multi-Thread races, and migration qualification;
+- replace the raw instruction proof with an embedded static PIE EL0 program
+  running through direct syscalls, without requiring a vDSO; and
 - support temporary unstable debug output, yield, and exit without calling the
   result ABI stable.
 
 ### Phase 3: usable Native runtime
 
-- implement VMO/VMAR, Channel/Event/EventPair, WaitSet, clock/timer/sleep, and
-  atomic waits;
+- expose VMO/VMAR lifecycle operations through capabilities and implement
+  Channel/Event/EventPair, WaitSet, clock/timer/sleep, and atomic waits;
 - start an EL0 init process with multiple processes and Threads; and
 - add generated Rust/C bindings and ABI conformance tests.
 
@@ -722,13 +743,17 @@ AArch64's world-regime and translation differences.
 - implement FreeBSD as a separate ABI family, reusing kernel mechanisms but not
   Linux personality state.
 
-Every phase runs the quality gate and all-architecture builds. User-entry work
-adds AArch64 nVHE/VHE four-CPU QEMU tests for direct syscalls, invalid pointers,
-unknown calls, W^X, address-space isolation, wait cancellation, migration,
-IRQ-tail preemption, TLS/SIMD preservation, and process-fault containment. The
-existing Linux guest boot remains a regression contract. Cache, TLB, IOMMU,
-interrupt, and speculation properties which QEMU cannot prove require physical
-AArch64 validation before the corresponding feature is declared stable.
+Every phase runs the quality gate and all-architecture builds. The current QEMU
+proof covers both AArch64 host regimes, direct `abi_query`, breakpoint-fault
+containment, Process/Thread join, retirement, and architecture-neutral rejection
+of malformed or unknown calls. The remaining user-entry acceptance target adds
+successful Process-backed handle operations from EL0, invalid pointers, W^X and
+cross-Process isolation, blocking cancellation, same-Process multi-Thread
+migration, IRQ-tail user preemption, TLS/SIMD preservation, and stop-versus-entry
+races. The existing Linux guest boot remains a regression contract. Cache, TLB,
+IOMMU, interrupt, and speculation properties which QEMU cannot prove require
+physical AArch64 validation before the corresponding feature is declared
+stable.
 
 ## Open implementation questions
 

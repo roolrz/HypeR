@@ -15,7 +15,7 @@ mod rights;
 
 pub(crate) use handle::{
     ClosedHandle, HandleError, HandleFlags, HandleInfo, HandleReservation, HandleTable,
-    HandleValue, PreparedHandle, ResolvedObject, TeardownCursor,
+    HandleValue, PreparedHandle, ResolvedObject, RetiredHandleStorage, TeardownCursor,
 };
 pub(crate) use object::{KernelObject, Koid, ObjectCreationError, ObjectKind, ObjectRef, private};
 pub(crate) use rights::Rights;

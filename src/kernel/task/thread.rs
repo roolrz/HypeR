@@ -29,15 +29,49 @@ pub(super) enum DeferredFifoPlacement {
 pub struct ThreadId(u64);
 
 impl ThreadId {
+    const SLOT_BITS: u32 = 24;
+    const SLOT_MASK: u64 = (1 << Self::SLOT_BITS) - 1;
+    const IDENTITY_LIMIT: u64 = u64::MAX >> Self::SLOT_BITS;
+
     pub const BOOTSTRAP: Self = Self(0);
 
-    /// Mints an identity from the scheduler's never-reused slot namespace.
-    pub(super) const fn from_scheduler_index(value: u64) -> Self {
+    /// Combines a never-reused identity with a reusable registry-slot hint.
+    pub(super) const fn from_scheduler_parts(identity: u64, slot: usize) -> Option<Self> {
+        if identity == 0 || identity > Self::IDENTITY_LIMIT || slot >= Self::SLOT_MASK as usize {
+            return None;
+        }
+        Some(Self((identity << Self::SLOT_BITS) | (slot as u64 + 1)))
+    }
+
+    /// Reconstructs an ID retained by Process publication.
+    pub(crate) const fn from_process_publication(value: u64) -> Self {
         Self(value)
     }
 
     pub const fn get(self) -> u64 {
         self.0
+    }
+
+    /// Returns the private reusable slot encoded by the scheduler.
+    pub(super) const fn scheduler_slot(self) -> Option<usize> {
+        if self.0 == 0 {
+            Some(0)
+        } else {
+            let encoded = self.0 & Self::SLOT_MASK;
+            if encoded == 0 {
+                None
+            } else {
+                Some((encoded - 1) as usize)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) const fn for_test(identity: u64) -> Self {
+        match Self::from_scheduler_parts(identity, 0) {
+            Some(id) => id,
+            None => Self::BOOTSTRAP,
+        }
     }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,15 +239,17 @@ impl Drop for VcpuExecution {
     }
 }
 
-pub enum ThreadExecution {
+pub(crate) enum ThreadExecution {
     Kernel,
     Vcpu(Box<VcpuExecution>),
+    User(Box<crate::kernel::process::UserExecution>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionKind {
     Kernel,
     Vcpu,
+    User,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -270,6 +306,11 @@ impl FairRuntime {
 }
 
 impl Thread {
+    /// Bounded scheduler-object storage charged before user-thread publication.
+    pub(crate) const fn allocation_size() -> usize {
+        core::mem::size_of::<Self>()
+    }
+
     pub(super) fn bootstrap(cpu_index: CpuIndex) -> Self {
         let name = match ThreadName::new("bootstrap") {
             Ok(name) => name,
@@ -313,6 +354,33 @@ impl Thread {
             fair_runtime: FairRuntime::NEW,
             deferred_fifo_placement: None,
             state: ThreadState::Dormant,
+            queue_links: QueueLinks::EMPTY,
+            wait: WaitRecord::NEW,
+            pending_migration: None,
+            context,
+            kernel_stack: Some(stack),
+            execution: ThreadExecution::Kernel,
+        })
+    }
+
+    /// Creates the permanent fallback Thread for one already-registered CPU.
+    pub(super) fn idle(
+        id: ThreadId,
+        cpu_index: CpuIndex,
+        name: &str,
+        entry: KernelThreadEntry,
+    ) -> Result<Self, Error> {
+        let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
+        let mut context = crate::hal::context::ThreadContext::empty();
+        context.prepare(stack.top(), entry, 0);
+        Ok(Self {
+            id,
+            placement: ThreadPlacement::pinned(cpu_index),
+            name: ThreadName::new(name)?,
+            scheduling: SchedulingPolicy::Idle,
+            fair_runtime: FairRuntime::NEW,
+            deferred_fifo_placement: None,
+            state: ThreadState::Idle,
             queue_links: QueueLinks::EMPTY,
             wait: WaitRecord::NEW,
             pending_migration: None,
@@ -381,6 +449,36 @@ impl Thread {
                 })
                 .map_err(|_| Error::Allocation)?,
             ),
+        })
+    }
+
+    pub(super) fn user(
+        id: ThreadId,
+        cpu_index: CpuIndex,
+        affinity: crate::kernel::task::policy::CpuMask,
+        name: &str,
+        execution: Box<crate::kernel::process::UserExecution>,
+        entry: KernelThreadEntry,
+    ) -> Result<Self, Error> {
+        let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
+        let mut context = crate::hal::context::ThreadContext::empty();
+        context.prepare(stack.top(), entry, 0);
+        let placement = ThreadPlacement::movable_with_affinity(cpu_index, affinity)
+            .ok_or(Error::InvalidPlacement)?;
+        Ok(Self {
+            id,
+            placement,
+            name: ThreadName::new(name)?,
+            scheduling: SchedulingPolicy::fair(),
+            fair_runtime: FairRuntime::NEW,
+            deferred_fifo_placement: None,
+            state: ThreadState::Dormant,
+            queue_links: QueueLinks::EMPTY,
+            wait: WaitRecord::NEW,
+            pending_migration: None,
+            context,
+            kernel_stack: Some(stack),
+            execution: ThreadExecution::User(execution),
         })
     }
 
@@ -555,6 +653,7 @@ impl Thread {
         match self.execution {
             ThreadExecution::Kernel => ExecutionKind::Kernel,
             ThreadExecution::Vcpu(_) => ExecutionKind::Vcpu,
+            ThreadExecution::User(_) => ExecutionKind::User,
         }
     }
 
@@ -569,6 +668,34 @@ impl Thread {
         match &mut self.execution {
             ThreadExecution::Vcpu(execution) => Some(execution.as_mut()),
             _ => None,
+        }
+    }
+
+    pub(crate) fn user_execution(&self) -> Option<&crate::kernel::process::UserExecution> {
+        match &self.execution {
+            ThreadExecution::User(execution) => Some(execution.as_ref()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn user_execution_mut(
+        &mut self,
+    ) -> Option<&mut crate::kernel::process::UserExecution> {
+        match &mut self.execution {
+            ThreadExecution::User(execution) => Some(execution.as_mut()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn take_user_execution(
+        &mut self,
+    ) -> Option<Box<crate::kernel::process::UserExecution>> {
+        if !matches!(self.execution, ThreadExecution::User(_)) {
+            return None;
+        }
+        match core::mem::replace(&mut self.execution, ThreadExecution::Kernel) {
+            ThreadExecution::User(execution) => Some(execution),
+            _ => crate::hal::cpu::halt(),
         }
     }
 

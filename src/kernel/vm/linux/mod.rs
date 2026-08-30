@@ -118,10 +118,10 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     let abi = crate::hal::guest::linux_abi();
     let image = guest.kernel();
     let initramfs = guest.initramfs();
-    let reservation = crate::kernel::vm::registry::reserve()?;
+    let mut reservation = crate::kernel::vm::registry::reserve()?;
     let virtual_machine = reservation.id();
     let mut address_space = GuestAddressSpace::new(
-        reservation.hardware_vmid(),
+        reservation.take_hardware_vmid()?,
         abi.ram_base().get(),
         guest.memory_size(),
     )?;

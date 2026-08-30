@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use hyper::hal::interrupt::InterruptMask;
 use hyper::sync::atomic::{AtomicFlag, AtomicU64, Ordering as AtomicOrdering, fence};
-use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
+use hyper::sync::{GenerationTaggedState, InterruptMaskGuard, InterruptSpinLock};
 use std::sync::Arc;
 use std::thread;
 
@@ -140,4 +140,40 @@ fn atomic_flag_and_counter_use_explicit_ordering() {
     assert_eq!(counter.fetch_add(2, AtomicOrdering::AcqRel), 40);
     fence(AtomicOrdering::SeqCst);
     assert_eq!(counter.load(AtomicOrdering::Acquire), 42);
+}
+
+#[test]
+fn delayed_generation_cannot_claim_a_republished_state() {
+    const PENDING: u8 = 1;
+    const WORKING: u8 = 2;
+
+    let stale_pending = GenerationTaggedState::new(7, PENDING);
+    let current_pending = GenerationTaggedState::new(8, PENDING);
+    let slot = AtomicU64::new(stale_pending.bits());
+
+    // Model a publisher completing generation 7 and reusing the slot for 8
+    // before a delayed generation-7 observer reaches its atomic claim.
+    slot.store(current_pending.bits(), AtomicOrdering::Release);
+    assert!(
+        slot.compare_exchange(
+            stale_pending.bits(),
+            GenerationTaggedState::new(7, WORKING).bits(),
+            AtomicOrdering::Acquire,
+            AtomicOrdering::Relaxed,
+        )
+        .is_err()
+    );
+
+    let observed = GenerationTaggedState::from_bits(slot.load(AtomicOrdering::Acquire));
+    assert_eq!(observed.state_for(7), None);
+    assert_eq!(observed.state_for(8), Some(PENDING));
+    assert!(
+        slot.compare_exchange(
+            current_pending.bits(),
+            GenerationTaggedState::new(8, WORKING).bits(),
+            AtomicOrdering::Acquire,
+            AtomicOrdering::Relaxed,
+        )
+        .is_ok()
+    );
 }

@@ -173,6 +173,151 @@ aarch64_capture_crash_context:
     ret
 .size aarch64_capture_crash_context, . - aarch64_capture_crash_context
 
+/*
+ * Runs a native EL0 context as a call-like machine operation.
+ *
+ * A selected lower-EL exception copies the raw vector frame into the supplied
+ * context and branches to aarch64_unwind_native_user. That tail discards the
+ * vector frame, restores this ordinary kernel call frame, and returns to Rust.
+ */
+.global aarch64_run_native_user
+.type aarch64_run_native_user, %function
+aarch64_run_native_user:
+    // ELR_EL2 and SPSR_EL2 become the pending user return state below. A
+    // physical IRQ in that preparation window would overwrite both registers
+    // with its EL2 return state, so retain the caller's exact mask and keep
+    // local exceptions masked until the user exception has unwound.
+    mrs     x2, daif
+    msr     daifset, #0xf
+    sub     sp, sp, #USER_RUN_FRAME_SIZE
+    str     x2, [sp, #USER_RUN_FRAME_DAIF_OFFSET]
+    mrs     x2, tpidr_el0
+    str     x2, [sp, #USER_RUN_FRAME_TPIDR_EL0_OFFSET]
+    mrs     x2, tpidrro_el0
+    str     x2, [sp, #USER_RUN_FRAME_TPIDRRO_EL0_OFFSET]
+    mrs     x2, mdcr_el2
+    str     x2, [sp, #USER_RUN_FRAME_MDCR_EL2_OFFSET]
+    orr     x2, x2, #MDCR_EL2_TPM
+    msr     mdcr_el2, x2
+    mrs     x2, cptr_el2
+    str     x2, [sp, #USER_RUN_FRAME_CPTR_EL2_OFFSET]
+    orr     x2, x2, #CPTR_EL2_TAM
+    msr     cptr_el2, x2
+    mrs     x2, sp_el0
+    str     x2, [sp, #USER_RUN_FRAME_SP_EL0_OFFSET]
+    stp     x19, x20, [sp, #(USER_RUN_FRAME_X19_OFFSET + 0)]
+    stp     x21, x22, [sp, #(USER_RUN_FRAME_X19_OFFSET + 16)]
+    stp     x23, x24, [sp, #(USER_RUN_FRAME_X19_OFFSET + 32)]
+    stp     x25, x26, [sp, #(USER_RUN_FRAME_X19_OFFSET + 48)]
+    stp     x27, x28, [sp, #(USER_RUN_FRAME_X19_OFFSET + 64)]
+    stp     x29, x30, [sp, #USER_RUN_FRAME_X29_OFFSET]
+    stp     d8, d9, [sp, #(USER_RUN_FRAME_D8_OFFSET + 0)]
+    stp     d10, d11, [sp, #(USER_RUN_FRAME_D8_OFFSET + 16)]
+    stp     d12, d13, [sp, #(USER_RUN_FRAME_D8_OFFSET + 32)]
+    stp     d14, d15, [sp, #(USER_RUN_FRAME_D8_OFFSET + 48)]
+    mrs     x1, fpcr
+    str     x1, [sp, #USER_RUN_FRAME_FPCR_OFFSET]
+    mrs     x1, fpsr
+    str     x1, [sp, #USER_RUN_FRAME_FPSR_OFFSET]
+
+    mov     x30, x0
+    ldr     x1, [x30, #USER_CONTEXT_PC_OFFSET]
+    msr     elr_el2, x1
+    ldr     x1, [x30, #USER_CONTEXT_PSTATE_OFFSET]
+    msr     spsr_el2, x1
+    ldr     x1, [x30, #USER_CONTEXT_SP_OFFSET]
+    msr     sp_el0, x1
+    ldr     x1, [x30, #USER_CONTEXT_TPIDR_EL0_OFFSET]
+    msr     tpidr_el0, x1
+    ldr     x1, [x30, #USER_CONTEXT_TPIDRRO_EL0_OFFSET]
+    msr     tpidrro_el0, x1
+    ldr     x1, [x30, #USER_CONTEXT_FPCR_OFFSET]
+    msr     fpcr, x1
+    ldr     x1, [x30, #USER_CONTEXT_FPSR_OFFSET]
+    msr     fpsr, x1
+    ldp     q0, q1, [x30, #(USER_CONTEXT_SIMD_OFFSET + 0)]
+    ldp     q2, q3, [x30, #(USER_CONTEXT_SIMD_OFFSET + 32)]
+    ldp     q4, q5, [x30, #(USER_CONTEXT_SIMD_OFFSET + 64)]
+    ldp     q6, q7, [x30, #(USER_CONTEXT_SIMD_OFFSET + 96)]
+    ldp     q8, q9, [x30, #(USER_CONTEXT_SIMD_OFFSET + 128)]
+    ldp     q10, q11, [x30, #(USER_CONTEXT_SIMD_OFFSET + 160)]
+    ldp     q12, q13, [x30, #(USER_CONTEXT_SIMD_OFFSET + 192)]
+    ldp     q14, q15, [x30, #(USER_CONTEXT_SIMD_OFFSET + 224)]
+    ldp     q16, q17, [x30, #(USER_CONTEXT_SIMD_OFFSET + 256)]
+    ldp     q18, q19, [x30, #(USER_CONTEXT_SIMD_OFFSET + 288)]
+    ldp     q20, q21, [x30, #(USER_CONTEXT_SIMD_OFFSET + 320)]
+    ldp     q22, q23, [x30, #(USER_CONTEXT_SIMD_OFFSET + 352)]
+    ldp     q24, q25, [x30, #(USER_CONTEXT_SIMD_OFFSET + 384)]
+    ldp     q26, q27, [x30, #(USER_CONTEXT_SIMD_OFFSET + 416)]
+    ldp     q28, q29, [x30, #(USER_CONTEXT_SIMD_OFFSET + 448)]
+    ldp     q30, q31, [x30, #(USER_CONTEXT_SIMD_OFFSET + 480)]
+
+    // ESR_EL2 and FAR_EL2 are overwritten by the next exception, so they are
+    // safe register-only shuttles for entry HCR and user x30. This leaves no
+    // host pointer dereference after switching the lower-EL world.
+    ldr     x1, [x30, #USER_CONTEXT_ENTRY_HCR_OFFSET]
+    msr     esr_el2, x1
+    ldr     x1, [x30, #USER_CONTEXT_X30_OFFSET]
+    msr     far_el2, x1
+    ldp     x0, x1, [x30, #(USER_CONTEXT_X0_OFFSET + 0)]
+    ldp     x2, x3, [x30, #(USER_CONTEXT_X0_OFFSET + 16)]
+    ldp     x4, x5, [x30, #(USER_CONTEXT_X0_OFFSET + 32)]
+    ldp     x6, x7, [x30, #(USER_CONTEXT_X0_OFFSET + 48)]
+    ldp     x8, x9, [x30, #(USER_CONTEXT_X0_OFFSET + 64)]
+    ldp     x10, x11, [x30, #(USER_CONTEXT_X0_OFFSET + 80)]
+    ldp     x12, x13, [x30, #(USER_CONTEXT_X0_OFFSET + 96)]
+    ldp     x14, x15, [x30, #(USER_CONTEXT_X0_OFFSET + 112)]
+    ldp     x16, x17, [x30, #(USER_CONTEXT_X0_OFFSET + 128)]
+    ldp     x18, x19, [x30, #(USER_CONTEXT_X0_OFFSET + 144)]
+    ldp     x20, x21, [x30, #(USER_CONTEXT_X0_OFFSET + 160)]
+    ldp     x22, x23, [x30, #(USER_CONTEXT_X0_OFFSET + 176)]
+    ldp     x24, x25, [x30, #(USER_CONTEXT_X0_OFFSET + 192)]
+    ldp     x26, x27, [x30, #(USER_CONTEXT_X0_OFFSET + 208)]
+    ldp     x28, x29, [x30, #(USER_CONTEXT_X0_OFFSET + 224)]
+    mrs     x30, esr_el2
+    msr     hcr_el2, x30
+    isb
+    mrs     x30, far_el2
+    eret
+.size aarch64_run_native_user, . - aarch64_run_native_user
+
+.global aarch64_unwind_native_user
+.type aarch64_unwind_native_user, %function
+aarch64_unwind_native_user:
+    // Vector assembly restored SP to the native raw frame before invoking this
+    // non-returning tail. The persistent UserContext already owns its contents.
+    add     sp, sp, #EXCEPTION_FRAME_SIZE
+    ldp     x19, x20, [sp, #(USER_RUN_FRAME_X19_OFFSET + 0)]
+    ldp     x21, x22, [sp, #(USER_RUN_FRAME_X19_OFFSET + 16)]
+    ldp     x23, x24, [sp, #(USER_RUN_FRAME_X19_OFFSET + 32)]
+    ldp     x25, x26, [sp, #(USER_RUN_FRAME_X19_OFFSET + 48)]
+    ldp     x27, x28, [sp, #(USER_RUN_FRAME_X19_OFFSET + 64)]
+    ldp     x29, x30, [sp, #USER_RUN_FRAME_X29_OFFSET]
+    ldp     d8, d9, [sp, #(USER_RUN_FRAME_D8_OFFSET + 0)]
+    ldp     d10, d11, [sp, #(USER_RUN_FRAME_D8_OFFSET + 16)]
+    ldp     d12, d13, [sp, #(USER_RUN_FRAME_D8_OFFSET + 32)]
+    ldp     d14, d15, [sp, #(USER_RUN_FRAME_D8_OFFSET + 48)]
+    ldr     x0, [sp, #USER_RUN_FRAME_FPCR_OFFSET]
+    msr     fpcr, x0
+    ldr     x0, [sp, #USER_RUN_FRAME_FPSR_OFFSET]
+    msr     fpsr, x0
+    ldr     x0, [sp, #USER_RUN_FRAME_TPIDR_EL0_OFFSET]
+    msr     tpidr_el0, x0
+    ldr     x0, [sp, #USER_RUN_FRAME_TPIDRRO_EL0_OFFSET]
+    msr     tpidrro_el0, x0
+    ldr     x0, [sp, #USER_RUN_FRAME_MDCR_EL2_OFFSET]
+    msr     mdcr_el2, x0
+    ldr     x0, [sp, #USER_RUN_FRAME_CPTR_EL2_OFFSET]
+    msr     cptr_el2, x0
+    ldr     x0, [sp, #USER_RUN_FRAME_SP_EL0_OFFSET]
+    msr     sp_el0, x0
+    isb
+    ldr     x0, [sp, #USER_RUN_FRAME_DAIF_OFFSET]
+    msr     daif, x0
+    add     sp, sp, #USER_RUN_FRAME_SIZE
+    ret
+.size aarch64_unwind_native_user, . - aarch64_unwind_native_user
+
 .global aarch64_enter_guest
 .type aarch64_enter_guest, %function
 aarch64_enter_guest:

@@ -507,10 +507,11 @@ fn validate_neighbors(
 }
 
 pub(super) fn thread_ref(threads: &[Option<Box<Thread>>], id: ThreadId) -> Result<&Thread, Error> {
-    let index = usize::try_from(id.get()).map_err(|_| Error::ThreadNotFound)?;
+    let slot = id.scheduler_slot().ok_or(Error::ThreadNotFound)?;
     threads
-        .get(index)
+        .get(slot)
         .and_then(Option::as_deref)
+        .filter(|thread| thread.id() == id)
         .ok_or(Error::ThreadNotFound)
 }
 
@@ -518,9 +519,10 @@ pub(super) fn thread_mut(
     threads: &mut [Option<Box<Thread>>],
     id: ThreadId,
 ) -> Result<&mut Thread, Error> {
-    let index = usize::try_from(id.get()).map_err(|_| Error::ThreadNotFound)?;
+    let slot = id.scheduler_slot().ok_or(Error::ThreadNotFound)?;
     threads
-        .get_mut(index)
+        .get_mut(slot)
         .and_then(Option::as_deref_mut)
+        .filter(|thread| thread.id() == id)
         .ok_or(Error::ThreadNotFound)
 }

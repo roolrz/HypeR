@@ -9,6 +9,15 @@
 
 use core::ops::{Index, IndexMut};
 
+/// Proof that the current execution context cannot migrate to another CPU.
+///
+/// # Safety
+///
+/// Implementors must retain non-migratable execution for their entire borrow.
+/// The proof does not imply that interrupts are masked or that memory is
+/// ordered; consumers use it only for same-PE architectural sequences.
+pub unsafe trait PinnedExecution {}
+
 /// Number of logical CPU slots compiled into the kernel.
 pub const MAX_CPUS: usize = crate::config::MAX_CPUS as usize;
 

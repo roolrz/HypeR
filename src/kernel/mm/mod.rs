@@ -10,12 +10,15 @@ pub mod allocator;
 pub mod memory;
 pub mod page_block;
 pub mod stack;
+pub(crate) mod translation_id;
+#[allow(dead_code)]
 mod user_access;
+#[allow(dead_code, unused_imports)]
+pub(crate) mod user_space;
 
 pub use memory::PreparedMemory;
-pub use user_access::{
-    AddressSpaceId, UserAddressSpace, UserCopyError, copy_from_user, copy_to_user,
-};
+#[allow(unused_imports)]
+pub(crate) use user_access::{UserCopyError, copy_from_user, copy_to_user};
 
 static READY: AtomicBool = AtomicBool::new(false);
 
@@ -151,9 +154,10 @@ pub(crate) fn report_statistics(reason: &str) {
         buddy.allocation_failures
     );
     crate::println!(
-        "HypeR: page owners: guest {} (peak {}), page tables {}, kernel {}, heap {}",
+        "HypeR: page owners: guest {} (peak {}), user {}, page tables {}, kernel {}, heap {}",
         runtime.guest_pages.pages,
         runtime.guest_pages.peak_pages,
+        runtime.user_pages.pages,
         runtime.page_table_pages.pages,
         runtime.kernel_pages.pages,
         runtime.slab_pages + runtime.large_heap_pages

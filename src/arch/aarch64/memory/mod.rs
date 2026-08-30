@@ -9,7 +9,7 @@ mod page_table;
 pub use address_space::inspect_mapping;
 pub use address_space::{ActivationContext, Error, PreparedAddressSpace, StackMapping, prepare};
 pub use layout::Aarch64AddressTranslation;
-pub(super) use layout::{KERNEL_BASE, LINEAR_BASE};
+pub(super) use layout::{KERNEL_BASE, LINEAR_BASE, MMIO_BASE};
 
 /// Returns the permanent bootstrap-stack bounds when `stack_pointer` lies in it.
 pub fn bootstrap_stack_bounds(stack_pointer: u64) -> Option<(usize, usize)> {

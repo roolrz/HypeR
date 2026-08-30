@@ -6,20 +6,24 @@
 use hyper::mm::PAGE_SIZE;
 
 use crate::kernel::vm::memory::{Error as MemoryError, GuestAddressSpace};
-use crate::kernel::vm::registry::HardwareVmid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
     Copy(MemoryError),
     DemandZero,
+    Identity,
     Payload,
     Statistics,
 }
 
 pub(super) fn run() -> Result<(), Error> {
     const BASE: u64 = 0x4000_0000;
-    let mut memory = GuestAddressSpace::new(HardwareVmid::for_test(0x3ffe), BASE, 2 * PAGE_SIZE)
-        .map_err(Error::Copy)?;
+    let identifier = crate::kernel::mm::translation_id::reserve::<
+        crate::kernel::mm::translation_id::Stage2Vmid,
+    >(8)
+    .map_err(|_| Error::Identity)?;
+    let mut memory =
+        GuestAddressSpace::new(identifier, BASE, 2 * PAGE_SIZE).map_err(Error::Copy)?;
     let address = BASE + PAGE_SIZE - 16;
 
     let mut demand_zero = [0xff; 32];

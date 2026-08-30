@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use hyper::cpu::{CpuIndex, PerCpu};
 
 use super::queue::{self, CpuRunQueue};
-use super::{CurrentVcpu, Error, MigrationStatus, SecondaryStack, Statistics};
+use super::{CurrentUser, CurrentVcpu, Error, MigrationStatus, SecondaryStack, Statistics};
 use crate::kernel::task::policy::{
     CpuMask, PlacementPolicy, SchedulingClass, SchedulingPolicy, ThreadPriority,
 };
@@ -20,6 +20,9 @@ use crate::kernel::task::wait::{
     PendingResolution, ThreadQueue, WaitMobility, WaitOutcome, WaitQueue, WaitRecordError,
     WaitTicket,
 };
+
+const THREAD_REGISTRY_SLOTS: usize = hyper::config::MAX_KERNEL_STACKS as usize + 1;
+const _: () = assert!(hyper::config::MAX_KERNEL_STACKS > 0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ReadyOutcome {
@@ -38,6 +41,7 @@ pub(super) struct MigrationOutcome {
 #[must_use = "a thread reservation must be published or explicitly abandoned"]
 pub(super) struct ThreadReservation {
     id: ThreadId,
+    slot: usize,
     cpu: CpuIndex,
     armed: bool,
 }
@@ -86,10 +90,12 @@ struct SwitchingContext {
 }
 
 pub(super) struct Scheduler {
-    // Slot index equals ThreadId and is never reused. Individual Box
-    // allocations pin contexts while this registry grows.
+    // Thread identities never repeat, while empty registry slots do. The
+    // complete bounded backing is allocated during scheduler initialization;
+    // user-created Threads cannot grow persistent kernel infrastructure.
     #[allow(clippy::vec_box)]
     threads: Vec<Option<Box<Thread>>>,
+    free_slots: Vec<usize>,
     cpus: Vec<CpuScheduler>,
     cpu_slots: PerCpu<Option<usize>>,
     cpu_reservations: PerCpu<bool>,
@@ -163,45 +169,46 @@ impl CpuScheduler {
 impl Scheduler {
     pub fn new(boot_cpu: CpuIndex) -> Result<Self, Error> {
         let mut threads = Vec::new();
-        threads.try_reserve(1).map_err(|_| Error::Allocation)?;
+        threads
+            .try_reserve_exact(THREAD_REGISTRY_SLOTS)
+            .map_err(|_| Error::Allocation)?;
         threads.push(Some(
             hyper::mm::try_box(Thread::bootstrap(boot_cpu)).map_err(|_| Error::Allocation)?,
         ));
+        let boot_idle_id = match ThreadId::from_scheduler_parts(1, 1) {
+            Some(id) => id,
+            None => return Err(Error::IdentifierExhausted),
+        };
+        let boot_idle = Thread::idle(boot_idle_id, boot_cpu, "idle", super::idle_thread_entry)?;
+        threads.push(Some(
+            hyper::mm::try_box(boot_idle).map_err(|_| Error::Allocation)?,
+        ));
+        let mut free_slots = Vec::new();
+        free_slots
+            .try_reserve_exact(THREAD_REGISTRY_SLOTS)
+            .map_err(|_| Error::Allocation)?;
         let mut cpus = Vec::new();
         cpus.try_reserve(hyper::cpu::MAX_CPUS)
             .map_err(|_| Error::Allocation)?;
-        cpus.push(CpuScheduler::new(boot_cpu, ThreadId::BOOTSTRAP));
+        let mut boot_scheduler = CpuScheduler::new(boot_cpu, ThreadId::BOOTSTRAP);
+        boot_scheduler.idle = Some(boot_idle_id);
+        cpus.push(boot_scheduler);
         let mut cpu_slots = PerCpu::new([None; hyper::cpu::MAX_CPUS]);
         cpu_slots[boot_cpu] = Some(0);
         Ok(Self {
             threads,
+            free_slots,
             cpus,
             cpu_slots,
             cpu_reservations: PerCpu::new([false; hyper::cpu::MAX_CPUS]),
             terminated: ThreadQueue::new(),
-            next_id: 1,
+            next_id: 2,
             context_switches: 0,
         })
     }
 
     pub fn current_thread(&self, cpu: CpuIndex) -> Result<ThreadId, Error> {
         Ok(self.cpus[self.cpu_slot(cpu)?].current)
-    }
-
-    pub fn registry_growth_target(&self) -> Option<usize> {
-        (self.threads.len() == self.threads.capacity())
-            .then(|| self.threads.capacity().saturating_mul(2).max(16))
-    }
-
-    pub fn install_registry_storage(
-        &mut self,
-        mut replacement: Vec<Option<Box<Thread>>>,
-    ) -> Vec<Option<Box<Thread>>> {
-        if replacement.capacity() > self.threads.capacity() {
-            replacement.append(&mut self.threads);
-            core::mem::swap(&mut replacement, &mut self.threads);
-        }
-        replacement
     }
 
     /// Reports whether no CPU owns or may still be saving this context.
@@ -250,13 +257,15 @@ impl Scheduler {
     }
 
     pub fn abandon_reservation(&mut self, reservation: &ThreadReservation) -> Result<(), Error> {
-        let index = usize::try_from(reservation.id.get()).map_err(|_| Error::ThreadNotFound)?;
-        if !matches!(self.threads.get(index), Some(None)) {
+        if reservation.id.scheduler_slot() != Some(reservation.slot)
+            || !matches!(self.threads.get(reservation.slot), Some(None))
+        {
             return Err(Error::InvalidThreadState);
         }
         if self.cpu_reservations[reservation.cpu] {
             self.cpu_reservations[reservation.cpu] = false;
         }
+        self.release_thread_slot(reservation.slot)?;
         Ok(())
     }
 
@@ -278,11 +287,12 @@ impl Scheduler {
         if affinity.is_empty() {
             return Err(Error::EmptyCpuAffinity);
         }
-        if affinity.contains(preferred_cpu) && self.cpu_slots[preferred_cpu].is_some() {
+        if affinity.contains(preferred_cpu) && self.cpu_is_schedulable(preferred_cpu) {
             return Ok(preferred_cpu);
         }
         self.cpus
             .iter()
+            .filter(|cpu| cpu.idle.is_some())
             .map(|cpu| cpu.index)
             .filter(|cpu| affinity.contains(*cpu))
             .min()
@@ -290,7 +300,7 @@ impl Scheduler {
     }
 
     pub fn reserve_vcpu_thread(&mut self, cpu: CpuIndex) -> Result<ThreadReservation, Error> {
-        self.cpu_slot(cpu)?;
+        self.schedulable_cpu_slot(cpu)?;
         self.reserve_thread_slot(cpu)
     }
 
@@ -299,21 +309,35 @@ impl Scheduler {
         reservation: &ThreadReservation,
         thread: Box<Thread>,
     ) -> Result<(), (Error, Box<Thread>)> {
-        let Ok(index) = usize::try_from(reservation.id.get()) else {
-            return Err((Error::IdentifierExhausted, thread));
-        };
-        if thread.id() != reservation.id
+        if reservation.id.scheduler_slot() != Some(reservation.slot)
+            || thread.id() != reservation.id
             || thread.cpu_index() != reservation.cpu
-            || !matches!(self.threads.get(index), Some(None))
+            || !matches!(self.threads.get(reservation.slot), Some(None))
         {
             return Err((Error::InvalidThreadState, thread));
         }
-        self.threads[index] = Some(thread);
+        self.threads[reservation.slot] = Some(thread);
         Ok(())
     }
 
     pub fn take_dormant_vcpu(&mut self, id: ThreadId) -> Result<Box<Thread>, Error> {
         self.take_dormant_thread(id, crate::kernel::task::thread::ExecutionKind::Vcpu)
+    }
+
+    pub fn take_dormant_user(&mut self, id: ThreadId) -> Result<Box<Thread>, Error> {
+        self.take_dormant_thread(id, crate::kernel::task::thread::ExecutionKind::User)
+    }
+
+    pub fn arm_dormant_user(&mut self, id: ThreadId) -> Result<(), Error> {
+        let thread = self.thread_mut(id)?;
+        if thread.state() != ThreadState::Dormant {
+            return Err(Error::InvalidThreadState);
+        }
+        let execution = thread
+            .user_execution_mut()
+            .ok_or(Error::InvalidThreadState)?;
+        execution.arm_after_process_publication();
+        Ok(())
     }
 
     #[cfg(feature = "kernel-self-test")]
@@ -326,19 +350,22 @@ impl Scheduler {
         id: ThreadId,
         execution: crate::kernel::task::thread::ExecutionKind,
     ) -> Result<Box<Thread>, Error> {
-        let index = usize::try_from(id.get()).map_err(|_| Error::ThreadNotFound)?;
+        let index = id.scheduler_slot().ok_or(Error::ThreadNotFound)?;
         let thread = self
             .threads
             .get(index)
             .and_then(Option::as_ref)
             .ok_or(Error::ThreadNotFound)?;
-        if thread.state() != ThreadState::Dormant
+        if thread.id() != id
+            || thread.state() != ThreadState::Dormant
             || thread.queue_links().membership != QueueMembership::None
             || thread.execution_kind() != execution
         {
             return Err(Error::InvalidThreadState);
         }
-        self.threads[index].take().ok_or(Error::ThreadNotFound)
+        let thread = self.threads[index].take().ok_or(Error::ThreadNotFound)?;
+        self.release_thread_slot(index)?;
+        Ok(thread)
     }
 
     pub fn current_vcpu(&mut self, cpu: CpuIndex) -> Result<CurrentVcpu, Error> {
@@ -352,6 +379,23 @@ impl Scheduler {
             .vcpu_execution_mut()
             .ok_or(Error::InvalidThreadState)? as *mut _;
         Ok(CurrentVcpu {
+            thread: id,
+            execution,
+            stack,
+        })
+    }
+
+    pub fn current_user(&mut self, cpu: CpuIndex) -> Result<CurrentUser, Error> {
+        let id = self.current_thread(cpu)?;
+        let thread = self.thread_mut(id)?;
+        if thread.state() != ThreadState::Running {
+            return Err(Error::InvalidThreadState);
+        }
+        let stack = thread.kernel_stack_bounds().ok_or(Error::Allocation)?;
+        let execution = thread
+            .user_execution_mut()
+            .ok_or(Error::InvalidThreadState)? as *mut _;
+        Ok(CurrentUser {
             thread: id,
             execution,
             stack,
@@ -422,7 +466,7 @@ impl Scheduler {
         id: ThreadId,
         target: CpuIndex,
     ) -> Result<MigrationOutcome, Error> {
-        self.cpu_slot(target)?;
+        self.schedulable_cpu_slot(target)?;
         let thread = self.thread(id)?;
         if !thread.can_run_on(target) {
             return Err(Error::CpuNotAllowed);
@@ -458,12 +502,14 @@ impl Scheduler {
         plan: MigrationRequest,
     ) -> Result<MigrationOutcome, Error> {
         let thread = self.thread(id)?;
-        if thread.execution_kind() != ExecutionKind::Kernel
-            || thread.placement_policy() != PlacementPolicy::Movable
+        if !matches!(
+            thread.execution_kind(),
+            ExecutionKind::Kernel | ExecutionKind::User
+        ) || thread.placement_policy() != PlacementPolicy::Movable
         {
             return Err(Error::MigrationUnsupported);
         }
-        if !plan.affinity.contains(plan.target) || self.cpu_slots[plan.target].is_none() {
+        if !plan.affinity.contains(plan.target) || !self.cpu_is_schedulable(plan.target) {
             return Err(Error::NoRegisteredCpuInAffinity);
         }
         if !thread.wait_record().permits_assignment(plan.target) {
@@ -961,6 +1007,18 @@ impl Scheduler {
         if !self.thread(current)?.wait_record().is_idle() {
             return Err(Error::InvalidWaitRegistration);
         }
+        // Validate a distinct successor before publishing termination. Once
+        // the current Thread enters the terminated queue, every later failure
+        // is an internal scheduler invariant and cannot be rolled back.
+        let successor = self.cpus[cpu_slot]
+            .run_queue
+            .peek_next(&self.threads, cpu)?
+            .map(|ready| ready.id)
+            .or(self.cpus[cpu_slot].idle)
+            .ok_or(Error::CurrentThreadMissing)?;
+        if successor == current {
+            return Err(Error::CurrentThreadMissing);
+        }
         queue::push(
             &mut self.threads,
             &mut self.terminated,
@@ -972,10 +1030,63 @@ impl Scheduler {
             .dequeue_ready(cpu_slot)?
             .or(self.cpus[cpu_slot].idle)
             .ok_or(Error::CurrentThreadMissing)?;
-        if next == current {
-            return Err(Error::CurrentThreadMissing);
+        if next != successor {
+            scheduler_invariant(Error::QueueCorrupted);
         }
         self.prepare_switch(cpu_slot, current, next)
+    }
+
+    pub fn request_user_stop(
+        &mut self,
+        id: ThreadId,
+        reason: crate::kernel::process::TerminalReason,
+    ) -> Result<Option<CpuIndex>, Error> {
+        let thread = self.thread(id)?;
+        let execution = thread.user_execution().ok_or(Error::InvalidThreadState)?;
+        execution.thread().request_stop(reason);
+        let cpu = thread.cpu_index();
+        let wait_resolution = match thread.wait_record().current_ticket(id) {
+            Some(ticket) => Some(self.resolve_wait(ticket, WaitOutcome::Cancelled)?),
+            None => None,
+        };
+        let state = self.thread(id)?.state();
+        match state {
+            ThreadState::Running => Ok(Some(cpu)),
+            ThreadState::Dormant => {
+                self.enqueue_terminated(id)?;
+                Ok(Some(cpu))
+            }
+            ThreadState::Ready => {
+                // The suspended continuation may own arbitrary RAII state.
+                // Keep it queued so the fixed user runner can unwind normally.
+                Ok(Some(cpu))
+            }
+            ThreadState::Blocked => {
+                let resolved = wait_resolution.ok_or(Error::InvalidWaitRegistration)?;
+                Ok(resolved.ready.map(|ready| ready.target_cpu))
+            }
+            ThreadState::Migrating => {
+                // Source context is still owned until switch-tail. The durable
+                // stop state follows the Thread to its target continuation.
+                Ok(Some(cpu))
+            }
+            ThreadState::Terminated => Ok(None),
+            ThreadState::Idle => Err(Error::InvalidThreadState),
+        }
+    }
+
+    fn enqueue_terminated(&mut self, id: ThreadId) -> Result<(), Error> {
+        if self.thread(id)?.queue_links().membership != QueueMembership::None {
+            return Err(Error::QueueCorrupted);
+        }
+        queue::push(
+            &mut self.threads,
+            &mut self.terminated,
+            id,
+            QueueMembership::Terminated,
+        )?;
+        self.thread_mut(id)?.set_state(ThreadState::Terminated);
+        Ok(())
     }
 
     pub fn set_fifo_policy(
@@ -1183,11 +1294,14 @@ impl Scheduler {
                     id,
                     QueueMembership::Terminated,
                 )?;
-                let index = usize::try_from(id.get()).map_err(|_| Error::ThreadNotFound)?;
-                return self.threads[index]
-                    .take()
-                    .map(Some)
-                    .ok_or(Error::ThreadNotFound);
+                let index = id.scheduler_slot().ok_or(Error::ThreadNotFound)?;
+                let thread = self.threads[index].take().ok_or(Error::ThreadNotFound)?;
+                // Slot zero is the reserved bootstrap identity and never
+                // enters the reusable namespace after init exits.
+                if index != 0 {
+                    self.release_thread_slot(index)?;
+                }
+                return Ok(Some(thread));
             }
         }
         Ok(None)
@@ -1218,6 +1332,11 @@ impl Scheduler {
             stats.per_cpu_ready[cpu.index.get()] = cpu.run_queue.len();
         }
         stats
+    }
+
+    #[cfg(feature = "kernel-self-test")]
+    pub const fn registry_slot_count(&self) -> usize {
+        self.threads.len()
     }
 
     pub fn thread(&self, id: ThreadId) -> Result<&Thread, Error> {
@@ -1492,25 +1611,57 @@ impl Scheduler {
         self.cpu_slots[cpu].ok_or(Error::CpuNotRegistered)
     }
 
+    fn schedulable_cpu_slot(&self, cpu: CpuIndex) -> Result<usize, Error> {
+        let slot = self.cpu_slot(cpu)?;
+        self.cpus[slot]
+            .idle
+            .map(|_| slot)
+            .ok_or(Error::CpuNotRegistered)
+    }
+
+    fn cpu_is_schedulable(&self, cpu: CpuIndex) -> bool {
+        self.cpu_slots[cpu].is_some_and(|slot| self.cpus[slot].idle.is_some())
+    }
+
     fn reserve_thread_slot(&mut self, cpu: CpuIndex) -> Result<ThreadReservation, Error> {
-        if self.threads.len() == self.threads.capacity() {
-            return Err(Error::Allocation);
+        let slot = match self.free_slots.pop() {
+            Some(slot) => slot,
+            None if self.threads.len() < THREAD_REGISTRY_SLOTS => {
+                let slot = self.threads.len();
+                self.threads.push(None);
+                slot
+            }
+            None => return Err(Error::ThreadLimit),
+        };
+        if !matches!(self.threads.get(slot), Some(None)) {
+            scheduler_invariant(Error::InvalidThreadState);
         }
-        let id = ThreadId::from_scheduler_index(self.next_id);
-        let index = usize::try_from(self.next_id).map_err(|_| Error::IdentifierExhausted)?;
-        if index != self.threads.len() || self.next_id == u64::MAX {
+        let Some(id) = ThreadId::from_scheduler_parts(self.next_id, slot) else {
+            self.release_thread_slot(slot)?;
             return Err(Error::IdentifierExhausted);
-        }
-        self.threads.push(None);
-        // Reservation failure leaves this slot as a tombstone. Identity values
-        // are observable system-wide once published, so the namespace is
-        // monotonic and never rolls back or reuses an earlier value.
-        self.next_id += 1;
+        };
+        let Some(next_id) = self.next_id.checked_add(1) else {
+            self.release_thread_slot(slot)?;
+            return Err(Error::IdentifierExhausted);
+        };
+        self.next_id = next_id;
         Ok(ThreadReservation {
             id,
+            slot,
             cpu,
             armed: true,
         })
+    }
+
+    fn release_thread_slot(&mut self, slot: usize) -> Result<(), Error> {
+        if slot == 0
+            || !matches!(self.threads.get(slot), Some(None))
+            || self.free_slots.len() == self.free_slots.capacity()
+        {
+            return Err(Error::InvalidThreadState);
+        }
+        self.free_slots.push(slot);
+        Ok(())
     }
 }
 

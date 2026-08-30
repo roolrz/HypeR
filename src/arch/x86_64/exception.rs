@@ -453,7 +453,7 @@ extern "C" fn x86_64_vector_dispatch(frame: &mut ExceptionFrame) {
             return;
         }
         super::virtualization::observe_host_interrupt(vector);
-        match crate::kernel::entry::irq::dispatch(InterruptId::new(vector)) {
+        match crate::kernel::entry::irq::dispatch(InterruptId::new(vector), None) {
             crate::kernel::entry::irq::Action::Resume { postlude } => {
                 // This architecture retains the request for a cooperative
                 // point until it provides a qualified IRQ-tail continuation.

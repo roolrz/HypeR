@@ -6,13 +6,16 @@
 use alloc::boxed::Box;
 use core::alloc::Layout;
 use core::marker::PhantomData;
-use core::ops::Deref;
+use core::mem::ManuallyDrop;
+use core::mem::MaybeUninit;
+use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AllocationError;
 
+#[repr(C)]
 struct SharedInner<T> {
     references: AtomicUsize,
     value: T,
@@ -29,6 +32,23 @@ pub struct FallibleArc<T> {
     ownership: PhantomData<SharedInner<T>>,
 }
 
+/// Unique owner which retains a `FallibleArc` allocation without refcounting.
+///
+/// This is the linear teardown form for large hardware owners: conversion is
+/// allocation-free, the value remains pinned, and sharing can be restored
+/// without moving the payload.
+pub struct UniqueFallibleArc<T> {
+    inner: NonNull<SharedInner<T>>,
+    ownership: PhantomData<SharedInner<T>>,
+}
+
+// SAFETY: UniqueFallibleArc has exclusive ownership, so moving the owner
+// across CPUs is sound exactly when moving T is sound.
+unsafe impl<T: Send> Send for UniqueFallibleArc<T> {}
+// SAFETY: Shared references to the uniquely owned value may cross CPUs exactly
+// when shared references to T may cross CPUs.
+unsafe impl<T: Sync> Sync for UniqueFallibleArc<T> {}
+
 // SAFETY: FallibleArc grants shared access to T from every clone. Moving or
 // sharing that access across CPUs is sound exactly when T is Send + Sync.
 unsafe impl<T: Send + Sync> Send for FallibleArc<T> {}
@@ -37,12 +57,23 @@ unsafe impl<T: Send + Sync> Send for FallibleArc<T> {}
 unsafe impl<T: Send + Sync> Sync for FallibleArc<T> {}
 
 impl<T> FallibleArc<T> {
+    /// Returns the allocator-requested size of one shared allocation.
+    pub const fn allocation_size() -> usize {
+        core::mem::size_of::<SharedInner<T>>()
+    }
+
     /// Allocates one shared owner without invoking the allocation-error path.
     pub fn try_new(value: T) -> Result<Self, AllocationError> {
-        let inner = try_box(SharedInner {
+        Self::try_new_or_return(value).map_err(|(error, _)| error)
+    }
+
+    /// Allocates one shared owner while preserving `value` on failure.
+    pub fn try_new_or_return(value: T) -> Result<Self, (AllocationError, T)> {
+        let inner = try_box_or_return(SharedInner {
             references: AtomicUsize::new(1),
             value,
-        })?;
+        })
+        .map_err(|(error, inner)| (error, inner.value))?;
         // SAFETY: Box never contains a null pointer. FallibleArc assumes the
         // allocation and becomes responsible for reconstructing the Box after
         // the final non-saturated reference is released.
@@ -58,10 +89,129 @@ impl<T> FallibleArc<T> {
         self.inner().references.load(Ordering::Relaxed)
     }
 
+    /// Extracts the value when this is the unique, non-saturated owner.
+    ///
+    /// Failure returns the original owner unchanged. This is the retirement
+    /// boundary for resources which may be shared while active but require a
+    /// linear owner for final hardware teardown.
+    pub fn try_unwrap(self) -> Result<T, Self> {
+        self.try_into_unique().map(UniqueFallibleArc::into_inner)
+    }
+
+    /// Converts the sole shared reference into a pinned linear owner.
+    pub fn try_into_unique(self) -> Result<UniqueFallibleArc<T>, Self> {
+        if self
+            .inner()
+            .references
+            .compare_exchange(1, 0, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            return Err(self);
+        }
+        let owner = ManuallyDrop::new(self);
+        Ok(UniqueFallibleArc {
+            inner: owner.inner,
+            ownership: PhantomData,
+        })
+    }
+
     fn inner(&self) -> &SharedInner<T> {
         // SAFETY: Every FallibleArc clone retains one reference. The allocation
         // cannot be freed while `self` is alive, and the pointee never moves.
         unsafe { self.inner.as_ref() }
+    }
+}
+
+impl<T> UniqueFallibleArc<T> {
+    pub const fn allocation_size() -> usize {
+        core::mem::size_of::<SharedInner<T>>()
+    }
+
+    /// Restores one shared reference without allocating or moving `T`.
+    pub fn into_shared(self) -> FallibleArc<T> {
+        let owner = ManuallyDrop::new(self);
+        // No FallibleArc exists while the unique token is live. Release makes
+        // all unique-owner mutation visible before future Arc clones.
+        // SAFETY: The unique owner keeps the allocation live and excludes
+        // concurrent access to the zero-valued reference counter.
+        unsafe { owner.inner.as_ref() }
+            .references
+            .store(1, Ordering::Release);
+        FallibleArc {
+            inner: owner.inner,
+            ownership: PhantomData,
+        }
+    }
+
+    /// Extracts the value and releases the retained shared allocation.
+    pub fn into_inner(self) -> T {
+        let owner = ManuallyDrop::new(self);
+        // SAFETY: A UniqueFallibleArc is the only owner and keeps the count at
+        // zero, so exactly this operation may reconstruct the allocation.
+        let inner = unsafe { Box::from_raw(owner.inner.as_ptr()) };
+        let SharedInner { value, .. } = *inner;
+        value
+    }
+}
+
+impl<T> UniqueFallibleArc<MaybeUninit<T>> {
+    /// Allocates a pinned linear slot before fallible hardware publication.
+    pub fn try_new_uninit() -> Result<Self, AllocationError> {
+        FallibleArc::try_new(MaybeUninit::uninit()).map(|owner| {
+            // The newly created Arc is uniquely owned by construction.
+            match owner.try_into_unique() {
+                Ok(unique) => unique,
+                Err(_) => unreachable_unique_creation(),
+            }
+        })
+    }
+
+    /// Initializes the retained slot without moving the resulting owner.
+    pub fn write(self, value: T) -> UniqueFallibleArc<T> {
+        let owner = ManuallyDrop::new(self);
+        // SAFETY: MaybeUninit<T> has the same layout as T. This unique owner
+        // grants exclusive access to the value field, which is written once.
+        unsafe {
+            core::ptr::addr_of_mut!((*owner.inner.as_ptr()).value).write(MaybeUninit::new(value));
+        }
+        UniqueFallibleArc {
+            inner: owner.inner.cast(),
+            ownership: PhantomData,
+        }
+    }
+}
+
+impl<T> Deref for UniqueFallibleArc<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: The unique allocation stays live and initialized.
+        unsafe { &self.inner.as_ref().value }
+    }
+}
+
+impl<T> DerefMut for UniqueFallibleArc<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: The linear owner excludes every FallibleArc and other unique
+        // owner, so it grants exclusive access to the pinned value.
+        unsafe { &mut self.inner.as_mut().value }
+    }
+}
+
+impl<T> Drop for UniqueFallibleArc<T> {
+    fn drop(&mut self) {
+        // SAFETY: Unique ownership and the zero reference count prove this is
+        // the only destructor which can reconstruct the allocation.
+        unsafe { drop(Box::from_raw(self.inner.as_ptr())) };
+    }
+}
+
+#[cold]
+fn unreachable_unique_creation() -> ! {
+    // A newly allocated FallibleArc has exactly one reference. Keep this
+    // dependency-free primitive fail-stop if its own constructor is violated.
+    loop {
+        core::hint::spin_loop();
     }
 }
 
@@ -136,6 +286,11 @@ impl<T> Drop for FallibleArc<T> {
 /// Allocates and initializes one owned value without invoking the infallible
 /// allocation-error path.
 pub fn try_box<T>(value: T) -> Result<Box<T>, AllocationError> {
+    try_box_or_return(value).map_err(|(error, _)| error)
+}
+
+/// Allocates one owned value while preserving it on allocation failure.
+pub fn try_box_or_return<T>(value: T) -> Result<Box<T>, (AllocationError, T)> {
     let layout = Layout::new::<T>();
     if layout.size() == 0 {
         // Box does not allocate storage for a zero-sized type. Using the safe
@@ -145,8 +300,9 @@ pub fn try_box<T>(value: T) -> Result<Box<T>, AllocationError> {
         return Ok(Box::new(value));
     }
     // SAFETY: A successful allocation has the exact layout required by T.
-    let pointer =
-        NonNull::new(unsafe { alloc::alloc::alloc(layout) } as *mut T).ok_or(AllocationError)?;
+    let Some(pointer) = NonNull::new(unsafe { alloc::alloc::alloc(layout) } as *mut T) else {
+        return Err((AllocationError, value));
+    };
     // SAFETY: pointer is aligned, writable, and uniquely owned for one T.
     unsafe {
         pointer.as_ptr().write(value);

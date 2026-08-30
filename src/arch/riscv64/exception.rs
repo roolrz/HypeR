@@ -359,7 +359,7 @@ extern "C" fn dispatch_trap(frame: &mut TrapFrame) {
             SUPERVISOR_TIMER => {
                 dispatch_irq_action(
                     frame,
-                    crate::kernel::entry::irq::dispatch(InterruptId::new(0)),
+                    crate::kernel::entry::irq::dispatch(InterruptId::new(0), None),
                 );
             }
             SUPERVISOR_EXTERNAL => {

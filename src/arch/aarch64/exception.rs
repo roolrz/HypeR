@@ -66,18 +66,19 @@ static AARCH64_IRQ_STACK_BOUNDS: StackTable = StackTable::new();
 static AARCH64_EMERGENCY_STACK_BOUNDS: StackTable = StackTable::new();
 
 #[repr(C, align(16))]
-struct ExceptionFrame {
-    general: [u64; 31],
-    elr: u64,
-    spsr: u64,
-    esr: u64,
-    far: u64,
-    vector: u64,
-    sp_el0: u64,
-    sp_el1: u64,
-    simd: [[u64; 2]; 32],
-    fpcr: u64,
-    fpsr: u64,
+pub(super) struct ExceptionFrame {
+    pub(super) general: [u64; 31],
+    pub(super) elr: u64,
+    pub(super) spsr: u64,
+    pub(super) esr: u64,
+    pub(super) far: u64,
+    pub(super) vector: u64,
+    pub(super) sp_el0: u64,
+    pub(super) sp_el1: u64,
+    pub(super) simd: [[u64; 2]; 32],
+    pub(super) fpcr: u64,
+    pub(super) fpsr: u64,
+    pub(super) return_hcr: u64,
 }
 
 const _: () = {
@@ -103,6 +104,10 @@ const _: () = {
     assert!(offset_of!(ExceptionFrame, simd) == registers::EXCEPTION_FRAME_SIMD_OFFSET as usize);
     assert!(offset_of!(ExceptionFrame, fpcr) == registers::EXCEPTION_FRAME_FPCR_OFFSET as usize);
     assert!(offset_of!(ExceptionFrame, fpsr) == registers::EXCEPTION_FRAME_FPSR_OFFSET as usize);
+    assert!(
+        offset_of!(ExceptionFrame, return_hcr)
+            == registers::EXCEPTION_FRAME_RETURN_HCR_OFFSET as usize
+    );
     assert!(size_of::<ExceptionFrame>() == registers::EXCEPTION_FRAME_SIZE as usize);
 };
 
@@ -474,6 +479,8 @@ extern "C" fn aarch64_exception_dispatch(
             ),
         );
     };
+    let native_user =
+        origin == ExceptionOrigin::LowerAarch64 && super::user_entry::active_on_current_cpu();
     if kind == ExceptionKind::Irq {
         let interrupt = super::acknowledge_interrupt()?;
         if Some(interrupt) == super::kernel_rpc_interrupt() {
@@ -481,8 +488,22 @@ extern "C" fn aarch64_exception_dispatch(
             super::end_interrupt(interrupt);
             return None;
         }
-        match crate::kernel::entry::irq::dispatch(interrupt) {
-            crate::kernel::entry::irq::Action::Resume { postlude } => return postlude,
+        let native_unwind = native_user.then_some(super::user_entry::unwind_callback());
+        match crate::kernel::entry::irq::dispatch(interrupt, native_unwind) {
+            crate::kernel::entry::irq::Action::Resume { postlude } => {
+                // IRQ policy and preemption accounting have finished using the
+                // acknowledged identity. EOImode 0 requires this write before
+                // either the optional scheduling tail or exception return.
+                super::end_interrupt(interrupt);
+                if native_user && postlude.is_some() {
+                    // The raw vector frame must not outlive this stack.
+                    match super::user_entry::capture_interrupt(frame) {
+                        Ok(true) => {}
+                        Ok(false) | Err(_) => super::user_entry::fail_stop(),
+                    }
+                }
+                return postlude;
+            }
             crate::kernel::entry::irq::Action::Stop => {
                 super::end_interrupt(interrupt);
                 let stack_pointer = interrupted_stack_pointer(frame, origin);
@@ -492,6 +513,12 @@ extern "C" fn aarch64_exception_dispatch(
         }
     }
     if kind == ExceptionKind::Synchronous && origin == ExceptionOrigin::LowerAarch64 {
+        if native_user {
+            return match super::user_entry::capture_synchronous(frame) {
+                Ok(true) => Some(super::user_entry::unwind_callback()),
+                Ok(false) | Err(_) => super::user_entry::fail_stop(),
+            };
+        }
         let physical_address = guest_physical_address(frame.far);
         let memory_fault = super::decode_guest_memory_fault(frame.esr, physical_address);
         if let Some(fault) = memory_fault {

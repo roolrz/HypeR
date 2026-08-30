@@ -134,25 +134,28 @@ adapter receives an owned syscall invocation and returns a fixed-width result;
 it never passes a Rust frame reference into code which can allocate, block,
 preempt, or migrate.
 
-The selected `hal::user` facade currently exposes only inert machine-capability
-discovery. It deliberately provides no activation or entry operation. The
-completed facade will own opaque prepared user address spaces, activation and
-deactivation, entry and return, architecture user-address limits, and the
-selected local invalidation mechanism. Process lifetime, handles, rights,
-syscall numbers, ELF policy, compatibility routing, and resource accounting
-remain in the kernel. The earlier identity-only `UserExecution` scaffold was
-removed; a runnable replacement must strongly own its Process and prepared
-address space.
+The selected `hal::user` facade owns architecture user-address limits, opaque
+prepared roots, CPU-affine activation/deactivation tokens, and acknowledged
+local replacement and invalidation. On AArch64 it also exposes a call-like
+run/leave/completion contract: architecture entry copies a native call, fault,
+or interruption into owned state, closes the active translation, and only then
+returns control to kernel policy. RISC-V and x86-64 currently reject native-user
+entry as unsupported. Process lifetime, handles, rights, syscall numbers, ELF
+policy, compatibility routing, residency, and resource accounting remain in
+the kernel. The scheduler-owned `UserExecution` strongly retains its Process,
+native address space, and per-Thread machine context.
 
-AArch64 requires two independently validated implementations behind that
-facade. VHE uses the host EL2&0 translation regime. The preferred nVHE spike
-uses direct EL0, `HCR_EL2.TGE`, and a per-process stage-2 address space; it must
-not reuse the VM subsystem's current single-active-vCPU execution lease because
-one process may execute Threads concurrently on several CPUs. User stage-2
-therefore needs its own resident-CPU set, mapping epoch, shootdown
-acknowledgement, VMID generation, and reuse-retirement protocol. An EL1 relay
-is a compatibility fallback only if the stage-2-only proof cannot provide a
-required ABI semantic.
+AArch64 provides two implementations behind that facade. VHE uses an immutable
+host EL2&0 stage-1 root. nVHE uses an immutable per-process stage-2 root with a
+separate resident-CPU set, mapping epoch, acknowledged shootdown, and shared
+guest/native VMID allocation and retirement. Both retain old roots and tags
+until every cut target acknowledges; safe abandonment leaks published owners
+rather than risking reuse. A kernel self-test exercises call-like EL0 entry,
+Native syscall return, contained fault, join, and retirement under both QEMU
+host regimes. A loader-backed runtime, blocking and migration qualification,
+and physical-hardware validation remain prerequisites for general native
+userspace. An EL1 relay remains a compatibility fallback only if direct
+stage-2-only execution cannot provide a required ABI semantic.
 
 The kernel exposes one Native ABI. Linux and FreeBSD are initially isolated
 EL0 supervisor domains selected transactionally with the process image; foreign

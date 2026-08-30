@@ -36,6 +36,10 @@ const _: () = {
 
 type StackLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
+pub(crate) const fn thread_stack_bytes() -> usize {
+    THREAD_STACK_BYTES
+}
+
 // This is the sole runtime stage-1 mutation and virtual-slot allocator lock.
 // On x86 its IRQ-mask policy services pending shootdowns while contended, so a
 // CPU already executing with IF clear cannot block a synchronous invalidation.

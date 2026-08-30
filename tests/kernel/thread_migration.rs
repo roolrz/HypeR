@@ -389,7 +389,6 @@ fn quiesce_threads() -> Result<(), Error> {
         if stats.ready == 0
             && stats.blocked == 0
             && stats.migrating == 0
-            && stats.threads == crate::kernel::cpu::online_cpu_count()
             && stats.threads == stats.running + stats.idle
         {
             return Ok(());

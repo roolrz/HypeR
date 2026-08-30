@@ -29,6 +29,7 @@ pub(crate) enum Error {
     IrqDepthOverflow,
     IrqDepthUnderflow,
     WrongCpu,
+    AlreadyDisabled,
 }
 
 impl Error {
@@ -42,6 +43,7 @@ impl Error {
             Self::IrqDepthOverflow => "IRQ nesting overflow",
             Self::IrqDepthUnderflow => "IRQ nesting underflow",
             Self::WrongCpu => "preemption guard completed on the wrong CPU",
+            Self::AlreadyDisabled => "native-user entry requires preemption to be enabled",
         }
     }
 }
@@ -169,12 +171,35 @@ pub(crate) fn should_reschedule_after_irq() -> Result<bool, Error> {
     Ok(pending(cpu)? && can_reschedule(cpu)?)
 }
 
+/// Tests whether a native-user run must unwind before scheduling.
+///
+/// A native-user run owns exactly one preemption-disable level while its
+/// CPU-affine translation root is installed. IRQ exit cannot schedule under
+/// that root. Instead it returns to the run continuation, which removes the
+/// root, releases this final disable level, and then consumes the durable
+/// reschedule request at an ordinary scheduler point.
+pub(crate) fn should_unwind_user_after_irq() -> Result<bool, Error> {
+    let cpu = current_cpu()?;
+    let state = &PREEMPTION[cpu];
+    ensure_online(state)?;
+    Ok(state.pending.is_pending()
+        && state.irq_depth.load(Ordering::Relaxed) == 0
+        && state.disable_depth.load(Ordering::Relaxed) == 1)
+}
+
 /// Disables asynchronous preemption on the calling CPU.
 ///
 /// Dropping the guard only restores accounting. Call
 /// `scheduler::preempt_enable_and_reschedule` when the release point is also a
 /// deliberate scheduling point.
 pub(crate) fn disable() -> Result<PreemptionGuard, Error> {
+    // Closing the identification-to-publication window is essential: an IRQ
+    // tail could otherwise migrate this continuation after `current_cpu()` but
+    // before the old CPU's depth is incremented.
+    // SAFETY: The guard remains lexical and is restored before this function
+    // returns. A nonzero disable depth pins the continuation afterwards.
+    let interrupt_mask =
+        unsafe { hyper::sync::InterruptMaskGuard::<crate::hal::irq::LocalMask>::acquire() };
     let cpu = current_cpu()?;
     let state = &PREEMPTION[cpu];
     ensure_online(state)?;
@@ -182,11 +207,39 @@ pub(crate) fn disable() -> Result<PreemptionGuard, Error> {
     // Do not let protected accesses move above the local preemption boundary.
     // CPU-local depth accounting needs no hardware fence or global ordering.
     compiler_fence(Ordering::Acquire);
-    Ok(PreemptionGuard {
+    let guard = PreemptionGuard {
         cpu,
         active: true,
         not_send: PhantomData,
-    })
+    };
+    drop(interrupt_mask);
+    Ok(guard)
+}
+
+/// Acquires the sole preemption-disable level reserved for native-user entry.
+///
+/// Requiring a zero starting depth makes IRQ-tail unwind an exact contract
+/// instead of a guess about arbitrary nested guards.
+pub(crate) fn disable_for_user_run() -> Result<PreemptionGuard, Error> {
+    // SAFETY: See `disable`: masking spans CPU identification and the atomic
+    // zero-to-one publication, then the preemption guard provides pinning.
+    let interrupt_mask =
+        unsafe { hyper::sync::InterruptMaskGuard::<crate::hal::irq::LocalMask>::acquire() };
+    let cpu = current_cpu()?;
+    let state = &PREEMPTION[cpu];
+    ensure_online(state)?;
+    state
+        .disable_depth
+        .compare_exchange(0, 1, Ordering::Relaxed, Ordering::Relaxed)
+        .map_err(|_| Error::AlreadyDisabled)?;
+    compiler_fence(Ordering::Acquire);
+    let guard = PreemptionGuard {
+        cpu,
+        active: true,
+        not_send: PhantomData,
+    };
+    drop(interrupt_mask);
+    Ok(guard)
 }
 
 pub(crate) struct PreemptionGuard {

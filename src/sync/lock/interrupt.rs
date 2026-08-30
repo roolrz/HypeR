@@ -85,6 +85,11 @@ impl<T, M: InterruptMask> InterruptSpinLock<T, M> {
         }
     }
 
+    /// Extracts the value when no shared lock reference can remain.
+    pub fn into_inner(self) -> T {
+        self.lock.into_inner()
+    }
+
     pub fn with<R>(&self, operation: impl FnOnce(&mut T) -> R) -> R {
         // SAFETY: This lexical guard cannot escape, and nested `with` calls
         // necessarily destroy their guards before this one.

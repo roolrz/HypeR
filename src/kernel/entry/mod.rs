@@ -9,4 +9,5 @@
 
 pub(crate) mod exception;
 pub(crate) mod irq;
+pub(crate) mod user;
 pub(crate) mod vmexit;

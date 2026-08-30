@@ -30,7 +30,10 @@ pub(crate) enum Action {
 /// The caller owns interrupt acknowledgement and raw-frame lifetime. Local
 /// interrupts must remain masked. Dispatch is allocation-free but invokes
 /// registered interrupt-safe handlers under the IRQ registry lock.
-pub(crate) fn dispatch(interrupt: InterruptId) -> Action {
+pub(crate) fn dispatch(
+    interrupt: InterruptId,
+    native_unwind: Option<unsafe extern "C" fn()>,
+) -> Action {
     let irq = match crate::kernel::task::preempt::enter_irq() {
         Ok(irq) => irq,
         Err(error) => {
@@ -46,6 +49,22 @@ pub(crate) fn dispatch(interrupt: InterruptId) -> Action {
     match irq.complete() {
         Ok(true)
             if matches!(action, Action::Resume { .. })
+                && native_unwind.is_some()
+                && match crate::kernel::task::preempt::should_unwind_user_after_irq() {
+                    Ok(pending) => pending,
+                    Err(error) => crate::kernel::irq::exception::fatal_interrupt(
+                        error.description(),
+                        Some(interrupt),
+                    ),
+                } =>
+        {
+            Action::Resume {
+                postlude: native_unwind,
+            }
+        }
+        Ok(true)
+            if matches!(action, Action::Resume { .. })
+                && native_unwind.is_none()
                 && match crate::kernel::task::preempt::should_reschedule_after_irq() {
                     Ok(pending) => pending,
                     Err(error) => crate::kernel::irq::exception::fatal_interrupt(
@@ -151,7 +170,7 @@ fn fail_vcpu_tail(operation: &str, error: crate::kernel::vm::vcpu::HardwareTrans
 // `arch` leaves this narrow adapter intentionally unused on other targets.
 #[allow(dead_code)]
 pub(crate) fn claim_and_dispatch_external() -> Option<Action> {
-    crate::kernel::irq::acknowledge_external().map(dispatch)
+    crate::kernel::irq::acknowledge_external().map(|interrupt| dispatch(interrupt, None))
 }
 
 /// Publishes a remote CPU's exact interrupt snapshot and stops that CPU.
