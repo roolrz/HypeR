@@ -49,6 +49,7 @@ static QUEUED_ARBITRATION: QueuedArbitration = QueuedArbitration::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
+    Quiescence(super::support::QuiescenceError),
     Scheduler(scheduler::Error),
     Synchronization(crate::kernel::sync::Error),
     TimedWait(crate::kernel::task::TimedWaitError),
@@ -58,6 +59,12 @@ pub(super) enum Error {
 impl From<scheduler::Error> for Error {
     fn from(error: scheduler::Error) -> Self {
         Self::Scheduler(error)
+    }
+}
+
+impl From<super::support::QuiescenceError> for Error {
+    fn from(error: super::support::QuiescenceError) -> Self {
+        Self::Quiescence(error)
     }
 }
 
@@ -78,35 +85,8 @@ pub(super) fn run() -> Result<(), Error> {
     exercise_queued_arbitration_and_stale_ticket()?;
     exercise_timed_wait_paths()?;
     exercise_cpu_local_migration_barrier()?;
-    quiesce_test_threads()?;
+    super::support::quiesce_workers()?;
     Ok(())
-}
-
-/// Drives every completed worker through its exit trampoline and reclamation.
-///
-/// A completion semaphore publishes a worker's last shared-state access, but
-/// IRQ-tail preemption may resume bootstrap before that worker returns from its
-/// entry point. Quiescence requires one permanent idle Thread per admitted CPU
-/// plus the still-running bootstrap Thread before later lifecycle tests inspect
-/// the scheduler registry.
-fn quiesce_test_threads() -> Result<(), Error> {
-    const MAX_REAP_PASSES: usize = 4_096;
-
-    for _ in 0..MAX_REAP_PASSES {
-        scheduler::yield_now()?;
-        let stats = scheduler::statistics()?;
-        let online_cpus = crate::kernel::cpu::online_cpu_count();
-        if stats.ready == 0
-            && stats.blocked == 0
-            && stats.migrating == 0
-            && stats.running == 1
-            && stats.idle == online_cpus
-            && stats.threads == online_cpus.saturating_add(1)
-        {
-            return Ok(());
-        }
-    }
-    Err(Error::StateMismatch(26))
 }
 
 /// Exercises the real timer callback and handle-directed retirement paths.

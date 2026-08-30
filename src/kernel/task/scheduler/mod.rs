@@ -552,12 +552,6 @@ pub(crate) fn discard_dormant_kernel_thread(id: ThreadId) -> Result<(), Error> {
     Ok(())
 }
 
-/// Confirms that scheduler registry backing was prepared during initialization.
-#[cfg(feature = "kernel-self-test")]
-pub(crate) fn prepare_thread_accounting_probe() -> Result<(), Error> {
-    SCHEDULER.with(|slot| slot.as_ref().map(|_| ()).ok_or(Error::NotInitialized))
-}
-
 pub(in crate::kernel) fn vcpu_create(
     name: &str,
     vm: crate::kernel::vm::registry::VmBinding,

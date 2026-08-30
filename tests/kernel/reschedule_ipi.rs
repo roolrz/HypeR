@@ -16,6 +16,7 @@ static REMOTE_WORKER_RAN: AtomicBool = AtomicBool::new(false);
 pub(super) enum Error {
     InvalidTarget,
     NotificationUnavailable,
+    Quiescence(super::support::QuiescenceError),
     Scheduler(scheduler::Error),
     Time(crate::kernel::time::Error),
     Timeout(&'static str),
@@ -24,6 +25,12 @@ pub(super) enum Error {
 impl From<scheduler::Error> for Error {
     fn from(error: scheduler::Error) -> Self {
         Self::Scheduler(error)
+    }
+}
+
+impl From<super::support::QuiescenceError> for Error {
+    fn from(error: super::support::QuiescenceError) -> Self {
+        Self::Quiescence(error)
     }
 }
 
@@ -68,6 +75,7 @@ pub(super) fn run() -> Result<(), Error> {
     wait_until("completed SGI was not delivered again", || {
         crate::kernel::irq::reschedule_delivery_count_for_test(target) > first_delivery
     })?;
+    super::support::quiesce_workers()?;
 
     crate::println!("HypeR test: targeted reschedule IPI delivery and EOI passed");
     Ok(())

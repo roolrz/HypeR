@@ -12,6 +12,7 @@ const TEST_SLEEP_NS: u64 = 2_000_000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
     Clock(crate::kernel::time::Error),
+    Quiescence(super::support::QuiescenceError),
     Scheduler(crate::kernel::task::scheduler::Error),
     Sleep(SleepError),
     SleptTooBriefly,
@@ -21,6 +22,12 @@ pub(super) enum Error {
 impl From<crate::kernel::time::Error> for Error {
     fn from(error: crate::kernel::time::Error) -> Self {
         Self::Clock(error)
+    }
+}
+
+impl From<super::support::QuiescenceError> for Error {
+    fn from(error: super::support::QuiescenceError) -> Self {
+        Self::Quiescence(error)
     }
 }
 
@@ -52,23 +59,27 @@ impl SleepObservation {
     }
 }
 
+static SLEEP_OBSERVATION: SleepObservation = SleepObservation::new();
+
 pub(super) fn run() -> Result<(), Error> {
-    let observation = SleepObservation::new();
+    SLEEP_OBSERVATION.complete.store(false, Ordering::Relaxed);
+    SLEEP_OBSERVATION.elapsed_ns.store(0, Ordering::Relaxed);
+    SLEEP_OBSERVATION.error.store(0, Ordering::Relaxed);
     let worker = crate::kernel::task::scheduler::kthread_create(
         "sleep-test",
         sleep_worker,
-        core::ptr::from_ref(&observation).expose_provenance(),
+        core::ptr::from_ref(&SLEEP_OBSERVATION).expose_provenance(),
     )?;
     crate::kernel::task::scheduler::thread_ready(worker)?;
-    while !observation.complete.load(Ordering::Acquire) {
+    while !SLEEP_OBSERVATION.complete.load(Ordering::Acquire) {
         // The bootstrap thread remains runnable while the worker parks. Timer
         // IRQ delivery eventually makes the worker eligible for this yield.
         crate::kernel::task::scheduler::yield_now()?;
     }
-    if observation.error.load(Ordering::Acquire) != 0 {
+    if SLEEP_OBSERVATION.error.load(Ordering::Acquire) != 0 {
         return Err(Error::UnexpectedSleepResult);
     }
-    if observation.elapsed_ns.load(Ordering::Acquire) < TEST_SLEEP_NS {
+    if SLEEP_OBSERVATION.elapsed_ns.load(Ordering::Acquire) < TEST_SLEEP_NS {
         return Err(Error::SleptTooBriefly);
     }
 
@@ -110,12 +121,13 @@ pub(super) fn run() -> Result<(), Error> {
     {
         return Err(Error::UnexpectedSleepResult);
     }
+    super::support::quiesce_workers()?;
     Ok(())
 }
 
 extern "C" fn sleep_worker(context: usize) {
-    // SAFETY: run retains its stack-local observation until this worker sets
-    // complete with Release ordering and can no longer access the record.
+    // SAFETY: Only the address of the static SLEEP_OBSERVATION is passed here.
+    // Its lifetime dominates the one-shot worker and every failure path.
     let observation = unsafe { &*core::ptr::with_exposed_provenance::<SleepObservation>(context) };
     let start = match crate::kernel::time::monotonic_nanoseconds() {
         Ok(start) => start,

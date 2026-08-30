@@ -11,7 +11,6 @@ use hyper::sync::atomic::{AtomicUsize, Ordering};
 use crate::kernel::mm::stack;
 use crate::kernel::sync::Semaphore;
 use crate::kernel::task::scheduler;
-use crate::kernel::task::thread::ThreadId;
 
 static IRQ_CALLBACK_SP: AtomicUsize = AtomicUsize::new(0);
 
@@ -21,6 +20,7 @@ pub(super) enum Error {
     IrqCallbackMissing,
     IrqStackMismatch,
     PageAccountingUnavailable,
+    Quiescence(super::support::QuiescenceError),
     StackPageAllocation,
     StackPageRetirement,
     #[cfg(CONFIG_ARCH_X86_64)]
@@ -29,12 +29,17 @@ pub(super) enum Error {
     Stack(stack::Error),
     StackUsageMissing,
     Synchronization(crate::kernel::sync::Error),
-    ThreadRetirementTimeout,
 }
 
 impl From<scheduler::Error> for Error {
     fn from(error: scheduler::Error) -> Self {
         Self::Scheduler(error)
+    }
+}
+
+impl From<super::support::QuiescenceError> for Error {
+    fn from(error: super::support::QuiescenceError) -> Self {
+        Self::Quiescence(error)
     }
 }
 
@@ -64,6 +69,8 @@ impl ThreadProbe {
     }
 }
 
+static THREAD_PROBE: ThreadProbe = ThreadProbe::new();
+
 pub(super) fn run() -> Result<(), Error> {
     validate_cpu_exception_stacks()?;
     validate_thread_stack()?;
@@ -89,23 +96,22 @@ fn validate_thread_stack() -> Result<(), Error> {
     // Exercise dormant ownership retirement, then move any persistent Thread
     // registry growth before the stack-only accounting window. Registry slots
     // intentionally outlive individual Threads and are not stack leakage.
-    let warmup = scheduler::kthread_create("stack-accounting-warmup", stack_worker, 0)?;
+    let warmup = scheduler::kthread_create("stack-accounting-warmup", empty_worker, 0)?;
     scheduler::discard_dormant_kernel_thread(warmup)?;
-    scheduler::prepare_thread_accounting_probe()?;
+    super::support::quiesce_workers()?;
     let baseline_pages = crate::kernel::mm::statistics()
         .ok_or(Error::PageAccountingUnavailable)?
         .runtime
         .kernel_pages
         .pages;
-    let probe = ThreadProbe::new();
     let id = scheduler::kthread_create(
         "stack-watermark",
         stack_worker,
-        (&probe as *const ThreadProbe) as usize,
+        core::ptr::from_ref(&THREAD_PROBE).expose_provenance(),
     )?;
     scheduler::thread_ready(id)?;
     scheduler::yield_now()?;
-    probe.ready.acquire()?;
+    THREAD_PROBE.ready.acquire()?;
     let statistics = scheduler::thread_stack_statistics(id)?.ok_or(Error::StackUsageMissing)?;
     let allocated_pages = crate::kernel::mm::statistics()
         .ok_or(Error::PageAccountingUnavailable)?
@@ -123,8 +129,8 @@ fn validate_thread_stack() -> Result<(), Error> {
     if !stack::guard_page_is_unmapped(statistics)? {
         return Err(Error::GuardMapped);
     }
-    probe.release.release()?;
-    wait_for_thread_retirement(id)?;
+    THREAD_PROBE.release.release()?;
+    super::support::quiesce_workers()?;
     let final_pages = crate::kernel::mm::statistics()
         .ok_or(Error::PageAccountingUnavailable)?
         .runtime
@@ -140,28 +146,10 @@ fn validate_thread_stack() -> Result<(), Error> {
     Ok(())
 }
 
-/// Waits until the worker's stack owner has passed scheduler reclamation.
-///
-/// A completion signal only publishes the worker's last shared-state access.
-/// IRQ-tail preemption can resume this parent before the worker returns through
-/// its exit trampoline, so a fixed number of yields is not a retirement proof.
-fn wait_for_thread_retirement(id: ThreadId) -> Result<(), Error> {
-    const MAX_REAP_PASSES: usize = 64;
-
-    for _ in 0..MAX_REAP_PASSES {
-        scheduler::yield_now()?;
-        match scheduler::thread_stack_statistics(id) {
-            Err(scheduler::Error::ThreadNotFound) => return Ok(()),
-            Ok(_) | Err(scheduler::Error::InvalidThreadState) => {}
-            Err(error) => return Err(Error::Scheduler(error)),
-        }
-    }
-    Err(Error::ThreadRetirementTimeout)
-}
-
 extern "C" fn stack_worker(argument: usize) {
-    // SAFETY: The parent retains the probe until this worker is released.
-    let probe = unsafe { &*(argument as *const ThreadProbe) };
+    // SAFETY: Only the address of the static THREAD_PROBE is passed here. Its
+    // lifetime dominates the one-shot self-test worker and crash-stop paths.
+    let probe = unsafe { &*core::ptr::with_exposed_provenance::<ThreadProbe>(argument) };
     let mut consumption = [0u8; 8 * 1024];
     for (index, byte) in consumption.iter_mut().enumerate() {
         // SAFETY: byte is one unique element in the local stack allocation.
@@ -172,6 +160,8 @@ extern "C" fn stack_worker(argument: usize) {
     let _ = probe.release.acquire();
     black_box(&consumption);
 }
+
+extern "C" fn empty_worker(_argument: usize) {}
 
 fn validate_irq_stack_switch() -> Result<(), Error> {
     IRQ_CALLBACK_SP.store(0, Ordering::Release);
