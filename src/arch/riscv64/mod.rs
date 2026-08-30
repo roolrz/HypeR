@@ -38,7 +38,7 @@ pub use exception::{
     validate_local_runtime_vectors, validate_runtime_vectors,
 };
 pub use guest::ValidationError as GuestValidationError;
-pub(crate) use guest::{GuestSyncAction, GuestSyncFrame, handle_guest_sync};
+pub(crate) use guest::{GuestSyncAction, GuestSyncExit, handle_guest_sync};
 pub use interrupt_controller::{
     Error as InterruptControllerError,
     Riscv64InterruptController as ArchitectureInterruptController,
@@ -78,7 +78,6 @@ pub use vm_interrupt::{Error as VmInterruptError, VmInterruptController};
 pub use vm_vcpu::Error as VcpuInterruptError;
 pub(crate) use vm_vcpu::{
     activate as activate_vcpu_hardware, deactivate as deactivate_vcpu_hardware,
-    deliver_software_interrupt as deliver_guest_software_interrupt, handle_guest_device_access,
     handle_maintenance_interrupt as handle_virtualization_maintenance_interrupt,
     handle_virtual_timer_interrupt as handle_guest_virtual_timer_interrupt,
     maintenance_interrupt_pending as virtualization_maintenance_pending,

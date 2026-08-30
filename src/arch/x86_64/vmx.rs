@@ -13,13 +13,15 @@ use core::cell::UnsafeCell;
 use core::ptr::{copy_nonoverlapping, read_unaligned, write_volatile};
 
 use hyper::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use hyper::vm::x86::device::legacy_pc::InterruptSource;
+use hyper::vm::exit::{GuestMemoryFault, GuestPhysicalAddress, MemoryAccess, MemoryFaultAction};
+use hyper::vm::x86::exit::{PendingInterruptAction, PortIoExit, PortIoOperation, PortIoWidth};
 use hyper::vm::x86::vmx::{
     ControlCapability, EptAccess, EptViolation, IoDirection, IoExit, VmxBasic,
 };
-use hyper::vm::x86::{CpuidResult, GuestMsr, hypervisor_cpuid, merge_port_input, sanitize_cpuid};
+use hyper::vm::x86::{CpuidResult, GuestMsr, hypervisor_cpuid, sanitize_cpuid};
 
 use super::context::{VcpuContext, VcpuMsrState};
+use super::guest::{PortIoCompletion, PortIoCompletionError, complete_port_io};
 
 mod instruction;
 
@@ -297,7 +299,7 @@ unsafe extern "C" {
 
 pub unsafe fn enter(context: *mut VcpuContext) -> ! {
     if super::local_irq_enabled() {
-        crate::kernel::boot::fail(
+        super::virtualization::fail_stop(
             "VMX guest entry with local IRQs enabled",
             Error::InterruptsEnabled,
         );
@@ -306,11 +308,11 @@ pub unsafe fn enter(context: *mut VcpuContext) -> ! {
     // borrow ends before VMLAUNCH and VM-exit access through the raw pointer.
     let preparation = unsafe { prepare_vmcs(&*context) };
     if let Err(error) = preparation {
-        crate::kernel::boot::fail("VMX guest entry preparation", error);
+        super::virtualization::fail_stop("VMX guest entry preparation", error);
     }
     let cpu = super::current_cpu_index();
     let Some(slot) = ACTIVE_CONTEXT.get(cpu) else {
-        crate::kernel::boot::fail("VMX active-context publication", cpu);
+        super::virtualization::fail_stop("VMX active-context publication", cpu);
     };
     slot.store(context.expose_provenance(), Ordering::Release);
     // VM exits continue on the scheduler-owned, guarded vCPU kernel stack.
@@ -643,7 +645,7 @@ fn active_context_pointer() -> *mut VcpuContext {
         .get(cpu)
         .map_or(0, |slot| slot.load(Ordering::Acquire));
     if address == 0 {
-        crate::kernel::boot::fail("VMX active-context lookup", cpu);
+        super::virtualization::fail_stop("VMX active-context lookup", cpu);
     }
     core::ptr::with_exposed_provenance_mut(address)
 }
@@ -658,7 +660,7 @@ fn active_eptp() -> Option<u64> {
 fn synchronize_guest_msrs(context: &mut VcpuContext) {
     let cpu = super::current_cpu_index();
     if cpu >= MAX_CPUS {
-        crate::kernel::boot::fail("VMX guest-MSR list lookup", cpu);
+        super::virtualization::fail_stop("VMX guest-MSR list lookup", cpu);
     }
     // SAFETY: VM exit completed its store list before transferring control to
     // this dispatcher, and hardware will not access it again until VM entry.
@@ -677,7 +679,7 @@ fn synchronize_guest_msrs(context: &mut VcpuContext) {
 fn update_guest_msr(msr: u32, value: u64) {
     let cpu = super::current_cpu_index();
     if cpu >= MAX_CPUS {
-        crate::kernel::boot::fail("VMX guest-MSR list update", cpu);
+        super::virtualization::fail_stop("VMX guest-MSR list update", cpu);
     }
     // SAFETY: This runs between VM exit and VM entry on the owning CPU, while
     // VMX hardware is not accessing the guest load/store list. Projecting from
@@ -718,14 +720,18 @@ fn save_guest_context(registers: &ExitRegisters, context: &mut VcpuContext) {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn x86_64_vmexit_dispatch(registers: &mut ExitRegisters) {
+unsafe extern "C" fn x86_64_vmexit_dispatch(registers: *mut ExitRegisters) {
+    if registers.is_null() || !registers.is_aligned() {
+        super::virtualization::fail_stop("invalid VMX exit-register frame", Error::InvalidAddress);
+    }
     let context = active_context_pointer();
     // SAFETY: VM entry published the pinned active context for this CPU, and
-    // VM exit is serialized with any future vCPU migration.
-    synchronize_guest_msrs(unsafe { &mut *context });
+    // VM exit is serialized with any future vCPU migration. This borrow ends
+    // before any registered VM-exit service may borrow the containing owner.
+    unsafe { synchronize_guest_msrs(&mut *context) };
     let raw_reason = read_vmcs(VMCS_EXIT_REASON) as u32;
     if raw_reason & (1 << 31) != 0 {
-        crate::kernel::boot::fail(
+        super::virtualization::fail_stop(
             "VM-entry failure",
             (raw_reason & 0xffff, read_vmcs(VMCS_EXIT_QUALIFICATION)),
         );
@@ -735,7 +741,9 @@ extern "C" fn x86_64_vmexit_dispatch(registers: &mut ExitRegisters) {
         EXIT_EXTERNAL_INTERRUPT => handle_external_interrupt(),
         EXIT_INTERRUPT_WINDOW => {}
         EXIT_CPUID => {
-            emulate_cpuid(registers);
+            // SAFETY: This architecture-local branch exclusively owns the
+            // assembly register frame and invokes no registered service.
+            unsafe { emulate_cpuid(&mut *registers) };
             advance_rip();
         }
         EXIT_HLT => advance_rip(),
@@ -745,22 +753,23 @@ extern "C" fn x86_64_vmexit_dispatch(registers: &mut ExitRegisters) {
         }
         // SAFETY: The active-context pointer remains pinned and no mutable
         // context borrow is live in this mutually exclusive exit branch.
-        EXIT_RDMSR => handle_rdmsr(registers, unsafe { &*context }),
+        EXIT_RDMSR => unsafe { handle_rdmsr(&mut *registers, &*context) },
         // SAFETY: VM-exit dispatch exclusively owns the active vCPU here.
-        EXIT_WRMSR => handle_wrmsr(registers, unsafe { &mut *context }),
+        EXIT_WRMSR => unsafe { handle_wrmsr(&*registers, &mut *context) },
         EXIT_EPT_VIOLATION => handle_ept_violation(),
-        EXIT_EPT_MISCONFIGURATION => crate::kernel::boot::fail(
+        EXIT_EPT_MISCONFIGURATION => super::virtualization::fail_stop(
             "EPT misconfiguration",
             (
                 read_vmcs(VMCS_GUEST_PHYSICAL_ADDRESS),
                 read_vmcs(VMCS_EXIT_QUALIFICATION),
             ),
         ),
-        _ => crate::kernel::boot::fail("unhandled VMX exit", reason),
+        _ => super::virtualization::fail_stop("unhandled VMX exit", reason),
     }
     prepare_guest_interrupt();
-    // SAFETY: No subsystem borrow of the active vCPU survives its callback.
-    save_guest_context(registers, unsafe { &mut *context });
+    // SAFETY: No registered service retains backend state. VM-exit dispatch
+    // exclusively owns both the assembly frame and active pinned context.
+    unsafe { save_guest_context(&*registers, &mut *context) };
 }
 
 fn handle_rdmsr(registers: &mut ExitRegisters, context: &VcpuContext) {
@@ -858,25 +867,33 @@ fn handle_ept_violation() {
     let address = read_vmcs(VMCS_GUEST_PHYSICAL_ADDRESS);
     let violation = EptViolation::decode(qualification);
     let access = match violation.access {
-        EptAccess::Read => hyper::vm::exit::MemoryAccess::Read,
-        EptAccess::Write => hyper::vm::exit::MemoryAccess::Write,
-        EptAccess::Execute => hyper::vm::exit::MemoryAccess::Execute,
+        EptAccess::Read => MemoryAccess::Read,
+        EptAccess::Write => MemoryAccess::Write,
+        EptAccess::Execute => MemoryAccess::Execute,
     };
-    let mut frame = super::GuestSyncFrame::memory_fault(hyper::vm::exit::GuestMemoryFault::new(
-        hyper::vm::exit::GuestPhysicalAddress::new(address),
+    let fault = GuestMemoryFault::new(
+        GuestPhysicalAddress::new(address),
         access,
         violation.during_page_walk,
-    ));
-    if !crate::kernel::entry::vmexit::dispatch_legacy(&mut frame) {
-        crate::kernel::boot::fail("unhandled EPT violation", (address, qualification));
+    );
+    match crate::arch::vm::dispatch_memory_fault(fault) {
+        MemoryFaultAction::Retry => {}
+        MemoryFaultAction::ForwardToDevice => super::virtualization::fail_stop(
+            "unhandled EPT device access",
+            (address, qualification),
+        ),
+        MemoryFaultAction::Stop => super::virtualization::fail_stop(
+            "EPT fault policy stopped the guest",
+            (address, qualification),
+        ),
     }
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn x86_64_vmx_instruction_failure() -> ! {
     match vmread(VMCS_INSTRUCTION_ERROR) {
-        Ok(error) => crate::kernel::boot::fail("VMX instruction", error),
-        Err(error) => crate::kernel::boot::fail("VMX instruction without VMCS error", error),
+        Ok(error) => super::virtualization::fail_stop("VMX instruction", error),
+        Err(error) => super::virtualization::fail_stop("VMX instruction without VMCS error", error),
     }
 }
 
@@ -894,17 +911,17 @@ fn handle_external_interrupt() {
             super::interrupt_controller::end_local_interrupt();
             return;
         }
-        match crate::kernel::entry::irq::dispatch(
+        match crate::arch::irq::dispatch_entry(
             hyper::hal::interrupt::InterruptId::new(vector),
             None,
         ) {
-            crate::kernel::entry::irq::Action::Resume { postlude } => {
+            hyper::hal::interrupt::EntryAction::Resume { postlude } => {
                 // VM exits remain cooperative until x86 provides a qualified
                 // IRQ-tail continuation and vCPU teardown boundary.
                 let _ = postlude;
             }
-            crate::kernel::entry::irq::Action::Stop => {
-                crate::kernel::entry::irq::stop(crate::arch::exception::capture_crash_context())
+            hyper::hal::interrupt::EntryAction::Stop => {
+                crate::arch::irq::stop_entry(crate::arch::exception::capture_crash_context())
             }
         }
         if vector == super::platform::TIMER_VECTOR {
@@ -921,25 +938,30 @@ fn prepare_guest_interrupt() {
         return;
     }
     let timer_pending = timer_pending();
-    let pending = match crate::kernel::entry::vmexit::pending_legacy_interrupt(
-        timer_pending.load(Ordering::Acquire),
-    ) {
-        Ok(pending) => pending,
-        Err(error) => crate::kernel::boot::fail("legacy PIC interrupt routing", error),
-    };
-    let Some(pending) = pending else {
-        primary &= !PRIMARY_INTERRUPT_WINDOW;
-        write_vmcs(VMCS_CTRL_PRIMARY, u64::from(primary));
-        return;
-    };
+    let (vector, consumes_timer) =
+        match crate::arch::vm::query_pending_interrupt(timer_pending.load(Ordering::Acquire)) {
+            PendingInterruptAction::None => {
+                primary &= !PRIMARY_INTERRUPT_WINDOW;
+                write_vmcs(VMCS_CTRL_PRIMARY, u64::from(primary));
+                return;
+            }
+            PendingInterruptAction::Inject {
+                vector,
+                consumes_timer,
+            } => (vector, consumes_timer),
+            PendingInterruptAction::Stop => super::virtualization::fail_stop(
+                "x86 interrupt-routing policy stopped the guest",
+                (),
+            ),
+        };
     let flags = read_vmcs(VMCS_GUEST_RFLAGS);
     let blocked = read_vmcs(VMCS_GUEST_INTERRUPTIBILITY) != 0;
     if flags & (1 << 9) != 0 && !blocked {
         write_vmcs(
             VMCS_CTRL_ENTRY_INTERRUPT,
-            INTERRUPTION_VALID | u64::from(pending.vector),
+            INTERRUPTION_VALID | u64::from(vector),
         );
-        if pending.source == InterruptSource::Timer {
+        if consumes_timer {
             timer_pending.store(false, Ordering::Release);
         }
         primary &= !PRIMARY_INTERRUPT_WINDOW;
@@ -952,7 +974,7 @@ fn prepare_guest_interrupt() {
 fn timer_pending() -> &'static AtomicBool {
     match TIMER_PENDING.get(super::current_cpu_index()) {
         Some(pending) => pending,
-        None => crate::kernel::boot::fail("VMX timer CPU lookup", Error::InvalidCpu),
+        None => super::virtualization::fail_stop("VMX timer CPU lookup", Error::InvalidCpu),
     }
 }
 
@@ -988,29 +1010,39 @@ fn write_cpuid_result(registers: &mut ExitRegisters, value: CpuidResult) {
     registers.rdx = u64::from(value.edx);
 }
 
-fn emulate_io(registers: &mut ExitRegisters) {
+fn emulate_io(registers: *mut ExitRegisters) {
     let qualification = read_vmcs(VMCS_EXIT_QUALIFICATION);
     let Some(exit) = IoExit::decode(qualification) else {
-        crate::kernel::boot::fail("invalid VMX I/O access size", qualification)
+        super::virtualization::fail_stop("invalid VMX I/O access size", qualification)
     };
     if exit.string || exit.repeat {
-        crate::kernel::boot::fail("unsupported VMX string I/O", qualification);
+        super::virtualization::fail_stop("unsupported VMX string I/O", qualification);
     }
-    let input = exit.direction == IoDirection::Input;
-    let result = match crate::kernel::entry::vmexit::dispatch_port_io(
-        exit.port,
-        exit.size,
-        !input,
-        registers.rax as u32,
-    ) {
-        Ok(result) => result,
-        Err(error) => crate::kernel::boot::fail("legacy PC port I/O", error),
+    let Some(width) = PortIoWidth::from_bytes(exit.size) else {
+        super::virtualization::fail_stop("invalid VMX I/O access size", exit.size)
     };
-    if let Some(value) = result {
-        registers.rax = match merge_port_input(registers.rax, value, exit.size) {
-            Some(merged) => merged,
-            None => crate::kernel::boot::fail("invalid VMX I/O access size", exit.size),
-        };
+    // SAFETY: The dispatcher supplies its valid assembly frame. Copy policy
+    // input before invoking the registered service and retain no frame borrow.
+    let accumulator = unsafe { core::ptr::addr_of!((*registers).rax).read() };
+    let operation = match exit.direction {
+        IoDirection::Input => PortIoOperation::Input,
+        IoDirection::Output => PortIoOperation::Output(accumulator as u32),
+    };
+    let event = PortIoExit::new(exit.port, width, operation);
+    let action = crate::arch::vm::dispatch_port_io(event);
+    match complete_port_io(accumulator, event, action) {
+        Ok(PortIoCompletion::Input(merged)) => {
+            // SAFETY: Policy returned without retaining the frame; apply its
+            // owned result through a fresh raw-pointer projection.
+            unsafe { core::ptr::addr_of_mut!((*registers).rax).write(merged) };
+        }
+        Ok(PortIoCompletion::Output) => {}
+        Err(PortIoCompletionError::PolicyStopped) => {
+            super::virtualization::fail_stop("VMX I/O policy stopped the guest", event)
+        }
+        Err(PortIoCompletionError::ActionMismatch | PortIoCompletionError::InvalidWidth) => {
+            super::virtualization::fail_stop("invalid VMX I/O policy completion", (event, action))
+        }
     }
 }
 
@@ -1023,13 +1055,13 @@ fn advance_rip() {
 fn read_vmcs(field: u64) -> u64 {
     match vmread(field) {
         Ok(value) => value,
-        Err(error) => crate::kernel::boot::fail("VMCS read", (field, error)),
+        Err(error) => super::virtualization::fail_stop("VMCS read", (field, error)),
     }
 }
 
 fn write_vmcs(field: u64, value: u64) {
     if let Err(error) = vmwrite(field, value) {
-        crate::kernel::boot::fail("VMCS write", (field, error));
+        super::virtualization::fail_stop("VMCS write", (field, error));
     }
 }
 
@@ -1067,7 +1099,7 @@ pub(super) fn activate_ept(root: u64) {
     let eptp = root | 6 | (3 << 3);
     let cpu = super::current_cpu_index();
     let Some(slot) = ACTIVE_EPTP.get(cpu) else {
-        crate::kernel::boot::fail("VMX EPT CPU lookup", Error::InvalidCpu);
+        super::virtualization::fail_stop("VMX EPT CPU lookup", Error::InvalidCpu);
     };
     slot.store(eptp, Ordering::Release);
     EPT_INVALIDATION_PENDING[cpu].store(true, Ordering::Release);
@@ -1084,10 +1116,5 @@ pub(super) fn invalidate_ept(root: u64) -> Result<(), Error> {
 }
 
 fn kernel_physical(virtual_address: usize) -> Result<u64, Error> {
-    crate::kernel::boot::with_boot_state(|state| {
-        (virtual_address as u64)
-            .checked_sub(state.memory.kernel_base())
-            .and_then(|offset| state.image_physical_start.checked_add(offset))
-    })
-    .ok_or(Error::InvalidAddress)
+    super::memory::kernel_image_physical_address(virtual_address).ok_or(Error::InvalidAddress)
 }

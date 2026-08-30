@@ -4,6 +4,7 @@
 //! Architecture-independent contracts for the x86 virtual CPU model.
 
 pub mod device;
+pub mod exit;
 pub mod svm;
 pub mod vmx;
 

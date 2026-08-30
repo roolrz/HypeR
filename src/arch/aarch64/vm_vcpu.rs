@@ -5,13 +5,14 @@
 
 use hyper::vm::interrupt::{VirtualCpuId, VirtualInterruptId};
 
-use super::{GuestSyncAction, GuestSyncFrame, VcpuContext, VmInterruptController, vm_timer};
+use super::{VcpuContext, VmInterruptController, vm_timer};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Architecture(super::VgicError),
     Bridge(vm_timer::Error),
     Controller(hyper::vm::interrupt::Error),
+    ReturnWorld(super::lower_el::Error),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34,6 +35,12 @@ impl From<hyper::vm::interrupt::Error> for Error {
 impl From<vm_timer::Error> for Error {
     fn from(error: vm_timer::Error) -> Self {
         Self::Bridge(error)
+    }
+}
+
+impl From<super::lower_el::Error> for Error {
+    fn from(error: super::lower_el::Error) -> Self {
+        Self::ReturnWorld(error)
     }
 }
 
@@ -83,6 +90,15 @@ pub unsafe fn activate(
         unsafe { context.deactivate_system_registers() };
         return Err(error.into());
     }
+    if let Err(error) = super::lower_el::publish_guest(context) {
+        super::disable_vgic();
+        // SAFETY: Guest execution did not begin and this context still owns
+        // the local timer and system-register banks activated above.
+        unsafe { context.deactivate_timer() };
+        // SAFETY: The failed publication left no lower-EL frame consumer.
+        unsafe { context.deactivate_system_registers() };
+        return Err(error.into());
+    }
     Ok(timer_asserted)
 }
 
@@ -98,6 +114,10 @@ pub unsafe fn deactivate(
     interrupts: &VmInterruptController,
     physical_count: u64,
 ) -> Result<(), Error> {
+    // Retire return-world ownership before changing any live guest register
+    // bank. A lower-EL vector can therefore never observe partially detached
+    // hardware under a still-published guest identity.
+    super::lower_el::retire_guest(context)?;
     // SAFETY: This context owns the active local timer bank.
     unsafe { context.deactivate_timer() };
     // SAFETY: Guest execution is stopped and local interrupts are masked.
@@ -176,16 +196,6 @@ pub(crate) fn deliver_software_interrupt(
     // SAFETY: The complete model was reconciled into this still-active vCPU.
     unsafe { context.activate_vgic()? };
     Ok(())
-}
-
-pub(crate) fn handle_guest_device_access(
-    _context: &mut VcpuContext,
-    _vcpu_id: u32,
-    _interrupts: &VmInterruptController,
-    _frame: &mut GuestSyncFrame<'_>,
-    fallback: GuestSyncAction,
-) -> GuestSyncAction {
-    fallback
 }
 
 pub fn handle_virtual_timer_interrupt(

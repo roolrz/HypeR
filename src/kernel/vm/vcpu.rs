@@ -11,7 +11,17 @@ pub(super) fn create_thread(
     context: crate::hal::vm::VcpuContext,
 ) -> Result<crate::kernel::task::scheduler::DormantVcpuThread, crate::kernel::task::scheduler::Error>
 {
-    crate::kernel::task::scheduler::vcpu_create("vcpu/0", vm, vcpu_id, context, thread_entry)
+    let Some(entry_ready) = super::entry_ready() else {
+        return Err(crate::kernel::task::scheduler::Error::VmEntryUnavailable);
+    };
+    crate::kernel::task::scheduler::vcpu_create(
+        "vcpu/0",
+        vm,
+        vcpu_id,
+        context,
+        &entry_ready,
+        thread_entry,
+    )
 }
 
 extern "C" fn thread_entry(_argument: usize) {

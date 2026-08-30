@@ -21,13 +21,18 @@ enum HostMode {
     Vhe,
 }
 
-pub(super) fn initialize() {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InitializationError {
+    ConflictingSelection,
+}
+
+pub(super) fn initialize() -> Result<(), InitializationError> {
     let mode = current_mode();
     let encoded = encode(mode);
     match HOST_MODE.compare_exchange(UNINITIALIZED, encoded, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => {}
-        Err(selected) if selected == encoded => {}
-        Err(selected) => crate::kernel::boot::fail("AArch64 host-mode selection", selected),
+        Ok(_) => Ok(()),
+        Err(selected) if selected == encoded => Ok(()),
+        Err(_) => Err(InitializationError::ConflictingSelection),
     }
 }
 
@@ -39,7 +44,7 @@ pub(super) fn is_vhe() -> bool {
     match HOST_MODE.load(Ordering::Acquire) {
         VHE => true,
         NVHE => false,
-        _ => crate::kernel::boot::fail("AArch64 host-mode access", UNINITIALIZED),
+        _ => super::halt(),
     }
 }
 

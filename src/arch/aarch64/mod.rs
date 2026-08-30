@@ -14,6 +14,7 @@ mod interrupt_virtualization;
 mod interrupts;
 mod kaslr;
 mod linux;
+mod lower_el;
 mod memory;
 mod platform;
 mod protection;
@@ -123,7 +124,6 @@ pub use vm_interrupt::{Error as VmInterruptError, VmInterruptController};
 pub use vm_vcpu::Error as VcpuInterruptError;
 pub(crate) use vm_vcpu::{
     activate as activate_vcpu_hardware, deactivate as deactivate_vcpu_hardware,
-    deliver_software_interrupt as deliver_guest_software_interrupt, handle_guest_device_access,
     handle_maintenance_interrupt as handle_virtualization_maintenance_interrupt,
     handle_virtual_timer_interrupt as handle_guest_virtual_timer_interrupt,
     inject_timer_for_validation,
@@ -131,8 +131,8 @@ pub(crate) use vm_vcpu::{
     quiesce_virtual_interrupt_delivery, update_guest_device_interrupt,
 };
 pub(crate) use vsysreg::{
-    GuestSyncAction, GuestSyncFrame, complete_guest_mmio_access, decode_guest_memory_fault,
-    decode_guest_mmio_access, handle_guest_sync,
+    GuestSyncAction, GuestSyncExit, apply_guest_sync_action, decode_guest_memory_fault,
+    decode_guest_mmio_access, decode_guest_sync, handle_guest_sync,
 };
 pub use vsysreg::{ValidationError as GuestValidationError, validate as validate_vsysreg};
 
@@ -308,7 +308,9 @@ pub const fn service_stage1_tlb_shootdown() -> bool {
 extern "C" fn aarch64_bootstrap(dtb_address: usize) -> ! {
     address::initialize().unwrap_or_else(|_| halt());
     atomics::initialize();
-    host::initialize();
+    if host::initialize().is_err() {
+        halt()
+    }
     if !smp::initialize_boot_cpu() {
         halt()
     }

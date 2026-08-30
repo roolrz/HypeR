@@ -9,7 +9,7 @@
 //! interrupt virtualization belongs to `arch::vm`.
 
 use hyper::cpu::CpuIndex;
-use hyper::hal::interrupt::InterruptId;
+use hyper::hal::interrupt::{EntryAction, InterruptId};
 use hyper::sync::atomic::{AtomicU8, Ordering};
 
 use core::cell::UnsafeCell;
@@ -68,6 +68,111 @@ impl KernelRpcServiceSlot {
 }
 
 static KERNEL_RPC_SERVICE: KernelRpcServiceSlot = KernelRpcServiceSlot::new();
+
+/// Immutable kernel policy callbacks reachable from physical-interrupt entry.
+#[derive(Clone, Copy)]
+pub(crate) struct InterruptEntryServices {
+    dispatch: fn(InterruptId, Option<unsafe extern "C" fn()>) -> EntryAction,
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    claim_external: fn() -> Option<EntryAction>,
+    stop: fn(super::exception::CrashContext) -> !,
+}
+
+impl InterruptEntryServices {
+    pub(crate) const fn new(
+        dispatch: fn(InterruptId, Option<unsafe extern "C" fn()>) -> EntryAction,
+        #[cfg(CONFIG_ARCH_RISCV64)] claim_external: fn() -> Option<EntryAction>,
+        stop: fn(super::exception::CrashContext) -> !,
+    ) -> Self {
+        Self {
+            dispatch,
+            #[cfg(CONFIG_ARCH_RISCV64)]
+            claim_external,
+            stop,
+        }
+    }
+}
+
+struct InterruptEntryServiceSlot {
+    state: AtomicU8,
+    services: UnsafeCell<Option<InterruptEntryServices>>,
+}
+
+// SAFETY: A single installer initializes the immutable table before Release-
+// publishing READY. Every architecture entry reader observes it with Acquire.
+unsafe impl Sync for InterruptEntryServiceSlot {}
+
+impl InterruptEntryServiceSlot {
+    const fn new() -> Self {
+        Self {
+            state: AtomicU8::new(SERVICE_EMPTY),
+            services: UnsafeCell::new(None),
+        }
+    }
+
+    fn install(
+        &self,
+        services: InterruptEntryServices,
+    ) -> Result<InterruptEntryReady, InterruptEntryServiceError> {
+        self.state
+            .compare_exchange(
+                SERVICE_EMPTY,
+                SERVICE_INSTALLING,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .map_err(|_| InterruptEntryServiceError::AlreadyInstalled)?;
+        // SAFETY: The state transition grants the only write to this slot.
+        unsafe { *self.services.get() = Some(services) };
+        self.state.store(SERVICE_READY, Ordering::Release);
+        Ok(InterruptEntryReady { _private: () })
+    }
+
+    fn services(&self) -> InterruptEntryServices {
+        if self.state.load(Ordering::Acquire) != SERVICE_READY {
+            super::imp::halt()
+        }
+        // SAFETY: Acquire observed the immutable table published at READY.
+        let Some(services) = (unsafe { *self.services.get() }) else {
+            super::imp::halt()
+        };
+        services
+    }
+}
+
+static INTERRUPT_ENTRY_SERVICES: InterruptEntryServiceSlot = InterruptEntryServiceSlot::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InterruptEntryServiceError {
+    AlreadyInstalled,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct InterruptEntryReady {
+    _private: (),
+}
+
+pub(crate) fn install_interrupt_entry_services(
+    services: InterruptEntryServices,
+) -> Result<InterruptEntryReady, InterruptEntryServiceError> {
+    INTERRUPT_ENTRY_SERVICES.install(services)
+}
+
+pub(crate) fn dispatch_entry(
+    interrupt: InterruptId,
+    native_unwind: Option<unsafe extern "C" fn()>,
+) -> EntryAction {
+    (INTERRUPT_ENTRY_SERVICES.services().dispatch)(interrupt, native_unwind)
+}
+
+#[cfg(CONFIG_ARCH_RISCV64)]
+pub(crate) fn claim_and_dispatch_external_entry() -> Option<EntryAction> {
+    (INTERRUPT_ENTRY_SERVICES.services().claim_external)()
+}
+
+pub(crate) fn stop_entry(context: super::exception::CrashContext) -> ! {
+    (INTERRUPT_ENTRY_SERVICES.services().stop)(context)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum KernelRpcServiceError {

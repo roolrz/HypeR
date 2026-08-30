@@ -180,6 +180,7 @@ pub enum Error {
     MigrationBlockedByCpuLocalWait,
     PreemptionUnavailable,
     PreemptionInvariant,
+    VmEntryUnavailable,
     Thread(super::thread::Error),
 }
 
@@ -562,26 +563,21 @@ pub(in crate::kernel) fn vcpu_create(
     vm: crate::kernel::vm::registry::VmBinding,
     vcpu_id: u32,
     context: crate::hal::vm::VcpuContext,
+    entry_ready: &crate::hal::vm::VmEntryReady,
     entry: KernelThreadEntry,
 ) -> Result<DormantVcpuThread, Error> {
     let cpu = current_cpu()?;
+    let execution = VcpuExecution::installed(vm, vcpu_id, context, entry_ready)?;
     let reservation = reserve_thread(|scheduler| scheduler.reserve_vcpu_thread(cpu))?;
     let id = reservation.id();
-    let thread = match prepare_boxed_thread(Thread::vcpu(
-        id,
-        reservation.cpu(),
-        name,
-        vm,
-        vcpu_id,
-        context,
-        entry,
-    )) {
-        Ok(thread) => thread,
-        Err(error) => {
-            abandon_reservation(reservation)?;
-            return Err(error);
-        }
-    };
+    let thread =
+        match prepare_boxed_thread(Thread::vcpu(id, reservation.cpu(), name, execution, entry)) {
+            Ok(thread) => thread,
+            Err(error) => {
+                abandon_reservation(reservation)?;
+                return Err(error);
+            }
+        };
     publish_thread(reservation, thread)?;
     Ok(DormantVcpuThread {
         thread: id,

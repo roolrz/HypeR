@@ -8,11 +8,13 @@ use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_volatile};
 
 use hyper::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use hyper::vm::x86::device::legacy_pc::InterruptSource;
+use hyper::vm::exit::{GuestMemoryFault, GuestPhysicalAddress, MemoryAccess, MemoryFaultAction};
+use hyper::vm::x86::exit::{PendingInterruptAction, PortIoExit, PortIoOperation, PortIoWidth};
 use hyper::vm::x86::svm::{IoDirection, IoExit, NptAccess, NptViolation, SvmFeatures};
-use hyper::vm::x86::{CpuidResult, GuestMsr, hypervisor_cpuid, merge_port_input, sanitize_cpuid};
+use hyper::vm::x86::{CpuidResult, GuestMsr, hypervisor_cpuid, sanitize_cpuid};
 
 use super::context::VcpuContext;
+use super::guest::{PortIoCompletion, PortIoCompletionError, complete_port_io};
 use super::svm_registers::*;
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
@@ -78,7 +80,7 @@ pub(super) fn validate() -> Result<(), super::guest::ValidationError> {
 
 pub(super) unsafe fn enter(context: *mut VcpuContext) -> ! {
     if super::local_irq_enabled() {
-        crate::kernel::boot::fail(
+        super::virtualization::fail_stop(
             "SVM guest entry with local IRQs enabled",
             Error::InterruptsEnabled,
         );
@@ -89,7 +91,7 @@ pub(super) unsafe fn enter(context: *mut VcpuContext) -> ! {
     let prepared = unsafe { prepare(cpu, &*context) };
     let (vmcb, host_save) = match prepared {
         Ok(addresses) => addresses,
-        Err(error) => crate::kernel::boot::fail("SVM guest entry preparation", error),
+        Err(error) => super::virtualization::fail_stop("SVM guest entry preparation", error),
     };
     // SAFETY: No Rust reference to the context remains live across VMRUN.
     unsafe { x86_64_svm_run(context, vmcb, host_save) }
@@ -98,7 +100,7 @@ pub(super) unsafe fn enter(context: *mut VcpuContext) -> ! {
 pub(super) fn activate_npt(root: u64) {
     let cpu = super::current_cpu_index();
     let Some(slot) = ACTIVE_NPT_ROOT.get(cpu) else {
-        crate::kernel::boot::fail("SVM NPT CPU lookup", Error::InvalidCpu);
+        super::virtualization::fail_stop("SVM NPT CPU lookup", Error::InvalidCpu);
     };
     slot.store(root, Ordering::Release);
     // The selected ASID is reused across VM address spaces. Defer the flush
@@ -217,39 +219,69 @@ fn write_guest_msrs(vmcb: &mut Page, context: &VcpuContext) {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn x86_64_svm_exit_dispatch(context: &mut VcpuContext) {
-    // SAFETY: A VMRUN exit is serialized on this CPU, local interrupts remain
-    // masked, and this is the sole Rust reference to the active per-CPU VMCB
-    // for the duration of dispatch.
-    let vmcb = unsafe { &mut *active_vmcb_pointer() };
-    synchronize_context(vmcb, context);
-    let exit_code = vmcb.read_u64(VMCB_EXIT_CODE);
+unsafe extern "C" fn x86_64_svm_exit_dispatch(context: *mut VcpuContext) {
+    if context.is_null() || !context.is_aligned() {
+        super::virtualization::fail_stop("invalid SVM exit context", Error::InvalidAddress);
+    }
+    let vmcb = active_vmcb_pointer();
+    // SAFETY: Assembly passes the pinned context which exclusively owns this
+    // VMRUN loop, and the active VMCB belongs exclusively to this CPU. Both
+    // borrows end before any registered VM-exit service may reconstruct a
+    // borrow of the containing VcpuExecution.
+    unsafe { synchronize_context(&*vmcb, &mut *context) };
+    // SAFETY: VM exit completed before this CPU-local VMCB read.
+    let exit_code = unsafe { (&*vmcb).read_u64(VMCB_EXIT_CODE) };
     match exit_code {
         EXIT_INTR => handle_external_interrupt(),
         EXIT_CPUID => {
+            // SAFETY: This backend-local branch invokes no entry service and
+            // exclusively owns the pinned context until the borrow ends.
+            let context = unsafe { &mut *context };
             emulate_cpuid(context);
+            // SAFETY: This backend-local branch retains exclusive VMCB
+            // ownership and invokes no registered service.
+            let vmcb = unsafe { &mut *vmcb };
             vmcb.write_u64(SAVE_RAX, context.general[0]);
             advance_rip(vmcb);
         }
-        EXIT_HLT => advance_rip(vmcb),
+        EXIT_HLT => {
+            // SAFETY: The active VMCB remains CPU-local between exits.
+            unsafe { advance_rip(&mut *vmcb) }
+        }
         EXIT_IO => {
             emulate_io(vmcb, context);
-            advance_rip(vmcb);
+            // SAFETY: Port-I/O policy returned without retaining backend state.
+            unsafe { advance_rip(&mut *vmcb) }
         }
-        EXIT_MSR => emulate_msr(vmcb, context),
+        EXIT_MSR => {
+            // SAFETY: MSR emulation is architecture-local and the borrow does
+            // not cross a registered entry-service call.
+            unsafe { emulate_msr(&mut *vmcb, &mut *context) }
+        }
         EXIT_NPF => handle_npf(vmcb),
-        EXIT_SHUTDOWN => crate::kernel::boot::fail("SVM guest shutdown", exit_code),
-        u64::MAX => crate::kernel::boot::fail("invalid SVM guest state", dump_exit(vmcb)),
-        _ => crate::kernel::boot::fail("unhandled SVM exit", dump_exit(vmcb)),
+        EXIT_SHUTDOWN => super::virtualization::fail_stop("SVM guest shutdown", exit_code),
+        u64::MAX => {
+            // SAFETY: Diagnostic reads observe this CPU's stopped VMCB.
+            super::virtualization::fail_stop("invalid SVM guest state", unsafe {
+                dump_exit(&*vmcb)
+            })
+        }
+        _ => {
+            // SAFETY: Diagnostic reads observe this CPU's stopped VMCB.
+            super::virtualization::fail_stop("unhandled SVM exit", unsafe { dump_exit(&*vmcb) })
+        }
     }
     prepare_guest_interrupt(vmcb);
     if tlb_pending().swap(false, Ordering::AcqRel) {
         // Full flush is supported without AMD's optional FlushByAsid feature.
         // HypeR currently reuses ASID 1, so the wider operation is required on
         // processors which do not advertise that extension.
-        vmcb.write_u8(VMCB_TLB_CONTROL, 1);
+        // SAFETY: No registered service is active and this CPU exclusively
+        // owns its stopped VMCB.
+        unsafe { (&mut *vmcb).write_u8(VMCB_TLB_CONTROL, 1) };
     }
-    vmcb.write_u32(VMCB_CLEAN_BITS, 0);
+    // SAFETY: The stopped VMCB remains exclusively owned until VMRUN.
+    unsafe { (&mut *vmcb).write_u32(VMCB_CLEAN_BITS, 0) };
 }
 
 fn synchronize_context(vmcb: &Page, context: &mut VcpuContext) {
@@ -290,28 +322,45 @@ fn emulate_cpuid(context: &mut VcpuContext) {
     context.general[3] = u64::from(value.edx);
 }
 
-fn emulate_io(vmcb: &mut Page, context: &mut VcpuContext) {
-    let info = vmcb.read_u64(VMCB_EXIT_INFO1);
+fn emulate_io(vmcb: *mut Page, context: *mut VcpuContext) {
+    // SAFETY: The caller owns the stopped CPU-local VMCB. This temporary
+    // reference ends before the policy callback below.
+    let info = unsafe { (&*vmcb).read_u64(VMCB_EXIT_INFO1) };
     let Some(exit) = IoExit::decode(info) else {
-        crate::kernel::boot::fail("invalid SVM I/O access", info);
+        super::virtualization::fail_stop("invalid SVM I/O access", info);
     };
     if exit.string || exit.repeat {
-        crate::kernel::boot::fail("unsupported SVM string I/O", info);
+        super::virtualization::fail_stop("unsupported SVM string I/O", info);
     }
-    let input = exit.direction == IoDirection::Input;
-    let result = match crate::kernel::entry::vmexit::dispatch_port_io(
-        exit.port,
-        exit.size,
-        !input,
-        context.general[0] as u32,
-    ) {
-        Ok(value) => value,
-        Err(error) => crate::kernel::boot::fail("legacy PC port I/O", error),
+    // SAFETY: The VMRUN loop supplies its pinned context. Copy the only input
+    // needed for policy before entering it, without retaining a Rust borrow.
+    let accumulator = unsafe { core::ptr::addr_of!((*context).general[0]).read() };
+    let Some(width) = PortIoWidth::from_bytes(exit.size) else {
+        super::virtualization::fail_stop("invalid SVM I/O access size", exit.size)
     };
-    if let Some(value) = result {
-        context.general[0] = merge_port_input(context.general[0], value, exit.size)
-            .unwrap_or_else(|| crate::kernel::boot::fail("invalid SVM I/O access size", exit.size));
-        vmcb.write_u64(SAVE_RAX, context.general[0]);
+    let operation = match exit.direction {
+        IoDirection::Input => PortIoOperation::Input,
+        IoDirection::Output => PortIoOperation::Output(accumulator as u32),
+    };
+    let event = PortIoExit::new(exit.port, width, operation);
+    let action = crate::arch::vm::dispatch_port_io(event);
+    match complete_port_io(accumulator, event, action) {
+        Ok(PortIoCompletion::Input(merged)) => {
+            // SAFETY: The policy callback returned and retained no
+            // frame/context borrow. Reborrow the pinned context only to apply
+            // its owned result.
+            unsafe { core::ptr::addr_of_mut!((*context).general[0]).write(merged) };
+            // SAFETY: The service returned, so the CPU-local VMCB can be
+            // borrowed exclusively for completion.
+            unsafe { (&mut *vmcb).write_u64(SAVE_RAX, merged) };
+        }
+        Ok(PortIoCompletion::Output) => {}
+        Err(PortIoCompletionError::PolicyStopped) => {
+            super::virtualization::fail_stop("SVM I/O policy stopped the guest", event)
+        }
+        Err(PortIoCompletionError::ActionMismatch | PortIoCompletionError::InvalidWidth) => {
+            super::virtualization::fail_stop("invalid SVM I/O policy completion", (event, action))
+        }
     }
 }
 
@@ -395,22 +444,34 @@ fn write_guest_msr(vmcb: &mut Page, context: &mut VcpuContext, msr: u32, value: 
     true
 }
 
-fn handle_npf(vmcb: &Page) {
-    let info = vmcb.read_u64(VMCB_EXIT_INFO1);
-    let address = vmcb.read_u64(VMCB_EXIT_INFO2);
+fn handle_npf(vmcb: *const Page) {
+    // SAFETY: VM exit completed and the caller owns this CPU-local VMCB. Copy
+    // all policy inputs before the registered service is invoked.
+    let (info, address) = unsafe {
+        (
+            (&*vmcb).read_u64(VMCB_EXIT_INFO1),
+            (&*vmcb).read_u64(VMCB_EXIT_INFO2),
+        )
+    };
     let violation = NptViolation::decode(info);
     let access = match violation.access {
-        NptAccess::Read => hyper::vm::exit::MemoryAccess::Read,
-        NptAccess::Write => hyper::vm::exit::MemoryAccess::Write,
-        NptAccess::Execute => hyper::vm::exit::MemoryAccess::Execute,
+        NptAccess::Read => MemoryAccess::Read,
+        NptAccess::Write => MemoryAccess::Write,
+        NptAccess::Execute => MemoryAccess::Execute,
     };
-    let mut frame = super::GuestSyncFrame::memory_fault(hyper::vm::exit::GuestMemoryFault::new(
-        hyper::vm::exit::GuestPhysicalAddress::new(address),
+    let fault = GuestMemoryFault::new(
+        GuestPhysicalAddress::new(address),
         access,
         violation.during_page_walk,
-    ));
-    if !crate::kernel::entry::vmexit::dispatch_legacy(&mut frame) {
-        crate::kernel::boot::fail("unhandled NPT violation", (address, info));
+    );
+    match crate::arch::vm::dispatch_memory_fault(fault) {
+        MemoryFaultAction::Retry => {}
+        MemoryFaultAction::ForwardToDevice => {
+            super::virtualization::fail_stop("unhandled NPT device access", (address, info))
+        }
+        MemoryFaultAction::Stop => {
+            super::virtualization::fail_stop("NPT fault policy stopped the guest", (address, info))
+        }
     }
 }
 
@@ -433,25 +494,30 @@ pub(super) fn observe_host_interrupt(vector: u32) {
     }
 }
 
-fn prepare_guest_interrupt(vmcb: &mut Page) {
-    let timer_pending = timer_pending();
-    let pending = match crate::kernel::entry::vmexit::pending_legacy_interrupt(
-        timer_pending.load(Ordering::Acquire),
-    ) {
-        Ok(Some(pending)) => pending,
-        Ok(None) => return,
-        Err(error) => crate::kernel::boot::fail("legacy PIC interrupt routing", error),
+fn prepare_guest_interrupt(vmcb: *mut Page) {
+    let timer_is_pending = timer_pending().load(Ordering::Acquire);
+    let (vector, consumes_timer) = match crate::arch::vm::query_pending_interrupt(timer_is_pending)
+    {
+        PendingInterruptAction::None => return,
+        PendingInterruptAction::Inject {
+            vector,
+            consumes_timer,
+        } => (vector, consumes_timer),
+        PendingInterruptAction::Stop => {
+            super::virtualization::fail_stop("x86 interrupt-routing policy stopped the guest", ())
+        }
     };
+    // SAFETY: Interrupt-routing policy returned without retaining backend
+    // state, so the stopped CPU-local VMCB may be borrowed for completion.
+    let vmcb = unsafe { &mut *vmcb };
     let mut control = vmcb.read_u32(VMCB_INT_CONTROL);
     control &= !((0xf << V_INTR_PRIORITY_SHIFT) | V_IRQ | V_IGNORE_TPR);
-    control |= V_INTR_MASKING
-        | V_IRQ
-        | V_IGNORE_TPR
-        | (u32::from(pending.vector >> 4) << V_INTR_PRIORITY_SHIFT);
-    vmcb.write_u32(VMCB_INT_VECTOR, u32::from(pending.vector));
+    control |=
+        V_INTR_MASKING | V_IRQ | V_IGNORE_TPR | (u32::from(vector >> 4) << V_INTR_PRIORITY_SHIFT);
+    vmcb.write_u32(VMCB_INT_VECTOR, u32::from(vector));
     vmcb.write_u32(VMCB_INT_CONTROL, control);
-    if pending.source == InterruptSource::Timer {
-        timer_pending.store(false, Ordering::Release);
+    if consumes_timer {
+        timer_pending().store(false, Ordering::Release);
     }
 }
 
@@ -470,7 +536,7 @@ fn advance_rip(vmcb: &mut Page) {
 fn active_vmcb_pointer() -> *mut Page {
     let cpu = super::current_cpu_index();
     if cpu >= MAX_CPUS {
-        crate::kernel::boot::fail("SVM VMCB CPU lookup", Error::InvalidCpu);
+        super::virtualization::fail_stop("SVM VMCB CPU lookup", Error::InvalidCpu);
     }
     // `Page` elements are contiguous at the start of the backing array. A raw
     // pointer is returned so lookup itself does not forge a `'static` mutable
@@ -486,21 +552,24 @@ fn active_npt_root() -> Option<u64> {
 }
 
 fn tlb_pending() -> &'static AtomicBool {
-    TLB_PENDING
-        .get(super::current_cpu_index())
-        .unwrap_or_else(|| crate::kernel::boot::fail("SVM TLB CPU lookup", Error::InvalidCpu))
+    match TLB_PENDING.get(super::current_cpu_index()) {
+        Some(pending) => pending,
+        None => super::virtualization::fail_stop("SVM TLB CPU lookup", Error::InvalidCpu),
+    }
 }
 
 fn timer_pending() -> &'static AtomicBool {
-    TIMER_PENDING
-        .get(super::current_cpu_index())
-        .unwrap_or_else(|| crate::kernel::boot::fail("SVM timer CPU lookup", Error::InvalidCpu))
+    match TIMER_PENDING.get(super::current_cpu_index()) {
+        Some(pending) => pending,
+        None => super::virtualization::fail_stop("SVM timer CPU lookup", Error::InvalidCpu),
+    }
 }
 
 fn accepting_host_interrupt() -> &'static AtomicBool {
-    ACCEPTING_HOST_INTERRUPT
-        .get(super::current_cpu_index())
-        .unwrap_or_else(|| crate::kernel::boot::fail("SVM IRQ CPU lookup", Error::InvalidCpu))
+    match ACCEPTING_HOST_INTERRUPT.get(super::current_cpu_index()) {
+        Some(accepting) => accepting,
+        None => super::virtualization::fail_stop("SVM IRQ CPU lookup", Error::InvalidCpu),
+    }
 }
 
 fn dump_exit(vmcb: &Page) -> (u64, u64, u64, u64) {
@@ -556,12 +625,7 @@ impl Page {
 }
 
 fn kernel_physical(virtual_address: usize) -> Result<u64, Error> {
-    crate::kernel::boot::with_boot_state(|state| {
-        (virtual_address as u64)
-            .checked_sub(state.memory.kernel_base())
-            .and_then(|offset| state.image_physical_start.checked_add(offset))
-    })
-    .ok_or(Error::InvalidAddress)
+    super::memory::kernel_image_physical_address(virtual_address).ok_or(Error::InvalidAddress)
 }
 
 fn read_msr(msr: u32) -> u64 {

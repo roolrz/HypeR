@@ -3,33 +3,15 @@
 
 //! Physical-interrupt entry policy.
 
-use hyper::hal::interrupt::InterruptId;
-
-/// Kernel action selected for an acknowledged physical interrupt.
-#[derive(Clone, Copy, Debug)]
-#[must_use]
-pub(crate) enum Action {
-    /// Complete exception return after ordinary IRQ dispatch.
-    Resume {
-        /// Optional work which must run on the interrupted Thread stack.
-        ///
-        /// # Safety
-        ///
-        /// The architecture entry path must complete interrupt
-        /// acknowledgement, restore the interrupted Thread's private stack,
-        /// keep local interrupts masked, and retain no raw-frame borrow before
-        /// invoking this callback exactly once before exception return.
-        postlude: Option<unsafe extern "C" fn()>,
-    },
-    /// Capture the interrupted architecture frame and stop this CPU.
-    Stop,
-}
+use hyper::hal::interrupt::{EntryAction as Action, InterruptId};
 
 /// Dispatches one architecture-acknowledged interrupt.
 ///
-/// The caller owns interrupt acknowledgement and raw-frame lifetime. Local
-/// interrupts must remain masked. Dispatch is allocation-free but invokes
-/// registered interrupt-safe handlers under the IRQ registry lock.
+/// The caller owns interrupt acknowledgement and raw-frame lifetime. This
+/// adapter completes the acknowledged source exactly once before returning
+/// either action. Local interrupts must remain masked. Dispatch is
+/// allocation-free but may invoke registered interrupt-safe handlers under the
+/// IRQ registry lock.
 pub(crate) fn dispatch(
     interrupt: InterruptId,
     native_unwind: Option<unsafe extern "C" fn()>,
@@ -41,6 +23,7 @@ pub(crate) fn dispatch(
         }
     };
     let action = if crate::kernel::crash::is_stop_interrupt(interrupt) {
+        crate::kernel::irq::interrupt::complete(interrupt);
         Action::Stop
     } else {
         crate::kernel::irq::interrupt::dispatch(interrupt);

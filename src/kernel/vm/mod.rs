@@ -16,6 +16,13 @@ pub(crate) mod vcpu;
 
 use core::convert::Infallible;
 
+use hyper::sync::InterruptSpinLock;
+
+type EntryReadyLock =
+    InterruptSpinLock<Option<crate::hal::vm::VmEntryReady>, crate::hal::irq::LocalMask>;
+
+static ENTRY_READY: EntryReadyLock = InterruptSpinLock::new(None);
+
 pub use crate::hal::vm::{
     InterruptController as VmInterruptController, InterruptError as VmInterruptError,
 };
@@ -28,6 +35,8 @@ pub use vcpu::{RunError as VcpuRunError, VcpuInterruptError};
 pub(crate) enum InitializationError {
     Devices(crate::hal::vm::DeviceError),
     Interrupts(crate::hal::vm::InterruptInitializationError),
+    EntryServices(crate::hal::vm::ExitServiceError),
+    EntryReadyAlreadyPublished,
     Registers(crate::hal::vm::RegisterValidationError),
     Timer(timer::Error),
     TimerValidation(timer::ValidationError),
@@ -53,6 +62,32 @@ pub fn boot_linux(
 
 /// Initializes hardware virtualization and guest-visible platform devices.
 pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), InitializationError> {
+    let exit_services = crate::hal::vm::install_exit_services({
+        #[cfg(CONFIG_ARCH_AARCH64)]
+        {
+            crate::hal::vm::ExitServices::aarch64(
+                crate::kernel::entry::vmexit::dispatch_memory_fault,
+                crate::kernel::entry::vmexit::dispatch_mmio,
+                crate::kernel::entry::vmexit::dispatch_guest_sync,
+            )
+        }
+        #[cfg(CONFIG_ARCH_RISCV64)]
+        {
+            crate::hal::vm::ExitServices::riscv64(
+                crate::kernel::entry::vmexit::dispatch_memory_fault,
+                crate::kernel::entry::vmexit::dispatch_guest_sync,
+            )
+        }
+        #[cfg(CONFIG_ARCH_X86_64)]
+        {
+            crate::hal::vm::ExitServices::x86_64(
+                crate::kernel::entry::vmexit::dispatch_memory_fault,
+                crate::kernel::entry::vmexit::dispatch_port_io,
+                crate::kernel::entry::vmexit::query_pending_interrupt,
+            )
+        }
+    })
+    .map_err(InitializationError::EntryServices)?;
     crate::hal::vm::validate_register_interface().map_err(InitializationError::Registers)?;
     // Prepared physical mappings must remain non-deliverable until every VM
     // dependency below is published. Quiesce virtual delivery before exposing
@@ -78,7 +113,7 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
         binding.rollback();
         return Err(InitializationError::Devices(error));
     }
-    match timer::validate_hardware(guest_timer.interrupt) {
+    match timer::validate_hardware(guest_timer.interrupt, &exit_services) {
         Ok(true) => crate::println!("HypeR: virtual architected timer injection validated"),
         Ok(false) => {}
         Err(error) => {
@@ -104,8 +139,21 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
         );
     }
     binding.activate().map_err(InitializationError::Timer)?;
+    let entry_ready = crate::hal::vm::complete_entry_initialization(exit_services);
+    ENTRY_READY.with(|slot| {
+        if slot.is_some() {
+            Err(InitializationError::EntryReadyAlreadyPublished)
+        } else {
+            *slot = Some(entry_ready);
+            Ok(())
+        }
+    })?;
     crate::println!("HypeR: guest synchronous trap and vSysReg emulation validated");
     Ok(())
+}
+
+pub(in crate::kernel) fn entry_ready() -> Option<crate::hal::vm::VmEntryReady> {
+    ENTRY_READY.with(|slot| *slot)
 }
 
 /// Loads the default VM bundle from the boot ramdisk and enters the guest.
@@ -139,86 +187,6 @@ pub(crate) fn start_default() -> Result<Infallible, StartError> {
     };
     crate::println!("HypeR: Linux boot vCPU scheduled as thread {}", vcpu.get());
     super::task::scheduler::exit_current()
-}
-
-pub(crate) fn handle_guest_sync(frame: &mut crate::hal::vm::LegacySyncFrame<'_>) -> bool {
-    handle_guest_sync_inner(frame, true)
-}
-
-/// Continues architecture-local exit decoding after typed memory policy has
-/// already classified the fault as outside guest RAM.
-pub(crate) fn handle_guest_sync_after_memory_fault(
-    frame: &mut crate::hal::vm::LegacySyncFrame<'_>,
-) -> bool {
-    handle_guest_sync_inner(frame, false)
-}
-
-fn handle_guest_sync_inner(
-    frame: &mut crate::hal::vm::LegacySyncFrame<'_>,
-    resolve_memory_fault: bool,
-) -> bool {
-    match active_vcpu::with(|execution, interrupts| {
-        let action =
-            crate::hal::vm::decode_legacy_sync(&mut execution.hardware, execution.vcpu_id, frame);
-        match action {
-            crate::hal::vm::LegacySyncAction::SoftwareInterrupt(request) => {
-                return match crate::hal::vm::deliver_legacy_software_interrupt(
-                    &mut execution.hardware,
-                    execution.vcpu_id,
-                    interrupts,
-                    request,
-                ) {
-                    Ok(()) => crate::hal::vm::LegacySyncAction::Resume,
-                    Err(error) => {
-                        crate::pr_err!(
-                            "HypeR: failed to deliver guest software interrupt: {error:?}"
-                        );
-                        crate::hal::vm::LegacySyncAction::Unhandled
-                    }
-                };
-            }
-            crate::hal::vm::LegacySyncAction::Unhandled => {}
-            _ => return action,
-        }
-        if resolve_memory_fault && let Some(fault) = frame.guest_memory_fault() {
-            let Some(vm) = execution.vm_binding() else {
-                return crate::hal::vm::LegacySyncAction::Unhandled;
-            };
-            match memory::resolve_guest_memory_fault(vm, fault) {
-                Ok(true) => return crate::hal::vm::LegacySyncAction::Resume,
-                Ok(false) => {}
-                Err(error) => {
-                    crate::pr_err!(
-                        "HypeR: guest memory fault resolution failed at {:#x} ({:?}, guest-page-walk={}): {error:?}",
-                        fault.address().get(),
-                        fault.access(),
-                        fault.during_guest_page_walk()
-                    );
-                    return crate::hal::vm::LegacySyncAction::Unhandled;
-                }
-            }
-        }
-        if let Some(device_action) = device::handle_legacy_mmio(execution, interrupts, frame) {
-            return device_action;
-        }
-        crate::hal::vm::handle_legacy_device_access(
-            &mut execution.hardware,
-            execution.vcpu_id,
-            interrupts,
-            frame,
-            action,
-        )
-    }) {
-        Ok(Some(
-            crate::hal::vm::LegacySyncAction::Resume | crate::hal::vm::LegacySyncAction::Injected,
-        )) => true,
-        Ok(Some(
-            crate::hal::vm::LegacySyncAction::SoftwareInterrupt(_)
-            | crate::hal::vm::LegacySyncAction::Unhandled,
-        ))
-        | Ok(None)
-        | Err(_) => false,
-    }
 }
 
 /// Routes host-console input to the virtual console owned by the active VM.

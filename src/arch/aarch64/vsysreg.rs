@@ -5,22 +5,73 @@
 
 use core::arch::asm;
 use hyper::vm::exit::{
-    GuestMemoryFault, GuestPhysicalAddress, MemoryAccess, MmioAccess, MmioOperation,
+    AccessWidth, GuestMemoryFault, GuestPhysicalAddress, MemoryAccess, MmioAccess, MmioAction,
+    MmioOperation,
 };
 
-use super::VcpuContext;
 use super::registers::{self, SystemRegisterEncoding as Encoding};
+use super::{VcpuContext, VmInterruptController};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[must_use]
 pub(crate) enum GuestSyncAction {
-    Resume,
-    Injected,
-    SoftwareInterrupt(u64),
-    Unhandled,
+    /// Consume one trapped `AArch64` instruction.
+    Advance,
+    /// Write one guest register and optionally consume the instruction.
+    WriteRegister {
+        register: u8,
+        value: u64,
+        advance: bool,
+    },
+    /// Enter the guest's Undefined Instruction vector.
+    InjectUndefined {
+        program_counter: u64,
+        processor_state: u64,
+    },
+    /// The exit cannot safely return to the guest.
+    Stop,
+}
+
+/// Owned `AArch64` synchronous-exit facts consumed by active-vCPU emulation.
+///
+/// Register-file references and raw exception frames remain in exception
+/// entry. This value is fixed-width and may cross the architecture-to-policy
+/// callback without extending a stack-frame borrow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestSyncExit {
+    SystemRegister(SystemRegisterExit),
+    HypervisorCall { function: u64, argument: u64 },
+    SecureMonitorCall,
+    Wait,
+    Undefined(UndefinedExit),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct SystemRegisterExit {
+    encoding: Encoding,
+    target: u8,
+    direction: Direction,
+    value: u64,
+    undefined: UndefinedExit,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct UndefinedExit {
+    program_counter: u64,
+    processor_state: u64,
+    syndrome: u64,
+}
+
+const _: () = {
+    // Entry copies only the operands required by policy. Keep accidental raw
+    // register-file snapshots from silently entering this hot-path contract.
+    assert!(core::mem::size_of::<GuestSyncExit>() <= 64);
+    assert!(core::mem::size_of::<GuestSyncAction>() <= 32);
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
+    InvalidCompletion,
     InvalidDecoder,
     InvalidTopology,
     UnsafeFeatureExposure,
@@ -52,7 +103,98 @@ pub fn validate() -> Result<(), ValidationError> {
     if !validate_guest_memory_fault_decoder() {
         return Err(ValidationError::InvalidDecoder);
     }
+    if !validate_owned_exit_completion() {
+        return Err(ValidationError::InvalidCompletion);
+    }
     Ok(())
+}
+
+fn validate_owned_exit_completion() -> bool {
+    let mut general = [0u64; 31];
+    general[3] = 0x12cd;
+    let write_syndrome = (registers::ESR_EC_DATA_ABORT_LOWER << registers::ESR_EC_SHIFT)
+        | registers::ESR_DATA_ABORT_ISV
+        | registers::ESR_DATA_ABORT_WNR
+        | (3 << registers::ESR_DATA_ABORT_SRT_SHIFT);
+    let Some((write, write_completion)) =
+        decode_guest_mmio_access(write_syndrome, 0x9000_1000, &general)
+    else {
+        return false;
+    };
+    if write.width() != AccessWidth::Byte || write.operation() != MmioOperation::Write(0xcd) {
+        return false;
+    }
+    let mut mismatch_pc = 0x8000;
+    if write_completion.apply(&mut general, &mut mismatch_pc, MmioAction::CompleteRead(1))
+        || mismatch_pc != 0x8000
+    {
+        return false;
+    }
+    let mut write_pc = 0x8000;
+    if !write_completion.apply(&mut general, &mut write_pc, MmioAction::CompleteWrite)
+        || write_pc != 0x8004
+        || general[3] != 0x12cd
+    {
+        return false;
+    }
+
+    let read_syndrome = (registers::ESR_EC_DATA_ABORT_LOWER << registers::ESR_EC_SHIFT)
+        | registers::ESR_DATA_ABORT_ISV
+        | registers::ESR_DATA_ABORT_SSE
+        | (4 << registers::ESR_DATA_ABORT_SRT_SHIFT);
+    let Some((read, read_completion)) =
+        decode_guest_mmio_access(read_syndrome, 0x9000_2000, &general)
+    else {
+        return false;
+    };
+    let mut read_pc = 0x8100;
+    if read.operation() != MmioOperation::Read
+        || !read_completion.apply(&mut general, &mut read_pc, MmioAction::CompleteRead(0x80))
+        || read_pc != 0x8104
+        || general[4] != 0xffff_ff80
+    {
+        return false;
+    }
+
+    general[0] = registers::SMCCC_VERSION;
+    general[1] = 0xfeed;
+    let hvc_syndrome = registers::ESR_EC_HVC64 << registers::ESR_EC_SHIFT;
+    let Some(GuestSyncExit::HypervisorCall { function, argument }) = decode_guest_sync(
+        hvc_syndrome,
+        &general,
+        0x8200,
+        registers::SPSR_EL1H_AND_DAIF,
+    ) else {
+        return false;
+    };
+    let hvc_exit = GuestSyncExit::HypervisorCall { function, argument };
+    let mut mismatch_pc = 0x8200;
+    let mut mismatch_pstate = registers::SPSR_EL1H_AND_DAIF;
+    if apply_guest_sync_action(
+        hvc_exit,
+        &mut general,
+        &mut mismatch_pc,
+        &mut mismatch_pstate,
+        GuestSyncAction::WriteRegister {
+            register: 1,
+            value: 0,
+            advance: false,
+        },
+    ) || mismatch_pc != 0x8200
+    {
+        return false;
+    }
+    let mut hvc_pc = 0x8200;
+    let mut hvc_pstate = registers::SPSR_EL1H_AND_DAIF;
+    apply_guest_sync_action(
+        hvc_exit,
+        &mut general,
+        &mut hvc_pc,
+        &mut hvc_pstate,
+        emulate_hypercall(function, argument),
+    ) && general[0] == registers::SMCCC_VERSION_1_1
+        && hvc_pc == 0x8200
+        && hvc_pstate == registers::SPSR_EL1H_AND_DAIF
 }
 
 fn validate_guest_memory_fault_decoder() -> bool {
@@ -95,154 +237,190 @@ fn validate_guest_memory_fault_decoder() -> bool {
     write_valid && execute_valid && read_valid && unrelated_rejected && non_translation_rejected
 }
 
-pub(crate) struct GuestSyncFrame<'a> {
-    general: &'a mut [u64; 31],
-    program_counter: &'a mut u64,
-    processor_state: &'a mut u64,
-    syndrome: u64,
-    physical_address: u64,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct GuestDataAccess {
-    pub address: u64,
-    pub size: usize,
-    pub write: bool,
-    pub value: u64,
+pub(crate) struct GuestMmioCompletion {
+    operation: MmioOperation,
     target: u8,
+    width: AccessWidth,
     sign_extend: bool,
     register_64_bit: bool,
 }
 
-impl<'a> GuestSyncFrame<'a> {
-    pub(crate) fn new(
-        general: &'a mut [u64; 31],
-        program_counter: &'a mut u64,
-        processor_state: &'a mut u64,
-        syndrome: u64,
-        physical_address: u64,
-    ) -> Self {
-        Self {
-            general,
-            program_counter,
-            processor_state,
-            syndrome,
-            physical_address,
-        }
-    }
-
-    fn read_general(&self, index: u8) -> u64 {
-        match self.general.get(index as usize) {
-            Some(value) => *value,
-            None => 0,
-        }
-    }
-
-    fn write_general(&mut self, index: u8, value: u64) {
-        if let Some(target) = self.general.get_mut(index as usize) {
-            *target = value;
-        }
-    }
-
-    fn advance(&mut self) {
-        *self.program_counter = self
-            .program_counter
-            .wrapping_add(registers::AARCH64_INSTRUCTION_SIZE);
-    }
-
-    pub(crate) fn data_access(&self) -> Option<GuestDataAccess> {
-        if (self.syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK
-            != registers::ESR_EC_DATA_ABORT_LOWER
-            || self.syndrome & registers::ESR_DATA_ABORT_ISV == 0
-        {
-            return None;
-        }
-        let size = 1usize
-            << ((self.syndrome >> registers::ESR_DATA_ABORT_SAS_SHIFT)
-                & registers::ESR_DATA_ABORT_SAS_MASK);
-        let target = ((self.syndrome >> registers::ESR_DATA_ABORT_SRT_SHIFT)
-            & registers::ESR_DATA_ABORT_SRT_MASK) as u8;
-        let mask = if size == 8 {
-            u64::MAX
-        } else {
-            (1u64 << (size * 8)) - 1
+impl GuestMmioCompletion {
+    pub(crate) fn apply(
+        self,
+        general: &mut [u64; 31],
+        program_counter: &mut u64,
+        action: MmioAction,
+    ) -> bool {
+        let value = match (self.operation, action) {
+            (MmioOperation::Read, MmioAction::CompleteRead(value)) => Some(value),
+            (MmioOperation::Write(_), MmioAction::CompleteWrite) => None,
+            (_, MmioAction::Unhandled | MmioAction::Stop)
+            | (MmioOperation::Read, MmioAction::CompleteWrite)
+            | (MmioOperation::Write(_), MmioAction::CompleteRead(_)) => return false,
         };
-        Some(GuestDataAccess {
-            address: self.physical_address,
-            size,
-            write: self.syndrome & registers::ESR_DATA_ABORT_WNR != 0,
-            value: self.read_general(target) & mask,
-            target,
-            sign_extend: self.syndrome & registers::ESR_DATA_ABORT_SSE != 0,
-            register_64_bit: self.syndrome & registers::ESR_DATA_ABORT_SF != 0,
-        })
-    }
-
-    pub(crate) fn mmio_access(&self) -> Option<MmioAccess> {
-        let access = self.data_access()?;
-        let operation = if access.write {
-            MmioOperation::Write(access.value)
-        } else {
-            MmioOperation::Read
-        };
-        Some(MmioAccess::new(
-            GuestPhysicalAddress::new(access.address),
-            access.size,
-            operation,
-        ))
-    }
-
-    pub(crate) fn guest_memory_fault(&self) -> Option<GuestMemoryFault> {
-        decode_guest_memory_fault(self.syndrome, self.physical_address)
-    }
-
-    pub(crate) fn complete_data_access(&mut self, access: GuestDataAccess, value: Option<u64>) {
         if let Some(mut value) = value {
-            if access.sign_extend {
-                let shift = 64 - access.size * 8;
+            let bits = self.width.bytes() * 8;
+            if bits < u64::BITS as usize {
+                value &= (1u64 << bits) - 1;
+            }
+            if self.sign_extend {
+                let shift = 64 - bits;
                 value = ((value << shift) as i64 >> shift) as u64;
             }
-            if !access.register_64_bit {
+            if !self.register_64_bit {
                 value &= u64::from(u32::MAX);
             }
-            self.write_general(access.target, value);
+            write_general(general, self.target, value);
         }
-        self.advance();
-    }
-
-    pub(crate) fn complete_mmio_access(&mut self, access: MmioAccess, value: Option<u64>) -> bool {
-        let Some(decoded) = self.data_access() else {
-            return false;
-        };
-        let operation = if decoded.write {
-            MmioOperation::Write(decoded.value)
-        } else {
-            MmioOperation::Read
-        };
-        if access
-            != MmioAccess::new(
-                GuestPhysicalAddress::new(decoded.address),
-                decoded.size,
-                operation,
-            )
-        {
-            return false;
-        }
-        self.complete_data_access(decoded, value);
+        advance(program_counter);
         true
     }
 }
 
-pub(crate) fn decode_guest_mmio_access(frame: &GuestSyncFrame<'_>) -> Option<MmioAccess> {
-    frame.mmio_access()
+fn read_general(general: &[u64; 31], index: u8) -> u64 {
+    match general.get(index as usize) {
+        Some(value) => *value,
+        None => 0,
+    }
 }
 
-pub(crate) fn complete_guest_mmio_access(
-    frame: &mut GuestSyncFrame<'_>,
-    access: MmioAccess,
-    value: Option<u64>,
+pub(crate) fn write_general(general: &mut [u64; 31], index: u8, value: u64) {
+    if let Some(target) = general.get_mut(index as usize) {
+        *target = value;
+    }
+}
+
+pub(crate) fn advance(program_counter: &mut u64) {
+    *program_counter = program_counter.wrapping_add(registers::AARCH64_INSTRUCTION_SIZE);
+}
+
+pub(crate) fn apply_guest_sync_action(
+    exit: GuestSyncExit,
+    general: &mut [u64; 31],
+    program_counter: &mut u64,
+    processor_state: &mut u64,
+    action: GuestSyncAction,
 ) -> bool {
-    frame.complete_mmio_access(access, value)
+    if !guest_sync_action_matches(exit, action) {
+        return false;
+    }
+    match action {
+        GuestSyncAction::Advance => {
+            advance(program_counter);
+            true
+        }
+        GuestSyncAction::WriteRegister {
+            register,
+            value,
+            advance: should_advance,
+        } => {
+            write_general(general, register, value);
+            if should_advance {
+                advance(program_counter);
+            }
+            true
+        }
+        GuestSyncAction::InjectUndefined {
+            program_counter: next_program_counter,
+            processor_state: next_processor_state,
+        } => {
+            *program_counter = next_program_counter;
+            *processor_state = next_processor_state;
+            true
+        }
+        GuestSyncAction::Stop => false,
+    }
+}
+
+fn guest_sync_action_matches(exit: GuestSyncExit, action: GuestSyncAction) -> bool {
+    if action == GuestSyncAction::Stop {
+        return true;
+    }
+    match (exit, action) {
+        (
+            GuestSyncExit::SystemRegister(SystemRegisterExit {
+                target,
+                direction: Direction::Read,
+                ..
+            }),
+            GuestSyncAction::WriteRegister {
+                register,
+                advance: true,
+                ..
+            },
+        ) => register == target,
+        (
+            GuestSyncExit::SystemRegister(SystemRegisterExit {
+                direction: Direction::Write,
+                ..
+            }),
+            GuestSyncAction::Advance | GuestSyncAction::InjectUndefined { .. },
+        )
+        | (
+            GuestSyncExit::SystemRegister(SystemRegisterExit {
+                direction: Direction::Read,
+                ..
+            }),
+            GuestSyncAction::InjectUndefined { .. },
+        )
+        | (GuestSyncExit::Wait, GuestSyncAction::Advance)
+        | (GuestSyncExit::Undefined(_), GuestSyncAction::InjectUndefined { .. }) => true,
+        (
+            GuestSyncExit::HypervisorCall { .. } | GuestSyncExit::SecureMonitorCall,
+            GuestSyncAction::WriteRegister {
+                register: 0,
+                advance: false,
+                ..
+            },
+        ) => true,
+        _ => false,
+    }
+}
+
+pub(crate) fn decode_guest_mmio_access(
+    syndrome: u64,
+    physical_address: u64,
+    general: &[u64; 31],
+) -> Option<(MmioAccess, GuestMmioCompletion)> {
+    if (syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK
+        != registers::ESR_EC_DATA_ABORT_LOWER
+        || syndrome & registers::ESR_DATA_ABORT_ISV == 0
+        || syndrome & registers::ESR_DATA_ABORT_S1PTW != 0
+    {
+        return None;
+    }
+    let bytes = 1usize
+        << ((syndrome >> registers::ESR_DATA_ABORT_SAS_SHIFT) & registers::ESR_DATA_ABORT_SAS_MASK);
+    let width = AccessWidth::from_bytes(bytes)?;
+    let target = ((syndrome >> registers::ESR_DATA_ABORT_SRT_SHIFT)
+        & registers::ESR_DATA_ABORT_SRT_MASK) as u8;
+    let mask = if bytes == 8 {
+        u64::MAX
+    } else {
+        (1u64 << (bytes * 8)) - 1
+    };
+    let operation = if syndrome & registers::ESR_DATA_ABORT_WNR != 0 {
+        MmioOperation::Write(read_general(general, target) & mask)
+    } else {
+        MmioOperation::Read
+    };
+    let access = MmioAccess::new(
+        GuestPhysicalAddress::new(physical_address),
+        width,
+        operation,
+    );
+    Some((
+        access,
+        GuestMmioCompletion {
+            operation,
+            target,
+            width,
+            sign_extend: syndrome & registers::ESR_DATA_ABORT_SSE != 0,
+            register_64_bit: syndrome & registers::ESR_DATA_ABORT_SF != 0,
+        },
+    ))
 }
 
 /// Decodes an owned stage-2 translation-fault event from an `AArch64` syndrome.
@@ -295,38 +473,81 @@ struct Access {
     direction: Direction,
 }
 
+pub(crate) fn decode_guest_sync(
+    syndrome: u64,
+    general: &[u64; 31],
+    program_counter: u64,
+    processor_state: u64,
+) -> Option<GuestSyncExit> {
+    let undefined = UndefinedExit {
+        program_counter,
+        processor_state,
+        syndrome,
+    };
+    Some(
+        match (syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK {
+            registers::ESR_EC_SYSTEM_REGISTER => {
+                let access = decode_access(syndrome);
+                GuestSyncExit::SystemRegister(SystemRegisterExit {
+                    encoding: access.encoding,
+                    target: access.target,
+                    direction: access.direction,
+                    value: match access.direction {
+                        Direction::Write => read_general(general, access.target),
+                        Direction::Read => 0,
+                    },
+                    undefined,
+                })
+            }
+            registers::ESR_EC_HVC64 => GuestSyncExit::HypervisorCall {
+                function: read_general(general, 0),
+                argument: read_general(general, 1),
+            },
+            registers::ESR_EC_SMC64 => GuestSyncExit::SecureMonitorCall,
+            registers::ESR_EC_WFX => GuestSyncExit::Wait,
+            // Abort classes are completed only through memory or MMIO policy.
+            registers::ESR_EC_INSTRUCTION_ABORT_LOWER | registers::ESR_EC_DATA_ABORT_LOWER => {
+                return None;
+            }
+            _ => GuestSyncExit::Undefined(undefined),
+        },
+    )
+}
+
 pub(crate) fn handle_guest_sync(
     context: &mut VcpuContext,
     vcpu_id: u32,
-    frame: &mut GuestSyncFrame<'_>,
+    interrupts: &VmInterruptController,
+    exit: GuestSyncExit,
 ) -> GuestSyncAction {
-    match (frame.syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK {
-        registers::ESR_EC_SYSTEM_REGISTER => emulate_system_register(context, vcpu_id, frame),
-        registers::ESR_EC_HVC64 => emulate_hypercall(frame),
-        registers::ESR_EC_SMC64 => unsupported_call(frame),
-        registers::ESR_EC_WFX => {
-            // A scheduler-aware WFI exit can replace this resume policy once
-            // vCPU threads gain a blocked state and interrupt wakeup queue.
-            frame.advance();
-            GuestSyncAction::Resume
+    match exit {
+        GuestSyncExit::SystemRegister(exit) => {
+            emulate_system_register(context, vcpu_id, interrupts, exit)
         }
-        // Lower-EL aborts require stage-2 fault resolution and must not be
-        // mistaken for guest Undefined Instruction exceptions.
-        registers::ESR_EC_INSTRUCTION_ABORT_LOWER | registers::ESR_EC_DATA_ABORT_LOWER => {
-            GuestSyncAction::Unhandled
+        GuestSyncExit::HypervisorCall { function, argument } => {
+            emulate_hypercall(function, argument)
         }
-        _ => inject_undefined(context, frame),
+        GuestSyncExit::SecureMonitorCall => GuestSyncAction::WriteRegister {
+            register: 0,
+            value: registers::SMCCC_NOT_SUPPORTED,
+            advance: false,
+        },
+        GuestSyncExit::Wait => {
+            // A scheduler-aware WFI exit can replace this completion once vCPU
+            // Threads acquire a device-interrupt wakeup wait queue.
+            GuestSyncAction::Advance
+        }
+        GuestSyncExit::Undefined(exit) => inject_undefined(context, exit),
     }
 }
 
-fn emulate_hypercall(frame: &mut GuestSyncFrame<'_>) -> GuestSyncAction {
-    let function = frame.read_general(0);
+fn emulate_hypercall(function: u64, argument: u64) -> GuestSyncAction {
     let result = match function {
         registers::SMCCC_VERSION => registers::SMCCC_VERSION_1_1,
         registers::SMCCC_ARCH_FEATURES => registers::SMCCC_NOT_SUPPORTED,
         registers::PSCI_VERSION => registers::PSCI_VERSION_1_0,
         registers::PSCI_MIGRATE_INFO_TYPE => registers::PSCI_TOS_NOT_PRESENT,
-        registers::PSCI_FEATURES => match frame.read_general(1) {
+        registers::PSCI_FEATURES => match argument {
             registers::PSCI_VERSION
             | registers::PSCI_FEATURES
             | registers::PSCI_MIGRATE_INFO_TYPE => 0,
@@ -334,44 +555,44 @@ fn emulate_hypercall(frame: &mut GuestSyncFrame<'_>) -> GuestSyncAction {
         },
         _ => registers::SMCCC_NOT_SUPPORTED,
     };
-    frame.write_general(0, result);
     // HVC and SMC save the architectural return address in ELR_EL2. Unlike
     // trapped instructions such as WFx and system-register accesses, the
     // exception-generating instruction has already been consumed.
-    GuestSyncAction::Resume
-}
-
-fn unsupported_call(frame: &mut GuestSyncFrame<'_>) -> GuestSyncAction {
-    frame.write_general(0, registers::SMCCC_NOT_SUPPORTED);
-    GuestSyncAction::Resume
+    GuestSyncAction::WriteRegister {
+        register: 0,
+        value: result,
+        advance: false,
+    }
 }
 
 fn emulate_system_register(
     context: &mut VcpuContext,
     vcpu_id: u32,
-    frame: &mut GuestSyncFrame<'_>,
+    interrupts: &VmInterruptController,
+    exit: SystemRegisterExit,
 ) -> GuestSyncAction {
-    let access = decode_access(frame.syndrome);
-    match access.direction {
-        Direction::Read => match read_virtual_register(context, vcpu_id, access.encoding) {
-            Some(value) => {
-                frame.write_general(access.target, value);
-                frame.advance();
-                GuestSyncAction::Resume
-            }
-            None => inject_undefined(context, frame),
+    match exit.direction {
+        Direction::Read => match read_virtual_register(context, vcpu_id, exit.encoding) {
+            Some(value) => GuestSyncAction::WriteRegister {
+                register: exit.target,
+                value,
+                advance: true,
+            },
+            None => inject_undefined(context, exit.undefined),
         },
         Direction::Write => {
-            let value = frame.read_general(access.target);
-            if access.encoding == registers::SYSREG_ICC_SGI1R_EL1 {
-                frame.advance();
-                return GuestSyncAction::SoftwareInterrupt(value);
+            if exit.encoding == registers::SYSREG_ICC_SGI1R_EL1 {
+                return match super::vm_vcpu::deliver_software_interrupt(
+                    context, vcpu_id, interrupts, exit.value,
+                ) {
+                    Ok(()) => GuestSyncAction::Advance,
+                    Err(_) => GuestSyncAction::Stop,
+                };
             }
-            if write_virtual_register(access.encoding, value) {
-                frame.advance();
-                GuestSyncAction::Resume
+            if write_virtual_register(exit.encoding, exit.value) {
+                GuestSyncAction::Advance
             } else {
-                inject_undefined(context, frame)
+                inject_undefined(context, exit.undefined)
             }
         }
     }
@@ -428,11 +649,9 @@ fn write_virtual_register(encoding: Encoding, _value: u64) -> bool {
     encoding == registers::SYSREG_ACTLR_EL1
 }
 
-fn inject_undefined(context: &mut VcpuContext, frame: &mut GuestSyncFrame<'_>) -> GuestSyncAction {
-    let saved_pc = *frame.program_counter;
-    let saved_pstate = *frame.processor_state;
-    let syndrome = frame.syndrome & registers::ESR_IL;
-    let vector_offset = match saved_pstate & registers::SPSR_M_MASK {
+fn inject_undefined(context: &mut VcpuContext, exit: UndefinedExit) -> GuestSyncAction {
+    let syndrome = exit.syndrome & registers::ESR_IL;
+    let vector_offset = match exit.processor_state & registers::SPSR_M_MASK {
         registers::SPSR_EL0T => registers::VECTOR_LOWER_EL_AARCH64,
         registers::SPSR_EL1T => registers::VECTOR_CURRENT_EL_SP0,
         _ => registers::VECTOR_CURRENT_EL_SPX,
@@ -440,16 +659,18 @@ fn inject_undefined(context: &mut VcpuContext, frame: &mut GuestSyncFrame<'_>) -
 
     context.esr_el1 = syndrome;
     context.far_el1 = 0;
-    context.elr_el1 = saved_pc;
-    context.spsr_el1 = saved_pstate;
+    context.elr_el1 = exit.program_counter;
+    context.spsr_el1 = exit.processor_state;
     // SAFETY: The active-vCPU bridge guarantees this is the guest whose EL1
     // bank is live on the current CPU.
-    let live_vbar = unsafe { load_undefined_exception(syndrome, saved_pc, saved_pstate) };
+    let live_vbar =
+        unsafe { load_undefined_exception(syndrome, exit.program_counter, exit.processor_state) };
     context.vbar_el1 = live_vbar;
-    *frame.program_counter = live_vbar.wrapping_add(vector_offset);
-    *frame.processor_state =
-        (saved_pstate & !registers::SPSR_MODE_AND_DAIF_MASK) | registers::SPSR_EL1H_AND_DAIF;
-    GuestSyncAction::Injected
+    GuestSyncAction::InjectUndefined {
+        program_counter: live_vbar.wrapping_add(vector_offset),
+        processor_state: (exit.processor_state & !registers::SPSR_MODE_AND_DAIF_MASK)
+            | registers::SPSR_EL1H_AND_DAIF,
+    }
 }
 
 unsafe fn load_undefined_exception(syndrome: u64, elr: u64, spsr: u64) -> u64 {

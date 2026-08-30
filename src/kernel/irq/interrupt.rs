@@ -1011,6 +1011,21 @@ pub fn dispatch(hardware: InterruptId) {
     }
 }
 
+/// Completes an acknowledged interrupt without invoking its registered handlers.
+///
+/// Fatal entry uses this for the reserved crash-stop source. Keeping completion
+/// behind the controller owner gives every registered entry callback one
+/// completion point, independent of the selected architecture's acknowledge
+/// mechanism.
+pub(crate) fn complete(hardware: InterruptId) {
+    if let Err(error) = with_state(|state| {
+        state.controller.end(hardware);
+        Ok(())
+    }) {
+        crate::kernel::irq::exception::fatal_interrupt_state(error)
+    }
+}
+
 /// Claims one pending source from a memory-mapped controller CPU context.
 /// Architecture trap entry uses this only for external-interrupt causes.
 pub fn acknowledge_external() -> Option<InterruptId> {

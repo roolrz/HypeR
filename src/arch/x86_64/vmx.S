@@ -54,6 +54,8 @@ x86_64_vmexit_entry:
     pushq %r15
     subq $512, %rsp
     fxsave64 (%rsp)
+    # Pass the register frame as an unborrowed owner pointer. The Rust
+    # dispatcher scopes architecture references around typed policy calls.
     leaq 512(%rsp), %rdi
     call x86_64_vmexit_dispatch
     fxrstor64 (%rsp)

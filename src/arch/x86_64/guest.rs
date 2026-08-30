@@ -1,40 +1,13 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Architecture-facing representation of synchronous x86 guest exits.
+//! x86 hardware-virtualization admission checks.
 //!
-//! VMX and SVM own their machine state and place only owned, decoded facts in
-//! this adapter. The lifetime parameter preserves the common architecture
-//! facade shape; this backend does not borrow a VMCS or VMCB through it.
+//! VMX and SVM decode owned guest-exit events in their respective backends;
+//! no common raw synchronous frame exists at this architecture boundary.
 
-use hyper::vm::exit::GuestMemoryFault;
-
-pub(crate) struct GuestSyncFrame<'a> {
-    fault: Option<GuestMemoryFault>,
-    marker: core::marker::PhantomData<&'a mut ()>,
-}
-
-impl GuestSyncFrame<'_> {
-    pub(crate) const fn memory_fault(fault: GuestMemoryFault) -> Self {
-        Self {
-            fault: Some(fault),
-            marker: core::marker::PhantomData,
-        }
-    }
-
-    pub(crate) fn guest_memory_fault(&self) -> Option<GuestMemoryFault> {
-        self.fault
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)] // The common VM-exit contract is richer than each architecture backend.
-pub(crate) enum GuestSyncAction {
-    Resume,
-    Injected,
-    SoftwareInterrupt(u64),
-    Unhandled,
-}
+use hyper::vm::x86::exit::{PortIoAction, PortIoExit, PortIoOperation};
+use hyper::vm::x86::merge_port_input;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
@@ -44,18 +17,43 @@ pub enum ValidationError {
     BackendConflict,
 }
 
-pub(super) fn validate() -> Result<(), ValidationError> {
-    // VM-exit backends decode their machine-owned frames before constructing
-    // GuestSyncFrame, so the common trap interface has no runtime hardware
-    // dependency to validate here. Backend selection belongs to Linux guest
-    // admission, not host exception-vector initialization.
-    Ok(())
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PortIoCompletion {
+    Input(u64),
+    Output,
 }
 
-pub(crate) fn handle_guest_sync(
-    _context: &mut super::VcpuContext,
-    _vcpu_id: u32,
-    _frame: &mut GuestSyncFrame<'_>,
-) -> GuestSyncAction {
-    GuestSyncAction::Unhandled
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum PortIoCompletionError {
+    ActionMismatch,
+    InvalidWidth,
+    PolicyStopped,
+}
+
+/// Validates a policy action against its originating port operation.
+///
+/// Both x86 backends share accumulator semantics but retain distinct machine
+/// completion. Keeping this step pure ensures an input result cannot be
+/// applied to an output exit, or vice versa.
+pub(super) fn complete_port_io(
+    accumulator: u64,
+    exit: PortIoExit,
+    action: PortIoAction,
+) -> Result<PortIoCompletion, PortIoCompletionError> {
+    match (exit.operation(), action) {
+        (PortIoOperation::Input, PortIoAction::CompleteInput(value)) => {
+            merge_port_input(accumulator, value, exit.width().bytes())
+                .map(PortIoCompletion::Input)
+                .ok_or(PortIoCompletionError::InvalidWidth)
+        }
+        (PortIoOperation::Output(_), PortIoAction::CompleteOutput) => Ok(PortIoCompletion::Output),
+        (_, PortIoAction::Stop) => Err(PortIoCompletionError::PolicyStopped),
+        _ => Err(PortIoCompletionError::ActionMismatch),
+    }
+}
+
+pub(super) fn validate() -> Result<(), ValidationError> {
+    // Backend selection belongs to Linux guest admission, not host exception-
+    // vector initialization.
+    Ok(())
 }

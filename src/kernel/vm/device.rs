@@ -220,17 +220,20 @@ pub(crate) fn prepare() -> Result<VirtualDeviceSet, Error> {
 }
 
 #[cfg(CONFIG_ARCH_AARCH64)]
-pub(super) fn handle_legacy_mmio(
+pub(in crate::kernel) fn dispatch_mmio(
     execution: &mut crate::kernel::task::thread::VcpuExecution,
     interrupts: &super::VmInterruptController,
-    frame: &mut crate::hal::vm::LegacySyncFrame<'_>,
-) -> Option<crate::hal::vm::LegacySyncAction> {
-    let access = crate::hal::vm::decode_legacy_mmio(frame)?;
-    let binding = execution.vm_binding()?;
+    access: hyper::vm::exit::MmioAccess,
+) -> hyper::vm::exit::MmioAction {
+    use hyper::vm::exit::{MmioAction, MmioOperation};
+
+    let Some(binding) = execution.vm_binding() else {
+        return MmioAction::Stop;
+    };
     match imp::handle_mmio(binding, access) {
         Ok(Some(outcome)) => {
             if let Some((interrupt, asserted)) = outcome.interrupt
-                && let Err(error) = crate::hal::vm::update_legacy_device_interrupt(
+                && let Err(error) = crate::hal::vm::update_guest_device_interrupt(
                     &mut execution.hardware,
                     execution.vcpu_id,
                     interrupts,
@@ -239,33 +242,31 @@ pub(super) fn handle_legacy_mmio(
                 )
             {
                 crate::pr_err!("HypeR: failed to update guest device interrupt: {error:?}");
-                return Some(crate::hal::vm::LegacySyncAction::Unhandled);
+                return MmioAction::Stop;
             }
-            if !crate::hal::vm::complete_legacy_mmio(frame, access, outcome.value) {
-                crate::pr_err!("HypeR: guest console completion no longer matched its exit");
-                return Some(crate::hal::vm::LegacySyncAction::Unhandled);
+            match (access.operation(), outcome.value) {
+                (MmioOperation::Read, Some(value)) => MmioAction::CompleteRead(value),
+                (MmioOperation::Write(_), _) => MmioAction::CompleteWrite,
+                (MmioOperation::Read, None) => MmioAction::Stop,
             }
-            Some(crate::hal::vm::LegacySyncAction::Resume)
         }
         Ok(None) => match imp::handle_gic(
             interrupts,
             hyper::vm::interrupt::VirtualCpuId::new(execution.vcpu_id),
             access,
         ) {
-            Ok(Some(outcome)) => {
-                if !crate::hal::vm::complete_legacy_mmio(frame, access, outcome.value) {
-                    crate::pr_err!("HypeR: guest GIC completion no longer matched its exit");
-                    return Some(crate::hal::vm::LegacySyncAction::Unhandled);
-                }
-                Some(crate::hal::vm::LegacySyncAction::Resume)
-            }
-            Ok(None) => None,
+            Ok(Some(outcome)) => match (access.operation(), outcome.value) {
+                (MmioOperation::Read, Some(value)) => MmioAction::CompleteRead(value),
+                (MmioOperation::Write(_), _) => MmioAction::CompleteWrite,
+                (MmioOperation::Read, None) => MmioAction::Stop,
+            },
+            Ok(None) => MmioAction::Unhandled,
             Err(error) => {
                 crate::pr_err!(
                     "HypeR: unsupported guest GIC access at {:#x}: {error:?}",
                     access.address().get()
                 );
-                Some(crate::hal::vm::LegacySyncAction::Unhandled)
+                MmioAction::Stop
             }
         },
         Err(error) => {
@@ -273,18 +274,9 @@ pub(super) fn handle_legacy_mmio(
                 "HypeR: unsupported guest console access at {:#x}: {error:?}",
                 access.address().get()
             );
-            Some(crate::hal::vm::LegacySyncAction::Unhandled)
+            MmioAction::Stop
         }
     }
-}
-
-#[cfg(not(CONFIG_ARCH_AARCH64))]
-pub(super) const fn handle_legacy_mmio(
-    _execution: &mut crate::kernel::task::thread::VcpuExecution,
-    _interrupts: &super::VmInterruptController,
-    _frame: &mut crate::hal::vm::LegacySyncFrame<'_>,
-) -> Option<crate::hal::vm::LegacySyncAction> {
-    None
 }
 
 #[cfg(CONFIG_ARCH_AARCH64)]
@@ -295,7 +287,7 @@ pub(super) fn receive_console_input(byte: u8) -> bool {
         let Some((interrupt, asserted)) = outcome.interrupt else {
             return Ok(());
         };
-        crate::hal::vm::update_legacy_device_interrupt(
+        crate::hal::vm::update_guest_device_interrupt(
             &mut execution.hardware,
             execution.vcpu_id,
             interrupts,
@@ -315,15 +307,16 @@ pub(super) const fn receive_console_input(_byte: u8) -> bool {
 }
 
 #[cfg(CONFIG_ARCH_X86_64)]
-pub(crate) fn access_port(
-    port: u16,
-    size: usize,
-    write: bool,
-    value: u32,
-) -> Result<Option<u32>, Error> {
+pub(crate) fn access_port(access: hyper::vm::x86::exit::PortIoExit) -> Result<Option<u32>, Error> {
+    use hyper::vm::x86::exit::PortIoOperation;
+
+    let (write, value) = match access.operation() {
+        PortIoOperation::Input => (false, 0),
+        PortIoOperation::Output(value) => (true, value),
+    };
     match super::active_vcpu::with(|execution, _| {
         let binding = execution.vm_binding().ok_or(Error::NoActiveVcpu)?;
-        imp::access_port(binding, port, size, write, value)
+        imp::access_port(binding, access.port(), access.width().bytes(), write, value)
     })
     .map_err(Error::Active)?
     {

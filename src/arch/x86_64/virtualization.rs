@@ -111,8 +111,23 @@ pub(super) unsafe fn enter(context: *mut VcpuContext) -> ! {
         Some(Backend::Vmx) => unsafe { super::vmx::enter(context) },
         // SAFETY: The caller's raw-context contract is forwarded to the selected backend.
         Some(Backend::Svm) => unsafe { super::svm::enter(context) },
-        None => crate::kernel::boot::fail("x86 virtualization backend selection", NONE),
+        None => fail_stop("x86 virtualization backend selection", NONE),
     }
+}
+
+/// Enters registered kernel fail-stop policy for an unrecoverable backend error.
+///
+/// Runtime exception services are published before VM initialization, and a
+/// vCPU cannot be constructed without the later VM-entry readiness capability.
+/// Capturing the machine context here keeps backend diagnostics below the
+/// registered architecture-entry boundary.
+#[cold]
+#[inline(never)]
+pub(super) fn fail_stop(operation: &str, detail: impl core::fmt::Debug) -> ! {
+    crate::arch::exception::fatal(
+        crate::arch::exception::capture_crash_context(),
+        format_args!("fatal x86 virtualization failure: {operation}: {detail:?}"),
+    )
 }
 
 const fn encode(backend: Backend) -> u8 {
