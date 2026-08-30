@@ -1101,75 +1101,81 @@ impl Scheduler {
             return Err(Error::TerminatedThread);
         }
         let links = self.thread(id)?.queue_links();
-        if let QueueMembership::ReadyRealTime { cpu, priority: old } = links.membership {
-            if old == priority.get() {
-                return Ok(None);
-            }
-            self.remove_ready(id, cpu, links.membership)?;
-            if !self
-                .thread_mut(id)?
-                .set_scheduling_policy(SchedulingPolicy::fifo(priority))
-            {
-                return Err(Error::InvalidThreadState);
-            }
-            if priority.get() < old {
-                self.enqueue_ready(id)?;
-            } else {
-                self.enqueue_ready_front(id)?;
-            }
-            Ok(self.ready_thread_preempts(id)?.then_some(cpu))
-        } else if let QueueMembership::ReadyFair { cpu } = links.membership {
-            self.remove_ready(id, cpu, links.membership)?;
-            if !self
-                .thread_mut(id)?
-                .set_scheduling_policy(SchedulingPolicy::fifo(priority))
-            {
-                return Err(Error::InvalidThreadState);
-            }
-            self.enqueue_ready(id)?;
-            Ok(self.ready_thread_preempts(id)?.then_some(cpu))
-        } else {
-            let previous_policy = self.thread(id)?.scheduling_policy();
-            let old = previous_policy.priority();
-            if previous_policy == SchedulingPolicy::fifo(priority) {
-                return Ok(None);
-            }
-            if !self
-                .thread_mut(id)?
-                .set_scheduling_policy(SchedulingPolicy::fifo(priority))
-            {
-                return Err(Error::InvalidThreadState);
-            }
-            if state != ThreadState::Running {
-                return Ok(None);
-            }
-            self.thread_mut(id)?.set_deferred_fifo_placement(None);
-            let thread = self.thread(id)?;
-            let cpu = thread.cpu_index();
-            let ready = self.cpus[self.cpu_slot(cpu)?]
-                .run_queue
-                .peek_next(&self.threads, cpu)?;
-            let should_reschedule = ready.is_some_and(|ready| match old {
-                Some(old) => matches!(
-                    ready.policy,
-                    SchedulingPolicy::Fifo { priority: ready }
-                        if ready < priority || (priority < old && ready == priority)
-                ),
-                None => SchedulingPolicy::fifo(priority).is_preempted_by(ready.policy),
-            });
-            if should_reschedule {
-                if let Some(old) = old {
-                    let placement = if priority < old {
-                        DeferredFifoPlacement::Tail
-                    } else {
-                        DeferredFifoPlacement::Head
-                    };
-                    self.thread_mut(id)?
-                        .set_deferred_fifo_placement(Some(placement));
+        match links.membership {
+            QueueMembership::ReadyRealTime { cpu, priority: old } => {
+                if old == priority.get() {
+                    return Ok(None);
                 }
-                Ok(Some(cpu))
-            } else {
-                Ok(None)
+                self.remove_ready(id, cpu, links.membership)?;
+                if !self
+                    .thread_mut(id)?
+                    .set_scheduling_policy(SchedulingPolicy::fifo(priority))
+                {
+                    return Err(Error::InvalidThreadState);
+                }
+                if priority.get() < old {
+                    self.enqueue_ready(id)?;
+                } else {
+                    self.enqueue_ready_front(id)?;
+                }
+                Ok(self.ready_thread_preempts(id)?.then_some(cpu))
+            }
+            QueueMembership::ReadyFair { cpu } => {
+                self.remove_ready(id, cpu, links.membership)?;
+                if !self
+                    .thread_mut(id)?
+                    .set_scheduling_policy(SchedulingPolicy::fifo(priority))
+                {
+                    return Err(Error::InvalidThreadState);
+                }
+                self.enqueue_ready(id)?;
+                Ok(self.ready_thread_preempts(id)?.then_some(cpu))
+            }
+            QueueMembership::None
+            | QueueMembership::Waiting { .. }
+            | QueueMembership::Terminated => {
+                let previous_policy = self.thread(id)?.scheduling_policy();
+                let old = previous_policy.priority();
+                if previous_policy == SchedulingPolicy::fifo(priority) {
+                    return Ok(None);
+                }
+                if !self
+                    .thread_mut(id)?
+                    .set_scheduling_policy(SchedulingPolicy::fifo(priority))
+                {
+                    return Err(Error::InvalidThreadState);
+                }
+                if state != ThreadState::Running {
+                    return Ok(None);
+                }
+                self.thread_mut(id)?.set_deferred_fifo_placement(None);
+                let thread = self.thread(id)?;
+                let cpu = thread.cpu_index();
+                let ready = self.cpus[self.cpu_slot(cpu)?]
+                    .run_queue
+                    .peek_next(&self.threads, cpu)?;
+                let should_reschedule = ready.is_some_and(|ready| match old {
+                    Some(old) => matches!(
+                        ready.policy,
+                        SchedulingPolicy::Fifo { priority: ready }
+                            if ready < priority || (priority < old && ready == priority)
+                    ),
+                    None => SchedulingPolicy::fifo(priority).is_preempted_by(ready.policy),
+                });
+                if should_reschedule {
+                    if let Some(old) = old {
+                        let placement = if priority < old {
+                            DeferredFifoPlacement::Tail
+                        } else {
+                            DeferredFifoPlacement::Head
+                        };
+                        self.thread_mut(id)?
+                            .set_deferred_fifo_placement(Some(placement));
+                    }
+                    Ok(Some(cpu))
+                } else {
+                    Ok(None)
+                }
             }
         }
     }

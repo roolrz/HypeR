@@ -29,6 +29,18 @@ enum ExceptionKind {
     SystemError,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExceptionEntry {
+    kind: ExceptionKind,
+    origin: ExceptionOrigin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LowerAarch64Owner {
+    Guest,
+    Native { generation: u64 },
+}
+
 #[repr(C)]
 struct StackBounds {
     // Assembly loads `top` with acquire semantics before reading `bottom`.
@@ -451,114 +463,167 @@ extern "C" fn aarch64_exception_dispatch(
     frame: &mut ExceptionFrame,
 ) -> Option<unsafe extern "C" fn()> {
     let exception_class = (frame.esr >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK;
-    if matches!(
-        frame.vector,
-        registers::EXCEPTION_VECTOR_CURRENT_SP0_SYNC | registers::EXCEPTION_VECTOR_CURRENT_SPX_SYNC
-    ) && exception_class == registers::ESR_EC_BRK64
-        && frame.esr & registers::ESR_BRK_COMMENT_MASK == registers::EXCEPTION_VECTOR_TEST_IMMEDIATE
-        && VECTOR_TEST_EXPECTED
-            .compare_exchange(
-                frame.vector,
-                registers::EXCEPTION_VECTOR_TEST_NONE,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-    {
-        frame.elr = frame.elr.wrapping_add(4);
+
+    match decode_vector(frame.vector) {
+        Some(entry) => {
+            let owner = lower_aarch64_owner(frame, entry.origin);
+            match entry.kind {
+                ExceptionKind::Synchronous => {
+                    dispatch_synchronous(frame, entry, owner, exception_class)
+                }
+                ExceptionKind::Irq => dispatch_irq(frame, entry, owner),
+                ExceptionKind::Fiq | ExceptionKind::SystemError => {
+                    fatal_exception(frame, entry, exception_class)
+                }
+            }
+        }
+        None => fatal_invalid_vector(frame),
+    }
+}
+
+fn lower_aarch64_owner(
+    frame: &ExceptionFrame,
+    origin: ExceptionOrigin,
+) -> Option<LowerAarch64Owner> {
+    if origin != ExceptionOrigin::LowerAarch64 {
         return None;
     }
 
-    let Some((kind, origin)) = decode_vector(frame.vector) else {
-        let context = exception_crash_context(frame, frame.sp_el1);
-        crate::arch::exception::fatal(
-            context,
-            format_args!(
-                "invalid AArch64 vector {}, ESR {:#x}, ELR {:#x}, FAR {:#x}, SPSR {:#x}",
-                frame.vector, frame.esr, frame.elr, frame.far, frame.spsr
-            ),
-        );
-    };
-    let lower_world = if origin == ExceptionOrigin::LowerAarch64 {
-        Some(super::lower_el::current_world())
-    } else {
-        None
-    };
-    if matches!(
-        lower_world,
-        Some(super::lower_el::World::None | super::lower_el::World::Corrupt)
-    ) {
-        let context = exception_crash_context(frame, interrupted_stack_pointer(frame, origin));
-        crate::arch::exception::fatal(
-            context,
-            format_args!(
-                "lower-AArch64 exception has no unique return-world owner: {lower_world:?}"
-            ),
-        );
-    }
-    let native_generation = match lower_world {
-        Some(super::lower_el::World::Native { generation }) => Some(generation),
-        _ => None,
-    };
-    let guest = matches!(
-        lower_world,
-        Some(super::lower_el::World::Guest { generation }) if generation != 0
-    );
-    if kind == ExceptionKind::Irq {
-        let interrupt = super::acknowledge_interrupt()?;
-        if Some(interrupt) == super::kernel_rpc_interrupt() {
-            crate::arch::irq::service_kernel_rpc();
-            super::end_interrupt(interrupt);
-            return None;
+    match super::lower_el::current_world() {
+        super::lower_el::World::Guest { .. } => Some(LowerAarch64Owner::Guest),
+        super::lower_el::World::Native { generation } => {
+            Some(LowerAarch64Owner::Native { generation })
         }
-        let native_unwind = native_generation.map(|_| super::user_entry::unwind_callback());
-        match crate::arch::irq::dispatch_entry(interrupt, native_unwind) {
-            hyper::hal::interrupt::EntryAction::Resume { postlude } => {
-                // Registry dispatch completed the acknowledged interrupt
-                // exactly once before returning this action. The optional
-                // scheduling tail therefore runs after GIC EOI/deactivation.
-                if let (Some(generation), Some(_)) = (native_generation, postlude) {
-                    // The raw vector frame must not outlive this stack.
-                    if super::user_entry::capture_interrupt(frame, generation).is_err() {
-                        super::user_entry::fail_stop();
-                    }
-                }
-                return postlude;
-            }
-            hyper::hal::interrupt::EntryAction::Stop => {
-                let stack_pointer = interrupted_stack_pointer(frame, origin);
-                let context = exception_crash_context(frame, stack_pointer);
-                crate::arch::irq::stop_entry(context)
-            }
+        world @ (super::lower_el::World::None | super::lower_el::World::Corrupt) => {
+            let context = exception_crash_context(frame, interrupted_stack_pointer(frame, origin));
+            crate::arch::exception::fatal(
+                context,
+                format_args!("lower-AArch64 exception has no unique return-world owner: {world:?}"),
+            )
         }
     }
-    if kind == ExceptionKind::Synchronous && origin == ExceptionOrigin::LowerAarch64 {
-        if let Some(generation) = native_generation {
-            return match super::user_entry::handle_synchronous(frame, generation) {
+}
+
+fn dispatch_synchronous(
+    frame: &mut ExceptionFrame,
+    entry: ExceptionEntry,
+    owner: Option<LowerAarch64Owner>,
+    exception_class: u64,
+) -> Option<unsafe extern "C" fn()> {
+    if complete_vector_test(frame, entry, exception_class) {
+        return None;
+    }
+
+    match owner {
+        Some(LowerAarch64Owner::Native { generation }) => {
+            match super::user_entry::handle_synchronous(frame, generation) {
                 Ok(super::user_entry::SynchronousAction::Resume) => None,
                 Ok(super::user_entry::SynchronousAction::Unwind) => {
                     Some(super::user_entry::unwind_callback())
                 }
                 Err(_) => super::user_entry::fail_stop(),
-            };
+            }
         }
-        if guest && dispatch_guest_synchronous(frame, exception_class) {
-            return None;
+        Some(LowerAarch64Owner::Guest) if dispatch_guest_synchronous(frame, exception_class) => {
+            None
         }
+        Some(LowerAarch64Owner::Guest) | None => fatal_exception(frame, entry, exception_class),
+    }
+}
+
+fn complete_vector_test(
+    frame: &mut ExceptionFrame,
+    entry: ExceptionEntry,
+    exception_class: u64,
+) -> bool {
+    let test_vector = matches!(
+        entry.origin,
+        ExceptionOrigin::CurrentSp0 | ExceptionOrigin::CurrentSpx
+    ) && exception_class == registers::ESR_EC_BRK64
+        && frame.esr & registers::ESR_BRK_COMMENT_MASK
+            == registers::EXCEPTION_VECTOR_TEST_IMMEDIATE;
+    if !test_vector {
+        return false;
+    }
+    if VECTOR_TEST_EXPECTED
+        .compare_exchange(
+            frame.vector,
+            registers::EXCEPTION_VECTOR_TEST_NONE,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return false;
     }
 
-    let stack_pointer = interrupted_stack_pointer(frame, origin);
-    let (architecture_class, description) = if kind == ExceptionKind::Fiq {
-        (0, "FIQ exception")
-    } else {
-        (exception_class as u8, syndrome_description(exception_class))
+    frame.elr = frame.elr.wrapping_add(4);
+    true
+}
+
+fn dispatch_irq(
+    frame: &mut ExceptionFrame,
+    entry: ExceptionEntry,
+    owner: Option<LowerAarch64Owner>,
+) -> Option<unsafe extern "C" fn()> {
+    let interrupt = super::acknowledge_interrupt()?;
+    if Some(interrupt) == super::kernel_rpc_interrupt() {
+        crate::arch::irq::service_kernel_rpc();
+        super::end_interrupt(interrupt);
+        return None;
+    }
+
+    let native_generation = match owner {
+        Some(LowerAarch64Owner::Native { generation }) => Some(generation),
+        Some(LowerAarch64Owner::Guest) | None => None,
+    };
+    let native_unwind = native_generation.map(|_| super::user_entry::unwind_callback());
+    match crate::arch::irq::dispatch_entry(interrupt, native_unwind) {
+        hyper::hal::interrupt::EntryAction::Resume { postlude } => {
+            // Registry dispatch completed the acknowledged interrupt exactly
+            // once before returning this action. The optional scheduling tail
+            // therefore runs after GIC EOI/deactivation.
+            if let (Some(generation), Some(_)) = (native_generation, postlude) {
+                // The raw vector frame must not outlive this stack.
+                if super::user_entry::capture_interrupt(frame, generation).is_err() {
+                    super::user_entry::fail_stop();
+                }
+            }
+            postlude
+        }
+        hyper::hal::interrupt::EntryAction::Stop => {
+            let stack_pointer = interrupted_stack_pointer(frame, entry.origin);
+            let context = exception_crash_context(frame, stack_pointer);
+            crate::arch::irq::stop_entry(context)
+        }
+    }
+}
+
+fn fatal_invalid_vector(frame: &ExceptionFrame) -> ! {
+    let context = exception_crash_context(frame, frame.sp_el1);
+    crate::arch::exception::fatal(
+        context,
+        format_args!(
+            "invalid AArch64 vector {}, ESR {:#x}, ELR {:#x}, FAR {:#x}, SPSR {:#x}",
+            frame.vector, frame.esr, frame.elr, frame.far, frame.spsr
+        ),
+    )
+}
+
+fn fatal_exception(frame: &ExceptionFrame, entry: ExceptionEntry, exception_class: u64) -> ! {
+    let stack_pointer = interrupted_stack_pointer(frame, entry.origin);
+    let (architecture_class, description) = match entry.kind {
+        ExceptionKind::Fiq => (0, "FIQ exception"),
+        ExceptionKind::Synchronous | ExceptionKind::Irq | ExceptionKind::SystemError => {
+            (exception_class as u8, syndrome_description(exception_class))
+        }
     };
     let context = exception_crash_context(frame, stack_pointer);
     crate::arch::exception::fatal(
         context,
         format_args!(
-            "fatal {kind:?} from {origin:?}: {description} (EC {architecture_class:#x}, ESR {:#x}, FAR {:#x})",
-            frame.esr, frame.far
+            "fatal {:?} from {:?}: {description} (EC {architecture_class:#x}, ESR {:#x}, FAR {:#x})",
+            entry.kind, entry.origin, frame.esr, frame.far
         ),
     )
 }
@@ -644,7 +709,7 @@ fn interrupted_stack_pointer(frame: &ExceptionFrame, origin: ExceptionOrigin) ->
     }
 }
 
-fn decode_vector(vector: u64) -> Option<(ExceptionKind, ExceptionOrigin)> {
+fn decode_vector(vector: u64) -> Option<ExceptionEntry> {
     let origin = match vector / 4 {
         0 => ExceptionOrigin::CurrentSp0,
         1 => ExceptionOrigin::CurrentSpx,
@@ -659,7 +724,7 @@ fn decode_vector(vector: u64) -> Option<(ExceptionKind, ExceptionOrigin)> {
         3 => ExceptionKind::SystemError,
         _ => return None,
     };
-    Some((kind, origin))
+    Some(ExceptionEntry { kind, origin })
 }
 
 fn syndrome_description(exception_class: u64) -> &'static str {

@@ -270,59 +270,9 @@ fn finish_node(
     discovered: &mut DiscoveryState,
     ancestors: &[NodeState],
 ) -> Result<CompletedNode, Error> {
-    let translate_register = |range| translate_range(range, ancestors);
-
-    let mut translated_registers = [PhysicalRange::EMPTY; MAX_NODE_REGIONS];
-    let mut translated_count = 0usize;
-    for &range in node.registers.as_slice() {
-        match translate_register(range) {
-            Ok(range) => {
-                translated_registers[translated_count] = range;
-                translated_count += 1;
-            }
-            Err(Error::UntranslatedAddress) if !node.is_memory && !node.is_reserved_region => {}
-            Err(error) => return Err(error),
-        }
-    }
-
+    let (translated_registers, translated_count) = translated_registers(&node, ancestors)?;
     if !node.disabled {
-        if node.is_cpu {
-            let hardware_id = node.cpu_hardware_id.ok_or(Error::BadStructure)?;
-            discovered
-                .cpus
-                .push(CpuInfo { hardware_id })
-                .map_err(|error| match error {
-                    CpuListError::Capacity => Error::TooManyCpus,
-                    CpuListError::Duplicate => Error::DuplicateCpu,
-                })?;
-        }
-
-        let (target, require_translation) = if node.is_memory {
-            (Some(&mut discovered.memory as &mut dyn RegionSink), true)
-        } else if node.is_reserved_region {
-            (Some(&mut discovered.reserved as &mut dyn RegionSink), true)
-        } else if !node.is_cpu {
-            (Some(&mut discovered.mmio as &mut dyn RegionSink), false)
-        } else {
-            (None, false)
-        };
-
-        if let Some(target) = target {
-            for &range in node.registers.as_slice() {
-                let range = match translate_register(range) {
-                    Ok(range) => range,
-                    Err(Error::UntranslatedAddress) if !require_translation => continue,
-                    Err(error) => return Err(error),
-                };
-                target.insert(range)?;
-                if node.is_reserved_region && node.no_map {
-                    discovered
-                        .no_map
-                        .insert(range)
-                        .map_err(|_| Error::TooManyRegions)?;
-                }
-            }
-        }
+        discover_node_resources(&node, discovered, ancestors)?;
     }
 
     Ok(CompletedNode {
@@ -335,14 +285,97 @@ fn finish_node(
     })
 }
 
-trait RegionSink {
-    fn insert(&mut self, range: PhysicalRange) -> Result<(), Error>;
+fn translated_registers(
+    node: &NodeState,
+    ancestors: &[NodeState],
+) -> Result<([PhysicalRange; MAX_NODE_REGIONS], usize), Error> {
+    let mut translated_registers = [PhysicalRange::EMPTY; MAX_NODE_REGIONS];
+    let mut translated_count = 0usize;
+    for &range in node.registers.as_slice() {
+        match translate_range(range, ancestors) {
+            Ok(range) => {
+                translated_registers[translated_count] = range;
+                translated_count += 1;
+            }
+            Err(Error::UntranslatedAddress) if !node.is_memory && !node.is_reserved_region => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok((translated_registers, translated_count))
 }
 
-impl<const CAPACITY: usize> RegionSink for RegionList<CAPACITY> {
-    fn insert(&mut self, range: PhysicalRange) -> Result<(), Error> {
-        RegionList::insert(self, range).map_err(|_| Error::TooManyRegions)
+fn discover_node_resources(
+    node: &NodeState,
+    discovered: &mut DiscoveryState,
+    ancestors: &[NodeState],
+) -> Result<(), Error> {
+    if node.is_cpu {
+        discover_cpu(node, discovered)?;
     }
+
+    let kind = NodeRegionKind::classify(node);
+    if kind == NodeRegionKind::None {
+        return Ok(());
+    }
+    for &range in node.registers.as_slice() {
+        let range = match translate_range(range, ancestors) {
+            Ok(range) => range,
+            Err(Error::UntranslatedAddress) if kind == NodeRegionKind::Mmio => continue,
+            Err(error) => return Err(error),
+        };
+        match kind {
+            NodeRegionKind::Memory => insert_region(&mut discovered.memory, range)?,
+            NodeRegionKind::Reserved => {
+                insert_region(&mut discovered.reserved, range)?;
+                if node.no_map {
+                    insert_region(&mut discovered.no_map, range)?;
+                }
+            }
+            NodeRegionKind::Mmio => insert_region(&mut discovered.mmio, range)?,
+            NodeRegionKind::None => {}
+        }
+    }
+    Ok(())
+}
+
+fn discover_cpu(node: &NodeState, discovered: &mut DiscoveryState) -> Result<(), Error> {
+    let hardware_id = node.cpu_hardware_id.ok_or(Error::BadStructure)?;
+    discovered
+        .cpus
+        .push(CpuInfo { hardware_id })
+        .map_err(|error| match error {
+            CpuListError::Capacity => Error::TooManyCpus,
+            CpuListError::Duplicate => Error::DuplicateCpu,
+        })
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NodeRegionKind {
+    Memory,
+    Reserved,
+    Mmio,
+    None,
+}
+
+impl NodeRegionKind {
+    const fn classify(node: &NodeState) -> Self {
+        if node.is_memory {
+            Self::Memory
+        } else if node.is_reserved_region {
+            Self::Reserved
+        } else if node.is_cpu {
+            Self::None
+        } else {
+            Self::Mmio
+        }
+    }
+}
+
+fn insert_region<const CAPACITY: usize>(
+    regions: &mut RegionList<CAPACITY>,
+    range: PhysicalRange,
+) -> Result<(), Error> {
+    regions.insert(range).map_err(|_| Error::TooManyRegions)
 }
 
 fn apply_property(node: &mut NodeState, name: &str, value: &[u8]) -> Result<(), Error> {
