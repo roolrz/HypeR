@@ -11,6 +11,7 @@ use hyper::sync::atomic::{AtomicUsize, Ordering};
 use crate::kernel::mm::stack;
 use crate::kernel::sync::Semaphore;
 use crate::kernel::task::scheduler;
+use crate::kernel::task::thread::ThreadId;
 
 static IRQ_CALLBACK_SP: AtomicUsize = AtomicUsize::new(0);
 
@@ -19,13 +20,16 @@ pub(super) enum Error {
     GuardMapped,
     IrqCallbackMissing,
     IrqStackMismatch,
-    PageAccounting,
+    PageAccountingUnavailable,
+    StackPageAllocation,
+    StackPageRetirement,
     #[cfg(CONFIG_ARCH_X86_64)]
     ShootdownMissing,
     Scheduler(scheduler::Error),
     Stack(stack::Error),
     StackUsageMissing,
     Synchronization(crate::kernel::sync::Error),
+    ThreadRetirementTimeout,
 }
 
 impl From<scheduler::Error> for Error {
@@ -89,7 +93,7 @@ fn validate_thread_stack() -> Result<(), Error> {
     scheduler::discard_dormant_kernel_thread(warmup)?;
     scheduler::prepare_thread_accounting_probe()?;
     let baseline_pages = crate::kernel::mm::statistics()
-        .ok_or(Error::PageAccounting)?
+        .ok_or(Error::PageAccountingUnavailable)?
         .runtime
         .kernel_pages
         .pages;
@@ -104,14 +108,14 @@ fn validate_thread_stack() -> Result<(), Error> {
     probe.ready.acquire()?;
     let statistics = scheduler::thread_stack_statistics(id)?.ok_or(Error::StackUsageMissing)?;
     let allocated_pages = crate::kernel::mm::statistics()
-        .ok_or(Error::PageAccounting)?
+        .ok_or(Error::PageAccountingUnavailable)?
         .runtime
         .kernel_pages
         .pages;
     let expected_pages =
         hyper::config::KERNEL_STACK_SIZE_KB as usize * 1024 / hyper::mm::PAGE_SIZE as usize;
     if allocated_pages != baseline_pages + expected_pages {
-        return Err(Error::PageAccounting);
+        return Err(Error::StackPageAllocation);
     }
     if statistics.used < 8 * 1024 || !statistics.canary_intact {
         return Err(Error::StackUsageMissing);
@@ -120,21 +124,39 @@ fn validate_thread_stack() -> Result<(), Error> {
         return Err(Error::GuardMapped);
     }
     probe.release.release()?;
-    scheduler::yield_now()?;
-    scheduler::yield_now()?;
+    wait_for_thread_retirement(id)?;
     let final_pages = crate::kernel::mm::statistics()
-        .ok_or(Error::PageAccounting)?
+        .ok_or(Error::PageAccountingUnavailable)?
         .runtime
         .kernel_pages
         .pages;
     if final_pages != baseline_pages {
-        return Err(Error::PageAccounting);
+        return Err(Error::StackPageRetirement);
     }
     #[cfg(CONFIG_ARCH_X86_64)]
     if crate::hal::memory::stage1_shootdown_count_for_test() <= shootdown_baseline {
         return Err(Error::ShootdownMissing);
     }
     Ok(())
+}
+
+/// Waits until the worker's stack owner has passed scheduler reclamation.
+///
+/// A completion signal only publishes the worker's last shared-state access.
+/// IRQ-tail preemption can resume this parent before the worker returns through
+/// its exit trampoline, so a fixed number of yields is not a retirement proof.
+fn wait_for_thread_retirement(id: ThreadId) -> Result<(), Error> {
+    const MAX_REAP_PASSES: usize = 64;
+
+    for _ in 0..MAX_REAP_PASSES {
+        scheduler::yield_now()?;
+        match scheduler::thread_stack_statistics(id) {
+            Err(scheduler::Error::ThreadNotFound) => return Ok(()),
+            Ok(_) | Err(scheduler::Error::InvalidThreadState) => {}
+            Err(error) => return Err(Error::Scheduler(error)),
+        }
+    }
+    Err(Error::ThreadRetirementTimeout)
 }
 
 extern "C" fn stack_worker(argument: usize) {
