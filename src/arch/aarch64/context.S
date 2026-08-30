@@ -176,9 +176,10 @@ aarch64_capture_crash_context:
 /*
  * Runs a native EL0 context as a call-like machine operation.
  *
- * A selected lower-EL exception copies the raw vector frame into the supplied
- * context and branches to aarch64_unwind_native_user. That tail discards the
- * vector frame, restores this ordinary kernel call frame, and returns to Rust.
+ * A lower-EL exception which requires scheduling, blocking, or termination
+ * copies the raw vector frame into the supplied context and branches to
+ * aarch64_unwind_native_user. Never-blocking Native calls complete in the
+ * vector and ERET directly without returning through this call frame.
  */
 .global aarch64_run_native_user
 .type aarch64_run_native_user, %function

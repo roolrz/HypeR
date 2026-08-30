@@ -12,7 +12,7 @@ use core::marker::PhantomData;
 
 use hyper::abi::native::{NativeInvocation, NativeResult};
 use hyper::cpu::{CpuIndex, PinnedExecution};
-use hyper::hal::user::{UserFault, UserRunBinding};
+use hyper::hal::user::{NativeCallService, UserFault, UserRunBinding};
 use hyper::mm::PhysicalAddress;
 use hyper::sync::InterruptMaskGuard;
 
@@ -443,16 +443,17 @@ pub(crate) struct StoppedUser<'context, 'pin> {
     active: Option<ActiveAddressSpace<'pin>>,
 }
 
-/// Runs one admitted native-user generation as a call-like machine operation.
+/// Runs one admitted native-user generation until ordinary kernel state is required.
 ///
 /// The active translation token retains both execution pinning and root
-/// ownership. A selected exception copies the raw frame into `context` and
-/// returns to this call rather than dispatching from the vector stack.
+/// ownership. Never-blocking Native calls complete from synchronous exception
+/// entry; faults, preemption, and deferred calls return owned state here.
 pub(crate) fn run_user<'context, 'pin>(
     context: &'context mut UserContext,
     active: ActiveAddressSpace<'pin>,
     binding: UserRunBinding,
     kernel_access: PreparedKernelAccess<'_>,
+    service: &NativeCallService<'_>,
 ) -> Result<StoppedUser<'context, 'pin>, UserEntryError> {
     if kernel_access.cpu != active.cpu || crate::hal::irq::local_enabled() {
         // SAFETY: `active` still owns the current-CPU pin and translation.
@@ -466,17 +467,18 @@ pub(crate) fn run_user<'context, 'pin>(
         // SAFETY: `active` retains the current-CPU pin, translation root, and
         // owner for this entire call. `context` is exclusively borrowed until
         // the architecture has closed its generation-qualified publication.
-        let exit = match unsafe { crate::arch::user::run_user(&mut context.backend, binding) } {
-            Ok(exit) => exit,
-            Err(error) => {
-                // SAFETY: The consumed token proves the current CPU remains
-                // pinned to the activation which this path is abandoning.
-                if unsafe { deactivate_local(active) }.is_err() {
-                    crate::hal::cpu::halt();
+        let exit =
+            match unsafe { crate::arch::user::run_user(&mut context.backend, binding, service) } {
+                Ok(exit) => exit,
+                Err(error) => {
+                    // SAFETY: The consumed token proves the current CPU remains
+                    // pinned to the activation which this path is abandoning.
+                    if unsafe { deactivate_local(active) }.is_err() {
+                        crate::hal::cpu::halt();
+                    }
+                    return Err(UserEntryError::Backend(error));
                 }
-                return Err(UserEntryError::Backend(error));
-            }
-        };
+            };
         Ok(StoppedUser {
             exit: Some(exit),
             active: Some(active),
@@ -484,7 +486,7 @@ pub(crate) fn run_user<'context, 'pin>(
     }
     #[cfg(not(CONFIG_ARCH_AARCH64))]
     {
-        let _ = (context, active, binding, kernel_access);
+        let _ = (context, active, binding, kernel_access, service);
         Err(UserEntryError::Unsupported)
     }
 }
@@ -693,6 +695,11 @@ impl<'context> CompletionFailure<'context> {
 #[cfg(CONFIG_ARCH_AARCH64)]
 pub(crate) fn address_limit() -> Result<u64, UserMachineContractError> {
     crate::arch::user::user_address_limit()
+}
+
+#[cfg(all(CONFIG_ARCH_AARCH64, feature = "kernel-self-test"))]
+pub(crate) fn direct_native_call_count_for_test() -> usize {
+    crate::arch::user::direct_native_call_count_for_test()
 }
 
 /// Copies from machine-visible memory using the selected architecture seam.

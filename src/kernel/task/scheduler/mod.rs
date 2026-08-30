@@ -9,6 +9,7 @@ mod state;
 use alloc::boxed::Box;
 use alloc::rc::Rc;
 use core::marker::PhantomData;
+use core::ptr::NonNull;
 
 use hyper::cpu::CpuIndex;
 use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
@@ -225,10 +226,9 @@ pub(crate) struct CurrentVcpu {
     pub stack: (usize, usize),
 }
 
-#[derive(Clone, Copy)]
 pub(crate) struct CurrentUser {
     pub thread: ThreadId,
-    pub execution: *mut crate::kernel::process::UserExecution,
+    pub execution: NonNull<crate::kernel::process::UserExecution>,
     pub stack: (usize, usize),
 }
 
@@ -713,8 +713,8 @@ pub(crate) fn current_vcpu() -> Result<CurrentVcpu, Error> {
 
 /// Returns the pinned native-user payload owned by the current Thread.
 ///
-/// The dedicated guard proves that the raw pointer cannot migrate or be
-/// reclaimed until the caller closes its machine-active borrow.
+/// The dedicated guard proves that the non-null payload address remains pinned
+/// and cannot be reclaimed until the caller closes its machine-active borrow.
 pub(crate) fn current_user(_pin: &UserRunGuard) -> Result<CurrentUser, Error> {
     let cpu = current_cpu()?;
     SCHEDULER.with(|slot| {

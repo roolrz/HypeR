@@ -555,11 +555,12 @@ impl<'owner> ActiveNativeAddressSpace<'owner> {
         context: &'context mut crate::hal::user::UserContext,
         binding: hyper::hal::user::UserRunBinding,
         kernel_access: crate::hal::user::PreparedKernelAccess<'_>,
+        service: &hyper::hal::user::NativeCallService<'_>,
     ) -> StoppedNativeUser<'context, 'owner> {
         let Some(backend) = self.backend.take() else {
             crate::hal::cpu::halt();
         };
-        match crate::hal::user::run_user(context, backend, binding, kernel_access) {
+        match crate::hal::user::run_user(context, backend, binding, kernel_access, service) {
             Ok(stopped) => StoppedNativeUser {
                 active: Some(self),
                 stopped: Some(stopped),
