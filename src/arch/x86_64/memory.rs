@@ -1,7 +1,6 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-use core::cell::UnsafeCell;
 use core::ptr::{read_volatile, write_bytes, write_volatile};
 
 use hyper::hal::memory::{AddressTranslation, KernelImageLayout, VirtualMemoryLayout};
@@ -9,7 +8,7 @@ use hyper::hal::memory::{AddressTranslation, KernelImageLayout, VirtualMemoryLay
 use hyper::hal::memory::{Stage1Mapping, Stage1MemoryType};
 use hyper::mm::{BootAllocator, BootAllocatorError, PAGE_SIZE, PhysicalAddress, VirtualAddress};
 use hyper::platform::{PhysicalRange, PlatformInfo};
-use hyper::sync::atomic::{AtomicU8, Ordering};
+use hyper::sync::PublishedOnce;
 
 use super::registers;
 
@@ -21,10 +20,6 @@ const STACK_PAGES: usize = 64;
 const STACK_SLOT_PAGES: usize = 65;
 const REGION_SIZE: u64 = 1 << 40;
 const STACK_ARENA_BASE: u64 = registers::PML4_STACK_BASE + 2 * 1024 * 1024;
-const IMAGE_MAPPING_EMPTY: u8 = 0;
-const IMAGE_MAPPING_INSTALLING: u8 = 1;
-const IMAGE_MAPPING_READY: u8 = 2;
-
 #[derive(Clone, Copy)]
 struct KernelImageMapping {
     virtual_start: u64,
@@ -32,54 +27,7 @@ struct KernelImageMapping {
     size: u64,
 }
 
-struct KernelImageMappingSlot {
-    state: AtomicU8,
-    mapping: UnsafeCell<Option<KernelImageMapping>>,
-}
-
-// SAFETY: Permanent address-space preparation has one successful publisher.
-// Release publication makes the immutable mapping visible to every later VMX
-// or SVM entry, and the mapping is never replaced or removed.
-unsafe impl Sync for KernelImageMappingSlot {}
-
-impl KernelImageMappingSlot {
-    const fn new() -> Self {
-        Self {
-            state: AtomicU8::new(IMAGE_MAPPING_EMPTY),
-            mapping: UnsafeCell::new(None),
-        }
-    }
-
-    fn publish(&self, mapping: KernelImageMapping) -> Result<(), Error> {
-        self.state
-            .compare_exchange(
-                IMAGE_MAPPING_EMPTY,
-                IMAGE_MAPPING_INSTALLING,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            )
-            .map_err(|_| Error::AlreadyPrepared)?;
-        // SAFETY: EMPTY -> INSTALLING grants the only write and readers cannot
-        // inspect the cell until the following READY publication.
-        unsafe { *self.mapping.get() = Some(mapping) };
-        self.state.store(IMAGE_MAPPING_READY, Ordering::Release);
-        Ok(())
-    }
-
-    fn translate(&self, virtual_address: usize) -> Option<u64> {
-        if self.state.load(Ordering::Acquire) != IMAGE_MAPPING_READY {
-            return None;
-        }
-        // SAFETY: Acquire observed the immutable mapping published at READY.
-        let mapping = unsafe { *self.mapping.get() }?;
-        let offset = (virtual_address as u64).checked_sub(mapping.virtual_start)?;
-        (offset < mapping.size)
-            .then(|| mapping.physical_start.checked_add(offset))
-            .flatten()
-    }
-}
-
-static KERNEL_IMAGE_MAPPING: KernelImageMappingSlot = KernelImageMappingSlot::new();
+static KERNEL_IMAGE_MAPPING: PublishedOnce<KernelImageMapping> = PublishedOnce::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -372,11 +320,13 @@ pub unsafe fn prepare(
         ),
         kernel_base,
     };
-    KERNEL_IMAGE_MAPPING.publish(KernelImageMapping {
-        virtual_start: kernel_base,
-        physical_start: image.physical_start,
-        size: image.total_size,
-    })?;
+    KERNEL_IMAGE_MAPPING
+        .publish(KernelImageMapping {
+            virtual_start: kernel_base,
+            physical_start: image.physical_start,
+            size: image.total_size,
+        })
+        .map_err(|_| Error::AlreadyPrepared)?;
     Ok(prepared)
 }
 
@@ -387,7 +337,11 @@ pub unsafe fn prepare(
 /// architecture memory mechanism avoids consulting kernel boot policy from a
 /// runtime VM-entry path.
 pub(super) fn kernel_image_physical_address(virtual_address: usize) -> Option<u64> {
-    KERNEL_IMAGE_MAPPING.translate(virtual_address)
+    let mapping = KERNEL_IMAGE_MAPPING.get()?;
+    let offset = (virtual_address as u64).checked_sub(mapping.virtual_start)?;
+    (offset < mapping.size)
+        .then(|| mapping.physical_start.checked_add(offset))
+        .flatten()
 }
 
 unsafe fn map_kernel(

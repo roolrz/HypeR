@@ -9,9 +9,16 @@
 
 use super::report::StopSummary;
 
-pub(super) fn initialize() {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InitializationError {
     #[cfg(CONFIG_CRASH_CONSOLE)]
-    super::monitor::initialize();
+    Monitor(super::monitor::InitializationError),
+}
+
+pub(super) fn initialize() -> Result<(), InitializationError> {
+    #[cfg(CONFIG_CRASH_CONSOLE)]
+    super::monitor::initialize().map_err(InitializationError::Monitor)?;
+    Ok(())
 }
 
 pub(super) fn run(owner: usize, stop: StopSummary) {

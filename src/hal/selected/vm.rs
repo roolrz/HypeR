@@ -63,11 +63,15 @@ pub(crate) fn install_exit_services(
     crate::arch::vm::install_exit_services(services)
 }
 
-/// Completes the one-way transition from callback publication to guest entry.
+/// Commits the one-way transition from callback publication to guest entry.
 ///
-/// Callers must invoke this only after all selected VM devices, timer routes,
-/// and interrupt mechanisms have been initialized and activated.
-pub(crate) fn complete_entry_initialization(_services: ExitServicesReady) -> VmEntryReady {
+/// # Safety
+///
+/// Register validation and selected virtual-device initialization must have
+/// completed. Every host timer route and interrupt-virtualization dependency
+/// must be active and no longer eligible for rollback. The caller must own the
+/// only VM initialization transaction and invoke this commit at most once.
+pub(crate) unsafe fn commit_entry_initialization(_services: ExitServicesReady) -> VmEntryReady {
     VmEntryReady { _private: () }
 }
 

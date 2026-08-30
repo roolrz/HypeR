@@ -16,12 +16,9 @@ pub(crate) mod vcpu;
 
 use core::convert::Infallible;
 
-use hyper::sync::InterruptSpinLock;
+use hyper::sync::PublishedOnce;
 
-type EntryReadyLock =
-    InterruptSpinLock<Option<crate::hal::vm::VmEntryReady>, crate::hal::irq::LocalMask>;
-
-static ENTRY_READY: EntryReadyLock = InterruptSpinLock::new(None);
+static ENTRY_READY: PublishedOnce<crate::hal::vm::VmEntryReady> = PublishedOnce::new();
 
 pub use crate::hal::vm::{
     InterruptController as VmInterruptController, InterruptError as VmInterruptError,
@@ -139,21 +136,20 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
         );
     }
     binding.activate().map_err(InitializationError::Timer)?;
-    let entry_ready = crate::hal::vm::complete_entry_initialization(exit_services);
-    ENTRY_READY.with(|slot| {
-        if slot.is_some() {
-            Err(InitializationError::EntryReadyAlreadyPublished)
-        } else {
-            *slot = Some(entry_ready);
-            Ok(())
-        }
-    })?;
+    // SAFETY: Register validation, virtual-device initialization, hardware
+    // timer validation, and interrupt virtualization all completed above.
+    // `binding.activate` committed the host routes and consumed their rollback
+    // path. Kernel boot owns the only VM initialization transaction.
+    let entry_ready = unsafe { crate::hal::vm::commit_entry_initialization(exit_services) };
+    ENTRY_READY
+        .publish(entry_ready)
+        .map_err(|_| InitializationError::EntryReadyAlreadyPublished)?;
     crate::println!("HypeR: guest synchronous trap and vSysReg emulation validated");
     Ok(())
 }
 
 pub(in crate::kernel) fn entry_ready() -> Option<crate::hal::vm::VmEntryReady> {
-    ENTRY_READY.with(|slot| *slot)
+    ENTRY_READY.get().copied()
 }
 
 /// Loads the default VM bundle from the boot ramdisk and enters the guest.

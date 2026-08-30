@@ -3,15 +3,14 @@
 
 //! Architecture-independent kernel policy, grouped by subsystem.
 
-// Resource accounting is compiled before Process and user-address-space
-// owners exist so its portable lifecycle contracts remain continuously tested.
+// Native Process execution is not yet part of the normal boot workload. Keep
+// its complete ownership graph compiled on every architecture so accounting,
+// capability, memory, and lifecycle contracts cannot decay behind AArch64-only
+// self-test coverage.
 pub(crate) mod abi;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod accounting;
 pub(crate) mod boot;
-// The compiled capability core deliberately precedes its Process owner. Keep
-// this narrow exception until strong Process/address-space publication lands;
-// cfg-gating the module would leave its cross-architecture safety uncompiled.
 #[allow(dead_code, unused_imports)]
 pub(crate) mod capability;
 pub mod cpu;

@@ -132,10 +132,10 @@ services own policy, resource publication, scheduling, virtual-device binding,
 and failure decisions.
 
 Exceptions and VM exits necessarily travel upward. Named entry adapters confine
-that transition, decode owned events where the migration is complete, invoke a
-narrow kernel policy boundary, and encode the resulting action. CI rejects new
-direct architecture-to-kernel dependencies while the remaining raw-frame exit
-classes are migrated independently.
+that transition, copy architecture-private state into owned typed events,
+invoke immutable registered kernel services, and encode exhaustive completion
+actions only after policy returns. CI rejects direct architecture-to-kernel
+policy dependencies outside the three non-returning bootstrap transfers.
 
 Read [the architecture guide](docs/architecture.md) for the normative boundary
 rules and migration constraints. The planned process, capability, syscall, and

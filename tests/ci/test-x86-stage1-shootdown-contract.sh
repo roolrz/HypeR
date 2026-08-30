@@ -26,6 +26,7 @@ copy_sources() {
     cp "$root/src/kernel/boot/state.rs" "$fixture/src/kernel/boot/state.rs"
     cp "$root/src/kernel/mm/stack.rs" "$fixture/src/kernel/mm/stack.rs"
     cp "$root/src/sync/lock/interrupt.rs" "$fixture/src/sync/lock/interrupt.rs"
+    cp "$root/src/sync/publication.rs" "$fixture/src/sync/publication.rs"
 }
 
 check() {
@@ -38,8 +39,14 @@ mutate() {
     file=$2
     expression=$3
     copy_sources
+    before=$(cksum "$fixture/$file")
     sed "$expression" "$fixture/$file" >"$fixture/mutated"
     mv "$fixture/mutated" "$fixture/$file"
+    after=$(cksum "$fixture/$file")
+    if [ "$before" = "$after" ]; then
+        echo "mutation did not change $file: $description" >&2
+        exit 1
+    fi
     if check >/dev/null 2>&1; then
         echo "$description" >&2
         exit 1
@@ -53,9 +60,15 @@ mutate_three() {
     second_expression=$4
     third_expression=$5
     copy_sources
+    before=$(cksum "$fixture/$file")
     sed -e "$first_expression" -e "$second_expression" -e "$third_expression" \
         "$fixture/$file" >"$fixture/mutated"
     mv "$fixture/mutated" "$fixture/$file"
+    after=$(cksum "$fixture/$file")
+    if [ "$before" = "$after" ]; then
+        echo "mutation did not change $file: $description" >&2
+        exit 1
+    fi
     if check >/dev/null 2>&1; then
         echo "$description" >&2
         exit 1
@@ -124,18 +137,22 @@ mutate 'one IRQ-safe acquisition path skipped RPC progress' src/sync/lock/interr
     '/pub unsafe fn with_mask_retained/,/^    }/s/with_relax(operation, M::wait_for_lock_owner)/with(operation)/'
 mutate 'stage-1 mutation serializer mutation was accepted' src/kernel/mm/stack.rs \
     's/static STACK_SLOTS: StackLock<StackSlots>/static STACK_SLOTS: SpinLock<StackSlots>/'
-mutate 'BootState Release mutation was accepted' src/kernel/boot/state.rs \
-    's/status.store(READY, Ordering::Release)/status.store(READY, Ordering::Relaxed)/'
-mutate 'BootState Acquire mutation was accepted' src/kernel/boot/state.rs \
-    's/status.load(Ordering::Acquire) != READY/status.load(Ordering::Relaxed) != READY/'
+mutate 'one-shot publication Release mutation was accepted' src/sync/publication.rs \
+    's/state.store(READY, Ordering::Release)/state.store(READY, Ordering::Relaxed)/'
+mutate 'one-shot publication Acquire mutation was accepted' src/sync/publication.rs \
+    's/state.load(Ordering::Acquire) != READY/state.load(Ordering::Relaxed) != READY/'
+mutate 'one-shot publication lost its Send bound' src/sync/publication.rs \
+    's/T: Send + Sync/T: Sync/'
+mutate 'BootState bypassed one-shot publication' src/kernel/boot/state.rs \
+    's/PublishedOnce<BootState>/UnsafeCell<BootState>/'
 mutate 'live unmap without all-CPU shootdown was accepted' src/arch/x86_64/memory.rs \
     '/pub unsafe fn unmap_stack/,/^    }/s/super::tlb::flush_all_online()/flush_local()/'
 mutate 'x2APIC publication fence mutation was accepted' src/arch/x86_64/interrupt_controller.rs \
     '/            "mfence",/d'
 mutate 'x2APIC compiler-memory mutation was accepted' src/arch/x86_64/interrupt_controller.rs \
     '/^pub fn send_fixed_ipi(/,/^}/s/options(nostack)/options(nomem, nostack)/'
-mutate 'relaxed Kernel RPC callback publication was accepted' src/arch/irq.rs \
-    's/state.store(SERVICE_READY, Ordering::Release)/state.store(SERVICE_READY, Ordering::Relaxed)/'
+mutate 'Kernel RPC bypassed one-shot publication' src/arch/irq.rs \
+    's/PublishedOnce<fn()>/UnsafeCell<fn()>/'
 mutate 'late Kernel RPC callback installation was accepted' src/kernel/irq/mod.rs \
     's/install_kernel_rpc_service(cross_call::service)/install_kernel_rpc_service_later(cross_call::service)/'
 
