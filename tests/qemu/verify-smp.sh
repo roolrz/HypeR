@@ -168,7 +168,9 @@ runtime_contract_is_ready() {
         grep -q 'HypeR test: AArch64 guest-entry IRQ mask contract passed' "$log" &&
         grep -q 'HypeR test: AArch64 IRQ-tail Fair vCPU preemption passed' "$log" &&
         grep -q "HypeR: periodic timer IRQs active on $cpus CPUs" "$log" &&
-        grep -q 'Booting Linux on physical CPU' "$log" &&
+        # Host records may preempt the byte-at-a-time guest UART in the middle
+        # of a line. `/init` and its userspace markers prove the stronger Linux
+        # milestone without assuming that the early banner is contiguous.
         grep -q 'arch_timer: cp15 timer running at .* (virt).' "$log" &&
         grep -q 'Run /init as init process' "$log" &&
         grep -q 'HypeR guest: /init reached' "$log" &&
