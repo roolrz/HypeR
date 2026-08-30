@@ -3,12 +3,10 @@
 
 //! RISC-V vCPU hardware-state mechanisms.
 
-use super::{GuestSyncAction, GuestSyncFrame, VcpuContext, VmInterruptController};
+use super::{VcpuContext, VmInterruptController};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Error {
-    UnsupportedSoftwareInterrupt,
-}
+pub enum Error {}
 
 /// Loads one exclusively owned stopped vCPU into the current hart.
 ///
@@ -42,25 +40,6 @@ pub unsafe fn deactivate(
     // SAFETY: The caller identifies this context as the active local vCPU.
     unsafe { context.deactivate_system_registers() };
     Ok(())
-}
-
-pub(crate) fn deliver_software_interrupt(
-    _context: &mut VcpuContext,
-    _vcpu_id: u32,
-    _interrupts: &VmInterruptController,
-    _request: u64,
-) -> Result<(), Error> {
-    Err(Error::UnsupportedSoftwareInterrupt)
-}
-
-pub(crate) fn handle_guest_device_access(
-    _context: &mut VcpuContext,
-    _vcpu_id: u32,
-    _interrupts: &VmInterruptController,
-    _frame: &mut GuestSyncFrame<'_>,
-    fallback: GuestSyncAction,
-) -> GuestSyncAction {
-    fallback
 }
 
 pub const fn handle_virtual_timer_interrupt(

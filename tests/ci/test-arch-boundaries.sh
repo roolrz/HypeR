@@ -9,13 +9,15 @@ root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/hyper-arch-boundary-test.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
-mkdir -p "$fixture/src/arch" "$fixture/src/kernel"
+mkdir -p "$fixture/src/arch/aarch64" "$fixture/src/kernel"
 printf '%s\n' \
-    'fn dispatch() {' \
-    '    crate::kernel::vm::handle_guest_exit();' \
-    '}' >"$fixture/src/arch/entry.rs"
-printf '%s\t%s\t%s\n' \
-    'src/arch/entry.rs' 'crate::kernel::vm::handle_guest_exit' '1' \
+    'fn bootstrap() {' \
+    '    let _ = crate::kernel::boot::ProtocolInputs::new();' \
+    '    crate::kernel::boot::prepare_boot_environment();' \
+    '}' >"$fixture/src/arch/aarch64/mod.rs"
+printf '%s\t%s\t%s\n%s\t%s\t%s\n' \
+    'src/arch/aarch64/mod.rs' 'crate::kernel::boot::ProtocolInputs::new' '1' \
+    'src/arch/aarch64/mod.rs' 'crate::kernel::boot::prepare_boot_environment' '1' \
     >"$fixture/baseline.txt"
 
 HYPER_ARCH_BOUNDARY_ROOT="$fixture" \

@@ -152,10 +152,11 @@ pub(crate) fn set_host_timer_enabled(enabled: bool) -> Result<(), Error> {
 
 pub(super) fn validate_hardware(
     timer_interrupt: hyper::hal::interrupt::InterruptId,
+    services: &crate::hal::vm::ExitServicesReady,
 ) -> Result<bool, ValidationError> {
     let now = crate::kernel::time::monotonic_ticks();
     let Some((interrupts, hardware)) =
-        crate::hal::vm::prepare_timer_validation(timer_interrupt, now)
+        crate::hal::vm::prepare_timer_validation(timer_interrupt, now, services)
             .map_err(ValidationError::Machine)?
     else {
         return Ok(false);

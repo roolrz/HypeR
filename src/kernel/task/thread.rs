@@ -130,6 +130,22 @@ enum VcpuVm {
 }
 
 impl VcpuExecution {
+    pub(in crate::kernel) fn installed(
+        vm: crate::kernel::vm::registry::VmBinding,
+        vcpu_id: u32,
+        context: crate::hal::vm::VcpuContext,
+        entry_ready: &crate::hal::vm::VmEntryReady,
+    ) -> Result<Self, Error> {
+        let mut hardware = crate::hal::vm::VcpuHardwareState::new(context, entry_ready);
+        crate::hal::vm::initialize_vcpu_interrupts(&mut hardware)?;
+        Ok(Self {
+            vm: VcpuVm::Installed(vm),
+            active_execution: None,
+            vcpu_id,
+            hardware,
+        })
+    }
+
     pub(in crate::kernel) fn vm_binding(&self) -> Option<&crate::kernel::vm::registry::VmBinding> {
         match &self.vm {
             VcpuVm::Installed(binding) => Some(binding),
@@ -417,13 +433,9 @@ impl Thread {
         id: ThreadId,
         cpu_index: CpuIndex,
         name: &str,
-        vm: crate::kernel::vm::registry::VmBinding,
-        vcpu_id: u32,
-        context: crate::hal::vm::VcpuContext,
+        execution: VcpuExecution,
         entry: KernelThreadEntry,
     ) -> Result<Self, Error> {
-        let mut hardware = crate::hal::vm::VcpuHardwareState::new(context);
-        crate::hal::vm::initialize_vcpu_interrupts(&mut hardware)?;
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
         let mut scheduling_context = crate::hal::context::ThreadContext::empty();
         scheduling_context.prepare_vcpu(stack.top(), entry, 0);
@@ -441,13 +453,7 @@ impl Thread {
             context: scheduling_context,
             kernel_stack: Some(stack),
             execution: ThreadExecution::Vcpu(
-                hyper::mm::try_box(VcpuExecution {
-                    vm: VcpuVm::Installed(vm),
-                    active_execution: None,
-                    vcpu_id,
-                    hardware,
-                })
-                .map_err(|_| Error::Allocation)?,
+                hyper::mm::try_box(execution).map_err(|_| Error::Allocation)?,
             ),
         })
     }

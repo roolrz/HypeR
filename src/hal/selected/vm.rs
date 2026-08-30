@@ -16,20 +16,59 @@
 use hyper::hal::interrupt::{HostInterruptBinding, InterruptId};
 
 pub(crate) use crate::arch::vm::{
-    DeviceError, InterruptInitializationError, LegacySyncAction, LegacySyncFrame,
+    DeviceError, ExitServiceError, ExitServices, ExitServicesReady, InterruptInitializationError,
     RegisterValidationError, Stage2AddressSpace, Stage2Error, VcpuContext, VirtualInterruptError,
 };
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+pub(crate) use crate::arch::vm::{GuestSyncAction, GuestSyncExit};
 pub use crate::arch::vm::{InterruptController, InterruptError, VcpuInterruptError};
 
 /// Selected per-vCPU machine state retained by one scheduler execution.
 pub struct VcpuHardwareState {
     context: VcpuContext,
+    runtime_authorized: bool,
+}
+
+/// Proof that every dependency required for normal guest entry is active.
+///
+/// The kernel may mint this only after exit services, register validation,
+/// virtual devices, timer routing, and interrupt virtualization have all
+/// completed. Copies describe the same irreversible boot publication.
+#[derive(Clone, Copy)]
+#[must_use]
+pub(crate) struct VmEntryReady {
+    _private: (),
 }
 
 impl VcpuHardwareState {
-    pub(crate) const fn new(context: VcpuContext) -> Self {
-        Self { context }
+    pub(crate) const fn new(context: VcpuContext, _entry: &VmEntryReady) -> Self {
+        Self {
+            context,
+            runtime_authorized: true,
+        }
     }
+
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    const fn for_validation(context: VcpuContext, _services: &ExitServicesReady) -> Self {
+        Self {
+            context,
+            runtime_authorized: false,
+        }
+    }
+}
+
+pub(crate) fn install_exit_services(
+    services: ExitServices,
+) -> Result<ExitServicesReady, ExitServiceError> {
+    crate::arch::vm::install_exit_services(services)
+}
+
+/// Completes the one-way transition from callback publication to guest entry.
+///
+/// Callers must invoke this only after all selected VM devices, timer routes,
+/// and interrupt mechanisms have been initialized and activated.
+pub(crate) fn complete_entry_initialization(_services: ExitServicesReady) -> VmEntryReady {
+    VmEntryReady { _private: () }
 }
 
 pub(crate) fn validate_register_interface() -> Result<(), RegisterValidationError> {
@@ -124,8 +163,14 @@ pub(crate) unsafe fn deactivate_hardware(
 ///
 /// `state` must be non-null, aligned, pinned, and exclusively owned by the
 /// active vCPU for the entire guest-run lifetime. Stage-2 and local virtual
-/// hardware must already be active. Guest exits may mutate the state.
+/// hardware must already be active, and the state must carry final
+/// [`VmEntryReady`] authorization rather than validation-only authorization.
+/// Guest exits may mutate the state.
 pub(crate) unsafe fn enter(state: *mut VcpuHardwareState) -> ! {
+    // SAFETY: The caller guarantees a valid exclusive state pointer.
+    if !unsafe { (*state).runtime_authorized } {
+        crate::hal::cpu::halt()
+    }
     // SAFETY: The caller pins and exclusively owns the complete state.
     let context = unsafe { core::ptr::addr_of_mut!((*state).context) };
     // SAFETY: The facade preserves the backend entry contract unchanged.
@@ -191,6 +236,7 @@ pub(crate) enum TimerValidationError {
 pub(crate) fn prepare_timer_validation(
     timer_interrupt: InterruptId,
     physical_count: u64,
+    services: &ExitServicesReady,
 ) -> Result<Option<(InterruptController, VcpuHardwareState)>, TimerValidationError> {
     #[cfg(CONFIG_ARCH_AARCH64)]
     {
@@ -205,11 +251,14 @@ pub(crate) fn prepare_timer_validation(
         context.set_virtual_count(physical_count, physical_count);
         context.set_virtual_timer_deadline(physical_count.wrapping_add(1_000_000));
         context.set_virtual_timer_enabled(true);
-        Ok(Some((interrupts, VcpuHardwareState::new(context))))
+        Ok(Some((
+            interrupts,
+            VcpuHardwareState::for_validation(context, services),
+        )))
     }
     #[cfg(not(CONFIG_ARCH_AARCH64))]
     {
-        let _ = (timer_interrupt, physical_count);
+        let _ = (timer_interrupt, physical_count, services);
         Ok(None)
     }
 }
@@ -248,56 +297,25 @@ pub(crate) fn timer_validation_succeeded(
     }
 }
 
-pub(crate) fn decode_legacy_sync(
-    state: &mut VcpuHardwareState,
-    vcpu_id: u32,
-    frame: &mut LegacySyncFrame<'_>,
-) -> LegacySyncAction {
-    crate::arch::vm::decode_legacy_sync(&mut state.context, vcpu_id, frame)
-}
-
-pub(crate) fn deliver_legacy_software_interrupt(
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+pub(crate) fn handle_guest_sync(
     state: &mut VcpuHardwareState,
     vcpu_id: u32,
     interrupts: &InterruptController,
-    request: u64,
-) -> Result<(), VcpuInterruptError> {
-    crate::arch::vm::deliver_legacy_software_interrupt(
-        &mut state.context,
-        vcpu_id,
-        interrupts,
-        request,
-    )
-}
-
-pub(crate) fn handle_legacy_device_access(
-    state: &mut VcpuHardwareState,
-    vcpu_id: u32,
-    interrupts: &InterruptController,
-    frame: &mut LegacySyncFrame<'_>,
-    fallback: LegacySyncAction,
-) -> LegacySyncAction {
-    crate::arch::vm::handle_legacy_device_access(
-        &mut state.context,
-        vcpu_id,
-        interrupts,
-        frame,
-        fallback,
-    )
+    exit: GuestSyncExit,
+) -> GuestSyncAction {
+    crate::arch::vm::handle_guest_sync(&mut state.context, vcpu_id, interrupts, exit)
 }
 
 #[cfg(CONFIG_ARCH_AARCH64)]
-pub(crate) use crate::arch::vm::{complete_legacy_mmio, decode_legacy_mmio};
-
-#[cfg(CONFIG_ARCH_AARCH64)]
-pub(crate) fn update_legacy_device_interrupt(
+pub(crate) fn update_guest_device_interrupt(
     state: &mut VcpuHardwareState,
     vcpu_id: u32,
     interrupts: &InterruptController,
     interrupt: hyper::vm::interrupt::VirtualInterruptId,
     asserted: bool,
 ) -> Result<(), VcpuInterruptError> {
-    crate::arch::vm::update_legacy_device_interrupt(
+    crate::arch::vm::update_guest_device_interrupt(
         &mut state.context,
         vcpu_id,
         interrupts,

@@ -74,6 +74,9 @@ x86_64_svm_run:
     movq 16(%rsp), %rax
     vmload %rax
 
+    # Pass the pinned context as an unborrowed owner pointer. The Rust
+    # dispatcher creates architecture-local references only between typed
+    # policy callbacks, which may borrow the containing vCPU execution.
     movq 0(%rsp), %rdi
     call x86_64_svm_exit_dispatch
     jmp .Lsvm_resume

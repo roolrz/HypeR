@@ -7,6 +7,7 @@
 //! this module supplies the controller, routing, and dispatch mechanisms they
 //! consume.
 
+use hyper::sync::InterruptSpinLock;
 use hyper::sync::atomic::{AtomicBool, Ordering};
 
 pub(crate) mod cross_call;
@@ -17,10 +18,15 @@ pub(crate) mod reschedule;
 pub use interrupt::acknowledge_external;
 
 static EXCEPTIONS_READY: AtomicBool = AtomicBool::new(false);
+type EntryReadyLock =
+    InterruptSpinLock<Option<crate::hal::exception::EntryReady>, crate::hal::irq::LocalMask>;
+static ENTRY_READY: EntryReadyLock = InterruptSpinLock::new(None);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InitializationError {
     Controller(interrupt::Error),
+    EntryServices(crate::hal::exception::EntryServiceError),
+    EntryReadyAlreadyPublished,
     KernelRpcService(crate::hal::irq::KernelRpcServiceError),
     MissingController,
     RuntimeVectors(crate::hal::exception::RuntimeVectorError),
@@ -30,6 +36,7 @@ pub(crate) enum InitializationError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalInitializationError {
     Controller(interrupt::Error),
+    MissingEntryServices,
     RuntimeVectors(crate::hal::exception::RuntimeVectorError),
 }
 
@@ -47,7 +54,35 @@ pub(crate) fn initialize(
     crate::hal::irq::install_kernel_rpc_service(cross_call::service)
         .map_err(InitializationError::KernelRpcService)?;
     interrupt::initialize_local_rpc_transport().map_err(InitializationError::Controller)?;
-    initialize_exceptions()?;
+    let entry = {
+        #[cfg(CONFIG_ARCH_RISCV64)]
+        {
+            crate::hal::exception::install_entry_services(
+                crate::kernel::entry::exception::fatal,
+                crate::kernel::entry::irq::dispatch,
+                crate::kernel::entry::irq::claim_and_dispatch_external,
+                crate::kernel::entry::irq::stop,
+            )
+        }
+        #[cfg(not(CONFIG_ARCH_RISCV64))]
+        {
+            crate::hal::exception::install_entry_services(
+                crate::kernel::entry::exception::fatal,
+                crate::kernel::entry::irq::dispatch,
+                crate::kernel::entry::irq::stop,
+            )
+        }
+    }
+    .map_err(InitializationError::EntryServices)?;
+    initialize_exceptions(&entry)?;
+    ENTRY_READY.with(|slot| {
+        if slot.is_some() {
+            Err(InitializationError::EntryReadyAlreadyPublished)
+        } else {
+            *slot = Some(entry);
+            Ok(())
+        }
+    })?;
     reschedule::initialize(boot.interrupts().root_domain).map_err(InitializationError::Reschedule)
 }
 
@@ -78,10 +113,12 @@ fn initialize_controller(
 }
 
 /// Installs and validates the permanent runtime exception vectors.
-fn initialize_exceptions() -> Result<(), InitializationError> {
+fn initialize_exceptions(
+    entry: &crate::hal::exception::EntryReady,
+) -> Result<(), InitializationError> {
     // SAFETY: The final RX kernel mapping, stack, console, and interrupt
     // controller are active. IRQ delivery remains masked until runtime activation.
-    unsafe { crate::hal::exception::install_runtime_vectors() };
+    unsafe { crate::hal::exception::install_runtime_vectors(entry) };
     crate::hal::exception::validate_runtime_vectors()
         .map_err(InitializationError::RuntimeVectors)?;
     EXCEPTIONS_READY.store(true, Ordering::Release);
@@ -93,9 +130,12 @@ fn initialize_exceptions() -> Result<(), InitializationError> {
 /// The global vector table, IRQ domain, and controller are immutable before
 /// SMP admission. Local interrupts remain masked throughout this operation.
 pub(crate) fn initialize_local_cpu() -> Result<(), LocalInitializationError> {
+    let entry = ENTRY_READY
+        .with(|slot| *slot)
+        .ok_or(LocalInitializationError::MissingEntryServices)?;
     // SAFETY: SMP prepared this CPU's pinned exception stacks before CPU_ON;
     // the permanent executable mapping is active and IRQs remain masked.
-    unsafe { crate::hal::exception::install_local_runtime_vectors() };
+    unsafe { crate::hal::exception::install_local_runtime_vectors(&entry) };
     crate::hal::exception::validate_local_runtime_vectors()
         .map_err(LocalInitializationError::RuntimeVectors)?;
     interrupt::initialize_local_cpu().map_err(LocalInitializationError::Controller)

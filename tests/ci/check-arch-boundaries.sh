@@ -103,6 +103,12 @@ if ! awk -F '\t' '
             failed = 1
             next
         }
+        if ($1 !~ /^src\/arch\/(aarch64|riscv64|x86_64)\/mod\.rs$/ ||
+                ($2 != "crate::kernel::boot::ProtocolInputs::new" &&
+                 $2 != "crate::kernel::boot::prepare_boot_environment")) {
+            printf "non-bootstrap dependency is not permitted in the architecture allowlist: %s -> %s\n", $1, $2 > "/dev/stderr"
+            failed = 1
+        }
         key = $1 SUBSEP $2
         if (key in expected) {
             printf "duplicate dependency baseline entry: %s -> %s\n", $1, $2 > "/dev/stderr"
@@ -137,7 +143,7 @@ if ! awk -F '\t' '
         exit failed
     }
 ' "$baseline" "$current"; then
-    echo "src/arch must not depend on kernel policy." >&2
-    echo "Remove the dependency and lower the temporary baseline in $baseline." >&2
+    echo "src/arch must not depend on kernel policy outside the selected bootstrap adapter." >&2
+    echo "Remove the dependency and update the bootstrap allowlist in $baseline." >&2
     exit 1
 fi

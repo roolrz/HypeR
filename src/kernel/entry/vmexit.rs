@@ -1,42 +1,21 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Guest-exit entry adapter.
+//! Registered upward policy services for architecture-owned guest entry.
 //!
-//! This is the sole upward call from architecture guest-exit mechanisms into
-//! kernel VM policy. The current `GuestSyncFrame` argument is a migration
-//! adapter: individual exit classes must replace it with owned events from
-//! `hyper::vm::exit`, after which this raw-frame entry point will be removed.
+//! Architecture code copies fixed-width events out of private machine frames,
+//! invokes one of these callbacks, and applies the returned typed action only
+//! after the callback has returned. No raw frame, VMCS/VMCB borrow, or backend
+//! completion reference crosses this boundary.
 
-use hyper::vm::exit::GuestMemoryFault;
+use hyper::vm::exit::{GuestMemoryFault, MemoryFaultAction};
 
-/// Kernel disposition for an owned guest-memory-fault event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[must_use]
-pub(crate) enum MemoryFaultAction {
-    /// Re-enter the guest at the faulting instruction after mapping memory.
-    Retry,
-    /// Continue backend-local decoding, normally to identify an MMIO access.
-    Forward,
-    /// Enter the architecture fail-stop path for an invalid active context or
-    /// a memory-policy failure.
-    Stop,
-}
-
-/// Dispatches one owned guest-memory fault without exposing its raw frame.
+/// Resolves one owned guest-memory fault through the installed VM.
 ///
-/// The architecture caller keeps local interrupts masked and must have
-/// published the current vCPU binding before guest entry. This path takes the
-/// active-vCPU and VM address-space locks; it must not be called while either
-/// lock is already held. The owned event may outlive the raw frame, but no
-/// reference to that frame crosses this boundary.
-///
-/// The common path performs one active-vCPU lookup. Resolving demand-zero RAM
-/// may allocate pages and update the active second-stage translation tables;
-/// failure reporting may take the kernel log lock. Forwarding performs no
-/// allocation and drops the active borrow before the backend continues
-/// decoding the raw frame.
-#[allow(dead_code)]
+/// Local interrupts remain masked. This is the only VM-exit service allowed to
+/// allocate: demand-zero RAM may allocate and publish pages before returning
+/// `Retry`. `ForwardToDevice` performs no frame mutation and lets the backend
+/// decode an MMIO operation from its still-private exit state.
 pub(crate) fn dispatch_memory_fault(fault: GuestMemoryFault) -> MemoryFaultAction {
     match crate::kernel::vm::active_vcpu::with(|execution, _| {
         let vm = execution
@@ -47,7 +26,7 @@ pub(crate) fn dispatch_memory_fault(fault: GuestMemoryFault) -> MemoryFaultActio
         crate::kernel::vm::memory::resolve_guest_memory_fault(vm, fault)
     }) {
         Ok(Some(Ok(true))) => MemoryFaultAction::Retry,
-        Ok(Some(Ok(false))) => MemoryFaultAction::Forward,
+        Ok(Some(Ok(false))) => MemoryFaultAction::ForwardToDevice,
         Ok(Some(Err(error))) => {
             crate::pr_err!(
                 "HypeR: guest memory fault resolution failed at {:#x} ({:?}, guest-page-walk={}): {error:?}",
@@ -68,43 +47,81 @@ pub(crate) fn dispatch_memory_fault(fault: GuestMemoryFault) -> MemoryFaultActio
     }
 }
 
-/// Dispatches a legacy architecture guest-synchronous frame.
+/// Dispatches one owned `AArch64` MMIO operation.
+#[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) fn dispatch_mmio(access: hyper::vm::exit::MmioAccess) -> hyper::vm::exit::MmioAction {
+    match crate::kernel::vm::active_vcpu::with(|execution, interrupts| {
+        crate::kernel::vm::device::dispatch_mmio(execution, interrupts, access)
+    }) {
+        Ok(Some(action)) => action,
+        Ok(None) | Err(_) => hyper::vm::exit::MmioAction::Stop,
+    }
+}
+
+/// Resolves an owned backend-specific synchronous exit.
 ///
-/// Guest entry owns the raw frame and keeps local interrupts masked. Kernel
-/// policy borrows it only for this call and cannot retain the frame. Dispatch
-/// may enter the explicit guest-memory slow path, which can allocate pages and
-/// update active second-stage translation tables.
-pub(crate) fn dispatch_legacy(frame: &mut crate::hal::vm::LegacySyncFrame<'_>) -> bool {
-    crate::kernel::vm::handle_guest_sync(frame)
+/// The selected exit/action types contain only copied values. Backend machine
+/// context is accessed through the already-published active vCPU for exactly
+/// this callback and cannot escape it.
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+pub(crate) fn dispatch_guest_sync(
+    exit: crate::hal::vm::GuestSyncExit,
+) -> crate::hal::vm::GuestSyncAction {
+    match crate::kernel::vm::active_vcpu::with(|execution, interrupts| {
+        #[cfg(CONFIG_ARCH_RISCV64)]
+        if let Some(byte) = exit.legacy_console_byte() {
+            crate::kernel::log::console::write_raw_byte(byte);
+            return crate::hal::vm::GuestSyncAction::complete_legacy_console();
+        }
+        crate::hal::vm::handle_guest_sync(
+            &mut execution.hardware,
+            execution.vcpu_id,
+            interrupts,
+            exit,
+        )
+    }) {
+        Ok(Some(action)) => action,
+        Ok(None) | Err(_) => crate::hal::vm::GuestSyncAction::Stop,
+    }
 }
 
-/// Continues legacy backend decoding after typed memory policy forwarded a
-/// non-RAM access. The memory event is not dispatched a second time.
-#[allow(dead_code)]
-pub(crate) fn dispatch_legacy_after_memory_fault(
-    frame: &mut crate::hal::vm::LegacySyncFrame<'_>,
-) -> bool {
-    crate::kernel::vm::handle_guest_sync_after_memory_fault(frame)
-}
-
-/// Dispatches one x86 port access through the active VM's device set.
+/// Dispatches one owned scalar x86 port-I/O operation.
 #[cfg(CONFIG_ARCH_X86_64)]
 pub(crate) fn dispatch_port_io(
-    port: u16,
-    size: usize,
-    write: bool,
-    value: u32,
-) -> Result<Option<u32>, crate::kernel::vm::device::Error> {
-    crate::kernel::vm::device::access_port(port, size, write, value)
+    exit: hyper::vm::x86::exit::PortIoExit,
+) -> hyper::vm::x86::exit::PortIoAction {
+    use hyper::vm::x86::exit::{PortIoAction, PortIoOperation};
+
+    match crate::kernel::vm::device::access_port(exit) {
+        Ok(value) => match (exit.operation(), value) {
+            (PortIoOperation::Input, Some(value)) => PortIoAction::CompleteInput(value),
+            (PortIoOperation::Output(_), _) => PortIoAction::CompleteOutput,
+            (PortIoOperation::Input, None) => PortIoAction::Stop,
+        },
+        Err(error) => {
+            crate::pr_err!("HypeR: x86 guest port-I/O dispatch failed: {error:?}");
+            PortIoAction::Stop
+        }
+    }
 }
 
-/// Queries the active VM's legacy interrupt router after host timer polling.
+/// Selects one x86 virtual interrupt for the next guest-entry transaction.
 #[cfg(CONFIG_ARCH_X86_64)]
-pub(crate) fn pending_legacy_interrupt(
+pub(crate) fn query_pending_interrupt(
     timer_pending: bool,
-) -> Result<
-    Option<hyper::vm::x86::device::legacy_pc::PendingInterrupt>,
-    crate::kernel::vm::device::Error,
-> {
-    crate::kernel::vm::device::pending_interrupt(timer_pending)
+) -> hyper::vm::x86::exit::PendingInterruptAction {
+    use hyper::vm::x86::device::legacy_pc::InterruptSource;
+    use hyper::vm::x86::exit::PendingInterruptAction;
+
+    match crate::kernel::vm::device::pending_interrupt(timer_pending) {
+        Ok(Some(pending)) => PendingInterruptAction::Inject {
+            vector: pending.vector,
+            consumes_timer: pending.source == InterruptSource::Timer,
+        },
+        Ok(None) => PendingInterruptAction::None,
+        Err(error) => {
+            crate::pr_err!("HypeR: x86 guest interrupt routing failed: {error:?}");
+            PendingInterruptAction::Stop
+        }
+    }
 }

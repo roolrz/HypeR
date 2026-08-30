@@ -93,9 +93,9 @@ The selected binary HAL exposes eleven enforced capability modules:
 - `hal::vm` owns stage-2 translation, vCPU entry, virtual interrupt hardware,
   guest timer integration, and architecture-local exit completion. Reusable
   device models live in `vm`; each installed VM owns its mutable instances in
-  `kernel::vm::device`. Its
-  explicitly named `LegacySyncFrame` path is temporary; new exits cross the
-  entry adapter as owned `hyper::vm::exit` events.
+  `kernel::vm::device`. Guest exits cross registered entry services as owned,
+  fixed-width events with exhaustive actions; raw frames and backend
+  completion state remain architecture-private.
 
 Only files below `src/hal/selected` may call the topical `crate::arch`
 facades. Conversely, no selected-HAL file may call `crate::kernel`. The rule
@@ -119,11 +119,13 @@ adapter per entry class:
 2. Invoke one explicitly registered kernel service boundary.
 3. Encode the returned action into machine state.
 
-The adapter contract must define registration and publication, the fail-stop
-case before registration, interrupt and preemption state, reentrancy, allowed
-allocation or blocking, frame aliasing and lifetime, and hot-path costs. Other
-architecture mechanism code must not call kernel logging, boot failure,
-scheduling, IRQ dispatch, or VM policy directly.
+Fatal, physical-interrupt, and VM-exit services are immutable one-shot
+registrations. Runtime vector installation and vCPU construction require the
+corresponding readiness capability; entry before publication halts in the
+architecture backend. Decode and completion remain allocation-free, keep local
+interrupts masked, and release every raw-frame or backend-state borrow before a
+policy callback. Other architecture mechanism code must not call kernel
+logging, boot failure, scheduling, IRQ dispatch, or VM policy directly.
 
 ## Native userspace boundary
 
@@ -355,23 +357,16 @@ cooperative point. Each architecture must qualify the IRQ-tail boundary
 independently rather than inheriting the AArch64 capability through a
 misleading common interface.
 
-## Current migration debt
+## Bootstrap boundary
 
-The present tree still contains direct `src/arch -> crate::kernel` references,
-including the narrow exception/VM-exit entry adapters and some remaining boot
-and hardware-virtualization integration. This raw entry path is distinct from
-the selected HAL: architecture entry code must use explicitly named
-`kernel::entry` adapters, while ordinary downward calls use `crate::hal`.
+The only direct `src/arch -> crate::kernel` references are the three selected
+architecture bootstrap adapters which construct typed protocol inputs and
+transfer permanently into kernel boot. Ordinary exception, interrupt, VM-exit,
+failure, and virtualization mechanisms use immutable registered services or
+the selected HAL and have no kernel-policy dependency.
 
-The architecture-boundary CI check records the remaining raw upward debt by
-source file and exact kernel contract path, rejecting a new, substituted, or
-increased dependency. A migration that removes references must lower the
-baseline in the same change so the improvement cannot regress. Architecture
-code also may not hide logging dependencies behind the crate logging macros.
-This lexical ratchet cannot prove the complete Rust module graph; privacy and
-review must also reject macro expansion or indirect re-exports that conceal an
-upward dependency.
-
-This ratchet is not an approved dependency direction. It is a temporary
-migration guard until typed exception and VM-exit adapters replace the direct
-calls, after which the baseline and compatibility allowance must be removed.
+The architecture-boundary CI check records the bootstrap references by source
+file and exact contract path, rejecting any new, substituted, or increased
+dependency. Architecture code also may not conceal logging or policy calls
+behind macros, aliases, or indirect imports. This lexical enforcement is
+reinforced by facade privacy and review of every upward entry contract.

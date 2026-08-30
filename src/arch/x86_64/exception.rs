@@ -453,20 +453,20 @@ extern "C" fn x86_64_vector_dispatch(frame: &mut ExceptionFrame) {
             return;
         }
         super::virtualization::observe_host_interrupt(vector);
-        match crate::kernel::entry::irq::dispatch(InterruptId::new(vector), None) {
-            crate::kernel::entry::irq::Action::Resume { postlude } => {
+        match crate::arch::irq::dispatch_entry(InterruptId::new(vector), None) {
+            hyper::hal::interrupt::EntryAction::Resume { postlude } => {
                 // This architecture retains the request for a cooperative
                 // point until it provides a qualified IRQ-tail continuation.
                 let _ = postlude;
             }
-            crate::kernel::entry::irq::Action::Stop => {
-                crate::kernel::entry::irq::stop(exception_crash_context(frame))
+            hyper::hal::interrupt::EntryAction::Stop => {
+                crate::arch::irq::stop_entry(exception_crash_context(frame))
             }
         }
         return;
     }
     let context = exception_crash_context(frame);
-    crate::kernel::entry::exception::fatal(
+    crate::arch::exception::fatal(
         context,
         format_args!(
             "fatal x86 exception: vector {}, error {:#x}, RIP {:#x}, CR2 {:#x}, RFLAGS {:#x}",

@@ -3,7 +3,7 @@
 
 use core::arch::asm;
 
-use hyper::hal::interrupt::InterruptId;
+use hyper::hal::interrupt::{EntryAction, InterruptId};
 use hyper::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
@@ -359,11 +359,11 @@ extern "C" fn dispatch_trap(frame: &mut TrapFrame) {
             SUPERVISOR_TIMER => {
                 dispatch_irq_action(
                     frame,
-                    crate::kernel::entry::irq::dispatch(InterruptId::new(0), None),
+                    crate::arch::irq::dispatch_entry(InterruptId::new(0), None),
                 );
             }
             SUPERVISOR_EXTERNAL => {
-                if let Some(action) = crate::kernel::entry::irq::claim_and_dispatch_external() {
+                if let Some(action) = crate::arch::irq::claim_and_dispatch_external_entry() {
                     dispatch_irq_action(frame, action);
                 }
             }
@@ -371,18 +371,15 @@ extern "C" fn dispatch_trap(frame: &mut TrapFrame) {
         }
         return;
     }
-    if frame.guest_origin != 0 {
-        let mut guest_frame = super::guest::GuestSyncFrame::new(frame);
-        if crate::kernel::entry::vmexit::dispatch_legacy(&mut guest_frame) {
-            return;
-        }
+    if frame.guest_origin != 0 && super::guest::dispatch(frame) {
+        return;
     }
     fatal_trap(frame)
 }
 
 fn fatal_trap(frame: &TrapFrame) -> ! {
     let context = trap_crash_context(frame);
-    crate::kernel::entry::exception::fatal(
+    crate::arch::exception::fatal(
         context,
         format_args!(
             "fatal RISC-V trap: scause {:#x}, sepc {:#x}, stval {:#x}, sstatus {:#x}",
@@ -391,16 +388,14 @@ fn fatal_trap(frame: &TrapFrame) -> ! {
     )
 }
 
-fn dispatch_irq_action(frame: &TrapFrame, action: crate::kernel::entry::irq::Action) {
+fn dispatch_irq_action(frame: &TrapFrame, action: EntryAction) {
     match action {
-        crate::kernel::entry::irq::Action::Resume { postlude } => {
+        EntryAction::Resume { postlude } => {
             // This architecture retains the request for a cooperative point
             // until it provides a qualified IRQ-tail continuation.
             let _ = postlude;
         }
-        crate::kernel::entry::irq::Action::Stop => {
-            crate::kernel::entry::irq::stop(trap_crash_context(frame))
-        }
+        EntryAction::Stop => crate::arch::irq::stop_entry(trap_crash_context(frame)),
     }
 }
 

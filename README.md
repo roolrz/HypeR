@@ -253,17 +253,7 @@ overlap, but a later stage must not bypass an ownership or isolation prerequisit
 from an earlier one. Every stage keeps AArch64 healthy and preserves buildable
 secondary architectures.
 
-### 1. Complete typed architecture entry
-
-- replace the remaining `LegacySyncFrame` exit classes with owned typed events
-  and exhaustive actions without erasing meaningful backend differences;
-- remove ratcheted boot/failure integration dependencies from ordinary
-  architecture mechanisms;
-- require a lifecycle capability before normal guest or interrupt activation
-  can reach an unregistered entry service;
-- keep raw frames and backend-specific state private to architecture entry.
-
-### 2. Establish native EL0 and the capability ABI
+### 1. Establish native EL0 and the capability ABI
 
 - extend the current AArch64 VHE host-EL0 and nVHE stage-2-only raw-code proof
   into a loader-backed static PIE before publishing a binary ABI, retaining a
@@ -281,7 +271,7 @@ secondary architectures.
   blocking cancellation and multi-Thread Process qualification before atomic
   exec.
 
-### 3. Extend VM lifetime and topology
+### 2. Extend VM lifetime and topology
 
 - replace the current non-removable binding with allocator-safe VM leases and
   cross-CPU vCPU retirement;
@@ -290,7 +280,7 @@ secondary architectures.
   registries;
 - add explicit pause, resume, shutdown, and resource-accounting lifecycles.
 
-### 4. Move VMM policy to native userspace
+### 3. Move VMM policy to native userspace
 
 - expose VM, vCPU, guest-memory, interrupt, and lifecycle operations through
   typed capabilities without duplicating the kernel VM registry;
@@ -299,7 +289,7 @@ secondary architectures.
 - retain architecture entry, translation, IRQ, and world-switch mechanisms
   behind the selected HAL.
 
-### 5. Build device-isolation resources
+### 4. Build device-isolation resources
 
 - extend the existing owned MMIO/IRQ model to DMA, IOMMU, firmware, and
   physical-memory authorities;
@@ -308,7 +298,7 @@ secondary architectures.
 - resolve generic FDT phandles, `interrupt-map`, and `interrupts-extended`
   without moving binding policy into the parser.
 
-### 6. Add the transitional Linux driver domain
+### 5. Add the transitional Linux driver domain
 
 - run Linux as an untrusted driver-domain VM, never as HypeR's host OS;
 - introduce a bounded copy-based backend transport before shared zero-copy
@@ -316,7 +306,7 @@ secondary architectures.
 - require stage-2 and IOMMU confinement before assigning physical devices or
   permitting DMA into granted memory.
 
-### 7. Mature kernel execution
+### 6. Mature kernel execution
 
 - qualify IRQ-tail and vCPU preemption on secondary architectures, then add
   controlled migration and load balancing over existing affinity metadata;
@@ -325,7 +315,7 @@ secondary architectures.
 - validate ordering, cache maintenance, and interrupt behavior on physical
   AArch64 hardware.
 
-### 8. Add foreign binary personalities
+### 7. Add foreign binary personalities
 
 - add a supervised execution route which is immutable for each installed
   ProcessImage and prove it first with a small alternate test ABI;

@@ -471,7 +471,7 @@ extern "C" fn aarch64_exception_dispatch(
 
     let Some((kind, origin)) = decode_vector(frame.vector) else {
         let context = exception_crash_context(frame, frame.sp_el1);
-        crate::kernel::entry::exception::fatal(
+        crate::arch::exception::fatal(
             context,
             format_args!(
                 "invalid AArch64 vector {}, ESR {:#x}, ELR {:#x}, FAR {:#x}, SPSR {:#x}",
@@ -479,8 +479,32 @@ extern "C" fn aarch64_exception_dispatch(
             ),
         );
     };
-    let native_user =
-        origin == ExceptionOrigin::LowerAarch64 && super::user_entry::active_on_current_cpu();
+    let lower_world = if origin == ExceptionOrigin::LowerAarch64 {
+        Some(super::lower_el::current_world())
+    } else {
+        None
+    };
+    if matches!(
+        lower_world,
+        Some(
+            super::lower_el::World::None
+                | super::lower_el::World::Conflict
+                | super::lower_el::World::Corrupt
+        )
+    ) {
+        let context = exception_crash_context(frame, interrupted_stack_pointer(frame, origin));
+        crate::arch::exception::fatal(
+            context,
+            format_args!(
+                "lower-AArch64 exception has no unique return-world owner: {lower_world:?}"
+            ),
+        );
+    }
+    let native_user = matches!(lower_world, Some(super::lower_el::World::Native));
+    let guest = matches!(
+        lower_world,
+        Some(super::lower_el::World::Guest { generation }) if generation != 0
+    );
     if kind == ExceptionKind::Irq {
         let interrupt = super::acknowledge_interrupt()?;
         if Some(interrupt) == super::kernel_rpc_interrupt() {
@@ -489,12 +513,11 @@ extern "C" fn aarch64_exception_dispatch(
             return None;
         }
         let native_unwind = native_user.then_some(super::user_entry::unwind_callback());
-        match crate::kernel::entry::irq::dispatch(interrupt, native_unwind) {
-            crate::kernel::entry::irq::Action::Resume { postlude } => {
-                // IRQ policy and preemption accounting have finished using the
-                // acknowledged identity. EOImode 0 requires this write before
-                // either the optional scheduling tail or exception return.
-                super::end_interrupt(interrupt);
+        match crate::arch::irq::dispatch_entry(interrupt, native_unwind) {
+            hyper::hal::interrupt::EntryAction::Resume { postlude } => {
+                // Registry dispatch completed the acknowledged interrupt
+                // exactly once before returning this action. The optional
+                // scheduling tail therefore runs after GIC EOI/deactivation.
                 if native_user && postlude.is_some() {
                     // The raw vector frame must not outlive this stack.
                     match super::user_entry::capture_interrupt(frame) {
@@ -504,11 +527,10 @@ extern "C" fn aarch64_exception_dispatch(
                 }
                 return postlude;
             }
-            crate::kernel::entry::irq::Action::Stop => {
-                super::end_interrupt(interrupt);
+            hyper::hal::interrupt::EntryAction::Stop => {
                 let stack_pointer = interrupted_stack_pointer(frame, origin);
                 let context = exception_crash_context(frame, stack_pointer);
-                crate::kernel::entry::irq::stop(context)
+                crate::arch::irq::stop_entry(context)
             }
         }
     }
@@ -519,39 +541,7 @@ extern "C" fn aarch64_exception_dispatch(
                 Ok(false) | Err(_) => super::user_entry::fail_stop(),
             };
         }
-        let physical_address = guest_physical_address(frame.far);
-        let memory_fault = super::decode_guest_memory_fault(frame.esr, physical_address);
-        if let Some(fault) = memory_fault {
-            match crate::kernel::entry::vmexit::dispatch_memory_fault(fault) {
-                crate::kernel::entry::vmexit::MemoryFaultAction::Retry => {
-                    return None;
-                }
-                crate::kernel::entry::vmexit::MemoryFaultAction::Forward => {}
-                crate::kernel::entry::vmexit::MemoryFaultAction::Stop => {
-                    let stack_pointer = interrupted_stack_pointer(frame, origin);
-                    let context = exception_crash_context(frame, stack_pointer);
-                    crate::kernel::entry::exception::fatal(
-                        context,
-                        format_args!(
-                            "failed to dispatch AArch64 guest memory fault at IPA {physical_address:#x}"
-                        ),
-                    )
-                }
-            }
-        }
-        let mut guest_frame = super::GuestSyncFrame::new(
-            &mut frame.general,
-            &mut frame.elr,
-            &mut frame.spsr,
-            frame.esr,
-            physical_address,
-        );
-        let handled = if memory_fault.is_some() {
-            crate::kernel::entry::vmexit::dispatch_legacy_after_memory_fault(&mut guest_frame)
-        } else {
-            crate::kernel::entry::vmexit::dispatch_legacy(&mut guest_frame)
-        };
-        if handled {
+        if guest && dispatch_guest_synchronous(frame, exception_class) {
             return None;
         }
     }
@@ -563,12 +553,52 @@ extern "C" fn aarch64_exception_dispatch(
         (exception_class as u8, syndrome_description(exception_class))
     };
     let context = exception_crash_context(frame, stack_pointer);
-    crate::kernel::entry::exception::fatal(
+    crate::arch::exception::fatal(
         context,
         format_args!(
             "fatal {kind:?} from {origin:?}: {description} (EC {architecture_class:#x}, ESR {:#x}, FAR {:#x})",
             frame.esr, frame.far
         ),
+    )
+}
+
+fn dispatch_guest_synchronous(frame: &mut ExceptionFrame, exception_class: u64) -> bool {
+    let abort = matches!(
+        exception_class,
+        registers::ESR_EC_INSTRUCTION_ABORT_LOWER | registers::ESR_EC_DATA_ABORT_LOWER
+    );
+    if abort {
+        // HPFAR_EL2 is architecturally meaningful only for a lower-EL abort
+        // involving stage-2 translation. Do not read stale FIPA state for
+        // system-register, firmware-call, WFx, or Undefined exits.
+        let physical_address = guest_physical_address(frame.far);
+        if let Some(fault) = super::decode_guest_memory_fault(frame.esr, physical_address) {
+            match crate::arch::vm::dispatch_memory_fault(fault) {
+                hyper::vm::exit::MemoryFaultAction::Retry => return true,
+                hyper::vm::exit::MemoryFaultAction::ForwardToDevice => {}
+                hyper::vm::exit::MemoryFaultAction::Stop => return false,
+            }
+        }
+        let Some((access, completion)) =
+            super::decode_guest_mmio_access(frame.esr, physical_address, &frame.general)
+        else {
+            return false;
+        };
+        let action = crate::arch::vm::dispatch_mmio(access);
+        return completion.apply(&mut frame.general, &mut frame.elr, action);
+    }
+
+    let Some(exit) = super::decode_guest_sync(frame.esr, &frame.general, frame.elr, frame.spsr)
+    else {
+        return false;
+    };
+    let action = crate::arch::vm::dispatch_guest_sync(exit);
+    super::apply_guest_sync_action(
+        exit,
+        &mut frame.general,
+        &mut frame.elr,
+        &mut frame.spsr,
+        action,
     )
 }
 

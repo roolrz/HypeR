@@ -36,6 +36,21 @@ impl InterruptId {
     }
 }
 
+/// Kernel disposition for an architecture-acknowledged physical interrupt.
+#[derive(Clone, Copy, Debug)]
+#[must_use]
+pub enum EntryAction {
+    /// Return after registered policy completed the acknowledged interrupt.
+    Resume {
+        /// Work which architecture entry must invoke exactly once after the
+        /// registered dispatcher completed EOI/deactivation, on the
+        /// interrupted Thread stack with local interrupts masked.
+        postlude: Option<unsafe extern "C" fn()>,
+    },
+    /// Registered policy completed the interrupt and selected fail-stop.
+    Stop,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct KernelRpcReasons(u8);
 
