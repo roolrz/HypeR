@@ -6,6 +6,8 @@
 pub mod atomic;
 mod generation;
 pub mod lock;
+mod publication;
 
 pub use generation::GenerationTaggedState;
 pub use lock::{InterruptMaskGuard, InterruptSpinLock, SpinLock};
+pub use publication::{PublishError, PublishedOnce};

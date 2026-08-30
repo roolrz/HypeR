@@ -7,7 +7,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use hyper::hal::interrupt::InterruptMask;
 use hyper::sync::atomic::{AtomicFlag, AtomicU64, Ordering as AtomicOrdering, fence};
-use hyper::sync::{GenerationTaggedState, InterruptMaskGuard, InterruptSpinLock};
+use hyper::sync::{GenerationTaggedState, InterruptMaskGuard, InterruptSpinLock, PublishedOnce};
 use std::sync::Arc;
 use std::thread;
 
@@ -176,4 +176,85 @@ fn delayed_generation_cannot_claim_a_republished_state() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn one_shot_publication_has_one_winner_and_retains_its_value() {
+    let published: Arc<PublishedOnce<usize>> = Arc::new(PublishedOnce::new());
+    let mut publishers = std::vec::Vec::new();
+    for value in 0..8usize {
+        let published = Arc::clone(&published);
+        publishers.push(thread::spawn(move || published.publish(value).is_ok()));
+    }
+
+    let mut winners = 0;
+    for publisher in publishers {
+        match publisher.join() {
+            Ok(true) => winners += 1,
+            Ok(false) => {}
+            Err(_) => panic!("publication thread panicked"),
+        }
+    }
+    assert_eq!(winners, 1);
+    let Some(value) = published.get().copied() else {
+        panic!("winning publication was not visible");
+    };
+    assert!(value < 8);
+    match published.publish(9) {
+        Ok(()) => panic!("second publication unexpectedly succeeded"),
+        Err(error) => assert_eq!(error.into_value(), 9),
+    }
+    assert_eq!(published.get(), Some(&value));
+}
+
+#[test]
+fn one_shot_publication_acquires_the_complete_payload() {
+    #[derive(Debug, Eq, PartialEq)]
+    struct Payload {
+        first: usize,
+        second: usize,
+    }
+
+    let published: Arc<PublishedOnce<Payload>> = Arc::new(PublishedOnce::new());
+    let reader = Arc::clone(&published);
+    let observer = thread::spawn(move || {
+        loop {
+            if let Some(value) = reader.get() {
+                return (value.first, value.second);
+            }
+            thread::yield_now();
+        }
+    });
+
+    assert!(
+        published
+            .publish(Payload {
+                first: 0x1234,
+                second: 0xabcd,
+            })
+            .is_ok()
+    );
+    match observer.join() {
+        Ok(observed) => assert_eq!(observed, (0x1234, 0xabcd)),
+        Err(_) => panic!("publication observer panicked"),
+    }
+}
+
+#[test]
+fn one_shot_publication_drops_the_retained_value_with_its_owner() {
+    struct DropProbe(Arc<AtomicUsize>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    {
+        let published = PublishedOnce::new();
+        assert!(published.publish(DropProbe(Arc::clone(&drops))).is_ok());
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+    }
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
 }

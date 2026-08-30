@@ -8,19 +8,13 @@
 //! virtual interrupt, guest timer, and architecture-local exit mechanisms.
 //! Linux image formats and boot ABI policy deliberately remain outside it.
 
-use core::cell::UnsafeCell;
-
-use hyper::sync::atomic::{AtomicU8, Ordering};
+use hyper::sync::PublishedOnce;
 use hyper::vm::exit::{GuestMemoryFault, MemoryFaultAction};
 
 #[cfg(CONFIG_ARCH_AARCH64)]
 use hyper::vm::exit::{MmioAccess, MmioAction};
 #[cfg(CONFIG_ARCH_X86_64)]
 use hyper::vm::x86::exit::{PendingInterruptAction, PortIoAction, PortIoExit};
-
-const SERVICES_EMPTY: u8 = 0;
-const SERVICES_INSTALLING: u8 = 1;
-const SERVICES_READY: u8 = 2;
 
 pub use super::imp::{
     VcpuInterruptError, VmInterruptController as InterruptController,
@@ -117,53 +111,7 @@ impl ExitServices {
     }
 }
 
-struct ExitServiceSlot {
-    state: AtomicU8,
-    services: UnsafeCell<Option<ExitServices>>,
-}
-
-// SAFETY: Installation has one writer. Release publication makes the copied,
-// immutable function table visible before architecture entry can be enabled;
-// the table is never replaced or removed.
-unsafe impl Sync for ExitServiceSlot {}
-
-impl ExitServiceSlot {
-    const fn new() -> Self {
-        Self {
-            state: AtomicU8::new(SERVICES_EMPTY),
-            services: UnsafeCell::new(None),
-        }
-    }
-
-    fn install(&self, services: ExitServices) -> Result<ExitServicesReady, ExitServiceError> {
-        self.state
-            .compare_exchange(
-                SERVICES_EMPTY,
-                SERVICES_INSTALLING,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            )
-            .map_err(|_| ExitServiceError::AlreadyInstalled)?;
-        // SAFETY: The successful EMPTY -> INSTALLING transition grants the
-        // only write, and readers cannot inspect this cell before READY.
-        unsafe { *self.services.get() = Some(services) };
-        self.state.store(SERVICES_READY, Ordering::Release);
-        Ok(ExitServicesReady { _private: () })
-    }
-
-    fn services(&self) -> ExitServices {
-        if self.state.load(Ordering::Acquire) != SERVICES_READY {
-            super::imp::halt()
-        }
-        // SAFETY: Acquire observed the immutable table published before READY.
-        let Some(services) = (unsafe { *self.services.get() }) else {
-            super::imp::halt()
-        };
-        services
-    }
-}
-
-static EXIT_SERVICES: ExitServiceSlot = ExitServiceSlot::new();
+static EXIT_SERVICES: PublishedOnce<ExitServices> = PublishedOnce::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExitServiceError {
@@ -182,29 +130,39 @@ pub(crate) struct ExitServicesReady {
 pub(crate) fn install_exit_services(
     services: ExitServices,
 ) -> Result<ExitServicesReady, ExitServiceError> {
-    EXIT_SERVICES.install(services)
+    EXIT_SERVICES
+        .publish(services)
+        .map_err(|_| ExitServiceError::AlreadyInstalled)?;
+    Ok(ExitServicesReady { _private: () })
+}
+
+fn exit_services() -> ExitServices {
+    let Some(services) = EXIT_SERVICES.get().copied() else {
+        super::imp::halt()
+    };
+    services
 }
 
 pub(crate) fn dispatch_memory_fault(fault: GuestMemoryFault) -> MemoryFaultAction {
-    (EXIT_SERVICES.services().memory_fault)(fault)
+    (exit_services().memory_fault)(fault)
 }
 
 #[cfg(CONFIG_ARCH_AARCH64)]
 pub(crate) fn dispatch_mmio(access: MmioAccess) -> MmioAction {
-    (EXIT_SERVICES.services().mmio)(access)
+    (exit_services().mmio)(access)
 }
 
 #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(crate) fn dispatch_guest_sync(exit: GuestSyncExit) -> GuestSyncAction {
-    (EXIT_SERVICES.services().guest_sync)(exit)
+    (exit_services().guest_sync)(exit)
 }
 
 #[cfg(CONFIG_ARCH_X86_64)]
 pub(crate) fn dispatch_port_io(exit: PortIoExit) -> PortIoAction {
-    (EXIT_SERVICES.services().port_io)(exit)
+    (exit_services().port_io)(exit)
 }
 
 #[cfg(CONFIG_ARCH_X86_64)]
 pub(crate) fn query_pending_interrupt(timer_pending: bool) -> PendingInterruptAction {
-    (EXIT_SERVICES.services().pending_interrupt)(timer_pending)
+    (exit_services().pending_interrupt)(timer_pending)
 }

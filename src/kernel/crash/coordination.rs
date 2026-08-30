@@ -21,6 +21,7 @@ const STOP_WAIT_FALLBACK_ITERATIONS: usize = 10_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InitializationError {
+    ConsoleAlreadyInitialized,
     Interrupt(super::super::irq::interrupt::Error),
     Prerequisite(Prerequisite),
 }
@@ -38,7 +39,7 @@ pub(crate) fn initialize(
     boot: &super::super::boot::Initialization,
 ) -> Result<(), InitializationError> {
     validate_prerequisites()?;
-    super::console::initialize();
+    super::console::initialize().map_err(|_| InitializationError::ConsoleAlreadyInitialized)?;
 
     let Some(hardware_interrupt) = crate::hal::exception::crash_stop_interrupt() else {
         super::state::mark_ready();

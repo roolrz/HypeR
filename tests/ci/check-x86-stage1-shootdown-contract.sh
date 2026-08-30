@@ -101,6 +101,7 @@ reject_commented_contract() {
 tlb=src/arch/x86_64/tlb.rs
 rpc=src/kernel/irq/cross_call.rs
 controller=src/arch/x86_64/interrupt_controller.rs
+publication=src/sync/publication.rs
 
 require 'if previous == u64::MAX \{[^}]*super::halt\(\)' "$tlb" \
     'TLB generations must fail closed before wrapping to zero'
@@ -230,12 +231,26 @@ require 'if vector == super::platform::KERNEL_RPC_VECTOR \{[[:space:]]*crate::ar
     src/arch/x86_64/vmx.rs 'VMX must consume and EOI Kernel RPC exactly once'
 require 'fn wait_for_lock_owner\(\) \{[^}]*crate::arch::irq::service_kernel_rpc\(\);' \
     src/arch/x86_64/interrupts.rs 'masked lock waits must drain Kernel RPC'
-require 'compare_exchange\([[:space:]]*SERVICE_EMPTY,[[:space:]]*SERVICE_INSTALLING,[[:space:]]*Ordering::Acquire' \
-    src/arch/irq.rs 'Kernel RPC service installation must be one-shot'
-require 'state\.store\(SERVICE_READY, Ordering::Release\)' src/arch/irq.rs \
-    'Kernel RPC callback publication must use Release'
-require 'state\.load\(Ordering::Acquire\) != SERVICE_READY' src/arch/irq.rs \
-    'Kernel RPC callback entry must acquire publication'
+require 'static KERNEL_RPC_SERVICE: PublishedOnce<fn\(\)> = PublishedOnce::new\(\);' \
+    src/arch/irq.rs 'Kernel RPC service installation must use one-shot publication'
+require 'KERNEL_RPC_SERVICE[[:space:]]*\.publish\(callback\)' src/arch/irq.rs \
+    'Kernel RPC callback must be published through the one-shot cell'
+require 'KERNEL_RPC_SERVICE\.get\(\)\.copied\(\)' src/arch/irq.rs \
+    'Kernel RPC callback entry must acquire the published callback'
+require 'compare_exchange\(EMPTY, INSTALLING, Ordering::Relaxed, Ordering::Relaxed\)' \
+    "$publication" 'one-shot publication must claim exactly one initializer'
+require 'state\.store\(READY, Ordering::Release\)' "$publication" \
+    'one-shot publication must release-publish initialized values'
+require 'state\.load\(Ordering::Acquire\) != READY' "$publication" \
+    'one-shot readers must acquire initialization'
+require 'unsafe impl<T: Send \+ Sync> Sync for PublishedOnce<T>' "$publication" \
+    'shared publication must require both ownership transfer and shared access'
+require 'static BOOT_STATE: PublishedOnce<BootState> = PublishedOnce::new\(\);' \
+    src/kernel/boot/state.rs 'BootState must use the shared one-shot publication cell'
+require 'BOOT_STATE[[:space:]]*\.publish\(state\)' src/kernel/boot/state.rs \
+    'BootState installation must publish through the one-shot cell'
+require 'BOOT_STATE\.get\(\)' src/kernel/boot/state.rs \
+    'BootState access must acquire the published state'
 require_order src/kernel/irq/mod.rs 'install_kernel_rpc_service\(cross_call::service\)' \
     'initialize_local_rpc_transport\(\)' \
     'the opaque Kernel RPC dispatcher must be installed before its doorbell is armed'
@@ -266,10 +281,6 @@ if [ "$relaxed_paths" -ne 2 ]; then
 fi
 require 'static STACK_SLOTS: StackLock<StackSlots>' src/kernel/mm/stack.rs \
     'STACK_SLOTS must serialize slot ownership and stage-1 mutation'
-require 'status\.store\(READY, Ordering::Release\)' src/kernel/boot/state.rs \
-    'BootState installation must use one-time Release publication'
-require 'status\.load\(Ordering::Acquire\) != READY' src/kernel/boot/state.rs \
-    'BootState readers must acquire one-time publication'
 
 flushes=$(LC_ALL=C rg -c 'super::tlb::flush_all_online\(\);' src/arch/x86_64/memory.rs)
 if [ "$flushes" -ne 3 ]; then

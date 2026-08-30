@@ -8,15 +8,13 @@
 //! emergency logging is active; commands must remain bounded or explicitly
 //! polling and must not allocate or acquire ordinary kernel locks.
 
-use core::cell::UnsafeCell;
 use core::fmt::{self, Write};
 use core::hint::spin_loop;
-use core::mem::MaybeUninit;
 use core::ptr::read_volatile;
 
 use hyper::hal::memory::{KernelImageLayout, Stage1Mapping, Stage1MemoryType, VirtualMemoryLayout};
 use hyper::platform::{PhysicalRange, PlatformInfo};
-use hyper::sync::atomic::{AtomicBool, Ordering};
+use hyper::sync::PublishedOnce;
 
 use super::report::StopSummary;
 use super::state::{self, MAX_CPUS};
@@ -34,41 +32,14 @@ struct MemorySnapshot {
     kernel_base: u64,
 }
 
-struct SnapshotSlot {
-    published: AtomicBool,
-    value: UnsafeCell<MaybeUninit<MemorySnapshot>>,
+static MEMORY_SNAPSHOT: PublishedOnce<MemorySnapshot> = PublishedOnce::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum InitializationError {
+    AlreadyInitialized,
 }
 
-impl SnapshotSlot {
-    const fn new() -> Self {
-        Self {
-            published: AtomicBool::new(false),
-            value: UnsafeCell::new(MaybeUninit::uninit()),
-        }
-    }
-
-    fn publish(&self, snapshot: MemorySnapshot) {
-        // SAFETY: Initialization publishes exactly once on the boot CPU before
-        // SMP startup can expose fatal handling on another CPU.
-        unsafe { (*self.value.get()).write(snapshot) };
-        self.published.store(true, Ordering::Release);
-    }
-
-    fn read(&self) -> Option<MemorySnapshot> {
-        if !self.published.load(Ordering::Acquire) {
-            return None;
-        }
-        // SAFETY: Acquire observes the complete immutable Copy snapshot.
-        Some(unsafe { *(*self.value.get()).assume_init_ref() })
-    }
-}
-
-// SAFETY: The boot CPU publishes once and readers only copy after acquire.
-unsafe impl Sync for SnapshotSlot {}
-
-static MEMORY_SNAPSHOT: SnapshotSlot = SnapshotSlot::new();
-
-pub(super) fn initialize() {
+pub(super) fn initialize() -> Result<(), InitializationError> {
     let image = crate::kernel::boot::image::layout();
     let snapshot = crate::kernel::boot::with_boot_state(|state| MemorySnapshot {
         platform: state.platform,
@@ -82,7 +53,9 @@ pub(super) fn initialize() {
         root: state.memory.root_address(),
         kernel_base: state.memory.kernel_base(),
     });
-    MEMORY_SNAPSHOT.publish(snapshot);
+    MEMORY_SNAPSHOT
+        .publish(snapshot)
+        .map_err(|_| InitializationError::AlreadyInitialized)
 }
 
 pub(super) fn run(owner: usize, stop: StopSummary) {
@@ -156,7 +129,7 @@ fn print_status(owner: usize, stop: StopSummary) {
     ));
     write_line(format_args!(
         "memory snapshot: {}",
-        if MEMORY_SNAPSHOT.read().is_some() {
+        if MEMORY_SNAPSHOT.get().is_some() {
             "available"
         } else {
             "unavailable"
@@ -223,7 +196,7 @@ fn dump_cpu_backtrace(cpu: usize) {
 }
 
 fn print_mappings() {
-    let Some(snapshot) = MEMORY_SNAPSHOT.read() else {
+    let Some(snapshot) = MEMORY_SNAPSHOT.get().copied() else {
         write_raw(b"memory snapshot unavailable\n");
         return;
     };
@@ -304,7 +277,7 @@ fn inspect_mapping_argument<'a>(arguments: &mut impl Iterator<Item = &'a str>) {
         write_raw(b"usage: map <virtual-address>\n");
         return;
     }
-    let Some(snapshot) = MEMORY_SNAPSHOT.read() else {
+    let Some(snapshot) = MEMORY_SNAPSHOT.get().copied() else {
         write_raw(b"memory snapshot unavailable\n");
         return;
     };
@@ -358,7 +331,7 @@ fn dump_memory_arguments<'a>(arguments: &mut impl Iterator<Item = &'a str>) {
         write_raw(b"usage: x <virtual-address> [byte-count]\n");
         return;
     }
-    let Some(snapshot) = MEMORY_SNAPSHOT.read() else {
+    let Some(snapshot) = MEMORY_SNAPSHOT.get().copied() else {
         write_raw(b"memory snapshot unavailable\n");
         return;
     };
@@ -440,7 +413,7 @@ fn run_self_test(owner: usize, stop: StopSummary) {
         &mut passed,
         &mut failed,
     );
-    let snapshot = MEMORY_SNAPSHOT.read();
+    let snapshot = MEMORY_SNAPSHOT.get().copied();
     report_test(
         "memory snapshot",
         snapshot.is_some(),

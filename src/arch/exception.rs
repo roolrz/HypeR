@@ -8,67 +8,16 @@
 //! stack entry, and crash-stop delivery. Raw exception entry remains in the
 //! selected backend and reaches policy through immutable registered services.
 
-use core::cell::UnsafeCell;
 use core::fmt;
 
-use hyper::sync::atomic::{AtomicU8, Ordering};
-
 use hyper::cpu::CpuIndex;
+use hyper::sync::PublishedOnce;
 
 pub(crate) use super::imp::{CrashContext, RuntimeVectorError};
 
-const SERVICE_EMPTY: u8 = 0;
-const SERVICE_INSTALLING: u8 = 1;
-const SERVICE_READY: u8 = 2;
-
 type FatalCallback = for<'reason> fn(CrashContext, fmt::Arguments<'reason>) -> !;
 
-struct FatalServiceSlot {
-    state: AtomicU8,
-    callback: UnsafeCell<Option<FatalCallback>>,
-}
-
-// SAFETY: The single installer writes the callback before Release-publishing
-// READY. It is immutable thereafter and every entry reader observes READY with
-// Acquire ordering.
-unsafe impl Sync for FatalServiceSlot {}
-
-impl FatalServiceSlot {
-    const fn new() -> Self {
-        Self {
-            state: AtomicU8::new(SERVICE_EMPTY),
-            callback: UnsafeCell::new(None),
-        }
-    }
-
-    fn install(&self, callback: FatalCallback) -> Result<FatalEntryReady, EntryServiceError> {
-        self.state
-            .compare_exchange(
-                SERVICE_EMPTY,
-                SERVICE_INSTALLING,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            )
-            .map_err(|_| EntryServiceError::AlreadyInstalled)?;
-        // SAFETY: The successful state transition grants the sole write.
-        unsafe { *self.callback.get() = Some(callback) };
-        self.state.store(SERVICE_READY, Ordering::Release);
-        Ok(FatalEntryReady { _private: () })
-    }
-
-    fn invoke(&self, context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
-        if self.state.load(Ordering::Acquire) != SERVICE_READY {
-            super::imp::halt()
-        }
-        // SAFETY: Acquire observed the immutable callback published at READY.
-        let Some(callback) = (unsafe { *self.callback.get() }) else {
-            super::imp::halt()
-        };
-        callback(context, reason)
-    }
-}
-
-static FATAL_SERVICE: FatalServiceSlot = FatalServiceSlot::new();
+static FATAL_SERVICE: PublishedOnce<FatalCallback> = PublishedOnce::new();
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EntryServiceError {
@@ -83,11 +32,17 @@ pub(crate) struct FatalEntryReady {
 pub(crate) fn install_fatal_service(
     callback: FatalCallback,
 ) -> Result<FatalEntryReady, EntryServiceError> {
-    FATAL_SERVICE.install(callback)
+    FATAL_SERVICE
+        .publish(callback)
+        .map_err(|_| EntryServiceError::AlreadyInstalled)?;
+    Ok(FatalEntryReady { _private: () })
 }
 
 pub(crate) fn fatal(context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
-    FATAL_SERVICE.invoke(context, reason)
+    let Some(callback) = FATAL_SERVICE.get().copied() else {
+        super::imp::halt()
+    };
+    callback(context, reason)
 }
 
 pub(crate) use super::imp::{

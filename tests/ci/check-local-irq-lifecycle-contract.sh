@@ -126,7 +126,7 @@ require_order "$fixture/serial-install.rs" 'enable_runtime_input' 'interrupt::ac
     'serial source state must be published before controller activation'
 require_order "$fixture/vm-initialize.rs" 'timer::prepare' 'initialize_devices' \
     'VM IRQ mappings must be prepared before publishing device dependencies'
-require_order "$fixture/vm-initialize.rs" 'initialize_interrupts' 'binding\.activate' \
+require_order "$fixture/vm-initialize.rs" 'initialize_interrupts' 'binding\.activate\(\)' \
     'VM IRQ mappings must activate only after virtualization state is published'
 
 registers=src/arch/aarch64/registers.rs
