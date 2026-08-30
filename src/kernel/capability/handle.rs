@@ -222,6 +222,11 @@ pub(crate) struct HandleTable {
     next_teardown_generation: u64,
 }
 
+/// Detached retired table backing, destroyed only after releasing table locks.
+pub(crate) struct RetiredHandleStorage {
+    _slots: Vec<Slot>,
+}
+
 #[derive(Clone, Copy)]
 enum TableLifecycle {
     Active,
@@ -240,22 +245,34 @@ impl HandleTable {
         }
     }
 
+    /// Returns the persistent logical-slot growth required by one reservation.
+    pub(crate) fn reservation_growth<const N: usize>(&self) -> Result<usize, HandleError> {
+        self.ensure_active()?;
+        if N == 0 {
+            return Err(HandleError::EmptyReservation);
+        }
+        let additional = N.saturating_sub(self.free_slots);
+        if self.slots.len().saturating_add(additional) > MAX_SLOTS {
+            return Err(HandleError::TableFull);
+        }
+        Ok(additional)
+    }
+
+    /// Logical storage bytes represented by one persistent slot.
+    pub(crate) const fn slot_storage_size() -> usize {
+        core::mem::size_of::<Slot>()
+    }
+
     /// Reserves `N` unresolvable slots for one final publication transaction.
     ///
     /// Existing vacant slots are removed from an intrusive free list, so the
     /// non-allocation path costs O(N) rather than O(total table slots).
     pub(crate) fn reserve<const N: usize>(&mut self) -> Result<HandleReservation<N>, HandleError> {
         self.ensure_active()?;
-        if N == 0 {
-            return Err(HandleError::EmptyReservation);
-        }
         let reservation = ReservationId::allocate()?;
-        let additional = N.saturating_sub(self.free_slots);
-        if self.slots.len().saturating_add(additional) > MAX_SLOTS {
-            return Err(HandleError::TableFull);
-        }
+        let additional = self.reservation_growth::<N>()?;
         self.slots
-            .try_reserve(additional)
+            .try_reserve_exact(additional)
             .map_err(|_| HandleError::Allocation)?;
         for _ in 0..additional {
             let index = self.slots.len();
@@ -602,6 +619,18 @@ impl HandleTable {
         }
         self.lifecycle = TableLifecycle::Retired;
         cursor.finished = true;
+    }
+
+    /// Moves retired backing storage out for destruction without the table lock.
+    pub(crate) fn take_retired_storage(&mut self) -> RetiredHandleStorage {
+        if !matches!(self.lifecycle, TableLifecycle::Retired) {
+            super::invariant_violation();
+        }
+        self.free_head = None;
+        self.free_slots = 0;
+        RetiredHandleStorage {
+            _slots: core::mem::take(&mut self.slots),
+        }
     }
 
     fn ensure_active(&self) -> Result<(), HandleError> {

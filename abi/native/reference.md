@@ -9,6 +9,22 @@ This file is generated from `abi/native/schema.rs`. Do not edit it directly.
 
 ABI revision: `0`.
 
+## Status values
+
+| Value | Name |
+| ---: | --- |
+| 0 | `ok` |
+| -1 | `invalid_argument` |
+| -2 | `bad_handle` |
+| -3 | `access_denied` |
+| -4 | `not_supported` |
+| -5 | `no_memory` |
+| -6 | `bad_state` |
+| -7 | `fault` |
+| -8 | `resource_limit` |
+| -9 | `busy` |
+| -10 | `internal` |
+
 ## Syscalls
 
 | Number | Name | Arguments | Results | Capability effects | User memory | Execution | Audit |

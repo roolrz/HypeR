@@ -356,6 +356,7 @@ fn exercise_affinity_creation() -> Result<(), Error> {
         return Err(Error::Affinity(8));
     }
 
+    let registry_before = scheduler::registry_slot_count()?;
     let before = scheduler::kthread_create("reservation-before", fifo_peer, 0)?;
     scheduler::discard_dormant_kernel_thread(before)?;
     if scheduler::kthread_create(
@@ -371,7 +372,22 @@ fn exercise_affinity_creation() -> Result<(), Error> {
     if after.get() <= before.get() + 1 {
         return Err(Error::Affinity(10));
     }
+    if !matches!(
+        scheduler::thread_placement(before),
+        Err(scheduler::Error::ThreadNotFound)
+    ) || scheduler::registry_slot_count()? > registry_before.saturating_add(1)
+    {
+        return Err(Error::Affinity(11));
+    }
     scheduler::discard_dormant_kernel_thread(after)?;
+    let stable_slots = scheduler::registry_slot_count()?;
+    for _ in 0..64 {
+        let id = scheduler::kthread_create("registry-reuse", fifo_peer, 0)?;
+        scheduler::discard_dormant_kernel_thread(id)?;
+    }
+    if scheduler::registry_slot_count()? != stable_slots {
+        return Err(Error::Affinity(12));
+    }
     Ok(())
 }
 

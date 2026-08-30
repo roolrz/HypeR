@@ -39,6 +39,9 @@ mod aarch64_cache;
 #[path = "cases/aarch64_user_contract.rs"]
 mod aarch64_user_contract;
 #[cfg(test)]
+#[path = "cases/address_space_residency.rs"]
+mod address_space_residency;
+#[cfg(test)]
 #[path = "cases/allocation.rs"]
 mod allocation;
 #[cfg(test)]
@@ -96,8 +99,14 @@ mod physical_ranges;
 #[path = "cases/plic.rs"]
 mod plic;
 #[cfg(test)]
+#[path = "cases/process_lifecycle.rs"]
+mod process_lifecycle;
+#[cfg(test)]
 #[path = "cases/psci.rs"]
 mod psci;
+#[cfg(test)]
+#[path = "cases/resource_domain.rs"]
+mod resource_domain;
 #[cfg(test)]
 #[path = "cases/runtime_allocators.rs"]
 mod runtime_allocators;
@@ -116,6 +125,12 @@ mod stage2_mapping;
 #[cfg(test)]
 #[path = "cases/synchronization.rs"]
 mod synchronization;
+#[cfg(test)]
+#[path = "cases/translation_id.rs"]
+mod translation_id;
+#[cfg(test)]
+#[path = "cases/user_memory.rs"]
+mod user_memory;
 #[cfg(test)]
 #[path = "cases/vgic.rs"]
 mod vgic;

@@ -5,13 +5,20 @@
 
 mod access;
 mod address;
+mod address_space_state;
 mod allocation;
 pub mod allocator;
 pub mod boot;
 pub mod kaslr;
+mod translation_id;
 
 pub use access::{ForeignCopyError, ForeignMemory, copy_from_foreign, copy_to_foreign};
 pub use address::{PAGE_SIZE, PhysicalAddress, VirtualAddress};
-pub use allocation::{AllocationError, FallibleArc, try_box};
+pub use address_space_state::{AddressSpaceResidency, ResidencyCut, ResidencyError};
+pub use allocation::{AllocationError, FallibleArc, UniqueFallibleArc, try_box};
 pub use allocator::{BuddyAllocator, BuddyError, BuddyStats, MAX_ORDER, MemoryHandoff};
 pub use boot::{BootAllocator, BootAllocatorError, BootMemoryStats};
+pub use translation_id::{
+    ActiveTranslationId, ReservedTranslationId, RetiringTranslationId, TranslationIdError,
+    TranslationIdPool,
+};

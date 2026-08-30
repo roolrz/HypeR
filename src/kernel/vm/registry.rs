@@ -28,7 +28,7 @@ use hyper::vm::translation::{
 
 use super::VmInterruptController;
 use super::device::VirtualDeviceSet;
-use super::memory::GuestAddressSpace;
+use super::memory::{GuestAddressSpace, Stage2IdentifierReservation};
 use crate::kernel::task::thread::ThreadId;
 
 type RegistryLock = InterruptSpinLock<VmRegistry, crate::hal::irq::LocalMask>;
@@ -129,21 +129,6 @@ impl VmBinding {
     }
 }
 
-/// Architecture stage-2 identifier assigned independently of logical VM IDs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HardwareVmid(u16);
-
-impl HardwareVmid {
-    pub(crate) const fn get(self) -> u16 {
-        self.0
-    }
-
-    #[cfg(feature = "kernel-self-test")]
-    pub(crate) const fn for_test(value: u16) -> Self {
-        Self(value)
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Allocation,
@@ -161,7 +146,11 @@ pub enum Error {
 /// slot to `Vacant` with a new generation.
 pub(crate) struct VmReservation {
     id: VmId,
-    hardware_vmid: HardwareVmid,
+    hardware_vmid: Option<
+        crate::kernel::mm::translation_id::IdentifierReservation<
+            crate::kernel::mm::translation_id::Stage2Vmid,
+        >,
+    >,
     unpublished: bool,
 }
 
@@ -170,8 +159,8 @@ impl VmReservation {
         self.id
     }
 
-    pub(crate) const fn hardware_vmid(&self) -> HardwareVmid {
-        self.hardware_vmid
+    pub(crate) fn take_hardware_vmid(&mut self) -> Result<Stage2IdentifierReservation, Error> {
+        self.hardware_vmid.take().ok_or(Error::InvalidReservation)
     }
 }
 
@@ -263,17 +252,15 @@ impl PreparedVm {
             mut reservation,
         } = self;
         let id = reservation.id;
+        REGISTRY.with(|registry| registry.validate_install(id, &machine))?;
+        machine
+            .address_space
+            .with(GuestAddressSpace::activate_identifier_for_install)?;
         let mut machine = Some(machine);
-        // Validation precedes ownership transfer under the registry lock. On
-        // failure `machine` remains owned by this stack frame and is dropped
-        // only after the lock has been released, avoiding registry -> allocator
-        // lock nesting while its address space is destroyed.
-        if let Err(error) = REGISTRY.with(|registry| registry.install(id, &mut machine)) {
-            drop(dormant);
-            drop(machine);
-            drop(reservation);
-            return Err(error);
-        }
+        // The first locked validation proved this uniquely reserved slot and
+        // complete machine. A live reservation prevents any intervening slot
+        // transition, so final publication is infallible after VMID activation.
+        REGISTRY.with(|registry| registry.install_prevalidated(id, &mut machine));
         reservation.unpublished = false;
         drop(reservation);
         // SAFETY: Installation transferred the binding's Box into a
@@ -329,7 +316,7 @@ impl VmRegistry {
         }
     }
 
-    fn reserve(&mut self) -> Result<VmReservation, Error> {
+    fn reserve(&mut self) -> Result<VmId, Error> {
         let (slot, generation) = self
             .slots
             .iter()
@@ -340,18 +327,10 @@ impl VmRegistry {
             })
             .ok_or(Error::RegistryFull)?;
         let slot_u32 = u32::try_from(slot).map_err(|_| Error::IdentityExhausted)?;
-        let hardware = slot_u32
-            .checked_add(1)
-            .and_then(|value| u16::try_from(value).ok())
-            .ok_or(Error::IdentityExhausted)?;
         self.slots[slot] = VmSlot::Reserved { generation };
-        Ok(VmReservation {
-            id: VmId {
-                slot: slot_u32,
-                generation,
-            },
-            hardware_vmid: HardwareVmid(hardware),
-            unpublished: true,
+        Ok(VmId {
+            slot: slot_u32,
+            generation,
         })
     }
 
@@ -370,12 +349,7 @@ impl VmRegistry {
         }
     }
 
-    fn install(
-        &mut self,
-        id: VmId,
-        machine: &mut Option<Box<VirtualMachine>>,
-    ) -> Result<(), Error> {
-        let candidate = machine.as_ref().ok_or(Error::InvalidReservation)?;
+    fn validate_install(&self, id: VmId, candidate: &VirtualMachine) -> Result<(), Error> {
         if candidate.id != id
             || candidate.boot_vcpu.is_none()
             || candidate.boot_vcpu == Some(ThreadId::BOOTSTRAP)
@@ -383,13 +357,27 @@ impl VmRegistry {
             return Err(Error::InvalidReservation);
         }
         let slot = usize::try_from(id.slot).map_err(|_| Error::InvalidReservation)?;
-        let entry = self.slots.get_mut(slot).ok_or(Error::InvalidReservation)?;
+        let entry = self.slots.get(slot).ok_or(Error::InvalidReservation)?;
         if !matches!(entry, VmSlot::Reserved { generation } if *generation == id.generation) {
             return Err(Error::InvalidReservation);
         }
-        let machine = machine.take().ok_or(Error::InvalidReservation)?;
-        *entry = VmSlot::Installed(machine);
         Ok(())
+    }
+
+    fn install_prevalidated(&mut self, id: VmId, machine: &mut Option<Box<VirtualMachine>>) {
+        let valid = machine
+            .as_deref()
+            .is_some_and(|candidate| self.validate_install(id, candidate).is_ok());
+        if !valid {
+            crate::hal::cpu::halt();
+        }
+        let Some(machine) = machine.take() else {
+            crate::hal::cpu::halt();
+        };
+        let Some(entry) = self.slots.get_mut(id.slot as usize) else {
+            crate::hal::cpu::halt();
+        };
+        *entry = VmSlot::Installed(machine);
     }
 
     fn installed(&self, id: VmId) -> Result<&VirtualMachine, Error> {
@@ -408,7 +396,22 @@ impl VmRegistry {
 }
 
 pub(crate) fn reserve() -> Result<VmReservation, Error> {
-    REGISTRY.with(VmRegistry::reserve)
+    let id = REGISTRY.with(VmRegistry::reserve)?;
+    let hardware_vmid = match crate::kernel::mm::translation_id::reserve::<
+        crate::kernel::mm::translation_id::Stage2Vmid,
+    >(8)
+    {
+        Ok(identifier) => identifier,
+        Err(_) => {
+            REGISTRY.with(|registry| registry.cancel(id));
+            return Err(Error::IdentityExhausted);
+        }
+    };
+    Ok(VmReservation {
+        id,
+        hardware_vmid: Some(hardware_vmid),
+        unpublished: true,
+    })
 }
 
 /// Runs an operation under the installed VM's address-space lock.

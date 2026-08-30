@@ -8,6 +8,9 @@ mod guest_entry_irq;
 mod guest_memory_access;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod irq_tail_preemption;
+mod native_syscall;
+#[cfg(CONFIG_ARCH_AARCH64)]
+mod native_user_entry;
 #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
 mod reschedule_ipi;
 mod scheduler_sync;
@@ -15,6 +18,7 @@ mod stack_model;
 mod startup_readiness;
 mod thread_migration;
 mod thread_sleep;
+#[cfg(CONFIG_ARCH_AARCH64)]
 mod user_memory_access;
 mod vm_registry;
 mod wait_arbitration;
@@ -27,10 +31,14 @@ pub(crate) fn run() {
     let stack_result = stack_model::run();
     let sleep_result = thread_sleep::run();
     let migration_result = thread_migration::run();
+    let native_syscall_result = native_syscall::run();
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    let native_user_entry_result = native_user_entry::run();
     let wait_arbitration_result = wait_arbitration::run();
     let readiness_result = startup_readiness::run();
     let guest_execution = crate::hal::vm::guest_execution_available();
     let guest_memory_result = guest_execution.then(guest_memory_access::run);
+    #[cfg(CONFIG_ARCH_AARCH64)]
     let user_memory_result = user_memory_access::run();
     let vm_registry_result = vm_registry::run();
     #[cfg(CONFIG_ARCH_AARCH64)]
@@ -54,6 +62,13 @@ pub(crate) fn run() {
     if let Err(error) = migration_result {
         crate::kernel::boot::fail("kernel thread-migration tests", error);
     }
+    if let Err(error) = native_syscall_result {
+        crate::kernel::boot::fail("kernel Native syscall validation tests", error);
+    }
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    if let Err(error) = native_user_entry_result {
+        crate::kernel::boot::fail("AArch64 native-user entry tests", error);
+    }
     if let Err(error) = wait_arbitration_result {
         crate::kernel::boot::fail("kernel wait-arbitration tests", error);
     }
@@ -63,6 +78,7 @@ pub(crate) fn run() {
     if let Some(Err(error)) = guest_memory_result {
         crate::kernel::boot::fail("kernel guest-memory access tests", error);
     }
+    #[cfg(CONFIG_ARCH_AARCH64)]
     if let Err(error) = user_memory_result {
         crate::kernel::boot::fail("kernel user-memory access tests", error);
     }
@@ -81,6 +97,9 @@ pub(crate) fn run() {
     crate::println!("HypeR test: guarded thread, IRQ, and emergency stacks passed");
     crate::println!("HypeR test: deadline-based thread sleep passed");
     crate::println!("HypeR test: race-safe wait arbitration passed");
+    crate::println!("HypeR test: Native syscall validation passed");
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    crate::println!("HypeR test: AArch64 EL0 syscall and fault containment passed");
     crate::println!("HypeR test: fatal-path readiness contract passed");
     #[cfg(CONFIG_ARCH_AARCH64)]
     crate::println!("HypeR test: AArch64 guest-entry IRQ mask contract passed");

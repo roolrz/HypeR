@@ -1,17 +1,12 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Inert machine contracts for native `AArch64` userspace.
+//! Machine contracts for native `AArch64` userspace.
 //!
 //! This module validates register encodings and makes lower-EL return regimes
-//! explicit. It deliberately owns no page-table memory, residency set, or
-//! executable entry capability. A validated value therefore cannot activate
-//! an address space; that operation must wait for a pinned process address
-//! space and a concurrent-residency token supplied by kernel memory policy.
-
-// These contracts are intentionally dormant until process memory can produce
-// the residency capability required by a real entry path.
-#![allow(dead_code)]
+//! explicit. It deliberately owns no page-table memory or residency policy;
+//! those owners remain in the kernel and reach the architecture only through
+//! opaque HAL capabilities.
 
 use super::registers;
 
@@ -63,6 +58,7 @@ impl UserExecutionCapabilities {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) const fn regime(self) -> UserTranslationRegime {
         self.regime
     }
@@ -71,12 +67,33 @@ impl UserExecutionCapabilities {
         self.address_bits
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) const fn physical_address_bits(self) -> u8 {
         self.physical_address_bits
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(super) const fn translation_identifier_bits(self) -> u8 {
         self.translation_identifier_bits
+    }
+
+    /// Selects the exclusive native-user address limit for this regime.
+    ///
+    /// `vhe_privileged_base` is the first host-owned address in the shared VHE
+    /// stage-1 root. nVHE uses a private stage-2 IPA space and therefore does
+    /// not inherit that host-layout reservation.
+    pub(super) const fn user_address_limit(self, vhe_privileged_base: u64) -> u64 {
+        let translation_limit = 1u64 << self.address_bits;
+        match self.regime {
+            UserTranslationRegime::VheHostStage1 => {
+                if translation_limit < vhe_privileged_base {
+                    translation_limit
+                } else {
+                    vhe_privileged_base
+                }
+            }
+            UserTranslationRegime::NvheStage2Only => translation_limit,
+        }
     }
 }
 
@@ -95,9 +112,9 @@ pub(super) struct UserTranslationRegisters {
 impl UserTranslationRegisters {
     /// Validates the root and identifier without claiming root ownership.
     ///
-    /// The returned value is data only. It cannot be activated until a future
-    /// address-space owner proves that the complete hierarchy is pinned and a
-    /// concurrent residency protocol has admitted the calling CPU.
+    /// The returned value is data only. Activation remains a separate HAL
+    /// operation which requires the kernel owner to retain the hierarchy and
+    /// identifier while its residency protocol admits the calling CPU.
     pub(super) const fn new(
         capabilities: UserExecutionCapabilities,
         regime: UserTranslationRegime,
@@ -157,16 +174,17 @@ impl UserTranslationRegisters {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LowerElReturnRegime {
     Native(UserTranslationRegime),
+    #[cfg_attr(not(test), allow(dead_code))]
     Guest,
 }
 
 impl LowerElReturnRegime {
     /// Produces the `HCR_EL2` value required before `ERET`.
     ///
-    /// `VM`, `TGE`, and `DC` are written deterministically because they select
-    /// the lower-EL translation world. Unrelated host trap controls are
-    /// preserved. The selected host mode must already match `E2H`; changing
-    /// host mode is a boot-time operation, not a return-path side effect.
+    /// Native values are built from kernel policy rather than inherited from
+    /// a preceding guest. Guest return is a compatibility helper for the
+    /// existing vCPU path; new entry code restores its explicitly captured
+    /// HCR value instead. The selected host mode must already match `E2H`.
     pub(super) const fn transition_hcr(
         self,
         current_hcr: u64,
@@ -177,20 +195,16 @@ impl LowerElReturnRegime {
                 if !vhe_host {
                     return Err(UserMachineContractError::HostModeMismatch);
                 }
-                Ok(
-                    (current_hcr | registers::HCR_EL2_TGE | registers::HCR_EL2_RW)
-                        & !(registers::HCR_EL2_DC | registers::HCR_EL2_VM),
-                )
+                Ok(native_hcr_base() | registers::HCR_EL2_E2H | registers::HCR_EL2_TGE)
             }
             Self::Native(UserTranslationRegime::NvheStage2Only) => {
                 if vhe_host {
                     return Err(UserMachineContractError::HostModeMismatch);
                 }
-                Ok(current_hcr
+                Ok(native_hcr_base()
                     | registers::HCR_EL2_TGE
                     | registers::HCR_EL2_DC
-                    | registers::HCR_EL2_VM
-                    | registers::HCR_EL2_RW)
+                    | registers::HCR_EL2_VM)
             }
             Self::Guest => Ok(
                 (current_hcr | registers::HCR_EL2_VM | registers::HCR_EL2_RW)
@@ -200,10 +214,32 @@ impl LowerElReturnRegime {
     }
 }
 
+/// Deterministic trap policy for untrusted native EL0 execution.
+///
+/// Unsupported wait, cache-maintenance, translation-maintenance, and feature
+/// discovery operations trap instead of inheriting controls from whichever
+/// guest or native thread previously occupied the CPU.
+const fn native_hcr_base() -> u64 {
+    registers::HCR_EL2_BOOT_VALUE
+        | registers::HCR_EL2_TWI
+        | registers::HCR_EL2_TWE
+        | registers::HCR_EL2_TID0
+        | registers::HCR_EL2_TID1
+        | registers::HCR_EL2_TID2
+        | registers::HCR_EL2_TID3
+        | registers::HCR_EL2_TSC
+        | registers::HCR_EL2_TIDCP
+        | registers::HCR_EL2_TSW
+        | registers::HCR_EL2_TPCP
+        | registers::HCR_EL2_TPU
+        | registers::HCR_EL2_TTLB
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UserMachineContractError {
     HostModeMismatch,
     InvalidGeneration,
+    InvalidPermissions,
     InvalidRootAlignment,
     InvalidTranslationIdentifier,
     RootOutsidePhysicalAddressSpace,
@@ -211,6 +247,72 @@ pub enum UserMachineContractError {
     UnsupportedAddressWidth,
     UnsupportedIdentifierWidth,
     UnsupportedPhysicalAddressWidth,
+    UnsupportedPrivilegedAccessProtection,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct UserPagePermissions {
+    readable: bool,
+    writable: bool,
+    executable: bool,
+}
+
+impl UserPagePermissions {
+    pub(super) const fn new(
+        readable: bool,
+        writable: bool,
+        executable: bool,
+    ) -> Result<Self, UserMachineContractError> {
+        if (writable || executable) && !readable || (writable && executable) {
+            return Err(UserMachineContractError::InvalidPermissions);
+        }
+        Ok(Self {
+            readable,
+            writable,
+            executable,
+        })
+    }
+
+    pub(super) const fn vhe_stage1_descriptor(self, physical: u64) -> u64 {
+        if !self.readable {
+            return registers::STAGE1_DESC_INVALID;
+        }
+        let mut descriptor = (physical & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT)
+            | registers::STAGE1_DESC_TABLE_OR_PAGE
+            | registers::STAGE1_DESC_ATTR_NORMAL
+            | registers::STAGE1_DESC_INNER_SHAREABLE
+            | registers::STAGE1_DESC_AP_EL0
+            | registers::STAGE1_DESC_ACCESS_FLAG
+            | registers::STAGE1_DESC_NOT_GLOBAL
+            | registers::STAGE1_DESC_PXN;
+        if !self.writable {
+            descriptor |= registers::STAGE1_DESC_AP_READ_ONLY;
+        }
+        if !self.executable {
+            descriptor |= registers::STAGE1_DESC_UXN;
+        }
+        descriptor
+    }
+
+    pub(super) const fn nvhe_stage2_descriptor(self, physical: u64) -> u64 {
+        if !self.readable {
+            return registers::STAGE2_DESC_INVALID;
+        }
+        let mut descriptor = (physical & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT)
+            | registers::STAGE2_DESC_TABLE_OR_PAGE
+            | registers::STAGE2_DESC_MEMATTR_NORMAL_WB
+            | registers::STAGE2_DESC_INNER_SHAREABLE
+            | registers::STAGE2_DESC_ACCESS_FLAG
+            | if self.writable {
+                registers::STAGE2_DESC_READ_WRITE
+            } else {
+                registers::STAGE2_DESC_READ_ONLY
+            };
+        if !self.executable {
+            descriptor |= registers::STAGE2_DESC_XN;
+        }
+        descriptor
+    }
 }
 
 const fn same_regime(left: UserTranslationRegime, right: UserTranslationRegime) -> bool {

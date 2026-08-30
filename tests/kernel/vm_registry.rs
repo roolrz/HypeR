@@ -20,9 +20,10 @@ pub(super) fn run() -> Result<(), Error> {
     }
 
     let before = crate::kernel::task::scheduler::statistics().map_err(Error::Scheduler)?;
-    let reservation = crate::kernel::vm::registry::reserve().map_err(Error::Registry)?;
+    let mut reservation = crate::kernel::vm::registry::reserve().map_err(Error::Registry)?;
+    let identifier = reservation.take_hardware_vmid().map_err(Error::Registry)?;
     let address_space = crate::kernel::vm::memory::GuestAddressSpace::new(
-        reservation.hardware_vmid(),
+        identifier,
         crate::hal::guest::linux_abi().ram_base().get(),
         2 * hyper::mm::PAGE_SIZE,
     )

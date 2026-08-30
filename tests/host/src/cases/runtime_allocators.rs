@@ -161,20 +161,25 @@ fn accounts_direct_pages_by_owner() {
 
     let guest = crate::require_ok(allocator.allocate_pages_for(3, PageOwner::Guest));
     let table = crate::require_ok(allocator.allocate_pages_for(0, PageOwner::PageTable));
+    let user = crate::require_ok(allocator.allocate_pages_for(1, PageOwner::User));
     let stats = crate::require_some(allocator.stats());
     assert_eq!(stats.guest_pages.pages, 8);
     assert_eq!(stats.page_table_pages.pages, 1);
-    assert_eq!(stats.buddy.allocated_pages, 9);
+    assert_eq!(stats.user_pages.pages, 2);
+    assert_eq!(stats.buddy.allocated_pages, 11);
 
     // SAFETY: These are the exact live blocks and owners returned above.
     unsafe {
         crate::require_ok(allocator.deallocate_pages_for(table, 0, PageOwner::PageTable));
+        crate::require_ok(allocator.deallocate_pages_for(user, 1, PageOwner::User));
         crate::require_ok(allocator.deallocate_pages_for(guest, 3, PageOwner::Guest));
     }
     let stats = crate::require_some(allocator.stats());
     assert_eq!(stats.guest_pages.pages, 0);
     assert_eq!(stats.guest_pages.peak_pages, 8);
     assert_eq!(stats.page_table_pages.pages, 0);
+    assert_eq!(stats.user_pages.pages, 0);
+    assert_eq!(stats.user_pages.peak_pages, 2);
     assert_eq!(stats.buddy.allocated_pages, 0);
 }
 

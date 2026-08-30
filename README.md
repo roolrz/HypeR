@@ -81,6 +81,12 @@ The current foundation includes:
 - a compiled capability foundation with fallible shared objects, schema-owned
   rights, 64-bit generation handles, detached unpublished slot transactions,
   deferred close, and allocation-free iterative teardown;
+- strong `ProcessImage`, `Process`, `UserThread`, and `TaskGroup` ownership with
+  accounted construction, explicit publication, start/ready, stop/join, and
+  acknowledged retirement;
+- an AArch64 VHE/nVHE native-EL0 proof which enters through a scheduler-owned
+  user Thread, dispatches the six initial Native syscalls, contains a user
+  fault, and retires the complete Process ownership graph;
 - safe AArch64 IRQ-tail preemption, including deactivation and resumption of
   scheduler-owned vCPU continuations;
 - IRQ domains and shared handler registration, GICv3/vGIC, PLIC, x2APIC, host
@@ -95,11 +101,12 @@ The current foundation includes:
   optional allocation-free crash console.
 
 This list describes implemented foundations, not a claim of production
-completeness. In particular, runnable isolated native userspace, a published
-capability syscall ABI, device assignment, strong guest isolation policy,
-cross-architecture asynchronous preemption, controlled vCPU migration,
-automatic load balancing, broad hardware discovery, stable management APIs,
-and a general-purpose virtual I/O stack are still under development.
+completeness. In particular, a general-purpose Native runtime and loader, an
+EL0 init and VMM, a published capability syscall ABI, device assignment, strong
+guest isolation policy, cross-architecture asynchronous preemption, controlled
+vCPU migration, automatic load balancing, broad hardware discovery, stable
+management APIs, and a general-purpose virtual I/O stack are still under
+development.
 
 ## Architecture
 
@@ -107,7 +114,7 @@ HypeR keeps policy above mechanism:
 
 ```text
 native EL0 VMM, services, and future compatibility supervisors
-    -> versioned syscall and capability boundary
+    -> schema-defined pre-release syscall and capability boundary
     -> kernel user-entry adapters and services
     -> kernel policy: task, IRQ, time, memory, crash, device
     -> kernel VM policy: lifecycle, vCPU orchestration, resource ownership
@@ -258,17 +265,21 @@ secondary architectures.
 
 ### 2. Establish native EL0 and the capability ABI
 
-- prove the AArch64 VHE host-EL0 and nVHE stage-2-only execution paths before
-  publishing a binary ABI, retaining a minimal EL1 relay only as a justified
-  compatibility fallback;
-- add Process, UserThread, user-address-space, generational handle, typed-right,
-  ResourceDomain, and TaskGroup ownership;
-- generate direct syscall dispatch, Rust/C bindings, architecture stubs, vDSO
-  exports, layouts, and reference documentation from one checked schema;
-- provide VMO/VMAR, Channel/Event/WaitSet, time, atomic-wait, and safe user-copy
-  primitives sufficient for a real service runtime.
-- complete cooperative Thread/Process stop, join, cancellation, and fault
-  containment before admitting multi-Thread processes or atomic exec.
+- extend the current AArch64 VHE host-EL0 and nVHE stage-2-only raw-code proof
+  into a loader-backed static PIE before publishing a binary ABI, retaining a
+  minimal EL1 relay only as a justified compatibility fallback;
+- extend the implemented Process, UserThread, ProcessImage, TaskGroup,
+  ResourceDomain, and address-space lifecycle with multi-Thread race coverage
+  and atomic exec quiescence;
+- expand the checked schema's current Rust values, C header, layouts, metadata,
+  and reference into generated dispatch wrappers, architecture stubs, and vDSO
+  exports;
+- expose the existing VMO/VMAR and safe-copy core through capabilities, then add
+  Channel/Event/WaitSet, time, and atomic-wait primitives sufficient for a real
+  service runtime;
+- add temporary pre-release debug output, yield, and exit calls, then complete
+  blocking cancellation and multi-Thread Process qualification before atomic
+  exec.
 
 ### 3. Extend VM lifetime and topology
 

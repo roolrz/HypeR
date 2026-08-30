@@ -1,36 +1,38 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Safe access boundary for application-owned virtual memory.
+//! Typed access boundary for native application virtual memory.
 
-use hyper::mm::{ForeignCopyError, ForeignMemory};
+use super::user_space::{
+    AddressSpaceError, MemoryAccount, PageBackend, UserAddressSpace, UserSlice,
+};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AddressSpaceId(pub u64);
+pub type UserCopyError<BackendError, AccountError> = AddressSpaceError<BackendError, AccountError>;
 
-/// Capability implemented by a live, locked application address space.
-///
-/// A raw virtual address is deliberately insufficient to call the user-copy
-/// API. The application memory manager must hold its mappings stable for the
-/// duration of each operation and implement the page-level access contract.
-pub trait UserAddressSpace: ForeignMemory {
-    fn id(&self) -> AddressSpaceId;
-}
-
-pub type UserCopyError<BackendError> = ForeignCopyError<BackendError>;
-
-pub fn copy_from_user<AddressSpace: UserAddressSpace + ?Sized>(
-    address_space: &mut AddressSpace,
-    source_address: u64,
+/// Copies from a fully validated user range without exposing a user reference.
+/// Backend failure may leave the destination prefix modified.
+pub fn copy_from_user<Backend, Account>(
+    address_space: &UserAddressSpace<Backend, Account>,
+    source: UserSlice,
     destination: &mut [u8],
-) -> Result<(), UserCopyError<AddressSpace::Error>> {
-    hyper::mm::copy_from_foreign(address_space, source_address, destination)
+) -> Result<(), UserCopyError<Backend::Error, Account::Error>>
+where
+    Backend: PageBackend,
+    Account: MemoryAccount,
+{
+    address_space.copy_from_user(source, destination)
 }
 
-pub fn copy_to_user<AddressSpace: UserAddressSpace + ?Sized>(
-    address_space: &mut AddressSpace,
-    destination_address: u64,
+/// Copies into a fully validated user range without exposing a user reference.
+/// Backend failure may leave an earlier user-memory prefix modified.
+pub fn copy_to_user<Backend, Account>(
+    address_space: &UserAddressSpace<Backend, Account>,
+    destination: UserSlice,
     source: &[u8],
-) -> Result<(), UserCopyError<AddressSpace::Error>> {
-    hyper::mm::copy_to_foreign(address_space, destination_address, source)
+) -> Result<(), UserCopyError<Backend::Error, Account::Error>>
+where
+    Backend: PageBackend,
+    Account: MemoryAccount,
+{
+    address_space.copy_to_user(destination, source)
 }

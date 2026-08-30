@@ -5,7 +5,8 @@ use core::arch::asm;
 
 use hyper::hal::barrier::{Barrier, BarrierAccess, BarrierDomain};
 use hyper::hal::cache::{CacheError, CacheMaintenance};
-use hyper::vm::aarch64::cache::{GuestInstructionCachePolicy, guest_instruction_cache_policy};
+use hyper::sync::atomic::{AtomicU64, Ordering};
+use hyper::vm::aarch64::cache::{GuestInstructionCachePolicy, instruction_publication_contract};
 
 use super::barrier::Aarch64Barrier;
 use super::registers;
@@ -13,13 +14,46 @@ use super::registers;
 /// `AArch64` cache maintenance using virtual-address operations at EL2.
 pub struct Aarch64Cache;
 
+const UNINITIALIZED_CONTRACT: u64 = u64::MAX;
+static BOOT_PUBLICATION_CONTRACT: AtomicU64 = AtomicU64::new(UNINITIALIZED_CONTRACT);
+static BOOT_CTR_EL0: AtomicU64 = AtomicU64::new(UNINITIALIZED_CONTRACT);
+
+/// Freezes the effective cache-maintenance contract selected by the boot PE.
+pub(super) fn prepare_boot_cpu() -> Result<(), CacheError> {
+    let ctr_el0 = read_ctr_el0();
+    let contract = instruction_publication_contract(ctr_el0);
+    let _ = BOOT_CTR_EL0.compare_exchange(
+        UNINITIALIZED_CONTRACT,
+        ctr_el0,
+        Ordering::Release,
+        Ordering::Relaxed,
+    );
+    match BOOT_PUBLICATION_CONTRACT.compare_exchange(
+        UNINITIALIZED_CONTRACT,
+        contract,
+        Ordering::Release,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => Ok(()),
+        Err(existing) if existing == contract => Ok(()),
+        Err(_) => Err(CacheError::InvalidLineSize),
+    }
+}
+
+/// Checks that this PE can safely consume boot-CPU cache publications.
+pub(super) fn current_cpu_is_compatible() -> bool {
+    let expected = BOOT_PUBLICATION_CONTRACT.load(Ordering::Acquire);
+    expected != UNINITIALIZED_CONTRACT
+        && expected == instruction_publication_contract(read_ctr_el0())
+}
+
 impl CacheMaintenance for Aarch64Cache {
     fn data_line_size() -> usize {
-        cache_line_size(registers::CTR_EL0_DMINLINE_SHIFT)
+        selected_data_line_size()
     }
 
     fn instruction_line_size() -> usize {
-        cache_line_size(registers::CTR_EL0_IMINLINE_SHIFT)
+        selected_instruction_line_size()
     }
 
     unsafe fn publish_data_range(start: usize, length: usize) -> Result<(), CacheError> {
@@ -64,8 +98,8 @@ impl CacheMaintenance for Aarch64Cache {
     unsafe fn publish_instruction_ranges(
         mut ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
     ) -> Result<(), CacheError> {
-        let ctr = read_ctr_el0();
-        let data_line_size = cache_line_size_from(ctr, registers::CTR_EL0_DMINLINE_SHIFT);
+        let contract = selected_contract();
+        let data_line_size = contract_data_line_size(contract);
         let mut clean_result = Ok(());
         ranges(&mut |start, length| {
             if clean_result.is_ok() {
@@ -79,10 +113,9 @@ impl CacheMaintenance for Aarch64Cache {
         Aarch64Barrier::data_synchronization(BarrierDomain::InnerShareable, BarrierAccess::All);
         clean_result?;
 
-        let invalidate_result = match guest_instruction_cache_policy(ctr) {
+        let invalidate_result = match contract_instruction_policy(contract) {
             GuestInstructionCachePolicy::Range => {
-                let instruction_line_size =
-                    cache_line_size_from(ctr, registers::CTR_EL0_IMINLINE_SHIFT);
+                let instruction_line_size = contract_instruction_line_size(contract);
                 let mut result = Ok(());
                 ranges(&mut |start, length| {
                     if result.is_ok() {
@@ -122,10 +155,6 @@ impl CacheMaintenance for Aarch64Cache {
     }
 }
 
-fn cache_line_size(shift: u64) -> usize {
-    cache_line_size_from(read_ctr_el0(), shift)
-}
-
 fn read_ctr_el0() -> u64 {
     let ctr: u64;
     // SAFETY: CTR_EL0 is readable at EL2 and has no side effects.
@@ -139,9 +168,43 @@ fn read_ctr_el0() -> u64 {
     ctr
 }
 
-const fn cache_line_size_from(ctr: u64, shift: u64) -> usize {
-    let encoded = (ctr >> shift) & registers::CTR_EL0_LINE_SIZE_MASK;
-    4usize << encoded
+fn selected_contract() -> u64 {
+    let contract = BOOT_PUBLICATION_CONTRACT.load(Ordering::Acquire);
+    if contract == UNINITIALIZED_CONTRACT {
+        instruction_publication_contract(read_ctr_el0())
+    } else {
+        contract
+    }
+}
+
+const fn contract_instruction_line_size(contract: u64) -> usize {
+    4usize << (contract & registers::CTR_EL0_LINE_SIZE_MASK)
+}
+
+const fn contract_data_line_size(contract: u64) -> usize {
+    4usize << ((contract >> 4) & registers::CTR_EL0_LINE_SIZE_MASK)
+}
+
+const fn contract_instruction_policy(contract: u64) -> GuestInstructionCachePolicy {
+    if contract & (1 << 8) != 0 {
+        GuestInstructionCachePolicy::Range
+    } else {
+        GuestInstructionCachePolicy::WholeInnerShareableDomain
+    }
+}
+
+fn selected_instruction_line_size() -> usize {
+    let ctr_el0 = BOOT_CTR_EL0.load(Ordering::Acquire);
+    let ctr_el0 = if ctr_el0 == UNINITIALIZED_CONTRACT {
+        read_ctr_el0()
+    } else {
+        ctr_el0
+    };
+    4usize << (ctr_el0 & registers::CTR_EL0_LINE_SIZE_MASK)
+}
+
+fn selected_data_line_size() -> usize {
+    contract_data_line_size(selected_contract())
 }
 
 unsafe fn invalidate_instruction_domain() {

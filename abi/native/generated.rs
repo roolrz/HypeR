@@ -11,6 +11,18 @@ pub type HyperNativeStatus = i64;
 
 pub const HYPER_NATIVE_FEATURE_CORE: u64 = 1;
 
+pub const HYPER_NATIVE_STATUS_OK: HyperNativeStatus = 0;
+pub const HYPER_NATIVE_STATUS_INVALID_ARGUMENT: HyperNativeStatus = -1;
+pub const HYPER_NATIVE_STATUS_BAD_HANDLE: HyperNativeStatus = -2;
+pub const HYPER_NATIVE_STATUS_ACCESS_DENIED: HyperNativeStatus = -3;
+pub const HYPER_NATIVE_STATUS_NOT_SUPPORTED: HyperNativeStatus = -4;
+pub const HYPER_NATIVE_STATUS_NO_MEMORY: HyperNativeStatus = -5;
+pub const HYPER_NATIVE_STATUS_BAD_STATE: HyperNativeStatus = -6;
+pub const HYPER_NATIVE_STATUS_FAULT: HyperNativeStatus = -7;
+pub const HYPER_NATIVE_STATUS_RESOURCE_LIMIT: HyperNativeStatus = -8;
+pub const HYPER_NATIVE_STATUS_BUSY: HyperNativeStatus = -9;
+pub const HYPER_NATIVE_STATUS_INTERNAL: HyperNativeStatus = -10;
+
 pub const HYPER_NATIVE_OBJECT_NONE: u32 = 0;
 
 pub const HYPER_NATIVE_RIGHT_DUPLICATE: u64 = 1;

@@ -23,10 +23,17 @@ pub const SYSCALL_RESULT_REGISTERS: usize = 2;
 pub struct AbiSchema {
     pub revision: u64,
     pub features: &'static [Feature],
+    pub statuses: &'static [Status],
     pub object_kinds: &'static [ObjectKind],
     pub rights: &'static [Right],
     pub records: &'static [Record],
     pub syscalls: &'static [Syscall],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Status {
+    pub value: i64,
+    pub name: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -225,6 +232,53 @@ pub const FEATURES: &[Feature] = &[Feature {
     bit: 0,
     name: "core",
 }];
+
+pub const STATUSES: &[Status] = &[
+    Status {
+        value: 0,
+        name: "ok",
+    },
+    Status {
+        value: -1,
+        name: "invalid_argument",
+    },
+    Status {
+        value: -2,
+        name: "bad_handle",
+    },
+    Status {
+        value: -3,
+        name: "access_denied",
+    },
+    Status {
+        value: -4,
+        name: "not_supported",
+    },
+    Status {
+        value: -5,
+        name: "no_memory",
+    },
+    Status {
+        value: -6,
+        name: "bad_state",
+    },
+    Status {
+        value: -7,
+        name: "fault",
+    },
+    Status {
+        value: -8,
+        name: "resource_limit",
+    },
+    Status {
+        value: -9,
+        name: "busy",
+    },
+    Status {
+        value: -10,
+        name: "internal",
+    },
+];
 
 const RIGHT_DUPLICATE_BIT: u8 = 0;
 const RIGHT_INSPECT_BIT: u8 = 3;
@@ -580,6 +634,7 @@ pub const SYSCALLS: &[Syscall] = &[
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
     revision: ABI_REVISION,
     features: FEATURES,
+    statuses: STATUSES,
     object_kinds: OBJECT_KINDS,
     rights: RIGHTS,
     records: RECORDS,

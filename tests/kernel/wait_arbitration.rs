@@ -86,19 +86,22 @@ pub(super) fn run() -> Result<(), Error> {
 ///
 /// A completion semaphore publishes a worker's last shared-state access, but
 /// IRQ-tail preemption may resume bootstrap before that worker returns from its
-/// entry point. Thread count must therefore return to the immutable online CPU
-/// count before subsequent lifecycle tests inspect the scheduler registry.
+/// entry point. Quiescence requires one permanent idle Thread per admitted CPU
+/// plus the still-running bootstrap Thread before later lifecycle tests inspect
+/// the scheduler registry.
 fn quiesce_test_threads() -> Result<(), Error> {
     const MAX_REAP_PASSES: usize = 4_096;
 
     for _ in 0..MAX_REAP_PASSES {
         scheduler::yield_now()?;
         let stats = scheduler::statistics()?;
+        let online_cpus = crate::kernel::cpu::online_cpu_count();
         if stats.ready == 0
             && stats.blocked == 0
             && stats.migrating == 0
-            && stats.threads == crate::kernel::cpu::online_cpu_count()
-            && stats.threads == stats.running + stats.idle
+            && stats.running == 1
+            && stats.idle == online_cpus
+            && stats.threads == online_cpus.saturating_add(1)
         {
             return Ok(());
         }
@@ -138,11 +141,15 @@ fn exercise_timed_wait_paths() -> Result<(), Error> {
 
     // Moving the blocked Thread away from the timer's source CPU forces the
     // resumed waiter to retire the handle from a remote per-CPU queue.
-    if source != CpuIndex::BOOT
-        && scheduler::migrate_thread(worker, CpuIndex::BOOT)?
-            != scheduler::MigrationStatus::Completed
-    {
-        return Err(Error::StateMismatch(14));
+    if source != CpuIndex::BOOT {
+        // Queue publication may become visible before the source CPU's
+        // incoming switch tail releases `switching_from`. Both Completed and
+        // Pending mean the migration transaction was accepted; in the latter
+        // case that tail moves a concurrently awakened Ready thread before it
+        // can execute, preserving the remote timer-retirement proof.
+        match scheduler::migrate_thread(worker, CpuIndex::BOOT)? {
+            scheduler::MigrationStatus::Completed | scheduler::MigrationStatus::Pending => {}
+        }
     }
     if TIMED_QUEUE.wake_one()? != Some(worker) {
         return Err(Error::StateMismatch(15));

@@ -894,7 +894,10 @@ fn handle_external_interrupt() {
             super::interrupt_controller::end_local_interrupt();
             return;
         }
-        match crate::kernel::entry::irq::dispatch(hyper::hal::interrupt::InterruptId::new(vector)) {
+        match crate::kernel::entry::irq::dispatch(
+            hyper::hal::interrupt::InterruptId::new(vector),
+            None,
+        ) {
             crate::kernel::entry::irq::Action::Resume { postlude } => {
                 // VM exits remain cooperative until x86 provides a qualified
                 // IRQ-tail continuation and vCPU teardown boundary.

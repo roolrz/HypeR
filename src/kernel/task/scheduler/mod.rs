@@ -8,7 +8,6 @@ mod state;
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;
-use alloc::vec::Vec;
 use core::marker::PhantomData;
 
 use hyper::cpu::CpuIndex;
@@ -50,6 +49,49 @@ static SCHEDULER: SchedulerLock = InterruptSpinLock::new(None);
 pub(in crate::kernel) struct DormantVcpuThread {
     thread: ThreadId,
     rollback: bool,
+}
+
+/// Scheduler ownership of one non-runnable, unpublished user Thread.
+pub(in crate::kernel) struct DormantUserThread {
+    thread: ThreadId,
+    rollback: bool,
+}
+
+impl DormantUserThread {
+    pub(in crate::kernel) const fn id(&self) -> ThreadId {
+        self.thread
+    }
+
+    /// Arms explicit reaper retirement and ends rollback before Process
+    /// membership performs its final publication.
+    pub(in crate::kernel) fn commit_before_process_publication(mut self) {
+        let result = SCHEDULER.with(|slot| {
+            slot.as_mut()
+                .ok_or(Error::NotInitialized)?
+                .arm_dormant_user(self.thread)
+        });
+        if result.is_err() {
+            crate::hal::cpu::halt();
+        }
+        self.rollback = false;
+    }
+}
+
+impl Drop for DormantUserThread {
+    fn drop(&mut self) {
+        if !self.rollback {
+            return;
+        }
+        let thread = match SCHEDULER.with(|slot| {
+            slot.as_mut()
+                .ok_or(Error::NotInitialized)?
+                .take_dormant_user(self.thread)
+        }) {
+            Ok(thread) => thread,
+            Err(_) => crate::hal::cpu::halt(),
+        };
+        drop(thread);
+    }
 }
 
 impl DormantVcpuThread {
@@ -108,6 +150,7 @@ pub enum Error {
     AlreadyInitialized,
     NotInitialized,
     Allocation,
+    ThreadLimit,
     IdentifierExhausted,
     CurrentThreadMissing,
     ThreadNotFound,
@@ -119,6 +162,7 @@ pub enum Error {
     CannotSleepWithInterruptsMasked,
     CannotSleepWithPreemptionDisabled,
     IrqTailRequiresInterruptsMasked,
+    UserRunRequiresInterruptsEnabled,
     InvalidThreadState,
     IdleThreadAlreadyInstalled,
     InvalidIdleTransition,
@@ -150,7 +194,8 @@ impl From<super::preempt::Error> for Error {
             | super::preempt::Error::DisableDepthUnderflow
             | super::preempt::Error::IrqDepthOverflow
             | super::preempt::Error::IrqDepthUnderflow
-            | super::preempt::Error::WrongCpu => Self::PreemptionInvariant,
+            | super::preempt::Error::WrongCpu
+            | super::preempt::Error::AlreadyDisabled => Self::PreemptionInvariant,
         }
     }
 }
@@ -176,6 +221,13 @@ pub struct SecondaryStack {
 pub(crate) struct CurrentVcpu {
     pub thread: ThreadId,
     pub execution: *mut VcpuExecution,
+    pub stack: (usize, usize),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CurrentUser {
+    pub thread: ThreadId,
+    pub execution: *mut crate::kernel::process::UserExecution,
     pub stack: (usize, usize),
 }
 
@@ -480,6 +532,15 @@ pub(crate) fn thread_placement(id: ThreadId) -> Result<(CpuIndex, CpuMask), Erro
 }
 
 #[cfg(feature = "kernel-self-test")]
+pub(crate) fn registry_slot_count() -> Result<usize, Error> {
+    SCHEDULER.with(|slot| {
+        slot.as_ref()
+            .ok_or(Error::NotInitialized)
+            .map(Scheduler::registry_slot_count)
+    })
+}
+
+#[cfg(feature = "kernel-self-test")]
 pub(crate) fn discard_dormant_kernel_thread(id: ThreadId) -> Result<(), Error> {
     let thread = SCHEDULER.with(|slot| {
         slot.as_mut()
@@ -490,14 +551,10 @@ pub(crate) fn discard_dormant_kernel_thread(id: ThreadId) -> Result<(), Error> {
     Ok(())
 }
 
-/// Ensures the next self-test Thread reservation cannot grow registry backing.
-///
-/// Runtime callers use the normal fallible growth path. Stack accounting tests
-/// call this only after exercising dormant Thread destruction so persistent
-/// scheduler metadata is outside their page-ownership measurement window.
+/// Confirms that scheduler registry backing was prepared during initialization.
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn prepare_thread_accounting_probe() -> Result<(), Error> {
-    ensure_thread_registry_capacity()
+    SCHEDULER.with(|slot| slot.as_ref().map(|_| ()).ok_or(Error::NotInitialized))
 }
 
 pub(in crate::kernel) fn vcpu_create(
@@ -532,48 +589,61 @@ pub(in crate::kernel) fn vcpu_create(
     })
 }
 
+pub(in crate::kernel) fn prepare_user_thread(
+    name: &str,
+    execution: alloc::boxed::Box<crate::kernel::process::UserExecution>,
+    entry: KernelThreadEntry,
+    affinity: CpuMask,
+) -> Result<DormantUserThread, Error> {
+    let cpu = current_cpu()?;
+    let reservation = reserve_thread(|scheduler| scheduler.reserve_kernel_thread(cpu, affinity))?;
+    let id = reservation.id();
+    let thread = match prepare_boxed_thread(Thread::user(
+        id,
+        reservation.cpu(),
+        affinity,
+        name,
+        execution,
+        entry,
+    )) {
+        Ok(thread) => thread,
+        Err(error) => {
+            abandon_reservation(reservation)?;
+            return Err(error);
+        }
+    };
+    publish_thread(reservation, thread)?;
+    Ok(DormantUserThread {
+        thread: id,
+        rollback: true,
+    })
+}
+
+pub(in crate::kernel) fn request_user_thread_stop(
+    id: ThreadId,
+    reason: crate::kernel::process::TerminalReason,
+) -> Result<(), Error> {
+    let target = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .request_user_stop(id, reason)
+    })?;
+    if let Some(cpu) = target {
+        request_reschedule(cpu)?;
+    }
+    Ok(())
+}
+
 fn prepare_boxed_thread(
     thread: Result<Thread, super::thread::Error>,
 ) -> Result<Box<Thread>, Error> {
     hyper::mm::try_box(thread?).map_err(|_| Error::Allocation)
 }
 
-/// Grows the identity registry without allocating while the scheduler lock is held.
-fn ensure_thread_registry_capacity() -> Result<(), Error> {
-    loop {
-        let target = SCHEDULER.with(|slot| {
-            slot.as_ref()
-                .ok_or(Error::NotInitialized)
-                .map(Scheduler::registry_growth_target)
-        })?;
-        let Some(target) = target else {
-            return Ok(());
-        };
-        let mut replacement = Vec::new();
-        replacement
-            .try_reserve(target)
-            .map_err(|_| Error::Allocation)?;
-        let unused = SCHEDULER.with(|slot| {
-            slot.as_mut()
-                .ok_or(Error::NotInitialized)
-                .map(|scheduler| scheduler.install_registry_storage(replacement))
-        })?;
-        drop(unused);
-    }
-}
-
 fn reserve_thread(
     reserve: impl Fn(&mut Scheduler) -> Result<ThreadReservation, Error>,
 ) -> Result<ThreadReservation, Error> {
-    loop {
-        ensure_thread_registry_capacity()?;
-        match SCHEDULER.with(|slot| reserve(slot.as_mut().ok_or(Error::NotInitialized)?)) {
-            // Another CPU may consume the last slot between capacity check and
-            // reservation. Grow/retry without exposing a partial identity.
-            Err(Error::Allocation) => {}
-            result => return result,
-        }
-    }
+    SCHEDULER.with(|slot| reserve(slot.as_mut().ok_or(Error::NotInitialized)?))
 }
 
 fn publish_thread(mut reservation: ThreadReservation, thread: Box<Thread>) -> Result<(), Error> {
@@ -651,6 +721,19 @@ pub(crate) fn current_vcpu() -> Result<CurrentVcpu, Error> {
     })
 }
 
+/// Returns the pinned native-user payload owned by the current Thread.
+///
+/// The dedicated guard proves that the raw pointer cannot migrate or be
+/// reclaimed until the caller closes its machine-active borrow.
+pub(crate) fn current_user(_pin: &UserRunGuard) -> Result<CurrentUser, Error> {
+    let cpu = current_cpu()?;
+    SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .current_user(cpu)
+    })
+}
+
 /// Returns the pinned vCPU payload when the current Thread owns one.
 ///
 /// This does not borrow or publish the execution. The raw owner pointer is
@@ -670,6 +753,31 @@ pub(crate) fn current_vcpu_if_present() -> Result<Option<CurrentVcpu>, Error> {
 pub fn thread_ready(id: ThreadId) -> Result<bool, Error> {
     let outcome =
         SCHEDULER.with(|slot| slot.as_mut().ok_or(Error::NotInitialized)?.make_ready(id))?;
+    publish_ready_outcome(outcome)?;
+    Ok(outcome.changed)
+}
+
+/// Publishes native-user lifecycle and scheduler readiness as one transaction.
+pub(in crate::kernel) fn ready_user_thread(id: ThreadId) -> Result<bool, Error> {
+    let outcome = SCHEDULER.with(|slot| {
+        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+        let thread = scheduler.thread(id)?;
+        if !matches!(
+            thread.state(),
+            ThreadState::Dormant | ThreadState::Ready | ThreadState::Running
+        ) {
+            return Err(Error::InvalidThreadState);
+        }
+        let execution = thread.user_execution().ok_or(Error::InvalidThreadState)?;
+        execution
+            .thread()
+            .mark_runnable()
+            .map_err(|_| Error::InvalidThreadState)?;
+        match scheduler.make_ready(id) {
+            Ok(outcome) => Ok(outcome),
+            Err(_) => crate::hal::cpu::halt(),
+        }
+    })?;
     publish_ready_outcome(outcome)?;
     Ok(outcome.changed)
 }
@@ -842,6 +950,38 @@ fn cond_resched_inner() -> Result<bool, Error> {
 #[must_use = "dropping the guard restores preemption without scheduling"]
 pub struct PreemptionGuard(super::preempt::PreemptionGuard);
 
+// SAFETY: The underlying per-CPU disable-depth owner prevents every scheduler
+// preemption point from migrating this context until the guard is released.
+unsafe impl hyper::cpu::PinnedExecution for PreemptionGuard {}
+
+/// Exclusive preemption level used by a native-user machine run.
+///
+/// Unlike a generic guard this can be created only from depth zero, making
+/// the IRQ-tail `depth == 1` unwind rule exact and auditable.
+#[must_use = "native-user pinning must span active translation and machine state"]
+pub(crate) struct UserRunGuard(super::preempt::PreemptionGuard);
+
+// SAFETY: Construction atomically changes the current CPU's disable depth
+// from zero to one while IRQs are masked. The guard cannot move safely between
+// Rust threads and its underlying token rejects release on a different CPU.
+unsafe impl hyper::cpu::PinnedExecution for UserRunGuard {}
+
+pub(crate) fn user_run_guard() -> Result<UserRunGuard, Error> {
+    if !crate::hal::irq::local_enabled() {
+        return Err(Error::UserRunRequiresInterruptsEnabled);
+    }
+    super::preempt::disable_for_user_run()
+        .map(UserRunGuard)
+        .map_err(Into::into)
+}
+
+pub(crate) fn finish_user_run(guard: UserRunGuard) -> Result<bool, Error> {
+    if !guard.0.release()? {
+        return Err(Error::PreemptionInvariant);
+    }
+    cond_resched()
+}
+
 /// Prevents asynchronous scheduling while CPU-local state is borrowed.
 pub fn preempt_disable() -> Result<PreemptionGuard, Error> {
     super::preempt::disable()
@@ -858,19 +998,6 @@ pub fn preempt_enable_and_reschedule(guard: PreemptionGuard) -> Result<bool, Err
     }
 }
 
-pub fn thread_become_idle() -> ! {
-    crate::hal::irq::mask_local();
-    let stack = match install_current_idle() {
-        Ok(stack) => stack,
-        Err(error) => crate::kernel::crash::fatal(format_args!(
-            "HypeR: idle-thread installation failed: {error:?}"
-        )),
-    };
-    // SAFETY: The current Thread exclusively owns this newly installed stack,
-    // local interrupts are masked, and the idle continuation never returns.
-    unsafe { crate::kernel::mm::stack::reset_and_enter(stack, enter_clean_idle, 0) }
-}
-
 pub(crate) fn install_current_idle() -> Result<(usize, usize), Error> {
     let cpu = current_cpu()?;
     SCHEDULER.with(|slot| {
@@ -883,6 +1010,10 @@ pub(crate) fn install_current_idle() -> Result<(usize, usize), Error> {
 extern "C" fn enter_clean_idle(_argument: usize) -> ! {
     crate::hal::irq::enable_local();
     run_idle_loop()
+}
+
+extern "C" fn idle_thread_entry(argument: usize) {
+    enter_clean_idle(argument)
 }
 
 pub(crate) fn run_idle_loop() -> ! {
@@ -1223,11 +1354,21 @@ fn reap_terminated_threads() -> Result<(), Error> {
                 .ok_or(Error::NotInitialized)?
                 .detach_terminated()
         })?;
-        let Some(thread) = thread else {
+        let Some(mut thread) = thread else {
             return Ok(());
         };
+        if let Some(execution) = thread.take_user_execution() {
+            drop(thread);
+            (*execution).complete_detach();
+            continue;
+        }
         drop(thread);
     }
+}
+
+/// Terminates the current non-idle kernel Thread and schedules a successor.
+pub(crate) fn exit_current() -> ! {
+    kernel_thread_exit()
 }
 
 #[unsafe(no_mangle)]

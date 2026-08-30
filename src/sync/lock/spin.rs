@@ -33,6 +33,11 @@ impl<T> SpinLock<T> {
         }
     }
 
+    /// Extracts the protected value from an exclusively owned lock.
+    pub fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+
     pub fn with<R>(&self, operation: impl FnOnce(&mut T) -> R) -> R {
         self.with_relax(operation, spin_loop)
     }

@@ -138,6 +138,8 @@ runtime_contract_is_ready() {
         fi &&
         grep -q 'HypeR test: guarded thread, IRQ, and emergency stacks passed' "$log" &&
         grep -q 'HypeR test: fatal-path readiness contract passed' "$log" &&
+        grep -q 'HypeR test: Native syscall validation passed' "$log" &&
+        grep -q 'HypeR test: AArch64 EL0 syscall and fault containment passed' "$log" &&
         reschedule_ipi_proof_is_valid &&
         grep -q 'HypeR test: checked stage-2 guest-memory copies passed' "$log" &&
         grep -q 'HypeR test: checked application-memory copies passed' "$log" &&
@@ -160,7 +162,7 @@ runtime_contract_is_ready() {
         grep -q "HypeR: loaded VM 'alpine' from boot ramdisk: 128 MiB RAM, 1 vCPU(s)" "$log" &&
         demand_paging_is_lazy &&
         grep -q 'HypeR: memory (guest prepared): [1-9][0-9]* MiB RAM, [1-9][0-9]* reserved pages, [1-9][0-9]* managed pages' "$log" &&
-        grep -q 'HypeR: page owners: guest [1-9][0-9]* (peak [1-9][0-9]*), page tables [1-9][0-9]*, kernel [1-9][0-9]*, heap [1-9][0-9]*' "$log" &&
+        grep -q 'HypeR: page owners: guest [1-9][0-9]* (peak [1-9][0-9]*), user [0-9][0-9]*, page tables [1-9][0-9]*, kernel [1-9][0-9]*, heap [1-9][0-9]*' "$log" &&
         grep -q 'HypeR: kernel initialization complete; starting Linux guest' "$log" &&
         grep -q 'HypeR: vCPU 0 running as scheduler thread [1-9][0-9]* on guarded stack 0x[0-9a-f][0-9a-f]*-0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR test: AArch64 guest-entry IRQ mask contract passed' "$log" &&

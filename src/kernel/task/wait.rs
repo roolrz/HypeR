@@ -272,6 +272,15 @@ impl WaitRecord {
         matches!(self.phase, WaitPhase::Idle)
     }
 
+    pub(super) fn current_ticket(&self, thread: ThreadId) -> Option<WaitTicket> {
+        match self.phase {
+            WaitPhase::Queued { generation, .. }
+            | WaitPhase::Armed { generation, .. }
+            | WaitPhase::Completed { generation, .. } => Some(WaitTicket { thread, generation }),
+            WaitPhase::Idle => None,
+        }
+    }
+
     fn require_ticket(&self, ticket: WaitTicket) -> Result<(), WaitRecordError> {
         if ticket.generation == self.generation {
             Ok(())
@@ -385,7 +394,7 @@ mod tests {
 
     #[test]
     fn exact_ticket_selects_only_one_outcome() {
-        let thread = ThreadId::from_scheduler_index(7);
+        let thread = ThreadId::for_test(7);
         let mut wait = WaitRecord::NEW;
         let ticket = match wait.arm(thread, WaitMobility::Migratable, cpu(0)) {
             Ok(ticket) => ticket,
@@ -408,7 +417,7 @@ mod tests {
 
     #[test]
     fn stale_ticket_cannot_resolve_reused_queue() {
-        let thread = ThreadId::from_scheduler_index(11);
+        let thread = ThreadId::for_test(11);
         let mut wait = WaitRecord::NEW;
         let stale = match wait.arm(thread, WaitMobility::Migratable, cpu(0)) {
             Ok(ticket) => ticket,
@@ -428,7 +437,7 @@ mod tests {
 
     #[test]
     fn cpu_local_constraint_applies_while_armed_and_queued() {
-        let thread = ThreadId::from_scheduler_index(19);
+        let thread = ThreadId::for_test(19);
         let mut wait = WaitRecord::NEW;
         let ticket = match wait.arm(thread, WaitMobility::CpuLocal, cpu(0)) {
             Ok(ticket) => ticket,

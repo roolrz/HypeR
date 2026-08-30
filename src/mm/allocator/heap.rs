@@ -82,10 +82,11 @@ pub enum PageOwner {
     Kernel = 0,
     PageTable = 1,
     Guest = 2,
+    User = 3,
 }
 
 impl PageOwner {
-    const COUNT: usize = 3;
+    const COUNT: usize = 4;
 
     const fn index(self) -> usize {
         self as usize
@@ -119,6 +120,7 @@ pub struct HeapStats {
     pub kernel_pages: PageOwnerStats,
     pub page_table_pages: PageOwnerStats,
     pub guest_pages: PageOwnerStats,
+    pub user_pages: PageOwnerStats,
 }
 
 #[repr(C)]
@@ -649,6 +651,7 @@ impl SlabAllocator {
             kernel_pages: self.page_owners[PageOwner::Kernel.index()],
             page_table_pages: self.page_owners[PageOwner::PageTable.index()],
             guest_pages: self.page_owners[PageOwner::Guest.index()],
+            user_pages: self.page_owners[PageOwner::User.index()],
         }
     }
 

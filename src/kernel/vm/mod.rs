@@ -138,7 +138,7 @@ pub(crate) fn start_default() -> Result<Infallible, StartError> {
         }
     };
     crate::println!("HypeR: Linux boot vCPU scheduled as thread {}", vcpu.get());
-    super::task::scheduler::thread_become_idle()
+    super::task::scheduler::exit_current()
 }
 
 pub(crate) fn handle_guest_sync(frame: &mut crate::hal::vm::LegacySyncFrame<'_>) -> bool {

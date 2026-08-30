@@ -1,83 +1,63 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Exercises the application-memory capability copy boundary.
+//! Exercises production native-page allocation and typed user-copy plumbing.
 
-use hyper::mm::ForeignMemory;
+use hyper::mm::PAGE_SIZE;
 
-use crate::kernel::mm::{AddressSpaceId, UserAddressSpace, copy_from_user, copy_to_user};
+use crate::kernel::accounting::{ResourceDomain, ResourceLimits};
+use crate::kernel::mm::user_space::{
+    DomainAccount, KernelPageBackend, Permissions, UserAddress, UserAddressSpace, UserSlice,
+    WritableVmo, address_window,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
+    Contract,
     Copy,
     Payload,
 }
 
-struct TestAddressSpace {
-    bytes: [u8; 64],
-}
-
-impl ForeignMemory for TestAddressSpace {
-    type Error = Error;
-
-    fn address_base(&self) -> u64 {
-        0x20_0000
-    }
-
-    fn address_size(&self) -> u64 {
-        self.bytes.len() as u64
-    }
-
-    fn page_size(&self) -> usize {
-        16
-    }
-
-    fn read_page(
-        &mut self,
-        page_index: usize,
-        page_offset: usize,
-        destination: &mut [u8],
-    ) -> Result<(), Self::Error> {
-        let start = page_index * self.page_size() + page_offset;
-        let source = self
-            .bytes
-            .get(start..start + destination.len())
-            .ok_or(Error::Copy)?;
-        destination.copy_from_slice(source);
-        Ok(())
-    }
-
-    fn write_page(
-        &mut self,
-        page_index: usize,
-        page_offset: usize,
-        source: &[u8],
-    ) -> Result<(), Self::Error> {
-        let start = page_index * self.page_size() + page_offset;
-        let destination = self
-            .bytes
-            .get_mut(start..start + source.len())
-            .ok_or(Error::Copy)?;
-        destination.copy_from_slice(source);
-        Ok(())
-    }
-}
-
-impl UserAddressSpace for TestAddressSpace {
-    fn id(&self) -> AddressSpaceId {
-        AddressSpaceId(7)
-    }
-}
-
 pub(super) fn run() -> Result<(), Error> {
-    let mut address_space = TestAddressSpace { bytes: [0; 64] };
-    let payload = *b"checked app-memory boundary";
-    copy_to_user(&mut address_space, 0x20_000d, &payload).map_err(|_| Error::Copy)?;
+    let domain =
+        ResourceDomain::try_new_root(ResourceLimits::UNLIMITED).map_err(|_| Error::Contract)?;
+    let account = DomainAccount::new(domain);
+    let backend = KernelPageBackend;
+    let window = address_window().map_err(|_| Error::Contract)?;
+    let range =
+        UserSlice::new(UserAddress::new(0x20_0000), PAGE_SIZE).map_err(|_| Error::Contract)?;
+    let address_space = UserAddressSpace::try_new(window, range, backend, account.clone())
+        .map_err(|_| Error::Contract)?;
+    let vmo = WritableVmo::try_new(PAGE_SIZE, backend, account).map_err(|_| Error::Contract)?;
+    vmo.populate(0, PAGE_SIZE).map_err(|_| Error::Contract)?;
+    let prepared = address_space
+        .prepare_map_writable(
+            address_space.root_vmar(),
+            range,
+            vmo,
+            0,
+            Permissions::read_write(),
+            Permissions::read_write(),
+        )
+        .map_err(|_| Error::Contract)?;
+    let committed = prepared.commit_for_test().map_err(|_| Error::Contract)?;
+    // SAFETY: This portable self-test never installs the logical mapping into
+    // a machine translation root, so there is no TLB-visible retired epoch.
+    unsafe { committed.complete_retirement_for_test() };
 
+    let payload = *b"checked app-memory boundary";
+    let copy_range = UserSlice::new(UserAddress::new(0x20_000d), payload.len() as u64)
+        .map_err(|_| Error::Contract)?;
+    address_space
+        .copy_to_user(copy_range, &payload)
+        .map_err(|_| Error::Copy)?;
     let mut copied = [0; 27];
-    copy_from_user(&mut address_space, 0x20_000d, &mut copied).map_err(|_| Error::Copy)?;
-    if address_space.id() != AddressSpaceId(7) || copied != payload {
+    address_space
+        .copy_from_user(copy_range, &mut copied)
+        .map_err(|_| Error::Copy)?;
+    if copied != payload {
         return Err(Error::Payload);
     }
+    crate::kernel::mm::user_space::run_dormant_self_test().map_err(|_| Error::Contract)?;
     Ok(())
 }

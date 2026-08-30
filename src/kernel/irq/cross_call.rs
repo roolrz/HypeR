@@ -7,9 +7,12 @@
 //! missing acknowledgement is ambiguous, so the transport poisons itself and
 //! enters fail-stop instead of reusing payload storage under a late handler.
 
+use core::cell::UnsafeCell;
+
 use hyper::cpu::{CpuIndex, PerCpu};
 use hyper::hal::interrupt::{InterruptId, InterruptPriority, InterruptTrigger, KernelRpcReasons};
-use hyper::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use hyper::sync::GenerationTaggedState;
+use hyper::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 const TIMEOUT_NS: u64 = 1_000_000_000;
 const IDLE: u8 = 0;
@@ -20,16 +23,26 @@ const REJECTED: u8 = 4;
 const APPLIED_OR_UNKNOWN: u8 = 5;
 
 static OWNER: AtomicBool = AtomicBool::new(false);
-static READY: AtomicBool = AtomicBool::new(false);
+static PUBLISHED_GENERATION: AtomicU32 = AtomicU32::new(0);
 static POISONED: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU32 = AtomicU32::new(0);
 static OPCODE: AtomicU8 = AtomicU8::new(0);
 static ARGUMENT0: AtomicU32 = AtomicU32::new(0);
 static ARGUMENT1: AtomicU8 = AtomicU8::new(0);
 static ARGUMENT2: AtomicU8 = AtomicU8::new(0);
-static STATUS: PerCpu<AtomicU8> =
-    PerCpu::new([const { AtomicU8::new(IDLE) }; hyper::cpu::MAX_CPUS]);
+static STATUS: PerCpu<AtomicU64> = PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 static ACK: PerCpu<AtomicU32> = PerCpu::new([const { AtomicU32::new(0) }; hyper::cpu::MAX_CPUS]);
+
+struct UserAddressSpacePayload(UnsafeCell<Option<UserAddressSpaceCall>>);
+
+// SAFETY: OWNER serializes publishers. PUBLISHED_GENERATION Release/Acquire
+// publishes the payload to handlers, while generation-tagged STATUS prevents
+// a delayed handler from claiming a later request. The publisher waits for
+// every target acknowledgement before clearing or replacing the payload.
+unsafe impl Sync for UserAddressSpacePayload {}
+
+static USER_ADDRESS_SPACE_PAYLOAD: UserAddressSpacePayload =
+    UserAddressSpacePayload(UnsafeCell::new(None));
 
 #[derive(Clone, Copy)]
 pub(crate) enum LocalIrqOperation {
@@ -46,6 +59,38 @@ pub(crate) enum KernelRpc {
         trigger: InterruptTrigger,
         operation: LocalIrqOperation,
     },
+    UserAddressSpace(UserAddressSpaceCall),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct UserAddressSpaceCall {
+    owner: u64,
+    epoch: u64,
+    new_epoch: u64,
+    active_target: bool,
+    expected_active: crate::hal::user::LocalIdentity,
+    request: crate::hal::user::LocalRequest,
+}
+
+pub(crate) enum UserAddressSpaceOperation<'root> {
+    Replace(&'root crate::hal::user::PreparedAddressSpace),
+    Invalidate(&'root crate::hal::user::PreparedAddressSpace),
+}
+
+pub(crate) struct UserAddressSpaceExecution<'root> {
+    pub(crate) owner: u64,
+    pub(crate) epoch: u64,
+    pub(crate) new_epoch: u64,
+    pub(crate) active_target: bool,
+    pub(crate) expected: &'root crate::hal::user::PreparedAddressSpace,
+    pub(crate) operation: UserAddressSpaceOperation<'root>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LocalApply {
+    Applied,
+    Rejected,
+    AppliedOrUnknown,
 }
 
 pub(crate) struct Outcome {
@@ -67,9 +112,57 @@ impl Owner {
     }
 }
 
+/// Linear reservation for a multi-phase user-translation transaction.
+///
+/// Acquiring this before logical publication makes ordinary transport
+/// contention recoverable. Once publication occurs, every execution either
+/// acknowledges or enters fail-stop without releasing retained roots.
+pub(crate) struct UserAddressSpaceTransaction {
+    _owner: Owner,
+}
+
+impl UserAddressSpaceTransaction {
+    pub(crate) fn try_acquire() -> Result<Self, ()> {
+        Owner::acquire().map(|owner| Self { _owner: owner })
+    }
+
+    pub(crate) fn execute(
+        &mut self,
+        execution: UserAddressSpaceExecution<'_>,
+        count: usize,
+        targets: &[bool; hyper::cpu::MAX_CPUS],
+    ) -> Outcome {
+        // SAFETY: Both roots are borrowed through this synchronous execution,
+        // and the transaction cannot release the mailbox until every target
+        // acknowledged or fail-stop prevented normal return.
+        let request = unsafe {
+            match execution.operation {
+                UserAddressSpaceOperation::Replace(root) => root.replace_request(),
+                UserAddressSpaceOperation::Invalidate(root) => root.invalidate_request(),
+            }
+        };
+        let call = UserAddressSpaceCall {
+            owner: execution.owner,
+            epoch: execution.epoch,
+            new_epoch: execution.new_epoch,
+            active_target: execution.active_target,
+            expected_active: execution.expected.local_identity(),
+            request,
+        };
+        match execute_owned(KernelRpc::UserAddressSpace(call), count, targets) {
+            Ok(outcome) => outcome,
+            Err(()) => poison("reserved user-address-space RPC failed"),
+        }
+    }
+}
+
 impl Drop for Owner {
     fn drop(&mut self) {
-        READY.store(false, Ordering::Release);
+        PUBLISHED_GENERATION.store(0, Ordering::Release);
+        // SAFETY: This owner observed every target acknowledgement before a
+        // normal return. A zero published generation excludes new claims, and
+        // generation-tagged status rejects every delayed old claim.
+        unsafe { *USER_ADDRESS_SPACE_PAYLOAD.0.get() = None };
         OWNER.store(false, Ordering::Release);
     }
 }
@@ -80,6 +173,14 @@ pub(crate) fn execute(
     targets: &[bool; hyper::cpu::MAX_CPUS],
 ) -> Result<Outcome, ()> {
     let _owner = Owner::acquire()?;
+    execute_owned(rpc, count, targets)
+}
+
+fn execute_owned(
+    rpc: KernelRpc,
+    count: usize,
+    targets: &[bool; hyper::cpu::MAX_CPUS],
+) -> Result<Outcome, ()> {
     let generation = match GENERATION.load(Ordering::Relaxed).checked_add(1) {
         Some(generation) if generation != 0 => generation,
         _ => poison("kernel RPC generation exhausted"),
@@ -90,17 +191,18 @@ pub(crate) fn execute(
         let Some(cpu) = CpuIndex::new(cpu) else {
             continue;
         };
+        let state = if cpu.get() < count && targeted {
+            PENDING
+        } else {
+            IDLE
+        };
         STATUS[cpu].store(
-            if cpu.get() < count && targeted {
-                PENDING
-            } else {
-                IDLE
-            },
+            GenerationTaggedState::new(generation, state).bits(),
             Ordering::Relaxed,
         );
         ACK[cpu].store(0, Ordering::Relaxed);
     }
-    READY.store(true, Ordering::Release);
+    PUBLISHED_GENERATION.store(generation, Ordering::Release);
     service_local_irq_mailbox();
 
     let current = crate::kernel::cpu::current_index();
@@ -111,7 +213,11 @@ pub(crate) fn execute(
         if !targeted || Some(cpu) == current {
             continue;
         }
-        if !crate::hal::irq::notify_kernel_rpc(cpu, KernelRpcReasons::LOCAL_IRQ_LIFECYCLE) {
+        let reason = match rpc {
+            KernelRpc::LocalIrqLifecycle { .. } => KernelRpcReasons::LOCAL_IRQ_LIFECYCLE,
+            KernelRpc::UserAddressSpace(_) => KernelRpcReasons::USER_ADDRESS_SPACE,
+        };
+        if !crate::hal::irq::notify_kernel_rpc(cpu, reason) {
             poison("kernel RPC route rejected");
         }
     }
@@ -131,9 +237,17 @@ pub(crate) fn execute(
         Ok(true) => {}
         Ok(false) | Err(_) => poison("kernel RPC acknowledgement timed out"),
     }
-    READY.store(false, Ordering::Release);
+    PUBLISHED_GENERATION.store(0, Ordering::Release);
     let mut rejected_cpu = None;
-    let mut ambiguous_cpu = None;
+    let mut ambiguous_cpu = match rpc {
+        KernelRpc::UserAddressSpace(_) => targets
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(count)
+            .find_map(|(index, targeted)| targeted.then_some(index)),
+        KernelRpc::LocalIrqLifecycle { .. } => None,
+    };
     for (index, targeted) in targets.iter().copied().enumerate().take(count) {
         if !targeted {
             continue;
@@ -141,7 +255,12 @@ pub(crate) fn execute(
         let Some(cpu) = CpuIndex::new(index) else {
             continue;
         };
-        match STATUS[cpu].load(Ordering::Acquire) {
+        let status = GenerationTaggedState::from_bits(STATUS[cpu].load(Ordering::Acquire));
+        let status = match status.state_for(generation) {
+            Some(status) => status,
+            None => poison("kernel RPC completion generation is inconsistent"),
+        };
+        match status {
             APPLIED => {}
             REJECTED => {
                 if rejected_cpu.is_none() {
@@ -177,37 +296,62 @@ pub(crate) fn service() {
         if reasons.contains(KernelRpcReasons::LOCAL_IRQ_LIFECYCLE) {
             service_local_irq_mailbox();
         }
+        if reasons.contains(KernelRpcReasons::USER_ADDRESS_SPACE) {
+            service_local_irq_mailbox();
+        }
     }
 }
 
 fn service_local_irq_mailbox() {
-    if !READY.load(Ordering::Acquire) {
+    let generation = PUBLISHED_GENERATION.load(Ordering::Acquire);
+    if generation == 0 {
         return;
     }
     let Some(cpu) = crate::kernel::cpu::current_index() else {
         return;
     };
     if STATUS[cpu]
-        .compare_exchange(PENDING, WORKING, Ordering::Acquire, Ordering::Relaxed)
+        .compare_exchange(
+            GenerationTaggedState::new(generation, PENDING).bits(),
+            GenerationTaggedState::new(generation, WORKING).bits(),
+            Ordering::Acquire,
+            Ordering::Relaxed,
+        )
         .is_err()
     {
         return;
     }
-    let generation = GENERATION.load(Ordering::Acquire);
     let outcome = match decode() {
         KernelRpc::LocalIrqLifecycle {
             hardware,
             priority,
             trigger,
             operation,
-        } => super::interrupt::apply_local_irq_lifecycle(hardware, priority, trigger, operation),
+        } => match super::interrupt::apply_local_irq_lifecycle(
+            hardware, priority, trigger, operation,
+        ) {
+            super::interrupt::LocalLifecycleApply::Applied => LocalApply::Applied,
+            super::interrupt::LocalLifecycleApply::Rejected => LocalApply::Rejected,
+            super::interrupt::LocalLifecycleApply::AppliedOrUnknown => LocalApply::AppliedOrUnknown,
+        },
+        KernelRpc::UserAddressSpace(request) => crate::kernel::mm::user_space::service_local_rpc(
+            request.owner,
+            request.epoch,
+            request.new_epoch,
+            request.active_target,
+            request.expected_active,
+            request.request,
+        ),
     };
     let status = match outcome {
-        super::interrupt::LocalLifecycleApply::Applied => APPLIED,
-        super::interrupt::LocalLifecycleApply::Rejected => REJECTED,
-        super::interrupt::LocalLifecycleApply::AppliedOrUnknown => APPLIED_OR_UNKNOWN,
+        LocalApply::Applied => APPLIED,
+        LocalApply::Rejected => REJECTED,
+        LocalApply::AppliedOrUnknown => APPLIED_OR_UNKNOWN,
     };
-    STATUS[cpu].store(status, Ordering::Relaxed);
+    STATUS[cpu].store(
+        GenerationTaggedState::new(generation, status).bits(),
+        Ordering::Relaxed,
+    );
     ACK[cpu].store(generation, Ordering::Release);
 }
 
@@ -224,11 +368,28 @@ fn publish(rpc: KernelRpc) {
             ARGUMENT2.store(encode_trigger(trigger), Ordering::Relaxed);
             OPCODE.store(encode_operation(operation), Ordering::Relaxed);
         }
+        KernelRpc::UserAddressSpace(request) => {
+            // SAFETY: The unique OWNER writes while no generation is
+            // published. The payload is Copy and remains immutable until all
+            // targets acknowledge the following generation publication.
+            unsafe { *USER_ADDRESS_SPACE_PAYLOAD.0.get() = Some(request) };
+            OPCODE.store(3, Ordering::Relaxed);
+        }
     }
 }
 
 fn decode() -> KernelRpc {
     let opcode = OPCODE.load(Ordering::Relaxed);
+    if opcode == 3 {
+        // SAFETY: PUBLISHED_GENERATION Acquire precedes the exact-generation
+        // status claim, and the publishing OWNER keeps this Copy payload
+        // immutable until this CPU acknowledges completion.
+        let payload = unsafe { *USER_ADDRESS_SPACE_PAYLOAD.0.get() };
+        return match payload {
+            Some(request) => KernelRpc::UserAddressSpace(request),
+            None => poison("kernel RPC user-address-space payload is missing"),
+        };
+    }
     KernelRpc::LocalIrqLifecycle {
         hardware: InterruptId::new(ARGUMENT0.load(Ordering::Relaxed)),
         priority: decode_priority(ARGUMENT1.load(Ordering::Relaxed)),
