@@ -64,7 +64,7 @@ mutate 'compensated local rejection lost its recoverable activation path' src/ke
 mutate 'final removal without Disabling publication was accepted' src/kernel/irq/interrupt.rs \
     '/^pub fn unregister(/,/^}/s/MappingLifecycle::Disabling/MappingLifecycle::Active/'
 mutate 'Prepared dispatch mutation was accepted' src/kernel/irq/interrupt.rs \
-    '/^    fn dispatch_one(/,/^    }/s/== MappingLifecycle::Prepared/== MappingLifecycle::Enabling/'
+    '/^    fn dispatch_one(/,/^    }/s/MappingLifecycle::Prepared =>/MappingLifecycle::Enabling =>/'
 mutate 'non-Active local enable mutation was accepted' src/kernel/irq/interrupt.rs \
     '/^    fn set_local_enabled(/,/^    }/s/!= MappingLifecycle::Active/!= MappingLifecycle::Prepared/'
 mutate 'partial rollback target mutation was accepted' src/kernel/irq/interrupt.rs \

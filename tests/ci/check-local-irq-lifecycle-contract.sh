@@ -16,6 +16,8 @@ sed -n '/^    pub fn prepare_shared_mapping(/,/^    }/p' "$interrupt" >"$fixture
 sed -n '/^pub fn activate(/,/^}/p' "$interrupt" >"$fixture/activate.rs"
 sed -n '/^pub fn unregister(/,/^}/p' "$interrupt" >"$fixture/unregister.rs"
 sed -n '/^    fn dispatch_one(/,/^    }/p' "$interrupt" >"$fixture/dispatch.rs"
+sed -n '/^    fn dispatch_prepared_source(/,/^    }/p' \
+    "$interrupt" >"$fixture/dispatch-prepared.rs"
 sed -n '/^    fn set_local_enabled(/,/^    }/p' "$interrupt" >"$fixture/local-enable.rs"
 sed -n '/^fn synchronize_local_lifecycle(/,/^}/p' "$interrupt" >"$fixture/synchronize.rs"
 sed -n '/^fn install(/,/^}/p' src/kernel/device/serial.rs >"$fixture/serial-install.rs"
@@ -71,8 +73,16 @@ require_order "$fixture/unregister.rs" 'LocalLifecycleOperation::Disable' \
     'mapping\.handlers\.swap_remove\(handler\)' \
     'the final late handler may be removed only after all CPUs acknowledge disable'
 
-require '(?s)lifecycle[[:space:]]*== MappingLifecycle::Prepared[[:space:]]*\{.*set_hardware_enabled\(hardware, false\).*controller\.end\(hardware\).*return DispatchOutcome::Prepared' \
-    "$fixture/dispatch.rs" 'Prepared IRQ delivery must be masked and EOIed without calling handlers'
+require '(?s)MappingLifecycle::Prepared[[:space:]]*=>[[:space:]]*\{[[:space:]]*self\.dispatch_prepared_source\(hardware, domain, mapping\)' \
+    "$fixture/dispatch.rs" 'Prepared IRQ delivery must use the non-handler dispatch path'
+require '(?s)set_hardware_enabled\(hardware, false\).*DispatchOutcome::Prepared' \
+    "$fixture/dispatch-prepared.rs" 'Prepared IRQ delivery must be masked before completion'
+if LC_ALL=C rg -q 'dispatch_handlers' "$fixture/dispatch-prepared.rs"; then
+    echo 'Prepared IRQ delivery must not call installed handlers' >&2
+    exit 1
+fi
+require_order "$fixture/dispatch.rs" 'let outcome = match' 'controller\.end\(hardware\)' \
+    'IRQ delivery must EOI every classified dispatch outcome exactly once'
 require 'lifecycle != MappingLifecycle::Active[[:space:]]*\{[[:space:]]*return Err\(Error::MappingBusy\.into\(\)\)|lifecycle != MappingLifecycle::Active[[:space:]]*\{[[:space:]]*return Err\(TransitionFailure::NotApplied\(Error::MappingBusy\)\)' \
     "$fixture/local-enable.rs" 'local mask control must reject non-Active mappings'
 

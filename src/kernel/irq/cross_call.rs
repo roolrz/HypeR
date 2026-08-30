@@ -181,12 +181,26 @@ fn execute_owned(
     count: usize,
     targets: &[bool; hyper::cpu::MAX_CPUS],
 ) -> Result<Outcome, ()> {
-    let generation = match GENERATION.load(Ordering::Relaxed).checked_add(1) {
-        Some(generation) if generation != 0 => generation,
-        _ => poison("kernel RPC generation exhausted"),
-    };
+    let generation = next_generation();
     publish(rpc);
     GENERATION.store(generation, Ordering::Relaxed);
+    initialize_target_status(generation, count, targets);
+    PUBLISHED_GENERATION.store(generation, Ordering::Release);
+    service_local_irq_mailbox();
+    notify_remote_targets(rpc, count, targets);
+    await_acknowledgements(generation, count, targets);
+    PUBLISHED_GENERATION.store(0, Ordering::Release);
+    Ok(collect_outcome(rpc, generation, count, targets))
+}
+
+fn next_generation() -> u32 {
+    match GENERATION.load(Ordering::Relaxed).checked_add(1) {
+        Some(generation) if generation != 0 => generation,
+        _ => poison("kernel RPC generation exhausted"),
+    }
+}
+
+fn initialize_target_status(generation: u32, count: usize, targets: &[bool; hyper::cpu::MAX_CPUS]) {
     for (cpu, targeted) in targets.iter().copied().enumerate() {
         let Some(cpu) = CpuIndex::new(cpu) else {
             continue;
@@ -202,9 +216,9 @@ fn execute_owned(
         );
         ACK[cpu].store(0, Ordering::Relaxed);
     }
-    PUBLISHED_GENERATION.store(generation, Ordering::Release);
-    service_local_irq_mailbox();
+}
 
+fn notify_remote_targets(rpc: KernelRpc, count: usize, targets: &[bool; hyper::cpu::MAX_CPUS]) {
     let current = crate::kernel::cpu::current_index();
     for (cpu, targeted) in targets.iter().copied().enumerate().take(count) {
         let Some(cpu) = CpuIndex::new(cpu) else {
@@ -213,14 +227,13 @@ fn execute_owned(
         if !targeted || Some(cpu) == current {
             continue;
         }
-        let reason = match rpc {
-            KernelRpc::LocalIrqLifecycle { .. } => KernelRpcReasons::LOCAL_IRQ_LIFECYCLE,
-            KernelRpc::UserAddressSpace(_) => KernelRpcReasons::USER_ADDRESS_SPACE,
-        };
-        if !crate::hal::irq::notify_kernel_rpc(cpu, reason) {
+        if !crate::hal::irq::notify_kernel_rpc(cpu, rpc.reason()) {
             poison("kernel RPC route rejected");
         }
     }
+}
+
+fn await_acknowledgements(generation: u32, count: usize, targets: &[bool; hyper::cpu::MAX_CPUS]) {
     match crate::kernel::time::spin_wait_until(TIMEOUT_NS, || {
         service();
         targets
@@ -237,7 +250,14 @@ fn execute_owned(
         Ok(true) => {}
         Ok(false) | Err(_) => poison("kernel RPC acknowledgement timed out"),
     }
-    PUBLISHED_GENERATION.store(0, Ordering::Release);
+}
+
+fn collect_outcome(
+    rpc: KernelRpc,
+    generation: u32,
+    count: usize,
+    targets: &[bool; hyper::cpu::MAX_CPUS],
+) -> Outcome {
     let mut rejected_cpu = None;
     let mut ambiguous_cpu = match rpc {
         KernelRpc::UserAddressSpace(_) => targets
@@ -275,10 +295,19 @@ fn execute_owned(
             _ => poison("kernel RPC completion state is inconsistent"),
         }
     }
-    Ok(Outcome {
+    Outcome {
         rejected_cpu,
         ambiguous_cpu,
-    })
+    }
+}
+
+impl KernelRpc {
+    const fn reason(self) -> KernelRpcReasons {
+        match self {
+            Self::LocalIrqLifecycle { .. } => KernelRpcReasons::LOCAL_IRQ_LIFECYCLE,
+            Self::UserAddressSpace(_) => KernelRpcReasons::USER_ADDRESS_SPACE,
+        }
+    }
 }
 
 pub(crate) fn service() {

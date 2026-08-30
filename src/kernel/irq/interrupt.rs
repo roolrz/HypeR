@@ -265,6 +265,45 @@ struct IrqMapping {
     lifecycle: MappingLifecycle,
 }
 
+impl IrqMapping {
+    fn dispatch_handlers(&mut self, hardware: InterruptId, per_cpu: bool) -> HandlerDispatch {
+        let mut actions = HandlerActions::default();
+        for entry in &self.handlers {
+            actions.record((entry.handler)(self.virtual_interrupt, entry.context));
+        }
+
+        let outcome = if actions.handled {
+            self.consecutive_unhandled = 0;
+            DispatchOutcome::Handled
+        } else {
+            self.consecutive_unhandled = self.consecutive_unhandled.saturating_add(1);
+            if self.consecutive_unhandled >= UNHANDLED_QUARANTINE_THRESHOLD
+                && self.enabled_by_registry
+            {
+                // A PPI is disabled only on this CPU. Preserve the registry's
+                // installed intent so secondary-CPU replay and an explicit
+                // local re-enable remain correct.
+                if !per_cpu {
+                    self.enabled_by_registry = false;
+                }
+                DispatchOutcome::Quarantined {
+                    hardware,
+                    virtual_interrupt: self.virtual_interrupt,
+                }
+            } else {
+                DispatchOutcome::Handled
+            }
+        };
+        let quarantine = matches!(outcome, DispatchOutcome::Quarantined { .. });
+        HandlerDispatch {
+            outcome,
+            quarantine,
+            mask_local: actions.mask_local,
+            unmask_local: actions.unmask_local,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MappingLifecycle {
     Prepared,
@@ -303,6 +342,37 @@ enum DispatchOutcome {
         operation: &'static str,
         error: crate::hal::irq::ControllerError,
     },
+}
+
+#[derive(Default)]
+struct HandlerActions {
+    handled: bool,
+    mask_local: bool,
+    unmask_local: Option<VirtualInterrupt>,
+}
+
+impl HandlerActions {
+    fn record(&mut self, result: HandlerResult) {
+        match result {
+            HandlerResult::Handled => self.handled = true,
+            HandlerResult::NotHandled => {}
+            HandlerResult::HandledAndMaskLocal => {
+                self.handled = true;
+                self.mask_local = true;
+            }
+            HandlerResult::HandledAndUnmaskLocal(interrupt) => {
+                self.handled = true;
+                self.unmask_local = Some(interrupt);
+            }
+        }
+    }
+}
+
+struct HandlerDispatch {
+    outcome: DispatchOutcome,
+    quarantine: bool,
+    mask_local: bool,
+    unmask_local: Option<VirtualInterrupt>,
 }
 
 enum TransitionFailure {
@@ -1078,99 +1148,88 @@ impl InterruptState {
     }
 
     fn dispatch_one(&mut self, hardware: InterruptId) -> DispatchOutcome {
-        let Some((domain_index, mapping_index)) = self.mapping_position_by_hardware(hardware)
-        else {
-            let transition = classify_transition(self.controller.disable(hardware));
-            self.controller.end(hardware);
-            if let Some(outcome) = dispatch_transition(transition, "unmapped-source disable") {
-                return outcome;
-            }
-            return DispatchOutcome::Unmapped(hardware);
+        let outcome = match self.mapping_position_by_hardware(hardware) {
+            None => self.dispatch_unmapped_source(hardware),
+            Some((domain, mapping)) => match self.domains[domain].mappings[mapping].lifecycle {
+                MappingLifecycle::Prepared => {
+                    self.dispatch_prepared_source(hardware, domain, mapping)
+                }
+                MappingLifecycle::Enabling
+                | MappingLifecycle::Active
+                | MappingLifecycle::Disabling => {
+                    self.dispatch_mapped_source(hardware, domain, mapping)
+                }
+            },
         };
-        if self.domains[domain_index].mappings[mapping_index].lifecycle
-            == MappingLifecycle::Prepared
-        {
-            let virtual_interrupt =
-                self.domains[domain_index].mappings[mapping_index].virtual_interrupt;
-            let transition = self.set_hardware_enabled(hardware, false);
-            self.controller.end(hardware);
-            if let Some(outcome) = dispatch_transition(transition, "prepared-source disable") {
-                return outcome;
-            }
-            return DispatchOutcome::Prepared {
-                hardware,
-                virtual_interrupt,
-            };
-        }
+        self.controller.end(hardware);
+        outcome
+    }
+
+    fn dispatch_unmapped_source(&mut self, hardware: InterruptId) -> DispatchOutcome {
+        dispatch_transition(
+            classify_transition(self.controller.disable(hardware)),
+            "unmapped-source disable",
+        )
+        .unwrap_or(DispatchOutcome::Unmapped(hardware))
+    }
+
+    fn dispatch_prepared_source(
+        &mut self,
+        hardware: InterruptId,
+        domain: usize,
+        mapping: usize,
+    ) -> DispatchOutcome {
+        let virtual_interrupt = self.domains[domain].mappings[mapping].virtual_interrupt;
+        dispatch_transition(
+            self.set_hardware_enabled(hardware, false),
+            "prepared-source disable",
+        )
+        .unwrap_or(DispatchOutcome::Prepared {
+            hardware,
+            virtual_interrupt,
+        })
+    }
+
+    fn dispatch_mapped_source(
+        &mut self,
+        hardware: InterruptId,
+        domain: usize,
+        mapping: usize,
+    ) -> DispatchOutcome {
         let per_cpu = self.controller.is_per_cpu(hardware);
-        let (outcome, mask_local, unmask_local, quarantine) = {
-            let mapping = &mut self.domains[domain_index].mappings[mapping_index];
-            let mut handled = false;
-            let mut mask_local = false;
-            let mut unmask_local = None;
-            for entry in &mapping.handlers {
-                match (entry.handler)(mapping.virtual_interrupt, entry.context) {
-                    HandlerResult::Handled => handled = true,
-                    HandlerResult::NotHandled => {}
-                    HandlerResult::HandledAndMaskLocal => {
-                        handled = true;
-                        mask_local = true;
-                    }
-                    HandlerResult::HandledAndUnmaskLocal(interrupt) => {
-                        handled = true;
-                        unmask_local = Some(interrupt);
-                    }
-                }
-            }
-            let outcome = if handled {
-                mapping.consecutive_unhandled = 0;
-                DispatchOutcome::Handled
-            } else {
-                mapping.consecutive_unhandled = mapping.consecutive_unhandled.saturating_add(1);
-                if mapping.consecutive_unhandled >= UNHANDLED_QUARANTINE_THRESHOLD
-                    && mapping.enabled_by_registry
-                {
-                    // A PPI was disabled only on this CPU. Preserve the
-                    // registry's installed intent so secondary-CPU replay and
-                    // an explicit local re-enable remain correct.
-                    if !per_cpu {
-                        mapping.enabled_by_registry = false;
-                    }
-                    DispatchOutcome::Quarantined {
-                        hardware,
-                        virtual_interrupt: mapping.virtual_interrupt,
-                    }
-                } else {
-                    DispatchOutcome::Handled
-                }
-            };
-            let quarantine = matches!(outcome, DispatchOutcome::Quarantined { .. });
-            (outcome, mask_local, unmask_local, quarantine)
-        };
-        if quarantine
+        let dispatch = self.domains[domain].mappings[mapping].dispatch_handlers(hardware, per_cpu);
+        match self.apply_handler_actions(hardware, &dispatch) {
+            Some(outcome) => outcome,
+            None => dispatch.outcome,
+        }
+    }
+
+    fn apply_handler_actions(
+        &mut self,
+        hardware: InterruptId,
+        dispatch: &HandlerDispatch,
+    ) -> Option<DispatchOutcome> {
+        if dispatch.quarantine
             && let Some(ambiguous) = dispatch_transition(
                 self.set_hardware_enabled(hardware, false),
                 "quarantined-source disable",
             )
         {
-            self.controller.end(hardware);
-            return ambiguous;
+            return Some(ambiguous);
         }
-        if mask_local
+        if dispatch.mask_local
             && let Some(ambiguous) = dispatch_transition(
                 self.set_hardware_enabled(hardware, false),
                 "handler-requested local disable",
             )
         {
-            self.controller.end(hardware);
-            return ambiguous;
+            return Some(ambiguous);
         }
-        if let Some(interrupt) = unmask_local
+        if let Some(interrupt) = dispatch.unmask_local
             && let Some((domain, mapping)) = self.mapping_position_by_virtual(interrupt)
         {
             if self.domains[domain].mappings[mapping].lifecycle != MappingLifecycle::Active {
-                self.controller.end(hardware);
-                return DispatchOutcome::Handled;
+                return Some(DispatchOutcome::Handled);
             }
             let target = self.domains[domain].mappings[mapping].hardware;
             if self.controller.is_per_cpu(target)
@@ -1179,12 +1238,10 @@ impl InterruptState {
                     "handler-requested local enable",
                 )
             {
-                self.controller.end(hardware);
-                return ambiguous;
+                return Some(ambiguous);
             }
         }
-        self.controller.end(hardware);
-        outcome
+        None
     }
 
     fn set_local_enabled(
