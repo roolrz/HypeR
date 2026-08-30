@@ -392,9 +392,11 @@ impl Scheduler {
             return Err(Error::InvalidThreadState);
         }
         let stack = thread.kernel_stack_bounds().ok_or(Error::Allocation)?;
-        let execution = thread
-            .user_execution_mut()
-            .ok_or(Error::InvalidThreadState)? as *mut _;
+        let execution = core::ptr::NonNull::from(
+            thread
+                .user_execution_mut()
+                .ok_or(Error::InvalidThreadState)?,
+        );
         Ok(CurrentUser {
             thread: id,
             execution,

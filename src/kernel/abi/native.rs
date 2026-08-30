@@ -23,13 +23,30 @@ use crate::kernel::process::ProcessError;
 
 const HANDLE_INFO_SIZE: usize = core::mem::size_of::<HyperNativeHandleInfo>();
 const OBJECT_BASIC_INFO_SIZE: usize = core::mem::size_of::<HyperNativeObjectBasicInfo>();
+type Arguments = [u64; hyper::abi::native::HYPER_NATIVE_SYSCALL_ARGUMENT_REGISTERS];
+
+/// Reports whether the current implementation is audited for masked entry.
+///
+/// New syscall numbers default to the deferred Thread path until their full
+/// implementation is proven nonblocking and added deliberately here.
+pub(in crate::kernel) const fn is_immediate(number: u64) -> bool {
+    matches!(
+        number,
+        HYPER_NATIVE_SYS_ABI_QUERY
+            | HYPER_NATIVE_SYS_HANDLE_CLOSE
+            | HYPER_NATIVE_SYS_HANDLE_DUPLICATE
+            | HYPER_NATIVE_SYS_HANDLE_REPLACE
+            | HYPER_NATIVE_SYS_HANDLE_GET_INFO
+            | HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO
+    )
+}
 
 /// Narrow Process service boundary consumed by the Native ABI adapter.
 ///
 /// Implementations finish every handle-table operation before copying user
 /// memory. Keeping those two phases separate prevents faults or backend work
 /// from extending the Process lock graph.
-pub(in crate::kernel) trait Services {
+pub(in crate::kernel) trait ImmediateServices {
     fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError>;
     fn duplicate_handle(
         &self,
@@ -49,73 +66,103 @@ pub(in crate::kernel) trait Services {
     fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError>;
 }
 
-/// Dispatches one owned invocation after architecture entry released its raw
-/// frame borrow. Unknown numbers and malformed fixed-width values fail closed.
-pub(in crate::kernel) fn dispatch(
-    services: &impl Services,
+/// Dispatches one owned, nonblocking invocation.
+///
+/// Architecture entry retains its private raw frame but passes no frame borrow
+/// or architecture offset into this adapter. Unknown numbers and malformed
+/// fixed-width values fail closed. Operations that may block must use a
+/// separate deferred dispatcher.
+pub(in crate::kernel) fn dispatch_immediate(
+    services: &impl ImmediateServices,
     invocation: NativeInvocation,
 ) -> NativeResult {
     let arguments = invocation.arguments();
     match invocation.number() {
-        HYPER_NATIVE_SYS_ABI_QUERY => {
-            success([HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_FEATURE_CORE])
-        }
-        HYPER_NATIVE_SYS_HANDLE_CLOSE => {
-            let result = parse_handle(arguments[0]).and_then(|value| {
-                services
-                    .close_handle(value)
-                    .map_err(status_from_process_error)
-            });
-            status_only(result)
-        }
-        HYPER_NATIVE_SYS_HANDLE_DUPLICATE => {
-            let result =
-                parse_handle_and_rights(arguments[0], arguments[1]).and_then(|(value, rights)| {
-                    services
-                        .duplicate_handle(value, rights)
-                        .map_err(status_from_process_error)
-                });
-            handle_result(result)
-        }
-        HYPER_NATIVE_SYS_HANDLE_REPLACE => {
-            let result =
-                parse_handle_and_rights(arguments[0], arguments[1]).and_then(|(value, rights)| {
-                    services
-                        .replace_handle(value, rights)
-                        .map_err(status_from_process_error)
-                });
-            handle_result(result)
-        }
-        HYPER_NATIVE_SYS_HANDLE_GET_INFO => {
-            let result = prepare_info_request(arguments, HANDLE_INFO_SIZE).and_then(
-                |(value, destination)| {
-                    let info = services
-                        .handle_info(value, Rights::NONE)
-                        .map_err(status_from_process_error)?;
-                    let record = encode_handle_info(info);
-                    services
-                        .copy_to_user(destination, &record)
-                        .map_err(status_from_process_error)
-                },
-            );
-            status_only(result)
-        }
-        HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO => {
-            let result = prepare_info_request(arguments, OBJECT_BASIC_INFO_SIZE).and_then(
-                |(value, destination)| {
-                    let info = services
-                        .handle_info(value, Rights::INSPECT)
-                        .map_err(status_from_process_error)?;
-                    let record = encode_object_basic_info(info);
-                    services
-                        .copy_to_user(destination, &record)
-                        .map_err(status_from_process_error)
-                },
-            );
-            status_only(result)
-        }
-        _ => failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED),
+        HYPER_NATIVE_SYS_ABI_QUERY => sys_abi_query(),
+        HYPER_NATIVE_SYS_HANDLE_CLOSE => sys_handle_close(services, arguments),
+        HYPER_NATIVE_SYS_HANDLE_DUPLICATE => sys_handle_duplicate(services, arguments),
+        HYPER_NATIVE_SYS_HANDLE_REPLACE => sys_handle_replace(services, arguments),
+        HYPER_NATIVE_SYS_HANDLE_GET_INFO => sys_handle_get_info(services, arguments),
+        HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO => sys_object_get_basic_info(services, arguments),
+        _ => sys_not_supported(),
     }
+}
+
+// Keep each syscall as a distinct machine frame. The routing match must not
+// inherit the largest handler's stack requirement, and crash traces should
+// identify the operation which was active at the fault boundary.
+
+#[inline(never)]
+fn sys_abi_query() -> NativeResult {
+    success([HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_FEATURE_CORE])
+}
+
+#[inline(never)]
+fn sys_handle_close(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+    let result = parse_handle(arguments[0]).and_then(|value| {
+        services
+            .close_handle(value)
+            .map_err(status_from_process_error)
+    });
+    status_only(result)
+}
+
+#[inline(never)]
+fn sys_handle_duplicate(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+    let result = parse_handle_and_rights(arguments[0], arguments[1]).and_then(|(value, rights)| {
+        services
+            .duplicate_handle(value, rights)
+            .map_err(status_from_process_error)
+    });
+    handle_result(result)
+}
+
+#[inline(never)]
+fn sys_handle_replace(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+    let result = parse_handle_and_rights(arguments[0], arguments[1]).and_then(|(value, rights)| {
+        services
+            .replace_handle(value, rights)
+            .map_err(status_from_process_error)
+    });
+    handle_result(result)
+}
+
+#[inline(never)]
+fn sys_handle_get_info(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+    let result =
+        prepare_info_request(arguments, HANDLE_INFO_SIZE).and_then(|(value, destination)| {
+            let info = services
+                .handle_info(value, Rights::NONE)
+                .map_err(status_from_process_error)?;
+            let record = encode_handle_info(info);
+            services
+                .copy_to_user(destination, &record)
+                .map_err(status_from_process_error)
+        });
+    status_only(result)
+}
+
+#[inline(never)]
+fn sys_object_get_basic_info(
+    services: &impl ImmediateServices,
+    arguments: &Arguments,
+) -> NativeResult {
+    let result =
+        prepare_info_request(arguments, OBJECT_BASIC_INFO_SIZE).and_then(|(value, destination)| {
+            let info = services
+                .handle_info(value, Rights::INSPECT)
+                .map_err(status_from_process_error)?;
+            let record = encode_object_basic_info(info);
+            services
+                .copy_to_user(destination, &record)
+                .map_err(status_from_process_error)
+        });
+    status_only(result)
+}
+
+#[inline(never)]
+fn sys_not_supported() -> NativeResult {
+    failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED)
 }
 
 fn parse_handle(raw: u64) -> Result<HandleValue, HyperNativeStatus> {
@@ -132,7 +179,7 @@ fn parse_handle_and_rights(
 }
 
 fn prepare_info_request(
-    arguments: &[u64; hyper::abi::native::HYPER_NATIVE_SYSCALL_ARGUMENT_REGISTERS],
+    arguments: &Arguments,
     record_size: usize,
 ) -> Result<(HandleValue, UserSlice), HyperNativeStatus> {
     let record_size = u64::try_from(record_size).map_err(|_| HYPER_NATIVE_STATUS_INTERNAL)?;
@@ -339,7 +386,7 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         }
     }
 
-    impl Services for RejectingServices {
+    impl ImmediateServices for RejectingServices {
         fn close_handle(&self, _: HandleValue) -> Result<(), ProcessError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation)
@@ -373,24 +420,24 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     let services = RejectingServices {
         calls: Cell::new(0),
     };
-    let query = dispatch(&services, invoke(HYPER_NATIVE_SYS_ABI_QUERY, [u64::MAX; 6]));
+    let query = dispatch_immediate(&services, invoke(HYPER_NATIVE_SYS_ABI_QUERY, [u64::MAX; 6]));
     if query.status() != hyper::abi::native::HYPER_NATIVE_STATUS_OK
         || query.values() != &[HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_FEATURE_CORE]
     {
         return Err(SelfTestError::AbiQuery);
     }
-    let unknown = dispatch(&services, invoke(u64::MAX, [u64::MAX; 6]));
+    let unknown = dispatch_immediate(&services, invoke(u64::MAX, [u64::MAX; 6]));
     if unknown.status() != HYPER_NATIVE_STATUS_NOT_SUPPORTED || unknown.values() != &[0, 0] {
         return Err(SelfTestError::UnknownNumber);
     }
-    let bad_handle = dispatch(
+    let bad_handle = dispatch_immediate(
         &services,
         invoke(HYPER_NATIVE_SYS_HANDLE_CLOSE, [0, 0, 0, 0, 0, 0]),
     );
     if bad_handle.status() != HYPER_NATIVE_STATUS_BAD_HANDLE {
         return Err(SelfTestError::InvalidHandle);
     }
-    let bad_rights = dispatch(
+    let bad_rights = dispatch_immediate(
         &services,
         invoke(
             HYPER_NATIVE_SYS_HANDLE_DUPLICATE,
@@ -400,7 +447,7 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     if bad_rights.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT {
         return Err(SelfTestError::InvalidRights);
     }
-    let bad_size = dispatch(
+    let bad_size = dispatch_immediate(
         &services,
         invoke(
             HYPER_NATIVE_SYS_HANDLE_GET_INFO,

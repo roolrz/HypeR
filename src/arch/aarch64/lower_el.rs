@@ -6,8 +6,8 @@
 //! A lower-AArch64 vector identifies neither a guest nor a native Process.
 //! Guest activation therefore publishes a non-repeating generation alongside
 //! the pinned vCPU context identity. Native execution already publishes its
-//! own generation in `user_entry`; exception entry combines both sources and
-//! rejects missing or conflicting ownership before interpreting a raw frame.
+//! own generation in `user_entry`. Each world excludes the other once during
+//! run admission, so exception entry consults only the active world's source.
 
 use hyper::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,9 +49,8 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum World {
     Guest { generation: u64 },
-    Native,
+    Native { generation: u64 },
     None,
-    Conflict,
     Corrupt,
 }
 
@@ -62,7 +61,7 @@ pub(super) enum World {
 /// ownership identity; exception entry never reconstructs a Rust reference
 /// from it.
 pub(super) fn publish_guest(context: &mut VcpuContext) -> Result<(), Error> {
-    if super::user_entry::active_on_current_cpu() {
+    if super::user_entry::active_generation().is_some() {
         return Err(Error::NativeActive);
     }
     let cpu = current_cpu()?;
@@ -104,15 +103,19 @@ pub(super) fn retire_guest(context: &mut VcpuContext) -> Result<(), Error> {
 
 /// Identifies the only world allowed to interpret a lower-AArch64 frame.
 pub(super) fn current_world() -> World {
-    let native = super::user_entry::active_on_current_cpu();
-    let guest = guest_generation();
-    match (native, guest) {
-        (false, Ok(None)) => World::None,
-        (true, Ok(None)) => World::Native,
-        (false, Ok(Some(generation))) => World::Guest { generation },
-        (true, Ok(Some(_))) => World::Conflict,
-        (_, Err(_)) => World::Corrupt,
+    if let Some(generation) = super::user_entry::active_generation() {
+        return World::Native { generation };
     }
+    match guest_generation() {
+        Ok(None) => World::None,
+        Ok(Some(generation)) => World::Guest { generation },
+        Err(_) => World::Corrupt,
+    }
+}
+
+/// Checks the guest slot before a pinned Native run publishes its generation.
+pub(super) fn native_world_available() -> bool {
+    matches!(guest_generation(), Ok(None))
 }
 
 fn guest_generation() -> Result<Option<u64>, Error> {

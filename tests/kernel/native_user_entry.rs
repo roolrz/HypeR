@@ -15,9 +15,30 @@ use crate::kernel::task::scheduler::CpuMask;
 
 const IMAGE_BASE: u64 = 0x40_0000;
 
-// svc #0 (abi_query), followed by brk #0. All initial registers are zero, so
-// x8 already selects syscall zero and x0 requests the base ABI revision.
-const PROGRAM: [u8; 8] = [0x01, 0x00, 0x00, 0xd4, 0x00, 0x00, 0x20, 0xd4];
+const DIRECT_CALL_COUNT: usize = 64;
+
+// Query the ABI repeatedly within one machine run and validate x0/x1/x2 after
+// every direct return. An unknown call then exercises deferred unwind/re-entry
+// and must return NOT_SUPPORTED before brk #0 reports success. Any comparison
+// failure branches to brk #1 so its syndrome identifies a return-path error.
+const PROGRAM: [u8; 64] = [
+    0x09, 0x08, 0x80, 0xd2, // mov x9, #64; direct-call loop count.
+    0x01, 0x00, 0x00, 0xd4, // svc #0; x8 starts at abi_query (zero).
+    0x1f, 0x00, 0x00, 0xf1, // cmp x0, #0; status == OK.
+    0x81, 0x01, 0x00, 0x54, // b.ne failure.
+    0x3f, 0x00, 0x00, 0xf1, // cmp x1, #0; pre-release ABI revision.
+    0x41, 0x01, 0x00, 0x54, // b.ne failure.
+    0x5f, 0x04, 0x00, 0xf1, // cmp x2, #1; CORE feature bitmap.
+    0x01, 0x01, 0x00, 0x54, // b.ne failure.
+    0x29, 0x05, 0x00, 0xf1, // subs x9, x9, #1.
+    0x01, 0xff, 0xff, 0x54, // b.ne svc loop.
+    0x08, 0x00, 0x80, 0x92, // mov x8, #-1; unknown syscall number.
+    0x01, 0x00, 0x00, 0xd4, // svc #0; deferred slow path.
+    0x1f, 0x10, 0x00, 0xb1, // cmn x0, #4; status == NOT_SUPPORTED (-4).
+    0x41, 0x00, 0x00, 0x54, // b.ne failure.
+    0x00, 0x00, 0x20, 0xd4, // brk #0; success.
+    0x20, 0x00, 0x20, 0xd4, // brk #1; result mismatch.
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
@@ -31,6 +52,7 @@ pub(super) enum Error {
 }
 
 pub(super) fn run() -> Result<(), Error> {
+    let direct_calls = crate::hal::user::direct_native_call_count_for_test();
     let code_range =
         UserSlice::new(UserAddress::new(IMAGE_BASE), PAGE_SIZE).map_err(|_| Error::Construction)?;
     let stack_range = UserSlice::new(UserAddress::new(IMAGE_BASE + PAGE_SIZE * 2), PAGE_SIZE)
@@ -74,7 +96,12 @@ pub(super) fn run() -> Result<(), Error> {
         .map_err(|_| Error::Construction)?;
     thread.ready().map_err(|_| Error::Scheduler)?;
     let reason = thread.join().map_err(|_| Error::Lifecycle)?;
-    if !matches!(reason, TerminalReason::Fault { class: 6, .. }) {
+    if !matches!(reason, TerminalReason::Fault { class: 6, code } if code & 0xffff == 0) {
+        return Err(Error::Terminal);
+    }
+    if crate::hal::user::direct_native_call_count_for_test()
+        != direct_calls.saturating_add(DIRECT_CALL_COUNT)
+    {
         return Err(Error::Terminal);
     }
     if process.join().map_err(|_| Error::Lifecycle)? != reason {

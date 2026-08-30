@@ -486,11 +486,7 @@ extern "C" fn aarch64_exception_dispatch(
     };
     if matches!(
         lower_world,
-        Some(
-            super::lower_el::World::None
-                | super::lower_el::World::Conflict
-                | super::lower_el::World::Corrupt
-        )
+        Some(super::lower_el::World::None | super::lower_el::World::Corrupt)
     ) {
         let context = exception_crash_context(frame, interrupted_stack_pointer(frame, origin));
         crate::arch::exception::fatal(
@@ -500,7 +496,10 @@ extern "C" fn aarch64_exception_dispatch(
             ),
         );
     }
-    let native_user = matches!(lower_world, Some(super::lower_el::World::Native));
+    let native_generation = match lower_world {
+        Some(super::lower_el::World::Native { generation }) => Some(generation),
+        _ => None,
+    };
     let guest = matches!(
         lower_world,
         Some(super::lower_el::World::Guest { generation }) if generation != 0
@@ -512,17 +511,16 @@ extern "C" fn aarch64_exception_dispatch(
             super::end_interrupt(interrupt);
             return None;
         }
-        let native_unwind = native_user.then_some(super::user_entry::unwind_callback());
+        let native_unwind = native_generation.map(|_| super::user_entry::unwind_callback());
         match crate::arch::irq::dispatch_entry(interrupt, native_unwind) {
             hyper::hal::interrupt::EntryAction::Resume { postlude } => {
                 // Registry dispatch completed the acknowledged interrupt
                 // exactly once before returning this action. The optional
                 // scheduling tail therefore runs after GIC EOI/deactivation.
-                if native_user && postlude.is_some() {
+                if let (Some(generation), Some(_)) = (native_generation, postlude) {
                     // The raw vector frame must not outlive this stack.
-                    match super::user_entry::capture_interrupt(frame) {
-                        Ok(true) => {}
-                        Ok(false) | Err(_) => super::user_entry::fail_stop(),
+                    if super::user_entry::capture_interrupt(frame, generation).is_err() {
+                        super::user_entry::fail_stop();
                     }
                 }
                 return postlude;
@@ -535,10 +533,13 @@ extern "C" fn aarch64_exception_dispatch(
         }
     }
     if kind == ExceptionKind::Synchronous && origin == ExceptionOrigin::LowerAarch64 {
-        if native_user {
-            return match super::user_entry::capture_synchronous(frame) {
-                Ok(true) => Some(super::user_entry::unwind_callback()),
-                Ok(false) | Err(_) => super::user_entry::fail_stop(),
+        if let Some(generation) = native_generation {
+            return match super::user_entry::handle_synchronous(frame, generation) {
+                Ok(super::user_entry::SynchronousAction::Resume) => None,
+                Ok(super::user_entry::SynchronousAction::Unwind) => {
+                    Some(super::user_entry::unwind_callback())
+                }
+                Err(_) => super::user_entry::fail_stop(),
             };
         }
         if guest && dispatch_guest_synchronous(frame, exception_class) {

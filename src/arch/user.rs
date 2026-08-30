@@ -7,6 +7,8 @@
 //! they define their own execution mechanism. It contains no process or ABI
 //! policy and exposes no runnable entry before address-space residency exists.
 
+#[cfg(all(target_arch = "aarch64", feature = "kernel-self-test"))]
+pub(crate) use super::imp::direct_native_call_count_for_test;
 #[cfg(target_arch = "aarch64")]
 pub(crate) use super::imp::{
     PreparedUserAddressSpace, UserAddressSpaceError, UserLocalActivation, UserLocalIdentity,

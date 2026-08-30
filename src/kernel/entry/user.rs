@@ -1,23 +1,29 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Upward adapter from an owned native-user exit into kernel ABI policy.
+//! Native-user execution session and synchronous-call policy entry.
 
-use hyper::abi::native::{HYPER_NATIVE_STATUS_NOT_SUPPORTED, NativeInvocation, NativeResult};
-use hyper::hal::user::{UserFault, UserFaultKind};
+use core::ptr::NonNull;
+
+use hyper::abi::native::{NativeInvocation, NativeResult};
+use hyper::hal::user::{
+    NativeCallAction, NativeCallHandler, NativeCallService, UserFault, UserFaultKind,
+};
 use hyper::sync::InterruptMaskGuard;
 
-use crate::kernel::abi::native::{self, Services};
+use crate::kernel::abi::native::{self, ImmediateServices};
 use crate::kernel::capability::{HandleInfo, HandleValue, Rights};
 use crate::kernel::mm::user_space::UserSlice;
-use crate::kernel::process::{AbiFamily, ExecutionRoute, Process, ProcessError};
-use crate::kernel::process::{RunAdmissionError, TerminalReason, UserThreadPhase};
+use crate::kernel::process::{
+    AbiFamily, ExecutionRoute, Process, ProcessError, RunAdmissionError, TerminalReason,
+    UserExecution, UserThread, UserThreadPhase,
+};
 
 struct ProcessServices<'process> {
     process: &'process Process,
 }
 
-impl Services for ProcessServices<'_> {
+impl ImmediateServices for ProcessServices<'_> {
     fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError> {
         self.process.close_handle(value)
     }
@@ -51,14 +57,92 @@ impl Services for ProcessServices<'_> {
     }
 }
 
-/// Dispatches one invocation only for an immutable Native-kernel image route.
-pub(crate) fn dispatch(process: &Process, invocation: NativeInvocation) -> NativeResult {
-    if process.image().family() != AbiFamily::Native
-        || process.image().route() != ExecutionRoute::NativeKernel
-    {
-        return NativeResult::new(HYPER_NATIVE_STATUS_NOT_SUPPORTED, [0, 0]);
+struct NativeProcessCalls<'process> {
+    process: &'process Process,
+}
+
+impl NativeProcessCalls<'_> {
+    fn dispatch_immediate(&self, invocation: NativeInvocation) -> NativeResult {
+        native::dispatch_immediate(
+            &ProcessServices {
+                process: self.process,
+            },
+            invocation,
+        )
     }
-    native::dispatch(&ProcessServices { process }, invocation)
+}
+
+// SAFETY: The current Native ABI dispatcher contains only Never-blocking
+// operations. Its Process services use non-sleeping spinlocked transactions,
+// fallible nonblocking allocation, and resident-page copies; none enters the
+// scheduler or retains the invocation. A future blocking ABI operation must
+// return NativeCallAction::Unwind before it performs any work.
+unsafe impl NativeCallHandler for NativeProcessCalls<'_> {
+    unsafe fn dispatch(&self, invocation: NativeInvocation) -> NativeCallAction {
+        if native::is_immediate(invocation.number()) {
+            NativeCallAction::Return(self.dispatch_immediate(invocation))
+        } else {
+            NativeCallAction::Unwind
+        }
+    }
+}
+
+/// Stable ownership established once for the scheduler Thread's entire entry.
+struct UserSession {
+    thread: UserThread,
+    process: Process,
+}
+
+impl UserSession {
+    fn attach(
+        current: crate::kernel::task::scheduler::CurrentUser,
+        pin: &crate::kernel::task::scheduler::UserRunGuard,
+    ) -> (Self, NonNull<UserExecution>) {
+        validate_current_stack(current.stack);
+        let execution = current.execution;
+        // SAFETY: `current_user` returned the scheduler-owned payload of this
+        // pinned current Thread. This borrow ends before `pin` is consumed by
+        // run admission; later machine runs obtain a fresh pointer and pin.
+        let owner = unsafe { execution.as_ref() };
+        let thread = owner.thread().clone();
+        if thread.scheduler_id() != Some(current.thread) {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: native-user scheduler identity is inconsistent"
+            ));
+        }
+        let process = thread.process().clone();
+        if process.image().family() != AbiFamily::Native
+            || process.image().route() != ExecutionRoute::NativeKernel
+        {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: native-user Thread has an invalid execution route"
+            ));
+        }
+        let _ = pin;
+        (Self { thread, process }, execution)
+    }
+
+    fn refresh_execution(
+        &self,
+        current: crate::kernel::task::scheduler::CurrentUser,
+        pin: &crate::kernel::task::scheduler::UserRunGuard,
+    ) -> NonNull<UserExecution> {
+        if self.thread.scheduler_id() != Some(current.thread) {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: resumed native-user scheduler identity is inconsistent"
+            ));
+        }
+        let execution = current.execution;
+        // SAFETY: `current_user` returned this payload under `pin`. Reading its
+        // immutable owner identity does not enter a machine-active borrow.
+        if unsafe { execution.as_ref() }.thread().scheduler_id() != Some(current.thread) {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: resumed native-user execution owner is inconsistent"
+            ));
+        }
+        let _ = pin;
+        execution
+    }
 }
 
 /// Fixed scheduler entry for every native user Thread.
@@ -70,39 +154,34 @@ pub(in crate::kernel) extern "C" fn thread_entry(_argument: usize) {
 }
 
 fn run_current() {
-    loop {
-        let pin = match crate::kernel::task::scheduler::user_run_guard() {
-            Ok(pin) => pin,
-            Err(error) => fail_run("failed to pin native-user execution", error),
-        };
-        let current = match crate::kernel::task::scheduler::current_user(&pin) {
-            Ok(current) => current,
-            Err(error) => fail_run("failed to identify current native-user Thread", error),
-        };
-        validate_current_stack(current.stack);
-        if current.execution.is_null() || !current.execution.is_aligned() {
-            crate::kernel::crash::fatal(format_args!(
-                "HypeR: current native-user execution pointer is invalid"
-            ));
-        }
+    let pin = acquire_pin();
+    let current = match crate::kernel::task::scheduler::current_user(&pin) {
+        Ok(current) => current,
+        Err(error) => fail_run("failed to identify current native-user Thread", error),
+    };
+    let (session, execution) = UserSession::attach(current, &pin);
+    run_session(&session, pin, execution)
+}
 
-        // SAFETY: `current_user` returned the scheduler-owned payload of this
-        // pinned current Thread. UserExecution interior-mutates only its
-        // architecture context under the admitted run token below.
-        let execution = unsafe { &*current.execution };
-        let thread = execution.thread().clone();
-        if thread.scheduler_id() != Some(current.thread) {
-            crate::kernel::crash::fatal(format_args!(
-                "HypeR: native-user scheduler identity is inconsistent"
-            ));
-        }
-        let process = thread.process().clone();
-        if execution.stop_requested() {
+fn run_session(
+    session: &UserSession,
+    mut pin: crate::kernel::task::scheduler::UserRunGuard,
+    mut execution: NonNull<UserExecution>,
+) {
+    loop {
+        // SAFETY: `execution` was obtained with this run's `pin`. The prepared
+        // and active run tokens below consume that same pin and retain its
+        // no-migration/no-reclamation guarantee until machine exit.
+        let execution_owner = unsafe { execution.as_ref() };
+        if execution_owner.stop_requested() {
             finish_pin(pin);
             return;
         }
 
-        let prepared = match thread.prepare_run(pin, process.image_generation()) {
+        let prepared = match session
+            .thread
+            .prepare_run(pin, session.process.image_generation())
+        {
             Ok(prepared) => prepared,
             Err((pin, RunAdmissionError::AdmissionClosed)) => {
                 finish_pin(pin);
@@ -125,9 +204,10 @@ fn run_current() {
         };
         match crate::kernel::task::preempt::pending(cpu) {
             Ok(true) => {
-                let pin = prepared.abort();
+                let aborted_pin = prepared.abort();
                 drop(interrupt_mask);
-                finish_pin(pin);
+                finish_pin(aborted_pin);
+                (pin, execution) = reacquire_execution(session);
                 continue;
             }
             Ok(false) => {}
@@ -154,7 +234,7 @@ fn run_current() {
                 fail_run("failed to publish native-user generation", error);
             }
         };
-        let active_address = match execution
+        let active_address = match execution_owner
             .address_space()
             .activate(active_run.pin(), &kernel_access)
         {
@@ -165,17 +245,26 @@ fn run_current() {
         // SAFETY: The scheduler pin, admitted generation, and active address
         // root uniquely own the stopped context until its return capability is
         // consumed. UserExecution uses UnsafeCell solely for this seam.
-        let context = unsafe { &mut *execution.context_ptr() };
-        let stopped = active_address.run_user(context, binding, kernel_access);
+        let context = unsafe { &mut *execution_owner.context_ptr() };
+        let stopped = {
+            // Keep the CPU-affine service wholly inside this pinned machine
+            // run. Architecture exit closes its publication before returning,
+            // so both borrowed values are gone before the pin can be released.
+            let calls = NativeProcessCalls {
+                process: &session.process,
+            };
+            let service = NativeCallService::new(&calls);
+            active_address.run_user(context, binding, kernel_access, &service)
+        };
 
         drop(interrupt_mask);
         let (exit, proof) = stopped.leave();
-        let (stopped_run, pin) = active_run.stop_after_machine_exit(proof);
-        if let Err(error) = crate::kernel::task::scheduler::finish_user_run(pin) {
+        let (stopped_run, returned_pin) = active_run.stop_after_machine_exit(proof);
+        if let Err(error) = crate::kernel::task::scheduler::finish_user_run(returned_pin) {
             fail_run("failed to release native-user execution pin", error);
         }
 
-        let stop_requested = thread.snapshot().phase == UserThreadPhase::StopRequested;
+        let stop_requested = session.thread.snapshot().phase == UserThreadPhase::StopRequested;
         match exit {
             crate::hal::user::UserExit::NativeCall {
                 invocation,
@@ -184,7 +273,7 @@ fn run_current() {
                 let result = if stop_requested {
                     completion.discard(binding)
                 } else {
-                    completion.complete_native(binding, dispatch(&process, invocation))
+                    completion.complete_native(binding, dispatch_native(session, invocation))
                 };
                 if let Err(failure) = result {
                     fail_completion(failure);
@@ -209,7 +298,7 @@ fn run_current() {
                 }
             }
             crate::hal::user::UserExit::Fault { fault, completion } => {
-                process.request_stop(fault_reason(fault));
+                session.process.request_stop(fault_reason(fault));
                 if let Err(failure) = completion.discard(binding) {
                     fail_completion(failure);
                 }
@@ -217,6 +306,36 @@ fn run_current() {
                 return;
             }
         }
+        (pin, execution) = reacquire_execution(session);
+    }
+}
+
+fn dispatch_native(session: &UserSession, invocation: NativeInvocation) -> NativeResult {
+    NativeProcessCalls {
+        process: &session.process,
+    }
+    .dispatch_immediate(invocation)
+}
+
+fn reacquire_execution(
+    session: &UserSession,
+) -> (
+    crate::kernel::task::scheduler::UserRunGuard,
+    NonNull<UserExecution>,
+) {
+    let pin = acquire_pin();
+    let current = match crate::kernel::task::scheduler::current_user(&pin) {
+        Ok(current) => current,
+        Err(error) => fail_run("failed to refresh current native-user Thread", error),
+    };
+    let execution = session.refresh_execution(current, &pin);
+    (pin, execution)
+}
+
+fn acquire_pin() -> crate::kernel::task::scheduler::UserRunGuard {
+    match crate::kernel::task::scheduler::user_run_guard() {
+        Ok(pin) => pin,
+        Err(error) => fail_run("failed to pin native-user execution", error),
     }
 }
 

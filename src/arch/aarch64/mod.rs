@@ -98,6 +98,8 @@ pub use timer::{
 pub use user::{UserMachineContractError, user_address_limit};
 pub(crate) use user::{assert_kernel_pan, uses_vhe_translation as user_uses_vhe_translation};
 pub(crate) use user::{copy_from_exposed, copy_to_exposed};
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use user_entry::direct_native_call_count_for_test;
 pub(crate) use user_entry::{
     CompletionFailure as UserCompletionFailure, Error as UserEntryError,
     ReturnCapability as UserReturnCapability, UserContext, UserExit, run_user,

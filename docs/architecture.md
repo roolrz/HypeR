@@ -138,26 +138,31 @@ preempt, or migrate.
 
 The selected `hal::user` facade owns architecture user-address limits, opaque
 prepared roots, CPU-affine activation/deactivation tokens, and acknowledged
-local replacement and invalidation. On AArch64 it also exposes a call-like
-run/leave/completion contract: architecture entry copies a native call, fault,
-or interruption into owned state, closes the active translation, and only then
-returns control to kernel policy. RISC-V and x86-64 currently reject native-user
-entry as unsupported. Process lifetime, handles, rights, syscall numbers, ELF
-policy, compatibility routing, residency, and resource accounting remain in
-the kernel. The scheduler-owned `UserExecution` strongly retains its Process,
-native address space, and per-Thread machine context.
+local replacement and invalidation. On AArch64, synchronous exception entry
+passes an owned invocation to a borrowed Native service scoped to that pinned
+machine run. Explicitly classified Never-blocking calls write their fixed-width
+result into the private frame and return directly; unknown calls, faults,
+preemption, and deferred calls close the active translation and return owned
+state to the ordinary Thread continuation. After a true scheduling point, that
+continuation reacquires its scheduler pin and current execution payload rather
+than retaining a CPU-affine borrow. RISC-V and x86-64 currently reject
+native-user entry as unsupported. Process lifetime, handles, rights, syscall
+numbers, ELF policy, compatibility routing, residency, and resource accounting
+remain in the kernel. The scheduler-owned `UserExecution` strongly retains its
+Process, native address space, and per-Thread machine context.
 
 AArch64 provides two implementations behind that facade. VHE uses an immutable
 host EL2&0 stage-1 root. nVHE uses an immutable per-process stage-2 root with a
 separate resident-CPU set, mapping epoch, acknowledged shootdown, and shared
 guest/native VMID allocation and retirement. Both retain old roots and tags
 until every cut target acknowledges; safe abandonment leaks published owners
-rather than risking reuse. A kernel self-test exercises call-like EL0 entry,
-Native syscall return, contained fault, join, and retirement under both QEMU
-host regimes. A loader-backed runtime, blocking and migration qualification,
-and physical-hardware validation remain prerequisites for general native
-userspace. An EL1 relay remains a compatibility fallback only if direct
-stage-2-only execution cannot provide a required ABI semantic.
+rather than risking reuse. A kernel self-test exercises repeated direct Native
+syscall return, register-result validation, deferred-call unwind and re-entry,
+contained fault unwind, join, and retirement under both QEMU host regimes. A
+loader-backed runtime, blocking and migration qualification, and
+physical-hardware validation remain prerequisites for general native userspace.
+An EL1 relay remains a compatibility fallback only if direct stage-2-only
+execution cannot provide a required ABI semantic.
 
 The kernel exposes one Native ABI. Linux and FreeBSD are initially isolated
 EL0 supervisor domains selected transactionally with the process image; foreign

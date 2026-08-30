@@ -186,23 +186,32 @@ For Native calls, the architecture entry adapter:
 1. proves that the current Thread owns an active user execution context;
 2. copies the syscall number, six argument words, and call site into an owned
    `NativeInvocation`;
-3. ends every Rust borrow of the private frame;
-4. invokes the one registered `kernel::entry::user` service; and
-5. consumes an architecture-private, exactly-once return capability to encode
-   `NativeResult` into the same Thread's frame.
+3. passes no private-frame reference or architecture offset to policy;
+4. invokes the borrowed `kernel::entry::user` service; and
+5. either encodes an immediate `NativeResult` and returns through the vector,
+   or captures an owned stopped context and unwinds to the Thread continuation.
 
-The return capability is linear and bound to the exact stopped `UserContext`
-plus its Thread, ProcessImage generation, and run generation. Machine-active
-CPU pinning and translation ownership end before policy dispatch; a separate
-stopped-run token keeps that logical generation occupied until completion.
-This makes the stopped continuation migratable without exporting or retaining
-the raw exception frame. Blocking, preemption, and migration may suspend the
-kernel continuation, but no frame reference is passed into code that can
-block. Dropping an armed return owner enters a lock-, allocation-, and
-diagnostic-free fail-stop. Exit, termination, and successful exec consume it
-explicitly. Architecture result encoding is proven infallible before a syscall
-may publish new capabilities; an impossible post-publication encoding failure
-retains the capabilities and enters fail-stop rather than attempting rollback.
+An immediate service runs with interrupts masked, preemption disabled, and the
+current user translation active. Its unsafe implementation contract forbids
+blocking, scheduling, CPU migration, retained invocation state, and any
+operation which requires the ordinary kernel translation. An explicit
+Never-blocking allowlist selects this path; every new or unknown syscall number
+defaults to unwind until its complete implementation is audited for this
+contract. The borrowed service exists only for one pinned machine run and is
+withdrawn and destroyed before that run releases its CPU pin. A blocking call
+must select unwind before producing side effects.
+
+The unwind return capability is linear and bound to the exact stopped
+`UserContext` plus its Thread, ProcessImage generation, and run generation.
+Machine-active CPU pinning and translation ownership end before deferred policy
+dispatch; a separate stopped-run token keeps that logical generation occupied
+until completion. This makes a stopped continuation migratable without
+exporting or retaining the raw exception frame. Dropping an armed return owner
+enters a lock-, allocation-, and diagnostic-free fail-stop. Exit, termination,
+and successful exec consume it explicitly. Architecture result encoding is
+proven infallible before a deferred syscall may publish new capabilities; an
+impossible post-publication encoding failure retains the capabilities and
+enters fail-stop rather than attempting rollback.
 
 For a foreign restricted Thread, entry produces a `RestrictedExit` reason and
 switches that Thread into its supervisor view. The private frame is never
@@ -678,11 +687,13 @@ AArch64's world-regime and translation differences.
 
 The current checkpoint implements much of the Phase 1 capability mechanics and
 a narrow AArch64 Phase 2 proof. The proof maps a raw instruction sequence,
-executes `abi_query`, contains a breakpoint fault, joins its Thread and Process,
-and retires the ownership graph. The architecture-neutral dispatcher implements
-syscalls 0 through 5: ABI query, handle close, duplicate, replace, handle info,
-and object basic info. It is not a static PIE loader, general runtime, init
-process, vDSO, blocking syscall path, or secondary-architecture entry.
+executes 64 direct `abi_query` calls in one machine run, exercises an unknown
+call through deferred unwind and re-entry, contains a breakpoint fault, joins
+its Thread and Process, and retires the ownership graph. The
+architecture-neutral dispatcher implements syscalls 0 through 5: ABI query,
+handle close, duplicate, replace, handle info, and object basic info. It is not
+a static PIE loader, general runtime, init process, vDSO, blocking syscall path,
+or secondary-architecture entry.
 
 ### Phase 0: prove the boundary
 
@@ -744,16 +755,16 @@ process, vDSO, blocking syscall path, or secondary-architecture entry.
   Linux personality state.
 
 Every phase runs the quality gate and all-architecture builds. The current QEMU
-proof covers both AArch64 host regimes, direct `abi_query`, breakpoint-fault
-containment, Process/Thread join, retirement, and architecture-neutral rejection
-of malformed or unknown calls. The remaining user-entry acceptance target adds
-successful Process-backed handle operations from EL0, invalid pointers, W^X and
-cross-Process isolation, blocking cancellation, same-Process multi-Thread
-migration, IRQ-tail user preemption, TLS/SIMD preservation, and stop-versus-entry
-races. The existing Linux guest boot remains a regression contract. Cache, TLB,
-IOMMU, interrupt, and speculation properties which QEMU cannot prove require
-physical AArch64 validation before the corresponding feature is declared
-stable.
+proof covers both AArch64 host regimes, repeated direct `abi_query`, deferred
+unknown-call unwind and re-entry, breakpoint-fault containment, Process/Thread
+join, retirement, and architecture-neutral rejection of malformed calls. The
+remaining user-entry acceptance target adds successful Process-backed handle
+operations from EL0, invalid pointers, W^X and cross-Process isolation,
+blocking cancellation, same-Process multi-Thread migration, IRQ-tail user
+preemption, TLS/SIMD preservation, and stop-versus-entry races. The existing
+Linux guest boot remains a regression contract. Cache, TLB, IOMMU, interrupt,
+and speculation properties which QEMU cannot prove require physical AArch64
+validation before the corresponding feature is declared stable.
 
 ## Open implementation questions
 
