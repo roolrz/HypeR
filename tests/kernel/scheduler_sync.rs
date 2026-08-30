@@ -30,6 +30,7 @@ static FAIR_ROTATION: FairRotationState = FairRotationState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
     Affinity(usize),
+    Quiescence(super::support::QuiescenceError),
     Scheduler(scheduler::Error),
     Synchronization(crate::kernel::sync::Error),
     Worker(usize),
@@ -39,6 +40,12 @@ pub(super) enum Error {
 impl From<scheduler::Error> for Error {
     fn from(error: scheduler::Error) -> Self {
         Self::Scheduler(error)
+    }
+}
+
+impl From<super::support::QuiescenceError> for Error {
+    fn from(error: super::support::QuiescenceError) -> Self {
+        Self::Quiescence(error)
     }
 }
 
@@ -129,7 +136,7 @@ pub(super) fn run() -> Result<(), Error> {
     exercise_mutex_and_semaphore_handoff()?;
     exercise_completion_events()?;
     exercise_wait_queue_wake_all()?;
-    let stats = quiesce_test_threads()?;
+    let stats = super::support::quiesce_workers()?;
     if stats.ready != 0
         || stats.blocked != 0
         || stats.real_time_class_threads + stats.fair_class_threads + stats.idle_class_threads
@@ -139,25 +146,6 @@ pub(super) fn run() -> Result<(), Error> {
         return Err(Error::StateMismatch);
     }
     Ok(())
-}
-
-/// Drives completed test workers through exit and scheduler reclamation.
-///
-/// A completion semaphore publishes the worker's last shared-state access; it
-/// is not a thread join. IRQ-tail preemption may resume the parent before the
-/// worker returns through the entry trampoline. Quiescence therefore requires
-/// that no ready, blocked, dormant, or terminated test Thread remains.
-fn quiesce_test_threads() -> Result<scheduler::Statistics, Error> {
-    const MAX_REAP_PASSES: usize = 64;
-
-    for _ in 0..MAX_REAP_PASSES {
-        scheduler::yield_now()?;
-        let stats = scheduler::statistics()?;
-        if stats.ready == 0 && stats.blocked == 0 && stats.threads == stats.running + stats.idle {
-            return Ok(stats);
-        }
-    }
-    Err(Error::StateMismatch)
 }
 
 fn wait_for_completions(semaphore: &Semaphore, mut remaining: usize) -> Result<(), Error> {
@@ -195,7 +183,7 @@ fn exercise_policy_transitions() -> Result<(), Error> {
     if FIFO_SEQUENCE.load(Ordering::Acquire) != 1 {
         return Err(Error::StateMismatch);
     }
-    let _ = quiesce_test_threads()?;
+    let _ = super::support::quiesce_workers()?;
 
     let guard = scheduler::preempt_disable()?;
     let ready = scheduler::kthread_create("policy-ready", policy_peer, 2)?;
@@ -211,7 +199,7 @@ fn exercise_policy_transitions() -> Result<(), Error> {
     if FIFO_SEQUENCE.load(Ordering::Acquire) != 2 {
         return Err(Error::StateMismatch);
     }
-    let _ = quiesce_test_threads()?;
+    let _ = super::support::quiesce_workers()?;
 
     let current = scheduler::current_thread_id()?;
     scheduler::set_thread_fifo_policy(current, ThreadPriority::HIGHEST)?;
@@ -225,7 +213,7 @@ fn exercise_policy_transitions() -> Result<(), Error> {
         return Err(Error::StateMismatch);
     }
     wait_for_completions(&POLICY_DONE, 1)?;
-    let _ = quiesce_test_threads()?;
+    let _ = super::support::quiesce_workers()?;
 
     if FIFO_SEQUENCE.load(Ordering::Acquire) != 3 {
         return Err(Error::StateMismatch);
@@ -249,7 +237,7 @@ fn exercise_policy_transitions() -> Result<(), Error> {
     if FIFO_SEQUENCE.load(Ordering::Acquire) != 4 {
         return Err(Error::StateMismatch);
     }
-    let _ = quiesce_test_threads()?;
+    let _ = super::support::quiesce_workers()?;
     scheduler::set_thread_fair_policy(current)?;
     Ok(())
 }
@@ -281,7 +269,7 @@ fn exercise_fair_rotation() -> Result<(), Error> {
     if FAIR_ROTATION.ran.load(Ordering::Acquire) != 0b11 {
         return Err(Error::StateMismatch);
     }
-    let _ = quiesce_test_threads()?;
+    let _ = super::support::quiesce_workers()?;
     Ok(())
 }
 

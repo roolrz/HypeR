@@ -38,6 +38,7 @@ static SLEEP_FAILURE: AtomicUsize = AtomicUsize::new(0);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
     InvalidCpu,
+    Quiescence(super::support::QuiescenceError),
     Scheduler(scheduler::Error),
     Sleep(SleepError),
     Synchronization(crate::kernel::sync::Error),
@@ -48,6 +49,12 @@ pub(super) enum Error {
 impl From<scheduler::Error> for Error {
     fn from(error: scheduler::Error) -> Self {
         Self::Scheduler(error)
+    }
+}
+
+impl From<super::support::QuiescenceError> for Error {
+    fn from(error: super::support::QuiescenceError) -> Self {
+        Self::Quiescence(error)
     }
 }
 
@@ -380,26 +387,8 @@ fn exercise_sleep_migration(target: CpuIndex) -> Result<(), Error> {
 }
 
 fn quiesce_threads() -> Result<(), Error> {
-    let deadline = crate::kernel::time::monotonic_nanoseconds()
-        .map_err(|_| Error::Timeout("migration quiescence clock failed"))?
-        .saturating_add(PROGRESS_TIMEOUT_NS);
-    loop {
-        scheduler::yield_now()?;
-        let stats = scheduler::statistics()?;
-        if stats.ready == 0
-            && stats.blocked == 0
-            && stats.migrating == 0
-            && stats.threads == stats.running + stats.idle
-        {
-            return Ok(());
-        }
-        if crate::kernel::time::monotonic_nanoseconds()
-            .map_err(|_| Error::Timeout("migration quiescence clock failed"))?
-            >= deadline
-        {
-            return Err(Error::Timeout("migrated Threads did not quiesce"));
-        }
-    }
+    super::support::quiesce_workers()?;
+    Ok(())
 }
 
 fn wait_until(description: &'static str, condition: impl FnMut() -> bool) -> Result<(), Error> {
