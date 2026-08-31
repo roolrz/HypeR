@@ -11,9 +11,10 @@ use hyper::hal::user::{
 };
 use hyper::sync::InterruptMaskGuard;
 
-use crate::kernel::abi::native::{self, ImmediateServices};
-use crate::kernel::capability::{HandleInfo, HandleValue, Rights};
+use crate::kernel::abi::native::{self, DeferredServices, ImmediateServices, ObjectServiceError};
+use crate::kernel::capability::{HandleInfo, HandleValue, KernelObject, Rights};
 use crate::kernel::mm::user_space::UserSlice;
+use crate::kernel::object::{Event, SignalWaitOutcome};
 use crate::kernel::process::{
     AbiFamily, ExecutionRoute, Process, ProcessError, RunAdmissionError, StoppedUserRun,
     TerminalReason, UserExecution, UserThread, UserThreadPhase,
@@ -60,6 +61,51 @@ impl ImmediateServices for ProcessServices<'_> {
 
     fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError> {
         self.process.copy_to_user(destination, source)
+    }
+
+    fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
+        let event = Event::try_new(&self.process.resource_domain())?;
+        Ok(self
+            .process
+            .create_object(event, <Event as KernelObject>::SUPPORTED_RIGHTS)?)
+    }
+}
+
+struct DeferredProcessServices<'session> {
+    session: &'session UserSession,
+}
+
+impl DeferredServices for DeferredProcessServices<'_> {
+    fn signal_event(
+        &self,
+        value: HandleValue,
+        clear: u64,
+        set: u64,
+    ) -> Result<(), ObjectServiceError> {
+        let event = self
+            .session
+            .process
+            .resolve_handle::<Event>(value, Rights::SIGNAL)?;
+        event.object().signal(clear, set)?;
+        Ok(())
+    }
+
+    fn wait_one(
+        &self,
+        value: HandleValue,
+        requested: u64,
+        deadline: u64,
+    ) -> Result<SignalWaitOutcome, ObjectServiceError> {
+        let resolved = self
+            .session
+            .process
+            .resolve_handle::<Event>(value, Rights::WAIT)?;
+        let domain = self.session.process.resource_domain();
+        Ok(resolved
+            .object()
+            .wait_one(&domain, requested, deadline, || {
+                self.session.thread.snapshot().phase == UserThreadPhase::StopRequested
+            })?)
     }
 }
 
@@ -328,8 +374,13 @@ fn finish_native_call(
         return NativeRunAction::Stop;
     }
 
-    match native::dispatch_deferred(invocation) {
+    let deferred = DeferredProcessServices { session };
+    match native::dispatch_deferred(&deferred, invocation) {
         native::DeferredAction::Return(result) => {
+            if session.thread.snapshot().phase == UserThreadPhase::StopRequested {
+                consume_discarded_call(completion, binding, stopped_run);
+                return NativeRunAction::Stop;
+            }
             consume_returning_call(completion, binding, stopped_run, result);
             NativeRunAction::Resume
         }

@@ -6,22 +6,28 @@
 use hyper::abi::native::{
     HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_FEATURE_CORE, HYPER_NATIVE_STATUS_ACCESS_DENIED,
     HYPER_NATIVE_STATUS_BAD_HANDLE, HYPER_NATIVE_STATUS_BAD_STATE, HYPER_NATIVE_STATUS_BUSY,
-    HYPER_NATIVE_STATUS_FAULT, HYPER_NATIVE_STATUS_INTERNAL, HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
-    HYPER_NATIVE_STATUS_NO_MEMORY, HYPER_NATIVE_STATUS_NOT_SUPPORTED,
-    HYPER_NATIVE_STATUS_RESOURCE_LIMIT, HYPER_NATIVE_SYS_ABI_QUERY, HYPER_NATIVE_SYS_HANDLE_CLOSE,
+    HYPER_NATIVE_STATUS_CANCELLED, HYPER_NATIVE_STATUS_FAULT, HYPER_NATIVE_STATUS_INTERNAL,
+    HYPER_NATIVE_STATUS_INVALID_ARGUMENT, HYPER_NATIVE_STATUS_NO_MEMORY,
+    HYPER_NATIVE_STATUS_NOT_SUPPORTED, HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
+    HYPER_NATIVE_STATUS_TIMED_OUT, HYPER_NATIVE_SYS_ABI_QUERY, HYPER_NATIVE_SYS_EVENT_CREATE,
+    HYPER_NATIVE_SYS_EVENT_SIGNAL, HYPER_NATIVE_SYS_HANDLE_CLOSE,
     HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
     HYPER_NATIVE_SYS_HANDLE_REPLACE, HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO,
-    HYPER_NATIVE_SYS_PROCESS_EXIT, HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD,
-    HyperNativeHandleInfo, HyperNativeObjectBasicInfo, HyperNativeStatus, NativeInvocation,
-    NativeResult,
+    HYPER_NATIVE_SYS_OBJECT_WAIT_ONE, HYPER_NATIVE_SYS_PROCESS_EXIT, HYPER_NATIVE_SYS_THREAD_EXIT,
+    HYPER_NATIVE_SYS_THREAD_YIELD, HyperNativeHandleInfo, HyperNativeObjectBasicInfo,
+    HyperNativeStatus, NativeInvocation, NativeResult,
 };
 
 use crate::kernel::accounting::ResourceError;
-use crate::kernel::capability::{HandleError, HandleInfo, HandleValue, Rights};
+use crate::kernel::capability::{
+    HandleError, HandleInfo, HandleValue, ObjectCreationError, Rights,
+};
 use crate::kernel::mm::user_space::{
     AddressError, AddressSpaceError, MachineError, UserAddress, UserSlice,
 };
+use crate::kernel::object::{EventError, ObjectWaitError, SignalWaitError, SignalWaitOutcome};
 use crate::kernel::process::ProcessError;
+use crate::kernel::task::TimedWaitError;
 
 const HANDLE_INFO_SIZE: usize = core::mem::size_of::<HyperNativeHandleInfo>();
 const OBJECT_BASIC_INFO_SIZE: usize = core::mem::size_of::<HyperNativeObjectBasicInfo>();
@@ -40,6 +46,7 @@ pub(in crate::kernel) const fn is_immediate(number: u64) -> bool {
             | HYPER_NATIVE_SYS_HANDLE_REPLACE
             | HYPER_NATIVE_SYS_HANDLE_GET_INFO
             | HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO
+            | HYPER_NATIVE_SYS_EVENT_CREATE
     )
 }
 
@@ -66,6 +73,49 @@ pub(in crate::kernel) trait ImmediateServices {
         required_rights: Rights,
     ) -> Result<HandleInfo, ProcessError>;
     fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError>;
+    fn create_event(&self) -> Result<HandleValue, ObjectServiceError>;
+}
+
+/// Sleepable object services invoked only after architecture entry unwinds.
+pub(in crate::kernel) trait DeferredServices {
+    fn signal_event(
+        &self,
+        value: HandleValue,
+        clear: u64,
+        set: u64,
+    ) -> Result<(), ObjectServiceError>;
+
+    fn wait_one(
+        &self,
+        value: HandleValue,
+        requested: u64,
+        deadline: u64,
+    ) -> Result<SignalWaitOutcome, ObjectServiceError>;
+}
+
+#[derive(Debug)]
+pub(in crate::kernel) enum ObjectServiceError {
+    Process(ProcessError),
+    Event(EventError),
+    Wait(ObjectWaitError),
+}
+
+impl From<ProcessError> for ObjectServiceError {
+    fn from(error: ProcessError) -> Self {
+        Self::Process(error)
+    }
+}
+
+impl From<EventError> for ObjectServiceError {
+    fn from(error: EventError) -> Self {
+        Self::Event(error)
+    }
+}
+
+impl From<ObjectWaitError> for ObjectServiceError {
+    fn from(error: ObjectWaitError) -> Self {
+        Self::Wait(error)
+    }
 }
 
 /// Policy action produced after architecture entry has fully unwound.
@@ -98,20 +148,27 @@ pub(in crate::kernel) fn dispatch_immediate(
         HYPER_NATIVE_SYS_HANDLE_REPLACE => sys_handle_replace(services, arguments),
         HYPER_NATIVE_SYS_HANDLE_GET_INFO => sys_handle_get_info(services, arguments),
         HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO => sys_object_get_basic_info(services, arguments),
+        HYPER_NATIVE_SYS_EVENT_CREATE => sys_event_create(services, arguments),
         _ => sys_not_supported(),
     }
 }
 
-/// Decodes one syscall after the machine context has returned to its Thread.
+/// Executes one syscall after the machine context has returned to its Thread.
 ///
 /// The returned action separates ABI decoding from scheduler and Process
-/// policy. Unknown calls remain ordinary returning failures even though they
+/// policy. A blocking service may park the current Thread before producing the
+/// action. Unknown calls remain ordinary returning failures even though they
 /// conservatively use the deferred path.
-pub(in crate::kernel) fn dispatch_deferred(invocation: NativeInvocation) -> DeferredAction {
+pub(in crate::kernel) fn dispatch_deferred(
+    services: &impl DeferredServices,
+    invocation: NativeInvocation,
+) -> DeferredAction {
     match invocation.number() {
         HYPER_NATIVE_SYS_THREAD_YIELD => sys_thread_yield(),
         HYPER_NATIVE_SYS_THREAD_EXIT => sys_thread_exit(invocation.arguments()),
         HYPER_NATIVE_SYS_PROCESS_EXIT => sys_process_exit(invocation.arguments()),
+        HYPER_NATIVE_SYS_EVENT_SIGNAL => sys_event_signal(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_OBJECT_WAIT_ONE => sys_object_wait_one(services, invocation.arguments()),
         _ => DeferredAction::Return(sys_not_supported()),
     }
 }
@@ -189,6 +246,28 @@ fn sys_object_get_basic_info(
 }
 
 #[inline(never)]
+fn sys_event_create(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+    if arguments[0] != 0 {
+        return failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    handle_result(
+        services
+            .create_event()
+            .map_err(status_from_object_service_error),
+    )
+}
+
+#[inline(never)]
+fn sys_event_signal(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_handle(arguments[0]).and_then(|value| {
+        services
+            .signal_event(value, arguments[1], arguments[2])
+            .map_err(status_from_object_service_error)
+    });
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
 fn sys_not_supported() -> NativeResult {
     failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED)
 }
@@ -210,6 +289,22 @@ fn sys_process_exit(arguments: &Arguments) -> DeferredAction {
     DeferredAction::ExitProcess {
         status: arguments[0] as i64,
     }
+}
+
+#[inline(never)]
+fn sys_object_wait_one(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_handle(arguments[0]).and_then(|value| {
+        services
+            .wait_one(value, arguments[1], arguments[2])
+            .map_err(status_from_object_service_error)
+    });
+    let result = match result {
+        Ok(SignalWaitOutcome::Observed(snapshot)) => success([snapshot.signals().bits(), 0]),
+        Ok(SignalWaitOutcome::TimedOut) => failure(HYPER_NATIVE_STATUS_TIMED_OUT),
+        Ok(SignalWaitOutcome::Cancelled) => failure(HYPER_NATIVE_STATUS_CANCELLED),
+        Err(status) => failure(status),
+    };
+    DeferredAction::Return(result)
 }
 
 fn parse_handle(raw: u64) -> Result<HandleValue, HyperNativeStatus> {
@@ -294,6 +389,7 @@ fn status_from_process_error(error: ProcessError) -> HyperNativeStatus {
     match error {
         ProcessError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
         ProcessError::Handle(error) => status_from_handle_error(error),
+        ProcessError::Object(error) => status_from_object_creation_error(error),
         ProcessError::Lifecycle(_) | ProcessError::AddressSpaceReferenced => {
             HYPER_NATIVE_STATUS_BAD_STATE
         }
@@ -301,6 +397,70 @@ fn status_from_process_error(error: ProcessError) -> HyperNativeStatus {
         ProcessError::Scheduler(_) | ProcessError::TaskGroup(_) => HYPER_NATIVE_STATUS_INTERNAL,
         ProcessError::UserEntry(_) => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
         ProcessError::UserMemory(error) => status_from_machine_error(error),
+    }
+}
+
+const fn status_from_object_creation_error(error: ObjectCreationError) -> HyperNativeStatus {
+    match error {
+        ObjectCreationError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+        ObjectCreationError::KoidExhausted => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
+    }
+}
+
+fn status_from_object_service_error(error: ObjectServiceError) -> HyperNativeStatus {
+    match error {
+        ObjectServiceError::Process(error) => status_from_process_error(error),
+        ObjectServiceError::Event(error) => status_from_event_error(error),
+        ObjectServiceError::Wait(error) => status_from_object_wait_error(error),
+    }
+}
+
+const fn status_from_event_error(error: EventError) -> HyperNativeStatus {
+    match error {
+        EventError::InvalidSignals => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        EventError::AllocationSize => HYPER_NATIVE_STATUS_INTERNAL,
+        EventError::Resource(error) => status_from_resource_error(error),
+        EventError::SignalWait(error) => status_from_signal_wait_error(error),
+    }
+}
+
+const fn status_from_object_wait_error(error: ObjectWaitError) -> HyperNativeStatus {
+    match error {
+        ObjectWaitError::AllocationSize => HYPER_NATIVE_STATUS_INTERNAL,
+        ObjectWaitError::Deadline(error) => status_from_deadline_error(error),
+        ObjectWaitError::InvalidSignals => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        ObjectWaitError::Resource(error) => status_from_resource_error(error),
+        ObjectWaitError::Signal(error) => status_from_signal_wait_error(error),
+        ObjectWaitError::Timer(error) => status_from_timed_wait_error(error),
+    }
+}
+
+const fn status_from_deadline_error(error: crate::kernel::time::Error) -> HyperNativeStatus {
+    match error {
+        crate::kernel::time::Error::Conversion(_) | crate::kernel::time::Error::DeadlineTooFar => {
+            HYPER_NATIVE_STATUS_INVALID_ARGUMENT
+        }
+        _ => HYPER_NATIVE_STATUS_INTERNAL,
+    }
+}
+
+const fn status_from_timed_wait_error(error: TimedWaitError) -> HyperNativeStatus {
+    match error {
+        TimedWaitError::Allocation
+        | TimedWaitError::Time(crate::kernel::time::Error::TimerQueue(
+            hyper::time::TimerQueueError::Allocation,
+        )) => HYPER_NATIVE_STATUS_NO_MEMORY,
+        TimedWaitError::Scheduler(_)
+        | TimedWaitError::Time(_)
+        | TimedWaitError::TimerCleanup(_) => HYPER_NATIVE_STATUS_INTERNAL,
+    }
+}
+
+const fn status_from_signal_wait_error(error: SignalWaitError) -> HyperNativeStatus {
+    match error {
+        SignalWaitError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+        SignalWaitError::SequenceExhausted => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
+        SignalWaitError::Scheduler(_) => HYPER_NATIVE_STATUS_INTERNAL,
     }
 }
 
@@ -411,6 +571,7 @@ pub(crate) enum SelfTestError {
     InvalidHandle,
     InvalidRights,
     InvalidRecordSize,
+    ObjectErrorMapping,
     RecordEncoding,
     ValidationReachedService,
     DeferredDispatch,
@@ -459,6 +620,28 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation)
         }
+
+        fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ProcessError::Allocation.into())
+        }
+    }
+
+    impl DeferredServices for RejectingServices {
+        fn signal_event(&self, _: HandleValue, _: u64, _: u64) -> Result<(), ObjectServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ProcessError::Allocation.into())
+        }
+
+        fn wait_one(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: u64,
+        ) -> Result<SignalWaitOutcome, ObjectServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ProcessError::Allocation.into())
+        }
     }
 
     fn invoke(number: u64, arguments: [u64; 6]) -> NativeInvocation {
@@ -478,16 +661,28 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     if unknown.status() != HYPER_NATIVE_STATUS_NOT_SUPPORTED || unknown.values() != &[0, 0] {
         return Err(SelfTestError::UnknownNumber);
     }
-    if dispatch_deferred(invoke(HYPER_NATIVE_SYS_THREAD_YIELD, [u64::MAX; 6]))
-        != DeferredAction::Yield(success([0, 0]))
-        || dispatch_deferred(invoke(HYPER_NATIVE_SYS_THREAD_EXIT, [u64::MAX; 6]))
-            != (DeferredAction::ExitThread { status: -1 })
-        || dispatch_deferred(invoke(HYPER_NATIVE_SYS_PROCESS_EXIT, [42, 0, 0, 0, 0, 0]))
-            != (DeferredAction::ExitProcess { status: 42 })
-        || dispatch_deferred(invoke(u64::MAX, [u64::MAX; 6]))
+    if dispatch_deferred(
+        &services,
+        invoke(HYPER_NATIVE_SYS_THREAD_YIELD, [u64::MAX; 6]),
+    ) != DeferredAction::Yield(success([0, 0]))
+        || dispatch_deferred(
+            &services,
+            invoke(HYPER_NATIVE_SYS_THREAD_EXIT, [u64::MAX; 6]),
+        ) != (DeferredAction::ExitThread { status: -1 })
+        || dispatch_deferred(
+            &services,
+            invoke(HYPER_NATIVE_SYS_PROCESS_EXIT, [42, 0, 0, 0, 0, 0]),
+        ) != (DeferredAction::ExitProcess { status: 42 })
+        || dispatch_deferred(&services, invoke(u64::MAX, [u64::MAX; 6]))
             != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED))
     {
         return Err(SelfTestError::DeferredDispatch);
+    }
+    let timer_allocation = ObjectWaitError::Timer(TimedWaitError::Time(
+        crate::kernel::time::Error::TimerQueue(hyper::time::TimerQueueError::Allocation),
+    ));
+    if status_from_object_wait_error(timer_allocation) != HYPER_NATIVE_STATUS_NO_MEMORY {
+        return Err(SelfTestError::ObjectErrorMapping);
     }
     let bad_handle = dispatch_immediate(
         &services,

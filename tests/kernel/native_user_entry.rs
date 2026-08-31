@@ -6,7 +6,9 @@
 use hyper::mm::PAGE_SIZE;
 
 use crate::kernel::accounting::{ResourceDomain, ResourceLimits};
+use crate::kernel::capability::{HandleValue, Rights};
 use crate::kernel::mm::user_space::{UserAddress, UserSlice, prepare_native_entry_self_test};
+use crate::kernel::object::Event;
 use crate::kernel::process::{
     AddressSpaceRetirement, MachineAbi, PreparedProcess, Process, ProcessImage,
     ProcessRetirementStep, TaskGroup, TerminalReason,
@@ -64,10 +66,69 @@ const PROCESS_EXIT_PROGRAM: [u8; 16] = [
     0x20, 0x00, 0x20, 0xd4, // brk #1; no-return contract failed.
 ];
 
+// Create an Event, assert its level through the deferred signal path, observe
+// it with an infinite-deadline wait, then exit normally. This proves the
+// generated ABI numbers, Process handle publication, rights checks, object
+// dispatch, and the signal snapshot return convention through real EL0 entry.
+const EVENT_WAIT_PROGRAM: [u8; 108] = [
+    0x00, 0x00, 0x80, 0xd2, // mov x0, #0; event_create options.
+    0x28, 0x01, 0x80, 0xd2, // mov x8, #9; event_create.
+    0x01, 0x00, 0x00, 0xd4, // svc #0.
+    0x1f, 0x00, 0x00, 0xf1, // cmp x0, #0.
+    0xc1, 0x02, 0x00, 0x54, // b.ne failure.
+    0xf3, 0x03, 0x01, 0xaa, // mov x19, x1; retain Event handle.
+    0xe0, 0x03, 0x13, 0xaa, // mov x0, x19; Event handle.
+    0x01, 0x00, 0x80, 0xd2, // mov x1, #0; clear mask.
+    0x22, 0x00, 0x80, 0xd2, // mov x2, #1; set SIGNALED.
+    0x48, 0x01, 0x80, 0xd2, // mov x8, #10; event_signal.
+    0x01, 0x00, 0x00, 0xd4, // svc #0.
+    0x1f, 0x00, 0x00, 0xf1, // cmp x0, #0.
+    0xc1, 0x01, 0x00, 0x54, // b.ne failure.
+    0xe0, 0x03, 0x13, 0xaa, // mov x0, x19; Event handle.
+    0x21, 0x00, 0x80, 0xd2, // mov x1, #1; requested SIGNALED.
+    0x02, 0x00, 0x80, 0x92, // mov x2, #-1; infinite deadline.
+    0x68, 0x01, 0x80, 0xd2, // mov x8, #11; object_wait_one.
+    0x01, 0x00, 0x00, 0xd4, // svc #0.
+    0x1f, 0x00, 0x00, 0xf1, // cmp x0, #0.
+    0xe1, 0x00, 0x00, 0x54, // b.ne failure.
+    0x3f, 0x04, 0x00, 0xf1, // cmp x1, #1; observed SIGNALED.
+    0xa1, 0x00, 0x00, 0x54, // b.ne failure.
+    0x00, 0x00, 0x80, 0xd2, // mov x0, #0; exit status.
+    0xe8, 0x00, 0x80, 0xd2, // mov x8, #7; thread_exit.
+    0x01, 0x00, 0x00, 0xd4, // svc #0; must not return.
+    0x20, 0x00, 0x20, 0xd4, // brk #1; no-return contract failed.
+    0x40, 0x00, 0x20, 0xd4, // failure: brk #2.
+];
+
+// Block forever on a clear Event. The kernel self-test controller requests
+// Process stop only after the Event publishes its waiter; returning to either
+// breakpoint proves cancellation leaked a result back into EL0.
+const CANCELLED_EVENT_WAIT_PROGRAM: [u8; 52] = [
+    0x00, 0x00, 0x80, 0xd2, // mov x0, #0; event_create options.
+    0x28, 0x01, 0x80, 0xd2, // mov x8, #9; event_create.
+    0x01, 0x00, 0x00, 0xd4, // svc #0.
+    0x1f, 0x00, 0x00, 0xf1, // cmp x0, #0.
+    0x01, 0x01, 0x00, 0x54, // b.ne failure.
+    0xf3, 0x03, 0x01, 0xaa, // mov x19, x1; retain Event handle.
+    0xe0, 0x03, 0x13, 0xaa, // mov x0, x19; Event handle.
+    0x21, 0x00, 0x80, 0xd2, // mov x1, #1; requested SIGNALED.
+    0x02, 0x00, 0x80, 0x92, // mov x2, #-1; infinite deadline.
+    0x68, 0x01, 0x80, 0xd2, // mov x8, #11; object_wait_one.
+    0x01, 0x00, 0x00, 0xd4, // svc #0; controller cancels this wait.
+    0x60, 0x00, 0x20, 0xd4, // brk #3; cancellation must not return.
+    0x40, 0x00, 0x20, 0xd4, // failure: brk #2.
+];
+
 #[derive(Clone, Copy)]
 enum SiblingSetup {
     None,
     Dormant,
+}
+
+#[derive(Clone, Copy)]
+enum RunControl {
+    Join,
+    CancelPublishedEventWait,
 }
 
 struct ProgramOutcome {
@@ -99,6 +160,7 @@ pub(super) fn run() -> Result<(), Error> {
         &PROGRAM,
         "selftest/el0-fault",
         SiblingSetup::None,
+        RunControl::Join,
     )?;
     if !matches!(outcome.thread, TerminalReason::Fault { class: 6, code } if code & 0xffff == 0)
         || outcome.process != outcome.thread
@@ -118,6 +180,7 @@ pub(super) fn run() -> Result<(), Error> {
         &THREAD_EXIT_PROGRAM,
         "selftest/el0-thread-exit",
         SiblingSetup::None,
+        RunControl::Join,
     )?;
     if outcome.thread != (TerminalReason::ThreadExited { status: -17 })
         || outcome.process != (TerminalReason::LastThreadExited { status: -17 })
@@ -129,9 +192,40 @@ pub(super) fn run() -> Result<(), Error> {
     let outcome = run_program(
         &domain,
         &group,
+        &EVENT_WAIT_PROGRAM,
+        "selftest/el0-event-wait",
+        SiblingSetup::None,
+        RunControl::Join,
+    )?;
+    if outcome.thread != (TerminalReason::ThreadExited { status: 0 })
+        || outcome.process != (TerminalReason::LastThreadExited { status: 0 })
+        || outcome.sibling.is_some()
+    {
+        return Err(Error::Terminal);
+    }
+
+    let outcome = run_program(
+        &domain,
+        &group,
+        &CANCELLED_EVENT_WAIT_PROGRAM,
+        "selftest/el0-event-cancel",
+        SiblingSetup::None,
+        RunControl::CancelPublishedEventWait,
+    )?;
+    if outcome.thread != TerminalReason::Requested
+        || outcome.process != TerminalReason::Requested
+        || outcome.sibling.is_some()
+    {
+        return Err(Error::Terminal);
+    }
+
+    let outcome = run_program(
+        &domain,
+        &group,
         &PROCESS_EXIT_PROGRAM,
         "selftest/el0-process-exit",
         SiblingSetup::Dormant,
+        RunControl::Join,
     )?;
     let process_exit = TerminalReason::ProcessExited { status: 23 };
     if outcome.thread != process_exit
@@ -152,6 +246,7 @@ fn run_program(
     program: &[u8],
     name: &str,
     sibling_setup: SiblingSetup,
+    control: RunControl,
 ) -> Result<ProgramOutcome, Error> {
     let code_range =
         UserSlice::new(UserAddress::new(IMAGE_BASE), PAGE_SIZE).map_err(|_| Error::Construction)?;
@@ -201,6 +296,13 @@ fn run_program(
         ),
     };
     thread.ready().map_err(|_| Error::Scheduler)?;
+    if matches!(control, RunControl::CancelPublishedEventWait) {
+        wait_for_event_registration(&process)?;
+        let report = process.request_stop(TerminalReason::Requested);
+        if !report.newly_requested || !report.dispatch_complete {
+            return Err(Error::Lifecycle);
+        }
+    }
     let thread_reason = thread.join().map_err(|_| Error::Lifecycle)?;
     let sibling_reason = match sibling.as_ref() {
         Some(sibling) => Some(sibling.join().map_err(|_| Error::Lifecycle)?),
@@ -215,6 +317,21 @@ fn run_program(
         process: process_reason,
         sibling: sibling_reason,
     })
+}
+
+fn wait_for_event_registration(process: &Process) -> Result<(), Error> {
+    const MAX_PROGRESS_PASSES: usize = 4_096;
+
+    let handle = HandleValue::first_for_test();
+    for _ in 0..MAX_PROGRESS_PASSES {
+        if let Ok(event) = process.resolve_handle::<Event>(handle, Rights::WAIT)
+            && event.object().waiter_count() == 1
+        {
+            return Ok(());
+        }
+        crate::kernel::task::scheduler::yield_now().map_err(|_| Error::Scheduler)?;
+    }
+    Err(Error::Lifecycle)
 }
 
 fn retire_process(process: &Process) -> Result<(), Error> {

@@ -21,6 +21,7 @@ pub(crate) mod entry;
 pub mod irq;
 pub mod log;
 pub mod mm;
+pub(crate) mod object;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod process;
 pub mod sync;

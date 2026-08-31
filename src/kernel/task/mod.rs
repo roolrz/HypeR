@@ -16,9 +16,8 @@ mod wait;
 
 pub use sleep::{SleepError, sleep_ms, sleep_ns, sleep_s, sleep_until, sleep_us};
 pub use timeout::TimedWaitError;
-pub(crate) use wait::WaitMobility;
-#[cfg(feature = "kernel-self-test")]
-pub(crate) use wait::WaitTicket;
+pub(crate) use timeout::{ArmedTimeout, PreparedTimeout};
+pub(crate) use wait::{WaitMobility, WaitTicket};
 pub use wait::{WaitOutcome, WaitQueue};
 
 static READY: AtomicBool = AtomicBool::new(false);

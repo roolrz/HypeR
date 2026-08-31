@@ -21,7 +21,8 @@ use crate::kernel::accounting::{
 };
 use crate::kernel::capability::{
     ClosedHandle, HandleError, HandleFlags, HandleInfo, HandleReservation, HandleTable,
-    HandleValue, KernelObject, PreparedHandle, ResolvedObject, Rights,
+    HandleValue, KernelObject, ObjectCreationError, ObjectRef, PreparedHandle, ResolvedObject,
+    Rights,
 };
 use crate::kernel::mm::user_space::{MachineError, NativeAddressSpace, UserSlice};
 use crate::kernel::sync::Completion;
@@ -103,6 +104,7 @@ struct ProcessInner {
 pub(crate) enum ProcessError {
     Allocation,
     Handle(HandleError),
+    Object(ObjectCreationError),
     Lifecycle(LifecycleError),
     UserMemory(MachineError),
     Resource(ResourceError),
@@ -115,6 +117,12 @@ pub(crate) enum ProcessError {
 impl From<HandleError> for ProcessError {
     fn from(error: HandleError) -> Self {
         Self::Handle(error)
+    }
+}
+
+impl From<ObjectCreationError> for ProcessError {
+    fn from(error: ObjectCreationError) -> Self {
+        Self::Object(error)
     }
 }
 
@@ -831,6 +839,38 @@ impl Process {
                 .handles
                 .with(|table| table.resolve(value, rights))?)
         })
+    }
+
+    /// Publishes the first process-local handle for a new kernel object.
+    ///
+    /// Slot, quota, object identity, and active-handle state are prepared
+    /// before the Process lock commits publication. Every failure before that
+    /// point rolls back both the slot reservation and unpublished authority.
+    pub(crate) fn create_object<T: KernelObject>(
+        &self,
+        payload: T,
+        rights: Rights,
+    ) -> Result<HandleValue, ProcessError> {
+        let reservation = self.reserve_handles::<1>()?;
+        let object = match ObjectRef::try_new(payload) {
+            Ok(object) => object,
+            Err(error) => {
+                self.abort_handles(reservation);
+                return Err(error.into());
+            }
+        };
+        let prepared = match PreparedHandle::try_from_new_object(object, rights, HandleFlags::NONE)
+        {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.abort_handles(reservation);
+                return Err(error.into());
+            }
+        };
+        match self.publish_handles(reservation, [prepared]) {
+            Ok(values) => Ok(values[0]),
+            Err(failure) => Err(failure.error),
+        }
     }
 
     pub(crate) fn handle_info(

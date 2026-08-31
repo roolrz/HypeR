@@ -26,6 +26,8 @@ pub struct AbiSchema {
     pub statuses: &'static [Status],
     pub object_kinds: &'static [ObjectKind],
     pub rights: &'static [Right],
+    pub signals: &'static [Signal],
+    pub constants: &'static [AbiConstant],
     pub records: &'static [Record],
     pub syscalls: &'static [Syscall],
 }
@@ -52,6 +54,19 @@ pub struct ObjectKind {
 pub struct Right {
     pub bit: u8,
     pub name: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Signal {
+    pub object: &'static str,
+    pub bit: u8,
+    pub name: &'static str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AbiConstant {
+    pub name: &'static str,
+    pub value: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -279,15 +294,30 @@ pub const STATUSES: &[Status] = &[
         value: -10,
         name: "internal",
     },
+    Status {
+        value: -11,
+        name: "timed_out",
+    },
+    Status {
+        value: -12,
+        name: "cancelled",
+    },
 ];
 
 const RIGHT_DUPLICATE_BIT: u8 = 0;
 const RIGHT_INSPECT_BIT: u8 = 3;
+const RIGHT_SIGNAL_BIT: u8 = 19;
 
-pub const OBJECT_KINDS: &[ObjectKind] = &[ObjectKind {
-    value: 0,
-    name: "none",
-}];
+pub const OBJECT_KINDS: &[ObjectKind] = &[
+    ObjectKind {
+        value: 0,
+        name: "none",
+    },
+    ObjectKind {
+        value: 1,
+        name: "event",
+    },
+];
 
 pub const RIGHTS: &[Right] = &[
     Right {
@@ -366,10 +396,31 @@ pub const RIGHTS: &[Right] = &[
         bit: 18,
         name: "revoke",
     },
+    Right {
+        bit: RIGHT_SIGNAL_BIT,
+        name: "signal",
+    },
 ];
 
 pub const RIGHT_DUPLICATE: u64 = 1 << RIGHT_DUPLICATE_BIT;
 pub const RIGHT_INSPECT: u64 = 1 << RIGHT_INSPECT_BIT;
+pub const RIGHT_TRANSFER: u64 = 1 << 1;
+pub const RIGHT_WAIT: u64 = 1 << 2;
+pub const RIGHT_SIGNAL: u64 = 1 << RIGHT_SIGNAL_BIT;
+
+pub const EVENT_RIGHTS: u64 =
+    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
+
+pub const SIGNALS: &[Signal] = &[Signal {
+    object: "event",
+    bit: 0,
+    name: "signaled",
+}];
+
+pub const CONSTANTS: &[AbiConstant] = &[AbiConstant {
+    name: "deadline_infinite",
+    value: u64::MAX,
+}];
 
 const HANDLE_INFO_FIELDS: &[Field] = &[
     Field {
@@ -556,6 +607,73 @@ const EXIT_ARGUMENTS: &[Argument] = &[Argument {
     handle: None,
     memory: None,
 }];
+const EVENT_CREATE_ARGUMENTS: &[Argument] = &[Argument {
+    name: "options",
+    kind: ValueKind::U32,
+    handle: None,
+    memory: None,
+}];
+const EVENT_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "handle",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("event"),
+        rights: ProducedRights::Fixed(EVENT_RIGHTS),
+    }),
+}];
+const EVENT_SIGNAL_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "event",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("event"),
+            required_rights: RIGHT_SIGNAL,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "clear_mask",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "set_mask",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+];
+const OBJECT_WAIT_ONE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "object",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Any,
+            required_rights: RIGHT_WAIT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "signals",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "deadline",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+];
+const OBJECT_WAIT_ONE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "observed",
+    kind: ValueKind::U64,
+    handle: None,
+}];
 
 pub const SYSCALLS: &[Syscall] = &[
     Syscall {
@@ -675,6 +793,45 @@ pub const SYSCALLS: &[Syscall] = &[
         audit: AuditClass::Task,
         flags: FlagPolicy::None,
     },
+    Syscall {
+        number: 9,
+        name: "event_create",
+        feature: FeatureGate::Core,
+        arguments: EVENT_CREATE_ARGUMENTS,
+        results: EVENT_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::Strict,
+    },
+    Syscall {
+        number: 10,
+        name: "event_signal",
+        feature: FeatureGate::Core,
+        arguments: EVENT_SIGNAL_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::Strict,
+    },
+    Syscall {
+        number: 11,
+        name: "object_wait_one",
+        feature: FeatureGate::Core,
+        arguments: OBJECT_WAIT_ONE_ARGUMENTS,
+        results: OBJECT_WAIT_ONE_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -683,6 +840,8 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
     statuses: STATUSES,
     object_kinds: OBJECT_KINDS,
     rights: RIGHTS,
+    signals: SIGNALS,
+    constants: CONSTANTS,
     records: RECORDS,
     syscalls: SYSCALLS,
 };

@@ -30,6 +30,7 @@ impl Rights {
     pub(crate) const MAP_DMA: Self = Self(native::HYPER_NATIVE_RIGHT_MAP_DMA);
     pub(crate) const ACK_INTERRUPT: Self = Self(native::HYPER_NATIVE_RIGHT_ACK_INTERRUPT);
     pub(crate) const REVOKE: Self = Self(native::HYPER_NATIVE_RIGHT_REVOKE);
+    pub(crate) const SIGNAL: Self = Self(native::HYPER_NATIVE_RIGHT_SIGNAL);
     pub(crate) const KNOWN: Self = Self(native::HYPER_NATIVE_RIGHTS_MASK);
 
     pub(crate) const fn from_bits(bits: u64) -> Option<Self> {

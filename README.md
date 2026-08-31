@@ -81,12 +81,16 @@ The current foundation includes:
 - a compiled capability foundation with fallible shared objects, schema-owned
   rights, 64-bit generation handles, detached unpublished slot transactions,
   deferred close, and allocation-free iterative teardown;
+- capability-backed Event objects with independent `WAIT` and `SIGNAL`
+  authority, absolute-deadline waits, and exactly-once arbitration among
+  signal, timeout, and Process cancellation;
 - strong `ProcessImage`, `Process`, `UserThread`, and `TaskGroup` ownership with
   accounted construction, explicit publication, start/ready, stop/join, and
   acknowledged retirement;
 - an AArch64 VHE/nVHE native-EL0 proof which enters through a scheduler-owned
-  user Thread, dispatches the six initial Native syscalls, contains a user
-  fault, and retires the complete Process ownership graph;
+  user Thread, dispatches the initial handle, scheduling, lifecycle, and Event
+  syscalls, contains a user fault, and retires the complete Process ownership
+  graph;
 - safe AArch64 IRQ-tail preemption, including deactivation and resumption of
   scheduler-owned vCPU continuations;
 - IRQ domains and shared handler registration, GICv3/vGIC, PLIC, x2APIC, host
@@ -264,12 +268,12 @@ secondary architectures.
 - expand the checked schema's current Rust values, C header, layouts, metadata,
   and reference into generated dispatch wrappers, architecture stubs, and vDSO
   exports;
-- expose the existing VMO/VMAR and safe-copy core through capabilities, then add
-  Channel/Event/WaitSet, time, and atomic-wait primitives sufficient for a real
-  service runtime;
-- add temporary pre-release debug output, then extend the implemented yield and
-  exit calls with blocking cancellation and multi-Thread Process qualification
-  before atomic exec.
+- expose the existing VMO/VMAR and safe-copy core through capabilities, then
+  extend the Event and single-object wait foundation with Channel, EventPair,
+  WaitSet, clock/timer, and atomic-wait primitives sufficient for a real service
+  runtime;
+- add temporary pre-release debug output, then extend the implemented blocking
+  cancellation with multi-Thread Process qualification before atomic exec.
 
 ### 2. Extend VM lifetime and topology
 

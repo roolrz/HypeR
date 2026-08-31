@@ -63,6 +63,12 @@ impl HandleValue {
         self.0.get()
     }
 
+    /// Returns the first value published by a fresh table.
+    #[allow(dead_code)]
+    pub(crate) fn first_for_test() -> Self {
+        Self::encode(0, 1)
+    }
+
     fn encode(slot: usize, generation: u64) -> Self {
         let raw = (generation << SLOT_BITS) | (slot as u64 + 1);
         // Slot indices and generations are private validated table state. Their

@@ -14,6 +14,9 @@ use super::Rights;
 
 const RETIRED: usize = 1 << (usize::BITS - 1);
 const ACTIVE_LIMIT: usize = RETIRED - 1;
+const EVENT_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_EVENT;
+
+const _: () = assert!(EVENT_OBJECT_KIND != 0);
 
 static NEXT_KOID: AtomicU64 = AtomicU64::new(1);
 
@@ -48,20 +51,23 @@ impl Koid {
 
 /// Stable object-kind identity used by the handle ABI.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ObjectKind(NonZeroU32);
+pub(crate) struct ObjectKind(u32);
 
 impl ObjectKind {
+    /// Native Event object kind declared by the generated ABI schema.
+    pub(crate) const EVENT: Self = Self(EVENT_OBJECT_KIND);
+
     /// Constructs a synthetic kind for host-only mechanism tests.
     ///
     /// A production constructor is added here only with a corresponding
     /// generated ABI kind, keeping type/kind coherence in one module.
     #[cfg(test)]
     pub(crate) const fn for_test(value: NonZeroU32) -> Self {
-        Self(value)
+        Self(value.get())
     }
 
     pub(crate) const fn get(self) -> u32 {
-        self.0.get()
+        self.0
     }
 }
 
@@ -131,6 +137,11 @@ struct SharedObject {
 pub(crate) struct ObjectRef(FallibleArc<SharedObject>);
 
 impl ObjectRef {
+    /// Heap bytes required by the erased owner and one concrete payload.
+    pub(crate) const fn allocation_size<T: KernelObject>() -> Option<usize> {
+        FallibleArc::<SharedObject>::allocation_size().checked_add(core::mem::size_of::<T>())
+    }
+
     /// Fallibly constructs an unpublished object with no active handles.
     pub(crate) fn try_new<T: KernelObject>(payload: T) -> Result<Self, ObjectCreationError> {
         let payload: Box<dyn ErasedKernelObject> = try_box(payload)?;
