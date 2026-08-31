@@ -1139,7 +1139,9 @@ impl ProcessThreadMembership {
             process_invariant_violation();
         }
         let status = match terminal {
-            TerminalReason::LastThreadExited { status } => status,
+            TerminalReason::ThreadExited { status }
+            | TerminalReason::ProcessExited { status }
+            | TerminalReason::LastThreadExited { status } => status,
             _ => 0,
         };
         let detached = self.process.inner.state.with(|state| {
