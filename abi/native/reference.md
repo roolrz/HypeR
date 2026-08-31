@@ -35,6 +35,9 @@ ABI revision: `0`.
 | 3 | `handle_replace` | `source: handle`, `requested_rights: rights` | `handle: handle` | `source: ConsumeOnCommit, any, rights=0x0`, `handle: produce, same-as(source), subset-from(requested_rights)` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 4 | `handle_get_info` | `handle: handle`, `output: user_address`, `output_size: byte_count` | — | `handle: Borrow, any, rights=0x0` | `output: Write, len=output_size, max=16, record=handle_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 5 | `object_get_basic_info` | `handle: handle`, `output: user_address`, `output_size: byte_count` | — | `handle: Borrow, any, rights=0x8` | `output: Write, len=output_size, max=16, record=object_basic_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 6 | `thread_yield` | — | — | — | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 7 | `thread_exit` | `status: i64` | — | — | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=NoReturn, flags=None` | `Task` |
+| 8 | `process_exit` | `status: i64` | — | — | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=NoReturn, flags=None` | `Task` |
 
 ## Public records
 

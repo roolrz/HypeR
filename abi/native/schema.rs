@@ -219,6 +219,7 @@ pub enum AuditClass {
     Abi,
     Capability,
     Object,
+    Task,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -549,6 +550,12 @@ const OBJECT_GET_BASIC_INFO_ARGUMENTS: &[Argument] = &[
         memory: None,
     },
 ];
+const EXIT_ARGUMENTS: &[Argument] = &[Argument {
+    name: "status",
+    kind: ValueKind::I64,
+    handle: None,
+    memory: None,
+}];
 
 pub const SYSCALLS: &[Syscall] = &[
     Syscall {
@@ -627,6 +634,45 @@ pub const SYSCALLS: &[Syscall] = &[
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
         audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+    },
+    Syscall {
+        number: 6,
+        name: "thread_yield",
+        feature: FeatureGate::Core,
+        arguments: NO_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+    },
+    Syscall {
+        number: 7,
+        name: "thread_exit",
+        feature: FeatureGate::Core,
+        arguments: EXIT_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::NoReturn,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+    },
+    Syscall {
+        number: 8,
+        name: "process_exit",
+        feature: FeatureGate::Core,
+        arguments: EXIT_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::NoReturn,
+        audit: AuditClass::Task,
         flags: FlagPolicy::None,
     },
 ];

@@ -10,8 +10,10 @@ use hyper::abi::native::{
     HYPER_NATIVE_STATUS_NO_MEMORY, HYPER_NATIVE_STATUS_NOT_SUPPORTED,
     HYPER_NATIVE_STATUS_RESOURCE_LIMIT, HYPER_NATIVE_SYS_ABI_QUERY, HYPER_NATIVE_SYS_HANDLE_CLOSE,
     HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
-    HYPER_NATIVE_SYS_HANDLE_REPLACE, HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO, HyperNativeHandleInfo,
-    HyperNativeObjectBasicInfo, HyperNativeStatus, NativeInvocation, NativeResult,
+    HYPER_NATIVE_SYS_HANDLE_REPLACE, HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO,
+    HYPER_NATIVE_SYS_PROCESS_EXIT, HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD,
+    HyperNativeHandleInfo, HyperNativeObjectBasicInfo, HyperNativeStatus, NativeInvocation,
+    NativeResult,
 };
 
 use crate::kernel::accounting::ResourceError;
@@ -66,6 +68,18 @@ pub(in crate::kernel) trait ImmediateServices {
     fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError>;
 }
 
+/// Policy action produced after architecture entry has fully unwound.
+///
+/// This value owns no architecture frame, CPU pin, or address-space guard, so
+/// the caller may safely execute its scheduling or lifecycle effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::kernel) enum DeferredAction {
+    Return(NativeResult),
+    Yield(NativeResult),
+    ExitThread { status: i64 },
+    ExitProcess { status: i64 },
+}
+
 /// Dispatches one owned, nonblocking invocation.
 ///
 /// Architecture entry retains its private raw frame but passes no frame borrow
@@ -85,6 +99,20 @@ pub(in crate::kernel) fn dispatch_immediate(
         HYPER_NATIVE_SYS_HANDLE_GET_INFO => sys_handle_get_info(services, arguments),
         HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO => sys_object_get_basic_info(services, arguments),
         _ => sys_not_supported(),
+    }
+}
+
+/// Decodes one syscall after the machine context has returned to its Thread.
+///
+/// The returned action separates ABI decoding from scheduler and Process
+/// policy. Unknown calls remain ordinary returning failures even though they
+/// conservatively use the deferred path.
+pub(in crate::kernel) fn dispatch_deferred(invocation: NativeInvocation) -> DeferredAction {
+    match invocation.number() {
+        HYPER_NATIVE_SYS_THREAD_YIELD => sys_thread_yield(),
+        HYPER_NATIVE_SYS_THREAD_EXIT => sys_thread_exit(invocation.arguments()),
+        HYPER_NATIVE_SYS_PROCESS_EXIT => sys_process_exit(invocation.arguments()),
+        _ => DeferredAction::Return(sys_not_supported()),
     }
 }
 
@@ -163,6 +191,25 @@ fn sys_object_get_basic_info(
 #[inline(never)]
 fn sys_not_supported() -> NativeResult {
     failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED)
+}
+
+#[inline(never)]
+fn sys_thread_yield() -> DeferredAction {
+    DeferredAction::Yield(success([0, 0]))
+}
+
+#[inline(never)]
+fn sys_thread_exit(arguments: &Arguments) -> DeferredAction {
+    DeferredAction::ExitThread {
+        status: arguments[0] as i64,
+    }
+}
+
+#[inline(never)]
+fn sys_process_exit(arguments: &Arguments) -> DeferredAction {
+    DeferredAction::ExitProcess {
+        status: arguments[0] as i64,
+    }
 }
 
 fn parse_handle(raw: u64) -> Result<HandleValue, HyperNativeStatus> {
@@ -366,6 +413,7 @@ pub(crate) enum SelfTestError {
     InvalidRecordSize,
     RecordEncoding,
     ValidationReachedService,
+    DeferredDispatch,
 }
 
 #[cfg(feature = "kernel-self-test")]
@@ -429,6 +477,17 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     let unknown = dispatch_immediate(&services, invoke(u64::MAX, [u64::MAX; 6]));
     if unknown.status() != HYPER_NATIVE_STATUS_NOT_SUPPORTED || unknown.values() != &[0, 0] {
         return Err(SelfTestError::UnknownNumber);
+    }
+    if dispatch_deferred(invoke(HYPER_NATIVE_SYS_THREAD_YIELD, [u64::MAX; 6]))
+        != DeferredAction::Yield(success([0, 0]))
+        || dispatch_deferred(invoke(HYPER_NATIVE_SYS_THREAD_EXIT, [u64::MAX; 6]))
+            != (DeferredAction::ExitThread { status: -1 })
+        || dispatch_deferred(invoke(HYPER_NATIVE_SYS_PROCESS_EXIT, [42, 0, 0, 0, 0, 0]))
+            != (DeferredAction::ExitProcess { status: 42 })
+        || dispatch_deferred(invoke(u64::MAX, [u64::MAX; 6]))
+            != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED))
+    {
+        return Err(SelfTestError::DeferredDispatch);
     }
     let bad_handle = dispatch_immediate(
         &services,

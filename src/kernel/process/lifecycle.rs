@@ -17,9 +17,25 @@ pub(crate) enum ProcessPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TerminalReason {
     Requested,
-    LastThreadExited { status: i64 },
-    Fault { class: u32, code: u64 },
-    TaskGroupStop { generation: u64 },
+    /// Thread-local outcome supplied by an explicit or normal Thread exit.
+    ThreadExited {
+        status: i64,
+    },
+    /// Process-wide outcome propagated to every member Thread.
+    ProcessExited {
+        status: i64,
+    },
+    /// Process outcome synthesized when its final Thread detaches.
+    LastThreadExited {
+        status: i64,
+    },
+    Fault {
+        class: u32,
+        code: u64,
+    },
+    TaskGroupStop {
+        generation: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -291,7 +307,7 @@ impl UserThreadLifecycle {
         }
         let terminal = self
             .terminal
-            .unwrap_or(TerminalReason::LastThreadExited { status: 0 });
+            .unwrap_or(TerminalReason::ThreadExited { status: 0 });
         self.terminal = Some(terminal);
         self.phase = UserThreadPhase::Detached;
         Ok(terminal)

@@ -53,6 +53,9 @@ pub const HYPER_NATIVE_SYS_HANDLE_DUPLICATE: u64 = 2;
 pub const HYPER_NATIVE_SYS_HANDLE_REPLACE: u64 = 3;
 pub const HYPER_NATIVE_SYS_HANDLE_GET_INFO: u64 = 4;
 pub const HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO: u64 = 5;
+pub const HYPER_NATIVE_SYS_THREAD_YIELD: u64 = 6;
+pub const HYPER_NATIVE_SYS_THREAD_EXIT: u64 = 7;
+pub const HYPER_NATIVE_SYS_PROCESS_EXIT: u64 = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

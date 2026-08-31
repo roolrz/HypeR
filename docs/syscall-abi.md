@@ -686,14 +686,17 @@ AArch64's world-regime and translation differences.
 ## Implementation plan and acceptance gates
 
 The current checkpoint implements much of the Phase 1 capability mechanics and
-a narrow AArch64 Phase 2 proof. The proof maps a raw instruction sequence,
+a narrow AArch64 Phase 2 proof. The proof maps raw instruction sequences,
 executes 64 direct `abi_query` calls in one machine run, exercises an unknown
-call through deferred unwind and re-entry, contains a breakpoint fault, joins
-its Thread and Process, and retires the ownership graph. The
-architecture-neutral dispatcher implements syscalls 0 through 5: ABI query,
-handle close, duplicate, replace, handle info, and object basic info. It is not
-a static PIE loader, general runtime, init process, vDSO, blocking syscall path,
-or secondary-architecture entry.
+call through deferred unwind and re-entry, yields and resumes, exits a Thread,
+propagates Process exit to a dormant sibling, contains a breakpoint fault,
+joins each Thread and Process, and retires each ownership graph. The
+architecture-neutral dispatchers implement syscalls 0 through 8: ABI query,
+handle close, duplicate, replace, handle info, object basic info, Thread yield,
+Thread exit, and Process exit. The last three prove deferred unwind and
+lifecycle completion, but do not yet constitute a general blocking/cancellation
+path. The checkpoint is not a static PIE loader, general runtime, init process,
+vDSO, or secondary-architecture entry.
 
 ### Phase 0: prove the boundary
 
@@ -720,8 +723,8 @@ or secondary-architecture entry.
   multi-Thread races, and migration qualification;
 - replace the raw instruction proof with an embedded static PIE EL0 program
   running through direct syscalls, without requiring a vDSO; and
-- support temporary unstable debug output, yield, and exit without calling the
-  result ABI stable.
+- support temporary unstable debug output without calling the result ABI
+  stable.
 
 ### Phase 3: usable Native runtime
 

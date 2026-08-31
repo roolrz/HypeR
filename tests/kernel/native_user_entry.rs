@@ -8,8 +8,8 @@ use hyper::mm::PAGE_SIZE;
 use crate::kernel::accounting::{ResourceDomain, ResourceLimits};
 use crate::kernel::mm::user_space::{UserAddress, UserSlice, prepare_native_entry_self_test};
 use crate::kernel::process::{
-    AddressSpaceRetirement, MachineAbi, PreparedProcess, ProcessImage, ProcessRetirementStep,
-    TaskGroup, TerminalReason,
+    AddressSpaceRetirement, MachineAbi, PreparedProcess, Process, ProcessImage,
+    ProcessRetirementStep, TaskGroup, TerminalReason,
 };
 use crate::kernel::task::scheduler::CpuMask;
 
@@ -40,6 +40,42 @@ const PROGRAM: [u8; 64] = [
     0x20, 0x00, 0x20, 0xd4, // brk #1; result mismatch.
 ];
 
+// Yield once, validate its completed result, then terminate the current Thread
+// with status -17. Reaching either breakpoint means that a returning or
+// no-return contract was violated.
+const THREAD_EXIT_PROGRAM: [u8; 36] = [
+    0xc8, 0x00, 0x80, 0xd2, // mov x8, #6; thread_yield.
+    0x01, 0x00, 0x00, 0xd4, // svc #0; deferred scheduling path.
+    0x1f, 0x00, 0x00, 0xf1, // cmp x0, #0; status == OK.
+    0xa1, 0x00, 0x00, 0x54, // b.ne result_mismatch.
+    0x00, 0x02, 0x80, 0x92, // mov x0, #-17; exit status.
+    0xe8, 0x00, 0x80, 0xd2, // mov x8, #7; thread_exit.
+    0x01, 0x00, 0x00, 0xd4, // svc #0; must not return.
+    0x20, 0x00, 0x20, 0xd4, // brk #1; no-return contract failed.
+    0x40, 0x00, 0x20, 0xd4, // result_mismatch: brk #2.
+];
+
+// Terminate the Process with status 23. The call must stop its current Thread
+// without completing a machine-visible result.
+const PROCESS_EXIT_PROGRAM: [u8; 16] = [
+    0xe0, 0x02, 0x80, 0xd2, // mov x0, #23; exit status.
+    0x08, 0x01, 0x80, 0xd2, // mov x8, #8; process_exit.
+    0x01, 0x00, 0x00, 0xd4, // svc #0; must not return.
+    0x20, 0x00, 0x20, 0xd4, // brk #1; no-return contract failed.
+];
+
+#[derive(Clone, Copy)]
+enum SiblingSetup {
+    None,
+    Dormant,
+}
+
+struct ProgramOutcome {
+    thread: TerminalReason,
+    process: TerminalReason,
+    sibling: Option<TerminalReason>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
     AddressSpace,
@@ -53,22 +89,83 @@ pub(super) enum Error {
 
 pub(super) fn run() -> Result<(), Error> {
     let direct_calls = crate::hal::user::direct_native_call_count_for_test();
+    let domain =
+        ResourceDomain::try_new_root(ResourceLimits::UNLIMITED).map_err(|_| Error::Construction)?;
+    let group = TaskGroup::try_new(&domain).map_err(|_| Error::Group)?;
+
+    let outcome = run_program(
+        &domain,
+        &group,
+        &PROGRAM,
+        "selftest/el0-fault",
+        SiblingSetup::None,
+    )?;
+    if !matches!(outcome.thread, TerminalReason::Fault { class: 6, code } if code & 0xffff == 0)
+        || outcome.process != outcome.thread
+        || outcome.sibling.is_some()
+    {
+        return Err(Error::Terminal);
+    }
+    if crate::hal::user::direct_native_call_count_for_test()
+        != direct_calls.saturating_add(DIRECT_CALL_COUNT)
+    {
+        return Err(Error::Terminal);
+    }
+
+    let outcome = run_program(
+        &domain,
+        &group,
+        &THREAD_EXIT_PROGRAM,
+        "selftest/el0-thread-exit",
+        SiblingSetup::None,
+    )?;
+    if outcome.thread != (TerminalReason::ThreadExited { status: -17 })
+        || outcome.process != (TerminalReason::LastThreadExited { status: -17 })
+        || outcome.sibling.is_some()
+    {
+        return Err(Error::Terminal);
+    }
+
+    let outcome = run_program(
+        &domain,
+        &group,
+        &PROCESS_EXIT_PROGRAM,
+        "selftest/el0-process-exit",
+        SiblingSetup::Dormant,
+    )?;
+    let process_exit = TerminalReason::ProcessExited { status: 23 };
+    if outcome.thread != process_exit
+        || outcome.process != process_exit
+        || outcome.sibling != Some(process_exit)
+    {
+        return Err(Error::Terminal);
+    }
+
+    group.request_stop().map_err(|_| Error::Group)?;
+    group.finish_retirement().map_err(|_| Error::Group)?;
+    Ok(())
+}
+
+fn run_program(
+    domain: &ResourceDomain,
+    group: &TaskGroup,
+    program: &[u8],
+    name: &str,
+    sibling_setup: SiblingSetup,
+) -> Result<ProgramOutcome, Error> {
     let code_range =
         UserSlice::new(UserAddress::new(IMAGE_BASE), PAGE_SIZE).map_err(|_| Error::Construction)?;
     let stack_range = UserSlice::new(UserAddress::new(IMAGE_BASE + PAGE_SIZE * 2), PAGE_SIZE)
         .map_err(|_| Error::Construction)?;
     let image_range = UserSlice::new(UserAddress::new(IMAGE_BASE), PAGE_SIZE * 3)
         .map_err(|_| Error::Construction)?;
-    let domain =
-        ResourceDomain::try_new_root(ResourceLimits::UNLIMITED).map_err(|_| Error::Construction)?;
-    let group = TaskGroup::try_new(&domain).map_err(|_| Error::Group)?;
     let pin = crate::kernel::task::scheduler::preempt_disable().map_err(|_| Error::Scheduler)?;
     let address_space = prepare_native_entry_self_test(
         domain.clone(),
         image_range,
         code_range,
         stack_range,
-        &PROGRAM,
+        program,
         &pin,
     );
     crate::kernel::task::scheduler::preempt_enable_and_reschedule(pin)
@@ -81,40 +178,46 @@ pub(super) fn run() -> Result<(), Error> {
         UserAddress::new(0),
     )
     .map_err(|_| Error::Image)?;
-    let prepared = match PreparedProcess::try_new(image, group.clone(), domain, address_space) {
-        Ok(prepared) => prepared,
-        Err(failure) => {
-            let (_cause, mut address_space) = failure.into_parts();
-            address_space.retire().map_err(|_| Error::AddressSpace)?;
-            return Err(Error::Construction);
-        }
-    };
+    let prepared =
+        match PreparedProcess::try_new(image, group.clone(), domain.clone(), address_space) {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                let (_cause, mut address_space) = failure.into_parts();
+                address_space.retire().map_err(|_| Error::AddressSpace)?;
+                return Err(Error::Construction);
+            }
+        };
     let process = prepared.publish();
     process.start().map_err(|_| Error::Lifecycle)?;
     let thread = process
-        .create_initial_user_thread("selftest/el0", CpuMask::ALL)
+        .create_initial_user_thread(name, CpuMask::ALL)
         .map_err(|_| Error::Construction)?;
+    let sibling = match sibling_setup {
+        SiblingSetup::None => None,
+        SiblingSetup::Dormant => Some(
+            process
+                .create_initial_user_thread("selftest/el0-dormant-sibling", CpuMask::ALL)
+                .map_err(|_| Error::Construction)?,
+        ),
+    };
     thread.ready().map_err(|_| Error::Scheduler)?;
-    let reason = thread.join().map_err(|_| Error::Lifecycle)?;
-    if !matches!(reason, TerminalReason::Fault { class: 6, code } if code & 0xffff == 0) {
-        return Err(Error::Terminal);
-    }
-    if crate::hal::user::direct_native_call_count_for_test()
-        != direct_calls.saturating_add(DIRECT_CALL_COUNT)
-    {
-        return Err(Error::Terminal);
-    }
-    if process.join().map_err(|_| Error::Lifecycle)? != reason {
-        return Err(Error::Terminal);
-    }
+    let thread_reason = thread.join().map_err(|_| Error::Lifecycle)?;
+    let sibling_reason = match sibling.as_ref() {
+        Some(sibling) => Some(sibling.join().map_err(|_| Error::Lifecycle)?),
+        None => None,
+    };
+    let process_reason = process.join().map_err(|_| Error::Lifecycle)?;
     drop(thread);
-    group.request_stop().map_err(|_| Error::Group)?;
+    drop(sibling);
     retire_process(&process)?;
-    group.finish_retirement().map_err(|_| Error::Group)?;
-    Ok(())
+    Ok(ProgramOutcome {
+        thread: thread_reason,
+        process: process_reason,
+        sibling: sibling_reason,
+    })
 }
 
-fn retire_process(process: &crate::kernel::process::Process) -> Result<(), Error> {
+fn retire_process(process: &Process) -> Result<(), Error> {
     let mut retry: Option<AddressSpaceRetirement> = None;
     for _ in 0..64 {
         let step = match retry.take() {

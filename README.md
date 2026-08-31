@@ -267,9 +267,9 @@ secondary architectures.
 - expose the existing VMO/VMAR and safe-copy core through capabilities, then add
   Channel/Event/WaitSet, time, and atomic-wait primitives sufficient for a real
   service runtime;
-- add temporary pre-release debug output, yield, and exit calls, then complete
-  blocking cancellation and multi-Thread Process qualification before atomic
-  exec.
+- add temporary pre-release debug output, then extend the implemented yield and
+  exit calls with blocking cancellation and multi-Thread Process qualification
+  before atomic exec.
 
 ### 2. Extend VM lifetime and topology
 

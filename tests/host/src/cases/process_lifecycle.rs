@@ -71,16 +71,52 @@ fn first_terminal_reason_wins_every_later_stop_race() {
 }
 
 #[test]
+fn explicit_thread_exit_supplies_the_last_thread_status() {
+    let mut process = ProcessLifecycle::prepared();
+    assert_eq!(process.publish(), Ok(()));
+    assert_eq!(process.start(), Ok(()));
+    assert_eq!(process.reserve_thread(), Ok(()));
+    assert_eq!(process.publish_thread(), Ok(()));
+    assert_eq!(process.detach_thread(-17), Ok(()));
+    assert_eq!(
+        process.terminal(),
+        Some(TerminalReason::LastThreadExited { status: -17 })
+    );
+}
+
+#[test]
+fn explicit_process_exit_is_an_immutable_process_outcome() {
+    let mut process = ProcessLifecycle::prepared();
+    assert_eq!(process.publish(), Ok(()));
+    assert_eq!(process.start(), Ok(()));
+    let exit = TerminalReason::ProcessExited { status: 23 };
+    assert!(process.request_stop(exit));
+    assert!(!process.request_stop(TerminalReason::Requested));
+    assert_eq!(process.terminal(), Some(exit));
+}
+
+#[test]
 fn user_thread_terminal_and_detach_are_exactly_once() {
     let mut thread = UserThreadLifecycle::prepared();
     assert_eq!(thread.publish(), Ok(()));
     assert_eq!(thread.mark_runnable(), Ok(()));
-    assert!(thread.request_terminal(TerminalReason::Requested));
-    assert_eq!(thread.terminal(), Some(TerminalReason::Requested));
+    let exit = TerminalReason::ThreadExited { status: -17 };
+    assert!(thread.request_terminal(exit));
+    assert_eq!(thread.terminal(), Some(exit));
     assert!(!thread.request_terminal(TerminalReason::Fault { class: 1, code: 2 }));
-    assert_eq!(thread.detach(), Ok(TerminalReason::Requested));
+    assert_eq!(thread.detach(), Ok(exit));
     assert_eq!(thread.phase(), UserThreadPhase::Detached);
     assert_eq!(thread.detach(), Err(LifecycleError::InvalidMembership));
+}
+
+#[test]
+fn user_thread_normal_return_is_not_a_process_terminal_reason() {
+    let mut thread = UserThreadLifecycle::prepared();
+    assert_eq!(thread.publish(), Ok(()));
+    assert_eq!(
+        thread.detach(),
+        Ok(TerminalReason::ThreadExited { status: 0 })
+    );
 }
 
 #[test]

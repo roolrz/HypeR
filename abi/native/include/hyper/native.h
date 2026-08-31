@@ -69,6 +69,9 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_SYS_HANDLE_REPLACE UINT64_C(3)
 #define HYPER_NATIVE_SYS_HANDLE_GET_INFO UINT64_C(4)
 #define HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO UINT64_C(5)
+#define HYPER_NATIVE_SYS_THREAD_YIELD UINT64_C(6)
+#define HYPER_NATIVE_SYS_THREAD_EXIT UINT64_C(7)
+#define HYPER_NATIVE_SYS_PROCESS_EXIT UINT64_C(8)
 
 typedef struct hyper_native_handle_info_t {
     uint32_t object_kind;

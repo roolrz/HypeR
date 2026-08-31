@@ -15,9 +15,15 @@ use crate::kernel::abi::native::{self, ImmediateServices};
 use crate::kernel::capability::{HandleInfo, HandleValue, Rights};
 use crate::kernel::mm::user_space::UserSlice;
 use crate::kernel::process::{
-    AbiFamily, ExecutionRoute, Process, ProcessError, RunAdmissionError, TerminalReason,
-    UserExecution, UserThread, UserThreadPhase,
+    AbiFamily, ExecutionRoute, Process, ProcessError, RunAdmissionError, StoppedUserRun,
+    TerminalReason, UserExecution, UserThread, UserThreadPhase,
 };
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum NativeRunAction {
+    Resume,
+    Stop,
+}
 
 struct ProcessServices<'process> {
     process: &'process Process,
@@ -270,16 +276,15 @@ fn run_session(
                 invocation,
                 completion,
             } => {
-                let result = if stop_requested {
-                    completion.discard(binding)
-                } else {
-                    completion.complete_native(binding, dispatch_native(session, invocation))
-                };
-                if let Err(failure) = result {
-                    fail_completion(failure);
-                }
-                stopped_run.acknowledge_architecture_exit();
-                if stop_requested {
+                if finish_native_call(
+                    session,
+                    invocation,
+                    completion,
+                    binding,
+                    stopped_run,
+                    stop_requested,
+                ) == NativeRunAction::Stop
+                {
                     return;
                 }
             }
@@ -310,11 +315,69 @@ fn run_session(
     }
 }
 
-fn dispatch_native(session: &UserSession, invocation: NativeInvocation) -> NativeResult {
-    NativeProcessCalls {
-        process: &session.process,
+fn finish_native_call(
+    session: &UserSession,
+    invocation: NativeInvocation,
+    completion: crate::hal::user::ReturnCapability<'_>,
+    binding: hyper::hal::user::UserRunBinding,
+    stopped_run: StoppedUserRun,
+    stop_requested: bool,
+) -> NativeRunAction {
+    if stop_requested {
+        consume_discarded_call(completion, binding, stopped_run);
+        return NativeRunAction::Stop;
     }
-    .dispatch_immediate(invocation)
+
+    match native::dispatch_deferred(invocation) {
+        native::DeferredAction::Return(result) => {
+            consume_returning_call(completion, binding, stopped_run, result);
+            NativeRunAction::Resume
+        }
+        native::DeferredAction::Yield(result) => {
+            consume_returning_call(completion, binding, stopped_run, result);
+            if let Err(error) = crate::kernel::task::scheduler::yield_now() {
+                fail_run("failed to yield native-user Thread", error);
+            }
+            NativeRunAction::Resume
+        }
+        native::DeferredAction::ExitThread { status } => {
+            session
+                .thread
+                .request_stop(TerminalReason::ThreadExited { status });
+            consume_discarded_call(completion, binding, stopped_run);
+            NativeRunAction::Stop
+        }
+        native::DeferredAction::ExitProcess { status } => {
+            session
+                .process
+                .request_stop(TerminalReason::ProcessExited { status });
+            consume_discarded_call(completion, binding, stopped_run);
+            NativeRunAction::Stop
+        }
+    }
+}
+
+fn consume_returning_call(
+    completion: crate::hal::user::ReturnCapability<'_>,
+    binding: hyper::hal::user::UserRunBinding,
+    stopped_run: StoppedUserRun,
+    result: NativeResult,
+) {
+    if let Err(failure) = completion.complete_native(binding, result) {
+        fail_completion(failure);
+    }
+    stopped_run.acknowledge_architecture_exit();
+}
+
+fn consume_discarded_call(
+    completion: crate::hal::user::ReturnCapability<'_>,
+    binding: hyper::hal::user::UserRunBinding,
+    stopped_run: StoppedUserRun,
+) {
+    if let Err(failure) = completion.discard(binding) {
+        fail_completion(failure);
+    }
+    stopped_run.acknowledge_architecture_exit();
 }
 
 fn reacquire_execution(
