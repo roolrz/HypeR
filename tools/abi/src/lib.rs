@@ -68,8 +68,11 @@ pub fn validate(schema: &AbiSchema) -> Result<(), Error> {
     validate_statuses(schema)?;
     validate_object_kinds(schema)?;
     let supported_rights = validate_rights(schema)?;
+    validate_signals(schema)?;
+    validate_constants(schema)?;
     validate_records(schema)?;
-    validate_syscalls(schema, supported_rights)
+    validate_syscalls(schema, supported_rights)?;
+    validate_generated_constant_names(schema)
 }
 
 fn validate_statuses(schema: &AbiSchema) -> Result<(), Error> {
@@ -206,6 +209,113 @@ fn validate_rights(schema: &AbiSchema) -> Result<u64, Error> {
         mask |= 1u64 << right.bit;
     }
     Ok(mask)
+}
+
+fn validate_signals(schema: &AbiSchema) -> Result<(), Error> {
+    let mut names = BTreeSet::new();
+    let mut bits = BTreeSet::new();
+    for signal in schema.signals {
+        validate_identifier("signal object", signal.object)?;
+        validate_identifier("signal", signal.name)?;
+        if signal.bit >= 64 {
+            return invalid(format!(
+                "signal {}.{} uses bit {} outside u64",
+                signal.object, signal.name, signal.bit
+            ));
+        }
+        if !schema
+            .object_kinds
+            .iter()
+            .any(|object| object.name == signal.object && object.name != "none")
+        {
+            return invalid(format!(
+                "signal {}.{} names unknown object kind",
+                signal.object, signal.name
+            ));
+        }
+        if !names.insert((signal.object, signal.name)) {
+            return invalid(format!(
+                "signal {}.{} is declared more than once",
+                signal.object, signal.name
+            ));
+        }
+        if !bits.insert((signal.object, signal.bit)) {
+            return invalid(format!(
+                "signal bit {} is declared more than once for {}",
+                signal.bit, signal.object
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_constants(schema: &AbiSchema) -> Result<(), Error> {
+    let mut names = BTreeSet::new();
+    for constant in schema.constants {
+        validate_identifier("constant", constant.name)?;
+        if !names.insert(constant.name) {
+            return invalid(format!(
+                "constant {} is declared more than once",
+                constant.name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Rejects schema entries which render to the same public Rust/C constant.
+///
+/// Category-local names are insufficient here because free-form constants use
+/// the root `HYPER_NATIVE_` namespace and can otherwise collide with generated
+/// feature, status, object, right, signal, or syscall definitions.
+fn validate_generated_constant_names(schema: &AbiSchema) -> Result<(), Error> {
+    let mut names = BTreeSet::new();
+    for reserved in [
+        "HYPER_NATIVE_ABI_REVISION".to_owned(),
+        "HYPER_NATIVE_FEATURE_MASK".to_owned(),
+        "HYPER_NATIVE_RIGHTS_MASK".to_owned(),
+    ] {
+        names.insert(reserved);
+    }
+
+    let mut insert = |name: String| {
+        if names.insert(name.clone()) {
+            Ok(())
+        } else {
+            invalid(format!(
+                "generated constant {name} is declared more than once"
+            ))
+        }
+    };
+    for feature in schema.features {
+        insert(format!(
+            "HYPER_NATIVE_FEATURE_{}",
+            upper_snake(feature.name)
+        ))?;
+    }
+    for status in schema.statuses {
+        insert(format!("HYPER_NATIVE_STATUS_{}", upper_snake(status.name)))?;
+    }
+    for object in schema.object_kinds {
+        insert(format!("HYPER_NATIVE_OBJECT_{}", upper_snake(object.name)))?;
+    }
+    for right in schema.rights {
+        insert(format!("HYPER_NATIVE_RIGHT_{}", upper_snake(right.name)))?;
+    }
+    for signal in schema.signals {
+        insert(format!(
+            "HYPER_NATIVE_SIGNAL_{}_{}",
+            upper_snake(signal.object),
+            upper_snake(signal.name)
+        ))?;
+    }
+    for constant in schema.constants {
+        insert(format!("HYPER_NATIVE_{}", upper_snake(constant.name)))?;
+    }
+    for syscall in schema.syscalls {
+        insert(format!("HYPER_NATIVE_SYS_{}", upper_snake(syscall.name)))?;
+    }
+    Ok(())
 }
 
 fn validate_records(schema: &AbiSchema) -> Result<(), Error> {
@@ -580,6 +690,26 @@ fn render_rust(schema: &AbiSchema) -> String {
         output,
         "pub const HYPER_NATIVE_RIGHTS_MASK: u64 = {rights_mask};\n"
     );
+    for signal in schema.signals {
+        let _ = writeln!(
+            output,
+            "pub const HYPER_NATIVE_SIGNAL_{}_{}: u64 = {};",
+            upper_snake(signal.object),
+            upper_snake(signal.name),
+            1u64 << signal.bit
+        );
+    }
+    if !schema.signals.is_empty() {
+        output.push('\n');
+    }
+    render_rust_constants(
+        &mut output,
+        "HYPER_NATIVE",
+        schema
+            .constants
+            .iter()
+            .map(|constant| (constant.name, constant.value)),
+    );
     render_rust_constants(
         &mut output,
         "HYPER_NATIVE_SYS",
@@ -764,6 +894,26 @@ fn render_c(schema: &AbiSchema) -> String {
         output,
         "#define HYPER_NATIVE_RIGHTS_MASK UINT64_C({rights_mask})\n"
     );
+    for signal in schema.signals {
+        let _ = writeln!(
+            output,
+            "#define HYPER_NATIVE_SIGNAL_{}_{} UINT64_C({})",
+            upper_snake(signal.object),
+            upper_snake(signal.name),
+            1u64 << signal.bit
+        );
+    }
+    if !schema.signals.is_empty() {
+        output.push('\n');
+    }
+    render_c_constants(
+        &mut output,
+        "HYPER_NATIVE",
+        schema
+            .constants
+            .iter()
+            .map(|constant| (constant.name, constant.value)),
+    );
     render_c_constants(
         &mut output,
         "HYPER_NATIVE_SYS",
@@ -879,6 +1029,20 @@ fn render_reference(schema: &AbiSchema) -> String {
     output.push_str("## Status values\n\n| Value | Name |\n| ---: | --- |\n");
     for status in schema.statuses {
         let _ = writeln!(output, "| {} | `{}` |", status.value, status.name);
+    }
+    output.push('\n');
+    output.push_str("## Object signals\n\n| Object | Bit | Name |\n| --- | ---: | --- |\n");
+    for signal in schema.signals {
+        let _ = writeln!(
+            output,
+            "| `{}` | {} | `{}` |",
+            signal.object, signal.bit, signal.name
+        );
+    }
+    output.push('\n');
+    output.push_str("## Constants\n\n| Name | Value |\n| --- | ---: |\n");
+    for constant in schema.constants {
+        let _ = writeln!(output, "| `{}` | `{}` |", constant.name, constant.value);
     }
     output.push('\n');
     output.push_str(
@@ -1185,6 +1349,67 @@ mod tests {
         };
         assert!(
             matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("reserved value zero"))
+        );
+    }
+
+    #[test]
+    fn rejects_signals_for_unknown_object_kinds() {
+        let signals = Box::leak(
+            vec![schema::Signal {
+                object: "missing",
+                bit: 0,
+                name: "ready",
+            }]
+            .into_boxed_slice(),
+        );
+        let candidate = AbiSchema {
+            signals,
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("unknown object kind"))
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_public_constants() {
+        let constants = Box::leak(
+            vec![
+                schema::AbiConstant {
+                    name: "duplicate",
+                    value: 1,
+                },
+                schema::AbiConstant {
+                    name: "duplicate",
+                    value: 2,
+                },
+            ]
+            .into_boxed_slice(),
+        );
+        let candidate = AbiSchema {
+            constants,
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("declared more than once"))
+        );
+    }
+
+    #[test]
+    fn rejects_cross_category_generated_constant_collisions() {
+        let constants = Box::leak(
+            vec![schema::AbiConstant {
+                name: "sys_abi_query",
+                value: 99,
+            }]
+            .into_boxed_slice(),
+        );
+        let candidate = AbiSchema {
+            constants,
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("HYPER_NATIVE_SYS_ABI_QUERY"))
         );
     }
 

@@ -22,6 +22,7 @@ type ArbitrationLock = InterruptSpinLock<ArbitrationState, crate::hal::irq::Loca
 struct ArbitrationState {
     queue: WaitQueue,
     published_ticket: Option<WaitTicket>,
+    committed_observation: usize,
 }
 
 struct QueuedArbitration {
@@ -37,6 +38,7 @@ impl QueuedArbitration {
             state: ArbitrationLock::new(ArbitrationState {
                 queue: WaitQueue::new(),
                 published_ticket: None,
+                committed_observation: 0,
             }),
             done: Semaphore::new(0),
             outcomes: AtomicUsize::new(0),
@@ -81,11 +83,33 @@ impl From<crate::kernel::task::TimedWaitError> for Error {
 }
 
 pub(super) fn run() -> Result<(), Error> {
+    exercise_exact_notification()?;
     exercise_unqueued_arbitration()?;
     exercise_queued_arbitration_and_stale_ticket()?;
     exercise_timed_wait_paths()?;
     exercise_cpu_local_migration_barrier()?;
     super::support::quiesce_workers()?;
+    Ok(())
+}
+
+/// Proves that an exact notification commits caller-owned payload only for
+/// the winning generation, including while the Thread is still Armed.
+fn exercise_exact_notification() -> Result<(), Error> {
+    let registration = scheduler::begin_wait(WaitMobility::Migratable)?;
+    let ticket = registration.ticket();
+    let mut observation = 0usize;
+    let winner = scheduler::notify_registered_with(ticket, || observation = 0x51)?;
+    let loser = scheduler::notify_registered_with(ticket, || observation = 0x99)?;
+    if !winner.won || winner.made_ready || loser.won || loser.made_ready || observation != 0x51 {
+        return Err(Error::StateMismatch(26));
+    }
+    if scheduler::finish_wait(registration)? != Some(WaitOutcome::Notified) {
+        return Err(Error::StateMismatch(27));
+    }
+    let stale = scheduler::notify_registered_with(ticket, || observation = 0xff)?;
+    if stale.won || stale.made_ready || observation != 0x51 {
+        return Err(Error::StateMismatch(28));
+    }
     Ok(())
 }
 
@@ -226,7 +250,10 @@ fn exercise_queued_arbitration_and_stale_ticket() -> Result<(), Error> {
     let state = &QUEUED_ARBITRATION;
     state.outcomes.store(0, Ordering::Release);
     state.failure.store(0, Ordering::Release);
-    state.state.with(|inner| inner.published_ticket = None);
+    state.state.with(|inner| {
+        inner.published_ticket = None;
+        inner.committed_observation = 0;
+    });
 
     let worker_cpu = if crate::kernel::cpu::online_cpu_count() > 1 {
         CpuIndex::new(1).ok_or(Error::StateMismatch(6))?
@@ -242,9 +269,22 @@ fn exercise_queued_arbitration_and_stale_ticket() -> Result<(), Error> {
     scheduler::thread_ready(worker)?;
 
     let first = wait_for_published_ticket(None)?;
-    let first_resolution = scheduler::resolve_wait(first, WaitOutcome::TimedOut)?;
+    let first_resolution = state.state.with(|inner| {
+        scheduler::notify_registered_with(first, || inner.committed_observation = 0x71)
+    })?;
     if !first_resolution.won || !first_resolution.made_ready {
         return Err(Error::StateMismatch(7));
+    }
+    let replay = state.state.with(|inner| {
+        scheduler::notify_registered_with(first, || inner.committed_observation = 0x99)
+    })?;
+    if replay.won
+        || replay.made_ready
+        || state
+            .state
+            .with(|inner| inner.committed_observation != 0x71)
+    {
+        return Err(Error::StateMismatch(29));
     }
 
     let second = wait_for_published_ticket(Some(first))?;
@@ -289,7 +329,14 @@ fn wait_for_published_ticket(previous: Option<WaitTicket>) -> Result<WaitTicket,
 
 extern "C" fn queued_arbitration_worker(_argument: usize) {
     match park_for_test() {
-        Ok(WaitOutcome::TimedOut) => {
+        Ok(WaitOutcome::Notified) => {
+            if QUEUED_ARBITRATION
+                .state
+                .with(|state| state.committed_observation)
+                != 0x71
+            {
+                QUEUED_ARBITRATION.failure.store(4, Ordering::Release);
+            }
             QUEUED_ARBITRATION.outcomes.fetch_or(1, Ordering::AcqRel);
         }
         Ok(_) => QUEUED_ARBITRATION.failure.store(1, Ordering::Release),

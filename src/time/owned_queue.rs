@@ -35,6 +35,10 @@ struct TimerNode {
 pub struct PendingTimer(Box<TimerNode>);
 
 impl PendingTimer {
+    pub const fn allocation_size() -> usize {
+        core::mem::size_of::<TimerNode>()
+    }
+
     pub fn try_new(
         deadline: u64,
         mode: TimerMode,

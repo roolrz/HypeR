@@ -13,5 +13,7 @@ fn generated_rust_layouts_are_compiler_checked() {
         8
     );
     assert_eq!(generated::HYPER_NATIVE_SYS_HANDLE_CLOSE, 1);
-    assert_eq!(generated::HYPER_NATIVE_RIGHTS_MASK, 0x7_ffff);
+    assert_eq!(generated::HYPER_NATIVE_RIGHTS_MASK, 0xf_ffff);
+    assert_eq!(generated::HYPER_NATIVE_SIGNAL_EVENT_SIGNALED, 1);
+    assert_eq!(generated::HYPER_NATIVE_DEADLINE_INFINITE, u64::MAX);
 }

@@ -11,6 +11,7 @@ mod irq_tail_preemption;
 mod native_syscall;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod native_user_entry;
+mod object_wait;
 #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
 mod reschedule_ipi;
 mod scheduler_sync;
@@ -38,6 +39,7 @@ pub(crate) fn run() {
     );
     #[cfg(CONFIG_ARCH_AARCH64)]
     run_case("AArch64 native-user entry tests", native_user_entry::run);
+    run_case("kernel object-wait tests", object_wait::run);
     run_case("kernel wait-arbitration tests", wait_arbitration::run);
     run_case("kernel startup-readiness tests", startup_readiness::run);
     let guest_execution = crate::hal::vm::guest_execution_available();
@@ -65,6 +67,7 @@ pub(crate) fn run() {
     crate::println!("HypeR test: guarded thread, IRQ, and emergency stacks passed");
     crate::println!("HypeR test: deadline-based thread sleep passed");
     crate::println!("HypeR test: race-safe wait arbitration passed");
+    crate::println!("HypeR test: level-triggered object waits passed");
     crate::println!("HypeR test: Native syscall validation passed");
     #[cfg(CONFIG_ARCH_AARCH64)]
     crate::println!("HypeR test: AArch64 EL0 syscall and fault containment passed");

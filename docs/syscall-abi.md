@@ -689,14 +689,16 @@ The current checkpoint implements much of the Phase 1 capability mechanics and
 a narrow AArch64 Phase 2 proof. The proof maps raw instruction sequences,
 executes 64 direct `abi_query` calls in one machine run, exercises an unknown
 call through deferred unwind and re-entry, yields and resumes, exits a Thread,
-propagates Process exit to a dormant sibling, contains a breakpoint fault,
-joins each Thread and Process, and retires each ownership graph. The
-architecture-neutral dispatchers implement syscalls 0 through 8: ABI query,
-handle close, duplicate, replace, handle info, object basic info, Thread yield,
-Thread exit, and Process exit. The last three prove deferred unwind and
-lifecycle completion, but do not yet constitute a general blocking/cancellation
-path. The checkpoint is not a static PIE loader, general runtime, init process,
-vDSO, or secondary-architecture entry.
+propagates Process exit to a dormant sibling, contains a breakpoint fault, and
+creates, signals, and observes an Event from EL0. It joins each Thread and
+Process and retires each ownership graph. The architecture-neutral dispatchers
+implement syscalls 0 through 11: ABI query, handle close, duplicate, replace,
+handle info, object basic info, Thread yield, Thread exit, Process exit, Event
+create, Event signal, and single-object wait. `object_wait_one` uses absolute
+monotonic deadlines, generation-qualified signal/timeout/cancellation
+arbitration, and a Process-stop recheck before completing the machine return.
+The checkpoint is not a static PIE loader, general runtime, init process, vDSO,
+or secondary-architecture entry.
 
 ### Phase 0: prove the boundary
 
@@ -759,15 +761,15 @@ vDSO, or secondary-architecture entry.
 
 Every phase runs the quality gate and all-architecture builds. The current QEMU
 proof covers both AArch64 host regimes, repeated direct `abi_query`, deferred
-unknown-call unwind and re-entry, breakpoint-fault containment, Process/Thread
-join, retirement, and architecture-neutral rejection of malformed calls. The
-remaining user-entry acceptance target adds successful Process-backed handle
-operations from EL0, invalid pointers, W^X and cross-Process isolation,
-blocking cancellation, same-Process multi-Thread migration, IRQ-tail user
-preemption, TLS/SIMD preservation, and stop-versus-entry races. The existing
-Linux guest boot remains a regression contract. Cache, TLB, IOMMU, interrupt,
-and speculation properties which QEMU cannot prove require physical AArch64
-validation before the corresponding feature is declared stable.
+unknown-call unwind and re-entry, Event handle publication and observation,
+breakpoint-fault containment, Process/Thread join, retirement, and
+architecture-neutral rejection of malformed calls. The remaining user-entry
+acceptance target adds invalid-pointer operations, cross-Process isolation,
+same-Process multi-Thread migration, IRQ-tail user preemption, TLS/SIMD
+preservation, and broader stop-versus-entry races. The existing Linux guest boot
+remains a regression contract. Cache, TLB, IOMMU, interrupt, and speculation
+properties which QEMU cannot prove require physical AArch64 validation before
+the corresponding feature is declared stable.
 
 ## Open implementation questions
 

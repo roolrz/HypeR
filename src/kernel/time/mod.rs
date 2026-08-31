@@ -160,6 +160,25 @@ pub fn deadline_after(nanoseconds: u64) -> Result<u64, Error> {
     Ok(monotonic_ticks().wrapping_add(ticks))
 }
 
+/// Converts an absolute monotonic nanosecond value into a counter deadline.
+///
+/// The counter and its nanosecond representation are sampled once. Deriving
+/// the delta and final deadline from that same snapshot prevents syscall
+/// preparation time from silently extending an absolute deadline.
+pub(crate) fn deadline_from_monotonic_nanoseconds(nanoseconds: u64) -> Result<u64, Error> {
+    let frequency = counter_frequency_hz()?;
+    let now_ticks = monotonic_ticks();
+    let now_nanoseconds = ticks_to_nanoseconds(now_ticks, frequency)?;
+    if nanoseconds <= now_nanoseconds {
+        return Ok(now_ticks);
+    }
+    let delta_ticks = nanoseconds_to_ticks(nanoseconds - now_nanoseconds, frequency)?;
+    if delta_ticks > i64::MAX as u64 {
+        return Err(Error::DeadlineTooFar);
+    }
+    Ok(now_ticks.wrapping_add(delta_ticks))
+}
+
 /// Polls an allocation-free condition until it succeeds or monotonic time
 /// reaches the requested duration.
 ///

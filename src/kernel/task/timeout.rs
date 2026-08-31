@@ -42,13 +42,59 @@ impl TimeoutContext {
     }
 }
 
+/// Fallibly allocated callback storage which is not yet visible to a timer.
+///
+/// Condition-based waits prepare this value before taking their state lock or
+/// publishing a scheduler registration. Arming consumes it, so a successful
+/// return is the sole owner responsible for exact timer retirement.
+pub(crate) struct PreparedTimeout {
+    context: Box<TimeoutContext>,
+}
+
+impl PreparedTimeout {
+    pub(crate) const fn allocation_size() -> usize {
+        match core::mem::size_of::<TimeoutContext>()
+            .checked_add(hyper::time::PendingTimer::allocation_size())
+        {
+            Some(bytes) => bytes,
+            None => usize::MAX,
+        }
+    }
+
+    pub(crate) fn try_new() -> Result<Self, TimedWaitError> {
+        let context =
+            hyper::mm::try_box(TimeoutContext::new()).map_err(|_| TimedWaitError::Allocation)?;
+        Ok(Self { context })
+    }
+
+    /// Publishes an exact scheduler generation to a one-shot timer callback.
+    ///
+    /// `schedule_at` either returns a live exact handle or proves that its
+    /// provisional queue entry was detached before returning an error. The
+    /// context may therefore be dropped normally on the error path.
+    pub(crate) fn arm(
+        mut self,
+        ticket: WaitTicket,
+        deadline: u64,
+    ) -> Result<ArmedTimeout, TimedWaitError> {
+        self.context.ticket = Some(ticket);
+        let timer = crate::kernel::time::schedule_at(
+            deadline,
+            crate::kernel::time::TimerMode::OneShot,
+            expire_wait,
+            self.context.pointer(),
+        )?;
+        Ok(ArmedTimeout::new(timer, self.context))
+    }
+}
+
 /// Linear owner of one queued timer and its raw callback context.
 ///
 /// The timer queue borrows `context` through an exposed pointer. This owner may
 /// be destroyed only after exact-handle cancellation or callback completion has
 /// ended that borrow.
 #[must_use = "an armed timeout must be retired before its callback owner is dropped"]
-struct ArmedTimeout {
+pub(crate) struct ArmedTimeout {
     timer: Option<crate::kernel::time::TimerHandle>,
     context: Box<TimeoutContext>,
 }
@@ -66,6 +112,21 @@ impl ArmedTimeout {
             crate::hal::cpu::halt()
         };
         retire_timeout(timer, &self.context, disposition)
+    }
+
+    /// Retires the timer after the scheduler selected `outcome`.
+    ///
+    /// A timeout winner must join its callback. Notification and cancellation
+    /// cancel the exact source-CPU handle or join a callback which detached it
+    /// concurrently. This operation may wait for an in-flight callback and
+    /// therefore must run without object, Process, or scheduler locks held.
+    pub(crate) fn retire_after(self, outcome: WaitOutcome) -> Result<(), TimedWaitError> {
+        let disposition = if outcome == WaitOutcome::TimedOut {
+            Retirement::CallbackCompleted
+        } else {
+            Retirement::CancelOrJoin
+        };
+        self.retire(disposition)
     }
 }
 
@@ -122,26 +183,15 @@ impl WaitQueue {
 
         // Allocate the callback owner before arming the Thread. Allocation is
         // deliberately outside the scheduler wait transaction.
-        let mut timeout =
-            hyper::mm::try_box(TimeoutContext::new()).map_err(|_| TimedWaitError::Allocation)?;
+        let timeout = PreparedTimeout::try_new()?;
         let registration = scheduler::begin_wait(WaitMobility::Migratable)?;
-        // Publish the immutable ticket before exposing the context pointer to
-        // the timer queue. schedule_at masks local IRQ delivery through queue
-        // insertion, and no write to `ticket` occurs after this point.
-        timeout.ticket = Some(registration.ticket());
-        let timer = match crate::kernel::time::schedule_at(
-            deadline,
-            crate::kernel::time::TimerMode::OneShot,
-            expire_wait,
-            timeout.pointer(),
-        ) {
-            Ok(timer) => timer,
+        let timeout = match timeout.arm(registration.ticket(), deadline) {
+            Ok(timeout) => timeout,
             Err(error) => {
                 finish_unscheduled(registration);
-                return Err(error.into());
+                return Err(error);
             }
         };
-        let timeout = ArmedTimeout::new(timer, timeout);
 
         let prepared = match scheduler::prepare_registered_park(self, registration) {
             Ok(prepared) => prepared,
@@ -158,12 +208,7 @@ impl WaitQueue {
             scheduler::PreparedWait::Park(token) => scheduler::complete_park(token),
             scheduler::PreparedWait::Completed(outcome) => outcome,
         };
-        let retirement = if outcome == WaitOutcome::TimedOut {
-            Retirement::CallbackCompleted
-        } else {
-            Retirement::CancelOrJoin
-        };
-        timeout.retire(retirement)?;
+        timeout.retire_after(outcome)?;
         Ok(outcome)
     }
 

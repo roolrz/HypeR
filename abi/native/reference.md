@@ -24,6 +24,20 @@ ABI revision: `0`.
 | -8 | `resource_limit` |
 | -9 | `busy` |
 | -10 | `internal` |
+| -11 | `timed_out` |
+| -12 | `cancelled` |
+
+## Object signals
+
+| Object | Bit | Name |
+| --- | ---: | --- |
+| `event` | 0 | `signaled` |
+
+## Constants
+
+| Name | Value |
+| --- | ---: |
+| `deadline_infinite` | `18446744073709551615` |
 
 ## Syscalls
 
@@ -38,6 +52,9 @@ ABI revision: `0`.
 | 6 | `thread_yield` | — | — | — | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 7 | `thread_exit` | `status: i64` | — | — | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=NoReturn, flags=None` | `Task` |
 | 8 | `process_exit` | `status: i64` | — | — | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=NoReturn, flags=None` | `Task` |
+| 9 | `event_create` | `options: u32` | `handle: handle` | `handle: produce, kind=event, fixed=0x8000f` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Object` |
+| 10 | `event_signal` | `event: handle`, `clear_mask: u64`, `set_mask: u64` | — | `event: Borrow, kind=event, rights=0x80000` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Object` |
+| 11 | `object_wait_one` | `object: handle`, `signals: u64`, `deadline: u64` | `observed: u64` | `object: Borrow, any, rights=0x4` | — | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Object` |
 
 ## Public records
 

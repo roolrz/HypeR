@@ -864,6 +864,21 @@ impl Scheduler {
         ticket: WaitTicket,
         outcome: WaitOutcome,
     ) -> Result<ResolvedWait, Error> {
+        self.resolve_wait_with(ticket, outcome, || {})
+    }
+
+    /// Resolves one exact wait generation and commits resolver-owned state.
+    ///
+    /// `on_commit` runs only for the winning resolver, after the wait record
+    /// and any queue membership have been completed but before a blocked
+    /// Thread is published Ready. The callback must be bounded, infallible,
+    /// allocation-free, and must not re-enter the scheduler.
+    pub fn resolve_wait_with(
+        &mut self,
+        ticket: WaitTicket,
+        outcome: WaitOutcome,
+        on_commit: impl FnOnce(),
+    ) -> Result<ResolvedWait, Error> {
         let pending = match self.thread(ticket.thread()) {
             Ok(thread) => thread.wait_record().pending_resolution(ticket)?,
             Err(Error::ThreadNotFound) => {
@@ -888,6 +903,7 @@ impl Scheduler {
                 if completion.is_err() {
                     scheduler_invariant(Error::InvalidWaitRegistration);
                 }
+                on_commit();
                 Ok(ResolvedWait {
                     won: true,
                     ready: None,
@@ -909,6 +925,7 @@ impl Scheduler {
                 if completion.is_err() {
                     scheduler_invariant(Error::InvalidWaitRegistration);
                 }
+                on_commit();
                 let ready = match self.make_ready_from_wait(ticket.thread()) {
                     Ok(ready) => ready,
                     Err(error) => scheduler_invariant(error),

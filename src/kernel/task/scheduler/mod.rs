@@ -1245,6 +1245,31 @@ pub(crate) fn resolve_wait(ticket: WaitTicket, outcome: WaitOutcome) -> Result<R
     })
 }
 
+/// Notifies one exact wait generation and commits caller-owned result state.
+///
+/// `on_commit` executes synchronously under the scheduler lock only when this
+/// notification wins over timeout and cancellation. It runs before a queued
+/// Thread becomes Ready, so an object may publish a typed observation without
+/// storing that payload in scheduler policy. The callback must be bounded,
+/// infallible, allocation-free, and must not re-enter the scheduler.
+pub(crate) fn notify_registered_with(
+    ticket: WaitTicket,
+    on_commit: impl FnOnce(),
+) -> Result<ResolveWait, Error> {
+    let resolved = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .resolve_wait_with(ticket, WaitOutcome::Notified, on_commit)
+    })?;
+    if let Some(ready) = resolved.ready {
+        publish_committed_ready(ready);
+    }
+    Ok(ResolveWait {
+        won: resolved.won,
+        made_ready: resolved.ready.is_some(),
+    })
+}
+
 pub(crate) fn cancel_waiter(wait_queue: &WaitQueue, id: ThreadId) -> Result<bool, Error> {
     let resolved = SCHEDULER.with(|slot| {
         slot.as_mut()
