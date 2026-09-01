@@ -81,6 +81,11 @@ impl Stage2AddressSpace {
         self.root.get()
     }
 
+    pub(crate) fn retirement_request(&self) -> super::GuestStage2RetirementRequest {
+        let vttbr = (u64::from(self.vmid) << registers::VTTBR_EL2_VMID_SHIFT) | self.root.get();
+        super::GuestStage2RetirementRequest::new(vttbr, address::capabilities().stage2_vtcr_el2())
+    }
+
     #[allow(dead_code)]
     /// Maps normal memory using page-table pages supplied by `allocator`.
     ///
@@ -298,6 +303,52 @@ impl Stage2AddressSpace {
             return Err(Error::Conflict);
         }
         write_entry(table, slot, descriptor)
+    }
+}
+
+/// Invalidates one retained guest translation identity on the current CPU.
+///
+/// The request is opaque outside the architecture. Its publisher retains the
+/// exact root and VMID until every targeted CPU acknowledges this operation.
+pub(crate) fn retire_local(request: super::GuestStage2RetirementRequest) {
+    let retiring_vttbr = request.retiring_vttbr();
+    let guest_vtcr = request.guest_vtcr();
+    // SAFETY: The caller has stopped every execution of the retiring VM and
+    // retains its root and VMID. This register-only interval selects that
+    // exact guest regime, performs a local combined stage-1/stage-2
+    // invalidation, and restores unrelated local state before returning.
+    unsafe {
+        asm!(
+            "mrs {saved_hcr}, HCR_EL2",
+            "mrs {saved_vttbr}, VTTBR_EL2",
+            "mrs {saved_vtcr}, VTCR_EL2",
+            "orr {guest_hcr}, {saved_hcr}, {vm}",
+            "bic {guest_hcr}, {guest_hcr}, {tge}",
+            "msr VTCR_EL2, {guest_vtcr}",
+            "msr VTTBR_EL2, {retiring_vttbr}",
+            "msr HCR_EL2, {guest_hcr}",
+            "isb",
+            "dsb ishst",
+            "tlbi VMALLS12E1",
+            "dsb ish",
+            "isb",
+            "cmp {saved_vttbr}, {retiring_vttbr}",
+            "csel {restore_vttbr}, xzr, {saved_vttbr}, eq",
+            "msr VTTBR_EL2, {restore_vttbr}",
+            "msr VTCR_EL2, {saved_vtcr}",
+            "msr HCR_EL2, {saved_hcr}",
+            "isb",
+            saved_hcr = out(reg) _,
+            saved_vttbr = out(reg) _,
+            saved_vtcr = out(reg) _,
+            guest_hcr = out(reg) _,
+            restore_vttbr = out(reg) _,
+            guest_vtcr = in(reg) guest_vtcr,
+            retiring_vttbr = in(reg) retiring_vttbr,
+            vm = in(reg) registers::HCR_EL2_VM,
+            tge = in(reg) registers::HCR_EL2_TGE,
+            options(nostack)
+        );
     }
 }
 

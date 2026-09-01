@@ -3,7 +3,8 @@
 
 //! Running-vCPU bridge for the Arm virtual timer and vGIC.
 
-use hyper::vm::interrupt::{Error as VgicError, VirtualCpuId};
+use hyper::vm::arm::gic::RuntimeError as VgicError;
+use hyper::vm::interrupt::VirtualCpuId;
 
 use super::VmInterruptController;
 use super::vgic::{self, Error as VgicArchitectureError};
@@ -76,7 +77,7 @@ fn update_model(
 }
 
 fn set_timer_level(
-    controller: &mut hyper::vm::interrupt::VirtualInterruptController,
+    controller: &mut hyper::vm::arm::gic::VirtualGic,
     interrupts: &VmInterruptController,
     vcpu: VirtualCpuId,
     asserted: bool,

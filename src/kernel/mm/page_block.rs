@@ -47,19 +47,22 @@ impl Drop for PageBlock {
     fn drop(&mut self) {
         // SAFETY: PageBlock is the unique owner of this exact buddy block and
         // relinquishes it exactly once from Drop.
-        if unsafe {
+        match unsafe {
             super::allocator::GLOBAL_ALLOCATOR.deallocate_pages_for(
                 self.physical,
                 self.order,
                 self.owner,
             )
-        }
-        .is_err()
-        {
-            // Page owners can be dropped beneath unrelated subsystem locks.
-            // Keep this allocator invariant path free of diagnostics and
-            // further lock acquisition.
-            crate::hal::cpu::halt();
+        } {
+            Ok(()) => {}
+            Err(error) => {
+                // PageBlock exists only after permanent memory and CPU identity
+                // are available. Crash entry is allocation-free and tolerates
+                // arbitrary outer locks, including before full crash readiness.
+                crate::kernel::crash::fatal(format_args!(
+                    "PageBlock buddy deallocation invariant failed: {error:?}"
+                ));
+            }
         }
     }
 }

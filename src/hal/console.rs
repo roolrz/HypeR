@@ -8,7 +8,19 @@ use core::fmt;
 /// Rich terminal policy belongs above this interface. Drivers only provide a
 /// reliable byte sink, which keeps this contract usable across architectures.
 pub trait Console: Sync {
-    fn write_byte(&self, byte: u8);
+    /// Attempts one byte without waiting for transmitter capacity.
+    fn try_write_byte(&self, byte: u8) -> bool;
+
+    /// Writes one byte, waiting until the transmitter accepts it.
+    ///
+    /// Boot paths may use this blocking operation. Runtime and emergency
+    /// output use [`Self::try_write_byte`] with their respective scheduling or
+    /// fixed-budget policy so a stalled UART cannot monopolize a CPU.
+    fn write_byte(&self, byte: u8) {
+        while !self.try_write_byte(byte) {
+            core::hint::spin_loop();
+        }
+    }
 
     fn write_bytes(&self, bytes: &[u8]) {
         for &byte in bytes {

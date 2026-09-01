@@ -28,17 +28,37 @@ struct State {
     capabilities: super::VgicCapabilities,
 }
 
-pub fn initialize(host_timer_interrupt: Option<HostInterruptBinding>) -> Result<(), Error> {
+/// Validated capability retained privately until boot commits VM entry support.
+pub struct Prepared {
+    state: State,
+}
+
+impl Prepared {
+    pub const fn list_registers(&self) -> u8 {
+        self.state.capabilities.list_registers
+    }
+}
+
+pub fn prepare(host_timer_interrupt: Option<HostInterruptBinding>) -> Result<Prepared, Error> {
     let host_timer_interrupt = host_timer_interrupt.ok_or(Error::MissingHostTimerInterrupt)?;
     let capabilities = super::validate_vgic()?;
+    if VGIC.with(|slot| slot.is_some()) {
+        return Err(Error::AlreadyInitialized);
+    }
+    Ok(Prepared {
+        state: State {
+            _host_timer_interrupt: host_timer_interrupt,
+            capabilities,
+        },
+    })
+}
+
+pub fn commit(prepared: Prepared) -> Result<(), Error> {
     VGIC.with(|slot| {
         if slot.is_some() {
             return Err(Error::AlreadyInitialized);
         }
-        *slot = Some(State {
-            _host_timer_interrupt: host_timer_interrupt,
-            capabilities,
-        });
+        *slot = Some(prepared.state);
         Ok(())
     })?;
     Ok(())

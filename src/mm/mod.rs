@@ -14,7 +14,9 @@ mod translation_id;
 
 pub use access::{ForeignCopyError, ForeignMemory, copy_from_foreign, copy_to_foreign};
 pub use address::{PAGE_SIZE, PhysicalAddress, VirtualAddress};
-pub use address_space_state::{AddressSpaceResidency, ResidencyCut, ResidencyError};
+pub use address_space_state::{
+    AddressSpaceResidency, CutFailure, ResidencyError, RetirementCut, UpdateCut,
+};
 pub use allocation::{AllocationError, FallibleArc, UniqueFallibleArc, try_box};
 pub use allocator::{BuddyAllocator, BuddyError, BuddyStats, MAX_ORDER, MemoryHandoff};
 pub use boot::{BootAllocator, BootAllocatorError, BootMemoryStats};

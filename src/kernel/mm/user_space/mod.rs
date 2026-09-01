@@ -26,7 +26,7 @@ pub(crate) use contract::{
     Access, AddressError, MemoryAccount, MemoryCharge, PageBackend, Permissions, UserAddress,
     UserAddressWindow, UserSlice,
 };
-#[cfg(all(not(test), CONFIG_ARCH_AARCH64))]
+#[cfg(not(test))]
 pub(crate) use kernel_adapter::address_window;
 #[cfg(all(not(test), feature = "kernel-self-test"))]
 pub(crate) use kernel_adapter::fail_exposed_write_after_copy_for_test;

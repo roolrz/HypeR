@@ -25,8 +25,10 @@ static READY: AtomicBool = AtomicBool::new(false);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InitializationError {
     Allocator(hyper::mm::allocator::heap::InitError),
+    AllocatorCaches(hyper::mm::allocator::heap::CacheActivationError),
     AllocatorInterface(AllocatorSmokeError),
     BootstrapStack(stack::Error),
+    CpuTopologyUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -41,7 +43,11 @@ pub struct MemoryStats {
     pub runtime: hyper::mm::allocator::heap::HeapStats,
 }
 
-/// Returns a lock-consistent allocator snapshot once memory initialization is complete.
+/// Returns allocator topology and concurrent logical/cache diagnostics.
+///
+/// The central buddy/slab portion is lock-consistent. CPU-local and logical
+/// counters are coherent observations but do not share one global
+/// linearization point with that topology snapshot.
 pub fn statistics() -> Option<MemoryStats> {
     let boot = super::boot::try_with_boot_state(|state| state.memory.boot_memory_stats())?;
     let runtime = allocator::GLOBAL_ALLOCATOR.stats()?;
@@ -73,6 +79,15 @@ pub(crate) fn initialize() -> Result<(), InitializationError> {
 
 pub(crate) fn is_ready() -> bool {
     READY.load(Ordering::Acquire)
+}
+
+/// Activates bounded CPU-local slab magazines after SMP topology freezes.
+pub(crate) fn activate_local_allocator_caches() -> Result<(), InitializationError> {
+    let topology =
+        super::cpu::frozen_topology().ok_or(InitializationError::CpuTopologyUnavailable)?;
+    allocator::GLOBAL_ALLOCATOR
+        .activate_local_caches(topology.count())
+        .map_err(InitializationError::AllocatorCaches)
 }
 
 /// Removes bootstrap-only mappings and reports the permanent memory layout.
@@ -169,6 +184,14 @@ pub(crate) fn report_statistics(reason: &str) {
         runtime.requested_bytes.div_ceil(1024),
         runtime.peak_requested_bytes.div_ceil(1024),
         runtime.allocation_failures
+    );
+    crate::println!(
+        "HypeR: heap caches: {} CPUs, {} objects, {} hits, {} misses, {} pressure reclaims",
+        runtime.cache.enabled_cpus,
+        runtime.cache.cached_objects,
+        runtime.cache.hits,
+        runtime.cache.misses,
+        runtime.cache.pressure_reclaims
     );
 }
 

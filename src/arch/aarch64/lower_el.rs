@@ -9,7 +9,7 @@
 //! own generation in `user_entry`. Each world excludes the other once during
 //! run admission, so exception entry consults only the active world's source.
 
-use hyper::sync::atomic::{AtomicU64, Ordering};
+use hyper::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use super::VcpuContext;
 
@@ -20,14 +20,14 @@ const TRANSITION: u64 = u64::MAX;
 struct GuestWorldSlot {
     /// A normal generation Release-publishes the preceding context identity.
     generation: AtomicU64,
-    context: AtomicU64,
+    context: AtomicPtr<VcpuContext>,
 }
 
 impl GuestWorldSlot {
     const fn empty() -> Self {
         Self {
             generation: AtomicU64::new(EMPTY),
-            context: AtomicU64::new(0),
+            context: AtomicPtr::new(core::ptr::null_mut()),
         }
     }
 }
@@ -57,9 +57,10 @@ pub(super) enum World {
 /// Publishes the pinned guest context which owns the next lower-EL return.
 ///
 /// The caller keeps local interrupts masked and retains the context at this
-/// address until [`retire_guest`] succeeds. The address is used only as an
-/// ownership identity; exception entry never reconstructs a Rust reference
-/// from it.
+/// address until [`retire_guest`] succeeds. Ordinary exception dispatch uses
+/// the address only as identity. A terminal vector may reconstruct one
+/// short-lived exclusive reference after matching the exact generation and
+/// pointer, while guest entry retains no Rust reference to the context.
 pub(super) fn publish_guest(context: &mut VcpuContext) -> Result<(), Error> {
     if super::user_entry::active_generation().is_some() {
         return Err(Error::NativeActive);
@@ -70,10 +71,8 @@ pub(super) fn publish_guest(context: &mut VcpuContext) -> Result<(), Error> {
     slot.generation
         .compare_exchange(EMPTY, TRANSITION, Ordering::Acquire, Ordering::Relaxed)
         .map_err(|_| Error::AlreadyPublished)?;
-    slot.context.store(
-        core::ptr::from_mut(context).expose_provenance() as u64,
-        Ordering::Relaxed,
-    );
+    slot.context
+        .store(core::ptr::from_mut(context), Ordering::Relaxed);
     slot.generation.store(generation, Ordering::Release);
     Ok(())
 }
@@ -89,14 +88,14 @@ pub(super) fn retire_guest(context: &mut VcpuContext) -> Result<(), Error> {
     if generation == TRANSITION {
         return Err(Error::TransitionInProgress);
     }
-    let expected = core::ptr::from_mut(context).expose_provenance() as u64;
+    let expected = core::ptr::from_mut(context);
     if slot.context.load(Ordering::Relaxed) != expected {
         return Err(Error::InvalidOwner);
     }
     slot.generation
         .compare_exchange(generation, TRANSITION, Ordering::AcqRel, Ordering::Acquire)
         .map_err(|_| Error::InvalidOwner)?;
-    slot.context.store(0, Ordering::Relaxed);
+    slot.context.store(core::ptr::null_mut(), Ordering::Relaxed);
     slot.generation.store(EMPTY, Ordering::Release);
     Ok(())
 }
@@ -124,16 +123,48 @@ fn guest_generation() -> Result<Option<u64>, Error> {
     let generation = slot.generation.load(Ordering::Acquire);
     match generation {
         EMPTY => {
-            if slot.context.load(Ordering::Relaxed) == 0 {
+            if slot.context.load(Ordering::Relaxed).is_null() {
                 Ok(None)
             } else {
                 Err(Error::InvalidOwner)
             }
         }
         TRANSITION => Err(Error::TransitionInProgress),
-        generation if slot.context.load(Ordering::Relaxed) != 0 => Ok(Some(generation)),
+        generation if !slot.context.load(Ordering::Relaxed).is_null() => Ok(Some(generation)),
         _ => Err(Error::InvalidOwner),
     }
+}
+
+/// Returns the exact pinned context owned by one observed guest generation.
+///
+/// The caller is architecture exception entry with local exceptions masked;
+/// no ordinary Rust reference to the context may be live across guest entry.
+pub(super) fn guest_context(generation: u64) -> Result<core::ptr::NonNull<VcpuContext>, Error> {
+    if generation == EMPTY || generation == TRANSITION {
+        return Err(Error::InvalidOwner);
+    }
+    let slot = &GUEST_WORLDS[current_cpu()?];
+    if slot.generation.load(Ordering::Acquire) != generation {
+        return Err(Error::InvalidOwner);
+    }
+    core::ptr::NonNull::new(slot.context.load(Ordering::Relaxed)).ok_or(Error::InvalidOwner)
+}
+
+/// Closes the exact guest generation after its terminal frame was captured.
+pub(super) fn close_captured_guest(
+    generation: u64,
+    context: core::ptr::NonNull<VcpuContext>,
+) -> Result<(), Error> {
+    let slot = &GUEST_WORLDS[current_cpu()?];
+    if slot.context.load(Ordering::Relaxed) != context.as_ptr() {
+        return Err(Error::InvalidOwner);
+    }
+    slot.generation
+        .compare_exchange(generation, TRANSITION, Ordering::AcqRel, Ordering::Acquire)
+        .map_err(|_| Error::InvalidOwner)?;
+    slot.context.store(core::ptr::null_mut(), Ordering::Relaxed);
+    slot.generation.store(EMPTY, Ordering::Release);
+    Ok(())
 }
 
 fn next_generation() -> Result<u64, Error> {

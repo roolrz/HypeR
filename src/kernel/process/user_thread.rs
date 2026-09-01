@@ -283,13 +283,13 @@ impl UserExecution {
         thread: UserThread,
         address_space: FallibleArc<NativeAddressSpace>,
         context: crate::hal::user::UserContext,
-    ) -> Result<alloc::boxed::Box<Self>, ()> {
-        hyper::mm::try_box(Self {
+    ) -> Result<alloc::boxed::Box<UnsafeCell<Self>>, ()> {
+        hyper::mm::try_box(UnsafeCell::new(Self {
             thread,
             address_space: Some(address_space),
             context: UnsafeCell::new(context),
             armed: false,
-        })
+        }))
         .map_err(|_| ())
     }
 

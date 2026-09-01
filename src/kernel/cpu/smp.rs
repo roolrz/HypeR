@@ -407,15 +407,15 @@ extern "C" fn enter_clean_idle(cpu_index: usize) -> ! {
         cpu_index.get(),
         crate::hal::cpu::current_hardware_id().get()
     );
-    super::super::task::scheduler::run_idle_loop_after(publish_current_online)
+    super::super::task::scheduler::run_secondary_idle_loop()
 }
 
 /// Publishes scheduler readiness from the first protected idle observation.
 ///
-/// The scheduler invokes this callback with local IRQs masked and its global
-/// lock held. A boot CPU that observes the Release store cannot enqueue work
-/// until that first queue check completes, closing the secondary-online race.
-fn publish_current_online() {
+/// The scheduler reaches this helper only after its first queue observation
+/// completed and while local IRQs remain masked. A boot CPU that observes the
+/// Release store therefore cannot strand work behind an unobserved idle wait.
+pub(crate) fn publish_current_online_from_idle_observation() {
     let Some(cpu) = super::current_index() else {
         crate::hal::cpu::halt()
     };

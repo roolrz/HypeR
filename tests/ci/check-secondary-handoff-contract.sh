@@ -9,11 +9,13 @@ root=${HYPER_SECONDARY_HANDOFF_ROOT:-$(CDPATH='' cd -- "$(dirname "$0")/../.." &
 cd "$root"
 
 source=src/kernel/cpu/smp.rs
+scheduler_source=src/kernel/task/scheduler/mod.rs
 cache_source=src/hal/selected/cache.rs
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/hyper-secondary-handoff-check.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
 sed -n '/^pub fn initialize(/,/^}/p' "$source" >"$fixture/initialize.rs"
+sed -n '/^fn idle_wait_or_schedule(/,/^}/p' "$scheduler_source" >"$fixture/idle.rs"
 
 require_in() {
     checked_source=$1
@@ -56,10 +58,16 @@ require_in "$fixture/initialize.rs" \
     'online\.load\(Ordering::Acquire\)' \
     'the boot CPU must acquire secondary handoff consumption'
 require \
-    '(?s)extern "C" fn enter_clean_idle\(.*?run_idle_loop_after\(publish_current_online\)' \
-    'secondary admission must publish from its first scheduler-locked idle observation'
+    '(?s)fn try_secondary_entry\(.*?run_secondary_idle_loop\(\)' \
+    'secondary admission must enter the dedicated scheduler secondary-idle path'
+idle_prepare_line=$(rg -n 'scheduler\.prepare_yield\(cpu\)' "$fixture/idle.rs" | head -n1 | cut -d: -f1)
+idle_publish_line=$(rg -n 'publish_current_online_from_idle_observation\(\);' "$fixture/idle.rs" | head -n1 | cut -d: -f1)
+if [ -z "$idle_prepare_line" ] || [ -z "$idle_publish_line" ] || [ "$idle_prepare_line" -ge "$idle_publish_line" ]; then
+    echo 'scheduler secondary readiness must publish only after its first protected queue observation' >&2
+    exit 1
+fi
 require \
-    '(?s)fn publish_current_online\(.*?ONLINE\[cpu\]\.store\(true, Ordering::Release\)' \
+    '(?s)fn publish_current_online_from_idle_observation\(.*?ONLINE\[cpu\]\.store\(true, Ordering::Release\)' \
     'secondaries must release-publish completion after consuming the handoff'
 require_in "$fixture/initialize.rs" \
     '(?s)online\.load\(Ordering::Acquire\).*?boot_parameters\.release\(\);' \

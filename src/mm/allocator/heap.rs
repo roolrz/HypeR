@@ -10,9 +10,11 @@
 //! accounting, not an ownership token.
 
 use core::alloc::Layout;
+use core::fmt;
 use core::hint::spin_loop;
-use core::ptr::null_mut;
+use core::ptr::{NonNull, null_mut};
 
+use crate::sync::PublishedOnce;
 use crate::sync::atomic::{AtomicU8, Ordering};
 
 use crate::mm::{
@@ -20,13 +22,32 @@ use crate::mm::{
 };
 
 mod global;
+mod local_cache;
+mod partial;
 
-pub use global::KernelGlobalAllocator;
+use partial::{
+    InsertPermit, PartialLinks, PartialNode, PartialNodeStore, PartialSlabLists, RemovePermit,
+    SlabClass, SlabLink, SlabPageId,
+};
 
-const NONE: u64 = u64::MAX;
+pub use global::{CacheActivationError, CpuLocalCachePolicy, KernelGlobalAllocator};
+
 const SLAB_MAGIC: u64 = 0x4859_5045_5253_4c42;
 const LARGE_MAGIC: u64 = 0x4859_5045_524c_4152;
-const CLASS_SIZES: [usize; 8] = [16, 32, 64, 128, 256, 512, 1024, 2048];
+pub(super) const CLASS_SIZES: [usize; 8] = [16, 32, 64, 128, 256, 512, 1024, 2048];
+const SLAB_CLASS_COUNT: usize = CLASS_SIZES.len();
+const SLAB_DETACHED: u8 = 0;
+const SLAB_LINKED: u8 = 1;
+
+type HeapSlabClass = SlabClass<SLAB_CLASS_COUNT>;
+type HeapInsertPermit<'a> = InsertPermit<'a, SLAB_CLASS_COUNT>;
+type HeapRemovePermit<'a> = RemovePermit<'a, SLAB_CLASS_COUNT>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LargeAllocationError {
+    OutOfMemory,
+    UnsupportedLayout,
+}
 
 #[derive(Clone, Copy)]
 #[repr(u8)]
@@ -43,9 +64,138 @@ enum AllocatorFault {
     AllocationCountOverflow = 10,
     InvalidLargePointer = 11,
     UninitializedDeallocation = 12,
+    InvalidCacheState = 13,
+    CachePolicyFailure = 14,
+    CacheAccountingUnderflow = 15,
+    CacheAccountingOverflow = 16,
 }
 
 static LAST_ALLOCATOR_FAULT: AtomicU8 = AtomicU8::new(0);
+
+/// Opaque identity of one violated runtime-allocator invariant.
+///
+/// The numeric code is stable for debugger and crash-report inspection, while
+/// allocator implementation details remain private to this module.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AllocatorInvariant(u8);
+
+impl AllocatorInvariant {
+    /// Recovers a currently defined invariant from its stable numeric code.
+    ///
+    /// Numeric recovery is public because crash dumps and debuggers retain the
+    /// code without depending on private allocator implementation types.
+    pub const fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1..=16 => Some(Self(code)),
+            _ => None,
+        }
+    }
+
+    pub const fn code(self) -> u8 {
+        self.0
+    }
+
+    pub const fn description(self) -> &'static str {
+        match self.0 {
+            1 => "invalid slab header",
+            2 => "slab size-class mismatch",
+            3 => "invalid slab allocation pointer",
+            4 => "allocation accounting underflow",
+            5 => "invalid partial-slab list",
+            6 => "buddy deallocation failure",
+            7 => "invalid large-allocation header",
+            8 => "page-owner accounting underflow",
+            9 => "invalid slab physical address",
+            10 => "allocation accounting overflow",
+            11 => "invalid large-allocation pointer",
+            12 => "deallocation before allocator initialization",
+            13 => "invalid CPU-local allocator cache state",
+            14 => "CPU-local allocator cache policy failure",
+            15 => "CPU-local allocator accounting underflow",
+            16 => "CPU-local allocator accounting overflow",
+            _ => "unknown allocator invariant",
+        }
+    }
+}
+
+impl fmt::Debug for AllocatorInvariant {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AllocatorInvariant")
+            .field("code", &self.code())
+            .field("description", &self.description())
+            .finish()
+    }
+}
+
+/// One allocator failure and the first failure retained for post-mortem use.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AllocatorInvariantReport {
+    current: AllocatorInvariant,
+    first: AllocatorInvariant,
+}
+
+impl AllocatorInvariantReport {
+    const fn new(current: AllocatorInvariant, first: AllocatorInvariant) -> Self {
+        Self { current, first }
+    }
+
+    pub const fn current(self) -> AllocatorInvariant {
+        self.current
+    }
+
+    pub const fn first(self) -> AllocatorInvariant {
+        self.first
+    }
+}
+
+/// Non-returning policy callback for corrupted allocator state.
+///
+/// The handler may be called with local IRQs masked and allocator or unrelated
+/// outer locks held. It must not allocate, deallocate, block, acquire ordinary
+/// locks, unwind, or return to the corrupted allocator transaction.
+pub type AllocatorInvariantHandler = fn(AllocatorInvariantReport) -> !;
+
+/// Failure to publish the process-wide allocator corruption policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AllocatorInvariantInstallError {
+    AlreadyInstalled,
+}
+
+struct AllocatorInvariantHandlerSlot {
+    handler: PublishedOnce<AllocatorInvariantHandler>,
+}
+
+impl AllocatorInvariantHandlerSlot {
+    const fn new() -> Self {
+        Self {
+            handler: PublishedOnce::new(),
+        }
+    }
+
+    fn install(
+        &self,
+        handler: AllocatorInvariantHandler,
+    ) -> Result<(), AllocatorInvariantInstallError> {
+        self.handler
+            .publish(handler)
+            .map_err(|_| AllocatorInvariantInstallError::AlreadyInstalled)
+    }
+
+    fn get(&self) -> Option<AllocatorInvariantHandler> {
+        self.handler.get().copied()
+    }
+}
+
+static ALLOCATOR_INVARIANT_HANDLER: AllocatorInvariantHandlerSlot =
+    AllocatorInvariantHandlerSlot::new();
+
+/// Installs the process-wide allocator corruption policy exactly once.
+pub fn install_allocator_invariant_handler(
+    handler: AllocatorInvariantHandler,
+) -> Result<(), AllocatorInvariantInstallError> {
+    ALLOCATOR_INVARIANT_HANDLER.install(handler)
+}
 
 /// Returns zero or the stable numeric code of the first allocator fault.
 pub fn allocator_fault_code() -> u8 {
@@ -53,8 +203,25 @@ pub fn allocator_fault_code() -> u8 {
 }
 
 fn allocator_fault(fault: AllocatorFault) -> ! {
-    let _ =
-        LAST_ALLOCATOR_FAULT.compare_exchange(0, fault as u8, Ordering::AcqRel, Ordering::Acquire);
+    let current = AllocatorInvariant(fault as u8);
+    let first_code = match LAST_ALLOCATOR_FAULT.compare_exchange(
+        0,
+        current.code(),
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
+        Ok(_) => current.code(),
+        Err(first) => first,
+    };
+    let Some(first) = AllocatorInvariant::from_code(first_code) else {
+        loop {
+            spin_loop();
+        }
+    };
+    let report = AllocatorInvariantReport::new(current, first);
+    if let Some(handler) = ALLOCATOR_INVARIANT_HANDLER.get() {
+        handler(report)
+    }
     loop {
         spin_loop();
     }
@@ -117,23 +284,43 @@ pub struct HeapStats {
     pub peak_requested_bytes: usize,
     pub allocation_requests: u64,
     pub allocation_failures: u64,
+    pub cache: HeapCacheStats,
     pub kernel_pages: PageOwnerStats,
     pub page_table_pages: PageOwnerStats,
     pub guest_pages: PageOwnerStats,
     pub user_pages: PageOwnerStats,
 }
 
+/// Diagnostic state for the bounded CPU-local slab magazines.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HeapCacheStats {
+    pub enabled_cpus: usize,
+    pub cached_objects: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub refills: u64,
+    pub drains: u64,
+    pub pressure_reclaims: u64,
+    pub reclaimed_objects: u64,
+}
+
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct SlabHeader {
     magic: u64,
     physical: u64,
+    previous_partial: u64,
     next_partial: u64,
     free_head: usize,
     in_use: u16,
     capacity: u16,
     class: u8,
-    _reserved: [u8; 3],
+    list_state: u8,
+    _reserved: [u8; 2],
 }
+
+const _: () = assert!(core::mem::size_of::<SlabHeader>() == 48);
+const _: () = assert!(PAGE_SIZE == partial::SLAB_PAGE_SIZE);
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -142,6 +329,64 @@ struct LargeHeader {
     physical: u64,
     order: u8,
     _reserved: [u8; 7],
+}
+
+/// Linear ownership of one object reserved from the central slab topology.
+///
+/// A token may reside in one transfer batch or CPU-local magazine. Converting
+/// it to a caller pointer relinquishes this internal ownership; reconstructing
+/// a token is permitted only by the matching `GlobalAlloc::dealloc` contract.
+struct CachedObject {
+    pointer: NonNull<u8>,
+    class: HeapSlabClass,
+    armed: bool,
+}
+
+// SAFETY: A CachedObject uniquely owns untyped allocator storage. It is never
+// dereferenced while cached, and the central slab topology keeps its backing
+// page resident until the token is returned.
+unsafe impl Send for CachedObject {}
+
+impl CachedObject {
+    fn new(pointer: NonNull<u8>, class: HeapSlabClass) -> Self {
+        Self {
+            pointer,
+            class,
+            armed: true,
+        }
+    }
+
+    /// Adopts the exact live object relinquished by a `GlobalAlloc` caller.
+    ///
+    /// # Safety
+    ///
+    /// `pointer` must identify one live allocation from `class`, and the caller
+    /// must no longer access it after this transfer.
+    unsafe fn from_caller(pointer: NonNull<u8>, class: HeapSlabClass) -> Self {
+        Self::new(pointer, class)
+    }
+
+    fn class(&self) -> HeapSlabClass {
+        self.class
+    }
+
+    fn into_caller_pointer(mut self) -> *mut u8 {
+        self.armed = false;
+        self.pointer.as_ptr()
+    }
+
+    fn into_central_pointer(mut self) -> NonNull<u8> {
+        self.armed = false;
+        self.pointer
+    }
+}
+
+impl Drop for CachedObject {
+    fn drop(&mut self) {
+        if self.armed {
+            allocator_fault(AllocatorFault::InvalidCacheState);
+        }
+    }
 }
 
 /// Owns a buddy block until the surrounding heap metadata is publishable.
@@ -197,9 +442,230 @@ impl Drop for PendingBuddyBlock<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ValidatedSlab {
+    pointer: NonNull<SlabHeader>,
+    header: SlabHeader,
+    class: HeapSlabClass,
+    object_start: usize,
+    object_end: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SlabHeaderAccess<'a> {
+    buddy: &'a BuddyAllocator,
+}
+
+struct SlabTopology<'a> {
+    headers: SlabHeaderAccess<'a>,
+}
+
+impl PartialNodeStore<SLAB_CLASS_COUNT> for SlabTopology<'_> {
+    type Error = ();
+
+    fn resolve(&self, page: SlabPageId) -> Result<PartialNode<SLAB_CLASS_COUNT>, Self::Error> {
+        let slab = self.headers.validated_slab(page).ok_or(())?;
+        Ok(PartialNode {
+            class: slab.class,
+            links: PartialLinks {
+                previous: SlabLink::from_raw(slab.header.previous_partial),
+                next: SlabLink::from_raw(slab.header.next_partial),
+            },
+            linked: slab.header.list_state == SLAB_LINKED,
+        })
+    }
+}
+
+struct PreparedInsert<'a> {
+    permit: HeapInsertPermit<'a>,
+    target: NonNull<SlabHeader>,
+    old_head: Option<NonNull<SlabHeader>>,
+}
+
+struct PreparedRemove<'a> {
+    permit: HeapRemovePermit<'a>,
+    target: NonNull<SlabHeader>,
+    previous: Option<NonNull<SlabHeader>>,
+    next: Option<NonNull<SlabHeader>>,
+}
+
+enum PreparedTransition<'a> {
+    None,
+    Insert(PreparedInsert<'a>),
+    Remove(PreparedRemove<'a>),
+}
+
+impl PreparedTransition<'_> {
+    fn commit(self) {
+        match self {
+            Self::None => {}
+            Self::Insert(prepared) => prepared.commit(),
+            Self::Remove(prepared) => prepared.commit(),
+        }
+    }
+}
+
+impl SlabHeaderAccess<'_> {
+    fn validated_slab(self, page: SlabPageId) -> Option<ValidatedSlab> {
+        let page_virtual = self.buddy.managed_page_pointer(page.physical()).ok()?;
+        let pointer = NonNull::new(core::ptr::with_exposed_provenance_mut::<SlabHeader>(
+            page_virtual,
+        ))?;
+        // SAFETY: managed_page_pointer proved that a complete handed-off page
+        // is direct-mapped. Slab links are minted only for live slab pages;
+        // without a separate ownership bitmap, arbitrary corrupted links into
+        // a concurrently used non-slab page are outside this invariant.
+        let header = unsafe { pointer.as_ptr().read() };
+        if header.magic != SLAB_MAGIC || header.physical != page.physical() {
+            return None;
+        }
+        let class = HeapSlabClass::new(usize::from(header.class))?;
+        let object_size = CLASS_SIZES[class.index()];
+        let object_start = page_virtual
+            .checked_add(core::mem::size_of::<SlabHeader>())
+            .and_then(|end| align_up_usize(end, object_size))?;
+        let page_end = page_virtual.checked_add(PAGE_SIZE as usize)?;
+        let expected_capacity = (page_end - object_start) / object_size;
+        if expected_capacity == 0
+            || expected_capacity > u16::MAX as usize
+            || usize::from(header.capacity) != expected_capacity
+            || header.in_use > header.capacity
+        {
+            return None;
+        }
+        let object_end = object_start.checked_add(expected_capacity.checked_mul(object_size)?)?;
+        let linked = header.list_state == SLAB_LINKED;
+        let detached = header.list_state == SLAB_DETACHED;
+        if (!linked && !detached)
+            || (linked && header.in_use == header.capacity)
+            || (detached
+                && (header.in_use != header.capacity
+                    || header.previous_partial != SlabLink::NONE.raw()
+                    || header.next_partial != SlabLink::NONE.raw()))
+            || (header.free_head == 0) != (header.in_use == header.capacity)
+        {
+            return None;
+        }
+        let slab = ValidatedSlab {
+            pointer,
+            header,
+            class,
+            object_start,
+            object_end,
+        };
+        if header.free_head != 0 && !self.valid_free_object(slab, header.free_head) {
+            return None;
+        }
+        Some(slab)
+    }
+
+    fn valid_free_object(self, slab: ValidatedSlab, address: usize) -> bool {
+        let object_size = CLASS_SIZES[slab.class.index()];
+        address >= slab.object_start
+            && address < slab.object_end
+            && (address - slab.object_start).is_multiple_of(object_size)
+    }
+
+    fn read_free_link(self, slab: ValidatedSlab, address: usize) -> Option<usize> {
+        if address == 0 || !self.valid_free_object(slab, address) {
+            return None;
+        }
+        // SAFETY: address was validated as one object in this slab's free
+        // extent. External allocator locking excludes concurrent free-list
+        // mutation, and the linked object stores an initialized usize.
+        let next = unsafe { core::ptr::with_exposed_provenance::<usize>(address).read() };
+        if next == 0 || self.valid_free_object(slab, next) {
+            Some(next)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> PreparedInsert<'a> {
+    fn new(permit: HeapInsertPermit<'a>, headers: SlabHeaderAccess<'_>) -> Option<Self> {
+        let target = headers.validated_slab(permit.target())?.pointer;
+        let old_head = match permit.old_head() {
+            Some(page) => Some(headers.validated_slab(page)?.pointer),
+            None => None,
+        };
+        Some(Self {
+            permit,
+            target,
+            old_head,
+        })
+    }
+
+    fn commit(self) {
+        let old_head = self
+            .permit
+            .old_head()
+            .map_or(SlabLink::NONE, SlabLink::from_page)
+            .raw();
+        // SAFETY: preflight validated distinct, stable headers and every
+        // mutation below is an infallible scalar store under exclusive access.
+        unsafe {
+            (*self.target.as_ptr()).previous_partial = SlabLink::NONE.raw();
+            (*self.target.as_ptr()).next_partial = old_head;
+            (*self.target.as_ptr()).list_state = SLAB_LINKED;
+            if let Some(old_head) = self.old_head {
+                (*old_head.as_ptr()).previous_partial = self.permit.target().physical();
+            }
+        }
+        self.permit.commit();
+    }
+}
+
+impl<'a> PreparedRemove<'a> {
+    fn new(permit: HeapRemovePermit<'a>, headers: SlabHeaderAccess<'_>) -> Option<Self> {
+        let target = headers.validated_slab(permit.target())?.pointer;
+        let previous = match permit.previous() {
+            Some(page) => Some(headers.validated_slab(page)?.pointer),
+            None => None,
+        };
+        let next = match permit.next() {
+            Some(page) => Some(headers.validated_slab(page)?.pointer),
+            None => None,
+        };
+        Some(Self {
+            permit,
+            target,
+            previous,
+            next,
+        })
+    }
+
+    fn commit(self) {
+        let previous = self
+            .permit
+            .previous()
+            .map_or(SlabLink::NONE, SlabLink::from_page)
+            .raw();
+        let next = self
+            .permit
+            .next()
+            .map_or(SlabLink::NONE, SlabLink::from_page)
+            .raw();
+        // SAFETY: preflight validated reciprocal, distinct headers and every
+        // mutation below is an infallible scalar store under exclusive access.
+        unsafe {
+            if let Some(previous_header) = self.previous {
+                (*previous_header.as_ptr()).next_partial = next;
+            }
+            if let Some(next_header) = self.next {
+                (*next_header.as_ptr()).previous_partial = previous;
+            }
+            (*self.target.as_ptr()).previous_partial = SlabLink::NONE.raw();
+            (*self.target.as_ptr()).next_partial = SlabLink::NONE.raw();
+            (*self.target.as_ptr()).list_state = SLAB_DETACHED;
+        }
+        self.permit.commit();
+    }
+}
+
 pub struct SlabAllocator {
     buddy: BuddyAllocator,
-    partial: [u64; CLASS_SIZES.len()],
+    partial: PartialSlabLists<SLAB_CLASS_COUNT>,
     slab_pages: usize,
     large_heap_pages: usize,
     live_allocations: usize,
@@ -232,7 +698,7 @@ impl SlabAllocator {
             // SAFETY: This constructor inherits and preserves its caller's
             // permanent writable direct-map contract for the buddy lifetime.
             buddy: unsafe { BuddyAllocator::from_handoff(handoff, direct_map_base)? },
-            partial: [NONE; CLASS_SIZES.len()],
+            partial: PartialSlabLists::new(),
             slab_pages: 0,
             large_heap_pages: 0,
             live_allocations: 0,
@@ -250,14 +716,22 @@ impl SlabAllocator {
     /// Allocates memory satisfying `layout`.
     pub fn allocate(&mut self, layout: Layout) -> *mut u8 {
         self.allocation_requests = self.allocation_requests.saturating_add(1);
-        let pointer = if let Some(class) = class_for(layout) {
-            self.allocate_slab(class)
+        let class = self.slab_class_for(layout);
+        let pointer = if let Some(class) = class {
+            self.reserve_slab_object(class)
+                .map_or(null_mut(), CachedObject::into_caller_pointer)
         } else {
-            self.allocate_large(layout)
+            self.allocate_large(layout).unwrap_or(null_mut())
         };
         if pointer.is_null() {
             self.allocation_failures = self.allocation_failures.saturating_add(1);
         } else {
+            increment(&mut self.live_allocations);
+            if class.is_some() {
+                increment(&mut self.live_slab_allocations);
+            } else {
+                increment(&mut self.live_large_allocations);
+            }
             let requested = layout.size().max(1);
             self.requested_bytes = self.requested_bytes.saturating_add(requested);
             self.peak_requested_bytes = self.peak_requested_bytes.max(self.requested_bytes);
@@ -272,168 +746,241 @@ impl SlabAllocator {
     ///
     /// `pointer` and `layout` must describe one live allocation from this heap.
     pub unsafe fn deallocate(&mut self, pointer: *mut u8, layout: Layout) {
-        if let Some(class) = class_for(layout) {
+        let requested_bytes = match self.requested_bytes.checked_sub(layout.size().max(1)) {
+            Some(requested_bytes) => requested_bytes,
+            None => allocator_fault(AllocatorFault::AllocationCountUnderflow),
+        };
+        let class = self.slab_class_for(layout);
+        if self.live_allocations == 0
+            || class.is_some() && self.live_slab_allocations == 0
+            || class.is_none() && self.live_large_allocations == 0
+        {
+            allocator_fault(AllocatorFault::AllocationCountUnderflow);
+        }
+        if let Some(class) = class {
+            let Some(pointer) = NonNull::new(pointer) else {
+                allocator_fault(AllocatorFault::InvalidSlabPointer);
+            };
             // SAFETY: The caller's exact pointer/layout contract identifies a
             // live object in this computed slab size class.
-            unsafe { self.deallocate_slab(pointer, class) };
+            let cached = unsafe { CachedObject::from_caller(pointer, class) };
+            self.release_slab_object(cached);
+            self.live_slab_allocations -= 1;
         } else {
             // SAFETY: A non-slab layout was allocated with an adjacent valid
             // LargeHeader and the caller relinquishes that live allocation.
             unsafe { self.deallocate_large(pointer, layout) };
+            self.live_large_allocations -= 1;
         }
-        self.requested_bytes = match self.requested_bytes.checked_sub(layout.size().max(1)) {
-            Some(requested_bytes) => requested_bytes,
-            None => allocator_fault(AllocatorFault::AllocationCountUnderflow),
-        };
+        self.live_allocations -= 1;
+        self.requested_bytes = requested_bytes;
     }
 
-    fn allocate_slab(&mut self, class: usize) -> *mut u8 {
-        if self.partial[class] == NONE && self.create_slab(class).is_err() {
-            return null_mut();
+    fn reserve_slab_object(&mut self, class: HeapSlabClass) -> Option<CachedObject> {
+        if self.partial.head(class).is_none() && self.create_slab(class).is_err() {
+            return None;
         }
 
-        let physical = self.partial[class];
-        let header = match self.slab_header(physical) {
-            Some(header) => header,
+        let page = match self.partial.head(class) {
+            Some(page) => page,
             None => allocator_fault(AllocatorFault::InvalidPartialList),
         };
-        // SAFETY: `physical` is the head of this class's partial-slab list.
-        let header = unsafe { &mut *header };
-        if header.magic != SLAB_MAGIC {
-            allocator_fault(AllocatorFault::InvalidSlabHeader);
-        }
-        if usize::from(header.class) != class {
+        let headers = SlabHeaderAccess { buddy: &self.buddy };
+        let slab = match headers.validated_slab(page) {
+            Some(slab) => slab,
+            None => allocator_fault(AllocatorFault::InvalidPartialList),
+        };
+        if slab.class != class || slab.header.list_state != SLAB_LINKED {
             allocator_fault(AllocatorFault::SlabClassMismatch);
         }
-        if header.physical != physical {
-            allocator_fault(AllocatorFault::InvalidSlabPhysical);
-        }
-        if header.in_use >= header.capacity {
-            allocator_fault(AllocatorFault::InvalidSlabHeader);
-        }
-        let pointer = header.free_head as *mut u8;
-        if pointer.is_null() {
-            allocator_fault(AllocatorFault::InvalidPartialList);
-        }
-        // SAFETY: Every free object stores the next virtual pointer in its first
-        // machine word.
-        header.free_head = unsafe { *(pointer as *const usize) };
-        header.in_use = match header.in_use.checked_add(1) {
+        let pointer = slab.header.free_head;
+        let next_free = match headers.read_free_link(slab, pointer) {
+            Some(next) => next,
+            None => allocator_fault(AllocatorFault::InvalidPartialList),
+        };
+        let in_use = match slab.header.in_use.checked_add(1) {
             Some(in_use) => in_use,
             None => allocator_fault(AllocatorFault::AllocationCountOverflow),
         };
-        increment(&mut self.live_allocations);
-        increment(&mut self.live_slab_allocations);
-        if header.free_head == 0 {
-            self.partial[class] = header.next_partial;
-            header.next_partial = NONE;
+        let becomes_full = next_free == 0;
+        if becomes_full != (in_use == slab.header.capacity) {
+            allocator_fault(AllocatorFault::InvalidPartialList);
         }
-        pointer
+        let removal = if becomes_full {
+            let permit = match self
+                .partial
+                .preflight_remove(&SlabTopology { headers }, class, page)
+            {
+                Ok(permit) => permit,
+                Err(_) => allocator_fault(AllocatorFault::InvalidPartialList),
+            };
+            match PreparedRemove::new(permit, headers) {
+                Some(prepared) => Some(prepared),
+                None => allocator_fault(AllocatorFault::InvalidPartialList),
+            }
+        } else {
+            None
+        };
+
+        // SAFETY: Every address and counter involved in this transaction was
+        // validated above, and external allocator locking excludes mutation.
+        unsafe {
+            (*slab.pointer.as_ptr()).free_head = next_free;
+            (*slab.pointer.as_ptr()).in_use = in_use;
+        }
+        if let Some(removal) = removal {
+            removal.commit();
+        }
+        let Some(pointer) = NonNull::new(core::ptr::with_exposed_provenance_mut::<u8>(pointer))
+        else {
+            allocator_fault(AllocatorFault::InvalidSlabPointer);
+        };
+        Some(CachedObject::new(pointer, class))
     }
 
-    unsafe fn deallocate_slab(&mut self, pointer: *mut u8, class: usize) {
+    fn release_slab_object(&mut self, object: CachedObject) {
+        let class = object.class();
+        let pointer = object.into_central_pointer().as_ptr();
         let page_virtual = (pointer as usize) & !(PAGE_SIZE as usize - 1);
         let physical = match (page_virtual as u64).checked_sub(self.buddy.direct_map_base()) {
             Some(physical) => physical,
             None => allocator_fault(AllocatorFault::InvalidSlabPointer),
         };
-        let header_pointer = match self.slab_header(physical) {
-            Some(header) => header,
+        let page = match SlabPageId::new(physical) {
+            Some(page) => page,
             None => allocator_fault(AllocatorFault::InvalidSlabPointer),
         };
-        // SAFETY: GlobalAlloc requires `pointer` and `layout` to describe one
-        // live allocation returned by this allocator.
-        let header = unsafe { &mut *header_pointer };
-        if header.magic != SLAB_MAGIC {
-            allocator_fault(AllocatorFault::InvalidSlabHeader);
-        }
-        if usize::from(header.class) != class {
+        let headers = SlabHeaderAccess { buddy: &self.buddy };
+        let slab = match headers.validated_slab(page) {
+            Some(slab) => slab,
+            None => allocator_fault(AllocatorFault::InvalidSlabPointer),
+        };
+        if slab.class != class {
             allocator_fault(AllocatorFault::SlabClassMismatch);
         }
-        if header.physical != physical {
-            allocator_fault(AllocatorFault::InvalidSlabPhysical);
-        }
-        let object_size = CLASS_SIZES[class];
-        let object_start = match page_virtual
-            .checked_add(core::mem::size_of::<SlabHeader>())
-            .and_then(|header_end| align_up_usize(header_end, object_size))
-        {
-            Some(object_start) => object_start,
-            None => allocator_fault(AllocatorFault::InvalidSlabHeader),
-        };
-        let object_bytes = match usize::from(header.capacity).checked_mul(object_size) {
-            Some(object_bytes) => object_bytes,
-            None => allocator_fault(AllocatorFault::InvalidSlabHeader),
-        };
-        let object_end = match object_start.checked_add(object_bytes) {
-            Some(object_end) => object_end,
-            None => allocator_fault(AllocatorFault::InvalidSlabHeader),
-        };
-        let page_end = match page_virtual.checked_add(PAGE_SIZE as usize) {
-            Some(page_end) => page_end,
-            None => allocator_fault(AllocatorFault::InvalidSlabHeader),
-        };
         let pointer_address = pointer as usize;
-        if header.capacity == 0
-            || object_end > page_end
-            || pointer_address < object_start
-            || pointer_address >= object_end
-            || !(pointer_address - object_start).is_multiple_of(object_size)
-        {
+        if !headers.valid_free_object(slab, pointer_address) {
             allocator_fault(AllocatorFault::InvalidSlabPointer);
         }
-        if header.in_use == 0
-            || header.in_use > header.capacity
-            || self.live_allocations == 0
-            || self.live_slab_allocations == 0
-        {
+        if slab.header.in_use == 0 {
             allocator_fault(AllocatorFault::AllocationCountUnderflow);
         }
-        let was_full = header.free_head == 0;
+        let in_use = slab.header.in_use - 1;
+        let was_full = slab.header.list_state == SLAB_DETACHED;
+        let capacity_one_empty = was_full && slab.header.capacity == 1;
+        let transition = if was_full && !capacity_one_empty {
+            let permit = match self
+                .partial
+                .preflight_insert(&SlabTopology { headers }, class, page)
+            {
+                Ok(permit) => permit,
+                Err(_) => allocator_fault(AllocatorFault::InvalidPartialList),
+            };
+            match PreparedInsert::new(permit, headers) {
+                Some(prepared) => PreparedTransition::Insert(prepared),
+                None => allocator_fault(AllocatorFault::InvalidPartialList),
+            }
+        } else if !was_full && in_use == 0 {
+            let permit = match self
+                .partial
+                .preflight_remove(&SlabTopology { headers }, class, page)
+            {
+                Ok(permit) => permit,
+                Err(_) => allocator_fault(AllocatorFault::InvalidPartialList),
+            };
+            match PreparedRemove::new(permit, headers) {
+                Some(prepared) => PreparedTransition::Remove(prepared),
+                None => allocator_fault(AllocatorFault::InvalidPartialList),
+            }
+        } else {
+            PreparedTransition::None
+        };
+        if self.slab_pages == 0 {
+            allocator_fault(AllocatorFault::AllocationCountUnderflow);
+        }
+
         // SAFETY: The caller relinquishes this live slab object, whose size is
         // at least one word; it is now exclusive free-list storage.
-        unsafe { *(pointer as *mut usize) = header.free_head };
-        header.free_head = pointer as usize;
-        header.in_use -= 1;
-        self.live_allocations -= 1;
-        self.live_slab_allocations -= 1;
-
-        if was_full {
-            header.next_partial = self.partial[class];
-            self.partial[class] = physical;
+        unsafe {
+            pointer.cast::<usize>().write(slab.header.free_head);
+            (*slab.pointer.as_ptr()).free_head = pointer_address;
+            (*slab.pointer.as_ptr()).in_use = in_use;
         }
-        if header.in_use == 0 {
-            self.remove_partial(class, physical);
-            header.magic = 0;
+        transition.commit();
+        if in_use == 0 {
+            // A capacity-one slab transitions directly from detached/full to
+            // empty; it never enters the partial list only to leave it again.
+            // SAFETY: The validated page is empty and exclusively owned by
+            // this allocator until the buddy deallocation below.
+            unsafe { (*slab.pointer.as_ptr()).magic = 0 };
             self.slab_pages -= 1;
             // SAFETY: The empty slab page is exclusively owned by this heap.
-            if unsafe { self.buddy.deallocate(PhysicalAddress::new(physical), 0) }.is_err() {
+            if unsafe {
+                self.buddy
+                    .deallocate(PhysicalAddress::new(page.physical()), 0)
+            }
+            .is_err()
+            {
                 allocator_fault(AllocatorFault::BuddyDeallocation);
             }
         }
     }
 
-    fn create_slab(&mut self, class: usize) -> Result<(), BuddyError> {
-        let next_partial = self.partial[class];
+    fn create_slab(&mut self, class: HeapSlabClass) -> Result<(), BuddyError> {
+        let headers = SlabHeaderAccess { buddy: &self.buddy };
+        let head_permit = match self
+            .partial
+            .preflight_head(&SlabTopology { headers }, class)
+        {
+            Ok(permit) => permit,
+            Err(_) => allocator_fault(AllocatorFault::InvalidPartialList),
+        };
+        let old_head = head_permit.head();
+        let old_head_pointer = match old_head {
+            Some(head) => match headers.validated_slab(head) {
+                Some(slab) => Some(slab.pointer),
+                None => allocator_fault(AllocatorFault::InvalidPartialList),
+            },
+            None => None,
+        };
+        let slab_pages = match self.slab_pages.checked_add(1) {
+            Some(pages) => pages,
+            None => allocator_fault(AllocatorFault::AllocationCountOverflow),
+        };
         let pending = PendingBuddyBlock::allocate(&mut self.buddy, 0)?;
         let physical = pending.physical().get();
+        let page = match SlabPageId::new(physical) {
+            Some(page) => page,
+            None => allocator_fault(AllocatorFault::InvalidSlabPhysical),
+        };
+        let permit = match head_permit.prepare_new_page(page) {
+            Some(permit) => permit,
+            None => allocator_fault(AllocatorFault::InvalidPartialList),
+        };
         let header_pointer = pending
             .virtual_address()
-            .map(|address| address as *mut SlabHeader)
+            .map(core::ptr::with_exposed_provenance_mut::<SlabHeader>)
             .ok_or(BuddyError::Unaddressable)?;
-        let object_size = CLASS_SIZES[class];
+        let object_size = CLASS_SIZES[class.index()];
         let page_virtual = header_pointer as usize;
         let object_start = page_virtual
             .checked_add(core::mem::size_of::<SlabHeader>())
             .and_then(|header_end| align_up_usize(header_end, object_size))
             .ok_or(BuddyError::Unaddressable)?;
-        let capacity = (PAGE_SIZE as usize - (object_start - page_virtual)) / object_size;
+        let object_offset = object_start
+            .checked_sub(page_virtual)
+            .ok_or(BuddyError::Unaddressable)?;
+        let capacity = (PAGE_SIZE as usize)
+            .checked_sub(object_offset)
+            .ok_or(BuddyError::Unaddressable)?
+            / object_size;
         if capacity == 0 || capacity > u16::MAX as usize {
             allocator_fault(AllocatorFault::InvalidSlabHeader);
         }
 
         for index in 0..capacity {
-            let object = (object_start + index * object_size) as *mut usize;
+            let object =
+                core::ptr::with_exposed_provenance_mut::<usize>(object_start + index * object_size);
             let next = if index + 1 == capacity {
                 0
             } else {
@@ -448,57 +995,33 @@ impl SlabAllocator {
             header_pointer.write(SlabHeader {
                 magic: SLAB_MAGIC,
                 physical,
-                next_partial,
+                previous_partial: SlabLink::NONE.raw(),
+                next_partial: old_head.map_or(SlabLink::NONE, SlabLink::from_page).raw(),
                 free_head: object_start,
                 in_use: 0,
                 capacity: capacity as u16,
-                class: class as u8,
-                _reserved: [0; 3],
+                class: class.raw(),
+                list_state: SLAB_LINKED,
+                _reserved: [0; 2],
             })
         };
-        let physical = pending.publish().get();
-        self.partial[class] = physical;
-        increment(&mut self.slab_pages);
+        if let Some(old_head) = old_head_pointer {
+            // SAFETY: The old head was prevalidated and remains stable while
+            // this allocator is exclusively borrowed.
+            unsafe { (*old_head.as_ptr()).previous_partial = physical };
+        }
+        permit.commit();
+        let _ = pending.publish();
+        self.slab_pages = slab_pages;
         Ok(())
     }
 
-    fn remove_partial(&mut self, class: usize, target: u64) {
-        let mut previous = NONE;
-        let mut current = self.partial[class];
-        while current != NONE {
-            let header_pointer = match self.slab_header(current) {
-                Some(header) => header,
-                None => allocator_fault(AllocatorFault::InvalidPartialList),
-            };
-            // SAFETY: `current` came from the class's slab list.
-            let header = unsafe { &*header_pointer };
-            if header.magic != SLAB_MAGIC
-                || usize::from(header.class) != class
-                || header.physical != current
-            {
-                allocator_fault(AllocatorFault::InvalidPartialList);
-            }
-            let next = header.next_partial;
-            if current == target {
-                if previous == NONE {
-                    self.partial[class] = next;
-                } else {
-                    let previous_header = match self.slab_header(previous) {
-                        Some(header) => header,
-                        None => allocator_fault(AllocatorFault::InvalidPartialList),
-                    };
-                    // SAFETY: `previous` is the preceding list element.
-                    unsafe { (*previous_header).next_partial = next };
-                }
-                return;
-            }
-            previous = current;
-            current = next;
-        }
-        allocator_fault(AllocatorFault::InvalidPartialList);
+    fn slab_class_for(&self, layout: Layout) -> Option<HeapSlabClass> {
+        let class = slab_class_for_layout(layout)?;
+        self.partial.class(class.index())
     }
 
-    fn allocate_large(&mut self, layout: Layout) -> *mut u8 {
+    fn allocate_large(&mut self, layout: Layout) -> Result<*mut u8, LargeAllocationError> {
         let header_size = core::mem::size_of::<LargeHeader>();
         let required = match layout
             .size()
@@ -507,44 +1030,47 @@ impl SlabAllocator {
             .and_then(|size| size.checked_add(header_size))
         {
             Some(required) => required,
-            None => return null_mut(),
+            None => return Err(LargeAllocationError::UnsupportedLayout),
         };
         let pages = required.div_ceil(PAGE_SIZE as usize);
         let Some(power_of_two_pages) = pages.checked_next_power_of_two() else {
-            return null_mut();
+            return Err(LargeAllocationError::UnsupportedLayout);
         };
         let order = power_of_two_pages.trailing_zeros() as usize;
         if order > MAX_ORDER {
-            return null_mut();
+            return Err(LargeAllocationError::UnsupportedLayout);
         }
-        let pending = match PendingBuddyBlock::allocate(&mut self.buddy, order) {
-            Ok(pending) => pending,
-            Err(_) => return null_mut(),
-        };
+        let pending = PendingBuddyBlock::allocate(&mut self.buddy, order).map_err(|error| {
+            if error == BuddyError::OutOfMemory {
+                LargeAllocationError::OutOfMemory
+            } else {
+                LargeAllocationError::UnsupportedLayout
+            }
+        })?;
         let physical = pending.physical().get();
         let Some(base) = pending.virtual_address() else {
-            return null_mut();
+            return Err(LargeAllocationError::UnsupportedLayout);
         };
         let Some(user) = base
             .checked_add(header_size)
             .and_then(|header_end| align_up_usize(header_end, layout.align()))
         else {
-            return null_mut();
+            return Err(LargeAllocationError::UnsupportedLayout);
         };
         let block_size = match power_of_two_pages.checked_mul(PAGE_SIZE as usize) {
             Some(block_size) => block_size,
-            None => return null_mut(),
+            None => return Err(LargeAllocationError::UnsupportedLayout),
         };
         let allocation_end = match base.checked_add(block_size) {
             Some(allocation_end) => allocation_end,
-            None => return null_mut(),
+            None => return Err(LargeAllocationError::UnsupportedLayout),
         };
         let object_end = match user.checked_add(layout.size().max(1)) {
             Some(object_end) => object_end,
-            None => return null_mut(),
+            None => return Err(LargeAllocationError::UnsupportedLayout),
         };
         if object_end > allocation_end {
-            return null_mut();
+            return Err(LargeAllocationError::UnsupportedLayout);
         }
         let header = (user - header_size) as *mut LargeHeader;
         // SAFETY: The header lies inside the exclusively owned buddy block.
@@ -557,13 +1083,11 @@ impl SlabAllocator {
             })
         };
         let _ = pending.publish();
-        increment(&mut self.live_allocations);
-        increment(&mut self.live_large_allocations);
         self.large_heap_pages = match self.large_heap_pages.checked_add(1usize << order) {
             Some(pages) => pages,
             None => allocator_fault(AllocatorFault::AllocationCountOverflow),
         };
-        user as *mut u8
+        Ok(user as *mut u8)
     }
 
     unsafe fn deallocate_large(&mut self, pointer: *mut u8, layout: Layout) {
@@ -601,10 +1125,7 @@ impl SlabAllocator {
         if expected != Some(pointer as usize) || !object_fits {
             allocator_fault(AllocatorFault::InvalidLargePointer);
         }
-        if self.live_allocations == 0
-            || self.live_large_allocations == 0
-            || self.large_heap_pages < pages
-        {
+        if self.large_heap_pages < pages {
             allocator_fault(AllocatorFault::AllocationCountUnderflow);
         }
         // SAFETY: The header records the exact buddy allocation.
@@ -616,14 +1137,7 @@ impl SlabAllocator {
         {
             allocator_fault(AllocatorFault::BuddyDeallocation);
         }
-        self.live_allocations -= 1;
-        self.live_large_allocations -= 1;
         self.large_heap_pages -= pages;
-    }
-
-    fn slab_header(&self, physical: u64) -> Option<*mut SlabHeader> {
-        self.virtual_address(physical)
-            .map(|address| address as *mut SlabHeader)
     }
 
     fn virtual_address(&self, physical: u64) -> Option<usize> {
@@ -648,6 +1162,7 @@ impl SlabAllocator {
             peak_requested_bytes: self.peak_requested_bytes,
             allocation_requests: self.allocation_requests,
             allocation_failures: self.allocation_failures,
+            cache: HeapCacheStats::default(),
             kernel_pages: self.page_owners[PageOwner::Kernel.index()],
             page_table_pages: self.page_owners[PageOwner::PageTable.index()],
             guest_pages: self.page_owners[PageOwner::Guest.index()],
@@ -704,9 +1219,13 @@ impl SlabAllocator {
     }
 }
 
-fn class_for(layout: Layout) -> Option<usize> {
+fn class_index_for(layout: Layout) -> Option<usize> {
     let required = layout.size().max(layout.align()).max(1);
     CLASS_SIZES.iter().position(|&size| size >= required)
+}
+
+fn slab_class_for_layout(layout: Layout) -> Option<HeapSlabClass> {
+    class_index_for(layout).and_then(HeapSlabClass::new)
 }
 
 fn align_up_usize(value: usize, alignment: usize) -> Option<usize> {

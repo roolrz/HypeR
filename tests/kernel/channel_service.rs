@@ -447,8 +447,9 @@ fn create_process(domain: &ResourceDomain, group: &TaskGroup) -> Result<Process,
         match PreparedProcess::try_new(image, group.clone(), domain.clone(), address_space) {
             Ok(prepared) => prepared,
             Err(failure) => {
-                let (_, mut address_space) = failure.into_parts();
-                address_space.retire().map_err(|_| Error::AddressSpace)?;
+                let (_, address_space) = failure.into_parts();
+                crate::kernel::mm::user_space::NativeAddressSpace::retire(address_space)
+                    .map_err(|_| Error::AddressSpace)?;
                 return Err(Error::Construction);
             }
         };

@@ -386,10 +386,8 @@ fn baud_divisors(input_clock_hz: u32, baud_rate: u32) -> Result<(u32, u32), Erro
 }
 
 impl Console for Pl011 {
-    fn write_byte(&self, byte: u8) {
-        while !self.try_write(byte) {
-            core::hint::spin_loop();
-        }
+    fn try_write_byte(&self, byte: u8) -> bool {
+        self.try_write(byte)
     }
 }
 

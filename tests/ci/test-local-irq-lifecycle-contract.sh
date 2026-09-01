@@ -89,8 +89,9 @@ mutate 'AArch64 unreachable secondary route was admitted' src/arch/aarch64/smp.r
     '/pub fn register_cpu/,/^}/s/affinity & 0xff >= 16/false/'
 mutate 'serial activation-before-source mutation was accepted' src/kernel/device/serial.rs \
     's/port.enable_runtime_input()/port.arm_runtime_input()/'
-mutate 'VM activation dependency mutation was accepted' src/kernel/vm/mod.rs \
-    's/binding.activate()/binding.commit()/'
+mutate 'VM activation without an interrupt-virtualization commit was accepted' \
+    src/kernel/vm/mod.rs \
+    's/commit_interrupts(prepared_interrupts)/publish_interrupts(prepared_interrupts)/'
 mutate 'AArch64 Kernel RPC SGI gap mutation was accepted' src/arch/aarch64/registers.rs \
     's/GIC_KERNEL_RPC_SGI = 8;/GIC_KERNEL_RPC_SGI = 13;/'
 mutate 'AArch64 reschedule SGI mutation was accepted' src/arch/aarch64/registers.rs \

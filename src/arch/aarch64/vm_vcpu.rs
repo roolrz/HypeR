@@ -3,7 +3,8 @@
 
 //! `AArch64` vCPU timer and virtual-interrupt hardware-state mechanisms.
 
-use hyper::vm::interrupt::{VirtualCpuId, VirtualInterruptId};
+use hyper::vm::arm::gic::GicInterruptId;
+use hyper::vm::interrupt::VirtualCpuId;
 
 use super::{VcpuContext, VmInterruptController, vm_timer};
 
@@ -11,8 +12,15 @@ use super::{VcpuContext, VmInterruptController, vm_timer};
 pub enum Error {
     Architecture(super::VgicError),
     Bridge(vm_timer::Error),
-    Controller(hyper::vm::interrupt::Error),
+    Controller(hyper::vm::arm::gic::RuntimeError),
+    GuestRun(super::context::GuestRunError),
     ReturnWorld(super::lower_el::Error),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GicAccessError {
+    Architecture(super::VgicError),
+    Transaction(super::vm_interrupt::AccessError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,8 +34,8 @@ impl From<super::VgicError> for Error {
     }
 }
 
-impl From<hyper::vm::interrupt::Error> for Error {
-    fn from(error: hyper::vm::interrupt::Error) -> Self {
+impl From<hyper::vm::arm::gic::RuntimeError> for Error {
+    fn from(error: hyper::vm::arm::gic::RuntimeError) -> Self {
         Self::Controller(error)
     }
 }
@@ -69,7 +77,7 @@ pub unsafe fn activate(
         let vcpu = VirtualCpuId::new(vcpu_id);
         controller.synchronize(vcpu, context.vgic.slots())?;
         let _ = controller.refill(vcpu, context.vgic.slots_mut())?;
-        Ok::<(), hyper::vm::interrupt::Error>(())
+        Ok::<(), hyper::vm::arm::gic::RuntimeError>(())
     });
     if let Err(error) = result {
         // SAFETY: Activation above made this the live local timer bank.
@@ -118,6 +126,46 @@ pub unsafe fn deactivate(
     // bank. A lower-EL vector can therefore never observe partially detached
     // hardware under a still-published guest identity.
     super::lower_el::retire_guest(context)?;
+    // SAFETY: The caller's active-vCPU contract remains in force after
+    // return-world retirement.
+    unsafe { deactivate_banks(context, vcpu_id, interrupts, physical_count) }
+}
+
+/// Detaches a terminal run whose vector already closed lower-EL ownership.
+///
+/// # Safety
+///
+/// `context` and `stopped` must identify the same active local vCPU. Local
+/// interrupts remain masked and callback publication must already be cleared.
+pub unsafe fn deactivate_stopped(
+    context: &mut VcpuContext,
+    vcpu_id: u32,
+    interrupts: &VmInterruptController,
+    physical_count: u64,
+    mut stopped: super::context::StoppedGuestRun,
+) -> Result<(), StoppedDeactivationFailure> {
+    // SAFETY: The caller owns this terminal stopped vCPU and its live banks.
+    if let Err(error) = unsafe { deactivate_banks(context, vcpu_id, interrupts, physical_count) } {
+        return Err(StoppedDeactivationFailure {
+            error,
+            _stopped: stopped,
+        });
+    }
+    if let Err(error) = context.consume_stopped(&mut stopped) {
+        return Err(StoppedDeactivationFailure {
+            error: Error::GuestRun(error),
+            _stopped: stopped,
+        });
+    }
+    Ok(())
+}
+
+unsafe fn deactivate_banks(
+    context: &mut VcpuContext,
+    vcpu_id: u32,
+    interrupts: &VmInterruptController,
+    physical_count: u64,
+) -> Result<(), Error> {
     // SAFETY: This context owns the active local timer bank.
     unsafe { context.deactivate_timer() };
     // SAFETY: Guest execution is stopped and local interrupts are masked.
@@ -135,6 +183,17 @@ pub unsafe fn deactivate(
     Ok(())
 }
 
+pub struct StoppedDeactivationFailure {
+    error: Error,
+    _stopped: super::context::StoppedGuestRun,
+}
+
+impl StoppedDeactivationFailure {
+    pub const fn error(&self) -> Error {
+        self.error
+    }
+}
+
 pub(crate) fn deliver_software_interrupt(
     context: &mut VcpuContext,
     vcpu_id: u32,
@@ -149,8 +208,8 @@ pub(crate) fn deliver_software_interrupt(
     const RANGE_SHIFT: u32 = 44;
     const AFFINITY_3_SHIFT: u32 = 48;
 
-    let interrupt = VirtualInterruptId::new(((request >> INTERRUPT_SHIFT) & 0xf) as u32).ok_or(
-        Error::Controller(hyper::vm::interrupt::Error::NotConfigured),
+    let interrupt = GicInterruptId::new(((request >> INTERRUPT_SHIFT) & 0xf) as u32).ok_or(
+        Error::Controller(hyper::vm::arm::gic::RuntimeError::NotConfigured),
     )?;
     let target_list = request & TARGET_LIST_MASK;
     let affinity_1 = (request >> AFFINITY_1_SHIFT) & 0xff;
@@ -187,7 +246,7 @@ pub(crate) fn deliver_software_interrupt(
             }
         }
         let _ = controller.refill(current, context.vgic.slots_mut())?;
-        Ok::<(), hyper::vm::interrupt::Error>(())
+        Ok::<(), hyper::vm::arm::gic::RuntimeError>(())
     });
     if let Err(error) = result {
         super::disable_vgic();
@@ -238,7 +297,7 @@ pub(crate) fn update_guest_device_interrupt(
     context: &mut VcpuContext,
     vcpu_id: u32,
     interrupts: &VmInterruptController,
-    interrupt: VirtualInterruptId,
+    interrupt: GicInterruptId,
     asserted: bool,
 ) -> Result<(), Error> {
     // SAFETY: Guest-exit dispatch supplied the active local vCPU with IRQs masked.
@@ -255,7 +314,7 @@ pub(crate) fn update_guest_device_interrupt(
             controller.clear_pending(interrupt, vcpu)?;
         }
         let _ = controller.refill(vcpu, context.vgic.slots_mut())?;
-        Ok::<(), hyper::vm::interrupt::Error>(())
+        Ok::<(), hyper::vm::arm::gic::RuntimeError>(())
     });
     if let Err(error) = result {
         super::disable_vgic();
@@ -264,4 +323,94 @@ pub(crate) fn update_guest_device_interrupt(
     // SAFETY: Refill completed for the same active local vCPU.
     unsafe { context.activate_vgic()? };
     Ok(())
+}
+
+/// Updates only the VM-owned interrupt model for a stopped or remotely
+/// running vCPU. The caller publishes durable reconcile work after this lock
+/// transaction completes; this function never accesses another CPU's live
+/// virtual-interface bank.
+pub(crate) fn update_saved_guest_device_interrupt(
+    interrupts: &VmInterruptController,
+    vcpu_id: u32,
+    interrupt: GicInterruptId,
+    asserted: bool,
+) -> Result<(), Error> {
+    interrupts
+        .with(|controller| {
+            let vcpu = VirtualCpuId::new(vcpu_id);
+            if asserted {
+                controller.inject(interrupt, vcpu)
+            } else {
+                controller.clear_pending(interrupt, vcpu)
+            }
+        })
+        .map_err(Into::into)
+}
+
+/// Reconciles saved interrupt-model work into the active local vGIC bank.
+pub(crate) fn reconcile_active_interrupts(
+    context: &mut VcpuContext,
+    vcpu_id: u32,
+    interrupts: &VmInterruptController,
+) -> Result<(), Error> {
+    // SAFETY: The active-vCPU owner calls with local IRQs masked and retains
+    // exclusive ownership of this CPU's live virtual interface.
+    if let Err(error) = unsafe { context.deactivate_vgic() } {
+        super::disable_vgic();
+        return Err(error.into());
+    }
+    let result = interrupts.with(|controller| {
+        let vcpu = VirtualCpuId::new(vcpu_id);
+        controller.synchronize(vcpu, context.vgic.slots())?;
+        let _ = controller.refill(vcpu, context.vgic.slots_mut())?;
+        Ok::<(), hyper::vm::arm::gic::RuntimeError>(())
+    });
+    if let Err(error) = result {
+        super::disable_vgic();
+        return Err(error.into());
+    }
+    // SAFETY: Synchronization and refill completed for this same local bank.
+    unsafe { context.activate_vgic()? };
+    Ok(())
+}
+
+/// Requests a prompt exit from a guest currently running on `cpu`.
+///
+/// The VM-owned reconcile bit is the durable condition. The targeted SGI is
+/// only a hardware prompt and may race harmlessly with migration.
+pub(crate) fn request_guest_exit(cpu: hyper::cpu::CpuIndex) -> bool {
+    super::gic_cpu_interface::notify_guest_exit(cpu)
+}
+
+pub(crate) fn access_guest_gic(
+    context: &mut VcpuContext,
+    vcpu_id: u32,
+    interrupts: &VmInterruptController,
+    access: hyper::vm::aarch64::device::gicv3::DecodedAccess,
+    operation: hyper::vm::exit::MmioOperation,
+) -> Result<Option<u64>, GicAccessError> {
+    // SAFETY: Guest synchronous entry masked local IRQs and owns this vCPU.
+    if let Err(error) = unsafe { context.deactivate_vgic() } {
+        super::disable_vgic();
+        return Err(GicAccessError::Architecture(error));
+    }
+    let result = interrupts.access_saved_bank(
+        VirtualCpuId::new(vcpu_id),
+        context.vgic.slots_mut(),
+        access.register(),
+        operation,
+    );
+    let value = match result {
+        Ok(value) => value,
+        Err(error) => {
+            super::disable_vgic();
+            return Err(GicAccessError::Transaction(error));
+        }
+    };
+    // SAFETY: The transaction reconciled and refilled the complete saved bank.
+    if let Err(error) = unsafe { context.activate_vgic() } {
+        super::disable_vgic();
+        return Err(GicAccessError::Architecture(error));
+    }
+    Ok(value)
 }

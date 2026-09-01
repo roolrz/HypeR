@@ -7,10 +7,22 @@
 //! activation, guest-visible devices, VM publication, and vCPU orchestration.
 
 pub(crate) mod active_vcpu;
+mod address_space_state;
 pub(crate) mod device;
+mod diagnostics;
+pub(in crate::kernel) use diagnostics::UnhandledMmioReport;
+mod endpoint;
+mod endpoint_state;
+mod endpoint_wait;
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use endpoint::{WaitSelfTestError, run_wait_self_test};
+mod lifecycle;
 pub(crate) mod linux;
 pub mod memory;
+mod reconcile;
 pub(crate) mod registry;
+mod residency_state;
+mod run_admission;
 mod timer;
 pub(crate) mod vcpu;
 
@@ -59,32 +71,9 @@ pub fn boot_linux(
 
 /// Initializes hardware virtualization and guest-visible platform devices.
 pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), InitializationError> {
-    let exit_services = crate::hal::vm::install_exit_services({
-        #[cfg(CONFIG_ARCH_AARCH64)]
-        {
-            crate::hal::vm::ExitServices::aarch64(
-                crate::kernel::entry::vmexit::dispatch_memory_fault,
-                crate::kernel::entry::vmexit::dispatch_mmio,
-                crate::kernel::entry::vmexit::dispatch_guest_sync,
-            )
-        }
-        #[cfg(CONFIG_ARCH_RISCV64)]
-        {
-            crate::hal::vm::ExitServices::riscv64(
-                crate::kernel::entry::vmexit::dispatch_memory_fault,
-                crate::kernel::entry::vmexit::dispatch_guest_sync,
-            )
-        }
-        #[cfg(CONFIG_ARCH_X86_64)]
-        {
-            crate::hal::vm::ExitServices::x86_64(
-                crate::kernel::entry::vmexit::dispatch_memory_fault,
-                crate::kernel::entry::vmexit::dispatch_port_io,
-                crate::kernel::entry::vmexit::query_pending_interrupt,
-            )
-        }
-    })
-    .map_err(InitializationError::EntryServices)?;
+    let exit_services =
+        crate::hal::vm::install_exit_services(crate::kernel::entry::vmexit::services())
+            .map_err(InitializationError::EntryServices)?;
     crate::hal::vm::validate_register_interface().map_err(InitializationError::Registers)?;
     // Prepared physical mappings must remain non-deliverable until every VM
     // dependency below is published. Quiesce virtual delivery before exposing
@@ -110,7 +99,14 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
         binding.rollback();
         return Err(InitializationError::Devices(error));
     }
-    match timer::validate_hardware(guest_timer.interrupt, &exit_services) {
+    let prepared_interrupts = match crate::hal::vm::prepare_interrupts(binding.host_interrupt()) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            binding.rollback();
+            return Err(InitializationError::Interrupts(error));
+        }
+    };
+    match timer::validate_hardware(guest_timer.interrupt, &exit_services, &prepared_interrupts) {
         Ok(true) => crate::println!("HypeR: virtual architected timer injection validated"),
         Ok(false) => {}
         Err(error) => {
@@ -118,7 +114,7 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
             return Err(InitializationError::TimerValidation(error));
         }
     }
-    if let Err(error) = crate::hal::vm::initialize_interrupts(binding.host_interrupt()) {
+    if let Err(error) = crate::hal::vm::commit_interrupts(prepared_interrupts) {
         binding.rollback();
         return Err(InitializationError::Interrupts(error));
     }

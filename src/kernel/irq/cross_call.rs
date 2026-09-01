@@ -44,6 +44,14 @@ unsafe impl Sync for UserAddressSpacePayload {}
 static USER_ADDRESS_SPACE_PAYLOAD: UserAddressSpacePayload =
     UserAddressSpacePayload(UnsafeCell::new(None));
 
+struct GuestStage2Payload(UnsafeCell<Option<GuestStage2Call>>);
+
+// SAFETY: The same OWNER and exact-generation protocol described for the user
+// payload protects this separate, immutable guest-retirement payload.
+unsafe impl Sync for GuestStage2Payload {}
+
+static GUEST_STAGE2_PAYLOAD: GuestStage2Payload = GuestStage2Payload(UnsafeCell::new(None));
+
 #[derive(Clone, Copy)]
 pub(crate) enum LocalIrqOperation {
     Configure,
@@ -60,6 +68,7 @@ pub(crate) enum KernelRpc {
         operation: LocalIrqOperation,
     },
     UserAddressSpace(UserAddressSpaceCall),
+    GuestStage2(GuestStage2Call),
 }
 
 #[derive(Clone, Copy)]
@@ -70,6 +79,11 @@ pub(crate) struct UserAddressSpaceCall {
     active_target: bool,
     expected_active: crate::hal::user::LocalIdentity,
     request: crate::hal::user::LocalRequest,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct GuestStage2Call {
+    request: crate::kernel::vm::memory::GuestStage2LocalRequest,
 }
 
 pub(crate) enum UserAddressSpaceOperation<'root> {
@@ -121,6 +135,37 @@ pub(crate) struct UserAddressSpaceTransaction {
     _owner: Owner,
 }
 
+/// Linear reservation for one final guest stage-2 invalidation transaction.
+///
+/// The caller acquires this before cutting address-space residency. Once the
+/// cut is published, rejection, ambiguity, or timeout fail-stop inside the
+/// transport while the VM owner and retiring VMID remain retained.
+pub(in crate::kernel) struct GuestStage2Transaction {
+    _owner: Owner,
+}
+
+impl GuestStage2Transaction {
+    pub(in crate::kernel) fn try_acquire() -> Result<Self, ()> {
+        Owner::acquire().map(|owner| Self { _owner: owner })
+    }
+
+    pub(in crate::kernel) fn execute(
+        &mut self,
+        request: crate::kernel::vm::memory::GuestStage2LocalRequest,
+        count: usize,
+        targets: &[bool; hyper::cpu::MAX_CPUS],
+    ) -> Outcome {
+        match execute_owned(
+            KernelRpc::GuestStage2(GuestStage2Call { request }),
+            count,
+            targets,
+        ) {
+            Ok(outcome) => outcome,
+            Err(()) => poison("reserved guest stage-2 RPC failed"),
+        }
+    }
+}
+
 impl UserAddressSpaceTransaction {
     pub(crate) fn try_acquire() -> Result<Self, ()> {
         Owner::acquire().map(|owner| Self { _owner: owner })
@@ -163,6 +208,10 @@ impl Drop for Owner {
         // normal return. A zero published generation excludes new claims, and
         // generation-tagged status rejects every delayed old claim.
         unsafe { *USER_ADDRESS_SPACE_PAYLOAD.0.get() = None };
+        // SAFETY: The same exact-generation exclusion applies to this payload.
+        unsafe {
+            *GUEST_STAGE2_PAYLOAD.0.get() = None;
+        }
         OWNER.store(false, Ordering::Release);
     }
 }
@@ -181,6 +230,15 @@ fn execute_owned(
     count: usize,
     targets: &[bool; hyper::cpu::MAX_CPUS],
 ) -> Result<Outcome, ()> {
+    // Acquiring the pin is the last recoverable operation before publication.
+    // The guard preserves the caller's steady-state IRQ mask while preventing
+    // an IRQ-tail scheduling point from migrating this publisher between local
+    // service, remote notification, and exact-generation acknowledgement
+    // collection.
+    let publisher_pin = match crate::kernel::task::scheduler::preempt_disable() {
+        Ok(guard) => guard,
+        Err(_) => return Err(()),
+    };
     let generation = next_generation();
     publish(rpc);
     GENERATION.store(generation, Ordering::Relaxed);
@@ -190,7 +248,15 @@ fn execute_owned(
     notify_remote_targets(rpc, count, targets);
     await_acknowledgements(generation, count, targets);
     PUBLISHED_GENERATION.store(0, Ordering::Release);
-    Ok(collect_outcome(rpc, generation, count, targets))
+    let outcome = collect_outcome(rpc, generation, count, targets);
+    // Do not schedule here: the caller may still own the outer mailbox
+    // reservation or a multi-cut translation transaction, and may itself have
+    // entered with IRQs masked. Its enclosing safe point observes any deferred
+    // request after those linear owners are released.
+    if crate::kernel::task::scheduler::preempt_enable_without_reschedule(publisher_pin).is_err() {
+        poison("kernel RPC publisher pin release failed");
+    }
+    Ok(outcome)
 }
 
 fn next_generation() -> u32 {
@@ -260,12 +326,8 @@ fn collect_outcome(
 ) -> Outcome {
     let mut rejected_cpu = None;
     let mut ambiguous_cpu = match rpc {
-        KernelRpc::UserAddressSpace(_) => targets
-            .iter()
-            .copied()
-            .enumerate()
-            .skip(count)
-            .find_map(|(index, targeted)| targeted.then_some(index)),
+        KernelRpc::UserAddressSpace(_) => first_target_outside_count(count, targets),
+        KernelRpc::GuestStage2(_) => first_target_outside_count(count, targets),
         KernelRpc::LocalIrqLifecycle { .. } => None,
     };
     for (index, targeted) in targets.iter().copied().enumerate().take(count) {
@@ -301,11 +363,24 @@ fn collect_outcome(
     }
 }
 
+fn first_target_outside_count(
+    count: usize,
+    targets: &[bool; hyper::cpu::MAX_CPUS],
+) -> Option<usize> {
+    targets
+        .iter()
+        .copied()
+        .enumerate()
+        .skip(count)
+        .find_map(|(index, targeted)| targeted.then_some(index))
+}
+
 impl KernelRpc {
     const fn reason(self) -> KernelRpcReasons {
         match self {
             Self::LocalIrqLifecycle { .. } => KernelRpcReasons::LOCAL_IRQ_LIFECYCLE,
             Self::UserAddressSpace(_) => KernelRpcReasons::USER_ADDRESS_SPACE,
+            Self::GuestStage2(_) => KernelRpcReasons::GUEST_STAGE2,
         }
     }
 }
@@ -326,6 +401,9 @@ pub(crate) fn service() {
             service_local_irq_mailbox();
         }
         if reasons.contains(KernelRpcReasons::USER_ADDRESS_SPACE) {
+            service_local_irq_mailbox();
+        }
+        if reasons.contains(KernelRpcReasons::GUEST_STAGE2) {
             service_local_irq_mailbox();
         }
     }
@@ -371,6 +449,10 @@ fn service_local_irq_mailbox() {
             request.expected_active,
             request.request,
         ),
+        KernelRpc::GuestStage2(request) => {
+            crate::kernel::vm::memory::service_local_retirement(request.request);
+            LocalApply::Applied
+        }
     };
     let status = match outcome {
         LocalApply::Applied => APPLIED,
@@ -404,11 +486,26 @@ fn publish(rpc: KernelRpc) {
             unsafe { *USER_ADDRESS_SPACE_PAYLOAD.0.get() = Some(request) };
             OPCODE.store(3, Ordering::Relaxed);
         }
+        KernelRpc::GuestStage2(request) => {
+            // SAFETY: OWNER excludes another publisher and the payload remains
+            // immutable through every exact-generation acknowledgement.
+            unsafe { *GUEST_STAGE2_PAYLOAD.0.get() = Some(request) };
+            OPCODE.store(4, Ordering::Relaxed);
+        }
     }
 }
 
 fn decode() -> KernelRpc {
     let opcode = OPCODE.load(Ordering::Relaxed);
+    if opcode == 4 {
+        // SAFETY: Exact-generation Acquire publication and OWNER retention
+        // provide the same immutable payload proof as user-address-space RPC.
+        let payload = unsafe { *GUEST_STAGE2_PAYLOAD.0.get() };
+        return match payload {
+            Some(request) => KernelRpc::GuestStage2(request),
+            None => poison("kernel RPC guest stage-2 payload is missing"),
+        };
+    }
     if opcode == 3 {
         // SAFETY: PUBLISHED_GENERATION Acquire precedes the exact-generation
         // status claim, and the publishing OWNER keeps this Copy payload

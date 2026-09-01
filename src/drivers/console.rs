@@ -125,10 +125,10 @@ fn parse_address(value: &str) -> Option<u64> {
 }
 
 impl Console for ConsoleDevice {
-    fn write_byte(&self, byte: u8) {
+    fn try_write_byte(&self, byte: u8) -> bool {
         match self {
-            Self::Pl011(device) => device.write_byte(byte),
-            Self::Ns16550(device) => device.write_byte(byte),
+            Self::Pl011(device) => device.try_write(byte),
+            Self::Ns16550(device) => device.try_write(byte),
         }
     }
 }

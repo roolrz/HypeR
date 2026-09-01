@@ -10,6 +10,13 @@ pub const CONTROL_MASK: u64 = 1 << 1;
 pub const CONTROL_STATUS: u64 = 1 << 2;
 pub const CONTROL_WRITABLE_MASK: u64 = CONTROL_ENABLE | CONTROL_MASK;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum VirtualTimerWake {
+    None,
+    PendingNow,
+    Deadline(u64),
+}
+
 /// Saved CNTV state belonging to one vCPU.
 #[repr(C)]
 pub struct VirtualTimerState {
@@ -76,6 +83,22 @@ impl VirtualTimerState {
 
     pub const fn interrupt_asserted_at(&self, physical_count: u64) -> bool {
         self.enabled() && !self.masked() && self.condition_met_at(physical_count)
+    }
+
+    pub const fn wfi_wake_at(&self, physical_count: u64) -> VirtualTimerWake {
+        if !self.enabled() || self.masked() {
+            return VirtualTimerWake::None;
+        }
+        let deadline = self.compare_value.wrapping_add(self.offset);
+        let forward_distance = deadline.wrapping_sub(physical_count);
+        // Modular deadlines are ordered only within an open half-range. Treat
+        // the exact half-period boundary conservatively as already pending so
+        // WFI never arms an ambiguous host deadline.
+        if forward_distance == 0 || forward_distance >= (1_u64 << 63) {
+            VirtualTimerWake::PendingNow
+        } else {
+            VirtualTimerWake::Deadline(deadline)
+        }
     }
 }
 

@@ -58,14 +58,18 @@ pub(super) fn run() -> Result<(), Error> {
         CpuMask::single(target),
     )?;
     scheduler::thread_ready(worker)?;
+    wait_until("reschedule SGI was not dispatched", || {
+        crate::kernel::irq::reschedule_delivery_count_for_test(target) > baseline
+    })?;
+    let first_delivery = crate::kernel::irq::reschedule_delivery_count_for_test(target);
+
+    // Ready state is durable and may be consumed at another scheduling point
+    // before the SGI itself is acknowledged. Prove worker progress and SGI
+    // delivery independently instead of treating either observation as a
+    // publication fence for the other.
     wait_until("remote worker did not run", || {
         REMOTE_WORKER_RAN.load(Ordering::Acquire)
     })?;
-
-    let first_delivery = crate::kernel::irq::reschedule_delivery_count_for_test(target);
-    if first_delivery <= baseline {
-        return Err(Error::Timeout("remote worker ran without SGI dispatch"));
-    }
 
     // A second delivery after the handler ran proves that the first SGI was
     // completed and deactivated; an active SGI cannot be delivered again.

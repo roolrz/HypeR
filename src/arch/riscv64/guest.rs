@@ -356,7 +356,7 @@ pub(crate) fn handle_guest_sync(
         GuestSyncExit::VirtualInstruction(instruction) => {
             emulate_virtual_instruction(context, instruction)
         }
-        GuestSyncExit::SupervisorCall(call) => emulate_sbi(call),
+        GuestSyncExit::SupervisorCall(call) => emulate_sbi(context, call),
         GuestSyncExit::Unsupported(_) => GuestSyncAction::Stop,
     }
 }
@@ -370,7 +370,7 @@ fn emulate_virtual_instruction(
     };
     let old = match instruction.register {
         VirtualCsr::InterruptEnable => read_vsie(),
-        VirtualCsr::InterruptPending => read_vsip(),
+        VirtualCsr::InterruptPending => read_guest_vsip(context),
         VirtualCsr::CounterEnable => context.scounteren,
         VirtualCsr::EnvironmentConfiguration => context.senvcfg,
     };
@@ -383,12 +383,9 @@ fn emulate_virtual_instruction(
     if let Some(value) = new_value {
         match instruction.register {
             VirtualCsr::InterruptEnable => write_vsie(value),
-            VirtualCsr::InterruptPending => write_vsip(value),
-            VirtualCsr::CounterEnable => {
-                context.scounteren = value;
-                write_hcounteren(value);
-            }
-            VirtualCsr::EnvironmentConfiguration => context.senvcfg = value,
+            VirtualCsr::InterruptPending => write_guest_vsip(context, value),
+            VirtualCsr::CounterEnable => context.scounteren = sanitize_scounteren(value),
+            VirtualCsr::EnvironmentConfiguration => context.senvcfg = sanitize_senvcfg(value),
         }
     }
     GuestSyncAction::ResumeVirtualInstruction { value: Some(old) }
@@ -406,24 +403,83 @@ fn write_vsie(value: u64) {
     unsafe { asm!("csrw vsie, {value}", value = in(reg) value, options(nostack)) };
 }
 
-fn read_vsip() -> u64 {
+fn read_guest_vsip(context: &VcpuContext) -> u64 {
     let value: u64;
-    // SAFETY: VSIP is accessible in HS mode while the guest context is active.
-    unsafe { asm!("csrr {value}, vsip", value = out(reg) value, options(nomem, nostack)) };
+    // SAFETY: Guest trap entry quiesced the context-owned HVIP and VSTIMECMP
+    // state before Rust ran. Local interrupts remain masked while this helper
+    // briefly reinstalls it to obtain the architecturally composed VSIP view,
+    // then returns the hart to the quiesced host state.
+    unsafe {
+        asm!(
+            "csrw 0x24d, {deadline}",
+            "csrc hvip, {mask}",
+            "csrs hvip, {pending}",
+            "csrr {value}, vsip",
+            "csrw 0x24d, {disabled}",
+            "csrc hvip, {mask}",
+            deadline = in(reg) context.vstimecmp,
+            pending = in(reg) context.hvip & super::registers::HVIP_GUEST_MASK,
+            mask = in(reg) super::registers::HVIP_GUEST_MASK,
+            disabled = in(reg) u64::MAX,
+            value = out(reg) value,
+            options(nomem, nostack)
+        )
+    };
     value
 }
 
-fn write_vsip(value: u64) {
-    // SAFETY: VSIP is writable in HS mode while the guest context is active.
-    unsafe { asm!("csrw vsip, {value}", value = in(reg) value, options(nostack)) };
+fn write_guest_vsip(context: &mut VcpuContext, value: u64) {
+    const VSIP_SSIP: u64 = 1 << 1;
+    const HVIP_VSSIP: u64 = 1 << 2;
+    context.hvip &= !HVIP_VSSIP;
+    if value & VSIP_SSIP != 0 {
+        context.hvip |= HVIP_VSSIP;
+    }
 }
 
-fn write_hcounteren(value: u64) {
-    // SAFETY: HCOUNTEREN is writable in HS mode.
-    unsafe { asm!("csrw hcounteren, {value}", value = in(reg) value, options(nostack)) };
+fn sanitize_scounteren(value: u64) -> u64 {
+    let host: u64;
+    let accepted: u64;
+    // SAFETY: The guest trap entry restored the host value before Rust ran.
+    // Local interrupts are masked, so the temporary WARL probe cannot be
+    // observed by another context on this hart, and the exact host value is
+    // restored before returning.
+    unsafe {
+        asm!("csrr {host}, scounteren", host = out(reg) host, options(nomem, nostack));
+        asm!(
+            "csrw scounteren, {value}",
+            "csrr {accepted}, scounteren",
+            "csrw scounteren, {host}",
+            host = in(reg) host,
+            accepted = out(reg) accepted,
+            value = in(reg) value,
+            options(nomem, nostack)
+        )
+    };
+    accepted
 }
 
-fn emulate_sbi(call: SupervisorCall) -> GuestSyncAction {
+fn sanitize_senvcfg(value: u64) -> u64 {
+    let host: u64;
+    let accepted: u64;
+    // SAFETY: This is the SENVCFG counterpart of `sanitize_scounteren`; the
+    // host value is restored before any interrupt or scheduler boundary.
+    unsafe {
+        asm!("csrr {host}, senvcfg", host = out(reg) host, options(nomem, nostack));
+        asm!(
+            "csrw senvcfg, {value}",
+            "csrr {accepted}, senvcfg",
+            "csrw senvcfg, {host}",
+            host = in(reg) host,
+            accepted = out(reg) accepted,
+            value = in(reg) value,
+            options(nomem, nostack)
+        )
+    };
+    accepted
+}
+
+fn emulate_sbi(context: &mut VcpuContext, call: SupervisorCall) -> GuestSyncAction {
     match call.extension {
         0 => GuestSyncAction::ProgramTimer {
             deadline: call.arguments[0],
@@ -436,7 +492,7 @@ fn emulate_sbi(call: SupervisorCall) -> GuestSyncAction {
             value: u64::MAX,
         }),
         3 => {
-            clear_legacy_software_interrupt();
+            clear_legacy_software_interrupt(context);
             GuestSyncAction::CompleteSupervisorCall(SupervisorCallResult::Legacy {
                 value: SBI_SUCCESS,
             })
@@ -474,11 +530,11 @@ const fn modern_extension_available(extension: u64) -> bool {
     extension == SBI_EXT_TIME
 }
 
-fn clear_legacy_software_interrupt() {
-    const HVIP_VSSIP: usize = 1 << 2;
-    // SAFETY: HVIP is writable in HS mode. Clearing VSSIP implements the only
-    // legacy local-IPI operation whose complete side effect is CPU-local.
-    unsafe { asm!("csrc hvip, {mask}", mask = in(reg) HVIP_VSSIP, options(nostack)) };
+fn clear_legacy_software_interrupt(context: &mut VcpuContext) {
+    const HVIP_VSSIP: u64 = 1 << 2;
+    // Trap entry has already quiesced physical HVIP. Update the authoritative
+    // vCPU image so the resume path cannot reassert the cleared software IRQ.
+    context.hvip &= !HVIP_VSSIP;
 }
 
 fn apply(
@@ -508,7 +564,9 @@ fn apply(
         (Completion::SupervisorCall(call), GuestSyncAction::ProgramTimer { deadline, result })
             if supervisor_timer_matches(call, result) =>
         {
-            set_timer(deadline);
+            if !set_timer(frame, deadline) {
+                return false;
+            }
             apply_supervisor_call_result(&mut frame.general, result);
             advance_program_counter(frame);
             true
@@ -570,7 +628,18 @@ fn advance_program_counter_value(program_counter: &mut u64) {
     *program_counter = program_counter.wrapping_add(4);
 }
 
-fn set_timer(deadline: u64) {
+fn set_timer(frame: &super::exception::TrapFrame, deadline: u64) -> bool {
+    let context = frame.guest_context_address() as *mut VcpuContext;
+    if context.is_null() || !context.is_aligned() {
+        return false;
+    }
+    // SAFETY: Assembly published the exact live context in the guest anchor.
+    // Policy dispatch has returned and no Rust reference to the context was
+    // retained across it. Local interrupts remain masked in this completion.
+    unsafe {
+        (*context).vstimecmp = deadline;
+        (*context).hvip &= !(HVIP_VSTIP as u64);
+    }
     // SAFETY: These hypervisor CSRs are writable in HS mode while the active
     // vCPU is exclusively owned on this hart.
     unsafe {
@@ -584,16 +653,21 @@ fn set_timer(deadline: u64) {
             options(nostack)
         )
     };
+    true
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
+    GuestAnchorState,
     CsrDecoder,
     GuestMemoryFaultDecoder,
     SupervisorCallCompletion,
 }
 
 pub(super) fn validate() -> Result<(), ValidationError> {
+    if !super::context::validate_anchor_state_machine() {
+        return Err(ValidationError::GuestAnchorState);
+    }
     if guest_page_walk_access(0x3000) != Some(MemoryAccess::Read)
         || guest_page_walk_access(0x3020) != Some(MemoryAccess::Write)
         || guest_page_walk_access(0x0000_20c3).is_some()
@@ -657,6 +731,14 @@ pub(super) fn validate() -> Result<(), ValidationError> {
         function: 0,
         arguments: [0; 6],
     };
+    let legacy_clear_ipi = SupervisorCall {
+        extension: 3,
+        function: 0,
+        arguments: [0; 6],
+    };
+    let mut context = VcpuContext::new(0);
+    context.hvip = super::registers::HVIP_GUEST_MASK;
+    let clear_ipi_result = emulate_sbi(&mut context, legacy_clear_ipi);
     if !supervisor_completion_matches(legacy_console, SupervisorCallResult::Legacy { value: 0 })
         || supervisor_completion_matches(
             legacy_console,
@@ -674,6 +756,13 @@ pub(super) fn validate() -> Result<(), ValidationError> {
         || modern_extension_available(0x0073_5049)
         || modern_extension_available(0x5246_4e43)
         || !modern_extension_available(SBI_EXT_TIME)
+        || context.hvip & (1 << 2) != 0
+        || !matches!(
+            clear_ipi_result,
+            GuestSyncAction::CompleteSupervisorCall(SupervisorCallResult::Legacy {
+                value: SBI_SUCCESS
+            })
+        )
     {
         return Err(ValidationError::SupervisorCallCompletion);
     }

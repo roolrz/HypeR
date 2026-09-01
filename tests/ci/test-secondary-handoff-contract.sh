@@ -10,6 +10,7 @@ fixture=$(mktemp -d "${TMPDIR:-/tmp}/hyper-secondary-handoff-test.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
 mkdir -p "$fixture/src/kernel/cpu" "$fixture/src/hal/selected"
+mkdir -p "$fixture/src/kernel/task/scheduler"
 
 check() {
     HYPER_SECONDARY_HANDOFF_ROOT="$fixture" \
@@ -46,14 +47,28 @@ write_valid_fixture() {
         '    online.load(Ordering::Acquire);' \
         '    boot_parameters.release();' \
         '}' \
-        'extern "C" fn enter_clean_idle(cpu_index: CpuIndex) {' \
-        '    run_idle_loop_after(publish_current_online);' \
+        'fn try_secondary_entry() {' \
+        '    run_secondary_idle_loop();' \
         '}' \
-        'fn publish_current_online() {' \
+        'fn publish_current_online_from_idle_observation() {' \
         '    let cpu = cpu_index();' \
         '    ONLINE[cpu].store(true, Ordering::Release);' \
         '}' \
+        'extern "C" fn enter_clean_idle(cpu_index: CpuIndex) {' \
+        '    run_idle_loop();' \
+        '}' \
+        'fn unrelated_helper() {' \
+        '    publish_current_online_from_idle_observation();' \
+        '}' \
         >"$fixture/src/kernel/cpu/smp.rs"
+    printf '%s\n' \
+        'fn idle_wait_or_schedule() {' \
+        '    let switch = SCHEDULER.with(|slot| {' \
+        '        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;' \
+        '        scheduler.prepare_yield(cpu)' \
+        '    })?;' \
+        '    publish_current_online_from_idle_observation();' \
+        '}' >"$fixture/src/kernel/task/scheduler/mod.rs"
     printf '%s\n' \
         'fn validate() {' \
         '    if !valid_page_subdivision(data_line_size()) ||' \
@@ -121,8 +136,11 @@ mutate 'the secondary must release-publish handoff consumption' \
     src/kernel/cpu/smp.rs \
     's/ONLINE\[cpu\].store(true, Ordering::Release)/ONLINE[cpu].store(true, Ordering::Relaxed)/'
 mutate 'the secondary must publish from its first scheduler observation' \
+    src/kernel/task/scheduler/mod.rs \
+    's/publish_current_online_from_idle_observation()/publish_later()/'
+mutate 'the dedicated secondary idle path must be used during secondary entry' \
     src/kernel/cpu/smp.rs \
-    's/run_idle_loop_after(publish_current_online)/run_idle_loop()/'
+    's/run_secondary_idle_loop()/run_idle_loop()/'
 mutate 'the all-online path must reclaim retained handoffs' \
     src/kernel/cpu/smp.rs \
     's/boot_parameters.release()/boot_parameters.retain()/'

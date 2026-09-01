@@ -49,13 +49,26 @@ pub struct VcpuContext {
     pub vsepc: u64,
     pub vscause: u64,
     pub vstval: u64,
+    pub hvip: u64,
     pub vsatp: u64,
-    pub floating: [u64; 32],
-    pub fcsr: u32,
-    _floating_padding: u32,
+    pub vstimecmp: u64,
     pub scounteren: u64,
     pub senvcfg: u64,
     virtual_count_offset: u64,
+    pub floating: [u64; 32],
+    pub fcsr: u32,
+    _floating_padding: u32,
+    run_state: u64,
+}
+
+const GUEST_RUN_READY: u64 = 0;
+const GUEST_RUN_RUNNING: u64 = 1;
+const GUEST_RUN_IRQ_TAIL: u64 = 2;
+
+#[repr(C)]
+struct GuestAnchorExit {
+    kind: u64,
+    target: usize,
 }
 
 impl VcpuContext {
@@ -74,13 +87,16 @@ impl VcpuContext {
             vsepc: 0,
             vscause: 0,
             vstval: 0,
+            hvip: 0,
             vsatp: 0,
-            floating: [0; 32],
-            fcsr: 0,
-            _floating_padding: 0,
+            vstimecmp: u64::MAX,
             scounteren: 0,
             senvcfg: 0,
             virtual_count_offset: 0,
+            floating: [0; 32],
+            fcsr: 0,
+            _floating_padding: 0,
+            run_state: GUEST_RUN_READY,
         }
     }
 
@@ -88,7 +104,9 @@ impl VcpuContext {
         Ok(())
     }
     pub fn set_virtual_count(&mut self, physical: u64, value: u64) {
-        self.virtual_count_offset = physical.wrapping_sub(value);
+        // HTIMEDELTA is added to TIME while V=1, unlike AArch64 CNTVOFF which
+        // is subtracted from the physical counter.
+        self.virtual_count_offset = value.wrapping_sub(physical);
     }
     /// Loads this stopped vCPU's hart-local floating-point and timer state.
     ///
@@ -97,8 +115,6 @@ impl VcpuContext {
     /// The caller must exclusively own this pinned context, keep local
     /// interrupts masked, and ensure no other vCPU is active on this hart.
     pub unsafe fn activate_system_registers(&self) {
-        // SAFETY: The method contract grants exclusive active-hart ownership of `self`.
-        unsafe { riscv64_load_guest_floating_point(core::ptr::from_ref(self).cast()) };
         // SAFETY: HTIMEDELTA is writable in HS mode and the input is a plain value.
         unsafe {
             core::arch::asm!(
@@ -115,8 +131,7 @@ impl VcpuContext {
     /// This context must be the active vCPU on the current hart, exclusively
     /// owned by the caller, with local interrupts masked.
     pub unsafe fn deactivate_system_registers(&mut self) {
-        // SAFETY: The method contract grants exclusive active-hart ownership of `self`.
-        unsafe { riscv64_save_guest_floating_point(core::ptr::from_mut(self).cast()) };
+        self.capture_virtual_supervisor_registers();
     }
     /// Enters the guest represented by `context`.
     ///
@@ -125,9 +140,145 @@ impl VcpuContext {
     /// `context` must be non-null, aligned, pinned, and exclusively owned by the
     /// active vCPU for the guest-run lifetime. Trap handling may mutate it.
     pub unsafe fn enter(context: *mut Self) -> ! {
-        // SAFETY: The caller establishes the raw context, HGATP, and HS-stack contract.
-        unsafe { riscv64_enter_guest(context.cast_const().cast()) }
+        // Keep only the pinned raw pointer across guest entry and scheduling.
+        // The IRQ-tail transition temporarily lends this object to VM
+        // deactivation/reactivation, so retaining a Rust reference here would
+        // violate exclusive-borrow provenance even though execution is nested.
+        loop {
+            // SAFETY: The run owner has exclusive access before guest entry;
+            // this short reference ends before assembly or policy can borrow it.
+            if unsafe { (&mut *context).begin_run() }.is_err() {
+                super::halt()
+            }
+            // SAFETY: RUNNING publishes the exact context to the assembly
+            // anchor. A typed anchor exit destroys that publication before it
+            // returns here with local interrupts still masked.
+            let exit = unsafe { riscv64_enter_guest(context.cast_const().cast()) };
+            // SAFETY: Typed assembly return restored exclusive access; this
+            // short reference ends before invoking the scheduler callback.
+            let target = match unsafe { (&mut *context).consume_irq_tail(exit) } {
+                Ok(target) => target,
+                Err(_) => super::halt(),
+            };
+            // SAFETY: Trap dispatch accepts only an opaque callback previously
+            // qualified by the selected HAL. The anchor is gone, no raw frame
+            // borrow remains, and SIE stays masked across the callback.
+            let postlude: unsafe extern "C" fn() = unsafe { core::mem::transmute(target) };
+            // SAFETY: The qualified callback contract is established above.
+            unsafe { postlude() };
+        }
     }
+
+    /// Captures guest state before a typed IRQ-tail anchor unwind.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the exact context published in the current hart's live
+    /// guest anchor. Guest floating-point state must already have been copied
+    /// by trap entry and local interrupts must remain masked.
+    pub(crate) unsafe fn capture_irq_tail(
+        &mut self,
+        general: &[u64; 32],
+        program_counter: u64,
+    ) -> Result<(), GuestAnchorError> {
+        if self.run_state != GUEST_RUN_RUNNING {
+            return Err(GuestAnchorError::State);
+        }
+        self.general = *general;
+        self.program_counter = program_counter;
+        self.capture_virtual_supervisor_registers();
+        // This state is the final publication consumed by `enter`; all guest
+        // register copies happen-before it in same-hart program order.
+        self.publish_irq_tail()
+    }
+
+    fn begin_run(&mut self) -> Result<(), GuestAnchorError> {
+        if self.run_state != GUEST_RUN_READY {
+            return Err(GuestAnchorError::State);
+        }
+        self.run_state = GUEST_RUN_RUNNING;
+        Ok(())
+    }
+
+    fn publish_irq_tail(&mut self) -> Result<(), GuestAnchorError> {
+        if self.run_state != GUEST_RUN_RUNNING {
+            return Err(GuestAnchorError::State);
+        }
+        self.run_state = GUEST_RUN_IRQ_TAIL;
+        Ok(())
+    }
+
+    fn consume_irq_tail(&mut self, exit: GuestAnchorExit) -> Result<usize, GuestAnchorError> {
+        if self.run_state != GUEST_RUN_IRQ_TAIL
+            || exit.kind != registers::GUEST_ANCHOR_EXIT_IRQ_TAIL
+            || exit.target == 0
+        {
+            return Err(GuestAnchorError::Exit);
+        }
+        self.run_state = GUEST_RUN_READY;
+        Ok(exit.target)
+    }
+
+    fn capture_virtual_supervisor_registers(&mut self) {
+        // SAFETY: These virtual-supervisor CSRs are accessible in HS mode while
+        // this vCPU owns the current hart. No memory ordering is implied or
+        // required by these same-hart register snapshots.
+        unsafe {
+            core::arch::asm!(
+                "csrr {vsstatus}, vsstatus",
+                "csrr {vsie}, vsie",
+                "csrr {vstvec}, vstvec",
+                "csrr {vsscratch}, vsscratch",
+                "csrr {vsepc}, vsepc",
+                "csrr {vscause}, vscause",
+                "csrr {vstval}, vstval",
+                vsstatus = out(reg) self.vsstatus,
+                vsie = out(reg) self.vsie,
+                vstvec = out(reg) self.vstvec,
+                vsscratch = out(reg) self.vsscratch,
+                vsepc = out(reg) self.vsepc,
+                vscause = out(reg) self.vscause,
+                vstval = out(reg) self.vstval,
+                options(nomem, nostack)
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestAnchorError {
+    State,
+    Exit,
+}
+
+pub(super) fn validate_anchor_state_machine() -> bool {
+    let mut context = VcpuContext::new(0);
+    let mut other = VcpuContext::new(0);
+    context.set_virtual_count(0xf000, 0x1000);
+    if 0xf000u64.wrapping_add(context.virtual_count_offset) != 0x1000 {
+        return false;
+    }
+    if context.begin_run().is_err()
+        || context.publish_irq_tail().is_err()
+        || other
+            .consume_irq_tail(GuestAnchorExit {
+                kind: registers::GUEST_ANCHOR_EXIT_IRQ_TAIL,
+                target: 1,
+            })
+            .is_ok()
+        || context.consume_irq_tail(GuestAnchorExit {
+            kind: registers::GUEST_ANCHOR_EXIT_IRQ_TAIL,
+            target: 1,
+        }) != Ok(1)
+    {
+        return false;
+    }
+    context
+        .consume_irq_tail(GuestAnchorExit {
+            kind: registers::GUEST_ANCHOR_EXIT_IRQ_TAIL,
+            target: 1,
+        })
+        .is_err()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,7 +289,8 @@ unsafe extern "C" {
         previous: *mut ThreadContext,
         next: *const ThreadContext,
         previous_interrupt_state: usize,
-        completion: extern "C" fn(),
+        completion: extern "C" fn(usize),
+        completion_ticket: usize,
     );
     fn riscv64_thread_trampoline();
     fn riscv64_reset_stack_and_enter(
@@ -150,9 +302,7 @@ unsafe extern "C" {
         argument: usize,
     ) -> !;
     fn riscv64_run_on_stack(top: usize, callback: extern "C" fn(usize) -> !, argument: usize) -> !;
-    fn riscv64_enter_guest(context: *const u8) -> !;
-    fn riscv64_load_guest_floating_point(context: *const u8);
-    fn riscv64_save_guest_floating_point(context: *mut u8);
+    fn riscv64_enter_guest(context: *const u8) -> GuestAnchorExit;
 }
 
 /// Switches from `previous` to `next` without returning through a normal call.
@@ -167,10 +317,19 @@ pub unsafe fn switch_thread_context(
     previous: *mut ThreadContext,
     next: *const ThreadContext,
     previous_interrupt_state: usize,
-    completion: extern "C" fn(),
+    completion: extern "C" fn(usize),
+    completion_ticket: usize,
 ) {
     // SAFETY: The caller establishes ownership and lifetime for both contexts.
-    unsafe { riscv64_switch_context(previous, next, previous_interrupt_state, completion) };
+    unsafe {
+        riscv64_switch_context(
+            previous,
+            next,
+            previous_interrupt_state,
+            completion,
+            completion_ticket,
+        )
+    };
 }
 
 /// Resets a stack and transfers control to `callback`.
@@ -225,7 +384,17 @@ const _: () = {
     assert!(offset_of!(VcpuContext, vsepc) == registers::VCPU_VSEPC_OFFSET as usize);
     assert!(offset_of!(VcpuContext, vscause) == registers::VCPU_VSCAUSE_OFFSET as usize);
     assert!(offset_of!(VcpuContext, vstval) == registers::VCPU_VSTVAL_OFFSET as usize);
+    assert!(offset_of!(VcpuContext, hvip) == registers::VCPU_HVIP_OFFSET as usize);
     assert!(offset_of!(VcpuContext, vsatp) == registers::VCPU_VSATP_OFFSET as usize);
+    assert!(offset_of!(VcpuContext, vstimecmp) == registers::VCPU_VSTIMECMP_OFFSET as usize);
+    assert!(offset_of!(VcpuContext, scounteren) == registers::VCPU_SCOUNTEREN_OFFSET as usize);
+    assert!(offset_of!(VcpuContext, senvcfg) == registers::VCPU_SENVCFG_OFFSET as usize);
+    assert!(
+        offset_of!(VcpuContext, virtual_count_offset)
+            == registers::VCPU_VIRTUAL_COUNT_OFFSET as usize
+    );
     assert!(offset_of!(VcpuContext, floating) == registers::VCPU_FLOATING_OFFSET as usize);
     assert!(offset_of!(VcpuContext, fcsr) == registers::VCPU_FCSR_OFFSET as usize);
+    assert!(offset_of!(VcpuContext, run_state) == registers::VCPU_RUN_STATE_OFFSET as usize);
+    assert!(size_of::<GuestAnchorExit>() == 16);
 };

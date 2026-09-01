@@ -118,9 +118,9 @@ mutate 'Kernel RPC acknowledgement Release mutation was accepted' src/kernel/irq
 mutate 'Kernel RPC subset mutation was accepted' src/kernel/irq/cross_call.rs \
     's/if !targeted {/if false {/'
 mutate 'IDT interception mutation was accepted' src/arch/x86_64/exception.rs \
-    's/irq::service_kernel_rpc()/irq::service_rpc_later()/'
+    's/irq::service_kernel_rpc_interrupt/irq::service_rpc_later/'
 mutate 'VMX interception mutation was accepted' src/arch/x86_64/vmx.rs \
-    's/irq::service_kernel_rpc()/irq::service_rpc_later()/'
+    's/irq::service_kernel_rpc_interrupt/irq::service_rpc_later/'
 mutate 'masked progress mutation was accepted' src/arch/x86_64/interrupts.rs \
     's/irq::service_kernel_rpc()/core::hint::spin_loop()/'
 mutate 'AArch64 reason Release mutation was accepted' src/arch/aarch64/smp.rs \
@@ -152,9 +152,9 @@ mutate 'x2APIC publication fence mutation was accepted' src/arch/x86_64/interrup
 mutate 'x2APIC compiler-memory mutation was accepted' src/arch/x86_64/interrupt_controller.rs \
     '/^pub fn send_fixed_ipi(/,/^}/s/options(nostack)/options(nomem, nostack)/'
 mutate 'Kernel RPC bypassed one-shot publication' src/arch/irq.rs \
-    's/PublishedOnce<fn()>/UnsafeCell<fn()>/'
+    's/PublishedOnce<KernelRpcServices>/UnsafeCell<KernelRpcServices>/'
 mutate 'late Kernel RPC callback installation was accepted' src/kernel/irq/mod.rs \
-    's/install_kernel_rpc_service(cross_call::service)/install_kernel_rpc_service_later(cross_call::service)/'
+    's/install_kernel_rpc_services(/install_kernel_rpc_services_later(/'
 
 copy_sources
 awk '

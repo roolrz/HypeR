@@ -5,8 +5,8 @@
 
 use core::arch::asm;
 
-use hyper::vm::interrupt::gicv3::{decode_list_register, encode_list_register};
-use hyper::vm::interrupt::{InterruptGroup, ListEntry, ListState, VirtualInterruptId};
+use hyper::vm::arm::gic::lr::{decode as decode_list_register, encode as encode_list_register};
+use hyper::vm::arm::gic::{GicInterruptId, InterruptGroup, ListEntry, ListState};
 
 use super::registers;
 
@@ -125,7 +125,7 @@ pub fn validate_context_switch() -> Result<Capabilities, Error> {
     let mut context = CpuContext::empty();
     let capabilities = initialize_context(&mut context)?;
     let probe = ListEntry {
-        interrupt: VirtualInterruptId::new(31).ok_or(Error::InvalidVirtualInterrupt)?,
+        interrupt: GicInterruptId::new(31).ok_or(Error::InvalidVirtualInterrupt)?,
         priority: 0xa0,
         group: InterruptGroup::Group1,
         state: ListState::Pending,

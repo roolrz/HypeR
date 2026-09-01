@@ -7,8 +7,11 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use hyper::hal::interrupt::InterruptMask;
 use hyper::sync::atomic::{AtomicFlag, AtomicU64, Ordering as AtomicOrdering, fence};
-use hyper::sync::{GenerationTaggedState, InterruptMaskGuard, InterruptSpinLock, PublishedOnce};
-use std::sync::Arc;
+use hyper::sync::{
+    AtomicBorrowClaim, AtomicBorrowError, AtomicBorrowPtr, GenerationTaggedState,
+    InterruptMaskGuard, InterruptSpinLock, PublishedOnce,
+};
+use std::sync::{Arc, Barrier};
 use std::thread;
 
 static MASK_DEPTH: AtomicUsize = AtomicUsize::new(0);
@@ -57,6 +60,168 @@ const _: fn() = || {
 
     let _ = <InterruptMaskGuard<TestInterruptMask> as AmbiguousIfImpl<_>>::marker;
 };
+
+#[repr(align(2))]
+struct AlignedByte(u8);
+
+const _: fn() = || {
+    trait AmbiguousIfImpl<Marker: ?Sized> {
+        fn marker() {}
+    }
+
+    impl<T: ?Sized> AmbiguousIfImpl<()> for T {}
+    impl<T: ?Sized + Send> AmbiguousIfImpl<dyn Send> for T {}
+    impl<T: ?Sized + Sync> AmbiguousIfImpl<dyn Sync> for T {}
+
+    let _ = <AtomicBorrowClaim<'static, AlignedByte> as AmbiguousIfImpl<_>>::marker;
+};
+
+#[test]
+fn atomic_borrow_pointer_enforces_exact_state_transitions() {
+    let state = AtomicBorrowPtr::new();
+    let mut value = AlignedByte(7);
+    let pointer = core::ptr::NonNull::from(&mut value);
+
+    assert!(matches!(state.begin_borrow(), Ok(None)));
+    assert_eq!(state.publish(pointer), Ok(()));
+    assert_eq!(state.publish(pointer), Err(AtomicBorrowError::Active));
+    let claim = match state.begin_borrow() {
+        Ok(Some(claim)) => claim,
+        Ok(None) | Err(_) => panic!("active pointer was not claimable"),
+    };
+    assert_eq!(claim.pointer(), pointer);
+    assert!(matches!(
+        state.begin_borrow(),
+        Err(AtomicBorrowError::Borrowed)
+    ));
+    assert_eq!(state.unpublish(pointer), Err(AtomicBorrowError::Borrowed));
+    assert_eq!(claim.finish(), Ok(()));
+    assert_eq!(state.unpublish(pointer), Ok(()));
+    assert_eq!(state.unpublish(pointer), Err(AtomicBorrowError::Inactive));
+    assert_eq!(value.0, 7);
+}
+
+#[test]
+fn atomic_borrow_pointer_rejects_mismatch_without_changing_owner() {
+    let state = AtomicBorrowPtr::new();
+    let mut owner = AlignedByte(1);
+    let mut stranger = AlignedByte(2);
+    let owner = core::ptr::NonNull::from(&mut owner);
+    let stranger = core::ptr::NonNull::from(&mut stranger);
+
+    assert_eq!(state.publish(owner), Ok(()));
+    assert_eq!(
+        state.unpublish(stranger),
+        Err(AtomicBorrowError::PointerMismatch)
+    );
+    let claim = match state.begin_borrow() {
+        Ok(Some(claim)) => claim,
+        Ok(None) | Err(_) => panic!("owner pointer was not claimable"),
+    };
+    assert_eq!(claim.pointer(), owner);
+    assert_eq!(claim.finish(), Ok(()));
+    assert_eq!(state.unpublish(owner), Ok(()));
+}
+
+#[test]
+fn forgotten_atomic_borrow_claim_leaves_state_safely_borrowed() {
+    let state = AtomicBorrowPtr::new();
+    let mut value = AlignedByte(3);
+    let pointer = core::ptr::NonNull::from(&mut value);
+
+    assert_eq!(state.publish(pointer), Ok(()));
+    let claim = match state.begin_borrow() {
+        Ok(Some(claim)) => claim,
+        Ok(None) | Err(_) => panic!("active pointer was not claimable"),
+    };
+    core::mem::forget(claim);
+    assert!(matches!(
+        state.begin_borrow(),
+        Err(AtomicBorrowError::Borrowed)
+    ));
+    assert_eq!(state.unpublish(pointer), Err(AtomicBorrowError::Borrowed));
+}
+
+#[test]
+fn dropped_atomic_borrow_claim_restores_active_state() {
+    let state = AtomicBorrowPtr::new();
+    let mut value = AlignedByte(6);
+    let pointer = core::ptr::NonNull::from(&mut value);
+
+    assert_eq!(state.publish(pointer), Ok(()));
+    let claim = match state.begin_borrow() {
+        Ok(Some(claim)) => claim,
+        Ok(None) | Err(_) => panic!("active pointer was not claimable"),
+    };
+    drop(claim);
+    let claim = match state.begin_borrow() {
+        Ok(Some(claim)) => claim,
+        Ok(None) | Err(_) => panic!("dropped claim did not restore active state"),
+    };
+    assert_eq!(claim.pointer(), pointer);
+    assert_eq!(claim.finish(), Ok(()));
+    assert_eq!(state.unpublish(pointer), Ok(()));
+}
+
+#[test]
+fn atomic_borrow_pointer_rejects_low_bit_pointer() {
+    let state = AtomicBorrowPtr::new();
+    let mut value = AlignedByte(4);
+    let pointer = core::ptr::NonNull::from(&mut value);
+    let tagged = pointer.as_ptr().map_addr(|address| address | 1);
+    let Some(tagged) = core::ptr::NonNull::new(tagged) else {
+        panic!("tagging a non-null pointer produced null");
+    };
+
+    assert_eq!(
+        state.publish(tagged),
+        Err(AtomicBorrowError::InvalidPointer)
+    );
+    assert!(matches!(state.begin_borrow(), Ok(None)));
+}
+
+#[test]
+fn concurrent_atomic_borrow_has_one_claim_winner() {
+    let state = Arc::new(AtomicBorrowPtr::new());
+    let start = Arc::new(Barrier::new(2));
+    let attempted = Arc::new(Barrier::new(2));
+    let winners = Arc::new(AtomicUsize::new(0));
+    let losers = Arc::new(AtomicUsize::new(0));
+    let mut value = AlignedByte(5);
+    let pointer = core::ptr::NonNull::from(&mut value);
+    assert_eq!(state.publish(pointer), Ok(()));
+
+    thread::scope(|scope| {
+        for _ in 0..2 {
+            let state = Arc::clone(&state);
+            let start = Arc::clone(&start);
+            let attempted = Arc::clone(&attempted);
+            let winners = Arc::clone(&winners);
+            let losers = Arc::clone(&losers);
+            scope.spawn(move || {
+                start.wait();
+                let claim = state.begin_borrow();
+                // Keep the winner Borrowed until both contenders have made
+                // their one attempt; no scheduling assumption is needed.
+                attempted.wait();
+                match claim {
+                    Ok(Some(claim)) => {
+                        winners.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(claim.finish(), Ok(()));
+                    }
+                    Err(AtomicBorrowError::Borrowed) => {
+                        losers.fetch_add(1, Ordering::SeqCst);
+                    }
+                    Ok(None) | Err(_) => panic!("unexpected concurrent claim result"),
+                }
+            });
+        }
+    });
+
+    assert_eq!(winners.load(Ordering::SeqCst), 1);
+    assert_eq!(losers.load(Ordering::SeqCst), 1);
+    assert_eq!(state.unpublish(pointer), Ok(()));
+}
 
 #[test]
 fn interrupt_lock_restores_the_previous_mask_state() {

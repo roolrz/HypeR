@@ -1,7 +1,16 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Guest-visible placement of the `GICv3` on the reference virtual board.
+//! Guest-visible `GICv3` placement, decoding, and reusable register state.
+
+mod decode;
+mod model;
+
+pub use decode::{
+    BitmapRegister, DecodeError, DecodedAccess, DecodedRegister, Frame, ModelRegister,
+    ModelRegisterDescriptor, ServiceRegister, SingleVcpuRoute, decode_access,
+};
+pub use model::{ModelError, RegisterState, read_model_register, write_model_register};
 
 pub const DISTRIBUTOR_BASE: u32 = 0x0800_0000;
 pub const DISTRIBUTOR_SIZE: u32 = 0x0001_0000;

@@ -71,6 +71,7 @@ impl BuddyStats {
 pub struct BuddyAllocator {
     free_lists: [u64; MAX_ORDER + 1],
     free_blocks: [usize; MAX_ORDER + 1],
+    handoff: MemoryHandoff,
     direct_map_base: u64,
     managed_pages: usize,
     free_pages: usize,
@@ -94,6 +95,7 @@ impl BuddyAllocator {
         let mut allocator = Self {
             free_lists: [NONE; MAX_ORDER + 1],
             free_blocks: [0; MAX_ORDER + 1],
+            handoff: *handoff,
             direct_map_base,
             managed_pages: 0,
             free_pages: 0,
@@ -202,6 +204,36 @@ impl BuddyAllocator {
 
     pub const fn direct_map_base(&self) -> u64 {
         self.direct_map_base
+    }
+
+    /// Resolves one complete page from the allocator's original managed set.
+    ///
+    /// This checks physical topology before intrusive metadata is read. It
+    /// does not prove the page's current ownership; allocator-maintained links
+    /// must still be minted only for live metadata pages.
+    pub(crate) fn managed_page_pointer(&self, physical: u64) -> Result<usize, BuddyError> {
+        let end = physical
+            .checked_add(PAGE_SIZE)
+            .ok_or(BuddyError::Unaddressable)?;
+        if physical & (PAGE_SIZE - 1) != 0
+            || !self
+                .handoff
+                .memory()
+                .iter()
+                .any(|range| range.start() <= physical && end <= range.end())
+            || self
+                .handoff
+                .reserved()
+                .iter()
+                .any(|range| physical < range.end() && range.start() < end)
+        {
+            return Err(BuddyError::Unaddressable);
+        }
+        let pointer = self.pointer(physical)?;
+        pointer
+            .checked_add(PAGE_SIZE as usize)
+            .ok_or(BuddyError::Unaddressable)?;
+        Ok(pointer)
     }
 
     fn add_interval(&mut self, mut start: u64, end: u64) -> Result<(), BuddyError> {

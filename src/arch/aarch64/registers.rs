@@ -166,6 +166,9 @@ define_asm_constants! {
     EXCEPTION_FRAME_FPSR_OFFSET = 824;
     EXCEPTION_FRAME_RETURN_HCR_OFFSET = 832;
     EXCEPTION_FRAME_SIZE = 848;
+    VECTOR_ACTION_RESUME = 0;
+    VECTOR_ACTION_POSTLUDE = 1;
+    VECTOR_ACTION_UNWIND = 2;
 
     // CrashContext ABI shared with the panic register-capture assembly.
     CRASH_CONTEXT_X0_OFFSET = 0;
@@ -253,6 +256,17 @@ define_asm_constants! {
     VCPU_CONTEXT_X30_OFFSET = 240;
     VCPU_CONTEXT_PC_OFFSET = 264;
     VCPU_CONTEXT_PSTATE_OFFSET = 272;
+    VCPU_CONTEXT_SIMD_OFFSET = 288;
+    VCPU_CONTEXT_FPCR_OFFSET = 800;
+    VCPU_CONTEXT_FPSR_OFFSET = 808;
+    GUEST_RUN_FRAME_X19_OFFSET = 0;
+    GUEST_RUN_FRAME_X29_OFFSET = 80;
+    GUEST_RUN_FRAME_X30_OFFSET = 88;
+    GUEST_RUN_FRAME_D8_OFFSET = 96;
+    GUEST_RUN_FRAME_FPCR_OFFSET = 160;
+    GUEST_RUN_FRAME_FPSR_OFFSET = 168;
+    GUEST_RUN_FRAME_SIZE = 176;
+    GUEST_RUN_RETURN_STOPPED = 1;
 
     // MAIR_ELx attribute encodings.
     MAIR_ATTR_DEVICE_NGNRNE = 0x00;
@@ -371,6 +385,8 @@ pub const ESR_ISS_MASK: u64 = 0x01ff_ffff;
 pub const ESR_BRK_COMMENT_MASK: u64 = 0xffff;
 pub const ESR_EC_UNKNOWN: u64 = 0x00;
 pub const ESR_EC_WFX: u64 = 0x01;
+/// `WFx` ISS bit selecting `WFE` (set) rather than `WFI` (clear).
+pub const ESR_WFX_TI_WFE: u64 = 1;
 pub const ESR_EC_CP15_RT: u64 = 0x03;
 pub const ESR_EC_CP15_RRT: u64 = 0x04;
 pub const ESR_EC_CP14_RT: u64 = 0x05;

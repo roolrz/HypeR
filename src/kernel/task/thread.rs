@@ -4,6 +4,7 @@
 //! Architecture-neutral thread objects and execution payloads.
 
 use alloc::boxed::Box;
+use core::cell::UnsafeCell;
 use hyper::cpu::CpuIndex;
 
 const THREAD_NAME_CAPACITY: usize = 32;
@@ -119,10 +120,19 @@ impl QueueLinks {
 
 pub struct VcpuExecution {
     vm: VcpuVm,
-    active_execution: Option<hyper::vm::translation::ExecutionClaim>,
+    terminal_mmio_report: Option<crate::kernel::vm::UnhandledMmioReport>,
+    reap_publication: Option<crate::kernel::vm::registry::VcpuReapPublication>,
     pub(crate) vcpu_id: u32,
     pub(crate) hardware: crate::hal::vm::VcpuHardwareState,
 }
+
+// Keep migration eligibility compiler-proven. CPU-affine execution and
+// residency claims live exclusively in `vm::active_vcpu`, never in this
+// scheduler-owned payload.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<VcpuExecution>();
+};
 
 enum VcpuVm {
     Installed(crate::kernel::vm::registry::VmBinding),
@@ -140,7 +150,8 @@ impl VcpuExecution {
         crate::hal::vm::initialize_vcpu_interrupts(&mut hardware)?;
         Ok(Self {
             vm: VcpuVm::Installed(vm),
-            active_execution: None,
+            terminal_mmio_report: None,
+            reap_publication: None,
             vcpu_id,
             hardware,
         })
@@ -149,6 +160,23 @@ impl VcpuExecution {
     pub(in crate::kernel) fn vm_binding(&self) -> Option<&crate::kernel::vm::registry::VmBinding> {
         match &self.vm {
             VcpuVm::Installed(binding) => Some(binding),
+            VcpuVm::TimerValidation { .. } => None,
+        }
+    }
+
+    // Only selected guest platforms with in-kernel MMIO models consume this
+    // view today. Keep the stable Thread payload API available to those
+    // modules without changing VcpuExecution's layout by host architecture.
+    #[allow(dead_code)]
+    pub(in crate::kernel) fn device_context(
+        &mut self,
+    ) -> Option<(
+        &crate::kernel::vm::registry::VmBinding,
+        &mut crate::hal::vm::VcpuHardwareState,
+        u32,
+    )> {
+        match &self.vm {
+            VcpuVm::Installed(binding) => Some((binding, &mut self.hardware, self.vcpu_id)),
             VcpuVm::TimerValidation { .. } => None,
         }
     }
@@ -169,53 +197,56 @@ impl VcpuExecution {
         }
     }
 
-    /// Claims the installed VM's exclusive execution interval.
-    ///
-    /// Timer validation has no installed address space and therefore requires
-    /// no claim. Returning `true` tells the caller that release is mandatory.
-    pub(crate) fn claim_execution(
+    /// Retains a terminal MMIO diagnostic until stopped hardware is detached.
+    // Terminal MMIO diagnostics are currently produced by the AArch64 guest
+    // platform; the storage and ownership protocol remain architecture-neutral.
+    #[allow(dead_code)]
+    pub(in crate::kernel) fn publish_terminal_mmio_report(
         &mut self,
-        cpu: CpuIndex,
-    ) -> Result<bool, hyper::vm::translation::ExecutionError> {
-        if self.active_execution.is_some() {
-            return Err(hyper::vm::translation::ExecutionError::AlreadyActive);
+        report: crate::kernel::vm::UnhandledMmioReport,
+    ) -> Result<(), ()> {
+        if self.terminal_mmio_report.is_some() {
+            return Err(());
         }
-        let VcpuVm::Installed(binding) = &self.vm else {
-            return Ok(false);
-        };
-        let claim = binding.claim_execution(cpu)?;
-        self.active_execution = Some(claim);
-        Ok(true)
+        self.terminal_mmio_report = Some(report);
+        Ok(())
     }
 
-    /// Releases the execution capability after guest hardware is stopped.
-    pub(crate) fn release_execution(
+    pub(in crate::kernel) const fn terminal_mmio_report_pending(&self) -> bool {
+        self.terminal_mmio_report.is_some()
+    }
+
+    /// Takes the owned report only after terminal hardware detachment.
+    pub(in crate::kernel) fn take_terminal_mmio_report(
         &mut self,
-        cpu: CpuIndex,
-    ) -> Result<(), hyper::vm::translation::ExecutionError> {
-        let Some(claim) = self.active_execution.take() else {
-            return match self.vm {
-                VcpuVm::Installed(_) => Err(hyper::vm::translation::ExecutionError::NotActiveOwner),
-                VcpuVm::TimerValidation { .. } => Ok(()),
-            };
-        };
-        let binding = match &self.vm {
-            VcpuVm::Installed(binding) => binding,
-            VcpuVm::TimerValidation { .. } => {
-                // Preserve the linear claim even on this impossible binding
-                // mismatch so the caller can cross a controlled fail-stop.
-                self.active_execution = Some(claim);
-                return Err(hyper::vm::translation::ExecutionError::WrongAddressSpace);
-            }
-        };
-        match binding.release_execution(claim, cpu) {
-            Ok(()) => Ok(()),
-            Err(failure) => {
-                let error = failure.error();
-                self.active_execution = Some(failure.into_claim());
-                Err(error)
-            }
+    ) -> Option<crate::kernel::vm::UnhandledMmioReport> {
+        self.terminal_mmio_report.take()
+    }
+
+    pub(in crate::kernel) fn arm_reap_publication(
+        &mut self,
+        thread: ThreadId,
+        reason: crate::kernel::vm::registry::VcpuClosureReason,
+    ) -> Result<(), ()> {
+        if self.reap_publication.is_some() {
+            return Err(());
         }
+        let Some(binding) = self.vm_binding() else {
+            return Err(());
+        };
+        self.reap_publication = Some(crate::kernel::vm::registry::VcpuReapPublication::new(
+            binding.id(),
+            self.vcpu_id,
+            thread,
+            reason,
+        ));
+        Ok(())
+    }
+
+    fn take_reap_publication(
+        &mut self,
+    ) -> Option<crate::kernel::vm::registry::VcpuReapPublication> {
+        self.reap_publication.take()
     }
 
     /// Builds the non-runnable execution used by architecture timer checks.
@@ -238,27 +269,18 @@ impl VcpuExecution {
             vm: VcpuVm::TimerValidation {
                 interrupts: core::ptr::from_ref(interrupts).expose_provenance(),
             },
-            active_execution: None,
+            terminal_mmio_report: None,
+            reap_publication: None,
             vcpu_id: 0,
             hardware,
         }
     }
 }
 
-impl Drop for VcpuExecution {
-    fn drop(&mut self) {
-        if self.active_execution.is_some() {
-            // Destruction cannot safely stop architecture hardware or prove
-            // guest execution quiescent. Fail closed without taking locks.
-            crate::hal::cpu::halt()
-        }
-    }
-}
-
 pub(crate) enum ThreadExecution {
     Kernel,
-    Vcpu(Box<VcpuExecution>),
-    User(Box<crate::kernel::process::UserExecution>),
+    Vcpu(Box<UnsafeCell<VcpuExecution>>),
+    User(Box<UnsafeCell<crate::kernel::process::UserExecution>>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -288,20 +310,88 @@ impl From<crate::hal::vm::VirtualInterruptError> for Error {
 /// thread, a private kernel stack. vCPU architectural state is an attached
 /// execution payload; it is deliberately separate from the context used while
 /// the scheduler and exception handlers execute in the host hypervisor
-/// privilege domain. A future user execution payload must strongly own its
-/// Process and prepared address space before it becomes a Thread variant.
+/// privilege domain. A user execution payload strongly owns its Process and
+/// prepared address space before it becomes a Thread variant.
 pub struct Thread {
+    identity: ThreadIdentity,
+    schedule_owner: ScheduleOwner,
+    schedule: UnsafeCell<ThreadScheduleState>,
+    /// Waiting/terminated intrusive links owned only by `TransitionLock`.
+    ///
+    /// This cell is independent from the CPU-owned scheduling domain so a
+    /// global control queue may safely link neighbors owned by different CPUs.
+    control_queue_links: UnsafeCell<QueueLinks>,
+    resources: Box<ThreadResources>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScheduleOwner {
+    /// Owned by the transition coordinator and absent from every ready queue.
+    Coordinator,
+    /// Owned by one CPU domain, either as current or on that CPU's ready queue.
+    Cpu(CpuIndex),
+}
+
+/// Immutable identity published for the complete registry lifetime.
+struct ThreadIdentity {
     id: ThreadId,
-    placement: ThreadPlacement,
     name: ThreadName,
-    scheduling: SchedulingPolicy,
+}
+
+/// State mutated only by scheduler transactions.
+///
+/// Keeping queue topology, placement, policy, and wait/migration state in one
+/// explicit domain permits its ownership to move without moving Thread
+/// identity or execution resources. Stored state is transition-lock-owned;
+/// running state is owned by one CPU scheduler lock. The state has no internal
+/// synchronization, so the linear residence token is the access authority.
+pub(super) struct ThreadScheduleState {
+    pub(super) placement: ThreadPlacement,
+    pub(super) scheduling: SchedulingPolicy,
     fair_runtime: FairRuntime,
-    deferred_fifo_placement: Option<DeferredFifoPlacement>,
-    state: ThreadState,
-    queue_links: QueueLinks,
-    wait: WaitRecord,
-    pending_migration: Option<MigrationRequest>,
-    context: crate::hal::context::ThreadContext,
+    pub(super) deferred_fifo_placement: Option<DeferredFifoPlacement>,
+    pub(super) state: ThreadState,
+    pub(super) ready_queue_links: QueueLinks,
+    pub(super) wait: WaitRecord,
+    pub(super) pending_migration: Option<MigrationRequest>,
+}
+
+impl ThreadScheduleState {
+    pub(super) fn fair_slice_expired(&self) -> bool {
+        self.scheduling.class() == SchedulingClass::Fair && self.fair_runtime.slice_remaining == 0
+    }
+
+    pub(super) fn scheduling_class(&self) -> SchedulingClass {
+        self.scheduling.class()
+    }
+
+    pub(super) fn account_fair_ticks(&mut self, elapsed: u64, quantum: u64) -> bool {
+        if self.scheduling_class() != SchedulingClass::Fair {
+            return false;
+        }
+        if self.fair_runtime.slice_remaining == 0 {
+            self.fair_runtime.slice_remaining = quantum;
+        }
+        self.fair_runtime.slice_remaining =
+            self.fair_runtime.slice_remaining.saturating_sub(elapsed);
+        self.fair_runtime.slice_remaining == 0
+    }
+
+    pub(super) fn replenish_fair_slice(&mut self, quantum: u64) {
+        self.fair_runtime.slice_remaining = quantum;
+    }
+}
+
+/// Stable machine resources governed by the running/stopped context protocol.
+///
+/// This value has its own private heap allocation. Mutating `Thread` identity
+/// or scheduling state therefore cannot create an exclusive reference that
+/// covers a machine pointer retained by assembly or an execution runner. The
+/// Box is never replaced while the Thread is published; resource extraction
+/// is permitted only after scheduler context ownership has stopped.
+struct ThreadResources {
+    /// Assembly owns this cell between switch preparation and switch tail.
+    context: UnsafeCell<crate::hal::context::ThreadContext>,
     kernel_stack: Option<KernelStack>,
     execution: ThreadExecution,
 }
@@ -322,31 +412,64 @@ impl FairRuntime {
 }
 
 impl Thread {
-    /// Bounded scheduler-object storage charged before user-thread publication.
-    pub(crate) const fn allocation_size() -> usize {
-        core::mem::size_of::<Self>()
+    pub(super) fn schedule_is_coordinator_owned(&self) -> bool {
+        self.schedule_owner == ScheduleOwner::Coordinator
     }
 
-    pub(super) fn bootstrap(cpu_index: CpuIndex) -> Self {
+    /// CPU owning this Thread's linear running-schedule token, if any.
+    pub(super) fn schedule_owner_cpu(&self) -> Option<CpuIndex> {
+        match self.schedule_owner {
+            ScheduleOwner::Coordinator => None,
+            ScheduleOwner::Cpu(cpu) => Some(cpu),
+        }
+    }
+
+    /// Bounded scheduler storage charged before user-thread publication.
+    pub(crate) const fn allocation_size() -> usize {
+        core::mem::size_of::<Self>() + core::mem::size_of::<ThreadResources>()
+    }
+
+    fn allocate_resources(
+        context: crate::hal::context::ThreadContext,
+        kernel_stack: Option<KernelStack>,
+        execution: ThreadExecution,
+    ) -> Result<Box<ThreadResources>, Error> {
+        hyper::mm::try_box(ThreadResources {
+            context: UnsafeCell::new(context),
+            kernel_stack,
+            execution,
+        })
+        .map_err(|_| Error::Allocation)
+    }
+
+    pub(super) fn bootstrap(cpu_index: CpuIndex) -> Result<Self, Error> {
         let name = match ThreadName::new("bootstrap") {
             Ok(name) => name,
             Err(_) => ThreadName::empty(),
         };
-        Self {
-            id: ThreadId::BOOTSTRAP,
-            placement: ThreadPlacement::pinned(cpu_index),
-            name,
-            scheduling: SchedulingPolicy::fair(),
-            fair_runtime: FairRuntime::NEW,
-            deferred_fifo_placement: None,
-            state: ThreadState::Running,
-            queue_links: QueueLinks::EMPTY,
-            wait: WaitRecord::NEW,
-            pending_migration: None,
-            context: crate::hal::context::ThreadContext::empty(),
-            kernel_stack: None,
-            execution: ThreadExecution::Kernel,
-        }
+        Ok(Self {
+            identity: ThreadIdentity {
+                id: ThreadId::BOOTSTRAP,
+                name,
+            },
+            schedule_owner: ScheduleOwner::Coordinator,
+            schedule: UnsafeCell::new(ThreadScheduleState {
+                placement: ThreadPlacement::pinned(cpu_index),
+                scheduling: SchedulingPolicy::fair(),
+                fair_runtime: FairRuntime::NEW,
+                deferred_fifo_placement: None,
+                state: ThreadState::Running,
+                ready_queue_links: QueueLinks::EMPTY,
+                wait: WaitRecord::NEW,
+                pending_migration: None,
+            }),
+            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            resources: Self::allocate_resources(
+                crate::hal::context::ThreadContext::empty(),
+                None,
+                ThreadExecution::Kernel,
+            )?,
+        })
     }
 
     pub(super) fn kernel(
@@ -363,19 +486,23 @@ impl Thread {
         let placement = ThreadPlacement::movable_with_affinity(cpu_index, affinity)
             .ok_or(Error::InvalidPlacement)?;
         Ok(Self {
-            id,
-            placement,
-            name: ThreadName::new(name)?,
-            scheduling: SchedulingPolicy::fair(),
-            fair_runtime: FairRuntime::NEW,
-            deferred_fifo_placement: None,
-            state: ThreadState::Dormant,
-            queue_links: QueueLinks::EMPTY,
-            wait: WaitRecord::NEW,
-            pending_migration: None,
-            context,
-            kernel_stack: Some(stack),
-            execution: ThreadExecution::Kernel,
+            identity: ThreadIdentity {
+                id,
+                name: ThreadName::new(name)?,
+            },
+            schedule_owner: ScheduleOwner::Coordinator,
+            schedule: UnsafeCell::new(ThreadScheduleState {
+                placement,
+                scheduling: SchedulingPolicy::fair(),
+                fair_runtime: FairRuntime::NEW,
+                deferred_fifo_placement: None,
+                state: ThreadState::Dormant,
+                ready_queue_links: QueueLinks::EMPTY,
+                wait: WaitRecord::NEW,
+                pending_migration: None,
+            }),
+            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            resources: Self::allocate_resources(context, Some(stack), ThreadExecution::Kernel)?,
         })
     }
 
@@ -390,19 +517,23 @@ impl Thread {
         let mut context = crate::hal::context::ThreadContext::empty();
         context.prepare(stack.top(), entry, 0);
         Ok(Self {
-            id,
-            placement: ThreadPlacement::pinned(cpu_index),
-            name: ThreadName::new(name)?,
-            scheduling: SchedulingPolicy::Idle,
-            fair_runtime: FairRuntime::NEW,
-            deferred_fifo_placement: None,
-            state: ThreadState::Idle,
-            queue_links: QueueLinks::EMPTY,
-            wait: WaitRecord::NEW,
-            pending_migration: None,
-            context,
-            kernel_stack: Some(stack),
-            execution: ThreadExecution::Kernel,
+            identity: ThreadIdentity {
+                id,
+                name: ThreadName::new(name)?,
+            },
+            schedule_owner: ScheduleOwner::Coordinator,
+            schedule: UnsafeCell::new(ThreadScheduleState {
+                placement: ThreadPlacement::pinned(cpu_index),
+                scheduling: SchedulingPolicy::Idle,
+                fair_runtime: FairRuntime::NEW,
+                deferred_fifo_placement: None,
+                state: ThreadState::Idle,
+                ready_queue_links: QueueLinks::EMPTY,
+                wait: WaitRecord::NEW,
+                pending_migration: None,
+            }),
+            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            resources: Self::allocate_resources(context, Some(stack), ThreadExecution::Kernel)?,
         })
     }
 
@@ -413,19 +544,27 @@ impl Thread {
         name: &str,
     ) -> Result<Self, Error> {
         Ok(Self {
-            id,
-            placement: ThreadPlacement::pinned(cpu_index),
-            name: ThreadName::new(name)?,
-            scheduling: SchedulingPolicy::fair(),
-            fair_runtime: FairRuntime::NEW,
-            deferred_fifo_placement: None,
-            state: ThreadState::Running,
-            queue_links: QueueLinks::EMPTY,
-            wait: WaitRecord::NEW,
-            pending_migration: None,
-            context: crate::hal::context::ThreadContext::empty(),
-            kernel_stack: Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
-            execution: ThreadExecution::Kernel,
+            identity: ThreadIdentity {
+                id,
+                name: ThreadName::new(name)?,
+            },
+            schedule_owner: ScheduleOwner::Coordinator,
+            schedule: UnsafeCell::new(ThreadScheduleState {
+                placement: ThreadPlacement::pinned(cpu_index),
+                scheduling: SchedulingPolicy::fair(),
+                fair_runtime: FairRuntime::NEW,
+                deferred_fifo_placement: None,
+                state: ThreadState::Running,
+                ready_queue_links: QueueLinks::EMPTY,
+                wait: WaitRecord::NEW,
+                pending_migration: None,
+            }),
+            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            resources: Self::allocate_resources(
+                crate::hal::context::ThreadContext::empty(),
+                Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
+                ThreadExecution::Kernel,
+            )?,
         })
     }
 
@@ -440,21 +579,30 @@ impl Thread {
         let mut scheduling_context = crate::hal::context::ThreadContext::empty();
         scheduling_context.prepare_vcpu(stack.top(), entry, 0);
         Ok(Self {
-            id,
-            placement: ThreadPlacement::prefer(cpu_index),
-            name: ThreadName::new(name)?,
-            scheduling: SchedulingPolicy::fair(),
-            fair_runtime: FairRuntime::NEW,
-            deferred_fifo_placement: None,
-            state: ThreadState::Dormant,
-            queue_links: QueueLinks::EMPTY,
-            wait: WaitRecord::NEW,
-            pending_migration: None,
-            context: scheduling_context,
-            kernel_stack: Some(stack),
-            execution: ThreadExecution::Vcpu(
-                hyper::mm::try_box(execution).map_err(|_| Error::Allocation)?,
-            ),
+            identity: ThreadIdentity {
+                id,
+                name: ThreadName::new(name)?,
+            },
+            schedule_owner: ScheduleOwner::Coordinator,
+            schedule: UnsafeCell::new(ThreadScheduleState {
+                placement: ThreadPlacement::prefer(cpu_index),
+                scheduling: SchedulingPolicy::fair(),
+                fair_runtime: FairRuntime::NEW,
+                deferred_fifo_placement: None,
+                state: ThreadState::Dormant,
+                ready_queue_links: QueueLinks::EMPTY,
+                wait: WaitRecord::NEW,
+                pending_migration: None,
+            }),
+            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            resources: Self::allocate_resources(
+                scheduling_context,
+                Some(stack),
+                ThreadExecution::Vcpu(
+                    hyper::mm::try_box(UnsafeCell::new(execution))
+                        .map_err(|_| Error::Allocation)?,
+                ),
+            )?,
         })
     }
 
@@ -463,7 +611,7 @@ impl Thread {
         cpu_index: CpuIndex,
         affinity: crate::kernel::task::policy::CpuMask,
         name: &str,
-        execution: Box<crate::kernel::process::UserExecution>,
+        execution: Box<UnsafeCell<crate::kernel::process::UserExecution>>,
         entry: KernelThreadEntry,
     ) -> Result<Self, Error> {
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
@@ -472,267 +620,388 @@ impl Thread {
         let placement = ThreadPlacement::movable_with_affinity(cpu_index, affinity)
             .ok_or(Error::InvalidPlacement)?;
         Ok(Self {
-            id,
-            placement,
-            name: ThreadName::new(name)?,
-            scheduling: SchedulingPolicy::fair(),
-            fair_runtime: FairRuntime::NEW,
-            deferred_fifo_placement: None,
-            state: ThreadState::Dormant,
-            queue_links: QueueLinks::EMPTY,
-            wait: WaitRecord::NEW,
-            pending_migration: None,
-            context,
-            kernel_stack: Some(stack),
-            execution: ThreadExecution::User(execution),
+            identity: ThreadIdentity {
+                id,
+                name: ThreadName::new(name)?,
+            },
+            schedule_owner: ScheduleOwner::Coordinator,
+            schedule: UnsafeCell::new(ThreadScheduleState {
+                placement,
+                scheduling: SchedulingPolicy::fair(),
+                fair_runtime: FairRuntime::NEW,
+                deferred_fifo_placement: None,
+                state: ThreadState::Dormant,
+                ready_queue_links: QueueLinks::EMPTY,
+                wait: WaitRecord::NEW,
+                pending_migration: None,
+            }),
+            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            resources: Self::allocate_resources(
+                context,
+                Some(stack),
+                ThreadExecution::User(execution),
+            )?,
         })
     }
 
     pub const fn id(&self) -> ThreadId {
-        self.id
+        self.identity.id
+    }
+
+    fn stored_schedule(&self) -> &ThreadScheduleState {
+        if self.schedule_owner != ScheduleOwner::Coordinator {
+            crate::hal::cpu::halt();
+        }
+        // SAFETY: coordinator access is serialized by TransitionLock, and a
+        // Cpu owner is rejected before the cell is dereferenced.
+        unsafe { &*self.schedule.get() }
+    }
+
+    fn stored_schedule_mut(&mut self) -> &mut ThreadScheduleState {
+        if self.schedule_owner != ScheduleOwner::Coordinator {
+            crate::hal::cpu::halt();
+        }
+        self.schedule.get_mut()
+    }
+
+    pub(super) fn with_coordinator_schedule_mut<R>(
+        &mut self,
+        operation: impl FnOnce(&mut ThreadScheduleState) -> R,
+    ) -> R {
+        operation(self.stored_schedule_mut())
+    }
+
+    /// Transfers one coordinator-owned schedule into a CPU scheduling domain.
+    pub(super) fn claim_schedule(&mut self, cpu: CpuIndex) -> bool {
+        if self.schedule_owner != ScheduleOwner::Coordinator {
+            return false;
+        }
+        let schedule = self.schedule.get_mut();
+        if schedule.placement.assigned_cpu() != cpu
+            || !matches!(schedule.state, ThreadState::Running | ThreadState::Idle)
+            || schedule.ready_queue_links.membership != QueueMembership::None
+        {
+            return false;
+        }
+        self.schedule_owner = ScheduleOwner::Cpu(cpu);
+        true
+    }
+
+    /// Returns a CPU-owned schedule to the coordinator after it is absent
+    /// from that CPU's current and ready ownership structures.
+    pub(super) fn release_schedule(&mut self, cpu: CpuIndex) -> bool {
+        if self.schedule_owner != ScheduleOwner::Cpu(cpu) {
+            return false;
+        }
+        self.schedule_owner = ScheduleOwner::Coordinator;
+        true
+    }
+
+    /// Accesses CPU-owned schedule state under the matching CPU lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold CPU `cpu`'s scheduler lock and must have
+    /// revalidated `schedule_owner_cpu() == Some(cpu)` after acquiring it.
+    pub(super) unsafe fn with_cpu_schedule<R>(
+        &self,
+        cpu: CpuIndex,
+        operation: impl FnOnce(&ThreadScheduleState) -> R,
+    ) -> Option<R> {
+        if self.schedule_owner != ScheduleOwner::Cpu(cpu) {
+            return None;
+        }
+        // SAFETY: guaranteed by the caller's matching CPU-lock authority.
+        Some(operation(unsafe { &*self.schedule.get() }))
+    }
+
+    /// Mutably accesses CPU-owned schedule state under the matching CPU lock.
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold CPU `cpu`'s scheduler lock exclusively and must
+    /// have revalidated the owner locator after acquiring it.
+    pub(super) unsafe fn with_cpu_schedule_mut<R>(
+        &self,
+        cpu: CpuIndex,
+        operation: impl FnOnce(&mut ThreadScheduleState) -> R,
+    ) -> Option<R> {
+        if self.schedule_owner != ScheduleOwner::Cpu(cpu) {
+            return None;
+        }
+        // SAFETY: guaranteed by the caller's matching CPU-lock authority.
+        Some(operation(unsafe { &mut *self.schedule.get() }))
+    }
+
+    /// Commits coordinator-owned state to one ready queue.
+    ///
+    /// Queue code performs every fallible topology check before this operation;
+    /// failure therefore indicates an internal transaction bug and must not be
+    /// recovered after neighboring links have changed.
+    pub(super) fn publish_ready_ownership(&mut self, cpu: CpuIndex, links: QueueLinks) -> bool {
+        if links.membership
+            != match links.membership {
+                QueueMembership::ReadyRealTime { priority, .. } => {
+                    QueueMembership::ReadyRealTime { cpu, priority }
+                }
+                QueueMembership::ReadyFair { .. } => QueueMembership::ReadyFair { cpu },
+                _ => return false,
+            }
+        {
+            return false;
+        }
+        if self.schedule_owner != ScheduleOwner::Coordinator {
+            return false;
+        }
+        let schedule = self.schedule.get_mut();
+        if schedule.ready_queue_links.membership != QueueMembership::None
+            || self.control_queue_links.get_mut().membership != QueueMembership::None
+        {
+            return false;
+        }
+        schedule.ready_queue_links = links;
+        schedule.state = ThreadState::Ready;
+        self.schedule_owner = ScheduleOwner::Cpu(cpu);
+        true
     }
 
     /// Returns the CPU that owns this thread's scheduling context.
     ///
     /// Assignment changes only through the scheduler's stopped-thread handoff.
-    pub const fn cpu_index(&self) -> CpuIndex {
-        self.placement.assigned_cpu()
+    pub fn cpu_index(&self) -> CpuIndex {
+        self.stored_schedule().placement.assigned_cpu()
     }
 
-    pub(super) const fn affinity(&self) -> crate::kernel::task::policy::CpuMask {
-        self.placement.affinity()
+    pub(super) fn affinity(&self) -> crate::kernel::task::policy::CpuMask {
+        self.stored_schedule().placement.affinity()
     }
 
-    pub(super) const fn placement_policy(&self) -> crate::kernel::task::policy::PlacementPolicy {
-        self.placement.policy()
-    }
-
-    /// Checks the placement constraint independently of current assignment.
-    pub(super) const fn can_run_on(&self, cpu: CpuIndex) -> bool {
-        self.placement.affinity().contains(cpu)
+    pub(super) fn placement_policy(&self) -> crate::kernel::task::policy::PlacementPolicy {
+        self.stored_schedule().placement.policy()
     }
 
     pub fn name(&self) -> &str {
-        self.name.as_str()
+        self.identity.name.as_str()
     }
 
-    pub const fn state(&self) -> ThreadState {
-        self.state
+    pub fn state(&self) -> ThreadState {
+        self.stored_schedule().state
     }
 
-    pub(crate) const fn scheduling_policy(&self) -> SchedulingPolicy {
-        self.scheduling
+    pub(crate) fn scheduling_policy(&self) -> SchedulingPolicy {
+        self.stored_schedule().scheduling
     }
 
-    pub(crate) const fn scheduling_class(&self) -> SchedulingClass {
-        self.scheduling.class()
+    pub(crate) fn scheduling_class(&self) -> SchedulingClass {
+        self.stored_schedule().scheduling.class()
     }
 
-    pub const fn priority(&self) -> Option<ThreadPriority> {
-        self.scheduling.priority()
+    pub fn priority(&self) -> Option<ThreadPriority> {
+        self.stored_schedule().scheduling.priority()
     }
 
     pub(super) fn set_scheduling_policy(&mut self, policy: SchedulingPolicy) -> bool {
         if self.scheduling_class() == SchedulingClass::Idle {
             return false;
         }
-        self.scheduling = policy;
-        self.fair_runtime = FairRuntime::NEW;
-        self.deferred_fifo_placement = None;
+        let schedule = self.stored_schedule_mut();
+        schedule.scheduling = policy;
+        schedule.fair_runtime = FairRuntime::NEW;
+        schedule.deferred_fifo_placement = None;
         true
-    }
-
-    pub(super) fn account_fair_ticks(&mut self, elapsed: u64, quantum: u64) -> bool {
-        if self.scheduling_class() != SchedulingClass::Fair {
-            return false;
-        }
-        if self.fair_runtime.slice_remaining == 0 {
-            self.fair_runtime.slice_remaining = quantum;
-        }
-        self.fair_runtime.slice_remaining =
-            self.fair_runtime.slice_remaining.saturating_sub(elapsed);
-        self.fair_runtime.slice_remaining == 0
-    }
-
-    pub(super) fn replenish_fair_slice(&mut self, quantum: u64) {
-        self.fair_runtime.slice_remaining = quantum;
     }
 
     pub(super) fn fair_slice_expired(&self) -> bool {
-        self.scheduling_class() == SchedulingClass::Fair && self.fair_runtime.slice_remaining == 0
+        let schedule = self.stored_schedule();
+        schedule.scheduling.class() == SchedulingClass::Fair
+            && schedule.fair_runtime.slice_remaining == 0
     }
 
-    pub(super) fn set_deferred_fifo_placement(&mut self, placement: Option<DeferredFifoPlacement>) {
-        self.deferred_fifo_placement = placement;
+    pub(super) fn deferred_fifo_placement(&self) -> Option<DeferredFifoPlacement> {
+        self.stored_schedule().deferred_fifo_placement
     }
 
-    pub(super) const fn deferred_fifo_placement(&self) -> Option<DeferredFifoPlacement> {
-        self.deferred_fifo_placement
+    pub(super) fn queue_links(&self) -> QueueLinks {
+        // SAFETY: coordinator schedule access is legal only under the global
+        // transition authority, which also owns the control-link cell.
+        unsafe { self.combined_queue_links(self.stored_schedule().ready_queue_links) }
     }
 
-    pub(super) fn become_idle(&mut self) {
-        self.scheduling = SchedulingPolicy::Idle;
-        self.state = ThreadState::Idle;
-    }
-
-    pub(super) fn set_state(&mut self, state: ThreadState) {
-        self.state = state;
-    }
-
-    pub(super) fn mark_running_on(&mut self, cpu: CpuIndex) -> bool {
-        let Some(placement) = self.placement.mark_running(cpu) else {
-            return false;
-        };
-        self.placement = placement;
-        self.deferred_fifo_placement = None;
-        self.state = ThreadState::Running;
-        true
-    }
-
-    pub(super) fn replace_affinity(
-        &mut self,
-        affinity: crate::kernel::task::policy::CpuMask,
-    ) -> bool {
-        let Some(placement) = self.placement.with_affinity(affinity) else {
-            return false;
-        };
-        self.placement = placement;
-        true
-    }
-
-    /// Applies an affinity and assignment change after the context is stopped.
-    pub(super) fn reassign_stopped_with_affinity(
-        &mut self,
-        cpu: CpuIndex,
-        affinity: crate::kernel::task::policy::CpuMask,
-    ) -> bool {
-        let Some(placement) = self.placement.reassign_with_affinity(cpu, affinity) else {
-            return false;
-        };
-        self.placement = placement;
-        true
-    }
-
-    pub(super) const fn queue_links(&self) -> QueueLinks {
-        self.queue_links
-    }
-
-    pub(super) fn set_queue_links(&mut self, links: QueueLinks) {
-        self.queue_links = links;
-    }
-
-    pub(super) const fn wait_record(&self) -> &WaitRecord {
-        &self.wait
-    }
-
-    pub(super) const fn wait_record_mut(&mut self) -> &mut WaitRecord {
-        &mut self.wait
-    }
-
-    pub(super) const fn pending_migration(&self) -> Option<MigrationRequest> {
-        self.pending_migration
-    }
-
-    pub(super) fn request_migration(&mut self, request: MigrationRequest) -> bool {
-        match self.pending_migration {
-            Some(existing) => existing == request,
-            None => {
-                self.pending_migration = Some(request);
-                true
-            }
+    /// Combines disjoint ready and control topology under transition authority.
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold the global `TransitionLock`. A CPU lock alone does
+    /// not authorize reading the control-link cell.
+    pub(super) unsafe fn combined_queue_links(&self, ready: QueueLinks) -> QueueLinks {
+        // SAFETY: inherited from this method's caller contract.
+        let control = unsafe { self.control_queue_links() };
+        match (ready.membership, control.membership) {
+            (QueueMembership::None, _) => control,
+            (_, QueueMembership::None) => ready,
+            _ => crate::hal::cpu::halt(),
         }
     }
 
-    pub(super) fn take_migration_request(&mut self) -> Option<MigrationRequest> {
-        self.pending_migration.take()
+    pub(super) fn table_owned_ready_queue_links(&self) -> Option<QueueLinks> {
+        match self.schedule_owner {
+            ScheduleOwner::Coordinator => Some(self.stored_schedule().ready_queue_links),
+            ScheduleOwner::Cpu(_) => None,
+        }
     }
 
-    pub fn context(&self) -> &crate::hal::context::ThreadContext {
-        &self.context
+    /// Returns links owned exclusively by the transition coordinator.
+    pub(super) unsafe fn control_queue_links(&self) -> QueueLinks {
+        // SAFETY: the caller holds TransitionLock control authority and the
+        // cell is disjoint from schedule.
+        unsafe { *self.control_queue_links.get() }
     }
 
-    pub(super) fn context_mut(&mut self) -> &mut crate::hal::context::ThreadContext {
-        &mut self.context
+    /// Mutates transition-coordinator queue topology without borrowing a
+    /// CPU-owned schedule.
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold the registry's unique control-queue authority.
+    pub(super) unsafe fn with_control_queue_links_mut<R>(
+        &self,
+        operation: impl FnOnce(&mut QueueLinks) -> R,
+    ) -> R {
+        // SAFETY: guaranteed by the caller's linear control authority.
+        operation(unsafe { &mut *self.control_queue_links.get() })
     }
 
-    pub const fn execution_kind(&self) -> ExecutionKind {
-        match self.execution {
+    pub(super) fn wait_record(&self) -> &WaitRecord {
+        &self.stored_schedule().wait
+    }
+
+    pub(super) fn pending_migration(&self) -> Option<MigrationRequest> {
+        self.stored_schedule().pending_migration
+    }
+
+    /// Returns the stable machine-context address without minting a Rust borrow.
+    ///
+    /// The scheduler's switch protocol exclusively owns mutation from switch
+    /// preparation until the incoming tail retires `switching_from`.
+    pub(super) fn context_pointer(&self) -> *mut crate::hal::context::ThreadContext {
+        self.resources.context.get()
+    }
+
+    pub fn execution_kind(&self) -> ExecutionKind {
+        match self.resources.execution {
             ThreadExecution::Kernel => ExecutionKind::Kernel,
             ThreadExecution::Vcpu(_) => ExecutionKind::Vcpu,
             ThreadExecution::User(_) => ExecutionKind::User,
         }
     }
 
-    pub fn vcpu_execution(&self) -> Option<&VcpuExecution> {
-        match &self.execution {
-            ThreadExecution::Vcpu(execution) => Some(execution.as_ref()),
+    /// Returns the stable vCPU payload address without creating `&mut`.
+    ///
+    /// Current-vCPU admission and hardware ownership serialize all dereference
+    /// of this pointer. Repeated scheduler queries therefore cannot invalidate
+    /// a previously issued raw capability by retagging an exclusive reference.
+    pub(super) fn vcpu_execution_pointer(&self) -> Option<*mut VcpuExecution> {
+        match &self.resources.execution {
+            ThreadExecution::Vcpu(execution) => Some(execution.get()),
             _ => None,
         }
     }
 
-    pub(super) fn vcpu_execution_mut(&mut self) -> Option<&mut VcpuExecution> {
-        match &mut self.execution {
-            ThreadExecution::Vcpu(execution) => Some(execution.as_mut()),
+    /// Returns the stable user payload address through a shared reference.
+    ///
+    /// `UserExecution` confines machine-register mutation to its own
+    /// `UnsafeCell`; scheduler identity and lifecycle observation are shared.
+    pub(super) fn user_execution_pointer(
+        &self,
+    ) -> Option<core::ptr::NonNull<crate::kernel::process::UserExecution>> {
+        match &self.resources.execution {
+            ThreadExecution::User(execution) => core::ptr::NonNull::new(execution.get()),
             _ => None,
         }
     }
 
     pub(crate) fn user_execution(&self) -> Option<&crate::kernel::process::UserExecution> {
-        match &self.execution {
-            ThreadExecution::User(execution) => Some(execution.as_ref()),
+        match &self.resources.execution {
+            // SAFETY: running UserExecution mutates only its internal machine
+            // context cell. Whole-object mutation is restricted to dormant or
+            // stopped ownership below, where no shared pointer is live.
+            ThreadExecution::User(execution) => Some(unsafe { &*execution.get() }),
             _ => None,
         }
     }
 
-    pub(super) fn user_execution_mut(
-        &mut self,
-    ) -> Option<&mut crate::kernel::process::UserExecution> {
-        match &mut self.execution {
-            ThreadExecution::User(execution) => Some(execution.as_mut()),
-            _ => None,
+    /// Arms a dormant user payload before its first scheduler publication.
+    pub(super) fn arm_user_execution(&mut self) -> bool {
+        match &mut self.resources.execution {
+            ThreadExecution::User(execution) => {
+                execution.get_mut().arm_after_process_publication();
+                true
+            }
+            _ => false,
         }
     }
 
+    /// Extracts user ownership only after the scheduler proved context stop.
     pub(super) fn take_user_execution(
         &mut self,
-    ) -> Option<Box<crate::kernel::process::UserExecution>> {
-        if !matches!(self.execution, ThreadExecution::User(_)) {
+    ) -> Option<Box<UnsafeCell<crate::kernel::process::UserExecution>>> {
+        if !matches!(self.resources.execution, ThreadExecution::User(_)) {
             return None;
         }
-        match core::mem::replace(&mut self.execution, ThreadExecution::Kernel) {
+        match core::mem::replace(&mut self.resources.execution, ThreadExecution::Kernel) {
             ThreadExecution::User(execution) => Some(execution),
             _ => crate::hal::cpu::halt(),
         }
     }
 
+    pub(super) fn take_vcpu_reap_publication(
+        &mut self,
+    ) -> Option<crate::kernel::vm::registry::VcpuReapPublication> {
+        match &mut self.resources.execution {
+            // `detach_terminated` proved no CPU or switch tail owns this
+            // payload, so the cell's unique owner may safely use `get_mut`.
+            ThreadExecution::Vcpu(execution) => execution.get_mut().take_reap_publication(),
+            _ => None,
+        }
+    }
+
     pub const fn owns_kernel_stack(&self) -> bool {
-        self.kernel_stack.is_some()
+        self.resources.kernel_stack.is_some()
     }
 
     pub(super) fn ensure_kernel_stack(&mut self) -> Result<(usize, usize), Error> {
-        if self.kernel_stack.is_none() {
-            self.kernel_stack =
+        if self.resources.kernel_stack.is_none() {
+            self.resources.kernel_stack =
                 Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?);
         }
         self.kernel_stack_bounds().ok_or(Error::Allocation)
     }
 
     pub(super) fn kernel_stack_top(&self) -> Option<usize> {
-        self.kernel_stack.as_ref().map(KernelStack::top)
+        self.resources.kernel_stack.as_ref().map(KernelStack::top)
     }
 
     pub(super) fn kernel_stack_physical_top(&self) -> Option<u64> {
-        self.kernel_stack.as_ref().map(KernelStack::physical_top)
+        self.resources
+            .kernel_stack
+            .as_ref()
+            .map(KernelStack::physical_top)
     }
 
     pub(super) fn kernel_stack_bounds(&self) -> Option<(usize, usize)> {
-        self.kernel_stack.as_ref().map(KernelStack::bounds)
+        self.resources
+            .kernel_stack
+            .as_ref()
+            .map(KernelStack::bounds)
     }
 
     pub(super) fn kernel_stack_statistics(
         &self,
     ) -> Option<crate::kernel::mm::stack::StackStatistics> {
-        self.kernel_stack.as_ref().map(KernelStack::statistics)
+        self.resources
+            .kernel_stack
+            .as_ref()
+            .map(KernelStack::statistics)
     }
 }
 

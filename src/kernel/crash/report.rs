@@ -20,7 +20,7 @@ pub(super) struct StopSummary {
     pub(super) sent: bool,
 }
 
-pub(super) fn emit_banner(cpu: usize, reason: &str, stop: StopSummary) {
+pub(super) fn emit_banner(cpu: usize, reason: &str, reason_was_truncated: bool, stop: StopSummary) {
     super::super::log::emergency(format_args!(
         "============================================================"
     ));
@@ -30,6 +30,9 @@ pub(super) fn emit_banner(cpu: usize, reason: &str, stop: StopSummary) {
     ));
     super::super::log::emergency(format_args!("BUG: fatal kernel failure on CPU {cpu}"));
     super::super::log::emergency(format_args!("{reason}"));
+    if reason_was_truncated {
+        super::super::log::emergency(format_args!("[crash reason truncated]"));
+    }
     if stop.expected == 0 {
         super::super::log::emergency(format_args!("SMP: no other online CPUs"));
     } else if !stop.sent {

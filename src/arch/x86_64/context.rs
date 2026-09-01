@@ -139,7 +139,8 @@ unsafe extern "C" {
         previous: *mut ThreadContext,
         next: *const ThreadContext,
         previous_interrupt_state: usize,
-        completion: extern "C" fn(),
+        completion: extern "C" fn(usize),
+        completion_ticket: usize,
     );
     fn x86_64_thread_trampoline();
     fn x86_64_reset_stack_and_enter(
@@ -164,10 +165,19 @@ pub unsafe fn switch_thread_context(
     previous: *mut ThreadContext,
     next: *const ThreadContext,
     previous_interrupt_state: usize,
-    completion: extern "C" fn(),
+    completion: extern "C" fn(usize),
+    completion_ticket: usize,
 ) {
     // SAFETY: The caller establishes ownership and lifetime for both contexts.
-    unsafe { x86_64_switch_context(previous, next, previous_interrupt_state, completion) };
+    unsafe {
+        x86_64_switch_context(
+            previous,
+            next,
+            previous_interrupt_state,
+            completion,
+            completion_ticket,
+        )
+    };
 }
 
 /// Restores the timer side of the local interrupt-enable contract.

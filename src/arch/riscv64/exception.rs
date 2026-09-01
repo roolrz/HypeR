@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use core::arch::asm;
+use core::mem::{align_of, offset_of, size_of};
 
-use hyper::hal::interrupt::{EntryAction, InterruptId};
+use hyper::hal::interrupt::{EntryAction, InterruptId, InterruptOrigin};
 use hyper::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
@@ -229,8 +230,8 @@ unsafe extern "C" {
     fn riscv64_call_trap_on_stack(
         frame: *mut TrapFrame,
         stack_top: usize,
-        callback: extern "C" fn(&mut TrapFrame),
-    );
+        callback: extern "C" fn(&mut TrapFrame) -> TrapAction,
+    ) -> TrapAction;
 }
 
 /// Installs the runtime trap vector on the current hart.
@@ -319,11 +320,80 @@ pub(crate) struct TrapFrame {
     pub(crate) htval: u64,
     pub(crate) htinst: u64,
     guest_origin: u64,
+    guest_anchor_return: u64,
     host_cpu_index: u64,
+    guest_context: u64,
 }
 
+impl TrapFrame {
+    /// Returns the assembly-published vCPU context address for guest-only
+    /// completion code. The value is copied so no context borrow crosses the
+    /// kernel-policy dispatch performed by the architecture entry path.
+    pub(crate) const fn guest_context_address(&self) -> usize {
+        self.guest_context as usize
+    }
+}
+
+#[repr(C)]
+struct TrapAction {
+    kind: u64,
+    target: usize,
+}
+
+impl TrapAction {
+    const RESUME: Self = Self {
+        kind: super::registers::TRAP_ACTION_RESUME,
+        target: 0,
+    };
+
+    fn postlude(target: unsafe extern "C" fn()) -> Self {
+        Self {
+            kind: super::registers::TRAP_ACTION_POSTLUDE,
+            target: target as usize,
+        }
+    }
+
+    fn anchor_irq_tail(target: unsafe extern "C" fn()) -> Self {
+        Self {
+            kind: super::registers::TRAP_ACTION_ANCHOR_IRQ_TAIL,
+            target: target as usize,
+        }
+    }
+}
+
+const _: () = {
+    assert!(offset_of!(TrapFrame, general) == super::registers::TRAP_FRAME_GENERAL_OFFSET as usize);
+    assert!(offset_of!(TrapFrame, sepc) == super::registers::TRAP_FRAME_SEPC_OFFSET as usize);
+    assert!(offset_of!(TrapFrame, sstatus) == super::registers::TRAP_FRAME_SSTATUS_OFFSET as usize);
+    assert!(offset_of!(TrapFrame, scause) == super::registers::TRAP_FRAME_SCAUSE_OFFSET as usize);
+    assert!(offset_of!(TrapFrame, stval) == super::registers::TRAP_FRAME_STVAL_OFFSET as usize);
+    assert!(offset_of!(TrapFrame, htval) == super::registers::TRAP_FRAME_HTVAL_OFFSET as usize);
+    assert!(offset_of!(TrapFrame, htinst) == super::registers::TRAP_FRAME_HTINST_OFFSET as usize);
+    assert!(
+        offset_of!(TrapFrame, guest_origin)
+            == super::registers::TRAP_FRAME_GUEST_ORIGIN_OFFSET as usize
+    );
+    assert!(
+        offset_of!(TrapFrame, guest_anchor_return)
+            == super::registers::TRAP_FRAME_GUEST_ANCHOR_RETURN_OFFSET as usize
+    );
+    assert!(
+        offset_of!(TrapFrame, host_cpu_index)
+            == super::registers::TRAP_FRAME_HOST_CPU_INDEX_OFFSET as usize
+    );
+    assert!(
+        offset_of!(TrapFrame, guest_context)
+            == super::registers::TRAP_FRAME_GUEST_CONTEXT_OFFSET as usize
+    );
+    assert!(align_of::<TrapFrame>() == 16);
+    assert!(size_of::<TrapFrame>() == super::registers::TRAP_FRAME_SIZE as usize);
+    assert!(size_of::<TrapAction>() == 16);
+    assert!(offset_of!(TrapAction, kind) == 0);
+    assert!(offset_of!(TrapAction, target) == 8);
+};
+
 #[unsafe(no_mangle)]
-extern "C" fn riscv64_trap_dispatch(frame: &mut TrapFrame) {
+extern "C" fn riscv64_trap_dispatch(frame: &mut TrapFrame) -> TrapAction {
     const INTERRUPT: u64 = 1 << 63;
     if frame.scause & INTERRUPT != 0 {
         let cpu = super::current_cpu_index();
@@ -336,16 +406,24 @@ extern "C" fn riscv64_trap_dispatch(frame: &mut TrapFrame) {
             // SAFETY: Per-CPU IRQ-stack installation validates these bounds.
             // Hardware masks S-mode interrupts on trap entry, so this CPU is
             // the exclusive owner until the callback returns.
-            unsafe {
+            return unsafe {
                 riscv64_call_trap_on_stack(core::ptr::from_mut(frame), bounds.top, dispatch_trap)
             };
-            return;
         }
     }
-    dispatch_trap(frame);
+    dispatch_trap(frame)
 }
 
-extern "C" fn dispatch_trap(frame: &mut TrapFrame) {
+#[unsafe(no_mangle)]
+extern "C" fn riscv64_invalid_trap_action(frame: &TrapFrame, kind: u64, target: usize) -> ! {
+    let context = trap_crash_context(frame);
+    crate::arch::exception::fatal(
+        context,
+        format_args!("invalid RISC-V trap action: kind {kind:#x}, target {target:#x}"),
+    )
+}
+
+extern "C" fn dispatch_trap(frame: &mut TrapFrame) -> TrapAction {
     const INTERRUPT: u64 = 1 << 63;
     const SUPERVISOR_TIMER: u64 = 5;
     const SUPERVISOR_EXTERNAL: u64 = 9;
@@ -354,27 +432,30 @@ extern "C" fn dispatch_trap(frame: &mut TrapFrame) {
         match frame.scause & !INTERRUPT {
             SUPERVISOR_SOFTWARE => {
                 super::interrupts::clear_software_interrupt();
-                crate::arch::irq::service_kernel_rpc();
-            }
-            SUPERVISOR_TIMER => {
                 dispatch_irq_action(
                     frame,
-                    crate::arch::irq::dispatch_entry(InterruptId::new(0), None),
-                );
+                    crate::arch::irq::service_kernel_rpc_interrupt(interrupt_origin(frame)),
+                )
             }
+            SUPERVISOR_TIMER => dispatch_irq_action(
+                frame,
+                crate::arch::irq::dispatch_entry(InterruptId::new(0), interrupt_origin(frame)),
+            ),
             SUPERVISOR_EXTERNAL => {
-                if let Some(action) = crate::arch::irq::claim_and_dispatch_external_entry() {
-                    dispatch_irq_action(frame, action);
+                if let Some(action) =
+                    crate::arch::irq::claim_and_dispatch_external_entry(interrupt_origin(frame))
+                {
+                    return dispatch_irq_action(frame, action);
                 }
+                TrapAction::RESUME
             }
             _ => fatal_trap(frame),
         }
-        return;
+    } else if frame.guest_origin != 0 && super::guest::dispatch(frame) {
+        TrapAction::RESUME
+    } else {
+        fatal_trap(frame)
     }
-    if frame.guest_origin != 0 && super::guest::dispatch(frame) {
-        return;
-    }
-    fatal_trap(frame)
 }
 
 fn fatal_trap(frame: &TrapFrame) -> ! {
@@ -388,14 +469,51 @@ fn fatal_trap(frame: &TrapFrame) -> ! {
     )
 }
 
-fn dispatch_irq_action(frame: &TrapFrame, action: EntryAction) {
+fn interrupt_origin(frame: &TrapFrame) -> InterruptOrigin {
+    if frame.guest_origin != 0 && frame.guest_anchor_return != 0 {
+        InterruptOrigin::Guest
+    } else {
+        InterruptOrigin::Host
+    }
+}
+
+fn dispatch_irq_action(frame: &mut TrapFrame, action: EntryAction) -> TrapAction {
     match action {
         EntryAction::Resume { postlude } => {
-            // This architecture retains the request for a cooperative point
-            // until it provides a qualified IRQ-tail continuation.
-            let _ = postlude;
+            let Some(postlude) = postlude else {
+                return TrapAction::RESUME;
+            };
+            if frame.guest_origin != 0 && frame.guest_anchor_return != 0 {
+                capture_guest_irq_tail(frame);
+                TrapAction::anchor_irq_tail(postlude)
+            } else {
+                TrapAction::postlude(postlude)
+            }
+        }
+        EntryAction::StopGuest { postlude } => {
+            let Some(postlude) = postlude else {
+                crate::arch::irq::stop_entry(trap_crash_context(frame))
+            };
+            if frame.guest_origin == 0 || frame.guest_anchor_return == 0 {
+                crate::arch::irq::stop_entry(trap_crash_context(frame))
+            }
+            capture_guest_irq_tail(frame);
+            TrapAction::anchor_irq_tail(postlude)
         }
         EntryAction::Stop => crate::arch::irq::stop_entry(trap_crash_context(frame)),
+    }
+}
+
+fn capture_guest_irq_tail(frame: &mut TrapFrame) {
+    let context = frame.guest_context as *mut super::VcpuContext;
+    if context.is_null() || !context.is_aligned() {
+        crate::arch::irq::stop_entry(trap_crash_context(frame))
+    }
+    // SAFETY: Assembly copied this pointer from the complete live HS anchor.
+    // Guest entry retains no Rust reference, all guest floating state is
+    // already stored, and local interrupts remain masked.
+    if unsafe { (&mut *context).capture_irq_tail(&frame.general, frame.sepc) }.is_err() {
+        crate::arch::irq::stop_entry(trap_crash_context(frame))
     }
 }
 

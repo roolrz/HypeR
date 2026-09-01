@@ -21,8 +21,14 @@ pub(super) enum Error {
     IrqStackMismatch,
     PageAccountingUnavailable,
     Quiescence(super::support::QuiescenceError),
-    StackPageAllocation,
-    StackPageRetirement,
+    StackPageAllocation {
+        expected: usize,
+        observed: usize,
+    },
+    StackPageRetirement {
+        expected: usize,
+        observed: usize,
+    },
     #[cfg(CONFIG_ARCH_X86_64)]
     ShootdownMissing,
     Scheduler(scheduler::Error),
@@ -121,7 +127,10 @@ fn validate_thread_stack() -> Result<(), Error> {
     let expected_pages =
         hyper::config::KERNEL_STACK_SIZE_KB as usize * 1024 / hyper::mm::PAGE_SIZE as usize;
     if allocated_pages != baseline_pages + expected_pages {
-        return Err(Error::StackPageAllocation);
+        return Err(Error::StackPageAllocation {
+            expected: baseline_pages + expected_pages,
+            observed: allocated_pages,
+        });
     }
     if statistics.used < 8 * 1024 || !statistics.canary_intact {
         return Err(Error::StackUsageMissing);
@@ -137,7 +146,10 @@ fn validate_thread_stack() -> Result<(), Error> {
         .kernel_pages
         .pages;
     if final_pages != baseline_pages {
-        return Err(Error::StackPageRetirement);
+        return Err(Error::StackPageRetirement {
+            expected: baseline_pages,
+            observed: final_pages,
+        });
     }
     #[cfg(CONFIG_ARCH_X86_64)]
     if crate::hal::memory::stage1_shootdown_count_for_test() <= shootdown_baseline {

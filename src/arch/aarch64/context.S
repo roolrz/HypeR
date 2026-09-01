@@ -36,6 +36,7 @@ aarch64_switch_context:
     mov     x19, x1
     ldr     x2, [x19, #THREAD_CONTEXT_SP_OFFSET]
     mov     sp, x2
+    mov     x0, x4
     blr     x3
     mov     x1, x19
 
@@ -319,15 +320,33 @@ aarch64_unwind_native_user:
     ret
 .size aarch64_unwind_native_user, . - aarch64_unwind_native_user
 
-.global aarch64_enter_guest
-.type aarch64_enter_guest, %function
-aarch64_enter_guest:
+.global aarch64_run_guest
+.type aarch64_run_guest, %function
+aarch64_run_guest:
     // Local IRQs must stay masked until ERET. An IRQ in this trampoline would
     // replace the guest ELR_EL2/SPSR_EL2 with its host return state; vCPU
     // deactivation would then persist that host state as the guest context.
     // Keep the context pointer in x30 while the VHE host translation regime is
     // active. The heap may live in the host-only lower VA range, so no context
     // load is permitted after TGE is cleared.
+    // This frame is the only legal target of a typed guest vector unwind. Save
+    // the complete AAPCS64 host callee set before any guest register load.
+    sub     sp, sp, #GUEST_RUN_FRAME_SIZE
+    stp     x19, x20, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 0)]
+    stp     x21, x22, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 16)]
+    stp     x23, x24, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 32)]
+    stp     x25, x26, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 48)]
+    stp     x27, x28, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 64)]
+    stp     x29, x30, [sp, #GUEST_RUN_FRAME_X29_OFFSET]
+    stp     d8, d9, [sp, #(GUEST_RUN_FRAME_D8_OFFSET + 0)]
+    stp     d10, d11, [sp, #(GUEST_RUN_FRAME_D8_OFFSET + 16)]
+    stp     d12, d13, [sp, #(GUEST_RUN_FRAME_D8_OFFSET + 32)]
+    stp     d14, d15, [sp, #(GUEST_RUN_FRAME_D8_OFFSET + 48)]
+    mrs     x1, fpcr
+    str     x1, [sp, #GUEST_RUN_FRAME_FPCR_OFFSET]
+    mrs     x1, fpsr
+    str     x1, [sp, #GUEST_RUN_FRAME_FPSR_OFFSET]
+
     mov     x30, x0
 
     // FAR_EL2 is overwritten by any subsequent fault, making it a safe
@@ -339,6 +358,26 @@ aarch64_enter_guest:
     msr     elr_el2, x1
     ldr     x1, [x30, #VCPU_CONTEXT_PSTATE_OFFSET]
     msr     spsr_el2, x1
+    ldr     x1, [x30, #VCPU_CONTEXT_FPCR_OFFSET]
+    msr     fpcr, x1
+    ldr     x1, [x30, #VCPU_CONTEXT_FPSR_OFFSET]
+    msr     fpsr, x1
+    ldp     q0, q1, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 0)]
+    ldp     q2, q3, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 32)]
+    ldp     q4, q5, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 64)]
+    ldp     q6, q7, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 96)]
+    ldp     q8, q9, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 128)]
+    ldp     q10, q11, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 160)]
+    ldp     q12, q13, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 192)]
+    ldp     q14, q15, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 224)]
+    ldp     q16, q17, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 256)]
+    ldp     q18, q19, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 288)]
+    ldp     q20, q21, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 320)]
+    ldp     q22, q23, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 352)]
+    ldp     q24, q25, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 384)]
+    ldp     q26, q27, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 416)]
+    ldp     q28, q29, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 448)]
+    ldp     q30, q31, [x30, #(VCPU_CONTEXT_SIMD_OFFSET + 480)]
     ldp     x0, x1, [x30, #(VCPU_CONTEXT_X0_OFFSET + 0)]
     ldp     x2, x3, [x30, #(VCPU_CONTEXT_X0_OFFSET + 16)]
     ldp     x4, x5, [x30, #(VCPU_CONTEXT_X0_OFFSET + 32)]
@@ -364,4 +403,29 @@ aarch64_enter_guest:
     isb
     mrs     x30, far_el2
     eret
-.size aarch64_enter_guest, . - aarch64_enter_guest
+.size aarch64_run_guest, . - aarch64_run_guest
+
+// Vector entry already copied the raw frame into VcpuContext and
+// closed lower-EL ownership. This path never returns to vector restoration.
+.global aarch64_unwind_guest
+.type aarch64_unwind_guest, %function
+aarch64_unwind_guest:
+    add     sp, sp, #EXCEPTION_FRAME_SIZE
+    ldp     x19, x20, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 0)]
+    ldp     x21, x22, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 16)]
+    ldp     x23, x24, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 32)]
+    ldp     x25, x26, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 48)]
+    ldp     x27, x28, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 64)]
+    ldp     x29, x30, [sp, #GUEST_RUN_FRAME_X29_OFFSET]
+    ldp     d8, d9, [sp, #(GUEST_RUN_FRAME_D8_OFFSET + 0)]
+    ldp     d10, d11, [sp, #(GUEST_RUN_FRAME_D8_OFFSET + 16)]
+    ldp     d12, d13, [sp, #(GUEST_RUN_FRAME_D8_OFFSET + 32)]
+    ldp     d14, d15, [sp, #(GUEST_RUN_FRAME_D8_OFFSET + 48)]
+    ldr     x0, [sp, #GUEST_RUN_FRAME_FPCR_OFFSET]
+    msr     fpcr, x0
+    ldr     x0, [sp, #GUEST_RUN_FRAME_FPSR_OFFSET]
+    msr     fpsr, x0
+    add     sp, sp, #GUEST_RUN_FRAME_SIZE
+    mov     x0, #GUEST_RUN_RETURN_STOPPED
+    ret
+.size aarch64_unwind_guest, . - aarch64_unwind_guest

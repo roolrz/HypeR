@@ -3,6 +3,9 @@
 
 //! Linux guest boot policy shared by all supported instruction sets.
 
+pub(super) mod abi;
+mod selected;
+
 use hyper::mm::{BuddyError, PAGE_SIZE};
 
 use crate::kernel::task::thread::ThreadId;
@@ -50,23 +53,11 @@ impl From<hyper::vm::fdt::Error> for Error {
     }
 }
 
-impl From<crate::hal::guest::Error> for Error {
-    fn from(error: crate::hal::guest::Error) -> Self {
+impl From<abi::PayloadLoadError<crate::kernel::vm::memory::Error>> for Error {
+    fn from(error: abi::PayloadLoadError<crate::kernel::vm::memory::Error>) -> Self {
         match error {
-            crate::hal::guest::Error::AddressOverflow => Self::AddressOverflow,
-            crate::hal::guest::Error::DeviceTree(error) => Self::DeviceTree(error),
-            crate::hal::guest::Error::InvalidKernel => Self::InvalidKernel,
-            crate::hal::guest::Error::InvalidLayout => Self::InvalidLayout,
-            crate::hal::guest::Error::VirtualizationUnavailable => Self::VirtualizationUnavailable,
-        }
-    }
-}
-
-impl From<crate::hal::guest::PayloadLoadError<crate::kernel::vm::memory::Error>> for Error {
-    fn from(error: crate::hal::guest::PayloadLoadError<crate::kernel::vm::memory::Error>) -> Self {
-        match error {
-            crate::hal::guest::PayloadLoadError::Abi(error) => error.into(),
-            crate::hal::guest::PayloadLoadError::Memory(error) => Self::Memory(error),
+            abi::PayloadLoadError::Abi(error) => error,
+            abi::PayloadLoadError::Memory(error) => Self::Memory(error),
         }
     }
 }
@@ -115,7 +106,7 @@ impl From<crate::kernel::vm::VcpuInterruptError> for Error {
 
 pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     validate_guest(&guest)?;
-    let abi = crate::hal::guest::linux_abi();
+    let abi = selected::linux_abi();
     let image = guest.kernel();
     let initramfs = guest.initramfs();
     let mut reservation = crate::kernel::vm::registry::reserve()?;
@@ -127,7 +118,16 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     )?;
     let initramfs_range = layout_payload(image, initramfs, guest.memory_size())?;
 
-    crate::hal::guest::load_linux_payload(&guest, &mut address_space, initramfs_range)?;
+    let initramfs_matches_range = match (initramfs, initramfs_range) {
+        (None, None) => true,
+        (Some(bytes), Some(range)) => u64::try_from(bytes.len()).ok() == Some(range.length()),
+        _ => false,
+    };
+    if !initramfs_matches_range {
+        return Err(Error::InvalidLayout);
+    }
+
+    selected::load_linux_payload(&guest, &mut address_space, initramfs_range)?;
     // Instruction publication precedes this handoff. Each CPU observes the
     // address space's instruction epoch and performs its local synchronization
     // before the vCPU enters there, including after migration.
@@ -141,27 +141,35 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     crate::kernel::mm::report_statistics("guest prepared");
     // Both unpublished capabilities roll themselves back until registry
     // publication and scheduler ownership are committed below.
-    let builder = VmBuilder::new(reservation, address_space, interrupts, devices)?;
+    let builder = VmBuilder::new(
+        reservation,
+        address_space,
+        interrupts,
+        devices,
+        guest.vcpu_count(),
+    )?;
     let prepared = builder.prepare_boot_vcpu(0, context)?;
     let installed = prepared.install()?;
-    debug_assert_eq!(installed.id(), virtual_machine);
-    let thread = installed.boot_vcpu();
+    let (installed_id, thread, control) = installed.into_boot_parts();
+    debug_assert_eq!(installed_id, virtual_machine);
+    let _ = crate::kernel::vm::device::try_publish_console_route(installed_id, 0, thread);
+    crate::kernel::vm::lifecycle::retain_default(control);
     crate::kernel::task::scheduler::thread_ready(thread)?;
     Ok(thread)
 }
 
 fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
-    crate::hal::guest::validate_linux_host()?;
-    crate::hal::guest::describe_linux_host(|description| {
+    selected::validate_linux_host()?;
+    selected::describe_linux_host(|description| {
         crate::println!("{description}");
     });
     if guest.guest_type() != "linux" {
         return Err(Error::UnsupportedGuestType);
     }
-    if guest.architecture() != crate::hal::guest::linux_abi().architecture() {
+    if guest.architecture() != selected::linux_abi().architecture() {
         return Err(Error::UnsupportedArchitecture);
     }
-    crate::hal::guest::validate_linux_kernel(guest.kernel())?;
+    selected::validate_linux_kernel(guest.kernel())?;
     // This is also the current VM execution invariant: address-space
     // activation handles migration residency, while one exclusive execution
     // claim prevents concurrent sibling vCPUs until synchronous VM-wide
@@ -180,9 +188,9 @@ fn layout_payload(
     image: &[u8],
     initramfs: Option<&[u8]>,
     guest_ram_size: u64,
-) -> Result<Option<crate::hal::guest::PayloadRange>, Error> {
-    let abi = crate::hal::guest::linux_abi();
-    let payload_size = crate::hal::guest::linux_kernel_occupied_size(image)?;
+) -> Result<Option<abi::PayloadRange>, Error> {
+    let abi = selected::linux_abi();
+    let payload_size = selected::linux_kernel_occupied_size(image)?;
     let image_end = abi
         .kernel_load()
         .get()
@@ -194,7 +202,7 @@ fn layout_payload(
             let length = u64::try_from(bytes.len()).map_err(|_| Error::AddressOverflow)?;
             let end = start.checked_add(length).ok_or(Error::AddressOverflow)?;
             Some(
-                crate::hal::guest::PayloadRange::new(
+                abi::PayloadRange::new(
                     hyper::vm::exit::GuestPhysicalAddress::new(start),
                     hyper::vm::exit::GuestPhysicalAddress::new(end),
                 )
@@ -218,9 +226,11 @@ fn layout_payload(
 fn prepare_boot_vcpu(
     vcpu_count: u32,
 ) -> Result<(VmInterruptController, crate::hal::vm::VcpuContext), Error> {
-    let interrupts =
-        VmInterruptController::new(vcpu_count, crate::hal::guest::linux_abi().timer_interrupt())?;
-    let mut context = crate::hal::guest::prepare_linux_vcpu_context();
+    let interrupts = crate::hal::vm::create_interrupt_controller(
+        vcpu_count,
+        selected::linux_abi().timer_interrupt(),
+    )?;
+    let mut context = selected::prepare_linux_vcpu_context()?;
     crate::hal::vm::set_virtual_count(
         &mut context,
         crate::kernel::time::monotonic_ticks(),
@@ -231,7 +241,7 @@ fn prepare_boot_vcpu(
 
 fn report_guest_layout(
     guest: &VmBundle<'_>,
-    initramfs_range: Option<crate::hal::guest::PayloadRange>,
+    initramfs_range: Option<abi::PayloadRange>,
     stage2_root: u64,
     memory: crate::kernel::vm::memory::GuestMemoryStats,
 ) {
@@ -241,7 +251,7 @@ fn report_guest_layout(
         guest.initramfs().map_or(0, |bytes| bytes.len()),
         guest.memory_size() / (1024 * 1024)
     );
-    crate::hal::guest::describe_linux_layout(initramfs_range, stage2_root, |description| {
+    selected::describe_linux_guest_layout(initramfs_range, stage2_root, |description| {
         crate::println!("{description}");
     });
     crate::println!(
@@ -256,4 +266,15 @@ fn align_up(value: u64, alignment: u64) -> Result<u64, Error> {
         .checked_add(alignment - 1)
         .map(|rounded| rounded & !(alignment - 1))
         .ok_or(Error::AddressOverflow)
+}
+
+#[cfg(feature = "kernel-self-test")]
+pub(crate) const fn test_abi() -> (u64, hyper::vm::interrupt::VirtualInterruptId) {
+    let abi = selected::linux_abi();
+    (abi.ram_base().get(), abi.timer_interrupt())
+}
+
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn test_boot_context() -> Option<crate::hal::vm::VcpuContext> {
+    selected::prepare_linux_vcpu_context().ok()
 }

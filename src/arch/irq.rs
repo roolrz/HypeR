@@ -9,24 +9,30 @@
 //! interrupt virtualization belongs to `arch::vm`.
 
 use hyper::cpu::CpuIndex;
-use hyper::hal::interrupt::{EntryAction, InterruptId};
+use hyper::hal::interrupt::{EntryAction, InterruptId, InterruptOrigin};
 use hyper::sync::PublishedOnce;
 
-static KERNEL_RPC_SERVICE: PublishedOnce<fn()> = PublishedOnce::new();
+#[derive(Clone, Copy)]
+struct KernelRpcServices {
+    poll: fn(),
+    interrupt: fn(InterruptOrigin) -> EntryAction,
+}
+
+static KERNEL_RPC_SERVICES: PublishedOnce<KernelRpcServices> = PublishedOnce::new();
 
 /// Immutable kernel policy callbacks reachable from physical-interrupt entry.
 #[derive(Clone, Copy)]
 pub(crate) struct InterruptEntryServices {
-    dispatch: fn(InterruptId, Option<unsafe extern "C" fn()>) -> EntryAction,
+    dispatch: fn(InterruptId, InterruptOrigin) -> EntryAction,
     #[cfg(CONFIG_ARCH_RISCV64)]
-    claim_external: fn() -> Option<EntryAction>,
+    claim_external: fn(InterruptOrigin) -> Option<EntryAction>,
     stop: fn(super::exception::CrashContext) -> !,
 }
 
 impl InterruptEntryServices {
     pub(crate) const fn new(
-        dispatch: fn(InterruptId, Option<unsafe extern "C" fn()>) -> EntryAction,
-        #[cfg(CONFIG_ARCH_RISCV64)] claim_external: fn() -> Option<EntryAction>,
+        dispatch: fn(InterruptId, InterruptOrigin) -> EntryAction,
+        #[cfg(CONFIG_ARCH_RISCV64)] claim_external: fn(InterruptOrigin) -> Option<EntryAction>,
         stop: fn(super::exception::CrashContext) -> !,
     ) -> Self {
         Self {
@@ -66,16 +72,13 @@ fn interrupt_entry_services() -> InterruptEntryServices {
     services
 }
 
-pub(crate) fn dispatch_entry(
-    interrupt: InterruptId,
-    native_unwind: Option<unsafe extern "C" fn()>,
-) -> EntryAction {
-    (interrupt_entry_services().dispatch)(interrupt, native_unwind)
+pub(crate) fn dispatch_entry(interrupt: InterruptId, origin: InterruptOrigin) -> EntryAction {
+    (interrupt_entry_services().dispatch)(interrupt, origin)
 }
 
 #[cfg(CONFIG_ARCH_RISCV64)]
-pub(crate) fn claim_and_dispatch_external_entry() -> Option<EntryAction> {
-    (interrupt_entry_services().claim_external)()
+pub(crate) fn claim_and_dispatch_external_entry(origin: InterruptOrigin) -> Option<EntryAction> {
+    (interrupt_entry_services().claim_external)(origin)
 }
 
 pub(crate) fn stop_entry(context: super::exception::CrashContext) -> ! {
@@ -125,18 +128,28 @@ pub(crate) fn take_kernel_rpc_reasons() -> u8 {
 }
 
 /// Installs the allocation-free kernel dispatcher before its doorbell is armed.
-pub(crate) fn install_kernel_rpc_service(callback: fn()) -> Result<(), KernelRpcServiceError> {
-    KERNEL_RPC_SERVICE
-        .publish(callback)
+pub(crate) fn install_kernel_rpc_services(
+    poll: fn(),
+    interrupt: fn(InterruptOrigin) -> EntryAction,
+) -> Result<(), KernelRpcServiceError> {
+    KERNEL_RPC_SERVICES
+        .publish(KernelRpcServices { poll, interrupt })
         .map_err(|_| KernelRpcServiceError::AlreadyInstalled)
 }
 
-/// Enters the opaque kernel dispatcher from architecture-private IRQ paths.
-pub(crate) fn service_kernel_rpc() {
-    // A Kernel RPC doorbell is enabled only after installation. Seeing it
-    // earlier means entry ordering is corrupt, so fail closed.
-    let Some(callback) = KERNEL_RPC_SERVICE.get().copied() else {
+fn kernel_rpc_services() -> KernelRpcServices {
+    let Some(services) = KERNEL_RPC_SERVICES.get().copied() else {
         super::imp::halt()
     };
-    callback();
+    services
+}
+
+/// Polls only the lock-safe mailbox service while local IRQs cannot run.
+pub(crate) fn service_kernel_rpc() {
+    (kernel_rpc_services().poll)();
+}
+
+/// Enters kernel policy after an architecture-private doorbell is acknowledged.
+pub(crate) fn service_kernel_rpc_interrupt(origin: InterruptOrigin) -> EntryAction {
+    (kernel_rpc_services().interrupt)(origin)
 }

@@ -14,6 +14,11 @@ pub(crate) use tick::Error as TickError;
 
 use core::hint::spin_loop;
 
+// Reserved timers are a target-independent timer-queue capability. Secondary
+// VM backends do not consume it yet, but keeping one stable kernel API avoids
+// making the generic primitive follow current backend support.
+#[allow(unused_imports)]
+pub(crate) use timers::{ArmedReservedTimer, ReservedTimer};
 pub use timers::{
     QueueStats as TimerQueueStats, TimerCallback, TimerEvent, TimerHandle, TimerMode, cancel,
     local_statistics as timer_statistics, schedule_after, schedule_at, schedule_periodic,
@@ -37,6 +42,7 @@ pub enum Error {
     DeadlineTooFar,
     InvalidCpuIndex,
     NotInitialized,
+    Preemption(crate::kernel::task::scheduler::Error),
     TimerQueue(hyper::time::TimerQueueError),
     TimerQueueAlreadyInitialized,
     TimerQueueNotInitialized,

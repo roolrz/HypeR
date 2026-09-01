@@ -16,19 +16,19 @@ use hyper::hal::user::{NativeCallService, UserFault, UserRunBinding};
 use hyper::mm::PhysicalAddress;
 use hyper::sync::InterruptMaskGuard;
 
-#[cfg(CONFIG_ARCH_AARCH64)]
-pub(crate) use crate::arch::user::UserMachineContractError;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ExposedCopyError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AddressSpaceError {
     InvalidCpu,
+    InvalidAddressLimit,
     #[cfg(not(CONFIG_ARCH_AARCH64))]
     Unsupported,
     #[cfg(CONFIG_ARCH_AARCH64)]
     Backend(crate::arch::user::UserAddressSpaceError),
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    Contract(crate::arch::user::UserMachineContractError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -40,9 +40,98 @@ pub(crate) enum UserEntryError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TranslationKind {
+#[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
+enum TranslationKind {
     VheHostStage1,
     NvheStage2Only,
+}
+
+const USER_TRANSLATION_IDENTIFIER_BITS: u8 = 8;
+
+/// Opaque construction policy for the selected native-user translation regime.
+///
+/// The plan keeps architecture selection, identifier namespace, and hierarchy
+/// sizing below the HAL boundary. Kernel ownership supplies storage and typed
+/// identifier lifetimes without learning which register regime consumes them.
+pub(crate) struct AddressSpacePlan {
+    kind: TranslationKind,
+    address_limit: u64,
+}
+
+enum SelectedIdentifier<HostStage, SecondStage> {
+    HostStage(HostStage),
+    SecondStage(SecondStage),
+}
+
+/// Identifier ownership selected by an opaque address-space plan.
+///
+/// The private variant binds the kernel-owned typed identifier to the same
+/// translation regime which will consume its numeric value. Callers cannot
+/// accidentally pair a host-stage identifier with a second-stage plan.
+pub(crate) struct AddressSpaceIdentifier<HostStage, SecondStage> {
+    selected: SelectedIdentifier<HostStage, SecondStage>,
+}
+
+impl<HostStage, SecondStage> AddressSpaceIdentifier<HostStage, SecondStage> {
+    /// Returns a conservative upper bound for pages retained by one hierarchy.
+    pub(crate) fn table_page_capacity(&self, leaf_count: usize) -> Option<usize> {
+        let levels_per_leaf = match &self.selected {
+            SelectedIdentifier::HostStage(_) => 3,
+            SelectedIdentifier::SecondStage(_) => 2,
+        };
+        leaf_count
+            .checked_mul(levels_per_leaf)
+            .and_then(|pages| pages.checked_add(1))
+    }
+
+    pub(crate) fn try_map<NextHost, NextSecond, Error>(
+        self,
+        host_stage: impl FnOnce(HostStage) -> Result<NextHost, Error>,
+        second_stage: impl FnOnce(SecondStage) -> Result<NextSecond, Error>,
+    ) -> Result<AddressSpaceIdentifier<NextHost, NextSecond>, Error> {
+        let selected = match self.selected {
+            SelectedIdentifier::HostStage(identifier) => {
+                SelectedIdentifier::HostStage(host_stage(identifier)?)
+            }
+            SelectedIdentifier::SecondStage(identifier) => {
+                SelectedIdentifier::SecondStage(second_stage(identifier)?)
+            }
+        };
+        Ok(AddressSpaceIdentifier { selected })
+    }
+
+    /// Builds the hierarchy selected when this identifier was reserved.
+    ///
+    /// # Safety
+    ///
+    /// Allocator results must be new, zeroed, linearly mapped blocks of the
+    /// requested order and remain retained through acknowledged retirement.
+    /// Each projection must return the exact value and generation represented
+    /// by its input token; substituting another identifier can violate hardware
+    /// translation isolation.
+    pub(crate) unsafe fn prepare_address_space(
+        &self,
+        host_identity: impl FnOnce(&HostStage) -> (u16, u64),
+        second_identity: impl FnOnce(&SecondStage) -> (u16, u64),
+        enumerate: impl FnMut(&mut dyn FnMut(MappingPage)),
+        allocator: &mut impl FnMut(usize) -> Option<PhysicalAddress>,
+    ) -> Result<PreparedAddressSpace, AddressSpaceError> {
+        // SAFETY: One private variant selects both the identifier namespace and
+        // its builder, while the caller supplies the allocation and exact
+        // token-projection proofs documented above.
+        unsafe {
+            match &self.selected {
+                SelectedIdentifier::HostStage(token) => {
+                    let (identifier, generation) = host_identity(token);
+                    prepare_vhe_address_space(identifier, generation, enumerate, allocator)
+                }
+                SelectedIdentifier::SecondStage(token) => {
+                    let (identifier, generation) = second_identity(token);
+                    prepare_nvhe_address_space(identifier, generation, enumerate, allocator)
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,13 +156,49 @@ pub(crate) const fn host_machine() -> HostMachine {
     }
 }
 
-#[cfg(CONFIG_ARCH_AARCH64)]
-pub(crate) fn translation_kind() -> Result<TranslationKind, AddressSpaceError> {
-    Ok(if crate::arch::user::user_uses_vhe_translation() {
-        TranslationKind::VheHostStage1
-    } else {
-        TranslationKind::NvheStage2Only
-    })
+pub(crate) fn address_space_plan() -> Result<AddressSpacePlan, AddressSpaceError> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        let address_limit =
+            crate::arch::user::user_address_limit().map_err(AddressSpaceError::Contract)?;
+        let kind = if crate::arch::user::user_uses_vhe_translation() {
+            TranslationKind::VheHostStage1
+        } else {
+            TranslationKind::NvheStage2Only
+        };
+        Ok(AddressSpacePlan {
+            kind,
+            address_limit,
+        })
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        Err(AddressSpaceError::Unsupported)
+    }
+}
+
+impl AddressSpacePlan {
+    /// Returns the exclusive native-user virtual-address limit.
+    pub(crate) const fn address_limit(&self) -> u64 {
+        self.address_limit
+    }
+
+    /// Selects the identifier namespace required by this machine plan.
+    pub(crate) fn reserve_identifier<HostStage, SecondStage, Error>(
+        self,
+        reserve_host: impl FnOnce(u8) -> Result<HostStage, Error>,
+        reserve_stage2: impl FnOnce(u8) -> Result<SecondStage, Error>,
+    ) -> Result<AddressSpaceIdentifier<HostStage, SecondStage>, Error> {
+        let selected = match self.kind {
+            TranslationKind::VheHostStage1 => {
+                SelectedIdentifier::HostStage(reserve_host(USER_TRANSLATION_IDENTIFIER_BITS)?)
+            }
+            TranslationKind::NvheStage2Only => {
+                SelectedIdentifier::SecondStage(reserve_stage2(USER_TRANSLATION_IDENTIFIER_BITS)?)
+            }
+        };
+        Ok(AddressSpaceIdentifier { selected })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -209,7 +334,7 @@ impl ActiveAddressSpace<'_> {
 ///
 /// Allocator results must be new, zeroed, linearly mapped blocks of the
 /// requested order and remain retained through acknowledged root retirement.
-pub(crate) unsafe fn prepare_vhe_address_space(
+unsafe fn prepare_vhe_address_space(
     asid: u16,
     generation: u64,
     mut enumerate: impl FnMut(&mut dyn FnMut(MappingPage)),
@@ -250,7 +375,7 @@ pub(crate) unsafe fn prepare_vhe_address_space(
 /// Builds an nVHE private stage-2 root. The safety contract matches the VHE
 /// builder, while the caller must supply a VMID from the shared guest/native
 /// namespace.
-pub(crate) unsafe fn prepare_nvhe_address_space(
+unsafe fn prepare_nvhe_address_space(
     vmid: u16,
     generation: u64,
     mut enumerate: impl FnMut(&mut dyn FnMut(MappingPage)),
@@ -675,6 +800,9 @@ pub(crate) struct CompletionFailure<'context> {
     completion: ReturnCapability<'context>,
 }
 
+/// Uninhabited proof that completion-failure handling cannot return.
+pub(crate) enum CompletionStopped {}
+
 impl<'context> CompletionFailure<'context> {
     #[cfg(CONFIG_ARCH_AARCH64)]
     fn from_arch(failure: crate::arch::user::UserCompletionFailure<'context>) -> Self {
@@ -687,14 +815,19 @@ impl<'context> CompletionFailure<'context> {
         }
     }
 
-    pub(crate) fn into_parts(self) -> (UserEntryError, ReturnCapability<'context>) {
-        (self.error, self.completion)
+    /// Retains an armed architecture return owner for an imminent fail-stop.
+    ///
+    /// A completion mismatch makes the context permanently unusable. The
+    /// capability must therefore remain armed until the fatal path stops all
+    /// execution; dropping it would trigger a second, less diagnostic halt.
+    pub(crate) fn abandon_with(self, stop: impl FnOnce(UserEntryError) -> CompletionStopped) -> ! {
+        let Self { error, completion } = self;
+        #[cfg(CONFIG_ARCH_AARCH64)]
+        core::mem::forget(completion);
+        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        let _ = completion;
+        match stop(error) {}
     }
-}
-
-#[cfg(CONFIG_ARCH_AARCH64)]
-pub(crate) fn address_limit() -> Result<u64, UserMachineContractError> {
-    crate::arch::user::user_address_limit()
 }
 
 #[cfg(all(CONFIG_ARCH_AARCH64, feature = "kernel-self-test"))]

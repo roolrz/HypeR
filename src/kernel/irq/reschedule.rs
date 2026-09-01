@@ -10,19 +10,13 @@
 use hyper::cpu::CpuIndex;
 use hyper::hal::interrupt::{InterruptPriority, InterruptTrigger};
 use hyper::sync::atomic::{AtomicBool, Ordering};
-#[cfg(all(
-    feature = "kernel-self-test",
-    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64)
-))]
+#[cfg(feature = "kernel-self-test")]
 use hyper::{cpu::PerCpu, sync::atomic::AtomicUsize};
 
 use super::interrupt::{HandlerResult, IrqDomainId, VirtualInterrupt};
 
 static READY: AtomicBool = AtomicBool::new(false);
-#[cfg(all(
-    feature = "kernel-self-test",
-    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64)
-))]
+#[cfg(feature = "kernel-self-test")]
 static DELIVERY_COUNT: PerCpu<AtomicUsize> =
     PerCpu::new([const { AtomicUsize::new(0) }; hyper::cpu::MAX_CPUS]);
 
@@ -83,11 +77,14 @@ pub(crate) fn initialize(root_domain: IrqDomainId) -> Result<(), Error> {
     Ok(())
 }
 
-/// Prompts `cpu` after the scheduler published its pending request.
+/// Prompts `cpu` to enter the deferred IRQ service and scheduling boundary.
 ///
-/// Architecture routing is validated before a CPU becomes scheduler-visible.
-/// The event fallback covers an unavailable cross-call during early bring-up
-/// and wakes an idle CPU, while the durable pending bit remains authoritative.
+/// Scheduler callers publish their pending request before this call. Other
+/// deferred services publish an independent durable condition which IRQ entry
+/// translates before scheduling. Architecture routing is validated before a
+/// CPU becomes scheduler-visible; the event fallback wakes an idle CPU while
+/// the next timer IRQ remains the progress guarantee on backends without a
+/// targeted interrupt.
 pub(crate) fn notify(cpu: CpuIndex) {
     if !READY.load(Ordering::Acquire) || !crate::hal::irq::notify_reschedule(cpu) {
         crate::hal::cpu::send_event();
@@ -95,10 +92,7 @@ pub(crate) fn notify(cpu: CpuIndex) {
 }
 
 fn handle(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
-    #[cfg(all(
-        feature = "kernel-self-test",
-        any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64)
-    ))]
+    #[cfg(feature = "kernel-self-test")]
     if let Some(cpu) = crate::kernel::cpu::current_index() {
         // The counter is only an observation point; it publishes no protected
         // state and therefore requires no ordering beyond atomic coherence.
@@ -112,10 +106,8 @@ fn handle(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
 /// Returns the number of reschedule interrupts dispatched on `cpu`.
 ///
 /// This observation seam is compiled only into the bare-metal self-test image.
-#[cfg(all(
-    feature = "kernel-self-test",
-    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64)
-))]
+#[cfg(feature = "kernel-self-test")]
+#[allow(dead_code)]
 pub(super) fn delivery_count_for_test(cpu: CpuIndex) -> usize {
     DELIVERY_COUNT[cpu].load(Ordering::Relaxed)
 }

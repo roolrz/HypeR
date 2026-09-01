@@ -84,6 +84,9 @@ pub(crate) fn take_kernel_rpc_reasons() -> KernelRpcReasons {
     KernelRpcReasons::from_bits(crate::arch::irq::take_kernel_rpc_reasons())
 }
 
-pub(crate) fn install_kernel_rpc_service(callback: fn()) -> Result<(), KernelRpcServiceError> {
-    crate::arch::irq::install_kernel_rpc_service(callback)
+pub(crate) fn install_kernel_rpc_services(
+    poll: fn(),
+    interrupt: fn(hyper::hal::interrupt::InterruptOrigin) -> hyper::hal::interrupt::EntryAction,
+) -> Result<(), KernelRpcServiceError> {
+    crate::arch::irq::install_kernel_rpc_services(poll, interrupt)
 }

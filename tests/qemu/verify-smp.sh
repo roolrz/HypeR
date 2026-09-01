@@ -156,6 +156,7 @@ runtime_contract_is_ready() {
         grep -q 'HypeR: platform bus: .* bound, .* unmatched, .* deferred, .* failed' "$log" &&
         secondary_cpus_online &&
         grep -q "HypeR: SMP online: $cpus/$cpus discovered CPUs" "$log" &&
+        grep -q "HypeR: heap caches: $cpus CPUs, [0-9][0-9]* objects," "$log" &&
         grep -q 'HypeR: randomized kernel base 0x[0-9a-f][0-9a-f]*, KASLR offset 0x[0-9a-f][0-9a-f]*' "$log" &&
         grep -q 'HypeR: transition identity mappings retired' "$log" &&
         grep -q "HypeR: AArch64 host execution mode: $host_mode" "$log" &&

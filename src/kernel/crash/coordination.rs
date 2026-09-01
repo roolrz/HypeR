@@ -20,6 +20,11 @@ const STOP_WAIT_TIMEOUT_NS: u64 = 100_000_000;
 const STOP_WAIT_FALLBACK_ITERATIONS: usize = 10_000_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EarlyInitializationError {
+    AllocatorInvariantHandler(hyper::mm::allocator::heap::AllocatorInvariantInstallError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InitializationError {
     ConsoleAlreadyInitialized,
     Interrupt(super::super::irq::interrupt::Error),
@@ -34,6 +39,12 @@ pub(crate) enum Prerequisite {
     Scheduler,
 }
 
+/// Installs allocation-free crash policy before the runtime allocator starts.
+pub(crate) fn early_initialize() -> Result<(), EarlyInitializationError> {
+    hyper::mm::allocator::heap::install_allocator_invariant_handler(allocator_invariant_failure)
+        .map_err(EarlyInitializationError::AllocatorInvariantHandler)
+}
+
 /// Reserves and installs the all-but-self crash-stop interrupt.
 pub(crate) fn initialize(
     boot: &super::super::boot::Initialization,
@@ -41,29 +52,46 @@ pub(crate) fn initialize(
     validate_prerequisites()?;
     super::console::initialize().map_err(|_| InitializationError::ConsoleAlreadyInitialized)?;
 
-    let Some(hardware_interrupt) = crate::hal::exception::crash_stop_interrupt() else {
-        super::state::mark_ready();
-        crate::println!("HypeR: crash-stop cross-call is unavailable on this platform");
-        return Ok(());
+    let crash_stop_available = match crate::hal::exception::crash_stop_interrupt() {
+        Some(hardware_interrupt) => {
+            let (_, registration) = boot
+                .interrupts()
+                .root_domain
+                .register_shared_mapping(
+                    hardware_interrupt,
+                    InterruptPriority::Critical,
+                    InterruptTrigger::Edge,
+                    0,
+                    crash_stop_interrupt,
+                )
+                .map_err(InitializationError::Interrupt)?;
+            // Fatal-crash coordination remains active until power-off. There
+            // is no shutdown stage in which this handler can be safely removed.
+            registration.retain_permanently();
+            super::state::mark_ipi_ready();
+            true
+        }
+        None => false,
     };
-    let (_, registration) = boot
-        .interrupts()
-        .root_domain
-        .register_shared_mapping(
-            hardware_interrupt,
-            InterruptPriority::Critical,
-            InterruptTrigger::Edge,
-            0,
-            crash_stop_interrupt,
-        )
-        .map_err(InitializationError::Interrupt)?;
-    // Fatal-crash coordination remains active until power-off. There is no
-    // shutdown stage in which this handler can be safely removed.
-    registration.retain_permanently();
-    super::state::mark_ipi_ready();
     super::state::mark_ready();
-    crate::println!("HypeR: crash-stop IPI and CPU state capture initialized");
+    if crash_stop_available {
+        crate::println!("HypeR: crash-stop IPI and CPU state capture initialized");
+    } else {
+        crate::println!("HypeR: crash-stop cross-call is unavailable on this platform");
+    }
     Ok(())
+}
+
+/// Enters crash policy without returning to corrupted allocator state.
+///
+/// This bridge may run beneath arbitrary locks. Formatting writes only to the
+/// fixed-capacity crash reason owned by `fatal`; it must remain allocation-free.
+fn allocator_invariant_failure(report: hyper::mm::allocator::heap::AllocatorInvariantReport) -> ! {
+    fatal(format_args!(
+        "allocator invariant failure: current {:?}, first {:?}",
+        report.current(),
+        report.first()
+    ))
 }
 
 fn validate_prerequisites() -> Result<(), InitializationError> {
@@ -147,12 +175,19 @@ extern "C" fn stop_this_cpu_on_emergency_stack(argument: usize) -> ! {
 }
 
 fn enter(context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
-    let mut owned_reason = super::state::CrashReason::new();
-    let _ = owned_reason.write_fmt(reason);
+    let owned_reason = super::state::CrashReason::capture(reason);
     crate::hal::irq::disable_all_sources();
     let Some(cpu) = super::super::cpu::current_index() else {
         crate::hal::cpu::halt();
     };
+    let mut owned_reason = owned_reason;
+    if let Some(supplement) = super::supplement::read_for_fatal(cpu) {
+        let _ = owned_reason.write_str("\nterminal context: ");
+        let _ = owned_reason.write_str(supplement.as_str());
+        if supplement.was_truncated() {
+            let _ = owned_reason.write_str(" [truncated]");
+        }
+    }
     let payload = super::state::CrashPayload::new(context, owned_reason);
     let Some(argument) = super::state::publish_payload(cpu, payload) else {
         if is_ready() {
@@ -210,7 +245,12 @@ extern "C" fn enter_on_emergency_stack(argument: usize) -> ! {
     super::super::log::enter_emergency_mode();
     super::state::publish_context(cpu, *payload.context());
     let stop = stop_other_cpus();
-    super::report::emit_banner(cpu.get(), payload.reason(), stop);
+    super::report::emit_banner(
+        cpu.get(),
+        payload.reason(),
+        payload.reason_was_truncated(),
+        stop,
+    );
     super::report::dump_cpu_states(cpu.get());
     super::console::run(cpu.get(), stop);
     super::super::log::emergency(format_args!(

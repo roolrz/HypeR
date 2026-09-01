@@ -3,7 +3,8 @@
 
 //! RISC-V Linux Image boot convention for virtual machines.
 
-use crate::arch::guest::{Error, PayloadLoadError, PayloadMemory, PayloadRange};
+use super::super::Error;
+use super::super::abi::{LinuxAbi, PayloadLoadError, PayloadMemory, PayloadRange};
 use hyper::vm::fdt::{self, Builder};
 use hyper::vm::{bundle::VmBundle, exit::GuestPhysicalAddress};
 
@@ -18,6 +19,15 @@ const IMAGE_HEADER_SIZE: usize = 64;
 
 pub(crate) const fn linux_guest_architecture() -> &'static str {
     "riscv64"
+}
+
+pub(crate) const fn linux_abi() -> LinuxAbi {
+    LinuxAbi::new(
+        linux_guest_architecture(),
+        LINUX_GUEST_RAM_IPA,
+        LINUX_GUEST_KERNEL_IPA,
+        LINUX_GUEST_TIMER_INTERRUPT,
+    )
 }
 
 pub(crate) const fn validate_linux_host() -> Result<(), Error> {
@@ -81,11 +91,16 @@ pub(crate) fn load_linux_payload<Memory: PayloadMemory>(
     Ok(())
 }
 
-pub(crate) fn prepare_linux_vcpu_context() -> super::VcpuContext {
-    let mut context = super::VcpuContext::new(LINUX_GUEST_KERNEL_IPA);
-    context.general[10] = 0;
-    context.general[11] = GUEST_DTB_IPA;
-    context
+pub(crate) fn prepare_linux_vcpu_context() -> Result<crate::hal::vm::VcpuContext, Error> {
+    use crate::hal::vm::InitialRegisterAssignment as Register;
+    const A0: usize = 10;
+    const A1: usize = 11;
+
+    crate::hal::vm::prepare_initial_context(
+        LINUX_GUEST_KERNEL_IPA,
+        &[Register::new(A0, 0), Register::new(A1, GUEST_DTB_IPA)],
+    )
+    .map_err(|_| Error::InvalidLayout)
 }
 
 pub(crate) fn describe_linux_guest_layout(

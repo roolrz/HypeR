@@ -12,7 +12,6 @@ pub(crate) mod cache;
 pub(crate) mod context;
 pub(crate) mod cpu;
 pub(crate) mod exception;
-pub(crate) mod guest;
 pub(crate) mod irq;
 pub(crate) mod memory;
 pub(crate) mod platform;

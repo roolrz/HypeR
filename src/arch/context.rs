@@ -9,7 +9,7 @@
 
 pub(crate) use super::imp::ThreadContext;
 
-pub(crate) type SwitchCompletion = extern "C" fn();
+pub(crate) type SwitchCompletion = extern "C" fn(usize);
 
 /// Switches between two pinned scheduler-owned machine contexts.
 ///
@@ -30,11 +30,18 @@ pub(crate) unsafe fn switch_thread_context(
     next: *const ThreadContext,
     previous_interrupt_state: <super::irq::LocalMask as hyper::hal::interrupt::InterruptMask>::State,
     completion: SwitchCompletion,
+    completion_ticket: usize,
 ) {
     // SAFETY: This facade preserves the selected backend's context ownership,
     // pinning, and prepared-state preconditions unchanged.
     unsafe {
-        super::imp::switch_thread_context(previous, next, previous_interrupt_state, completion)
+        super::imp::switch_thread_context(
+            previous,
+            next,
+            previous_interrupt_state,
+            completion,
+            completion_ticket,
+        )
     }
 }
 

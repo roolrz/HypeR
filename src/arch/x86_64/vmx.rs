@@ -907,18 +907,32 @@ fn handle_external_interrupt() {
         // them. The private handler completes the local APIC interrupt, so
         // this path must not dispatch or acknowledge it again.
         if vector == super::platform::KERNEL_RPC_VECTOR {
-            crate::arch::irq::service_kernel_rpc();
             super::interrupt_controller::end_local_interrupt();
+            let action = crate::arch::irq::service_kernel_rpc_interrupt(
+                hyper::hal::interrupt::InterruptOrigin::Guest,
+            );
+            if !matches!(
+                action,
+                hyper::hal::interrupt::EntryAction::Resume { postlude: None }
+            ) {
+                crate::arch::irq::stop_entry(crate::arch::exception::capture_crash_context())
+            }
             return;
         }
         match crate::arch::irq::dispatch_entry(
             hyper::hal::interrupt::InterruptId::new(vector),
-            None,
+            hyper::hal::interrupt::InterruptOrigin::Guest,
         ) {
             hyper::hal::interrupt::EntryAction::Resume { postlude } => {
                 // VM exits remain cooperative until x86 provides a qualified
                 // IRQ-tail continuation and vCPU teardown boundary.
                 let _ = postlude;
+            }
+            hyper::hal::interrupt::EntryAction::StopGuest { postlude: _ } => {
+                // VMX cannot consume this action until guest exit unwinds to a
+                // typed scheduler-owned continuation. Fail closed if policy
+                // ever publishes it without that capability.
+                crate::arch::irq::stop_entry(crate::arch::exception::capture_crash_context())
             }
             hyper::hal::interrupt::EntryAction::Stop => {
                 crate::arch::irq::stop_entry(crate::arch::exception::capture_crash_context())

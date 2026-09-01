@@ -18,6 +18,78 @@ use hyper::hal::interrupt::InterruptId;
 /// state behind a false lowest-common-denominator representation.
 pub(crate) use crate::arch::exception::{CrashContext, RuntimeVectorError};
 
+/// Proof that execution is inside the selected architecture's qualified IRQ
+/// return continuation.
+///
+/// This type has no public constructor. Only backends with a private-stack
+/// return continuation can mint it; unsupported backends therefore cannot
+/// accidentally enter the IRQ-tail scheduling path.
+pub(crate) struct IrqTailCapability {
+    // The proof describes the current CPU's masked interrupt continuation and
+    // must not become transferable even if a later caller adds scoped work.
+    not_send_or_sync: core::marker::PhantomData<alloc::rc::Rc<()>>,
+}
+
+impl IrqTailCapability {
+    /// Ends the CPU-affine proof before a scheduler transition may migrate the
+    /// resumed thread continuation.
+    pub(crate) fn consume(self) {}
+}
+
+/// Executes kernel tail policy while the selected architecture's qualified
+/// interrupt-return contract is active.
+///
+/// # Safety
+///
+/// The caller must be a selected post-acknowledgement continuation running on
+/// the interrupted Thread stack with local IRQs masked and without any raw
+/// exception-frame borrow crossing `service`.
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+pub(crate) unsafe fn with_irq_tail_capability(service: fn(IrqTailCapability)) {
+    service(IrqTailCapability {
+        not_send_or_sync: core::marker::PhantomData,
+    });
+}
+
+#[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
+pub(crate) unsafe fn with_irq_tail_capability(_service: fn(IrqTailCapability)) {
+    // This function is referenced by the stable kernel postlude, but the
+    // selected backend below never publishes that postlude on this target.
+    // Fail closed if an invalid caller bypasses the selection contract.
+    crate::hal::cpu::halt()
+}
+
+/// Qualifies a kernel IRQ-tail postlude for the selected entry backend.
+///
+/// `None` means interrupt return cannot safely switch a Thread context. The
+/// scheduler retains any pending request for a later cooperative safe point.
+pub(crate) const fn qualify_irq_tail_postlude(
+    origin: hyper::hal::interrupt::InterruptOrigin,
+    postlude: unsafe extern "C" fn(),
+) -> Option<unsafe extern "C" fn()> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        match origin {
+            hyper::hal::interrupt::InterruptOrigin::Host
+            | hyper::hal::interrupt::InterruptOrigin::Guest => Some(postlude),
+            hyper::hal::interrupt::InterruptOrigin::Native { .. } => None,
+        }
+    }
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        match origin {
+            hyper::hal::interrupt::InterruptOrigin::Guest => Some(postlude),
+            hyper::hal::interrupt::InterruptOrigin::Host
+            | hyper::hal::interrupt::InterruptOrigin::Native { .. } => None,
+        }
+    }
+    #[cfg(CONFIG_ARCH_X86_64)]
+    {
+        let _ = (origin, postlude);
+        None
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EntryServiceError {
     Fatal(crate::arch::exception::EntryServiceError),
@@ -31,33 +103,34 @@ pub(crate) struct EntryReady {
     interrupt: crate::arch::irq::InterruptEntryReady,
 }
 
-#[cfg(CONFIG_ARCH_RISCV64)]
 pub(crate) fn install_entry_services(
     fatal: for<'reason> fn(CrashContext, core::fmt::Arguments<'reason>) -> !,
-    dispatch: fn(InterruptId, Option<unsafe extern "C" fn()>) -> hyper::hal::interrupt::EntryAction,
-    claim_external: fn() -> Option<hyper::hal::interrupt::EntryAction>,
+    dispatch: fn(
+        InterruptId,
+        hyper::hal::interrupt::InterruptOrigin,
+    ) -> hyper::hal::interrupt::EntryAction,
+    claim_external: fn(
+        hyper::hal::interrupt::InterruptOrigin,
+    ) -> Option<hyper::hal::interrupt::EntryAction>,
     stop: fn(CrashContext) -> !,
 ) -> Result<EntryReady, EntryServiceError> {
     let fatal =
         crate::arch::exception::install_fatal_service(fatal).map_err(EntryServiceError::Fatal)?;
-    let interrupt = crate::arch::irq::install_interrupt_entry_services(
-        crate::arch::irq::InterruptEntryServices::new(dispatch, claim_external, stop),
-    )
-    .map_err(EntryServiceError::Interrupt)?;
-    Ok(EntryReady { fatal, interrupt })
-}
-
-#[cfg(not(CONFIG_ARCH_RISCV64))]
-pub(crate) fn install_entry_services(
-    fatal: for<'reason> fn(CrashContext, core::fmt::Arguments<'reason>) -> !,
-    dispatch: fn(InterruptId, Option<unsafe extern "C" fn()>) -> hyper::hal::interrupt::EntryAction,
-    stop: fn(CrashContext) -> !,
-) -> Result<EntryReady, EntryServiceError> {
-    let fatal =
-        crate::arch::exception::install_fatal_service(fatal).map_err(EntryServiceError::Fatal)?;
-    let interrupt = crate::arch::irq::install_interrupt_entry_services(
-        crate::arch::irq::InterruptEntryServices::new(dispatch, stop),
-    )
+    let interrupt = {
+        #[cfg(CONFIG_ARCH_RISCV64)]
+        {
+            crate::arch::irq::install_interrupt_entry_services(
+                crate::arch::irq::InterruptEntryServices::new(dispatch, claim_external, stop),
+            )
+        }
+        #[cfg(not(CONFIG_ARCH_RISCV64))]
+        {
+            let _ = claim_external;
+            crate::arch::irq::install_interrupt_entry_services(
+                crate::arch::irq::InterruptEntryServices::new(dispatch, stop),
+            )
+        }
+    }
     .map_err(EntryServiceError::Interrupt)?;
     Ok(EntryReady { fatal, interrupt })
 }

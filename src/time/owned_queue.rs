@@ -24,7 +24,23 @@ struct TimerNode {
     mode: TimerMode,
     callback: TimerCallback,
     context: usize,
+    claim: Option<TimerClaim>,
+    claim_context: usize,
+    recycle: Option<TimerRecycle>,
+    recycle_context: usize,
     next: Option<Box<Self>>,
+}
+
+pub type TimerRecycle = fn(ReservedTimerNode, usize);
+pub type TimerClaim = fn(TimerEvent, usize);
+
+pub struct ReservedTimerCallbacks {
+    pub callback: TimerCallback,
+    pub context: usize,
+    pub claim: TimerClaim,
+    pub claim_context: usize,
+    pub recycle: TimerRecycle,
+    pub recycle_context: usize,
 }
 
 /// An allocated timer node that is not linked into a queue.
@@ -60,6 +76,10 @@ impl PendingTimer {
             mode,
             callback,
             context,
+            claim: None,
+            claim_context: 0,
+            recycle: None,
+            recycle_context: 0,
             next: None,
         })
         .map(Self)
@@ -67,13 +87,61 @@ impl PendingTimer {
     }
 }
 
+/// One preallocated one-shot node reserved for allocation-free rearming.
+pub struct ReservedTimerNode(Box<TimerNode>);
+
+impl ReservedTimerNode {
+    pub fn try_new() -> Result<Self, Error> {
+        crate::mm::try_box(TimerNode {
+            identity: 0,
+            deadline: 0,
+            sequence: 0,
+            mode: TimerMode::OneShot,
+            callback: reserved_unarmed,
+            context: 0,
+            claim: None,
+            claim_context: 0,
+            recycle: None,
+            recycle_context: 0,
+            next: None,
+        })
+        .map(Self)
+        .map_err(|_| Error::Allocation)
+    }
+
+    pub fn prepare(
+        mut self,
+        deadline: u64,
+        callbacks: ReservedTimerCallbacks,
+    ) -> PendingReservedTimer {
+        self.0.deadline = deadline;
+        self.0.mode = TimerMode::OneShot;
+        self.0.callback = callbacks.callback;
+        self.0.context = callbacks.context;
+        self.0.claim = Some(callbacks.claim);
+        self.0.claim_context = callbacks.claim_context;
+        self.0.recycle = Some(callbacks.recycle);
+        self.0.recycle_context = callbacks.recycle_context;
+        PendingReservedTimer(self.0)
+    }
+}
+
+/// Configured reserved node not yet linked into a deadline queue.
+pub struct PendingReservedTimer(Box<TimerNode>);
+
 /// A callback delivery whose one-shot node, if any, remains owned until the
 /// delivery is invoked or dropped outside the queue lock.
+#[must_use = "expired timers must be invoked; reserved deliveries recover on drop"]
 pub struct ExpiredTimer {
     event: TimerEvent,
     callback: TimerCallback,
     context: usize,
-    _retired: Option<PendingTimer>,
+    retired: Option<RetiredTimer>,
+}
+
+enum RetiredTimer {
+    Ordinary(PendingTimer),
+    Reserved(ReservedTimerNode, TimerRecycle, usize),
 }
 
 impl ExpiredTimer {
@@ -85,8 +153,31 @@ impl ExpiredTimer {
         self.context
     }
 
-    pub fn invoke(self) {
+    pub fn invoke(mut self) {
         (self.callback)(self.event, self.context);
+        self.recycle();
+    }
+
+    fn recycle(&mut self) {
+        match self.retired.take() {
+            Some(RetiredTimer::Ordinary(timer)) => drop(timer),
+            Some(RetiredTimer::Reserved(node, recycle, recycle_context)) => {
+                recycle(node, recycle_context)
+            }
+            None => {}
+        }
+    }
+}
+
+impl Drop for ExpiredTimer {
+    fn drop(&mut self) {
+        if matches!(self.retired, Some(RetiredTimer::Reserved(..))) {
+            // A reserved expiry was already claimed under its queue lock. Its
+            // notification is therefore mandatory even when a safe caller
+            // abandons the delivery value.
+            (self.callback)(self.event, self.context);
+        }
+        self.recycle();
     }
 }
 
@@ -146,19 +237,42 @@ impl OwnedDeadlineQueue {
         TimerHandle::owned(self.queue_id, identity)
     }
 
+    /// Links a preallocated reserved node without invoking the allocator.
+    pub fn insert_reserved(&mut self, pending: PendingReservedTimer) -> TimerHandle {
+        let mut node = pending.0;
+        let identity = self.take_identity();
+        node.identity = identity;
+        node.sequence = self.take_sequence();
+        self.insert_node(node);
+        self.stats.schedules = self.stats.schedules.saturating_add(1);
+        self.refresh_active_stats();
+        TimerHandle::owned(self.queue_id, identity)
+    }
+
     /// Unlinks a timer and returns its ownership to the caller.
     ///
     /// The returned allocation should be dropped after releasing the queue
     /// lock.
     pub fn cancel(&mut self, handle: TimerHandle) -> Result<PendingTimer, Error> {
-        let node = self.detach(handle)?;
+        let node = self.detach(handle, false)?;
         self.stats.cancellations = self.stats.cancellations.saturating_add(1);
         self.refresh_active_stats();
         Ok(PendingTimer(node))
     }
 
+    pub fn cancel_reserved(&mut self, handle: TimerHandle) -> Result<ReservedTimerNode, Error> {
+        let mut node = self.detach(handle, true)?;
+        node.claim = None;
+        node.claim_context = 0;
+        node.recycle = None;
+        node.recycle_context = 0;
+        self.stats.cancellations = self.stats.cancellations.saturating_add(1);
+        self.refresh_active_stats();
+        Ok(ReservedTimerNode(node))
+    }
+
     pub fn reschedule(&mut self, handle: TimerHandle, deadline: u64) -> Result<(), Error> {
-        let mut node = self.detach(handle)?;
+        let mut node = self.detach(handle, false)?;
         node.deadline = deadline;
         node.sequence = self.take_sequence();
         self.insert_node(node);
@@ -178,8 +292,25 @@ impl OwnedDeadlineQueue {
         let mode = node.mode;
         let callback = node.callback;
         let context = node.context;
+        let event = TimerEvent {
+            handle: TimerHandle::owned(self.queue_id, identity),
+            deadline,
+            observed_at: now,
+            overruns: 0,
+        };
+        if let Some(claim) = node.claim.take() {
+            claim(event, node.claim_context);
+        }
         let (overruns, retired) = match mode {
-            TimerMode::OneShot => (0, Some(PendingTimer(node))),
+            TimerMode::OneShot => {
+                let retired = match (node.recycle.take(), node.recycle_context) {
+                    (Some(recycle), recycle_context) => {
+                        RetiredTimer::Reserved(ReservedTimerNode(node), recycle, recycle_context)
+                    }
+                    (None, _) => RetiredTimer::Ordinary(PendingTimer(node)),
+                };
+                (0, Some(retired))
+            }
             TimerMode::Periodic { interval } => {
                 let periods = now.wrapping_sub(deadline) / interval + 1;
                 node.deadline = deadline.wrapping_add(interval.wrapping_mul(periods));
@@ -192,15 +323,10 @@ impl OwnedDeadlineQueue {
         self.stats.overruns = self.stats.overruns.saturating_add(overruns);
         self.refresh_active_stats();
         Some(ExpiredTimer {
-            event: TimerEvent {
-                handle: TimerHandle::owned(self.queue_id, identity),
-                deadline,
-                observed_at: now,
-                overruns,
-            },
+            event: TimerEvent { overruns, ..event },
             callback,
             context,
-            _retired: retired,
+            retired,
         })
     }
 
@@ -212,7 +338,7 @@ impl OwnedDeadlineQueue {
         self.stats
     }
 
-    fn detach(&mut self, handle: TimerHandle) -> Result<Box<TimerNode>, Error> {
+    fn detach(&mut self, handle: TimerHandle, reserved: bool) -> Result<Box<TimerNode>, Error> {
         let identity = handle
             .owned_identity(self.queue_id)
             .ok_or(Error::InvalidHandle)?;
@@ -220,6 +346,12 @@ impl OwnedDeadlineQueue {
         loop {
             let matches = link.as_ref().is_some_and(|node| node.identity == identity);
             if matches {
+                if link
+                    .as_ref()
+                    .is_some_and(|node| node.recycle.is_some() != reserved)
+                {
+                    return Err(Error::InvalidHandle);
+                }
                 let Some(mut node) = link.take() else {
                     return Err(Error::InvalidHandle);
                 };
@@ -282,6 +414,8 @@ impl OwnedDeadlineQueue {
         self.stats.peak_timers = self.stats.peak_timers.max(self.len);
     }
 }
+
+fn reserved_unarmed(_event: TimerEvent, _context: usize) {}
 
 impl Default for OwnedDeadlineQueue {
     fn default() -> Self {

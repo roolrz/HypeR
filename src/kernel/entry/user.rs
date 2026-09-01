@@ -514,14 +514,7 @@ fn fault_reason(fault: UserFault) -> TerminalReason {
 }
 
 fn fail_completion(failure: crate::hal::user::CompletionFailure<'_>) -> ! {
-    let (error, completion) = failure.into_parts();
-    // The machine context cannot be reused after a binding failure. Retain its
-    // armed owner while the fatal path stops the system.
-    #[cfg(CONFIG_ARCH_AARCH64)]
-    core::mem::forget(completion);
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
-    let _ = completion;
-    fail_run("native-user return ownership is inconsistent", error)
+    failure.abandon_with(|error| fail_run("native-user return ownership is inconsistent", error))
 }
 
 fn fail_run(context: &str, error: impl core::fmt::Debug) -> ! {

@@ -448,16 +448,32 @@ extern "C" fn x86_64_vector_dispatch(frame: &mut ExceptionFrame) {
     let vector = frame.vector as u32;
     if vector >= 32 {
         if vector == super::platform::KERNEL_RPC_VECTOR {
-            crate::arch::irq::service_kernel_rpc();
             super::interrupt_controller::end_local_interrupt();
+            let action = crate::arch::irq::service_kernel_rpc_interrupt(
+                hyper::hal::interrupt::InterruptOrigin::Host,
+            );
+            if !matches!(
+                action,
+                hyper::hal::interrupt::EntryAction::Resume { postlude: None }
+            ) {
+                crate::arch::irq::stop_entry(exception_crash_context(frame))
+            }
             return;
         }
         super::virtualization::observe_host_interrupt(vector);
-        match crate::arch::irq::dispatch_entry(InterruptId::new(vector), None) {
+        match crate::arch::irq::dispatch_entry(
+            InterruptId::new(vector),
+            hyper::hal::interrupt::InterruptOrigin::Host,
+        ) {
             hyper::hal::interrupt::EntryAction::Resume { postlude } => {
                 // This architecture retains the request for a cooperative
                 // point until it provides a qualified IRQ-tail continuation.
                 let _ = postlude;
+            }
+            hyper::hal::interrupt::EntryAction::StopGuest { postlude: _ } => {
+                // x86 has not published a qualified typed guest-stop unwind.
+                // Treating this action as resumable would lose kernel policy.
+                crate::arch::irq::stop_entry(exception_crash_context(frame))
             }
             hyper::hal::interrupt::EntryAction::Stop => {
                 crate::arch::irq::stop_entry(exception_crash_context(frame))

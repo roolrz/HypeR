@@ -1,9 +1,9 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! `GICv3` hardware list-register encoding shared by architecture backends.
+//! `GICv3` hardware list-register encoding.
 
-use super::{InterruptGroup, ListEntry, ListState, VirtualInterruptId};
+use super::{GicInterruptId, InterruptGroup, ListEntry, ListState};
 
 const LR_VIRTUAL_ID_MASK: u64 = u32::MAX as u64;
 const LR_EOI_MAINTENANCE: u64 = 1 << 41;
@@ -17,7 +17,7 @@ pub enum DecodeError {
     InvalidVirtualInterrupt,
 }
 
-pub fn encode_list_register(entry: Option<ListEntry>) -> u64 {
+pub fn encode(entry: Option<ListEntry>) -> u64 {
     let Some(entry) = entry else {
         return 0;
     };
@@ -37,14 +37,14 @@ pub fn encode_list_register(entry: Option<ListEntry>) -> u64 {
         }
 }
 
-pub fn decode_list_register(value: u64) -> Result<Option<ListEntry>, DecodeError> {
+pub fn decode(value: u64) -> Result<Option<ListEntry>, DecodeError> {
     let state = match value & (LR_STATE_PENDING | LR_STATE_ACTIVE) {
         0 => return Ok(None),
         LR_STATE_PENDING => ListState::Pending,
         LR_STATE_ACTIVE => ListState::Active,
         _ => ListState::PendingActive,
     };
-    let interrupt = VirtualInterruptId::new((value & LR_VIRTUAL_ID_MASK) as u32)
+    let interrupt = GicInterruptId::new((value & LR_VIRTUAL_ID_MASK) as u32)
         .ok_or(DecodeError::InvalidVirtualInterrupt)?;
     Ok(Some(ListEntry {
         interrupt,

@@ -23,6 +23,40 @@ if [ -n "$violations" ]; then
     exit 1
 fi
 
+# Common policy and reusable primitives must be compiled through one stable
+# interface on every target. Host-architecture selection belongs to `arch` or
+# the selected HAL facade. The only kernel selection points are the typed VM
+# exit table and guest-platform device module; both isolate target-specific
+# value types which deliberately do not belong in the host HAL.
+common_arch_cfg=$(LC_ALL=C rg -n --glob '*.rs' 'CONFIG_ARCH_' \
+    src/kernel src/mm src/sync src/time src/log 2>/dev/null || true)
+common_arch_cfg=$(printf '%s\n' "$common_arch_cfg" |
+    sed '\#^src/kernel/entry/vmexit/selected.rs:#d; \#^src/kernel/vm/device/selected.rs:#d; \#^src/kernel/vm/linux/selected.rs:#d; /^$/d')
+if [ -n "$common_arch_cfg" ]; then
+    echo "common kernel policy must use selected HAL interfaces, not CONFIG_ARCH_:" >&2
+    printf '%s\n' "$common_arch_cfg" >&2
+    exit 1
+fi
+
+# Generic kernel and driver code must enter machine mechanisms through the
+# selected HAL. A direct architecture path bypasses that contract even when it
+# happens not to need an explicit cfg at the call site.
+direct_arch_dependency=$(LC_ALL=C rg -n --glob '*.rs' 'crate::arch\b' \
+    src/kernel src/mm src/sync src/time src/log src/drivers 2>/dev/null || true)
+if [ -n "$direct_arch_dependency" ]; then
+    echo "common kernel and driver code must use HAL interfaces, not crate::arch:" >&2
+    printf '%s\n' "$direct_arch_dependency" >&2
+    exit 1
+fi
+
+# Guest-visible boot formats and layouts are VM product policy. Keeping this
+# check semantic avoids silently rebuilding the retired host-HAL guest facade.
+if [ -e src/hal/selected/guest.rs ] ||
+    LC_ALL=C rg -q --glob '*.rs' 'crate::hal::guest\b|hal::guest\b' src tests 2>/dev/null; then
+    echo "Linux guest ABI policy must remain in kernel::vm::linux, not the host HAL" >&2
+    exit 1
+fi
+
 obfuscated=$(LC_ALL=C rg -n -U --glob '*.rs' \
     'use\s+crate\s+as\s+|use\s+crate::kernel\s*(?:;|::\s*\*)|use\s+crate::kernel\s+as\s+|use\s+crate::kernel::(?:crash|irq(?:::(?:interrupt|exception))?|vm(?:::memory)?)\s*(?:;|::\s*\*|\s+as\s+)|use\s+crate::kernel[^;]*::\{|crate::\{[^}]*kernel|crate\s+::\s*kernel|crate::\s+kernel|(?:super::){2,}kernel|#\s*\[\s*path\s*=\s*"[^"]*kernel|include!\s*\(' \
     src/arch || true)
