@@ -6,13 +6,14 @@
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
-use crate::kernel::capability::{KernelObject, ObjectKind, ObjectRef, Rights, private};
+use crate::kernel::object::{KernelObject, ObjectKind, ObjectRef, private};
 #[cfg(feature = "kernel-self-test")]
 use crate::kernel::task::scheduler::WaitRegistration;
 
+use super::Rights;
 #[cfg(feature = "kernel-self-test")]
-use super::signals::{PreparedSignalWait, SignalSnapshot};
-use super::signals::{SignalMask, SignalState, SignalWaitError, SignalWaitOutcome};
+use super::signals::{PreparedSignalWait, SignalSnapshot, SignalWaitOutcome};
+use super::signals::{SignalMask, SignalSource, SignalState, SignalWaitError};
 
 /// Event operation failure.
 ///
@@ -117,25 +118,6 @@ impl Event {
         Ok(self.signals.wait_registered(prepared, registration)?)
     }
 
-    /// Waits for one Event signal, deadline, or Process cancellation outcome.
-    pub(crate) fn wait_one(
-        &self,
-        domain: &ResourceDomain,
-        requested: u64,
-        deadline_nanoseconds: u64,
-        cancellation_requested: impl FnOnce() -> bool,
-    ) -> Result<SignalWaitOutcome, super::ObjectWaitError> {
-        let requested = Self::validate_signals(requested, false)
-            .ok_or(super::ObjectWaitError::InvalidSignals)?;
-        super::wait::wait_one(
-            &self.signals,
-            domain,
-            requested,
-            deadline_nanoseconds,
-            cancellation_requested,
-        )
-    }
-
     fn validate_signals(raw: u64, allow_empty: bool) -> Option<SignalMask> {
         let signals = SignalMask::from_bits(raw, Self::SUPPORTED_SIGNALS)?;
         if !allow_empty && signals.is_empty() {
@@ -164,6 +146,10 @@ impl KernelObject for Event {
         .union(Rights::WAIT)
         .union(Rights::INSPECT)
         .union(Rights::SIGNAL);
+
+    fn signal_source(&self) -> Option<SignalSource<'_>> {
+        Some(SignalSource::new(&self.signals, Self::SUPPORTED_SIGNALS))
+    }
 
     // The default zero-handle callback is deliberate. A resolved operation
     // retains object lifetime but not active handle authority, and close does

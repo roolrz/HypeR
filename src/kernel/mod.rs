@@ -10,6 +10,8 @@
 pub(crate) mod abi;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod accounting;
+#[allow(dead_code)]
+pub(crate) mod authority;
 pub(crate) mod boot;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod capability;
@@ -18,6 +20,8 @@ pub mod crash;
 pub mod debug;
 pub mod device;
 pub(crate) mod entry;
+#[allow(dead_code, unused_imports)]
+pub(crate) mod ipc;
 pub mod irq;
 pub mod log;
 pub mod mm;

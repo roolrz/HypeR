@@ -89,6 +89,10 @@ impl UserSlice {
     pub(crate) fn contains(self, other: Self) -> bool {
         other.base >= self.base && other.end() <= self.end()
     }
+
+    pub(crate) fn is_disjoint(self, other: Self) -> bool {
+        self.end() <= other.base || other.end() <= self.base
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

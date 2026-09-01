@@ -20,11 +20,16 @@ use crate::kernel::accounting::{
     ChargeReservation, CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::capability::{
-    ClosedHandle, HandleError, HandleFlags, HandleInfo, HandleReservation, HandleTable,
-    HandleValue, KernelObject, ObjectCreationError, ObjectRef, PreparedHandle, ResolvedObject,
-    Rights,
+    ClosedHandle, HANDLE_TABLE_STORAGE_SEGMENTS, HandleBatchReservation,
+    HandleBatchReservationStorage, HandleError, HandleFlags, HandleInfo, HandleReservation,
+    HandleTable, HandleTableStoragePlan, HandleTableStorageSnapshot, HandleTransferClaim,
+    HandleTransferRequest, HandleTransferStorage, HandleValue, InTransitCapabilities,
+    PreparedHandle, ResolvedObject, ResolvedWaitable, Rights,
 };
-use crate::kernel::mm::user_space::{MachineError, NativeAddressSpace, UserSlice};
+use crate::kernel::mm::user_space::{
+    MachineError, NativeAddressSpace, UserSlice, UserWriteReservation,
+};
+use crate::kernel::object::{KernelObject, Koid, ObjectCreationError, ObjectRef};
 use crate::kernel::sync::Completion;
 use crate::kernel::task::scheduler::{self, CpuMask};
 use crate::kernel::task::thread::ThreadId;
@@ -65,7 +70,7 @@ struct ProcessState {
     process_charge: Option<CommittedCharge>,
     threads: Option<FallibleArc<ThreadRecord>>,
     handle_charges: Option<FallibleArc<HandleChargeRecord>>,
-    handle_table_charges: Option<FallibleArc<TableStorageChargeRecord>>,
+    handle_table_charges: [Option<CommittedCharge>; HANDLE_TABLE_STORAGE_SEGMENTS],
     handles_retired: bool,
 }
 
@@ -82,11 +87,6 @@ struct HandleChargeRecord {
     state: ProcessLock<HandleChargeState>,
     next: ProcessLock<Option<FallibleArc<HandleChargeRecord>>>,
     _metadata_charge: CommittedCharge,
-}
-
-struct TableStorageChargeRecord {
-    next: ProcessLock<Option<FallibleArc<TableStorageChargeRecord>>>,
-    _charge: CommittedCharge,
 }
 
 struct ProcessInner {
@@ -276,7 +276,7 @@ impl PreparedProcess {
                 process_charge: Some(process_charge),
                 threads: None,
                 handle_charges: None,
-                handle_table_charges: None,
+                handle_table_charges: [const { None }; HANDLE_TABLE_STORAGE_SEGMENTS],
                 handles_retired: false,
             }),
             stopped: Completion::new(),
@@ -603,42 +603,36 @@ impl Process {
         &self,
     ) -> Result<ProcessHandleReservation<N>, ProcessError> {
         let reservation = loop {
-            let growth = self.inner.state.with(|state| {
+            let snapshot = self.inner.state.with(|state| {
                 require_handle_phase(state.lifecycle.phase())?;
                 Ok::<_, ProcessError>(
                     self.inner
                         .handles
-                        .with(|table| table.reservation_growth::<N>())?,
+                        .with(|table| table.reservation_storage_snapshot_for(N))?,
                 )
             })?;
-            let storage_record = self.prepare_table_storage_charge(growth)?;
+            let (mut storage_plan, mut storage_charge) =
+                self.prepare_table_storage_plan(snapshot)?;
             let attempt = self.inner.state.with(|state| {
                 require_handle_phase(state.lifecycle.phase())?;
-                let current_growth = self
+                let current = self
                     .inner
                     .handles
-                    .with(|table| table.reservation_growth::<N>())?;
-                if current_growth != growth {
+                    .with(|table| table.reservation_storage_snapshot_for(N))?;
+                if current != snapshot {
                     return Ok::<_, ProcessError>(None);
                 }
-                let reservation = self.inner.handles.with(HandleTable::reserve)?;
-                if let Some(record) = storage_record.as_ref() {
-                    record
-                        .next
-                        .with(|next| *next = state.handle_table_charges.clone());
-                    state.handle_table_charges = Some(record.clone());
-                }
+                let reservation = self
+                    .inner
+                    .handles
+                    .with(|table| table.reserve_with_plan(&mut storage_plan))?;
+                install_table_storage_charge(state, snapshot, &mut storage_charge);
                 Ok(Some(reservation))
             });
             match attempt {
                 Ok(Some(reservation)) => break reservation,
-                Ok(None) => {
-                    drop(storage_record);
-                }
-                Err(error) => {
-                    drop(storage_record);
-                    return Err(error);
-                }
+                Ok(None) => drop((storage_plan, storage_charge)),
+                Err(error) => return Err(error),
             }
         };
         let values = reservation.values();
@@ -709,31 +703,151 @@ impl Process {
         })
     }
 
-    fn prepare_table_storage_charge(
+    pub(crate) fn reserve_handle_batch(
         &self,
-        growth: usize,
-    ) -> Result<Option<FallibleArc<TableStorageChargeRecord>>, ProcessError> {
-        if growth == 0 {
-            return Ok(None);
-        }
-        let storage_bytes = growth
-            .checked_mul(HandleTable::slot_storage_size())
+        count: usize,
+    ) -> Result<ProcessHandleBatchReservation, ProcessError> {
+        HandleBatchReservationStorage::validate_count(count)?;
+        let entries_bytes = count
+            .checked_mul(core::mem::size_of::<HandleChargeEntry>())
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or(ProcessError::Allocation)?;
-        let base = metadata_amount::<TableStorageChargeRecord>()?;
-        let amount = base.with(
+        let metadata_base = metadata_amount::<HandleChargeRecord>()?;
+        let metadata_request = metadata_base.with(
             ResourceKind::KernelMemoryBytes,
-            base.get(ResourceKind::KernelMemoryBytes)
-                .checked_add(storage_bytes)
+            metadata_base
+                .get(ResourceKind::KernelMemoryBytes)
+                .checked_add(entries_bytes)
                 .ok_or(ProcessError::Allocation)?,
         );
-        let charge = self.inner.domain.reserve(amount)?.commit();
-        let record = FallibleArc::try_new(TableStorageChargeRecord {
+        let charge_scratch_bytes = count
+            .checked_mul(core::mem::size_of::<ChargeReservation>())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(ProcessError::Allocation)?;
+        let reservation_scratch_bytes = HandleBatchReservationStorage::allocation_size(count)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(ProcessError::Allocation)?;
+        let scratch_bytes = charge_scratch_bytes
+            .checked_add(reservation_scratch_bytes)
+            .ok_or(ProcessError::Allocation)?;
+        let scratch_request =
+            ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, scratch_bytes);
+        let scratch_charge = self.inner.domain.reserve(scratch_request)?.commit();
+        let mut reservation_storage = Some(HandleBatchReservationStorage::try_new(count)?);
+        let reservation = loop {
+            let snapshot = self.inner.state.with(|state| {
+                require_handle_phase(state.lifecycle.phase())?;
+                Ok::<_, ProcessError>(
+                    self.inner
+                        .handles
+                        .with(|table| table.reservation_storage_snapshot_for(count))?,
+                )
+            })?;
+            let (mut storage_plan, mut storage_charge) =
+                self.prepare_table_storage_plan(snapshot)?;
+            let attempt = self.inner.state.with(|state| {
+                require_handle_phase(state.lifecycle.phase())?;
+                let current = self
+                    .inner
+                    .handles
+                    .with(|table| table.reservation_storage_snapshot_for(count))?;
+                if current != snapshot {
+                    return Ok::<_, ProcessError>(None);
+                }
+                let reservation = self.inner.handles.with(|table| {
+                    table.reserve_batch_with_plan(
+                        count,
+                        &mut reservation_storage,
+                        &mut storage_plan,
+                    )
+                })?;
+                install_table_storage_charge(state, snapshot, &mut storage_charge);
+                Ok(Some(reservation))
+            });
+            match attempt {
+                Ok(Some(reservation)) => break reservation,
+                Ok(None) => drop((storage_plan, storage_charge)),
+                Err(error) => return Err(error),
+            }
+        };
+        let metadata = self.inner.domain.reserve(metadata_request);
+        let metadata = match metadata {
+            Ok(charge) => charge.commit(),
+            Err(error) => {
+                self.abort_raw_handle_batch_reservation(reservation);
+                return Err(error.into());
+            }
+        };
+        let mut charges = alloc::vec::Vec::new();
+        let mut entries = alloc::vec::Vec::new();
+        if charges.try_reserve_exact(count).is_err() || entries.try_reserve_exact(count).is_err() {
+            self.abort_raw_handle_batch_reservation(reservation);
+            return Err(ProcessError::Allocation);
+        }
+        let mut charge_error = None;
+        for value in reservation.values() {
+            let charge = match self
+                .inner
+                .domain
+                .reserve(ResourceAmount::ZERO.with(ResourceKind::Handles, 1))
+            {
+                Ok(charge) => charge,
+                Err(error) => {
+                    charge_error = Some(error);
+                    break;
+                }
+            };
+            charges.push(charge);
+            entries.push(HandleChargeEntry {
+                value: *value,
+                charge: None,
+            });
+        }
+        if let Some(error) = charge_error {
+            self.abort_raw_handle_batch_reservation(reservation);
+            return Err(error.into());
+        }
+        let record = match FallibleArc::try_new(HandleChargeRecord {
+            state: ProcessLock::new(HandleChargeState { entries }),
             next: ProcessLock::new(None),
-            _charge: charge,
+            _metadata_charge: metadata,
+        }) {
+            Ok(record) => record,
+            Err(_) => {
+                self.abort_raw_handle_batch_reservation(reservation);
+                return Err(ProcessError::Allocation);
+            }
+        };
+        Ok(ProcessHandleBatchReservation {
+            reservation: Some(reservation),
+            handle_charges: Some(charges),
+            record: Some(record),
+            scratch_charge: Some(scratch_charge),
         })
-        .map_err(|_| ProcessError::Allocation)?;
-        Ok(Some(record))
+    }
+
+    fn prepare_table_storage_plan(
+        &self,
+        snapshot: HandleTableStorageSnapshot,
+    ) -> Result<(Option<HandleTableStoragePlan>, Option<CommittedCharge>), ProcessError> {
+        let storage_bytes = snapshot
+            .growth_bytes()
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(ProcessError::Allocation)?;
+        let charge = if storage_bytes == 0 {
+            None
+        } else {
+            Some(
+                self.inner
+                    .domain
+                    .reserve(
+                        ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, storage_bytes),
+                    )?
+                    .commit(),
+            )
+        };
+        let plan = HandleTableStoragePlan::try_new(snapshot)?;
+        Ok((Some(plan), charge))
     }
 
     pub(crate) fn publish_handles<const N: usize>(
@@ -742,6 +856,7 @@ impl Process {
         handles: [PreparedHandle; N],
     ) -> Result<[HandleValue; N], HandlePublishFailure<N>> {
         let mut handles = Some(handles);
+        let mut retired_charge_storage = None;
         let result = self.inner.state.with(|state| {
             if require_handle_phase(state.lifecycle.phase()).is_err() {
                 let token = match reservation.reservation.take() {
@@ -786,12 +901,18 @@ impl Process {
                     process_invariant_violation();
                 }
             });
-            record
-                .next
-                .with(|next| *next = state.handle_charges.clone());
+            let previous = state.handle_charges.take();
+            record.next.with(|next| {
+                if next.is_some() {
+                    process_invariant_violation();
+                }
+                *next = previous;
+            });
             state.handle_charges = Some(record);
+            retired_charge_storage = Some(charges);
             Ok(values)
         });
+        drop(retired_charge_storage.take());
         match result {
             Ok(values) => Ok(values),
             Err(error) => {
@@ -806,6 +927,117 @@ impl Process {
                 })
             }
         }
+    }
+
+    // Boxing the error would add a fallible allocation precisely on rollback;
+    // the large variant is the linear owner required to preserve authority.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn publish_handle_batch(
+        &self,
+        mut reservation: ProcessHandleBatchReservation,
+        handles: InTransitCapabilities,
+    ) -> Result<(), HandleBatchPublishFailure> {
+        let (handles, storage_charge) = handles.into_prepared_handles();
+        let mut handles = Some(handles);
+        let mut storage_charge = Some(storage_charge);
+        let mut retired_reservation_storage = None;
+        let mut retired_charge_storage = None;
+        let result = self.inner.state.with(|state| {
+            if require_handle_phase(state.lifecycle.phase()).is_err() {
+                let token = match reservation.reservation.take() {
+                    Some(token) => token,
+                    None => process_invariant_violation(),
+                };
+                retired_reservation_storage =
+                    Some(self.inner.handles.with(|table| token.abort(table)));
+                return Err(ProcessError::Lifecycle(LifecycleError::AdmissionClosed));
+            }
+            let token = match reservation.reservation.take() {
+                Some(token) => token,
+                None => process_invariant_violation(),
+            };
+            let prepared = match handles.take() {
+                Some(handles) => handles,
+                None => process_invariant_violation(),
+            };
+            retired_reservation_storage = Some(
+                self.inner
+                    .handles
+                    .with(|table| token.publish(table, prepared)),
+            );
+            let mut charges = match reservation.handle_charges.take() {
+                Some(charges) => charges,
+                None => process_invariant_violation(),
+            };
+            let record = match reservation.record.take() {
+                Some(record) => record,
+                None => process_invariant_violation(),
+            };
+            record.state.with(|record_state| {
+                if record_state.entries.len() != charges.len() {
+                    process_invariant_violation();
+                }
+                for entry in record_state.entries.iter_mut().rev() {
+                    let charge = match charges.pop() {
+                        Some(charge) => charge,
+                        None => process_invariant_violation(),
+                    };
+                    entry.charge = Some(charge.commit());
+                }
+            });
+            let previous = state.handle_charges.take();
+            record.next.with(|next| {
+                if next.is_some() {
+                    process_invariant_violation();
+                }
+                *next = previous;
+            });
+            state.handle_charges = Some(record);
+            retired_charge_storage = Some(charges);
+            Ok(())
+        });
+        drop(retired_reservation_storage.take());
+        drop(retired_charge_storage.take());
+        drop(reservation.scratch_charge.take());
+        match result {
+            Ok(()) => {
+                drop(storage_charge.take());
+                Ok(())
+            }
+            Err(error) => {
+                drop(reservation.handle_charges.take());
+                drop(reservation.record.take());
+                let prepared = match handles.take() {
+                    Some(handles) => handles,
+                    None => process_invariant_violation(),
+                };
+                Err(HandleBatchPublishFailure {
+                    error,
+                    handles: InTransitCapabilities::from_prepared_handles(
+                        prepared,
+                        match storage_charge.take() {
+                            Some(charge) => charge,
+                            None => process_invariant_violation(),
+                        },
+                    ),
+                })
+            }
+        }
+    }
+
+    pub(crate) fn abort_handle_batch(&self, mut reservation: ProcessHandleBatchReservation) {
+        let token = match reservation.reservation.take() {
+            Some(token) => token,
+            None => process_invariant_violation(),
+        };
+        let retired = self
+            .inner
+            .state
+            .with(|_| self.inner.handles.with(|table| token.abort(table)));
+        drop(retired);
+        drop(reservation.handle_charges.take());
+        drop(reservation.record.take());
+        drop(reservation.scratch_charge.take());
     }
 
     pub(crate) fn abort_handles<const N: usize>(
@@ -827,6 +1059,14 @@ impl Process {
         });
     }
 
+    fn abort_raw_handle_batch_reservation(&self, reservation: HandleBatchReservation) {
+        let retired = self
+            .inner
+            .state
+            .with(|_| self.inner.handles.with(|table| reservation.abort(table)));
+        drop(retired);
+    }
+
     pub(crate) fn resolve_handle<T: KernelObject>(
         &self,
         value: HandleValue,
@@ -838,6 +1078,92 @@ impl Process {
                 .inner
                 .handles
                 .with(|table| table.resolve(value, rights))?)
+        })
+    }
+
+    pub(crate) fn resolve_waitable(
+        &self,
+        value: HandleValue,
+        rights: Rights,
+    ) -> Result<ResolvedWaitable, ProcessError> {
+        self.inner.state.with(|state| {
+            require_handle_phase(state.lifecycle.phase())?;
+            Ok(self
+                .inner
+                .handles
+                .with(|table| table.resolve_waitable(value, rights))?)
+        })
+    }
+
+    /// Claims source handles without changing their process-local values.
+    ///
+    /// The returned transaction owns every active capability while exact
+    /// lookups report `Busy`. It can either restore the same values or perform
+    /// one final generation-advancing move into an in-transit batch.
+    pub(crate) fn prepare_handle_transfer(
+        &self,
+        requests: &[HandleTransferRequest],
+        forbidden_object: Option<Koid>,
+        forbidden_kind: Option<crate::kernel::object::ObjectKind>,
+    ) -> Result<PreparedProcessHandleTransfer, ProcessError> {
+        HandleTransferStorage::validate_count(requests.len())?;
+        let entry_bytes = HandleTransferClaim::entry_allocation_size(requests.len())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(ProcessError::Allocation)?;
+        let handle_bytes = HandleTransferClaim::handle_allocation_size(requests.len())
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(ProcessError::Allocation)?;
+        let scratch_bytes = requests
+            .len()
+            .checked_mul(
+                core::mem::size_of::<CommittedCharge>()
+                    .saturating_add(core::mem::size_of::<FallibleArc<HandleChargeRecord>>()),
+            )
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(ProcessError::Allocation)?;
+        let entry_charge = self
+            .inner
+            .domain
+            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, entry_bytes))?
+            .commit();
+        let handle_charge = self
+            .inner
+            .domain
+            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, handle_bytes))?
+            .commit();
+        let scratch_charge = self
+            .inner
+            .domain
+            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, scratch_bytes))?
+            .commit();
+        let mut storage = Some(HandleTransferStorage::try_new(requests.len())?);
+        let mut released_charges = alloc::vec::Vec::new();
+        released_charges
+            .try_reserve_exact(requests.len())
+            .map_err(|_| ProcessError::Allocation)?;
+        let mut retired_records = alloc::vec::Vec::new();
+        retired_records
+            .try_reserve_exact(requests.len())
+            .map_err(|_| ProcessError::Allocation)?;
+        let claim = self.inner.state.with(|state| {
+            require_handle_phase(state.lifecycle.phase())?;
+            Ok::<_, ProcessError>(self.inner.handles.with(|table| {
+                table.prepare_transfer_with_storage(
+                    requests,
+                    forbidden_object,
+                    forbidden_kind,
+                    &mut storage,
+                )
+            })?)
+        })?;
+        Ok(PreparedProcessHandleTransfer {
+            process: self.clone(),
+            claim: Some(claim),
+            entry_charge: Some(entry_charge),
+            handle_charge: Some(handle_charge),
+            scratch_charge: Some(scratch_charge),
+            released_charges,
+            retired_records,
         })
     }
 
@@ -869,6 +1195,54 @@ impl Process {
         };
         match self.publish_handles(reservation, [prepared]) {
             Ok(values) => Ok(values[0]),
+            Err(failure) => Err(failure.error),
+        }
+    }
+
+    /// Publishes a same-kind object pair in one handle-table transaction.
+    ///
+    /// Both erased objects and both active owners exist before publication, so
+    /// userspace can never observe only one endpoint of a newly created pair.
+    pub(crate) fn create_object_pair<T: KernelObject>(
+        &self,
+        first: T,
+        second: T,
+        rights: Rights,
+    ) -> Result<[HandleValue; 2], ProcessError> {
+        let reservation = self.reserve_handles::<2>()?;
+        let first = match ObjectRef::try_new(first) {
+            Ok(object) => object,
+            Err(error) => {
+                self.abort_handles(reservation);
+                return Err(error.into());
+            }
+        };
+        let second = match ObjectRef::try_new(second) {
+            Ok(object) => object,
+            Err(error) => {
+                self.abort_handles(reservation);
+                drop(first);
+                return Err(error.into());
+            }
+        };
+        let first = match PreparedHandle::try_from_new_object(first, rights, HandleFlags::NONE) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.abort_handles(reservation);
+                drop(second);
+                return Err(error.into());
+            }
+        };
+        let second = match PreparedHandle::try_from_new_object(second, rights, HandleFlags::NONE) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.abort_handles(reservation);
+                drop(first);
+                return Err(error.into());
+            }
+        };
+        match self.publish_handles(reservation, [first, second]) {
+            Ok(values) => Ok(values),
             Err(failure) => Err(failure.error),
         }
     }
@@ -920,15 +1294,44 @@ impl Process {
         value: HandleValue,
         rights: Rights,
     ) -> Result<HandleValue, ProcessError> {
-        self.inner.state.with(|state| {
-            require_handle_phase(state.lifecycle.phase())?;
-            let replacement = self
-                .inner
-                .handles
-                .with(|table| table.replace(value, rights))?;
-            replace_handle_charge_value(state, value, replacement);
-            Ok(replacement)
-        })
+        loop {
+            let snapshot = self.inner.state.with(|state| {
+                require_handle_phase(state.lifecycle.phase())?;
+                Ok::<_, ProcessError>(
+                    self.inner
+                        .handles
+                        .with(|table| table.replace_storage_snapshot(value, rights))?,
+                )
+            })?;
+            let (mut storage_plan, mut storage_charge) = match snapshot {
+                Some(snapshot) => self.prepare_table_storage_plan(snapshot)?,
+                None => (None, None),
+            };
+            let attempt = self.inner.state.with(|state| {
+                require_handle_phase(state.lifecycle.phase())?;
+                let current = self
+                    .inner
+                    .handles
+                    .with(|table| table.replace_storage_snapshot(value, rights))?;
+                if current != snapshot {
+                    return Ok::<_, ProcessError>(None);
+                }
+                let replacement = self
+                    .inner
+                    .handles
+                    .with(|table| table.replace_with_plan(value, rights, &mut storage_plan))?;
+                if let Some(snapshot) = snapshot {
+                    install_table_storage_charge(state, snapshot, &mut storage_charge);
+                }
+                replace_handle_charge_value(state, value, replacement);
+                Ok(Some(replacement))
+            });
+            match attempt {
+                Ok(Some(replacement)) => return Ok(replacement),
+                Ok(None) => drop((storage_plan, storage_charge)),
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     pub(crate) fn copy_to_user(
@@ -946,6 +1349,42 @@ impl Process {
         })?;
         address_space.copy_to_user(destination, source)?;
         Ok(())
+    }
+
+    pub(crate) fn copy_from_user(
+        &self,
+        source: UserSlice,
+        destination: &mut [u8],
+    ) -> Result<(), ProcessError> {
+        let address_space = self.inner.state.with(|state| {
+            require_handle_phase(state.lifecycle.phase())?;
+            state
+                .address_space
+                .as_ref()
+                .cloned()
+                .ok_or(ProcessError::AddressSpaceReferenced)
+        })?;
+        address_space.copy_from_user(source, destination)?;
+        Ok(())
+    }
+
+    /// Pins one exact output range across a capability publication transaction.
+    pub(crate) fn reserve_user_write(
+        &self,
+        destination: UserSlice,
+    ) -> Result<UserWriteReservation, ProcessError> {
+        let address_space = self.inner.state.with(|state| {
+            require_handle_phase(state.lifecycle.phase())?;
+            state
+                .address_space
+                .as_ref()
+                .cloned()
+                .ok_or(ProcessError::AddressSpaceReferenced)
+        })?;
+        Ok(NativeAddressSpace::reserve_user_write(
+            address_space,
+            destination,
+        )?)
     }
 
     pub(crate) fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError> {
@@ -1042,7 +1481,7 @@ impl Process {
 
     fn finish_retirement(&self) {
         let retired_table_storage = self.inner.handles.with(HandleTable::take_retired_storage);
-        let (membership, process_charge, mut records, mut handle_charges, mut table_charges) =
+        let (membership, process_charge, mut records, mut handle_charges, table_charges) =
             self.inner.state.with(|state| {
                 if state.lifecycle.finish_retirement().is_err() {
                     process_invariant_violation();
@@ -1052,7 +1491,10 @@ impl Process {
                     state.process_charge.take(),
                     state.threads.take(),
                     state.handle_charges.take(),
-                    state.handle_table_charges.take(),
+                    core::mem::replace(
+                        &mut state.handle_table_charges,
+                        [const { None }; HANDLE_TABLE_STORAGE_SEGMENTS],
+                    ),
                 )
             });
         while let Some(record) = records {
@@ -1070,10 +1512,7 @@ impl Process {
             drop(record);
         }
         drop(retired_table_storage);
-        while let Some(record) = table_charges {
-            table_charges = record.next.with(Option::take);
-            drop(record);
-        }
+        drop(table_charges);
         let membership = match membership {
             Some(membership) => membership,
             None => process_invariant_violation(),
@@ -1096,11 +1535,158 @@ pub(crate) struct HandlePublishFailure<const N: usize> {
     pub(crate) handles: [PreparedHandle; N],
 }
 
+/// Process-owned reversible source-handle transaction.
+#[must_use = "commit or roll back the process handle transfer"]
+pub(crate) struct PreparedProcessHandleTransfer {
+    process: Process,
+    claim: Option<HandleTransferClaim>,
+    entry_charge: Option<CommittedCharge>,
+    handle_charge: Option<CommittedCharge>,
+    scratch_charge: Option<CommittedCharge>,
+    released_charges: alloc::vec::Vec<CommittedCharge>,
+    retired_records: alloc::vec::Vec<FallibleArc<HandleChargeRecord>>,
+}
+
+impl PreparedProcessHandleTransfer {
+    /// Restores every claimed source at its original numeric value.
+    pub(crate) fn rollback(mut self) {
+        let claim = match self.claim.take() {
+            Some(claim) => claim,
+            None => process_invariant_violation(),
+        };
+        let retired = self.process.inner.state.with(|_| {
+            self.process
+                .inner
+                .handles
+                .with(|table| claim.rollback_with_storage(table))
+        });
+        drop(retired);
+        drop(self.entry_charge.take());
+        drop(self.handle_charge.take());
+        drop(self.scratch_charge.take());
+    }
+
+    /// Permanently consumes all source values and returns their active owners.
+    ///
+    /// Admission is the only recoverable check. Once it succeeds, accounting
+    /// extraction and generation advancement are infallible and serialized by
+    /// the Process lock. Released accounting owners are dropped afterward.
+    // The recoverable error must retain this complete linear transaction.
+    // Boxing it would make rollback depend on a new allocation.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn commit(mut self) -> Result<InTransitCapabilities, HandleTransferCommitFailure> {
+        let result = self.process.inner.state.with(|state| {
+            require_handle_phase(state.lifecycle.phase())?;
+            let claim = match self.claim.as_ref() {
+                Some(claim) => claim,
+                None => process_invariant_violation(),
+            };
+            for value in claim.values() {
+                if !handle_charge_is_live(state, value) {
+                    process_invariant_violation();
+                }
+            }
+            for value in claim.values() {
+                let (charge, retired_record) = release_handle_charge(state, value);
+                self.released_charges.push(charge);
+                if let Some(record) = retired_record {
+                    self.retired_records.push(record);
+                }
+            }
+            let claim = match self.claim.take() {
+                Some(claim) => claim,
+                None => process_invariant_violation(),
+            };
+            Ok(self
+                .process
+                .inner
+                .handles
+                .with(|table| claim.commit_with_storage(table)))
+        });
+        let (handles, retired_transfer_storage) = match result {
+            Ok(handles) => handles,
+            Err(error) => {
+                return Err(HandleTransferCommitFailure {
+                    error,
+                    transfer: self,
+                });
+            }
+        };
+        drop(retired_transfer_storage);
+        drop(core::mem::take(&mut self.released_charges));
+        drop(core::mem::take(&mut self.retired_records));
+        drop(self.entry_charge.take());
+        drop(self.scratch_charge.take());
+        let storage_charge = match self.handle_charge.take() {
+            Some(charge) => charge,
+            None => process_invariant_violation(),
+        };
+        Ok(InTransitCapabilities::new(handles, storage_charge))
+    }
+}
+
+impl Drop for PreparedProcessHandleTransfer {
+    fn drop(&mut self) {
+        if self.claim.is_some()
+            || self.entry_charge.is_some()
+            || self.handle_charge.is_some()
+            || self.scratch_charge.is_some()
+            || !self.released_charges.is_empty()
+            || !self.retired_records.is_empty()
+        {
+            process_invariant_violation();
+        }
+    }
+}
+
+/// Recoverable final-commit failure retaining the exact rollback owner.
+#[must_use = "inspect the error and roll back the retained transfer"]
+pub(crate) struct HandleTransferCommitFailure {
+    pub(crate) error: ProcessError,
+    pub(crate) transfer: PreparedProcessHandleTransfer,
+}
+
 #[must_use = "publish or abort the process handle reservation"]
 pub(crate) struct ProcessHandleReservation<const N: usize> {
     reservation: Option<HandleReservation<N>>,
     handle_charges: Option<alloc::vec::Vec<ChargeReservation>>,
     record: Option<FallibleArc<HandleChargeRecord>>,
+}
+
+#[must_use = "publish or abort the process handle batch reservation"]
+pub(crate) struct ProcessHandleBatchReservation {
+    reservation: Option<HandleBatchReservation>,
+    handle_charges: Option<alloc::vec::Vec<ChargeReservation>>,
+    record: Option<FallibleArc<HandleChargeRecord>>,
+    scratch_charge: Option<CommittedCharge>,
+}
+
+impl ProcessHandleBatchReservation {
+    /// Future numeric values which remain unresolved until batch publication.
+    pub(crate) fn values(&self) -> &[HandleValue] {
+        match self.reservation.as_ref() {
+            Some(reservation) => reservation.values(),
+            None => process_invariant_violation(),
+        }
+    }
+}
+
+impl Drop for ProcessHandleBatchReservation {
+    fn drop(&mut self) {
+        if self.reservation.is_some()
+            || self.handle_charges.is_some()
+            || self.record.is_some()
+            || self.scratch_charge.is_some()
+        {
+            process_invariant_violation();
+        }
+    }
+}
+
+#[must_use = "recover the in-transit handles from the failed publication"]
+pub(crate) struct HandleBatchPublishFailure {
+    pub(crate) error: ProcessError,
+    pub(crate) handles: InTransitCapabilities,
 }
 
 impl<const N: usize> Drop for ProcessHandleReservation<N> {
@@ -1257,6 +1843,35 @@ fn metadata_amount<T>() -> Result<ResourceAmount, ProcessError> {
         ))
 }
 
+fn install_table_storage_charge(
+    state: &mut ProcessState,
+    snapshot: HandleTableStorageSnapshot,
+    prepared: &mut Option<CommittedCharge>,
+) {
+    let bytes = match snapshot.growth_bytes() {
+        Some(bytes) => bytes,
+        None => process_invariant_violation(),
+    };
+    if bytes == 0 {
+        if prepared.is_some() {
+            process_invariant_violation();
+        }
+    } else {
+        let charge = match prepared.take() {
+            Some(charge) => charge,
+            None => process_invariant_violation(),
+        };
+        let Some(slot) = state
+            .handle_table_charges
+            .iter_mut()
+            .find(|slot| slot.is_none())
+        else {
+            process_invariant_violation();
+        };
+        *slot = Some(charge);
+    }
+}
+
 fn require_handle_phase(phase: ProcessPhase) -> Result<(), ProcessError> {
     match phase {
         ProcessPhase::Created | ProcessPhase::Running => Ok(()),
@@ -1330,6 +1945,23 @@ fn release_handle_charge(
         current = next;
     }
     process_invariant_violation()
+}
+
+fn handle_charge_is_live(state: &ProcessState, value: HandleValue) -> bool {
+    let mut current = state.handle_charges.clone();
+    while let Some(record) = current {
+        let found = record.state.with(|record_state| {
+            record_state
+                .entries
+                .iter()
+                .any(|entry| entry.value == value && entry.charge.is_some())
+        });
+        if found {
+            return true;
+        }
+        current = record.next.with(|next| next.clone());
+    }
+    false
 }
 
 fn replace_handle_charge_value(

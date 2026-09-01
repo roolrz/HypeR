@@ -11,9 +11,7 @@ use crate::kernel::task::{
     ArmedTimeout, PreparedTimeout, TimedWaitError, WaitMobility, WaitOutcome,
 };
 
-use super::signals::{
-    PreparedSignalWait, SignalMask, SignalState, SignalWaitError, SignalWaitOutcome,
-};
+use super::signals::{PreparedSignalWait, SignalSource, SignalWaitError, SignalWaitOutcome};
 
 /// Failure before a signal, timeout, or cancellation outcome is selected.
 #[derive(Debug)]
@@ -132,13 +130,17 @@ impl ArmedWaitTimer {
 }
 
 /// Executes one generation-qualified wait from local preparation to retirement.
-pub(super) fn wait_one(
-    signals: &SignalState,
+pub(crate) fn wait_one(
+    source: SignalSource<'_>,
     domain: &ResourceDomain,
-    requested: SignalMask,
+    requested: u64,
     deadline_nanoseconds: u64,
     cancellation_requested: impl FnOnce() -> bool,
 ) -> Result<SignalWaitOutcome, ObjectWaitError> {
+    let requested = source
+        .validate(requested, false)
+        .ok_or(ObjectWaitError::InvalidSignals)?;
+    let signals = source.state();
     if let Some(snapshot) = signals.observe(requested) {
         return Ok(SignalWaitOutcome::Observed(snapshot));
     }

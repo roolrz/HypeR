@@ -269,9 +269,9 @@ secondary architectures.
   and reference into generated dispatch wrappers, architecture stubs, and vDSO
   exports;
 - expose the existing VMO/VMAR and safe-copy core through capabilities, then
-  extend the Event and single-object wait foundation with Channel, EventPair,
-  WaitSet, clock/timer, and atomic-wait primitives sufficient for a real service
-  runtime;
+  extend the implemented Event, Channel, and single-object wait foundation with
+  EventPair, WaitSet, clock/timer, and atomic-wait primitives sufficient for a
+  real service runtime;
 - add temporary pre-release debug output, then extend the implemented blocking
   cancellation with multi-Thread Process qualification before atomic exec.
 

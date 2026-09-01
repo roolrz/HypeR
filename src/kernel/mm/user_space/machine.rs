@@ -16,8 +16,8 @@ use super::kernel_adapter::DomainCharge;
 use super::{
     Access, AddressError, AddressSpaceError as LogicalError, DomainAccount, KernelPageBackend,
     KernelPageError, MappingChange, MemoryAccount, MemoryCharge, Permissions,
-    PreparedMappingChange, PreparedPageSnapshot, UserAddress, UserAddressSpace, UserSlice,
-    VmoError, WritableVmo,
+    PreparedMappingChange, PreparedPageSnapshot, PreparedUserWrite, UserAddress, UserAddressSpace,
+    UserSlice, VmoError, WritableVmo,
 };
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
@@ -29,6 +29,7 @@ use crate::kernel::mm::translation_id::{
 
 type LogicalAddressSpace = UserAddressSpace<KernelPageBackend, DomainAccount>;
 type LogicalPrepared<'a> = PreparedMappingChange<'a, KernelPageBackend, DomainAccount>;
+type LogicalUserWrite = PreparedUserWrite<KernelPageBackend, DomainAccount>;
 type StateLock = InterruptSpinLock<MachineState, crate::hal::irq::LocalMask>;
 type LogicalAddressSpaceError = LogicalError<KernelPageError, ResourceError>;
 
@@ -353,6 +354,28 @@ impl NativeAddressSpace {
         Ok(())
     }
 
+    /// Copies bytes from the current logical user-address mappings.
+    pub(crate) fn copy_from_user(
+        &self,
+        source: UserSlice,
+        destination: &mut [u8],
+    ) -> Result<(), Error> {
+        self.logical.copy_from_user(source, destination)?;
+        Ok(())
+    }
+
+    /// Reserves a stable writable mapping for capability-returning syscalls.
+    pub(crate) fn reserve_user_write(
+        owner: FallibleArc<Self>,
+        destination: UserSlice,
+    ) -> Result<UserWriteReservation, Error> {
+        let plan = owner.logical.prepare_user_write(destination)?;
+        Ok(UserWriteReservation {
+            owner,
+            plan: Some(plan),
+        })
+    }
+
     pub(crate) fn prepare_change<'a>(
         &'a self,
         logical: LogicalPrepared<'a>,
@@ -533,6 +556,42 @@ impl NativeAddressSpace {
         drop(state);
         drop(logical);
         Ok(())
+    }
+}
+
+/// Owned guard which prevents output mappings from changing before commit.
+pub(crate) struct UserWriteReservation {
+    owner: FallibleArc<NativeAddressSpace>,
+    plan: Option<LogicalUserWrite>,
+}
+
+impl UserWriteReservation {
+    pub(crate) fn copy_from(&self, source: &[u8]) -> Result<(), Error> {
+        let Some(plan) = self.plan.as_ref() else {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: completed user-write reservation reused"
+            ));
+        };
+        self.owner.logical.write_user_reservation(plan, source)?;
+        Ok(())
+    }
+
+    pub(crate) fn complete(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        let plan = match self.plan.take() {
+            Some(plan) => plan,
+            None => return,
+        };
+        self.owner.logical.release_user_write(plan);
+    }
+}
+
+impl Drop for UserWriteReservation {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 

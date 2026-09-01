@@ -3,6 +3,9 @@
 
 //! Bare-metal integration tests compiled only by `kernel-self-test`.
 
+mod channel;
+#[cfg(CONFIG_ARCH_AARCH64)]
+mod channel_service;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod guest_entry_irq;
 mod guest_memory_access;
@@ -40,6 +43,12 @@ pub(crate) fn run() {
     #[cfg(CONFIG_ARCH_AARCH64)]
     run_case("AArch64 native-user entry tests", native_user_entry::run);
     run_case("kernel object-wait tests", object_wait::run);
+    run_case("kernel Channel core tests", channel::run);
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    run_case(
+        "kernel Channel service transaction tests",
+        channel_service::run,
+    );
     run_case("kernel wait-arbitration tests", wait_arbitration::run);
     run_case("kernel startup-readiness tests", startup_readiness::run);
     let guest_execution = crate::hal::vm::guest_execution_available();
@@ -68,6 +77,9 @@ pub(crate) fn run() {
     crate::println!("HypeR test: deadline-based thread sleep passed");
     crate::println!("HypeR test: race-safe wait arbitration passed");
     crate::println!("HypeR test: level-triggered object waits passed");
+    crate::println!("HypeR test: bounded Channel FIFO and signal lifecycle passed");
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    crate::println!("HypeR test: Channel Process and user-copy transactions passed");
     crate::println!("HypeR test: Native syscall validation passed");
     #[cfg(CONFIG_ARCH_AARCH64)]
     crate::println!("HypeR test: AArch64 EL0 syscall and fault containment passed");

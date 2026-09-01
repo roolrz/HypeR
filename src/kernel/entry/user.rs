@@ -12,9 +12,10 @@ use hyper::hal::user::{
 use hyper::sync::InterruptMaskGuard;
 
 use crate::kernel::abi::native::{self, DeferredServices, ImmediateServices, ObjectServiceError};
-use crate::kernel::capability::{HandleInfo, HandleValue, KernelObject, Rights};
+use crate::kernel::capability::{HandleInfo, HandleValue, Rights};
+use crate::kernel::ipc::{ChannelReadOutcome, ChannelServiceError, ReadBuffers};
 use crate::kernel::mm::user_space::UserSlice;
-use crate::kernel::object::{Event, SignalWaitOutcome};
+use crate::kernel::object::{self, Event, KernelObject, SignalWaitOutcome};
 use crate::kernel::process::{
     AbiFamily, ExecutionRoute, Process, ProcessError, RunAdmissionError, StoppedUserRun,
     TerminalReason, UserExecution, UserThread, UserThreadPhase,
@@ -69,6 +70,10 @@ impl ImmediateServices for ProcessServices<'_> {
             .process
             .create_object(event, <Event as KernelObject>::SUPPORTED_RIGHTS)?)
     }
+
+    fn create_channel(&self) -> Result<[HandleValue; 2], ChannelServiceError> {
+        crate::kernel::ipc::channel_create(self.process)
+    }
 }
 
 struct DeferredProcessServices<'session> {
@@ -96,16 +101,39 @@ impl DeferredServices for DeferredProcessServices<'_> {
         requested: u64,
         deadline: u64,
     ) -> Result<SignalWaitOutcome, ObjectServiceError> {
-        let resolved = self
-            .session
-            .process
-            .resolve_handle::<Event>(value, Rights::WAIT)?;
+        let resolved = self.session.process.resolve_waitable(value, Rights::WAIT)?;
         let domain = self.session.process.resource_domain();
-        Ok(resolved
-            .object()
-            .wait_one(&domain, requested, deadline, || {
-                self.session.thread.snapshot().phase == UserThreadPhase::StopRequested
-            })?)
+        Ok(object::wait_one(
+            resolved.source(),
+            &domain,
+            requested,
+            deadline,
+            || self.session.thread.snapshot().phase == UserThreadPhase::StopRequested,
+        )?)
+    }
+
+    fn write_channel(
+        &self,
+        endpoint: HandleValue,
+        bytes: Option<UserSlice>,
+        dispositions: Option<UserSlice>,
+        disposition_count: usize,
+    ) -> Result<(), ChannelServiceError> {
+        crate::kernel::ipc::channel_write(
+            &self.session.process,
+            endpoint,
+            bytes,
+            dispositions,
+            disposition_count,
+        )
+    }
+
+    fn read_channel(
+        &self,
+        endpoint: HandleValue,
+        buffers: ReadBuffers,
+    ) -> Result<ChannelReadOutcome, ChannelServiceError> {
+        crate::kernel::ipc::channel_read(&self.session.process, endpoint, buffers)
     }
 }
 

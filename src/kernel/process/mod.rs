@@ -15,8 +15,10 @@ pub(crate) use image::{
 };
 pub(crate) use lifecycle::{ProcessPhase, TerminalReason, UserThreadPhase};
 pub(crate) use owner::{
-    AddressSpaceRetirement, PreparedProcess, Process, ProcessCreateFailure, ProcessError,
-    ProcessHandleReservation, ProcessId, ProcessRetirementStep, ProcessSnapshot, ProcessStopReport,
+    AddressSpaceRetirement, HandleBatchPublishFailure, HandleTransferCommitFailure,
+    PreparedProcess, PreparedProcessHandleTransfer, Process, ProcessCreateFailure, ProcessError,
+    ProcessHandleBatchReservation, ProcessHandleReservation, ProcessId, ProcessRetirementStep,
+    ProcessSnapshot, ProcessStopReport,
 };
 pub(crate) use task_group::{TaskGroup, TaskGroupError, TaskGroupId, TaskGroupStopReport};
 pub(crate) use user_thread::{

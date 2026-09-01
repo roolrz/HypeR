@@ -119,6 +119,14 @@ pub struct Syscall {
     pub completion: CompletionClass,
     pub audit: AuditClass,
     pub flags: FlagPolicy,
+    /// Auxiliary results which remain defined for specific failure statuses.
+    pub failure_results: &'static [FailureResults],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FailureResults {
+    pub status: &'static str,
+    pub results: &'static [&'static str],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +158,7 @@ pub enum ValueKind {
     Handle,
     UserAddress,
     ByteCount,
+    ElementCount,
     Rights,
 }
 
@@ -193,10 +202,36 @@ pub enum ProducedRights {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UserMemory {
     pub direction: MemoryDirection,
-    pub length_argument: &'static str,
-    pub maximum_bytes: u32,
+    pub length: MemoryLength,
     pub record: Option<&'static str>,
+    pub handles: Option<IndirectHandles>,
     pub validation_order: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MemoryLength {
+    Bytes {
+        argument: &'static str,
+        maximum_bytes: u32,
+    },
+    Elements {
+        argument: &'static str,
+        maximum_elements: u32,
+        element_size: u16,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IndirectHandles {
+    /// Handle values in input records are moved only when the syscall commits.
+    ConsumeRecords {
+        handle_field: &'static str,
+        rights_field: &'static str,
+        expected_kind_field: &'static str,
+        required_rights: u64,
+    },
+    /// The kernel publishes transferred handles into an output element array.
+    ProduceTransferred,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -302,6 +337,18 @@ pub const STATUSES: &[Status] = &[
         value: -12,
         name: "cancelled",
     },
+    Status {
+        value: -13,
+        name: "would_block",
+    },
+    Status {
+        value: -14,
+        name: "buffer_too_small",
+    },
+    Status {
+        value: -15,
+        name: "peer_closed",
+    },
 ];
 
 const RIGHT_DUPLICATE_BIT: u8 = 0;
@@ -316,6 +363,10 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
     ObjectKind {
         value: 1,
         name: "event",
+    },
+    ObjectKind {
+        value: 2,
+        name: "channel",
     },
 ];
 
@@ -407,20 +458,67 @@ pub const RIGHT_INSPECT: u64 = 1 << RIGHT_INSPECT_BIT;
 pub const RIGHT_TRANSFER: u64 = 1 << 1;
 pub const RIGHT_WAIT: u64 = 1 << 2;
 pub const RIGHT_SIGNAL: u64 = 1 << RIGHT_SIGNAL_BIT;
+pub const RIGHT_READ: u64 = 1 << 4;
+pub const RIGHT_WRITE: u64 = 1 << 5;
 
 pub const EVENT_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
+pub const CHANNEL_RIGHTS: u64 =
+    RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE;
 
-pub const SIGNALS: &[Signal] = &[Signal {
-    object: "event",
-    bit: 0,
-    name: "signaled",
-}];
+pub const SIGNALS: &[Signal] = &[
+    Signal {
+        object: "event",
+        bit: 0,
+        name: "signaled",
+    },
+    Signal {
+        object: "channel",
+        bit: 0,
+        name: "readable",
+    },
+    Signal {
+        object: "channel",
+        bit: 1,
+        name: "writable",
+    },
+    Signal {
+        object: "channel",
+        bit: 2,
+        name: "peer_closed",
+    },
+];
 
-pub const CONSTANTS: &[AbiConstant] = &[AbiConstant {
-    name: "deadline_infinite",
-    value: u64::MAX,
-}];
+pub const CONSTANTS: &[AbiConstant] = &[
+    AbiConstant {
+        name: "deadline_infinite",
+        value: u64::MAX,
+    },
+    AbiConstant {
+        name: "channel_disposition_same_rights",
+        value: u64::MAX,
+    },
+    AbiConstant {
+        name: "channel_max_message_bytes",
+        value: 64 * 1024,
+    },
+    AbiConstant {
+        name: "channel_max_message_handles",
+        value: 64,
+    },
+    AbiConstant {
+        name: "channel_max_queued_messages",
+        value: 16,
+    },
+    AbiConstant {
+        name: "channel_max_queued_bytes",
+        value: 16 * 64 * 1024,
+    },
+    AbiConstant {
+        name: "channel_max_queued_handles",
+        value: 16 * 64,
+    },
+];
 
 const HANDLE_INFO_FIELDS: &[Field] = &[
     Field {
@@ -458,6 +556,29 @@ const OBJECT_BASIC_INFO_FIELDS: &[Field] = &[
     },
 ];
 
+const CHANNEL_DISPOSITION_FIELDS: &[Field] = &[
+    Field {
+        name: "handle",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "rights",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "expected_kind",
+        kind: FieldKind::U32,
+        offset: 16,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U32,
+        offset: 20,
+    },
+];
+
 pub const RECORDS: &[Record] = &[
     Record {
         name: "handle_info",
@@ -469,6 +590,12 @@ pub const RECORDS: &[Record] = &[
         name: "object_basic_info",
         fields: OBJECT_BASIC_INFO_FIELDS,
         size: 16,
+        alignment: 8,
+    },
+    Record {
+        name: "channel_disposition",
+        fields: CHANNEL_DISPOSITION_FIELDS,
+        size: 24,
         alignment: 8,
     },
 ];
@@ -558,9 +685,12 @@ const HANDLE_GET_INFO_ARGUMENTS: &[Argument] = &[
         handle: None,
         memory: Some(UserMemory {
             direction: MemoryDirection::Write,
-            length_argument: "output_size",
-            maximum_bytes: 16,
+            length: MemoryLength::Bytes {
+                argument: "output_size",
+                maximum_bytes: 16,
+            },
             record: Some("handle_info"),
+            handles: None,
             validation_order: 0,
         }),
     },
@@ -588,9 +718,12 @@ const OBJECT_GET_BASIC_INFO_ARGUMENTS: &[Argument] = &[
         handle: None,
         memory: Some(UserMemory {
             direction: MemoryDirection::Write,
-            length_argument: "output_size",
-            maximum_bytes: 16,
+            length: MemoryLength::Bytes {
+                argument: "output_size",
+                maximum_bytes: 16,
+            },
             record: Some("object_basic_info"),
+            handles: None,
             validation_order: 0,
         }),
     },
@@ -675,6 +808,178 @@ const OBJECT_WAIT_ONE_RESULTS: &[ResultValue] = &[ResultValue {
     handle: None,
 }];
 
+const CHANNEL_CREATE_ARGUMENTS: &[Argument] = &[Argument {
+    name: "options",
+    kind: ValueKind::U32,
+    handle: None,
+    memory: None,
+}];
+const CHANNEL_CREATE_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "endpoint0",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("channel"),
+            rights: ProducedRights::Fixed(CHANNEL_RIGHTS),
+        }),
+    },
+    ResultValue {
+        name: "endpoint1",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("channel"),
+            rights: ProducedRights::Fixed(CHANNEL_RIGHTS),
+        }),
+    },
+];
+const CHANNEL_WRITE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "endpoint",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("channel"),
+            required_rights: RIGHT_WRITE,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "options",
+        kind: ValueKind::U32,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "bytes",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "byte_count",
+                maximum_bytes: 64 * 1024,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "byte_count",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "dispositions",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Elements {
+                argument: "disposition_count",
+                maximum_elements: 64,
+                element_size: 24,
+            },
+            record: Some("channel_disposition"),
+            // The initial implementation accepts Event handles here. Moving a
+            // Channel endpoint returns NOT_SUPPORTED until revocation and
+            // iterative teardown make queued endpoint cycles reclaimable.
+            handles: Some(IndirectHandles::ConsumeRecords {
+                handle_field: "handle",
+                rights_field: "rights",
+                expected_kind_field: "expected_kind",
+                required_rights: RIGHT_TRANSFER,
+            }),
+            validation_order: 1,
+        }),
+    },
+    Argument {
+        name: "disposition_count",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+];
+const CHANNEL_READ_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "endpoint",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("channel"),
+            required_rights: RIGHT_READ,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "options",
+        kind: ValueKind::U32,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "bytes",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "byte_capacity",
+                maximum_bytes: 64 * 1024,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "byte_capacity",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "handles",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Elements {
+                argument: "handle_capacity",
+                maximum_elements: 64,
+                element_size: 8,
+            },
+            record: None,
+            handles: Some(IndirectHandles::ProduceTransferred),
+            validation_order: 1,
+        }),
+    },
+    Argument {
+        name: "handle_capacity",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+];
+const CHANNEL_READ_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "actual_bytes",
+        kind: ValueKind::ByteCount,
+        handle: None,
+    },
+    ResultValue {
+        name: "actual_handles",
+        kind: ValueKind::ElementCount,
+        handle: None,
+    },
+];
+const CHANNEL_READ_BUFFER_TOO_SMALL_RESULTS: &[&str] = &["actual_bytes", "actual_handles"];
+const CHANNEL_READ_FAILURE_RESULTS: &[FailureResults] = &[FailureResults {
+    status: "buffer_too_small",
+    results: CHANNEL_READ_BUFFER_TOO_SMALL_RESULTS,
+}];
+
 pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 0,
@@ -688,6 +993,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Abi,
         flags: FlagPolicy::None,
+        failure_results: &[],
     },
     Syscall {
         number: 1,
@@ -701,6 +1007,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Capability,
         flags: FlagPolicy::None,
+        failure_results: &[],
     },
     Syscall {
         number: 2,
@@ -714,6 +1021,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Capability,
         flags: FlagPolicy::None,
+        failure_results: &[],
     },
     Syscall {
         number: 3,
@@ -727,6 +1035,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Capability,
         flags: FlagPolicy::None,
+        failure_results: &[],
     },
     Syscall {
         number: 4,
@@ -740,6 +1049,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Capability,
         flags: FlagPolicy::None,
+        failure_results: &[],
     },
     Syscall {
         number: 5,
@@ -753,6 +1063,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Object,
         flags: FlagPolicy::None,
+        failure_results: &[],
     },
     Syscall {
         number: 6,
@@ -766,6 +1077,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Task,
         flags: FlagPolicy::None,
+        failure_results: &[],
     },
     Syscall {
         number: 7,
@@ -779,6 +1091,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::NoReturn,
         audit: AuditClass::Task,
         flags: FlagPolicy::None,
+        failure_results: &[],
     },
     Syscall {
         number: 8,
@@ -792,6 +1105,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::NoReturn,
         audit: AuditClass::Task,
         flags: FlagPolicy::None,
+        failure_results: &[],
     },
     Syscall {
         number: 9,
@@ -805,6 +1119,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Object,
         flags: FlagPolicy::Strict,
+        failure_results: &[],
     },
     Syscall {
         number: 10,
@@ -818,6 +1133,7 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Object,
         flags: FlagPolicy::Strict,
+        failure_results: &[],
     },
     Syscall {
         number: 11,
@@ -831,6 +1147,49 @@ pub const SYSCALLS: &[Syscall] = &[
         completion: CompletionClass::Returns,
         audit: AuditClass::Object,
         flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 12,
+        name: "channel_create",
+        feature: FeatureGate::Core,
+        arguments: CHANNEL_CREATE_ARGUMENTS,
+        results: CHANNEL_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 13,
+        name: "channel_write",
+        feature: FeatureGate::Core,
+        arguments: CHANNEL_WRITE_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 14,
+        name: "channel_read",
+        feature: FeatureGate::Core,
+        arguments: CHANNEL_READ_ARGUMENTS,
+        results: CHANNEL_READ_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: CHANNEL_READ_FAILURE_RESULTS,
     },
 ];
 

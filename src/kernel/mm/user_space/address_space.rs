@@ -196,6 +196,7 @@ struct AddressSpaceState<Backend: PageBackend, Account: MemoryAccount> {
     next_vmar_id: u64,
     authority_epoch: u64,
     mapping_epoch: u64,
+    active_user_writes: usize,
 }
 
 struct AddressSpaceSnapshot<Backend: PageBackend, Account: MemoryAccount> {
@@ -276,6 +277,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
                 next_vmar_id: 1,
                 authority_epoch: 1,
                 mapping_epoch: 1,
+                active_user_writes: 0,
             }),
             _metadata_charge: metadata_charge,
         })
@@ -788,15 +790,108 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         Ok(())
     }
 
+    /// Pins the current writable mapping set for a later transactional copy.
+    ///
+    /// While the returned plan is active, mapping publication returns `Busy`.
+    /// This closes the interval between writing future capability values and
+    /// publishing those values in a Process handle table: another Thread
+    /// cannot redirect the output range to unrelated backing in that window.
+    pub(super) fn prepare_user_write(
+        &self,
+        destination: UserSlice,
+    ) -> Result<
+        PreparedUserWrite<Backend, Account>,
+        AddressSpaceError<Backend::Error, Account::Error>,
+    > {
+        let snapshot = self.snapshot();
+        let plan = self.prepare_copy_from_snapshot(destination, Access::Write, &snapshot)?;
+        self.state.with(|state| {
+            if state.mapping_epoch != snapshot.mapping_epoch {
+                return Err(AddressSpaceError::StaleTransaction);
+            }
+            state.active_user_writes = state
+                .active_user_writes
+                .checked_add(1)
+                .ok_or(AddressSpaceError::Busy)?;
+            Ok(())
+        })?;
+        Ok(PreparedUserWrite {
+            address_space: self.id,
+            plan,
+            completed: false,
+        })
+    }
+
+    pub(super) fn write_user_reservation(
+        &self,
+        reservation: &PreparedUserWrite<Backend, Account>,
+        source: &[u8],
+    ) -> Result<(), AddressSpaceError<Backend::Error, Account::Error>> {
+        if reservation.address_space != self.id || reservation.completed {
+            return Err(AddressSpaceError::InvalidAddressSpace);
+        }
+        reservation.plan.copy_from(source)
+    }
+
+    pub(super) fn release_user_write(&self, mut reservation: PreparedUserWrite<Backend, Account>) {
+        if reservation.address_space != self.id || reservation.completed {
+            address_space_invariant_violation();
+        }
+        self.state.with(|state| {
+            let Some(active) = state.active_user_writes.checked_sub(1) else {
+                address_space_invariant_violation();
+            };
+            state.active_user_writes = active;
+        });
+        reservation.completed = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepare_user_write_for_test(
+        &self,
+        destination: UserSlice,
+    ) -> Result<
+        PreparedUserWrite<Backend, Account>,
+        AddressSpaceError<Backend::Error, Account::Error>,
+    > {
+        self.prepare_user_write(destination)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_user_reservation_for_test(
+        &self,
+        reservation: &PreparedUserWrite<Backend, Account>,
+        source: &[u8],
+    ) -> Result<(), AddressSpaceError<Backend::Error, Account::Error>> {
+        self.write_user_reservation(reservation, source)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_user_write_for_test(
+        &self,
+        reservation: PreparedUserWrite<Backend, Account>,
+    ) {
+        self.release_user_write(reservation);
+    }
+
     fn prepare_copy(
         &self,
         range: UserSlice,
         access: Access,
     ) -> Result<CopyPlan<Backend, Account>, AddressSpaceError<Backend::Error, Account::Error>> {
+        let snapshot = self.snapshot();
+        self.prepare_copy_from_snapshot(range, access, &snapshot)
+    }
+
+    fn prepare_copy_from_snapshot(
+        &self,
+        range: UserSlice,
+        access: Access,
+        snapshot: &AddressSpaceSnapshot<Backend, Account>,
+    ) -> Result<CopyPlan<Backend, Account>, AddressSpaceError<Backend::Error, Account::Error>> {
         if !self.root.range.contains(range) {
             return Err(AddressSpaceError::InvalidRange);
         }
-        let snapshot = self.snapshot();
         let count = snapshot
             .mappings
             .records
@@ -936,6 +1031,13 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
     }
 }
 
+#[cold]
+fn address_space_invariant_violation() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 #[must_use = "prepared mapping state must be committed or explicitly abandoned"]
 pub(crate) struct PreparedMappingChange<'a, Backend: PageBackend, Account: MemoryAccount> {
     address_space: &'a UserAddressSpace<Backend, Account>,
@@ -1023,6 +1125,9 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
             {
                 return Err(AddressSpaceError::StaleTransaction);
             }
+            if state.active_user_writes != 0 {
+                return Err(AddressSpaceError::Busy);
+            }
             // Keep the prepared owner outside the lock so a stale commit never
             // runs mapping/page/account destructors with local IRQs masked.
             let old = core::mem::replace(&mut state.mappings, self.replacement.clone());
@@ -1105,6 +1210,54 @@ struct CopySegment<Backend: PageBackend, Account: MemoryAccount> {
 struct CopyPlan<Backend: PageBackend, Account: MemoryAccount> {
     segments: Vec<CopySegment<Backend, Account>>,
     _temporary_charge: Option<Account::Charge>,
+}
+
+impl<Backend: PageBackend, Account: MemoryAccount> CopyPlan<Backend, Account> {
+    fn copy_from(
+        &self,
+        source: &[u8],
+    ) -> Result<(), AddressSpaceError<Backend::Error, Account::Error>> {
+        let expected = self.segments.iter().try_fold(0usize, |total, segment| {
+            let length =
+                usize::try_from(segment.length).map_err(|_| AddressSpaceError::SizeOverflow)?;
+            total
+                .checked_add(length)
+                .ok_or(AddressSpaceError::SizeOverflow)
+        })?;
+        if expected != source.len() {
+            return Err(AddressSpaceError::SizeMismatch);
+        }
+        let mut copied = 0usize;
+        for segment in &self.segments {
+            let length =
+                usize::try_from(segment.length).map_err(|_| AddressSpaceError::SizeOverflow)?;
+            let end = copied
+                .checked_add(length)
+                .ok_or(AddressSpaceError::SizeOverflow)?;
+            let bytes = source
+                .get(copied..end)
+                .ok_or(AddressSpaceError::SizeOverflow)?;
+            segment.object.write_exposed(segment.object_offset, bytes)?;
+            copied = end;
+        }
+        Ok(())
+    }
+}
+
+/// Mapping-stable copy plan owned by the machine-level reservation.
+#[must_use = "release the mapping reservation on every exit path"]
+pub(crate) struct PreparedUserWrite<Backend: PageBackend, Account: MemoryAccount> {
+    address_space: AddressSpaceId,
+    plan: CopyPlan<Backend, Account>,
+    completed: bool,
+}
+
+impl<Backend: PageBackend, Account: MemoryAccount> Drop for PreparedUserWrite<Backend, Account> {
+    fn drop(&mut self) {
+        if !self.completed {
+            address_space_invariant_violation();
+        }
+    }
 }
 
 impl<Backend: PageBackend, Account: MemoryAccount> ForeignMemory
