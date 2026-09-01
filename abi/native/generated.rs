@@ -24,9 +24,13 @@ pub const HYPER_NATIVE_STATUS_BUSY: HyperNativeStatus = -9;
 pub const HYPER_NATIVE_STATUS_INTERNAL: HyperNativeStatus = -10;
 pub const HYPER_NATIVE_STATUS_TIMED_OUT: HyperNativeStatus = -11;
 pub const HYPER_NATIVE_STATUS_CANCELLED: HyperNativeStatus = -12;
+pub const HYPER_NATIVE_STATUS_WOULD_BLOCK: HyperNativeStatus = -13;
+pub const HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL: HyperNativeStatus = -14;
+pub const HYPER_NATIVE_STATUS_PEER_CLOSED: HyperNativeStatus = -15;
 
 pub const HYPER_NATIVE_OBJECT_NONE: u32 = 0;
 pub const HYPER_NATIVE_OBJECT_EVENT: u32 = 1;
+pub const HYPER_NATIVE_OBJECT_CHANNEL: u32 = 2;
 
 pub const HYPER_NATIVE_RIGHT_DUPLICATE: u64 = 1;
 pub const HYPER_NATIVE_RIGHT_TRANSFER: u64 = 2;
@@ -52,8 +56,17 @@ pub const HYPER_NATIVE_RIGHT_SIGNAL: u64 = 524288;
 pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 1048575;
 
 pub const HYPER_NATIVE_SIGNAL_EVENT_SIGNALED: u64 = 1;
+pub const HYPER_NATIVE_SIGNAL_CHANNEL_READABLE: u64 = 1;
+pub const HYPER_NATIVE_SIGNAL_CHANNEL_WRITABLE: u64 = 2;
+pub const HYPER_NATIVE_SIGNAL_CHANNEL_PEER_CLOSED: u64 = 4;
 
 pub const HYPER_NATIVE_DEADLINE_INFINITE: u64 = 18446744073709551615;
+pub const HYPER_NATIVE_CHANNEL_DISPOSITION_SAME_RIGHTS: u64 = 18446744073709551615;
+pub const HYPER_NATIVE_CHANNEL_MAX_MESSAGE_BYTES: u64 = 65536;
+pub const HYPER_NATIVE_CHANNEL_MAX_MESSAGE_HANDLES: u64 = 64;
+pub const HYPER_NATIVE_CHANNEL_MAX_QUEUED_MESSAGES: u64 = 16;
+pub const HYPER_NATIVE_CHANNEL_MAX_QUEUED_BYTES: u64 = 1048576;
+pub const HYPER_NATIVE_CHANNEL_MAX_QUEUED_HANDLES: u64 = 1024;
 
 pub const HYPER_NATIVE_SYS_ABI_QUERY: u64 = 0;
 pub const HYPER_NATIVE_SYS_HANDLE_CLOSE: u64 = 1;
@@ -67,6 +80,19 @@ pub const HYPER_NATIVE_SYS_PROCESS_EXIT: u64 = 8;
 pub const HYPER_NATIVE_SYS_EVENT_CREATE: u64 = 9;
 pub const HYPER_NATIVE_SYS_EVENT_SIGNAL: u64 = 10;
 pub const HYPER_NATIVE_SYS_OBJECT_WAIT_ONE: u64 = 11;
+pub const HYPER_NATIVE_SYS_CHANNEL_CREATE: u64 = 12;
+pub const HYPER_NATIVE_SYS_CHANNEL_WRITE: u64 = 13;
+pub const HYPER_NATIVE_SYS_CHANNEL_READ: u64 = 14;
+
+pub const fn hyper_native_failure_result_mask(
+    syscall_number: u64,
+    status: HyperNativeStatus,
+) -> u64 {
+    match (syscall_number, status) {
+        (HYPER_NATIVE_SYS_CHANNEL_READ, HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL) => 3,
+        _ => 0,
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,3 +119,18 @@ const _: () = assert!(core::mem::align_of::<HyperNativeObjectBasicInfo>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, koid) == 0);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, object_kind) == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, reserved) == 12);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeChannelDisposition {
+    pub handle: u64,
+    pub rights: u64,
+    pub expected_kind: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeChannelDisposition>() == 24);
+const _: () = assert!(core::mem::align_of::<HyperNativeChannelDisposition>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeChannelDisposition, handle) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeChannelDisposition, rights) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeChannelDisposition, expected_kind) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeChannelDisposition, reserved) == 20);

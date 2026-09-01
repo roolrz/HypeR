@@ -1,11 +1,11 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Monotonically decreasing authority masks.
+//! Architecture-neutral authority vocabulary shared by object policy and handles.
 
 use hyper::abi::native;
 
-/// Rights attached to one process-local handle.
+/// Object support ceiling and monotonically attenuated process-handle grant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Rights(u64);
 

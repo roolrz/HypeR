@@ -756,6 +756,66 @@ fn copy_plan_survives_concurrent_unmap_without_holding_address_space_lock() {
 }
 
 #[test]
+fn user_write_reservation_blocks_mapping_commit_until_release() {
+    let (backend, account) = fixtures();
+    let address_space = crate::require_ok(UserAddressSpace::try_new(
+        window(),
+        slice(0x72_000, PAGE_SIZE),
+        backend.clone(),
+        account.clone(),
+    ));
+    let vmo = crate::require_ok(WritableVmo::try_new(PAGE_SIZE, backend, account));
+    assert!(vmo.populate(0, PAGE_SIZE).is_ok());
+    let map = crate::require_ok(address_space.prepare_map_writable(
+        address_space.root_vmar(),
+        slice(0x72_000, PAGE_SIZE),
+        vmo,
+        0,
+        Permissions::read_write(),
+        Permissions::read_write(),
+    ));
+    complete(crate::require_ok(map.commit_for_test()));
+
+    let first_reservation =
+        crate::require_ok(address_space.prepare_user_write_for_test(slice(0x72_000, 1)));
+    let second_reservation =
+        crate::require_ok(address_space.prepare_user_write_for_test(slice(0x72_000, 1)));
+    let unmap = crate::require_ok(
+        address_space.prepare_unmap(address_space.root_vmar(), slice(0x72_000, PAGE_SIZE)),
+    );
+    assert!(matches!(
+        unmap.commit_for_test(),
+        Err(AddressSpaceError::Busy)
+    ));
+    address_space.release_user_write_for_test(first_reservation);
+    let unmap = crate::require_ok(
+        address_space.prepare_unmap(address_space.root_vmar(), slice(0x72_000, PAGE_SIZE)),
+    );
+    assert!(matches!(
+        unmap.commit_for_test(),
+        Err(AddressSpaceError::Busy)
+    ));
+    assert!(
+        address_space
+            .write_user_reservation_for_test(&second_reservation, &[0xa5])
+            .is_ok()
+    );
+    address_space.release_user_write_for_test(second_reservation);
+
+    let mut observed = [0];
+    assert!(
+        address_space
+            .copy_from_user(slice(0x72_000, 1), &mut observed)
+            .is_ok()
+    );
+    assert_eq!(observed, [0xa5]);
+    let unmap = crate::require_ok(
+        address_space.prepare_unmap(address_space.root_vmar(), slice(0x72_000, PAGE_SIZE)),
+    );
+    complete(crate::require_ok(unmap.commit_for_test()));
+}
+
+#[test]
 fn backend_failures_report_defined_partial_copy_effects() {
     let (backend, account) = fixtures();
     let address_space = crate::require_ok(UserAddressSpace::try_new(

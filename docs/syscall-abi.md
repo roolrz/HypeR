@@ -392,8 +392,9 @@ offers checked copy operations rather than Rust references. `ReceiveClaim`
 restores the same message at the queue head on cancellation or copy failure. A
 fault may leave meaningless bytes or unresolved handle values in the caller's
 buffer, but it publishes no authority. Concurrent access to a syscall output
-buffer is caller misuse; it can observe `BadHandle`, never acquire authority
-early.
+buffer is caller misuse: provisional values have no specified meaning until the
+syscall completes, and may become usable during the final infallible commit of
+an operation which will succeed.
 
 ## Channels and IPC
 
@@ -449,6 +450,13 @@ revocation; terminal observation is published only after quiescence.
 The initial native surface has no `channel_call`. Request/reply libraries use
 transaction IDs, Channel operations, and WaitSet. Any future kernel-assisted
 call returns an explicit cancellable operation.
+
+The initial Channel implementation permits Event handles in transfer
+dispositions. A disposition containing a Channel endpoint returns
+`NOT_SUPPORTED` without consuming any handle or enqueuing a message. Endpoint
+transfer becomes available only with ResourceDomain revocation and iterative
+teardown capable of reclaiming queued endpoint cycles; the disposition ABI
+does not change when that restriction is removed.
 
 ## Waiting, signals, and atomic waits
 
@@ -692,9 +700,13 @@ call through deferred unwind and re-entry, yields and resumes, exits a Thread,
 propagates Process exit to a dormant sibling, contains a breakpoint fault, and
 creates, signals, and observes an Event from EL0. It joins each Thread and
 Process and retires each ownership graph. The architecture-neutral dispatchers
-implement syscalls 0 through 11: ABI query, handle close, duplicate, replace,
+implement syscalls 0 through 14: ABI query, handle close, duplicate, replace,
 handle info, object basic info, Thread yield, Thread exit, Process exit, Event
-create, Event signal, and single-object wait. `object_wait_one` uses absolute
+create, Event signal, single-object wait, and Channel create, write, and read.
+Channel operations use bounded queues, transactional user copies, and atomic
+capability publication; the initial transfer policy accepts Event handles and
+rejects Channel endpoint transfer without consuming the source.
+`object_wait_one` uses absolute
 monotonic deadlines, generation-qualified signal/timeout/cancellation
 arbitration, and a Process-stop recheck before completing the machine return.
 The checkpoint is not a static PIE loader, general runtime, init process, vDSO,

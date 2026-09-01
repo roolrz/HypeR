@@ -30,7 +30,7 @@ impl SignalMask {
     }
 
     /// Constructs bits whose value came from the generated ABI schema.
-    pub(super) const fn from_trusted_bits(bits: u64) -> Self {
+    pub(crate) const fn from_trusted_bits(bits: u64) -> Self {
         Self(bits)
     }
 
@@ -48,6 +48,39 @@ impl SignalMask {
 
     const fn intersection(self, other: Self) -> Self {
         Self(self.0 & other.0)
+    }
+}
+
+/// Borrowed type-erased access to one object's level-state signals.
+///
+/// The object retains the stable `SignalState`; this value carries the exact
+/// object-specific mask so generic wait code can validate untrusted bits
+/// without dispatching on `ObjectKind`.
+#[derive(Clone, Copy)]
+pub(crate) struct SignalSource<'object> {
+    state: &'object SignalState,
+    supported: SignalMask,
+}
+
+impl<'object> SignalSource<'object> {
+    pub(crate) const fn new(state: &'object SignalState, supported: SignalMask) -> Self {
+        Self { state, supported }
+    }
+
+    pub(super) fn validate(self, raw: u64, allow_empty: bool) -> Option<SignalMask> {
+        let signals = SignalMask::from_bits(raw, self.supported)?;
+        if !allow_empty && signals.is_empty() {
+            return None;
+        }
+        Some(signals)
+    }
+
+    pub(super) const fn state(self) -> &'object SignalState {
+        self.state
+    }
+
+    pub(super) const fn has_empty_mask(self) -> bool {
+        self.supported.is_empty()
     }
 }
 
@@ -135,15 +168,20 @@ struct State {
 }
 
 /// Signal state embedded at a stable address in one kernel object.
-pub(super) struct SignalState {
+pub(crate) struct SignalState {
     state: StateLock,
 }
 
 impl SignalState {
     pub(super) const fn new() -> Self {
+        Self::with_initial_level(SignalMask::EMPTY)
+    }
+
+    /// Constructs unpublished signal state with one authoritative initial level.
+    pub(crate) const fn with_initial_level(level: SignalMask) -> Self {
         Self {
             state: StateLock::new(State {
-                level: SignalMask::EMPTY,
+                level,
                 sequence: 0,
                 park_queue: WaitQueue::new(),
                 registrations: None,
@@ -151,7 +189,7 @@ impl SignalState {
         }
     }
 
-    pub(super) fn update(&self, clear: SignalMask, set: SignalMask) -> Result<(), SignalWaitError> {
+    pub(crate) fn update(&self, clear: SignalMask, set: SignalMask) -> Result<(), SignalWaitError> {
         let result = self.state.with(|state| {
             let previous = state.level.0;
             let next_level = SignalMask((previous & !clear.0) | set.0);
@@ -172,7 +210,7 @@ impl SignalState {
         }
     }
 
-    pub(super) fn observe(&self, requested: SignalMask) -> Option<SignalSnapshot> {
+    pub(crate) fn observe(&self, requested: SignalMask) -> Option<SignalSnapshot> {
         self.state.with(|state| {
             (!state.level.intersection(requested).is_empty()).then_some(SignalSnapshot {
                 signals: state.level,

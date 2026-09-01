@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 pub mod schema;
 
 use schema::{
-    AbiSchema, CompletionClass, FeatureGate, FieldKind, HandleDisposition, ObjectConstraint,
-    ProducedObject, ProducedRights, ValueKind,
+    AbiSchema, CompletionClass, FeatureGate, FieldKind, HandleDisposition, IndirectHandles,
+    MemoryDirection, MemoryLength, ObjectConstraint, ProducedObject, ProducedRights, ValueKind,
 };
 
 const GENERATED_RUST: &str = "abi/native/generated.rs";
@@ -486,28 +486,64 @@ fn validate_arguments(
         }
         if let Some(memory) = argument.memory {
             memory_count += 1;
-            if memory.maximum_bytes == 0 {
-                return invalid(format!(
-                    "syscall {} argument {} has an unbounded zero maximum",
-                    syscall.name, argument.name
-                ));
-            }
             if !memory_orders.insert(memory.validation_order) {
                 return invalid(format!(
                     "syscall {} repeats memory validation order {}",
                     syscall.name, memory.validation_order
                 ));
             }
+            let (length_argument, expected_length_kind, maximum_bytes, element_size) = match memory
+                .length
+            {
+                MemoryLength::Bytes {
+                    argument: length_name,
+                    maximum_bytes,
+                } => {
+                    if maximum_bytes == 0 {
+                        return invalid(format!(
+                            "syscall {} argument {} has an unbounded zero byte maximum",
+                            syscall.name, argument.name
+                        ));
+                    }
+                    (length_name, ValueKind::ByteCount, maximum_bytes, None)
+                }
+                MemoryLength::Elements {
+                    argument: length_name,
+                    maximum_elements,
+                    element_size,
+                } => {
+                    if maximum_elements == 0 || element_size == 0 {
+                        return invalid(format!(
+                            "syscall {} argument {} has an invalid element bound",
+                            syscall.name, argument.name
+                        ));
+                    }
+                    let Some(maximum_bytes) = maximum_elements.checked_mul(u32::from(element_size))
+                    else {
+                        return invalid(format!(
+                            "syscall {} argument {} element range overflows",
+                            syscall.name, argument.name
+                        ));
+                    };
+                    (
+                        length_name,
+                        ValueKind::ElementCount,
+                        maximum_bytes,
+                        Some(element_size),
+                    )
+                }
+            };
             let length = syscall
                 .arguments
                 .iter()
-                .find(|candidate| candidate.name == memory.length_argument);
-            if !matches!(length, Some(candidate) if candidate.kind == ValueKind::ByteCount) {
+                .find(|candidate| candidate.name == length_argument);
+            if !matches!(length, Some(candidate) if candidate.kind == expected_length_kind) {
                 return invalid(format!(
-                    "syscall {} memory argument {} has no byte-count length argument",
-                    syscall.name, argument.name
+                    "syscall {} memory argument {} has no matching length argument",
+                    syscall.name, argument.name,
                 ));
             }
+            let mut selected_record = None;
             if let Some(record_name) = memory.record {
                 let Some(record) = schema
                     .records
@@ -519,12 +555,35 @@ fn validate_arguments(
                         syscall.name, argument.name
                     ));
                 };
-                if u32::from(record.size) > memory.maximum_bytes {
+                if u32::from(record.size) > maximum_bytes {
                     return invalid(format!(
                         "syscall {} memory argument {} cannot contain record {record_name}",
                         syscall.name, argument.name
                     ));
                 }
+                if element_size.is_some_and(|size| size != record.size) {
+                    return invalid(format!(
+                        "syscall {} memory argument {} element size does not match record {record_name}",
+                        syscall.name, argument.name
+                    ));
+                }
+                selected_record = Some(record);
+            }
+            if u32::from(element_size.unwrap_or(1)) > maximum_bytes {
+                return invalid(format!(
+                    "syscall {} memory argument {} cannot contain one element",
+                    syscall.name, argument.name
+                ));
+            }
+            if let Some(handles) = memory.handles {
+                validate_indirect_handles(
+                    syscall,
+                    argument,
+                    memory,
+                    handles,
+                    selected_record,
+                    supported_rights,
+                )?;
             }
         }
     }
@@ -593,7 +652,135 @@ fn validate_results(
             ProducedRights::Fixed(_) => {}
         }
     }
+    let mut failure_statuses = BTreeSet::new();
+    for failure in syscall.failure_results {
+        validate_identifier("failure-result status", failure.status)?;
+        if !schema
+            .statuses
+            .iter()
+            .any(|status| status.name == failure.status && status.value != 0)
+        {
+            return invalid(format!(
+                "syscall {} names unknown failure-result status {}",
+                syscall.name, failure.status
+            ));
+        }
+        if !failure_statuses.insert(failure.status) {
+            return invalid(format!(
+                "syscall {} repeats failure-result status {}",
+                syscall.name, failure.status
+            ));
+        }
+        if failure.results.is_empty() {
+            return invalid(format!(
+                "syscall {} exposes no results for failure status {}",
+                syscall.name, failure.status
+            ));
+        }
+        let mut result_names = BTreeSet::new();
+        for name in failure.results {
+            if !result_names.insert(*name)
+                || !syscall.results.iter().any(|result| result.name == *name)
+            {
+                return invalid(format!(
+                    "syscall {} names invalid failure result {}",
+                    syscall.name, name
+                ));
+            }
+        }
+    }
     Ok(())
+}
+
+fn validate_indirect_handles(
+    syscall: &schema::Syscall,
+    argument: &schema::Argument,
+    memory: schema::UserMemory,
+    handles: IndirectHandles,
+    record: Option<&schema::Record>,
+    supported_rights: u64,
+) -> Result<(), Error> {
+    if !matches!(memory.length, MemoryLength::Elements { .. }) {
+        return invalid(format!(
+            "syscall {} memory argument {} describes handles without element length",
+            syscall.name, argument.name
+        ));
+    }
+    match handles {
+        IndirectHandles::ConsumeRecords {
+            handle_field,
+            rights_field,
+            expected_kind_field,
+            required_rights,
+        } => {
+            if memory.direction != MemoryDirection::Read {
+                return invalid(format!(
+                    "syscall {} consumed-handle argument {} is not input memory",
+                    syscall.name, argument.name
+                ));
+            }
+            if required_rights & !supported_rights != 0 {
+                return invalid(format!(
+                    "syscall {} argument {} indirectly requires undeclared rights",
+                    syscall.name, argument.name
+                ));
+            }
+            let Some(record) = record else {
+                return invalid(format!(
+                    "syscall {} consumed-handle argument {} has no record",
+                    syscall.name, argument.name
+                ));
+            };
+            require_record_field(record, handle_field, FieldKind::U64, syscall, argument)?;
+            require_record_field(record, rights_field, FieldKind::U64, syscall, argument)?;
+            require_record_field(
+                record,
+                expected_kind_field,
+                FieldKind::U32,
+                syscall,
+                argument,
+            )?;
+        }
+        IndirectHandles::ProduceTransferred => {
+            if memory.direction != MemoryDirection::Write
+                || !matches!(
+                    memory.length,
+                    MemoryLength::Elements {
+                        element_size: 8,
+                        ..
+                    }
+                )
+                || memory.record.is_some()
+            {
+                return invalid(format!(
+                    "syscall {} transferred-handle output {} must be a raw u64 element array",
+                    syscall.name, argument.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_record_field(
+    record: &schema::Record,
+    field: &str,
+    kind: FieldKind,
+    syscall: &schema::Syscall,
+    argument: &schema::Argument,
+) -> Result<(), Error> {
+    if record
+        .fields
+        .iter()
+        .any(|candidate| candidate.name == field && candidate.kind == kind)
+    {
+        Ok(())
+    } else {
+        invalid(format!(
+            "syscall {} memory argument {} names invalid {} field {}",
+            syscall.name, argument.name, record.name, field
+        ))
+    }
 }
 
 fn require_object_kind(schema: &AbiSchema, syscall: &str, kind: &str) -> Result<(), Error> {
@@ -718,6 +905,7 @@ fn render_rust(schema: &AbiSchema) -> String {
             .iter()
             .map(|value| (value.name, u64::from(value.number))),
     );
+    render_rust_failure_result_mask(&mut output, schema);
     for record in schema.records {
         let rust_name = upper_camel(record.name);
         output.push_str("#[repr(C)]\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
@@ -772,6 +960,33 @@ fn render_rust(schema: &AbiSchema) -> String {
         output.pop();
     }
     output
+}
+
+fn render_rust_failure_result_mask(output: &mut String, schema: &AbiSchema) {
+    output.push_str(
+        "pub const fn hyper_native_failure_result_mask(\n    syscall_number: u64,\n    status: HyperNativeStatus,\n) -> u64 {\n    match (syscall_number, status) {\n",
+    );
+    for syscall in schema.syscalls {
+        for failure in syscall.failure_results {
+            let mut mask = 0u64;
+            for result_name in failure.results {
+                if let Some(index) = syscall
+                    .results
+                    .iter()
+                    .position(|result| result.name == *result_name)
+                {
+                    mask |= 1u64 << index;
+                }
+            }
+            let _ = writeln!(
+                output,
+                "        (HYPER_NATIVE_SYS_{}, HYPER_NATIVE_STATUS_{}) => {mask},",
+                upper_snake(syscall.name),
+                upper_snake(failure.status)
+            );
+        }
+    }
+    output.push_str("        _ => 0,\n    }\n}\n\n");
 }
 
 fn render_rust_constants<'a>(
@@ -922,6 +1137,7 @@ fn render_c(schema: &AbiSchema) -> String {
             .iter()
             .map(|value| (value.name, u64::from(value.number))),
     );
+    render_c_failure_result_mask(&mut output, schema);
     for record in schema.records {
         let _ = writeln!(output, "typedef struct hyper_native_{}_t {{", record.name);
         let mut cursor = 0u16;
@@ -968,6 +1184,33 @@ fn render_c(schema: &AbiSchema) -> String {
     output.push_str("#undef HYPER_ABI_ALIGNOF\n#undef HYPER_ABI_STATIC_ASSERT\n\n");
     output.push_str("#endif /* HYPER_NATIVE_H */\n");
     output
+}
+
+fn render_c_failure_result_mask(output: &mut String, schema: &AbiSchema) {
+    output.push_str(
+        "static inline uint64_t hyper_native_failure_result_mask(\n    uint64_t syscall_number, hyper_native_status_t status)\n{\n",
+    );
+    for syscall in schema.syscalls {
+        for failure in syscall.failure_results {
+            let mut mask = 0u64;
+            for result_name in failure.results {
+                if let Some(index) = syscall
+                    .results
+                    .iter()
+                    .position(|result| result.name == *result_name)
+                {
+                    mask |= 1u64 << index;
+                }
+            }
+            let _ = writeln!(
+                output,
+                "    if (syscall_number == HYPER_NATIVE_SYS_{} &&\n        status == HYPER_NATIVE_STATUS_{}) {{\n        return UINT64_C({mask});\n    }}",
+                upper_snake(syscall.name),
+                upper_snake(failure.status)
+            );
+        }
+    }
+    output.push_str("    return UINT64_C(0);\n}\n\n");
 }
 
 fn render_c_constants<'a>(
@@ -1047,6 +1290,9 @@ fn render_reference(schema: &AbiSchema) -> String {
     output.push('\n');
     output.push_str(
         "## Syscalls\n\n\
+         Auxiliary result registers are defined only for `ok` unless a result is annotated with\n\
+         `also-on=<status>`. Element-count memory ranges are checked as count times the declared\n\
+         element size before any user-memory access.\n\n\
          | Number | Name | Arguments | Results | Capability effects | User memory | Execution | Audit |\n\
          | ---: | --- | --- | --- | --- | --- | --- | --- |\n",
     );
@@ -1057,12 +1303,15 @@ fn render_reference(schema: &AbiSchema) -> String {
                 .iter()
                 .map(|value| format!("`{}: {}`", value.name, value_kind_name(value.kind))),
         );
-        let results = joined_values(
-            syscall
-                .results
-                .iter()
-                .map(|value| format!("`{}: {}`", value.name, value_kind_name(value.kind))),
-        );
+        let results = joined_values(syscall.results.iter().map(|value| {
+            let failures = joined_failure_statuses(syscall, value.name);
+            format!(
+                "`{}: {}{}`",
+                value.name,
+                value_kind_name(value.kind),
+                failures
+            )
+        }));
         let capability_effects = joined_values(
             syscall
                 .arguments
@@ -1159,14 +1408,49 @@ fn describe_user_memory(name: &str, memory: schema::UserMemory) -> String {
     let record = memory
         .record
         .map_or_else(String::new, |record| format!(", record={record}"));
+    let length = match memory.length {
+        MemoryLength::Bytes {
+            argument,
+            maximum_bytes,
+        } => format!("len={argument} bytes, max-bytes={maximum_bytes}"),
+        MemoryLength::Elements {
+            argument,
+            maximum_elements,
+            element_size,
+        } => format!(
+            "len={argument} elements, max-elements={maximum_elements}, element-size={element_size}"
+        ),
+    };
+    let handles = match memory.handles {
+        None => String::new(),
+        Some(IndirectHandles::ConsumeRecords {
+            handle_field,
+            rights_field,
+            expected_kind_field,
+            required_rights,
+        }) => format!(
+            ", consume-handles=({handle_field}, {rights_field}, {expected_kind_field}), required-rights=0x{required_rights:x}"
+        ),
+        Some(IndirectHandles::ProduceTransferred) => String::from(", produce-transferred-handles"),
+    };
     format!(
-        "`{name}: {:?}, len={}, max={}{}; order={}`",
-        memory.direction,
-        memory.length_argument,
-        memory.maximum_bytes,
-        record,
-        memory.validation_order
+        "`{name}: {:?}, {}{}{}; order={}`",
+        memory.direction, length, record, handles, memory.validation_order
     )
+}
+
+fn joined_failure_statuses(syscall: &schema::Syscall, result_name: &str) -> String {
+    let statuses: Vec<_> = syscall
+        .failure_results
+        .iter()
+        .filter(|failure| failure.results.contains(&result_name))
+        .map(|failure| failure.status)
+        .collect();
+    if statuses.is_empty() {
+        String::new()
+    } else {
+        format!("; also-on={}", statuses.join("+"))
+    }
 }
 
 fn value_kind_name(kind: ValueKind) -> &'static str {
@@ -1177,6 +1461,7 @@ fn value_kind_name(kind: ValueKind) -> &'static str {
         ValueKind::Handle => "handle",
         ValueKind::UserAddress => "user_address",
         ValueKind::ByteCount => "byte_count",
+        ValueKind::ElementCount => "element_count",
         ValueKind::Rights => "rights",
     }
 }
@@ -1277,8 +1562,10 @@ mod tests {
     fn rejects_unlinked_user_memory() {
         let mut calls = schema::SYSCALLS.to_vec();
         let mut arguments = calls[4].arguments.to_vec();
-        if let Some(memory) = arguments[1].memory.as_mut() {
-            memory.length_argument = "missing";
+        if let Some(memory) = arguments[1].memory.as_mut()
+            && let MemoryLength::Bytes { argument, .. } = &mut memory.length
+        {
+            *argument = "missing";
         }
         calls[4].arguments = Box::leak(arguments.into_boxed_slice());
         let calls = Box::leak(calls.into_boxed_slice());
@@ -1287,7 +1574,99 @@ mod tests {
             ..schema::NATIVE_ABI
         };
         assert!(
-            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("byte-count"))
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("matching length"))
+        );
+    }
+
+    #[test]
+    fn rejects_element_memory_with_byte_count_length() {
+        let mut calls = schema::SYSCALLS.to_vec();
+        let mut arguments = calls[13].arguments.to_vec();
+        arguments[5].kind = ValueKind::ByteCount;
+        calls[13].arguments = Box::leak(arguments.into_boxed_slice());
+        let calls = Box::leak(calls.into_boxed_slice());
+        let candidate = AbiSchema {
+            syscalls: calls,
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("matching length"))
+        );
+    }
+
+    #[test]
+    fn rejects_element_stride_which_disagrees_with_record() {
+        let mut calls = schema::SYSCALLS.to_vec();
+        let mut arguments = calls[13].arguments.to_vec();
+        if let Some(memory) = arguments[4].memory.as_mut()
+            && let MemoryLength::Elements { element_size, .. } = &mut memory.length
+        {
+            *element_size = 8;
+        }
+        calls[13].arguments = Box::leak(arguments.into_boxed_slice());
+        let calls = Box::leak(calls.into_boxed_slice());
+        let candidate = AbiSchema {
+            syscalls: calls,
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("element size does not match"))
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_indirect_handle_record_field() {
+        let mut calls = schema::SYSCALLS.to_vec();
+        let mut arguments = calls[13].arguments.to_vec();
+        if let Some(memory) = arguments[4].memory.as_mut() {
+            memory.handles = Some(IndirectHandles::ConsumeRecords {
+                handle_field: "missing",
+                rights_field: "rights",
+                expected_kind_field: "expected_kind",
+                required_rights: schema::RIGHT_TRANSFER,
+            });
+        }
+        calls[13].arguments = Box::leak(arguments.into_boxed_slice());
+        let calls = Box::leak(calls.into_boxed_slice());
+        let candidate = AbiSchema {
+            syscalls: calls,
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("invalid channel_disposition field"))
+        );
+    }
+
+    #[test]
+    fn rejects_failure_results_for_unknown_status() {
+        let mut calls = schema::SYSCALLS.to_vec();
+        let failures = Box::leak(
+            vec![schema::FailureResults {
+                status: "missing",
+                results: &["actual_bytes"],
+            }]
+            .into_boxed_slice(),
+        );
+        calls[14].failure_results = failures;
+        let calls = Box::leak(calls.into_boxed_slice());
+        let candidate = AbiSchema {
+            syscalls: calls,
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("unknown failure-result status"))
+        );
+    }
+
+    #[test]
+    fn channel_read_declares_buffer_size_results_on_failure() {
+        let syscall = &schema::SYSCALLS[14];
+        assert_eq!(syscall.name, "channel_read");
+        assert_eq!(syscall.failure_results.len(), 1);
+        assert_eq!(syscall.failure_results[0].status, "buffer_too_small");
+        assert_eq!(
+            syscall.failure_results[0].results,
+            &["actual_bytes", "actual_handles"]
         );
     }
 

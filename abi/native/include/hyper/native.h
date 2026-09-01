@@ -40,9 +40,13 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_STATUS_INTERNAL (-INT64_C(10))
 #define HYPER_NATIVE_STATUS_TIMED_OUT (-INT64_C(11))
 #define HYPER_NATIVE_STATUS_CANCELLED (-INT64_C(12))
+#define HYPER_NATIVE_STATUS_WOULD_BLOCK (-INT64_C(13))
+#define HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL (-INT64_C(14))
+#define HYPER_NATIVE_STATUS_PEER_CLOSED (-INT64_C(15))
 
 #define HYPER_NATIVE_OBJECT_NONE UINT32_C(0)
 #define HYPER_NATIVE_OBJECT_EVENT UINT32_C(1)
+#define HYPER_NATIVE_OBJECT_CHANNEL UINT32_C(2)
 
 #define HYPER_NATIVE_RIGHT_DUPLICATE UINT64_C(1)
 #define HYPER_NATIVE_RIGHT_TRANSFER UINT64_C(2)
@@ -68,8 +72,17 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_RIGHTS_MASK UINT64_C(1048575)
 
 #define HYPER_NATIVE_SIGNAL_EVENT_SIGNALED UINT64_C(1)
+#define HYPER_NATIVE_SIGNAL_CHANNEL_READABLE UINT64_C(1)
+#define HYPER_NATIVE_SIGNAL_CHANNEL_WRITABLE UINT64_C(2)
+#define HYPER_NATIVE_SIGNAL_CHANNEL_PEER_CLOSED UINT64_C(4)
 
 #define HYPER_NATIVE_DEADLINE_INFINITE UINT64_C(18446744073709551615)
+#define HYPER_NATIVE_CHANNEL_DISPOSITION_SAME_RIGHTS UINT64_C(18446744073709551615)
+#define HYPER_NATIVE_CHANNEL_MAX_MESSAGE_BYTES UINT64_C(65536)
+#define HYPER_NATIVE_CHANNEL_MAX_MESSAGE_HANDLES UINT64_C(64)
+#define HYPER_NATIVE_CHANNEL_MAX_QUEUED_MESSAGES UINT64_C(16)
+#define HYPER_NATIVE_CHANNEL_MAX_QUEUED_BYTES UINT64_C(1048576)
+#define HYPER_NATIVE_CHANNEL_MAX_QUEUED_HANDLES UINT64_C(1024)
 
 #define HYPER_NATIVE_SYS_ABI_QUERY UINT64_C(0)
 #define HYPER_NATIVE_SYS_HANDLE_CLOSE UINT64_C(1)
@@ -83,6 +96,19 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_SYS_EVENT_CREATE UINT64_C(9)
 #define HYPER_NATIVE_SYS_EVENT_SIGNAL UINT64_C(10)
 #define HYPER_NATIVE_SYS_OBJECT_WAIT_ONE UINT64_C(11)
+#define HYPER_NATIVE_SYS_CHANNEL_CREATE UINT64_C(12)
+#define HYPER_NATIVE_SYS_CHANNEL_WRITE UINT64_C(13)
+#define HYPER_NATIVE_SYS_CHANNEL_READ UINT64_C(14)
+
+static inline uint64_t hyper_native_failure_result_mask(
+    uint64_t syscall_number, hyper_native_status_t status)
+{
+    if (syscall_number == HYPER_NATIVE_SYS_CHANNEL_READ &&
+        status == HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL) {
+        return UINT64_C(3);
+    }
+    return UINT64_C(0);
+}
 
 typedef struct hyper_native_handle_info_t {
     uint32_t object_kind;
@@ -105,6 +131,19 @@ HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_object_basic_info_t) == 8
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_basic_info_t, koid) == 0, "object_basic_info.koid offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_basic_info_t, object_kind) == 8, "object_basic_info.object_kind offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_basic_info_t, reserved) == 12, "object_basic_info.reserved offset");
+
+typedef struct hyper_native_channel_disposition_t {
+    uint64_t handle;
+    uint64_t rights;
+    uint32_t expected_kind;
+    uint32_t reserved;
+} hyper_native_channel_disposition_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_channel_disposition_t) == 24, "channel_disposition size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_channel_disposition_t) == 8, "channel_disposition alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_channel_disposition_t, handle) == 0, "channel_disposition.handle offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_channel_disposition_t, rights) == 8, "channel_disposition.rights offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_channel_disposition_t, expected_kind) == 16, "channel_disposition.expected_kind offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_channel_disposition_t, reserved) == 20, "channel_disposition.reserved offset");
 
 #undef HYPER_ABI_ALIGNOF
 #undef HYPER_ABI_STATIC_ASSERT

@@ -5,12 +5,14 @@
 
 use hyper::abi::native::{
     HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_FEATURE_CORE, HYPER_NATIVE_STATUS_ACCESS_DENIED,
-    HYPER_NATIVE_STATUS_BAD_HANDLE, HYPER_NATIVE_STATUS_BAD_STATE, HYPER_NATIVE_STATUS_BUSY,
-    HYPER_NATIVE_STATUS_CANCELLED, HYPER_NATIVE_STATUS_FAULT, HYPER_NATIVE_STATUS_INTERNAL,
-    HYPER_NATIVE_STATUS_INVALID_ARGUMENT, HYPER_NATIVE_STATUS_NO_MEMORY,
-    HYPER_NATIVE_STATUS_NOT_SUPPORTED, HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
-    HYPER_NATIVE_STATUS_TIMED_OUT, HYPER_NATIVE_SYS_ABI_QUERY, HYPER_NATIVE_SYS_EVENT_CREATE,
-    HYPER_NATIVE_SYS_EVENT_SIGNAL, HYPER_NATIVE_SYS_HANDLE_CLOSE,
+    HYPER_NATIVE_STATUS_BAD_HANDLE, HYPER_NATIVE_STATUS_BAD_STATE,
+    HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL, HYPER_NATIVE_STATUS_BUSY, HYPER_NATIVE_STATUS_CANCELLED,
+    HYPER_NATIVE_STATUS_FAULT, HYPER_NATIVE_STATUS_INTERNAL, HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+    HYPER_NATIVE_STATUS_NO_MEMORY, HYPER_NATIVE_STATUS_NOT_SUPPORTED,
+    HYPER_NATIVE_STATUS_PEER_CLOSED, HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
+    HYPER_NATIVE_STATUS_TIMED_OUT, HYPER_NATIVE_STATUS_WOULD_BLOCK, HYPER_NATIVE_SYS_ABI_QUERY,
+    HYPER_NATIVE_SYS_CHANNEL_CREATE, HYPER_NATIVE_SYS_CHANNEL_READ, HYPER_NATIVE_SYS_CHANNEL_WRITE,
+    HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL, HYPER_NATIVE_SYS_HANDLE_CLOSE,
     HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
     HYPER_NATIVE_SYS_HANDLE_REPLACE, HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO,
     HYPER_NATIVE_SYS_OBJECT_WAIT_ONE, HYPER_NATIVE_SYS_PROCESS_EXIT, HYPER_NATIVE_SYS_THREAD_EXIT,
@@ -19,13 +21,14 @@ use hyper::abi::native::{
 };
 
 use crate::kernel::accounting::ResourceError;
-use crate::kernel::capability::{
-    HandleError, HandleInfo, HandleValue, ObjectCreationError, Rights,
-};
+use crate::kernel::capability::{HandleError, HandleInfo, HandleValue, Rights};
+use crate::kernel::ipc::{ChannelError, ChannelReadOutcome, ChannelServiceError, ReadBuffers};
 use crate::kernel::mm::user_space::{
     AddressError, AddressSpaceError, MachineError, UserAddress, UserSlice,
 };
-use crate::kernel::object::{EventError, ObjectWaitError, SignalWaitError, SignalWaitOutcome};
+use crate::kernel::object::{
+    EventError, ObjectCreationError, ObjectWaitError, SignalWaitError, SignalWaitOutcome,
+};
 use crate::kernel::process::ProcessError;
 use crate::kernel::task::TimedWaitError;
 
@@ -47,6 +50,7 @@ pub(in crate::kernel) const fn is_immediate(number: u64) -> bool {
             | HYPER_NATIVE_SYS_HANDLE_GET_INFO
             | HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO
             | HYPER_NATIVE_SYS_EVENT_CREATE
+            | HYPER_NATIVE_SYS_CHANNEL_CREATE
     )
 }
 
@@ -74,6 +78,7 @@ pub(in crate::kernel) trait ImmediateServices {
     ) -> Result<HandleInfo, ProcessError>;
     fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError>;
     fn create_event(&self) -> Result<HandleValue, ObjectServiceError>;
+    fn create_channel(&self) -> Result<[HandleValue; 2], ChannelServiceError>;
 }
 
 /// Sleepable object services invoked only after architecture entry unwinds.
@@ -91,6 +96,20 @@ pub(in crate::kernel) trait DeferredServices {
         requested: u64,
         deadline: u64,
     ) -> Result<SignalWaitOutcome, ObjectServiceError>;
+
+    fn write_channel(
+        &self,
+        endpoint: HandleValue,
+        bytes: Option<UserSlice>,
+        dispositions: Option<UserSlice>,
+        disposition_count: usize,
+    ) -> Result<(), ChannelServiceError>;
+
+    fn read_channel(
+        &self,
+        endpoint: HandleValue,
+        buffers: ReadBuffers,
+    ) -> Result<ChannelReadOutcome, ChannelServiceError>;
 }
 
 #[derive(Debug)]
@@ -149,6 +168,7 @@ pub(in crate::kernel) fn dispatch_immediate(
         HYPER_NATIVE_SYS_HANDLE_GET_INFO => sys_handle_get_info(services, arguments),
         HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO => sys_object_get_basic_info(services, arguments),
         HYPER_NATIVE_SYS_EVENT_CREATE => sys_event_create(services, arguments),
+        HYPER_NATIVE_SYS_CHANNEL_CREATE => sys_channel_create(services, arguments),
         _ => sys_not_supported(),
     }
 }
@@ -169,6 +189,8 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_PROCESS_EXIT => sys_process_exit(invocation.arguments()),
         HYPER_NATIVE_SYS_EVENT_SIGNAL => sys_event_signal(services, invocation.arguments()),
         HYPER_NATIVE_SYS_OBJECT_WAIT_ONE => sys_object_wait_one(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_CHANNEL_WRITE => sys_channel_write(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_CHANNEL_READ => sys_channel_read(services, invocation.arguments()),
         _ => DeferredAction::Return(sys_not_supported()),
     }
 }
@@ -258,6 +280,20 @@ fn sys_event_create(services: &impl ImmediateServices, arguments: &Arguments) ->
 }
 
 #[inline(never)]
+fn sys_channel_create(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+    if arguments[0] != 0 {
+        return failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    match services
+        .create_channel()
+        .map_err(status_from_channel_service_error)
+    {
+        Ok([first, second]) => success([first.get(), second.get()]),
+        Err(status) => failure(status),
+    }
+}
+
+#[inline(never)]
 fn sys_event_signal(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
     let result = parse_handle(arguments[0]).and_then(|value| {
         services
@@ -307,6 +343,37 @@ fn sys_object_wait_one(services: &impl DeferredServices, arguments: &Arguments) 
     DeferredAction::Return(result)
 }
 
+#[inline(never)]
+fn sys_channel_write(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_channel_write(arguments).and_then(
+        |(endpoint, bytes, dispositions, disposition_count)| {
+            services
+                .write_channel(endpoint, bytes, dispositions, disposition_count)
+                .map_err(status_from_channel_service_error)
+        },
+    );
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+fn sys_channel_read(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_channel_read(arguments).and_then(|(endpoint, buffers)| {
+        services
+            .read_channel(endpoint, buffers)
+            .map_err(status_from_channel_service_error)
+    });
+    let result = match result {
+        Ok(ChannelReadOutcome::Received { bytes, handles }) => success([bytes, handles]),
+        Ok(ChannelReadOutcome::BufferTooSmall { bytes, handles }) => NativeResult::for_syscall(
+            HYPER_NATIVE_SYS_CHANNEL_READ,
+            HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL,
+            [bytes, handles],
+        ),
+        Err(status) => failure(status),
+    };
+    DeferredAction::Return(result)
+}
+
 fn parse_handle(raw: u64) -> Result<HandleValue, HyperNativeStatus> {
     HandleValue::try_from_raw(raw).map_err(status_from_handle_error)
 }
@@ -318,6 +385,58 @@ fn parse_handle_and_rights(
     let value = parse_handle(raw_handle)?;
     let rights = Rights::from_bits(raw_rights).ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
     Ok((value, rights))
+}
+
+fn parse_channel_write(
+    arguments: &Arguments,
+) -> Result<(HandleValue, Option<UserSlice>, Option<UserSlice>, usize), HyperNativeStatus> {
+    if arguments[1] != 0
+        || arguments[3] > hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_MESSAGE_BYTES
+        || arguments[5] > hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_MESSAGE_HANDLES
+    {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let endpoint = parse_handle(arguments[0])?;
+    let bytes = optional_user_slice(arguments[2], arguments[3])?;
+    let disposition_bytes = arguments[5]
+        .checked_mul(
+            core::mem::size_of::<hyper::abi::native::HyperNativeChannelDisposition>() as u64,
+        )
+        .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    let dispositions = optional_user_slice(arguments[4], disposition_bytes)?;
+    let disposition_count =
+        usize::try_from(arguments[5]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    Ok((endpoint, bytes, dispositions, disposition_count))
+}
+
+fn parse_channel_read(
+    arguments: &Arguments,
+) -> Result<(HandleValue, ReadBuffers), HyperNativeStatus> {
+    if arguments[1] != 0
+        || arguments[3] > hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_MESSAGE_BYTES
+        || arguments[5] > hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_MESSAGE_HANDLES
+    {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let endpoint = parse_handle(arguments[0])?;
+    let bytes = optional_user_slice(arguments[2], arguments[3])?;
+    let handle_bytes = arguments[5]
+        .checked_mul(core::mem::size_of::<u64>() as u64)
+        .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    let handles = optional_user_slice(arguments[4], handle_bytes)?;
+    Ok((endpoint, ReadBuffers { bytes, handles }))
+}
+
+fn optional_user_slice(
+    raw_address: u64,
+    length: u64,
+) -> Result<Option<UserSlice>, HyperNativeStatus> {
+    if length == 0 {
+        return Ok(None);
+    }
+    UserSlice::new(UserAddress::new(raw_address), length)
+        .map(Some)
+        .map_err(status_from_address_error)
 }
 
 fn prepare_info_request(
@@ -415,6 +534,29 @@ fn status_from_object_service_error(error: ObjectServiceError) -> HyperNativeSta
     }
 }
 
+fn status_from_channel_service_error(error: ChannelServiceError) -> HyperNativeStatus {
+    match error {
+        ChannelServiceError::InvalidDisposition => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        ChannelServiceError::Process(error) => status_from_process_error(error),
+        ChannelServiceError::Channel(error) => status_from_channel_error(error),
+        ChannelServiceError::Resource(error) => status_from_resource_error(error),
+    }
+}
+
+const fn status_from_channel_error(error: ChannelError) -> HyperNativeStatus {
+    match error {
+        ChannelError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+        ChannelError::AllocationSize => HYPER_NATIVE_STATUS_INTERNAL,
+        ChannelError::MessageTooLarge => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        ChannelError::EndpointClosed => HYPER_NATIVE_STATUS_BAD_STATE,
+        ChannelError::PeerClosed => HYPER_NATIVE_STATUS_PEER_CLOSED,
+        ChannelError::WouldBlock => HYPER_NATIVE_STATUS_WOULD_BLOCK,
+        ChannelError::Busy | ChannelError::StaleMessage => HYPER_NATIVE_STATUS_BUSY,
+        ChannelError::SequenceExhausted => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
+        ChannelError::Resource(error) => status_from_resource_error(error),
+    }
+}
+
 const fn status_from_event_error(error: EventError) -> HyperNativeStatus {
     match error {
         EventError::InvalidSignals => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
@@ -468,13 +610,16 @@ const fn status_from_handle_error(error: HandleError) -> HyperNativeStatus {
     match error {
         HandleError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
         HandleError::InvalidHandle | HandleError::WrongObjectType => HYPER_NATIVE_STATUS_BAD_HANDLE,
+        HandleError::Busy => HYPER_NATIVE_STATUS_BUSY,
         HandleError::AccessDenied => HYPER_NATIVE_STATUS_ACCESS_DENIED,
         HandleError::UnsupportedRights | HandleError::UnsupportedFlags => {
             HYPER_NATIVE_STATUS_INVALID_ARGUMENT
         }
+        HandleError::UnsupportedTransfer => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
         HandleError::ObjectRetired | HandleError::TableRetired => HYPER_NATIVE_STATUS_BAD_STATE,
         HandleError::ActiveHandleLimit
         | HandleError::ReservationIdExhausted
+        | HandleError::ReservationTooLarge
         | HandleError::TableFull => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
         HandleError::OutstandingReservation => HYPER_NATIVE_STATUS_BUSY,
         HandleError::ObjectAlreadyActive | HandleError::EmptyReservation => {
@@ -571,7 +716,9 @@ pub(crate) enum SelfTestError {
     InvalidHandle,
     InvalidRights,
     InvalidRecordSize,
+    ChannelValidation,
     ObjectErrorMapping,
+    ChannelErrorMapping,
     RecordEncoding,
     ValidationReachedService,
     DeferredDispatch,
@@ -625,6 +772,11 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation.into())
         }
+
+        fn create_channel(&self) -> Result<[HandleValue; 2], ChannelServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ChannelServiceError::Process(ProcessError::Allocation))
+        }
     }
 
     impl DeferredServices for RejectingServices {
@@ -641,6 +793,26 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         ) -> Result<SignalWaitOutcome, ObjectServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation.into())
+        }
+
+        fn write_channel(
+            &self,
+            _: HandleValue,
+            _: Option<UserSlice>,
+            _: Option<UserSlice>,
+            _: usize,
+        ) -> Result<(), ChannelServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ChannelServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn read_channel(
+            &self,
+            _: HandleValue,
+            _: ReadBuffers,
+        ) -> Result<ChannelReadOutcome, ChannelServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ChannelServiceError::Process(ProcessError::Allocation))
         }
     }
 
@@ -684,6 +856,13 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     if status_from_object_wait_error(timer_allocation) != HYPER_NATIVE_STATUS_NO_MEMORY {
         return Err(SelfTestError::ObjectErrorMapping);
     }
+    if status_from_channel_error(ChannelError::WouldBlock) != HYPER_NATIVE_STATUS_WOULD_BLOCK
+        || status_from_channel_error(ChannelError::PeerClosed) != HYPER_NATIVE_STATUS_PEER_CLOSED
+        || status_from_channel_error(ChannelError::MessageTooLarge)
+            != HYPER_NATIVE_STATUS_INVALID_ARGUMENT
+    {
+        return Err(SelfTestError::ChannelErrorMapping);
+    }
     let bad_handle = dispatch_immediate(
         &services,
         invoke(HYPER_NATIVE_SYS_HANDLE_CLOSE, [0, 0, 0, 0, 0, 0]),
@@ -717,6 +896,38 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     );
     if bad_size.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT {
         return Err(SelfTestError::InvalidRecordSize);
+    }
+    let bad_channel_create = dispatch_immediate(
+        &services,
+        invoke(HYPER_NATIVE_SYS_CHANNEL_CREATE, [1, 0, 0, 0, 0, 0]),
+    );
+    let bad_channel_write = dispatch_deferred(
+        &services,
+        invoke(
+            HYPER_NATIVE_SYS_CHANNEL_WRITE,
+            [1_u64 << 24 | 1, 1, 0, 0, 0, 0],
+        ),
+    );
+    let bad_channel_read = dispatch_deferred(
+        &services,
+        invoke(
+            HYPER_NATIVE_SYS_CHANNEL_READ,
+            [
+                1_u64 << 24 | 1,
+                0,
+                0,
+                0,
+                0,
+                hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_MESSAGE_HANDLES + 1,
+            ],
+        ),
+    );
+    if bad_channel_create.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT
+        || bad_channel_write
+            != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+        || bad_channel_read != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+    {
+        return Err(SelfTestError::ChannelValidation);
     }
     let handle_record = encode_handle_info_fields(0x1122_3344, 0x5566_7788, 0x99aa_bbcc_ddee_ff00);
     if handle_record
