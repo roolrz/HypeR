@@ -210,6 +210,18 @@ fn nvhe_native_and_guest_returns_have_different_cache_regimes() {
 }
 
 #[test]
+fn guest_return_traps_wait_for_interrupt() {
+    let host_hcr = registers::HCR_EL2_BOOT_VALUE;
+    let guest = LowerElReturnRegime::Guest
+        .transition_hcr(host_hcr)
+        .unwrap_or_else(|error| panic!("valid guest return rejected: {error:?}"));
+
+    // The host masks the guest virtual-timer PPI while its level is asserted,
+    // so an untrapped guest WFI would have no wake-up event left.
+    assert_ne!(guest & registers::HCR_EL2_TWI, 0);
+}
+
+#[test]
 fn native_return_rejects_the_wrong_host_mode() {
     assert_eq!(
         LowerElReturnRegime::Native(UserTranslationRegime::VheHostStage1)

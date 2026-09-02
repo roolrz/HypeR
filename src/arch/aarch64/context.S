@@ -396,9 +396,13 @@ aarch64_run_guest:
 
     // E2H remains set for VHE, but TGE must be clear while EL1/EL0 belongs to
     // the guest. On nVHE systems this is an idempotent write of a clear bit.
+    // TWI keeps guest WFI a trapped exit: the host masks the guest virtual
+    // timer PPI while its level is asserted, so an untrapped WFI could leave
+    // the PE without any wake-up event until an unrelated interrupt arrives.
     // Only register operations may follow until ERET.
     mrs     x30, hcr_el2
     bic     x30, x30, #HCR_EL2_TGE
+    orr     x30, x30, #HCR_EL2_TWI
     msr     hcr_el2, x30
     isb
     mrs     x30, far_el2
