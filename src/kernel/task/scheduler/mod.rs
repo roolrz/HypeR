@@ -1438,6 +1438,31 @@ pub(crate) fn notify_registered_with(
     })
 }
 
+/// Notifies a latency-sensitive waiter and establishes an equal-Fair boundary.
+///
+/// This is intended for deadline and interrupt delivery. It preserves FIFO
+/// class ordering while ensuring an ordinary Fair service thread cannot retain
+/// the CPU beyond the IRQ tail after an equally Fair execution endpoint wakes.
+pub(crate) fn notify_registered_fair_boundary(ticket: WaitTicket) -> Result<ResolveWait, Error> {
+    let resolved = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .resolve_wait_with_preemption(
+                ticket,
+                WaitOutcome::Notified,
+                state::WakePreemption::FairBoundary,
+                || {},
+            )
+    })?;
+    if let Some(ready) = resolved.ready {
+        publish_committed_ready(ready);
+    }
+    Ok(ResolveWait {
+        won: resolved.won,
+        made_ready: resolved.ready.is_some(),
+    })
+}
+
 pub(crate) fn cancel_waiter(wait_queue: &WaitQueue, id: ThreadId) -> Result<bool, Error> {
     let resolved = SCHEDULER.with(|slot| {
         slot.as_mut()

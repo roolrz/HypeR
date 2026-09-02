@@ -395,10 +395,13 @@ aarch64_run_guest:
     ldp     x28, x29, [x30, #(VCPU_CONTEXT_X0_OFFSET + 224)]
 
     // E2H remains set for VHE, but TGE must be clear while EL1/EL0 belongs to
-    // the guest. On nVHE systems this is an idempotent write of a clear bit.
-    // Only register operations may follow until ERET.
+    // the guest. Trap WFI and WFE so scheduler-owned vCPU waits retain an
+    // explicit wakeup contract instead of depending on the implementation's
+    // lower-EL idle behavior. Only register operations may follow until ERET.
     mrs     x30, hcr_el2
     bic     x30, x30, #HCR_EL2_TGE
+    orr     x30, x30, #HCR_EL2_TWI
+    orr     x30, x30, #HCR_EL2_TWE
     msr     hcr_el2, x30
     isb
     mrs     x30, far_el2

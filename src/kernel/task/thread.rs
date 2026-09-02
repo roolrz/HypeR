@@ -380,6 +380,12 @@ impl ThreadScheduleState {
     pub(super) fn replenish_fair_slice(&mut self, quantum: u64) {
         self.fair_runtime.slice_remaining = quantum;
     }
+
+    pub(super) fn expire_fair_slice(&mut self) {
+        if self.scheduling_class() == SchedulingClass::Fair {
+            self.fair_runtime.slice_remaining = 0;
+        }
+    }
 }
 
 /// Stable machine resources governed by the running/stopped context protocol.

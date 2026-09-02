@@ -286,13 +286,24 @@ pub fn wait_for_interrupt() {
 
 /// Waits for an interrupt after scheduler work was checked with IRQs masked.
 ///
-/// Keeping DAIF masked across the queue check and WFI closes the idle
-/// lost-wakeup window. A pending IRQ wakes WFI and remains pending until the
-/// caller restores its exact saved mask state.
+/// IRQ delivery is opened around WFI because an EL2 physical timer PPI is not
+/// required to retire a masked WFI on every implementation. If an interrupt
+/// publishes runnable work in the enable-to-WFI window, IRQ-tail preemption
+/// switches away from the idle Thread; this continuation reaches WFI only
+/// after idle is runnable again. The caller's outer guard still owns and
+/// restores the exact mask state after this function returns.
 pub fn wait_for_interrupt_masked() {
-    // SAFETY: WFI is valid at EL2. The caller keeps local exceptions masked,
-    // so an interrupt can wake this CPU without entering its handler here.
-    unsafe { core::arch::asm!("wfi", options(nostack, preserves_flags)) };
+    // SAFETY: DAIF.I is masked on entry. These instructions temporarily admit
+    // IRQ handlers, wait at EL2, then reestablish the caller-owned mask before
+    // returning. Exception entry preserves the remaining DAIF fields.
+    unsafe {
+        core::arch::asm!(
+            "msr daifclr, #2",
+            "wfi",
+            "msr daifset, #2",
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 pub const fn port_io() -> Option<hyper::hal::io::PortIo> {

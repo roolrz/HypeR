@@ -120,7 +120,7 @@ impl VcpuEndpoint {
                 return;
             };
             let resolved =
-                match crate::kernel::task::scheduler::notify_registered_with(ticket, || {}) {
+                match crate::kernel::task::scheduler::notify_registered_fair_boundary(ticket) {
                     Ok(resolved) => resolved,
                     Err(error) => crate::kernel::crash::fatal(format_args!(
                         "HypeR: vCPU endpoint could not resolve its exact wait: {error:?}"
