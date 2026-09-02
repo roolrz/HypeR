@@ -335,7 +335,7 @@ enum ScheduleOwner {
 /// Immutable identity published for the complete registry lifetime.
 struct ThreadIdentity {
     id: ThreadId,
-    name: ThreadName,
+    name: ThreadNameSnapshot,
 }
 
 /// State mutated only by scheduler transactions.
@@ -449,9 +449,9 @@ impl Thread {
     }
 
     pub(super) fn bootstrap(cpu_index: CpuIndex) -> Result<Self, Error> {
-        let name = match ThreadName::new("bootstrap") {
+        let name = match ThreadNameSnapshot::new("bootstrap") {
             Ok(name) => name,
-            Err(_) => ThreadName::empty(),
+            Err(_) => ThreadNameSnapshot::empty(),
         };
         Ok(Self {
             identity: ThreadIdentity {
@@ -494,7 +494,7 @@ impl Thread {
         Ok(Self {
             identity: ThreadIdentity {
                 id,
-                name: ThreadName::new(name)?,
+                name: ThreadNameSnapshot::new(name)?,
             },
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
@@ -525,7 +525,7 @@ impl Thread {
         Ok(Self {
             identity: ThreadIdentity {
                 id,
-                name: ThreadName::new(name)?,
+                name: ThreadNameSnapshot::new(name)?,
             },
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
@@ -552,7 +552,7 @@ impl Thread {
         Ok(Self {
             identity: ThreadIdentity {
                 id,
-                name: ThreadName::new(name)?,
+                name: ThreadNameSnapshot::new(name)?,
             },
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
@@ -587,7 +587,7 @@ impl Thread {
         Ok(Self {
             identity: ThreadIdentity {
                 id,
-                name: ThreadName::new(name)?,
+                name: ThreadNameSnapshot::new(name)?,
             },
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
@@ -628,7 +628,7 @@ impl Thread {
         Ok(Self {
             identity: ThreadIdentity {
                 id,
-                name: ThreadName::new(name)?,
+                name: ThreadNameSnapshot::new(name)?,
             },
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
@@ -788,6 +788,10 @@ impl Thread {
 
     pub fn name(&self) -> &str {
         self.identity.name.as_str()
+    }
+
+    pub(crate) const fn name_snapshot(&self) -> ThreadNameSnapshot {
+        self.identity.name
     }
 
     pub fn state(&self) -> ThreadState {
@@ -1011,12 +1015,13 @@ impl Thread {
     }
 }
 
-struct ThreadName {
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct ThreadNameSnapshot {
     bytes: [u8; THREAD_NAME_CAPACITY],
     len: u8,
 }
 
-impl ThreadName {
+impl ThreadNameSnapshot {
     fn new(name: &str) -> Result<Self, Error> {
         if name.len() > THREAD_NAME_CAPACITY {
             return Err(Error::NameTooLong);
@@ -1036,10 +1041,22 @@ impl ThreadName {
         }
     }
 
-    fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         let bytes = &self.bytes[..usize::from(self.len)];
-        // ThreadName is built from UTF-8 input. Keep the accessor safe and
-        // defensive if a future internal constructor violates that invariant.
+        // Snapshots are built from UTF-8 input. Keep the accessor defensive if
+        // a future internal constructor violates that invariant.
         core::str::from_utf8(bytes).unwrap_or("")
+    }
+}
+
+impl core::fmt::Debug for ThreadNameSnapshot {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        self.as_str().fmt(formatter)
+    }
+}
+
+impl core::fmt::Display for ThreadNameSnapshot {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str(self.as_str())
     }
 }

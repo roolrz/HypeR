@@ -18,11 +18,14 @@ use hyper::sync::{DeferredWork, InterruptMaskGuard, InterruptSpinLock, WorkDispo
 
 use self::registry::ThreadReservation;
 use self::state::{PreparedContextSwitch, Scheduler};
+pub use super::thread::ThreadNameSnapshot;
 use super::thread::{KernelThreadEntry, Thread, ThreadId, ThreadState, VcpuExecution};
 
 use super::policy::SchedulingPolicy;
 pub use super::policy::{CpuMask, ThreadPriority};
 use super::wait::{WaitMobility, WaitOutcome, WaitQueue, WaitTicket};
+
+use crate::pr_debug;
 
 /// Maximum scheduler-owned Thread population, including the bootstrap Thread.
 pub(crate) const THREAD_CAPACITY: usize = hyper::config::MAX_KERNEL_STACKS as usize + 1;
@@ -451,6 +454,15 @@ pub fn current_thread_id() -> Result<ThreadId, Error> {
     state::local_current_thread(cpu)
 }
 
+/// Returns an owned name snapshot for the identified scheduler Thread.
+pub fn thread_name(id: ThreadId) -> Result<ThreadNameSnapshot, Error> {
+    SCHEDULER.with(|slot| {
+        slot.as_ref()
+            .ok_or(Error::NotInitialized)?
+            .with_thread(id, Thread::name_snapshot)
+    })
+}
+
 pub fn statistics() -> Result<Statistics, Error> {
     let mut statistics = SCHEDULER.with(|slot| {
         slot.as_ref()
@@ -507,13 +519,26 @@ pub fn kthread_create(
     entry: KernelThreadEntry,
     argument: usize,
 ) -> Result<ThreadId, Error> {
-    kthread_create_with_policy_and_affinity(
+    match kthread_create_with_policy_and_affinity(
         name,
         entry,
         argument,
         SchedulingPolicy::fair(),
         CpuMask::ALL,
-    )
+    ) {
+        Ok(id) => {
+            pr_debug!("HypeR: created kernel thread {} with id {}", name, id.get());
+            Ok(id)
+        }
+        Err(error) => {
+            pr_debug!(
+                "HypeR: failed to create kernel thread {} with error {:?}",
+                name,
+                error
+            );
+            Err(error)
+        }
+    }
 }
 
 /// Creates a dormant kernel thread constrained to `affinity`.
@@ -1661,6 +1686,18 @@ extern "C" fn kernel_thread_exit() -> ! {
             "HypeR: thread exit on invalid CPU: {error:?}"
         )),
     };
+    let thread = match current_thread_id() {
+        Ok(thread) => thread,
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: thread exit without current identity: {error:?}"
+        )),
+    };
+    let name = match thread_name(thread) {
+        Ok(name) => name,
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: thread {thread:?} exit without name snapshot: {error:?}"
+        )),
+    };
     // SAFETY: The exiting continuation is CPU-pinned and transfers this outer
     // mask directly into the non-returning prepared context transition.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
@@ -1669,6 +1706,7 @@ extern "C" fn kernel_thread_exit() -> ! {
             .ok_or(Error::NotInitialized)?
             .prepare_exit(cpu)
     });
+    pr_debug!("HypeR: thread {thread:?} ({name}) exit");
     match result {
         Ok(pair) => {
             PreparedTransition {
