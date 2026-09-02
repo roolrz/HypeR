@@ -206,11 +206,11 @@ impl LowerElReturnRegime {
                     | registers::HCR_EL2_DC
                     | registers::HCR_EL2_VM)
             }
-            Self::Guest => Ok(
-                (current_hcr | registers::HCR_EL2_VM | registers::HCR_EL2_RW
-                    | registers::HCR_EL2_TWI)
-                    & !(registers::HCR_EL2_TGE | registers::HCR_EL2_DC),
-            ),
+            Self::Guest => Ok((current_hcr
+                | registers::HCR_EL2_VM
+                | registers::HCR_EL2_RW
+                | registers::HCR_EL2_TWI)
+                & !(registers::HCR_EL2_TGE | registers::HCR_EL2_DC)),
         }
     }
 }
