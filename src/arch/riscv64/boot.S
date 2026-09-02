@@ -23,6 +23,7 @@ _start:
     .byte 0x52, 0x53, 0x43, 0x05
     .word 0
 .Lboot_entry:
+    rdtime s11
     csrw sie, zero
     csrci sstatus, 2
     mv s8, a0
@@ -40,6 +41,7 @@ _start:
     mv ra, zero
     mv a0, s8
     mv a1, s9
+    mv a2, s11
     call riscv64_bootstrap
 .Lboot_halt:
     wfi

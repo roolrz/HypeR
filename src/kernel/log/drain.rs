@@ -479,8 +479,13 @@ fn prepare_record(
     record: Record,
     message: &[u8],
 ) -> Result<(), OutputError> {
-    write!(output, "<{}>[{:06}] ", record.level as u8, record.sequence)
-        .map_err(|_| OutputError::Full)?;
+    write!(
+        output,
+        "<{}>[{}] ",
+        record.level as u8,
+        hyper::log::Timestamp::from_microseconds(record.timestamp_microseconds)
+    )
+    .map_err(|_| OutputError::Full)?;
     output.push_console_bytes(message)?;
     if record.flags.contains(RecordFlags::TRUNCATED) || record.copied != record.length {
         output.push_console_bytes(b" [truncated]")?;
@@ -495,7 +500,12 @@ fn prepare_overrun(
     output: &mut OutputBuffer<OUTPUT_BUFFER_SIZE>,
     missed: u64,
 ) -> Result<(), OutputError> {
-    write!(output, "<4>[log] {missed} record(s) lost").map_err(|_| OutputError::Full)?;
+    write!(
+        output,
+        "<4>[{}] {missed} record(s) lost",
+        super::timestamp_now()
+    )
+    .map_err(|_| OutputError::Full)?;
     output.push_console_bytes(b"\n")
 }
 
@@ -503,7 +513,12 @@ fn prepare_ring_failure(
     output: &mut OutputBuffer<OUTPUT_BUFFER_SIZE>,
     error: super::Error,
 ) -> Result<(), OutputError> {
-    write!(output, "<2>[log] ring read failure: {error:?}").map_err(|_| OutputError::Full)?;
+    write!(
+        output,
+        "<2>[{}] ring read failure: {error:?}",
+        super::timestamp_now()
+    )
+    .map_err(|_| OutputError::Full)?;
     output.push_console_bytes(b"\n")
 }
 
@@ -511,8 +526,12 @@ fn prepare_raw_overflow(
     output: &mut OutputBuffer<OUTPUT_BUFFER_SIZE>,
     dropped: u64,
 ) -> Result<(), OutputError> {
-    write!(output, "<4>[console] {dropped} guest console byte(s) lost")
-        .map_err(|_| OutputError::Full)?;
+    write!(
+        output,
+        "<4>[{}] {dropped} guest console byte(s) lost",
+        super::timestamp_now()
+    )
+    .map_err(|_| OutputError::Full)?;
     output.push_console_bytes(b"\n")
 }
 

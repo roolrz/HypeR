@@ -7,6 +7,7 @@ use core::fmt::{self, Write};
 
 use hyper::log::{
     AppendError, EmergencyQuiescence, Level, ReadError, ReadResult, RecordFlags, RingBuffer,
+    Timestamp,
 };
 use hyper::sync::InterruptSpinLock;
 
@@ -68,7 +69,12 @@ pub struct Statistics {
 static LOG_RING: KernelSpinLock<RingBuffer<LOG_BUFFER_SIZE>> =
     KernelSpinLock::new(RingBuffer::new());
 
-pub fn log(level: Level, arguments: fmt::Arguments<'_>) -> Result<u64, Error> {
+pub(super) fn timestamp_now() -> Timestamp {
+    Timestamp::from_microseconds(crate::kernel::time::monotonic_microseconds())
+}
+
+pub fn log(level: Level, arguments: fmt::Arguments<'_>) -> Result<(), Error> {
+    let timestamp = crate::kernel::time::monotonic_microseconds();
     let mut formatted = FormatBuffer::new();
     let _ = formatted.write_fmt(arguments);
     let flags = if formatted.truncated {
@@ -76,11 +82,11 @@ pub fn log(level: Level, arguments: fmt::Arguments<'_>) -> Result<u64, Error> {
     } else {
         RecordFlags::NONE
     };
-    let sequence = LOG_RING
-        .with(|ring| ring.append(level, formatted.as_slice(), flags))
+    LOG_RING
+        .with(|ring| ring.append(level, timestamp, formatted.as_slice(), flags))
         .map_err(Error::Append)?;
     drain::request();
-    Ok(sequence)
+    Ok(())
 }
 
 /// Compatibility path for existing unclassified output.
@@ -140,17 +146,14 @@ pub(crate) const fn permanent_worker_count_for_test() -> usize {
 /// Reports the state of the logging backend at the end of kernel startup.
 pub(crate) fn report_startup_state() {
     let statistics = statistics();
-    crate::println!(
-        "HypeR: kernel log ring: {} bytes, {} records dropped",
-        statistics.capacity,
-        statistics.dropped
-    );
+    crate::println!("HypeR: kernel log ring: {} bytes", statistics.capacity);
 }
 
 /// Emits a fatal diagnostic without waiting for a potentially interrupted
 /// logging lock. Retention in the ring is best-effort; direct console output is
 /// attempted independently so a lock failure cannot stall the fail-stop path.
 pub fn emergency(arguments: fmt::Arguments<'_>) {
+    let timestamp = crate::kernel::time::monotonic_microseconds();
     let mut formatted = FormatBuffer::new();
     let _ = formatted.write_fmt(arguments);
     let flags = if formatted.truncated {
@@ -159,9 +162,11 @@ pub fn emergency(arguments: fmt::Arguments<'_>) {
         RecordFlags::NONE
     };
     let _ = LOG_RING.try_with(|ring| {
-        let _ = ring.append(Level::Emergency, formatted.as_slice(), flags);
+        let _ = ring.append(Level::Emergency, timestamp, formatted.as_slice(), flags);
     });
-    console::emergency_write(formatted.as_slice());
+    let mut prefix = FormatBuffer::new();
+    let _ = write!(prefix, "<0>[{}] ", Timestamp::from_microseconds(timestamp));
+    console::emergency_write(prefix.as_slice(), formatted.as_slice());
 }
 
 /// Transfers console ownership to the lock-free fatal-output path.

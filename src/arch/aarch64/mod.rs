@@ -320,7 +320,8 @@ pub const fn service_stage1_tlb_shootdown() -> bool {
 /// prepared from here, then assembly completes the transition to
 /// `start_kernel`.
 #[unsafe(no_mangle)]
-extern "C" fn aarch64_bootstrap(dtb_address: usize) -> ! {
+extern "C" fn aarch64_bootstrap(dtb_address: usize, boot_counter_ticks: u64) -> ! {
+    super::time::record_boot_counter(boot_counter_ticks);
     address::initialize().unwrap_or_else(|_| halt());
     atomics::initialize();
     if host::initialize().is_err() {

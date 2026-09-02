@@ -68,6 +68,10 @@ pub(crate) fn read_counter() -> u64 {
     crate::arch::time::Counter::read()
 }
 
+pub(crate) fn boot_counter() -> u64 {
+    crate::arch::time::boot_counter()
+}
+
 pub(crate) fn program_deadline(deadline: u64) -> Result<(), Error> {
     crate::arch::time::Timer::set_deadline(deadline).map_err(Error::from_backend)
 }

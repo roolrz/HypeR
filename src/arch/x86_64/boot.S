@@ -10,6 +10,9 @@
     .global x86_64_protected_entry
     .type x86_64_protected_entry, @function
 x86_64_protected_entry:
+    rdtsc
+    movl %eax, %ebp
+    movl %edx, %edi
     cli
     cld
     movw $0x18, %ax
@@ -20,6 +23,8 @@ x86_64_protected_entry:
     call 1f
 1:  popl %ebx
     subl $(1b - x86_64_protected_entry), %ebx
+    movl %ebp, (.Lboot_counter_ticks - x86_64_protected_entry)(%ebx)
+    movl %edi, (.Lboot_counter_ticks + 4 - x86_64_protected_entry)(%ebx)
 
     leal (__boot_pml4 - x86_64_protected_entry)(%ebx), %edi
     xorl %eax, %eax
@@ -81,15 +86,23 @@ x86_64_protected_entry:
     call .Lapply_load_relocations
     call .Lclear_bss
 
+    movq .Lboot_counter_ticks(%rip), %r14
     leaq __boot_stack_top(%rip), %rsp
     andq $-16, %rsp
     xorq %rbp, %rbp
     movq %r12, %rdi
+    movq %r14, %rsi
     call x86_64_bootstrap
 .Lhalt:
     cli
     hlt
     jmp .Lhalt
+
+    .pushsection .data.boot, "aw"
+    .balign 8
+.Lboot_counter_ticks:
+    .quad 0
+    .popsection
 
 .Lapply_load_relocations:
     leaq __rela_dyn_start(%rip), %rsi

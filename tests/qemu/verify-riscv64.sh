@@ -79,7 +79,7 @@ pid=$!
 
 attempt=0
 while [ "$attempt" -lt "$attempt_limit" ]; do
-    if grep -Eq '\[exception\].*(PANIC|BUG)|HypeR crash monitor|allocator invariant failure' "$log"; then
+    if grep -Eq '<0>\[[ 0-9]+\.[0-9]{6}\].*(PANIC|BUG)|HypeR crash monitor|allocator invariant failure' "$log"; then
         cat "$log" >&2
         echo "HypeR reported a fatal failure during the RISC-V integration test" >&2
         exit 1

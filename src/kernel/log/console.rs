@@ -120,12 +120,12 @@ pub(super) fn enter_emergency_mode() -> EmergencyQuiescence {
 }
 
 /// Writes a best-effort fatal message without waiting for kernel log locks.
-pub(super) fn emergency_write(message: &[u8]) {
+pub(super) fn emergency_write(prefix: &[u8], message: &[u8]) {
     let Some(device) = emergency_device() else {
         return;
     };
     let mut attempts = EMERGENCY_UART_ATTEMPTS;
-    emergency_write_bytes(&device, b"<0>[exception] ", &mut attempts);
+    emergency_write_bytes(&device, prefix, &mut attempts);
     emergency_write_bytes(&device, message, &mut attempts);
     if !message.ends_with(b"\n") {
         emergency_write_bytes(&device, b"\n", &mut attempts);
@@ -484,7 +484,12 @@ fn barrier_invariant(message: &str) -> ! {
 
 pub(super) fn write_record(console: &dyn Console, record: Record, message: &[u8]) {
     let mut writer = ConsoleWriter(console);
-    let _ = write!(writer, "<{}>[{:06}] ", record.level as u8, record.sequence);
+    let _ = write!(
+        writer,
+        "<{}>[{}] ",
+        record.level as u8,
+        hyper::log::Timestamp::from_microseconds(record.timestamp_microseconds)
+    );
     console.write_bytes(message);
     if record.flags.contains(RecordFlags::TRUNCATED) || record.copied != record.length {
         console.write_bytes(b" [truncated]");
@@ -496,12 +501,20 @@ pub(super) fn write_record(console: &dyn Console, record: Record, message: &[u8]
 
 pub(super) fn write_overrun(console: &ConsoleDevice, missed: u64) {
     let mut writer = ConsoleWriter(console);
-    let _ = writeln!(writer, "<4>[log] {missed} record(s) lost");
+    let _ = writeln!(
+        writer,
+        "<4>[{}] {missed} record(s) lost",
+        super::timestamp_now()
+    );
 }
 
 pub(super) fn write_ring_failure(console: &ConsoleDevice, error: super::Error) {
     let mut writer = ConsoleWriter(console);
-    let _ = writeln!(writer, "<2>[log] ring read failure: {error:?}");
+    let _ = writeln!(
+        writer,
+        "<2>[{}] ring read failure: {error:?}",
+        super::timestamp_now()
+    );
 }
 
 pub(super) fn write_raw(console: &ConsoleDevice, bytes: &[u8]) {
@@ -510,7 +523,11 @@ pub(super) fn write_raw(console: &ConsoleDevice, bytes: &[u8]) {
 
 pub(super) fn write_raw_overflow(console: &ConsoleDevice, dropped: u64) {
     let mut writer = ConsoleWriter(console);
-    let _ = writeln!(writer, "<4>[console] {dropped} guest console byte(s) lost");
+    let _ = writeln!(
+        writer,
+        "<4>[{}] {dropped} guest console byte(s) lost",
+        super::timestamp_now()
+    );
 }
 
 const fn configured_console_level() -> Level {

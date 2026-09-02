@@ -254,7 +254,8 @@ pub const fn guest_execution_available() -> bool {
     true
 }
 #[unsafe(no_mangle)]
-extern "C" fn riscv64_bootstrap(hart_id: usize, dtb_address: usize) -> ! {
+extern "C" fn riscv64_bootstrap(hart_id: usize, dtb_address: usize, boot_counter_ticks: u64) -> ! {
+    super::time::record_boot_counter(boot_counter_ticks);
     if !smp::initialize_boot_hart(hart_id as u64) {
         halt()
     }
