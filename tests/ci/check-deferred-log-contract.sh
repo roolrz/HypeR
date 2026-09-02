@@ -210,5 +210,5 @@ require_order "$main" 'kernel::time::initialize' 'kernel::log::initialize' \
     'deferred logging must start after timer initialization'
 require_order "$main" 'kernel::log::initialize' 'kernel::cpu::initialize' \
     'deferred logging must start before SMP admission'
-require 'drain::enter_emergency_mode\(\);[\s\S]*console::enter_emergency_mode\(\);' "$log" \
-    'fatal transition must retire deferred ownership before direct output'
+require 'drain::enter_emergency_mode\(\);[\s\S]*match console::enter_emergency_mode\(\)[\s\S]*LocalOwnerAbandoned => emergency[\s\S]*RemoteOwnerTimedOut => emergency' "$log" \
+    'fatal transition must retire deferred ownership and retain abnormal console handoff outcomes'

@@ -5,7 +5,9 @@
 
 use core::fmt::{self, Write};
 
-use hyper::log::{AppendError, Level, ReadError, ReadResult, RecordFlags, RingBuffer};
+use hyper::log::{
+    AppendError, EmergencyQuiescence, Level, ReadError, ReadResult, RecordFlags, RingBuffer,
+};
 use hyper::sync::InterruptSpinLock;
 
 pub(crate) mod console;
@@ -165,7 +167,15 @@ pub fn emergency(arguments: fmt::Arguments<'_>) {
 /// Transfers console ownership to the lock-free fatal-output path.
 pub(crate) fn enter_emergency_mode() {
     drain::enter_emergency_mode();
-    let _ = console::enter_emergency_mode();
+    match console::enter_emergency_mode() {
+        EmergencyQuiescence::Quiescent => {}
+        EmergencyQuiescence::LocalOwnerAbandoned => emergency(format_args!(
+            "emergency console recovered by abandoning an interrupted local writer"
+        )),
+        EmergencyQuiescence::RemoteOwnerTimedOut => emergency(format_args!(
+            "emergency console unavailable: remote normal writer did not quiesce"
+        )),
+    }
 }
 
 #[cfg(CONFIG_CRASH_CONSOLE)]

@@ -66,6 +66,9 @@ mutate 'normal drain batches must remain bounded' \
 mutate 'emergency ownership must retire deferred draining first' \
     src/kernel/log/mod.rs 'drain::enter_emergency_mode();' \
     'drain::request();'
+mutate 'abnormal emergency console handoff outcomes must remain observable' \
+    src/kernel/log/mod.rs 'match console::enter_emergency_mode() {' \
+    'let _ = console::enter_emergency_mode();'
 mutate 'runtime producer requests must not enter scheduler code' \
     src/kernel/log/drain.rs 'prompt_local_cpu();' \
     'scheduler::yield_now().ok();'
