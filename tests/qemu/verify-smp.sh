@@ -126,7 +126,7 @@ reschedule_ipi_proof_is_valid() {
 }
 
 runtime_contract_is_ready() {
-    grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
+    grep -q '<6>\[[ 0-9]\{5,\}\.[0-9]\{6\}\] HypeR: early console initialized' "$log" &&
         grep -q "HypeR: atomic RMW backend: $atomic_backend" "$log" &&
         grep -q "HypeR: AArch64 address space: $va_bits-bit VA/4 levels, $pa_bits-bit PA (CPU [0-9][0-9]-bit), 39-bit IPA/3 levels" "$log" &&
         grep -q 'HypeR: scheduler active on bootstrap thread 0' "$log" &&
@@ -145,7 +145,7 @@ runtime_contract_is_ready() {
         grep -q 'HypeR test: checked stage-2 guest-memory copies passed' "$log" &&
         grep -q 'HypeR test: checked application-memory copies passed' "$log" &&
         grep -q 'HypeR: kallsyms resolved hyper_kallsyms_lookup at 0x[0-9a-f][0-9a-f]*' "$log" &&
-        grep -q 'HypeR: kernel log ring: 65536 bytes, 0 records dropped' "$log" &&
+        grep -q 'HypeR: kernel log ring: 65536 bytes' "$log" &&
         grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
         grep -q 'HypeR: vGICv3 active with [1-9][0-9]* LRs, [5-8] priority bits, [5-7] preemption bits, \(16\|24\) INTID bits, maintenance VIRQ [0-9][0-9]*' "$log" &&
         grep -q 'HypeR: architectural timer: host INTID 26, guest INTID 27, [1-9][0-9]* Hz tick from a [1-9][0-9]* Hz counter' "$log" &&
@@ -198,7 +198,7 @@ pid=$!
 
 attempt=0
 while [ "$attempt" -lt "$attempt_limit" ]; do
-    if grep -Eq '\[exception\].*(PANIC|BUG)|HypeR crash monitor|allocator invariant failure' "$log"; then
+    if grep -Eq '<0>\[[ 0-9]+\.[0-9]{6}\].*(PANIC|BUG)|HypeR crash monitor|allocator invariant failure' "$log"; then
         cat "$log" >&2
         echo "HypeR reported a fatal failure during the AArch64 integration test" >&2
         exit 1

@@ -6,14 +6,28 @@
 use hyper::log::{
     ByteRing, DeferredDrain, DrainBarrierError, DrainBarrierRegistration, DrainBarrierSet,
     DrainBarrierStatus, DrainDisposition, EmergencyQuiescence, EmergencyWriteGate, Level,
-    OutputBuffer, ReadResult, RecordFlags, RingBuffer, RuntimeByteAccess,
+    OutputBuffer, ReadResult, RecordFlags, RingBuffer, RuntimeByteAccess, Timestamp,
 };
+
+#[test]
+fn timestamps_use_linux_width_and_microsecond_precision() {
+    assert_eq!(Timestamp::from_microseconds(0).to_string(), "    0.000000");
+    assert_eq!(
+        Timestamp::from_microseconds(12_000_034).to_string(),
+        "   12.000034"
+    );
+    assert_eq!(
+        Timestamp::from_microseconds(123_456_000_007).to_string(),
+        "123456.000007"
+    );
+}
 
 #[test]
 fn preserves_record_metadata_across_wraparound() {
     let mut ring = RingBuffer::<64>::new();
-    let first = crate::require_ok(ring.append(Level::Info, b"first", RecordFlags::NONE));
-    let second = crate::require_ok(ring.append(Level::Warning, b"second", RecordFlags::NONE));
+    let first = crate::require_ok(ring.append(Level::Info, 123_456, b"first", RecordFlags::NONE));
+    let second =
+        crate::require_ok(ring.append(Level::Warning, 1_234_567, b"second", RecordFlags::NONE));
     assert_eq!(first, 0);
     assert_eq!(second, 1);
 
@@ -22,11 +36,17 @@ fn preserves_record_metadata_across_wraparound() {
         ReadResult::Record(record) => record,
         result => panic!("required a record, received {result:?}"),
     };
+    assert_eq!(record.timestamp_microseconds, 1_234_567);
     assert_eq!(record.level, Level::Warning);
     assert_eq!(&output[..record.copied], b"second");
 
     for index in 0..8u8 {
-        crate::require_ok(ring.append(Level::Debug, &[index; 12], RecordFlags::NONE));
+        crate::require_ok(ring.append(
+            Level::Debug,
+            u64::from(index),
+            &[index; 12],
+            RecordFlags::NONE,
+        ));
     }
     assert!(ring.dropped() != 0);
     assert!(matches!(
@@ -40,6 +60,7 @@ fn truncates_a_record_that_exceeds_the_ring_capacity() {
     let mut ring = RingBuffer::<32>::new();
     let sequence = crate::require_ok(ring.append(
         Level::Error,
+        0,
         b"a message that cannot fit in this tiny ring",
         RecordFlags::NONE,
     ));
@@ -49,7 +70,7 @@ fn truncates_a_record_that_exceeds_the_ring_capacity() {
         result => panic!("required a record, received {result:?}"),
     };
     assert!(record.flags.contains(RecordFlags::TRUNCATED));
-    assert_eq!(record.length, 16);
+    assert_eq!(record.length, 8);
 }
 
 #[test]
@@ -61,7 +82,7 @@ fn reports_empty_buffers_and_partial_reads() {
         ReadResult::Empty { next_sequence: 0 }
     );
 
-    let sequence = crate::require_ok(ring.append(Level::Notice, b"abcdef", RecordFlags::NONE));
+    let sequence = crate::require_ok(ring.append(Level::Notice, 42, b"abcdef", RecordFlags::NONE));
     let record = match crate::require_ok(ring.read(sequence, &mut output)) {
         ReadResult::Record(record) => record,
         result => panic!("required a record, received {result:?}"),
@@ -75,7 +96,7 @@ fn reports_empty_buffers_and_partial_reads() {
 fn rejects_a_ring_smaller_than_its_record_header() {
     let mut ring = RingBuffer::<8>::new();
     assert_eq!(
-        ring.append(Level::Info, b"message", RecordFlags::NONE),
+        ring.append(Level::Info, 0, b"message", RecordFlags::NONE),
         Err(hyper::log::AppendError::BufferTooSmall)
     );
 }

@@ -7,6 +7,17 @@ use hyper::drivers::timer::arm_generic::{VirtualTimerState, VirtualTimerWake};
 use hyper::hal::timer::{
     ConversionError, deadline_reached, nanoseconds_to_ticks, ticks_to_nanoseconds,
 };
+use hyper::time::counter_elapsed_microseconds;
+
+#[test]
+fn boot_counter_conversion_handles_uninitialized_and_wrapping_sources() {
+    assert_eq!(counter_elapsed_microseconds(123, 100, 0), 0);
+    assert_eq!(
+        counter_elapsed_microseconds(24_012_000, 12_000, 24_000_000),
+        1_000_000
+    );
+    assert_eq!(counter_elapsed_microseconds(4, u64::MAX - 5, 1_000_000), 10);
+}
 
 #[test]
 fn converts_time_without_early_deadlines() {

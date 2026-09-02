@@ -36,6 +36,7 @@ _start:
 .balign 16
 .type aarch64_primary_entry, %function
 aarch64_primary_entry:
+    mrs     x24, cntpct_el0
     msr     daifset, #DAIFSET_ALL
     clrex
 
@@ -92,6 +93,7 @@ aarch64_primary_entry:
     mov     x29, xzr
     mov     x30, xzr
     mov     x0, x20
+    mov     x1, x24
     bl      aarch64_bootstrap
 .size aarch64_primary_entry, . - aarch64_primary_entry
 

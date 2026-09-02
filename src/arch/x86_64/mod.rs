@@ -288,7 +288,8 @@ pub fn virtualization_backend_name() -> &'static str {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn x86_64_bootstrap(boot_params: usize) -> ! {
+extern "C" fn x86_64_bootstrap(boot_params: usize, boot_counter_ticks: u64) -> ! {
+    super::time::record_boot_counter(boot_counter_ticks);
     if !smp::initialize_boot_cpu() {
         halt()
     }

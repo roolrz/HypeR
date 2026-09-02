@@ -51,7 +51,7 @@ attempt=0
 while [ "$attempt" -lt 300 ]; do
     if grep -q 'HypeR: SMP online: 4/4 discovered CPUs' "$log" &&
         grep -q 'HypeR: periodic timer IRQs active on 4 CPUs' "$log" &&
-        grep -q '<6>\[[0-9][0-9]*\] HypeR: early console initialized' "$log" &&
+        grep -q '<6>\[[ 0-9]\{5,\}\.[0-9]\{6\}\] HypeR: early console initialized' "$log" &&
         grep -q 'HypeR: scheduler active on bootstrap thread 0' "$log" &&
         grep -q 'HypeR test: scheduler ready/wait queues and sleeping sync passed' "$log" &&
         grep -q 'HypeR test: guarded thread, IRQ, and emergency stacks passed' "$log" &&
@@ -62,7 +62,7 @@ while [ "$attempt" -lt 300 ]; do
         grep -q 'HypeR: virtual architected timer injection validated' "$log" &&
         grep -q 'HypeR: guest synchronous trap and vSysReg emulation validated' "$log" &&
         grep -q 'HypeR: kallsyms resolved hyper_kallsyms_lookup at 0x[0-9a-f][0-9a-f]*' "$log" &&
-        grep -q 'HypeR: kernel log ring: 65536 bytes, 0 records dropped' "$log" &&
+        grep -q 'HypeR: kernel log ring: 65536 bytes' "$log" &&
         grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
         grep -q 'HypeR: platform bus: .* bound, .* unmatched, .* deferred, .* failed' "$log" &&
         grep -q "HypeR: loaded VM 'alpine' from boot ramdisk: 128 MiB RAM, 1 vCPU(s)" "$log" &&

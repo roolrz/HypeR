@@ -3,7 +3,9 @@
 
 //! Allocation-free variable-record log buffer.
 
-const HEADER_SIZE: usize = 16;
+use core::fmt;
+
+const HEADER_SIZE: usize = 24;
 
 /// Linux-compatible syslog severity values.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -32,6 +34,23 @@ impl Level {
             7 => Some(Self::Debug),
             _ => None,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Timestamp(u64);
+
+impl Timestamp {
+    pub const fn from_microseconds(microseconds: u64) -> Self {
+        Self(microseconds)
+    }
+}
+
+impl fmt::Display for Timestamp {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let seconds = self.0 / 1_000_000;
+        let microseconds = self.0 % 1_000_000;
+        write!(formatter, "{seconds:>5}.{microseconds:06}")
     }
 }
 
@@ -65,6 +84,7 @@ pub enum ReadError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Record {
     pub sequence: u64,
+    pub timestamp_microseconds: u64,
     pub level: Level,
     pub flags: RecordFlags,
     pub length: usize,
@@ -118,6 +138,7 @@ impl<const CAPACITY: usize> RingBuffer<CAPACITY> {
     pub fn append(
         &mut self,
         level: Level,
+        timestamp_microseconds: u64,
         message: &[u8],
         mut flags: RecordFlags,
     ) -> Result<u64, AppendError> {
@@ -138,9 +159,10 @@ impl<const CAPACITY: usize> RingBuffer<CAPACITY> {
         self.next_sequence = self.next_sequence.wrapping_add(1);
         self.write_u32(self.head, total_length as u32);
         self.write_u64(self.offset(self.head, 4), sequence);
-        self.write_byte(self.offset(self.head, 12), level as u8);
-        self.write_byte(self.offset(self.head, 13), flags.0);
-        self.write_u16(self.offset(self.head, 14), payload_length as u16);
+        self.write_u64(self.offset(self.head, 12), timestamp_microseconds);
+        self.write_byte(self.offset(self.head, 20), level as u8);
+        self.write_byte(self.offset(self.head, 21), flags.0);
+        self.write_u16(self.offset(self.head, 22), payload_length as u16);
         self.write_slice(
             self.offset(self.head, HEADER_SIZE),
             &message[..payload_length],
@@ -173,10 +195,11 @@ impl<const CAPACITY: usize> RingBuffer<CAPACITY> {
             }
             let record_sequence = self.read_u64(self.offset(cursor, 4));
             if record_sequence >= sequence {
-                let level = Level::from_u8(self.read_byte(self.offset(cursor, 12)))
+                let timestamp_microseconds = self.read_u64(self.offset(cursor, 12));
+                let level = Level::from_u8(self.read_byte(self.offset(cursor, 20)))
                     .ok_or(ReadError::Corrupt)?;
-                let flags = RecordFlags(self.read_byte(self.offset(cursor, 13)));
-                let length = usize::from(self.read_u16(self.offset(cursor, 14)));
+                let flags = RecordFlags(self.read_byte(self.offset(cursor, 21)));
+                let length = usize::from(self.read_u16(self.offset(cursor, 22)));
                 if HEADER_SIZE + length != total_length {
                     return Err(ReadError::Corrupt);
                 }
@@ -184,6 +207,7 @@ impl<const CAPACITY: usize> RingBuffer<CAPACITY> {
                 self.read_slice(self.offset(cursor, HEADER_SIZE), &mut output[..copied]);
                 return Ok(ReadResult::Record(Record {
                     sequence: record_sequence,
+                    timestamp_microseconds,
                     level,
                     flags,
                     length,

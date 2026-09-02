@@ -5,7 +5,9 @@ mod buffer;
 mod drain;
 mod output;
 
-pub use buffer::{AppendError, Level, ReadError, ReadResult, Record, RecordFlags, RingBuffer};
+pub use buffer::{
+    AppendError, Level, ReadError, ReadResult, Record, RecordFlags, RingBuffer, Timestamp,
+};
 pub use drain::{
     ByteRing, DrainBarrierError, DrainBarrierRegistration, DrainBarrierSet, DrainBarrierStatus,
     DrainBarrierToken,

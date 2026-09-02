@@ -150,6 +150,22 @@ pub fn monotonic_ticks() -> u64 {
     crate::hal::time::read_counter()
 }
 
+/// Returns microseconds elapsed since the primary assembly entry.
+///
+/// Early logging is allowed before clocksource discovery; those records use
+/// zero until the counter frequency has been published.
+pub fn monotonic_microseconds() -> u64 {
+    let frequency = COUNTER_FREQUENCY_HZ.load(Ordering::Acquire);
+    if frequency == 0 {
+        return 0;
+    }
+    hyper::time::counter_elapsed_microseconds(
+        monotonic_ticks(),
+        crate::hal::time::boot_counter(),
+        frequency,
+    )
+}
+
 pub fn monotonic_nanoseconds() -> Result<u64, Error> {
     Ok(ticks_to_nanoseconds(
         monotonic_ticks(),
