@@ -42,7 +42,11 @@ pub(crate) fn run() {
     run_case("kernel stack-model tests", stack_model::run);
     run_case("kernel thread-sleep tests", thread_sleep::run);
     run_case("kernel thread-migration tests", thread_migration::run);
-    return;
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+    run_case(
+        "guest IRQ-tail preemption setup",
+        irq_tail_preemption::install,
+    );
     run_case(
         "kernel Native syscall validation tests",
         native_syscall::run,
