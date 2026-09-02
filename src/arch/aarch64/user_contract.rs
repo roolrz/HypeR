@@ -182,9 +182,9 @@ impl LowerElReturnRegime {
     /// Produces the `HCR_EL2` value required before `ERET`.
     ///
     /// Native values are built from kernel policy rather than inherited from
-    /// a preceding guest. Guest return is a compatibility helper for the
-    /// existing vCPU path; new entry code restores its explicitly captured
-    /// HCR value instead. The selected host mode must already match `E2H`.
+    /// a preceding guest. Guest values preserve unrelated controls while
+    /// selecting the lower-EL guest regime. The selected host mode must
+    /// already match `E2H`.
     pub(super) const fn transition_hcr(
         self,
         current_hcr: u64,
@@ -206,13 +206,17 @@ impl LowerElReturnRegime {
                     | registers::HCR_EL2_DC
                     | registers::HCR_EL2_VM)
             }
-            Self::Guest => Ok((current_hcr
-                | registers::HCR_EL2_VM
-                | registers::HCR_EL2_RW
-                | registers::HCR_EL2_TWI
-                | registers::HCR_EL2_TWE)
-                & !(registers::HCR_EL2_TGE | registers::HCR_EL2_DC)),
+            Self::Guest => Ok(Self::guest_hcr(current_hcr)),
         }
+    }
+
+    pub(super) const fn guest_hcr(current_hcr: u64) -> u64 {
+        (current_hcr
+            | registers::HCR_EL2_VM
+            | registers::HCR_EL2_RW
+            | registers::HCR_EL2_TWI
+            | registers::HCR_EL2_TWE)
+            & !(registers::HCR_EL2_TGE | registers::HCR_EL2_DC)
     }
 }
 

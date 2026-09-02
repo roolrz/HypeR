@@ -332,6 +332,9 @@ aarch64_run_guest:
     // This frame is the only legal target of a typed guest vector unwind. Save
     // the complete AAPCS64 host callee set before any guest register load.
     sub     sp, sp, #GUEST_RUN_FRAME_SIZE
+    // Keep the Rust-computed guest HCR in this host frame until all guest
+    // registers have been loaded and the context pointer is no longer needed.
+    str     x1, [sp, #GUEST_RUN_FRAME_ENTRY_HCR_OFFSET]
     stp     x19, x20, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 0)]
     stp     x21, x22, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 16)]
     stp     x23, x24, [sp, #(GUEST_RUN_FRAME_X19_OFFSET + 32)]
@@ -394,23 +397,9 @@ aarch64_run_guest:
     ldp     x26, x27, [x30, #(VCPU_CONTEXT_X0_OFFSET + 208)]
     ldp     x28, x29, [x30, #(VCPU_CONTEXT_X0_OFFSET + 224)]
 
-    // E2H remains set for VHE, but TGE must be clear while EL1/EL0 belongs to
-    // the guest. Stage-2 activation is skipped when this CPU's cached stage-2
-    // observation still matches, yet an exception tail may meanwhile have
-    // restored a frame HCR captured before stage-2 first activated or after
-    // nVHE native EL0 execution enabled TGE/DC. Re-establish the full guest
-    // regime here on every entry, mirroring LowerElReturnRegime::Guest in
-    // user_contract.rs: set VM and RW, clear TGE and DC. Trap WFI and WFE so
-    // scheduler-owned vCPU waits retain an explicit wakeup contract instead of
-    // depending on the implementation's lower-EL idle behavior. Only register
-    // operations may follow until ERET.
-    mrs     x30, hcr_el2
-    bic     x30, x30, #HCR_EL2_TGE
-    bic     x30, x30, #HCR_EL2_DC
-    orr     x30, x30, #HCR_EL2_VM
-    orr     x30, x30, #HCR_EL2_RW
-    orr     x30, x30, #HCR_EL2_TWI
-    orr     x30, x30, #HCR_EL2_TWE
+    // Rust owns the guest-regime policy. Only register operations may follow
+    // the HCR write until ERET.
+    ldr     x30, [sp, #GUEST_RUN_FRAME_ENTRY_HCR_OFFSET]
     msr     hcr_el2, x30
     isb
     mrs     x30, far_el2
