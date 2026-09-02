@@ -5,6 +5,7 @@ use core::arch::asm;
 use core::mem::{offset_of, size_of};
 
 use super::registers;
+use super::user_contract::LowerElReturnRegime;
 
 pub type KernelThreadEntry = extern "C" fn(usize);
 
@@ -619,10 +620,11 @@ impl VcpuContext {
             return Err(GuestRunError::State);
         }
         context_ref.run_state = GUEST_RUN_RUNNING;
+        let entry_hcr = LowerElReturnRegime::guest_hcr(read_hcr_el2());
         // The exclusive reference ends before assembly transfers to the guest.
         // SAFETY: The caller established the complete active guest contract;
         // assembly retains the only live machine-context access until unwind.
-        let raw = unsafe { aarch64_run_guest(context.cast::<u8>()) };
+        let raw = unsafe { aarch64_run_guest(context.cast::<u8>(), entry_hcr) };
         // SAFETY: Assembly returns only after vector capture has closed its
         // return-world publication and released every context borrow.
         let context_ref = unsafe { &mut *context };
@@ -762,7 +764,7 @@ unsafe extern "C" {
         completion_ticket: usize,
     );
     fn aarch64_thread_trampoline();
-    fn aarch64_run_guest(context: *mut u8) -> u64;
+    fn aarch64_run_guest(context: *mut u8, entry_hcr: u64) -> u64;
     fn aarch64_reset_stack_and_enter(
         bottom: usize,
         top: usize,
@@ -772,6 +774,19 @@ unsafe extern "C" {
         argument: usize,
     ) -> !;
     fn aarch64_run_on_emergency_stack(callback: extern "C" fn(usize) -> !, argument: usize) -> !;
+}
+
+fn read_hcr_el2() -> u64 {
+    let value: u64;
+    // SAFETY: Reading HCR_EL2 is permitted in the kernel's EL2 execution mode.
+    unsafe {
+        asm!(
+            "mrs {value}, HCR_EL2",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+    value
 }
 
 /// Switches AAPCS64 callee-saved state and kernel stacks.
