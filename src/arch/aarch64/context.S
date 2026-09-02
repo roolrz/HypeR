@@ -395,11 +395,20 @@ aarch64_run_guest:
     ldp     x28, x29, [x30, #(VCPU_CONTEXT_X0_OFFSET + 224)]
 
     // E2H remains set for VHE, but TGE must be clear while EL1/EL0 belongs to
-    // the guest. Trap WFI and WFE so scheduler-owned vCPU waits retain an
-    // explicit wakeup contract instead of depending on the implementation's
-    // lower-EL idle behavior. Only register operations may follow until ERET.
+    // the guest. Stage-2 activation is skipped when this CPU's cached stage-2
+    // observation still matches, yet an exception tail may meanwhile have
+    // restored a frame HCR captured before stage-2 first activated or after
+    // nVHE native EL0 execution enabled TGE/DC. Re-establish the full guest
+    // regime here on every entry, mirroring LowerElReturnRegime::Guest in
+    // user_contract.rs: set VM and RW, clear TGE and DC. Trap WFI and WFE so
+    // scheduler-owned vCPU waits retain an explicit wakeup contract instead of
+    // depending on the implementation's lower-EL idle behavior. Only register
+    // operations may follow until ERET.
     mrs     x30, hcr_el2
     bic     x30, x30, #HCR_EL2_TGE
+    bic     x30, x30, #HCR_EL2_DC
+    orr     x30, x30, #HCR_EL2_VM
+    orr     x30, x30, #HCR_EL2_RW
     orr     x30, x30, #HCR_EL2_TWI
     orr     x30, x30, #HCR_EL2_TWE
     msr     hcr_el2, x30

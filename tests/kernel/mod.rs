@@ -79,6 +79,7 @@ pub(crate) fn run() {
         "AArch64 guest-entry IRQ mask contract",
         guest_entry_irq::run,
     );
+    crate::hal::irq::enable_local();
     crate::println!("HypeR test: scheduler ready/wait queues and sleeping sync passed");
     crate::println!("HypeR test: guarded thread, IRQ, and emergency stacks passed");
     crate::println!("HypeR test: deadline-based thread sleep passed");
