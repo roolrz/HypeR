@@ -153,11 +153,25 @@ aarch64_runtime_vectors:
     bl      aarch64_exception_dispatch
     mov     sp, x19
     cbz     x0, .Lexception_tail_complete
+    cmp     x0, #VECTOR_ACTION_POSTLUDE
+    b.ne    .Lexception_unwind
     // The dispatcher has completed IRQ accounting and EOI. Scheduling is
     // permitted only after returning from the per-CPU IRQ stack to the
     // interrupted Thread's private stack; its complete frame remains pinned
     // above this call chain until the continuation resumes.
-    blr     x0
+    cbz     x1, .Linvalid_vector_action
+    blr     x1
+    b       .Lexception_tail_complete
+.Lexception_unwind:
+    cmp     x0, #VECTOR_ACTION_UNWIND
+    b.ne    .Linvalid_vector_action
+    cbz     x1, .Linvalid_vector_action
+    // Capture is complete and the lower-EL return world is closed. Branching
+    // makes the non-return-to-vector contract explicit.
+    br      x1
+.Linvalid_vector_action:
+    brk     #0
+    b       .Linvalid_vector_action
 .Lexception_tail_complete:
 
     // Restore the exact world captured before VHE entry switched into the host

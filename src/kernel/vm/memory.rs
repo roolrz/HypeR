@@ -3,20 +3,23 @@
 
 //! Guest-physical memory ownership and stage-2 demand paging.
 
+use core::marker::PhantomData;
 use core::ptr::{copy_nonoverlapping, write_bytes};
 
 use alloc::vec::Vec;
 use hyper::cpu::PerCpu;
+use hyper::mm::RetirementCut;
 use hyper::mm::allocator::heap::PageOwner;
 use hyper::mm::{
-    BuddyError, ForeignCopyError, ForeignMemory, PAGE_SIZE, PhysicalAddress, copy_from_foreign,
-    copy_to_foreign,
+    AddressSpaceResidency, BuddyError, ForeignCopyError, ForeignMemory, PAGE_SIZE, PhysicalAddress,
+    ResidencyError, copy_from_foreign, copy_to_foreign,
 };
 use hyper::sync::atomic::{AtomicU64, Ordering};
 use hyper::vm::exit::{GuestMemoryFault, MemoryAccess};
-use hyper::vm::translation::{ActiveMappingError, residency_is_current};
+use hyper::vm::translation::ActiveMappingError;
 
 use super::registry::VmId;
+use super::residency_state::{LocalStage2Observation, Stage2AllocationIdentity, Stage2Incarnation};
 use crate::hal::vm::{Stage2AddressSpace, Stage2Error};
 use crate::kernel::mm::page_block::PageBlock;
 
@@ -24,9 +27,19 @@ static ACTIVE_STAGE2_ROOT: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 static ACTIVE_STAGE2_EPOCH: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
+static ACTIVE_STAGE2_VMID: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
+static ACTIVE_STAGE2_GENERATION: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 static ACTIVE_INSTRUCTION_ROOT: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 static ACTIVE_INSTRUCTION_EPOCH: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
+static ACTIVE_INSTRUCTION_TRANSLATION_EPOCH: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
+static ACTIVE_INSTRUCTION_VMID: PerCpu<AtomicU64> =
+    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
+static ACTIVE_INSTRUCTION_GENERATION: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -38,6 +51,7 @@ pub enum Error {
     MetadataAllocation,
     InvalidCpu,
     Poisoned,
+    Residency(ResidencyError),
     Registry(super::registry::Error),
     Stage2(Stage2Error),
 }
@@ -108,6 +122,7 @@ pub(crate) struct GuestAddressSpace {
     failed_faults: u64,
     poisoned: bool,
     translation_epoch: u64,
+    residency: AddressSpaceResidency<{ hyper::cpu::MAX_CPUS }>,
     instruction_epoch: AtomicU64,
     stage2: Stage2AddressSpace,
     table_pages: Stage2PagePool,
@@ -121,11 +136,39 @@ pub(crate) type Stage2IdentifierReservation =
 type ActiveStage2Identifier = crate::kernel::mm::translation_id::ActiveIdentifier<
     crate::kernel::mm::translation_id::Stage2Vmid,
 >;
+type RetiringStage2Identifier = crate::kernel::mm::translation_id::RetiringIdentifier<
+    crate::kernel::mm::translation_id::Stage2Vmid,
+>;
 
 enum Stage2Identifier {
     Reserved(Option<Stage2IdentifierReservation>),
     Active(ActiveStage2Identifier),
+    Retiring(RetiringStage2Identifier),
+    Retired,
     Poisoned,
+}
+
+impl Drop for GuestAddressSpace {
+    fn drop(&mut self) {
+        use super::address_space_state::{IdentifierState, destruction_is_safe};
+
+        let state = match &self.identifier {
+            Stage2Identifier::Reserved(_) => IdentifierState::Reserved,
+            Stage2Identifier::Active(_) => IdentifierState::Active,
+            Stage2Identifier::Retiring(_) => IdentifierState::Active,
+            Stage2Identifier::Retired => IdentifierState::Retired,
+            // Poisoned is installed only while consuming an unpublished VMID
+            // reservation. A failed activation never published this address
+            // space to hardware, so its pages remain safe to destroy.
+            Stage2Identifier::Poisoned => IdentifierState::UnpublishedFailure,
+        };
+        if !destruction_is_safe(state) {
+            // Drop runs before Rust destroys `pages`, `stage2`, and
+            // `table_pages`. Fail closed here so active translation storage is
+            // never returned while a CPU or stale TLB entry may reference it.
+            crate::hal::cpu::halt()
+        }
+    }
 }
 
 impl GuestAddressSpace {
@@ -170,6 +213,7 @@ impl GuestAddressSpace {
             // Epoch zero is reserved for per-CPU residency slots which have
             // never activated or synchronized a guest address space.
             translation_epoch: 1,
+            residency: AddressSpaceResidency::try_new(1).map_err(Error::Residency)?,
             instruction_epoch: AtomicU64::new(1),
             stage2,
             table_pages,
@@ -178,9 +222,26 @@ impl GuestAddressSpace {
     }
 
     pub(super) fn activate_identifier_for_install(&mut self) -> Result<(), super::registry::Error> {
+        use super::address_space_state::{IdentifierState, activation_may_begin};
+
+        let state = match &self.identifier {
+            Stage2Identifier::Reserved(Some(_)) => IdentifierState::Reserved,
+            Stage2Identifier::Active(_) => IdentifierState::Active,
+            Stage2Identifier::Retiring(_) => IdentifierState::Active,
+            Stage2Identifier::Retired => IdentifierState::Retired,
+            Stage2Identifier::Reserved(None) | Stage2Identifier::Poisoned => {
+                IdentifierState::UnpublishedFailure
+            }
+        };
+        if !activation_may_begin(state) {
+            // Reject without replacing Active: a second safe activation call
+            // must never turn live hardware ownership into a drop-safe state.
+            return Err(super::registry::Error::InvalidReservation);
+        }
         let previous = core::mem::replace(&mut self.identifier, Stage2Identifier::Poisoned);
         let Stage2Identifier::Reserved(Some(reservation)) = previous else {
-            return Err(super::registry::Error::InvalidReservation);
+            // The exclusive preflight above makes this branch impossible.
+            crate::hal::cpu::halt()
         };
         let active = reservation
             .activate()
@@ -192,8 +253,109 @@ impl GuestAddressSpace {
     fn active_identifier(&self) -> Result<&ActiveStage2Identifier, Error> {
         match &self.identifier {
             Stage2Identifier::Active(identifier) => Ok(identifier),
+            Stage2Identifier::Retiring(_) | Stage2Identifier::Retired => Err(Error::Poisoned),
             Stage2Identifier::Reserved(_) | Stage2Identifier::Poisoned => Err(Error::Poisoned),
         }
+    }
+
+    fn incarnation(&self) -> Result<Stage2Incarnation, Error> {
+        let identifier = self.active_identifier()?;
+        Ok(Stage2Incarnation::new(
+            self.stage2.root_address(),
+            identifier.value(),
+            identifier.generation(),
+            self.translation_epoch,
+        ))
+    }
+
+    pub(in crate::kernel) fn begin_retirement(
+        &mut self,
+        capability: &crate::hal::vm::GuestStage2RetirementCapability,
+        topology_count: usize,
+    ) -> Result<GuestStage2Retirement, Error> {
+        self.ensure_healthy()?;
+        if topology_count == 0 || topology_count > hyper::cpu::MAX_CPUS {
+            return Err(Error::InvalidCpu);
+        }
+        let incarnation = self.incarnation()?;
+        // The registry acquired this selected-mechanism proof before its own
+        // irreversible cut. Request preparation is therefore infallible and
+        // remains ahead of residency and identifier retirement.
+        let request = crate::hal::vm::prepare_guest_stage2_retirement(capability, &self.stage2);
+        let cut = self
+            .residency
+            .begin_retirement(incarnation.translation_epoch())
+            .map_err(Error::Residency)?;
+        if cut
+            .targets()
+            .iter()
+            .copied()
+            .enumerate()
+            .any(|(cpu, targeted)| targeted && cpu >= topology_count)
+        {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: guest retirement targets escape the frozen CPU topology"
+            ));
+        }
+
+        let previous = core::mem::replace(&mut self.identifier, Stage2Identifier::Poisoned);
+        let Stage2Identifier::Active(identifier) = previous else {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: guest retirement lost its active VMID"
+            ));
+        };
+        let retiring = match identifier.begin_retirement() {
+            Ok(retiring) => retiring,
+            Err(error) => crate::kernel::crash::fatal(format_args!(
+                "HypeR: guest VMID retirement could not begin after the residency cut: {error:?}"
+            )),
+        };
+        self.identifier = Stage2Identifier::Retiring(retiring);
+        Ok(GuestStage2Retirement {
+            cut,
+            allocation: incarnation.allocation(),
+            request,
+        })
+    }
+
+    pub(in crate::kernel) fn finish_retirement(&mut self, retirement: GuestStage2Retirement) {
+        let GuestStage2Retirement {
+            cut,
+            allocation,
+            request: _,
+        } = retirement;
+        let identity_matches = match &self.identifier {
+            Stage2Identifier::Retiring(identifier) => {
+                self.stage2.root_address() == allocation.root()
+                    && u64::from(identifier.value()) == allocation.vmid()
+                    && identifier.generation() == allocation.generation()
+            }
+            _ => false,
+        };
+        if !identity_matches {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: guest retirement completion changed translation identity"
+            ));
+        }
+        if self.residency.finish_retirement(cut).is_err() {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: guest residency retirement completion is inconsistent"
+            ));
+        }
+        let previous = core::mem::replace(&mut self.identifier, Stage2Identifier::Poisoned);
+        let Stage2Identifier::Retiring(identifier) = previous else {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: guest retirement lost its retiring VMID"
+            ));
+        };
+        // SAFETY: The residency state is irreversibly retired and the caller
+        // obtained exact-generation acknowledgement from every sticky target.
+        if unsafe { identifier.complete() }.is_err() {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: guest VMID completion is inconsistent"
+            ));
+        }
+        self.identifier = Stage2Identifier::Retired;
     }
 
     pub fn copy_from(&mut self, ipa: u64, destination: &mut [u8]) -> Result<(), Error> {
@@ -290,6 +452,18 @@ impl GuestAddressSpace {
         if self.pages[page_index].is_some() {
             return Ok(());
         }
+        let active_cpu = if active {
+            let cpu = crate::kernel::cpu::current_index().ok_or(Error::InvalidCpu)?;
+            self.residency
+                .check_single_active(cpu.get(), self.translation_epoch)
+                .map_err(Error::Residency)?;
+            Some(cpu)
+        } else {
+            self.residency
+                .check_inactive(self.translation_epoch)
+                .map_err(Error::Residency)?;
+            None
+        };
         let page = PageBlock::allocate_for(0, PageOwner::Guest)?;
         let physical = page.physical();
         let virtual_address = linear_address(physical)?;
@@ -325,7 +499,8 @@ impl GuestAddressSpace {
         // the live descriptor can never point at a page returned to the buddy.
         self.pages[page_index] = Some(page);
         self.committed_pages += 1;
-        self.translation_epoch = match self.translation_epoch.checked_add(1) {
+        let previous_epoch = self.translation_epoch;
+        self.translation_epoch = match previous_epoch.checked_add(1) {
             Some(epoch) => epoch,
             None => {
                 self.poisoned = true;
@@ -342,7 +517,33 @@ impl GuestAddressSpace {
             ));
         }
         if active {
-            publish_current_residency(self.stage2.root_address(), self.translation_epoch);
+            let Some(cpu) = active_cpu else {
+                crate::hal::cpu::halt()
+            };
+            if self
+                .residency
+                .advance_single_active(cpu.get(), previous_epoch, self.translation_epoch)
+                .is_err()
+            {
+                crate::kernel::crash::fatal(format_args!(
+                    "HypeR: active guest residency epoch publication is inconsistent"
+                ));
+            }
+            let incarnation = match self.incarnation() {
+                Ok(incarnation) => incarnation,
+                Err(error) => crate::kernel::crash::fatal(format_args!(
+                    "HypeR: active guest mapping lost its VMID incarnation: {error:?}"
+                )),
+            };
+            publish_current_residency(incarnation);
+        } else if self
+            .residency
+            .advance_inactive(previous_epoch, self.translation_epoch)
+            .is_err()
+        {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: inactive guest residency epoch publication is inconsistent"
+            ));
         }
         Ok(())
     }
@@ -445,6 +646,41 @@ impl GuestAddressSpace {
     }
 }
 
+#[must_use = "guest retirement must obtain every target acknowledgement"]
+pub(in crate::kernel) struct GuestStage2Retirement {
+    cut: RetirementCut<{ hyper::cpu::MAX_CPUS }>,
+    allocation: Stage2AllocationIdentity,
+    request: crate::hal::vm::GuestStage2RetirementRequest,
+}
+
+impl GuestStage2Retirement {
+    pub(in crate::kernel) fn targets(&self) -> &[bool; hyper::cpu::MAX_CPUS] {
+        self.cut.targets()
+    }
+
+    pub(in crate::kernel) const fn local_request(&self) -> GuestStage2LocalRequest {
+        GuestStage2LocalRequest {
+            allocation: self.allocation,
+            hardware: self.request,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(in crate::kernel) struct GuestStage2LocalRequest {
+    allocation: Stage2AllocationIdentity,
+    hardware: crate::hal::vm::GuestStage2RetirementRequest,
+}
+
+pub(in crate::kernel) fn service_local_retirement(request: GuestStage2LocalRequest) {
+    crate::hal::vm::service_guest_stage2_retirement(request.hardware);
+    if clear_local_observations(request.allocation).is_err() {
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: guest retirement could not clear local observations"
+        ));
+    }
+}
+
 impl ForeignMemory for GuestAddressSpace {
     type Error = Error;
 
@@ -503,7 +739,7 @@ impl ForeignMemory for GuestAddressSpace {
     }
 }
 
-impl crate::hal::guest::PayloadMemory for GuestAddressSpace {
+impl super::linux::abi::PayloadMemory for GuestAddressSpace {
     type Error = Error;
 
     fn copy_to(
@@ -531,56 +767,145 @@ impl crate::hal::guest::PayloadMemory for GuestAddressSpace {
     }
 }
 
+/// Linear residency retained from guest stage-2 activation until hardware
+/// detach completes on the same CPU.
+#[must_use = "an active guest residency must leave before VM execution release"]
+pub(in crate::kernel) struct GuestResidencyClaim {
+    cpu: hyper::cpu::CpuIndex,
+    admitted: Stage2Incarnation,
+    armed: bool,
+    cpu_affine: PhantomData<*mut ()>,
+}
+
+impl GuestResidencyClaim {
+    fn new(cpu: hyper::cpu::CpuIndex, admitted: Stage2Incarnation) -> Self {
+        Self {
+            cpu,
+            admitted,
+            armed: true,
+            cpu_affine: PhantomData,
+        }
+    }
+}
+
+impl Drop for GuestResidencyClaim {
+    fn drop(&mut self) {
+        if self.armed {
+            // No safe destructor can prove architecture hardware is detached
+            // or repair residency history after abandoning this capability.
+            crate::hal::cpu::halt()
+        }
+    }
+}
+
+#[must_use = "failed leave retains the exact armed residency claim"]
+pub(in crate::kernel) struct GuestResidencyLeaveFailure {
+    error: Error,
+    claim: GuestResidencyClaim,
+}
+
+impl GuestResidencyLeaveFailure {
+    pub(in crate::kernel) const fn error(&self) -> Error {
+        self.error
+    }
+
+    pub(in crate::kernel) fn into_claim(self) -> GuestResidencyClaim {
+        self.claim
+    }
+}
+
 /// Activates the installed VM's stage-2 hierarchy on the current CPU.
 ///
 /// # Safety
 ///
 /// The caller must own the stopped vCPU carrying `vm`, retain this VM's
 /// exclusive execution claim, and keep local interrupts masked.
-pub(in crate::kernel) unsafe fn activate(vm: &super::registry::VmBinding) -> Result<(), Error> {
+pub(in crate::kernel) unsafe fn activate(
+    vm: &super::registry::VmBinding,
+) -> Result<GuestResidencyClaim, Error> {
     vm.with_address_space(|address_space| {
         address_space.ensure_healthy()?;
-        if address_space.active_identifier()?.value() == 0 {
+        let incarnation = address_space.incarnation()?;
+        if incarnation.allocation().vmid() == 0 {
             return Err(Error::Poisoned);
         }
         let cpu = crate::kernel::cpu::current_index().ok_or(Error::InvalidCpu)?;
-        let root = address_space.stage2.root_address();
-        let epoch = address_space.translation_epoch;
-        if !residency_is_current(
-            ACTIVE_STAGE2_ROOT[cpu].load(Ordering::Relaxed),
-            ACTIVE_STAGE2_EPOCH[cpu].load(Ordering::Relaxed),
-            root,
-            epoch,
-        ) {
+        address_space
+            .residency
+            .check_admission(cpu.get(), incarnation.translation_epoch())
+            .map_err(Error::Residency)?;
+        if !load_stage2_observation(cpu).matches(incarnation, incarnation.translation_epoch()) {
             // SAFETY: The caller owns the stopped vCPU, and the installed
             // address space is pinned in the VM registry for the active guest
             // lifetime. Architecture activation includes any local
             // invalidation required before this CPU may consume the current
             // mapping epoch.
             unsafe { address_space.stage2.activate() };
-            ACTIVE_STAGE2_ROOT[cpu].store(root, Ordering::Relaxed);
-            ACTIVE_STAGE2_EPOCH[cpu].store(epoch, Ordering::Relaxed);
+            store_stage2_observation(
+                cpu,
+                LocalStage2Observation::new(incarnation, incarnation.translation_epoch()),
+            );
         }
 
         let instruction_epoch = address_space.instruction_epoch.load(Ordering::Acquire);
-        if !residency_is_current(
-            ACTIVE_INSTRUCTION_ROOT[cpu].load(Ordering::Relaxed),
-            ACTIVE_INSTRUCTION_EPOCH[cpu].load(Ordering::Relaxed),
-            root,
-            instruction_epoch,
-        ) {
+        if !load_instruction_observation(cpu).matches(incarnation, instruction_epoch) {
             // FENCE.I is hart-local on RISC-V; AArch64 and x86 likewise require
             // a local instruction synchronization event before entering a
             // newly published instruction stream on this CPU.
             crate::hal::cache::synchronize_instruction_execution();
-            ACTIVE_INSTRUCTION_ROOT[cpu].store(root, Ordering::Relaxed);
-            ACTIVE_INSTRUCTION_EPOCH[cpu].store(instruction_epoch, Ordering::Relaxed);
+            store_instruction_observation(
+                cpu,
+                LocalStage2Observation::new(incarnation, instruction_epoch),
+            );
         }
-        Ok(())
+        if address_space
+            .residency
+            .publish_admission(cpu.get())
+            .is_err()
+        {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: guest residency publication failed after stage-2 activation"
+            ));
+        }
+        Ok(GuestResidencyClaim::new(cpu, incarnation))
     })
 }
 
-fn publish_current_residency(root: u64, epoch: u64) {
+/// Leaves the exact admitted CPU after architecture hardware and host timer
+/// ownership have been restored but before VM execution admission is released.
+pub(in crate::kernel) fn leave(
+    vm: &super::registry::VmBinding,
+    mut claim: GuestResidencyClaim,
+) -> Result<(), GuestResidencyLeaveFailure> {
+    let current = match crate::kernel::cpu::current_index() {
+        Some(cpu) if cpu == claim.cpu => cpu,
+        _ => {
+            return Err(GuestResidencyLeaveFailure {
+                error: Error::InvalidCpu,
+                claim,
+            });
+        }
+    };
+    let result = vm.with_address_space(|address_space| {
+        let incarnation = address_space.incarnation()?;
+        if !claim.admitted.same_allocation(incarnation) {
+            return Err(Error::Poisoned);
+        }
+        address_space
+            .residency
+            .leave(current.get(), incarnation.translation_epoch())
+            .map_err(Error::Residency)
+    });
+    match result {
+        Ok(()) => {
+            claim.armed = false;
+            Ok(())
+        }
+        Err(error) => Err(GuestResidencyLeaveFailure { error, claim }),
+    }
+}
+
+fn publish_current_residency(incarnation: Stage2Incarnation) {
     let Some(cpu) = crate::kernel::cpu::current_index() else {
         crate::kernel::crash::fatal(format_args!(
             "HypeR: active stage-2 mapping has no registered CPU owner"
@@ -589,8 +914,78 @@ fn publish_current_residency(root: u64, epoch: u64) {
     // Active mapping publication already completed the architecture-local
     // invalidation. Updating this CPU-private observation avoids repeating a
     // whole-context activation at the following IRQ-tail resume.
-    ACTIVE_STAGE2_ROOT[cpu].store(root, Ordering::Relaxed);
-    ACTIVE_STAGE2_EPOCH[cpu].store(epoch, Ordering::Relaxed);
+    store_stage2_observation(
+        cpu,
+        LocalStage2Observation::new(incarnation, incarnation.translation_epoch()),
+    );
+}
+
+fn load_stage2_observation(cpu: hyper::cpu::CpuIndex) -> LocalStage2Observation {
+    observation_from_atomics(
+        ACTIVE_STAGE2_ROOT[cpu].load(Ordering::Relaxed),
+        ACTIVE_STAGE2_VMID[cpu].load(Ordering::Relaxed),
+        ACTIVE_STAGE2_GENERATION[cpu].load(Ordering::Relaxed),
+        ACTIVE_STAGE2_EPOCH[cpu].load(Ordering::Relaxed),
+        ACTIVE_STAGE2_EPOCH[cpu].load(Ordering::Relaxed),
+    )
+}
+
+fn store_stage2_observation(cpu: hyper::cpu::CpuIndex, observation: LocalStage2Observation) {
+    let allocation = observation.allocation();
+    ACTIVE_STAGE2_ROOT[cpu].store(allocation.root(), Ordering::Relaxed);
+    ACTIVE_STAGE2_VMID[cpu].store(allocation.vmid(), Ordering::Relaxed);
+    ACTIVE_STAGE2_GENERATION[cpu].store(allocation.generation(), Ordering::Relaxed);
+    ACTIVE_STAGE2_EPOCH[cpu].store(observation.translation_epoch(), Ordering::Relaxed);
+}
+
+fn load_instruction_observation(cpu: hyper::cpu::CpuIndex) -> LocalStage2Observation {
+    observation_from_atomics(
+        ACTIVE_INSTRUCTION_ROOT[cpu].load(Ordering::Relaxed),
+        ACTIVE_INSTRUCTION_VMID[cpu].load(Ordering::Relaxed),
+        ACTIVE_INSTRUCTION_GENERATION[cpu].load(Ordering::Relaxed),
+        ACTIVE_INSTRUCTION_TRANSLATION_EPOCH[cpu].load(Ordering::Relaxed),
+        ACTIVE_INSTRUCTION_EPOCH[cpu].load(Ordering::Relaxed),
+    )
+}
+
+fn store_instruction_observation(cpu: hyper::cpu::CpuIndex, observation: LocalStage2Observation) {
+    let allocation = observation.allocation();
+    ACTIVE_INSTRUCTION_ROOT[cpu].store(allocation.root(), Ordering::Relaxed);
+    ACTIVE_INSTRUCTION_VMID[cpu].store(allocation.vmid(), Ordering::Relaxed);
+    ACTIVE_INSTRUCTION_GENERATION[cpu].store(allocation.generation(), Ordering::Relaxed);
+    ACTIVE_INSTRUCTION_TRANSLATION_EPOCH[cpu]
+        .store(observation.translation_epoch(), Ordering::Relaxed);
+    ACTIVE_INSTRUCTION_EPOCH[cpu].store(observation.synchronization_epoch(), Ordering::Relaxed);
+}
+
+fn observation_from_atomics(
+    root: u64,
+    vmid: u64,
+    generation: u64,
+    translation_epoch: u64,
+    synchronization_epoch: u64,
+) -> LocalStage2Observation {
+    LocalStage2Observation::new(
+        Stage2Incarnation::new(root, vmid as u16, generation, translation_epoch),
+        synchronization_epoch,
+    )
+}
+
+/// Clears only per-CPU observations for the exact retained VMID allocation.
+///
+/// Stage-C retirement will invoke this locally after its tagged invalidation.
+#[allow(dead_code)]
+pub(super) fn clear_local_observations(allocation: Stage2AllocationIdentity) -> Result<(), Error> {
+    let cpu = crate::kernel::cpu::current_index().ok_or(Error::InvalidCpu)?;
+    let mut stage2 = load_stage2_observation(cpu);
+    if stage2.clear_allocation(allocation) {
+        store_stage2_observation(cpu, stage2);
+    }
+    let mut instruction = load_instruction_observation(cpu);
+    if instruction.clear_allocation(allocation) {
+        store_instruction_observation(cpu, instruction);
+    }
+    Ok(())
 }
 
 pub(in crate::kernel) fn resolve_guest_memory_fault(

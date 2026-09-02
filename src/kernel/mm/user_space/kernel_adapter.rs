@@ -83,15 +83,14 @@ pub(crate) fn fail_exposed_write_after_copy_for_test(countdown: usize) {
     FAIL_EXPOSED_WRITE_AFTER_COPY_COUNTDOWN.store(countdown, Ordering::Release);
 }
 
-#[cfg(CONFIG_ARCH_AARCH64)]
-pub(crate) fn address_window()
--> Result<UserAddressWindow, crate::hal::user::UserMachineContractError> {
-    let exclusive_limit = crate::hal::user::address_limit()?;
+pub(crate) fn address_window(
+    exclusive_limit: u64,
+) -> Result<UserAddressWindow, crate::hal::user::AddressSpaceError> {
     // The selected HAL validates both the translation width and reserved host
     // regions before returning the exclusive user limit.
     match UserAddressWindow::from_limit(exclusive_limit) {
         Ok(window) => Ok(window),
-        Err(_) => Err(crate::hal::user::UserMachineContractError::UnsupportedAddressWidth),
+        Err(_) => Err(crate::hal::user::AddressSpaceError::InvalidAddressLimit),
     }
 }
 

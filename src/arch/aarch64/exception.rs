@@ -37,8 +37,38 @@ struct ExceptionEntry {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LowerAarch64Owner {
-    Guest,
+    Guest { generation: u64 },
     Native { generation: u64 },
+}
+
+#[repr(C)]
+struct VectorAction {
+    kind: u64,
+    target: usize,
+}
+
+impl VectorAction {
+    const RESUME: Self = Self {
+        kind: registers::VECTOR_ACTION_RESUME,
+        target: 0,
+    };
+
+    fn postlude(target: Option<unsafe extern "C" fn()>) -> Self {
+        match target {
+            Some(target) => Self {
+                kind: registers::VECTOR_ACTION_POSTLUDE,
+                target: target as usize,
+            },
+            None => Self::RESUME,
+        }
+    }
+
+    fn unwind(target: usize) -> Self {
+        Self {
+            kind: registers::VECTOR_ACTION_UNWIND,
+            target,
+        }
+    }
 }
 
 #[repr(C)]
@@ -94,6 +124,9 @@ pub(super) struct ExceptionFrame {
 }
 
 const _: () = {
+    assert!(size_of::<VectorAction>() == 16);
+    assert!(offset_of!(VectorAction, kind) == 0);
+    assert!(offset_of!(VectorAction, target) == 8);
     assert!(size_of::<StackBounds>() == 16);
     assert!(core::mem::align_of::<StackBounds>() == 8);
     assert!(offset_of!(StackBounds, bottom) == 0);
@@ -126,6 +159,7 @@ const _: () = {
 unsafe extern "C" {
     static aarch64_runtime_vectors: u8;
     fn aarch64_capture_crash_context(context: *mut CrashContext);
+    fn aarch64_unwind_guest() -> !;
 }
 
 pub const NO_EXCEPTION_VECTOR: u64 = u64::MAX;
@@ -459,9 +493,7 @@ pub fn validate_runtime_vectors() -> Result<(), ValidationError> {
 }
 
 #[unsafe(no_mangle)]
-extern "C" fn aarch64_exception_dispatch(
-    frame: &mut ExceptionFrame,
-) -> Option<unsafe extern "C" fn()> {
+extern "C" fn aarch64_exception_dispatch(frame: &mut ExceptionFrame) -> VectorAction {
     let exception_class = (frame.esr >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK;
 
     match decode_vector(frame.vector) {
@@ -490,7 +522,9 @@ fn lower_aarch64_owner(
     }
 
     match super::lower_el::current_world() {
-        super::lower_el::World::Guest { .. } => Some(LowerAarch64Owner::Guest),
+        super::lower_el::World::Guest { generation } => {
+            Some(LowerAarch64Owner::Guest { generation })
+        }
         super::lower_el::World::Native { generation } => {
             Some(LowerAarch64Owner::Native { generation })
         }
@@ -509,25 +543,40 @@ fn dispatch_synchronous(
     entry: ExceptionEntry,
     owner: Option<LowerAarch64Owner>,
     exception_class: u64,
-) -> Option<unsafe extern "C" fn()> {
+) -> VectorAction {
     if complete_vector_test(frame, entry, exception_class) {
-        return None;
+        return VectorAction::RESUME;
     }
 
     match owner {
         Some(LowerAarch64Owner::Native { generation }) => {
             match super::user_entry::handle_synchronous(frame, generation) {
-                Ok(super::user_entry::SynchronousAction::Resume) => None,
+                Ok(super::user_entry::SynchronousAction::Resume) => VectorAction::RESUME,
                 Ok(super::user_entry::SynchronousAction::Unwind) => {
-                    Some(super::user_entry::unwind_callback())
+                    VectorAction::unwind(super::user_entry::unwind_callback() as usize)
                 }
                 Err(_) => super::user_entry::fail_stop(),
             }
         }
-        Some(LowerAarch64Owner::Guest) if dispatch_guest_synchronous(frame, exception_class) => {
-            None
+        Some(LowerAarch64Owner::Guest { generation }) => {
+            match dispatch_guest_synchronous(frame, exception_class) {
+                Ok(GuestDispatch::Resume) => VectorAction::RESUME,
+                Ok(GuestDispatch::Wait) => {
+                    if capture_waiting_guest(frame, generation).is_err() {
+                        fatal_exception(frame, entry, exception_class)
+                    }
+                    VectorAction::unwind(aarch64_unwind_guest as *const () as usize)
+                }
+                Ok(GuestDispatch::Terminal(reason)) => {
+                    if capture_terminal_guest(frame, generation, reason).is_err() {
+                        fatal_exception(frame, entry, exception_class)
+                    }
+                    VectorAction::unwind(aarch64_unwind_guest as *const () as usize)
+                }
+                Err(()) => fatal_exception(frame, entry, exception_class),
+            }
         }
-        Some(LowerAarch64Owner::Guest) | None => fatal_exception(frame, entry, exception_class),
+        None => fatal_exception(frame, entry, exception_class),
     }
 }
 
@@ -565,20 +614,28 @@ fn dispatch_irq(
     frame: &mut ExceptionFrame,
     entry: ExceptionEntry,
     owner: Option<LowerAarch64Owner>,
-) -> Option<unsafe extern "C" fn()> {
-    let interrupt = super::acknowledge_interrupt()?;
-    if Some(interrupt) == super::kernel_rpc_interrupt() {
-        crate::arch::irq::service_kernel_rpc();
-        super::end_interrupt(interrupt);
-        return None;
-    }
-
+) -> VectorAction {
+    let Some(interrupt) = super::acknowledge_interrupt() else {
+        return VectorAction::RESUME;
+    };
     let native_generation = match owner {
         Some(LowerAarch64Owner::Native { generation }) => Some(generation),
-        Some(LowerAarch64Owner::Guest) | None => None,
+        Some(LowerAarch64Owner::Guest { .. }) | None => None,
     };
-    let native_unwind = native_generation.map(|_| super::user_entry::unwind_callback());
-    match crate::arch::irq::dispatch_entry(interrupt, native_unwind) {
+    let interrupt_origin = match owner {
+        Some(LowerAarch64Owner::Guest { .. }) => hyper::hal::interrupt::InterruptOrigin::Guest,
+        Some(LowerAarch64Owner::Native { .. }) => hyper::hal::interrupt::InterruptOrigin::Native {
+            unwind: super::user_entry::unwind_callback(),
+        },
+        None => hyper::hal::interrupt::InterruptOrigin::Host,
+    };
+    let action = if Some(interrupt) == super::kernel_rpc_interrupt() {
+        super::end_interrupt(interrupt);
+        crate::arch::irq::service_kernel_rpc_interrupt(interrupt_origin)
+    } else {
+        crate::arch::irq::dispatch_entry(interrupt, interrupt_origin)
+    };
+    match action {
         hyper::hal::interrupt::EntryAction::Resume { postlude } => {
             // Registry dispatch completed the acknowledged interrupt exactly
             // once before returning this action. The optional scheduling tail
@@ -589,7 +646,16 @@ fn dispatch_irq(
                     super::user_entry::fail_stop();
                 }
             }
-            postlude
+            VectorAction::postlude(postlude)
+        }
+        hyper::hal::interrupt::EntryAction::StopGuest { postlude: _ } => {
+            let Some(LowerAarch64Owner::Guest { generation }) = owner else {
+                fatal_exception(frame, entry, 0)
+            };
+            if capture_administratively_stopped_guest(frame, generation).is_err() {
+                fatal_exception(frame, entry, 0)
+            }
+            VectorAction::unwind(aarch64_unwind_guest as *const () as usize)
         }
         hyper::hal::interrupt::EntryAction::Stop => {
             let stack_pointer = interrupted_stack_pointer(frame, entry.origin);
@@ -597,6 +663,19 @@ fn dispatch_irq(
             crate::arch::irq::stop_entry(context)
         }
     }
+}
+
+fn capture_administratively_stopped_guest(
+    frame: &ExceptionFrame,
+    generation: u64,
+) -> Result<(), ()> {
+    let mut context = super::lower_el::guest_context(generation).map_err(|_| ())?;
+    // SAFETY: the exact lower-EL generation owns this pinned context, guest
+    // entry retained no Rust borrow, and IRQ entry keeps local interrupts masked.
+    unsafe { context.as_mut() }
+        .capture_administrative_stop(frame)
+        .map_err(|_| ())?;
+    super::lower_el::close_captured_guest(generation, context).map_err(|_| ())
 }
 
 fn fatal_invalid_vector(frame: &ExceptionFrame) -> ! {
@@ -628,7 +707,16 @@ fn fatal_exception(frame: &ExceptionFrame, entry: ExceptionEntry, exception_clas
     )
 }
 
-fn dispatch_guest_synchronous(frame: &mut ExceptionFrame, exception_class: u64) -> bool {
+enum GuestDispatch {
+    Resume,
+    Wait,
+    Terminal(super::context::GuestTerminalCause),
+}
+
+fn dispatch_guest_synchronous(
+    frame: &mut ExceptionFrame,
+    exception_class: u64,
+) -> Result<GuestDispatch, ()> {
     let abort = matches!(
         exception_class,
         registers::ESR_EC_INSTRUCTION_ABORT_LOWER | registers::ESR_EC_DATA_ABORT_LOWER
@@ -640,32 +728,90 @@ fn dispatch_guest_synchronous(frame: &mut ExceptionFrame, exception_class: u64) 
         let physical_address = guest_physical_address(frame.far);
         if let Some(fault) = super::decode_guest_memory_fault(frame.esr, physical_address) {
             match crate::arch::vm::dispatch_memory_fault(fault) {
-                hyper::vm::exit::MemoryFaultAction::Retry => return true,
+                hyper::vm::exit::MemoryFaultAction::Retry => return Ok(GuestDispatch::Resume),
                 hyper::vm::exit::MemoryFaultAction::ForwardToDevice => {}
-                hyper::vm::exit::MemoryFaultAction::Stop => return false,
+                hyper::vm::exit::MemoryFaultAction::Stop => {
+                    return Ok(GuestDispatch::Terminal(
+                        super::context::GuestTerminalCause::MemoryFault,
+                    ));
+                }
             }
         }
         let Some((access, completion)) =
             super::decode_guest_mmio_access(frame.esr, physical_address, &frame.general)
         else {
-            return false;
+            return Ok(GuestDispatch::Terminal(
+                super::context::GuestTerminalCause::Mmio,
+            ));
         };
         let action = crate::arch::vm::dispatch_mmio(access);
-        return completion.apply(&mut frame.general, &mut frame.elr, action);
+        return match action {
+            hyper::vm::exit::MmioAction::Unhandled | hyper::vm::exit::MmioAction::Stop => Ok(
+                GuestDispatch::Terminal(super::context::GuestTerminalCause::Mmio),
+            ),
+            action if completion.apply(&mut frame.general, &mut frame.elr, action) => {
+                Ok(GuestDispatch::Resume)
+            }
+            _ => Err(()),
+        };
     }
 
     let Some(exit) = super::decode_guest_sync(frame.esr, &frame.general, frame.elr, frame.spsr)
     else {
-        return false;
+        return Ok(GuestDispatch::Terminal(
+            super::context::GuestTerminalCause::Synchronous(
+                super::context::GuestSynchronousTerminal::Undecodable,
+            ),
+        ));
     };
     let action = crate::arch::vm::dispatch_guest_sync(exit);
-    super::apply_guest_sync_action(
+    if let super::GuestSyncAction::Stop(failure) = action {
+        return Ok(GuestDispatch::Terminal(
+            super::context::GuestTerminalCause::Synchronous(
+                super::context::GuestSynchronousTerminal::Failed { exit, failure },
+            ),
+        ));
+    }
+    let applied = super::apply_guest_sync_action(
         exit,
         &mut frame.general,
         &mut frame.elr,
         &mut frame.spsr,
         action,
-    )
+    );
+    if !applied {
+        return Err(());
+    }
+    Ok(if action == super::GuestSyncAction::Wait {
+        GuestDispatch::Wait
+    } else {
+        GuestDispatch::Resume
+    })
+}
+
+fn capture_waiting_guest(frame: &ExceptionFrame, generation: u64) -> Result<(), ()> {
+    let mut context = super::lower_el::guest_context(generation).map_err(|_| ())?;
+    // SAFETY: The generation-qualified publication is the exact pinned guest
+    // context which produced this vector, and exceptions remain masked.
+    unsafe { context.as_mut() }
+        .capture_wait(frame)
+        .map_err(|_| ())?;
+    super::lower_el::close_captured_guest(generation, context).map_err(|_| ())
+}
+
+fn capture_terminal_guest(
+    frame: &ExceptionFrame,
+    generation: u64,
+    cause: super::context::GuestTerminalCause,
+) -> Result<(), ()> {
+    let mut context = super::lower_el::guest_context(generation).map_err(|_| ())?;
+    // SAFETY: The generation-qualified lower-EL publication is the exact
+    // pinned context whose guest execution produced this frame. Guest entry
+    // retained no Rust reference, and exceptions remain masked.
+    unsafe { context.as_mut() }
+        .capture_terminal(frame, cause)
+        .map_err(|_| ())?;
+    super::lower_el::close_captured_guest(generation, context).map_err(|_| ())
 }
 
 fn guest_physical_address(fault_address: u64) -> u64 {

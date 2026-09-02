@@ -11,10 +11,12 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
 copy_sources() {
     rm -rf "$fixture/src"
-    mkdir -p "$fixture/src/kernel/mm" "$fixture/src/kernel/cpu"
+    mkdir -p "$fixture/src/kernel/mm" "$fixture/src/kernel/cpu" \
+        "$fixture/src/kernel/vm"
     cp "$root/src/main.rs" "$fixture/src/main.rs"
     cp "$root/src/kernel/mm/mod.rs" "$fixture/src/kernel/mm/mod.rs"
     cp "$root/src/kernel/cpu/smp.rs" "$fixture/src/kernel/cpu/smp.rs"
+    cp "$root/src/kernel/vm/registry.rs" "$fixture/src/kernel/vm/registry.rs"
 }
 
 check() {
@@ -58,6 +60,10 @@ swap_calls 'memory must precede scheduler initialization' \
     'crate::kernel::mm::initialize' 'crate::kernel::task::initialize'
 swap_calls 'SMP must precede address-space sealing' \
     'crate::kernel::cpu::initialize' 'crate::kernel::mm::seal_address_space'
+swap_calls 'allocator caches must follow frozen SMP admission' \
+    'crate::kernel::cpu::initialize' 'crate::kernel::mm::activate_local_allocator_caches'
+swap_calls 'allocator caches must precede address-space sealing' \
+    'crate::kernel::mm::activate_local_allocator_caches' 'crate::kernel::mm::seal_address_space'
 swap_calls 'address-space sealing must precede platform drivers' \
     'crate::kernel::mm::seal_address_space' 'crate::kernel::device::platform_device_initialize'
 swap_calls 'platform drivers must precede full VM initialization' \
@@ -68,3 +74,41 @@ mutate 'relaxed FrozenTopology publication was accepted' \
     src/kernel/cpu/smp.rs 's/next_cpu_index, Ordering::Release/next_cpu_index, Ordering::Relaxed/'
 mutate 'removing the FrozenTopology capability was accepted' \
     src/kernel/cpu/smp.rs 's/frozen_topology/frozen_topology_removed/'
+
+copy_sources
+awk '
+    /^        let id = self\.reservation\.id;$/ {
+        print "        let Self {";
+        print "            dormant,";
+        print "            machine,";
+        print "            mut reservation,";
+        print "        } = self;";
+        print "        let id = reservation.id;";
+        moved = 1;
+        next;
+    }
+    /^        let Self \{$/ {
+        skipping = 1;
+        next;
+    }
+    skipping {
+        if (/^        } = self;$/) {
+            skipping = 0;
+        }
+        next;
+    }
+    moved && /^    }$/ {
+        moved = 0;
+        print;
+        next;
+    }
+    moved {
+        gsub(/self\.machine/, "machine");
+    }
+    { print }
+' "$fixture/src/kernel/vm/registry.rs" >"$fixture/mutated"
+mv "$fixture/mutated" "$fixture/src/kernel/vm/registry.rs"
+if check >/dev/null 2>&1; then
+    echo 'early PreparedVm destructuring was accepted' >&2
+    exit 1
+fi

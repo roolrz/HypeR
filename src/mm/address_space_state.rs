@@ -3,33 +3,60 @@
 
 //! Lock-protected admission and residency state for immutable machine roots.
 
+use core::{
+    num::NonZeroU64,
+    sync::atomic::{AtomicU64, Ordering},
+};
+
+static NEXT_OWNER_NONCE: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResidencyError {
     Busy,
     AlreadyActive,
     InvalidCpu,
     NotActive,
+    Retired,
     StaleEpoch,
     SequenceExhausted,
+    OwnerExhausted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResidencyPhase {
+    Open,
+    Updating,
+    Retiring,
+    Retired,
 }
 
 pub struct AddressSpaceResidency<const CPUS: usize> {
+    owner_nonce: NonZeroU64,
     epoch: u64,
-    updating: bool,
+    phase: ResidencyPhase,
     active: [bool; CPUS],
     resident: [bool; CPUS],
     update_sequence: u64,
 }
 
 impl<const CPUS: usize> AddressSpaceResidency<CPUS> {
-    pub const fn new(epoch: u64) -> Self {
-        Self {
+    pub fn try_new(epoch: u64) -> Result<Self, ResidencyError> {
+        // The counter establishes identity only; state publication and cut
+        // transitions remain protected by the owning address-space lock.
+        let owner_nonce = NEXT_OWNER_NONCE
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |nonce| {
+                nonce.checked_add(1).filter(|next| *next != 0)
+            })
+            .map_err(|_| ResidencyError::OwnerExhausted)?;
+        let owner_nonce = NonZeroU64::new(owner_nonce).ok_or(ResidencyError::OwnerExhausted)?;
+        Ok(Self {
+            owner_nonce,
             epoch,
-            updating: false,
+            phase: ResidencyPhase::Open,
             active: [false; CPUS],
             resident: [false; CPUS],
             update_sequence: 0,
-        }
+        })
     }
 
     pub const fn epoch(&self) -> u64 {
@@ -40,9 +67,7 @@ impl<const CPUS: usize> AddressSpaceResidency<CPUS> {
         if cpu >= CPUS {
             return Err(ResidencyError::InvalidCpu);
         }
-        if self.updating {
-            return Err(ResidencyError::Busy);
-        }
+        self.ensure_open()?;
         if epoch != self.epoch {
             return Err(ResidencyError::StaleEpoch);
         }
@@ -58,9 +83,7 @@ impl<const CPUS: usize> AddressSpaceResidency<CPUS> {
         if cpu >= CPUS {
             return Err(ResidencyError::InvalidCpu);
         }
-        if self.updating {
-            return Err(ResidencyError::Busy);
-        }
+        self.ensure_open()?;
         if self.active[cpu] {
             return Err(ResidencyError::AlreadyActive);
         }
@@ -69,12 +92,44 @@ impl<const CPUS: usize> AddressSpaceResidency<CPUS> {
         Ok(())
     }
 
+    pub fn check_single_active(&self, cpu: usize, epoch: u64) -> Result<(), ResidencyError> {
+        self.ensure_open()?;
+        if self.epoch != epoch {
+            return Err(ResidencyError::StaleEpoch);
+        }
+        if cpu >= CPUS {
+            return Err(ResidencyError::InvalidCpu);
+        }
+        if !self.active[cpu] {
+            return Err(ResidencyError::NotActive);
+        }
+        if self
+            .active
+            .iter()
+            .copied()
+            .enumerate()
+            .any(|(index, active)| index != cpu && active)
+        {
+            return Err(ResidencyError::Busy);
+        }
+        Ok(())
+    }
+
+    pub fn check_inactive(&self, epoch: u64) -> Result<(), ResidencyError> {
+        self.ensure_open()?;
+        if self.epoch != epoch {
+            return Err(ResidencyError::StaleEpoch);
+        }
+        if self.active.iter().copied().any(|active| active) {
+            return Err(ResidencyError::Busy);
+        }
+        Ok(())
+    }
+
     /// Removes one active CPU only after the update gate is open and the
     /// caller's observed machine epoch is current.
     pub fn leave(&mut self, cpu: usize, expected_epoch: u64) -> Result<(), ResidencyError> {
-        if self.updating {
-            return Err(ResidencyError::Busy);
-        }
+        self.ensure_open()?;
         if expected_epoch != self.epoch {
             return Err(ResidencyError::StaleEpoch);
         }
@@ -86,13 +141,8 @@ impl<const CPUS: usize> AddressSpaceResidency<CPUS> {
         Ok(())
     }
 
-    pub fn begin_update(
-        &mut self,
-        expected_epoch: u64,
-    ) -> Result<ResidencyCut<CPUS>, ResidencyError> {
-        if self.updating {
-            return Err(ResidencyError::Busy);
-        }
+    pub fn begin_update(&mut self, expected_epoch: u64) -> Result<UpdateCut<CPUS>, ResidencyError> {
+        self.ensure_open()?;
         if self.epoch != expected_epoch {
             return Err(ResidencyError::StaleEpoch);
         }
@@ -101,8 +151,9 @@ impl<const CPUS: usize> AddressSpaceResidency<CPUS> {
             .checked_add(1)
             .ok_or(ResidencyError::SequenceExhausted)?;
         self.update_sequence = sequence;
-        self.updating = true;
-        Ok(ResidencyCut {
+        self.phase = ResidencyPhase::Updating;
+        Ok(UpdateCut {
+            owner_nonce: self.owner_nonce,
             base_epoch: self.epoch,
             sequence,
             active: self.active,
@@ -116,53 +167,148 @@ impl<const CPUS: usize> AddressSpaceResidency<CPUS> {
     pub fn begin_retirement(
         &mut self,
         expected_epoch: u64,
-    ) -> Result<ResidencyCut<CPUS>, ResidencyError> {
+    ) -> Result<RetirementCut<CPUS>, ResidencyError> {
+        self.ensure_open()?;
         if self.active.iter().copied().any(|active| active) {
             return Err(ResidencyError::Busy);
         }
-        self.begin_update(expected_epoch)
+        if self.epoch != expected_epoch {
+            return Err(ResidencyError::StaleEpoch);
+        }
+        let sequence = self
+            .update_sequence
+            .checked_add(1)
+            .ok_or(ResidencyError::SequenceExhausted)?;
+        self.update_sequence = sequence;
+        self.phase = ResidencyPhase::Retiring;
+        Ok(RetirementCut {
+            owner_nonce: self.owner_nonce,
+            base_epoch: self.epoch,
+            sequence,
+            targets: self.resident,
+        })
     }
 
-    pub fn abort_update(&mut self, cut: ResidencyCut<CPUS>) -> Result<(), ResidencyError> {
-        self.validate_cut(&cut)?;
-        self.updating = false;
+    pub fn abort_update(
+        &mut self,
+        cut: UpdateCut<CPUS>,
+    ) -> Result<(), CutFailure<UpdateCut<CPUS>>> {
+        if let Err(error) = self.validate_update_cut(&cut) {
+            return Err(CutFailure { error, cut });
+        }
+        self.phase = ResidencyPhase::Open;
         Ok(())
     }
 
     /// Opens admission for the new epoch after every cut target acknowledged.
     pub fn finish_update(
         &mut self,
-        cut: ResidencyCut<CPUS>,
+        cut: UpdateCut<CPUS>,
         epoch: u64,
-    ) -> Result<(), ResidencyError> {
-        self.validate_cut(&cut)?;
+    ) -> Result<(), CutFailure<UpdateCut<CPUS>>> {
+        if let Err(error) = self.validate_update_cut(&cut) {
+            return Err(CutFailure { error, cut });
+        }
         if epoch <= self.epoch {
-            return Err(ResidencyError::StaleEpoch);
+            return Err(CutFailure {
+                error: ResidencyError::StaleEpoch,
+                cut,
+            });
         }
         self.epoch = epoch;
         // Inactive residents were invalidated by the cut. Active targets have
         // installed the new root and remain resident.
         self.resident = self.active;
-        self.updating = false;
+        self.phase = ResidencyPhase::Open;
         Ok(())
     }
 
-    fn validate_cut(&self, cut: &ResidencyCut<CPUS>) -> Result<(), ResidencyError> {
-        if !self.updating || cut.base_epoch != self.epoch || cut.sequence != self.update_sequence {
+    /// Permanently closes this residency after every retirement target has
+    /// acknowledged invalidating the retained translation identity.
+    pub fn finish_retirement(
+        &mut self,
+        cut: RetirementCut<CPUS>,
+    ) -> Result<(), CutFailure<RetirementCut<CPUS>>> {
+        if self.phase != ResidencyPhase::Retiring
+            || cut.owner_nonce != self.owner_nonce
+            || cut.base_epoch != self.epoch
+            || cut.sequence != self.update_sequence
+        {
+            return Err(CutFailure {
+                error: ResidencyError::StaleEpoch,
+                cut,
+            });
+        }
+        self.active = [false; CPUS];
+        self.resident = [false; CPUS];
+        self.phase = ResidencyPhase::Retired;
+        Ok(())
+    }
+
+    /// Advances an in-place mapping epoch while exactly one admitted CPU owns
+    /// and locally invalidates the mutable translation hierarchy.
+    pub fn advance_single_active(
+        &mut self,
+        cpu: usize,
+        expected_epoch: u64,
+        new_epoch: u64,
+    ) -> Result<(), ResidencyError> {
+        self.check_single_active(cpu, expected_epoch)?;
+        if new_epoch <= expected_epoch {
+            return Err(ResidencyError::StaleEpoch);
+        }
+        self.epoch = new_epoch;
+        Ok(())
+    }
+
+    /// Advances an unpublished or quiescent hierarchy in place.
+    pub fn advance_inactive(
+        &mut self,
+        expected_epoch: u64,
+        new_epoch: u64,
+    ) -> Result<(), ResidencyError> {
+        self.check_inactive(expected_epoch)?;
+        if new_epoch <= expected_epoch {
+            return Err(ResidencyError::StaleEpoch);
+        }
+        self.epoch = new_epoch;
+        Ok(())
+    }
+
+    pub const fn is_retired(&self) -> bool {
+        matches!(self.phase, ResidencyPhase::Retired)
+    }
+
+    fn ensure_open(&self) -> Result<(), ResidencyError> {
+        match self.phase {
+            ResidencyPhase::Open => Ok(()),
+            ResidencyPhase::Updating | ResidencyPhase::Retiring => Err(ResidencyError::Busy),
+            ResidencyPhase::Retired => Err(ResidencyError::Retired),
+        }
+    }
+
+    fn validate_update_cut(&self, cut: &UpdateCut<CPUS>) -> Result<(), ResidencyError> {
+        if self.phase != ResidencyPhase::Updating
+            || cut.owner_nonce != self.owner_nonce
+            || cut.base_epoch != self.epoch
+            || cut.sequence != self.update_sequence
+        {
             return Err(ResidencyError::StaleEpoch);
         }
         Ok(())
     }
 }
 
-pub struct ResidencyCut<const CPUS: usize> {
+#[derive(Debug)]
+pub struct UpdateCut<const CPUS: usize> {
+    owner_nonce: NonZeroU64,
     base_epoch: u64,
     sequence: u64,
     active: [bool; CPUS],
     targets: [bool; CPUS],
 }
 
-impl<const CPUS: usize> ResidencyCut<CPUS> {
+impl<const CPUS: usize> UpdateCut<CPUS> {
     pub const fn active(&self) -> &[bool; CPUS] {
         &self.active
     }
@@ -173,5 +319,43 @@ impl<const CPUS: usize> ResidencyCut<CPUS> {
 
     pub const fn base_epoch(&self) -> u64 {
         self.base_epoch
+    }
+}
+
+/// Irreversible target snapshot for final address-space retirement.
+///
+/// Unlike [`UpdateCut`], this token has no abort operation and cannot be
+/// supplied to an ordinary update completion API.
+#[derive(Debug)]
+pub struct RetirementCut<const CPUS: usize> {
+    owner_nonce: NonZeroU64,
+    base_epoch: u64,
+    sequence: u64,
+    targets: [bool; CPUS],
+}
+
+impl<const CPUS: usize> RetirementCut<CPUS> {
+    pub const fn targets(&self) -> &[bool; CPUS] {
+        &self.targets
+    }
+
+    pub const fn base_epoch(&self) -> u64 {
+        self.base_epoch
+    }
+}
+
+#[derive(Debug)]
+pub struct CutFailure<Cut> {
+    error: ResidencyError,
+    cut: Cut,
+}
+
+impl<Cut> CutFailure<Cut> {
+    pub const fn error(&self) -> ResidencyError {
+        self.error
+    }
+
+    pub fn into_cut(self) -> Cut {
+        self.cut
     }
 }

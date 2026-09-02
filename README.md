@@ -67,7 +67,8 @@ The current foundation includes:
   architecture handoffs including x86 boot parameters;
 - KASLR with RELA/RELR relocation on AArch64;
 - permanent stage-1 mappings, guest stage-2 translation, boot allocation,
-  buddy allocation, slab allocation, and Rust's global allocator interface;
+  buddy allocation, slab allocation, and a bounded per-CPU fast path behind
+  Rust's global allocator interface;
 - SMP startup with a scheduler-owned idle thread on every admitted CPU;
 - class-aware, intrusive ready queues with RT FIFO and a replaceable Fair
   class whose initial backend is time-sliced round-robin;

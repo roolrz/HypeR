@@ -28,6 +28,7 @@ x86_64_switch_context:
     # saved above and is preserved by the callback until next state is loaded.
     movq %rsi, %r12
     movq THREAD_CONTEXT_RSP_OFFSET(%r12), %rsp
+    movq %r8, %rdi
     subq $8, %rsp
     call *%rcx
     addq $8, %rsp

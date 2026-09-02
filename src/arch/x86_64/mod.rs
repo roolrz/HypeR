@@ -14,7 +14,6 @@ mod guest;
 mod interrupt_controller;
 mod interrupts;
 mod kaslr;
-mod linux;
 mod memory;
 mod platform;
 #[allow(dead_code)]
@@ -54,12 +53,6 @@ pub use interrupts::{
     irq_enabled as local_irq_enabled, mask_irq as mask_local_irq,
 };
 pub use kaslr::{Error as KaslrError, select as select_kaslr_layout};
-pub(crate) use linux::{
-    LINUX_GUEST_KERNEL_IPA, LINUX_GUEST_RAM_IPA, LINUX_GUEST_TIMER_INTERRUPT,
-    describe_linux_guest_layout, describe_linux_host, linux_guest_architecture,
-    linux_kernel_occupied_size, load_linux_payload, prepare_linux_vcpu_context,
-    validate_linux_host, validate_linux_kernel,
-};
 #[cfg(CONFIG_CRASH_CONSOLE)]
 pub use memory::inspect_mapping as inspect_stage1_mapping;
 pub use memory::{
@@ -313,8 +306,16 @@ extern "C" fn x86_64_bootstrap(boot_params: usize) -> ! {
 
 pub(crate) fn describe_runtime(_emit: impl FnMut(core::fmt::Arguments<'_>)) {}
 
-pub fn initialize_interrupt_virtualization(
+pub struct PreparedInterruptVirtualization;
+
+pub fn prepare_interrupt_virtualization(
     _host_timer_interrupt: Option<hyper::hal::interrupt::HostInterruptBinding>,
+) -> Result<PreparedInterruptVirtualization, InterruptVirtualizationError> {
+    Ok(PreparedInterruptVirtualization)
+}
+
+pub fn commit_interrupt_virtualization(
+    _prepared: PreparedInterruptVirtualization,
 ) -> Result<(), InterruptVirtualizationError> {
     Ok(())
 }

@@ -6,7 +6,10 @@
 mod owned_queue;
 mod queue;
 
-pub use owned_queue::{ExpiredTimer, OwnedDeadlineQueue, PendingTimer};
+pub use owned_queue::{
+    ExpiredTimer, OwnedDeadlineQueue, PendingReservedTimer, PendingTimer, ReservedTimerCallbacks,
+    ReservedTimerNode, TimerRecycle,
+};
 pub use queue::{
     DeadlineQueue, Error as TimerQueueError, QueueStats, TimerCallback, TimerEvent, TimerHandle,
     TimerMode,

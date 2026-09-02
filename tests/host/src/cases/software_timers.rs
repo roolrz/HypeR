@@ -4,8 +4,39 @@
 //! Software-timer ordering, identity, cancellation, and periodic semantics.
 
 use hyper::time::{
-    DeadlineQueue, OwnedDeadlineQueue, PendingTimer, TimerEvent, TimerMode, TimerQueueError,
+    DeadlineQueue, OwnedDeadlineQueue, PendingTimer, ReservedTimerCallbacks, ReservedTimerNode,
+    TimerEvent, TimerMode, TimerQueueError,
 };
+
+struct ReservedProbe {
+    node: std::sync::Mutex<Option<ReservedTimerNode>>,
+    claims: std::sync::atomic::AtomicUsize,
+    callbacks: std::sync::atomic::AtomicUsize,
+}
+
+fn probe(context: usize) -> &'static ReservedProbe {
+    let pointer = core::ptr::with_exposed_provenance::<ReservedProbe>(context);
+    // SAFETY: the test retains its boxed probe until every queued callback and
+    // recycled node has completed.
+    unsafe { &*pointer }
+}
+
+fn reserved_claim(_event: TimerEvent, context: usize) {
+    probe(context)
+        .claims
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn reserved_callback(_event: TimerEvent, context: usize) {
+    probe(context)
+        .callbacks
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn reserved_recycle(node: ReservedTimerNode, context: usize) {
+    let mut slot = crate::require_ok(probe(context).node.lock());
+    assert!(slot.replace(node).is_none());
+}
 
 fn callback(_: TimerEvent, _: usize) {}
 
@@ -194,4 +225,159 @@ fn owned_queue_rejects_stale_and_foreign_handles() {
         other.cancel(replacement),
         Err(TimerQueueError::InvalidHandle)
     ));
+}
+
+#[test]
+fn reserved_owned_timer_recycles_without_entering_ordinary_cancellation() {
+    let probe = Box::leak(Box::new(ReservedProbe {
+        node: std::sync::Mutex::new(Some(crate::require_ok(ReservedTimerNode::try_new()))),
+        claims: std::sync::atomic::AtomicUsize::new(0),
+        callbacks: std::sync::atomic::AtomicUsize::new(0),
+    }));
+    let context = core::ptr::from_ref(&*probe).expose_provenance();
+    let callbacks = || ReservedTimerCallbacks {
+        callback: reserved_callback,
+        context,
+        claim: reserved_claim,
+        claim_context: context,
+        recycle: reserved_recycle,
+        recycle_context: context,
+    };
+    let mut queue = OwnedDeadlineQueue::new();
+    let first_node = crate::require_some(crate::require_ok(probe.node.lock()).take());
+    let first = queue.insert_reserved(first_node.prepare(10, callbacks()));
+    assert!(matches!(
+        queue.cancel(first),
+        Err(TimerQueueError::InvalidHandle)
+    ));
+    crate::require_some(queue.pop_expired(10)).invoke();
+    assert_eq!(probe.claims.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(
+        probe.callbacks.load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+
+    let recycled = crate::require_some(crate::require_ok(probe.node.lock()).take());
+    let second = queue.insert_reserved(recycled.prepare(20, callbacks()));
+    let recovered = crate::require_ok(queue.cancel_reserved(second));
+    assert!(
+        crate::require_ok(probe.node.lock())
+            .replace(recovered)
+            .is_none()
+    );
+
+    let recovered = crate::require_some(crate::require_ok(probe.node.lock()).take());
+    let _third = queue.insert_reserved(recovered.prepare(30, callbacks()));
+    drop(crate::require_some(queue.pop_expired(30)));
+    assert_eq!(probe.claims.load(std::sync::atomic::Ordering::Relaxed), 2);
+    assert_eq!(
+        probe.callbacks.load(std::sync::atomic::Ordering::Relaxed),
+        2
+    );
+    assert!(crate::require_ok(probe.node.lock()).is_some());
+}
+
+fn source_region<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    let start = crate::require_some(source.find(start));
+    let end = crate::require_some(source[start..].find(end)) + start;
+    &source[start..end]
+}
+
+fn assert_source_order(region: &str, markers: &[&str]) {
+    let mut previous = 0;
+    for marker in markers {
+        let position = crate::require_some(region.find(marker));
+        assert!(position >= previous, "{marker} appears out of order");
+        previous = position;
+    }
+}
+
+#[test]
+fn cpu_local_timer_transactions_remain_pinned_through_comparator_programming() {
+    let source = include_str!("../../../../src/kernel/time/timers.rs");
+
+    let arm = source_region(
+        source,
+        "    pub(crate) fn arm(",
+        "    fn arm_on_pinned_cpu(",
+    );
+    assert_source_order(
+        arm,
+        &[
+            "pin_current_timer_cpu()?",
+            "self.arm_on_pinned_cpu(",
+            "release_timer_cpu_pin(cpu_pin)",
+        ],
+    );
+    let arm_transaction = source_region(
+        source,
+        "    fn arm_on_pinned_cpu(",
+        "    fn restore_cancelled(",
+    );
+    assert!(arm_transaction.contains("program_next(&timers.queue)"));
+
+    let schedule = source_region(source, "pub fn schedule_at(", "pub fn schedule_after(");
+    let allocation = crate::require_some(schedule.find("PendingTimer::try_new("));
+    let pin = crate::require_some(schedule.find("pin_current_timer_cpu()?"));
+    let insert = crate::require_some(schedule.find("timers.queue.insert(pending)"));
+    let program = crate::require_some(schedule.find("program_next(&timers.queue)"));
+    let release = crate::require_some(schedule.rfind("release_timer_cpu_pin(cpu_pin)"));
+    let retire = crate::require_some(schedule.find("drop(retired)"));
+    assert!(allocation < pin);
+    assert!(pin < insert);
+    assert!(insert < program);
+    assert!(program < release);
+    assert!(release < retire);
+
+    let cancel = source_region(source, "pub fn cancel(", "pub fn local_statistics(");
+    assert_source_order(
+        cancel,
+        &[
+            "pin_current_timer_cpu()?",
+            "TIMERS[owner].with(",
+            "program_next(&timers.queue)",
+            "release_timer_cpu_pin(cpu_pin)",
+            "drop(retired)",
+        ],
+    );
+
+    let statistics = source_region(
+        source,
+        "pub fn local_statistics(",
+        "pub(super) fn handle_interrupt(",
+    );
+    assert_source_order(
+        statistics,
+        &[
+            "pin_current_timer_cpu().ok()?",
+            "TIMERS[cpu].with(",
+            "release_timer_cpu_pin(cpu_pin)",
+        ],
+    );
+
+    let retire = source_region(source, "    fn retire(", "}\n\nimpl Drop for ReservedTimer");
+    assert_source_order(
+        retire,
+        &[
+            "TIMERS[owner].with(",
+            "owner == current_cpu()?",
+            "program_next(&timers.queue)",
+        ],
+    );
+
+    let pin_helper = source_region(
+        source,
+        "fn pin_current_timer_cpu(",
+        "/// Ends a timer CPU-local transaction",
+    );
+    assert_source_order(
+        pin_helper,
+        &["scheduler::preempt_disable()", "current_cpu()"],
+    );
+    let release_helper = source_region(
+        source,
+        "fn release_timer_cpu_pin(",
+        "fn ensure_initialized(",
+    );
+    assert!(release_helper.contains("scheduler::preempt_enable_without_reschedule(cpu_pin)"));
 }

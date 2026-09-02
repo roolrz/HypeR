@@ -35,6 +35,70 @@ fi
 rm "$fixture/src/arch/hidden_log.rs"
 
 printf '%s\n' \
+    '#[cfg(target_arch = "aarch64")]' \
+    'fn target_specific_kernel_policy() {}' \
+    >"$fixture/src/kernel/target_specific.rs"
+if HYPER_ARCH_BOUNDARY_ROOT="$fixture" \
+    HYPER_ARCH_KERNEL_BASELINE="$fixture/baseline.txt" \
+    sh "$root/tests/ci/check-arch-boundaries.sh" >/dev/null 2>&1; then
+    echo "target_arch selection outside src/arch must be rejected" >&2
+    exit 1
+fi
+rm "$fixture/src/kernel/target_specific.rs"
+
+printf '%s\n' \
+    '#[cfg(CONFIG_ARCH_AARCH64)]' \
+    'fn architecture_selected_kernel_policy() {}' \
+    >"$fixture/src/kernel/architecture_selected.rs"
+if HYPER_ARCH_BOUNDARY_ROOT="$fixture" \
+    HYPER_ARCH_KERNEL_BASELINE="$fixture/baseline.txt" \
+    sh "$root/tests/ci/check-arch-boundaries.sh" >/dev/null 2>&1; then
+    echo "CONFIG_ARCH selection in common kernel policy must be rejected" >&2
+    exit 1
+fi
+rm "$fixture/src/kernel/architecture_selected.rs"
+
+printf '%s\n' \
+    'fn bypass_hal() { crate::arch::cpu::send_event(); }' \
+    >"$fixture/src/kernel/direct_architecture.rs"
+if HYPER_ARCH_BOUNDARY_ROOT="$fixture" \
+    HYPER_ARCH_KERNEL_BASELINE="$fixture/baseline.txt" \
+    sh "$root/tests/ci/check-arch-boundaries.sh" >/dev/null 2>&1; then
+    echo "common kernel code must not bypass the selected HAL" >&2
+    exit 1
+fi
+rm "$fixture/src/kernel/direct_architecture.rs"
+
+printf '%s\n' 'fn leaked_guest_policy() { let _ = crate::hal::guest::linux_abi(); }' \
+    >"$fixture/src/kernel/guest_policy.rs"
+if HYPER_ARCH_BOUNDARY_ROOT="$fixture" \
+    HYPER_ARCH_KERNEL_BASELINE="$fixture/baseline.txt" \
+    sh "$root/tests/ci/check-arch-boundaries.sh" >/dev/null 2>&1; then
+    echo "guest ABI policy in the host HAL must be rejected" >&2
+    exit 1
+fi
+rm "$fixture/src/kernel/guest_policy.rs"
+
+mkdir -p "$fixture/src/kernel/entry" "$fixture/src/kernel/vm"
+for common_boundary in \
+    "$fixture/src/kernel/entry/vmexit.rs" \
+    "$fixture/src/kernel/vm/device.rs" \
+    "$fixture/src/kernel/vm/linux/mod.rs"; do
+    mkdir -p "$(dirname "$common_boundary")"
+    printf '%s\n' \
+        '#[cfg(CONFIG_ARCH_AARCH64)]' \
+        'fn hidden_selection_in_common_boundary() {}' \
+        >"$common_boundary"
+    if HYPER_ARCH_BOUNDARY_ROOT="$fixture" \
+        HYPER_ARCH_KERNEL_BASELINE="$fixture/baseline.txt" \
+        sh "$root/tests/ci/check-arch-boundaries.sh" >/dev/null 2>&1; then
+        echo "common boundary helpers must not inherit selected-module exemptions" >&2
+        exit 1
+    fi
+    rm "$common_boundary"
+done
+
+printf '%s\n' \
     'use crate::println as machine_log;' \
     'fn hidden_log() { machine_log!("entry"); }' \
     >"$fixture/src/arch/hidden_log.rs"

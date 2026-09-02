@@ -75,6 +75,7 @@ pub fn enable_irq() {
 /// This operation pairs with [`enable_irq`] across controlled context-entry
 /// transitions. IRQ-safe lexical critical sections must use
 /// [`LocalInterruptMask`] so they restore the exact prior state.
+#[allow(dead_code)]
 pub fn mask_irq() {
     // SAFETY: DAIFSet with immediate 2 sets only the IRQ mask bit. This
     // instruction remains a compiler memory boundary because interrupt

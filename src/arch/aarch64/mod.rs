@@ -13,7 +13,6 @@ mod interrupt_controller;
 mod interrupt_virtualization;
 mod interrupts;
 mod kaslr;
-mod linux;
 mod lower_el;
 mod memory;
 mod platform;
@@ -22,6 +21,7 @@ mod psci;
 pub mod registers;
 mod smp;
 mod stage2;
+mod stage2_retirement;
 mod timer;
 mod user;
 mod user_contract;
@@ -35,6 +35,11 @@ mod vsysreg;
 
 pub use atomics::{AtomicCapabilities, capabilities as atomic_capabilities};
 pub use cache::Aarch64Cache as ArchitectureCache;
+pub use context::GuestRunError;
+pub(crate) use context::{
+    GuestAdministrativeStopReason, GuestRunExit, GuestSynchronousTerminal, GuestTerminalCause,
+    GuestWaitReason, StoppedGuestRun,
+};
 pub use context::{
     ThreadContext, VcpuContext, reset_stack_and_enter, run_on_emergency_stack,
     switch_thread_context,
@@ -61,19 +66,14 @@ pub use interrupt_controller::{
 };
 pub(crate) use interrupt_virtualization::description as interrupt_virtualization_description;
 pub use interrupt_virtualization::{
-    Error as InterruptVirtualizationError, initialize as initialize_interrupt_virtualization,
+    Error as InterruptVirtualizationError, Prepared as PreparedInterruptVirtualization,
+    commit as commit_interrupt_virtualization, prepare as prepare_interrupt_virtualization,
 };
 pub use interrupts::{
     LocalInterruptMask, disable_all as disable_all_interrupts, enable_irq as enable_local_irq,
     irq_enabled as local_irq_enabled, mask_irq as mask_local_irq,
 };
 pub use kaslr::{Error as KaslrError, select as select_kaslr_layout};
-pub(crate) use linux::{
-    LINUX_GUEST_KERNEL_IPA, LINUX_GUEST_RAM_IPA, LINUX_GUEST_TIMER_INTERRUPT,
-    describe_linux_guest_layout, describe_linux_host, linux_guest_architecture,
-    linux_kernel_occupied_size, load_linux_payload, prepare_linux_vcpu_context,
-    validate_linux_host, validate_linux_kernel,
-};
 #[cfg(CONFIG_CRASH_CONSOLE)]
 pub use memory::inspect_mapping as inspect_stage1_mapping;
 pub use memory::{
@@ -90,7 +90,9 @@ pub use smp::{
     SecondaryBootParameters, current_cpu_index, current_hardware_id, secondary_entry_physical,
     send_event,
 };
+pub(crate) use stage2::retire_local as retire_guest_stage2_local;
 pub use stage2::{Error as Stage2Error, Stage2AddressSpace};
+pub(crate) use stage2_retirement::Request as GuestStage2RetirementRequest;
 pub use timer::{
     ArmGenericCounter as ArchitectureCounter, El2PhysicalTimer as ArchitectureTimer,
     Error as TimerError,
@@ -124,17 +126,21 @@ pub use vgic::{
 };
 pub use vm_interrupt::{Error as VmInterruptError, VmInterruptController};
 pub use vm_vcpu::Error as VcpuInterruptError;
+pub(crate) use vm_vcpu::GicAccessError;
+pub(crate) use vm_vcpu::StoppedDeactivationFailure;
 pub(crate) use vm_vcpu::{
-    activate as activate_vcpu_hardware, deactivate as deactivate_vcpu_hardware,
+    access_guest_gic, activate as activate_vcpu_hardware, deactivate as deactivate_vcpu_hardware,
+    deactivate_stopped as deactivate_stopped_vcpu_hardware,
     handle_maintenance_interrupt as handle_virtualization_maintenance_interrupt,
     handle_virtual_timer_interrupt as handle_guest_virtual_timer_interrupt,
     inject_timer_for_validation,
     maintenance_interrupt_pending as virtualization_maintenance_pending,
-    quiesce_virtual_interrupt_delivery, update_guest_device_interrupt,
+    quiesce_virtual_interrupt_delivery, reconcile_active_interrupts, request_guest_exit,
+    update_guest_device_interrupt, update_saved_guest_device_interrupt,
 };
 pub(crate) use vsysreg::{
-    GuestSyncAction, GuestSyncExit, apply_guest_sync_action, decode_guest_memory_fault,
-    decode_guest_mmio_access, decode_guest_sync, handle_guest_sync,
+    GuestSyncAction, GuestSyncExit, GuestSyncFailure, apply_guest_sync_action,
+    decode_guest_memory_fault, decode_guest_mmio_access, decode_guest_sync, handle_guest_sync,
 };
 pub use vsysreg::{ValidationError as GuestValidationError, validate as validate_vsysreg};
 
@@ -200,10 +206,6 @@ pub fn decode_kernel_timer(
 }
 
 pub use vm_vcpu::InitializationError as VirtualDeviceInitializationError;
-
-pub const GUEST_CONSOLE_BASE: u64 = hyper::vm::aarch64::device::pl011::REFERENCE_BASE;
-pub const GUEST_CONSOLE_SIZE: u64 = hyper::vm::aarch64::device::pl011::REFERENCE_SIZE;
-pub const GUEST_CONSOLE_INTERRUPT: u32 = hyper::vm::aarch64::device::pl011::REFERENCE_INTERRUPT;
 
 pub fn initialize_virtual_devices(
     _timer_interrupt: hyper::hal::interrupt::InterruptId,

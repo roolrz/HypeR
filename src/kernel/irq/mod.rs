@@ -51,28 +51,18 @@ pub(crate) fn initialize(
     boot: &mut super::boot::Initialization,
 ) -> Result<(), InitializationError> {
     initialize_controller(boot)?;
-    crate::hal::irq::install_kernel_rpc_service(cross_call::service)
-        .map_err(InitializationError::KernelRpcService)?;
+    crate::hal::irq::install_kernel_rpc_services(
+        cross_call::service,
+        crate::kernel::entry::irq::dispatch_kernel_rpc_entry,
+    )
+    .map_err(InitializationError::KernelRpcService)?;
     interrupt::initialize_local_rpc_transport().map_err(InitializationError::Controller)?;
-    let entry = {
-        #[cfg(CONFIG_ARCH_RISCV64)]
-        {
-            crate::hal::exception::install_entry_services(
-                crate::kernel::entry::exception::fatal,
-                crate::kernel::entry::irq::dispatch,
-                crate::kernel::entry::irq::claim_and_dispatch_external,
-                crate::kernel::entry::irq::stop,
-            )
-        }
-        #[cfg(not(CONFIG_ARCH_RISCV64))]
-        {
-            crate::hal::exception::install_entry_services(
-                crate::kernel::entry::exception::fatal,
-                crate::kernel::entry::irq::dispatch,
-                crate::kernel::entry::irq::stop,
-            )
-        }
-    }
+    let entry = crate::hal::exception::install_entry_services(
+        crate::kernel::entry::exception::fatal,
+        crate::kernel::entry::irq::dispatch,
+        crate::kernel::entry::irq::claim_and_dispatch_external,
+        crate::kernel::entry::irq::stop,
+    )
     .map_err(InitializationError::EntryServices)?;
     initialize_exceptions(&entry)?;
     ENTRY_READY.with(|slot| {
@@ -87,10 +77,8 @@ pub(crate) fn initialize(
 }
 
 /// Observes reschedule-SGI dispatch for the bare-metal runtime proof.
-#[cfg(all(
-    feature = "kernel-self-test",
-    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64)
-))]
+#[cfg(feature = "kernel-self-test")]
+#[allow(dead_code)]
 pub(crate) fn reschedule_delivery_count_for_test(cpu: hyper::cpu::CpuIndex) -> usize {
     reschedule::delivery_count_for_test(cpu)
 }

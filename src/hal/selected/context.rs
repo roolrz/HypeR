@@ -27,6 +27,7 @@ pub(crate) unsafe fn switch_thread_context(
     next: *const ThreadContext,
     previous_interrupt_state: <crate::hal::irq::LocalMask as hyper::hal::interrupt::InterruptMask>::State,
     completion: SwitchCompletion,
+    completion_ticket: usize,
 ) {
     // SAFETY: The selected architecture facade receives the same pinned,
     // exclusively scheduler-owned contexts and prepared-state guarantee.
@@ -36,6 +37,7 @@ pub(crate) unsafe fn switch_thread_context(
             next,
             previous_interrupt_state,
             completion,
+            completion_ticket,
         )
     }
 }

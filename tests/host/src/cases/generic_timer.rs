@@ -3,7 +3,7 @@
 
 //! Architecture-neutral counter conversion and guest timer semantics.
 
-use hyper::drivers::timer::arm_generic::VirtualTimerState;
+use hyper::drivers::timer::arm_generic::{VirtualTimerState, VirtualTimerWake};
 use hyper::hal::timer::{
     ConversionError, deadline_reached, nanoseconds_to_ticks, ticks_to_nanoseconds,
 };
@@ -60,4 +60,20 @@ fn models_guest_offset_masking_and_level_output() {
     assert!(timer.enabled());
     assert!(timer.masked());
     assert_eq!(timer.writable_control(), 0b11);
+}
+
+#[test]
+fn derives_wfi_wake_deadline_from_saved_virtual_timer_state() {
+    let mut timer = VirtualTimerState::empty();
+    assert_eq!(timer.wfi_wake_at(100), VirtualTimerWake::None);
+    timer.set_offset(1_000);
+    timer.set_compare_value(250);
+    timer.set_enabled(true);
+    assert_eq!(timer.wfi_wake_at(1_249), VirtualTimerWake::Deadline(1_250));
+    assert_eq!(timer.wfi_wake_at(1_250), VirtualTimerWake::PendingNow);
+    timer.set_offset(0);
+    timer.set_compare_value(100_u64.wrapping_add(1_u64 << 63));
+    assert_eq!(timer.wfi_wake_at(100), VirtualTimerWake::PendingNow);
+    timer.set_masked(true);
+    assert_eq!(timer.wfi_wake_at(2_000), VirtualTimerWake::None);
 }

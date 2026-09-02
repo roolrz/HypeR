@@ -25,6 +25,7 @@ static READY: AtomicBool = AtomicBool::new(false);
 /// Creates the bootstrap scheduling context and initial run queue.
 pub(crate) fn initialize() -> Result<(), scheduler::Error> {
     let capabilities = scheduler::initialize()?;
+    scheduler::initialize_retirement_worker()?;
     READY.store(true, Ordering::Release);
     crate::println!(
         "HypeR: scheduler active on bootstrap thread {}",

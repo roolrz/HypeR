@@ -10,6 +10,7 @@ pub(super) enum Error {
     Memory(crate::kernel::vm::memory::Error),
     Registry(crate::kernel::vm::registry::Error),
     Scheduler(crate::kernel::task::scheduler::Error),
+    InitialContext,
     SchedulerThreadLeaked,
 }
 
@@ -20,34 +21,49 @@ pub(super) fn run() -> Result<(), Error> {
     }
 
     let before = crate::kernel::task::scheduler::statistics().map_err(Error::Scheduler)?;
+    let prepared = prepare_test_vm()?;
+    drop(prepared);
+    let after = crate::kernel::task::scheduler::statistics().map_err(Error::Scheduler)?;
+    if after.threads != before.threads {
+        return Err(Error::SchedulerThreadLeaked);
+    }
+
+    if crate::hal::vm::try_administrative_stop().is_ok() {
+        verify_dormant_vcpu_stop()?;
+    }
+    Ok(())
+}
+
+fn prepare_test_vm() -> Result<crate::kernel::vm::registry::PreparedVm, Error> {
     let mut reservation = crate::kernel::vm::registry::reserve().map_err(Error::Registry)?;
     let identifier = reservation.take_hardware_vmid().map_err(Error::Registry)?;
+    let (ram_base, timer_interrupt) = crate::kernel::vm::linux::test_abi();
     let address_space = crate::kernel::vm::memory::GuestAddressSpace::new(
         identifier,
-        crate::hal::guest::linux_abi().ram_base().get(),
+        ram_base,
         2 * hyper::mm::PAGE_SIZE,
     )
     .map_err(Error::Memory)?;
-    let interrupts = crate::kernel::vm::VmInterruptController::new(
-        1,
-        crate::hal::guest::linux_abi().timer_interrupt(),
-    )
-    .map_err(Error::Interrupts)?;
+    let interrupts = crate::hal::vm::create_interrupt_controller(1, timer_interrupt)
+        .map_err(Error::Interrupts)?;
     let devices = crate::kernel::vm::device::prepare().map_err(Error::Device)?;
     let builder = crate::kernel::vm::registry::VmBuilder::new(
         reservation,
         address_space,
         interrupts,
         devices,
+        1,
     )
     .map_err(Error::Registry)?;
-    let prepared = builder
-        .prepare_boot_vcpu(0, crate::hal::guest::prepare_linux_vcpu_context())
-        .map_err(Error::Scheduler)?;
-    drop(prepared);
-    let after = crate::kernel::task::scheduler::statistics().map_err(Error::Scheduler)?;
-    if after.threads != before.threads {
-        return Err(Error::SchedulerThreadLeaked);
-    }
-    Ok(())
+    builder
+        .prepare_boot_vcpu(
+            0,
+            crate::kernel::vm::linux::test_boot_context().ok_or(Error::InitialContext)?,
+        )
+        .map_err(Error::Scheduler)
+}
+
+fn verify_dormant_vcpu_stop() -> Result<(), Error> {
+    let installed = prepare_test_vm()?.install().map_err(Error::Registry)?;
+    crate::kernel::vm::registry::verify_dormant_vcpu_quiesce(installed).map_err(Error::Registry)
 }

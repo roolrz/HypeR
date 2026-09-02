@@ -140,6 +140,16 @@ pub(crate) struct RetiringIdentifier<Namespace: IdentifierNamespace> {
 }
 
 impl<Namespace: IdentifierNamespace> RetiringIdentifier<Namespace> {
+    pub(crate) fn value(&self) -> u16 {
+        self.token.as_ref().map_or(0, RetiringTranslationId::value)
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.token
+            .as_ref()
+            .map_or(0, RetiringTranslationId::generation)
+    }
+
     /// # Safety
     ///
     /// Every CPU which could cache this identifier must have acknowledged the

@@ -153,14 +153,20 @@ pub(crate) fn set_host_timer_enabled(enabled: bool) -> Result<(), Error> {
 pub(super) fn validate_hardware(
     timer_interrupt: hyper::hal::interrupt::InterruptId,
     services: &crate::hal::vm::ExitServicesReady,
+    prepared_interrupts: &crate::hal::vm::PreparedInterruptVirtualization,
 ) -> Result<bool, ValidationError> {
     let now = crate::kernel::time::monotonic_ticks();
-    let Some((interrupts, hardware)) =
-        crate::hal::vm::prepare_timer_validation(timer_interrupt, now, services)
-            .map_err(ValidationError::Machine)?
+    let Some(prepared) = crate::hal::vm::prepare_timer_validation(
+        timer_interrupt,
+        now,
+        services,
+        prepared_interrupts,
+    )
+    .map_err(ValidationError::Machine)?
     else {
         return Ok(false);
     };
+    let (capability, interrupts, hardware) = prepared.into_parts();
     // SAFETY: `interrupts` remains fixed and outlives execution activation,
     // publication, deactivation, and drop.
     let mut execution = unsafe {
@@ -171,8 +177,9 @@ pub(super) fn validate_hardware(
     // exclusively owned, and local interrupts remain masked.
     unsafe { super::vcpu::activate(execution_pointer) }.map_err(ValidationError::Hardware)?;
     let validation = (|| {
-        let injected = super::active_vcpu::with(|execution, active_interrupts| {
+        super::active_vcpu::with(|execution, active_interrupts| {
             crate::hal::vm::inject_timer_for_validation(
+                &capability,
                 &mut execution.hardware,
                 execution.vcpu_id,
                 active_interrupts,
@@ -181,9 +188,8 @@ pub(super) fn validate_hardware(
         .map_err(ValidationError::Active)?
         .ok_or(ValidationError::StateMismatch)?
         .map_err(|_| ValidationError::StateMismatch)?;
-        if !injected
-            || !crate::hal::vm::timer_validation_succeeded(&interrupts)
-                .map_err(ValidationError::Interrupts)?
+        if !crate::hal::vm::timer_validation_succeeded(&capability, &interrupts)
+            .map_err(ValidationError::Interrupts)?
         {
             return Err(ValidationError::StateMismatch);
         }

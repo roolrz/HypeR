@@ -9,7 +9,6 @@
 //! immutable snapshots visible without taking locks in the crash-stop path.
 
 use core::cell::UnsafeCell;
-use core::fmt;
 use core::mem::MaybeUninit;
 
 use hyper::cpu::CpuIndex;
@@ -67,40 +66,13 @@ impl CrashPayload {
     pub(super) fn reason(&self) -> &str {
         self.reason.as_str()
     }
-}
 
-pub(super) struct CrashReason {
-    bytes: [u8; CRASH_REASON_CAPACITY],
-    length: usize,
-}
-
-impl CrashReason {
-    pub(super) const fn new() -> Self {
-        Self {
-            bytes: [0; CRASH_REASON_CAPACITY],
-            length: 0,
-        }
-    }
-
-    fn as_str(&self) -> &str {
-        // fmt::Write accepts UTF-8 and truncation preserves character
-        // boundaries. Stay safe if future formatting code breaks that rule.
-        core::str::from_utf8(&self.bytes[..self.length]).unwrap_or("")
+    pub(super) const fn reason_was_truncated(&self) -> bool {
+        self.reason.was_truncated()
     }
 }
 
-impl fmt::Write for CrashReason {
-    fn write_str(&mut self, value: &str) -> fmt::Result {
-        let available = CRASH_REASON_CAPACITY - self.length;
-        let mut copied = available.min(value.len());
-        while !value.is_char_boundary(copied) {
-            copied -= 1;
-        }
-        self.bytes[self.length..self.length + copied].copy_from_slice(&value.as_bytes()[..copied]);
-        self.length += copied;
-        Ok(())
-    }
-}
+pub(super) type CrashReason = super::fixed_text::FixedText<CRASH_REASON_CAPACITY>;
 
 pub(super) struct CrashSlot {
     published: AtomicBool,

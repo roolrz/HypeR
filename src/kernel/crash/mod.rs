@@ -11,16 +11,24 @@
 
 mod console;
 mod coordination;
+mod fixed_text;
 #[cfg(CONFIG_CRASH_CONSOLE)]
 mod monitor;
 mod report;
 mod state;
+mod supplement;
 mod unwind;
 
 pub(crate) use coordination::is_ready;
-pub(crate) use coordination::{InitializationError, fatal, fatal_context, initialize};
+pub(crate) use coordination::{
+    EarlyInitializationError, InitializationError, early_initialize, fatal, fatal_context,
+    initialize,
+};
 // Keep the existing crate-visible diagnostic type path even though current
 // callers only propagate InitializationError as a whole.
 #[allow(unused_imports)]
 pub(crate) use coordination::Prerequisite;
 pub use coordination::{is_stop_interrupt, panic, stop_this_cpu};
+
+#[allow(unused_imports)]
+pub(crate) use supplement::publish as publish_terminal_supplement;

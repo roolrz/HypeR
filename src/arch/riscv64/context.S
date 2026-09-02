@@ -32,6 +32,7 @@ riscv64_switch_context:
     // saved above and is preserved by the callback until next state is loaded.
     mv s0, a1
     ld sp, THREAD_CONTEXT_SP_OFFSET(s0)
+    mv a0, a4
     jalr a3
     mv a1, s0
 

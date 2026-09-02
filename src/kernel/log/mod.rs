@@ -5,10 +5,16 @@
 
 use core::fmt::{self, Write};
 
-use hyper::log::{AppendError, Level, ReadError, ReadResult, RecordFlags, RingBuffer};
+use hyper::log::{
+    AppendError, EmergencyQuiescence, Level, ReadError, ReadResult, RecordFlags, RingBuffer,
+};
 use hyper::sync::InterruptSpinLock;
 
 pub(crate) mod console;
+mod drain;
+
+pub(crate) use drain::InitializationError;
+pub use drain::{FlushError, FlushOutcome};
 
 type KernelSpinLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
@@ -73,7 +79,7 @@ pub fn log(level: Level, arguments: fmt::Arguments<'_>) -> Result<u64, Error> {
     let sequence = LOG_RING
         .with(|ring| ring.append(level, formatted.as_slice(), flags))
         .map_err(Error::Append)?;
-    console::flush();
+    drain::request();
     Ok(sequence)
 }
 
@@ -105,8 +111,30 @@ pub fn console_loglevel() -> Level {
     console::loglevel()
 }
 
-pub fn flush() {
-    console::flush();
+/// Requests normal-console progress without waiting for the UART.
+pub fn request_flush() {
+    drain::request();
+}
+
+/// Waits for the finite record watermark captured when this call begins.
+pub fn flush_sync() -> Result<FlushOutcome, FlushError> {
+    drain::flush_sync()
+}
+
+/// Starts deferred normal-console draining after scheduler and timer setup.
+pub(crate) fn initialize() -> Result<(), InitializationError> {
+    drain::initialize()
+}
+
+/// Services one producer prompt after interrupt-registry dispatch is complete.
+pub(crate) fn service_irq_prompt() {
+    drain::service_irq_prompt();
+}
+
+/// Returns the permanent scheduler population owned by runtime logging.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) const fn permanent_worker_count_for_test() -> usize {
+    1
 }
 
 /// Reports the state of the logging backend at the end of kernel startup.
@@ -138,7 +166,16 @@ pub fn emergency(arguments: fmt::Arguments<'_>) {
 
 /// Transfers console ownership to the lock-free fatal-output path.
 pub(crate) fn enter_emergency_mode() {
-    console::enter_emergency_mode();
+    drain::enter_emergency_mode();
+    match console::enter_emergency_mode() {
+        EmergencyQuiescence::Quiescent => {}
+        EmergencyQuiescence::LocalOwnerAbandoned => emergency(format_args!(
+            "emergency console recovered by abandoning an interrupted local writer"
+        )),
+        EmergencyQuiescence::RemoteOwnerTimedOut => emergency(format_args!(
+            "emergency console unavailable: remote normal writer did not quiesce"
+        )),
+    }
 }
 
 #[cfg(CONFIG_CRASH_CONSOLE)]

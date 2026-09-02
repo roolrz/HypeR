@@ -7,7 +7,10 @@ mod smp;
 
 pub(crate) use hyper::cpu::CpuIndex;
 pub use smp::{Capabilities, Error, secondary_entry};
-pub(crate) use smp::{frozen_topology, online_cpu_count, participating_cpu_count};
+pub(crate) use smp::{
+    frozen_topology, online_cpu_count, participating_cpu_count,
+    publish_current_online_from_idle_observation,
+};
 
 /// Reads and validates the executing CPU's logical kernel index.
 ///

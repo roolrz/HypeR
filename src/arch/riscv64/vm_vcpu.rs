@@ -3,10 +3,14 @@
 
 //! RISC-V vCPU hardware-state mechanisms.
 
+use core::arch::asm;
+
 use super::{VcpuContext, VmInterruptController};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Error {}
+pub enum Error {
+    SupervisorTimerCompareUnavailable,
+}
 
 /// Loads one exclusively owned stopped vCPU into the current hart.
 ///
@@ -20,9 +24,30 @@ pub unsafe fn activate(
     _interrupts: &VmInterruptController,
     _physical_count: u64,
 ) -> Result<bool, Error> {
+    if !enable_supervisor_timer_compare() {
+        return Err(Error::SupervisorTimerCompareUnavailable);
+    }
     // SAFETY: The caller grants exclusive ownership of the stopped context.
     unsafe { context.activate_system_registers() };
     Ok(false)
+}
+
+fn enable_supervisor_timer_compare() -> bool {
+    const HENVCFG_STCE: u64 = 1 << 63;
+    let environment: u64;
+    // SAFETY: HENVCFG is available because the H extension is a platform
+    // requirement. STCE is writable only when firmware enabled MENVCFG.STCE;
+    // reading it back validates this hart before any VSTIMECMP access.
+    unsafe {
+        asm!(
+            "csrs henvcfg, {stce}",
+            "csrr {environment}, henvcfg",
+            stce = in(reg) HENVCFG_STCE,
+            environment = out(reg) environment,
+            options(nomem, nostack)
+        )
+    };
+    environment & HENVCFG_STCE != 0
 }
 
 /// Saves the current hart's guest state into its exclusively owned context.

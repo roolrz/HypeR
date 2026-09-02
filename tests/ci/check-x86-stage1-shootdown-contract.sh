@@ -225,18 +225,22 @@ for source in src/arch/aarch64/smp.rs src/arch/riscv64/smp.rs src/arch/x86_64/sm
         "$source must acquire and atomically drain Kernel RPC reasons"
 done
 
-require 'if vector == super::platform::KERNEL_RPC_VECTOR \{[[:space:]]*crate::arch::irq::service_kernel_rpc\(\);[[:space:]]*super::interrupt_controller::end_local_interrupt\(\);[[:space:]]*return;' \
-    src/arch/x86_64/exception.rs 'IDT must consume and EOI Kernel RPC exactly once'
-require 'if vector == super::platform::KERNEL_RPC_VECTOR \{[[:space:]]*crate::arch::irq::service_kernel_rpc\(\);[[:space:]]*super::interrupt_controller::end_local_interrupt\(\);[[:space:]]*return;' \
-    src/arch/x86_64/vmx.rs 'VMX must consume and EOI Kernel RPC exactly once'
+require_order src/arch/x86_64/exception.rs 'end_local_interrupt\(\)' \
+    'service_kernel_rpc_interrupt\(' 'IDT must EOI Kernel RPC before policy entry'
+require 'service_kernel_rpc_interrupt\([[:space:]]*hyper::hal::interrupt::InterruptOrigin::Host' \
+    src/arch/x86_64/exception.rs 'IDT Kernel RPC must retain typed host origin'
+require_order src/arch/x86_64/vmx.rs 'end_local_interrupt\(\)' \
+    'service_kernel_rpc_interrupt\(' 'VMX must EOI Kernel RPC before policy entry'
+require 'service_kernel_rpc_interrupt\([[:space:]]*hyper::hal::interrupt::InterruptOrigin::Guest' \
+    src/arch/x86_64/vmx.rs 'VMX Kernel RPC must retain typed guest origin'
 require 'fn wait_for_lock_owner\(\) \{[^}]*crate::arch::irq::service_kernel_rpc\(\);' \
     src/arch/x86_64/interrupts.rs 'masked lock waits must drain Kernel RPC'
-require 'static KERNEL_RPC_SERVICE: PublishedOnce<fn\(\)> = PublishedOnce::new\(\);' \
-    src/arch/irq.rs 'Kernel RPC service installation must use one-shot publication'
-require 'KERNEL_RPC_SERVICE[[:space:]]*\.publish\(callback\)' src/arch/irq.rs \
-    'Kernel RPC callback must be published through the one-shot cell'
-require 'KERNEL_RPC_SERVICE\.get\(\)\.copied\(\)' src/arch/irq.rs \
-    'Kernel RPC callback entry must acquire the published callback'
+require 'static KERNEL_RPC_SERVICES: PublishedOnce<KernelRpcServices> = PublishedOnce::new\(\);' \
+    src/arch/irq.rs 'Kernel RPC services installation must use one-shot publication'
+require 'KERNEL_RPC_SERVICES[[:space:]]*\.publish\(KernelRpcServices \{ poll, interrupt \}\)' src/arch/irq.rs \
+    'Kernel RPC callbacks must be published together through the one-shot cell'
+require 'KERNEL_RPC_SERVICES\.get\(\)\.copied\(\)' src/arch/irq.rs \
+    'Kernel RPC callback entry must acquire the published services'
 require 'compare_exchange\(EMPTY, INSTALLING, Ordering::Relaxed, Ordering::Relaxed\)' \
     "$publication" 'one-shot publication must claim exactly one initializer'
 require 'state\.store\(READY, Ordering::Release\)' "$publication" \
@@ -251,7 +255,7 @@ require 'BOOT_STATE[[:space:]]*\.publish\(state\)' src/kernel/boot/state.rs \
     'BootState installation must publish through the one-shot cell'
 require 'BOOT_STATE\.get\(\)' src/kernel/boot/state.rs \
     'BootState access must acquire the published state'
-require_order src/kernel/irq/mod.rs 'install_kernel_rpc_service\(cross_call::service\)' \
+require_order src/kernel/irq/mod.rs 'install_kernel_rpc_services\(' \
     'initialize_local_rpc_transport\(\)' \
     'the opaque Kernel RPC dispatcher must be installed before its doorbell is armed'
 require 'KERNEL_RPC_VECTOR != TIMER_VECTOR' src/arch/x86_64/platform.rs \

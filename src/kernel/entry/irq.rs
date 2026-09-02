@@ -3,7 +3,33 @@
 
 //! Physical-interrupt entry policy.
 
-use hyper::hal::interrupt::{EntryAction as Action, InterruptId};
+use hyper::hal::interrupt::{EntryAction as Action, InterruptId, InterruptOrigin};
+
+/// Services one acknowledged architecture-private kernel doorbell.
+///
+/// Architecture entry completes its hardware acknowledgement before crossing
+/// this boundary. Mailbox polling runs first and releases all of its private
+/// synchronization before deferred services may wake scheduler waiters.
+pub(crate) fn dispatch_kernel_rpc() {
+    crate::kernel::irq::cross_call::service();
+    crate::kernel::task::scheduler::service_retirement_irq_prompt();
+    crate::kernel::log::service_irq_prompt();
+}
+
+/// Services one architecture-private doorbell as a real outer IRQ entry.
+///
+/// The architecture acknowledges its private source before this call. Unlike
+/// a registered hardware interrupt there is no domain interrupt number to
+/// dispatch or complete, but preemption accounting and tail selection are
+/// still required—RISC-V uses the same SSIP prompt for scheduler requests.
+pub(crate) fn dispatch_kernel_rpc_entry(origin: InterruptOrigin) -> Action {
+    let irq = match crate::kernel::task::preempt::enter_irq() {
+        Ok(irq) => irq,
+        Err(error) => crate::kernel::irq::exception::fatal_interrupt(error.description(), None),
+    };
+    dispatch_kernel_rpc();
+    complete_entry(irq, Action::Resume { postlude: None }, origin, None)
+}
 
 /// Dispatches one architecture-acknowledged interrupt.
 ///
@@ -12,10 +38,7 @@ use hyper::hal::interrupt::{EntryAction as Action, InterruptId};
 /// either action. Local interrupts must remain masked. Dispatch is
 /// allocation-free but may invoke registered interrupt-safe handlers under the
 /// IRQ registry lock.
-pub(crate) fn dispatch(
-    interrupt: InterruptId,
-    native_unwind: Option<unsafe extern "C" fn()>,
-) -> Action {
+pub(crate) fn dispatch(interrupt: InterruptId, origin: InterruptOrigin) -> Action {
     let irq = match crate::kernel::task::preempt::enter_irq() {
         Ok(irq) => irq,
         Err(error) => {
@@ -27,9 +50,35 @@ pub(crate) fn dispatch(
         Action::Stop
     } else {
         crate::kernel::irq::interrupt::dispatch(interrupt);
+        crate::kernel::task::scheduler::service_retirement_irq_prompt();
+        crate::kernel::log::service_irq_prompt();
         Action::Resume { postlude: None }
     };
+    complete_entry(irq, action, origin, Some(interrupt))
+}
+
+fn complete_entry(
+    irq: crate::kernel::task::preempt::IrqGuard,
+    action: Action,
+    origin: InterruptOrigin,
+    interrupt: Option<InterruptId>,
+) -> Action {
+    let native_unwind = origin.native_unwind();
+    let irq_tail_postlude = native_unwind
+        .is_none()
+        .then_some(())
+        .and_then(|()| guest_irq_postlude(origin));
     match irq.complete() {
+        Ok(true)
+            if matches!(action, Action::Resume { .. })
+                && origin.is_guest()
+                && irq_tail_postlude.is_some()
+                && current_guest_stop_requested(interrupt) =>
+        {
+            Action::StopGuest {
+                postlude: irq_tail_postlude,
+            }
+        }
         Ok(true)
             if matches!(action, Action::Resume { .. })
                 && native_unwind.is_some()
@@ -37,7 +86,7 @@ pub(crate) fn dispatch(
                     Ok(pending) => pending,
                     Err(error) => crate::kernel::irq::exception::fatal_interrupt(
                         error.description(),
-                        Some(interrupt),
+                        interrupt,
                     ),
                 } =>
         {
@@ -47,40 +96,62 @@ pub(crate) fn dispatch(
         }
         Ok(true)
             if matches!(action, Action::Resume { .. })
-                && native_unwind.is_none()
-                && match crate::kernel::task::preempt::should_reschedule_after_irq() {
-                    Ok(pending) => pending,
-                    Err(error) => crate::kernel::irq::exception::fatal_interrupt(
-                        error.description(),
-                        Some(interrupt),
-                    ),
-                } =>
+                && irq_tail_postlude.is_some()
+                && guest_postlude_required(interrupt) =>
         {
             Action::Resume {
-                postlude: preemption_postlude(),
+                postlude: irq_tail_postlude,
             }
         }
         Ok(_) => action,
         Err(_) => crate::kernel::irq::exception::fatal_interrupt(
             "failed to complete IRQ preemption accounting",
-            Some(interrupt),
+            interrupt,
         ),
     }
 }
 
-/// Runs the outermost interrupt-exit scheduling point on a Thread-owned stack.
+fn current_guest_stop_requested(interrupt: Option<InterruptId>) -> bool {
+    match crate::kernel::vm::vcpu::current_administrative_stop_requested() {
+        Ok(pending) => pending,
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: IRQ-tail vCPU stop observation failed for IRQ {:?}: {error:?}",
+            interrupt.map(InterruptId::get)
+        )),
+    }
+}
+
+fn guest_postlude_required(interrupt: Option<InterruptId>) -> bool {
+    let reschedule = match crate::kernel::task::preempt::should_reschedule_after_irq() {
+        Ok(pending) => pending,
+        Err(error) => {
+            crate::kernel::irq::exception::fatal_interrupt(error.description(), interrupt)
+        }
+    };
+    if reschedule {
+        return true;
+    }
+    match crate::kernel::vm::vcpu::current_interrupt_reconcile_pending() {
+        Ok(pending) => pending,
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: IRQ-tail vCPU reconcile observation failed: {error:?}"
+        )),
+    }
+}
+
+/// Runs the outermost guest interrupt-exit reconciliation and scheduling point.
 ///
 /// Local interrupts must remain masked and architecture entry must have
 /// completed interrupt acknowledgement before calling this adapter. No raw
 /// exception-frame reference crosses this boundary. If the interrupted Thread
 /// owns an active vCPU, its local virtual hardware is unpublished and saved
-/// before the scheduler commits a switch, then restored by the same suspended
-/// continuation before architecture exception return.
-#[cfg(CONFIG_ARCH_AARCH64)]
-fn preemption_tail() {
+/// before optional scheduling and then restored by the same suspended
+/// continuation. Interrupt-only work therefore refills virtual hardware
+/// without manufacturing scheduler policy.
+fn guest_irq_tail(tail: crate::hal::exception::IrqTailCapability) {
     let current_vcpu = match crate::kernel::task::scheduler::current_vcpu_if_present() {
         Ok(current) => current,
-        Err(error) => fail_preemption_tail("failed to identify interrupted Thread", error),
+        Err(error) => fail_guest_irq_tail("failed to identify interrupted Thread", error),
     };
 
     if let Some(current) = current_vcpu {
@@ -93,54 +164,103 @@ fn preemption_tail() {
         }
     }
 
-    if let Err(error) = crate::kernel::task::scheduler::cond_resched_from_irq_tail() {
-        fail_preemption_tail("IRQ-tail scheduling failed", error)
+    if let Err(error) = crate::kernel::task::scheduler::cond_resched_from_irq_tail(tail) {
+        fail_guest_irq_tail("IRQ-tail scheduling failed", error)
     }
 
-    if let Some(current) = current_vcpu {
+    if let Some(interrupted) = current_vcpu {
+        // This continuation may have been Ready or Migrating while another
+        // CPU published administrative stop. Reobserve the exact now-current
+        // vCPU after scheduling and before any hardware reactivation.
+        let resumed = match crate::kernel::task::scheduler::current_vcpu_if_present() {
+            Ok(Some(current)) => current,
+            Ok(None) => crate::kernel::crash::fatal(format_args!(
+                "HypeR: detached vCPU IRQ-tail resumed as a non-vCPU Thread"
+            )),
+            Err(error) => fail_guest_irq_tail("failed to reobserve resumed vCPU", error),
+        };
+        if resumed.thread != interrupted.thread || resumed.execution != interrupted.execution {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: detached vCPU IRQ-tail resumed with different scheduler ownership"
+            ));
+        }
+        // SAFETY: ordinary IRQ-tail deactivation completed before scheduling,
+        // the query above returned the exact current continuation, and local
+        // interrupts remain masked.
+        let stopped = match unsafe {
+            crate::kernel::vm::vcpu::complete_detached_stop_if_requested(resumed)
+        } {
+            Ok(stopped) => stopped,
+            Err(error) => fail_detached_stop(error),
+        };
+        if stopped {
+            // Nonreturning scheduler exit lets the suspended continuation
+            // unwind through its normal Thread destruction/reap path without
+            // ever restoring guest hardware.
+            crate::kernel::task::scheduler::exit_current()
+        }
         // SAFETY: This continuation can resume only when its pinned vCPU Thread
         // is current again. The preceding deactivation removed all local
         // architectural ownership, and interrupts are still masked.
-        if let Err(error) = unsafe { crate::kernel::vm::vcpu::activate(current.execution) } {
+        if let Err(error) = unsafe { crate::kernel::vm::vcpu::activate(resumed.execution) } {
+            if error
+                == crate::kernel::vm::vcpu::HardwareTransitionError::Execution(
+                    crate::kernel::vm::registry::VmExecutionError::AdmissionClosed,
+                )
+            {
+                // Admission is closed only after every bound endpoint has an
+                // exact durable stop request. Recheck that authority instead
+                // of treating an unrelated close as a graceful guest exit.
+                // SAFETY: activation failed before publication and hardware
+                // ownership, while the exact current vCPU remains pinned.
+                let stopped = match unsafe {
+                    crate::kernel::vm::vcpu::complete_detached_stop_if_requested(resumed)
+                } {
+                    Ok(stopped) => stopped,
+                    Err(error) => fail_detached_stop(error),
+                };
+                if stopped {
+                    crate::kernel::task::scheduler::exit_current()
+                }
+                crate::kernel::crash::fatal(format_args!(
+                    "HypeR: IRQ-tail VM admission closed without an exact vCPU stop request"
+                ));
+            }
             fail_vcpu_tail("failed to reactivate interrupted vCPU", error)
         }
     }
 }
 
-/// Runs the kernel-selected `AArch64` interrupt postlude.
+/// Runs the kernel-selected interrupt postlude.
 ///
 /// # Safety
 ///
 /// The caller must satisfy the postlude contract documented by
 /// [`Action::Resume`].
-#[cfg(CONFIG_ARCH_AARCH64)]
-unsafe extern "C" fn aarch64_preemption_postlude() {
-    preemption_tail();
+unsafe extern "C" fn selected_guest_irq_postlude() {
+    // SAFETY: selected entry publishes this callback only when it can invoke
+    // it after interrupt completion, on the interrupted Thread stack, with
+    // local IRQs masked.
+    unsafe { crate::hal::exception::with_irq_tail_capability(guest_irq_tail) };
 }
 
 #[inline]
-fn preemption_postlude() -> Option<unsafe extern "C" fn()> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
-    {
-        Some(aarch64_preemption_postlude)
-    }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
-    {
-        // Secondary architectures retain the pending request until a
-        // cooperative scheduling point; they do not yet provide an IRQ-tail
-        // context-switch contract.
-        None
-    }
+fn guest_irq_postlude(origin: InterruptOrigin) -> Option<unsafe extern "C" fn()> {
+    crate::hal::exception::qualify_irq_tail_postlude(origin, selected_guest_irq_postlude)
 }
 
-#[cfg(CONFIG_ARCH_AARCH64)]
-fn fail_preemption_tail(operation: &str, error: crate::kernel::task::scheduler::Error) -> ! {
+fn fail_guest_irq_tail(operation: &str, error: crate::kernel::task::scheduler::Error) -> ! {
     crate::kernel::crash::fatal(format_args!("HypeR: {operation}: {error:?}"))
 }
 
-#[cfg(CONFIG_ARCH_AARCH64)]
 fn fail_vcpu_tail(operation: &str, error: crate::kernel::vm::vcpu::HardwareTransitionError) -> ! {
     crate::kernel::crash::fatal(format_args!("HypeR: {operation}: {error:?}"))
+}
+
+fn fail_detached_stop(error: crate::kernel::vm::vcpu::DetachedStopError) -> ! {
+    crate::kernel::crash::fatal(format_args!(
+        "HypeR: detached IRQ-tail vCPU stop completion failed: {error:?}"
+    ))
 }
 
 /// Claims and dispatches one external controller interrupt, when pending.
@@ -152,8 +272,8 @@ fn fail_vcpu_tail(operation: &str, error: crate::kernel::vm::vcpu::HardwareTrans
 // architectural interrupt acknowledgement. Keeping target selection below
 // `arch` leaves this narrow adapter intentionally unused on other targets.
 #[allow(dead_code)]
-pub(crate) fn claim_and_dispatch_external() -> Option<Action> {
-    crate::kernel::irq::acknowledge_external().map(|interrupt| dispatch(interrupt, None))
+pub(crate) fn claim_and_dispatch_external(origin: InterruptOrigin) -> Option<Action> {
+    crate::kernel::irq::acknowledge_external().map(|interrupt| dispatch(interrupt, origin))
 }
 
 /// Publishes a remote CPU's exact interrupt snapshot and stops that CPU.

@@ -55,12 +55,18 @@ impl ThreadContext {
 }
 
 #[repr(C, align(16))]
+pub struct GuestSimdContext([[u64; 2]; 32]);
+
+#[repr(C, align(16))]
 pub struct VcpuContext {
     pub general: [u64; 31],
     pub stack_pointer_el0: u64,
     pub stack_pointer_el1: u64,
     pub program_counter: u64,
     pub processor_state: u64,
+    pub simd: GuestSimdContext,
+    pub fpcr: u64,
+    pub fpsr: u64,
     pub sctlr_el1: u64,
     pub tcr_el1: u64,
     pub ttbr0_el1: u64,
@@ -83,6 +89,137 @@ pub struct VcpuContext {
     pub tpidr_el1: u64,
     timer: super::timer::VirtualTimerContext,
     pub vgic: super::VgicCpuContext,
+    run_state: u64,
+    terminal_kind: u64,
+    terminal_syndrome: u64,
+    terminal_fault_address: u64,
+    terminal_vector: u64,
+    terminal_synchronous: Option<GuestSynchronousTerminal>,
+}
+
+const GUEST_RUN_READY: u64 = 1;
+const GUEST_RUN_RUNNING: u64 = 2;
+const GUEST_RUN_STOPPED: u64 = 3;
+
+const TERMINAL_MEMORY_FAULT: u64 = 1;
+const TERMINAL_MMIO: u64 = 2;
+const TERMINAL_SYNCHRONOUS: u64 = 3;
+const WAIT_FOR_INTERRUPT: u64 = 4;
+const ADMINISTRATIVE_STOP: u64 = 5;
+
+/// Decoded detail for a synchronous exit which cannot resume.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestSynchronousTerminal {
+    Undecodable,
+    Failed {
+        exit: super::vsysreg::GuestSyncExit,
+        failure: super::vsysreg::GuestSyncFailure,
+    },
+}
+
+/// Typed guest-policy cause for one terminal run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestTerminalCause {
+    MemoryFault,
+    Mmio,
+    Synchronous(GuestSynchronousTerminal),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestWaitReason {
+    Interrupt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestAdministrativeStopReason {
+    Requested,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GuestTerminalExit {
+    cause: GuestTerminalCause,
+    syndrome: u64,
+    fault_address: u64,
+    program_counter: u64,
+    processor_state: u64,
+    vector: u64,
+}
+
+impl GuestTerminalExit {
+    pub(crate) const fn cause(self) -> GuestTerminalCause {
+        self.cause
+    }
+
+    pub(crate) const fn syndrome(self) -> u64 {
+        self.syndrome
+    }
+
+    pub(crate) const fn fault_address(self) -> u64 {
+        self.fault_address
+    }
+
+    pub(crate) const fn program_counter(self) -> u64 {
+        self.program_counter
+    }
+
+    pub(crate) const fn processor_state(self) -> u64 {
+        self.processor_state
+    }
+
+    pub(crate) const fn vector(self) -> u64 {
+        self.vector
+    }
+}
+
+/// Copied stopped-exit facts which remain valid after local hardware detaches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestRunExit {
+    Wait(GuestWaitReason),
+    Terminal(GuestTerminalExit),
+    AdministrativeStop(GuestAdministrativeStopReason),
+}
+
+/// Linear proof that vector entry captured and closed one guest return world.
+#[must_use = "a stopped guest run must be detached exactly once"]
+pub(crate) struct StoppedGuestRun {
+    context: *mut VcpuContext,
+    exit: GuestRunExit,
+    armed: bool,
+    not_send_or_sync: core::marker::PhantomData<alloc::rc::Rc<()>>,
+}
+
+impl StoppedGuestRun {
+    pub(crate) const fn exit(&self) -> GuestRunExit {
+        self.exit
+    }
+
+    fn consume_for(&mut self, context: &mut VcpuContext) -> Result<(), GuestRunError> {
+        if !core::ptr::eq(self.context, context) || context.run_state != GUEST_RUN_STOPPED {
+            return Err(GuestRunError::Owner);
+        }
+        context.run_state = GUEST_RUN_READY;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for StoppedGuestRun {
+    fn drop(&mut self) {
+        if self.armed {
+            let context = crate::arch::exception::capture_crash_context();
+            crate::arch::exception::fatal(
+                context,
+                format_args!("armed AArch64 stopped-guest proof was dropped without detachment"),
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuestRunError {
+    Owner,
+    Return,
+    State,
 }
 
 impl VcpuContext {
@@ -93,6 +230,9 @@ impl VcpuContext {
             stack_pointer_el1: 0,
             program_counter,
             processor_state: registers::SPSR_EL1H_AND_DAIF,
+            simd: GuestSimdContext([[0; 2]; 32]),
+            fpcr: 0,
+            fpsr: 0,
             sctlr_el1: registers::SCTLR_EL1_GUEST_RESET_VALUE,
             tcr_el1: 0,
             ttbr0_el1: 0,
@@ -115,6 +255,12 @@ impl VcpuContext {
             tpidr_el1: 0,
             timer: super::timer::VirtualTimerContext::empty(),
             vgic: super::VgicCpuContext::empty(),
+            run_state: GUEST_RUN_READY,
+            terminal_kind: 0,
+            terminal_syndrome: 0,
+            terminal_fault_address: 0,
+            terminal_vector: 0,
+            terminal_synchronous: None,
         }
     }
 
@@ -141,6 +287,13 @@ impl VcpuContext {
 
     pub fn virtual_timer_interrupt_asserted_at(&self, physical_count: u64) -> bool {
         self.timer.interrupt_asserted_at(physical_count)
+    }
+
+    pub fn virtual_timer_wfi_wake_at(
+        &self,
+        physical_count: u64,
+    ) -> hyper::drivers::timer::arm_generic::VirtualTimerWake {
+        self.timer.wfi_wake_at(physical_count)
     }
 
     pub fn virtual_timer_interrupt_asserted_hardware(&self) -> bool {
@@ -447,7 +600,7 @@ impl VcpuContext {
         unsafe { super::timer::deactivate_virtual_timer(&mut self.timer) };
     }
 
-    /// Restores guest GPRs and returns to the configured lower-EL PC.
+    /// Runs the active guest until vector entry captures a typed stopped exit.
     ///
     /// # Safety
     ///
@@ -456,11 +609,147 @@ impl VcpuContext {
     /// context must be active on this CPU. Local IRQs must remain masked until
     /// the assembly path executes `ERET`. No Rust reference to the context may
     /// remain live: exception reentry mutates it before this call can return.
-    pub unsafe fn enter(context: *mut Self) -> ! {
-        // SAFETY: The caller established every architectural ownership and
-        // translation prerequisite documented above; the pointer is consumed
-        // only by the non-returning assembly guest-entry path.
-        unsafe { aarch64_enter_guest(context.cast::<u8>()) }
+    pub unsafe fn run(context: *mut Self) -> Result<StoppedGuestRun, GuestRunError> {
+        if context.is_null() || !context.is_aligned() {
+            return Err(GuestRunError::Owner);
+        }
+        // SAFETY: The caller provides this pinned, exclusively owned context.
+        let context_ref = unsafe { &mut *context };
+        if context_ref.run_state != GUEST_RUN_READY {
+            return Err(GuestRunError::State);
+        }
+        context_ref.run_state = GUEST_RUN_RUNNING;
+        // The exclusive reference ends before assembly transfers to the guest.
+        // SAFETY: The caller established the complete active guest contract;
+        // assembly retains the only live machine-context access until unwind.
+        let raw = unsafe { aarch64_run_guest(context.cast::<u8>()) };
+        // SAFETY: Assembly returns only after vector capture has closed its
+        // return-world publication and released every context borrow.
+        let context_ref = unsafe { &mut *context };
+        if raw != registers::GUEST_RUN_RETURN_STOPPED || context_ref.run_state != GUEST_RUN_STOPPED
+        {
+            return Err(GuestRunError::Return);
+        }
+        let exit = match context_ref.terminal_kind {
+            TERMINAL_MEMORY_FAULT | TERMINAL_MMIO | TERMINAL_SYNCHRONOUS => {
+                let cause = match context_ref.terminal_kind {
+                    TERMINAL_MEMORY_FAULT => GuestTerminalCause::MemoryFault,
+                    TERMINAL_MMIO => GuestTerminalCause::Mmio,
+                    TERMINAL_SYNCHRONOUS => GuestTerminalCause::Synchronous(
+                        context_ref
+                            .terminal_synchronous
+                            .ok_or(GuestRunError::Return)?,
+                    ),
+                    _ => return Err(GuestRunError::Return),
+                };
+                GuestRunExit::Terminal(GuestTerminalExit {
+                    cause,
+                    syndrome: context_ref.terminal_syndrome,
+                    fault_address: context_ref.terminal_fault_address,
+                    program_counter: context_ref.program_counter,
+                    processor_state: context_ref.processor_state,
+                    vector: context_ref.terminal_vector,
+                })
+            }
+            WAIT_FOR_INTERRUPT => GuestRunExit::Wait(GuestWaitReason::Interrupt),
+            ADMINISTRATIVE_STOP => {
+                GuestRunExit::AdministrativeStop(GuestAdministrativeStopReason::Requested)
+            }
+            _ => return Err(GuestRunError::Return),
+        };
+        Ok(StoppedGuestRun {
+            context,
+            exit,
+            armed: true,
+            not_send_or_sync: core::marker::PhantomData,
+        })
+    }
+
+    pub(super) fn capture_terminal(
+        &mut self,
+        frame: &super::exception::ExceptionFrame,
+        cause: GuestTerminalCause,
+    ) -> Result<(), GuestRunError> {
+        if self.run_state != GUEST_RUN_RUNNING {
+            return Err(GuestRunError::State);
+        }
+        self.general = frame.general;
+        self.stack_pointer_el0 = frame.sp_el0;
+        self.stack_pointer_el1 = frame.sp_el1;
+        self.program_counter = frame.elr;
+        self.processor_state = frame.spsr;
+        self.simd.0 = frame.simd;
+        self.fpcr = frame.fpcr;
+        self.fpsr = frame.fpsr;
+        self.terminal_kind = match cause {
+            GuestTerminalCause::MemoryFault => TERMINAL_MEMORY_FAULT,
+            GuestTerminalCause::Mmio => TERMINAL_MMIO,
+            GuestTerminalCause::Synchronous(_) => TERMINAL_SYNCHRONOUS,
+        };
+        self.terminal_synchronous = match cause {
+            GuestTerminalCause::Synchronous(synchronous) => Some(synchronous),
+            GuestTerminalCause::MemoryFault | GuestTerminalCause::Mmio => None,
+        };
+        self.terminal_syndrome = frame.esr;
+        self.terminal_fault_address = frame.far;
+        self.terminal_vector = frame.vector;
+        self.run_state = GUEST_RUN_STOPPED;
+        Ok(())
+    }
+
+    pub(super) fn capture_wait(
+        &mut self,
+        frame: &super::exception::ExceptionFrame,
+    ) -> Result<(), GuestRunError> {
+        if self.run_state != GUEST_RUN_RUNNING {
+            return Err(GuestRunError::State);
+        }
+        self.general = frame.general;
+        self.stack_pointer_el0 = frame.sp_el0;
+        self.stack_pointer_el1 = frame.sp_el1;
+        self.program_counter = frame.elr;
+        self.processor_state = frame.spsr;
+        self.simd.0 = frame.simd;
+        self.fpcr = frame.fpcr;
+        self.fpsr = frame.fpsr;
+        self.terminal_kind = WAIT_FOR_INTERRUPT;
+        self.terminal_syndrome = frame.esr;
+        self.terminal_fault_address = frame.far;
+        self.terminal_vector = frame.vector;
+        self.terminal_synchronous = None;
+        self.run_state = GUEST_RUN_STOPPED;
+        Ok(())
+    }
+
+    pub(super) fn capture_administrative_stop(
+        &mut self,
+        frame: &super::exception::ExceptionFrame,
+    ) -> Result<(), GuestRunError> {
+        if self.run_state != GUEST_RUN_RUNNING {
+            return Err(GuestRunError::State);
+        }
+        self.general = frame.general;
+        self.stack_pointer_el0 = frame.sp_el0;
+        self.stack_pointer_el1 = frame.sp_el1;
+        self.program_counter = frame.elr;
+        self.processor_state = frame.spsr;
+        self.simd.0 = frame.simd;
+        self.fpcr = frame.fpcr;
+        self.fpsr = frame.fpsr;
+        self.terminal_kind = ADMINISTRATIVE_STOP;
+        self.terminal_syndrome = frame.esr;
+        self.terminal_fault_address = frame.far;
+        self.terminal_vector = frame.vector;
+        self.terminal_synchronous = None;
+        self.run_state = GUEST_RUN_STOPPED;
+        Ok(())
+    }
+
+    pub(super) fn consume_stopped(
+        &mut self,
+        stopped: &mut StoppedGuestRun,
+    ) -> Result<(), GuestRunError> {
+        stopped.consume_for(self)
     }
 }
 
@@ -469,10 +758,11 @@ unsafe extern "C" {
         previous: *mut ThreadContext,
         next: *const ThreadContext,
         previous_interrupt_state: u64,
-        completion: extern "C" fn(),
+        completion: extern "C" fn(usize),
+        completion_ticket: usize,
     );
     fn aarch64_thread_trampoline();
-    fn aarch64_enter_guest(context: *mut u8) -> !;
+    fn aarch64_run_guest(context: *mut u8) -> u64;
     fn aarch64_reset_stack_and_enter(
         bottom: usize,
         top: usize,
@@ -496,11 +786,20 @@ pub unsafe fn switch_thread_context(
     previous: *mut ThreadContext,
     next: *const ThreadContext,
     previous_interrupt_state: u64,
-    completion: extern "C" fn(),
+    completion: extern "C" fn(usize),
+    completion_ticket: usize,
 ) {
     // SAFETY: The caller pins both contexts and guarantees `next` owns a valid
     // mapped stack until control eventually switches back.
-    unsafe { aarch64_switch_context(previous, next, previous_interrupt_state, completion) };
+    unsafe {
+        aarch64_switch_context(
+            previous,
+            next,
+            previous_interrupt_state,
+            completion,
+            completion_ticket,
+        )
+    };
 }
 
 /// Abandons the current call chain and enters a continuation on a clean stack.
@@ -567,4 +866,7 @@ const _: () = {
     assert!(
         offset_of!(VcpuContext, processor_state) == registers::VCPU_CONTEXT_PSTATE_OFFSET as usize
     );
+    assert!(offset_of!(VcpuContext, simd) == registers::VCPU_CONTEXT_SIMD_OFFSET as usize);
+    assert!(offset_of!(VcpuContext, fpcr) == registers::VCPU_CONTEXT_FPCR_OFFSET as usize);
+    assert!(offset_of!(VcpuContext, fpsr) == registers::VCPU_CONTEXT_FPSR_OFFSET as usize);
 };

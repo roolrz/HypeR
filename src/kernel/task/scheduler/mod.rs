@@ -4,6 +4,7 @@
 //! Public scheduler operations and architecture context-switch boundary.
 
 mod queue;
+mod registry;
 mod state;
 
 use alloc::boxed::Box;
@@ -12,14 +13,20 @@ use core::marker::PhantomData;
 use core::ptr::NonNull;
 
 use hyper::cpu::CpuIndex;
-use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
+use hyper::sync::atomic::{AtomicUsize, Ordering};
+use hyper::sync::{DeferredWork, InterruptMaskGuard, InterruptSpinLock, WorkDisposition};
 
-use self::state::{PreparedContextSwitch, Scheduler, ThreadReservation};
+use self::registry::ThreadReservation;
+use self::state::{PreparedContextSwitch, Scheduler};
 use super::thread::{KernelThreadEntry, Thread, ThreadId, ThreadState, VcpuExecution};
 
 use super::policy::SchedulingPolicy;
 pub use super::policy::{CpuMask, ThreadPriority};
 use super::wait::{WaitMobility, WaitOutcome, WaitQueue, WaitTicket};
+
+/// Maximum scheduler-owned Thread population, including the bootstrap Thread.
+pub(crate) const THREAD_CAPACITY: usize = hyper::config::MAX_KERNEL_STACKS as usize + 1;
+const _: () = assert!(hyper::config::MAX_KERNEL_STACKS > 0);
 
 /// Scheduler ticks granted by the initial Fair round-robin backend.
 ///
@@ -39,6 +46,46 @@ type TransitionMaskState =
     <crate::hal::irq::LocalMask as hyper::hal::interrupt::InterruptMask>::State;
 
 static SCHEDULER: SchedulerLock = InterruptSpinLock::new(None);
+static RETIREMENTS_IN_PROGRESS: AtomicUsize = AtomicUsize::new(0);
+static RETIREMENT_WORK: DeferredWork = DeferredWork::new();
+static RETIREMENT_WAKE: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
+const RETIREMENTS_PER_BATCH: usize = 16;
+
+/// Locks scheduler-detached resources into the observable retirement epoch.
+///
+/// Construction occurs under `SCHEDULER` immediately after detachment. Drop
+/// release-publishes that every lock-external resource destructor and terminal
+/// publication owned by the detached Thread has completed.
+pub(super) struct ResourceRetirement {
+    _private: (),
+}
+
+impl ResourceRetirement {
+    fn begin() -> Self {
+        if RETIREMENTS_IN_PROGRESS
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < THREAD_CAPACITY).then_some(count + 1)
+            })
+            .is_err()
+        {
+            crate::hal::cpu::halt();
+        }
+        Self { _private: () }
+    }
+}
+
+impl Drop for ResourceRetirement {
+    fn drop(&mut self) {
+        if RETIREMENTS_IN_PROGRESS
+            .fetch_update(Ordering::Release, Ordering::Relaxed, |count| {
+                count.checked_sub(1)
+            })
+            .is_err()
+        {
+            crate::hal::cpu::halt();
+        }
+    }
+}
 
 /// Scheduler ownership of one prepared, non-runnable vCPU thread.
 ///
@@ -243,6 +290,8 @@ pub struct Statistics {
     pub blocked: usize,
     pub migrating: usize,
     pub idle: usize,
+    /// Threads detached from scheduler state whose owned resources are not yet retired.
+    pub retirements_in_progress: usize,
     pub context_switches: u64,
     pub per_cpu_ready: [usize; hyper::config::MAX_CPUS as usize],
 }
@@ -351,12 +400,13 @@ pub fn initialize() -> Result<Capabilities, Error> {
     if SCHEDULER.with(|slot| slot.is_some()) {
         return Err(Error::AlreadyInitialized);
     }
-    let scheduler = Scheduler::new(cpu)?;
+    let mut scheduler = Scheduler::new(cpu)?;
     let preemption = super::preempt::prepare_cpu(cpu)?;
     let capabilities = SCHEDULER.with(|slot| {
         if slot.is_some() {
             return Err(Error::AlreadyInitialized);
         }
+        scheduler.activate_boot_cpu(cpu)?;
         *slot = Some(scheduler);
         Ok(Capabilities {
             bootstrap_thread: ThreadId::BOOTSTRAP,
@@ -366,17 +416,52 @@ pub fn initialize() -> Result<Capabilities, Error> {
     Ok(capabilities)
 }
 
+/// Creates the sole owner allowed to perform lock-external Thread teardown.
+pub(crate) fn initialize_retirement_worker() -> Result<(), Error> {
+    let worker = kthread_create("kreaper", retirement_worker_entry, 0)?;
+    if !RETIREMENT_WORK.claim_initial_worker() {
+        return Err(Error::AlreadyInitialized);
+    }
+    if !thread_ready(worker)? {
+        return Err(Error::InvalidThreadState);
+    }
+    Ok(())
+}
+
+/// Converts a durable retirement prompt into a scheduler wake at IRQ entry.
+pub(crate) fn service_retirement_irq_prompt() {
+    if !RETIREMENT_WORK.consume_prompt() || !RETIREMENT_WORK.claim_notification() {
+        return;
+    }
+    if let Err(error) = RETIREMENT_WAKE.complete() {
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: scheduler reaper wake failed: {error:?}"
+        ));
+    }
+}
+
+/// Permanent scheduler service population used by lifecycle self-tests.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) const fn permanent_worker_count_for_test() -> usize {
+    1
+}
+
 pub fn current_thread_id() -> Result<ThreadId, Error> {
     let cpu = current_cpu()?;
-    SCHEDULER.with(|slot| {
-        slot.as_ref()
-            .ok_or(Error::NotInitialized)?
-            .current_thread(cpu)
-    })
+    state::local_current_thread(cpu)
 }
 
 pub fn statistics() -> Result<Statistics, Error> {
-    SCHEDULER.with(|slot| Ok(slot.as_ref().ok_or(Error::NotInitialized)?.statistics()))
+    let mut statistics = SCHEDULER.with(|slot| {
+        slot.as_ref()
+            .ok_or(Error::NotInitialized)
+            .map(Scheduler::statistics)
+    })?;
+    // Population must be observed first. A concurrent detach either remains
+    // represented in that snapshot or increments the counter under the same
+    // scheduler critical section before this acquire observation.
+    statistics.retirements_in_progress = RETIREMENTS_IN_PROGRESS.load(Ordering::Acquire);
+    Ok(statistics)
 }
 
 pub fn thread_stack_statistics(
@@ -385,33 +470,20 @@ pub fn thread_stack_statistics(
     SCHEDULER.with(|slot| {
         let scheduler = slot.as_ref().ok_or(Error::NotInitialized)?;
         let thread = scheduler.thread(id)?;
-        if matches!(
-            thread.state(),
-            ThreadState::Running | ThreadState::Idle | ThreadState::Migrating
-        ) || !scheduler.context_is_stopped(id)?
+        if thread.schedule_owner_cpu().is_some()
+            || matches!(thread.state(), ThreadState::Migrating)
+            || !scheduler.context_is_stopped(id)?
         {
             return Err(Error::InvalidThreadState);
         }
-        Ok(thread.kernel_stack_statistics())
+        scheduler.with_thread(id, Thread::kernel_stack_statistics)
     })
 }
 
 /// Captures current-task metadata without waiting on a potentially held lock.
 pub(crate) fn crash_snapshot(cpu: usize) -> Option<CrashTaskSnapshot> {
     let cpu = CpuIndex::new(cpu)?;
-    SCHEDULER
-        .try_with(|slot| {
-            let scheduler = slot.as_ref()?;
-            let thread = scheduler.thread(scheduler.current_thread(cpu).ok()?).ok()?;
-            Some(CrashTaskSnapshot {
-                id: thread.id(),
-                state: thread.state(),
-                execution: thread.execution_kind(),
-                stack: thread.kernel_stack_bounds(),
-                stack_statistics: thread.kernel_stack_statistics(),
-            })
-        })
-        .flatten()
+    state::try_cpu_snapshot(cpu)
 }
 
 pub fn register_secondary_cpu(cpu: CpuIndex, name: &str) -> Result<SecondaryStack, Error> {
@@ -527,8 +599,9 @@ fn kthread_create_with_policy_and_affinity(
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn thread_placement(id: ThreadId) -> Result<(CpuIndex, CpuMask), Error> {
     SCHEDULER.with(|slot| {
-        let thread = slot.as_ref().ok_or(Error::NotInitialized)?.thread(id)?;
-        Ok((thread.cpu_index(), thread.affinity()))
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .thread_placement(id)
     })
 }
 
@@ -581,7 +654,7 @@ pub(in crate::kernel) fn vcpu_create(
 
 pub(in crate::kernel) fn prepare_user_thread(
     name: &str,
-    execution: alloc::boxed::Box<crate::kernel::process::UserExecution>,
+    execution: alloc::boxed::Box<core::cell::UnsafeCell<crate::kernel::process::UserExecution>>,
     entry: KernelThreadEntry,
     affinity: CpuMask,
 ) -> Result<DormantUserThread, Error> {
@@ -613,11 +686,15 @@ pub(in crate::kernel) fn request_user_thread_stop(
     id: ThreadId,
     reason: crate::kernel::process::TerminalReason,
 ) -> Result<(), Error> {
-    let target = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .request_user_stop(id, reason)
+    let (target, retirement_published) = SCHEDULER.with(|slot| {
+        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+        let target = scheduler.request_user_stop(id, reason)?;
+        let retirement_published = scheduler.queue_terminated_retirement(id)?;
+        Ok::<_, Error>((target, retirement_published))
     })?;
+    if retirement_published {
+        request_retirement_worker();
+    }
     if let Some(cpu) = target {
         request_reschedule(cpu)?;
     }
@@ -711,6 +788,83 @@ pub(crate) fn current_vcpu() -> Result<CurrentVcpu, Error> {
     })
 }
 
+/// Returns the CPU which the scheduler currently proves is running `thread`.
+///
+/// This is a read-only location observation. VM policy owns guest-exit
+/// prompting and must tolerate the Thread stopping or migrating after the
+/// scheduler lock is released.
+pub(in crate::kernel) fn running_vcpu_cpu(thread: ThreadId) -> Result<Option<CpuIndex>, Error> {
+    SCHEDULER.with(|slot| {
+        slot.as_ref()
+            .ok_or(Error::NotInitialized)?
+            .running_vcpu_cpu(thread)
+    })
+}
+
+/// Prompts the exact scheduler-owned vCPU after its endpoint accepted a stop.
+///
+/// This operation never tears down a suspended continuation. Dormant and
+/// Ready Threads run their fixed entry path; a WFI waiter was already made
+/// Ready by endpoint notification; Running/Migrating contexts receive only a
+/// nonblocking prompt and unwind at a qualified architecture boundary.
+pub(in crate::kernel) fn request_vcpu_stop(thread: ThreadId) -> Result<(), Error> {
+    let (target, retirement_published) = SCHEDULER.with(|slot| {
+        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+        let target = scheduler.request_vcpu_stop(thread)?;
+        let retirement_published = scheduler.queue_terminated_retirement(thread)?;
+        Ok::<_, Error>((target, retirement_published))
+    })?;
+    if retirement_published {
+        request_retirement_worker();
+    }
+    match target {
+        state::VcpuStopTarget::Running(cpu) => {
+            if !crate::hal::vm::request_guest_exit(cpu) {
+                let target = SCHEDULER.with(|slot| {
+                    slot.as_ref()
+                        .ok_or(Error::NotInitialized)?
+                        .running_vcpu_cpu(thread)
+                })?;
+                match target {
+                    None => {}
+                    Some(target) if target != cpu && crate::hal::vm::request_guest_exit(target) => {
+                    }
+                    Some(_) => scheduler_invariant(
+                        "administrative vCPU guest-exit prompt",
+                        Error::PreemptionUnavailable,
+                    ),
+                }
+            }
+        }
+        state::VcpuStopTarget::Migrating(cpu) => request_reschedule(cpu)?,
+        state::VcpuStopTarget::Runnable { cpu, ready } => {
+            if let Some(ready) = ready {
+                publish_ready_outcome(ready)?;
+            }
+            request_reschedule(cpu)?;
+        }
+        state::VcpuStopTarget::Terminated => {}
+    }
+    Ok(())
+}
+
+/// Reports generation-qualified scheduler reaping without blocking.
+#[allow(dead_code)]
+pub(in crate::kernel) fn vcpu_reaped(thread: ThreadId) -> Result<bool, Error> {
+    SCHEDULER.with(|slot| {
+        let scheduler = slot.as_ref().ok_or(Error::NotInitialized)?;
+        match scheduler.thread_registry_status(thread) {
+            registry::ThreadRegistryStatus::Occupied(super::thread::ExecutionKind::Vcpu)
+            | registry::ThreadRegistryStatus::Retiring(super::thread::ExecutionKind::Vcpu) => {
+                Ok(false)
+            }
+            registry::ThreadRegistryStatus::Occupied(_)
+            | registry::ThreadRegistryStatus::Retiring(_) => Err(Error::InvalidThreadState),
+            registry::ThreadRegistryStatus::Absent => Ok(true),
+        }
+    })
+}
+
 /// Returns the pinned native-user payload owned by the current Thread.
 ///
 /// The dedicated guard proves that the non-null payload address remains pinned
@@ -729,14 +883,9 @@ pub(crate) fn current_user(_pin: &UserRunGuard) -> Result<CurrentUser, Error> {
 /// This does not borrow or publish the execution. The raw owner pointer is
 /// consumed only by the masked architecture IRQ-tail continuation, where the
 /// current Thread cannot change before the scheduler transaction begins.
-#[cfg(CONFIG_ARCH_AARCH64)]
 pub(crate) fn current_vcpu_if_present() -> Result<Option<CurrentVcpu>, Error> {
     let cpu = current_cpu()?;
-    SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .current_vcpu_if_present(cpu)
-    })
+    state::local_current_vcpu(cpu)
 }
 
 /// Enqueues a dormant thread on its owning CPU's priority ready queue.
@@ -749,24 +898,24 @@ pub fn thread_ready(id: ThreadId) -> Result<bool, Error> {
 
 /// Publishes native-user lifecycle and scheduler readiness as one transaction.
 pub(in crate::kernel) fn ready_user_thread(id: ThreadId) -> Result<bool, Error> {
-    let outcome = SCHEDULER.with(|slot| {
+    let outcome = SCHEDULER.with(|slot| -> Result<state::ReadyOutcome, Error> {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        let thread = scheduler.thread(id)?;
-        if !matches!(
-            thread.state(),
-            ThreadState::Dormant | ThreadState::Ready | ThreadState::Running
-        ) {
-            return Err(Error::InvalidThreadState);
-        }
-        let execution = thread.user_execution().ok_or(Error::InvalidThreadState)?;
-        execution
-            .thread()
-            .mark_runnable()
-            .map_err(|_| Error::InvalidThreadState)?;
-        match scheduler.make_ready(id) {
-            Ok(outcome) => Ok(outcome),
+        scheduler.with_thread(id, |thread| {
+            if thread.schedule_owner_cpu().is_none()
+                && !matches!(thread.state(), ThreadState::Dormant | ThreadState::Ready)
+            {
+                return Err(Error::InvalidThreadState);
+            }
+            let execution = thread.user_execution().ok_or(Error::InvalidThreadState)?;
+            execution
+                .thread()
+                .mark_runnable()
+                .map_err(|_| Error::InvalidThreadState)
+        })??;
+        Ok(match scheduler.make_ready(id) {
+            Ok(outcome) => outcome,
             Err(_) => crate::hal::cpu::halt(),
-        }
+        })
     })?;
     publish_ready_outcome(outcome)?;
     Ok(outcome.changed)
@@ -862,11 +1011,7 @@ pub fn set_thread_fair_policy(id: ThreadId) -> Result<(), Error> {
 /// coalesced request after completing interrupt accounting.
 pub(crate) fn account_tick(elapsed_ticks: u64) -> Result<(), Error> {
     let cpu = current_cpu()?;
-    let should_reschedule = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .account_tick(cpu, elapsed_ticks)
-    })?;
+    let should_reschedule = state::account_tick(cpu, elapsed_ticks)?;
     if should_reschedule {
         // The real timer path is already inside IRQ accounting, so the common
         // request helper suppresses a redundant self-IPI. Keeping the generic
@@ -895,11 +1040,15 @@ pub fn cond_resched() -> Result<bool, Error> {
 
 /// Reconsiders scheduling from an outermost architecture IRQ continuation.
 ///
-/// IRQ accounting and controller completion must already be complete. This
-/// operation is AArch64-only until secondary architectures provide equivalent
-/// private-stack exception continuations and interrupt-state context transfer.
-#[cfg(CONFIG_ARCH_AARCH64)]
-pub(crate) fn cond_resched_from_irq_tail() -> Result<bool, Error> {
+/// IRQ accounting and controller completion must already be complete. The
+/// opaque capability is minted only by a selected architecture return path
+/// which provides private-stack continuation and interrupt-state transfer.
+// Secondary targets cannot mint `IrqTailCapability`; keep the common policy
+// entry compiled so target selection does not leak into scheduler code.
+#[allow(dead_code)]
+pub(crate) fn cond_resched_from_irq_tail(
+    tail: crate::hal::exception::IrqTailCapability,
+) -> Result<bool, Error> {
     if crate::hal::irq::local_enabled() {
         return Err(Error::IrqTailRequiresInterruptsMasked);
     }
@@ -907,6 +1056,10 @@ pub(crate) fn cond_resched_from_irq_tail() -> Result<bool, Error> {
     if !super::preempt::can_reschedule(cpu)? {
         return Ok(false);
     }
+    // This proof is CPU-affine. Consume it before the context switch can move
+    // the interrupted continuation; restored IRQ-mask state, not a live Rust
+    // value, governs execution after the switch.
+    tail.consume();
     cond_resched_inner()
 }
 
@@ -918,10 +1071,13 @@ fn cond_resched_inner() -> Result<bool, Error> {
     // SAFETY: This continuation transfers the exact prior interrupt state into
     // its saved ThreadContext at the final machine-switch boundary.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
-    let pair = SCHEDULER.with(|slot| {
-        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.prepare_preemption(cpu)
-    })?;
+    let pair = match state::prepare_local_preemption(cpu)? {
+        state::LocalScheduleAttempt::Complete(pair) => pair,
+        state::LocalScheduleAttempt::NeedsCoordinator => SCHEDULER.with(|slot| {
+            let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+            scheduler.prepare_preemption(cpu)
+        })?,
+    };
     let Some(pair) = pair else {
         return Ok(false);
     };
@@ -979,6 +1135,15 @@ pub fn preempt_disable() -> Result<PreemptionGuard, Error> {
         .map_err(Into::into)
 }
 
+/// Releases a preemption guard without introducing a scheduling point.
+///
+/// This is reserved for nested protocols that must restore preemption
+/// accounting before returning to an outer owner. Deferred work remains
+/// pending until that owner reaches its own safe scheduling point.
+pub(crate) fn preempt_enable_without_reschedule(guard: PreemptionGuard) -> Result<(), Error> {
+    guard.0.release().map(|_| ()).map_err(Into::into)
+}
+
 /// Releases a preemption guard and immediately observes deferred requests.
 pub fn preempt_enable_and_reschedule(guard: PreemptionGuard) -> Result<bool, Error> {
     if guard.0.release()? {
@@ -1007,42 +1172,45 @@ extern "C" fn idle_thread_entry(argument: usize) {
 }
 
 pub(crate) fn run_idle_loop() -> ! {
-    run_idle_loop_inner(None)
+    run_idle_loop_inner(false)
 }
 
-/// Enters the idle loop and publishes secondary readiness at its first queue check.
-pub(crate) fn run_idle_loop_after(ready: fn()) -> ! {
-    run_idle_loop_inner(Some(ready))
+/// Enters the secondary idle loop and publishes readiness after the first
+/// protected queue observation.
+pub(crate) fn run_secondary_idle_loop() -> ! {
+    run_idle_loop_inner(true)
 }
 
-fn run_idle_loop_inner(mut ready: Option<fn()>) -> ! {
+fn run_idle_loop_inner(mut publish_secondary_online: bool) -> ! {
     loop {
-        if let Err(error) = idle_wait_or_schedule(ready.take()) {
+        if let Err(error) = idle_wait_or_schedule(&mut publish_secondary_online) {
             crate::kernel::crash::fatal(format_args!("HypeR: idle scheduling failed: {error:?}"));
         }
     }
 }
 
 /// Closes the idle queue-check-to-sleep window under one interrupt mask.
-fn idle_wait_or_schedule(ready: Option<fn()>) -> Result<(), Error> {
+fn idle_wait_or_schedule(publish_secondary_online: &mut bool) -> Result<(), Error> {
     let cpu = current_cpu()?;
-    reap_terminated_threads()?;
     // SAFETY: The guard remains on this CPU. It is either consumed directly
     // into an outgoing context or dropped after the architecture returns from
     // its masked idle wait.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
-    let switch = SCHEDULER.with(|slot| {
-        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        let switch = scheduler.prepare_yield(cpu)?;
-        // The callback must be allocation-free and must not re-enter the
-        // scheduler. Publish only after the first queue observation completed
-        // successfully, while retaining the lock that excludes a boot-side
-        // enqueue between admission and that observation.
-        if let Some(ready) = ready {
-            ready();
-        }
-        Ok::<Option<PreparedContextSwitch>, Error>(switch)
-    })?;
+    let switch = match state::prepare_local_yield(cpu)? {
+        state::LocalScheduleAttempt::Complete(switch) => switch,
+        state::LocalScheduleAttempt::NeedsCoordinator => SCHEDULER.with(|slot| {
+            let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+            scheduler.prepare_yield(cpu)
+        })?,
+    };
+    if *publish_secondary_online {
+        // The first ready-queue observation completed under this CPU's local
+        // scheduler lock. Publish only after that point, while local IRQs
+        // remain masked, so boot-side enqueue can at worst leave a pending
+        // wakeup for the wait instruction below.
+        crate::kernel::cpu::publish_current_online_from_idle_observation();
+        *publish_secondary_online = false;
+    }
     if let Some(switch) = switch {
         PreparedTransition {
             switch,
@@ -1346,38 +1514,112 @@ fn request_reschedule(cpu: CpuIndex) -> Result<(), Error> {
 
 fn prepare_schedule() -> Result<Option<PreparedTransition>, Error> {
     let cpu = current_cpu()?;
-    reap_terminated_threads()?;
     // SAFETY: This continuation transfers the exact prior interrupt state into
     // its saved ThreadContext at the final machine-switch boundary.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
-    let switch = SCHEDULER.with(|slot| {
-        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.prepare_yield(cpu)
-    })?;
+    let switch = match state::prepare_local_yield(cpu)? {
+        state::LocalScheduleAttempt::Complete(switch) => switch,
+        state::LocalScheduleAttempt::NeedsCoordinator => SCHEDULER.with(|slot| {
+            let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+            scheduler.prepare_yield(cpu)
+        })?,
+    };
     Ok(switch.map(|switch| PreparedTransition {
         switch,
         interrupt_mask,
     }))
 }
 
-/// Detaches one stopped Thread at a time, then releases its owned resources
-/// without holding the global IRQ-masking scheduler lock.
-fn reap_terminated_threads() -> Result<(), Error> {
+/// Publishes work after the detached owner is fully resident in Scheduler.
+///
+/// The request path is allocation-free and never enters scheduler policy. An
+/// elected producer sends only a hardware prompt; IRQ entry later converts it
+/// into a Completion wake after all scheduler transition locks are released.
+fn request_retirement_worker() {
+    if !RETIREMENT_WORK.request() {
+        return;
+    }
+    match crate::kernel::cpu::current_index() {
+        Some(cpu) => crate::kernel::irq::reschedule::notify(cpu),
+        None => crate::hal::cpu::send_event(),
+    }
+}
+
+extern "C" fn retirement_worker_entry(_argument: usize) {
     loop {
-        let thread = SCHEDULER.with(|slot| {
-            slot.as_mut()
-                .ok_or(Error::NotInitialized)?
-                .detach_terminated()
-        })?;
-        let Some(mut thread) = thread else {
-            return Ok(());
-        };
-        if let Some(execution) = thread.take_user_execution() {
-            drop(thread);
-            (*execution).complete_detach();
-            continue;
+        RETIREMENT_WORK.begin_batch();
+        let mut more_work = false;
+        for _ in 0..RETIREMENTS_PER_BATCH {
+            match retire_one_thread() {
+                Ok(Some(more)) => more_work = more,
+                Ok(None) => {
+                    more_work = false;
+                    break;
+                }
+                Err(error) => crate::kernel::crash::fatal(format_args!(
+                    "HypeR: scheduler reaper failed: {error:?}"
+                )),
+            }
         }
+        match RETIREMENT_WORK.finish_batch(more_work) {
+            WorkDisposition::Continue => {
+                if let Err(error) = cond_resched() {
+                    crate::kernel::crash::fatal(format_args!(
+                        "HypeR: scheduler reaper reschedule failed: {error:?}"
+                    ));
+                }
+            }
+            WorkDisposition::Wait => {
+                if let Err(error) = RETIREMENT_WAKE.wait() {
+                    crate::kernel::crash::fatal(format_args!(
+                        "HypeR: scheduler reaper wait failed: {error:?}"
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Retires one detached owner in normal, interruptible Thread context.
+fn retire_one_thread() -> Result<Option<bool>, Error> {
+    let retired = SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .take_retirement()
+    })?;
+    let Some(state::RetiredThread {
+        id,
+        thread,
+        retirement,
+    }) = retired
+    else {
+        return Ok(None);
+    };
+
+    retire_detached_thread(thread);
+    let more = SCHEDULER.with(|slot| {
+        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+        scheduler.complete_retirement(id)?;
+        Ok::<_, Error>(scheduler.has_retirements())
+    })?;
+    drop(retirement);
+    Ok(Some(more))
+}
+
+fn retire_detached_thread(mut thread: Box<Thread>) {
+    if let Some(execution) = thread.take_user_execution() {
         drop(thread);
+        execution.into_inner().complete_detach();
+        return;
+    }
+    let vcpu_reap = thread.take_vcpu_reap_publication();
+    drop(thread);
+    if let Some(publication) = vcpu_reap
+        && let Err(error) = crate::kernel::vm::registry::complete_vcpu_reap(publication)
+    {
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: exact vCPU reap publication failed: {error:?}"
+        ));
     }
 }
 
@@ -1424,23 +1666,34 @@ fn current_cpu() -> Result<CpuIndex, Error> {
 }
 
 /// Completes source ownership on the incoming stack with interrupts masked.
-extern "C" fn finish_context_switch_tail() {
-    let result = current_cpu().and_then(|cpu| {
-        SCHEDULER.with(|slot| {
-            slot.as_mut()
-                .ok_or(Error::NotInitialized)?
-                .complete_incoming_switch(cpu)
-        })
-    });
+extern "C" fn finish_context_switch_tail(ticket: usize) {
+    let ticket = ticket as u64;
+    let result =
+        current_cpu().and_then(
+            |cpu| match state::complete_local_switch_tail(cpu, ticket)? {
+                state::LocalTailCompletion::Complete => Ok((None, false)),
+                state::LocalTailCompletion::NeedsCoordinator => SCHEDULER.with(|slot| {
+                    let completion = slot
+                        .as_mut()
+                        .ok_or(Error::NotInitialized)?
+                        .complete_incoming_switch(cpu, ticket)?;
+                    Ok((completion.ready, completion.retirement_published))
+                }),
+            },
+        );
     match result {
-        Ok(Some(outcome)) => {
-            if let Err(error) = publish_ready_outcome(outcome) {
+        Ok((ready, retirement_published)) => {
+            if let Some(outcome) = ready
+                && let Err(error) = publish_ready_outcome(outcome)
+            {
                 crate::kernel::crash::fatal(format_args!(
                     "HypeR: switch-tail migration publication failed: {error:?}"
                 ));
             }
+            if retirement_published {
+                request_retirement_worker();
+            }
         }
-        Ok(None) => {}
         Err(error) => crate::kernel::crash::fatal(format_args!(
             "HypeR: incoming context-switch completion failed: {error:?}"
         )),

@@ -36,6 +36,31 @@ impl InterruptId {
     }
 }
 
+/// Execution world interrupted by one physical interrupt.
+///
+/// Architecture entry constructs this value from state which cannot be
+/// reconstructed by kernel policy. In particular, `Host` and `Guest` must not
+/// be inferred from the absence of a native-user unwind callback.
+#[derive(Clone, Copy, Debug)]
+pub enum InterruptOrigin {
+    Host,
+    Guest,
+    Native { unwind: unsafe extern "C" fn() },
+}
+
+impl InterruptOrigin {
+    pub const fn native_unwind(self) -> Option<unsafe extern "C" fn()> {
+        match self {
+            Self::Native { unwind } => Some(unwind),
+            Self::Host | Self::Guest => None,
+        }
+    }
+
+    pub const fn is_guest(self) -> bool {
+        matches!(self, Self::Guest)
+    }
+}
+
 /// Kernel disposition for an architecture-acknowledged physical interrupt.
 #[derive(Clone, Copy, Debug)]
 #[must_use]
@@ -47,6 +72,13 @@ pub enum EntryAction {
         /// interrupted Thread stack with local interrupts masked.
         postlude: Option<unsafe extern "C" fn()>,
     },
+    /// A durable administrative request owns the interrupted guest and vector
+    /// entry must capture it into the typed guest-run return frame.
+    StopGuest {
+        /// Qualified fallback for backends which stop through their ordinary
+        /// IRQ-tail continuation rather than a terminal run-frame unwind.
+        postlude: Option<unsafe extern "C" fn()>,
+    },
     /// Registered policy completed the interrupt and selected fail-stop.
     Stop,
 }
@@ -55,12 +87,15 @@ pub enum EntryAction {
 pub struct KernelRpcReasons(u8);
 
 impl KernelRpcReasons {
-    const KNOWN_BITS: u8 =
-        Self::LOCAL_IRQ_LIFECYCLE.0 | Self::STAGE1_TLB_SHOOTDOWN.0 | Self::USER_ADDRESS_SPACE.0;
+    const KNOWN_BITS: u8 = Self::LOCAL_IRQ_LIFECYCLE.0
+        | Self::STAGE1_TLB_SHOOTDOWN.0
+        | Self::USER_ADDRESS_SPACE.0
+        | Self::GUEST_STAGE2.0;
     pub const NONE: Self = Self(0);
     pub const LOCAL_IRQ_LIFECYCLE: Self = Self(1 << 0);
     pub const STAGE1_TLB_SHOOTDOWN: Self = Self(1 << 1);
     pub const USER_ADDRESS_SPACE: Self = Self(1 << 2);
+    pub const GUEST_STAGE2: Self = Self(1 << 3);
 
     pub const fn bits(self) -> u8 {
         self.0

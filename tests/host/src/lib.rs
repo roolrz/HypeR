@@ -10,11 +10,26 @@
 extern crate alloc;
 
 #[cfg(test)]
+#[path = "../../../src/arch/aarch64/stage2_retirement.rs"]
+mod aarch64_stage2_retirement_model;
+#[cfg(test)]
 #[path = "../../../src/arch/aarch64/user_contract.rs"]
 mod aarch64_user_contract_model;
 #[cfg(test)]
 #[path = "../../../src/arch/aarch64/registers.rs"]
 mod registers;
+#[cfg(test)]
+#[path = "../../../src/kernel/vm/address_space_state.rs"]
+mod vm_address_space_state_model;
+#[cfg(test)]
+#[path = "../../../src/kernel/vm/endpoint_state.rs"]
+mod vm_endpoint_state_model;
+#[cfg(test)]
+#[path = "../../../src/kernel/vm/endpoint_wait.rs"]
+mod vm_endpoint_wait_model;
+#[cfg(test)]
+#[path = "../../../src/kernel/vm/residency_state.rs"]
+mod vm_residency_state_model;
 
 #[cfg(test)]
 fn require_ok<T, E: core::fmt::Debug>(result: Result<T, E>) -> T {
@@ -45,6 +60,9 @@ mod address_space_residency;
 #[path = "cases/allocation.rs"]
 mod allocation;
 #[cfg(test)]
+#[path = "cases/allocator_local_cache.rs"]
+mod allocator_local_cache;
+#[cfg(test)]
 #[path = "cases/boot_allocator.rs"]
 mod boot_allocator;
 #[cfg(test)]
@@ -60,6 +78,12 @@ mod cpio;
 #[path = "cases/cpu.rs"]
 mod cpu;
 #[cfg(test)]
+#[path = "cases/crash_supplement.rs"]
+mod crash_supplement;
+#[cfg(test)]
+#[path = "cases/cross_call_pinning.rs"]
+mod cross_call_pinning;
+#[cfg(test)]
 #[path = "cases/fallible_ownership.rs"]
 mod fallible_ownership;
 #[cfg(test)]
@@ -74,6 +98,9 @@ mod generic_timer;
 #[cfg(test)]
 #[path = "cases/gicv3.rs"]
 mod gicv3;
+#[cfg(test)]
+#[path = "cases/guest_gicv3.rs"]
+mod guest_gicv3;
 #[cfg(test)]
 #[path = "cases/kallsyms.rs"]
 mod kallsyms;
@@ -117,6 +144,12 @@ mod scheduler_policy;
 #[path = "cases/scheduler_requests.rs"]
 mod scheduler_requests;
 #[cfg(test)]
+#[path = "cases/scheduler_residence.rs"]
+mod scheduler_residence;
+#[cfg(test)]
+#[path = "cases/slab_partial.rs"]
+mod slab_partial;
+#[cfg(test)]
 #[path = "cases/software_timers.rs"]
 mod software_timers;
 #[cfg(test)]
@@ -140,6 +173,15 @@ mod virtual_legacy_pc;
 #[cfg(test)]
 #[path = "cases/virtual_pl011.rs"]
 mod virtual_pl011;
+#[cfg(test)]
+#[path = "cases/vm_interrupt_reconcile.rs"]
+mod vm_interrupt_reconcile;
+#[cfg(test)]
+#[path = "cases/vm_mmio_diagnostics.rs"]
+mod vm_mmio_diagnostics;
+#[cfg(test)]
+#[path = "cases/vm_run_admission.rs"]
+mod vm_run_admission;
 #[cfg(test)]
 #[path = "cases/x86_svm_contract.rs"]
 mod x86_svm_contract;

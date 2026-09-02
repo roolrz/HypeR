@@ -29,7 +29,15 @@ pub(crate) enum GuestSyncAction {
         processor_state: u64,
     },
     /// The exit cannot safely return to the guest.
-    Stop,
+    Stop(GuestSyncFailure),
+    /// Complete WFI and return through the typed stopped-vCPU boundary.
+    Wait,
+}
+
+/// Typed failure which prevented a decoded synchronous exit from completing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestSyncFailure {
+    VirtualInterrupt(super::vm_vcpu::Error),
 }
 
 /// Owned `AArch64` synchronous-exit facts consumed by active-vCPU emulation.
@@ -42,8 +50,14 @@ pub(crate) enum GuestSyncExit {
     SystemRegister(SystemRegisterExit),
     HypervisorCall { function: u64, argument: u64 },
     SecureMonitorCall,
-    Wait,
+    Wait(WaitInstruction),
     Undefined(UndefinedExit),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WaitInstruction {
+    Event,
+    Interrupt,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -66,7 +80,7 @@ const _: () = {
     // Entry copies only the operands required by policy. Keep accidental raw
     // register-file snapshots from silently entering this hot-path contract.
     assert!(core::mem::size_of::<GuestSyncExit>() <= 64);
-    assert!(core::mem::size_of::<GuestSyncAction>() <= 32);
+    assert!(core::mem::size_of::<GuestSyncAction>() <= 64);
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,7 +120,41 @@ pub fn validate() -> Result<(), ValidationError> {
     if !validate_owned_exit_completion() {
         return Err(ValidationError::InvalidCompletion);
     }
+    if !validate_typed_sync_failure() {
+        return Err(ValidationError::InvalidCompletion);
+    }
     Ok(())
+}
+
+fn validate_typed_sync_failure() -> bool {
+    let encoding = registers::SYSREG_ICC_SGI1R_EL1;
+    let target = 7u8;
+    let syndrome = (registers::ESR_EC_SYSTEM_REGISTER << registers::ESR_EC_SHIFT)
+        | (u64::from(encoding.op0) << registers::ESR_SYSREG_OP0_SHIFT)
+        | (u64::from(encoding.op1) << registers::ESR_SYSREG_OP1_SHIFT)
+        | (u64::from(encoding.crn) << registers::ESR_SYSREG_CRN_SHIFT)
+        | (u64::from(encoding.crm) << registers::ESR_SYSREG_CRM_SHIFT)
+        | (u64::from(encoding.op2) << registers::ESR_SYSREG_OP2_SHIFT)
+        | (u64::from(target) << registers::ESR_SYSREG_RT_SHIFT);
+    let request = 0x1234_5678_9abc_def0;
+    let mut general = [0u64; 31];
+    general[usize::from(target)] = request;
+    let Some(exit @ GuestSyncExit::SystemRegister(decoded)) =
+        decode_guest_sync(syndrome, &general, 0x8800, registers::SPSR_EL1H_AND_DAIF)
+    else {
+        return false;
+    };
+    if decoded.encoding != encoding
+        || decoded.target != target
+        || decoded.direction != Direction::Write
+        || decoded.value != request
+    {
+        return false;
+    }
+    let error = super::vm_vcpu::Error::Controller(hyper::vm::arm::gic::RuntimeError::NotConfigured);
+    exit == GuestSyncExit::SystemRegister(decoded)
+        && software_interrupt_completion(Err(error))
+            == GuestSyncAction::Stop(GuestSyncFailure::VirtualInterrupt(error))
 }
 
 fn validate_owned_exit_completion() -> bool {
@@ -186,7 +234,7 @@ fn validate_owned_exit_completion() -> bool {
     }
     let mut hvc_pc = 0x8200;
     let mut hvc_pstate = registers::SPSR_EL1H_AND_DAIF;
-    apply_guest_sync_action(
+    let hvc_valid = apply_guest_sync_action(
         hvc_exit,
         &mut general,
         &mut hvc_pc,
@@ -194,7 +242,44 @@ fn validate_owned_exit_completion() -> bool {
         emulate_hypercall(function, argument),
     ) && general[0] == registers::SMCCC_VERSION_1_1
         && hvc_pc == 0x8200
-        && hvc_pstate == registers::SPSR_EL1H_AND_DAIF
+        && hvc_pstate == registers::SPSR_EL1H_AND_DAIF;
+    let Some(wfi) = decode_guest_sync(
+        registers::ESR_EC_WFX << registers::ESR_EC_SHIFT,
+        &general,
+        0x8300,
+        registers::SPSR_EL1H_AND_DAIF,
+    ) else {
+        return false;
+    };
+    let Some(wfe) = decode_guest_sync(
+        (registers::ESR_EC_WFX << registers::ESR_EC_SHIFT) | registers::ESR_WFX_TI_WFE,
+        &general,
+        0x8400,
+        registers::SPSR_EL1H_AND_DAIF,
+    ) else {
+        return false;
+    };
+    let mut wfi_pc = 0x8300;
+    let mut wfe_pc = 0x8400;
+    hvc_valid
+        && wfi == GuestSyncExit::Wait(WaitInstruction::Interrupt)
+        && wfe == GuestSyncExit::Wait(WaitInstruction::Event)
+        && apply_guest_sync_action(
+            wfi,
+            &mut general,
+            &mut wfi_pc,
+            &mut hvc_pstate,
+            GuestSyncAction::Wait,
+        )
+        && apply_guest_sync_action(
+            wfe,
+            &mut general,
+            &mut wfe_pc,
+            &mut hvc_pstate,
+            GuestSyncAction::Advance,
+        )
+        && wfi_pc == 0x8304
+        && wfe_pc == 0x8404
 }
 
 fn validate_guest_memory_fault_decoder() -> bool {
@@ -330,12 +415,16 @@ pub(crate) fn apply_guest_sync_action(
             *processor_state = next_processor_state;
             true
         }
-        GuestSyncAction::Stop => false,
+        GuestSyncAction::Wait => {
+            advance(program_counter);
+            true
+        }
+        GuestSyncAction::Stop(_) => false,
     }
 }
 
 fn guest_sync_action_matches(exit: GuestSyncExit, action: GuestSyncAction) -> bool {
-    if action == GuestSyncAction::Stop {
+    if matches!(action, GuestSyncAction::Stop(_)) {
         return true;
     }
     match (exit, action) {
@@ -365,7 +454,8 @@ fn guest_sync_action_matches(exit: GuestSyncExit, action: GuestSyncAction) -> bo
             }),
             GuestSyncAction::InjectUndefined { .. },
         )
-        | (GuestSyncExit::Wait, GuestSyncAction::Advance)
+        | (GuestSyncExit::Wait(WaitInstruction::Event), GuestSyncAction::Advance)
+        | (GuestSyncExit::Wait(WaitInstruction::Interrupt), GuestSyncAction::Wait)
         | (GuestSyncExit::Undefined(_), GuestSyncAction::InjectUndefined { .. }) => true,
         (
             GuestSyncExit::HypervisorCall { .. } | GuestSyncExit::SecureMonitorCall,
@@ -504,7 +594,13 @@ pub(crate) fn decode_guest_sync(
                 argument: read_general(general, 1),
             },
             registers::ESR_EC_SMC64 => GuestSyncExit::SecureMonitorCall,
-            registers::ESR_EC_WFX => GuestSyncExit::Wait,
+            registers::ESR_EC_WFX => {
+                GuestSyncExit::Wait(if syndrome & registers::ESR_WFX_TI_WFE != 0 {
+                    WaitInstruction::Event
+                } else {
+                    WaitInstruction::Interrupt
+                })
+            }
             // Abort classes are completed only through memory or MMIO policy.
             registers::ESR_EC_INSTRUCTION_ABORT_LOWER | registers::ESR_EC_DATA_ABORT_LOWER => {
                 return None;
@@ -532,11 +628,8 @@ pub(crate) fn handle_guest_sync(
             value: registers::SMCCC_NOT_SUPPORTED,
             advance: false,
         },
-        GuestSyncExit::Wait => {
-            // A scheduler-aware WFI exit can replace this completion once vCPU
-            // Threads acquire a device-interrupt wakeup wait queue.
-            GuestSyncAction::Advance
-        }
+        GuestSyncExit::Wait(WaitInstruction::Event) => GuestSyncAction::Advance,
+        GuestSyncExit::Wait(WaitInstruction::Interrupt) => GuestSyncAction::Wait,
         GuestSyncExit::Undefined(exit) => inject_undefined(context, exit),
     }
 }
@@ -582,12 +675,9 @@ fn emulate_system_register(
         },
         Direction::Write => {
             if exit.encoding == registers::SYSREG_ICC_SGI1R_EL1 {
-                return match super::vm_vcpu::deliver_software_interrupt(
+                return software_interrupt_completion(super::vm_vcpu::deliver_software_interrupt(
                     context, vcpu_id, interrupts, exit.value,
-                ) {
-                    Ok(()) => GuestSyncAction::Advance,
-                    Err(_) => GuestSyncAction::Stop,
-                };
+                ));
             }
             if write_virtual_register(exit.encoding, exit.value) {
                 GuestSyncAction::Advance
@@ -595,6 +685,13 @@ fn emulate_system_register(
                 inject_undefined(context, exit.undefined)
             }
         }
+    }
+}
+
+fn software_interrupt_completion(result: Result<(), super::vm_vcpu::Error>) -> GuestSyncAction {
+    match result {
+        Ok(()) => GuestSyncAction::Advance,
+        Err(error) => GuestSyncAction::Stop(GuestSyncFailure::VirtualInterrupt(error)),
     }
 }
 

@@ -86,6 +86,7 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
     fi
     if grep -q 'HypeR: transition identity mappings retired' "$log" &&
         grep -q 'HypeR test: cross-CPU thread migration passed' "$log" &&
+        grep -q 'HypeR test: RISC-V IRQ-tail Fair vCPU preemption passed' "$log" &&
         grep -q "HypeR: loaded VM 'alpine' from boot ramdisk: 128 MiB RAM, 1 vCPU(s)" "$log" &&
         grep -q 'Booting Linux on hartid 0' "$log" &&
         grep -q 'Run /init as init process' "$log"; then

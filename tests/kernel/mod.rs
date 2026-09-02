@@ -9,8 +9,9 @@ mod channel_service;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod guest_entry_irq;
 mod guest_memory_access;
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 mod irq_tail_preemption;
+mod log_flush_barrier;
 mod native_syscall;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod native_user_entry;
@@ -26,6 +27,7 @@ mod thread_sleep;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod user_memory_access;
 mod vm_registry;
+mod vm_wfi_wait;
 mod wait_arbitration;
 
 pub(crate) fn run() {
@@ -33,6 +35,10 @@ pub(crate) fn run() {
     #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
     run_case("reschedule IPI runtime proof", reschedule_ipi::run);
     run_case("kernel scheduler/sync tests", scheduler_sync::run);
+    run_case(
+        "kernel log flush-barrier cancellation tests",
+        log_flush_barrier::run,
+    );
     run_case("kernel stack-model tests", stack_model::run);
     run_case("kernel thread-sleep tests", thread_sleep::run);
     run_case("kernel thread-migration tests", thread_migration::run);
@@ -61,9 +67,10 @@ pub(crate) fn run() {
         user_memory_access::run,
     );
     run_case("kernel VM registry tests", vm_registry::run);
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    run_case("kernel vCPU endpoint wait tests", vm_wfi_wait::run);
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     run_case(
-        "AArch64 IRQ-tail preemption probe installation",
+        "guest IRQ-tail preemption probe installation",
         irq_tail_preemption::install,
     );
     crate::hal::irq::mask_local();

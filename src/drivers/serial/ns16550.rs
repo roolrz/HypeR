@@ -414,10 +414,8 @@ impl Ns16550 {
 }
 
 impl Console for Ns16550 {
-    fn write_byte(&self, byte: u8) {
-        while !self.try_write(byte) {
-            core::hint::spin_loop();
-        }
+    fn try_write_byte(&self, byte: u8) -> bool {
+        self.try_write(byte)
     }
 }
 

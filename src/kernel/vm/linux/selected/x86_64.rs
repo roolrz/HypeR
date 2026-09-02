@@ -3,7 +3,8 @@
 
 //! Linux x86 boot-protocol image loading and initial long-mode state.
 
-use crate::arch::guest::{Error, PayloadLoadError, PayloadMemory, PayloadRange};
+use super::super::Error;
+use super::super::abi::{LinuxAbi, PayloadLoadError, PayloadMemory, PayloadRange};
 use hyper::vm::{bundle::VmBundle, exit::GuestPhysicalAddress};
 
 pub(crate) const LINUX_GUEST_RAM_IPA: u64 = 0;
@@ -23,8 +24,17 @@ pub(crate) const fn linux_guest_architecture() -> &'static str {
     "x86_64"
 }
 
+pub(crate) const fn linux_abi() -> LinuxAbi {
+    LinuxAbi::new(
+        linux_guest_architecture(),
+        LINUX_GUEST_RAM_IPA,
+        LINUX_GUEST_KERNEL_IPA,
+        LINUX_GUEST_TIMER_INTERRUPT,
+    )
+}
+
 pub(crate) fn validate_linux_host() -> Result<(), Error> {
-    if !super::guest_execution_available() {
+    if !crate::hal::vm::guest_execution_available() {
         return Err(Error::VirtualizationUnavailable);
     }
     Ok(())
@@ -33,7 +43,7 @@ pub(crate) fn validate_linux_host() -> Result<(), Error> {
 pub(crate) fn describe_linux_host(mut emit: impl FnMut(core::fmt::Arguments<'_>)) {
     emit(format_args!(
         "HypeR: {} guest-execution backend selected",
-        super::virtualization_backend_name()
+        crate::hal::vm::virtualization_backend_name()
     ));
 }
 
@@ -141,11 +151,19 @@ pub(crate) fn load_linux_payload<Memory: PayloadMemory>(
     Ok(())
 }
 
-pub(crate) fn prepare_linux_vcpu_context() -> super::VcpuContext {
-    let mut context = super::VcpuContext::new(LINUX_GUEST_KERNEL_IPA + 0x200);
-    context.general[4] = GUEST_STACK_TOP;
-    context.general[6] = BOOT_PARAMS_IPA;
-    context
+pub(crate) fn prepare_linux_vcpu_context() -> Result<crate::hal::vm::VcpuContext, Error> {
+    use crate::hal::vm::InitialRegisterAssignment as Register;
+    const RSP: usize = 4;
+    const RSI: usize = 6;
+
+    crate::hal::vm::prepare_initial_context(
+        LINUX_GUEST_KERNEL_IPA + 0x200,
+        &[
+            Register::new(RSP, GUEST_STACK_TOP),
+            Register::new(RSI, BOOT_PARAMS_IPA),
+        ],
+    )
+    .map_err(|_| Error::InvalidLayout)
 }
 
 pub(crate) fn describe_linux_guest_layout(

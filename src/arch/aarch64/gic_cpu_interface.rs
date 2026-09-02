@@ -162,6 +162,19 @@ pub fn notify_kernel_rpc(cpu: CpuIndex, reasons: u8) -> bool {
 /// affinity or an Aff0 value that requires unsupported range selection, so the
 /// caller can retain the pending flag and use a broader wakeup mechanism.
 pub fn notify_reschedule(cpu: CpuIndex) -> bool {
+    notify_with_reschedule_sgi(cpu)
+}
+
+/// Prompts a running guest to leave lower EL for durable VM reconciliation.
+///
+/// This shares the already-configured reschedule SGI, whose handler carries
+/// no scheduler state. Kernel IRQ-tail policy independently observes the
+/// VM-owned reconcile publication.
+pub(super) fn notify_guest_exit(cpu: CpuIndex) -> bool {
+    notify_with_reschedule_sgi(cpu)
+}
+
+fn notify_with_reschedule_sgi(cpu: CpuIndex) -> bool {
     let Some(affinity) = super::smp::gic_affinity(cpu.get()) else {
         return false;
     };
@@ -172,11 +185,12 @@ pub fn notify_reschedule(cpu: CpuIndex) -> bool {
         return false;
     };
 
-    // The scheduler publishes the pending flag with Release ordering. DSB
-    // ISHST completes prior stores before the GIC observes the SGI write, so a
-    // target cannot consume the one-shot interrupt and then observe stale
-    // shared state. ICC_SGI1R_EL1 does not change instruction context, so no
-    // post-write ISB is required.
+    // The caller Release-publishes its durable condition: scheduler pending
+    // for rescheduling, or VM-owned reconcile work for a guest exit. DSB ISHST
+    // completes prior stores before the GIC observes the SGI write, so a target
+    // cannot consume the one-shot interrupt and then observe stale shared
+    // state. ICC_SGI1R_EL1 does not change instruction context, so no post-write
+    // ISB is required.
     // SAFETY: The GICv3 system-register interface is initialized before the
     // reschedule interrupt is registered or any secondary becomes schedulable.
     unsafe {

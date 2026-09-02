@@ -139,7 +139,7 @@ case "$arch" in
         grep -Eq '[[:space:]]ic[[:space:]]+ivau,' "$instructions_file"
         grep -Eq '[[:space:]]ic[[:space:]]+ialluis' "$instructions_file"
         if ! awk '
-            /<aarch64_enter_guest>:/ { in_entry = 1; next }
+            /<aarch64_run_guest>:/ { in_entry = 1; next }
             in_entry && /^$/ { exit }
             in_entry {
                 instruction = tolower($0)

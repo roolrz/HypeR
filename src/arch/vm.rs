@@ -23,27 +23,50 @@ pub use super::imp::{
 
 pub(crate) use super::imp::{
     GuestValidationError as RegisterValidationError,
-    InterruptVirtualizationError as InterruptInitializationError, Stage2AddressSpace, Stage2Error,
-    VcpuContext, VirtualDeviceInitializationError as DeviceError, VirtualInterruptError,
+    InterruptVirtualizationError as InterruptInitializationError, PreparedInterruptVirtualization,
+    Stage2AddressSpace, Stage2Error, VcpuContext, VirtualDeviceInitializationError as DeviceError,
+    VirtualInterruptError,
 };
 
 #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(crate) use super::imp::{GuestSyncAction, GuestSyncExit, handle_guest_sync};
 
 #[cfg(CONFIG_ARCH_AARCH64)]
-pub(crate) use super::imp::update_guest_device_interrupt;
+pub(crate) use super::imp::{
+    GicAccessError, GuestAdministrativeStopReason, GuestRunError, GuestRunExit,
+    GuestStage2RetirementRequest, GuestSyncFailure, GuestSynchronousTerminal, GuestTerminalCause,
+    GuestWaitReason, StoppedDeactivationFailure, StoppedGuestRun, access_guest_gic,
+    deactivate_stopped_vcpu_hardware, reconcile_active_interrupts, request_guest_exit,
+    update_guest_device_interrupt, update_saved_guest_device_interrupt,
+};
+
+#[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) fn prepare_guest_stage2_retirement(
+    address_space: &Stage2AddressSpace,
+) -> GuestStage2RetirementRequest {
+    address_space.retirement_request()
+}
+
+#[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) fn service_guest_stage2_retirement(request: GuestStage2RetirementRequest) {
+    super::imp::retire_guest_stage2_local(request)
+}
 
 pub(crate) use super::imp::{
+    commit_interrupt_virtualization as commit_interrupts,
     handle_guest_virtual_timer_interrupt as handle_virtual_timer_interrupt,
     handle_virtualization_maintenance_interrupt as handle_maintenance_interrupt,
-    initialize_interrupt_virtualization as initialize_interrupts,
     initialize_virtual_devices as initialize_devices, interrupt_virtualization_description,
+    prepare_interrupt_virtualization as prepare_interrupts,
     prepare_interrupts_for_guest_entry as prepare_interrupts_for_entry,
     quiesce_virtual_interrupt_delivery, validate_vsysreg as validate_register_interface,
 };
 
-#[cfg(feature = "kernel-self-test")]
+#[cfg(any(CONFIG_ARCH_X86_64, feature = "kernel-self-test"))]
 pub(crate) use super::imp::guest_execution_available;
+
+#[cfg(CONFIG_ARCH_X86_64)]
+pub(crate) use super::imp::virtualization_backend_name;
 
 pub(crate) use super::imp::{
     activate_vcpu_hardware, deactivate_vcpu_hardware,

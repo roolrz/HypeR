@@ -137,10 +137,8 @@ pub(super) fn run() -> Result<(), Error> {
     exercise_completion_events()?;
     exercise_wait_queue_wake_all()?;
     let stats = super::support::quiesce_workers()?;
-    if stats.ready != 0
-        || stats.blocked != 0
-        || stats.real_time_class_threads + stats.fair_class_threads + stats.idle_class_threads
-            != stats.threads
+    if stats.real_time_class_threads + stats.fair_class_threads + stats.idle_class_threads
+        != stats.threads
         || stats.idle_class_threads != stats.idle
     {
         return Err(Error::StateMismatch);

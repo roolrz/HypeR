@@ -5,13 +5,120 @@
 
 #include "asm_constants.h"
 
+.macro SAVE_FLOATING base, floating_offset, fcsr_offset
+    fsd f0, \floating_offset + 0(\base)
+    fsd f1, \floating_offset + 8(\base)
+    fsd f2, \floating_offset + 16(\base)
+    fsd f3, \floating_offset + 24(\base)
+    fsd f4, \floating_offset + 32(\base)
+    fsd f5, \floating_offset + 40(\base)
+    fsd f6, \floating_offset + 48(\base)
+    fsd f7, \floating_offset + 56(\base)
+    fsd f8, \floating_offset + 64(\base)
+    fsd f9, \floating_offset + 72(\base)
+    fsd f10, \floating_offset + 80(\base)
+    fsd f11, \floating_offset + 88(\base)
+    fsd f12, \floating_offset + 96(\base)
+    fsd f13, \floating_offset + 104(\base)
+    fsd f14, \floating_offset + 112(\base)
+    fsd f15, \floating_offset + 120(\base)
+    fsd f16, \floating_offset + 128(\base)
+    fsd f17, \floating_offset + 136(\base)
+    fsd f18, \floating_offset + 144(\base)
+    fsd f19, \floating_offset + 152(\base)
+    fsd f20, \floating_offset + 160(\base)
+    fsd f21, \floating_offset + 168(\base)
+    fsd f22, \floating_offset + 176(\base)
+    fsd f23, \floating_offset + 184(\base)
+    fsd f24, \floating_offset + 192(\base)
+    fsd f25, \floating_offset + 200(\base)
+    fsd f26, \floating_offset + 208(\base)
+    fsd f27, \floating_offset + 216(\base)
+    fsd f28, \floating_offset + 224(\base)
+    fsd f29, \floating_offset + 232(\base)
+    fsd f30, \floating_offset + 240(\base)
+    fsd f31, \floating_offset + 248(\base)
+    frcsr t0
+    sw t0, \fcsr_offset(\base)
+.endm
+
+.macro LOAD_FLOATING base, floating_offset, fcsr_offset
+    lw t0, \fcsr_offset(\base)
+    fscsr t0
+    fld f0, \floating_offset + 0(\base)
+    fld f1, \floating_offset + 8(\base)
+    fld f2, \floating_offset + 16(\base)
+    fld f3, \floating_offset + 24(\base)
+    fld f4, \floating_offset + 32(\base)
+    fld f5, \floating_offset + 40(\base)
+    fld f6, \floating_offset + 48(\base)
+    fld f7, \floating_offset + 56(\base)
+    fld f8, \floating_offset + 64(\base)
+    fld f9, \floating_offset + 72(\base)
+    fld f10, \floating_offset + 80(\base)
+    fld f11, \floating_offset + 88(\base)
+    fld f12, \floating_offset + 96(\base)
+    fld f13, \floating_offset + 104(\base)
+    fld f14, \floating_offset + 112(\base)
+    fld f15, \floating_offset + 120(\base)
+    fld f16, \floating_offset + 128(\base)
+    fld f17, \floating_offset + 136(\base)
+    fld f18, \floating_offset + 144(\base)
+    fld f19, \floating_offset + 152(\base)
+    fld f20, \floating_offset + 160(\base)
+    fld f21, \floating_offset + 168(\base)
+    fld f22, \floating_offset + 176(\base)
+    fld f23, \floating_offset + 184(\base)
+    fld f24, \floating_offset + 192(\base)
+    fld f25, \floating_offset + 200(\base)
+    fld f26, \floating_offset + 208(\base)
+    fld f27, \floating_offset + 216(\base)
+    fld f28, \floating_offset + 224(\base)
+    fld f29, \floating_offset + 232(\base)
+    fld f30, \floating_offset + 240(\base)
+    fld f31, \floating_offset + 248(\base)
+.endm
+
 .section .text.guest, "ax"
 .balign 4
 .global riscv64_enter_guest
 .type riscv64_enter_guest, @function
 riscv64_enter_guest:
+    csrci sstatus, SSTATUS_SIE
     mv t6, a0
-    sd tp, -8(sp)
+    addi sp, sp, -GUEST_HS_ANCHOR_SIZE
+    sd ra, GUEST_HS_ANCHOR_RA_OFFSET(sp)
+    sd s0, GUEST_HS_ANCHOR_S0_OFFSET + 0(sp)
+    sd s1, GUEST_HS_ANCHOR_S0_OFFSET + 8(sp)
+    sd s2, GUEST_HS_ANCHOR_S0_OFFSET + 16(sp)
+    sd s3, GUEST_HS_ANCHOR_S0_OFFSET + 24(sp)
+    sd s4, GUEST_HS_ANCHOR_S0_OFFSET + 32(sp)
+    sd s5, GUEST_HS_ANCHOR_S0_OFFSET + 40(sp)
+    sd s6, GUEST_HS_ANCHOR_S0_OFFSET + 48(sp)
+    sd s7, GUEST_HS_ANCHOR_S0_OFFSET + 56(sp)
+    sd s8, GUEST_HS_ANCHOR_S0_OFFSET + 64(sp)
+    sd s9, GUEST_HS_ANCHOR_S0_OFFSET + 72(sp)
+    sd s10, GUEST_HS_ANCHOR_S0_OFFSET + 80(sp)
+    sd s11, GUEST_HS_ANCHOR_S0_OFFSET + 88(sp)
+    sd gp, GUEST_HS_ANCHOR_GP_OFFSET(sp)
+    sd tp, GUEST_HS_ANCHOR_TP_OFFSET(sp)
+    sd t6, GUEST_HS_ANCHOR_CONTEXT_OFFSET(sp)
+    csrr t0, sstatus
+    li t1, (3 << 13)
+    and t0, t0, t1
+    sd t0, GUEST_HS_ANCHOR_FS_OFFSET(sp)
+    csrs sstatus, t1
+    SAVE_FLOATING sp, GUEST_HS_ANCHOR_FLOATING_OFFSET, GUEST_HS_ANCHOR_FCSR_OFFSET
+    csrr t0, scounteren
+    sd t0, GUEST_HS_ANCHOR_SCOUNTEREN_OFFSET(sp)
+    csrr t0, senvcfg
+    sd t0, GUEST_HS_ANCHOR_SENVCFG_OFFSET(sp)
+
+    # Guest floating state is loaded only after the complete host ABI image is
+    # recoverable from the anchor. Trap entry performs the inverse transition
+    # before calling Rust policy.
+    ld t6, GUEST_HS_ANCHOR_CONTEXT_OFFSET(sp)
+    LOAD_FLOATING t6, VCPU_FLOATING_OFFSET, VCPU_FCSR_OFFSET
 
     ld t0, VCPU_VSSTATUS_OFFSET(t6)
     csrw vsstatus, t0
@@ -27,8 +134,22 @@ riscv64_enter_guest:
     csrw vscause, t0
     ld t0, VCPU_VSTVAL_OFFSET(t6)
     csrw vstval, t0
+    li t0, HVIP_GUEST_MASK
+    csrc hvip, t0
+    ld t1, VCPU_HVIP_OFFSET(t6)
+    and t1, t1, t0
+    csrs hvip, t1
     ld t0, VCPU_VSATP_OFFSET(t6)
     csrw vsatp, t0
+    hfence.vvma zero, zero
+    ld t0, VCPU_SCOUNTEREN_OFFSET(t6)
+    csrw scounteren, t0
+    ld t0, VCPU_SENVCFG_OFFSET(t6)
+    csrw senvcfg, t0
+    li t0, (1 << 63)
+    csrs henvcfg, t0
+    ld t0, VCPU_VSTIMECMP_OFFSET(t6)
+    csrw 0x24d, t0
 
     # Delegate exceptions handled by a normal supervisor kernel. Guest
     # supervisor ecalls and guest-page faults remain in HS mode for SBI and
@@ -57,8 +178,12 @@ riscv64_enter_guest:
     ld t0, VCPU_PC_OFFSET(t6)
     csrw sepc, t0
 
-    # Preserve the HS stack for trap entry before loading guest registers.
+    # Preserve the reserved HS anchor for trap entry before loading guest
+    # registers. SPIE carries the desired HS interrupt-enabled state across the
+    # initial sret into VS mode.
     csrw sscratch, sp
+    li t0, SSTATUS_SPIE
+    csrs sstatus, t0
     ld ra, 8(t6)
     ld sp, 16(t6)
     ld gp, 24(t6)
@@ -93,9 +218,22 @@ riscv64_enter_guest:
     sret
 .size riscv64_enter_guest, . - riscv64_enter_guest
 
+.global riscv64_restore_host_floating_point
+.type riscv64_restore_host_floating_point, @function
+riscv64_restore_host_floating_point:
+    li t0, (3 << 13)
+    csrs sstatus, t0
+    LOAD_FLOATING a0, GUEST_HS_ANCHOR_FLOATING_OFFSET, GUEST_HS_ANCHOR_FCSR_OFFSET
+    ret
+.size riscv64_restore_host_floating_point, . - riscv64_restore_host_floating_point
+
 .global riscv64_activate_stage2
 .type riscv64_activate_stage2, @function
 riscv64_activate_stage2:
+    # The old VS root must not remain live while HGATP changes: speculative
+    # VS-stage walks could otherwise populate translations under the new VMID.
+    csrw vsatp, zero
+    hfence.vvma zero, zero
     fence rw, rw
     csrw hgatp, a0
     hfence.gvma zero, zero

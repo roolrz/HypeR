@@ -73,10 +73,6 @@ The selected binary HAL exposes eleven enforced capability modules:
 - `hal::exception` owns exception-vector installation, crash-context capture,
   emergency-stack entry, and crash-stop delivery; stop/resume decisions remain
   behind the kernel entry adapters;
-- `hal::guest` owns the selected Linux guest boot ABI: guest architecture
-  identity, typed IPA layout, image validation/loading, boot context, and
-  guest-layout diagnostics. Generic VM bundle parsing remains in `vm`, while
-  hardware execution remains in `hal::vm`;
 - `hal::irq` owns ordinary reversible local masking, fail-stop source masking,
   host-controller construction, platform interrupt decoding, and targeted
   reschedule notification;
@@ -90,12 +86,20 @@ The selected binary HAL exposes eleven enforced capability modules:
   architecture diagnostics;
 - `hal::time` owns the monotonic counter, one-shot comparator, and validated
   kernel timer description;
+- `hal::user` owns user-address limits, prepared translation roots,
+  CPU-affine activation tokens, user-context entry, and typed return
+  completion; process policy and syscall dispatch remain in the kernel;
 - `hal::vm` owns stage-2 translation, vCPU entry, virtual interrupt hardware,
   guest timer integration, and architecture-local exit completion. Reusable
   device models live in `vm`; each installed VM owns its mutable instances in
   `kernel::vm::device`. Guest exits cross registered entry services as owned,
   fixed-width events with exhaustive actions; raw frames and backend
   completion state remain architecture-private.
+
+Linux guest architecture identity, IPA layout, image validation/loading, and
+boot-register plans live in `kernel::vm::linux`. Its narrow `selected` module
+is the guest-ABI build selection point; the HAL only realizes the resulting
+register plan and supplies host virtualization mechanisms.
 
 Only files below `src/hal/selected` may call the topical `crate::arch`
 facades. Conversely, no selected-HAL file may call `crate::kernel`. The rule
@@ -210,6 +214,24 @@ SMP admission publishes a `FrozenTopology` once. `HypeR` has no CPU hotplug:
 late replicated-local transactions snapshot this immutable participant set. A
 future hotplug implementation must either join the in-flight snapshot or
 replay every live local mapping before publishing a new CPU online.
+
+## Runtime allocation
+
+The central runtime heap is the sole owner of buddy free lists, slab headers,
+partial-slab topology, and page-owner accounting. After SMP admission freezes
+the participating CPU set, the kernel enables bounded per-CPU magazines for
+the smallest slab classes. A cached object remains reserved in its central slab
+and is represented by one linear ownership token; its backing page therefore
+cannot return to the buddy allocator while any magazine retains an object.
+
+Cache access requires a scheduler pin and local interrupt masking around only
+the selected slot mutation. Central heap operations never run while a local
+slot lock is held. Cross-CPU deallocation places the object in the freeing
+CPU's magazine, and memory-pressure paths may detach all magazines before one
+central allocation retry. An explicit reclaim pass supports diagnostics and
+pressure recovery but is not a teardown barrier while allocations continue.
+The current immutable topology has no offline transition; future CPU hotplug
+must quiesce and drain a departing CPU before withdrawing its slot.
 
 ## Kernel RPC and replicated-local IRQs
 

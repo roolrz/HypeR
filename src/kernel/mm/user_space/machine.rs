@@ -56,6 +56,18 @@ pub(crate) enum Error {
     Vmo(VmoError<KernelPageError, ResourceError>),
 }
 
+#[must_use = "recover and retry the exact native address-space owner"]
+pub(crate) struct RetirementFailure {
+    error: Error,
+    owner: UniqueFallibleArc<NativeAddressSpace>,
+}
+
+impl RetirementFailure {
+    pub(crate) fn into_parts(self) -> (Error, UniqueFallibleArc<NativeAddressSpace>) {
+        (self.error, self.owner)
+    }
+}
+
 impl From<crate::hal::user::AddressSpaceError> for Error {
     fn from(error: crate::hal::user::AddressSpaceError) -> Self {
         Self::Hal(error)
@@ -98,84 +110,47 @@ impl From<ResourceError> for Error {
     }
 }
 
-enum MachineIdentifier {
-    Vhe(ActiveIdentifier<HostAsid>),
-    Nvhe(ActiveIdentifier<Stage2Vmid>),
+type MachineIdentifier = crate::hal::user::AddressSpaceIdentifier<
+    ActiveIdentifier<HostAsid>,
+    ActiveIdentifier<Stage2Vmid>,
+>;
+type RetiringMachineIdentifier = crate::hal::user::AddressSpaceIdentifier<
+    RetiringIdentifier<HostAsid>,
+    RetiringIdentifier<Stage2Vmid>,
+>;
+type ReservedMachineIdentifier = crate::hal::user::AddressSpaceIdentifier<
+    IdentifierReservation<HostAsid>,
+    IdentifierReservation<Stage2Vmid>,
+>;
+
+fn activate_identifier(identifier: ReservedMachineIdentifier) -> Result<MachineIdentifier, Error> {
+    identifier.try_map(
+        |identifier| identifier.activate().map_err(Error::Identifier),
+        |identifier| identifier.activate().map_err(Error::Identifier),
+    )
 }
 
-enum RetiringMachineIdentifier {
-    Vhe(RetiringIdentifier<HostAsid>),
-    Nvhe(RetiringIdentifier<Stage2Vmid>),
+fn begin_identifier_retirement(
+    identifier: MachineIdentifier,
+) -> Result<RetiringMachineIdentifier, Error> {
+    identifier.try_map(
+        |identifier| identifier.begin_retirement().map_err(Error::Identifier),
+        |identifier| identifier.begin_retirement().map_err(Error::Identifier),
+    )
 }
 
-impl MachineIdentifier {
-    fn value(&self) -> u16 {
-        match self {
-            Self::Vhe(identifier) => identifier.value(),
-            Self::Nvhe(identifier) => identifier.value(),
-        }
-    }
-
-    fn generation(&self) -> u64 {
-        match self {
-            Self::Vhe(identifier) => identifier.generation(),
-            Self::Nvhe(identifier) => identifier.generation(),
-        }
-    }
-
-    fn begin_retirement(self) -> Result<RetiringMachineIdentifier, Error> {
-        match self {
-            Self::Vhe(identifier) => identifier
-                .begin_retirement()
-                .map(RetiringMachineIdentifier::Vhe),
-            Self::Nvhe(identifier) => identifier
-                .begin_retirement()
-                .map(RetiringMachineIdentifier::Nvhe),
-        }
-        .map_err(Into::into)
-    }
-}
-
-impl RetiringMachineIdentifier {
-    unsafe fn complete(self) -> Result<(), Error> {
-        match self {
-            // SAFETY: The caller supplies the acknowledged invalidation proof
-            // for the matching architecture translation namespace.
-            Self::Vhe(identifier) => unsafe { identifier.complete() },
+unsafe fn complete_identifier_retirement(
+    identifier: RetiringMachineIdentifier,
+) -> Result<(), Error> {
+    identifier
+        .try_map(
+            // SAFETY: The caller supplies acknowledged invalidation for the
+            // matching host-stage identifier namespace.
+            |identifier| unsafe { identifier.complete() }.map_err(Error::Identifier),
             // SAFETY: The same proof covers the shared native/guest VMID.
-            Self::Nvhe(identifier) => unsafe { identifier.complete() },
-        }
-        .map_err(Into::into)
-    }
-}
-
-enum ReservedMachineIdentifier {
-    Vhe(IdentifierReservation<HostAsid>),
-    Nvhe(IdentifierReservation<Stage2Vmid>),
-}
-
-impl ReservedMachineIdentifier {
-    fn value(&self) -> u16 {
-        match self {
-            Self::Vhe(identifier) => identifier.value(),
-            Self::Nvhe(identifier) => identifier.value(),
-        }
-    }
-
-    fn generation(&self) -> u64 {
-        match self {
-            Self::Vhe(identifier) => identifier.generation(),
-            Self::Nvhe(identifier) => identifier.generation(),
-        }
-    }
-
-    fn activate(self) -> Result<MachineIdentifier, Error> {
-        match self {
-            Self::Vhe(identifier) => identifier.activate().map(MachineIdentifier::Vhe),
-            Self::Nvhe(identifier) => identifier.activate().map(MachineIdentifier::Nvhe),
-        }
-        .map_err(Into::into)
-    }
+            |identifier| unsafe { identifier.complete() }.map_err(Error::Identifier),
+        )
+        .map(|_| ())
 }
 
 struct TablePage {
@@ -287,61 +262,48 @@ impl NativeAddressSpace {
         domain: ResourceDomain,
         range: UserSlice,
     ) -> Result<UniqueFallibleArc<Self>, Error> {
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
-        {
-            let _ = (domain, range);
-            Err(Error::Unsupported)
-        }
-        #[cfg(CONFIG_ARCH_AARCH64)]
-        {
-            let owner_bytes = u64::try_from(UniqueFallibleArc::<Self>::allocation_size())
-                .map_err(|_| Error::SizeOverflow)?;
-            let owner_charge = domain
-                .reserve(
-                    ResourceAmount::ZERO
-                        .with(ResourceKind::KernelObjects, 1)
-                        .with(ResourceKind::KernelMemoryBytes, owner_bytes),
-                )?
-                .commit();
-            // Reserve the final pinned owner before publishing any root or
-            // identifier, so later allocation failure cannot strand hardware.
-            let owner: UniqueFallibleArc<core::mem::MaybeUninit<Self>> =
-                UniqueFallibleArc::try_new_uninit().map_err(|_| Error::Allocation)?;
-            let kind = crate::hal::user::translation_kind()?;
-            let window = super::address_window().map_err(|_| Error::Unsupported)?;
-            let account = DomainAccount::new(domain);
-            let logical =
-                UserAddressSpace::try_new(window, range, KernelPageBackend, account.clone())?;
-            let reserved = match kind {
-                crate::hal::user::TranslationKind::VheHostStage1 => {
-                    ReservedMachineIdentifier::Vhe(crate::kernel::mm::translation_id::reserve(8)?)
-                }
-                crate::hal::user::TranslationKind::NvheStage2Only => {
-                    ReservedMachineIdentifier::Nvhe(crate::kernel::mm::translation_id::reserve(8)?)
-                }
-            };
-            let initial_epoch = logical.mapping_epoch();
-            let image = build_image(
-                kind,
-                reserved.value(),
-                reserved.generation(),
-                initial_epoch,
-                0,
-                account.clone(),
-                |_| {},
-            )?;
-            let identifier = reserved.activate()?;
-            Ok(owner.write(Self {
-                logical: ManuallyDrop::new(logical),
-                account,
-                identifier: ManuallyDrop::new(identifier),
-                state: ManuallyDrop::new(InterruptSpinLock::new(MachineState {
-                    current: image,
-                    residency: AddressSpaceResidency::new(initial_epoch),
-                })),
-                _owner_charge: owner_charge,
-            }))
-        }
+        let plan = crate::hal::user::address_space_plan()?;
+        let owner_bytes = u64::try_from(UniqueFallibleArc::<Self>::allocation_size())
+            .map_err(|_| Error::SizeOverflow)?;
+        let owner_charge = domain
+            .reserve(
+                ResourceAmount::ZERO
+                    .with(ResourceKind::KernelObjects, 1)
+                    .with(ResourceKind::KernelMemoryBytes, owner_bytes),
+            )?
+            .commit();
+        // Reserve the final pinned owner before publishing any root or
+        // identifier, so later allocation failure cannot strand hardware.
+        let owner: UniqueFallibleArc<core::mem::MaybeUninit<Self>> =
+            UniqueFallibleArc::try_new_uninit().map_err(|_| Error::Allocation)?;
+        let window = super::address_window(plan.address_limit())?;
+        let account = DomainAccount::new(domain);
+        let logical = UserAddressSpace::try_new(window, range, KernelPageBackend, account.clone())?;
+        let reserved = plan.reserve_identifier(
+            crate::kernel::mm::translation_id::reserve,
+            crate::kernel::mm::translation_id::reserve,
+        )?;
+        let initial_epoch = logical.mapping_epoch();
+        let image = build_image(
+            &reserved,
+            |identifier| (identifier.value(), identifier.generation()),
+            |identifier| (identifier.value(), identifier.generation()),
+            initial_epoch,
+            0,
+            account.clone(),
+            |_| {},
+        )?;
+        let identifier = activate_identifier(reserved)?;
+        Ok(owner.write(Self {
+            logical: ManuallyDrop::new(logical),
+            account,
+            identifier: ManuallyDrop::new(identifier),
+            state: ManuallyDrop::new(InterruptSpinLock::new(MachineState {
+                current: image,
+                residency: AddressSpaceResidency::try_new(initial_epoch)?,
+            })),
+            _owner_charge: owner_charge,
+        }))
     }
 
     pub(super) fn logical(&self) -> &LogicalAddressSpace {
@@ -407,14 +369,10 @@ impl NativeAddressSpace {
                 .ok_or(Error::SizeOverflow)?;
             mappings.push((snapshot, pages));
         }
-        let kind = match &*self.identifier {
-            MachineIdentifier::Vhe(_) => crate::hal::user::TranslationKind::VheHostStage1,
-            MachineIdentifier::Nvhe(_) => crate::hal::user::TranslationKind::NvheStage2Only,
-        };
         let image = build_image(
-            kind,
-            self.identifier.value(),
-            self.identifier.generation(),
+            &self.identifier,
+            |identifier| (identifier.value(), identifier.generation()),
+            |identifier| (identifier.value(), identifier.generation()),
             logical.next_epoch(),
             leaf_count,
             self.account.clone(),
@@ -498,22 +456,30 @@ impl NativeAddressSpace {
     /// tagged invalidation.
     // Returning the owner is intentional: a recoverable pre-publication Busy
     // result must preserve the address space without allocation or leakage.
-    pub(crate) fn retire(&mut self) -> Result<(), Error> {
+    pub(crate) fn retire(mut owner: UniqueFallibleArc<Self>) -> Result<(), RetirementFailure> {
         let mut transport =
             match crate::kernel::irq::cross_call::UserAddressSpaceTransaction::try_acquire() {
                 Ok(transport) => transport,
-                Err(()) => return Err(Error::Transport),
+                Err(()) => {
+                    return Err(RetirementFailure {
+                        error: Error::Transport,
+                        owner,
+                    });
+                }
             };
-        let cut_and_image = self.state.with(|state| {
+        let cut_and_image = owner.state.with(|state| {
             let cut = state.residency.begin_retirement(state.current.epoch)?;
             Ok::<_, Error>((cut, state.current.clone()))
         });
-        let (cut, image) = cut_and_image?;
+        let (cut, image) = match cut_and_image {
+            Ok(value) => value,
+            Err(error) => return Err(RetirementFailure { error, owner }),
+        };
 
-        // SAFETY: `self` is consumed, admission is permanently closed, and no
+        // SAFETY: `owner` is consumed, admission is permanently closed, and no
         // ActiveNativeAddressSpace borrow can coexist with this move.
-        let identifier = unsafe { ManuallyDrop::take(&mut self.identifier) };
-        let retiring = match identifier.begin_retirement() {
+        let identifier = unsafe { ManuallyDrop::take(&mut owner.identifier) };
+        let retiring = match begin_identifier_retirement(identifier) {
             Ok(retiring) => retiring,
             Err(_) => crate::kernel::crash::fatal(format_args!(
                 "HypeR: native translation identifier retirement is inconsistent"
@@ -521,7 +487,7 @@ impl NativeAddressSpace {
         };
         let outcome = transport.execute(
             crate::kernel::irq::cross_call::UserAddressSpaceExecution {
-                owner: self.logical.id().get(),
+                owner: owner.logical.id().get(),
                 epoch: image.epoch,
                 new_epoch: image.epoch,
                 active_target: false,
@@ -538,9 +504,18 @@ impl NativeAddressSpace {
                 "HypeR: native address-space final invalidation was not acknowledged"
             ));
         }
-        // SAFETY: Admission remains permanently closed and every resident CPU
+        if owner
+            .state
+            .with(|state| state.residency.finish_retirement(cut))
+            .is_err()
+        {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: native address-space residency retirement is inconsistent"
+            ));
+        }
+        // SAFETY: Residency is now irreversibly retired and every target
         // acknowledged invalidating this exact identifier before reuse.
-        if unsafe { retiring.complete() }.is_err() {
+        if unsafe { complete_identifier_retirement(retiring) }.is_err() {
             crate::kernel::crash::fatal(format_args!(
                 "HypeR: native translation identifier completion is inconsistent"
             ));
@@ -549,12 +524,13 @@ impl NativeAddressSpace {
         // SAFETY: The final invalidation acknowledged before these published
         // owners are extracted and destroyed. ManuallyDrop prevents `Drop`
         // from observing or releasing the moved fields a second time.
-        let state = unsafe { ManuallyDrop::take(&mut self.state) };
+        let state = unsafe { ManuallyDrop::take(&mut owner.state) };
         // SAFETY: The logical owner is protected by the same final quiescence.
-        let logical = unsafe { ManuallyDrop::take(&mut self.logical) };
+        let logical = unsafe { ManuallyDrop::take(&mut owner.logical) };
         drop(image);
         drop(state);
         drop(logical);
+        drop(owner);
         Ok(())
     }
 }
@@ -846,22 +822,17 @@ fn execute_cut(
     }
 }
 
-fn build_image(
-    kind: crate::hal::user::TranslationKind,
-    identifier: u16,
-    generation: u64,
+fn build_image<HostStage, SecondStage>(
+    identifier: &crate::hal::user::AddressSpaceIdentifier<HostStage, SecondStage>,
+    host_identity: impl FnOnce(&HostStage) -> (u16, u64),
+    second_identity: impl FnOnce(&SecondStage) -> (u16, u64),
     epoch: u64,
     leaf_count: usize,
     account: DomainAccount,
     enumerate: impl FnMut(&mut dyn FnMut(crate::hal::user::MappingPage)),
 ) -> Result<FallibleArc<MachineImage>, Error> {
-    let levels_per_leaf = match kind {
-        crate::hal::user::TranslationKind::VheHostStage1 => 3,
-        crate::hal::user::TranslationKind::NvheStage2Only => 2,
-    };
-    let capacity = leaf_count
-        .checked_mul(levels_per_leaf)
-        .and_then(|pages| pages.checked_add(1))
+    let capacity = identifier
+        .table_page_capacity(leaf_count)
         .ok_or(Error::SizeOverflow)?;
     let mut tables = TablePagePool::try_new(capacity, account.clone())?;
     let root = {
@@ -870,24 +841,12 @@ fn build_image(
         // and is moved intact into the resulting image through acknowledged
         // retirement.
         unsafe {
-            match kind {
-                crate::hal::user::TranslationKind::VheHostStage1 => {
-                    crate::hal::user::prepare_vhe_address_space(
-                        identifier,
-                        generation,
-                        enumerate,
-                        &mut allocator,
-                    )
-                }
-                crate::hal::user::TranslationKind::NvheStage2Only => {
-                    crate::hal::user::prepare_nvhe_address_space(
-                        identifier,
-                        generation,
-                        enumerate,
-                        &mut allocator,
-                    )
-                }
-            }
+            identifier.prepare_address_space(
+                host_identity,
+                second_identity,
+                enumerate,
+                &mut allocator,
+            )
         }
     };
     let root = match root {
@@ -1008,7 +967,7 @@ pub(crate) fn run_dormant_self_test() -> Result<(), Error> {
     let domain =
         ResourceDomain::try_new_root(crate::kernel::accounting::ResourceLimits::UNLIMITED)?;
     let range = UserSlice::new(UserAddress::new(0x30_0000), PAGE_SIZE)?;
-    let mut native = NativeAddressSpace::try_new(domain, range)?;
+    let native = NativeAddressSpace::try_new(domain, range)?;
     let vmo = WritableVmo::try_new(PAGE_SIZE, KernelPageBackend, native.account.clone())?;
     vmo.populate(0, PAGE_SIZE)
         .map_err(|error| Error::Vmo(error.cause))?;
@@ -1022,5 +981,11 @@ pub(crate) fn run_dormant_self_test() -> Result<(), Error> {
         Permissions::read_write(),
     )?;
     native.prepare_change(prepared)?.commit()?;
-    native.retire()
+    match NativeAddressSpace::retire(native) {
+        Ok(()) => Ok(()),
+        Err(failure) => {
+            let (error, _owner) = failure.into_parts();
+            Err(error)
+        }
+    }
 }

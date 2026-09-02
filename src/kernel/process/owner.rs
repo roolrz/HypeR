@@ -38,13 +38,13 @@ type ProcessLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
 static NEXT_PROCESS_ID: AtomicU64 = AtomicU64::new(1);
 
-const fn machine_matches_host(machine: MachineAbi) -> bool {
+fn machine_matches_host(machine: MachineAbi) -> bool {
     let requested = match machine {
         MachineAbi::Aarch64 => crate::hal::user::HostMachine::Aarch64,
         MachineAbi::Riscv64 => crate::hal::user::HostMachine::Riscv64,
         MachineAbi::X86_64 => crate::hal::user::HostMachine::X86_64,
     };
-    requested as u8 == crate::hal::user::host_machine() as u8
+    requested == crate::hal::user::host_machine()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1441,7 +1441,7 @@ impl Process {
         let Some(address_space) = address_space else {
             return Ok(ProcessRetirementStep::InProgress);
         };
-        let mut address_space = match address_space.try_into_unique() {
+        let address_space = match address_space.try_into_unique() {
             Ok(address_space) => address_space,
             Err(address_space) => {
                 self.inner
@@ -1450,16 +1450,18 @@ impl Process {
                 return Ok(ProcessRetirementStep::PendingReferences);
             }
         };
-        match address_space.retire() {
+        match NativeAddressSpace::retire(address_space) {
             Ok(()) => {
-                drop(address_space);
                 self.finish_retirement();
                 Ok(ProcessRetirementStep::Complete)
             }
-            Err(_) => Ok(ProcessRetirementStep::Retry(AddressSpaceRetirement {
-                process: self.clone(),
-                address_space: Some(address_space),
-            })),
+            Err(failure) => {
+                let (_, address_space) = failure.into_parts();
+                Ok(ProcessRetirementStep::Retry(AddressSpaceRetirement {
+                    process: self.clone(),
+                    address_space: Some(address_space),
+                }))
+            }
         }
     }
 
@@ -1807,17 +1809,17 @@ pub(crate) struct AddressSpaceRetirement {
 
 impl AddressSpaceRetirement {
     pub(crate) fn retry(mut self) -> Result<(), (Self, MachineError)> {
-        let mut address_space = match self.address_space.take() {
+        let address_space = match self.address_space.take() {
             Some(address_space) => address_space,
             None => process_invariant_violation(),
         };
-        match address_space.retire() {
+        match NativeAddressSpace::retire(address_space) {
             Ok(()) => {
-                drop(address_space);
                 self.process.finish_retirement();
                 Ok(())
             }
-            Err(error) => {
+            Err(failure) => {
+                let (error, address_space) = failure.into_parts();
                 self.address_space = Some(address_space);
                 Err((self, error))
             }
