@@ -98,7 +98,7 @@ mutate 'WFI must use the reserved endpoint timer before parking' \
     src/kernel/vm/vcpu/runner.rs 's/arm_wfi_timer/allocate_wfi_timer/'
 mutate 'WFI endpoint notification must use the registered-notification facade' \
     src/kernel/vm/endpoint.rs \
-    's/notify_registered_with(ticket, || {})/resolve_wait(ticket, crate::kernel::task::WaitOutcome::Notified)/'
+    's/notify_registered_fair_boundary(ticket)/resolve_wait(ticket, crate::kernel::task::WaitOutcome::Notified)/'
 mutate 'reserved expiry must claim ownership under the queue lock' \
     src/time/owned_queue.rs 's/claim(event, node.claim_context)/claim_after_unlock(event, node.claim_context)/'
 mutate 'abandoned reserved expiry must recycle its node' \

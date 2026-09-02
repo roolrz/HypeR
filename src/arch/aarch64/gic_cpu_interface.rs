@@ -88,6 +88,7 @@ impl CpuInterface for Aarch64GicCpuInterface {
         unsafe {
             asm!(
                 "msr ICC_EOIR1_EL1, {interrupt}",
+                "isb",
                 interrupt = in(reg) u64::from(interrupt),
                 options(nostack, preserves_flags)
             );

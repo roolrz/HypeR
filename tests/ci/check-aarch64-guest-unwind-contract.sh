@@ -218,7 +218,7 @@ require src/kernel/vm/endpoint.rs \
     '(?s)struct VcpuEndpoint \{.*timer: crate::kernel::time::ReservedTimer,.*id: u32,.*wait: InterruptSpinLock' \
     'endpoint timer ownership must drop before every field reachable by its callback'
 require src/kernel/vm/endpoint.rs \
-    '(?s)state\.publication\.signal\(\).*scheduler::notify_registered_with\(ticket, \|\| \{\}\)' \
+    '(?s)state\.publication\.signal\(\).*scheduler::notify_registered_fair_boundary\(ticket\)' \
     'endpoint publication must resolve the exact stored scheduler generation'
 reject src/kernel/vm/endpoint.rs \
     'scheduler::resolve_wait\([^\n]*WaitOutcome::Notified' \

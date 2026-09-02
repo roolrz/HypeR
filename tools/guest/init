@@ -11,5 +11,7 @@ export PATH=/usr/bin:/usr/sbin:/bin:/sbin
 
 echo "HypeR guest: /init reached"
 echo "HypeR guest: Linux userspace is running"
+/usr/bin/busybox sleep 1
+echo "HypeR guest: timer wakeup passed"
 
 /usr/bin/busybox sh

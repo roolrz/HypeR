@@ -183,6 +183,16 @@ fn lower_el_vector_does_not_determine_the_vhe_return_world() {
     );
     assert_eq!(guest & registers::HCR_EL2_TGE, 0);
     assert_ne!(guest & registers::HCR_EL2_VM, 0);
+    assert_ne!(
+        guest & registers::HCR_EL2_TWI,
+        0,
+        "guest entry must route WFI through the scheduler wait contract"
+    );
+    assert_ne!(
+        guest & registers::HCR_EL2_TWE,
+        0,
+        "guest entry must route WFE through explicit exit handling"
+    );
 }
 
 #[test]

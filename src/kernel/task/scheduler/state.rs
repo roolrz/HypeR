@@ -316,6 +316,12 @@ pub(super) struct ResolvedWait {
     pub ready: Option<ReadyOutcome>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WakePreemption {
+    Policy,
+    FairBoundary,
+}
+
 pub(super) enum VcpuStopTarget {
     Running(CpuIndex),
     Runnable {
@@ -1794,9 +1800,24 @@ impl Scheduler {
         outcome: WaitOutcome,
         on_commit: impl FnOnce(),
     ) -> Result<ResolvedWait, Error> {
+        self.resolve_wait_with_preemption(ticket, outcome, WakePreemption::Policy, on_commit)
+    }
+
+    /// Resolves one wait with an optional equal-Fair scheduling boundary.
+    ///
+    /// A Fair boundary expires the running Fair entity only after a blocked
+    /// Fair waiter becomes Ready. Real-time class ordering remains entirely
+    /// governed by [`SchedulingPolicy`].
+    pub fn resolve_wait_with_preemption(
+        &mut self,
+        ticket: WaitTicket,
+        outcome: WaitOutcome,
+        preemption: WakePreemption,
+        on_commit: impl FnOnce(),
+    ) -> Result<ResolvedWait, Error> {
         if let Ok(Some(cpu)) = self.cpu_lock_required_for(ticket.thread()) {
             return self.with_cpu_schedule_stored(cpu, |scheduler| {
-                scheduler.resolve_wait_with(ticket, outcome, on_commit)
+                scheduler.resolve_wait_with_preemption(ticket, outcome, preemption, on_commit)
             });
         }
         let pending = match self.thread(ticket.thread()) {
@@ -1846,10 +1867,17 @@ impl Scheduler {
                     scheduler_invariant(Error::InvalidWaitRegistration);
                 }
                 on_commit();
-                let ready = match self.make_ready_from_wait(ticket.thread()) {
+                let mut ready = match self.make_ready_from_wait(ticket.thread()) {
                     Ok(ready) => ready,
                     Err(error) => scheduler_invariant(error),
                 };
+                if preemption == WakePreemption::FairBoundary && !ready.should_preempt {
+                    ready.should_preempt =
+                        match self.expire_current_for_fair_wakeup(ticket.thread()) {
+                            Ok(should_preempt) => should_preempt,
+                            Err(error) => scheduler_invariant(error),
+                        };
+                }
                 Ok(ResolvedWait {
                     won: true,
                     ready: Some(ready),
@@ -2762,6 +2790,39 @@ impl Scheduler {
                 }
                 _ => Err(Error::InvalidThreadState),
             })?
+        })
+    }
+
+    /// Turns a latency-sensitive equal-Fair wakeup into a scheduling boundary.
+    ///
+    /// This is deliberately narrower than priority preemption: it neither
+    /// displaces real-time work nor changes the woken entity's queue position.
+    fn expire_current_for_fair_wakeup(&mut self, id: ThreadId) -> Result<bool, Error> {
+        let cpu = self
+            .registry
+            .with_thread(id, Thread::schedule_owner_cpu)?
+            .ok_or(Error::InvalidThreadState)?;
+        self.with_cpu_domain(cpu, |_scheduler, local| {
+            let candidate_is_fair = {
+                let threads = local.thread_authority();
+                threads.with_thread(id, |_thread, schedule| {
+                    schedule.scheduling_class() == SchedulingClass::Fair
+                })?
+            };
+            if !candidate_is_fair {
+                return Ok(false);
+            }
+            let current = local.current;
+            let mut threads = local.thread_authority();
+            threads.with_thread_mut(current, |_thread, schedule| {
+                if schedule.state != ThreadState::Running
+                    || schedule.scheduling_class() != SchedulingClass::Fair
+                {
+                    return false;
+                }
+                schedule.expire_fair_slice();
+                true
+            })
         })
     }
 

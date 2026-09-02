@@ -42,6 +42,11 @@ pub(crate) fn run() {
     run_case("kernel stack-model tests", stack_model::run);
     run_case("kernel thread-sleep tests", thread_sleep::run);
     run_case("kernel thread-migration tests", thread_migration::run);
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+    run_case(
+        "guest IRQ-tail preemption setup",
+        irq_tail_preemption::install,
+    );
     run_case(
         "kernel Native syscall validation tests",
         native_syscall::run,
@@ -68,17 +73,13 @@ pub(crate) fn run() {
     );
     run_case("kernel VM registry tests", vm_registry::run);
     run_case("kernel vCPU endpoint wait tests", vm_wfi_wait::run);
-    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
-    run_case(
-        "guest IRQ-tail preemption probe installation",
-        irq_tail_preemption::install,
-    );
     crate::hal::irq::mask_local();
     #[cfg(CONFIG_ARCH_AARCH64)]
     run_case(
         "AArch64 guest-entry IRQ mask contract",
         guest_entry_irq::run,
     );
+    crate::hal::irq::enable_local();
     crate::println!("HypeR test: scheduler ready/wait queues and sleeping sync passed");
     crate::println!("HypeR test: guarded thread, IRQ, and emergency stacks passed");
     crate::println!("HypeR test: deadline-based thread sleep passed");
