@@ -779,7 +779,13 @@ unsafe extern "C" {
 fn read_hcr_el2() -> u64 {
     let value: u64;
     // SAFETY: Reading HCR_EL2 is permitted in the kernel's EL2 execution mode.
-    unsafe { asm!("mrs {value}, hcr_el2", value = out(reg) value, options(nomem, nostack)) };
+    unsafe {
+        asm!(
+            "mrs {value}, HCR_EL2",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
     value
 }
 
