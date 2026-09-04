@@ -14,7 +14,7 @@ use core::ptr::NonNull;
 
 use hyper::cpu::CpuIndex;
 use hyper::sync::atomic::{AtomicUsize, Ordering};
-use hyper::sync::{DeferredWork, InterruptMaskGuard, InterruptSpinLock, WorkDisposition};
+use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
 
 use self::registry::ThreadReservation;
 use self::state::{PreparedContextSwitch, Scheduler};
@@ -50,9 +50,6 @@ type TransitionMaskState =
 
 static SCHEDULER: SchedulerLock = InterruptSpinLock::new(None);
 static RETIREMENTS_IN_PROGRESS: AtomicUsize = AtomicUsize::new(0);
-static RETIREMENT_WORK: DeferredWork = DeferredWork::new();
-static RETIREMENT_WAKE: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
-const RETIREMENTS_PER_BATCH: usize = 16;
 
 /// Locks scheduler-detached resources into the observable retirement epoch.
 ///
@@ -115,11 +112,14 @@ impl DormantUserThread {
 
     /// Arms explicit reaper retirement and ends rollback before Process
     /// membership performs its final publication.
-    pub(in crate::kernel) fn commit_before_process_publication(mut self) {
+    pub(in crate::kernel) fn commit_before_process_publication(
+        mut self,
+        ownership: crate::kernel::process::UserExecutionOwnership,
+    ) {
         let result = SCHEDULER.with(|slot| {
             slot.as_mut()
                 .ok_or(Error::NotInitialized)?
-                .arm_dormant_user(self.thread)
+                .arm_dormant_user(self.thread, ownership)
         });
         if result.is_err() {
             crate::hal::cpu::halt();
@@ -278,6 +278,7 @@ pub(crate) struct CurrentVcpu {
 
 pub(crate) struct CurrentUser {
     pub thread: ThreadId,
+    pub object: crate::kernel::process::UserThread,
     pub execution: NonNull<crate::kernel::process::UserExecution>,
     pub stack: (usize, usize),
 }
@@ -419,30 +420,6 @@ pub fn initialize() -> Result<Capabilities, Error> {
     Ok(capabilities)
 }
 
-/// Creates the sole owner allowed to perform lock-external Thread teardown.
-pub(crate) fn initialize_retirement_worker() -> Result<(), Error> {
-    let worker = kthread_create("kreaper", retirement_worker_entry, 0)?;
-    if !RETIREMENT_WORK.claim_initial_worker() {
-        return Err(Error::AlreadyInitialized);
-    }
-    if !thread_ready(worker)? {
-        return Err(Error::InvalidThreadState);
-    }
-    Ok(())
-}
-
-/// Converts a durable retirement prompt into a scheduler wake at IRQ entry.
-pub(crate) fn service_retirement_irq_prompt() {
-    if !RETIREMENT_WORK.consume_prompt() || !RETIREMENT_WORK.claim_notification() {
-        return;
-    }
-    if let Err(error) = RETIREMENT_WAKE.complete() {
-        crate::kernel::crash::fatal(format_args!(
-            "HypeR: scheduler reaper wake failed: {error:?}"
-        ));
-    }
-}
-
 /// Permanent scheduler service population used by lifecycle self-tests.
 #[cfg(feature = "kernel-self-test")]
 pub(crate) const fn permanent_worker_count_for_test() -> usize {
@@ -460,6 +437,29 @@ pub fn thread_name(id: ThreadId) -> Result<ThreadNameSnapshot, Error> {
         slot.as_ref()
             .ok_or(Error::NotInitialized)?
             .with_thread(id, Thread::name_snapshot)
+    })
+}
+
+/// Returns authority-free canonical object identity for a scheduler Thread.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn thread_object_snapshot(
+    id: ThreadId,
+) -> Result<crate::kernel::task::ThreadObjectSnapshot, Error> {
+    SCHEDULER.with(|slot| {
+        slot.as_ref()
+            .ok_or(Error::NotInitialized)?
+            .thread_object_snapshot(id)
+    })
+}
+
+/// Captures one pointer-free page of scheduler-to-object relationships.
+pub(crate) fn scan_thread_objects(
+    cursor: crate::kernel::task::ThreadObjectScanCursor,
+) -> Result<crate::kernel::task::ThreadObjectSnapshotPage, Error> {
+    SCHEDULER.with(|slot| {
+        slot.as_ref()
+            .ok_or(Error::NotInitialized)
+            .map(|scheduler| scheduler.scan_thread_objects(cursor))
     })
 }
 
@@ -679,6 +679,7 @@ pub(in crate::kernel) fn vcpu_create(
 
 pub(in crate::kernel) fn prepare_user_thread(
     name: &str,
+    object: crate::kernel::process::UserThread,
     execution: alloc::boxed::Box<core::cell::UnsafeCell<crate::kernel::process::UserExecution>>,
     entry: KernelThreadEntry,
     affinity: CpuMask,
@@ -691,6 +692,7 @@ pub(in crate::kernel) fn prepare_user_thread(
         reservation.cpu(),
         affinity,
         name,
+        object,
         execution,
         entry,
     )) {
@@ -718,7 +720,7 @@ pub(in crate::kernel) fn request_user_thread_stop(
         Ok::<_, Error>((target, retirement_published))
     })?;
     if retirement_published {
-        request_retirement_worker();
+        crate::kernel::reaper::request();
     }
     if let Some(cpu) = target {
         request_reschedule(cpu)?;
@@ -840,7 +842,7 @@ pub(in crate::kernel) fn request_vcpu_stop(thread: ThreadId) -> Result<(), Error
         Ok::<_, Error>((target, retirement_published))
     })?;
     if retirement_published {
-        request_retirement_worker();
+        crate::kernel::reaper::request();
     }
     match target {
         state::VcpuStopTarget::Running(cpu) => {
@@ -931,9 +933,9 @@ pub(in crate::kernel) fn ready_user_thread(id: ThreadId) -> Result<bool, Error> 
             {
                 return Err(Error::InvalidThreadState);
             }
-            let execution = thread.user_execution().ok_or(Error::InvalidThreadState)?;
-            execution
-                .thread()
+            thread
+                .user_thread()
+                .ok_or(Error::InvalidThreadState)?
                 .mark_runnable()
                 .map_err(|_| Error::InvalidThreadState)
         })??;
@@ -1580,58 +1582,10 @@ fn prepare_schedule() -> Result<Option<PreparedTransition>, Error> {
     }))
 }
 
-/// Publishes work after the detached owner is fully resident in Scheduler.
-///
-/// The request path is allocation-free and never enters scheduler policy. An
-/// elected producer sends only a hardware prompt; IRQ entry later converts it
-/// into a Completion wake after all scheduler transition locks are released.
-fn request_retirement_worker() {
-    if !RETIREMENT_WORK.request() {
-        return;
-    }
-    match crate::kernel::cpu::current_index() {
-        Some(cpu) => crate::kernel::irq::reschedule::notify(cpu),
-        None => crate::hal::cpu::send_event(),
-    }
-}
-
-extern "C" fn retirement_worker_entry(_argument: usize) {
-    loop {
-        RETIREMENT_WORK.begin_batch();
-        let mut more_work = false;
-        for _ in 0..RETIREMENTS_PER_BATCH {
-            match retire_one_thread() {
-                Ok(Some(more)) => more_work = more,
-                Ok(None) => {
-                    more_work = false;
-                    break;
-                }
-                Err(error) => crate::kernel::crash::fatal(format_args!(
-                    "HypeR: scheduler reaper failed: {error:?}"
-                )),
-            }
-        }
-        match RETIREMENT_WORK.finish_batch(more_work) {
-            WorkDisposition::Continue => {
-                if let Err(error) = cond_resched() {
-                    crate::kernel::crash::fatal(format_args!(
-                        "HypeR: scheduler reaper reschedule failed: {error:?}"
-                    ));
-                }
-            }
-            WorkDisposition::Wait => {
-                if let Err(error) = RETIREMENT_WAKE.wait() {
-                    crate::kernel::crash::fatal(format_args!(
-                        "HypeR: scheduler reaper wait failed: {error:?}"
-                    ));
-                }
-            }
-        }
-    }
-}
-
 /// Retires one detached owner in normal, interruptible Thread context.
-fn retire_one_thread() -> Result<Option<bool>, Error> {
+pub(crate) fn reap_one_thread(
+    _access: &mut crate::kernel::reaper::ReaperAccess,
+) -> Result<Option<bool>, Error> {
     let retired = SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
@@ -1656,10 +1610,15 @@ fn retire_one_thread() -> Result<Option<bool>, Error> {
     Ok(Some(more))
 }
 
+/// Reports whether scheduler-detached execution awaits the shared reaper.
+pub(crate) fn retirement_pending(_access: &crate::kernel::reaper::ReaperAccess) -> bool {
+    SCHEDULER.with(|slot| slot.as_ref().is_some_and(Scheduler::has_retirements))
+}
+
 fn retire_detached_thread(mut thread: Box<Thread>) {
-    if let Some(execution) = thread.take_user_execution() {
+    if let Some((object, execution)) = thread.take_user_execution() {
         drop(thread);
-        execution.into_inner().complete_detach();
+        execution.into_inner().complete_detach(object);
         return;
     }
     let vcpu_reap = thread.take_vcpu_reap_publication();
@@ -1754,7 +1713,7 @@ extern "C" fn finish_context_switch_tail(ticket: usize) {
                 ));
             }
             if retirement_published {
-                request_retirement_worker();
+                crate::kernel::reaper::request();
             }
         }
         Err(error) => crate::kernel::crash::fatal(format_args!(

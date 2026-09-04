@@ -11,6 +11,7 @@ cd "$root"
 scheduler=src/kernel/task/scheduler/mod.rs
 state=src/kernel/task/scheduler/state.rs
 registry=src/kernel/task/scheduler/registry.rs
+reaper=src/kernel/reaper.rs
 support=tests/kernel/support.rs
 
 require() {
@@ -56,12 +57,12 @@ sed -n '/^pub(in crate::kernel) fn request_user_thread_stop(/,/^fn prepare_boxed
     "$scheduler" >"$direct_stop"
 sed -n '/^extern "C" fn finish_context_switch_tail(/,/^}/p' \
     "$scheduler" >"$switch_tail"
-sed -n '/^fn retire_one_thread(/,/^fn retire_detached_thread(/p' \
+sed -n '/^pub(crate) fn reap_one_thread(/,/^fn retire_detached_thread(/p' \
     "$scheduler" >"$worker"
 
-require 'SCHEDULER\.with[\s\S]*queue_terminated_retirement\(id\)\?[\s\S]*request_retirement_worker\(\)' \
+require 'SCHEDULER\.with[\s\S]*queue_terminated_retirement\(id\)\?[\s\S]*crate::kernel::reaper::request\(\)' \
     "$direct_stop" 'direct stop must stage ownership before publishing durable reaper work'
-require 'SCHEDULER\.with[\s\S]*complete_incoming_switch\(cpu, ticket\)\?[\s\S]*request_retirement_worker\(\)' \
+require 'complete_incoming_switch\(cpu, ticket\)\?[\s\S]*retirement_published[\s\S]*crate::kernel::reaper::request\(\)' \
     "$switch_tail" 'switch tail must stage ownership before publishing durable reaper work'
 reject '(retire_detached_thread|drop\(thread\)|complete_detach|complete_vcpu_reap)' \
     "$switch_tail" 'switch-tail callbacks must not run blocking resource teardown'
@@ -77,8 +78,8 @@ reject 'reap_terminated_threads' "$scheduler" \
     'targeted retirement must not regress to a scheduler-wide hot-path scan'
 reject 'hyper::log::|DeferredDrain|DrainDisposition' "$scheduler" \
     'scheduler retirement must depend on neutral deferred-work synchronization'
-require 'DeferredWork[\s\S]*WorkDisposition' "$scheduler" \
-    'scheduler retirement must use the shared neutral deferred-work protocol'
+require 'DeferredWork[\s\S]*WorkDisposition' "$reaper" \
+    'the central reaper must use the shared neutral deferred-work protocol'
 require 'fetch_update\(Ordering::Relaxed, Ordering::Relaxed,[\s\S]*count < THREAD_CAPACITY' \
     "$scheduler" 'retirement admission must reject counter overflow'
 require 'fetch_update\(Ordering::Release, Ordering::Relaxed,[\s\S]*count\.checked_sub\(1\)' \

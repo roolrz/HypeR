@@ -13,7 +13,8 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use hyper::mm::try_box;
 use hyper::sync::InterruptSpinLock;
 
-use super::{Koid, ObjectCreationError, ObjectRef, ObjectSnapshot};
+use super::core::ObjectRef;
+use super::{Diagnostic, ErasedKernelRef, Koid, ObjectCreationError, ObjectSnapshot};
 
 const PAGE_CAPACITY: usize = 32;
 
@@ -151,7 +152,8 @@ impl ObjectSnapshotPage {
 
 /// Captures one directory page without retaining authority or allocating.
 pub(crate) fn scan(cursor: ObjectScanCursor) -> ObjectSnapshotPage {
-    let mut objects: [Option<ObjectRef>; PAGE_CAPACITY] = [const { None }; PAGE_CAPACITY];
+    let mut objects: [Option<ErasedKernelRef<Diagnostic>>; PAGE_CAPACITY] =
+        [const { None }; PAGE_CAPACITY];
     let (len, next) = DIRECTORY.with(|directory| {
         let mut len = 0;
         let mut last_sequence = 0;
@@ -179,7 +181,7 @@ pub(crate) fn scan(cursor: ObjectScanCursor) -> ObjectSnapshotPage {
     let mut entries = [None; PAGE_CAPACITY];
     for index in 0..len {
         let object = objects[index].take();
-        entries[index] = object.as_ref().map(ObjectRef::snapshot);
+        entries[index] = object.as_ref().map(ErasedKernelRef::snapshot);
         drop(object);
     }
     ObjectSnapshotPage { entries, len, next }

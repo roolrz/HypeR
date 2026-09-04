@@ -13,6 +13,7 @@ use crate::kernel::mm::stack::KernelStack;
 use crate::kernel::task::policy::{
     CpuMask, SchedulingClass, SchedulingPolicy, ThreadPlacement, ThreadPriority,
 };
+use crate::kernel::task::thread_object::{ThreadObject, ThreadObjectSnapshot, ThreadRole};
 use crate::kernel::task::wait::WaitRecord;
 
 pub type KernelThreadEntry = extern "C" fn(usize);
@@ -295,7 +296,24 @@ pub enum Error {
     Allocation,
     NameTooLong,
     InvalidPlacement,
+    ObjectAllocation,
+    ObjectIdentityExhausted,
+    ObjectRegistrationExhausted,
     VirtualInterrupt(crate::hal::vm::VirtualInterruptError),
+}
+
+impl From<crate::kernel::object::ObjectCreationError> for Error {
+    fn from(error: crate::kernel::object::ObjectCreationError) -> Self {
+        match error {
+            crate::kernel::object::ObjectCreationError::Allocation => Self::ObjectAllocation,
+            crate::kernel::object::ObjectCreationError::KoidExhausted => {
+                Self::ObjectIdentityExhausted
+            }
+            crate::kernel::object::ObjectCreationError::RegistrationExhausted => {
+                Self::ObjectRegistrationExhausted
+            }
+        }
+    }
 }
 
 impl From<crate::hal::vm::VirtualInterruptError> for Error {
@@ -314,6 +332,7 @@ impl From<crate::hal::vm::VirtualInterruptError> for Error {
 /// prepared address space before it becomes a Thread variant.
 pub struct Thread {
     identity: ThreadIdentity,
+    object: ThreadObject,
     schedule_owner: ScheduleOwner,
     schedule: UnsafeCell<ThreadScheduleState>,
     /// Waiting/terminated intrusive links owned only by `TransitionLock`.
@@ -458,6 +477,7 @@ impl Thread {
                 id: ThreadId::BOOTSTRAP,
                 name,
             },
+            object: ThreadObject::try_system(ThreadRole::Bootstrap)?,
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
                 placement: ThreadPlacement::pinned(cpu_index),
@@ -496,6 +516,7 @@ impl Thread {
                 id,
                 name: ThreadNameSnapshot::new(name)?,
             },
+            object: ThreadObject::try_system(ThreadRole::Kernel)?,
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
                 placement,
@@ -527,6 +548,7 @@ impl Thread {
                 id,
                 name: ThreadNameSnapshot::new(name)?,
             },
+            object: ThreadObject::try_system(ThreadRole::Idle)?,
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
                 placement: ThreadPlacement::pinned(cpu_index),
@@ -554,6 +576,9 @@ impl Thread {
                 id,
                 name: ThreadNameSnapshot::new(name)?,
             },
+            // A secondary bootstrap continuation exists solely to complete
+            // local setup and become that CPU's permanent idle Thread.
+            object: ThreadObject::try_system(ThreadRole::Idle)?,
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
                 placement: ThreadPlacement::pinned(cpu_index),
@@ -589,6 +614,7 @@ impl Thread {
                 id,
                 name: ThreadNameSnapshot::new(name)?,
             },
+            object: ThreadObject::try_system(ThreadRole::Vcpu)?,
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
                 placement: ThreadPlacement::prefer(cpu_index),
@@ -617,6 +643,7 @@ impl Thread {
         cpu_index: CpuIndex,
         affinity: crate::kernel::task::policy::CpuMask,
         name: &str,
+        object: crate::kernel::process::UserThread,
         execution: Box<UnsafeCell<crate::kernel::process::UserExecution>>,
         entry: KernelThreadEntry,
     ) -> Result<Self, Error> {
@@ -630,6 +657,7 @@ impl Thread {
                 id,
                 name: ThreadNameSnapshot::new(name)?,
             },
+            object: ThreadObject::user(object),
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
                 placement,
@@ -652,6 +680,14 @@ impl Thread {
 
     pub const fn id(&self) -> ThreadId {
         self.identity.id
+    }
+
+    pub(crate) fn object_snapshot(&self) -> ThreadObjectSnapshot {
+        self.object.snapshot()
+    }
+
+    pub(super) fn user_thread(&self) -> Option<&crate::kernel::process::UserThread> {
+        self.object.user_thread()
     }
 
     fn stored_schedule(&self) -> &ThreadScheduleState {
@@ -930,21 +966,14 @@ impl Thread {
         }
     }
 
-    pub(crate) fn user_execution(&self) -> Option<&crate::kernel::process::UserExecution> {
-        match &self.resources.execution {
-            // SAFETY: running UserExecution mutates only its internal machine
-            // context cell. Whole-object mutation is restricted to dormant or
-            // stopped ownership below, where no shared pointer is live.
-            ThreadExecution::User(execution) => Some(unsafe { &*execution.get() }),
-            _ => None,
-        }
-    }
-
     /// Arms a dormant user payload before its first scheduler publication.
-    pub(super) fn arm_user_execution(&mut self) -> bool {
+    pub(super) fn arm_user_execution(
+        &mut self,
+        ownership: crate::kernel::process::UserExecutionOwnership,
+    ) -> bool {
         match &mut self.resources.execution {
             ThreadExecution::User(execution) => {
-                execution.get_mut().arm_after_process_publication();
+                execution.get_mut().arm_for_process_publication(ownership);
                 true
             }
             _ => false,
@@ -954,12 +983,19 @@ impl Thread {
     /// Extracts user ownership only after the scheduler proved context stop.
     pub(super) fn take_user_execution(
         &mut self,
-    ) -> Option<Box<UnsafeCell<crate::kernel::process::UserExecution>>> {
+    ) -> Option<(
+        crate::kernel::process::UserThread,
+        Box<UnsafeCell<crate::kernel::process::UserExecution>>,
+    )> {
         if !matches!(self.resources.execution, ThreadExecution::User(_)) {
             return None;
         }
+        let object = match self.object.user_thread() {
+            Some(thread) => thread.clone(),
+            None => crate::hal::cpu::halt(),
+        };
         match core::mem::replace(&mut self.resources.execution, ThreadExecution::Kernel) {
-            ThreadExecution::User(execution) => Some(execution),
+            ThreadExecution::User(execution) => Some((object, execution)),
             _ => crate::hal::cpu::halt(),
         }
     }

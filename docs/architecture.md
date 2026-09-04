@@ -150,6 +150,71 @@ QEMU contract requires repeated initramfs timer wakeups after `/init`, proving
 that delivery survives successive list-register lifecycles rather than only
 successful guest entry or the first interrupt.
 
+## Kernel-object ownership
+
+Kernel objects are the standard identity mechanism for service entities with
+independent lifetimes or cross-subsystem ownership boundaries. Once an entity
+participates in this model, it has one canonical kernel-object allocation.
+Kernel code reaches that allocation through direct, counted, typed references;
+it does not resolve process-local handle values through a global kernel handle
+table. Userspace handle tables wrap the same allocation with process-local
+generations, rights, and flags only at the ABI boundary.
+
+Persistent references declare their ownership class. Scheduler residence,
+object-to-object edges, userspace authority, and temporary resolved operations
+all contribute to the object's total lifetime count while remaining separately
+observable. A borrowed Rust reference is scoped to one counted owner and is not
+itself an ownership edge. User-authority count is distinct from total lifetime:
+closing the final userspace handle may close an endpoint or publish another
+object-specific transition while an already resolved operation safely finishes.
+
+The scheduler retains a counted scheduler-class reference to every resident
+Thread object. CPU residence and scheduler authority continue to govern access
+to mutable scheduling state; an object reference alone never grants that
+authority. A user Thread's signals and terminal information remain in its
+durable object. System Thread objects currently provide stable identity, while
+the scheduler's bounded observations associate that identity with a role and
+generation-qualified Thread ID. In both cases, the kernel stack, machine
+context, and architecture execution payload are explicitly detached and
+retired by the scheduler. A userspace handle can therefore retain a terminated
+user Thread tombstone without retaining its execution resources.
+
+The final total-reference release performs only an allocation-free, nonblocking
+handoff to object reclamation. An object in the reap-pending state cannot be
+upgraded from a weak reference, republished as a userspace handle, or otherwise
+resurrected. Hardware and subsystem resources must already be quiescent before
+this transition; their typed retirement protocols are not delegated to the
+generic object reclaimer. Object destruction may release further references,
+but does not recursively execute another object's finalizer on the same stack.
+
+KOIDs, object-directory entries, and diagnostic snapshots confer no authority.
+The weak global directory can report bounded metadata and aggregate reference
+classes, while durable edges are enumerated by their owning Process, scheduler,
+or object subsystem. Temporary operation and diagnostic pins are reported as
+counts rather than globally allocated edge records. Multi-page graph scans are
+weakly consistent and expose neither kernel pointers nor a lookup path from a
+KOID to an operational reference.
+
+Kernel-only objects have no generic conversion into userspace handles. Handle
+publication requires an explicit typed publication capability; export-policy
+flags are diagnostic metadata rather than the security boundary. Kernel
+subsystem-owned edges must not form an unbroken strong-reference cycle. An
+intentional subsystem cycle therefore has an explicit retirement step which
+breaks it; reverse relationships otherwise use weak references or
+generation-qualified identifiers.
+
+Userspace can construct cyclic capability graphs, including handles carried by
+Channel messages. Reference counting does not collect those cycles: they can
+retain resources, but they cannot resurrect an object or create a use-after-free.
+Resource accounting and quotas are the current containment mechanism. A future
+reclamation policy may add cycle detection or a collector without changing the
+typed kernel-reference and userspace-handle boundary.
+
+Implementation records without independent identity remain ordinary subsystem
+state. Run-queue links, per-CPU scheduler state, page-table entries, allocator
+blocks, architecture register contexts, wait nodes, and device bookkeeping do
+not acquire KOIDs merely because they participate in an object's implementation.
+
 ## Native userspace boundary
 
 Native user entry follows the same policy-above-mechanism rule without reusing

@@ -12,7 +12,7 @@ use hyper::hal::interrupt::{EntryAction as Action, InterruptId, InterruptOrigin}
 /// synchronization before deferred services may wake scheduler waiters.
 pub(crate) fn dispatch_kernel_rpc() {
     crate::kernel::irq::cross_call::service();
-    crate::kernel::task::scheduler::service_retirement_irq_prompt();
+    crate::kernel::reaper::service_irq_prompt();
     crate::kernel::log::service_irq_prompt();
 }
 
@@ -50,7 +50,7 @@ pub(crate) fn dispatch(interrupt: InterruptId, origin: InterruptOrigin) -> Actio
         Action::Stop
     } else {
         crate::kernel::irq::interrupt::dispatch(interrupt);
-        crate::kernel::task::scheduler::service_retirement_irq_prompt();
+        crate::kernel::reaper::service_irq_prompt();
         crate::kernel::log::service_irq_prompt();
         Action::Resume { postlude: None }
     };

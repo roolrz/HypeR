@@ -105,8 +105,10 @@ extern "C" fn start_kernel() -> ! {
         crate::kernel::mm::initialize()?;
         crate::kernel::debug::initialize()?;
         crate::kernel::task::initialize()?;
+        crate::kernel::reaper::initialize()?;
 
         crate::kernel::irq::initialize(&mut boot)?;
+        crate::kernel::reaper::enable_irq_prompts();
         crate::kernel::crash::initialize(&boot)?;
         crate::kernel::time::initialize(&mut boot)?;
         crate::kernel::log::initialize()?;
@@ -116,6 +118,7 @@ extern "C" fn start_kernel() -> ! {
 
         crate::kernel::device::platform_device_initialize(&boot)?;
         crate::kernel::vm::initialize(&boot)?;
+        crate::kernel::debug::report_startup_state();
 
         #[cfg(feature = "kernel-self-test")]
         crate::kernel_tests::run();

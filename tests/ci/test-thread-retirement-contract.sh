@@ -15,6 +15,7 @@ copy_sources() {
     cp "$root/src/kernel/task/scheduler/mod.rs" "$fixture/src/kernel/task/scheduler/mod.rs"
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
     cp "$root/src/kernel/task/scheduler/registry.rs" "$fixture/src/kernel/task/scheduler/registry.rs"
+    cp "$root/src/kernel/reaper.rs" "$fixture/src/kernel/reaper.rs"
     cp "$root/tests/kernel/support.rs" "$fixture/tests/kernel/support.rs"
 }
 
@@ -47,7 +48,7 @@ mutate 'resource ownership outlived retirement completion' \
     'retire_detached_thread(thread);' 'drop(thread);'
 mutate 'switch tail performed resource teardown directly' \
     src/kernel/task/scheduler/mod.rs \
-    'request_retirement_worker();' 'retire_detached_thread(thread);'
+    'crate::kernel::reaper::request();' 'retire_detached_thread(thread);'
 mutate 'vCPU reaping treated a Retiring generation as absent' \
     src/kernel/task/scheduler/mod.rs \
     'ThreadRegistryStatus::Retiring(' 'ThreadRegistryStatus::Occupied('

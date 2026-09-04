@@ -299,12 +299,13 @@ decision to publish a supported userspace ABI.
 An object has a non-reused `Koid` for diagnostics and tracing. A KOID cannot
 open an object or authorize an operation.
 
-An object reference has the semantics of `Arc<dyn KernelObject>`. The trait is
-sealed, requires `Send + Sync + Any`, and exposes only a header, safe downcast
-support, and an infallible zero-active-handle transition. Concrete operations
-remain inherent methods on concrete types. Lookup uses `Any::downcast_ref`; an
-object-kind tag is never followed by an unchecked pointer cast. One generated
-declaration keeps Rust types and ABI object kinds unique and coherent.
+Every owning object reference shares one private erased allocation, but its
+Rust type records both the payload type and ownership class. The sealed
+`KernelObject` trait requires `Send + Sync + Any`; concrete operations remain
+inherent methods on concrete types. Handle lookup validates the kind before a
+safe `Any` downcast creates an operation-pin reference. An object-kind tag is
+never followed by an unchecked pointer cast. One generated declaration keeps
+Rust types and ABI object kinds unique and coherent.
 
 Object construction is fallible. Phase 1 must provide an audited no-std,
 Apache/MIT-compatible fallible shared owner or a comparably small reviewed
@@ -314,11 +315,13 @@ owner constructor or an unaudited hand-written reference count.
 Constructed objects also enter a global diagnostic directory through a weak
 reference. The directory never grants authority or retains the payload. Its
 newest-first cursor excludes later registrations from subsequent pages, while
-each snapshot reports KOID, kind, supported rights, active-handle state, and a
-non-authoritative internal-reference count. Published Processes have a
-corresponding weak directory, and each Process exposes bounded pages of
-generation-qualified `handle -> KOID` edges. These kernel interfaces are the
-canonical source for future privileged inspection syscalls; the text renderer
+each snapshot reports KOID, kind, immutable export policy, active-handle state,
+and weakly consistent counts for service, scheduler, publication,
+user-authority, operation-pin, diagnostic, and retirement owners. Published
+Processes have a corresponding weak directory, and each Process exposes
+bounded pages of generation-qualified `handle -> KOID` edges. These kernel
+interfaces are the canonical source for future privileged inspection syscalls;
+the text renderer
 is only one consumer. Multi-page results are weakly consistent with mutation,
 and no pointer value is exposed.
 
@@ -328,8 +331,8 @@ a practical stale handle valid; a slot is retired before generation wrap. A
 future 32-bit personality receives its own descriptor namespace and does not
 weaken the Native table.
 
-A handle entry contains an object reference, rights, and handle flags. Lookup
-under the process handle-table lock validates generation, object type,
+A handle entry contains a user-authority reference, rights, and handle flags.
+Lookup under the process handle-table lock validates generation, object type,
 supported rights, and required rights, then acquires a typed object reference.
 The lock is released before object code, user copy, allocation, or blocking.
 A concurrent close does not cancel an already resolved operation.
@@ -369,8 +372,9 @@ nested messages and capabilities without holding one object's lock while
 decrementing another. Zero-handle resurrection is forbidden, and `Drop` never
 accesses hardware.
 
-`UserThread` is itself a kernel object. Every kernel observer and Process
-handle retains the same erased object owner and therefore the same KOID; the
+`UserThread` is itself a kernel object. Kernel services, scheduler residence,
+resolved operations, and Process handles retain classified references to the
+same erased allocation and therefore the same KOID; the
 scheduler payload remains a separate execution owner rather than a second
 identity. The Thread object supports `WAIT`, `INSPECT`, `START`, and
 `REQUEST_STOP`, and asserts its level-triggered `TERMINATED` signal after

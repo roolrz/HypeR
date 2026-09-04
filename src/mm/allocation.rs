@@ -41,6 +41,19 @@ pub struct WeakFallibleArc<T> {
     ownership: PhantomData<SharedInner<T>>,
 }
 
+/// Linear responsibility for destroying a value after its final shared owner
+/// has been released.
+///
+/// The strong count is already zero while this value exists, so weak upgrades
+/// permanently fail. Dropping this owner destroys `T` and releases the
+/// allocation's implicit weak reference. This is a low-level deferred-drop
+/// mechanism, not an authority or a shareable object reference.
+#[must_use = "dropping this owner completes the deferred destruction"]
+pub struct DeferredArcDrop<T> {
+    inner: NonNull<SharedInner<T>>,
+    ownership: PhantomData<SharedInner<T>>,
+}
+
 /// Unique owner which retains a `FallibleArc` allocation without refcounting.
 ///
 /// This is the linear teardown form for large hardware owners: conversion is
@@ -71,6 +84,14 @@ unsafe impl<T: Send + Sync> Sync for FallibleArc<T> {}
 unsafe impl<T: Send + Sync> Send for WeakFallibleArc<T> {}
 // SAFETY: See the Send implementation. Weak-count mutation is atomic.
 unsafe impl<T: Send + Sync> Sync for WeakFallibleArc<T> {}
+
+// SAFETY: DeferredArcDrop is the sole owner of an initialized T after the
+// strong count reached zero. Moving final-destruction responsibility across
+// CPUs is sound exactly when moving T is sound.
+unsafe impl<T: Send> Send for DeferredArcDrop<T> {}
+// SAFETY: Shared access through DeferredArcDrop may cross CPUs exactly when
+// shared access to T may cross CPUs. No API can restore a strong owner.
+unsafe impl<T: Sync> Sync for DeferredArcDrop<T> {}
 
 impl<T> FallibleArc<T> {
     /// Returns the allocator-requested size of one shared allocation.
@@ -114,6 +135,26 @@ impl<T> FallibleArc<T> {
         WeakFallibleArc {
             inner: self.inner,
             ownership: PhantomData,
+        }
+    }
+
+    /// Releases this shared owner without destroying the final value inline.
+    ///
+    /// A non-final release returns `None`. The unique caller which changes the
+    /// strong count from one to zero receives the deferred-drop owner. Weak
+    /// upgrades fail from that transition onward, but `T` remains initialized
+    /// until the returned owner is dropped.
+    ///
+    /// A saturated reference count retains the existing leak-on-overflow
+    /// behavior and returns `None`.
+    pub fn release_deferred(self) -> Option<DeferredArcDrop<T>> {
+        let owner = ManuallyDrop::new(self);
+        match release_strong(owner.inner) {
+            StrongRelease::Final => Some(DeferredArcDrop {
+                inner: owner.inner,
+                ownership: PhantomData,
+            }),
+            StrongRelease::Shared | StrongRelease::Leaked => None,
         }
     }
 
@@ -237,6 +278,23 @@ impl<T> UniqueFallibleArc<T> {
     }
 }
 
+impl<T> Deref for DeferredArcDrop<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: the final-release transition leaves the value initialized
+        // and transfers its sole destruction responsibility into this owner.
+        // A zero strong count prevents every weak reference from upgrading.
+        unsafe { &self.inner.as_ref().value }
+    }
+}
+
+impl<T> Drop for DeferredArcDrop<T> {
+    fn drop(&mut self) {
+        destroy_value_and_release_implicit_weak(self.inner);
+    }
+}
+
 impl<T> UniqueFallibleArc<MaybeUninit<T>> {
     /// Allocates a pinned linear slot before fallible hardware publication.
     pub fn try_new_uninit() -> Result<Self, AllocationError> {
@@ -323,38 +381,9 @@ impl<T> Deref for FallibleArc<T> {
 
 impl<T> Drop for FallibleArc<T> {
     fn drop(&mut self) {
-        let strong = &self.inner().strong;
-        let mut current = strong.load(Ordering::Relaxed);
-        loop {
-            if current == usize::MAX || current == 0 {
-                // Saturation deliberately leaks every clone. A zero count is
-                // unreachable through the safe API because `self` owns one
-                // reference; treating it as another leak avoids arithmetic
-                // underflow if an unsafe caller has already broken that rule.
-                return;
-            }
-            match strong.compare_exchange_weak(
-                current,
-                current - 1,
-                Ordering::Release,
-                Ordering::Relaxed,
-            ) {
-                Ok(1) => break,
-                Ok(_) => return,
-                Err(observed) => current = observed,
-            }
+        if release_strong(self.inner) == StrongRelease::Final {
+            destroy_value_and_release_implicit_weak(self.inner);
         }
-
-        // This acquire fence pairs with every releasing decrement whose
-        // reference preceded the final one, so destruction observes all writes
-        // performed through those owners before they were released.
-        fence(Ordering::Acquire);
-        // SAFETY: This thread changed the unique final strong reference from
-        // one to zero. No future weak upgrade can succeed, so it exclusively
-        // destroys the initialized value before releasing the implicit weak
-        // allocation owner.
-        unsafe { ManuallyDrop::drop(&mut (*self.inner.as_ptr()).value) };
-        release_weak(self.inner);
     }
 }
 
@@ -390,6 +419,53 @@ fn retain_reference(counter: &AtomicUsize) {
             Err(observed) => current = observed,
         }
     }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum StrongRelease {
+    Shared,
+    Final,
+    Leaked,
+}
+
+fn release_strong<T>(inner: NonNull<SharedInner<T>>) -> StrongRelease {
+    // SAFETY: the caller owns one strong reference, so the allocation and its
+    // counters remain live throughout this decrement.
+    let strong = unsafe { &inner.as_ref().strong };
+    let mut current = strong.load(Ordering::Relaxed);
+    loop {
+        if current == usize::MAX || current == 0 {
+            // Saturation deliberately leaks every clone. A zero count is
+            // unreachable through the safe API because the caller consumes
+            // one reference; treating it as another leak avoids arithmetic
+            // underflow if unsafe code has already broken that rule.
+            return StrongRelease::Leaked;
+        }
+        match strong.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::Release,
+            Ordering::Relaxed,
+        ) {
+            Ok(1) => {
+                // Pair with every releasing decrement whose owner preceded
+                // this final one. The winner must observe those owners' writes
+                // before it accesses or destroys the initialized value.
+                fence(Ordering::Acquire);
+                return StrongRelease::Final;
+            }
+            Ok(_) => return StrongRelease::Shared,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+fn destroy_value_and_release_implicit_weak<T>(inner: NonNull<SharedInner<T>>) {
+    // SAFETY: only the caller which completed the one-to-zero strong
+    // transition can reach this helper, either directly or through the unique
+    // DeferredArcDrop it created. Weak upgrades cannot succeed at zero.
+    unsafe { ManuallyDrop::drop(&mut (*inner.as_ptr()).value) };
+    release_weak(inner);
 }
 
 fn release_weak<T>(inner: NonNull<SharedInner<T>>) {

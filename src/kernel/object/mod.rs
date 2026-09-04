@@ -15,9 +15,14 @@ mod event;
 mod signals;
 mod wait;
 
+#[cfg(test)]
+pub(crate) use core::reap_final_objects;
 pub(crate) use core::{
-    ActiveHandleError, KernelObject, Koid, ObjectCreationError, ObjectHandleState, ObjectKind,
-    ObjectRef, ObjectRetirement, ObjectSnapshot, private,
+    ActiveHandleError, ActiveHandleOwner, Diagnostic, ErasedKernelRef, ExportPolicy, KernelObject,
+    KernelRef, KernelService, Koid, ObjectCreationError, ObjectHandleState, ObjectKind,
+    ObjectPublication, ObjectReferenceSnapshot, ObjectRetirement, ObjectSnapshot, OperationPin,
+    PublishableRef, Scheduler, UserExportableObject, final_reap_pending, object_allocation_size,
+    private, reap_one_final_object,
 };
 pub(crate) use directory::{ObjectScanCursor, scan};
 pub(crate) use event::{Event, EventError};

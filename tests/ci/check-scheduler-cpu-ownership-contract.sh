@@ -82,9 +82,9 @@ require 'pub fn notify_one_with[\s\S]*cpu_lock_required_for\(id\)\?[\s\S]*thread
     "$state" 'wait-queue consumers must route a CPU-owned head before reading its schedule'
 require 'pub fn queue_terminated_retirement[\s\S]*schedule_owner_cpu[\s\S]*QueueMembership::Terminated[\s\S]*registry\.begin_retirement' \
     "$state" 'termination must stage exact identity-directed retirement'
-require 'request_user_stop\(id, reason\)[\s\S]*queue_terminated_retirement\(id\)[\s\S]*request_retirement_worker' \
+require 'request_user_stop\(id, reason\)[\s\S]*queue_terminated_retirement\(id\)[\s\S]*crate::kernel::reaper::request' \
     "$scheduler" 'dormant user termination must publish durable reaper work in its originating transaction'
-require 'complete_incoming_switch\(cpu, ticket\)[\s\S]*completion[\s\S]{0,60}\.retirement_published[\s\S]*request_retirement_worker' \
+require 'complete_incoming_switch\(cpu, ticket\)[\s\S]*completion[\s\S]{0,60}\.retirement_published[\s\S]*crate::kernel::reaper::request' \
     "$scheduler" 'coordinated exit tail must publish only bounded dedicated-reaper work'
 require 'enum ThreadSlot[\s\S]*Retiring \{[\s\S]*thread: Option<Box<Thread>>' \
     "$registry" 'retiring slots must retain detached ownership until the reaper takes it'

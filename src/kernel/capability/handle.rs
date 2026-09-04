@@ -5,12 +5,12 @@
 
 use alloc::vec::Vec;
 use core::array;
-use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::super::object::{
-    ActiveHandleError, KernelObject, Koid, ObjectKind, ObjectRef, ObjectRetirement, SignalSource,
+    ActiveHandleError, ActiveHandleOwner, ErasedKernelRef, KernelObject, Koid, ObjectKind,
+    ObjectPublication, ObjectRetirement, OperationPin, SignalSource, UserExportableObject,
 };
 use super::Rights;
 
@@ -210,31 +210,30 @@ pub(crate) struct HandleTransferRequest {
 /// run the zero-active callback; a potentially final owner must therefore be
 /// dropped only after releasing Process and object locks.
 pub(crate) struct PreparedHandle {
-    object: Option<ObjectRef>,
+    object: Option<ActiveHandleOwner>,
     rights: Rights,
     flags: HandleFlags,
 }
 
 impl PreparedHandle {
     /// Mints the sole first handle for a newly constructed object.
-    pub(crate) fn try_from_new_object(
-        object: ObjectRef,
+    pub(crate) fn try_from_new_object<T: UserExportableObject>(
+        publication: ObjectPublication<T>,
         rights: Rights,
         flags: HandleFlags,
     ) -> Result<Self, HandleError> {
-        if !object.supported_rights().contains(rights) {
+        if !publication.supported_rights().contains(rights) {
             return Err(HandleError::UnsupportedRights);
         }
         if HandleFlags::from_bits(flags.bits()).is_none() {
             return Err(HandleError::UnsupportedFlags);
         }
-        object
-            .acquire_initial_handle()
-            .map_err(|error| match error {
-                ActiveHandleError::Retired => HandleError::ObjectRetired,
-                ActiveHandleError::AlreadyActive => HandleError::ObjectAlreadyActive,
-                ActiveHandleError::CountExhausted => HandleError::ActiveHandleLimit,
-            })?;
+        let object = publication.activate().map_err(|error| match error {
+            ActiveHandleError::NotExportable => HandleError::UnsupportedRights,
+            ActiveHandleError::Retired => HandleError::ObjectRetired,
+            ActiveHandleError::AlreadyActive => HandleError::ObjectAlreadyActive,
+            ActiveHandleError::CountExhausted => HandleError::ActiveHandleLimit,
+        })?;
         Ok(Self {
             object: Some(object),
             rights,
@@ -246,15 +245,14 @@ impl PreparedHandle {
         if !self.rights.contains(rights) {
             return Err(HandleError::AccessDenied);
         }
-        self.object()
-            .acquire_additional_handle()
-            .map_err(|error| match error {
-                ActiveHandleError::Retired => HandleError::ObjectRetired,
-                ActiveHandleError::AlreadyActive => super::invariant_violation(),
-                ActiveHandleError::CountExhausted => HandleError::ActiveHandleLimit,
-            })?;
+        let object = self.object().try_duplicate().map_err(|error| match error {
+            ActiveHandleError::NotExportable => super::invariant_violation(),
+            ActiveHandleError::Retired => HandleError::ObjectRetired,
+            ActiveHandleError::AlreadyActive => super::invariant_violation(),
+            ActiveHandleError::CountExhausted => HandleError::ActiveHandleLimit,
+        })?;
         Ok(Self {
-            object: Some(self.object().clone()),
+            object: Some(object),
             rights,
             flags: self.flags,
         })
@@ -265,7 +263,7 @@ impl PreparedHandle {
         self.try_duplicate(rights)
     }
 
-    fn object(&self) -> &ObjectRef {
+    fn object(&self) -> &ActiveHandleOwner {
         match self.object.as_ref() {
             Some(object) => object,
             None => super::invariant_violation(),
@@ -277,9 +275,7 @@ impl PreparedHandle {
             Some(object) => object,
             None => super::invariant_violation(),
         };
-        if object.release_active_handle() {
-            retirement.enqueue(object);
-        }
+        object.release_into(retirement);
     }
 }
 
@@ -907,12 +903,14 @@ impl HandleTable {
         if !handle.rights.contains(required) {
             return Err(HandleError::AccessDenied);
         }
-        if handle.object().kind() != T::KIND || handle.object().downcast_ref::<T>().is_none() {
+        if handle.object().kind() != T::KIND {
             return Err(HandleError::WrongObjectType);
         }
         Ok(ResolvedObject {
-            object: handle.object().clone(),
-            object_type: PhantomData,
+            object: match handle.object().pin::<T>() {
+                Some(object) => object,
+                None => super::invariant_violation(),
+            },
         })
     }
 
@@ -927,12 +925,11 @@ impl HandleTable {
         if !handle.rights.contains(required) {
             return Err(HandleError::AccessDenied);
         }
-        if handle.object().signal_source().is_none() {
-            return Err(HandleError::WrongObjectType);
-        }
-        Ok(ResolvedWaitable {
-            object: handle.object().clone(),
-        })
+        let object = handle
+            .object()
+            .pin_waitable()
+            .ok_or(HandleError::WrongObjectType)?;
+        Ok(ResolvedWaitable { object })
     }
 
     /// Prepares a duplicate with rights attenuated from the source handle.
@@ -1780,13 +1777,12 @@ impl<const N: usize> Drop for HandleReservation<N> {
 
 /// Type-checked internal object reference retained beyond the handle-table lock.
 pub(crate) struct ResolvedObject<T: KernelObject> {
-    object: ObjectRef,
-    object_type: PhantomData<T>,
+    object: super::super::object::KernelRef<T, OperationPin>,
 }
 
 /// Type-erased wait authority retained beyond the handle-table lock.
 pub(crate) struct ResolvedWaitable {
-    object: ObjectRef,
+    object: ErasedKernelRef<OperationPin>,
 }
 
 impl ResolvedWaitable {
@@ -1805,14 +1801,10 @@ impl ResolvedWaitable {
 impl<T: KernelObject> ResolvedObject<T> {
     /// Returns the compiler-checked payload reference.
     ///
-    /// Type coherence was checked by `HandleTable::resolve` while cloning this
-    /// immutable `ObjectRef`. Failure here is therefore a private invariant
-    /// violation rather than an error an untrusted caller can cause.
+    /// `HandleTable::resolve` checked type coherence before constructing this
+    /// immutable typed kernel reference, so access needs no repeated downcast.
     pub(crate) fn object(&self) -> &T {
-        match self.object.downcast_ref::<T>() {
-            Some(object) => object,
-            None => super::invariant_violation(),
-        }
+        self.object.object()
     }
 
     pub(crate) fn koid(&self) -> Koid {
@@ -1820,7 +1812,7 @@ impl<T: KernelObject> ResolvedObject<T> {
     }
 
     /// Retains the canonical erased owner after typed authority validation.
-    pub(crate) fn into_object_ref(self) -> ObjectRef {
+    pub(crate) fn into_operation_pin(self) -> super::super::object::KernelRef<T, OperationPin> {
         self.object
     }
 }

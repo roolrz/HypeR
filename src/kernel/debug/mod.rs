@@ -32,8 +32,15 @@ pub(crate) fn initialize() -> Result<(), InitializationError> {
         symbol.name,
         symbol.address
     );
-    report_object_graph();
     Ok(())
+}
+
+/// Reports the initialized runtime ownership graph from normal context.
+///
+/// Kallsyms initialization precedes scheduler construction, so ownership
+/// reporting is a separate startup phase after task and VM publication.
+pub(crate) fn report_startup_state() {
+    report_object_graph();
 }
 
 /// Emits a weakly consistent object/handle graph from normal kernel context.

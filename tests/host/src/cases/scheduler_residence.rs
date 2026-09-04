@@ -493,3 +493,63 @@ fn retirement_publication_closes_worker_sleep_races() {
     assert!(!work.request());
     assert_eq!(work.finish_batch(false), WorkDisposition::Continue);
 }
+
+#[test]
+fn retirement_work_survives_publication_before_worker_and_irq_readiness() {
+    use hyper::sync::{DeferredWork, WorkDisposition};
+
+    let work = DeferredWork::new();
+
+    // Early producers cannot notify hardware, but both the work and elected
+    // prompt remain sticky until startup publishes the worker and IRQ route.
+    assert!(work.request());
+    assert!(work.claim_initial_worker());
+    assert!(work.consume_prompt());
+    assert!(!work.claim_notification());
+
+    work.begin_batch();
+    assert_eq!(work.finish_batch(false), WorkDisposition::Wait);
+    assert!(!work.consume_prompt());
+}
+
+#[test]
+fn prepublication_reaper_prompt_does_not_suppress_later_work() {
+    use hyper::sync::{DeferredWork, WorkDisposition};
+
+    let work = DeferredWork::new();
+
+    // An early object rollback publishes work before the worker or IRQ prompt
+    // route exists. Initial ownership consumes that unissued prompt before
+    // making the worker runnable.
+    assert!(work.request());
+    assert!(work.claim_initial_worker());
+    assert!(work.consume_prompt());
+    work.begin_batch();
+    assert_eq!(work.finish_batch(false), WorkDisposition::Wait);
+
+    // Once the initial batch sleeps, a new producer must be able to elect a
+    // fresh prompt and transfer wake ownership through IRQ service.
+    assert!(work.request());
+    assert!(work.consume_prompt());
+    assert!(work.claim_notification());
+}
+
+#[test]
+fn irq_prompt_enable_wakes_an_initial_worker_that_already_waited() {
+    use hyper::sync::{DeferredWork, WorkDisposition};
+
+    let work = DeferredWork::new();
+    assert!(work.request());
+    assert!(work.claim_initial_worker());
+
+    // Model the worker draining before IRQ prompting is enabled. Its original
+    // unissued prompt remains set while it releases wake ownership.
+    work.begin_batch();
+    assert_eq!(work.finish_batch(false), WorkDisposition::Wait);
+
+    // A producer cannot elect behind the stale prompt. Enabling the prompt
+    // route must consume it and claim the pending notification directly.
+    assert!(!work.request());
+    assert!(work.consume_prompt());
+    assert!(work.claim_notification());
+}

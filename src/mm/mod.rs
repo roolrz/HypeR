@@ -17,7 +17,9 @@ pub use address::{PAGE_SIZE, PhysicalAddress, VirtualAddress};
 pub use address_space_state::{
     AddressSpaceResidency, CutFailure, ResidencyError, RetirementCut, UpdateCut,
 };
-pub use allocation::{AllocationError, FallibleArc, UniqueFallibleArc, WeakFallibleArc, try_box};
+pub use allocation::{
+    AllocationError, DeferredArcDrop, FallibleArc, UniqueFallibleArc, WeakFallibleArc, try_box,
+};
 pub use allocator::{BuddyAllocator, BuddyError, BuddyStats, MAX_ORDER, MemoryHandoff};
 pub use boot::{BootAllocator, BootAllocatorError, BootMemoryStats};
 pub use translation_id::{

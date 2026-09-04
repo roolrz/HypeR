@@ -307,6 +307,17 @@ fn run_program(
     if object.kind != ObjectKind::THREAD || object.handles != ObjectHandleState::Unpublished {
         return Err(Error::Construction);
     }
+    let scheduler_id = match thread.scheduler_id() {
+        Some(id) => id,
+        None => return Err(Error::Construction),
+    };
+    let scheduler_object = crate::kernel::task::scheduler::thread_object_snapshot(scheduler_id)
+        .map_err(|_| Error::Scheduler)?;
+    if scheduler_object.object.koid != object.koid {
+        // Scheduler execution and userspace authority must refer to one
+        // canonical Thread object rather than parallel wrapper identities.
+        return Err(Error::Construction);
+    }
     let thread_waitable: Option<ResolvedWaitable> = match thread_authority {
         ThreadAuthority::None => None,
         ThreadAuthority::Publish => {
@@ -373,9 +384,12 @@ fn run_program(
         Some(sibling) => Some(sibling.join().map_err(|_| Error::Lifecycle)?),
         None => None,
     };
+    // Durable Thread objects are tombstones, not Process owners. Keeping both
+    // observer references alive must not prevent Process/address-space
+    // retirement after scheduler execution and membership have detached.
+    retire_process(&process)?;
     drop(thread);
     drop(sibling);
-    retire_process(&process)?;
     Ok(ProgramOutcome {
         thread: thread_reason,
         process: process_reason,

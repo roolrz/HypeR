@@ -206,8 +206,11 @@ impl ThreadMutation<'_> {
         }
     }
 
-    fn arm_user_execution(&mut self) -> bool {
-        self.apply(Thread::arm_user_execution)
+    fn arm_user_execution(
+        &mut self,
+        ownership: crate::kernel::process::UserExecutionOwnership,
+    ) -> bool {
+        self.apply(|thread| thread.arm_user_execution(ownership))
     }
     fn replace_affinity(&mut self, affinity: CpuMask) -> bool {
         self.apply_schedule(|schedule| {
@@ -908,6 +911,21 @@ impl Scheduler {
         self.registry.status(id)
     }
 
+    #[cfg(feature = "kernel-self-test")]
+    pub fn thread_object_snapshot(
+        &self,
+        id: ThreadId,
+    ) -> Result<crate::kernel::task::ThreadObjectSnapshot, Error> {
+        self.registry.object_snapshot(id)
+    }
+
+    pub fn scan_thread_objects(
+        &self,
+        cursor: crate::kernel::task::ThreadObjectScanCursor,
+    ) -> crate::kernel::task::ThreadObjectSnapshotPage {
+        self.registry.scan_objects(cursor)
+    }
+
     /// Routes schedule access without recursively reacquiring an active CPU lock.
     ///
     /// `Some(cpu)` means the caller must enter that CPU domain. `None` means
@@ -1157,12 +1175,16 @@ impl Scheduler {
         self.take_dormant_thread(id, crate::kernel::task::thread::ExecutionKind::User)
     }
 
-    pub fn arm_dormant_user(&mut self, id: ThreadId) -> Result<(), Error> {
+    pub fn arm_dormant_user(
+        &mut self,
+        id: ThreadId,
+        ownership: crate::kernel::process::UserExecutionOwnership,
+    ) -> Result<(), Error> {
         if self.thread(id)?.state() != ThreadState::Dormant {
             return Err(Error::InvalidThreadState);
         }
         let mut thread = self.thread_mut(id)?;
-        if !thread.arm_user_execution() {
+        if !thread.arm_user_execution(ownership) {
             return Err(Error::InvalidThreadState);
         }
         Ok(())
@@ -1303,8 +1325,15 @@ impl Scheduler {
         let execution = thread
             .user_execution_pointer()
             .ok_or(Error::InvalidThreadState)?;
+        let object = self.registry.with_thread(id, |thread| {
+            thread
+                .user_thread()
+                .cloned()
+                .ok_or(Error::InvalidThreadState)
+        })??;
         Ok(CurrentUser {
             thread: id,
+            object,
             execution,
             stack,
         })
@@ -2026,8 +2055,8 @@ impl Scheduler {
             });
         }
         self.with_thread(id, |thread| {
-            let execution = thread.user_execution().ok_or(Error::InvalidThreadState)?;
-            execution.thread().request_stop(reason);
+            let object = thread.user_thread().ok_or(Error::InvalidThreadState)?;
+            object.request_stop(reason);
             Ok::<_, Error>(())
         })??;
         // `resolve_wait` may publish a blocked Thread directly into a CPU

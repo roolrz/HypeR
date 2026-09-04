@@ -23,6 +23,7 @@ pub(crate) use owner::{
     ProcessSnapshot, ProcessStopReport,
 };
 pub(crate) use task_group::{TaskGroup, TaskGroupError, TaskGroupId, TaskGroupStopReport};
+pub(in crate::kernel) use user_thread::UserExecutionOwnership;
 pub(crate) use user_thread::{
     ActiveUserRun, PreparedUserRun, RunAdmissionError, StoppedUserRun, UserExecution, UserThread,
     UserThreadSnapshot,

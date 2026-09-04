@@ -111,6 +111,126 @@ fn concurrent_weak_upgrade_never_observes_a_destroyed_value() {
 }
 
 #[test]
+fn deferred_release_closes_weak_upgrade_before_destroying_the_value() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let owner = crate::require_ok(hyper::mm::FallibleArc::try_new(CountedDrop(drops.clone())));
+    let observer = owner.downgrade();
+
+    let deferred = match owner.release_deferred() {
+        Some(deferred) => deferred,
+        None => panic!("sole shared owner did not win final release"),
+    };
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+    assert!(!observer.is_alive());
+    assert!(observer.upgrade().is_none());
+
+    drop(deferred);
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+    assert!(observer.upgrade().is_none());
+}
+
+#[test]
+fn nonfinal_deferred_release_leaves_the_remaining_owner_live() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let owner = crate::require_ok(hyper::mm::FallibleArc::try_new(CountedDrop(drops.clone())));
+    let peer = owner.clone();
+
+    assert!(owner.release_deferred().is_none());
+    assert_eq!(peer.strong_count(), 1);
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+
+    let deferred = match peer.release_deferred() {
+        Some(deferred) => deferred,
+        None => panic!("remaining owner did not win final release"),
+    };
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+    drop(deferred);
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn concurrent_deferred_releases_produce_exactly_one_final_owner() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let owner = crate::require_ok(hyper::mm::FallibleArc::try_new(CountedDrop(drops.clone())));
+    let observer = owner.downgrade();
+    let barrier = Arc::new(Barrier::new(5));
+    let mut owners = Vec::new();
+    owners.push(owner);
+    for _ in 0..3 {
+        let clone = owners[0].clone();
+        owners.push(clone);
+    }
+
+    let mut workers = Vec::new();
+    for owner in owners {
+        let barrier = barrier.clone();
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            owner.release_deferred()
+        }));
+    }
+    barrier.wait();
+
+    let mut deferred = None;
+    let mut winners = 0usize;
+    for worker in workers {
+        let result = match worker.join() {
+            Ok(result) => result,
+            Err(_) => panic!("deferred-release worker panicked"),
+        };
+        if let Some(owner) = result {
+            winners += 1;
+            deferred = Some(owner);
+        }
+    }
+
+    assert_eq!(winners, 1);
+    assert!(!observer.is_alive());
+    assert!(observer.upgrade().is_none());
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+    drop(deferred);
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn weak_upgrade_racing_final_release_preserves_one_deferred_owner() {
+    for _ in 0..64 {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let owner = crate::require_ok(hyper::mm::FallibleArc::try_new(CountedDrop(drops.clone())));
+        let observer = owner.downgrade();
+        let contender = observer.clone();
+        let barrier = Arc::new(Barrier::new(2));
+        let worker_barrier = barrier.clone();
+        let worker = std::thread::spawn(move || {
+            worker_barrier.wait();
+            match contender.upgrade() {
+                Some(owner) => owner.release_deferred(),
+                None => None,
+            }
+        });
+
+        barrier.wait();
+        let caller_deferred = owner.release_deferred();
+        let worker_deferred = match worker.join() {
+            Ok(deferred) => deferred,
+            Err(_) => panic!("weak-upgrade contender panicked"),
+        };
+
+        assert_eq!(
+            usize::from(caller_deferred.is_some()) + usize::from(worker_deferred.is_some()),
+            1
+        );
+        assert!(!observer.is_alive());
+        assert!(observer.upgrade().is_none());
+        assert_eq!(drops.load(Ordering::Acquire), 0);
+
+        drop(caller_deferred);
+        drop(worker_deferred);
+        assert_eq!(drops.load(Ordering::Acquire), 1);
+    }
+}
+
+#[test]
 fn unique_fallible_arc_extracts_without_reallocation() {
     let owner = crate::require_ok(hyper::mm::FallibleArc::try_new(String::from("retired")));
     let value = match owner.try_unwrap() {
