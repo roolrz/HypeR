@@ -41,7 +41,11 @@ mod object_core;
 
 pub(crate) mod object {
     pub(crate) use super::object_core::{
-        ActiveHandleError, KernelObject, Koid, ObjectKind, ObjectRef, ObjectRetirement, private,
+        ActiveHandleError, ActiveHandleOwner, ErasedKernelRef, ExportPolicy, KernelObject,
+        KernelRef, KernelService, Koid, ObjectHandleState, ObjectKind, ObjectPublication,
+        ObjectReferenceSnapshot, ObjectRetirement, ObjectSnapshot, OperationPin, PublishableRef,
+        Scheduler, UserExportableObject, final_reap_pending, private, reap_final_objects,
+        reap_one_final_object,
     };
     pub(crate) use super::signals;
     pub(crate) use super::signals::SignalSource;

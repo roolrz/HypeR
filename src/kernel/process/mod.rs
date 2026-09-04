@@ -3,12 +3,14 @@
 
 //! Native Process, `TaskGroup`, and `UserThread` lifecycle ownership.
 
+mod directory;
 mod image;
 mod lifecycle;
 mod owner;
 mod task_group;
 mod user_thread;
 
+pub(crate) use directory::{ProcessScanCursor, ProcessSnapshotPage, scan};
 pub(crate) use image::{
     AbiFamily, ExecutionRoute, ImageError, MachineAbi, ProcessImage, SupervisionSessionId,
     UserThreadStart,
@@ -21,6 +23,7 @@ pub(crate) use owner::{
     ProcessSnapshot, ProcessStopReport,
 };
 pub(crate) use task_group::{TaskGroup, TaskGroupError, TaskGroupId, TaskGroupStopReport};
+pub(in crate::kernel) use user_thread::UserExecutionOwnership;
 pub(crate) use user_thread::{
     ActiveUserRun, PreparedUserRun, RunAdmissionError, StoppedUserRun, UserExecution, UserThread,
     UserThreadSnapshot,

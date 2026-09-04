@@ -6,7 +6,7 @@
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
-use crate::kernel::object::{KernelObject, ObjectKind, ObjectRef, private};
+use crate::kernel::object::{KernelObject, ObjectKind, object_allocation_size, private};
 #[cfg(feature = "kernel-self-test")]
 use crate::kernel::task::scheduler::WaitRegistration;
 
@@ -57,7 +57,7 @@ impl Event {
 
     /// Reserves the persistent object and memory charge before publication.
     pub(crate) fn try_new(domain: &ResourceDomain) -> Result<Self, EventError> {
-        let bytes = ObjectRef::allocation_size::<Self>()
+        let bytes = object_allocation_size::<Self>()
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or(EventError::AllocationSize)?;
         let charge = domain
@@ -138,6 +138,7 @@ impl Event {
 }
 
 impl private::Sealed for Event {}
+impl private::UserExportable for Event {}
 
 impl KernelObject for Event {
     const KIND: ObjectKind = ObjectKind::EVENT;

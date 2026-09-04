@@ -11,8 +11,14 @@ mod reschedule;
 pub mod scheduler;
 mod sleep;
 pub mod thread;
+mod thread_object;
 mod timeout;
 mod wait;
+
+pub(crate) use thread_object::{
+    ThreadObjectObservation, ThreadObjectRegistryPhase, ThreadObjectScanCursor,
+    ThreadObjectSnapshot, ThreadObjectSnapshotPage,
+};
 
 pub use sleep::{SleepError, sleep_ms, sleep_ns, sleep_s, sleep_until, sleep_us};
 pub use timeout::TimedWaitError;
@@ -25,7 +31,6 @@ static READY: AtomicBool = AtomicBool::new(false);
 /// Creates the bootstrap scheduling context and initial run queue.
 pub(crate) fn initialize() -> Result<(), scheduler::Error> {
     let capabilities = scheduler::initialize()?;
-    scheduler::initialize_retirement_worker()?;
     READY.store(true, Ordering::Release);
     crate::println!(
         "HypeR: scheduler active on bootstrap thread {}",

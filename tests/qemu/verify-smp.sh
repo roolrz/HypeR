@@ -177,7 +177,7 @@ runtime_contract_is_ready() {
         grep -q 'Run /init as init process' "$log" &&
         grep -q 'HypeR guest: /init reached' "$log" &&
         grep -q 'HypeR guest: Linux userspace is running' "$log" &&
-        grep -q 'HypeR guest: timer wakeup passed' "$log" &&
+        grep -q 'HypeR guest: repeated timer wakeups passed' "$log" &&
         grep -q '^RX_OK' "$log"
 }
 
@@ -203,7 +203,7 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         echo "HypeR reported a fatal failure during the AArch64 integration test" >&2
         exit 1
     fi
-    if [ "$input_sent" = false ] && grep -q 'HypeR guest: timer wakeup passed' "$log"; then
+    if [ "$input_sent" = false ] && grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
         # BusyBox ash asks the terminal for the cursor position before reading
         # its first command. Answer that query, then exercise guest RX.
         printf '\033[1;1Recho RX_OK\n' >&3

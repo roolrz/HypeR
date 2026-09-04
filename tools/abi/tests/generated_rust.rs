@@ -25,12 +25,14 @@ fn generated_rust_layouts_are_compiler_checked() {
         8
     );
     assert_eq!(generated::HYPER_NATIVE_OBJECT_CHANNEL, 2);
+    assert_eq!(generated::HYPER_NATIVE_OBJECT_THREAD, 3);
     assert_eq!(generated::HYPER_NATIVE_SYS_CHANNEL_CREATE, 12);
     assert_eq!(generated::HYPER_NATIVE_SYS_CHANNEL_WRITE, 13);
     assert_eq!(generated::HYPER_NATIVE_SYS_CHANNEL_READ, 14);
     assert_eq!(generated::HYPER_NATIVE_SIGNAL_CHANNEL_READABLE, 1);
     assert_eq!(generated::HYPER_NATIVE_SIGNAL_CHANNEL_WRITABLE, 2);
     assert_eq!(generated::HYPER_NATIVE_SIGNAL_CHANNEL_PEER_CLOSED, 4);
+    assert_eq!(generated::HYPER_NATIVE_SIGNAL_THREAD_TERMINATED, 1);
     assert_eq!(
         generated::HYPER_NATIVE_CHANNEL_DISPOSITION_SAME_RIGHTS,
         u64::MAX

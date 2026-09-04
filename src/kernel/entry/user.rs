@@ -183,14 +183,20 @@ impl UserSession {
         // SAFETY: `current_user` returned the scheduler-owned payload of this
         // pinned current Thread. This borrow ends before `pin` is consumed by
         // run admission; later machine runs obtain a fresh pointer and pin.
-        let owner = unsafe { execution.as_ref() };
-        let thread = owner.thread().clone();
+        let thread = current.object;
         if thread.scheduler_id() != Some(current.thread) {
             crate::kernel::crash::fatal(format_args!(
                 "HypeR: native-user scheduler identity is inconsistent"
             ));
         }
-        let process = thread.process().clone();
+        // SAFETY: the scheduler pin keeps the execution payload resident, and
+        // publication arms its Process membership before this entry can run.
+        let process = unsafe { execution.as_ref() }.process().clone();
+        if process.id() != thread.process_id() {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: native-user Process ownership is inconsistent"
+            ));
+        }
         if process.image().family() != AbiFamily::Native
             || process.image().route() != ExecutionRoute::NativeKernel
         {
@@ -213,9 +219,7 @@ impl UserSession {
             ));
         }
         let execution = current.execution;
-        // SAFETY: `current_user` returned this payload under `pin`. Reading its
-        // immutable owner identity does not enter a machine-active borrow.
-        if unsafe { execution.as_ref() }.thread().scheduler_id() != Some(current.thread) {
+        if current.object.object_snapshot().koid != self.thread.object_snapshot().koid {
             crate::kernel::crash::fatal(format_args!(
                 "HypeR: resumed native-user execution owner is inconsistent"
             ));
@@ -253,7 +257,7 @@ fn run_session(
         // and active run tokens below consume that same pin and retain its
         // no-migration/no-reclamation guarantee until machine exit.
         let execution_owner = unsafe { execution.as_ref() };
-        if execution_owner.stop_requested() {
+        if session.thread.snapshot().phase == UserThreadPhase::StopRequested {
             finish_pin(pin);
             return;
         }

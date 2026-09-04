@@ -28,6 +28,7 @@ pub mod mm;
 pub(crate) mod object;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod process;
+pub(crate) mod reaper;
 pub mod sync;
 pub mod task;
 pub mod time;

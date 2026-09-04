@@ -368,6 +368,10 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         value: 2,
         name: "channel",
     },
+    ObjectKind {
+        value: 3,
+        name: "thread",
+    },
 ];
 
 pub const RIGHTS: &[Right] = &[
@@ -486,6 +490,11 @@ pub const SIGNALS: &[Signal] = &[
         object: "channel",
         bit: 2,
         name: "peer_closed",
+    },
+    Signal {
+        object: "thread",
+        bit: 0,
+        name: "terminated",
     },
 ];
 

@@ -15,6 +15,7 @@ mod log_flush_barrier;
 mod native_syscall;
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod native_user_entry;
+mod object_directory;
 mod object_wait;
 #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
 mod reschedule_ipi;
@@ -54,6 +55,7 @@ pub(crate) fn run() {
     #[cfg(CONFIG_ARCH_AARCH64)]
     run_case("AArch64 native-user entry tests", native_user_entry::run);
     run_case("kernel object-wait tests", object_wait::run);
+    run_case("kernel object-directory tests", object_directory::run);
     run_case("kernel Channel core tests", channel::run);
     #[cfg(CONFIG_ARCH_AARCH64)]
     run_case(

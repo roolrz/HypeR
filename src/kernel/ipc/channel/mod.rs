@@ -18,7 +18,8 @@ use crate::kernel::authority::Rights;
 use crate::kernel::capability::InTransitCapabilities;
 
 use crate::kernel::object::{
-    KernelObject, ObjectKind, ObjectRef, ObjectRetirement, SignalMask, SignalSource, private,
+    KernelObject, ObjectKind, ObjectRetirement, SignalMask, SignalSource, object_allocation_size,
+    private,
 };
 use message::Message;
 use pair::Pair;
@@ -132,7 +133,7 @@ impl ChannelEndpoint {
     );
 
     pub(crate) fn try_pair(domain: &ResourceDomain) -> Result<(Self, Self), ChannelError> {
-        let endpoint_bytes = ObjectRef::allocation_size::<Self>()
+        let endpoint_bytes = object_allocation_size::<Self>()
             .and_then(|bytes| bytes.checked_mul(2))
             .and_then(|bytes| bytes.checked_add(FallibleArc::<Pair>::allocation_size()))
             .and_then(|bytes| u64::try_from(bytes).ok())
@@ -189,6 +190,7 @@ impl ChannelEndpoint {
 }
 
 impl private::Sealed for ChannelEndpoint {}
+impl private::UserExportable for ChannelEndpoint {}
 
 impl KernelObject for ChannelEndpoint {
     const KIND: ObjectKind = ObjectKind::CHANNEL;

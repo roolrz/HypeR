@@ -6,13 +6,19 @@
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use hyper::mm::FallibleArc;
+use hyper::mm::{FallibleArc, WeakFallibleArc};
 use hyper::sync::InterruptSpinLock;
 
 use super::lifecycle::{LifecycleError, TerminalReason, UserThreadLifecycle, UserThreadPhase};
 use super::owner::{Process, ProcessThreadMembership};
 use crate::kernel::accounting::CommittedCharge;
+use crate::kernel::authority::Rights;
 use crate::kernel::mm::user_space::NativeAddressSpace;
+use crate::kernel::object::{
+    KernelObject, KernelRef, KernelService, ObjectCreationError, ObjectKind, ObjectPublication,
+    ObjectSnapshot, OperationPin, PublishableRef, Scheduler as SchedulerReference, SignalMask,
+    SignalSource, SignalState, object_allocation_size, private,
+};
 use crate::kernel::sync::Completion;
 use crate::kernel::task::thread::ThreadId;
 
@@ -20,19 +26,46 @@ type ThreadLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
 struct ThreadControl {
     lifecycle: UserThreadLifecycle,
-    membership: Option<ProcessThreadMembership>,
-    execution_charge: Option<CommittedCharge>,
     next_run_generation: u64,
     prepared_run: Option<RunIdentity>,
     active_run: Option<RunIdentity>,
 }
 
 struct UserThreadInner {
-    process: Process,
+    process_id: super::owner::ProcessId,
+    process: WeakFallibleArc<super::owner::ProcessInner>,
     scheduler_id: AtomicU64,
     control: ThreadLock<ThreadControl>,
     joined: Completion,
+    signals: SignalState,
     _metadata_charge: CommittedCharge,
+}
+
+/// Erased object payload which gives one user thread a canonical KOID.
+pub(super) struct UserThreadObject {
+    inner: UserThreadInner,
+}
+
+impl private::Sealed for UserThreadObject {}
+impl private::UserExportable for UserThreadObject {}
+
+impl KernelObject for UserThreadObject {
+    const KIND: ObjectKind = ObjectKind::THREAD;
+    // Cross-Process transfer remains outside the initial Channel policy. It
+    // can be admitted later through an explicit typed publication policy
+    // without changing the handle ABI.
+    const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
+        .union(Rights::WAIT)
+        .union(Rights::INSPECT)
+        .union(Rights::START)
+        .union(Rights::REQUEST_STOP);
+
+    fn signal_source(&self) -> Option<SignalSource<'_>> {
+        Some(SignalSource::new(
+            &self.inner.signals,
+            UserThread::SUPPORTED_SIGNALS,
+        ))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,48 +92,112 @@ pub(crate) struct UserThreadSnapshot {
 }
 
 /// Observer and operation owner which outlives scheduler reclamation.
+///
+/// The object keeps only a weak Process relationship. Scheduler execution owns
+/// the strong Process membership, so a Process handle table may retain this
+/// object without forming a Process-to-Thread-to-Process reference cycle.
 pub(crate) struct UserThread {
-    inner: FallibleArc<UserThreadInner>,
+    object: UserThreadOwner,
+}
+
+enum UserThreadOwner {
+    Service(PublishableRef<UserThreadObject, KernelService>),
+    Scheduler(KernelRef<UserThreadObject, SchedulerReference>),
+    Operation(KernelRef<UserThreadObject, OperationPin>),
 }
 
 impl UserThread {
-    pub(super) const fn allocation_size() -> usize {
-        FallibleArc::<UserThreadInner>::allocation_size()
+    pub(crate) const TERMINATED: SignalMask =
+        SignalMask::from_trusted_bits(hyper::abi::native::HYPER_NATIVE_SIGNAL_THREAD_TERMINATED);
+    pub(crate) const SUPPORTED_SIGNALS: SignalMask = Self::TERMINATED;
+
+    pub(super) const fn allocation_size() -> Option<usize> {
+        object_allocation_size::<UserThreadObject>()
     }
+
     pub(super) fn try_prepared(
-        process: Process,
+        process: &Process,
         metadata_charge: CommittedCharge,
-    ) -> Result<Self, ()> {
+    ) -> Result<Self, ObjectCreationError> {
         let inner = UserThreadInner {
-            process,
+            process_id: process.id(),
+            process: process.inner.downgrade(),
             scheduler_id: AtomicU64::new(0),
             control: ThreadLock::new(ThreadControl {
                 lifecycle: UserThreadLifecycle::prepared(),
-                membership: None,
-                execution_charge: None,
                 next_run_generation: 1,
                 prepared_run: None,
                 active_run: None,
             }),
             joined: Completion::new(),
+            signals: SignalState::new(),
             _metadata_charge: metadata_charge,
         };
-        FallibleArc::try_new(inner)
-            .map(|inner| Self { inner })
-            .map_err(|_| ())
+        let object = PublishableRef::try_new(UserThreadObject { inner })?;
+        Ok(Self {
+            object: UserThreadOwner::Service(object),
+        })
     }
 
-    pub(crate) fn process(&self) -> &Process {
-        &self.inner.process
+    fn inner(&self) -> &UserThreadInner {
+        match &self.object {
+            UserThreadOwner::Service(object) => &object.object().inner,
+            UserThreadOwner::Scheduler(object) => &object.object().inner,
+            UserThreadOwner::Operation(object) => &object.object().inner,
+        }
+    }
+
+    pub(super) fn publication(&self) -> ObjectPublication<UserThreadObject> {
+        match &self.object {
+            UserThreadOwner::Service(object) => object.publication(),
+            UserThreadOwner::Scheduler(_) | UserThreadOwner::Operation(_) => {
+                crate::hal::cpu::halt()
+            }
+        }
+    }
+
+    pub(super) fn from_operation_pin(object: KernelRef<UserThreadObject, OperationPin>) -> Self {
+        Self {
+            object: UserThreadOwner::Operation(object),
+        }
+    }
+
+    pub(crate) fn into_scheduler_owner(self) -> Self {
+        match self.object {
+            UserThreadOwner::Service(object) => Self {
+                object: UserThreadOwner::Scheduler(object.into_scheduler()),
+            },
+            UserThreadOwner::Scheduler(_) => crate::hal::cpu::halt(),
+            UserThreadOwner::Operation(_) => crate::hal::cpu::halt(),
+        }
+    }
+
+    pub(crate) fn object_snapshot(&self) -> ObjectSnapshot {
+        match &self.object {
+            UserThreadOwner::Service(object) => object.snapshot(),
+            UserThreadOwner::Scheduler(object) => object.snapshot(),
+            UserThreadOwner::Operation(object) => object.snapshot(),
+        }
+    }
+
+    pub(crate) fn process_id(&self) -> super::owner::ProcessId {
+        self.inner().process_id
+    }
+
+    fn process(&self) -> Option<Process> {
+        self.inner()
+            .process
+            .upgrade()
+            .map(|inner| Process { inner })
     }
 
     pub(crate) fn scheduler_id(&self) -> Option<ThreadId> {
-        let raw = self.inner.scheduler_id.load(Ordering::Acquire);
+        let raw = self.inner().scheduler_id.load(Ordering::Acquire);
         (raw != 0).then(|| ThreadId::from_process_publication(raw))
     }
 
     pub(crate) fn snapshot(&self) -> UserThreadSnapshot {
-        self.inner.control.with(|control| UserThreadSnapshot {
+        self.inner().control.with(|control| UserThreadSnapshot {
             scheduler_id: self.scheduler_id(),
             phase: control.lifecycle.phase(),
             terminal: control.lifecycle.terminal(),
@@ -108,7 +205,7 @@ impl UserThread {
     }
 
     pub(crate) fn request_stop(&self, reason: TerminalReason) -> bool {
-        self.inner
+        self.inner()
             .control
             .with(|control| control.lifecycle.request_terminal(reason))
     }
@@ -119,9 +216,11 @@ impl UserThread {
             .ok_or(super::owner::ProcessError::Lifecycle(
                 LifecycleError::AdmissionClosed,
             ))?;
-        self.inner
-            .process
-            .with_run_admission(self.inner.process.image_generation(), || {
+        let process = self.process().ok_or(super::owner::ProcessError::Lifecycle(
+            LifecycleError::AdmissionClosed,
+        ))?;
+        process
+            .with_run_admission(process.image_generation(), || {
                 crate::kernel::task::scheduler::ready_user_thread(id)
             })
             .map_err(|_| super::owner::ProcessError::Lifecycle(LifecycleError::AdmissionClosed))?
@@ -129,7 +228,7 @@ impl UserThread {
     }
 
     pub(in crate::kernel) fn mark_runnable(&self) -> Result<(), LifecycleError> {
-        self.inner
+        self.inner()
             .control
             .with(|control| control.lifecycle.mark_runnable())
     }
@@ -149,34 +248,33 @@ impl UserThread {
         let Some(cpu) = crate::kernel::cpu::current_index() else {
             return Err((pin, RunAdmissionError::InvalidCpu));
         };
-        let identity =
-            match self
-                .inner
-                .process
-                .with_run_admission(expected_image_generation, || {
-                    self.inner.control.with(|control| {
-                        if control.lifecycle.phase() != UserThreadPhase::Runnable {
-                            return Err(RunAdmissionError::AdmissionClosed);
-                        }
-                        if control.prepared_run.is_some() || control.active_run.is_some() {
-                            return Err(RunAdmissionError::AlreadyAdmitted);
-                        }
-                        let generation = control.next_run_generation;
-                        control.next_run_generation = generation
-                            .checked_add(1)
-                            .ok_or(RunAdmissionError::GenerationExhausted)?;
-                        let identity = RunIdentity {
-                            generation,
-                            image_generation: expected_image_generation,
-                            cpu,
-                        };
-                        control.prepared_run = Some(identity);
-                        Ok(identity)
-                    })
-                }) {
-                Ok(Ok(identity)) => identity,
-                Ok(Err(error)) | Err(error) => return Err((pin, error)),
-            };
+        let Some(process) = self.process() else {
+            return Err((pin, RunAdmissionError::AdmissionClosed));
+        };
+        let identity = match process.with_run_admission(expected_image_generation, || {
+            self.inner().control.with(|control| {
+                if control.lifecycle.phase() != UserThreadPhase::Runnable {
+                    return Err(RunAdmissionError::AdmissionClosed);
+                }
+                if control.prepared_run.is_some() || control.active_run.is_some() {
+                    return Err(RunAdmissionError::AlreadyAdmitted);
+                }
+                let generation = control.next_run_generation;
+                control.next_run_generation = generation
+                    .checked_add(1)
+                    .ok_or(RunAdmissionError::GenerationExhausted)?;
+                let identity = RunIdentity {
+                    generation,
+                    image_generation: expected_image_generation,
+                    cpu,
+                };
+                control.prepared_run = Some(identity);
+                Ok(identity)
+            })
+        }) {
+            Ok(Ok(identity)) => identity,
+            Ok(Err(error)) | Err(error) => return Err((pin, error)),
+        };
         Ok(PreparedUserRun {
             thread: self.clone(),
             identity,
@@ -186,7 +284,7 @@ impl UserThread {
     }
 
     pub(crate) fn join(&self) -> Result<TerminalReason, crate::kernel::sync::Error> {
-        self.inner.joined.wait()?;
+        self.inner().joined.wait()?;
         match self.snapshot().terminal {
             Some(reason) => Ok(reason),
             None => crate::hal::cpu::halt(),
@@ -194,7 +292,7 @@ impl UserThread {
     }
 
     pub(crate) fn try_join(&self) -> Option<TerminalReason> {
-        if !self.inner.joined.try_wait() {
+        if !self.inner().joined.try_wait() {
             return None;
         }
         match self.snapshot().terminal {
@@ -203,52 +301,47 @@ impl UserThread {
         }
     }
 
-    pub(super) fn publish(
-        &self,
-        id: ThreadId,
-        membership: ProcessThreadMembership,
-        resource_charge: CommittedCharge,
-    ) {
-        if id == ThreadId::BOOTSTRAP || self.inner.scheduler_id.load(Ordering::Relaxed) != 0 {
+    pub(super) fn publish(&self, id: ThreadId) {
+        if id == ThreadId::BOOTSTRAP || self.inner().scheduler_id.load(Ordering::Relaxed) != 0 {
             crate::hal::cpu::halt();
         }
-        self.inner.control.with(|control| {
-            if control.membership.is_some()
-                || control.execution_charge.is_some()
-                || control.lifecycle.publish().is_err()
-            {
+        self.inner().control.with(|control| {
+            if control.lifecycle.publish().is_err() {
                 crate::hal::cpu::halt();
             }
-            control.membership = Some(membership);
-            control.execution_charge = Some(resource_charge);
         });
         // The ID is the publication word for every control field initialized
         // above. Acquire observers of a nonzero ID see complete ownership.
-        self.inner.scheduler_id.store(id.get(), Ordering::Release);
+        self.inner().scheduler_id.store(id.get(), Ordering::Release);
     }
 
-    fn complete_scheduler_detach(&self) {
-        let (membership, charge, terminal) = self.inner.control.with(|control| {
+    fn publish_terminal_state(&self) -> TerminalReason {
+        let terminal = self.inner().control.with(|control| {
             if control.prepared_run.is_some() || control.active_run.is_some() {
                 crate::hal::cpu::halt();
             }
-            let terminal = match control.lifecycle.detach() {
+            match control.lifecycle.detach() {
                 Ok(terminal) => terminal,
                 Err(_) => crate::hal::cpu::halt(),
-            };
-            let membership = match control.membership.take() {
-                Some(membership) => membership,
-                None => crate::hal::cpu::halt(),
-            };
-            let charge = match control.execution_charge.take() {
-                Some(charge) => charge,
-                None => crate::hal::cpu::halt(),
-            };
-            (membership, charge, terminal)
+            }
         });
-        membership.detach(terminal);
-        drop(charge);
-        if self.inner.joined.complete_all().is_err() {
+        // Publish the object-visible terminal state before Process membership
+        // can complete the enclosing Process. A waiter which observes Process
+        // completion must never find one of its detached Thread objects still
+        // missing TERMINATED.
+        if self
+            .inner()
+            .signals
+            .update(SignalMask::EMPTY, Self::TERMINATED)
+            .is_err()
+        {
+            crate::hal::cpu::halt();
+        }
+        terminal
+    }
+
+    fn publish_join_completion(&self) {
+        if self.inner().joined.complete_all().is_err() {
             crate::hal::cpu::halt();
         }
     }
@@ -257,18 +350,45 @@ impl UserThread {
 impl Clone for UserThread {
     fn clone(&self) -> Self {
         Self {
-            inner: self.inner.clone(),
+            object: match &self.object {
+                UserThreadOwner::Service(object) => UserThreadOwner::Service(object.clone()),
+                UserThreadOwner::Scheduler(object) => UserThreadOwner::Scheduler(object.clone()),
+                UserThreadOwner::Operation(object) => UserThreadOwner::Operation(object.clone()),
+            },
+        }
+    }
+}
+
+/// Linear Process ownership installed into one dormant scheduler execution.
+///
+/// Scheduler code transports this token but cannot inspect its Process-local
+/// membership or resource accounting internals.
+pub(in crate::kernel) struct UserExecutionOwnership {
+    membership: ProcessThreadMembership,
+    execution_charge: CommittedCharge,
+}
+
+impl UserExecutionOwnership {
+    pub(super) const fn new(
+        membership: ProcessThreadMembership,
+        execution_charge: CommittedCharge,
+    ) -> Self {
+        Self {
+            membership,
+            execution_charge,
         }
     }
 }
 
 /// Scheduler-owned payload for a runnable native user context.
 ///
-/// The address-space clone is dropped before Process membership completion,
-/// so observing zero active Process Threads also proves that no scheduler
-/// payload can retain the machine root.
+/// This payload owns the strong Process membership while execution is resident
+/// in the scheduler. There is no reverse owning edge from Process bookkeeping
+/// to the scheduler Thread. The address-space clone is dropped before Process
+/// membership completion, so observing zero active Process Threads also proves
+/// that no scheduler payload can retain the machine root.
 pub(crate) struct UserExecution {
-    thread: UserThread,
+    ownership: Option<UserExecutionOwnership>,
     address_space: Option<FallibleArc<NativeAddressSpace>>,
     context: UnsafeCell<crate::hal::user::UserContext>,
     armed: bool,
@@ -280,12 +400,11 @@ impl UserExecution {
     }
 
     pub(super) fn try_new(
-        thread: UserThread,
         address_space: FallibleArc<NativeAddressSpace>,
         context: crate::hal::user::UserContext,
     ) -> Result<alloc::boxed::Box<UnsafeCell<Self>>, ()> {
         hyper::mm::try_box(UnsafeCell::new(Self {
-            thread,
+            ownership: None,
             address_space: Some(address_space),
             context: UnsafeCell::new(context),
             armed: false,
@@ -293,13 +412,16 @@ impl UserExecution {
         .map_err(|_| ())
     }
 
-    pub(crate) const fn thread(&self) -> &UserThread {
-        &self.thread
-    }
-
     pub(crate) fn address_space(&self) -> &NativeAddressSpace {
         match self.address_space.as_ref() {
             Some(address_space) => address_space,
+            None => crate::hal::cpu::halt(),
+        }
+    }
+
+    pub(crate) fn process(&self) -> &Process {
+        match self.ownership.as_ref() {
+            Some(ownership) => ownership.membership.process(),
             None => crate::hal::cpu::halt(),
         }
     }
@@ -315,31 +437,38 @@ impl UserExecution {
         self.context.get()
     }
 
-    pub(crate) fn stop_requested(&self) -> bool {
-        self.thread.snapshot().phase == UserThreadPhase::StopRequested
-    }
-
-    pub(crate) fn arm_after_process_publication(&mut self) {
-        if self.armed {
+    pub(in crate::kernel) fn arm_for_process_publication(
+        &mut self,
+        ownership: UserExecutionOwnership,
+    ) {
+        if self.armed || self.ownership.is_some() {
             crate::hal::cpu::halt();
         }
+        self.ownership = Some(ownership);
         self.armed = true;
     }
 
     /// Completes scheduler-detach ownership outside the scheduler lock.
-    pub(crate) fn complete_detach(mut self) {
+    pub(crate) fn complete_detach(mut self, thread: UserThread) {
         if !self.armed {
             crate::hal::cpu::halt();
         }
         self.armed = false;
         drop(self.address_space.take());
-        self.thread.complete_scheduler_detach();
+        let terminal = thread.publish_terminal_state();
+        let ownership = match self.ownership.take() {
+            Some(ownership) => ownership,
+            None => crate::hal::cpu::halt(),
+        };
+        ownership.membership.detach(terminal);
+        drop(ownership.execution_charge);
+        thread.publish_join_completion();
     }
 }
 
 impl Drop for UserExecution {
     fn drop(&mut self) {
-        if self.armed {
+        if self.armed || self.ownership.is_some() {
             // Reclamation must call complete_detach after releasing scheduler
             // ownership. Drop cannot acquire Process/completion lock graphs.
             crate::hal::cpu::halt();
@@ -376,25 +505,22 @@ impl PreparedUserRun {
         if crate::kernel::cpu::current_index() != Some(self.identity.cpu) {
             return Err((self.abort_inner(), RunAdmissionError::InvalidCpu));
         }
-        let publication =
-            self.thread
-                .inner
-                .process
-                .with_run_admission(self.identity.image_generation, || {
-                    self.thread.inner.control.with(|control| {
-                        if control.lifecycle.phase() != UserThreadPhase::Runnable {
-                            return Err(RunAdmissionError::AdmissionClosed);
-                        }
-                        if control.prepared_run != Some(self.identity)
-                            || control.active_run.is_some()
-                        {
-                            return Err(RunAdmissionError::AlreadyAdmitted);
-                        }
-                        control.prepared_run = None;
-                        control.active_run = Some(self.identity);
-                        Ok(())
-                    })
-                });
+        let Some(process) = self.thread.process() else {
+            return Err((self.abort_inner(), RunAdmissionError::AdmissionClosed));
+        };
+        let publication = process.with_run_admission(self.identity.image_generation, || {
+            self.thread.inner().control.with(|control| {
+                if control.lifecycle.phase() != UserThreadPhase::Runnable {
+                    return Err(RunAdmissionError::AdmissionClosed);
+                }
+                if control.prepared_run != Some(self.identity) || control.active_run.is_some() {
+                    return Err(RunAdmissionError::AlreadyAdmitted);
+                }
+                control.prepared_run = None;
+                control.active_run = Some(self.identity);
+                Ok(())
+            })
+        });
         if let Err(error) | Ok(Err(error)) = publication {
             return Err((self.abort_inner(), error));
         }
@@ -412,7 +538,7 @@ impl PreparedUserRun {
     }
 
     fn abort_inner(&mut self) -> crate::kernel::task::scheduler::UserRunGuard {
-        self.thread.inner.control.with(|control| {
+        self.thread.inner().control.with(|control| {
             if control.prepared_run != Some(self.identity) {
                 crate::hal::cpu::halt();
             }
@@ -531,7 +657,7 @@ impl StoppedUserRun {
 
     /// Acknowledges that the architecture return capability was consumed.
     pub(crate) fn acknowledge_architecture_exit(mut self) {
-        self.thread.inner.control.with(|control| {
+        self.thread.inner().control.with(|control| {
             if control.active_run != Some(self.identity) {
                 crate::hal::cpu::halt();
             }

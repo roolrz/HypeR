@@ -84,8 +84,8 @@ The selected binary HAL exposes eleven enforced capability modules:
 - `hal::platform` owns allocation-free essential-device discovery,
   architecture KASLR geometry, optional host port I/O, and runtime
   architecture diagnostics;
-- `hal::time` owns the monotonic counter, one-shot comparator, and validated
-  kernel timer description;
+- `hal::time` owns the boot-entry counter origin, monotonic counter, one-shot
+  comparator, and validated kernel timer description;
 - `hal::user` owns user-address limits, prepared translation roots,
   CPU-affine activation tokens, user-context entry, and typed return
   completion; process policy and syscall dispatch remain in the kernel;
@@ -131,6 +131,90 @@ interrupts masked, and release every raw-frame or backend-state borrow before a
 policy callback. Other architecture mechanism code must not call kernel
 logging, boot failure, scheduling, IRQ dispatch, or VM policy directly.
 
+On AArch64, Rust computes the complete guest `HCR_EL2` return regime before
+each world switch and passes it through the architecture-private guest-run
+frame. Guest entry enables stage 2, selects AArch64 EL1, clears host-only
+`TGE`/`DC`, and traps WFI/WFE. A trapped guest wait is therefore a typed vCPU
+exit: VM policy snapshots pending virtual interrupts and the architectural
+timer deadline, then either re-enters immediately or parks the scheduler-owned
+vCPU Thread on its stable endpoint.
+
+The guest virtual-timer PPI is a level source. Injection may mask the host
+mapping while a list register owns the pending interrupt; maintenance
+reconciliation unmasks it only after the virtual interrupt can no longer be
+lost. Because a guest can retire that list register before its timer write has
+deasserted the physical level, the existing host tick supplies a bounded
+recheck for a source retained masked across that edge. The ordinary tick path
+pays only one CPU-local relaxed load while no recovery is pending. The AArch64
+QEMU contract requires repeated initramfs timer wakeups after `/init`, proving
+that delivery survives successive list-register lifecycles rather than only
+successful guest entry or the first interrupt.
+
+## Kernel-object ownership
+
+Kernel objects are the standard identity mechanism for service entities with
+independent lifetimes or cross-subsystem ownership boundaries. Once an entity
+participates in this model, it has one canonical kernel-object allocation.
+Kernel code reaches that allocation through direct, counted, typed references;
+it does not resolve process-local handle values through a global kernel handle
+table. Userspace handle tables wrap the same allocation with process-local
+generations, rights, and flags only at the ABI boundary.
+
+Persistent references declare their ownership class. Scheduler residence,
+object-to-object edges, userspace authority, and temporary resolved operations
+all contribute to the object's total lifetime count while remaining separately
+observable. A borrowed Rust reference is scoped to one counted owner and is not
+itself an ownership edge. User-authority count is distinct from total lifetime:
+closing the final userspace handle may close an endpoint or publish another
+object-specific transition while an already resolved operation safely finishes.
+
+The scheduler retains a counted scheduler-class reference to every resident
+Thread object. CPU residence and scheduler authority continue to govern access
+to mutable scheduling state; an object reference alone never grants that
+authority. A user Thread's signals and terminal information remain in its
+durable object. System Thread objects currently provide stable identity, while
+the scheduler's bounded observations associate that identity with a role and
+generation-qualified Thread ID. In both cases, the kernel stack, machine
+context, and architecture execution payload are explicitly detached and
+retired by the scheduler. A userspace handle can therefore retain a terminated
+user Thread tombstone without retaining its execution resources.
+
+The final total-reference release performs only an allocation-free, nonblocking
+handoff to object reclamation. An object in the reap-pending state cannot be
+upgraded from a weak reference, republished as a userspace handle, or otherwise
+resurrected. Hardware and subsystem resources must already be quiescent before
+this transition; their typed retirement protocols are not delegated to the
+generic object reclaimer. Object destruction may release further references,
+but does not recursively execute another object's finalizer on the same stack.
+
+KOIDs, object-directory entries, and diagnostic snapshots confer no authority.
+The weak global directory can report bounded metadata and aggregate reference
+classes, while durable edges are enumerated by their owning Process, scheduler,
+or object subsystem. Temporary operation and diagnostic pins are reported as
+counts rather than globally allocated edge records. Multi-page graph scans are
+weakly consistent and expose neither kernel pointers nor a lookup path from a
+KOID to an operational reference.
+
+Kernel-only objects have no generic conversion into userspace handles. Handle
+publication requires an explicit typed publication capability; export-policy
+flags are diagnostic metadata rather than the security boundary. Kernel
+subsystem-owned edges must not form an unbroken strong-reference cycle. An
+intentional subsystem cycle therefore has an explicit retirement step which
+breaks it; reverse relationships otherwise use weak references or
+generation-qualified identifiers.
+
+Userspace can construct cyclic capability graphs, including handles carried by
+Channel messages. Reference counting does not collect those cycles: they can
+retain resources, but they cannot resurrect an object or create a use-after-free.
+Resource accounting and quotas are the current containment mechanism. A future
+reclamation policy may add cycle detection or a collector without changing the
+typed kernel-reference and userspace-handle boundary.
+
+Implementation records without independent identity remain ordinary subsystem
+state. Run-queue links, per-CPU scheduler state, page-table entries, allocator
+blocks, architecture register contexts, wait nodes, and device bookkeeping do
+not acquire KOIDs merely because they participate in an object's implementation.
+
 ## Native userspace boundary
 
 Native user entry follows the same policy-above-mechanism rule without reusing
@@ -154,6 +238,15 @@ native-user entry as unsupported. Process lifetime, handles, rights, syscall
 numbers, ELF policy, compatibility routing, residency, and resource accounting
 remain in the kernel. The scheduler-owned `UserExecution` strongly retains its
 Process, native address space, and per-Thread machine context.
+
+`UserThread` wraps one canonical kernel object rather than maintaining a
+parallel task identity. Internal observers and eventual userspace handles share
+its KOID, rights ceiling, and level-triggered termination state. Global object
+and Process directories retain only weak references. Their cursor-based
+snapshots combine object headers with bounded per-Process handle-table pages,
+providing a pointer-free diagnostic graph without changing object lifetime or
+placing reverse-reference locks on capability hot paths. Rendering is allowed
+only from normal kernel context; fatal diagnostics remain lock-independent.
 
 AArch64 provides two implementations behind that facade. VHE uses an immutable
 host EL2&0 stage-1 root. nVHE uses an immutable per-process stage-2 root with a
@@ -356,11 +449,17 @@ Runtime CPU offline and hotplug remain unsupported and may not assume that
 bootstrap exception.
 
 Idle entry uses one interrupt-mask ownership interval for its final run-queue
-check and architecture wait. RISC-V and AArch64 execute WFI with local delivery
-masked so a newly pending interrupt wakes the CPU but remains pending until the
-saved mask is restored. x86 uses `STI; HLT; CLI`, whose interrupt shadow makes
-the enable-and-sleep boundary atomic. This prevents a wake IPI from being
-handled between an empty-queue observation and sleep.
+check and architecture wait. RISC-V executes WFI with global delivery masked;
+a locally enabled pending interrupt resumes the hart and remains pending until
+the saved mask is restored. AArch64 temporarily admits IRQ delivery around WFI
+because a masked physical PPI is not required to retire WFI on every
+implementation. If an IRQ publishes work in that enable-to-WFI window, the
+qualified outermost IRQ tail switches away from the idle Thread; this
+continuation can reach WFI only after idle runs again, and it reestablishes the
+outer guard's masked state before returning. x86 uses `STI; HLT; CLI`, whose
+interrupt shadow makes the enable-and-sleep boundary atomic. Each backend thus
+closes its own queue-check-to-sleep race without assuming a cross-architecture
+masked-wait behavior.
 
 Every scheduling transition masks interrupts before the scheduler publishes
 `current = next`. Blocking primitives transfer the outer synchronization lock's
@@ -383,6 +482,21 @@ x2APIC IPI on x86-64—while retaining the pending request for a later
 cooperative point. Each architecture must qualify the IRQ-tail boundary
 independently rather than inheriting the AArch64 capability through a
 misleading common interface.
+
+## Logging and diagnostic identity
+
+The kernel log ring timestamps a record when it is produced, rather than when
+the asynchronous console drain observes it. Architecture assembly captures a
+boot counter before Rust entry; once the clocksource publishes its frequency,
+records use boot-relative seconds with microsecond precision. Records emitted
+before that publication deliberately use zero. Ring sequence numbers remain
+internal cursor and loss-detection state, while console output reports an
+explicit warning only when records were missed.
+
+Thread diagnostics copy names into fixed-capacity owned snapshots while the
+scheduler owns the source Thread. Logging and crash paths can therefore render
+an ID/name pair without retaining a `Thread` reference or reacquiring object
+ownership after the scheduler boundary.
 
 ## Bootstrap boundary
 

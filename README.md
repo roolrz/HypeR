@@ -56,7 +56,7 @@ initramfs `/init` on AArch64 and RISC-V.
 
 | Host architecture | Status | Current acceptance contract |
 | --- | --- | --- |
-| AArch64 | Tier 1 | QEMU `virt`; nVHE and VHE; LL/SC and LSE; SMP; Linux guest reaches `/init` |
+| AArch64 | Tier 1 | QEMU `virt`; nVHE and VHE; LL/SC and LSE; SMP; Linux guest reaches `/init` and completes repeated timer wakeups |
 | RISC-V 64-bit | Supported | QEMU `virt`; OpenSBI, H extension, PLIC and SSTC; Linux guest reaches `/init` |
 | x86-64 | Experimental | QEMU `q35`-targeted build and image validation; no public runtime contract yet |
 
@@ -81,13 +81,16 @@ The current foundation includes:
   syscall metadata, and an auditable reference;
 - a compiled capability foundation with fallible shared objects, schema-owned
   rights, 64-bit generation handles, detached unpublished slot transactions,
-  deferred close, and allocation-free iterative teardown;
+  deferred close, allocation-free iterative teardown, and weak global
+  object/Process discovery with bounded pointer-free handle-graph snapshots;
 - capability-backed Event objects with independent `WAIT` and `SIGNAL`
   authority, absolute-deadline waits, and exactly-once arbitration among
   signal, timeout, and Process cancellation;
-- strong `ProcessImage`, `Process`, `UserThread`, and `TaskGroup` ownership with
-  accounted construction, explicit publication, start/ready, stop/join, and
-  acknowledged retirement;
+- bounded Channel endpoints with FIFO messages, level signals, transactional
+  user copies, and atomic capability-transfer publication;
+- strong `ProcessImage`, `Process`, object-backed `UserThread`, and `TaskGroup`
+  ownership with accounted construction, explicit publication, start/ready,
+  stop/join, and acknowledged retirement;
 - an AArch64 VHE/nVHE native-EL0 proof which enters through a scheduler-owned
   user Thread, dispatches the initial handle, scheduling, lifecycle, and Event
   syscalls, contains a user fault, and retires the complete Process ownership
@@ -102,8 +105,9 @@ The current foundation includes:
 - versioned CPIO VM bundles delivered through the firmware ramdisk;
 - rollback-safe VM construction with one generational registry publication for
   guest memory, virtual interrupts, devices, and the dormant boot vCPU;
-- kernel log buffering, kallsyms, guarded kernel/IRQ/emergency stacks, and an
-  optional allocation-free crash console.
+- boot-relative, severity-tagged kernel log buffering, lock-independent Thread
+  name snapshots for diagnostics, kallsyms, guarded kernel/IRQ/emergency
+  stacks, and an optional allocation-free crash console.
 
 This list describes implemented foundations, not a claim of production
 completeness. In particular, a general-purpose Native runtime and loader, an
@@ -234,8 +238,10 @@ GitHub Actions separates source quality, architecture builds, image contracts,
 and runtime acceptance. The AArch64 matrix exercises baseline and feature-rich
 CPU models, multiple host modes and atomic backends, address-space geometries,
 SMP, kernel self-tests, virtual interrupts and timers, and Linux guest startup.
-RISC-V must also reach guest `/init`. x86-64 currently has a build and image
-contract only.
+It requires repeated initramfs timer wakeups before exercising guest-console
+RX, so reaching `/init` or delivering only the first timer interrupt cannot
+hide a stalled virtual timer. RISC-V must also reach guest `/init`. x86-64
+currently has a build and image contract only.
 
 Stable local equivalents live in `tests/ci/run.sh`:
 

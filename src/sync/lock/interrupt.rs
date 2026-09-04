@@ -22,9 +22,10 @@ pub struct InterruptSpinLock<T, M: InterruptMask> {
 /// Ownership of one saved local-interrupt state.
 ///
 /// The guard may outlive the lock acquisition that created it. A scheduler
-/// transition must consume it with [`Self::into_restore_state`] before the
-/// machine handoff; the CPU-affine guard itself must never remain on a
-/// suspended Thread stack.
+/// transition of a migratable continuation must consume it with
+/// [`Self::into_restore_state`] before the machine handoff. The guard may
+/// remain on a suspended stack only while the scheduler guarantees that
+/// continuation stays pinned to this CPU until the saved state is restored.
 ///
 /// The guard is CPU-affine and therefore neither `Send` nor `Sync`. It must be
 /// destroyed on the CPU that acquired it, in strict reverse acquisition order
@@ -44,9 +45,10 @@ impl<M: InterruptMask> InterruptMaskGuard<M> {
     /// # Safety
     ///
     /// The returned guard must be dropped on this CPU in strict reverse order
-    /// within its continuation's mask-state lineage. If its continuation is
-    /// suspended, the scheduler must keep that continuation on this CPU until
-    /// the guard has restored its state.
+    /// within its continuation's mask-state lineage. A scheduler must either
+    /// keep a suspended continuation pinned to this CPU until restoration or
+    /// consume the guard into the continuation's machine context before it can
+    /// migrate.
     pub unsafe fn acquire() -> Self {
         Self {
             state: M::save_and_disable(),

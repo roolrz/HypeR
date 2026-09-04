@@ -12,11 +12,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod kernel;
 
 use kernel::capability::{
-    HandleBatchReservationStorage, HandleError, HandleFlags, HandleTable, HandleTableStoragePlan,
-    HandleTransferRequest, HandleTransferStorage, HandleValue, InTransitHandleBatch,
-    PreparedHandle, Rights,
+    HandleBatchReservationStorage, HandleError, HandleFlags, HandleScanCursor, HandleTable,
+    HandleTableStoragePlan, HandleTransferRequest, HandleTransferStorage, HandleValue,
+    InTransitHandleBatch, PreparedHandle, Rights,
 };
-use kernel::object::{KernelObject, ObjectKind, ObjectRef, ObjectRetirement};
+use kernel::object::{
+    ExportPolicy, KernelObject, KernelRef, KernelService, ObjectHandleState, ObjectKind,
+    ObjectRetirement, PublishableRef, Scheduler,
+};
 
 const TEST_KIND: ObjectKind = match NonZeroU32::new(0x7fff_ff01) {
     Some(value) => ObjectKind::for_test(value),
@@ -37,6 +40,7 @@ struct TestObject {
 }
 
 impl kernel::object::private::Sealed for TestObject {}
+impl kernel::object::private::UserExportable for TestObject {}
 
 impl KernelObject for TestObject {
     const KIND: ObjectKind = TEST_KIND;
@@ -62,6 +66,7 @@ struct CascadingObject {
 }
 
 impl kernel::object::private::Sealed for CascadingObject {}
+impl kernel::object::private::UserExportable for CascadingObject {}
 
 impl KernelObject for CascadingObject {
     const KIND: ObjectKind = CASCADING_KIND;
@@ -88,22 +93,40 @@ impl KernelObject for CascadingObject {
 struct OtherObject;
 
 impl kernel::object::private::Sealed for OtherObject {}
+impl kernel::object::private::UserExportable for OtherObject {}
 
 impl KernelObject for OtherObject {
     const KIND: ObjectKind = OTHER_KIND;
     const SUPPORTED_RIGHTS: Rights = Rights::INSPECT;
 }
 
-fn object(value: u64, zero_transitions: &Arc<AtomicUsize>) -> ObjectRef {
-    crate::require_ok(ObjectRef::try_new(TestObject {
+struct DropTrackedObject(Arc<AtomicUsize>);
+
+impl kernel::object::private::Sealed for DropTrackedObject {}
+
+impl KernelObject for DropTrackedObject {
+    const KIND: ObjectKind = OTHER_KIND;
+    const SUPPORTED_RIGHTS: Rights = Rights::INSPECT;
+}
+
+impl Drop for DropTrackedObject {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Release);
+    }
+}
+
+type TestObjectRef = PublishableRef<TestObject, KernelService>;
+
+fn object(value: u64, zero_transitions: &Arc<AtomicUsize>) -> TestObjectRef {
+    crate::require_ok(PublishableRef::try_new(TestObject {
         value,
         zero_transitions: zero_transitions.clone(),
     }))
 }
 
-fn prepared(object: ObjectRef, rights: Rights) -> PreparedHandle {
+fn prepared(object: TestObjectRef, rights: Rights) -> PreparedHandle {
     crate::require_ok(PreparedHandle::try_from_new_object(
-        object,
+        object.publication(),
         rights,
         HandleFlags::NONE,
     ))
@@ -116,13 +139,17 @@ fn cascading_handle(
     maximum_depth: &Arc<AtomicUsize>,
 ) -> PreparedHandle {
     let child = child.map(|handle| InTransitHandleBatch::from_prepared_handles(vec![handle]));
-    let object = crate::require_ok(ObjectRef::try_new(CascadingObject {
+    let object = crate::require_ok(PublishableRef::try_new(CascadingObject {
         child: std::sync::Mutex::new(child),
         transitions: transitions.clone(),
         callback_depth: callback_depth.clone(),
         maximum_depth: maximum_depth.clone(),
     }));
-    prepared(object, Rights::TRANSFER.union(Rights::INSPECT))
+    crate::require_ok(PreparedHandle::try_from_new_object(
+        object.publication(),
+        Rights::TRANSFER.union(Rights::INSPECT),
+        HandleFlags::NONE,
+    ))
 }
 
 fn remove_all(table: &mut HandleTable) {
@@ -151,6 +178,96 @@ fn retirement_worklist_flattens_nested_final_handle_callbacks() {
     assert_eq!(transitions.load(Ordering::Relaxed), 4);
     assert_eq!(maximum_depth.load(Ordering::Relaxed), 1);
     drop(retirement);
+}
+
+#[test]
+fn zero_reference_object_drop_is_deferred_and_reaped_exactly_once() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let object: KernelRef<DropTrackedObject, Scheduler> = crate::require_ok(
+        KernelRef::try_new_scheduler(DropTrackedObject(drops.clone())),
+    );
+
+    drop(object);
+    assert_eq!(drops.load(Ordering::Acquire), 0);
+    assert!(kernel::object::final_reap_pending());
+
+    let mut attempts = 0usize;
+    while drops.load(Ordering::Acquire) == 0 && attempts < 4_096 {
+        // Host tests share the global queue and run concurrently, so another
+        // test may consume the next item between observing this probe and the
+        // reap attempt. Only this probe's exactly-once drop is authoritative.
+        let _ = kernel::object::reap_one_final_object();
+        std::thread::yield_now();
+        attempts += 1;
+    }
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+
+    // Draining work queued by this test cannot destroy the target twice.
+    let _ = kernel::object::reap_final_objects(4_096);
+    assert_eq!(drops.load(Ordering::Acquire), 1);
+}
+
+#[test]
+fn object_snapshot_distinguishes_unpublished_active_and_retired_authority() {
+    let transitions = Arc::new(AtomicUsize::new(0));
+    let object = object(9, &transitions);
+    let unpublished = object.snapshot();
+    assert_eq!(unpublished.kind, TEST_KIND);
+    assert_eq!(unpublished.handles, ObjectHandleState::Unpublished);
+    assert_eq!(unpublished.export_policy, ExportPolicy::User);
+    assert_eq!(unpublished.references.kernel_service, 1);
+
+    let publication = object.publication();
+    let pending = object.snapshot();
+    assert_eq!(pending.references.publication, 1);
+    assert_eq!(pending.references.user_authority, 0);
+    let handle = crate::require_ok(PreparedHandle::try_from_new_object(
+        publication,
+        Rights::INSPECT,
+        HandleFlags::NONE,
+    ));
+    let active = object.snapshot();
+    assert_eq!(active.handles, ObjectHandleState::Active(1));
+    assert_eq!(active.references.kernel_service, 1);
+    assert_eq!(active.references.publication, 0);
+    assert_eq!(active.references.user_authority, 1);
+    drop(handle);
+    let retired = object.snapshot();
+    assert_eq!(retired.handles, ObjectHandleState::Retired);
+    assert_eq!(retired.references.user_authority, 0);
+    assert_eq!(transitions.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn handle_diagnostics_page_generation_qualified_object_edges() {
+    let transitions = Arc::new(AtomicUsize::new(0));
+    let mut table = HandleTable::new();
+    let reservation = crate::require_ok(table.reserve_batch(40));
+    let mut expected = reservation.values().to_vec();
+    let handles = (0_u64..40)
+        .map(|value| prepared(object(value, &transitions), Rights::INSPECT))
+        .collect();
+    reservation.publish(&mut table, handles);
+
+    let first = crate::require_ok(table.scan_handles(HandleScanCursor::start()));
+    let mut observed: Vec<_> = first.entries().map(|entry| entry.value).collect();
+    let next = match first.next() {
+        Some(cursor) => cursor,
+        None => {
+            remove_all(&mut table);
+            panic!("forty handles require a second diagnostic page");
+        }
+    };
+    let second = crate::require_ok(table.scan_handles(next));
+    observed.extend(second.entries().map(|entry| entry.value));
+    let completed = second.next().is_none();
+
+    remove_all(&mut table);
+    expected.sort_by_key(|value| value.get());
+    observed.sort_by_key(|value| value.get());
+    assert_eq!(observed, expected);
+    assert!(completed);
+    assert_eq!(transitions.load(Ordering::Relaxed), 40);
 }
 
 #[test]
@@ -483,7 +600,7 @@ fn typed_resolution_uses_compiler_checked_downcast_and_survives_close() {
     let mut table = HandleTable::new();
     let value = {
         let reservation = crate::require_ok(table.reserve::<1>());
-        reservation.publish(&mut table, [prepared(object, Rights::INSPECT)])[0]
+        reservation.publish(&mut table, [prepared(object.clone(), Rights::INSPECT)])[0]
     };
 
     assert!(matches!(
@@ -496,11 +613,63 @@ fn typed_resolution_uses_compiler_checked_downcast_and_survives_close() {
     ));
     let resolved = crate::require_ok(table.resolve::<TestObject>(value, Rights::INSPECT));
     assert_eq!(resolved.koid(), koid);
+    let pinned = object.snapshot();
+    assert_eq!(pinned.references.kernel_service, 1);
+    assert_eq!(pinned.references.user_authority, 1);
+    assert_eq!(pinned.references.operation_pin, 1);
     let closed = crate::require_ok(table.remove(value));
     assert_eq!(transitions.load(Ordering::Relaxed), 0);
     closed.complete();
     assert_eq!(transitions.load(Ordering::Relaxed), 1);
+    let retired = object.snapshot();
+    assert_eq!(retired.references.user_authority, 0);
+    assert_eq!(retired.references.operation_pin, 1);
     assert_eq!(resolved.object().value, 99);
+}
+
+#[test]
+fn scheduler_ownership_is_counted_separately_from_service_ownership() {
+    let transitions = Arc::new(AtomicUsize::new(0));
+    let service = object(102, &transitions);
+    let scheduler = service.clone().into_scheduler();
+
+    let snapshot = service.snapshot();
+    assert_eq!(snapshot.references.kernel_service, 1);
+    assert_eq!(snapshot.references.scheduler, 1);
+    assert_eq!(snapshot.references.user_authority, 0);
+
+    drop(scheduler);
+    assert_eq!(service.snapshot().references.scheduler, 0);
+}
+
+#[test]
+fn concurrent_close_retires_user_authority_without_revoking_an_operation_pin() {
+    let transitions = Arc::new(AtomicUsize::new(0));
+    let object = object(101, &transitions);
+    let mut table = HandleTable::new();
+    let value = {
+        let reservation = crate::require_ok(table.reserve::<1>());
+        reservation.publish(&mut table, [prepared(object, Rights::INSPECT)])[0]
+    };
+    let resolved = crate::require_ok(table.resolve::<TestObject>(value, Rights::INSPECT));
+    let rendezvous = Arc::new(std::sync::Barrier::new(2));
+    let operation_rendezvous = rendezvous.clone();
+    let operation = std::thread::spawn(move || {
+        operation_rendezvous.wait();
+        operation_rendezvous.wait();
+        resolved.object().value
+    });
+
+    rendezvous.wait();
+    crate::require_ok(table.remove(value)).complete();
+    assert_eq!(transitions.load(Ordering::Relaxed), 1);
+    rendezvous.wait();
+
+    let observed = match operation.join() {
+        Ok(observed) => observed,
+        Err(_) => panic!("resolved operation thread panicked"),
+    };
+    assert_eq!(observed, 101);
 }
 
 #[test]
@@ -532,8 +701,12 @@ fn unpublished_active_handle_rollback_runs_the_zero_transition_once() {
     let handle = prepared(object.clone(), Rights::INSPECT);
     assert_eq!(object.active_handle_count(), 1);
     assert_eq!(
-        PreparedHandle::try_from_new_object(object.clone(), Rights::INSPECT, HandleFlags::NONE,)
-            .err(),
+        PreparedHandle::try_from_new_object(
+            object.publication(),
+            Rights::INSPECT,
+            HandleFlags::NONE,
+        )
+        .err(),
         Some(HandleError::ObjectAlreadyActive)
     );
     drop(handle);
@@ -541,7 +714,12 @@ fn unpublished_active_handle_rollback_runs_the_zero_transition_once() {
     assert!(object.is_retired());
     assert_eq!(transitions.load(Ordering::Relaxed), 1);
     assert_eq!(
-        PreparedHandle::try_from_new_object(object, Rights::INSPECT, HandleFlags::NONE).err(),
+        PreparedHandle::try_from_new_object(
+            object.publication(),
+            Rights::INSPECT,
+            HandleFlags::NONE,
+        )
+        .err(),
         Some(HandleError::ObjectRetired)
     );
 }
@@ -851,5 +1029,5 @@ fn koids_are_unique_but_do_not_participate_in_lookup() {
 
     assert_ne!(first.koid(), second.koid());
     assert_ne!(first.koid().get(), 0);
-    assert_eq!(first.kind().get(), TEST_KIND.get());
+    assert_eq!(first.snapshot().kind.get(), TEST_KIND.get());
 }

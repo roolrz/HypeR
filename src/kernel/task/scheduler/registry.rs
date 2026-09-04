@@ -31,7 +31,10 @@ enum ThreadSlot {
     /// Identity remains unavailable until lock-external resource teardown ends.
     Retiring {
         id: ThreadId,
-        execution: crate::kernel::task::thread::ExecutionKind,
+        // Snapshotting preserves generation-correct diagnostics without
+        // extending object lifetime. The detached Thread carries the actual
+        // scheduler reference into the reaper until its resources are gone.
+        object: crate::kernel::task::ThreadObjectSnapshot,
         thread: Option<Box<Thread>>,
     },
 }
@@ -536,10 +539,10 @@ impl ThreadRegistry {
         let ThreadSlot::Occupied(thread) = core::mem::replace(slot_ref, ThreadSlot::Vacant) else {
             registry_invariant();
         };
-        let execution = thread.execution_kind();
+        let object = thread.object_snapshot();
         *slot_ref = ThreadSlot::Retiring {
             id,
-            execution,
+            object,
             thread: Some(thread),
         };
         Ok(())
@@ -630,6 +633,64 @@ impl ThreadRegistry {
         self.write_authority().with_thread_mut(id, operation)
     }
 
+    /// Returns canonical object identity for an occupied or retiring Thread.
+    #[cfg(feature = "kernel-self-test")]
+    pub fn object_snapshot(
+        &self,
+        id: ThreadId,
+    ) -> Result<crate::kernel::task::ThreadObjectSnapshot, Error> {
+        let slot = id.scheduler_slot().ok_or(Error::ThreadNotFound)?;
+        let table = self.table.access().table();
+        match table.slot(slot) {
+            Some(ThreadSlot::Occupied(thread)) if thread.id() == id => Ok(thread.object_snapshot()),
+            Some(ThreadSlot::Retiring {
+                id: retiring,
+                object,
+                ..
+            }) if *retiring == id => Ok(*object),
+            _ => Err(Error::ThreadNotFound),
+        }
+    }
+
+    /// Captures one bounded page without allowing Thread or object references
+    /// to escape the scheduler authority domain.
+    pub fn scan_objects(
+        &self,
+        cursor: crate::kernel::task::ThreadObjectScanCursor,
+    ) -> crate::kernel::task::ThreadObjectSnapshotPage {
+        use crate::kernel::task::{
+            ThreadObjectObservation, ThreadObjectRegistryPhase, ThreadObjectScanCursor,
+            ThreadObjectSnapshotPage,
+        };
+
+        let mut entries = [None; crate::kernel::task::thread_object::THREAD_OBJECT_PAGE_CAPACITY];
+        let mut len = 0usize;
+        let mut index = cursor.next_slot;
+        let table = self.table.access().table();
+        while index < self.high_water && len < entries.len() {
+            let observation = match table.slot(index) {
+                Some(ThreadSlot::Occupied(thread)) => Some(ThreadObjectObservation {
+                    thread: thread.id(),
+                    object: thread.object_snapshot(),
+                    phase: ThreadObjectRegistryPhase::Resident,
+                }),
+                Some(ThreadSlot::Retiring { id, object, .. }) => Some(ThreadObjectObservation {
+                    thread: *id,
+                    object: *object,
+                    phase: ThreadObjectRegistryPhase::Retiring,
+                }),
+                Some(ThreadSlot::Vacant | ThreadSlot::Reserved(_)) | None => None,
+            };
+            if let Some(observation) = observation {
+                entries[len] = Some(observation);
+                len += 1;
+            }
+            index += 1;
+        }
+        let next = (index < self.high_water).then_some(ThreadObjectScanCursor { next_slot: index });
+        ThreadObjectSnapshotPage { entries, len, next }
+    }
+
     pub fn for_each_thread(&self, mut operation: impl for<'thread> FnMut(&'thread Thread)) {
         for index in 0..self.high_water {
             if let Some(ThreadSlot::Occupied(thread)) = self.table.access().table().slot(index) {
@@ -649,9 +710,9 @@ impl ThreadRegistry {
             }
             Some(ThreadSlot::Retiring {
                 id: retiring,
-                execution,
+                object,
                 ..
-            }) if *retiring == id => ThreadRegistryStatus::Retiring(*execution),
+            }) if *retiring == id => ThreadRegistryStatus::Retiring(object.role.execution_kind()),
             Some(
                 ThreadSlot::Vacant
                 | ThreadSlot::Reserved(_)
