@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # HypeR
 
-[![CI](https://github.com/roolrz/HypeR/actions/workflows/ci.yml/badge.svg)](https://github.com/roolrz/HypeR/actions/workflows/ci.yml)
+[![CI](https://github.com/roolrz/HypeR-Kernel/actions/workflows/ci.yml/badge.svg)](https://github.com/roolrz/HypeR-Kernel/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 HypeR is an experimental type-1 hypervisor and kernel written in Rust. It is
@@ -77,8 +77,8 @@ The current foundation includes:
 - generation-tagged, allocation-free wait arbitration across notification,
   timeout, and cancellation, with counted Completion, sleeping Mutex and
   Semaphore primitives, and migration-safe deadline waits;
-- a pre-release Native ABI schema which generates checked Rust and C layouts,
-  syscall metadata, and an auditable reference;
+- an exactly pinned, pre-release [HypeR Native ABI](https://github.com/roolrz/HypeR-ABI)
+  with checked Rust and C layouts, syscall metadata, and an auditable reference;
 - a compiled capability foundation with fallible shared objects, schema-owned
   rights, 64-bit generation handles, detached unpublished slot transactions,
   deferred close, allocation-free iterative teardown, and weak global
@@ -194,7 +194,6 @@ Useful targets:
 
 | Command | Purpose |
 | --- | --- |
-| `make generate-abi` | Regenerate the in-tree Native ABI artifacts |
 | `make image ARCH=<arch>` | Build the canonical ELF and delivery image |
 | `make guest-assets ARCH=<arch>` | Download and package the pinned Linux guest inputs |
 | `make check ARCH=<arch>` | Run target checks and Clippy, including kernel self-test builds |
@@ -342,18 +341,18 @@ secondary architectures.
 | `src/arch/` | Architecture entry, context, page-table, exception, and virtualization mechanisms |
 | `src/hal/` | Narrow architecture-neutral capability contracts |
 | `src/kernel/` | Runtime ownership, policy, scheduling, IRQ, memory, devices, and VM orchestration |
-| `abi/native/` | Native ABI schema and generated Rust, C, and reference artifacts |
 | `src/vm/` | Reusable VM packages, guest-visible models, and architecture-neutral virtualization vocabulary |
 | `src/drivers/` | Physical devices and firmware-interface drivers |
 | `src/platform/` | Firmware parsing and immutable platform description |
 | `src/mm/`, `src/sync/`, `src/time/` | Reusable allocation, synchronization, and timing mechanisms |
 | `tests/` | Host tests, kernel self-tests, image verification, QEMU acceptance, and CI contracts |
-| `tools/` | Native ABI, Kconfig, kallsyms, and guest-payload tooling |
+| `tools/` | Kconfig, kallsyms, and guest-payload tooling |
 
 Further documentation:
 
 - [Architecture boundaries](docs/architecture.md)
 - [Userspace and syscall architecture](docs/syscall-abi.md)
+- [HypeR Native ABI](https://github.com/roolrz/HypeR-ABI)
 - [VM bundle format](docs/vm-bundle.md)
 - [RISC-V execution profile](docs/riscv64.md)
 - [x86-64 execution profile](docs/x86_64.md)
@@ -386,7 +385,7 @@ Before opening a pull request:
    file. Cargo-generated lockfiles and the complete `LICENSE` text are exempt.
 
 Small, coherent changes with a clear migration seam are preferred over broad
-rewrites. [Open an issue](https://github.com/roolrz/HypeR/issues) before
+rewrites. [Open an issue](https://github.com/roolrz/HypeR-Kernel/issues) before
 starting work that changes a public format, architecture boundary, unsafe
 ownership model, or guest-visible ABI. Issues are also the preferred place for
 bug reports and focused design proposals while a fuller contributor guide is
