@@ -311,6 +311,17 @@ Apache/MIT-compatible fallible shared owner or a comparably small reviewed
 allocation boundary. Untrusted creation paths may not use an infallible shared
 owner constructor or an unaudited hand-written reference count.
 
+Constructed objects also enter a global diagnostic directory through a weak
+reference. The directory never grants authority or retains the payload. Its
+newest-first cursor excludes later registrations from subsequent pages, while
+each snapshot reports KOID, kind, supported rights, active-handle state, and a
+non-authoritative internal-reference count. Published Processes have a
+corresponding weak directory, and each Process exposes bounded pages of
+generation-qualified `handle -> KOID` edges. These kernel interfaces are the
+canonical source for future privileged inspection syscalls; the text renderer
+is only one consumer. Multi-page results are weakly consistent with mutation,
+and no pointer value is exposed.
+
 `HandleValue` is a nonzero, process-local, opaque `u64` containing a slot and a
 large generation. Security does not depend on secrecy. Slot reuse never makes
 a practical stale handle valid; a slot is retired before generation wrap. A
@@ -357,6 +368,13 @@ log, or perform fallible hardware work. An iterative intrusive worklist drains
 nested messages and capabilities without holding one object's lock while
 decrementing another. Zero-handle resurrection is forbidden, and `Drop` never
 accesses hardware.
+
+`UserThread` is itself a kernel object. Every kernel observer and Process
+handle retains the same erased object owner and therefore the same KOID; the
+scheduler payload remains a separate execution owner rather than a second
+identity. The Thread object supports `WAIT`, `INSPECT`, `START`, and
+`REQUEST_STOP`, and asserts its level-triggered `TERMINATED` signal after
+scheduler detachment.
 
 Ordinary duplicated handles are not generically revocable. Revocable authority
 uses typed lease lineages such as `MemoryGrant`, `DeviceLease`, `DmaMapping`,
