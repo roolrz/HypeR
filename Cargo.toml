@@ -8,6 +8,7 @@ edition = "2024"
 build = "build.rs"
 license = "Apache-2.0"
 description = "A modular, Rust-based type-1 hypervisor kernel"
+repository = "https://github.com/roolrz/HypeR-Kernel"
 publish = false
 
 [features]
@@ -27,6 +28,7 @@ test = false
 bench = false
 
 [dependencies]
+hyper-abi = { git = "https://github.com/roolrz/HypeR-ABI", rev = "54c05af44e1b94eb6e917c03a5df21206dab661a" }
 rustc-demangle = { version = "0.1.28", default-features = false }
 
 [lints.clippy]

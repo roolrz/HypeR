@@ -3,7 +3,7 @@
 
 //! `HypeR` Native syscall values and owned entry payloads.
 
-include!("../../abi/native/generated.rs");
+pub use hyper_abi::*;
 
 /// Architecture-neutral copy of one Native syscall request.
 ///
