@@ -173,7 +173,7 @@ pub(crate) struct SignalState {
 }
 
 impl SignalState {
-    pub(super) const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self::with_initial_level(SignalMask::EMPTY)
     }
 

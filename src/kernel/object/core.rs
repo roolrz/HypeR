@@ -10,7 +10,7 @@ use core::num::NonZeroU32;
 use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering, fence};
 
-use hyper::mm::{AllocationError, FallibleArc, try_box};
+use hyper::mm::{AllocationError, FallibleArc, WeakFallibleArc, try_box};
 use hyper::sync::SpinLock;
 
 use super::{Rights, signals::SignalSource};
@@ -19,9 +19,11 @@ const RETIRED: usize = 1 << (usize::BITS - 1);
 const ACTIVE_LIMIT: usize = RETIRED - 1;
 const EVENT_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_EVENT;
 const CHANNEL_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_CHANNEL;
+const THREAD_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_THREAD;
 
 const _: () = assert!(EVENT_OBJECT_KIND != 0);
 const _: () = assert!(CHANNEL_OBJECT_KIND != 0);
+const _: () = assert!(THREAD_OBJECT_KIND != 0);
 
 static NEXT_KOID: AtomicU64 = AtomicU64::new(1);
 
@@ -63,6 +65,8 @@ impl ObjectKind {
     pub(crate) const EVENT: Self = Self(EVENT_OBJECT_KIND);
     /// Native Channel endpoint kind declared by the generated ABI schema.
     pub(crate) const CHANNEL: Self = Self(CHANNEL_OBJECT_KIND);
+    /// Native user-thread kind declared by the generated ABI schema.
+    pub(crate) const THREAD: Self = Self(THREAD_OBJECT_KIND);
 
     /// Constructs a synthetic kind for host-only mechanism tests.
     ///
@@ -82,6 +86,7 @@ impl ObjectKind {
 pub(crate) enum ObjectCreationError {
     Allocation,
     KoidExhausted,
+    RegistrationExhausted,
 }
 
 impl From<AllocationError> for ObjectCreationError {
@@ -153,6 +158,10 @@ struct ObjectHeader {
 }
 
 struct SharedObject {
+    // Declared first so directory metadata is detached before payload charges
+    // are released by field destruction.
+    #[cfg(not(test))]
+    directory: super::directory::Membership,
     header: ObjectHeader,
     payload: Box<dyn ErasedKernelObject>,
     // The allocation itself supplies its retirement-queue node. The link is
@@ -164,10 +173,48 @@ struct SharedObject {
 /// Shared object lifetime without process-local authority.
 pub(crate) struct ObjectRef(FallibleArc<SharedObject>);
 
+/// Non-owning directory reference to one object allocation.
+///
+/// This type deliberately exposes only upgrade and liveness observation. A
+/// diagnostic registry must never become an authority or extend payload life.
+pub(super) struct WeakObjectRef(WeakFallibleArc<SharedObject>);
+
+/// Active-handle state captured at one diagnostic observation point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObjectHandleState {
+    Unpublished,
+    Active(usize),
+    Retired,
+}
+
+/// Authority-free object metadata suitable for debug and future ABI encoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectSnapshot {
+    pub(crate) koid: Koid,
+    pub(crate) kind: ObjectKind,
+    pub(crate) supported_rights: Rights,
+    pub(crate) handles: ObjectHandleState,
+    /// Strong internal owners at the instant of observation, including the
+    /// temporary reference used to produce this snapshot.
+    pub(crate) strong_references: usize,
+}
+
 impl ObjectRef {
     /// Heap bytes required by the erased owner and one concrete payload.
     pub(crate) const fn allocation_size<T: KernelObject>() -> Option<usize> {
-        FallibleArc::<SharedObject>::allocation_size().checked_add(core::mem::size_of::<T>())
+        let object =
+            FallibleArc::<SharedObject>::allocation_size().checked_add(core::mem::size_of::<T>());
+        #[cfg(not(test))]
+        {
+            match object {
+                Some(bytes) => bytes.checked_add(super::directory::registration_size()),
+                None => None,
+            }
+        }
+        #[cfg(test)]
+        {
+            object
+        }
     }
 
     /// Fallibly constructs an unpublished object with no active handles.
@@ -184,6 +231,8 @@ impl ObjectRef {
         let payload: Box<dyn ErasedKernelObject> = try_box(payload)?;
         let koid = Koid::allocate()?;
         let object = SharedObject {
+            #[cfg(not(test))]
+            directory: super::directory::Membership::new(koid),
             header: ObjectHeader {
                 koid,
                 kind: T::KIND,
@@ -194,7 +243,10 @@ impl ObjectRef {
             payload,
             retirement_next: SpinLock::new(None),
         };
-        Ok(Self(FallibleArc::try_new(object)?))
+        let object = Self(FallibleArc::try_new(object)?);
+        #[cfg(not(test))]
+        super::directory::register(&object)?;
+        Ok(object)
     }
 
     pub(crate) fn koid(&self) -> Koid {
@@ -207,6 +259,31 @@ impl ObjectRef {
 
     pub(crate) fn supported_rights(&self) -> Rights {
         self.0.header.supported_rights
+    }
+
+    pub(super) fn downgrade(&self) -> WeakObjectRef {
+        WeakObjectRef(self.0.downgrade())
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn publish_directory_membership(&self) {
+        self.0.directory.publish();
+    }
+
+    pub(crate) fn snapshot(&self) -> ObjectSnapshot {
+        let active = self.0.header.active_handles.load(Ordering::Acquire);
+        let handles = match active {
+            0 => ObjectHandleState::Unpublished,
+            RETIRED => ObjectHandleState::Retired,
+            count => ObjectHandleState::Active(count),
+        };
+        ObjectSnapshot {
+            koid: self.koid(),
+            kind: self.kind(),
+            supported_rights: self.supported_rights(),
+            handles,
+            strong_references: self.0.strong_count(),
+        }
     }
 
     #[cfg(test)]
@@ -330,6 +407,16 @@ impl ObjectRef {
             object_invariant_violation();
         }
         self.0.payload.on_zero_active_handles(retirement);
+    }
+}
+
+impl WeakObjectRef {
+    pub(super) fn upgrade(&self) -> Option<ObjectRef> {
+        self.0.upgrade().map(ObjectRef)
+    }
+
+    pub(super) fn is_alive(&self) -> bool {
+        self.0.is_alive()
     }
 }
 

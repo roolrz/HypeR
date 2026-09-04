@@ -3,12 +3,14 @@
 
 //! Native Process, `TaskGroup`, and `UserThread` lifecycle ownership.
 
+mod directory;
 mod image;
 mod lifecycle;
 mod owner;
 mod task_group;
 mod user_thread;
 
+pub(crate) use directory::{ProcessScanCursor, ProcessSnapshotPage, scan};
 pub(crate) use image::{
     AbiFamily, ExecutionRoute, ImageError, MachineAbi, ProcessImage, SupervisionSessionId,
     UserThreadStart,

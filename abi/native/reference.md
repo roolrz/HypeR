@@ -38,6 +38,7 @@ ABI revision: `0`.
 | `channel` | 0 | `readable` |
 | `channel` | 1 | `writable` |
 | `channel` | 2 | `peer_closed` |
+| `thread` | 0 | `terminated` |
 
 ## Constants
 

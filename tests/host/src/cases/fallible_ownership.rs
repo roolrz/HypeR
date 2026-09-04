@@ -3,12 +3,20 @@
 
 //! Ownership and destruction behavior of fallible allocation helpers.
 
-use std::sync::Barrier;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Barrier};
 
 static DROPS: AtomicUsize = AtomicUsize::new(0);
 
 struct ZeroSizedDrop;
+
+struct CountedDrop(Arc<AtomicUsize>);
+
+impl Drop for CountedDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
 
 impl Drop for ZeroSizedDrop {
     fn drop(&mut self) {
@@ -33,6 +41,73 @@ fn fallible_arc_clones_share_one_stable_value() {
     assert_eq!(*owner, 41);
     assert_eq!(*clone, 41);
     assert_eq!(owner.strong_count(), 2);
+}
+
+#[test]
+fn weak_fallible_arc_observes_value_lifetime_without_owning_it() {
+    let owner = crate::require_ok(hyper::mm::FallibleArc::try_new(String::from("live")));
+    let observer = owner.downgrade();
+    let upgraded = crate::require_some(observer.upgrade());
+    assert_eq!(&*upgraded, "live");
+    drop(upgraded);
+    drop(owner);
+    assert!(observer.upgrade().is_none());
+}
+
+#[test]
+fn external_weak_owner_prevents_unique_arc_conversion() {
+    let owner = crate::require_ok(hyper::mm::FallibleArc::try_new(41_u64));
+    let observer = owner.downgrade();
+    let owner = match owner.try_into_unique() {
+        Ok(_) => panic!("weak-observed owner unexpectedly became unique"),
+        Err(owner) => owner,
+    };
+    drop(observer);
+    let unique = match owner.try_into_unique() {
+        Ok(unique) => unique,
+        Err(_) => panic!("unobserved owner did not become unique"),
+    };
+    assert_eq!(*unique, 41);
+}
+
+#[test]
+fn weak_allocation_outlives_but_does_not_retain_the_value() {
+    let drops = Arc::new(AtomicUsize::new(0));
+    let owner = crate::require_ok(hyper::mm::FallibleArc::try_new(CountedDrop(drops.clone())));
+    let observer = owner.downgrade();
+    drop(owner);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert!(observer.upgrade().is_none());
+    drop(observer);
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn concurrent_weak_upgrade_never_observes_a_destroyed_value() {
+    use std::thread;
+
+    let drops = Arc::new(AtomicUsize::new(0));
+    let owner = crate::require_ok(hyper::mm::FallibleArc::try_new(CountedDrop(drops.clone())));
+    let weak = owner.downgrade();
+    let start = Arc::new(Barrier::new(2));
+    let worker_start = start.clone();
+    let worker_drops = drops.clone();
+    let worker = thread::spawn(move || {
+        worker_start.wait();
+        while let Some(observed) = weak.upgrade() {
+            assert_eq!(worker_drops.load(Ordering::Acquire), 0);
+            drop(observed);
+            thread::yield_now();
+        }
+    });
+
+    start.wait();
+    drop(owner);
+    match worker.join() {
+        Ok(()) => {}
+        Err(_) => panic!("weak-upgrade worker panicked"),
+    }
+    assert_eq!(drops.load(Ordering::Acquire), 1);
 }
 
 #[test]

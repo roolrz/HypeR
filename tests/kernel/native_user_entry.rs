@@ -6,9 +6,9 @@
 use hyper::mm::PAGE_SIZE;
 
 use crate::kernel::accounting::{ResourceDomain, ResourceLimits};
-use crate::kernel::capability::{HandleValue, Rights};
+use crate::kernel::capability::{HandleValue, ResolvedWaitable, Rights};
 use crate::kernel::mm::user_space::{UserAddress, UserSlice, prepare_native_entry_self_test};
-use crate::kernel::object::Event;
+use crate::kernel::object::{Event, ObjectHandleState, ObjectKind, SignalWaitOutcome};
 use crate::kernel::process::{
     AddressSpaceRetirement, MachineAbi, PreparedProcess, Process, ProcessImage,
     ProcessRetirementStep, TaskGroup, TerminalReason,
@@ -131,6 +131,12 @@ enum RunControl {
     CancelPublishedEventWait,
 }
 
+#[derive(Clone, Copy)]
+enum ThreadAuthority {
+    None,
+    Publish,
+}
+
 struct ProgramOutcome {
     thread: TerminalReason,
     process: TerminalReason,
@@ -161,6 +167,7 @@ pub(super) fn run() -> Result<(), Error> {
         "selftest/el0-fault",
         SiblingSetup::None,
         RunControl::Join,
+        ThreadAuthority::Publish,
     )?;
     if !matches!(outcome.thread, TerminalReason::Fault { class: 6, code } if code & 0xffff == 0)
         || outcome.process != outcome.thread
@@ -181,6 +188,7 @@ pub(super) fn run() -> Result<(), Error> {
         "selftest/el0-thread-exit",
         SiblingSetup::None,
         RunControl::Join,
+        ThreadAuthority::None,
     )?;
     if outcome.thread != (TerminalReason::ThreadExited { status: -17 })
         || outcome.process != (TerminalReason::LastThreadExited { status: -17 })
@@ -196,6 +204,7 @@ pub(super) fn run() -> Result<(), Error> {
         "selftest/el0-event-wait",
         SiblingSetup::None,
         RunControl::Join,
+        ThreadAuthority::None,
     )?;
     if outcome.thread != (TerminalReason::ThreadExited { status: 0 })
         || outcome.process != (TerminalReason::LastThreadExited { status: 0 })
@@ -211,6 +220,7 @@ pub(super) fn run() -> Result<(), Error> {
         "selftest/el0-event-cancel",
         SiblingSetup::None,
         RunControl::CancelPublishedEventWait,
+        ThreadAuthority::None,
     )?;
     if outcome.thread != TerminalReason::Requested
         || outcome.process != TerminalReason::Requested
@@ -226,6 +236,7 @@ pub(super) fn run() -> Result<(), Error> {
         "selftest/el0-process-exit",
         SiblingSetup::Dormant,
         RunControl::Join,
+        ThreadAuthority::None,
     )?;
     let process_exit = TerminalReason::ProcessExited { status: 23 };
     if outcome.thread != process_exit
@@ -247,6 +258,7 @@ fn run_program(
     name: &str,
     sibling_setup: SiblingSetup,
     control: RunControl,
+    thread_authority: ThreadAuthority,
 ) -> Result<ProgramOutcome, Error> {
     let code_range =
         UserSlice::new(UserAddress::new(IMAGE_BASE), PAGE_SIZE).map_err(|_| Error::Construction)?;
@@ -284,10 +296,43 @@ fn run_program(
             }
         };
     let process = prepared.publish();
+    if !process_is_discoverable(&process) {
+        return Err(Error::Construction);
+    }
     process.start().map_err(|_| Error::Lifecycle)?;
     let thread = process
         .create_initial_user_thread(name, CpuMask::ALL)
         .map_err(|_| Error::Construction)?;
+    let object = thread.object_snapshot();
+    if object.kind != ObjectKind::THREAD || object.handles != ObjectHandleState::Unpublished {
+        return Err(Error::Construction);
+    }
+    let thread_waitable: Option<ResolvedWaitable> = match thread_authority {
+        ThreadAuthority::None => None,
+        ThreadAuthority::Publish => {
+            let rights = Rights::WAIT.union(Rights::INSPECT);
+            let handle = process
+                .publish_thread_handle(&thread, rights)
+                .map_err(|_| Error::Construction)?;
+            let info = process
+                .handle_info(handle, Rights::INSPECT)
+                .map_err(|_| Error::Construction)?;
+            let resolved = process
+                .resolve_user_thread_handle(handle, Rights::INSPECT)
+                .map_err(|_| Error::Construction)?;
+            if info.kind != ObjectKind::THREAD
+                || info.koid != object.koid
+                || resolved.object_snapshot().koid != object.koid
+            {
+                return Err(Error::Construction);
+            }
+            Some(
+                process
+                    .resolve_waitable(handle, Rights::WAIT)
+                    .map_err(|_| Error::Construction)?,
+            )
+        }
+    };
     let sibling = match sibling_setup {
         SiblingSetup::None => None,
         SiblingSetup::Dormant => Some(
@@ -304,12 +349,30 @@ fn run_program(
             return Err(Error::Lifecycle);
         }
     }
+    // Process completion is the externally visible aggregate lifetime cut.
+    // Observe it first so this test also proves that every detached Thread has
+    // published its terminal object signal before the Process reports stopped.
+    let process_reason = process.join().map_err(|_| Error::Lifecycle)?;
+    if let Some(waitable) = thread_waitable {
+        match crate::kernel::object::wait_one(
+            waitable.source(),
+            &process.resource_domain(),
+            crate::kernel::process::UserThread::TERMINATED.bits(),
+            u64::MAX,
+            || false,
+        )
+        .map_err(|_| Error::Lifecycle)?
+        {
+            SignalWaitOutcome::Observed(snapshot)
+                if snapshot.signals() == crate::kernel::process::UserThread::TERMINATED => {}
+            _ => return Err(Error::Lifecycle),
+        }
+    }
     let thread_reason = thread.join().map_err(|_| Error::Lifecycle)?;
     let sibling_reason = match sibling.as_ref() {
         Some(sibling) => Some(sibling.join().map_err(|_| Error::Lifecycle)?),
         None => None,
     };
-    let process_reason = process.join().map_err(|_| Error::Lifecycle)?;
     drop(thread);
     drop(sibling);
     retire_process(&process)?;
@@ -318,6 +381,21 @@ fn run_program(
         process: process_reason,
         sibling: sibling_reason,
     })
+}
+
+fn process_is_discoverable(target: &Process) -> bool {
+    let mut cursor = Some(crate::kernel::process::ProcessScanCursor::start());
+    while let Some(position) = cursor {
+        let page = crate::kernel::process::scan(position);
+        if page
+            .entries()
+            .any(|entry| entry.snapshot().id == target.id())
+        {
+            return true;
+        }
+        cursor = page.next();
+    }
+    false
 }
 
 fn wait_for_event_registration(process: &Process) -> Result<(), Error> {

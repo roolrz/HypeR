@@ -19,9 +19,10 @@ pub(crate) use handle::InTransitHandleBatch;
 pub(crate) use handle::{
     ClosedHandle, HANDLE_TABLE_STORAGE_SEGMENTS, HandleBatchReservation,
     HandleBatchReservationStorage, HandleError, HandleFlags, HandleInfo, HandleReservation,
-    HandleTable, HandleTableStoragePlan, HandleTableStorageSnapshot, HandleTransferClaim,
-    HandleTransferRequest, HandleTransferStorage, HandleValue, PreparedHandle, ResolvedObject,
-    ResolvedWaitable, RetiredHandleStorage, TeardownCursor,
+    HandleScanCursor, HandleSnapshot, HandleSnapshotPage, HandleTable, HandleTableStoragePlan,
+    HandleTableStorageSnapshot, HandleTransferClaim, HandleTransferRequest, HandleTransferStorage,
+    HandleValue, PreparedHandle, ResolvedObject, ResolvedWaitable, RetiredHandleStorage,
+    TeardownCursor,
 };
 pub(crate) use transfer::InTransitCapabilities;
 

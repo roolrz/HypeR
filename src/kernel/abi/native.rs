@@ -522,7 +522,9 @@ fn status_from_process_error(error: ProcessError) -> HyperNativeStatus {
 const fn status_from_object_creation_error(error: ObjectCreationError) -> HyperNativeStatus {
     match error {
         ObjectCreationError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
-        ObjectCreationError::KoidExhausted => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
+        ObjectCreationError::KoidExhausted | ObjectCreationError::RegistrationExhausted => {
+            HYPER_NATIVE_STATUS_RESOURCE_LIMIT
+        }
     }
 }
 

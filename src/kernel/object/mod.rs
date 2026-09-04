@@ -10,14 +10,16 @@
 use crate::kernel::authority::Rights;
 
 mod core;
+mod directory;
 mod event;
 mod signals;
 mod wait;
 
 pub(crate) use core::{
-    ActiveHandleError, KernelObject, Koid, ObjectCreationError, ObjectKind, ObjectRef,
-    ObjectRetirement, private,
+    ActiveHandleError, KernelObject, Koid, ObjectCreationError, ObjectHandleState, ObjectKind,
+    ObjectRef, ObjectRetirement, ObjectSnapshot, private,
 };
+pub(crate) use directory::{ObjectScanCursor, scan};
 pub(crate) use event::{Event, EventError};
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use signals::PreparedSignalWait;

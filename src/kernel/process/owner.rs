@@ -8,6 +8,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use hyper::mm::{FallibleArc, UniqueFallibleArc};
 use hyper::sync::InterruptSpinLock;
 
+use super::directory::PreparedRegistration;
 use super::image::{AbiFamily, ExecutionRoute, MachineAbi, ProcessImage, UserThreadStart};
 use super::lifecycle::{
     LifecycleError, ProcessLifecycle, ProcessPhase, StopDispatchProgress, TerminalReason,
@@ -15,16 +16,16 @@ use super::lifecycle::{
 use super::task_group::{
     PreparedTaskGroupMembership, TaskGroup, TaskGroupError, TaskGroupMembership,
 };
-use super::user_thread::{UserExecution, UserThread};
+use super::user_thread::{UserExecution, UserThread, UserThreadObject};
 use crate::kernel::accounting::{
     ChargeReservation, CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::capability::{
     ClosedHandle, HANDLE_TABLE_STORAGE_SEGMENTS, HandleBatchReservation,
     HandleBatchReservationStorage, HandleError, HandleFlags, HandleInfo, HandleReservation,
-    HandleTable, HandleTableStoragePlan, HandleTableStorageSnapshot, HandleTransferClaim,
-    HandleTransferRequest, HandleTransferStorage, HandleValue, InTransitCapabilities,
-    PreparedHandle, ResolvedObject, ResolvedWaitable, Rights,
+    HandleScanCursor, HandleSnapshotPage, HandleTable, HandleTableStoragePlan,
+    HandleTableStorageSnapshot, HandleTransferClaim, HandleTransferRequest, HandleTransferStorage,
+    HandleValue, InTransitCapabilities, PreparedHandle, ResolvedObject, ResolvedWaitable, Rights,
 };
 use crate::kernel::mm::user_space::{
     MachineError, NativeAddressSpace, UserSlice, UserWriteReservation,
@@ -89,7 +90,10 @@ struct HandleChargeRecord {
     _metadata_charge: CommittedCharge,
 }
 
-struct ProcessInner {
+pub(super) struct ProcessInner {
+    // Declared first so directory metadata is detached before payload charges
+    // are released by field destruction.
+    pub(super) directory: super::directory::Membership,
     id: ProcessId,
     image_generation: u64,
     image: ProcessImage,
@@ -223,13 +227,14 @@ pub(crate) enum ProcessRetirementStep {
 /// Strong process owner. Active `TaskGroup` membership pins one owner cycle until
 /// explicit Process retirement removes it.
 pub(crate) struct Process {
-    inner: FallibleArc<ProcessInner>,
+    pub(super) inner: FallibleArc<ProcessInner>,
 }
 
 #[must_use = "publish or abort the prepared process"]
 pub(crate) struct PreparedProcess {
     process: Option<Process>,
     group: Option<PreparedTaskGroupMembership>,
+    registration: Option<PreparedRegistration>,
 }
 
 impl PreparedProcess {
@@ -243,7 +248,7 @@ impl PreparedProcess {
             Ok(membership) => membership,
             Err(error) => return Err(create_failure(error.into(), address_space)),
         };
-        let metadata_amount = match metadata_amount::<ProcessInner>() {
+        let metadata_amount = match process_metadata_amount() {
             Ok(amount) => amount,
             Err(error) => return Err(create_failure(error, address_space)),
         };
@@ -264,6 +269,7 @@ impl PreparedProcess {
             }
         };
         let inner = ProcessInner {
+            directory: super::directory::Membership::new(id),
             id,
             image_generation: 1,
             image,
@@ -296,9 +302,18 @@ impl PreparedProcess {
                 ));
             }
         };
+        let process = Process { inner };
+        let registration = match PreparedRegistration::try_new(&process) {
+            Ok(registration) => registration,
+            Err(error) => {
+                let address_space = recover_unpublished_address_space(process);
+                return Err(create_failure_from_arc(error, address_space));
+            }
+        };
         Ok(Self {
-            process: Some(Process { inner }),
+            process: Some(process),
             group: Some(group_membership),
+            registration: Some(registration),
         })
     }
 
@@ -326,6 +341,10 @@ impl PreparedProcess {
         if let Some(generation) = pending_stop {
             let _ = process.request_stop(TerminalReason::TaskGroupStop { generation });
         }
+        match self.registration.take() {
+            Some(registration) => registration.publish(&process),
+            None => process_invariant_violation(),
+        }
         process
     }
 
@@ -336,6 +355,7 @@ impl PreparedProcess {
             None => process_invariant_violation(),
         };
         drop(self.group.take());
+        drop(self.registration.take());
         let inner = match process.inner.try_unwrap() {
             Ok(inner) => inner,
             Err(_) => process_invariant_violation(),
@@ -354,7 +374,7 @@ impl PreparedProcess {
 
 impl Drop for PreparedProcess {
     fn drop(&mut self) {
-        if self.process.is_some() || self.group.is_some() {
+        if self.process.is_some() || self.group.is_some() || self.registration.is_some() {
             process_invariant_violation();
         }
     }
@@ -503,8 +523,9 @@ impl Process {
             _metadata_charge: record_charge,
         })
         .map_err(|_| ProcessError::Allocation)?;
-        let thread_metadata_bytes =
-            u64::try_from(UserThread::allocation_size()).map_err(|_| ProcessError::Allocation)?;
+        let thread_metadata_bytes = UserThread::allocation_size()
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(ProcessError::Allocation)?;
         let thread_metadata = self
             .inner
             .domain
@@ -514,8 +535,7 @@ impl Process {
                     .with(ResourceKind::KernelMemoryBytes, thread_metadata_bytes),
             )?
             .commit();
-        let thread = UserThread::try_prepared(self.clone(), thread_metadata)
-            .map_err(|()| ProcessError::Allocation)?;
+        let thread = UserThread::try_prepared(self.clone(), thread_metadata)?;
         let stack_bytes = u64::try_from(crate::kernel::mm::stack::thread_stack_bytes())
             .map_err(|_| ProcessError::Allocation)?;
         let thread_object_bytes =
@@ -1199,6 +1219,47 @@ impl Process {
         }
     }
 
+    /// Publishes this Process's first userspace authority to an existing thread.
+    ///
+    /// The thread already has a canonical object identity. This transaction
+    /// mints its one initial handle without constructing a second wrapper or
+    /// allowing authority resurrection after the final handle closes.
+    pub(crate) fn publish_thread_handle(
+        &self,
+        thread: &UserThread,
+        rights: Rights,
+    ) -> Result<HandleValue, ProcessError> {
+        if thread.process().id() != self.id() {
+            return Err(ProcessError::Handle(HandleError::AccessDenied));
+        }
+        let reservation = self.reserve_handles::<1>()?;
+        let prepared = match PreparedHandle::try_from_new_object(
+            thread.object_ref(),
+            rights,
+            HandleFlags::NONE,
+        ) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.abort_handles(reservation);
+                return Err(error.into());
+            }
+        };
+        match self.publish_handles(reservation, [prepared]) {
+            Ok(values) => Ok(values[0]),
+            Err(failure) => Err(failure.error),
+        }
+    }
+
+    /// Resolves a thread handle into the same canonical kernel object owner.
+    pub(crate) fn resolve_user_thread_handle(
+        &self,
+        value: HandleValue,
+        rights: Rights,
+    ) -> Result<UserThread, ProcessError> {
+        let resolved = self.resolve_handle::<UserThreadObject>(value, rights)?;
+        Ok(UserThread::from_object_ref(resolved.into_object_ref()))
+    }
+
     /// Publishes a same-kind object pair in one handle-table transaction.
     ///
     /// Both erased objects and both active owners exist before publication, so
@@ -1260,6 +1321,17 @@ impl Process {
             }
             Ok(info)
         })
+    }
+
+    /// Returns one bounded, authority-free page of this Process handle graph.
+    pub(crate) fn scan_handles(
+        &self,
+        cursor: HandleScanCursor,
+    ) -> Result<HandleSnapshotPage, ProcessError> {
+        self.inner
+            .handles
+            .with(|table| table.scan_handles(cursor))
+            .map_err(Into::into)
     }
 
     pub(crate) fn duplicate_handle(
@@ -1845,6 +1917,16 @@ fn metadata_amount<T>() -> Result<ResourceAmount, ProcessError> {
         ))
 }
 
+fn process_metadata_amount() -> Result<ResourceAmount, ProcessError> {
+    let bytes = FallibleArc::<ProcessInner>::allocation_size()
+        .checked_add(super::directory::registration_size())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(ProcessError::Allocation)?;
+    Ok(ResourceAmount::ZERO
+        .with(ResourceKind::KernelObjects, 1)
+        .with(ResourceKind::KernelMemoryBytes, bytes))
+}
+
 fn install_table_storage_charge(
     state: &mut ProcessState,
     snapshot: HandleTableStorageSnapshot,
@@ -2029,6 +2111,18 @@ fn create_failure_from_arc(
     match address_space.try_into_unique() {
         Ok(address_space) => create_failure(error, address_space),
         Err(_) => process_invariant_violation(),
+    }
+}
+
+fn recover_unpublished_address_space(process: Process) -> FallibleArc<NativeAddressSpace> {
+    let inner = match process.inner.try_unwrap() {
+        Ok(inner) => inner,
+        Err(_) => process_invariant_violation(),
+    };
+    let state = inner.state.into_inner();
+    match state.address_space {
+        Some(address_space) => address_space,
+        None => process_invariant_violation(),
     }
 }
 

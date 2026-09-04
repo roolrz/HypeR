@@ -21,6 +21,8 @@ const MAX_SLOTS: usize = SLOT_MASK as usize;
 const MAX_RESERVATION_SLOTS: usize = 64;
 const SLOT_SEGMENTS: usize = 19;
 const FIRST_SEGMENT_SLOTS: usize = 64;
+const DIAGNOSTIC_PAGE_CAPACITY: usize = 32;
+const DIAGNOSTIC_SLOT_BUDGET: usize = 256;
 pub(crate) const HANDLE_TABLE_STORAGE_SEGMENTS: usize = SLOT_SEGMENTS;
 
 const _: () = assert!(
@@ -154,6 +156,42 @@ pub(crate) struct HandleInfo {
     pub(crate) kind: ObjectKind,
     pub(crate) rights: Rights,
     pub(crate) flags: HandleFlags,
+}
+
+/// Position in a process-local handle-table diagnostic scan.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HandleScanCursor {
+    next_slot: usize,
+}
+
+impl HandleScanCursor {
+    pub(crate) const fn start() -> Self {
+        Self { next_slot: 0 }
+    }
+}
+
+/// One handle-table edge from a process-local value to a kernel object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HandleSnapshot {
+    pub(crate) value: HandleValue,
+    pub(crate) info: HandleInfo,
+}
+
+/// Bounded diagnostic output from one locked handle-table observation.
+pub(crate) struct HandleSnapshotPage {
+    entries: [Option<HandleSnapshot>; DIAGNOSTIC_PAGE_CAPACITY],
+    len: usize,
+    next: Option<HandleScanCursor>,
+}
+
+impl HandleSnapshotPage {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &HandleSnapshot> {
+        self.entries[..self.len].iter().filter_map(Option::as_ref)
+    }
+
+    pub(crate) const fn next(&self) -> Option<HandleScanCursor> {
+        self.next
+    }
 }
 
 /// One source handle and its attenuated rights in a move transaction.
@@ -816,6 +854,42 @@ impl HandleTable {
             rights: handle.rights,
             flags: handle.flags,
         })
+    }
+
+    /// Copies a bounded page of object edges without exposing payload access.
+    ///
+    /// Every page is coherent under the owning Process lock. A complete scan
+    /// is intentionally weakly consistent with concurrent handle mutation;
+    /// generation-qualified values prevent a reused slot from aliasing an old
+    /// edge. The slot budget also bounds lock hold time for sparse tables.
+    pub(crate) fn scan_handles(
+        &self,
+        cursor: HandleScanCursor,
+    ) -> Result<HandleSnapshotPage, HandleError> {
+        self.ensure_active()?;
+        let mut entries = [None; DIAGNOSTIC_PAGE_CAPACITY];
+        let mut len = 0;
+        let mut slot = cursor.next_slot.min(self.slots.len());
+        let end = slot
+            .saturating_add(DIAGNOSTIC_SLOT_BUDGET)
+            .min(self.slots.len());
+        while slot < end && len < DIAGNOSTIC_PAGE_CAPACITY {
+            if let Some(Slot::Occupied { generation, handle }) = self.slots.get(slot) {
+                entries[len] = Some(HandleSnapshot {
+                    value: HandleValue::encode(slot, *generation),
+                    info: HandleInfo {
+                        koid: handle.object().koid(),
+                        kind: handle.object().kind(),
+                        rights: handle.rights,
+                        flags: handle.flags,
+                    },
+                });
+                len += 1;
+            }
+            slot += 1;
+        }
+        let next = (slot < self.slots.len()).then_some(HandleScanCursor { next_slot: slot });
+        Ok(HandleSnapshotPage { entries, len, next })
     }
 
     /// Resolves authority and clones only an internal object-lifetime reference.
@@ -1743,5 +1817,10 @@ impl<T: KernelObject> ResolvedObject<T> {
 
     pub(crate) fn koid(&self) -> Koid {
         self.object.koid()
+    }
+
+    /// Retains the canonical erased owner after typed authority validation.
+    pub(crate) fn into_object_ref(self) -> ObjectRef {
+        self.object
     }
 }

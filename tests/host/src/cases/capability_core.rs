@@ -12,11 +12,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 mod kernel;
 
 use kernel::capability::{
-    HandleBatchReservationStorage, HandleError, HandleFlags, HandleTable, HandleTableStoragePlan,
-    HandleTransferRequest, HandleTransferStorage, HandleValue, InTransitHandleBatch,
-    PreparedHandle, Rights,
+    HandleBatchReservationStorage, HandleError, HandleFlags, HandleScanCursor, HandleTable,
+    HandleTableStoragePlan, HandleTransferRequest, HandleTransferStorage, HandleValue,
+    InTransitHandleBatch, PreparedHandle, Rights,
 };
-use kernel::object::{KernelObject, ObjectKind, ObjectRef, ObjectRetirement};
+use kernel::object::{KernelObject, ObjectHandleState, ObjectKind, ObjectRef, ObjectRetirement};
 
 const TEST_KIND: ObjectKind = match NonZeroU32::new(0x7fff_ff01) {
     Some(value) => ObjectKind::for_test(value),
@@ -151,6 +151,53 @@ fn retirement_worklist_flattens_nested_final_handle_callbacks() {
     assert_eq!(transitions.load(Ordering::Relaxed), 4);
     assert_eq!(maximum_depth.load(Ordering::Relaxed), 1);
     drop(retirement);
+}
+
+#[test]
+fn object_snapshot_distinguishes_unpublished_active_and_retired_authority() {
+    let transitions = Arc::new(AtomicUsize::new(0));
+    let object = object(9, &transitions);
+    let unpublished = object.snapshot();
+    assert_eq!(unpublished.kind, TEST_KIND);
+    assert_eq!(unpublished.handles, ObjectHandleState::Unpublished);
+
+    let handle = prepared(object.clone(), Rights::INSPECT);
+    assert_eq!(object.snapshot().handles, ObjectHandleState::Active(1));
+    drop(handle);
+    assert_eq!(object.snapshot().handles, ObjectHandleState::Retired);
+    assert_eq!(transitions.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn handle_diagnostics_page_generation_qualified_object_edges() {
+    let transitions = Arc::new(AtomicUsize::new(0));
+    let mut table = HandleTable::new();
+    let reservation = crate::require_ok(table.reserve_batch(40));
+    let mut expected = reservation.values().to_vec();
+    let handles = (0_u64..40)
+        .map(|value| prepared(object(value, &transitions), Rights::INSPECT))
+        .collect();
+    reservation.publish(&mut table, handles);
+
+    let first = crate::require_ok(table.scan_handles(HandleScanCursor::start()));
+    let mut observed: Vec<_> = first.entries().map(|entry| entry.value).collect();
+    let next = match first.next() {
+        Some(cursor) => cursor,
+        None => {
+            remove_all(&mut table);
+            panic!("forty handles require a second diagnostic page");
+        }
+    };
+    let second = crate::require_ok(table.scan_handles(next));
+    observed.extend(second.entries().map(|entry| entry.value));
+    let completed = second.next().is_none();
+
+    remove_all(&mut table);
+    expected.sort_by_key(|value| value.get());
+    observed.sort_by_key(|value| value.get());
+    assert_eq!(observed, expected);
+    assert!(completed);
+    assert_eq!(transitions.load(Ordering::Relaxed), 40);
 }
 
 #[test]
