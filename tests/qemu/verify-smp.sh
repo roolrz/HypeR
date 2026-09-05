@@ -6,6 +6,7 @@
 set -eu
 
 script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=tests/qemu/aarch64-kaslr-geometry.sh
 . "$script_dir/aarch64-kaslr-geometry.sh"
 
 if [ "$#" -ne 6 ]; then

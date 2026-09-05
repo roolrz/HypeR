@@ -5,6 +5,7 @@
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
+# shellcheck source=tests/qemu/aarch64-kaslr-geometry.sh
 . "$root/tests/qemu/aarch64-kaslr-geometry.sh"
 
 expect_valid() {
