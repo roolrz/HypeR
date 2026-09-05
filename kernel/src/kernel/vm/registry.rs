@@ -1319,37 +1319,77 @@ pub(crate) fn verify_reservation_rollback() -> Result<(), Error> {
 }
 
 #[cfg(feature = "kernel-self-test")]
-pub(crate) fn verify_dormant_vcpu_quiesce(installed: InstalledVm) -> Result<(), Error> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DormantVcpuQuiesceError {
+    Registry(Error),
+    Sleep(crate::kernel::task::SleepError),
+    Time(crate::kernel::time::Error),
+    Timeout,
+}
+
+#[cfg(feature = "kernel-self-test")]
+impl From<Error> for DormantVcpuQuiesceError {
+    fn from(error: Error) -> Self {
+        Self::Registry(error)
+    }
+}
+
+#[cfg(feature = "kernel-self-test")]
+impl From<crate::kernel::task::SleepError> for DormantVcpuQuiesceError {
+    fn from(error: crate::kernel::task::SleepError) -> Self {
+        Self::Sleep(error)
+    }
+}
+
+#[cfg(feature = "kernel-self-test")]
+impl From<crate::kernel::time::Error> for DormantVcpuQuiesceError {
+    fn from(error: crate::kernel::time::Error) -> Self {
+        Self::Time(error)
+    }
+}
+
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn verify_dormant_vcpu_quiesce(
+    installed: InstalledVm,
+) -> Result<(), DormantVcpuQuiesceError> {
+    const QUIESCE_TIMEOUT_NS: u64 = 1_000_000_000;
+
     let (_, _, control) = installed.into_boot_parts();
     let mut quiescing = match control.begin() {
         Ok(quiescing) => quiescing,
         Err(failure) => {
-            return Err(match failure.error() {
+            return Err(DormantVcpuQuiesceError::Registry(match failure.error() {
                 BeginError::Registry(error) => error,
                 BeginError::Unsupported => Error::AdministrativeStopUnsupported,
-            });
+            }));
         }
     };
-    for _ in 0..32 {
+    let deadline = crate::kernel::time::deadline_after(QUIESCE_TIMEOUT_NS)?;
+    loop {
         quiescing = match quiescing.poll() {
             QuiescePoll::Pending(quiescing) => quiescing,
             QuiescePoll::Quiescent(control) => {
                 let retired = control.id();
                 if control.retire().is_err() {
-                    return Err(Error::Quiescing);
+                    return Err(DormantVcpuQuiesceError::Registry(Error::Quiescing));
                 }
                 let replacement = reserve()?;
                 let replacement_id = replacement.id();
                 if replacement_id.slot != retired.slot
                     || replacement_id.generation == retired.generation
                 {
-                    return Err(Error::InvalidReservation);
+                    return Err(DormantVcpuQuiesceError::Registry(Error::InvalidReservation));
                 }
                 drop(replacement);
                 return Ok(());
             }
         };
-        crate::kernel::task::scheduler::yield_now().map_err(|_| Error::Scheduler)?;
+        if hyper::hal::timer::deadline_reached(crate::kernel::time::monotonic_ticks(), deadline) {
+            return Err(DormantVcpuQuiesceError::Timeout);
+        }
+        // A local yield does not guarantee that QEMU TCG schedules the CPU
+        // running the vCPU or reaper. Block this Thread briefly so both owners
+        // receive physical execution time without relying on logging delays.
+        crate::kernel::task::sleep_ms(1)?;
     }
-    Err(Error::Quiescing)
 }
