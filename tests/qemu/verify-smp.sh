@@ -111,7 +111,23 @@ kaslr_geometry_is_valid() {
     [ -n "$kaslr_base" ] && [ -n "$kaslr_offset" ] || return 1
     kaslr_base_value=$((kaslr_base))
     kaslr_offset_value=$((kaslr_offset))
-    kernel_region_base=$(((1 << va_bits) - (1 << 40)))
+    actual_host_mode=$(
+        sed -n 's/.*HypeR: AArch64 host execution mode: //p' "$log" |
+            tr -d '\r' |
+            tail -n 1
+    )
+    case "$actual_host_mode" in
+        VHE)
+            # The upper range ends at 2^64, so its final 1 TiB starts here.
+            kernel_region_base=$((-(1 << 40)))
+            ;;
+        nVHE)
+            kernel_region_base=$(((1 << va_bits) - (1 << 40)))
+            ;;
+        *)
+            return 1
+            ;;
+    esac
     [ $((kaslr_offset_value % 0x200000)) -eq 0 ] &&
         [ "$kaslr_offset_value" -lt $((512 * 1024 * 1024 * 1024)) ] &&
         [ "$kaslr_base_value" -eq $((kernel_region_base + kaslr_offset_value)) ]

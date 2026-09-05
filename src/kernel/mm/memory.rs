@@ -42,6 +42,12 @@ impl PreparedMemory {
         self.address_space.kernel_base()
     }
 
+    pub(crate) fn secondary_activation_context(
+        &self,
+    ) -> crate::hal::memory::SecondaryActivationContext {
+        self.address_space.secondary_activation_context()
+    }
+
     pub fn reservation_count(&self) -> usize {
         self.allocator.reservations().len()
     }

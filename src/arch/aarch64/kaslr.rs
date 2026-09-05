@@ -3,8 +3,6 @@
 
 //! `AArch64` kernel virtual-address randomization policy.
 
-use super::memory::KERNEL_BASE;
-
 pub const ALIGNMENT: u64 = 2 * 1024 * 1024;
 pub const WINDOW_SIZE: u64 = 512 * 1024 * 1024 * 1024;
 
@@ -31,7 +29,7 @@ pub fn select(seed: Option<u64>, image_size: u64) -> Result<Layout, Error> {
             .map_err(Error::Entropy)?,
         None => 0,
     };
-    let kernel_base = KERNEL_BASE
+    let kernel_base = super::memory::kernel_region_base()
         .checked_add(offset)
         .ok_or(Error::ImageTooLarge)?;
     Ok(Layout {

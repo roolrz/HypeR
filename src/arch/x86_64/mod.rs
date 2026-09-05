@@ -56,8 +56,8 @@ pub use kaslr::{Error as KaslrError, select as select_kaslr_layout};
 #[cfg(CONFIG_CRASH_CONSOLE)]
 pub use memory::inspect_mapping as inspect_stage1_mapping;
 pub use memory::{
-    ActivationContext, Error as MemoryError, PreparedAddressSpace, StackMapping,
-    X86_64AddressTranslation as ArchitectureAddressTranslation,
+    ActivationContext, Error as MemoryError, PreparedAddressSpace, SecondaryActivationContext,
+    StackMapping, X86_64AddressTranslation as ArchitectureAddressTranslation,
 };
 pub use platform::{
     Error as PlatformDiscoveryError, EssentialDeviceDiscovery, EssentialPlatformInfo,

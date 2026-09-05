@@ -167,10 +167,20 @@ aarch64_capture_crash_context:
     str     x1, [x0, #CRASH_CONTEXT_TCR_EL2_OFFSET]
     mrs     x1, ttbr0_el2
     str     x1, [x0, #CRASH_CONTEXT_TTBR0_EL2_OFFSET]
+    mrs     x2, hcr_el2
+    tst     x2, #HCR_EL2_E2H
+    b.eq    .Lcapture_no_ttbr1
+    // The generic spelling retains the Armv8.0 assembly baseline; HCR.E2H
+    // protects this VHE-only register access.
+    mrs     x1, S3_4_C2_C0_1        // TTBR1_EL2
+    b       .Lcapture_store_ttbr1
+.Lcapture_no_ttbr1:
+    mov     x1, xzr
+.Lcapture_store_ttbr1:
+    str     x1, [x0, #CRASH_CONTEXT_TTBR1_EL2_OFFSET]
     mrs     x1, vbar_el2
     str     x1, [x0, #CRASH_CONTEXT_VBAR_EL2_OFFSET]
-    mrs     x1, hcr_el2
-    str     x1, [x0, #CRASH_CONTEXT_HCR_EL2_OFFSET]
+    str     x2, [x0, #CRASH_CONTEXT_HCR_EL2_OFFSET]
     ret
 .size aarch64_capture_crash_context, . - aarch64_capture_crash_context
 

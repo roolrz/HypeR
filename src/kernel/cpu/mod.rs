@@ -24,16 +24,16 @@ pub(crate) fn current_index() -> Option<CpuIndex> {
 
 /// Starts secondary CPUs and waits for their local kernel state to come online.
 pub(crate) fn initialize() -> Result<(), Error> {
-    let (platform, root, image_physical_start, kernel_base) =
+    let (platform, memory, image_physical_start, kernel_base) =
         super::boot::with_boot_state(|state| {
             (
                 state.platform,
-                state.memory.root_address(),
+                state.memory.secondary_activation_context(),
                 state.image_physical_start,
                 state.memory.kernel_base(),
             )
         });
-    let capabilities = smp::initialize(&platform, root, image_physical_start, kernel_base)?;
+    let capabilities = smp::initialize(&platform, memory, image_physical_start, kernel_base)?;
     crate::println!(
         "HypeR: SMP online: {}/{} discovered CPUs",
         capabilities.online_cpus,

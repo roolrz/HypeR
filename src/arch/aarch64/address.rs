@@ -54,16 +54,18 @@ impl Capabilities {
         1_u64 << self.physical_address_bits
     }
 
-    pub const fn stage1_tcr_el2(self) -> u64 {
-        (registers::TCR_EL2_BOOT_BASE & !registers::TCR_EL2_T0SZ_MASK)
-            | (64 - self.virtual_address_bits as u64)
-            | ((self.parange as u64) << registers::TCR_EL2_PS_SHIFT)
+    pub fn stage1_tcr_el2(self) -> u64 {
+        if super::host::is_vhe() {
+            registers::tcr_el2_vhe_stage1(self.virtual_address_bits, self.parange)
+        } else {
+            registers::tcr_el2_nvhe_stage1(self.virtual_address_bits, self.parange)
+        }
     }
 
     pub const fn stage2_vtcr_el2(self) -> u64 {
         registers::VTCR_EL2_GUEST_BASE
             | (64 - self.intermediate_physical_address_bits as u64)
-            | ((self.parange as u64) << registers::TCR_EL2_PS_SHIFT)
+            | ((self.parange as u64) << registers::VTCR_EL2_PS_SHIFT)
     }
 }
 

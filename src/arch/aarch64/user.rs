@@ -62,13 +62,12 @@ pub(crate) fn current_cpu_is_compatible() -> bool {
 
 /// Returns the exclusive virtual-address limit available to native userspace.
 ///
-/// VHE native execution shares the host stage-1 address space, so user
-/// authority stops before the first privileged host region. nVHE native
-/// execution instead uses a private stage-2 IPA space and may consume its full
-/// validated width.
+/// VHE assigns native userspace the complete lower `TTBR0_EL2` range while the
+/// host remains in the upper `TTBR1_EL2` range. nVHE uses its complete private
+/// stage-2 IPA range.
 pub fn user_address_limit() -> Result<u64, UserMachineContractError> {
     let capabilities = execution_capabilities()?;
-    Ok(capabilities.user_address_limit(super::memory::MMIO_BASE))
+    Ok(capabilities.user_address_limit())
 }
 
 pub(crate) fn uses_vhe_translation() -> bool {

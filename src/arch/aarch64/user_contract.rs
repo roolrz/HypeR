@@ -77,23 +77,9 @@ impl UserExecutionCapabilities {
         self.translation_identifier_bits
     }
 
-    /// Selects the exclusive native-user address limit for this regime.
-    ///
-    /// `vhe_privileged_base` is the first host-owned address in the shared VHE
-    /// stage-1 root. nVHE uses a private stage-2 IPA space and therefore does
-    /// not inherit that host-layout reservation.
-    pub(super) const fn user_address_limit(self, vhe_privileged_base: u64) -> u64 {
-        let translation_limit = 1u64 << self.address_bits;
-        match self.regime {
-            UserTranslationRegime::VheHostStage1 => {
-                if translation_limit < vhe_privileged_base {
-                    translation_limit
-                } else {
-                    vhe_privileged_base
-                }
-            }
-            UserTranslationRegime::NvheStage2Only => translation_limit,
-        }
+    /// Returns the exclusive native-user limit of the selected translation regime.
+    pub(super) const fn user_address_limit(self) -> u64 {
+        1u64 << self.address_bits
     }
 }
 

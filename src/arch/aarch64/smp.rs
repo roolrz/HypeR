@@ -37,7 +37,8 @@ unsafe extern "C" {
 /// Parameters consumed by the physical secondary-CPU trampoline.
 #[repr(C, align(64))]
 pub struct SecondaryBootParameters {
-    pub root: u64,
+    pub transition_root: u64,
+    pub kernel_root: u64,
     pub physical_stack_top: u64,
     pub virtual_stack_top: u64,
     pub cpu_index: u64,
@@ -48,19 +49,20 @@ pub struct SecondaryBootParameters {
 
 impl SecondaryBootParameters {
     pub fn new(
-        root: u64,
+        memory: super::memory::SecondaryActivationContext,
         physical_stack_top: u64,
         virtual_stack_top: u64,
         cpu_index: usize,
     ) -> Self {
         Self {
-            root,
+            transition_root: memory.transition_root.get(),
+            kernel_root: memory.kernel_root.get(),
             physical_stack_top,
             virtual_stack_top,
             cpu_index: cpu_index as u64,
             rust_entry: crate::start_secondary_cpu as *const () as usize as u64,
             runtime_vectors: super::exception::runtime_vector_address(),
-            tcr_el2: super::address::capabilities().stage1_tcr_el2(),
+            tcr_el2: memory.tcr_el2,
         }
     }
 }

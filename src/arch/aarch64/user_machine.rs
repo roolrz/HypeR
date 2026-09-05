@@ -159,10 +159,6 @@ pub(crate) unsafe fn prepare_vhe(
     }
     let root = allocator(0).ok_or(Error::Allocation)?;
     validate_table(root, 0)?;
-    // SAFETY: The allocator contract makes `root` a new writable page. The
-    // current host root is permanent; only its privileged L0 entries are
-    // copied, so process-private lower entries remain empty.
-    unsafe { copy_privileged_vhe_entries(root)? };
     let mut builder = Builder {
         root,
         regime: UserTranslationRegime::VheHostStage1,
@@ -251,7 +247,7 @@ impl<Allocator: FnMut(usize) -> Option<PhysicalAddress>> Builder<'_, Allocator> 
             return Err(Error::InvalidRange);
         }
         let capabilities = super::user::execution_capabilities()?;
-        let limit = capabilities.user_address_limit(memory::MMIO_BASE);
+        let limit = capabilities.user_address_limit();
         if page.address >= limit || page.physical.get() >= address::physical_address_limit() {
             return Err(Error::InvalidAddress);
         }
@@ -340,8 +336,8 @@ pub(crate) unsafe fn activate_local(root: &PreparedAddressSpace) -> LocalActivat
     if root.is_vhe() {
         let previous_root: u64;
         let previous_hcr: u64;
-        // Invalidate only this ASID on this PE. Privileged entries are global,
-        // so the handler cannot refill old EL0 entries before TTBR replacement.
+        // Invalidate only this ASID on this PE. The privileged upper range is
+        // owned independently by TTBR1_EL2 and cannot refill an EL0 entry.
         let operand = u64::from(root.identifier()) << registers::TTBR_ASID_SHIFT;
         // SAFETY: The caller supplies root/ID retention and local exclusion.
         unsafe {
@@ -620,32 +616,8 @@ unsafe fn invalidate_selected_stage2() {
     };
 }
 
-unsafe fn copy_privileged_vhe_entries(destination: PhysicalAddress) -> Result<(), Error> {
-    let source_register: u64;
-    // SAFETY: TTBR0_EL2 is readable at EL2 without side effects.
-    unsafe {
-        asm!(
-            "mrs {source}, TTBR0_EL2",
-            source = out(reg) source_register,
-            options(nomem, nostack, preserves_flags)
-        )
-    };
-    let source =
-        PhysicalAddress::new(source_register & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
-    validate_table(source, 0)?;
-    let l0_span = registers::STAGE1_LEVEL_SIZES_4K[0];
-    if !memory::MMIO_BASE.is_multiple_of(l0_span) {
-        return Err(Error::InvalidRange);
-    }
-    let boundary_index = stage1_index(memory::MMIO_BASE, 0);
-    for index in boundary_index..registers::TRANSLATION_TABLE_ENTRY_COUNT_4K {
-        write_entry(destination, index, read_entry(source, index)?)?;
-    }
-    Ok(())
-}
-
 fn stage1_index(virtual_address: u64, level: usize) -> usize {
-    ((virtual_address >> registers::STAGE1_LEVEL_SHIFTS_4K[level]) & 0x1ff) as usize
+    registers::stage1_table_index(virtual_address, level, address::STAGE1_VA_BITS)
 }
 
 fn stage2_index(ipa: u64, level: usize) -> usize {
@@ -677,7 +649,7 @@ fn write_entry(table: PhysicalAddress, index: usize, value: u64) -> Result<(), E
 }
 
 fn table_pointer(table: PhysicalAddress) -> Result<*mut u64, Error> {
-    memory::LINEAR_BASE
+    memory::linear_mapping_base()
         .checked_add(table.get())
         .and_then(|address| usize::try_from(address).ok())
         .map(core::ptr::with_exposed_provenance_mut::<u64>)

@@ -238,8 +238,15 @@ aarch64_boot_enable_translation:
     dsb     sy
     ldr     x1, =MAIR_EL2_BOOT_VALUE
     msr     mair_el2, x1
-    ldr     x1, =TCR_EL2_BOOT_BASE
-    orr     x1, x1, x23, lsl #TCR_EL2_PS_SHIFT
+    mrs     x2, hcr_el2
+    tbnz    x2, #34, .Lboot_tcr_vhe
+    ldr     x1, =TCR_EL2_NVHE_BOOT_BASE
+    orr     x1, x1, x23, lsl #TCR_EL2_NVHE_PS_SHIFT
+    b       .Lboot_tcr_ready
+.Lboot_tcr_vhe:
+    ldr     x1, =TCR_EL2_VHE_BOOT_BASE
+    orr     x1, x1, x23, lsl #TCR_EL2_VHE_IPS_SHIFT
+.Lboot_tcr_ready:
     msr     tcr_el2, x1
     msr     ttbr0_el2, x0
     isb
@@ -257,9 +264,10 @@ aarch64_boot_enable_translation:
  * enters Rust through the high kernel alias. This function never returns.
  *
  * x0 = final TTBR0_EL2 physical address
- * x1 = virtual load base of the kernel image
- * x2 = virtual top of the final boot stack
- * x3 = selected final TCR_EL2 value
+ * x1 = final TTBR1_EL2 physical address, or TTBR0_EL2 again for nVHE
+ * x2 = virtual load base of the kernel image
+ * x3 = virtual top of the final boot stack
+ * x4 = selected final TCR_EL2 value
  */
 .global aarch64_activate_final_address_space
 .type aarch64_activate_final_address_space, %function
@@ -268,8 +276,9 @@ aarch64_activate_final_address_space:
     mov     x19, x0
     mov     x20, x1
     mov     x21, x2
-    mov     x23, x3
-    adr     x22, _start
+    mov     x22, x3
+    mov     x23, x4
+    adr     x24, _start
 
     // Rewrite static PIE pointers for the high kernel alias.
     adrp    x3, __rela_dyn_start
@@ -284,14 +293,14 @@ aarch64_activate_final_address_space:
     ldr     x7, [x3, #16]
     cmp     w6, #R_AARCH64_RELATIVE
     b.ne    .Lunsupported_boot
-    add     x5, x22, x5
-    add     x7, x20, x7
+    add     x5, x24, x5
+    add     x7, x21, x7
     str     x7, [x5]
     add     x3, x3, #24
     b       .Lvirtual_relocate
 .Lvirtual_relocation_done:
     // RELR locations contain physical pointers after the load-bias pass.
-    sub     x8, x20, x22
+    sub     x8, x21, x24
     adrp    x3, __relr_dyn_start
     add     x3, x3, :lo12:__relr_dyn_start
     adrp    x4, __relr_dyn_end
@@ -302,7 +311,7 @@ aarch64_activate_final_address_space:
     b.hs    .Lvirtual_relr_done
     ldr     x6, [x3], #8
     tbnz    x6, #0, .Lvirtual_relr_bitmap
-    add     x5, x22, x6
+    add     x5, x24, x6
     ldr     x7, [x5]
     add     x7, x7, x8
     str     x7, [x5], #8
@@ -325,9 +334,15 @@ aarch64_activate_final_address_space:
 .Lvirtual_relr_done:
     dsb     ishst
 
-    // Install the configured VA width and boot-CPU-selected PA width with TTBR.
-    msr     tcr_el2, x23
+    // Install both roots before enabling the VHE upper walk in TCR_EL2.
     msr     ttbr0_el2, x19
+    cmp     x20, x19
+    b.eq    .Lfinal_roots_ready
+    // The generic system-register spelling keeps the image's Armv8.0 assembly
+    // baseline while this VHE-only access remains behind runtime E2H selection.
+    msr     S3_4_C2_C0_1, x20       // TTBR1_EL2
+.Lfinal_roots_ready:
+    msr     tcr_el2, x23
     isb
     tlbi    alle2
     dsb     ish
@@ -335,16 +350,16 @@ aarch64_activate_final_address_space:
 
     // Move vectors, stack, and execution to their high kernel aliases.
     adr     x3, .Lexception_vectors
-    sub     x3, x3, x22
-    add     x3, x20, x3
+    sub     x3, x3, x24
+    add     x3, x21, x3
     msr     vbar_el2, x3
     isb
-    mov     sp, x21
+    mov     sp, x22
     mov     x29, xzr
     mov     x30, xzr
     adr     x3, start_kernel
-    sub     x3, x3, x22
-    add     x3, x20, x3
+    sub     x3, x3, x24
+    add     x3, x21, x3
     br      x3
 .size aarch64_activate_final_address_space, . - aarch64_activate_final_address_space
 
@@ -358,12 +373,13 @@ aarch64_activate_final_address_space:
  *
  * x0 points to a physically addressed SecondaryBootParameters record:
  *   +0  final TTBR0_EL2 root
- *   +8  physical stack top used during the MMU transition
- *   +16 virtual stack top
- *   +24 logical CPU index
- *   +32 high Rust entry address
- *   +40 high runtime vector address
- *   +48 selected TCR_EL2 value
+ *   +8  final TTBR1_EL2 root, or TTBR0_EL2 again for nVHE
+ *   +16 physical stack top used during the MMU transition
+ *   +24 virtual stack top
+ *   +32 logical CPU index
+ *   +40 high Rust entry address
+ *   +48 high runtime vector address
+ *   +56 selected TCR_EL2 value
  */
 .balign 16
 .global aarch64_secondary_entry
@@ -378,8 +394,16 @@ aarch64_secondary_entry:
     b.ne    .Lsecondary_halt
 
     // Reject an incompatible secondary before enabling its translation regime.
-    ldr     x2, [x19, #48]
-    ubfx    x3, x2, #TCR_EL2_PS_SHIFT, #3
+    ldr     x2, [x19, #56]
+    ldr     x6, [x19, #8]
+    ldr     x7, [x19]
+    cmp     x6, x7
+    b.eq    .Lsecondary_nvhe_ps
+    ubfx    x3, x2, #TCR_EL2_VHE_IPS_SHIFT, #3
+    b       .Lsecondary_check_pa
+.Lsecondary_nvhe_ps:
+    ubfx    x3, x2, #TCR_EL2_NVHE_PS_SHIFT, #3
+.Lsecondary_check_pa:
     mrs     x4, id_aa64mmfr0_el1
     and     x5, x4, #ID_AA64MMFR0_PARANGE_MASK
     cmp     x5, x3
@@ -389,19 +413,36 @@ aarch64_secondary_entry:
     cmp     x5, #ID_AA64MMFR0_TGRAN4_UNSUPPORTED
     b.eq    .Lsecondary_halt
     msr     spsel, #1
-    ldr     x1, [x19, #8]
+    ldr     x1, [x19, #16]
     mov     sp, x1
 
     ldr     x1, =SCTLR_EL2_RES1
     msr     sctlr_el2, x1
     bl      aarch64_boot_initialize_el2
 
+    // The selected TCR format must match the primary CPU's host mode.
+    mrs     x2, hcr_el2
+    tst     x2, #HCR_EL2_E2H
+    cset    x2, ne
+    ldr     x3, [x19, #8]
+    ldr     x4, [x19]
+    cmp     x3, x4
+    cset    x3, ne
+    cmp     x2, x3
+    b.ne    .Lsecondary_halt
+
     ldr     x1, =MAIR_EL2_BOOT_VALUE
     msr     mair_el2, x1
-    ldr     x1, [x19, #48]
-    msr     tcr_el2, x1
     ldr     x1, [x19]
     msr     ttbr0_el2, x1
+    ldr     x2, [x19, #8]
+    cmp     x2, x1
+    b.eq    .Lsecondary_roots_ready
+    // See the primary transition above.
+    msr     S3_4_C2_C0_1, x2        // TTBR1_EL2
+.Lsecondary_roots_ready:
+    ldr     x1, [x19, #56]
+    msr     tcr_el2, x1
     isb
     tlbi    alle2
     dsb     sy
@@ -410,16 +451,16 @@ aarch64_secondary_entry:
     msr     sctlr_el2, x1
     isb
 
-    ldr     x0, [x19, #24]
+    ldr     x0, [x19, #32]
     msr     tpidr_el2, x0
-    ldr     x1, [x19, #40]
+    ldr     x1, [x19, #48]
     msr     vbar_el2, x1
     isb
-    ldr     x1, [x19, #16]
+    ldr     x1, [x19, #24]
     mov     sp, x1
     mov     x29, xzr
     mov     x30, xzr
-    ldr     x1, [x19, #32]
+    ldr     x1, [x19, #40]
     br      x1
 .size aarch64_secondary_entry, . - aarch64_secondary_entry
 

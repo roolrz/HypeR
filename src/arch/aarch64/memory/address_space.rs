@@ -18,9 +18,18 @@ pub struct PreparedAddressSpace {
 
 #[derive(Clone, Copy)]
 pub struct ActivationContext {
-    pub(in crate::arch::aarch64) root: hyper::mm::PhysicalAddress,
+    pub(in crate::arch::aarch64) transition_root: hyper::mm::PhysicalAddress,
+    pub(in crate::arch::aarch64) kernel_root: hyper::mm::PhysicalAddress,
     pub(in crate::arch::aarch64) stack_top: hyper::mm::VirtualAddress,
     pub(in crate::arch::aarch64) kernel_base: u64,
+    pub(in crate::arch::aarch64) tcr_el2: u64,
+}
+
+/// Inert permanent-translation state copied into a secondary boot handoff.
+#[derive(Clone, Copy)]
+pub struct SecondaryActivationContext {
+    pub(in crate::arch::aarch64) transition_root: hyper::mm::PhysicalAddress,
+    pub(in crate::arch::aarch64) kernel_root: hyper::mm::PhysicalAddress,
     pub(in crate::arch::aarch64) tcr_el2: u64,
 }
 
@@ -45,7 +54,7 @@ pub unsafe fn inspect_mapping(root: u64, address: usize) -> Result<Option<Stage1
 
 impl PreparedAddressSpace {
     pub fn root_address(&self) -> u64 {
-        self.address_space.root.get()
+        self.address_space.kernel_root.get()
     }
 
     pub fn kernel_base(&self) -> u64 {
@@ -54,9 +63,18 @@ impl PreparedAddressSpace {
 
     pub fn activation_context(&self) -> ActivationContext {
         ActivationContext {
-            root: self.address_space.root,
+            transition_root: self.address_space.transition_root,
+            kernel_root: self.address_space.kernel_root,
             stack_top: self.address_space.stack_top,
             kernel_base: self.address_space.kernel_base,
+            tcr_el2: super::super::address::capabilities().stage1_tcr_el2(),
+        }
+    }
+
+    pub fn secondary_activation_context(&self) -> SecondaryActivationContext {
+        SecondaryActivationContext {
+            transition_root: self.address_space.transition_root,
+            kernel_root: self.address_space.kernel_root,
             tcr_el2: super::super::address::capabilities().stage1_tcr_el2(),
         }
     }
@@ -69,7 +87,7 @@ impl PreparedAddressSpace {
     /// The caller must exclusively serialize page-table changes and keep the
     /// hierarchy alive and accessible through the linear map.
     pub unsafe fn retire_identity_mappings(&self, platform: &PlatformInfo) -> Result<(), Error> {
-        page_table::retire_identity_mappings(self.address_space.root, platform)
+        page_table::retire_identity_mappings(self.address_space.transition_root, platform)
     }
 
     /// Adds a guarded runtime-stack mapping to this hierarchy.
@@ -89,7 +107,7 @@ impl PreparedAddressSpace {
         allocate_table: &mut dyn FnMut() -> Option<PhysicalAddress>,
     ) -> Result<StackMapping, Error> {
         page_table::map_runtime_stack(
-            self.address_space.root,
+            self.address_space.kernel_root,
             slot,
             physical,
             pages,
@@ -104,7 +122,7 @@ impl PreparedAddressSpace {
     /// No CPU, saved context, or unwinder may access the mapping, and the
     /// caller must exclusively serialize page-table changes.
     pub unsafe fn unmap_stack(&self, slot: usize, pages: usize) -> Result<(), Error> {
-        page_table::unmap_runtime_stack(self.address_space.root, slot, pages)
+        page_table::unmap_runtime_stack(self.address_space.kernel_root, slot, pages)
     }
 
     /// Reads the live stage-1 hierarchy.
@@ -114,7 +132,7 @@ impl PreparedAddressSpace {
     /// The hierarchy must remain alive and mapped, and page-table mutation
     /// must be excluded throughout the walk.
     pub unsafe fn address_is_mapped(&self, address: usize) -> Result<bool, Error> {
-        page_table::runtime_address_is_mapped(self.address_space.root, address as u64)
+        page_table::runtime_address_is_mapped(self.address_space.kernel_root, address as u64)
     }
 }
 

@@ -281,9 +281,9 @@ secondary architectures.
 
 ### 1. Establish native EL0 and the capability ABI
 
-- extend the current loader-backed AArch64 VHE host-EL0 and nVHE
-  stage-2-only Native path into a service runtime before publishing a binary
-  ABI, retaining a minimal EL1 relay only as a justified compatibility
+- extend the current loader-backed AArch64 VHE split `TTBR0_EL2`/`TTBR1_EL2`
+  and nVHE stage-2-only Native path into a service runtime before publishing a
+  binary ABI, retaining a minimal EL1 relay only as a justified compatibility
   fallback;
 - extend the implemented Process, UserThread, ProcessImage, TaskGroup,
   ResourceDomain, and address-space lifecycle with multi-Thread race coverage
