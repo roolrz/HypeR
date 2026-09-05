@@ -565,8 +565,10 @@ fn reserve_relocations(output: &mut Vec<Relocation>, additional: usize) -> Resul
     if total > MAXIMUM_RELOCATIONS {
         return Err(Error::TooManyRelocations);
     }
+    // RELR bitmaps append one target at a time. Geometric growth bounds
+    // total copying even when the allocator cannot extend a block in place.
     output
-        .try_reserve_exact(additional)
+        .try_reserve(additional)
         .map_err(|_| Error::Allocation)
 }
 
