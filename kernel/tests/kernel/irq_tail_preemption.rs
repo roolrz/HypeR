@@ -39,5 +39,5 @@ extern "C" fn run_probe(_argument: usize) {
             crate::hal::cpu::halt()
         }
     }
-    crate::println!("HypeR test: {ARCHITECTURE} IRQ-tail Fair vCPU preemption passed");
+    crate::pr_info!("HypeR test: {ARCHITECTURE} IRQ-tail Fair vCPU preemption passed");
 }

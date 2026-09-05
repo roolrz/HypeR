@@ -89,7 +89,7 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
     )
     .map_err(InitializationError::Timer)?;
     if let Some(interrupt) = binding.host_interrupt() {
-        crate::println!(
+        crate::pr_info!(
             "HypeR: guest architectural timer mapped to host VIRQ {}",
             interrupt.get()
         );
@@ -108,7 +108,7 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
         }
     };
     match timer::validate_hardware(guest_timer.interrupt, &exit_services, &prepared_interrupts) {
-        Ok(true) => crate::println!("HypeR: virtual architected timer injection validated"),
+        Ok(true) => crate::pr_info!("HypeR: virtual architected timer injection validated"),
         Ok(false) => {}
         Err(error) => {
             binding.rollback();
@@ -123,7 +123,7 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
         crate::hal::vm::interrupt_virtualization_description(),
         binding.maintenance_interrupt(),
     ) {
-        crate::println!(
+        crate::pr_info!(
             "HypeR: vGICv3 active with {} LRs, {} priority bits, {} preemption bits, {} INTID bits, maintenance VIRQ {}",
             description.list_registers,
             description.priority_bits,
@@ -141,7 +141,7 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
     ENTRY_READY
         .publish(entry_ready)
         .map_err(|_| InitializationError::EntryReadyAlreadyPublished)?;
-    crate::println!("HypeR: guest synchronous trap and vSysReg emulation validated");
+    crate::pr_info!("HypeR: guest synchronous trap and vSysReg emulation validated");
     Ok(())
 }
 
@@ -153,13 +153,13 @@ pub(in crate::kernel) fn entry_ready() -> Option<crate::hal::vm::VmEntryReady> {
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn start_test_default(ramdisk: &[u8]) -> Result<Infallible, StartError> {
     let guest = select_default(ramdisk).map_err(StartError::Bundle)?;
-    crate::println!(
+    crate::pr_info!(
         "HypeR: loaded VM '{}' from boot ramdisk: {} MiB RAM, {} vCPU(s)",
         guest.name(),
         guest.memory_size() / (1024 * 1024),
         guest.vcpu_count()
     );
-    crate::println!("HypeR: kernel initialization complete; starting Linux guest");
+    crate::pr_info!("HypeR: kernel initialization complete; starting Linux guest");
     let vcpu = match boot_linux(guest) {
         Ok(vcpu) => vcpu,
         Err(error) => {
@@ -167,7 +167,7 @@ pub(crate) fn start_test_default(ramdisk: &[u8]) -> Result<Infallible, StartErro
             return Err(StartError::Linux(error));
         }
     };
-    crate::println!("HypeR: Linux boot vCPU scheduled as thread {}", vcpu.get());
+    crate::pr_info!("HypeR: Linux boot vCPU scheduled as thread {}", vcpu.get());
     super::task::scheduler::exit_current()
 }
 

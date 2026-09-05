@@ -28,7 +28,7 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
     let node_count = root.nodes().len();
     ROOT.publish(root)
         .map_err(|_| InitializationError::AlreadyInitialized)?;
-    crate::println!("HypeR: mounted initramfs with {node_count} node(s)");
+    crate::pr_info!("HypeR: mounted initramfs with {node_count} node(s)");
     Ok(())
 }
 

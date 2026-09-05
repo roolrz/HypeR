@@ -10,6 +10,8 @@ pub(crate) mod preempt;
 mod reschedule;
 pub mod scheduler;
 mod sleep;
+#[cfg(feature = "kernel-self-test")]
+mod test_progress;
 pub mod thread;
 mod thread_object;
 mod timeout;
@@ -21,6 +23,10 @@ pub(crate) use thread_object::{
 };
 
 pub use sleep::{SleepError, sleep_ms, sleep_ns, sleep_s, sleep_until, sleep_us};
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use test_progress::{
+    DEFAULT_TIMEOUT_NS as TEST_PROGRESS_TIMEOUT_NS, wait_until as wait_for_test_progress,
+};
 pub use timeout::TimedWaitError;
 pub(crate) use timeout::{ArmedTimeout, PreparedTimeout};
 pub(crate) use wait::{WaitMobility, WaitTicket};
@@ -32,7 +38,7 @@ static READY: AtomicBool = AtomicBool::new(false);
 pub(crate) fn initialize() -> Result<(), scheduler::Error> {
     let capabilities = scheduler::initialize()?;
     READY.store(true, Ordering::Release);
-    crate::println!(
+    crate::pr_info!(
         "HypeR: scheduler active on bootstrap thread {}",
         capabilities.bootstrap_thread.get()
     );

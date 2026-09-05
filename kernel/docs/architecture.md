@@ -530,6 +530,14 @@ before that publication deliberately use zero. Ring sequence numbers remain
 internal cursor and loss-detection state, while console output reports an
 explicit warning only when records were missed.
 
+`CONFIG_LOG_COMPILE_LEVEL` sets the maximum severity present in the kernel
+image. Statically leveled callsites above that ceiling have no generated code,
+argument evaluation, or ring-buffer side effect. Independently,
+`CONFIG_CONSOLE_LOGLEVEL_DEFAULT` initializes the mutable runtime Console
+threshold. Console filtering never removes an otherwise compiled record from
+the ring; it only decides whether the drain worker presents that record to the
+normal Console sink.
+
 Thread diagnostics copy names into fixed-capacity owned snapshots while the
 scheduler owns the source Thread. Logging and crash paths can therefore render
 an ID/name pair without retaining a `Thread` reference or reacquiring object

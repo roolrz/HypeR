@@ -34,7 +34,7 @@ pub(crate) fn initialize() -> Result<(), Error> {
             )
         });
     let capabilities = smp::initialize(&platform, memory, image_physical_start, kernel_base)?;
-    crate::println!(
+    crate::pr_info!(
         "HypeR: SMP online: {}/{} discovered CPUs",
         capabilities.online_cpus,
         capabilities.discovered_cpus

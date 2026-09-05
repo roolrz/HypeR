@@ -161,7 +161,7 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
 fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
     selected::validate_linux_host()?;
     selected::describe_linux_host(|description| {
-        crate::println!("{description}");
+        crate::pr_info!("{description}");
     });
     if guest.guest_type() != "linux" {
         return Err(Error::UnsupportedGuestType);
@@ -245,16 +245,16 @@ fn report_guest_layout(
     stage2_root: u64,
     memory: crate::kernel::vm::memory::GuestMemoryStats,
 ) {
-    crate::println!(
+    crate::pr_info!(
         "HypeR: entering Linux guest: Image {} bytes, initramfs {} bytes, RAM {} MiB",
         guest.kernel().len(),
         guest.initramfs().map_or(0, |bytes| bytes.len()),
         guest.memory_size() / (1024 * 1024)
     );
     selected::describe_linux_guest_layout(initramfs_range, stage2_root, |description| {
-        crate::println!("{description}");
+        crate::pr_info!("{description}");
     });
-    crate::println!(
+    crate::pr_info!(
         "HypeR: guest demand paging: {}/{} pages committed for boot",
         memory.boot_committed_pages,
         memory.addressable_pages

@@ -334,7 +334,7 @@ fn report_start(
     virtual_machine: crate::kernel::vm::registry::VmId,
     vcpu_id: u32,
 ) {
-    crate::println!(
+    crate::pr_info!(
         "HypeR: vCPU {} running as scheduler thread {} on guarded stack {:#x}-{:#x}; VM {:?}",
         vcpu_id,
         current.thread.get(),

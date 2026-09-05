@@ -14,6 +14,8 @@ copy_sources() {
     mkdir -p "$fixture/src/kernel/log" "$fixture/src/kernel/entry" "$fixture/src/kernel/irq" \
         "$fixture/src/arch/aarch64" "$fixture/src/arch/riscv64" "$fixture/src/arch/x86_64" \
         "$fixture/src/hal" "$fixture/src/log" "$fixture/src/arch" "$fixture/src/sync"
+    cp "$root/Kconfig" "$fixture/Kconfig"
+    cp "$root/build.rs" "$fixture/build.rs"
     cp "$root/src/kernel/log/mod.rs" "$fixture/src/kernel/log/mod.rs"
     cp "$root/src/kernel/log/drain.rs" "$fixture/src/kernel/log/drain.rs"
     cp "$root/src/kernel/log/console.rs" "$fixture/src/kernel/log/console.rs"
@@ -52,13 +54,33 @@ mutate() {
 
 copy_sources
 check
+mutate 'the compile-time log ceiling must retain its default' \
+    Kconfig 'config LOG_COMPILE_LEVEL' 'config LOG_COMPILE_LEVEL_REMOVED'
+mutate 'the runtime Console threshold must remain independently configurable' \
+    Kconfig 'config CONSOLE_LOGLEVEL_DEFAULT' 'config CONSOLE_LOGLEVEL_DEFAULT_REMOVED'
+mutate 'the build must export severity-specific compile gates' \
+    build.rs 'value("LOG_COMPILE_LEVEL")' 'value("LOG_COMPILE_LEVEL_REMOVED")'
+mutate 'the public log API must enforce the compiled-in ceiling' \
+    src/kernel/log/mod.rs 'if !compiled_in(level) {' 'if false {'
+mutate 'debug callsites must use their compile-time gate' \
+    src/kernel/log/mod.rs 'hyper_log_compile_debug, hyper::log::Level::Debug' \
+    'hyper_log_compile_info, hyper::log::Level::Debug'
+mutate 'kernel diagnostics must not recover an implicit println severity' \
+    src/kernel/log/mod.rs 'crate::pr_info!("HypeR: kernel log ring:' \
+    'crate::println!("HypeR: kernel log ring:'
+mutate 'Console state must use the runtime default threshold' \
+    src/kernel/log/console.rs 'hyper::config::CONSOLE_LOGLEVEL_DEFAULT' \
+    'hyper::config::LOG_COMPILE_LEVEL'
+mutate 'runtime Console drain must retain secondary severity filtering' \
+    src/kernel/log/drain.rs 'record.level > snapshot.maximum_level' \
+    'false'
 mutate 'log producers must not synchronously flush the console' \
     src/kernel/log/mod.rs 'drain::request();' 'console::flush();'
 mutate 'IRQ prompt service must follow registry dispatch' \
     src/kernel/entry/irq.rs 'crate::kernel::irq::interrupt::dispatch(interrupt);' \
     'crate::kernel::log::service_irq_prompt();'
-mutate 'guest bytes must not bypass the deferred FIFO' \
-    src/kernel/log/console.rs 'super::drain::enqueue_raw(byte);' \
+mutate 'guest bytes must not bypass the deferred Console TX FIFO' \
+    src/kernel/log/console.rs 'super::drain::enqueue_console_tx_byte(byte);' \
     'CONSOLE.with(|_| device.write_byte(byte));'
 mutate 'normal drain batches must remain bounded' \
     src/kernel/log/drain.rs 'const LOG_RECORDS_PER_BATCH: usize = 32;' \
@@ -123,12 +145,15 @@ mutate 'UART rejection must defer work to a later IRQ' \
 mutate 'partial frames must retain their selected device' \
     src/kernel/log/drain.rs 'output.device = Some(snapshot.device);' \
     'output.device = None;'
-mutate 'guest raw output must retain console newline translation' \
-    src/kernel/log/drain.rs 'push_console_bytes(&bytes\[\.\.count\])' \
-    'push_bytes(\&bytes[..count])'
-mutate 'raw queue ownership must not advance before physical acceptance' \
+mutate 'Console TX must preserve opaque bytes without newline translation' \
+    src/kernel/log/drain.rs 'push_bytes(&bytes\[\.\.count\])' \
+    'push_console_bytes(\&bytes[..count])'
+mutate 'Console TX queue ownership must not advance before physical acceptance' \
     src/kernel/log/drain.rs 'queue.bytes.discard_front(count)' \
     'true'
+mutate 'normal Console selection must prefer kernel diagnostics' \
+    src/kernel/log/drain.rs 'match prepare_log_output(output, snapshot)' \
+    'match PrepareOutcome::Idle'
 mutate 'RISC-V software prompts must reach the scheduler-safe log seam' \
     src/arch/riscv64/exception.rs 'crate::arch::irq::service_kernel_rpc_interrupt' \
     'crate::arch::irq::discard_kernel_rpc_interrupt'

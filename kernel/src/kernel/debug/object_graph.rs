@@ -9,6 +9,7 @@ use crate::kernel::object::{
 };
 use crate::kernel::process::ProcessScanCursor;
 use crate::kernel::task::ThreadObjectScanCursor;
+use crate::pr_debug;
 
 pub(super) fn report() {
     let mut object_count = 0usize;
@@ -30,7 +31,7 @@ pub(super) fn report() {
                 ExportPolicy::User => "user",
             };
             let references: ObjectReferenceSnapshot = object.references;
-            crate::println!(
+            pr_debug!(
                 "HypeR object: koid={} kind={} state={} export={} handles={} refs={} classes=[service:{},scheduler:{},publication:{},user:{},pin:{},diagnostic:{},retirement:{}] rights={:#x}",
                 object.koid.get(),
                 object.kind.get(),
@@ -61,7 +62,7 @@ pub(super) fn report() {
                 Err(_) => break,
             };
             for thread in page.entries() {
-                crate::println!(
+                pr_debug!(
                     "HypeR thread-object: thread={} koid={} role={:?} registry={:?}",
                     thread.thread.get(),
                     thread.object.object.koid.get(),
@@ -82,7 +83,7 @@ pub(super) fn report() {
         let page = crate::kernel::process::scan(cursor);
         for entry in page.entries() {
             let snapshot = entry.snapshot();
-            crate::println!(
+            pr_debug!(
                 "HypeR process: id={} phase={:?} threads={}/{}",
                 snapshot.id.get(),
                 snapshot.phase,
@@ -100,7 +101,7 @@ pub(super) fn report() {
                     }
                 };
                 for handle in handle_page.entries() {
-                    crate::println!(
+                    pr_debug!(
                         "HypeR handle: process={} value={:#x} koid={} kind={} rights={:#x} flags={:#x}",
                         snapshot.id.get(),
                         handle.value.get(),
@@ -116,7 +117,7 @@ pub(super) fn report() {
         }
         process_cursor = page.next();
     }
-    crate::println!(
+    pr_debug!(
         "HypeR: object diagnostics ready (objects={}, threads={}, processes={}, handles={}, unavailable={})",
         object_count,
         thread_count,

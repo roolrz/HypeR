@@ -189,7 +189,7 @@ fn report_timer_health_once() {
     {
         return;
     }
-    crate::println!("HypeR: periodic timer IRQs active on {participating} CPUs");
+    crate::pr_info!("HypeR: periodic timer IRQs active on {participating} CPUs");
 }
 
 fn current_cpu() -> Result<CpuIndex, Error> {

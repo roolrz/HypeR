@@ -55,7 +55,8 @@ and generated Rust, C, and reference outputs.
 ## Ownership boundary
 
 - The kernel implements and validates the machine contract.
-- `sdk/lib/` provides the C runtime and Native application interfaces.
+- `sdk/lib/` provides the C runtime and architecture syscall veneers.
+- `sdk/rust/` provides raw and safe Native Rust application bindings.
 - `sdk/toolchain/` assembles the compiler, linker, headers, and runtime into a
   consumable SDK.
 

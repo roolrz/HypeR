@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # HypeR
 
-[![CI](https://github.com/roolrz/HypeR-Kernel/actions/workflows/ci.yml/badge.svg)](https://github.com/roolrz/HypeR-Kernel/actions/workflows/ci.yml)
+[![CI](https://github.com/roolrz/HypeR/actions/workflows/ci.yml/badge.svg)](https://github.com/roolrz/HypeR/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
 HypeR is an experimental type-1 hypervisor and kernel written in Rust. It is
@@ -175,7 +175,7 @@ make defconfig
 make run
 ```
 
-`make run` builds `app/init` only through the assembled SDK under
+`make run` builds the `no_std` Rust `app/init` only through the assembled SDK under
 `target/sdk/aarch64`; the application does not include private kernel or SDK
 source paths. Pass `INITRAMFS=/path/to/archive.cpio` to test another Native
 userspace image.
@@ -373,7 +373,8 @@ secondary architectures.
 | `kernel/src/mm/`, `kernel/src/sync/`, `kernel/src/time/` | Reusable allocation, synchronization, and timing mechanisms |
 | `sdk/abi/` | Native ABI schema, generated Rust definitions, C header, and reference |
 | `sdk/lib/` | Freestanding Native C runtime and architecture syscall veneers |
-| `sdk/toolchain/` | Clang driver, linker contract, and transactional SDK assembly |
+| `sdk/rust/` | Safe `no_std` Native OS binding, raw syscalls, and Rust runtime entry |
+| `sdk/toolchain/` | Clang/Cargo drivers, linker contract, and transactional SDK assembly |
 | `app/` | Native system applications built only against the assembled SDK |
 | `kernel/tests/` | Kernel host tests, self-tests, image verification, and QEMU acceptance |
 | `kernel/tools/` | Kconfig, kallsyms, and Linux guest-payload tooling |
@@ -419,7 +420,7 @@ Before opening a pull request:
    file. Cargo-generated lockfiles and the complete `LICENSE` text are exempt.
 
 Small, coherent changes with a clear migration seam are preferred over broad
-rewrites. [Open an issue](https://github.com/roolrz/HypeR-Kernel/issues) before
+rewrites. [Open an issue](https://github.com/roolrz/HypeR/issues) before
 starting work that changes a public format, architecture boundary, unsafe
 ownership model, or guest-visible ABI. Issues are also the preferred place for
 bug reports and focused design proposals while a fuller contributor guide is

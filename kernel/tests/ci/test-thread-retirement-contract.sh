@@ -16,6 +16,7 @@ copy_sources() {
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
     cp "$root/src/kernel/task/scheduler/registry.rs" "$fixture/src/kernel/task/scheduler/registry.rs"
     cp "$root/src/kernel/reaper.rs" "$fixture/src/kernel/reaper.rs"
+    cp "$root/src/kernel/task/test_progress.rs" "$fixture/src/kernel/task/test_progress.rs"
     cp "$root/tests/kernel/support.rs" "$fixture/tests/kernel/support.rs"
 }
 
@@ -62,9 +63,9 @@ mutate 'retirement observation lost acquire ordering' \
     'RETIREMENTS_IN_PROGRESS.load(Ordering::Relaxed)'
 mutate 'quiescence ignored detached resources' \
     tests/kernel/support.rs \
-    'statistics.retirements_in_progress != 0' \
+    'statistics.retirements_in_progress == 0' \
     'statistics.retirements_in_progress == usize::MAX'
 mutate 'quiescence spun without yielding physical CPU progress' \
-    tests/kernel/support.rs \
-    'crate::kernel::task::sleep_ms(1)?;' \
-    'scheduler::yield_now()?;'
+    src/kernel/task/test_progress.rs \
+    'super::sleep_ms(1).map_err(E::from)?;' \
+    'core::hint::spin_loop();'

@@ -150,7 +150,14 @@ pub(super) enum Error {
     Image,
     Lifecycle,
     Scheduler,
+    Sleep(crate::kernel::task::SleepError),
     Terminal,
+}
+
+impl From<crate::kernel::task::SleepError> for Error {
+    fn from(error: crate::kernel::task::SleepError) -> Self {
+        Self::Sleep(error)
+    }
 }
 
 pub(super) fn run() -> Result<(), Error> {
@@ -412,27 +419,31 @@ fn process_is_discoverable(target: &Process) -> bool {
 }
 
 fn wait_for_event_registration(process: &Process) -> Result<(), Error> {
-    const MAX_PROGRESS_PASSES: usize = 4_096;
-
     let handle = HandleValue::first_for_test();
-    for _ in 0..MAX_PROGRESS_PASSES {
-        if let Ok(event) = process.resolve_handle::<Event>(handle, Rights::WAIT)
-            && event.object().waiter_count() == 1
-        {
-            return Ok(());
-        }
-        crate::kernel::task::scheduler::yield_now().map_err(|_| Error::Scheduler)?;
+    if crate::kernel::task::wait_for_test_progress(
+        crate::kernel::task::TEST_PROGRESS_TIMEOUT_NS,
+        || {
+            Ok::<_, Error>(
+                process
+                    .resolve_handle::<Event>(handle, Rights::WAIT)
+                    .is_ok_and(|event| event.object().waiter_count() == 1),
+            )
+        },
+    )? {
+        Ok(())
+    } else {
+        Err(Error::Lifecycle)
     }
-    Err(Error::Lifecycle)
 }
 
 fn retire_process(process: &Process) -> Result<(), Error> {
     // Observation only: production kreaper must own and complete retirement.
-    for _ in 0..1000 {
-        if process.snapshot().phase == ProcessPhase::Retired {
-            return Ok(());
-        }
-        crate::kernel::task::sleep_ms(1).map_err(|_| Error::Lifecycle)?;
+    if crate::kernel::task::wait_for_test_progress(
+        crate::kernel::task::TEST_PROGRESS_TIMEOUT_NS,
+        || Ok::<_, Error>(process.snapshot().phase == ProcessPhase::Retired),
+    )? {
+        Ok(())
+    } else {
+        Err(Error::Lifecycle)
     }
-    Err(Error::Lifecycle)
 }

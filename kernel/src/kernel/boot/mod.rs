@@ -208,7 +208,7 @@ fn try_prepare_boot_environment(inputs: ProtocolInputs) -> Result<Infallible, Pr
     report_chosen_errors(&chosen);
     let command_line = inputs.command_line.as_ref().or(chosen.command_line());
     let early_console = initialize_early_console(&platform, command_line)?;
-    crate::println!("HypeR: DTB at {:#x}", dtb_address);
+    crate::pr_info!("HypeR: DTB at {:#x}", dtb_address);
 
     let kernel_base =
         select_kernel_base(command_line, chosen.kaslr_seed(), image_layout.total_size)?;
@@ -223,12 +223,12 @@ fn try_prepare_boot_environment(inputs: ProtocolInputs) -> Result<Infallible, Pr
         .take_activation_context()
         .ok_or(PreparationError::MemoryActivationUnavailable)?;
 
-    crate::println!(
+    crate::pr_info!(
         "HypeR: discovered {} RAM and {} MMIO regions",
         platform.memory.len(),
         platform.mmio.len()
     );
-    crate::println!(
+    crate::pr_info!(
         "HypeR: root page table at {:#x}; switching to kernel VA {:#x}",
         memory.root_address(),
         memory.kernel_base()
@@ -317,7 +317,7 @@ fn initialize_early_console(
 
     if let Some(console_info) = early_console {
         install_bootstrap_console(console_info).map_err(PreparationError::Console)?;
-        crate::println!("HypeR: early console initialized");
+        crate::pr_info!("HypeR: early console initialized");
     }
     Ok(early_console)
 }

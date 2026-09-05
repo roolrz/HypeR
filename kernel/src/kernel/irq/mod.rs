@@ -92,7 +92,7 @@ fn initialize_controller(
         .interrupt_controller()
         .ok_or(InitializationError::MissingController)?;
     let capabilities = interrupt::initialize(info).map_err(InitializationError::Controller)?;
-    crate::println!(
+    crate::pr_info!(
         "HypeR: interrupt controller initialized with {} interrupt IDs; local IRQs remain masked",
         capabilities.interrupt_count
     );

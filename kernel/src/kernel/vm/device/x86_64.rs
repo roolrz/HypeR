@@ -38,7 +38,7 @@ impl VirtualDeviceSet {
             .with(|devices| devices.access(port, size, write, value))
             .map_err(Error::Model)?;
         if let Some(byte) = outcome.transmitted {
-            crate::kernel::log::console::write_raw_byte(byte);
+            crate::kernel::log::console::write_guest_console_byte(byte);
         }
         Ok(outcome.value)
     }

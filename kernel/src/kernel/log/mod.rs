@@ -21,6 +21,7 @@ type KernelSpinLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
 const LOG_BUFFER_SIZE: usize = 1usize << hyper::config::LOG_BUF_SHIFT as usize;
 const LOG_LINE_MAX: usize = hyper::config::LOG_LINE_MAX as usize;
+const LOG_COMPILE_LEVEL: Level = configured_compile_level();
 
 struct FormatBuffer {
     bytes: [u8; LOG_LINE_MAX],
@@ -74,6 +75,9 @@ pub(super) fn timestamp_now() -> Timestamp {
 }
 
 pub fn log(level: Level, arguments: fmt::Arguments<'_>) -> Result<(), Error> {
+    if !compiled_in(level) {
+        return Ok(());
+    }
     let timestamp = crate::kernel::time::monotonic_microseconds();
     let mut formatted = FormatBuffer::new();
     let _ = formatted.write_fmt(arguments);
@@ -87,6 +91,15 @@ pub fn log(level: Level, arguments: fmt::Arguments<'_>) -> Result<(), Error> {
         .map_err(Error::Append)?;
     drain::request();
     Ok(())
+}
+
+/// Returns whether records at `level` are present in this kernel image.
+///
+/// Log macros use this before constructing `fmt::Arguments`, so disabled
+/// callsites have neither argument-evaluation nor ring-buffer side effects.
+#[doc(hidden)]
+pub const fn compiled_in(level: Level) -> bool {
+    (level as u8) <= (LOG_COMPILE_LEVEL as u8)
 }
 
 /// Compatibility path for existing unclassified output.
@@ -137,9 +150,9 @@ pub(crate) fn service_irq_prompt() {
     drain::service_irq_prompt();
 }
 
-/// Queues raw system-console bytes for the sole normal UART writer.
-pub(crate) fn try_write_console(bytes: &[u8]) -> usize {
-    drain::try_enqueue_raw(bytes)
+/// Queues opaque Console TX bytes for the sole normal UART writer.
+pub(crate) fn try_write_console_tx(bytes: &[u8]) -> usize {
+    drain::try_enqueue_console_tx(bytes)
 }
 
 /// Returns the permanent scheduler population owned by runtime logging.
@@ -151,7 +164,7 @@ pub(crate) const fn permanent_worker_count_for_test() -> usize {
 /// Reports the state of the logging backend at the end of kernel startup.
 pub(crate) fn report_startup_state() {
     let statistics = statistics();
-    crate::println!("HypeR: kernel log ring: {} bytes", statistics.capacity);
+    crate::pr_info!("HypeR: kernel log ring: {} bytes", statistics.capacity);
 }
 
 /// Emits a fatal diagnostic without waiting for a potentially interrupted
@@ -206,57 +219,77 @@ pub(crate) fn crash_console_read() -> Option<u8> {
 #[macro_export]
 macro_rules! printk {
     ($level:expr, $($argument:tt)*) => {{
-        let _ = $crate::kernel::log::log($level, core::format_args!($($argument)*));
+        let level = $level;
+        if $crate::kernel::log::compiled_in(level) {
+            let _ = $crate::kernel::log::log(level, core::format_args!($($argument)*));
+        }
+    }};
+}
+
+/// Emits one statically leveled record only when that level is compiled in.
+///
+/// The disabled branch retains format checking and marks referenced values as
+/// used, while its constant-false body is removed before code generation.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __printk_static {
+    ($configuration:meta, $level:expr, $($argument:tt)*) => {{
+        #[cfg($configuration)]
+        {
+            $crate::printk!($level, $($argument)*);
+        }
+        #[cfg(not($configuration))]
+        {
+            if false {
+                let _ = core::format_args!($($argument)*);
+            }
+        }
     }};
 }
 
 #[macro_export]
 macro_rules! pr_emerg {
-    ($($argument:tt)*) => { $crate::printk!(hyper::log::Level::Emergency, $($argument)*) };
+    ($($argument:tt)*) => { $crate::__printk_static!(hyper_log_compile_emergency, hyper::log::Level::Emergency, $($argument)*) };
 }
 
 #[macro_export]
 macro_rules! pr_alert {
-    ($($argument:tt)*) => { $crate::printk!(hyper::log::Level::Alert, $($argument)*) };
+    ($($argument:tt)*) => { $crate::__printk_static!(hyper_log_compile_alert, hyper::log::Level::Alert, $($argument)*) };
 }
 
 #[macro_export]
 macro_rules! pr_crit {
-    ($($argument:tt)*) => { $crate::printk!(hyper::log::Level::Critical, $($argument)*) };
+    ($($argument:tt)*) => { $crate::__printk_static!(hyper_log_compile_critical, hyper::log::Level::Critical, $($argument)*) };
 }
 
 #[macro_export]
 macro_rules! pr_err {
-    ($($argument:tt)*) => { $crate::printk!(hyper::log::Level::Error, $($argument)*) };
+    ($($argument:tt)*) => { $crate::__printk_static!(hyper_log_compile_error, hyper::log::Level::Error, $($argument)*) };
 }
 
 #[macro_export]
 macro_rules! pr_warn {
-    ($($argument:tt)*) => { $crate::printk!(hyper::log::Level::Warning, $($argument)*) };
+    ($($argument:tt)*) => { $crate::__printk_static!(hyper_log_compile_warning, hyper::log::Level::Warning, $($argument)*) };
 }
 
 #[macro_export]
 macro_rules! pr_notice {
-    ($($argument:tt)*) => { $crate::printk!(hyper::log::Level::Notice, $($argument)*) };
+    ($($argument:tt)*) => { $crate::__printk_static!(hyper_log_compile_notice, hyper::log::Level::Notice, $($argument)*) };
 }
 
 #[macro_export]
 macro_rules! pr_info {
-    ($($argument:tt)*) => { $crate::printk!(hyper::log::Level::Info, $($argument)*) };
+    ($($argument:tt)*) => { $crate::__printk_static!(hyper_log_compile_info, hyper::log::Level::Info, $($argument)*) };
 }
 
 #[macro_export]
 macro_rules! pr_debug {
-    ($($argument:tt)*) => { $crate::printk!(hyper::log::Level::Debug, $($argument)*) };
+    ($($argument:tt)*) => { $crate::__printk_static!(hyper_log_compile_debug, hyper::log::Level::Debug, $($argument)*) };
 }
 
-#[macro_export]
-macro_rules! print {
-    ($($argument:tt)*) => { $crate::pr_info!($($argument)*) };
-}
-
-#[macro_export]
-macro_rules! println {
-    () => { $crate::pr_info!("") };
-    ($($argument:tt)*) => { $crate::pr_info!($($argument)*) };
+const fn configured_compile_level() -> Level {
+    match Level::from_u8(hyper::config::LOG_COMPILE_LEVEL as u8) {
+        Some(level) => level,
+        None => Level::Info,
+    }
 }

@@ -17,7 +17,7 @@ use hyper::sync::atomic::{AtomicUsize, Ordering};
 
 type KernelSpinLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
-const CONSOLE_LOGLEVEL: Level = configured_console_level();
+const CONSOLE_LOGLEVEL_DEFAULT: Level = configured_console_level();
 const FLUSH_BARRIER_SLOTS: usize = crate::kernel::task::scheduler::THREAD_CAPACITY;
 const EMERGENCY_QUIESCENCE_POLLS: usize = 4096;
 const EMERGENCY_UART_ATTEMPTS: usize = 4096;
@@ -35,7 +35,7 @@ impl ConsoleState {
         Self {
             device: None,
             next_sequence: 0,
-            maximum_level: CONSOLE_LOGLEVEL,
+            maximum_level: CONSOLE_LOGLEVEL_DEFAULT,
             barriers: DrainBarrierSet::new(),
             barrier_waiters: [const { crate::kernel::task::WaitQueue::new() }; FLUSH_BARRIER_SLOTS],
         }
@@ -173,9 +173,9 @@ fn emergency_device() -> Option<ConsoleDevice> {
     unsafe { ConsoleDevice::from_emergency_handle(handle, crate::hal::platform::port_io()) }
 }
 
-/// Enqueues one guest-console byte for the sole runtime console writer.
-pub(crate) fn write_raw_byte(byte: u8) {
-    super::drain::enqueue_raw(byte);
+/// Enqueues one guest Console byte for the sole runtime UART writer.
+pub(crate) fn write_guest_console_byte(byte: u8) {
+    super::drain::enqueue_console_tx_byte(byte);
 }
 
 #[derive(Clone, Copy)]
@@ -517,21 +517,21 @@ pub(super) fn write_ring_failure(console: &ConsoleDevice, error: super::Error) {
     );
 }
 
-pub(super) fn write_raw(console: &ConsoleDevice, bytes: &[u8]) {
+pub(super) fn write_console_tx(console: &ConsoleDevice, bytes: &[u8]) {
     console.write_bytes(bytes);
 }
 
-pub(super) fn write_raw_overflow(console: &ConsoleDevice, dropped: u64) {
+pub(super) fn write_console_tx_overflow(console: &ConsoleDevice, dropped: u64) {
     let mut writer = ConsoleWriter(console);
     let _ = writeln!(
         writer,
-        "<4>[{}] {dropped} guest console byte(s) lost",
+        "<4>[{}] {dropped} Console TX byte(s) lost",
         super::timestamp_now()
     );
 }
 
 const fn configured_console_level() -> Level {
-    match Level::from_u8(hyper::config::CONSOLE_LOGLEVEL as u8) {
+    match Level::from_u8(hyper::config::CONSOLE_LOGLEVEL_DEFAULT as u8) {
         Some(level) => level,
         None => Level::Info,
     }

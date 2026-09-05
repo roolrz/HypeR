@@ -279,25 +279,6 @@ impl<const CAPACITY: usize> ByteRing<CAPACITY> {
         count
     }
 
-    /// Copies one delimiter-bounded prefix without consuming it.
-    ///
-    /// The delimiter is included in the returned prefix. If it is not present
-    /// in the bounded window, the whole available window is copied so a
-    /// producer cannot block indefinitely on an unterminated record.
-    pub fn peek_through(&self, delimiter: u8, output: &mut [u8]) -> usize {
-        let count = self.length.min(output.len());
-        let mut index = self.tail;
-        for (offset, slot) in output[..count].iter_mut().enumerate() {
-            let byte = self.bytes[index];
-            *slot = byte;
-            if byte == delimiter {
-                return offset + 1;
-            }
-            index = (index + 1) % CAPACITY;
-        }
-        count
-    }
-
     /// Discards an already-observed prefix.
     ///
     /// Returns `false` without mutation when `count` exceeds the retained

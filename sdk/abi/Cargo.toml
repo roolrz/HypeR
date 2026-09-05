@@ -7,7 +7,7 @@ version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
 description = "Machine-readable definitions for the HypeR Native ABI"
-repository = "https://github.com/roolrz/HypeR-Kernel"
+repository = "https://github.com/roolrz/HypeR"
 publish = false
 
 [features]

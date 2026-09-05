@@ -98,7 +98,7 @@ pub(crate) fn initialize(
         .map_err(Error::Architecture)
         .map_err(InitializationError::Clock)?;
     let counter_frequency_hz = initialize_clock().map_err(InitializationError::Clock)?;
-    crate::println!(
+    crate::pr_info!(
         "HypeR: monotonic clocksource active at {} Hz",
         counter_frequency_hz
     );
@@ -109,18 +109,18 @@ pub(crate) fn initialize(
         .ok_or(InitializationError::MissingTimer)?;
     let capabilities =
         tick::initialize(info, boot.interrupts().root_domain).map_err(InitializationError::Tick)?;
-    crate::println!(
+    crate::pr_info!(
         "HypeR: architectural timer: host INTID {}, guest INTID {}, {} Hz tick from a {} Hz counter",
         capabilities.hardware_interrupt.get(),
         capabilities.guest_timer.interrupt.get(),
         capabilities.ticks_per_second,
         capabilities.counter_frequency_hz
     );
-    crate::println!(
+    crate::pr_info!(
         "HypeR: timer mapped to dynamic VIRQ {}",
         capabilities.virtual_interrupt.get()
     );
-    crate::println!("HypeR: dynamically owned per-CPU software timer queues active");
+    crate::pr_info!("HypeR: dynamically owned per-CPU software timer queues active");
     boot.set_timer(capabilities);
     Ok(())
 }

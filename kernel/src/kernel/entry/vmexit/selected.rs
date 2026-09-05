@@ -49,7 +49,7 @@ fn dispatch_guest_sync(exit: crate::hal::vm::GuestSyncExit) -> crate::hal::vm::G
     match crate::kernel::vm::active_vcpu::with(|execution, interrupts| {
         #[cfg(CONFIG_ARCH_RISCV64)]
         if let Some(byte) = exit.legacy_console_byte() {
-            crate::kernel::log::console::write_raw_byte(byte);
+            crate::kernel::log::console::write_guest_console_byte(byte);
             return crate::hal::vm::GuestSyncAction::complete_legacy_console();
         }
         crate::hal::vm::handle_guest_sync(
