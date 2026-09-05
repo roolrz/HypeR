@@ -402,7 +402,7 @@ extern "C" fn enter_clean_idle(cpu_index: usize) -> ! {
     }
     crate::hal::cpu::mark_current_online();
     crate::hal::irq::enable_local();
-    crate::println!(
+    crate::pr_info!(
         "HypeR: CPU {} online, hardware ID {:#x}; entering idle",
         cpu_index.get(),
         crate::hal::cpu::current_hardware_id().get()

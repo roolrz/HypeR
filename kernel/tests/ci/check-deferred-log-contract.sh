@@ -11,6 +11,8 @@ cd "$root"
 log=src/kernel/log/mod.rs
 drain=src/kernel/log/drain.rs
 console=src/kernel/log/console.rs
+kconfig=Kconfig
+build=build.rs
 irq=src/kernel/entry/irq.rs
 arch_irq=src/arch/irq.rs
 riscv_irq=src/arch/riscv64/exception.rs
@@ -48,7 +50,7 @@ require_order() {
 }
 
 producer=$(mktemp "${TMPDIR:-/tmp}/hyper-log-producer.XXXXXX")
-raw=$(mktemp "${TMPDIR:-/tmp}/hyper-log-raw.XXXXXX")
+console_tx=$(mktemp "${TMPDIR:-/tmp}/hyper-log-console-tx.XXXXXX")
 prompt=$(mktemp "${TMPDIR:-/tmp}/hyper-log-prompt.XXXXXX")
 rpc=$(mktemp "${TMPDIR:-/tmp}/hyper-log-rpc.XXXXXX")
 riscv_private=$(mktemp "${TMPDIR:-/tmp}/hyper-log-riscv-private.XXXXXX")
@@ -61,9 +63,9 @@ barrier=$(mktemp "${TMPDIR:-/tmp}/hyper-log-barrier.XXXXXX")
 registration=$(mktemp "${TMPDIR:-/tmp}/hyper-log-registration.XXXXXX")
 waiter=$(mktemp "${TMPDIR:-/tmp}/hyper-log-waiter.XXXXXX")
 runtime=$(mktemp "${TMPDIR:-/tmp}/hyper-log-runtime.XXXXXX")
-trap 'rm -f "$producer" "$raw" "$prompt" "$rpc" "$riscv_private" "$aarch64_private" "$x86_private" "$x86_vmx_private" "$request" "$retire" "$barrier" "$registration" "$waiter" "$runtime"' EXIT HUP INT TERM
+trap 'rm -f "$producer" "$console_tx" "$prompt" "$rpc" "$riscv_private" "$aarch64_private" "$x86_private" "$x86_vmx_private" "$request" "$retire" "$barrier" "$registration" "$waiter" "$runtime"' EXIT HUP INT TERM
 sed -n '/^pub fn log(/,/^}/p' "$log" >"$producer"
-sed -n '/^pub(crate) fn write_raw_byte(/,/^}/p' "$console" >"$raw"
+sed -n '/^pub(crate) fn write_guest_console_byte(/,/^}/p' "$console" >"$console_tx"
 sed -n '/^pub(crate) fn dispatch(/,/^}/p' "$irq" >"$prompt"
 sed -n '/^pub(crate) fn dispatch_kernel_rpc(/,/^}/p' "$irq" >"$rpc"
 sed -n '/^extern "C" fn dispatch_trap(/,/^fn fatal_trap(/p' "$riscv_irq" >"$riscv_private"
@@ -77,6 +79,35 @@ sed -n '/^pub(super) fn register_flush_barrier(/,/^}/p' "$console" >"$registrati
 sed -n '/^pub(super) fn wait_for_drain(/,/^impl FlushBarrier/p' "$console" >"$waiter"
 sed -n '/^fn drain_runtime_batch(/,/^fn prepare_runtime_output(/p' "$drain" >"$runtime"
 
+require 'config LOG_COMPILE_LEVEL\n[\s\S]*range 0 7[\s\S]*default 6' "$kconfig" \
+    'the compiled-in log ceiling must be an explicit 0..7 configuration with default 6'
+require 'config CONSOLE_LOGLEVEL_DEFAULT\n[\s\S]*range 0 7[\s\S]*default 6' "$kconfig" \
+    'the runtime Console threshold must have an independent default configuration'
+require 'value\("LOG_COMPILE_LEVEL"\)[\s\S]*hyper_log_compile_\{name\}[\s\S]*value <= maximum[\s\S]*cargo:rustc-cfg=\{cfg\}' "$build" \
+    'the build must derive per-severity Rust cfgs from CONFIG_LOG_COMPILE_LEVEL'
+require 'if !compiled_in\(level\)[\s\S]*return Ok\(\(\)\)' "$producer" \
+    'the log API must reject records above the compiled-in ceiling'
+require_order "$producer" 'if !compiled_in\(level\)' 'let timestamp' \
+    'compile-level rejection must precede timestamping, formatting, and ring access'
+require 'macro_rules! __printk_static[\s\S]*#\[cfg\(\$configuration\)\][\s\S]*#\[cfg\(not\(\$configuration\)\)\][\s\S]*if false[\s\S]*format_args!' "$log" \
+    'disabled static log callsites must have no runtime path while retaining format checking'
+require 'macro_rules! pr_info[\s\S]*hyper_log_compile_info, hyper::log::Level::Info' "$log" \
+    'pr_info must bind to the generated info compile gate'
+require 'macro_rules! pr_debug[\s\S]*hyper_log_compile_debug, hyper::log::Level::Debug' "$log" \
+    'pr_debug must bind to the generated debug compile gate'
+if rg -q '(^|[^[:alnum:]_])(print|println)!' src --glob '*.rs'; then
+    echo 'kernel diagnostics must select an explicit pr_* severity' >&2
+    exit 1
+fi
+require 'hyper::config::CONSOLE_LOGLEVEL_DEFAULT' "$console" \
+    'Console state must initialize its mutable threshold from the configured default'
+require 'pub fn set_loglevel\(level: Level\)[\s\S]*state.maximum_level = level' "$console" \
+    'the runtime Console threshold must remain dynamically mutable'
+require 'record.level > snapshot.maximum_level[\s\S]*publish_log_progress' "$drain" \
+    'runtime Console filtering must skip output without removing producer-side ring retention'
+require 'record.level <= output.maximum_level[\s\S]*write_record' "$drain" \
+    'bootstrap Console draining must apply the same runtime threshold'
+
 require 'drain::request\(\)' "$producer" \
     'runtime log production must publish deferred drain work'
 if rg -q 'console::|drain_batch|write_(?:bytes|record|raw)' "$producer"; then
@@ -88,9 +119,9 @@ require 'fn try_write_byte\(&self, byte: u8\) -> bool;' "$hal_console" \
     'the HAL console contract must expose a nonblocking byte operation'
 require 'fn write_byte[\s\S]*while !self\.try_write_byte\(byte\)' "$hal_console" \
     'blocking boot and emergency output must derive from the nonblocking driver primitive'
-require 'drain::enqueue_raw\(byte\)' "$raw" \
-    'guest console bytes must enter the bounded deferred queue'
-if rg -q 'write_byte|write_bytes|CONSOLE\.with' "$raw"; then
+require 'drain::enqueue_console_tx_byte\(byte\)' "$console_tx" \
+    'guest Console bytes must enter the bounded TX queue'
+if rg -q 'write_byte|write_bytes|CONSOLE\.with' "$console_tx"; then
     echo 'guest console producers must not write the physical UART' >&2
     exit 1
 fi
@@ -129,10 +160,10 @@ require 'pub fn finish_batch[\s\S]*compare_exchange_weak[\s\S]*observed & !WAKE_
     'worker ownership release must linearize on the same atomic state word'
 require 'const LOG_RECORDS_PER_BATCH: usize = [1-9][0-9]*;' "$drain" \
     'kernel log drain must retain a bounded record batch'
-require 'const RAW_BYTES_PER_BATCH: usize = [1-9][0-9]*;' "$drain" \
-    'guest console drain must retain a bounded byte batch'
-require 'ByteRing<RAW_QUEUE_CAPACITY>' "$drain" \
-    'guest console output must use an allocation-free bounded FIFO'
+require 'const CONSOLE_TX_FRAME_BYTES: usize = [1-9][0-9]*;' "$drain" \
+    'Console TX drain must retain a bounded frame'
+require 'ByteRing<CONSOLE_TX_QUEUE_CAPACITY>' "$drain" \
+    'Console TX output must use an allocation-free bounded FIFO'
 require 'DrainDisposition::Wait[\s\S]*WAKE\.wait\(\)' "$drain" \
     'the drain worker must block through the scheduler-aware wait primitive'
 require 'BatchOutcome::Backpressured[\s\S]*WORK\.defer_until_irq\(\)[\s\S]*wait_for_worker_prompt\(\)' "$drain" \
@@ -151,14 +182,26 @@ require 'output\.device = Some\(snapshot\.device\)' "$drain" \
     'frame preparation must retain the selected console device'
 require 'output\.device = None' "$drain" \
     'frame commit must release the selected console device'
-require "peek_through\\(b'\\\\n', &mut bytes\\)" "$drain" \
-    'raw console output must prefer one newline-delimited transaction'
-require 'push_console_bytes\(&bytes\[\.\.count\]\)' "$drain" \
-    'raw console output must preserve the console LF-to-CRLF convention'
-require 'PendingCommit::RawBytes[\s\S]*discard_front\(count\)' "$drain" \
-    'raw console queue ownership must advance only after its complete frame is accepted'
-require 'write_raw_overflow' "$drain" \
-    'the sole writer must report bounded guest-console overflow directly'
+require 'match prepare_log_output\(output, snapshot\) \{[\s\S]*PrepareOutcome::Prepared[\s\S]*PrepareOutcome::MoreKernelRecords[\s\S]*PrepareOutcome::Idle if prepare_console_tx_frame\(output\)' "$drain" \
+    'normal kernel records must be exhausted before pending Console TX frames'
+require 'later eligible kernel record cannot be overtaken by userspace output[\s\S]*PrepareOutcome::MoreKernelRecords' "$drain" \
+    'bounded filtering must resume kernel-log selection before Console TX'
+if rg -q 'prefer_raw' "$drain"; then
+    echo 'normal output must not alternate sources independently of source policy' >&2
+    exit 1
+fi
+require 'queue\.bytes\.peek_into\(&mut bytes\)' "$drain" \
+    'Console TX must prepare a bounded opaque prefix'
+require 'output\.bytes\.push_bytes\(&bytes\[\.\.count\]\)' "$drain" \
+    'Console TX must preserve accepted bytes exactly'
+if sed -n '/^fn prepare_console_tx_frame(/,/^}/p' "$drain" | rg -q 'push_console_bytes|peek_through'; then
+    echo 'Console TX must not interpret newline or terminal presentation' >&2
+    exit 1
+fi
+require 'PendingCommit::ConsoleFrame[\s\S]*discard_front\(count\)' "$drain" \
+    'Console TX queue ownership must advance only after its complete frame is accepted'
+require 'write_console_tx_overflow' "$drain" \
+    'the sole writer must report bounded Console TX overflow directly'
 require 'flush_boot\(\)[\s\S]*state\.device = None' "$retire" \
     'bootstrap console retirement must drain before invalidating its device owner'
 require_order "$barrier" 'register_flush_barrier\(\)' 'request\(\)' \

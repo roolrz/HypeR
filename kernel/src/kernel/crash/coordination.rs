@@ -75,9 +75,9 @@ pub(crate) fn initialize(
     };
     super::state::mark_ready();
     if crash_stop_available {
-        crate::println!("HypeR: crash-stop IPI and CPU state capture initialized");
+        crate::pr_info!("HypeR: crash-stop IPI and CPU state capture initialized");
     } else {
-        crate::println!("HypeR: crash-stop cross-call is unavailable on this platform");
+        crate::pr_notice!("HypeR: crash-stop cross-call is unavailable on this platform");
     }
     Ok(())
 }

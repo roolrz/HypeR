@@ -13,12 +13,13 @@ repositories.
 
 ## Source ownership
 
-The SDK is produced from three independently owned source components:
+The SDK is produced from four independently owned source components:
 
 | Path | Responsibility |
 | --- | --- |
 | `sdk/abi/` | Machine-visible values, layouts, syscall metadata, and generated interfaces |
 | `sdk/lib/` | Freestanding C runtime, startup code, and architecture syscall veneers |
+| `sdk/rust/` | Raw Rust ABI bindings, safe Native OS interfaces, and Rust runtime entry |
 | `sdk/toolchain/` | Clang driver, linker script, ELF branding, and transactional SDK assembly |
 
 The kernel consumes `sdk/abi/` as a dependency-free `no_std` path dependency.
@@ -38,6 +39,7 @@ The default output is `target/sdk/aarch64`:
 
 ```text
 bin/hyper-clang
+bin/hyper-cargo
 bin/hyper-brand-elf
 include/hyper/native.h
 include/hyper/startup.h
@@ -46,6 +48,11 @@ include/string.h
 lib/crt1.o
 lib/libhyper.a
 lib/hyper/aarch64/hyper-native.ld
+share/hyper/abi/Cargo.toml
+share/hyper/abi/src/
+share/hyper/rust/hyper-sys/
+share/hyper/rust/hyper-os/
+share/hyper/rust/hyper-rt/
 share/hyper/manifest
 ```
 
@@ -57,15 +64,27 @@ The manifest records the SDK version, source revision, host, target, and Native
 ABI revision. Local builds use a dirty-aware Git description; release jobs set
 an explicit SDK version and source identity.
 
-`make sdk-check` validates generated ABI output, lints the Rust ABI crate,
-builds the SDK transactionally, and compiles and links a public-interface-only
-application. `make sdk-test` runs ABI layout tests and portable C runtime unit
-tests.
+`hyper-cargo` builds `no_std` Rust applications against only the crates
+installed in the selected SDK. It configures the AArch64 bare-metal code
+generation target, the HypeR linker, static PIE relocation, panic abort, and
+installed-crate overrides. Repository builds additionally pass `--offline` to
+make the producer-consumer check independent of a package registry; external
+applications may use other Rust dependencies under their own policy. The
+resulting ELF is branded and validated by the same final link path as a C
+application. The built-in
+`aarch64-unknown-none` compiler target supplies `core`; HypeR OS identity is
+carried by the validated ELF ABI rather than by pretending to implement
+another operating system target.
+
+`make sdk-check` validates generated ABI output, lints the Rust SDK crates,
+builds the SDK transactionally, and compiles and links public-interface-only C
+and Rust applications. `make sdk-test` runs ABI layout tests, safe-binding host
+tests, and portable C runtime unit tests.
 
 ## Application integration
 
-`make app` first assembles the SDK and then builds `app/init` with
-the installed `bin/hyper-clang`. `make native-initramfs` packages that result
+`make app` first assembles the SDK and then builds the Rust `app/init` with
+the installed `bin/hyper-cargo`. `make native-initramfs` packages that result
 as a deterministic `newc` archive, and `make test-native` boots the kernel and
 verifies startup, blocking console input, and echo under QEMU.
 

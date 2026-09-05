@@ -16,31 +16,32 @@ use hyper::sync::atomic::{AtomicU8, Ordering};
 use crate::kernel::sync::Completion;
 use crate::kernel::task::scheduler;
 
-type RawQueueLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
+type ConsoleTxLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
 const BOOT: u8 = 0;
 const RUNTIME: u8 = 1;
 const EMERGENCY: u8 = 2;
 const LOG_RECORDS_PER_BATCH: usize = 32;
-const RAW_QUEUE_CAPACITY: usize = 4096;
-const RAW_BYTES_PER_BATCH: usize = 256;
+const CONSOLE_TX_QUEUE_CAPACITY: usize = 4096;
+const CONSOLE_TX_FRAME_BYTES: usize = 256;
 const LOG_LINE_MAX: usize = hyper::config::LOG_LINE_MAX as usize;
 const LOG_OUTPUT_BUFFER_SIZE: usize = LOG_LINE_MAX * 2 + 128;
-const RAW_OUTPUT_BUFFER_SIZE: usize = RAW_BYTES_PER_BATCH * 2;
-const OUTPUT_BUFFER_SIZE: usize = if LOG_OUTPUT_BUFFER_SIZE > RAW_OUTPUT_BUFFER_SIZE {
+const CONSOLE_TX_OUTPUT_BUFFER_SIZE: usize = CONSOLE_TX_FRAME_BYTES;
+const OUTPUT_BUFFER_SIZE: usize = if LOG_OUTPUT_BUFFER_SIZE > CONSOLE_TX_OUTPUT_BUFFER_SIZE {
     LOG_OUTPUT_BUFFER_SIZE
 } else {
-    RAW_OUTPUT_BUFFER_SIZE
+    CONSOLE_TX_OUTPUT_BUFFER_SIZE
 };
 const UART_BYTES_PER_BATCH: usize = 256;
 
 static MODE: AtomicU8 = AtomicU8::new(BOOT);
 static WORK: DeferredDrain = DeferredDrain::new();
 static WAKE: Completion = Completion::new();
-static RAW_QUEUE: RawQueueLock<RawQueueState> = InterruptSpinLock::new(RawQueueState::new());
+static CONSOLE_TX_QUEUE: ConsoleTxLock<ConsoleTxState> =
+    InterruptSpinLock::new(ConsoleTxState::new());
 
-struct RawQueueState {
-    bytes: ByteRing<RAW_QUEUE_CAPACITY>,
+struct ConsoleTxState {
+    bytes: ByteRing<CONSOLE_TX_QUEUE_CAPACITY>,
     reported_dropped: u64,
 }
 
@@ -48,8 +49,8 @@ struct RawQueueState {
 enum PendingCommit {
     None,
     Log { sequence: u64, missed: u64 },
-    RawBytes { count: usize },
-    RawOverflow { total_dropped: u64 },
+    ConsoleFrame { count: usize },
+    ConsoleOverflow { total_dropped: u64 },
     RingFailure,
 }
 
@@ -57,7 +58,6 @@ struct WorkerOutput {
     bytes: OutputBuffer<OUTPUT_BUFFER_SIZE>,
     commit: PendingCommit,
     device: Option<ConsoleDevice>,
-    prefer_raw: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,18 +68,24 @@ enum BatchOutcome {
     Emergency,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrepareOutcome {
+    Prepared,
+    MoreKernelRecords,
+    Idle,
+}
+
 impl WorkerOutput {
     const fn new() -> Self {
         Self {
             bytes: OutputBuffer::new(),
             commit: PendingCommit::None,
             device: None,
-            prefer_raw: false,
         }
     }
 }
 
-impl RawQueueState {
+impl ConsoleTxState {
     const fn new() -> Self {
         Self {
             bytes: ByteRing::new(),
@@ -208,12 +214,12 @@ fn prompt_local_cpu() {
     }
 }
 
-/// Enqueues a guest-console byte without touching the physical UART.
-pub(super) fn enqueue_raw(byte: u8) {
+/// Enqueues one guest Console byte without touching the physical UART.
+pub(super) fn enqueue_console_tx_byte(byte: u8) {
     if MODE.load(Ordering::Acquire) == EMERGENCY {
         return;
     }
-    RAW_QUEUE.with(|queue| {
+    CONSOLE_TX_QUEUE.with(|queue| {
         let was_writable = queue.bytes.remaining_capacity() != 0;
         let _ = queue.bytes.push(byte);
         let is_writable = queue.bytes.remaining_capacity() != 0;
@@ -224,12 +230,12 @@ pub(super) fn enqueue_raw(byte: u8) {
     request();
 }
 
-/// Enqueues a bounded userspace console write without silently dropping data.
-pub(super) fn try_enqueue_raw(bytes: &[u8]) -> usize {
+/// Enqueues a bounded userspace Console write without interpreting its bytes.
+pub(super) fn try_enqueue_console_tx(bytes: &[u8]) -> usize {
     if MODE.load(Ordering::Acquire) != RUNTIME || bytes.is_empty() {
         return 0;
     }
-    let accepted = RAW_QUEUE.with(|queue| {
+    let accepted = CONSOLE_TX_QUEUE.with(|queue| {
         let was_writable = queue.bytes.remaining_capacity() != 0;
         let accepted = queue.bytes.remaining_capacity().min(bytes.len());
         for &byte in &bytes[..accepted] {
@@ -301,7 +307,7 @@ fn worker_failure(operation: &str, error: impl core::fmt::Debug) -> ! {
 }
 
 fn drain_boot_synchronously() {
-    while drain_boot_log_records() || drain_boot_raw_bytes() {}
+    while drain_boot_log_records() || drain_boot_console_tx() {}
 }
 
 fn drain_runtime_batch(output: &mut WorkerOutput) -> BatchOutcome {
@@ -318,12 +324,16 @@ fn drain_runtime_batch(output: &mut WorkerOutput) -> BatchOutcome {
                     BatchOutcome::Idle
                 };
             };
-            if !prepare_runtime_output(output, snapshot) {
-                return if MODE.load(Ordering::Acquire) == EMERGENCY {
-                    BatchOutcome::Emergency
-                } else {
-                    BatchOutcome::Idle
-                };
+            match prepare_runtime_output(output, snapshot) {
+                PrepareOutcome::Prepared => {}
+                PrepareOutcome::MoreKernelRecords => return BatchOutcome::More,
+                PrepareOutcome::Idle => {
+                    return if MODE.load(Ordering::Acquire) == EMERGENCY {
+                        BatchOutcome::Emergency
+                    } else {
+                        BatchOutcome::Idle
+                    };
+                }
             }
         }
         let Some(device) = output.device else {
@@ -364,36 +374,31 @@ fn drain_runtime_batch(output: &mut WorkerOutput) -> BatchOutcome {
 fn prepare_runtime_output(
     output: &mut WorkerOutput,
     snapshot: super::console::OutputSnapshot,
-) -> bool {
+) -> PrepareOutcome {
     output.bytes.clear();
     output.commit = PendingCommit::None;
-    let prepared = match output.prefer_raw {
-        true => {
-            if prepare_raw_output(output) {
-                true
-            } else {
-                prepare_log_output(output, snapshot)
-            }
+    // Structured kernel diagnostics own the normal Console sink whenever a
+    // record is pending. Console TX remains independently buffered and makes
+    // progress when the diagnostic source is idle; only emergency output may
+    // interrupt an already prepared frame.
+    match prepare_log_output(output, snapshot) {
+        PrepareOutcome::Prepared => {
+            output.device = Some(snapshot.device);
+            PrepareOutcome::Prepared
         }
-        false => {
-            if prepare_log_output(output, snapshot) {
-                true
-            } else {
-                prepare_raw_output(output)
-            }
+        PrepareOutcome::MoreKernelRecords => PrepareOutcome::MoreKernelRecords,
+        PrepareOutcome::Idle if prepare_console_tx_frame(output) => {
+            output.device = Some(snapshot.device);
+            PrepareOutcome::Prepared
         }
-    };
-    if prepared {
-        output.device = Some(snapshot.device);
-        output.prefer_raw = !output.prefer_raw;
+        PrepareOutcome::Idle => PrepareOutcome::Idle,
     }
-    prepared
 }
 
 fn prepare_log_output(
     output: &mut WorkerOutput,
     mut snapshot: super::console::OutputSnapshot,
-) -> bool {
+) -> PrepareOutcome {
     let mut message = [0u8; LOG_LINE_MAX];
     for _ in 0..LOG_RECORDS_PER_BATCH {
         match super::read(snapshot.next_sequence, &mut message) {
@@ -401,7 +406,7 @@ fn prepare_log_output(
                 if record.level > snapshot.maximum_level {
                     publish_log_progress(record.sequence.wrapping_add(1), 0);
                     let Some(next) = super::console::output_snapshot() else {
-                        return false;
+                        return PrepareOutcome::Idle;
                     };
                     snapshot = next;
                     continue;
@@ -413,7 +418,7 @@ fn prepare_log_output(
                     sequence: record.sequence.wrapping_add(1),
                     missed: 0,
                 };
-                return true;
+                return PrepareOutcome::Prepared;
             }
             Ok(ReadResult::Overrun {
                 oldest_sequence,
@@ -426,35 +431,36 @@ fn prepare_log_output(
                     sequence: oldest_sequence,
                     missed,
                 };
-                return true;
+                return PrepareOutcome::Prepared;
             }
-            Ok(ReadResult::Empty { .. }) => return false,
+            Ok(ReadResult::Empty { .. }) => return PrepareOutcome::Idle,
             Err(error) => {
                 if prepare_ring_failure(&mut output.bytes, error).is_err() {
                     worker_failure("ring-failure formatting", OutputError::Full)
                 }
                 output.commit = PendingCommit::RingFailure;
-                return true;
+                return PrepareOutcome::Prepared;
             }
         }
     }
     // A run of filtered records still consumes only a bounded batch. Retain a
-    // durable internal request so the worker continues without external help.
+    // durable internal request and yield before inspecting Console TX, so a
+    // later eligible kernel record cannot be overtaken by userspace output.
     let _ = WORK.request();
-    false
+    PrepareOutcome::MoreKernelRecords
 }
 
-fn prepare_raw_output(output: &mut WorkerOutput) -> bool {
-    let mut bytes = [0u8; RAW_BYTES_PER_BATCH];
-    let (count, dropped, reported) = RAW_QUEUE.with(|queue| {
-        let count = queue.bytes.peek_through(b'\n', &mut bytes);
+fn prepare_console_tx_frame(output: &mut WorkerOutput) -> bool {
+    let mut bytes = [0u8; CONSOLE_TX_FRAME_BYTES];
+    let (count, dropped, reported) = CONSOLE_TX_QUEUE.with(|queue| {
+        let count = queue.bytes.peek_into(&mut bytes);
         (count, queue.bytes.dropped(), queue.reported_dropped)
     });
     if dropped > reported {
-        if prepare_raw_overflow(&mut output.bytes, dropped - reported).is_err() {
-            worker_failure("raw-overflow formatting", OutputError::Full)
+        if prepare_console_tx_overflow(&mut output.bytes, dropped - reported).is_err() {
+            worker_failure("Console TX overflow formatting", OutputError::Full)
         }
-        output.commit = PendingCommit::RawOverflow {
+        output.commit = PendingCommit::ConsoleOverflow {
             total_dropped: dropped,
         };
         return true;
@@ -462,10 +468,10 @@ fn prepare_raw_output(output: &mut WorkerOutput) -> bool {
     if count == 0 {
         return false;
     }
-    if output.bytes.push_console_bytes(&bytes[..count]).is_err() {
-        worker_failure("raw-output formatting", OutputError::Full)
+    if output.bytes.push_bytes(&bytes[..count]).is_err() {
+        worker_failure("Console TX frame preparation", OutputError::Full)
     }
-    output.commit = PendingCommit::RawBytes { count };
+    output.commit = PendingCommit::ConsoleFrame { count };
     true
 }
 
@@ -473,19 +479,19 @@ fn commit_runtime_output(output: &mut WorkerOutput) {
     match output.commit {
         PendingCommit::None => worker_failure("output commit", "missing commit owner"),
         PendingCommit::Log { sequence, missed } => publish_log_progress(sequence, missed),
-        PendingCommit::RawBytes { count } => RAW_QUEUE.with(|queue| {
+        PendingCommit::ConsoleFrame { count } => CONSOLE_TX_QUEUE.with(|queue| {
             let was_writable = queue.bytes.remaining_capacity() != 0;
-            // RAW_QUEUE has one consumer. Producers can only append while the
-            // prepared bytes are in flight, so the observed prefix remains
-            // stable until this successful physical write commits it.
+            // CONSOLE_TX_QUEUE has one consumer. Producers can only append
+            // while the prepared bytes are in flight, so the observed prefix
+            // remains stable until this successful physical write commits it.
             if !queue.bytes.discard_front(count) {
-                worker_failure("raw-output commit", "prepared prefix disappeared")
+                worker_failure("Console TX commit", "prepared prefix disappeared")
             }
             if !was_writable {
                 crate::kernel::device::console::publish_writable(true);
             }
         }),
-        PendingCommit::RawOverflow { total_dropped } => RAW_QUEUE.with(|queue| {
+        PendingCommit::ConsoleOverflow { total_dropped } => CONSOLE_TX_QUEUE.with(|queue| {
             if queue.reported_dropped < total_dropped {
                 queue.reported_dropped = total_dropped;
             }
@@ -559,13 +565,13 @@ fn prepare_ring_failure(
     output.push_console_bytes(b"\n")
 }
 
-fn prepare_raw_overflow(
+fn prepare_console_tx_overflow(
     output: &mut OutputBuffer<OUTPUT_BUFFER_SIZE>,
     dropped: u64,
 ) -> Result<(), OutputError> {
     write!(
         output,
-        "<4>[{}] {dropped} guest console byte(s) lost",
+        "<4>[{}] {dropped} Console TX byte(s) lost",
         super::timestamp_now()
     )
     .map_err(|_| OutputError::Full)?;
@@ -602,12 +608,12 @@ fn drain_boot_log_records() -> bool {
     true
 }
 
-fn drain_boot_raw_bytes() -> bool {
+fn drain_boot_console_tx() -> bool {
     let Some(output) = super::console::output_snapshot() else {
         return false;
     };
-    let mut bytes = [0u8; RAW_BYTES_PER_BATCH];
-    let (count, more, newly_dropped) = RAW_QUEUE.with(|queue| {
+    let mut bytes = [0u8; CONSOLE_TX_FRAME_BYTES];
+    let (count, more, newly_dropped) = CONSOLE_TX_QUEUE.with(|queue| {
         let count = queue.bytes.pop_into(&mut bytes);
         let more = !queue.bytes.is_empty();
         let dropped = queue.bytes.dropped().saturating_sub(queue.reported_dropped);
@@ -615,10 +621,10 @@ fn drain_boot_raw_bytes() -> bool {
         (count, more, dropped)
     });
     if newly_dropped != 0 {
-        super::console::write_raw_overflow(&output.device, newly_dropped);
+        super::console::write_console_tx_overflow(&output.device, newly_dropped);
     }
     if count != 0 {
-        super::console::write_raw(&output.device, &bytes[..count]);
+        super::console::write_console_tx(&output.device, &bytes[..count]);
     }
     more
 }

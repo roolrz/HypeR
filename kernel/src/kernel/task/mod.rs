@@ -32,7 +32,7 @@ static READY: AtomicBool = AtomicBool::new(false);
 pub(crate) fn initialize() -> Result<(), scheduler::Error> {
     let capabilities = scheduler::initialize()?;
     READY.store(true, Ordering::Release);
-    crate::println!(
+    crate::pr_info!(
         "HypeR: scheduler active on bootstrap thread {}",
         capabilities.bootstrap_thread.get()
     );

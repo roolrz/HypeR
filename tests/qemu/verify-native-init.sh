@@ -77,9 +77,9 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         echo "HypeR reported a fatal failure before Native init completed" >&2
         exit 1
     fi
-    # The deferred writer commits this retained newline-delimited userspace
-    # prefix as one frame. Normalize CRLF only; an interleaved kernel record
-    # must make the line contract fail rather than being hidden by the verifier.
+    # The deferred writer commits a retained opaque Console TX prefix as one
+    # frame. Normalize the init runtime's explicit CRLF only; an interleaved
+    # kernel record must make the line contract fail rather than be hidden.
     sed 's/\r$//' "$log" >"$native_output"
     if [ "$input_sent" = false ] &&
         grep -Fxq 'HypeR init: console ready' "$native_output"; then

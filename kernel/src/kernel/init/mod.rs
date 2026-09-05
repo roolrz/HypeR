@@ -171,7 +171,7 @@ pub(crate) fn start() -> Result<Infallible, Error> {
         .scheduler_id()
         .ok_or(Error::IncompleteThreadPublication)?;
     thread.ready()?;
-    crate::println!(
+    crate::pr_info!(
         "HypeR: starting Native init process {} as thread {}",
         process_id,
         thread_id.get()

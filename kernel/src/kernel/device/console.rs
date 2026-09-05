@@ -202,7 +202,7 @@ impl SystemConsole {
 
     /// Enqueues as much output as the sole normal writer can currently retain.
     pub(crate) fn try_write(&self, bytes: &[u8]) -> Result<usize, IoError> {
-        let accepted = crate::kernel::log::try_write_console(bytes);
+        let accepted = crate::kernel::log::try_write_console_tx(bytes);
         if accepted == 0 && !bytes.is_empty() {
             Err(IoError::WouldBlock)
         } else {

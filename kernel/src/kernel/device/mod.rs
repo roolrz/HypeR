@@ -27,7 +27,7 @@ pub(crate) fn early_initialize(
         .cpu_power()
         .ok_or(InitializationError::MissingCpuPower)?;
     let capabilities = cpu_power::initialize(info).map_err(InitializationError::CpuPower)?;
-    crate::println!(
+    crate::pr_info!(
         "HypeR: CPU power interface version {}.{}: on={}, off={}, suspend={}, reset={}",
         capabilities.version.major,
         capabilities.version.minor,
@@ -45,7 +45,7 @@ pub(crate) fn platform_device_initialize(
 ) -> Result<(), InitializationError> {
     let report = platform_bus::initialize(boot).map_err(InitializationError::DriverFramework)?;
     match report.console {
-        Ok(Some(capabilities)) => crate::println!(
+        Ok(Some(capabilities)) => crate::pr_info!(
             "HypeR: {} runtime input active: INTID {}, VIRQ {}",
             capabilities.driver,
             capabilities.hardware_interrupt,
@@ -58,7 +58,7 @@ pub(crate) fn platform_device_initialize(
             "HypeR: early console remains output-only; runtime input unavailable: {error:?}"
         ),
     }
-    crate::println!(
+    crate::pr_info!(
         "HypeR: platform bus: {} bound, {} unmatched, {} deferred, {} failed",
         report.drivers.bound,
         report.drivers.unmatched,

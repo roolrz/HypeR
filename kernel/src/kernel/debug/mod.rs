@@ -27,7 +27,7 @@ pub(crate) fn initialize() -> Result<(), InitializationError> {
         return Err(InitializationError::UnexpectedSelfSymbol);
     }
     READY.store(true, Ordering::Release);
-    crate::println!(
+    crate::pr_info!(
         "HypeR: kallsyms resolved {} at {:#x}",
         symbol.name,
         symbol.address

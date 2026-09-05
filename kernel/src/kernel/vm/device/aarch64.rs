@@ -74,7 +74,7 @@ impl VirtualDeviceSet {
         })?;
         // Host output occurs after both device and controller locks release.
         if let Some(byte) = outcome.transmitted {
-            crate::kernel::log::console::write_raw_byte(byte);
+            crate::kernel::log::console::write_guest_console_byte(byte);
         }
         Ok(Some(MmioOutcome {
             value: outcome.value,

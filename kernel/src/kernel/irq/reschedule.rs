@@ -49,7 +49,7 @@ pub(crate) fn initialize(root_domain: IrqDomainId) -> Result<(), Error> {
         if bootstrap_pending {
             notify(CpuIndex::BOOT);
         }
-        crate::println!(
+        crate::pr_notice!(
             "HypeR: IRQ-tail reschedule cross-calls are unavailable; using architecture-cooperative wake policy"
         );
         return Ok(());
@@ -70,7 +70,7 @@ pub(crate) fn initialize(root_domain: IrqDomainId) -> Result<(), Error> {
     if bootstrap_pending {
         notify(CpuIndex::BOOT);
     }
-    crate::println!(
+    crate::pr_info!(
         "HypeR: targeted reschedule cross-call initialized on INTID {}",
         hardware_interrupt.get()
     );
