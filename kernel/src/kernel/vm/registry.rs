@@ -1352,8 +1352,6 @@ impl From<crate::kernel::time::Error> for DormantVcpuQuiesceError {
 pub(crate) fn verify_dormant_vcpu_quiesce(
     installed: InstalledVm,
 ) -> Result<(), DormantVcpuQuiesceError> {
-    const QUIESCE_TIMEOUT_NS: u64 = 1_000_000_000;
-
     let (_, _, control) = installed.into_boot_parts();
     let mut quiescing = match control.begin() {
         Ok(quiescing) => quiescing,
@@ -1364,7 +1362,8 @@ pub(crate) fn verify_dormant_vcpu_quiesce(
             }));
         }
     };
-    let deadline = crate::kernel::time::deadline_after(QUIESCE_TIMEOUT_NS)?;
+    let deadline =
+        crate::kernel::time::deadline_after(crate::kernel::task::TEST_PROGRESS_TIMEOUT_NS)?;
     loop {
         quiescing = match quiescing.poll() {
             QuiescePoll::Pending(quiescing) => quiescing,

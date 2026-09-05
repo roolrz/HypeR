@@ -9,13 +9,14 @@ use crate::hal::interrupt::{
     InterruptController, InterruptId, InterruptPriority, InterruptTransitionError,
     InterruptTrigger, LocalInterruptController,
 };
+use crate::hal::timer::{MonotonicCounter, deadline_reached, nanoseconds_to_ticks};
 use crate::platform::{GicV3Info, MAX_GIC_REDISTRIBUTOR_REGIONS};
 
 const DISTRIBUTOR_MIN_SIZE: u64 = 0x1_0000;
 const REDISTRIBUTOR_FRAME_SIZE: u64 = 0x2_0000;
 const SGI_BASE_OFFSET: usize = 0x1_0000;
 const DEFAULT_REDISTRIBUTOR_STRIDE: u64 = REDISTRIBUTOR_FRAME_SIZE;
-const REGISTER_POLL_LIMIT: usize = 1_000_000;
+const REGISTER_POLL_TIMEOUT_NS: u64 = 1_000_000_000;
 
 const GICD_CTLR: usize = 0x0000;
 const GICD_TYPER: usize = 0x0004;
@@ -82,8 +83,9 @@ pub enum Error {
     InvalidInterrupt,
     InvalidRedistributorStride,
     NoMatchingRedistributor,
-    SystemRegisterInterfaceUnavailable,
+    PollingClockUnavailable,
     RegisterTimeout,
+    SystemRegisterInterfaceUnavailable,
 }
 
 #[derive(Clone, Copy)]
@@ -97,25 +99,28 @@ impl MappedRegion {
 }
 
 /// `GICv3` Distributor and per-CPU Redistributor state.
-pub struct GicV3<Cpu, MemoryBarrier> {
+///
+/// `Counter` supplies bounded register handshakes before kernel timekeeping is
+/// initialized; the architecture binding selects the available early counter.
+pub struct GicV3<Cpu, MemoryBarrier, Counter> {
     distributor: MappedRegion,
     redistributors: [MappedRegion; MAX_GIC_REDISTRIBUTOR_REGIONS],
     redistributor_count: usize,
     redistributor_stride: u64,
     boot_affinity: u32,
     interrupt_count: u32,
-    marker: PhantomData<(Cpu, MemoryBarrier)>,
+    marker: PhantomData<(Cpu, MemoryBarrier, Counter)>,
 }
 
 #[derive(Clone, Copy)]
-pub struct GicV3Local<Cpu, MemoryBarrier> {
+pub struct GicV3Local<Cpu, MemoryBarrier, Counter> {
     redistributor: usize,
     interrupt_count: u32,
-    marker: PhantomData<(Cpu, MemoryBarrier)>,
+    marker: PhantomData<(Cpu, MemoryBarrier, Counter)>,
 }
 
-impl<Cpu: CpuInterface, MemoryBarrier: Barrier> LocalInterruptController
-    for GicV3Local<Cpu, MemoryBarrier>
+impl<Cpu: CpuInterface, MemoryBarrier: Barrier, Counter: MonotonicCounter> LocalInterruptController
+    for GicV3Local<Cpu, MemoryBarrier, Counter>
 {
     type Error = Error;
 
@@ -156,7 +161,9 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> LocalInterruptController
     }
 }
 
-impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3Local<Cpu, MemoryBarrier> {
+impl<Cpu: CpuInterface, MemoryBarrier: Barrier, Counter: MonotonicCounter>
+    GicV3Local<Cpu, MemoryBarrier, Counter>
+{
     fn validate(&self, interrupt: InterruptId) -> Result<u32, Error> {
         let id = interrupt.get();
         (id < 32 && id < self.interrupt_count)
@@ -190,20 +197,17 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3Local<Cpu, MemoryBarrier> {
     }
 
     fn finish(&self) -> Result<(), Error> {
-        let mut remaining = REGISTER_POLL_LIMIT;
-        while read_u32(self.redistributor, GICR_CTLR) & GICR_CTLR_RWP != 0 {
-            if remaining == 0 {
-                return Err(Error::RegisterTimeout);
-            }
-            remaining -= 1;
-            core::hint::spin_loop();
-        }
+        wait_for_register::<Counter>(|| {
+            read_u32(self.redistributor, GICR_CTLR) & GICR_CTLR_RWP == 0
+        })?;
         MemoryBarrier::data_synchronization(BarrierDomain::FullSystem, BarrierAccess::All);
         Ok(())
     }
 }
 
-impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
+impl<Cpu: CpuInterface, MemoryBarrier: Barrier, Counter: MonotonicCounter>
+    GicV3<Cpu, MemoryBarrier, Counter>
+{
     /// Binds DTB-discovered register ranges to architecture-provided mappings.
     ///
     /// # Safety
@@ -284,7 +288,7 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
         self.interrupt_count
     }
 
-    pub fn local_controller(&self) -> Result<GicV3Local<Cpu, MemoryBarrier>, Error> {
+    pub fn local_controller(&self) -> Result<GicV3Local<Cpu, MemoryBarrier, Counter>, Error> {
         Ok(GicV3Local {
             redistributor: self.current_redistributor()?,
             interrupt_count: self.interrupt_count,
@@ -376,14 +380,9 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
         let mut waker = read_u32(redistributor, GICR_WAKER);
         waker &= !GICR_WAKER_PROCESSOR_SLEEP;
         write_u32(redistributor, GICR_WAKER, waker);
-        let mut remaining = REGISTER_POLL_LIMIT;
-        while read_u32(redistributor, GICR_WAKER) & GICR_WAKER_CHILDREN_ASLEEP != 0 {
-            if remaining == 0 {
-                return Err(Error::RegisterTimeout);
-            }
-            remaining -= 1;
-            core::hint::spin_loop();
-        }
+        wait_for_register::<Counter>(|| {
+            read_u32(redistributor, GICR_WAKER) & GICR_WAKER_CHILDREN_ASLEEP == 0
+        })?;
         write_u32(redistributor, GICR_IGROUPR0, u32::MAX);
         write_u32(redistributor, GICR_ICENABLER0, u32::MAX);
         write_u32(redistributor, GICR_ICPENDR0, u32::MAX);
@@ -430,27 +429,13 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
     }
 
     fn wait_for_distributor_write(&self) -> Result<(), Error> {
-        let mut remaining = REGISTER_POLL_LIMIT;
-        while read_u32(self.distributor.base, GICD_CTLR) & GICD_CTLR_RWP != 0 {
-            if remaining == 0 {
-                return Err(Error::RegisterTimeout);
-            }
-            remaining -= 1;
-            core::hint::spin_loop();
-        }
-        Ok(())
+        wait_for_register::<Counter>(|| {
+            read_u32(self.distributor.base, GICD_CTLR) & GICD_CTLR_RWP == 0
+        })
     }
 
     fn wait_for_redistributor_write(&self, redistributor: usize) -> Result<(), Error> {
-        let mut remaining = REGISTER_POLL_LIMIT;
-        while read_u32(redistributor, GICR_CTLR) & GICR_CTLR_RWP != 0 {
-            if remaining == 0 {
-                return Err(Error::RegisterTimeout);
-            }
-            remaining -= 1;
-            core::hint::spin_loop();
-        }
-        Ok(())
+        wait_for_register::<Counter>(|| read_u32(redistributor, GICR_CTLR) & GICR_CTLR_RWP == 0)
     }
 
     fn wait_for_write(&self, redistributor: Option<usize>) -> Result<(), Error> {
@@ -469,7 +454,9 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> GicV3<Cpu, MemoryBarrier> {
     }
 }
 
-impl<Cpu: CpuInterface, MemoryBarrier: Barrier> InterruptController for GicV3<Cpu, MemoryBarrier> {
+impl<Cpu: CpuInterface, MemoryBarrier: Barrier, Counter: MonotonicCounter> InterruptController
+    for GicV3<Cpu, MemoryBarrier, Counter>
+{
     type Error = Error;
 
     fn enable(
@@ -537,6 +524,30 @@ impl<Cpu: CpuInterface, MemoryBarrier: Barrier> InterruptController for GicV3<Cp
 
     fn end(&self, interrupt: InterruptId) {
         Cpu::end(interrupt.get());
+    }
+}
+
+fn wait_for_register<Counter: MonotonicCounter>(
+    mut complete: impl FnMut() -> bool,
+) -> Result<(), Error> {
+    if complete() {
+        return Ok(());
+    }
+    let frequency = Counter::frequency_hz().map_err(|_| Error::PollingClockUnavailable)?;
+    let timeout = nanoseconds_to_ticks(REGISTER_POLL_TIMEOUT_NS, frequency)
+        .map_err(|_| Error::PollingClockUnavailable)?;
+    if timeout > i64::MAX as u64 {
+        return Err(Error::PollingClockUnavailable);
+    }
+    let deadline = Counter::read().wrapping_add(timeout);
+    loop {
+        if complete() {
+            return Ok(());
+        }
+        if deadline_reached(Counter::read(), deadline) {
+            return Err(Error::RegisterTimeout);
+        }
+        core::hint::spin_loop();
     }
 }
 

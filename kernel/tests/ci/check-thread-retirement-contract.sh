@@ -13,6 +13,7 @@ state=src/kernel/task/scheduler/state.rs
 registry=src/kernel/task/scheduler/registry.rs
 reaper=src/kernel/reaper.rs
 support=tests/kernel/support.rs
+progress=src/kernel/task/test_progress.rs
 
 require() {
     pattern=$1
@@ -87,5 +88,7 @@ require 'fetch_update\(Ordering::Release, Ordering::Relaxed,[\s\S]*count\.checke
 require_order "$statistics" 'SCHEDULER\.with' \
     'RETIREMENTS_IN_PROGRESS\.load\(Ordering::Acquire\)' \
     'scheduler population must be observed before detached retirement completion'
-require 'statistics\.retirements_in_progress != 0[\s\S]*sleep_ms\(1\)[\s\S]*continue;' \
-    "$support" 'kernel-test quiescence must wait while yielding physical CPU progress to an in-flight reaper'
+require 'wait_for_test_progress[\s\S]*statistics\.retirements_in_progress == 0' \
+    "$support" 'kernel-test quiescence must include detached retirement in its timed progress predicate'
+require 'deadline_after\(timeout_nanoseconds\)[\s\S]*sleep_ms\(1\)[\s\S]*deadline_reached' \
+    "$progress" 'kernel-test progress waits must block remote-owner observers under a monotonic deadline'

@@ -8,12 +8,14 @@ use hyper::hal::interrupt::{
 };
 use hyper::platform::InterruptControllerInfo;
 
-use super::{Aarch64GicCpuInterface, barrier::Aarch64Barrier};
+use super::{Aarch64GicCpuInterface, barrier::Aarch64Barrier, timer::ArmGenericCounter};
 
-type Controller = GicV3<Aarch64GicCpuInterface, Aarch64Barrier>;
+type Controller = GicV3<Aarch64GicCpuInterface, Aarch64Barrier, ArmGenericCounter>;
 
 pub struct Aarch64InterruptController(Controller);
-pub struct Aarch64LocalInterruptController(GicV3Local<Aarch64GicCpuInterface, Aarch64Barrier>);
+pub struct Aarch64LocalInterruptController(
+    GicV3Local<Aarch64GicCpuInterface, Aarch64Barrier, ArmGenericCounter>,
+);
 
 impl LocalInterruptController for Aarch64LocalInterruptController {
     type Error = Error;

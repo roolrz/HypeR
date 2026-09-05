@@ -367,12 +367,19 @@ mod self_test {
     pub(crate) enum Error {
         Allocation,
         Scheduler(scheduler::Error),
+        Sleep(crate::kernel::task::SleepError),
         State(usize),
     }
 
     impl From<scheduler::Error> for Error {
         fn from(error: scheduler::Error) -> Self {
             Self::Scheduler(error)
+        }
+    }
+
+    impl From<crate::kernel::task::SleepError> for Error {
+        fn from(error: crate::kernel::task::SleepError) -> Self {
+            Self::Sleep(error)
         }
     }
 
@@ -414,27 +421,25 @@ mod self_test {
     }
 
     fn wait_for_phase(expected: usize) -> Result<(), Error> {
-        const MAX_PROGRESS_PASSES: usize = 4_096;
-
-        for _ in 0..MAX_PROGRESS_PASSES {
-            if PHASE.load(Ordering::Acquire) == expected {
-                return Ok(());
-            }
-            scheduler::yield_now()?;
+        if crate::kernel::task::wait_for_test_progress(
+            crate::kernel::task::TEST_PROGRESS_TIMEOUT_NS,
+            || Ok::<_, Error>(PHASE.load(Ordering::Acquire) == expected),
+        )? {
+            Ok(())
+        } else {
+            Err(Error::State(5))
         }
-        Err(Error::State(5))
     }
 
     fn wait_for_done() -> Result<(), Error> {
-        const MAX_PROGRESS_PASSES: usize = 4_096;
-
-        for _ in 0..MAX_PROGRESS_PASSES {
-            if DONE.try_acquire() {
-                return Ok(());
-            }
-            scheduler::yield_now()?;
+        if crate::kernel::task::wait_for_test_progress(
+            crate::kernel::task::TEST_PROGRESS_TIMEOUT_NS,
+            || Ok::<_, Error>(DONE.try_acquire()),
+        )? {
+            Ok(())
+        } else {
+            Err(Error::State(6))
         }
-        Err(Error::State(6))
     }
 
     extern "C" fn worker(_argument: usize) {
