@@ -46,12 +46,8 @@ pub(in crate::kernel) const fn is_immediate(number: u64) -> bool {
         number,
         HYPER_NATIVE_SYS_ABI_QUERY
             | HYPER_NATIVE_SYS_HANDLE_CLOSE
-            | HYPER_NATIVE_SYS_HANDLE_DUPLICATE
-            | HYPER_NATIVE_SYS_HANDLE_REPLACE
             | HYPER_NATIVE_SYS_HANDLE_GET_INFO
             | HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO
-            | HYPER_NATIVE_SYS_EVENT_CREATE
-            | HYPER_NATIVE_SYS_CHANNEL_CREATE
     )
 }
 
@@ -62,6 +58,17 @@ pub(in crate::kernel) const fn is_immediate(number: u64) -> bool {
 /// from extending the Process lock graph.
 pub(in crate::kernel) trait ImmediateServices {
     fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError>;
+
+    fn handle_info(
+        &self,
+        value: HandleValue,
+        required_rights: Rights,
+    ) -> Result<HandleInfo, ProcessError>;
+    fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError>;
+}
+
+/// Services which may grow storage and therefore run with interrupts enabled.
+pub(in crate::kernel) trait AllocatingServices {
     fn duplicate_handle(
         &self,
         value: HandleValue,
@@ -72,18 +79,12 @@ pub(in crate::kernel) trait ImmediateServices {
         value: HandleValue,
         rights: Rights,
     ) -> Result<HandleValue, ProcessError>;
-    fn handle_info(
-        &self,
-        value: HandleValue,
-        required_rights: Rights,
-    ) -> Result<HandleInfo, ProcessError>;
-    fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError>;
     fn create_event(&self) -> Result<HandleValue, ObjectServiceError>;
     fn create_channel(&self) -> Result<[HandleValue; 2], ChannelServiceError>;
 }
 
 /// Sleepable object services invoked only after architecture entry unwinds.
-pub(in crate::kernel) trait DeferredServices {
+pub(in crate::kernel) trait DeferredServices: AllocatingServices {
     fn signal_event(
         &self,
         value: HandleValue,
@@ -194,12 +195,8 @@ pub(in crate::kernel) fn dispatch_immediate(
     match invocation.number() {
         HYPER_NATIVE_SYS_ABI_QUERY => sys_abi_query(),
         HYPER_NATIVE_SYS_HANDLE_CLOSE => sys_handle_close(services, arguments),
-        HYPER_NATIVE_SYS_HANDLE_DUPLICATE => sys_handle_duplicate(services, arguments),
-        HYPER_NATIVE_SYS_HANDLE_REPLACE => sys_handle_replace(services, arguments),
         HYPER_NATIVE_SYS_HANDLE_GET_INFO => sys_handle_get_info(services, arguments),
         HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO => sys_object_get_basic_info(services, arguments),
-        HYPER_NATIVE_SYS_EVENT_CREATE => sys_event_create(services, arguments),
-        HYPER_NATIVE_SYS_CHANNEL_CREATE => sys_channel_create(services, arguments),
         _ => sys_not_supported(),
     }
 }
@@ -215,6 +212,18 @@ pub(in crate::kernel) fn dispatch_deferred(
     invocation: NativeInvocation,
 ) -> DeferredAction {
     match invocation.number() {
+        HYPER_NATIVE_SYS_HANDLE_DUPLICATE => {
+            DeferredAction::Return(sys_handle_duplicate(services, invocation.arguments()))
+        }
+        HYPER_NATIVE_SYS_HANDLE_REPLACE => {
+            DeferredAction::Return(sys_handle_replace(services, invocation.arguments()))
+        }
+        HYPER_NATIVE_SYS_EVENT_CREATE => {
+            DeferredAction::Return(sys_event_create(services, invocation.arguments()))
+        }
+        HYPER_NATIVE_SYS_CHANNEL_CREATE => {
+            DeferredAction::Return(sys_channel_create(services, invocation.arguments()))
+        }
         HYPER_NATIVE_SYS_THREAD_YIELD => sys_thread_yield(),
         HYPER_NATIVE_SYS_THREAD_EXIT => sys_thread_exit(invocation.arguments()),
         HYPER_NATIVE_SYS_PROCESS_EXIT => sys_process_exit(invocation.arguments()),
@@ -248,7 +257,7 @@ fn sys_handle_close(services: &impl ImmediateServices, arguments: &Arguments) ->
 }
 
 #[inline(never)]
-fn sys_handle_duplicate(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+fn sys_handle_duplicate(services: &impl AllocatingServices, arguments: &Arguments) -> NativeResult {
     let result = parse_handle_and_rights(arguments[0], arguments[1]).and_then(|(value, rights)| {
         services
             .duplicate_handle(value, rights)
@@ -258,7 +267,7 @@ fn sys_handle_duplicate(services: &impl ImmediateServices, arguments: &Arguments
 }
 
 #[inline(never)]
-fn sys_handle_replace(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+fn sys_handle_replace(services: &impl AllocatingServices, arguments: &Arguments) -> NativeResult {
     let result = parse_handle_and_rights(arguments[0], arguments[1]).and_then(|(value, rights)| {
         services
             .replace_handle(value, rights)
@@ -301,7 +310,7 @@ fn sys_object_get_basic_info(
 }
 
 #[inline(never)]
-fn sys_event_create(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+fn sys_event_create(services: &impl AllocatingServices, arguments: &Arguments) -> NativeResult {
     if arguments[0] != 0 {
         return failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
     }
@@ -313,7 +322,7 @@ fn sys_event_create(services: &impl ImmediateServices, arguments: &Arguments) ->
 }
 
 #[inline(never)]
-fn sys_channel_create(services: &impl ImmediateServices, arguments: &Arguments) -> NativeResult {
+fn sys_channel_create(services: &impl AllocatingServices, arguments: &Arguments) -> NativeResult {
     if arguments[0] != 0 {
         return failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
     }
@@ -840,16 +849,6 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(ProcessError::Allocation)
         }
 
-        fn duplicate_handle(&self, _: HandleValue, _: Rights) -> Result<HandleValue, ProcessError> {
-            self.calls.set(self.calls.get().saturating_add(1));
-            Err(ProcessError::Allocation)
-        }
-
-        fn replace_handle(&self, _: HandleValue, _: Rights) -> Result<HandleValue, ProcessError> {
-            self.calls.set(self.calls.get().saturating_add(1));
-            Err(ProcessError::Allocation)
-        }
-
         fn handle_info(&self, _: HandleValue, _: Rights) -> Result<HandleInfo, ProcessError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation)
@@ -859,12 +858,21 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation)
         }
+    }
 
+    impl AllocatingServices for RejectingServices {
+        fn duplicate_handle(&self, _: HandleValue, _: Rights) -> Result<HandleValue, ProcessError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ProcessError::Allocation)
+        }
+        fn replace_handle(&self, _: HandleValue, _: Rights) -> Result<HandleValue, ProcessError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ProcessError::Allocation)
+        }
         fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation.into())
         }
-
         fn create_channel(&self) -> Result<[HandleValue; 2], ChannelServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ChannelServiceError::Process(ProcessError::Allocation))
@@ -994,14 +1002,14 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     if bad_handle.status() != HYPER_NATIVE_STATUS_BAD_HANDLE {
         return Err(SelfTestError::InvalidHandle);
     }
-    let bad_rights = dispatch_immediate(
+    let bad_rights = dispatch_deferred(
         &services,
         invoke(
             HYPER_NATIVE_SYS_HANDLE_DUPLICATE,
             [1_u64 << 24 | 1, u64::MAX, 0, 0, 0, 0],
         ),
     );
-    if bad_rights.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT {
+    if bad_rights != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)) {
         return Err(SelfTestError::InvalidRights);
     }
     let bad_size = dispatch_immediate(
@@ -1021,7 +1029,7 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     if bad_size.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT {
         return Err(SelfTestError::InvalidRecordSize);
     }
-    let bad_channel_create = dispatch_immediate(
+    let bad_channel_create = dispatch_deferred(
         &services,
         invoke(HYPER_NATIVE_SYS_CHANNEL_CREATE, [1, 0, 0, 0, 0, 0]),
     );
@@ -1046,7 +1054,7 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             ],
         ),
     );
-    if bad_channel_create.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT
+    if bad_channel_create != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
         || bad_channel_write
             != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
         || bad_channel_read != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))

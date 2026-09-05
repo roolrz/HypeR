@@ -5,7 +5,7 @@
 
 use hyper::mm::PAGE_SIZE;
 
-use crate::kernel::accounting::{ResourceDomain, ResourceLimits};
+use crate::kernel::accounting::{ResourceDomain, ResourceKind, ResourceLimits};
 use crate::kernel::capability::{HandleError, HandleValue, Rights};
 use crate::kernel::ipc::{
     ChannelError, ChannelReadOutcome, ChannelServiceError, ReadBuffers, channel_create,
@@ -16,8 +16,8 @@ use crate::kernel::mm::user_space::{
 };
 use crate::kernel::object::{Event, KernelObject};
 use crate::kernel::process::{
-    AddressSpaceRetirement, MachineAbi, PreparedProcess, Process, ProcessError, ProcessImage,
-    ProcessRetirementStep, TaskGroup, TerminalReason,
+    MachineAbi, PreparedProcess, Process, ProcessError, ProcessImage, ProcessPhase, TaskGroup,
+    TerminalReason,
 };
 
 const IMAGE_BASE: u64 = 0x80_0000;
@@ -64,19 +64,98 @@ pub(super) fn run() -> Result<(), Error> {
     let group = TaskGroup::try_new(&domain).map_err(|_| Error::Group)?;
     let process = create_process(&domain, &group)?;
 
+    verify_handle_accounting_churn(&process)?;
     verify_create_and_fifo(&process)?;
     verify_buffer_too_small_and_event_transfer(&process)?;
     verify_invalid_and_unsupported_transfer_rollback(&process)?;
     verify_copy_failure_restores_message_without_authority(&process)?;
     verify_late_copy_failure_restores_complete_message(&process)?;
 
-    let report = process.request_stop(TerminalReason::Requested);
-    if !report.newly_requested || !report.dispatch_complete {
-        return Err(Error::State(90));
+    let retained_space = process.address_space_owner()?;
+    let retry_cpu = if crate::kernel::cpu::online_cpu_count() > 1 {
+        let cpu = hyper::cpu::CpuIndex::new(1).ok_or(Error::Construction)?;
+        crate::kernel::reaper::set_affinity_for_test(
+            crate::kernel::task::scheduler::CpuMask::single(cpu),
+        )
+        .map_err(|_| Error::Construction)?;
+        Some(cpu)
+    } else {
+        None
+    };
+    let retirement = (|| {
+        let report = process.request_stop(TerminalReason::Requested);
+        if !report.newly_requested || !report.dispatch_complete {
+            return Err(Error::State(90));
+        }
+        crate::kernel::task::sleep_ms(20).map_err(|_| Error::Construction)?;
+        if process.snapshot().phase != ProcessPhase::Retiring {
+            return Err(Error::State(91));
+        }
+        if let Some(cpu) = retry_cpu {
+            for _ in 0..100 {
+                if crate::kernel::reaper::retry_observed_on_for_test(cpu) {
+                    break;
+                }
+                crate::kernel::task::sleep_ms(1).map_err(|_| Error::Construction)?;
+            }
+            if !crate::kernel::reaper::retry_observed_on_for_test(cpu) {
+                return Err(Error::State(95));
+            }
+        }
+        drop(retained_space);
+        retire_process(&process)
+    })();
+    let affinity_restoration = if retry_cpu.is_some() {
+        crate::kernel::reaper::set_affinity_for_test(crate::kernel::task::scheduler::CpuMask::ALL)
+            .map_err(|_| Error::Construction)
+    } else {
+        Ok(())
+    };
+    retirement?;
+    affinity_restoration?;
+    if domain.usage().total(ResourceKind::Handles) != 0 {
+        return Err(Error::State(92));
     }
-    retire_process(&process)?;
     group.request_stop().map_err(|_| Error::Group)?;
     group.finish_retirement().map_err(|_| Error::Group)?;
+    Ok(())
+}
+
+fn verify_handle_accounting_churn(process: &Process) -> Result<(), Error> {
+    let baseline = process
+        .resource_domain()
+        .usage()
+        .total(ResourceKind::Handles);
+    let event = Event::try_new(&process.resource_domain()).map_err(|_| Error::Construction)?;
+    let original = process.create_object(event, <Event as KernelObject>::SUPPORTED_RIGHTS)?;
+    let mut handles = alloc::vec::Vec::new();
+    handles
+        .try_reserve_exact(257)
+        .map_err(|_| Error::Construction)?;
+    for _ in 0..257 {
+        handles.push(process.duplicate_handle(original, Rights::WAIT)?);
+    }
+    // Remove the oldest record first, then interleave slot reuse and replacement
+    // across several segment boundaries. Stale generations must stay invalid.
+    process.close_handle(original)?;
+    for stale in handles {
+        let replacement = process.replace_handle(stale, Rights::WAIT)?;
+        if process.handle_info(stale, Rights::NONE).is_ok() {
+            return Err(Error::State(93));
+        }
+        process.close_handle(replacement)?;
+        let event = Event::try_new(&process.resource_domain()).map_err(|_| Error::Construction)?;
+        let reused = process.create_object(event, <Event as KernelObject>::SUPPORTED_RIGHTS)?;
+        process.close_handle(reused)?;
+    }
+    if process
+        .resource_domain()
+        .usage()
+        .total(ResourceKind::Handles)
+        != baseline
+    {
+        return Err(Error::State(94));
+    }
     Ok(())
 }
 
@@ -573,29 +652,12 @@ fn scratch_image(offset: u64, length: u64) -> Result<UserSlice, Error> {
 }
 
 fn retire_process(process: &Process) -> Result<(), Error> {
-    let mut retry: Option<AddressSpaceRetirement> = None;
-    for _ in 0..64 {
-        let step = match retry.take() {
-            Some(token) => match token.retry() {
-                Ok(()) => return Ok(()),
-                Err((token, _)) => {
-                    retry = Some(token);
-                    crate::kernel::task::scheduler::cond_resched()
-                        .map_err(|_| Error::Construction)?;
-                    continue;
-                }
-            },
-            None => process.retire()?,
-        };
-        match step {
-            ProcessRetirementStep::Complete => return Ok(()),
-            ProcessRetirementStep::Retry(token) => retry = Some(token),
-            ProcessRetirementStep::InProgress | ProcessRetirementStep::PendingReferences => {}
+    // Observation only: production kreaper must own and complete retirement.
+    for _ in 0..1000 {
+        if process.snapshot().phase == ProcessPhase::Retired {
+            return Ok(());
         }
-        crate::kernel::task::scheduler::cond_resched().map_err(|_| Error::Construction)?;
-    }
-    if retry.is_some() {
-        crate::hal::cpu::halt();
+        crate::kernel::task::sleep_ms(1).map_err(|_| Error::Construction)?;
     }
     Err(Error::Construction)
 }

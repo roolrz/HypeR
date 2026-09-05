@@ -10,8 +10,7 @@ use crate::kernel::capability::{HandleValue, ResolvedWaitable, Rights};
 use crate::kernel::mm::user_space::{UserAddress, UserSlice, prepare_native_entry_self_test};
 use crate::kernel::object::{Event, ObjectHandleState, ObjectKind, SignalWaitOutcome};
 use crate::kernel::process::{
-    AddressSpaceRetirement, MachineAbi, PreparedProcess, Process, ProcessImage,
-    ProcessRetirementStep, TaskGroup, TerminalReason,
+    MachineAbi, PreparedProcess, Process, ProcessImage, ProcessPhase, TaskGroup, TerminalReason,
 };
 use crate::kernel::task::scheduler::CpuMask;
 
@@ -428,30 +427,12 @@ fn wait_for_event_registration(process: &Process) -> Result<(), Error> {
 }
 
 fn retire_process(process: &Process) -> Result<(), Error> {
-    let mut retry: Option<AddressSpaceRetirement> = None;
-    for _ in 0..64 {
-        let step = match retry.take() {
-            Some(token) => match token.retry() {
-                Ok(()) => return Ok(()),
-                Err((token, _)) => {
-                    retry = Some(token);
-                    crate::kernel::task::scheduler::cond_resched().map_err(|_| Error::Scheduler)?;
-                    continue;
-                }
-            },
-            None => process.retire().map_err(|_| Error::Lifecycle)?,
-        };
-        match step {
-            ProcessRetirementStep::Complete => return Ok(()),
-            ProcessRetirementStep::Retry(token) => retry = Some(token),
-            ProcessRetirementStep::InProgress | ProcessRetirementStep::PendingReferences => {}
+    // Observation only: production kreaper must own and complete retirement.
+    for _ in 0..1000 {
+        if process.snapshot().phase == ProcessPhase::Retired {
+            return Ok(());
         }
-        crate::kernel::task::scheduler::cond_resched().map_err(|_| Error::Scheduler)?;
-    }
-    // An armed retry token must not be abandoned. Reaching this bound signals
-    // a kernel teardown invariant, so fail-stop rather than return it live.
-    if retry.is_some() {
-        crate::hal::cpu::halt();
+        crate::kernel::task::sleep_ms(1).map_err(|_| Error::Lifecycle)?;
     }
     Err(Error::Lifecycle)
 }

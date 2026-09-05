@@ -356,6 +356,78 @@ impl HandleTableStorageSnapshot {
     }
 }
 
+/// Process-owned metadata indexed by the same bounded slot geometry as handles.
+/// Generations are checked by the caller's entry; no allocation occurs in lookup
+/// or publication. Growth is prepared alongside the authoritative table plan.
+pub(crate) struct HandleSidecar<T> {
+    segments: [Option<Vec<Option<T>>>; SLOT_SEGMENTS],
+}
+
+impl<T> HandleSidecar<T> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            segments: [const { None }; SLOT_SEGMENTS],
+        }
+    }
+
+    pub(crate) fn growth_bytes(snapshot: HandleTableStorageSnapshot) -> Option<usize> {
+        let mut bytes = 0usize;
+        for segment in 0..SLOT_SEGMENTS {
+            if snapshot.segment_mask & (1 << segment) != 0 {
+                bytes = bytes.checked_add(
+                    segment_capacity(segment).checked_mul(core::mem::size_of::<Option<T>>())?,
+                )?;
+            }
+        }
+        Some(bytes)
+    }
+
+    pub(crate) fn prepare(snapshot: HandleTableStorageSnapshot) -> Result<Self, HandleError> {
+        let mut plan = Self::new();
+        for segment in 0..SLOT_SEGMENTS {
+            if snapshot.segment_mask & (1 << segment) != 0 {
+                let count = segment_capacity(segment);
+                let mut entries = Vec::new();
+                entries
+                    .try_reserve_exact(count)
+                    .map_err(|_| HandleError::Allocation)?;
+                entries.resize_with(count, || None);
+                plan.segments[segment] = Some(entries);
+            }
+        }
+        Ok(plan)
+    }
+
+    pub(crate) fn install(&mut self, mut plan: Self) {
+        for (target, prepared) in self.segments.iter_mut().zip(&mut plan.segments) {
+            if let Some(entries) = prepared.take() {
+                if target.is_some() {
+                    super::invariant_violation();
+                }
+                *target = Some(entries);
+            }
+        }
+    }
+
+    pub(crate) fn get(&self, value: HandleValue) -> Option<&T> {
+        let (segment, offset) = segment_location(value.decode().0);
+        self.segments.get(segment)?.as_ref()?.get(offset)?.as_ref()
+    }
+
+    pub(crate) fn replace(&mut self, value: HandleValue, entry: Option<T>) -> Option<T> {
+        let (segment, offset) = segment_location(value.decode().0);
+        let target = self
+            .segments
+            .get_mut(segment)
+            .and_then(Option::as_mut)
+            .and_then(|entries| entries.get_mut(offset));
+        match target {
+            Some(target) => core::mem::replace(target, entry),
+            None => super::invariant_violation(),
+        }
+    }
+}
+
 /// Fully allocated table backing prepared before Process locks are acquired.
 #[must_use = "install or discard the handle-table storage plan"]
 pub(crate) struct HandleTableStoragePlan {

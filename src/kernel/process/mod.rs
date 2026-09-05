@@ -21,10 +21,10 @@ pub(crate) use lifecycle::{ProcessPhase, TerminalReason, UserThreadPhase};
 pub(crate) use loader::{Error as LoaderError, INITIAL_STACK_TOP, LoadedProcessImage, load_native};
 pub(crate) use objects::{ProcessObject, TaskFactory, TaskGroupObject, TaskObjectError};
 pub(crate) use owner::{
-    AddressSpaceRetirement, HandleBatchPublishFailure, HandleTransferCommitFailure,
-    PreparedProcess, PreparedProcessHandleTransfer, Process, ProcessCreateFailure, ProcessError,
-    ProcessHandleBatchReservation, ProcessHandleReservation, ProcessId, ProcessRetirementStep,
-    ProcessSnapshot, ProcessStopReport,
+    HandleBatchPublishFailure, HandleTransferCommitFailure, PreparedProcess,
+    PreparedProcessHandleTransfer, Process, ProcessCreateFailure, ProcessError,
+    ProcessHandleBatchReservation, ProcessHandleReservation, ProcessId, ProcessSnapshot,
+    ProcessStopReport, promote_delayed_retirements, reap_one_process, retirement_work,
 };
 pub(crate) use task_group::{TaskGroup, TaskGroupError, TaskGroupId, TaskGroupStopReport};
 pub(in crate::kernel) use user_thread::UserExecutionOwnership;
