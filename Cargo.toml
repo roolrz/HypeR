@@ -28,7 +28,7 @@ test = false
 bench = false
 
 [dependencies]
-hyper-abi = { git = "https://github.com/roolrz/HypeR-ABI", rev = "83aec4ce6a3b51ecd093220b815a25403cb9cdf3" }
+hyper-abi = { path = "sdk/abi" }
 rustc-demangle = { version = "0.1.28", default-features = false }
 
 [lints.clippy]

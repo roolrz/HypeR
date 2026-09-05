@@ -1,0 +1,32 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "hyper-abi"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Machine-readable definitions for the HypeR Native ABI"
+repository = "https://github.com/roolrz/HypeR-Kernel"
+publish = false
+
+[features]
+default = []
+generator = []
+
+[[bin]]
+name = "hyper-abi"
+path = "src/bin/hyper-abi.rs"
+required-features = ["generator"]
+
+[dependencies]
+
+[lints.clippy]
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
