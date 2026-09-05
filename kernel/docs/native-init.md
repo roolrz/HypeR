@@ -85,5 +85,5 @@ its own table.
 Host tests validate archive indexing, path rejection, ELF permissions, layout,
 entry points, and supported relocation decoding. Kernel QEMU tests use the
 test-only Linux guest path. The `test-native` contract separately builds
-`system/apps/init` through the assembled SDK, constructs the production
+`app/init` through the assembled SDK, constructs the production
 initramfs, and verifies Native startup and console I/O end to end.

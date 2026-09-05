@@ -3,7 +3,7 @@ SPDX-FileCopyrightText: 2026 roolrz
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# HypeR system applications
+# HypeR Native applications
 
 This directory contains the capability-oriented system applications that
 run directly on the HypeR Native ABI. Applications consume only the assembled
@@ -29,16 +29,16 @@ does not acquire ambient access to a debug device or platform register bank.
 From the repository root, run:
 
 ```sh
-make system
+make app
 ```
 
 The generated SDK is placed under `target/sdk/aarch64`, and static PIE
-application images are written to `target/system/aarch64`.
+application images are written to `target/app/aarch64`.
 
 ## Repository layout
 
 ```text
-apps/
+app/
   init/       Native system bootstrap and service supervision
 ```
 
