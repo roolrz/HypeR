@@ -188,6 +188,26 @@ context, and architecture execution payload are explicitly detached and
 retired by the scheduler. A userspace handle can therefore retain a terminated
 user Thread tombstone without retaining its execution resources.
 
+A Process reaching Stopped transfers a counted owner to the kernel reaper.
+The reaper closes its handles, waits for outstanding address-space references,
+and completes acknowledged address-space retirement before breaking TaskGroup
+membership. Retained references and failed machine retirement remain queued;
+the reaper arms its preallocated one-shot timer only before waiting with pending
+Process work. Expiry uses the same durable wake protocol as producers. Each
+batch attempts one Process so object finalizers and detached Threads can still
+make progress; no retry policy is attached to a particular CPU's periodic tick.
+Timer cancellation follows its owner queue even after worker migration. Future
+CPU hotplug must transfer or drain live timer queues before taking a CPU offline,
+as required for all timed waits; this is a timer-subsystem obligation. Process and
+Thread termination observations remain durable throughout this cleanup.
+
+Process handle accounting uses a sidecar with the same segmented slot geometry
+as the handle table. Segment growth is fallible, prepared outside Process locks,
+and charged before publication. Each slot directly identifies its batch entry;
+weak backward links allow an empty batch to be unlinked without scanning the
+Process. Allocating Native calls unwind to interruptible Thread context; masked
+immediate calls must have bounded work as well as nonblocking implementations.
+
 The final total-reference release performs only an allocation-free, nonblocking
 handoff to object reclamation. An object in the reap-pending state cannot be
 upgraded from a weak reference, republished as a userspace handle, or otherwise

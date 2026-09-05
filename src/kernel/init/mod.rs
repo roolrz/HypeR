@@ -181,6 +181,8 @@ pub(crate) fn start() -> Result<Infallible, Error> {
     // Thread's stack frame.
     drop(thread);
     drop(process);
+    drop(group);
+    drop(domain);
     scheduler::exit_current()
 }
 

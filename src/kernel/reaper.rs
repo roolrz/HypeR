@@ -13,11 +13,43 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use hyper::sync::{DeferredWork, WorkDisposition};
 
 const REAP_BATCH: usize = 16;
+const PROCESS_RETRY_NS: u64 = 10_000_000;
 
 static WORK: DeferredWork = DeferredWork::new();
 static WAKE: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
 static WORKER_PUBLISHED: AtomicBool = AtomicBool::new(false);
 static IRQ_PROMPTS_READY: AtomicBool = AtomicBool::new(false);
+static PROCESS_RETRY_DUE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(feature = "kernel-self-test")]
+static TEST_WORKER: hyper::sync::InterruptSpinLock<
+    Option<crate::kernel::task::thread::ThreadId>,
+    crate::hal::irq::LocalMask,
+> = hyper::sync::InterruptSpinLock::new(None);
+#[cfg(feature = "kernel-self-test")]
+static TEST_RETRY_CPU: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+// The current process-retirement integration case needs Native user mappings,
+// so only the AArch64 self-test binary calls these architecture-neutral hooks.
+#[cfg(feature = "kernel-self-test")]
+#[allow(dead_code)]
+pub(crate) fn set_affinity_for_test(
+    affinity: crate::kernel::task::scheduler::CpuMask,
+) -> Result<(), crate::kernel::task::scheduler::Error> {
+    let worker = TEST_WORKER
+        .with(|worker| *worker)
+        .ok_or(crate::kernel::task::scheduler::Error::NotInitialized)?;
+    crate::kernel::task::scheduler::set_thread_affinity(worker, affinity)?;
+    TEST_RETRY_CPU.store(usize::MAX, Ordering::Release);
+    Ok(())
+}
+
+#[cfg(feature = "kernel-self-test")]
+#[allow(dead_code)]
+pub(crate) fn retry_observed_on_for_test(cpu: hyper::cpu::CpuIndex) -> bool {
+    TEST_RETRY_CPU.load(Ordering::Acquire) == cpu.get()
+}
 
 /// Unforgeable proof that finalizers execute on the dedicated reaper Thread.
 pub(crate) struct ReaperAccess {
@@ -34,6 +66,8 @@ pub(crate) fn initialize() -> Result<(), crate::kernel::task::scheduler::Error> 
     {
         return Err(crate::kernel::task::scheduler::Error::AlreadyInitialized);
     }
+    #[cfg(feature = "kernel-self-test")]
+    TEST_WORKER.with(|slot| *slot = Some(worker));
     // The initial worker owns every request published before this point.
     // Clear their unissued prompt before the worker can drain and sleep, or a
     // stale IRQ_PROMPTED bit could suppress the first post-startup notifier.
@@ -100,9 +134,37 @@ pub(crate) fn service_irq_prompt() {
 extern "C" fn worker_entry(_argument: usize) {
     let mut access = ReaperAccess { _private: () };
     let mut prefer_objects = false;
+    // Reserve one node for the worker lifetime: retry under memory pressure
+    // must not require another allocation. Its queue follows timer ownership,
+    // never a hard-coded processor identity.
+    let retry_timer = match crate::kernel::time::ReservedTimer::try_new() {
+        Ok(timer) => timer,
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: reaper timer reservation failed: {error:?}"
+        )),
+    };
+    let mut armed_retry: Option<crate::kernel::time::ArmedReservedTimer<'_>> = None;
     loop {
+        // Unrelated retirement work may wake the worker while a Process retry
+        // remains delayed. Preserve that timer so a steady producer stream
+        // cannot postpone the older Process indefinitely.
+        if PROCESS_RETRY_DUE.swap(false, Ordering::AcqRel) {
+            let timer = match armed_retry.take() {
+                Some(timer) => timer,
+                None => crate::kernel::crash::fatal(format_args!(
+                    "HypeR: Process retry expired without timer ownership"
+                )),
+            };
+            if let Err(error) = timer.retire() {
+                crate::kernel::crash::fatal(format_args!(
+                    "HypeR: reaper timer retirement failed: {error:?}"
+                ));
+            }
+            crate::kernel::process::promote_delayed_retirements(&mut access);
+        }
         WORK.begin_batch();
-        let mut more_work = false;
+        crate::kernel::process::reap_one_process(&mut access);
+        let mut subsystem_work = false;
         for _ in 0..REAP_BATCH {
             let result = if prefer_objects {
                 reap_object_or_thread(&mut access)
@@ -111,9 +173,9 @@ extern "C" fn worker_entry(_argument: usize) {
             };
             prefer_objects = !prefer_objects;
             match result {
-                Ok(ReapStep::Reaped { more }) => more_work = more,
+                Ok(ReapStep::Reaped { more }) => subsystem_work = more,
                 Ok(ReapStep::Empty) => {
-                    more_work = false;
+                    subsystem_work = false;
                     break;
                 }
                 Err(error) => crate::kernel::crash::fatal(format_args!(
@@ -121,6 +183,24 @@ extern "C" fn worker_entry(_argument: usize) {
                 )),
             }
         }
+        let process_work = crate::kernel::process::retirement_work(&access);
+        if process_work.delayed && armed_retry.is_none() {
+            let deadline = match crate::kernel::time::deadline_after(PROCESS_RETRY_NS) {
+                Ok(deadline) => deadline,
+                Err(error) => crate::kernel::crash::fatal(format_args!(
+                    "HypeR: reaper retry deadline failed: {error:?}"
+                )),
+            };
+            armed_retry = Some(match retry_timer.arm(deadline, retry_expired, 0) {
+                Ok(timer) => timer,
+                Err(error) => crate::kernel::crash::fatal(format_args!(
+                    "HypeR: reaper retry timer failed: {error:?}"
+                )),
+            });
+        }
+        let more_work = subsystem_work || process_work.ready;
+        // Arm before relinquishing work ownership. An expiry or producer racing
+        // this handoff sets durable work and cannot be lost before WAKE.wait.
         match WORK.finish_batch(more_work) {
             WorkDisposition::Continue => {
                 if let Err(error) = crate::kernel::task::scheduler::cond_resched() {
@@ -180,4 +260,14 @@ fn reap_one_object(access: &mut ReaperAccess) -> ReapStep {
     } else {
         ReapStep::Empty
     }
+}
+
+fn retry_expired(_context: usize) {
+    #[cfg(feature = "kernel-self-test")]
+    TEST_RETRY_CPU.store(
+        crate::kernel::cpu::current_index().map_or(usize::MAX, |cpu| cpu.get()),
+        Ordering::Release,
+    );
+    PROCESS_RETRY_DUE.store(true, Ordering::Release);
+    request();
 }

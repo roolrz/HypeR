@@ -12,7 +12,8 @@ use hyper::hal::user::{
 use hyper::sync::InterruptMaskGuard;
 
 use crate::kernel::abi::native::{
-    self, ConsoleServiceError, DeferredServices, ImmediateServices, ObjectServiceError,
+    self, AllocatingServices, ConsoleServiceError, DeferredServices, ImmediateServices,
+    ObjectServiceError,
 };
 use crate::kernel::capability::{HandleInfo, HandleValue, Rights};
 use crate::kernel::ipc::{ChannelReadOutcome, ChannelServiceError, ReadBuffers};
@@ -38,22 +39,6 @@ impl ImmediateServices for ProcessServices<'_> {
         self.process.close_handle(value)
     }
 
-    fn duplicate_handle(
-        &self,
-        value: HandleValue,
-        rights: Rights,
-    ) -> Result<HandleValue, ProcessError> {
-        self.process.duplicate_handle(value, rights)
-    }
-
-    fn replace_handle(
-        &self,
-        value: HandleValue,
-        rights: Rights,
-    ) -> Result<HandleValue, ProcessError> {
-        self.process.replace_handle(value, rights)
-    }
-
     fn handle_info(
         &self,
         value: HandleValue,
@@ -65,14 +50,29 @@ impl ImmediateServices for ProcessServices<'_> {
     fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError> {
         self.process.copy_to_user(destination, source)
     }
+}
 
+impl AllocatingServices for ProcessServices<'_> {
+    fn duplicate_handle(
+        &self,
+        value: HandleValue,
+        rights: Rights,
+    ) -> Result<HandleValue, ProcessError> {
+        self.process.duplicate_handle(value, rights)
+    }
+    fn replace_handle(
+        &self,
+        value: HandleValue,
+        rights: Rights,
+    ) -> Result<HandleValue, ProcessError> {
+        self.process.replace_handle(value, rights)
+    }
     fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
         let event = Event::try_new(&self.process.resource_domain())?;
         Ok(self
             .process
             .create_object(event, <Event as KernelObject>::SUPPORTED_RIGHTS)?)
     }
-
     fn create_channel(&self) -> Result<[HandleValue; 2], ChannelServiceError> {
         crate::kernel::ipc::channel_create(self.process)
     }
@@ -80,6 +80,35 @@ impl ImmediateServices for ProcessServices<'_> {
 
 struct DeferredProcessServices<'session> {
     session: &'session UserSession,
+}
+
+impl AllocatingServices for DeferredProcessServices<'_> {
+    fn duplicate_handle(
+        &self,
+        value: HandleValue,
+        rights: Rights,
+    ) -> Result<HandleValue, ProcessError> {
+        self.session.process.duplicate_handle(value, rights)
+    }
+    fn replace_handle(
+        &self,
+        value: HandleValue,
+        rights: Rights,
+    ) -> Result<HandleValue, ProcessError> {
+        self.session.process.replace_handle(value, rights)
+    }
+    fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
+        ProcessServices {
+            process: &self.session.process,
+        }
+        .create_event()
+    }
+    fn create_channel(&self) -> Result<[HandleValue; 2], ChannelServiceError> {
+        ProcessServices {
+            process: &self.session.process,
+        }
+        .create_channel()
+    }
 }
 
 impl DeferredServices for DeferredProcessServices<'_> {
