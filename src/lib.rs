@@ -11,6 +11,8 @@ pub mod config;
 pub mod cpu;
 pub mod debug;
 pub mod drivers;
+pub mod exec;
+pub mod fs;
 pub mod hal;
 pub mod hw;
 pub mod log;

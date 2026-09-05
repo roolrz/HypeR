@@ -17,8 +17,9 @@ of platform-specific shortcuts.
 AArch64 is the Tier-1 architecture. RISC-V 64-bit is a supported secondary port;
 x86-64 remains experimental. Both expose accidental coupling and continuously
 test the kernel's architecture boundaries. Today, HypeR can bring up SMP hosts
-in QEMU, construct VMs from firmware-provided ramdisks, and boot Linux guests to
-initramfs `/init` on AArch64 and RISC-V.
+in QEMU, mount a firmware-provided initramfs, load a constrained Native ELF
+`/init` on AArch64, and boot Linux guests to initramfs `/init` in repository
+acceptance tests on AArch64 and RISC-V.
 
 > [!IMPORTANT]
 > HypeR is under active development. It is not yet suitable for production,
@@ -91,6 +92,9 @@ The current foundation includes:
 - strong `ProcessImage`, `Process`, object-backed `UserThread`, and `TaskGroup`
   ownership with accounted construction, explicit publication, start/ready,
   stop/join, and acknowledged retirement;
+- an immutable indexed ramfs and strict AArch64 ELF64 loader for the first
+  Native `/init`, with static PIE relocation, W^X enforcement, guarded stack,
+  and scheduler-owned Process publication;
 - an AArch64 VHE/nVHE native-EL0 proof which enters through a scheduler-owned
   user Thread, dispatches the initial handle, scheduling, lifecycle, and Event
   syscalls, contains a user fault, and retires the complete Process ownership
@@ -110,8 +114,8 @@ The current foundation includes:
   stacks, and an optional allocation-free crash console.
 
 This list describes implemented foundations, not a claim of production
-completeness. In particular, a general-purpose Native runtime and loader, an
-EL0 init and VMM, a published capability syscall ABI, device assignment, strong
+completeness. In particular, a general-purpose Native runtime, an EL0 VMM, a
+published capability syscall ABI, device assignment, strong
 guest isolation policy, cross-architecture asynchronous preemption, controlled
 vCPU migration, automatic load balancing, broad hardware discovery, stable
 management APIs, and a general-purpose virtual I/O stack are still under
@@ -163,23 +167,34 @@ design](docs/syscall-abi.md).
 - `curl`, `cpio`, `gzip`, `tar`, and SHA-256 tooling for the Linux guest assets;
 - `dtc` when building the x86-64 QEMU platform description.
 
-On AArch64, the default workflow is:
+Build the standalone AArch64 kernel and run it with an uncompressed `newc`
+initramfs containing a Native `/init`:
 
 ```sh
 make defconfig
-make run
+make run INITRAMFS=/path/to/hyper-initramfs.cpio
 ```
 
-This builds HypeR, downloads checksum-pinned Alpine Linux inputs, constructs a
-versioned VM bundle, and starts a four-CPU QEMU `virt` machine. Guest downloads
-are cached under the platform temporary directory and generated payloads remain
-under `target/guest/`.
+The integrated HypeR build supplies this archive from the Native userspace
+repositories. The Kernel repository validates the loader and ramfs with host
+tests; it does not carry or synthesize a production `/init` program.
+
+Linux guest construction and boot remain Kernel integration tests:
+
+```sh
+make test-qemu ARCH=aarch64
+```
+
+This downloads checksum-pinned Alpine Linux inputs, constructs a versioned VM
+bundle, builds the kernel with `kernel-self-test`, and starts a four-CPU QEMU
+`virt` machine. Guest downloads are cached under the platform temporary
+directory and generated payloads remain under `target/guest/`.
 
 Select another architecture explicitly:
 
 ```sh
 make defconfig ARCH=riscv64
-make run ARCH=riscv64
+make test-qemu ARCH=riscv64
 
 make defconfig ARCH=x86_64
 make image ARCH=x86_64
@@ -195,6 +210,7 @@ Useful targets:
 | Command | Purpose |
 | --- | --- |
 | `make image ARCH=<arch>` | Build the canonical ELF and delivery image |
+| `make run ARCH=aarch64 INITRAMFS=<path>` | Start the production boot path with a Native initramfs |
 | `make guest-assets ARCH=<arch>` | Download and package the pinned Linux guest inputs |
 | `make check ARCH=<arch>` | Run target checks and Clippy, including kernel self-test builds |
 | `make test ARCH=<arch>` | Run host, Kconfig, kallsyms, and Native ABI tests |
@@ -265,16 +281,17 @@ secondary architectures.
 
 ### 1. Establish native EL0 and the capability ABI
 
-- extend the current AArch64 VHE host-EL0 and nVHE stage-2-only raw-code proof
-  into a loader-backed static PIE before publishing a binary ABI, retaining a
-  minimal EL1 relay only as a justified compatibility fallback;
+- extend the current loader-backed AArch64 VHE host-EL0 and nVHE
+  stage-2-only Native path into a service runtime before publishing a binary
+  ABI, retaining a minimal EL1 relay only as a justified compatibility
+  fallback;
 - extend the implemented Process, UserThread, ProcessImage, TaskGroup,
   ResourceDomain, and address-space lifecycle with multi-Thread race coverage
   and atomic exec quiescence;
 - expand the checked schema's current Rust values, C header, layouts, metadata,
   and reference into generated dispatch wrappers, architecture stubs, and vDSO
   exports;
-- expose the existing VMO/VMAR and safe-copy core through capabilities, then
+- expose the typed VMO/VMAR capability core through Native syscalls, then
   extend the implemented Event, Channel, and single-object wait foundation with
   EventPair, WaitSet, clock/timer, and atomic-wait primitives sufficient for a
   real service runtime;
@@ -351,6 +368,7 @@ secondary architectures.
 Further documentation:
 
 - [Architecture boundaries](docs/architecture.md)
+- [Native init contract](docs/native-init.md)
 - [Userspace and syscall architecture](docs/syscall-abi.md)
 - [HypeR Native ABI](https://github.com/roolrz/HypeR-ABI)
 - [VM bundle format](docs/vm-bundle.md)

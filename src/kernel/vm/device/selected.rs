@@ -31,7 +31,7 @@ pub(super) fn clear_console_route_for_vm(vm: super::super::registry::VmId) {
     platform::clear_console_route_for_vm(vm);
 }
 
-pub(super) fn receive_console_input(byte: u8) -> bool {
+pub(super) fn receive_console_input(byte: u8) -> super::ConsoleInputDisposition {
     platform::receive_console_input(byte)
 }
 

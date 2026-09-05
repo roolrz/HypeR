@@ -4,6 +4,7 @@
 //! CPIO parsing and nested VM package selection contracts.
 
 use hyper::archive::cpio::{Archive, EntryKind, Error};
+use hyper::fs::ramfs::{Error as RamFsError, NodeKind, RamFs};
 use hyper::vm::bundle;
 
 fn append_hex(output: &mut Vec<u8>, value: u32) {
@@ -131,6 +132,49 @@ fn validates_crc_archives() {
     assert_eq!(
         Archive::new(&newc_with_checksum).map(|_| ()),
         Err(Error::InvalidChecksum)
+    );
+}
+
+#[test]
+fn mounts_an_immutable_root_filesystem_with_canonical_lookup() {
+    let bytes = archive_with_modes(&[
+        (".", 0o040_755, b""),
+        ("etc", 0o040_755, b""),
+        ("etc/config", 0o100_644, b"value"),
+        ("./init", 0o100_755, b"native image"),
+    ]);
+    let root = crate::require_ok(RamFs::from_newc(&bytes));
+
+    assert_eq!(root.nodes().len(), 3);
+    let init = crate::require_some(crate::require_ok(root.lookup("/init")));
+    assert_eq!(init.kind(), NodeKind::File);
+    assert!(init.is_executable());
+    assert_eq!(init.data(), b"native image");
+    let config = crate::require_some(crate::require_ok(root.lookup("/etc/config")));
+    assert_eq!(config.data(), b"value");
+    assert_eq!(crate::require_ok(root.lookup("/missing")), None);
+}
+
+#[test]
+fn rejects_ambiguous_or_escaping_ramfs_paths() {
+    let duplicate = archive(&[("init", b"one"), ("./init", b"two")]);
+    assert_eq!(
+        RamFs::from_newc(&duplicate).map(|_| ()),
+        Err(RamFsError::DuplicatePath)
+    );
+
+    for path in ["/absolute", "../escape", "dir/../escape", "dir//file"] {
+        let bytes = archive(&[(path, b"payload")]);
+        assert_eq!(
+            RamFs::from_newc(&bytes).map(|_| ()),
+            Err(RamFsError::InvalidPath)
+        );
+    }
+
+    let root_file = archive_with_modes(&[(".", 0o100_755, b"payload")]);
+    assert_eq!(
+        RamFs::from_newc(&root_file).map(|_| ()),
+        Err(RamFsError::InvalidPath)
     );
 }
 

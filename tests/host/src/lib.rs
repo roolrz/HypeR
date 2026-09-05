@@ -84,6 +84,12 @@ mod crash_supplement;
 #[path = "cases/cross_call_pinning.rs"]
 mod cross_call_pinning;
 #[cfg(test)]
+#[path = "cases/elf.rs"]
+mod elf;
+#[cfg(test)]
+#[path = "cases/exec_startup.rs"]
+mod exec_startup;
+#[cfg(test)]
 #[path = "cases/fallible_ownership.rs"]
 mod fallible_ownership;
 #[cfg(test)]

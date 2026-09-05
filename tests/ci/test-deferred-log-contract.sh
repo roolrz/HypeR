@@ -124,11 +124,11 @@ mutate 'partial frames must retain their selected device' \
     src/kernel/log/drain.rs 'output.device = Some(snapshot.device);' \
     'output.device = None;'
 mutate 'guest raw output must retain console newline translation' \
-    src/kernel/log/drain.rs 'push_console_bytes(core::slice::from_ref(&byte))' \
-    'push_byte(byte)'
+    src/kernel/log/drain.rs 'push_console_bytes(&bytes\[\.\.count\])' \
+    'push_bytes(\&bytes[..count])'
 mutate 'raw queue ownership must not advance before physical acceptance' \
-    src/kernel/log/drain.rs 'queue.bytes.pop_front()' \
-    'Some(expected)'
+    src/kernel/log/drain.rs 'queue.bytes.discard_front(count)' \
+    'true'
 mutate 'RISC-V software prompts must reach the scheduler-safe log seam' \
     src/arch/riscv64/exception.rs 'crate::arch::irq::service_kernel_rpc_interrupt' \
     'crate::arch::irq::discard_kernel_rpc_interrupt'

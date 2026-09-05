@@ -158,7 +158,7 @@ impl PreparedMessage {
 
     pub(super) fn is_complete(&self) -> bool {
         let message = self.message();
-        (message.handle_count == 0) == !message.has_capabilities()
+        (message.handle_count == 0) != message.has_capabilities()
     }
 
     fn message(&self) -> &Message {

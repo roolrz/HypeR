@@ -25,7 +25,13 @@ const LOG_RECORDS_PER_BATCH: usize = 32;
 const RAW_QUEUE_CAPACITY: usize = 4096;
 const RAW_BYTES_PER_BATCH: usize = 256;
 const LOG_LINE_MAX: usize = hyper::config::LOG_LINE_MAX as usize;
-const OUTPUT_BUFFER_SIZE: usize = LOG_LINE_MAX * 2 + 128;
+const LOG_OUTPUT_BUFFER_SIZE: usize = LOG_LINE_MAX * 2 + 128;
+const RAW_OUTPUT_BUFFER_SIZE: usize = RAW_BYTES_PER_BATCH * 2;
+const OUTPUT_BUFFER_SIZE: usize = if LOG_OUTPUT_BUFFER_SIZE > RAW_OUTPUT_BUFFER_SIZE {
+    LOG_OUTPUT_BUFFER_SIZE
+} else {
+    RAW_OUTPUT_BUFFER_SIZE
+};
 const UART_BYTES_PER_BATCH: usize = 256;
 
 static MODE: AtomicU8 = AtomicU8::new(BOOT);
@@ -42,7 +48,7 @@ struct RawQueueState {
 enum PendingCommit {
     None,
     Log { sequence: u64, missed: u64 },
-    RawByte(u8),
+    RawBytes { count: usize },
     RawOverflow { total_dropped: u64 },
     RingFailure,
 }
@@ -208,9 +214,39 @@ pub(super) fn enqueue_raw(byte: u8) {
         return;
     }
     RAW_QUEUE.with(|queue| {
+        let was_writable = queue.bytes.remaining_capacity() != 0;
         let _ = queue.bytes.push(byte);
+        let is_writable = queue.bytes.remaining_capacity() != 0;
+        if was_writable != is_writable {
+            crate::kernel::device::console::publish_writable(is_writable);
+        }
     });
     request();
+}
+
+/// Enqueues a bounded userspace console write without silently dropping data.
+pub(super) fn try_enqueue_raw(bytes: &[u8]) -> usize {
+    if MODE.load(Ordering::Acquire) != RUNTIME || bytes.is_empty() {
+        return 0;
+    }
+    let accepted = RAW_QUEUE.with(|queue| {
+        let was_writable = queue.bytes.remaining_capacity() != 0;
+        let accepted = queue.bytes.remaining_capacity().min(bytes.len());
+        for &byte in &bytes[..accepted] {
+            if !queue.bytes.push(byte) {
+                worker_failure("raw enqueue", "reserved queue capacity disappeared")
+            }
+        }
+        let is_writable = queue.bytes.remaining_capacity() != 0;
+        if was_writable != is_writable {
+            crate::kernel::device::console::publish_writable(is_writable);
+        }
+        accepted
+    });
+    if accepted != 0 {
+        request();
+    }
+    accepted
 }
 
 /// Gives fatal output permanent priority over normal runtime draining.
@@ -409,12 +445,10 @@ fn prepare_log_output(
 }
 
 fn prepare_raw_output(output: &mut WorkerOutput) -> bool {
-    let (byte, dropped, reported) = RAW_QUEUE.with(|queue| {
-        (
-            queue.bytes.front(),
-            queue.bytes.dropped(),
-            queue.reported_dropped,
-        )
+    let mut bytes = [0u8; RAW_BYTES_PER_BATCH];
+    let (count, dropped, reported) = RAW_QUEUE.with(|queue| {
+        let count = queue.bytes.peek_through(b'\n', &mut bytes);
+        (count, queue.bytes.dropped(), queue.reported_dropped)
     });
     if dropped > reported {
         if prepare_raw_overflow(&mut output.bytes, dropped - reported).is_err() {
@@ -425,17 +459,13 @@ fn prepare_raw_output(output: &mut WorkerOutput) -> bool {
         };
         return true;
     }
-    let Some(byte) = byte else {
+    if count == 0 {
         return false;
-    };
-    if output
-        .bytes
-        .push_console_bytes(core::slice::from_ref(&byte))
-        .is_err()
-    {
-        worker_failure("raw-byte formatting", OutputError::Full)
     }
-    output.commit = PendingCommit::RawByte(byte);
+    if output.bytes.push_console_bytes(&bytes[..count]).is_err() {
+        worker_failure("raw-output formatting", OutputError::Full)
+    }
+    output.commit = PendingCommit::RawBytes { count };
     true
 }
 
@@ -443,9 +473,16 @@ fn commit_runtime_output(output: &mut WorkerOutput) {
     match output.commit {
         PendingCommit::None => worker_failure("output commit", "missing commit owner"),
         PendingCommit::Log { sequence, missed } => publish_log_progress(sequence, missed),
-        PendingCommit::RawByte(expected) => RAW_QUEUE.with(|queue| {
-            if queue.bytes.pop_front() != Some(expected) {
-                worker_failure("raw-byte commit", "queue head changed")
+        PendingCommit::RawBytes { count } => RAW_QUEUE.with(|queue| {
+            let was_writable = queue.bytes.remaining_capacity() != 0;
+            // RAW_QUEUE has one consumer. Producers can only append while the
+            // prepared bytes are in flight, so the observed prefix remains
+            // stable until this successful physical write commits it.
+            if !queue.bytes.discard_front(count) {
+                worker_failure("raw-output commit", "prepared prefix disappeared")
+            }
+            if !was_writable {
+                crate::kernel::device::console::publish_writable(true);
             }
         }),
         PendingCommit::RawOverflow { total_dropped } => RAW_QUEUE.with(|queue| {

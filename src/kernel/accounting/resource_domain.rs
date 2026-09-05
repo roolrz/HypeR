@@ -3,10 +3,7 @@
 
 //! Hierarchical multi-resource accounting with owned charge transactions.
 
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-
-#[cfg(test)]
-use core::sync::atomic::AtomicBool;
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use hyper::mm::{AllocationError, FallibleArc};
 use hyper::sync::InterruptSpinLock;
@@ -269,6 +266,7 @@ struct DomainInner {
     depth: usize,
     control: DomainLock<DomainControl>,
     active_children: AtomicUsize,
+    object_published: AtomicBool,
     total: [AtomicU64; RESOURCE_KIND_COUNT],
     pending: [AtomicU64; RESOURCE_KIND_COUNT],
     #[cfg(test)]
@@ -329,6 +327,7 @@ impl ResourceDomain {
                 lifecycle: DomainLifecycle::Active,
             }),
             active_children: AtomicUsize::new(0),
+            object_published: AtomicBool::new(false),
             total: [const { AtomicU64::new(0) }; RESOURCE_KIND_COUNT],
             pending: [const { AtomicU64::new(0) }; RESOURCE_KIND_COUNT],
             #[cfg(test)]
@@ -377,6 +376,7 @@ impl ResourceDomain {
                 lifecycle: DomainLifecycle::Active,
             }),
             active_children: AtomicUsize::new(0),
+            object_published: AtomicBool::new(false),
             total: [const { AtomicU64::new(0) }; RESOURCE_KIND_COUNT],
             pending: [const { AtomicU64::new(0) }; RESOURCE_KIND_COUNT],
             #[cfg(test)]
@@ -433,6 +433,24 @@ impl ResourceDomain {
 
     pub(crate) fn local_limits(&self) -> ResourceLimits {
         self.inner.control.with(|control| control.limits)
+    }
+
+    pub(super) fn claim_object_publication(&self) -> bool {
+        self.inner
+            .object_published
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(super) fn abort_object_publication(&self) {
+        if self
+            .inner
+            .object_published
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            accounting_invariant_violation();
+        }
     }
 
     /// Replaces local ceilings without changing usage or ancestor policy.

@@ -22,10 +22,27 @@ const ACTIVE_LIMIT: usize = RETIRED - 1;
 const EVENT_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_EVENT;
 const CHANNEL_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_CHANNEL;
 const THREAD_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_THREAD;
+const PROCESS_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS;
+const TASK_GROUP_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_TASK_GROUP;
+const RESOURCE_DOMAIN_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN;
+const TASK_FACTORY_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_TASK_FACTORY;
+const EXECUTABLE_AUTHORITY_OBJECT_KIND: u32 =
+    hyper::abi::native::HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY;
+const VMO_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_VMO;
+const VMAR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_VMAR;
+const CONSOLE_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_CONSOLE;
 
 const _: () = assert!(EVENT_OBJECT_KIND != 0);
 const _: () = assert!(CHANNEL_OBJECT_KIND != 0);
 const _: () = assert!(THREAD_OBJECT_KIND != 0);
+const _: () = assert!(PROCESS_OBJECT_KIND != 0);
+const _: () = assert!(TASK_GROUP_OBJECT_KIND != 0);
+const _: () = assert!(RESOURCE_DOMAIN_OBJECT_KIND != 0);
+const _: () = assert!(TASK_FACTORY_OBJECT_KIND != 0);
+const _: () = assert!(EXECUTABLE_AUTHORITY_OBJECT_KIND != 0);
+const _: () = assert!(VMO_OBJECT_KIND != 0);
+const _: () = assert!(VMAR_OBJECT_KIND != 0);
+const _: () = assert!(CONSOLE_OBJECT_KIND != 0);
 
 static NEXT_KOID: AtomicU64 = AtomicU64::new(1);
 
@@ -87,6 +104,22 @@ impl ObjectKind {
     pub(crate) const CHANNEL: Self = Self(CHANNEL_OBJECT_KIND);
     /// Native user-thread kind declared by the generated ABI schema.
     pub(crate) const THREAD: Self = Self(THREAD_OBJECT_KIND);
+    /// Native process-control kind declared by the generated ABI schema.
+    pub(crate) const PROCESS: Self = Self(PROCESS_OBJECT_KIND);
+    /// Grouped process-lifecycle kind declared by the generated ABI schema.
+    pub(crate) const TASK_GROUP: Self = Self(TASK_GROUP_OBJECT_KIND);
+    /// Hierarchical resource-accounting kind declared by the generated ABI schema.
+    pub(crate) const RESOURCE_DOMAIN: Self = Self(RESOURCE_DOMAIN_OBJECT_KIND);
+    /// Authority to construct task objects declared by the generated ABI schema.
+    pub(crate) const TASK_FACTORY: Self = Self(TASK_FACTORY_OBJECT_KIND);
+    /// Authority to derive immutable executable memory.
+    pub(crate) const EXECUTABLE_AUTHORITY: Self = Self(EXECUTABLE_AUTHORITY_OBJECT_KIND);
+    /// Native virtual-memory object kind declared by the generated ABI schema.
+    pub(crate) const VMO: Self = Self(VMO_OBJECT_KIND);
+    /// Native virtual-address-region kind declared by the generated ABI schema.
+    pub(crate) const VMAR: Self = Self(VMAR_OBJECT_KIND);
+    /// Capability-scoped host-console kind declared by the generated ABI schema.
+    pub(crate) const CONSOLE: Self = Self(CONSOLE_OBJECT_KIND);
 
     /// Constructs a synthetic kind for host-only mechanism tests.
     ///
@@ -203,7 +236,18 @@ pub(crate) mod private {
 /// CPUs, and the callback must not invalidate state they can access.
 pub(crate) trait KernelObject: private::Sealed + Any + Send + Sync {
     const KIND: ObjectKind;
+    /// Type-wide ceiling for every instance of this object payload.
     const SUPPORTED_RIGHTS: Rights;
+
+    /// Rights supported by this particular immutable object instance.
+    ///
+    /// Most payloads use the type-wide ceiling. Sum types whose variants have
+    /// different authority surfaces override this method. The returned set is
+    /// captured in the object header at construction and must be a subset of
+    /// `SUPPORTED_RIGHTS`.
+    fn supported_rights(&self) -> Rights {
+        Self::SUPPORTED_RIGHTS
+    }
 
     /// Exposes level-state observation only for objects which support `WAIT`.
     ///
@@ -426,8 +470,10 @@ impl ObjectRef {
         export_policy: ExportPolicy,
         class: ReferenceKind,
     ) -> Result<Self, ObjectCreationError> {
+        let supported_rights = payload.supported_rights();
         let signal_source = payload.signal_source();
-        if T::SUPPORTED_RIGHTS.contains(Rights::WAIT) != signal_source.is_some()
+        if !T::SUPPORTED_RIGHTS.contains(supported_rights)
+            || supported_rights.contains(Rights::WAIT) != signal_source.is_some()
             || signal_source.is_some_and(SignalSource::has_empty_mask)
         {
             // Object definitions are closed kernel code. Publishing a WAIT
@@ -443,7 +489,7 @@ impl ObjectRef {
             header: ObjectHeader {
                 koid,
                 kind: T::KIND,
-                supported_rights: T::SUPPORTED_RIGHTS,
+                supported_rights,
                 payload_type: TypeId::of::<T>(),
                 export_policy,
                 active_handles: AtomicUsize::new(0),

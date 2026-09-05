@@ -115,6 +115,16 @@ impl ExecutableProvenance {
     }
 }
 
+impl ExecutableProvenance {
+    pub(super) const fn for_native_image_loader() -> Self {
+        Self { _private: () }
+    }
+
+    pub(super) const fn for_capability() -> Self {
+        Self { _private: () }
+    }
+}
+
 impl<Backend: PageBackend, Account: MemoryAccount> Clone for WritableVmo<Backend, Account> {
     fn clone(&self) -> Self {
         Self {

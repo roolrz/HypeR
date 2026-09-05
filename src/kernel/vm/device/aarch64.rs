@@ -199,9 +199,9 @@ fn publish_terminal_mmio_report(
     }
 }
 
-pub(super) fn receive_console_input(byte: u8) -> bool {
+pub(super) fn receive_console_input(byte: u8) -> super::super::ConsoleInputDisposition {
     let Some(route) = CONSOLE_ROUTE.with(|route| *route) else {
-        return true;
+        return super::super::ConsoleInputDisposition::from_guest_claim(false);
     };
     let delivery = super::super::super::registry::with_binding(route.vm, |binding| {
         binding
@@ -223,23 +223,24 @@ pub(super) fn receive_console_input(byte: u8) -> bool {
             .map_err(ConsoleDeliveryError::Registry)
     });
     match delivery {
-        Ok(Ok(())) => true,
+        Ok(Ok(())) => {}
         Ok(Err(ConsoleDeliveryError::Registry(
             super::super::super::registry::Error::EndpointClosed,
         ))) => {
             let _ = clear_console_route_exact(route.vm, route.thread);
-            true
         }
-        Ok(Err(_)) => false,
+        Ok(Err(_)) => {}
         Err(
             super::super::super::registry::Error::NotInstalled
             | super::super::super::registry::Error::StaleIdentity,
         ) => {
             let _ = clear_console_route_exact(route.vm, route.thread);
-            true
         }
-        Err(_) => false,
+        Err(_) => {}
     }
+    // Once a route was observed, failure cannot transfer ownership to Native
+    // userspace: doing so would leak a guest-owned input byte across domains.
+    super::super::ConsoleInputDisposition::from_guest_claim(true)
 }
 
 enum ConsoleDeliveryError {

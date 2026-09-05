@@ -6,6 +6,8 @@
 mod directory;
 mod image;
 mod lifecycle;
+mod loader;
+mod objects;
 mod owner;
 mod task_group;
 mod user_thread;
@@ -16,6 +18,8 @@ pub(crate) use image::{
     UserThreadStart,
 };
 pub(crate) use lifecycle::{ProcessPhase, TerminalReason, UserThreadPhase};
+pub(crate) use loader::{Error as LoaderError, INITIAL_STACK_TOP, LoadedProcessImage, load_native};
+pub(crate) use objects::{ProcessObject, TaskFactory, TaskGroupObject, TaskObjectError};
 pub(crate) use owner::{
     AddressSpaceRetirement, HandleBatchPublishFailure, HandleTransferCommitFailure,
     PreparedProcess, PreparedProcessHandleTransfer, Process, ProcessCreateFailure, ProcessError,
