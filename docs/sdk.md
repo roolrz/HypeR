@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Native SDK contract
 
 The HypeR Native SDK is the supported build boundary between this source tree
-and Native EL0 applications. Kernel, ABI, runtime, toolchain, and system-source
+and Native EL0 applications. Kernel, ABI, runtime, toolchain, and application
 changes are reviewed and tested in one commit; SDK releases are derived from
 that coherent commit rather than assembled from independently moving
 repositories.
@@ -62,9 +62,9 @@ builds the SDK transactionally, and compiles and links a public-interface-only
 application. `make sdk-test` runs ABI layout tests and portable C runtime unit
 tests.
 
-## System integration
+## Application integration
 
-`make system` first assembles the SDK and then builds `system/apps/init` with
+`make app` first assembles the SDK and then builds `app/init` with
 the installed `bin/hyper-clang`. `make native-initramfs` packages that result
 as a deterministic `newc` archive, and `make test-native` boots the kernel and
 verifies startup, blocking console input, and echo under QEMU.

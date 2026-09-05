@@ -150,10 +150,10 @@ invoke immutable registered kernel services, and encode exhaustive completion
 actions only after policy returns. CI rejects direct architecture-to-kernel
 policy dependencies outside the three non-returning bootstrap transfers.
 
-Read [the architecture guide](docs/architecture.md) for the normative boundary
-rules and migration constraints. The planned process, capability, syscall, and
-foreign-ABI boundary is specified separately in the [userspace and syscall
-design](docs/syscall-abi.md).
+Read [the architecture guide](kernel/docs/architecture.md) for the normative
+boundary rules and migration constraints. The planned process, capability,
+syscall, and foreign-ABI boundary is specified separately in the [userspace and
+syscall design](kernel/docs/syscall-abi.md).
 
 ## Quick start
 
@@ -175,7 +175,7 @@ make defconfig
 make run
 ```
 
-`make run` builds `system/apps/init` only through the assembled SDK under
+`make run` builds `app/init` only through the assembled SDK under
 `target/sdk/aarch64`; the application does not include private kernel or SDK
 source paths. Pass `INITRAMFS=/path/to/archive.cpio` to test another Native
 userspace image.
@@ -189,7 +189,7 @@ make test-qemu ARCH=aarch64
 This downloads checksum-pinned Alpine Linux inputs, constructs a versioned VM
 bundle, builds the kernel with `kernel-self-test`, and starts a four-CPU QEMU
 `virt` machine. Guest downloads are cached under the platform temporary
-directory and generated payloads remain under `target/guest/`.
+directory and generated payloads remain under `kernel/target/guest/`.
 
 Select another architecture explicitly:
 
@@ -227,8 +227,8 @@ Useful targets:
 The default AArch64 image is written to:
 
 ```text
-target/aarch64-unknown-none/kernel/hyper
-target/aarch64-unknown-none/kernel/hyper.img
+kernel/target/aarch64-unknown-none/kernel/hyper
+kernel/target/aarch64-unknown-none/kernel/hyper.img
 ```
 
 `make release` strips debugger-only sections from the canonical ELF without
@@ -236,8 +236,8 @@ recompiling it, then verifies that the resulting raw image is byte-identical.
 
 ## Configuration
 
-HypeR uses an in-tree, dependency-free Kconfig-like tool. It reads the root
-`Kconfig`, writes a Linux-style `.config`, validates dependencies and ranges,
+HypeR uses an in-tree, dependency-free Kconfig-like tool. It reads
+`kernel/Kconfig`, writes `kernel/.config`, validates dependencies and ranges,
 and exports declared symbols as checked Rust `cfg` values and typed constants.
 
 ```sh
@@ -250,7 +250,7 @@ make defconfig    # restore the selected QEMU architecture defaults
 developer's `.config`:
 
 ```sh
-make image ARCH=aarch64 CONFIG_FILE=configs/qemu_aarch64_defconfig
+make image ARCH=aarch64 CONFIG_FILE=kernel/configs/qemu_aarch64_defconfig
 ```
 
 ## Testing and CI
@@ -363,33 +363,36 @@ secondary architectures.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/arch/` | Architecture entry, context, page-table, exception, and virtualization mechanisms |
-| `src/hal/` | Narrow architecture-neutral capability contracts |
-| `src/kernel/` | Runtime ownership, policy, scheduling, IRQ, memory, devices, and VM orchestration |
-| `src/vm/` | Reusable VM packages, guest-visible models, and architecture-neutral virtualization vocabulary |
-| `src/drivers/` | Physical devices and firmware-interface drivers |
-| `src/platform/` | Firmware parsing and immutable platform description |
-| `src/mm/`, `src/sync/`, `src/time/` | Reusable allocation, synchronization, and timing mechanisms |
+| `kernel/` | Independently buildable hypervisor kernel, configuration, documentation, tests, and build tooling |
+| `kernel/src/arch/` | Architecture entry, context, page-table, exception, and virtualization mechanisms |
+| `kernel/src/hal/` | Narrow architecture-neutral capability contracts |
+| `kernel/src/kernel/` | Runtime ownership, policy, scheduling, IRQ, memory, devices, and VM orchestration |
+| `kernel/src/vm/` | Reusable VM packages, guest-visible models, and architecture-neutral virtualization vocabulary |
+| `kernel/src/drivers/` | Physical devices and firmware-interface drivers |
+| `kernel/src/platform/` | Firmware parsing and immutable platform description |
+| `kernel/src/mm/`, `kernel/src/sync/`, `kernel/src/time/` | Reusable allocation, synchronization, and timing mechanisms |
 | `sdk/abi/` | Native ABI schema, generated Rust definitions, C header, and reference |
 | `sdk/lib/` | Freestanding Native C runtime and architecture syscall veneers |
 | `sdk/toolchain/` | Clang driver, linker contract, and transactional SDK assembly |
-| `system/apps/` | Native system processes built only against the assembled SDK |
-| `tests/` | Host tests, kernel self-tests, image verification, QEMU acceptance, and CI contracts |
-| `tools/` | Kconfig, kallsyms, and guest-payload tooling |
+| `app/` | Native system applications built only against the assembled SDK |
+| `kernel/tests/` | Kernel host tests, self-tests, image verification, and QEMU acceptance |
+| `kernel/tools/` | Kconfig, kallsyms, and Linux guest-payload tooling |
+| `tests/` | Repository-wide contracts and Kernel/SDK/application integration tests |
+| `tools/` | Product-composition tooling shared across source domains |
 
 Further documentation:
 
-- [Architecture boundaries](docs/architecture.md)
-- [Native init contract](docs/native-init.md)
-- [Userspace and syscall architecture](docs/syscall-abi.md)
+- [Architecture boundaries](kernel/docs/architecture.md)
+- [Native init contract](kernel/docs/native-init.md)
+- [Userspace and syscall architecture](kernel/docs/syscall-abi.md)
 - [Native SDK contract](docs/sdk.md)
 - [HypeR Native ABI reference](sdk/abi/docs/native.md)
-- [VM bundle format](docs/vm-bundle.md)
-- [RISC-V execution profile](docs/riscv64.md)
-- [x86-64 execution profile](docs/x86_64.md)
-- [Crash console](docs/crash-console.md)
+- [VM bundle format](kernel/docs/vm-bundle.md)
+- [RISC-V execution profile](kernel/docs/riscv64.md)
+- [x86-64 execution profile](kernel/docs/x86_64.md)
+- [Crash console](kernel/docs/crash-console.md)
 - [Security policy](SECURITY.md)
-- [External guest payload and licensing](tools/guest/README.md)
+- [External guest payload and licensing](kernel/tools/guest/README.md)
 
 ## Contributing
 
@@ -431,7 +434,7 @@ They are checksum-verified, ignored by Git, and are not part of the
 Apache-2.0-licensed source distribution. Linux is GPL-2.0-only and Alpine
 packages carry their own licenses. Anyone redistributing generated guest
 payloads must preserve the relevant upstream notices and source-availability
-obligations. See [tools/guest/README.md](tools/guest/README.md) for details.
+obligations. See [kernel/tools/guest/README.md](kernel/tools/guest/README.md) for details.
 
 ---
 

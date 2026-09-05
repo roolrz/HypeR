@@ -28,7 +28,7 @@ test = false
 bench = false
 
 [dependencies]
-hyper-abi = { path = "sdk/abi" }
+hyper-abi = { path = "../sdk/abi" }
 rustc-demangle = { version = "0.1.28", default-features = false }
 
 [lints.clippy]
