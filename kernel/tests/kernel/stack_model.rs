@@ -13,6 +13,7 @@ use crate::kernel::sync::Semaphore;
 use crate::kernel::task::scheduler;
 
 static IRQ_CALLBACK_SP: AtomicUsize = AtomicUsize::new(0);
+const MAX_WORKER_PARK_PASSES: usize = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
@@ -29,6 +30,7 @@ pub(super) enum Error {
         expected: usize,
         observed: usize,
     },
+    WorkerNotParked,
     #[cfg(CONFIG_ARCH_X86_64)]
     ShootdownMissing,
     Scheduler(scheduler::Error),
@@ -118,6 +120,7 @@ fn validate_thread_stack() -> Result<(), Error> {
     scheduler::thread_ready(id)?;
     scheduler::yield_now()?;
     THREAD_PROBE.ready.acquire()?;
+    wait_until_worker_parked()?;
     let statistics = scheduler::thread_stack_statistics(id)?.ok_or(Error::StackUsageMissing)?;
     let allocated_pages = crate::kernel::mm::statistics()
         .ok_or(Error::PageAccountingUnavailable)?
@@ -156,6 +159,20 @@ fn validate_thread_stack() -> Result<(), Error> {
         return Err(Error::ShootdownMissing);
     }
     Ok(())
+}
+
+fn wait_until_worker_parked() -> Result<(), Error> {
+    for _ in 0..MAX_WORKER_PARK_PASSES {
+        if THREAD_PROBE.release.waiter_count()? == 1 {
+            return Ok(());
+        }
+        // The ready notification is published before the worker enters its
+        // blocking acquire. An IRQ-tail preemption may resume this test in
+        // that interval, so yield until the wait queue owns the worker before
+        // inspecting its stopped stack.
+        scheduler::yield_now()?;
+    }
+    Err(Error::WorkerNotParked)
 }
 
 extern "C" fn stack_worker(argument: usize) {
