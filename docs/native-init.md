@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 The production kernel boot path starts one Native userspace process from the
 firmware-provided initial ramdisk. Linux guest autostart belongs exclusively to
-Kernel repository images built with the `kernel-self-test` Cargo feature.
+images built with the `kernel-self-test` Cargo feature.
 
 ## Initial ramdisk
 
@@ -80,10 +80,10 @@ capability-checked reads and writes; `READABLE` and `WRITABLE` levels compose
 with the ordinary object-wait syscall. No self-Process handle is installed in
 its own table.
 
-## Repository validation boundary
+## Validation boundary
 
-Kernel host tests validate archive indexing, path rejection, ELF permissions,
-layout, entry points, and supported relocation decoding. Kernel QEMU tests use
-the test-only Linux guest path and do not claim to validate a Native `/init`.
-The integrated HypeR build owns construction of the real initramfs and the
-end-to-end Native init boot contract.
+Host tests validate archive indexing, path rejection, ELF permissions, layout,
+entry points, and supported relocation decoding. Kernel QEMU tests use the
+test-only Linux guest path. The `test-native` contract separately builds
+`system/apps/init` through the assembled SDK, constructs the production
+initramfs, and verifies Native startup and console I/O end to end.

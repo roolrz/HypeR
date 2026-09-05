@@ -78,7 +78,7 @@ The current foundation includes:
 - generation-tagged, allocation-free wait arbitration across notification,
   timeout, and cancellation, with counted Completion, sleeping Mutex and
   Semaphore primitives, and migration-safe deadline waits;
-- an exactly pinned, pre-release [HypeR Native ABI](https://github.com/roolrz/HypeR-ABI)
+- an in-tree, schema-defined pre-release [HypeR Native ABI](sdk/abi/docs/native.md)
   with checked Rust and C layouts, syscall metadata, and an auditable reference;
 - a compiled capability foundation with fallible shared objects, schema-owned
   rights, 64-bit generation handles, detached unpublished slot transactions,
@@ -167,17 +167,18 @@ design](docs/syscall-abi.md).
 - `curl`, `cpio`, `gzip`, `tar`, and SHA-256 tooling for the Linux guest assets;
 - `dtc` when building the x86-64 QEMU platform description.
 
-Build the standalone AArch64 kernel and run it with an uncompressed `newc`
-initramfs containing a Native `/init`:
+Build the AArch64 kernel, Native SDK, and initramfs, then run the complete
+system:
 
 ```sh
 make defconfig
-make run INITRAMFS=/path/to/hyper-initramfs.cpio
+make run
 ```
 
-The integrated HypeR build supplies this archive from the Native userspace
-repositories. The Kernel repository validates the loader and ramfs with host
-tests; it does not carry or synthesize a production `/init` program.
+`make run` builds `system/apps/init` only through the assembled SDK under
+`target/sdk/aarch64`; the application does not include private kernel or SDK
+source paths. Pass `INITRAMFS=/path/to/archive.cpio` to test another Native
+userspace image.
 
 Linux guest construction and boot remain Kernel integration tests:
 
@@ -210,13 +211,18 @@ Useful targets:
 | Command | Purpose |
 | --- | --- |
 | `make image ARCH=<arch>` | Build the canonical ELF and delivery image |
-| `make run ARCH=aarch64 INITRAMFS=<path>` | Start the production boot path with a Native initramfs |
+| `make sdk` | Assemble the AArch64 Native SDK under `target/sdk/aarch64` |
+| `make sdk-check` / `make sdk-test` | Verify SDK generation, publication, compilation, and portable runtime behavior |
+| `make native-initramfs` | Build Native `/init` through the SDK and package it as deterministic `newc` |
+| `make run ARCH=aarch64` | Build and start the complete Native system |
+| `make test-native` | Verify Native init startup, blocking console input, and echo under QEMU |
 | `make guest-assets ARCH=<arch>` | Download and package the pinned Linux guest inputs |
 | `make check ARCH=<arch>` | Run target checks and Clippy, including kernel self-test builds |
-| `make test ARCH=<arch>` | Run host, Kconfig, kallsyms, and Native ABI tests |
+| `make test ARCH=<arch>` | Run kernel host, Kconfig, and kallsyms tests |
 | `make test-image ARCH=<arch>` | Verify the ELF, relocation, image, and architecture contract |
 | `make test-qemu ARCH=<arch>` | Run the architecture's QEMU acceptance test where supported |
 | `make verify ARCH=<arch>` | Run the complete local contract for the selected architecture |
+| `make verify-all` | Verify the AArch64 kernel, SDK, and Native system together |
 
 The default AArch64 image is written to:
 
@@ -250,9 +256,10 @@ make image ARCH=aarch64 CONFIG_FILE=configs/qemu_aarch64_defconfig
 ## Testing and CI
 
 GitHub Actions separates source quality, architecture builds, image contracts,
-and runtime acceptance. The AArch64 matrix exercises baseline and feature-rich
-CPU models, multiple host modes and atomic backends, address-space geometries,
-SMP, kernel self-tests, virtual interrupts and timers, and Linux guest startup.
+Native SDK integration, and runtime acceptance. The AArch64 matrix exercises
+baseline and feature-rich CPU models, multiple host modes and atomic backends,
+address-space geometries, SMP, kernel self-tests, virtual interrupts and timers,
+and Linux guest startup.
 It requires repeated initramfs timer wakeups before exercising guest-console
 RX, so reaching `/init` or delivering only the first timer interrupt cannot
 hide a stalled virtual timer. RISC-V must also reach guest `/init`. x86-64
@@ -262,6 +269,7 @@ Stable local equivalents live in `tests/ci/run.sh`:
 
 ```sh
 sh tests/ci/run.sh quality
+sh tests/ci/run.sh native
 sh tests/ci/run.sh aarch64-build
 QEMU_CPU=max QEMU_CPUS=4 sh tests/ci/run.sh aarch64-qemu
 sh tests/ci/run.sh riscv64-qemu
@@ -362,6 +370,10 @@ secondary architectures.
 | `src/drivers/` | Physical devices and firmware-interface drivers |
 | `src/platform/` | Firmware parsing and immutable platform description |
 | `src/mm/`, `src/sync/`, `src/time/` | Reusable allocation, synchronization, and timing mechanisms |
+| `sdk/abi/` | Native ABI schema, generated Rust definitions, C header, and reference |
+| `sdk/lib/` | Freestanding Native C runtime and architecture syscall veneers |
+| `sdk/toolchain/` | Clang driver, linker contract, and transactional SDK assembly |
+| `system/apps/` | Native system processes built only against the assembled SDK |
 | `tests/` | Host tests, kernel self-tests, image verification, QEMU acceptance, and CI contracts |
 | `tools/` | Kconfig, kallsyms, and guest-payload tooling |
 
@@ -370,7 +382,8 @@ Further documentation:
 - [Architecture boundaries](docs/architecture.md)
 - [Native init contract](docs/native-init.md)
 - [Userspace and syscall architecture](docs/syscall-abi.md)
-- [HypeR Native ABI](https://github.com/roolrz/HypeR-ABI)
+- [Native SDK contract](docs/sdk.md)
+- [HypeR Native ABI reference](sdk/abi/docs/native.md)
 - [VM bundle format](docs/vm-bundle.md)
 - [RISC-V execution profile](docs/riscv64.md)
 - [x86-64 execution profile](docs/x86_64.md)

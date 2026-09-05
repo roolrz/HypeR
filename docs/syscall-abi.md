@@ -98,7 +98,7 @@ hardware validation exist.
 The intended production layout is:
 
 ```text
-HypeR-ABI                   compiler-checked schema and public interfaces
+sdk/abi/                    compiler-checked schema and public interfaces
 
 src/kernel/entry/user.rs    one upward user-entry adapter
 src/kernel/abi/             ABI values, native dispatch, supervised seam
@@ -264,10 +264,11 @@ Linux and FreeBSD restart rules remain foreign-personality policy.
 
 ## Declarative ABI schema
 
-One compiler-checked Rust data schema in the separately versioned
-[HypeR-ABI](https://github.com/roolrz/HypeR-ABI) repository is the source of
-truth. The kernel pins the dependency to an exact commit and consumes its
-dependency-free `no_std` crate without maintaining a second ABI definition.
+One compiler-checked Rust data schema under `sdk/abi/` is the source of truth.
+The kernel consumes its dependency-free `no_std` crate through an in-tree path
+dependency without maintaining a second ABI definition. Released Native SDKs
+are generated from the same repository commit as the kernel that implements
+their contract.
 
 Each syscall declaration records at least:
 

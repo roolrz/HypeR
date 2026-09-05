@@ -13,7 +13,6 @@ dependencies = [
 [[package]]
 name = "hyper-abi"
 version = "0.0.0"
-source = "git+https://github.com/roolrz/HypeR-ABI?rev=83aec4ce6a3b51ecd093220b815a25403cb9cdf3#83aec4ce6a3b51ecd093220b815a25403cb9cdf3"
 
 [[package]]
 name = "rustc-demangle"
