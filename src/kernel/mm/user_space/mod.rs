@@ -10,11 +10,15 @@
 #![cfg_attr(test, allow(unexpected_cfgs))]
 
 mod address_space;
+#[cfg(not(test))]
+mod authority;
 mod contract;
 #[cfg(not(test))]
 mod kernel_adapter;
 #[cfg(not(test))]
 mod machine;
+#[cfg(not(test))]
+mod objects;
 mod vmo;
 
 pub(crate) use address_space::{
@@ -22,6 +26,8 @@ pub(crate) use address_space::{
     MappingToken, PreparedMappingChange, PreparedPageSnapshot, PreparedUserWrite, UserAddressSpace,
     Vmar,
 };
+#[cfg(not(test))]
+pub(crate) use authority::{ExecutableAuthority, ExecutableAuthorityError};
 pub(crate) use contract::{
     Access, AddressError, MemoryAccount, MemoryCharge, PageBackend, Permissions, UserAddress,
     UserAddressWindow, UserSlice,
@@ -34,11 +40,13 @@ pub(crate) use kernel_adapter::fail_exposed_write_after_copy_for_test;
 pub(crate) use kernel_adapter::{DomainAccount, KernelPageBackend, KernelPageError};
 #[cfg(not(test))]
 pub(crate) use machine::{
-    ActiveNativeAddressSpace, Error as MachineError, NativeAddressSpace, StoppedNativeRun,
-    UserWriteReservation,
+    ActiveNativeAddressSpace, Error as MachineError, NativeAddressSpace, NativeImageSegment,
+    StoppedNativeRun, UserWriteReservation,
 };
 #[cfg(all(not(test), feature = "kernel-self-test"))]
 pub(crate) use machine::{prepare_native_entry_self_test, run_dormant_self_test};
+#[cfg(not(test))]
+pub(crate) use objects::{MemoryObjectError, VmarObject, VmoObject};
 
 #[cfg(not(test))]
 pub(crate) use machine::service_local_rpc;

@@ -12,7 +12,8 @@ use hyper::abi::native::{
     HYPER_NATIVE_STATUS_PEER_CLOSED, HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
     HYPER_NATIVE_STATUS_TIMED_OUT, HYPER_NATIVE_STATUS_WOULD_BLOCK, HYPER_NATIVE_SYS_ABI_QUERY,
     HYPER_NATIVE_SYS_CHANNEL_CREATE, HYPER_NATIVE_SYS_CHANNEL_READ, HYPER_NATIVE_SYS_CHANNEL_WRITE,
-    HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL, HYPER_NATIVE_SYS_HANDLE_CLOSE,
+    HYPER_NATIVE_SYS_CONSOLE_READ, HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_EVENT_CREATE,
+    HYPER_NATIVE_SYS_EVENT_SIGNAL, HYPER_NATIVE_SYS_HANDLE_CLOSE,
     HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
     HYPER_NATIVE_SYS_HANDLE_REPLACE, HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO,
     HYPER_NATIVE_SYS_OBJECT_WAIT_ONE, HYPER_NATIVE_SYS_PROCESS_EXIT, HYPER_NATIVE_SYS_THREAD_EXIT,
@@ -110,6 +111,36 @@ pub(in crate::kernel) trait DeferredServices {
         endpoint: HandleValue,
         buffers: ReadBuffers,
     ) -> Result<ChannelReadOutcome, ChannelServiceError>;
+
+    fn read_console(
+        &self,
+        console: HandleValue,
+        bytes: Option<UserSlice>,
+    ) -> Result<usize, ConsoleServiceError>;
+
+    fn write_console(
+        &self,
+        console: HandleValue,
+        bytes: Option<UserSlice>,
+    ) -> Result<usize, ConsoleServiceError>;
+}
+
+#[derive(Debug)]
+pub(in crate::kernel) enum ConsoleServiceError {
+    Process(ProcessError),
+    Io(crate::kernel::device::console::IoError),
+}
+
+impl From<ProcessError> for ConsoleServiceError {
+    fn from(error: ProcessError) -> Self {
+        Self::Process(error)
+    }
+}
+
+impl From<crate::kernel::device::console::IoError> for ConsoleServiceError {
+    fn from(error: crate::kernel::device::console::IoError) -> Self {
+        Self::Io(error)
+    }
 }
 
 #[derive(Debug)]
@@ -191,6 +222,8 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_OBJECT_WAIT_ONE => sys_object_wait_one(services, invocation.arguments()),
         HYPER_NATIVE_SYS_CHANNEL_WRITE => sys_channel_write(services, invocation.arguments()),
         HYPER_NATIVE_SYS_CHANNEL_READ => sys_channel_read(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_CONSOLE_READ => sys_console_read(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_CONSOLE_WRITE => sys_console_write(services, invocation.arguments()),
         _ => DeferredAction::Return(sys_not_supported()),
     }
 }
@@ -374,6 +407,26 @@ fn sys_channel_read(services: &impl DeferredServices, arguments: &Arguments) -> 
     DeferredAction::Return(result)
 }
 
+#[inline(never)]
+fn sys_console_read(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_console_io(arguments).and_then(|(console, bytes)| {
+        services
+            .read_console(console, bytes)
+            .map_err(status_from_console_service_error)
+    });
+    DeferredAction::Return(console_io_result(HYPER_NATIVE_SYS_CONSOLE_READ, result))
+}
+
+#[inline(never)]
+fn sys_console_write(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_console_io(arguments).and_then(|(console, bytes)| {
+        services
+            .write_console(console, bytes)
+            .map_err(status_from_console_service_error)
+    });
+    DeferredAction::Return(console_io_result(HYPER_NATIVE_SYS_CONSOLE_WRITE, result))
+}
+
 fn parse_handle(raw: u64) -> Result<HandleValue, HyperNativeStatus> {
     HandleValue::try_from_raw(raw).map_err(status_from_handle_error)
 }
@@ -425,6 +478,19 @@ fn parse_channel_read(
         .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
     let handles = optional_user_slice(arguments[4], handle_bytes)?;
     Ok((endpoint, ReadBuffers { bytes, handles }))
+}
+
+fn parse_console_io(
+    arguments: &Arguments,
+) -> Result<(HandleValue, Option<UserSlice>), HyperNativeStatus> {
+    if arguments[1] != 0
+        || arguments[3] > hyper::abi::native::HYPER_NATIVE_CONSOLE_MAX_TRANSFER_BYTES
+    {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let console = parse_handle(arguments[0])?;
+    let bytes = optional_user_slice(arguments[2], arguments[3])?;
+    Ok((console, bytes))
 }
 
 fn optional_user_slice(
@@ -496,6 +562,19 @@ fn status_only(result: Result<(), HyperNativeStatus>) -> NativeResult {
     }
 }
 
+fn console_io_result(syscall: u64, result: Result<usize, HyperNativeStatus>) -> NativeResult {
+    match result {
+        Ok(actual) => match u64::try_from(actual) {
+            Ok(actual) => success([actual, 0]),
+            Err(_) => failure(HYPER_NATIVE_STATUS_INTERNAL),
+        },
+        Err(HYPER_NATIVE_STATUS_WOULD_BLOCK) => {
+            NativeResult::for_syscall(syscall, HYPER_NATIVE_STATUS_WOULD_BLOCK, [0, 0])
+        }
+        Err(status) => failure(status),
+    }
+}
+
 const fn success(values: [u64; 2]) -> NativeResult {
     NativeResult::new(hyper::abi::native::HYPER_NATIVE_STATUS_OK, values)
 }
@@ -542,6 +621,15 @@ fn status_from_channel_service_error(error: ChannelServiceError) -> HyperNativeS
         ChannelServiceError::Process(error) => status_from_process_error(error),
         ChannelServiceError::Channel(error) => status_from_channel_error(error),
         ChannelServiceError::Resource(error) => status_from_resource_error(error),
+    }
+}
+
+fn status_from_console_service_error(error: ConsoleServiceError) -> HyperNativeStatus {
+    match error {
+        ConsoleServiceError::Process(error) => status_from_process_error(error),
+        ConsoleServiceError::Io(crate::kernel::device::console::IoError::WouldBlock) => {
+            HYPER_NATIVE_STATUS_WOULD_BLOCK
+        }
     }
 }
 
@@ -659,7 +747,7 @@ const fn status_from_machine_error(error: MachineError) -> HyperNativeStatus {
         MachineError::Hal(_) | MachineError::Identifier(_) | MachineError::Vmo(_) => {
             HYPER_NATIVE_STATUS_INTERNAL
         }
-        MachineError::SizeOverflow => HYPER_NATIVE_STATUS_FAULT,
+        MachineError::InvalidRange | MachineError::SizeOverflow => HYPER_NATIVE_STATUS_FAULT,
     }
 }
 
@@ -719,6 +807,8 @@ pub(crate) enum SelfTestError {
     InvalidRights,
     InvalidRecordSize,
     ChannelValidation,
+    ConsoleValidation,
+    ConsoleErrorMapping,
     ObjectErrorMapping,
     ChannelErrorMapping,
     RecordEncoding,
@@ -816,6 +906,24 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ChannelServiceError::Process(ProcessError::Allocation))
         }
+
+        fn read_console(
+            &self,
+            _: HandleValue,
+            _: Option<UserSlice>,
+        ) -> Result<usize, ConsoleServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ConsoleServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn write_console(
+            &self,
+            _: HandleValue,
+            _: Option<UserSlice>,
+        ) -> Result<usize, ConsoleServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ConsoleServiceError::Process(ProcessError::Allocation))
+        }
     }
 
     fn invoke(number: u64, arguments: [u64; 6]) -> NativeInvocation {
@@ -864,6 +972,20 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             != HYPER_NATIVE_STATUS_INVALID_ARGUMENT
     {
         return Err(SelfTestError::ChannelErrorMapping);
+    }
+    if status_from_console_service_error(ConsoleServiceError::Io(
+        crate::kernel::device::console::IoError::WouldBlock,
+    )) != HYPER_NATIVE_STATUS_WOULD_BLOCK
+        || console_io_result(
+            HYPER_NATIVE_SYS_CONSOLE_READ,
+            Err(HYPER_NATIVE_STATUS_WOULD_BLOCK),
+        ) != NativeResult::for_syscall(
+            HYPER_NATIVE_SYS_CONSOLE_READ,
+            HYPER_NATIVE_STATUS_WOULD_BLOCK,
+            [0, 0],
+        )
+    {
+        return Err(SelfTestError::ConsoleErrorMapping);
     }
     let bad_handle = dispatch_immediate(
         &services,
@@ -930,6 +1052,33 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         || bad_channel_read != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
     {
         return Err(SelfTestError::ChannelValidation);
+    }
+    let bad_console_options = dispatch_deferred(
+        &services,
+        invoke(
+            HYPER_NATIVE_SYS_CONSOLE_READ,
+            [1_u64 << 24 | 1, 1, 0, 0, 0, 0],
+        ),
+    );
+    let oversized_console_write = dispatch_deferred(
+        &services,
+        invoke(
+            HYPER_NATIVE_SYS_CONSOLE_WRITE,
+            [
+                1_u64 << 24 | 1,
+                0,
+                0x2000,
+                hyper::abi::native::HYPER_NATIVE_CONSOLE_MAX_TRANSFER_BYTES + 1,
+                0,
+                0,
+            ],
+        ),
+    );
+    if bad_console_options != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+        || oversized_console_write
+            != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+    {
+        return Err(SelfTestError::ConsoleValidation);
     }
     let handle_record = encode_handle_info_fields(0x1122_3344, 0x5566_7788, 0x99aa_bbcc_ddee_ff00);
     if handle_record

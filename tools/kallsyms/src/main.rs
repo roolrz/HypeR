@@ -61,7 +61,10 @@ fn read_symbols(nm: &Path, elf: &Path) -> Result<Vec<FunctionSymbol>, Box<dyn Er
         else {
             continue;
         };
-        if !matches!(kind, "t" | "T") || fields.next().is_some() {
+        if !matches!(kind, "t" | "T")
+            || fields.next().is_some()
+            || is_unstable_compiler_helper(name)
+        {
             continue;
         }
         let address = u64::from_str_radix(address, 16)?;
@@ -77,6 +80,16 @@ fn read_symbols(nm: &Path, elf: &Path) -> Result<Vec<FunctionSymbol>, Box<dyn Er
     symbols.sort_unstable_by(compare_symbols);
     symbols.dedup_by(|later, earlier| later.address == earlier.address);
     Ok(symbols)
+}
+
+/// Rejects implementation-detail helpers whose membership depends on codegen.
+///
+/// LLVM synthesizes Cortex erratum thunks with link-local hash-like suffixes.
+/// Embedding the symbol table can change which thunks are selected, so they
+/// cannot participate in the size-preserving kallsyms fixed point and are not
+/// useful diagnostic API names in any case.
+fn is_unstable_compiler_helper(name: &str) -> bool {
+    name.starts_with("__CortexA")
 }
 
 fn normalize_symbol_name(name: &str) -> &str {
@@ -153,7 +166,14 @@ fn write_u64(bytes: &mut [u8], offset: usize, value: u64) -> Result<(), Box<dyn 
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_symbol_name;
+    use super::{is_unstable_compiler_helper, normalize_symbol_name};
+
+    #[test]
+    fn excludes_codegen_dependent_cortex_erratum_helpers() {
+        assert!(is_unstable_compiler_helper("__CortexA53843419_63004"));
+        assert!(!is_unstable_compiler_helper("__aarch64_cas8_acq_rel"));
+        assert!(!is_unstable_compiler_helper("CortexA_user_symbol"));
+    }
 
     #[test]
     fn removes_an_llvm_private_numeric_suffix() {

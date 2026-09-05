@@ -21,8 +21,26 @@ pub(super) fn clear_console_route_for_vm(expected_vm: super::registry::VmId) {
     selected::clear_console_route_for_vm(expected_vm);
 }
 
-/// Delivers one host-console byte to the selected guest platform.
-pub(super) fn receive_console_input(byte: u8) -> bool {
+/// Guest ownership decision for one byte received from the host console.
+#[derive(Clone, Copy)]
+pub(crate) struct ConsoleInputDisposition {
+    claimed_by_guest: bool,
+}
+
+impl ConsoleInputDisposition {
+    const fn from_guest_claim(claimed_by_guest: bool) -> Self {
+        Self { claimed_by_guest }
+    }
+
+    /// Reports whether offering this byte to Native userspace would cross an
+    /// established guest-console ownership boundary.
+    pub(crate) const fn claimed_by_guest(self) -> bool {
+        self.claimed_by_guest
+    }
+}
+
+/// Attempts to deliver one host-console byte to the selected guest platform.
+pub(super) fn receive_console_input(byte: u8) -> ConsoleInputDisposition {
     selected::receive_console_input(byte)
 }
 

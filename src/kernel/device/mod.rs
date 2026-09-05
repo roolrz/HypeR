@@ -6,6 +6,7 @@
 //! Boot-critical firmware services are activated before interrupt setup;
 //! discoverable platform devices bind later through the driver framework.
 
+pub(crate) mod console;
 pub mod cpu_power;
 mod platform_bus;
 mod serial;

@@ -31,7 +31,8 @@ use crate::kernel::mm::user_space::{
     MachineError, NativeAddressSpace, UserSlice, UserWriteReservation,
 };
 use crate::kernel::object::{
-    KernelObject, Koid, ObjectCreationError, ObjectPublication, UserExportableObject,
+    KernelObject, Koid, ObjectCreationError, ObjectPublication, SignalMask, SignalSource,
+    SignalState, UserExportableObject,
 };
 use crate::kernel::sync::Completion;
 use crate::kernel::task::scheduler::{self, CpuMask};
@@ -102,6 +103,8 @@ pub(super) struct ProcessInner {
     domain: ResourceDomain,
     handles: ProcessLock<HandleTable>,
     state: ProcessLock<ProcessState>,
+    object_published: AtomicBool,
+    signals: SignalState,
     stopped: Completion,
     _metadata_charge: CommittedCharge,
 }
@@ -287,6 +290,8 @@ impl PreparedProcess {
                 handle_table_charges: [const { None }; HANDLE_TABLE_STORAGE_SEGMENTS],
                 handles_retired: false,
             }),
+            object_published: AtomicBool::new(false),
+            signals: SignalState::new(),
             stopped: Completion::new(),
             _metadata_charge: metadata_charge,
         };
@@ -383,6 +388,10 @@ impl Drop for PreparedProcess {
 }
 
 impl Process {
+    pub(crate) const TERMINATED: SignalMask =
+        SignalMask::from_trusted_bits(hyper::abi::native::HYPER_NATIVE_SIGNAL_PROCESS_TERMINATED);
+    pub(crate) const SUPPORTED_SIGNALS: SignalMask = Self::TERMINATED;
+
     pub(crate) fn id(&self) -> ProcessId {
         self.inner.id
     }
@@ -397,6 +406,43 @@ impl Process {
 
     pub(crate) fn resource_domain(&self) -> ResourceDomain {
         self.inner.domain.clone()
+    }
+
+    pub(super) fn claim_object_publication(&self) -> bool {
+        self.inner
+            .object_published
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(super) fn abort_object_publication(&self) {
+        if self
+            .inner
+            .object_published
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            process_invariant_violation();
+        }
+    }
+
+    /// Retains the native address-space owner while Process handle admission
+    /// remains open.
+    ///
+    /// Direct kernel references use this owner rather than manufacturing an
+    /// internal handle. A userspace VMAR capability wraps the same owner and a
+    /// generation-checked VMAR token.
+    pub(crate) fn address_space_owner(
+        &self,
+    ) -> Result<FallibleArc<NativeAddressSpace>, ProcessError> {
+        self.inner.state.with(|state| {
+            require_handle_phase(state.lifecycle.phase())?;
+            state
+                .address_space
+                .as_ref()
+                .cloned()
+                .ok_or(ProcessError::AddressSpaceReferenced)
+        })
     }
 
     pub(crate) fn snapshot(&self) -> ProcessSnapshot {
@@ -431,6 +477,10 @@ impl Process {
             Some(reason) => Some(reason),
             None => process_invariant_violation(),
         }
+    }
+
+    pub(super) fn signal_source(&self) -> SignalSource<'_> {
+        SignalSource::new(&self.inner.signals, Self::SUPPORTED_SIGNALS)
     }
 
     pub(crate) fn create_initial_user_thread(
@@ -503,8 +553,8 @@ impl Process {
             Ok(became_stopped) => became_stopped,
             Err(_) => process_invariant_violation(),
         };
-        if became_stopped && self.inner.stopped.complete_all().is_err() {
-            crate::hal::cpu::halt();
+        if became_stopped {
+            self.publish_stopped();
         }
     }
 
@@ -590,8 +640,8 @@ impl Process {
                     state.lifecycle.pending_threads(),
                 )
             });
-        if completed && self.inner.stopped.complete_all().is_err() {
-            crate::hal::cpu::halt();
+        if completed {
+            self.publish_stopped();
         }
         let mut current = self.inner.state.with(|state| state.threads.clone());
         let mut dispatched_threads = 0usize;
@@ -1411,14 +1461,7 @@ impl Process {
         destination: UserSlice,
         source: &[u8],
     ) -> Result<(), ProcessError> {
-        let address_space = self.inner.state.with(|state| {
-            require_handle_phase(state.lifecycle.phase())?;
-            state
-                .address_space
-                .as_ref()
-                .cloned()
-                .ok_or(ProcessError::AddressSpaceReferenced)
-        })?;
+        let address_space = self.address_space_owner()?;
         address_space.copy_to_user(destination, source)?;
         Ok(())
     }
@@ -1428,14 +1471,7 @@ impl Process {
         source: UserSlice,
         destination: &mut [u8],
     ) -> Result<(), ProcessError> {
-        let address_space = self.inner.state.with(|state| {
-            require_handle_phase(state.lifecycle.phase())?;
-            state
-                .address_space
-                .as_ref()
-                .cloned()
-                .ok_or(ProcessError::AddressSpaceReferenced)
-        })?;
+        let address_space = self.address_space_owner()?;
         address_space.copy_from_user(source, destination)?;
         Ok(())
     }
@@ -1445,14 +1481,7 @@ impl Process {
         &self,
         destination: UserSlice,
     ) -> Result<UserWriteReservation, ProcessError> {
-        let address_space = self.inner.state.with(|state| {
-            require_handle_phase(state.lifecycle.phase())?;
-            state
-                .address_space
-                .as_ref()
-                .cloned()
-                .ok_or(ProcessError::AddressSpaceReferenced)
-        })?;
+        let address_space = self.address_space_owner()?;
         Ok(NativeAddressSpace::reserve_user_write(
             address_space,
             destination,
@@ -1593,6 +1622,19 @@ impl Process {
         };
         membership.retire();
         drop(process_charge);
+    }
+
+    /// Publishes object-visible termination before waking Process joiners.
+    fn publish_stopped(&self) {
+        if self
+            .inner
+            .signals
+            .update(SignalMask::EMPTY, Self::TERMINATED)
+            .is_err()
+            || self.inner.stopped.complete_all().is_err()
+        {
+            process_invariant_violation();
+        }
     }
 }
 
@@ -1735,6 +1777,16 @@ pub(crate) struct ProcessHandleBatchReservation {
     scratch_charge: Option<CommittedCharge>,
 }
 
+impl<const N: usize> ProcessHandleReservation<N> {
+    /// Future generation-tagged values which resolve only after publication.
+    pub(crate) fn values(&self) -> [HandleValue; N] {
+        match self.reservation.as_ref() {
+            Some(reservation) => reservation.values(),
+            None => process_invariant_violation(),
+        }
+    }
+}
+
 impl ProcessHandleBatchReservation {
     /// Future numeric values which remain unresolved until batch publication.
     pub(crate) fn values(&self) -> &[HandleValue] {
@@ -1868,8 +1920,8 @@ impl ProcessThreadMembership {
         };
         drop(detached_record);
         drop(record);
-        if became_stopped && self.process.inner.stopped.complete_all().is_err() {
-            process_invariant_violation();
+        if became_stopped {
+            self.process.publish_stopped();
         }
     }
 }

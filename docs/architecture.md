@@ -255,9 +255,12 @@ guest/native VMID allocation and retirement. Both retain old roots and tags
 until every cut target acknowledges; safe abandonment leaks published owners
 rather than risking reuse. A kernel self-test exercises repeated direct Native
 syscall return, register-result validation, deferred-call unwind and re-entry,
-contained fault unwind, join, and retirement under both QEMU host regimes. A
-loader-backed runtime, blocking and migration qualification, and
-physical-hardware validation remain prerequisites for general native userspace.
+contained fault unwind, join, and retirement under both QEMU host regimes. The
+production AArch64 path mounts the firmware initramfs, strictly validates and
+maps `/init`, publishes its Process and initial UserThread, and transfers
+bootstrap execution to the scheduler. Broader runtime ABI coverage, blocking
+and migration qualification, and physical-hardware validation remain
+prerequisites for general native userspace.
 An EL1 relay remains a compatibility fallback only if direct stage-2-only
 execution cannot provide a required ABI semantic.
 
@@ -297,11 +300,13 @@ published state instead of receiving a count forwarded by the kernel entry
 path.
 
 The concrete startup order is boot-critical CPU power, memory/allocator,
-debug and scheduler, host IRQ/crash/time, one-shot SMP admission, stage-1
-address-space sealing, platform drivers, complete VM initialization, and VM
-bring-up. Sealing takes the same mutation lock as guarded-stack map/unmap and
-retires identity aliases only after every admitted CPU entered permanent high
-mappings.
+immutable initramfs publication, debug and scheduler, host IRQ/crash/time,
+one-shot SMP admission, stage-1 address-space sealing, platform drivers,
+complete VM initialization, and Native init publication. Kernel self-test
+images replace only that final workload selection with the repository's Linux
+guest bundle. Sealing takes the same mutation lock as guarded-stack map/unmap
+and retires identity aliases only after every admitted CPU entered permanent
+high mappings.
 
 SMP admission publishes a `FrozenTopology` once. `HypeR` has no CPU hotplug:
 late replicated-local transactions snapshot this immutable participant set. A

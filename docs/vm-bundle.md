@@ -5,6 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # VM boot ramdisk format
 
+This format is consumed directly by Kernel repository images built with the
+`kernel-self-test` feature. Production images mount the firmware ramdisk as
+their Native root filesystem and start `/init`; a userspace VMM will consume VM
+bundles through the Native capability interface.
+
 ## Firmware handoff
 
 HypeR is intended to be selected as the kernel component of a signed FIT image.

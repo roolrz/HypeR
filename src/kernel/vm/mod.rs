@@ -9,6 +9,7 @@
 pub(crate) mod active_vcpu;
 mod address_space_state;
 pub(crate) mod device;
+pub(crate) use device::ConsoleInputDisposition;
 mod diagnostics;
 pub(in crate::kernel) use diagnostics::UnhandledMmioReport;
 mod endpoint;
@@ -26,6 +27,7 @@ mod run_admission;
 mod timer;
 pub(crate) mod vcpu;
 
+#[cfg(feature = "kernel-self-test")]
 use core::convert::Infallible;
 
 use hyper::sync::PublishedOnce;
@@ -54,8 +56,6 @@ pub(crate) enum InitializationError {
 #[derive(Debug)]
 pub enum StartError {
     Bundle(VmBundleError),
-    InitialRamdiskAddress(hyper::platform::PhysicalRange),
-    InitialRamdiskSize(hyper::platform::PhysicalRange),
     Linux(LinuxBootError),
 }
 
@@ -149,20 +149,9 @@ pub(in crate::kernel) fn entry_ready() -> Option<crate::hal::vm::VmEntryReady> {
     ENTRY_READY.get().copied()
 }
 
-/// Loads the default VM bundle from the boot ramdisk and enters the guest.
-pub(crate) fn start_default() -> Result<Infallible, StartError> {
-    let initial_ramdisk = super::boot::with_boot_state(|state| state.initial_ramdisk);
-    let ramdisk_address = super::mm::memory::linear_address(initial_ramdisk.start())
-        .ok_or(StartError::InitialRamdiskAddress(initial_ramdisk))?;
-    let ramdisk_size = usize::try_from(initial_ramdisk.size())
-        .map_err(|_| StartError::InitialRamdiskSize(initial_ramdisk))?;
-    if ramdisk_size > isize::MAX as usize || ramdisk_address.checked_add(ramdisk_size).is_none() {
-        return Err(StartError::InitialRamdiskSize(initial_ramdisk));
-    }
-    // SAFETY: Early boot reserved this firmware-owned RAM range before buddy
-    // handoff, and the permanent linear map covers the validated complete range.
-    let ramdisk =
-        unsafe { core::slice::from_raw_parts(ramdisk_address as *const u8, ramdisk_size) };
+/// Loads the default VM bundle for kernel integration tests and enters it.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn start_test_default(ramdisk: &[u8]) -> Result<Infallible, StartError> {
     let guest = select_default(ramdisk).map_err(StartError::Bundle)?;
     crate::println!(
         "HypeR: loaded VM '{}' from boot ramdisk: {} MiB RAM, {} vCPU(s)",
@@ -182,7 +171,11 @@ pub(crate) fn start_default() -> Result<Infallible, StartError> {
     super::task::scheduler::exit_current()
 }
 
-/// Routes host-console input to the virtual console owned by the active VM.
-pub(crate) fn receive_console_input(byte: u8) -> bool {
+/// Resolves guest ownership of one host-console input byte.
+///
+/// Only `Unclaimed` permits the physical-console broker to offer the byte to
+/// Native userspace. A failed delivery to an established guest route remains
+/// consumed by that route and cannot cross an isolation boundary.
+pub(crate) fn receive_console_input(byte: u8) -> ConsoleInputDisposition {
     device::receive_console_input(byte)
 }

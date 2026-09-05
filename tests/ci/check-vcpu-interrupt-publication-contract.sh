@@ -105,8 +105,8 @@ rg -q 'current\.vm == expected_vm && current\.thread == expected_thread' "$devic
     echo 'console teardown must match the exact VM generation and Thread route' >&2
     exit 1
 }
-rg -U -q 'Error::EndpointClosed[\s\S]*clear_console_route_exact\(route\.vm, route\.thread\);[\s\S]*true' "$device" || {
-    echo 'closed vCPU endpoints must retire the exact console route without masking host UART' >&2
+rg -U -q 'Error::EndpointClosed[\s\S]*clear_console_route_exact\(route\.vm, route\.thread\);[\s\S]*ConsoleInputDisposition::from_guest_claim\(true\)' "$device" || {
+    echo 'closed vCPU endpoints must retire the exact console route without crossing into Native input' >&2
     exit 1
 }
 if rg -q 'try_publish_console_route' "$registry" ||

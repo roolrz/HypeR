@@ -310,6 +310,7 @@ fn parse_disposition(
         hyper::abi::native::HYPER_NATIVE_OBJECT_NONE => None,
         hyper::abi::native::HYPER_NATIVE_OBJECT_EVENT => Some(ObjectKind::EVENT),
         hyper::abi::native::HYPER_NATIVE_OBJECT_CHANNEL => Some(ObjectKind::CHANNEL),
+        hyper::abi::native::HYPER_NATIVE_OBJECT_CONSOLE => Some(ObjectKind::CONSOLE),
         _ => return Err(ChannelServiceError::InvalidDisposition),
     };
     let rights = if raw_rights == hyper::abi::native::HYPER_NATIVE_CHANNEL_DISPOSITION_SAME_RIGHTS {

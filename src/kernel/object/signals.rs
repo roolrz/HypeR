@@ -46,6 +46,10 @@ impl SignalMask {
         self.0 & other.0 != 0
     }
 
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
     const fn intersection(self, other: Self) -> Self {
         Self(self.0 & other.0)
     }

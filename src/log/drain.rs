@@ -265,8 +265,61 @@ impl<const CAPACITY: usize> ByteRing<CAPACITY> {
         count
     }
 
+    /// Copies as many oldest bytes as fit without consuming them.
+    ///
+    /// A caller may use this to prepare a fallible external write and discard
+    /// the exact prefix only after that write commits.
+    pub fn peek_into(&self, output: &mut [u8]) -> usize {
+        let count = self.length.min(output.len());
+        let mut index = self.tail;
+        for slot in &mut output[..count] {
+            *slot = self.bytes[index];
+            index = (index + 1) % CAPACITY;
+        }
+        count
+    }
+
+    /// Copies one delimiter-bounded prefix without consuming it.
+    ///
+    /// The delimiter is included in the returned prefix. If it is not present
+    /// in the bounded window, the whole available window is copied so a
+    /// producer cannot block indefinitely on an unterminated record.
+    pub fn peek_through(&self, delimiter: u8, output: &mut [u8]) -> usize {
+        let count = self.length.min(output.len());
+        let mut index = self.tail;
+        for (offset, slot) in output[..count].iter_mut().enumerate() {
+            let byte = self.bytes[index];
+            *slot = byte;
+            if byte == delimiter {
+                return offset + 1;
+            }
+            index = (index + 1) % CAPACITY;
+        }
+        count
+    }
+
+    /// Discards an already-observed prefix.
+    ///
+    /// Returns `false` without mutation when `count` exceeds the retained
+    /// length. This lets transaction owners reject stale or duplicated
+    /// commits without partially consuming the FIFO.
+    pub fn discard_front(&mut self, count: usize) -> bool {
+        if count > self.length {
+            return false;
+        }
+        if CAPACITY != 0 {
+            self.tail = (self.tail + count) % CAPACITY;
+        }
+        self.length -= count;
+        true
+    }
+
     pub const fn is_empty(&self) -> bool {
         self.length == 0
+    }
+
+    pub const fn remaining_capacity(&self) -> usize {
+        CAPACITY - self.length
     }
 
     pub const fn front(&self) -> Option<u8> {

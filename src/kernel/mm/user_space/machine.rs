@@ -46,6 +46,7 @@ pub(crate) enum Error {
     Address(AddressError),
     Hal(crate::hal::user::AddressSpaceError),
     Identifier(crate::kernel::mm::translation_id::Error),
+    InvalidRange,
     Logical(LogicalAddressSpaceError),
     Page(hyper::mm::BuddyError),
     Residency(ResidencyError),
@@ -254,7 +255,108 @@ pub(crate) struct NativeAddressSpace {
     account: DomainAccount,
     identifier: ManuallyDrop<MachineIdentifier>,
     state: ManuallyDrop<StateLock>,
+    root_vmar_object_published: AtomicBool,
     _owner_charge: CommittedCharge,
+}
+
+/// Unpublished, fully resident storage for one final image mapping.
+///
+/// Loader writes and relocations operate before this owner is consumed. Once
+/// installed, executable data is copied into an immutable instruction-coherent
+/// snapshot, preserving W^X even if another staging reference survives.
+pub(crate) struct NativeImageSegment {
+    range: UserSlice,
+    permissions: Permissions,
+    storage: WritableVmo<KernelPageBackend, DomainAccount>,
+}
+
+impl NativeImageSegment {
+    pub(crate) fn try_new(
+        address_space: &NativeAddressSpace,
+        range: UserSlice,
+        permissions: Permissions,
+    ) -> Result<Self, Error> {
+        if !permissions.is_valid() || permissions == Permissions::NONE {
+            return Err(Error::Unsupported);
+        }
+        let storage = WritableVmo::try_new(
+            range.length(),
+            KernelPageBackend,
+            address_space.account.clone(),
+        )?;
+        storage
+            .populate(0, range.length())
+            .map_err(|failure| Error::Vmo(failure.cause))?;
+        Ok(Self {
+            range,
+            permissions,
+            storage,
+        })
+    }
+
+    pub(crate) const fn range(&self) -> UserSlice {
+        self.range
+    }
+
+    pub(crate) fn write(&self, offset: u64, source: &[u8]) -> Result<(), Error> {
+        self.storage.write(offset, source).map_err(Error::Vmo)
+    }
+
+    pub(crate) fn read_word(&self, address: UserAddress) -> Result<u64, Error> {
+        let offset = self.relative_offset(address, size_of::<u64>())?;
+        let mut bytes = [0u8; size_of::<u64>()];
+        self.storage.read(offset, &mut bytes).map_err(Error::Vmo)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    pub(crate) fn write_word(&self, address: UserAddress, value: u64) -> Result<(), Error> {
+        let offset = self.relative_offset(address, size_of::<u64>())?;
+        self.storage
+            .write(offset, &value.to_le_bytes())
+            .map_err(Error::Vmo)
+    }
+
+    pub(crate) fn install(
+        self,
+        address_space: &NativeAddressSpace,
+        pin: &(impl PinnedExecution + 'static),
+    ) -> Result<(), Error> {
+        let logical = address_space.logical();
+        let prepared = if self.permissions.contains(Access::Execute) {
+            let executable = self.storage.try_executable_snapshot(
+                &super::ExecutableProvenance::for_native_image_loader(),
+                pin,
+            )?;
+            logical.prepare_map_executable(
+                logical.root_vmar(),
+                self.range,
+                executable,
+                0,
+                self.permissions,
+                self.permissions,
+            )?
+        } else {
+            logical.prepare_map_writable(
+                logical.root_vmar(),
+                self.range,
+                self.storage,
+                0,
+                self.permissions,
+                self.permissions,
+            )?
+        };
+        address_space.prepare_change(prepared)?.commit()?;
+        Ok(())
+    }
+
+    fn relative_offset(&self, address: UserAddress, length: usize) -> Result<u64, Error> {
+        let length = u64::try_from(length).map_err(|_| Error::SizeOverflow)?;
+        let requested = UserSlice::new(address, length)?;
+        if !self.range.contains(requested) {
+            return Err(Error::InvalidRange);
+        }
+        Ok(address.get() - self.range.base().get())
+    }
 }
 
 impl NativeAddressSpace {
@@ -302,12 +404,29 @@ impl NativeAddressSpace {
                 current: image,
                 residency: AddressSpaceResidency::try_new(initial_epoch)?,
             })),
+            root_vmar_object_published: AtomicBool::new(false),
             _owner_charge: owner_charge,
         }))
     }
 
     pub(super) fn logical(&self) -> &LogicalAddressSpace {
         &self.logical
+    }
+
+    pub(super) fn claim_root_vmar_object_publication(&self) -> bool {
+        self.root_vmar_object_published
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(super) fn abort_root_vmar_object_publication(&self) {
+        if self
+            .root_vmar_object_published
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            crate::hal::cpu::halt();
+        }
     }
 
     /// Copies kernel-owned bytes through the logical user-address contract.

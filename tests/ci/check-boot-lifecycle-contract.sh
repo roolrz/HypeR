@@ -43,6 +43,7 @@ for call in \
     'crate::kernel::crash::early_initialize' \
     'crate::kernel::device::early_initialize' \
     'crate::kernel::mm::initialize' \
+    'crate::kernel::fs::initialize' \
     'crate::kernel::debug::initialize' \
     'crate::kernel::task::initialize' \
     'crate::kernel::irq::initialize' \
@@ -52,8 +53,7 @@ for call in \
     'crate::kernel::mm::activate_local_allocator_caches' \
     'crate::kernel::mm::seal_address_space' \
     'crate::kernel::device::platform_device_initialize' \
-    'crate::kernel::vm::initialize' \
-    'crate::kernel::vm::start_default'; do
+    'crate::kernel::vm::initialize'; do
     line=$(LC_ALL=C rg -n -F -m1 "$call" "$fixture/start-kernel.rs" | cut -d: -f1 || true)
     if [ -z "$line" ] || [ "$line" -le "$previous" ]; then
         echo "boot lifecycle call is missing or out of order: $call" >&2
@@ -61,6 +61,21 @@ for call in \
     fi
     previous=$line
 done
+
+require '#\[cfg\(feature = "kernel-self-test"\)\][[:space:]]*let never = crate::kernel::vm::start_test_default\(' \
+    "$fixture/start-kernel.rs" 'kernel self-test images must select the test-only VM workload'
+require '#\[cfg\(not\(feature = "kernel-self-test"\)\)\][[:space:]]*let never = crate::kernel::init::start\(\)' \
+    "$fixture/start-kernel.rs" 'production images must select Native init'
+require_order "$fixture/start-kernel.rs" 'crate::kernel::vm::initialize' \
+    'crate::kernel::vm::start_test_default' \
+    'VM initialization must precede the test-only guest workload'
+require_order "$fixture/start-kernel.rs" 'crate::kernel::vm::initialize' \
+    'crate::kernel::init::start' \
+    'VM initialization must precede Native init publication'
+if LC_ALL=C rg -q 'crate::kernel::vm::start_default\(' "$fixture/start-kernel.rs"; then
+    echo 'production startup must not retain an unconditional default VM path' >&2
+    exit 1
+fi
 
 require 'pub\(crate\) fn seal_address_space\(\)[^{]*\{[[:space:]]*stack::serialize_stage1_mutation\(\|\| \{' \
     src/kernel/mm/mod.rs 'address-space sealing must share the runtime stage-1 mutation lock'

@@ -356,6 +356,13 @@ their supported mask. `WRITE` never means metadata mutation and never implies
 `EXECUTE`. Mapping permission is the intersection of VMO rights, VMAR rights,
 object policy, executable provenance, and requested protection.
 
+Task construction and accounting policy use the equally literal
+`CREATE_PROCESS`, `CREATE_THREAD`, `CREATE_TASK_GROUP`,
+`CREATE_RESOURCE_DOMAIN`, `SET_LIMITS`, and `CREATE_EXECUTABLE` rights. A
+factory or authority object grants only the named operation; every target
+`TaskGroup`, `ResourceDomain`, VMO, and VMAR remains a separately resolved
+capability.
+
 `handle_get_info` reports handle-local kind, rights, and flags. A fixed
 `object_get_basic_info` may report common identity under `INSPECT`. Lifecycle,
 memory, peer, task, accounting, and hardware state use typed calls such as
@@ -378,6 +385,20 @@ scheduler payload remains a separate execution owner rather than a second
 identity. The Thread object supports `WAIT`, `INSPECT`, `START`, and
 `REQUEST_STOP`, and asserts its level-triggered `TERMINATED` signal after
 scheduler detachment.
+
+`Process`, `TaskGroup`, and `ResourceDomain` each admit exactly one
+handle-visible object identity. Their publication claim is concurrency-safe,
+rolls back if object construction fails, and becomes permanent once the
+unpublished object exists; later code cannot manufacture a second KOID for the
+same lifecycle. Kernel subsystems continue to hold classified direct
+references rather than paying for private handle-table lookups.
+
+Writable and executable VMO variants share one ABI kind but publish different
+per-instance rights ceilings. A writable VMO cannot acquire `EXECUTE`; an
+executable VMO is a physically distinct immutable snapshot created through an
+`ExecutableAuthority` and cannot acquire `WRITE`. A root VMAR
+object retains the exact native address-space owner and its generation-checked
+token, and is also published at most once for that address space.
 
 Ordinary duplicated handles are not generically revocable. Revocable authority
 uses typed lease lineages such as `MemoryGrant`, `DeviceLease`, `DmaMapping`,

@@ -151,10 +151,12 @@ require 'output\.device = Some\(snapshot\.device\)' "$drain" \
     'frame preparation must retain the selected console device'
 require 'output\.device = None' "$drain" \
     'frame commit must release the selected console device'
-require 'push_console_bytes\(core::slice::from_ref\(&byte\)\)' "$drain" \
-    'guest raw output must preserve the console LF-to-CRLF convention'
-require 'PendingCommit::RawByte[\s\S]*pop_front\(\)' "$drain" \
-    'guest raw queue ownership must advance only after its complete frame is accepted'
+require "peek_through\\(b'\\\\n', &mut bytes\\)" "$drain" \
+    'raw console output must prefer one newline-delimited transaction'
+require 'push_console_bytes\(&bytes\[\.\.count\]\)' "$drain" \
+    'raw console output must preserve the console LF-to-CRLF convention'
+require 'PendingCommit::RawBytes[\s\S]*discard_front\(count\)' "$drain" \
+    'raw console queue ownership must advance only after its complete frame is accepted'
 require 'write_raw_overflow' "$drain" \
     'the sole writer must report bounded guest-console overflow directly'
 require 'flush_boot\(\)[\s\S]*state\.device = None' "$retire" \

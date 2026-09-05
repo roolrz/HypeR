@@ -23,6 +23,9 @@ enum KernelStartError {
     Cpu(crate::kernel::cpu::Error),
     Crash(crate::kernel::crash::InitializationError),
     EarlyCrash(crate::kernel::crash::EarlyInitializationError),
+    FileSystem(crate::kernel::fs::InitializationError),
+    #[cfg(not(feature = "kernel-self-test"))]
+    Init(crate::kernel::init::Error),
     Debug(crate::kernel::debug::InitializationError),
     Device(crate::kernel::device::InitializationError),
     Interrupt(crate::kernel::irq::InitializationError),
@@ -52,6 +55,7 @@ impl_kernel_start_error! {
     Cpu(crate::kernel::cpu::Error),
     Crash(crate::kernel::crash::InitializationError),
     EarlyCrash(crate::kernel::crash::EarlyInitializationError),
+    FileSystem(crate::kernel::fs::InitializationError),
     Debug(crate::kernel::debug::InitializationError),
     Device(crate::kernel::device::InitializationError),
     Interrupt(crate::kernel::irq::InitializationError),
@@ -64,6 +68,13 @@ impl_kernel_start_error! {
     VirtualMachine(crate::kernel::vm::StartError),
 }
 
+#[cfg(not(feature = "kernel-self-test"))]
+impl From<crate::kernel::init::Error> for KernelStartError {
+    fn from(error: crate::kernel::init::Error) -> Self {
+        Self::Init(error)
+    }
+}
+
 impl core::fmt::Debug for KernelStartError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let (stage, error): (&str, &dyn core::fmt::Debug) = match self {
@@ -71,6 +82,9 @@ impl core::fmt::Debug for KernelStartError {
             Self::Cpu(error) => ("cpu", error),
             Self::Crash(error) => ("crash", error),
             Self::EarlyCrash(error) => ("early-crash", error),
+            Self::FileSystem(error) => ("file-system", error),
+            #[cfg(not(feature = "kernel-self-test"))]
+            Self::Init(error) => ("init", error),
             Self::Debug(error) => ("debug", error),
             Self::Device(error) => ("device", error),
             Self::Interrupt(error) => ("interrupt", error),
@@ -103,6 +117,7 @@ extern "C" fn start_kernel() -> ! {
         crate::kernel::device::early_initialize(&boot)?;
 
         crate::kernel::mm::initialize()?;
+        crate::kernel::fs::initialize(&boot)?;
         crate::kernel::debug::initialize()?;
         crate::kernel::task::initialize()?;
         crate::kernel::reaper::initialize()?;
@@ -125,7 +140,10 @@ extern "C" fn start_kernel() -> ! {
 
         crate::kernel::log::report_startup_state();
 
-        let never = crate::kernel::vm::start_default()?;
+        #[cfg(feature = "kernel-self-test")]
+        let never = crate::kernel::vm::start_test_default(boot.initial_ramdisk())?;
+        #[cfg(not(feature = "kernel-self-test"))]
+        let never = crate::kernel::init::start()?;
         match never {}
     })();
 

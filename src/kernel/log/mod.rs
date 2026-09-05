@@ -137,6 +137,11 @@ pub(crate) fn service_irq_prompt() {
     drain::service_irq_prompt();
 }
 
+/// Queues raw system-console bytes for the sole normal UART writer.
+pub(crate) fn try_write_console(bytes: &[u8]) -> usize {
+    drain::try_enqueue_raw(bytes)
+}
+
 /// Returns the permanent scheduler population owned by runtime logging.
 #[cfg(feature = "kernel-self-test")]
 pub(crate) const fn permanent_worker_count_for_test() -> usize {

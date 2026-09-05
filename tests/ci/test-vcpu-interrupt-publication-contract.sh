@@ -55,8 +55,10 @@ mutate 'host console receive must update its line inside the console lock transa
     src/kernel/vm/device/aarch64.rs 'update(self.console_interrupt, asserted)' 'Ok(())'
 mutate 'console teardown must not clear a different Thread route' \
     src/kernel/vm/device/aarch64.rs 'current.thread == expected_thread' 'true'
-mutate 'closed endpoint console delivery must not mask the host UART' \
+mutate 'closed endpoint console delivery must retain guest ownership on failure' \
     src/kernel/vm/device/aarch64.rs 'Error::EndpointClosed' 'Error::EndpointStillOpen'
+mutate 'failed claimed console delivery must not cross into Native input' \
+    src/kernel/vm/device/aarch64.rs 'from_guest_claim(true)' 'from_guest_claim(false)'
 mutate 'generic registry installation must not select host-console policy' \
     src/kernel/vm/registry.rs 'control: VmControl::mint_for_install(id),' 'control: { super::device::try_publish_console_route(id, 0, boot_vcpu); VmControl::mint_for_install(id) },'
 mutate 'non-running vCPU states must not be guessed prompt targets' \

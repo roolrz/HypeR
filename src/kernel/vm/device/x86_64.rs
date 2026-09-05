@@ -55,8 +55,8 @@ pub(super) const fn prepare() -> Result<VirtualDeviceSet, Error> {
 
 pub(super) const fn clear_console_route_for_vm(_expected_vm: super::super::super::registry::VmId) {}
 
-pub(super) const fn receive_console_input(_byte: u8) -> bool {
-    false
+pub(super) const fn receive_console_input(_byte: u8) -> super::super::ConsoleInputDisposition {
+    super::super::ConsoleInputDisposition::from_guest_claim(false)
 }
 
 pub(super) const fn try_publish_console_route(

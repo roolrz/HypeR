@@ -31,6 +31,13 @@ impl Rights {
     pub(crate) const ACK_INTERRUPT: Self = Self(native::HYPER_NATIVE_RIGHT_ACK_INTERRUPT);
     pub(crate) const REVOKE: Self = Self(native::HYPER_NATIVE_RIGHT_REVOKE);
     pub(crate) const SIGNAL: Self = Self(native::HYPER_NATIVE_RIGHT_SIGNAL);
+    pub(crate) const CREATE_PROCESS: Self = Self(native::HYPER_NATIVE_RIGHT_CREATE_PROCESS);
+    pub(crate) const CREATE_THREAD: Self = Self(native::HYPER_NATIVE_RIGHT_CREATE_THREAD);
+    pub(crate) const CREATE_TASK_GROUP: Self = Self(native::HYPER_NATIVE_RIGHT_CREATE_TASK_GROUP);
+    pub(crate) const CREATE_RESOURCE_DOMAIN: Self =
+        Self(native::HYPER_NATIVE_RIGHT_CREATE_RESOURCE_DOMAIN);
+    pub(crate) const SET_LIMITS: Self = Self(native::HYPER_NATIVE_RIGHT_SET_LIMITS);
+    pub(crate) const CREATE_EXECUTABLE: Self = Self(native::HYPER_NATIVE_RIGHT_CREATE_EXECUTABLE);
     pub(crate) const KNOWN: Self = Self(native::HYPER_NATIVE_RIGHTS_MASK);
 
     pub(crate) const fn from_bits(bits: u64) -> Option<Self> {

@@ -52,6 +52,8 @@ pub enum RuntimeError {
     Cache(hyper::hal::cache::CacheError),
     Console(ConsoleError),
     DtbMapping(u64),
+    InitialRamdiskAddress(hyper::platform::PhysicalRange),
+    InitialRamdiskSize(hyper::platform::PhysicalRange),
 }
 
 impl core::fmt::Debug for ConsoleError {
@@ -73,6 +75,18 @@ impl core::fmt::Debug for RuntimeError {
             Self::DtbMapping(address) => {
                 format_error(formatter, "RuntimeError", "dtb-mapping", Some(address))
             }
+            Self::InitialRamdiskAddress(range) => format_error(
+                formatter,
+                "RuntimeError",
+                "initial-ramdisk-address",
+                Some(range),
+            ),
+            Self::InitialRamdiskSize(range) => format_error(
+                formatter,
+                "RuntimeError",
+                "initial-ramdisk-size",
+                Some(range),
+            ),
         }
     }
 }
@@ -121,6 +135,7 @@ pub(crate) struct Initialization {
     early_console: Option<ConsoleInfo>,
     early_console_mapping: Option<PermanentMmioMapping>,
     linear_dtb: usize,
+    initial_ramdisk: &'static [u8],
     interrupts: Option<irq::interrupt::Capabilities>,
     timer: Option<time::Capabilities>,
 }
@@ -153,6 +168,10 @@ impl Initialization {
     /// earlycon. Port-I/O consoles do not have an MMIO capability.
     pub(crate) const fn early_console_mapping(&self) -> Option<PermanentMmioMapping> {
         self.early_console_mapping
+    }
+
+    pub(crate) const fn initial_ramdisk(&self) -> &'static [u8] {
+        self.initial_ramdisk
     }
 
     pub(crate) fn interrupts(&self) -> irq::interrupt::Capabilities {
@@ -346,14 +365,16 @@ fn prepare_final_memory(
 
 /// Enters architecture-independent initialization on the permanent mappings.
 pub(crate) fn enter_runtime() -> Result<Initialization, RuntimeError> {
-    let (platform, essential, early_console, dtb_address) = with_boot_state(|state| {
-        (
-            state.platform,
-            state.essential,
-            state.early_console,
-            state.dtb_address,
-        )
-    });
+    let (platform, essential, early_console, dtb_address, initial_ramdisk) =
+        with_boot_state(|state| {
+            (
+                state.platform,
+                state.essential,
+                state.early_console,
+                state.dtb_address,
+                state.initial_ramdisk,
+            )
+        });
     let early_console_mapping = match early_console {
         Some(console_info) => {
             // The bootstrap identity map has already been retired. Remove its
@@ -367,15 +388,33 @@ pub(crate) fn enter_runtime() -> Result<Initialization, RuntimeError> {
     crate::hal::cache::prepare(&essential).map_err(RuntimeError::Cache)?;
     let linear_dtb =
         mm::memory::linear_address(dtb_address).ok_or(RuntimeError::DtbMapping(dtb_address))?;
+    let initial_ramdisk = map_initial_ramdisk(initial_ramdisk)?;
 
     Ok(Initialization {
         essential,
         early_console,
         early_console_mapping,
         linear_dtb,
+        initial_ramdisk,
         interrupts: None,
         timer: None,
     })
+}
+
+fn map_initial_ramdisk(
+    range: hyper::platform::PhysicalRange,
+) -> Result<&'static [u8], RuntimeError> {
+    let address = mm::memory::linear_address(range.start())
+        .ok_or(RuntimeError::InitialRamdiskAddress(range))?;
+    let size =
+        usize::try_from(range.size()).map_err(|_| RuntimeError::InitialRamdiskSize(range))?;
+    if size > isize::MAX as usize || address.checked_add(size).is_none() {
+        return Err(RuntimeError::InitialRamdiskSize(range));
+    }
+    // SAFETY: Early boot validated and reserved the complete firmware-owned
+    // range before allocator handoff. The permanent linear map covers it, and
+    // BootState retains that reservation for the lifetime of the kernel.
+    Ok(unsafe { core::slice::from_raw_parts(core::ptr::with_exposed_provenance(address), size) })
 }
 
 fn initial_ramdisk_is_accessible(

@@ -100,6 +100,26 @@ impl KernelObject for OtherObject {
     const SUPPORTED_RIGHTS: Rights = Rights::INSPECT;
 }
 
+struct VariantRightsObject {
+    writable: bool,
+}
+
+impl kernel::object::private::Sealed for VariantRightsObject {}
+impl kernel::object::private::UserExportable for VariantRightsObject {}
+
+impl KernelObject for VariantRightsObject {
+    const KIND: ObjectKind = OTHER_KIND;
+    const SUPPORTED_RIGHTS: Rights = Rights::INSPECT.union(Rights::WRITE).union(Rights::EXECUTE);
+
+    fn supported_rights(&self) -> Rights {
+        if self.writable {
+            Rights::INSPECT.union(Rights::WRITE)
+        } else {
+            Rights::INSPECT.union(Rights::EXECUTE)
+        }
+    }
+}
+
 struct DropTrackedObject(Arc<AtomicUsize>);
 
 impl kernel::object::private::Sealed for DropTrackedObject {}
@@ -1030,4 +1050,41 @@ fn koids_are_unique_but_do_not_participate_in_lookup() {
     assert_ne!(first.koid(), second.koid());
     assert_ne!(first.koid().get(), 0);
     assert_eq!(first.snapshot().kind.get(), TEST_KIND.get());
+}
+
+#[test]
+fn instance_rights_narrow_a_sum_type_without_cross_variant_authority() {
+    let writable = crate::require_ok(PublishableRef::try_new(VariantRightsObject {
+        writable: true,
+    }));
+    assert_eq!(
+        writable.snapshot().supported_rights,
+        Rights::INSPECT.union(Rights::WRITE)
+    );
+    assert_eq!(
+        PreparedHandle::try_from_new_object(
+            writable.publication(),
+            Rights::EXECUTE,
+            HandleFlags::NONE,
+        )
+        .err(),
+        Some(HandleError::UnsupportedRights)
+    );
+
+    let executable = crate::require_ok(PublishableRef::try_new(VariantRightsObject {
+        writable: false,
+    }));
+    assert_eq!(
+        executable.snapshot().supported_rights,
+        Rights::INSPECT.union(Rights::EXECUTE)
+    );
+    assert_eq!(
+        PreparedHandle::try_from_new_object(
+            executable.publication(),
+            Rights::WRITE,
+            HandleFlags::NONE,
+        )
+        .err(),
+        Some(HandleError::UnsupportedRights)
+    );
 }

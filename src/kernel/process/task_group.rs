@@ -54,6 +54,7 @@ struct TaskGroupInner {
     id: TaskGroupId,
     domain_id: ResourceDomainId,
     domain: ResourceDomain,
+    object_published: AtomicBool,
     state: GroupLock<GroupState>,
 }
 
@@ -106,6 +107,7 @@ impl TaskGroup {
             id,
             domain_id: domain.id(),
             domain: domain.clone(),
+            object_published: AtomicBool::new(false),
             state: GroupLock::new(GroupState {
                 phase: GroupPhase::Active,
                 stop_generation: 0,
@@ -126,6 +128,28 @@ impl TaskGroup {
 
     pub(crate) fn domain_id(&self) -> ResourceDomainId {
         self.inner.domain_id
+    }
+
+    pub(crate) fn resource_domain(&self) -> ResourceDomain {
+        self.inner.domain.clone()
+    }
+
+    pub(super) fn claim_object_publication(&self) -> bool {
+        self.inner
+            .object_published
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    pub(super) fn abort_object_publication(&self) {
+        if self
+            .inner
+            .object_published
+            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            group_invariant_violation();
+        }
     }
 
     pub(super) fn prepare_membership(&self) -> Result<PreparedTaskGroupMembership, TaskGroupError> {

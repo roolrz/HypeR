@@ -11,7 +11,6 @@ use hyper::hal::interrupt::{InterruptId, InterruptPriority, InterruptTrigger};
 use hyper::hw::pl011 as reg;
 use hyper::platform::{ConsoleInfo, ConsoleKind, ConsoleRegisterAccess, PlatformInterruptTrigger};
 use hyper::sync::InterruptSpinLock;
-use hyper::sync::atomic::{AtomicU64, Ordering};
 
 use crate::kernel::irq::interrupt::{self, HandlerResult, Registration, VirtualInterrupt};
 
@@ -19,7 +18,6 @@ type ConsoleLock = InterruptSpinLock<Option<RuntimeConsole>, crate::hal::irq::Lo
 const MAX_DRAIN: usize = 32;
 
 static HOST_CONSOLE: ConsoleLock = InterruptSpinLock::new(None);
-static RECEIVE_ERRORS: AtomicU64 = AtomicU64::new(0);
 
 struct RuntimeConsole {
     port: RuntimePort,
@@ -207,12 +205,19 @@ fn handle_interrupt(_interrupt: VirtualInterrupt, _context: usize) -> HandlerRes
     }
     for byte in &received[..count] {
         if byte.error {
-            RECEIVE_ERRORS.fetch_add(1, Ordering::Relaxed);
-        } else if !crate::kernel::vm::receive_console_input(byte.byte) {
-            return HandlerResult::HandledAndMaskLocal;
+            super::console::record_receive_error();
+        } else {
+            if !crate::kernel::vm::receive_console_input(byte.byte).claimed_by_guest() {
+                super::console::receive(byte.byte);
+            }
         }
     }
     HandlerResult::Handled
+}
+
+#[cfg(not(feature = "kernel-self-test"))]
+pub(super) fn runtime_input_available() -> bool {
+    HOST_CONSOLE.with(|slot| slot.is_some())
 }
 
 impl RuntimePort {
