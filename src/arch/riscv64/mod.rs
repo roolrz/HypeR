@@ -51,7 +51,8 @@ pub use kaslr::{Error as KaslrError, select as select_kaslr_layout};
 pub use memory::inspect_mapping as inspect_stage1_mapping;
 pub use memory::{
     ActivationContext, Error as MemoryError, PreparedAddressSpace,
-    Riscv64AddressTranslation as ArchitectureAddressTranslation, StackMapping,
+    Riscv64AddressTranslation as ArchitectureAddressTranslation, SecondaryActivationContext,
+    StackMapping,
 };
 pub use platform::{
     Error as PlatformDiscoveryError, EssentialDeviceDiscovery, EssentialPlatformInfo,

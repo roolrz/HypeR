@@ -184,6 +184,7 @@ pub struct CrashContext {
     pub sctlr_el2: u64,
     pub tcr_el2: u64,
     pub ttbr0_el2: u64,
+    pub ttbr1_el2: u64,
     pub vbar_el2: u64,
     pub hcr_el2: u64,
 }
@@ -208,6 +209,7 @@ impl CrashContext {
             sctlr_el2: 0,
             tcr_el2: 0,
             ttbr0_el2: 0,
+            ttbr1_el2: 0,
             vbar_el2: 0,
             hcr_el2: 0,
         }
@@ -245,8 +247,12 @@ impl CrashContext {
             ));
         }
         emit(format_args!(
-            "SCTLR_EL2: {:#018x}  TCR_EL2: {:#018x}  TTBR0_EL2: {:#018x}",
-            self.sctlr_el2, self.tcr_el2, self.ttbr0_el2
+            "SCTLR_EL2: {:#018x}  TCR_EL2: {:#018x}",
+            self.sctlr_el2, self.tcr_el2
+        ));
+        emit(format_args!(
+            "TTBR0_EL2: {:#018x}  TTBR1_EL2: {:#018x}",
+            self.ttbr0_el2, self.ttbr1_el2
         ));
         emit(format_args!(
             "VBAR_EL2: {:#018x}  HCR_EL2: {:#018x}",
@@ -319,6 +325,9 @@ const _: () = {
     assert!(offset_of!(CrashContext, tcr_el2) == registers::CRASH_CONTEXT_TCR_EL2_OFFSET as usize);
     assert!(
         offset_of!(CrashContext, ttbr0_el2) == registers::CRASH_CONTEXT_TTBR0_EL2_OFFSET as usize
+    );
+    assert!(
+        offset_of!(CrashContext, ttbr1_el2) == registers::CRASH_CONTEXT_TTBR1_EL2_OFFSET as usize
     );
     assert!(
         offset_of!(CrashContext, vbar_el2) == registers::CRASH_CONTEXT_VBAR_EL2_OFFSET as usize

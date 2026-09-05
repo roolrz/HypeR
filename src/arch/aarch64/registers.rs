@@ -186,9 +186,10 @@ define_asm_constants! {
     CRASH_CONTEXT_SCTLR_EL2_OFFSET = 328;
     CRASH_CONTEXT_TCR_EL2_OFFSET = 336;
     CRASH_CONTEXT_TTBR0_EL2_OFFSET = 344;
-    CRASH_CONTEXT_VBAR_EL2_OFFSET = 352;
-    CRASH_CONTEXT_HCR_EL2_OFFSET = 360;
-    CRASH_CONTEXT_SIZE = 368;
+    CRASH_CONTEXT_TTBR1_EL2_OFFSET = 352;
+    CRASH_CONTEXT_VBAR_EL2_OFFSET = 360;
+    CRASH_CONTEXT_HCR_EL2_OFFSET = 368;
+    CRASH_CONTEXT_SIZE = 384;
 
     // Physical SGIs reserved by the host kernel.
     GIC_KERNEL_RPC_SGI = 8;
@@ -277,9 +278,9 @@ define_asm_constants! {
     MAIR_ATTR_NORMAL_WB = 0xff;
     MAIR_EL2_BOOT_VALUE = MAIR_ATTR_DEVICE_NGNRNE | (MAIR_ATTR_NORMAL_WB << 8);
 
-    // TCR_EL2, 4 KiB granule.
+    // TCR_EL2 nVHE and VHE layouts, 4 KiB granules.
     TCR_EL2_T0SZ_MASK = 0x3f;
-    TCR_EL2_RES1 = (1 << 31) | (1 << 23);
+    TCR_EL2_NVHE_RES1 = (1 << 31) | (1 << 23);
     TCR_EL2_T0SZ_32 = 32;
     TCR_EL2_T0SZ_48 = 16;
     TCR_EL2_IRGN0_WBWA = 1 << 8;
@@ -288,21 +289,33 @@ define_asm_constants! {
     TCR_EL2_TG0_4K = 0 << 14;
     TCR_EL2_TG0_64K = 1 << 14;
     TCR_EL2_TG0_16K = 2 << 14;
-    TCR_EL2_PS_SHIFT = 16;
-    TCR_EL2_PS_MASK = 7 << TCR_EL2_PS_SHIFT;
-    TCR_EL2_PS_32BIT = 0 << TCR_EL2_PS_SHIFT;
-    TCR_EL2_PS_36BIT = 1 << TCR_EL2_PS_SHIFT;
-    TCR_EL2_PS_40BIT = 2 << TCR_EL2_PS_SHIFT;
-    TCR_EL2_PS_42BIT = 3 << TCR_EL2_PS_SHIFT;
-    TCR_EL2_PS_44BIT = 4 << TCR_EL2_PS_SHIFT;
-    TCR_EL2_PS_48BIT = 5 << TCR_EL2_PS_SHIFT;
-    TCR_EL2_PS_52BIT = 6 << TCR_EL2_PS_SHIFT;
-    TCR_EL2_BOOT_BASE = TCR_EL2_RES1
+    TCR_EL2_NVHE_PS_SHIFT = 16;
+    TCR_EL2_NVHE_PS_MASK = 7 << TCR_EL2_NVHE_PS_SHIFT;
+    TCR_EL2_VHE_T1SZ_SHIFT = 16;
+    TCR_EL2_VHE_EPD1 = 1 << 23;
+    TCR_EL2_VHE_IRGN1_WBWA = 1 << 24;
+    TCR_EL2_VHE_ORGN1_WBWA = 1 << 26;
+    TCR_EL2_VHE_SH1_INNER = 3 << 28;
+    TCR_EL2_VHE_TG1_4K = 2 << 30;
+    TCR_EL2_VHE_IPS_SHIFT = 32;
+    TCR_EL2_VHE_IPS_MASK = 7 << TCR_EL2_VHE_IPS_SHIFT;
+    TCR_EL2_NVHE_BOOT_BASE = TCR_EL2_NVHE_RES1
         | TCR_EL2_T0SZ_48
         | TCR_EL2_IRGN0_WBWA
         | TCR_EL2_ORGN0_WBWA
         | TCR_EL2_SH0_INNER
         | TCR_EL2_TG0_4K;
+    TCR_EL2_VHE_BOOT_BASE = TCR_EL2_T0SZ_48
+        | (TCR_EL2_T0SZ_48 << TCR_EL2_VHE_T1SZ_SHIFT)
+        | TCR_EL2_IRGN0_WBWA
+        | TCR_EL2_ORGN0_WBWA
+        | TCR_EL2_SH0_INNER
+        | TCR_EL2_TG0_4K
+        | TCR_EL2_VHE_EPD1
+        | TCR_EL2_VHE_IRGN1_WBWA
+        | TCR_EL2_VHE_ORGN1_WBWA
+        | TCR_EL2_VHE_SH1_INNER
+        | TCR_EL2_VHE_TG1_4K;
 
     // SCTLR_EL1/EL2 fields used by the base Armv8-A execution model.
     SCTLR_M = 1 << 0;
@@ -373,6 +386,47 @@ define_asm_constants! {
         | STAGE1_DESC_ATTR_NORMAL
         | STAGE1_DESC_INNER_SHAREABLE
         | STAGE1_DESC_ACCESS_FLAG;
+}
+
+/// Encodes the final nVHE stage-1 control value for one validated VA/PA policy.
+pub const fn tcr_el2_nvhe_stage1(virtual_address_bits: u8, parange: u8) -> u64 {
+    (TCR_EL2_NVHE_BOOT_BASE & !(TCR_EL2_T0SZ_MASK | TCR_EL2_NVHE_PS_MASK))
+        | (64 - virtual_address_bits as u64)
+        | ((parange as u64) << TCR_EL2_NVHE_PS_SHIFT)
+}
+
+/// Encodes the final VHE lower/upper stage-1 control value.
+pub const fn tcr_el2_vhe_stage1(virtual_address_bits: u8, parange: u8) -> u64 {
+    let size = 64 - virtual_address_bits as u64;
+    (TCR_EL2_VHE_BOOT_BASE
+        & !(TCR_EL2_T0SZ_MASK
+            | (TCR_EL2_T0SZ_MASK << TCR_EL2_VHE_T1SZ_SHIFT)
+            | TCR_EL2_VHE_EPD1
+            | TCR_EL2_VHE_IPS_MASK))
+        | size
+        | (size << TCR_EL2_VHE_T1SZ_SHIFT)
+        | ((parange as u64) << TCR_EL2_VHE_IPS_SHIFT)
+}
+
+/// Returns the descriptor index for a configured-width stage-1 address.
+///
+/// A reduced-width upper address is sign-extended above its effective input
+/// bits. The initial lookup level must discard that extension rather than
+/// treating it as part of the root-table index.
+pub const fn stage1_table_index(
+    virtual_address: u64,
+    level: usize,
+    virtual_address_bits: u32,
+) -> usize {
+    let shift = STAGE1_LEVEL_SHIFTS_4K[level];
+    let available_bits = virtual_address_bits.saturating_sub(shift);
+    let index_bits = if available_bits < 9 {
+        available_bits
+    } else {
+        9
+    };
+    let mask = (1u64 << index_bits) - 1;
+    ((virtual_address >> shift) & mask) as usize
 }
 
 // ESR_ELx common fields and exception classes.
@@ -520,6 +574,7 @@ pub const ICH_VMCR_PRIORITY_MASK_ALLOW_ALL: u64 = ICH_VMCR_PRIORITY_MASK;
 
 // Stage-2 translation control and descriptor fields, 4 KiB granule.
 pub const VTCR_EL2_T0SZ_MASK: u64 = 0x3f;
+pub const VTCR_EL2_PS_SHIFT: u64 = 16;
 pub const VTCR_EL2_T0SZ_39BIT: u64 = 25;
 pub const VTCR_EL2_SL0_LEVEL2: u64 = 0 << 6;
 pub const VTCR_EL2_SL0_LEVEL1: u64 = 1 << 6;

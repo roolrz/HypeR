@@ -5,6 +5,10 @@
 # Exercises the complete AArch64 runtime contract under QEMU.
 set -eu
 
+script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=tests/qemu/aarch64-kaslr-geometry.sh
+. "$script_dir/aarch64-kaslr-geometry.sh"
+
 if [ "$#" -ne 6 ]; then
     echo "usage: verify-smp.sh QEMU IMAGE INITRD CPU MEMORY BOOTARGS" >&2
     exit 2
@@ -109,12 +113,13 @@ kaslr_geometry_is_valid() {
     kaslr_base=$(sed -n 's/.*randomized kernel base \(0x[0-9a-f][0-9a-f]*\),.*/\1/p' "$log" | tail -n 1)
     kaslr_offset=$(sed -n 's/.*KASLR offset \(0x[0-9a-f][0-9a-f]*\).*/\1/p' "$log" | tail -n 1)
     [ -n "$kaslr_base" ] && [ -n "$kaslr_offset" ] || return 1
-    kaslr_base_value=$((kaslr_base))
-    kaslr_offset_value=$((kaslr_offset))
-    kernel_region_base=$(((1 << va_bits) - (1 << 40)))
-    [ $((kaslr_offset_value % 0x200000)) -eq 0 ] &&
-        [ "$kaslr_offset_value" -lt $((512 * 1024 * 1024 * 1024)) ] &&
-        [ "$kaslr_base_value" -eq $((kernel_region_base + kaslr_offset_value)) ]
+    actual_host_mode=$(
+        sed -n 's/.*HypeR: AArch64 host execution mode: //p' "$log" |
+            tr -d '\r' |
+            tail -n 1
+    )
+    aarch64_kaslr_geometry_is_valid \
+        "$actual_host_mode" "$va_bits" "$kaslr_base" "$kaslr_offset"
 }
 
 reschedule_ipi_proof_is_valid() {

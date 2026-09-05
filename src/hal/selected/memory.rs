@@ -40,6 +40,10 @@ pub(crate) struct PreparedAddressSpace {
 /// Opaque input for the one-way permanent-address-space transition.
 pub(crate) struct ActivationContext(crate::arch::memory::ActivationContext);
 
+/// Opaque permanent-translation state copied into secondary CPU handoffs.
+#[derive(Clone, Copy)]
+pub(crate) struct SecondaryActivationContext(crate::arch::memory::SecondaryActivationContext);
+
 /// One guarded runtime-stack mapping installed in the permanent hierarchy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StackMapping {
@@ -65,6 +69,10 @@ impl PreparedAddressSpace {
 
     pub(crate) fn kernel_base(&self) -> u64 {
         self.backend.kernel_base()
+    }
+
+    pub(crate) fn secondary_activation_context(&self) -> SecondaryActivationContext {
+        SecondaryActivationContext(self.backend.secondary_activation_context())
     }
 
     /// Issues the one-shot transition token before this hierarchy is published.
@@ -138,6 +146,12 @@ impl PreparedAddressSpace {
     pub(crate) unsafe fn address_is_mapped(&self, address: usize) -> Result<bool, Error> {
         // SAFETY: The facade preserves hierarchy lifetime and walk exclusion.
         unsafe { self.backend.address_is_mapped(address) }.map_err(Error::from_backend)
+    }
+}
+
+impl SecondaryActivationContext {
+    pub(super) const fn into_backend(self) -> crate::arch::memory::SecondaryActivationContext {
+        self.0
     }
 }
 

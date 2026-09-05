@@ -19,7 +19,7 @@ use hyper::platform::{PhysicalRange, PlatformInfo};
 
 use super::super::{address, registers};
 use super::address_space::StackMapping;
-use super::layout::{KERNEL_BASE, KERNEL_STACK_ARENA_BASE, LINEAR_BASE};
+use super::layout::{self, RootRegion};
 
 mod descriptor;
 mod mapping_plan;
@@ -51,6 +51,7 @@ impl From<BootAllocatorError> for Error {
 struct PageTableBuilder<'allocator> {
     allocator: &'allocator mut BootAllocator,
     root: PhysicalAddress,
+    region: RootRegion,
 }
 
 impl<'allocator> PageTableBuilder<'allocator> {
@@ -60,11 +61,18 @@ impl<'allocator> PageTableBuilder<'allocator> {
     ///
     /// The allocator's accessible range must be writable through the current
     /// bootstrap identity map.
-    unsafe fn new(allocator: &'allocator mut BootAllocator) -> Result<Self, Error> {
+    unsafe fn new(
+        allocator: &'allocator mut BootAllocator,
+        region: RootRegion,
+    ) -> Result<Self, Error> {
         // SAFETY: The caller guarantees all allocator output is writable via
         // the active bootstrap identity mapping.
         let root = unsafe { allocator.allocate_zeroed_pages(1, 1)? };
-        Ok(Self { allocator, root })
+        Ok(Self {
+            allocator,
+            root,
+            region,
+        })
     }
 
     fn root(&self) -> PhysicalAddress {
@@ -120,7 +128,7 @@ impl<'allocator> PageTableBuilder<'allocator> {
         leaf_level: usize,
         flags: MappingFlags,
     ) -> Result<(), Error> {
-        if virtual_address >= address::STAGE1_VA_LIMIT
+        if !region_contains(self.region, virtual_address)
             || physical_address >= address::physical_address_limit()
             || leaf_level == 0
         {
@@ -208,7 +216,7 @@ pub(super) fn runtime_address_is_mapped(
     root: PhysicalAddress,
     address: u64,
 ) -> Result<bool, Error> {
-    if address >= address::STAGE1_VA_LIMIT {
+    if !layout::selected().contains(address) {
         return Err(Error::InvalidAddress);
     }
     let mut table = root;
@@ -233,7 +241,7 @@ pub(super) fn inspect_runtime_mapping(
     root: PhysicalAddress,
     address: u64,
 ) -> Result<Option<Stage1Mapping>, Error> {
-    if address >= address::STAGE1_VA_LIMIT {
+    if !layout::selected().contains(address) {
         return Err(Error::InvalidAddress);
     }
     let mut table = root;
@@ -261,7 +269,9 @@ fn stack_slot_range(slot: usize, pages: usize) -> Result<(usize, usize, usize), 
         return Err(Error::InvalidRange);
     }
     let stride = STACK_SLOT_PAGES as u64 * PAGE_SIZE;
-    let guard_page = KERNEL_STACK_ARENA_BASE
+    let layout = layout::selected();
+    let guard_page = layout
+        .kernel_stack_arena_base
         .checked_add(
             u64::try_from(slot)
                 .ok()
@@ -278,7 +288,7 @@ fn stack_slot_range(slot: usize, pages: usize) -> Result<(usize, usize, usize), 
         .ok_or(Error::AddressOverflow)?;
     let top = bottom
         .checked_add(stack_size)
-        .filter(|top| *top < address::STAGE1_VA_LIMIT)
+        .filter(|top| layout.contains(*top))
         .ok_or(Error::InvalidAddress)?;
     Ok((
         usize::try_from(guard_page).map_err(|_| Error::InvalidAddress)?,
@@ -295,7 +305,7 @@ fn map_runtime_page(
 ) -> Result<(), Error> {
     if !virtual_address.is_multiple_of(PAGE_SIZE)
         || !physical_address.is_multiple_of(PAGE_SIZE)
-        || virtual_address >= address::STAGE1_VA_LIMIT
+        || !layout::selected().contains(virtual_address)
         || physical_address >= address::physical_address_limit()
     {
         return Err(Error::InvalidAddress);
@@ -450,11 +460,20 @@ fn runtime_table_address(table: PhysicalAddress) -> Result<usize, Error> {
     if !table.get().is_multiple_of(PAGE_SIZE) || table.get() >= address::physical_address_limit() {
         return Err(Error::InvalidAddress);
     }
-    LINEAR_BASE
+    let layout = layout::selected();
+    layout
+        .linear_base
         .checked_add(table.get())
-        .filter(|address| *address < KERNEL_BASE)
+        .filter(|address| *address < layout.kernel_base)
         .and_then(|address| usize::try_from(address).ok())
         .ok_or(Error::InvalidAddress)
+}
+
+const fn region_contains(region: RootRegion, address: u64) -> bool {
+    match region {
+        RootRegion::Lower => address < address::STAGE1_VA_LIMIT,
+        RootRegion::Upper => address >= 0u64.wrapping_sub(address::STAGE1_VA_LIMIT),
+    }
 }
 
 unsafe fn read_entry(table: PhysicalAddress, index: usize) -> Result<u64, Error> {

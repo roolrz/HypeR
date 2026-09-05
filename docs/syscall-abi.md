@@ -683,13 +683,14 @@ VHE and nVHE require different machine mechanisms behind one `hal::user`
 capability.
 
 On VHE, native EL0 uses the host EL2&0 translation regime with `E2H=1` and
-`TGE=1`. Per-process roots contain private user subtrees and share pinned,
-user-inaccessible kernel-only table subtrees. Guarded-stack and other runtime
-kernel mapping mutations remain serialized and coherent across every active
-and future root; a root cannot retire while its kernel stack or exception frame
-is active. Returning to a vCPU clears the host-user regime explicitly.
-Exception code must never infer the return regime merely from a lower-EL
-vector.
+`TGE=1`. The stable permanent kernel hierarchy occupies the configured
+canonical upper range through `TTBR1_EL2`; per-Process roots contain only
+private user mappings in the configured lower range through `TTBR0_EL2`.
+Guarded-stack and other runtime kernel mapping mutations therefore update only
+the kernel hierarchy and never require replication into Process roots. A user
+root cannot retire while its context is active. Returning to a vCPU clears the
+host-user regime explicitly. Exception code must never infer the return regime
+merely from a lower-EL vector.
 
 On nVHE, the current AArch64 proof enters EL0 directly with `TGE=1`, `DC=1`,
 stage-1 translation forced off, and a per-process stage-2 root/VMID. SVC,

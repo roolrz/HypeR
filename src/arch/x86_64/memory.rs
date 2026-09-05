@@ -97,6 +97,12 @@ pub struct ActivationContext {
     pub(super) kernel_base: u64,
 }
 
+/// Inert permanent-translation state copied into a secondary boot handoff.
+#[derive(Clone, Copy)]
+pub struct SecondaryActivationContext {
+    pub(super) root: PhysicalAddress,
+}
+
 impl PreparedAddressSpace {
     pub fn root_address(&self) -> u64 {
         self.root.get()
@@ -112,6 +118,10 @@ impl PreparedAddressSpace {
             stack_top: self.stack_top,
             kernel_base: self.kernel_base,
         }
+    }
+
+    pub fn secondary_activation_context(&self) -> SecondaryActivationContext {
+        SecondaryActivationContext { root: self.root }
     }
 
     /// Removes bootstrap identity mappings.

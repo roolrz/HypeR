@@ -34,13 +34,13 @@ pub struct SecondaryBootParameters {
 
 impl SecondaryBootParameters {
     pub fn new(
-        root: u64,
+        memory: super::memory::SecondaryActivationContext,
         physical_stack_top: u64,
         virtual_stack_top: u64,
         cpu_index: usize,
     ) -> Self {
         Self {
-            root,
+            root: memory.root.get(),
             physical_stack_top,
             virtual_stack_top,
             cpu_index: cpu_index as u64,

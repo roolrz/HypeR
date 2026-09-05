@@ -22,6 +22,12 @@ pub struct ActivationContext {
     pub(in crate::arch::riscv64) kernel_base: u64,
 }
 
+/// Inert permanent-translation state copied into a secondary boot handoff.
+#[derive(Clone, Copy)]
+pub struct SecondaryActivationContext {
+    pub(in crate::arch::riscv64) root: PhysicalAddress,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StackMapping {
     pub guard_page: usize,
@@ -54,6 +60,12 @@ impl PreparedAddressSpace {
             root: self.address_space.root,
             stack_top: self.address_space.stack_top,
             kernel_base: self.address_space.kernel_base,
+        }
+    }
+
+    pub fn secondary_activation_context(&self) -> SecondaryActivationContext {
+        SecondaryActivationContext {
+            root: self.address_space.root,
         }
     }
 

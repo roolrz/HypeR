@@ -78,7 +78,8 @@ pub use kaslr::{Error as KaslrError, select as select_kaslr_layout};
 pub use memory::inspect_mapping as inspect_stage1_mapping;
 pub use memory::{
     Aarch64AddressTranslation as ArchitectureAddressTranslation, ActivationContext,
-    Error as MemoryError, PreparedAddressSpace, StackMapping, bootstrap_stack_bounds,
+    Error as MemoryError, PreparedAddressSpace, SecondaryActivationContext, StackMapping,
+    bootstrap_stack_bounds,
 };
 pub use platform::{
     Error as PlatformDiscoveryError, EssentialDeviceDiscovery, EssentialPlatformInfo,
@@ -227,7 +228,8 @@ pub const fn prepare_interrupts_for_guest_entry() {}
 
 unsafe extern "C" {
     fn aarch64_activate_final_address_space(
-        root: u64,
+        transition_root: u64,
+        kernel_root: u64,
         virtual_base: u64,
         stack_top: u64,
         tcr_el2: u64,
@@ -262,7 +264,8 @@ pub unsafe fn activate_memory(context: ActivationContext) -> ! {
     // final hierarchy, high alias, and mapped stack consumed by this transition.
     unsafe {
         aarch64_activate_final_address_space(
-            context.root.get(),
+            context.transition_root.get(),
+            context.kernel_root.get(),
             context.kernel_base,
             context.stack_top.get(),
             context.tcr_el2,

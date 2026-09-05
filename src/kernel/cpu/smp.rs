@@ -260,7 +260,7 @@ pub(crate) fn frozen_topology() -> Option<FrozenTopology> {
 /// Starts every enabled CPU described by firmware, up to `CONFIG_MAX_CPUS`.
 pub fn initialize(
     platform: &PlatformInfo,
-    root: u64,
+    memory: crate::hal::memory::SecondaryActivationContext,
     image_physical_start: u64,
     kernel_virtual_base: u64,
 ) -> Result<Capabilities, Error> {
@@ -322,11 +322,11 @@ pub fn initialize(
         next_cpu_index += 1;
         super::super::mm::stack::prepare_cpu(cpu_index)?;
         let stack = super::super::task::scheduler::register_secondary_cpu(cpu_index, "idle")?;
-        let parameters = SecondaryBootHandoff::new(crate::hal::cpu::SecondaryBootParameters::new(
-            root,
+        let parameters = SecondaryBootHandoff::new(crate::hal::cpu::secondary_boot_parameters(
+            memory,
             stack.physical_top,
             stack.virtual_top as u64,
-            cpu_index.get(),
+            cpu_index,
         ))?;
         let context = parameters.context();
         boot_parameters.push(parameters);

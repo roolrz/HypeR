@@ -506,7 +506,7 @@ fn write_entry(table: PhysicalAddress, slot: usize, value: u64) -> Result<(), Er
 }
 
 fn table_pointer(table: PhysicalAddress) -> Result<*mut u64, Error> {
-    memory::LINEAR_BASE
+    memory::linear_mapping_base()
         .checked_add(table.get())
         .and_then(|address| usize::try_from(address).ok())
         .map(core::ptr::with_exposed_provenance_mut::<u64>)

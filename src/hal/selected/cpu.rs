@@ -13,6 +13,20 @@ use hyper::platform::CpuPowerInfo;
 
 pub(crate) use crate::arch::cpu::{PowerController, PowerError, SecondaryBootParameters};
 
+pub(crate) fn secondary_boot_parameters(
+    memory: super::memory::SecondaryActivationContext,
+    physical_stack_top: u64,
+    virtual_stack_top: u64,
+    cpu_index: CpuIndex,
+) -> SecondaryBootParameters {
+    SecondaryBootParameters::new(
+        memory.into_backend(),
+        physical_stack_top,
+        virtual_stack_top,
+        cpu_index.get(),
+    )
+}
+
 #[inline]
 pub(crate) fn initialize_power(info: CpuPowerInfo) -> Result<PowerController, PowerError> {
     crate::arch::cpu::initialize_power(info)

@@ -96,6 +96,15 @@ The selected binary HAL exposes eleven enforced capability modules:
   fixed-width events with exhaustive actions; raw frames and backend
   completion state remain architecture-private.
 
+The AArch64 host layout is selected at runtime without changing the image's
+Armv8.0 instruction baseline. VHE uses the configured lower range exclusively
+for native Process roots and the matching canonical upper range for MMIO,
+linear RAM, the randomized kernel image, and guarded kernel stacks. nVHE has no
+EL2 upper range and places the same host regions at equivalent offsets in its
+lower range; direct native EL0 remains isolated behind a private stage-2 root.
+The permanent-memory handoff is opaque above `hal::memory`, including the
+single-root or split-root state required by secondary CPUs.
+
 Linux guest architecture identity, IPA layout, image validation/loading, and
 boot-register plans live in `kernel::vm::linux`. Its narrow `selected` module
 is the guest-ABI build selection point; the HAL only realizes the resulting
@@ -248,15 +257,18 @@ providing a pointer-free diagnostic graph without changing object lifetime or
 placing reverse-reference locks on capability hot paths. Rendering is allowed
 only from normal kernel context; fatal diagnostics remain lock-independent.
 
-AArch64 provides two implementations behind that facade. VHE uses an immutable
-host EL2&0 stage-1 root. nVHE uses an immutable per-process stage-2 root with a
-separate resident-CPU set, mapping epoch, acknowledged shootdown, and shared
-guest/native VMID allocation and retirement. Both retain old roots and tags
-until every cut target acknowledges; safe abandonment leaks published owners
-rather than risking reuse. A kernel self-test exercises repeated direct Native
-syscall return, register-result validation, deferred-call unwind and re-entry,
-contained fault unwind, join, and retirement under both QEMU host regimes. The
-production AArch64 path mounts the firmware initramfs, strictly validates and
+AArch64 provides two implementations behind that facade. VHE keeps the
+permanent host mapping in the canonical upper range through `TTBR1_EL2` and
+gives each Process an immutable lower-range `TTBR0_EL2` root. nVHE keeps the EL2
+host in its lower-only translation regime and gives each Process an immutable
+stage-2 root with a separate resident-CPU set, mapping epoch, acknowledged
+shootdown, and shared guest/native VMID allocation and retirement. Both retain
+old roots and tags until every cut target acknowledges; safe abandonment leaks
+published owners rather than risking reuse. A kernel self-test exercises
+repeated direct Native syscall return, register-result validation,
+deferred-call unwind and re-entry, contained fault unwind, join, and retirement
+under both QEMU host regimes. The production AArch64 path mounts the firmware
+initramfs, strictly validates and
 maps `/init`, publishes its Process and initial UserThread, and transfers
 bootstrap execution to the scheduler. Broader runtime ABI coverage, blocking
 and migration qualification, and physical-hardware validation remain

@@ -26,15 +26,43 @@ fn absence_of_vhe_selects_a_supported_stage2_contract() {
 
 #[test]
 fn native_user_limit_respects_only_the_active_translation_regime() {
-    let privileged_base = 1u64 << 44;
     let vhe = UserExecutionCapabilities::new(UserTranslationRegime::VheHostStage1, 48, 40, 8)
         .unwrap_or_else(|error| panic!("valid VHE contract rejected: {error:?}"));
 
-    assert_eq!(vhe.user_address_limit(privileged_base), privileged_base);
+    assert_eq!(vhe.user_address_limit(), 1 << 48);
+    assert_eq!(nvhe_capabilities().user_address_limit(), 1 << 39);
+}
+
+#[test]
+fn final_tcr_uses_the_host_mode_specific_physical_size_field() {
+    let parange = registers::ID_AA64MMFR0_PARANGE_48BIT as u8;
+    let nvhe = registers::tcr_el2_nvhe_stage1(48, parange);
+    let vhe = registers::tcr_el2_vhe_stage1(48, parange);
+
     assert_eq!(
-        nvhe_capabilities().user_address_limit(privileged_base),
-        1 << 39
+        (nvhe & registers::TCR_EL2_NVHE_PS_MASK) >> registers::TCR_EL2_NVHE_PS_SHIFT,
+        u64::from(parange)
     );
+    assert_eq!(
+        (vhe & registers::TCR_EL2_VHE_IPS_MASK) >> registers::TCR_EL2_VHE_IPS_SHIFT,
+        u64::from(parange)
+    );
+    assert_eq!(vhe & registers::TCR_EL2_VHE_EPD1, 0);
+    assert_eq!(vhe & registers::TCR_EL2_T0SZ_MASK, 16);
+    assert_eq!(
+        (vhe >> registers::TCR_EL2_VHE_T1SZ_SHIFT) & registers::TCR_EL2_T0SZ_MASK,
+        16
+    );
+}
+
+#[test]
+fn compact_upper_addresses_discard_sign_extension_at_the_root() {
+    let upper_42_bit_base = 0u64.wrapping_sub(1 << 42);
+    let upper_kernel_base = 0u64.wrapping_sub(1 << 40);
+
+    assert_eq!(registers::stage1_table_index(upper_42_bit_base, 0, 42), 0);
+    assert_eq!(registers::stage1_table_index(upper_kernel_base, 0, 42), 6);
+    assert_eq!(registers::stage1_table_index(upper_kernel_base, 0, 48), 510);
 }
 
 #[test]
