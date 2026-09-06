@@ -8,11 +8,15 @@ use crate::kernel::accounting::{
 };
 use crate::kernel::authority::Rights;
 use crate::kernel::object::{
-    KernelObject, ObjectCreationError, ObjectKind, ObjectPublication, SignalSource, TransferClass,
-    object_allocation_size, private,
+    KernelObject, KernelService, ObjectCreationError, ObjectKind, ObjectPublication,
+    PublishableRef, SignalMask, SignalSource, SignalState, TransferClass, object_allocation_size,
+    private,
 };
+use hyper::mm::WeakFallibleArc;
+use hyper::sync::PublishedOnce;
 
-use super::{Process, TaskGroup, TaskGroupError};
+use super::owner::ProcessInner;
+use super::{Process, ProcessSnapshot, TaskGroup, TaskGroupError, TerminalReason};
 use crate::kernel::accounting::ResourceDomainObject;
 
 /// Failure while preparing an accounted task capability object.
@@ -49,7 +53,9 @@ impl From<ResourceError> for TaskObjectError {
 /// and scheduler execution. The object adds a KOID and handle rights; it does
 /// not create a second task lifecycle or an independently reclaimable task.
 pub(crate) struct ProcessObject {
-    process: Process,
+    process: WeakFallibleArc<ProcessInner>,
+    final_snapshot: PublishedOnce<ProcessSnapshot>,
+    signals: SignalState,
     _object_charge: CommittedCharge,
 }
 
@@ -60,31 +66,53 @@ impl ProcessObject {
         .union(Rights::INSPECT)
         .union(Rights::REQUEST_STOP);
 
-    fn try_new(process: Process) -> Result<Self, TaskObjectError> {
+    fn try_new(process: &Process) -> Result<Self, TaskObjectError> {
         let charge = reserve_object_charge::<Self>(&process.resource_domain())?;
         Ok(Self {
-            process,
+            process: process.inner.downgrade(),
+            final_snapshot: PublishedOnce::new(),
+            signals: SignalState::new(),
             _object_charge: charge,
         })
     }
 
-    pub(crate) const fn process(&self) -> &Process {
-        &self.process
+    pub(crate) fn snapshot(&self) -> ProcessSnapshot {
+        if let Some(inner) = self.process.upgrade() {
+            return Process { inner }.snapshot();
+        }
+        match self.final_snapshot.get() {
+            Some(snapshot) => *snapshot,
+            None => crate::hal::cpu::halt(),
+        }
     }
 
-    /// Constructs the single userspace object identity for this `Process`.
-    pub(crate) fn try_publication(
-        process: Process,
-    ) -> Result<ObjectPublication<Self>, TaskObjectError> {
-        if !process.claim_object_publication() {
-            return Err(TaskObjectError::AlreadyPublished);
+    pub(crate) fn request_stop(&self, reason: TerminalReason) {
+        if let Some(inner) = self.process.upgrade() {
+            let _ = (Process { inner }).request_stop(reason);
         }
-        let result = Self::try_new(process.clone())
-            .and_then(|payload| ObjectPublication::try_new(payload).map_err(Into::into));
-        if result.is_err() {
-            process.abort_object_publication();
+    }
+
+    pub(super) fn publish_stopped(&self) {
+        if self
+            .signals
+            .update(SignalMask::EMPTY, Process::TERMINATED)
+            .is_err()
+        {
+            crate::hal::cpu::halt();
         }
-        result
+    }
+
+    pub(super) fn publish_final_snapshot(&self, snapshot: ProcessSnapshot) {
+        if self.final_snapshot.publish(snapshot).is_err() {
+            crate::hal::cpu::halt();
+        }
+    }
+
+    /// Constructs the canonical service owner for this `Process`.
+    pub(crate) fn try_service(
+        process: &Process,
+    ) -> Result<PublishableRef<Self, KernelService>, TaskObjectError> {
+        Ok(PublishableRef::try_new(Self::try_new(process)?)?)
     }
 }
 
@@ -103,7 +131,7 @@ impl KernelObject for ProcessObject {
         .union(Rights::CREATE_THREAD);
 
     fn signal_source(&self) -> Option<SignalSource<'_>> {
-        Some(self.process.signal_source())
+        Some(SignalSource::new(&self.signals, Process::SUPPORTED_SIGNALS))
     }
 }
 

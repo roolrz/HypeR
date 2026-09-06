@@ -25,7 +25,7 @@
 typedef uint64_t hyper_native_handle_t;
 typedef int64_t hyper_native_status_t;
 
-#define HYPER_NATIVE_FEATURE_CORE UINT64_C(1)
+#define HYPER_NATIVE_FEATURE_CORE (UINT64_C(1) << 0)
 
 #define HYPER_NATIVE_STATUS_OK INT64_C(0)
 #define HYPER_NATIVE_STATUS_INVALID_ARGUMENT (-INT64_C(1))
@@ -61,6 +61,8 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_OBJECT_BOOT_FILE UINT32_C(13)
 #define HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL UINT32_C(14)
 #define HYPER_NATIVE_OBJECT_PROCESS_BUILDER UINT32_C(15)
+#define HYPER_NATIVE_OBJECT_TASK_INSPECTOR UINT32_C(16)
+#define HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR UINT32_C(17)
 
 #define HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN UINT32_C(0)
 #define HYPER_NATIVE_TRANSFER_CLASS_GENERAL UINT32_C(1)
@@ -84,51 +86,54 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
         case HYPER_NATIVE_OBJECT_BOOT_FILE: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
         case HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_PROCESS_BUILDER: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_TASK_INSPECTOR: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
+        case HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
         default: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
     }
 }
 
-#define HYPER_NATIVE_RIGHT_DUPLICATE UINT64_C(1)
-#define HYPER_NATIVE_RIGHT_TRANSFER UINT64_C(2)
-#define HYPER_NATIVE_RIGHT_WAIT UINT64_C(4)
-#define HYPER_NATIVE_RIGHT_INSPECT UINT64_C(8)
-#define HYPER_NATIVE_RIGHT_READ UINT64_C(16)
-#define HYPER_NATIVE_RIGHT_WRITE UINT64_C(32)
-#define HYPER_NATIVE_RIGHT_MAP UINT64_C(64)
-#define HYPER_NATIVE_RIGHT_EXECUTE UINT64_C(128)
-#define HYPER_NATIVE_RIGHT_RESIZE UINT64_C(256)
-#define HYPER_NATIVE_RIGHT_PIN UINT64_C(512)
-#define HYPER_NATIVE_RIGHT_START UINT64_C(1024)
-#define HYPER_NATIVE_RIGHT_REQUEST_STOP UINT64_C(2048)
-#define HYPER_NATIVE_RIGHT_RUN_VCPU UINT64_C(4096)
-#define HYPER_NATIVE_RIGHT_INJECT_INTERRUPT UINT64_C(8192)
-#define HYPER_NATIVE_RIGHT_GRANT_MEMORY UINT64_C(16384)
-#define HYPER_NATIVE_RIGHT_ASSIGN_DEVICE UINT64_C(32768)
-#define HYPER_NATIVE_RIGHT_MAP_DMA UINT64_C(65536)
-#define HYPER_NATIVE_RIGHT_ACK_INTERRUPT UINT64_C(131072)
-#define HYPER_NATIVE_RIGHT_REVOKE UINT64_C(262144)
-#define HYPER_NATIVE_RIGHT_SIGNAL UINT64_C(524288)
-#define HYPER_NATIVE_RIGHT_CREATE_PROCESS UINT64_C(1048576)
-#define HYPER_NATIVE_RIGHT_CREATE_THREAD UINT64_C(2097152)
-#define HYPER_NATIVE_RIGHT_CREATE_TASK_GROUP UINT64_C(4194304)
-#define HYPER_NATIVE_RIGHT_CREATE_RESOURCE_DOMAIN UINT64_C(8388608)
-#define HYPER_NATIVE_RIGHT_SET_LIMITS UINT64_C(16777216)
-#define HYPER_NATIVE_RIGHT_CREATE_EXECUTABLE UINT64_C(33554432)
-#define HYPER_NATIVE_RIGHT_TASK_GROUP_ATTACH_PROCESS UINT64_C(67108864)
-#define HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR UINT64_C(134217728)
+#define HYPER_NATIVE_RIGHT_DUPLICATE (UINT64_C(1) << 0)
+#define HYPER_NATIVE_RIGHT_TRANSFER (UINT64_C(1) << 1)
+#define HYPER_NATIVE_RIGHT_WAIT (UINT64_C(1) << 2)
+#define HYPER_NATIVE_RIGHT_INSPECT (UINT64_C(1) << 3)
+#define HYPER_NATIVE_RIGHT_READ (UINT64_C(1) << 4)
+#define HYPER_NATIVE_RIGHT_WRITE (UINT64_C(1) << 5)
+#define HYPER_NATIVE_RIGHT_MAP (UINT64_C(1) << 6)
+#define HYPER_NATIVE_RIGHT_EXECUTE (UINT64_C(1) << 7)
+#define HYPER_NATIVE_RIGHT_RESIZE (UINT64_C(1) << 8)
+#define HYPER_NATIVE_RIGHT_PIN (UINT64_C(1) << 9)
+#define HYPER_NATIVE_RIGHT_START (UINT64_C(1) << 10)
+#define HYPER_NATIVE_RIGHT_REQUEST_STOP (UINT64_C(1) << 11)
+#define HYPER_NATIVE_RIGHT_RUN_VCPU (UINT64_C(1) << 12)
+#define HYPER_NATIVE_RIGHT_INJECT_INTERRUPT (UINT64_C(1) << 13)
+#define HYPER_NATIVE_RIGHT_GRANT_MEMORY (UINT64_C(1) << 14)
+#define HYPER_NATIVE_RIGHT_ASSIGN_DEVICE (UINT64_C(1) << 15)
+#define HYPER_NATIVE_RIGHT_MAP_DMA (UINT64_C(1) << 16)
+#define HYPER_NATIVE_RIGHT_ACK_INTERRUPT (UINT64_C(1) << 17)
+#define HYPER_NATIVE_RIGHT_REVOKE (UINT64_C(1) << 18)
+#define HYPER_NATIVE_RIGHT_SIGNAL (UINT64_C(1) << 19)
+#define HYPER_NATIVE_RIGHT_CREATE_PROCESS (UINT64_C(1) << 20)
+#define HYPER_NATIVE_RIGHT_CREATE_THREAD (UINT64_C(1) << 21)
+#define HYPER_NATIVE_RIGHT_CREATE_TASK_GROUP (UINT64_C(1) << 22)
+#define HYPER_NATIVE_RIGHT_CREATE_RESOURCE_DOMAIN (UINT64_C(1) << 23)
+#define HYPER_NATIVE_RIGHT_SET_LIMITS (UINT64_C(1) << 24)
+#define HYPER_NATIVE_RIGHT_CREATE_EXECUTABLE (UINT64_C(1) << 25)
+#define HYPER_NATIVE_RIGHT_TASK_GROUP_ATTACH_PROCESS (UINT64_C(1) << 26)
+#define HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR (UINT64_C(1) << 27)
+#define HYPER_NATIVE_RIGHT_DERIVE (UINT64_C(1) << 28)
 
-#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(268435455)
+#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1fffffff)
 
-#define HYPER_NATIVE_SIGNAL_EVENT_SIGNALED UINT64_C(1)
-#define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE UINT64_C(1)
-#define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_WRITABLE UINT64_C(2)
-#define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_PEER_CLOSED UINT64_C(4)
-#define HYPER_NATIVE_SIGNAL_CAPABILITY_CHANNEL_PEER_RECEIVING UINT64_C(1)
-#define HYPER_NATIVE_SIGNAL_CAPABILITY_CHANNEL_PEER_CLOSED UINT64_C(2)
-#define HYPER_NATIVE_SIGNAL_THREAD_TERMINATED UINT64_C(1)
-#define HYPER_NATIVE_SIGNAL_PROCESS_TERMINATED UINT64_C(1)
-#define HYPER_NATIVE_SIGNAL_CONSOLE_READABLE UINT64_C(1)
-#define HYPER_NATIVE_SIGNAL_CONSOLE_WRITABLE UINT64_C(2)
+#define HYPER_NATIVE_SIGNAL_EVENT_SIGNALED (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_WRITABLE (UINT64_C(1) << 1)
+#define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_PEER_CLOSED (UINT64_C(1) << 2)
+#define HYPER_NATIVE_SIGNAL_CAPABILITY_CHANNEL_PEER_RECEIVING (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_CAPABILITY_CHANNEL_PEER_CLOSED (UINT64_C(1) << 1)
+#define HYPER_NATIVE_SIGNAL_THREAD_TERMINATED (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_PROCESS_TERMINATED (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_CONSOLE_READABLE (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_CONSOLE_WRITABLE (UINT64_C(1) << 1)
 
 #define HYPER_NATIVE_ELF_OSABI UINT64_C(63)
 #define HYPER_NATIVE_ELF_ABI_VERSION UINT64_C(0)
@@ -141,6 +146,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR UINT64_C(5)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE UINT64_C(6)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_BOOT_FS UINT64_C(7)
+#define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR UINT64_C(8)
+#define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR UINT64_C(9)
 #define HYPER_NATIVE_STARTUP_MAX_HANDLES UINT64_C(256)
 #define HYPER_NATIVE_DEADLINE_INFINITE UINT64_C(18446744073709551615)
 #define HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS UINT64_C(64)
@@ -176,6 +183,20 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_PROCESS_TERMINAL_LAST_THREAD_EXITED UINT64_C(4)
 #define HYPER_NATIVE_PROCESS_TERMINAL_FAULT UINT64_C(5)
 #define HYPER_NATIVE_PROCESS_TERMINAL_TASK_GROUP_STOP UINT64_C(6)
+#define HYPER_NATIVE_TASK_INSPECTOR_PROCESS_PAGE_CAPACITY UINT64_C(8)
+#define HYPER_NATIVE_TASK_INSPECTOR_THREAD_PAGE_CAPACITY UINT64_C(8)
+#define HYPER_NATIVE_OBJECT_INSPECTOR_OBJECT_PAGE_CAPACITY UINT64_C(8)
+#define HYPER_NATIVE_OBJECT_INSPECTOR_HANDLE_PAGE_CAPACITY UINT64_C(8)
+#define HYPER_NATIVE_THREAD_ROLE_BOOTSTRAP UINT64_C(1)
+#define HYPER_NATIVE_THREAD_ROLE_IDLE UINT64_C(2)
+#define HYPER_NATIVE_THREAD_ROLE_KERNEL UINT64_C(3)
+#define HYPER_NATIVE_THREAD_ROLE_USER UINT64_C(4)
+#define HYPER_NATIVE_THREAD_ROLE_VCPU UINT64_C(5)
+#define HYPER_NATIVE_THREAD_REGISTRY_RESIDENT UINT64_C(1)
+#define HYPER_NATIVE_THREAD_REGISTRY_RETIRING UINT64_C(2)
+#define HYPER_NATIVE_OBJECT_HANDLE_STATE_UNPUBLISHED UINT64_C(1)
+#define HYPER_NATIVE_OBJECT_HANDLE_STATE_ACTIVE UINT64_C(2)
+#define HYPER_NATIVE_OBJECT_HANDLE_STATE_RETIRED UINT64_C(3)
 
 #define HYPER_NATIVE_SYS_ABI_QUERY UINT64_C(0)
 #define HYPER_NATIVE_SYS_HANDLE_CLOSE UINT64_C(1)
@@ -211,6 +232,16 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP UINT64_C(31)
 #define HYPER_NATIVE_SYS_OBJECT_WAIT_MANY UINT64_C(32)
 #define HYPER_NATIVE_SYS_PROCESS_GET_INFO UINT64_C(33)
+#define HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_PROCESSES UINT64_C(34)
+#define HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_THREADS UINT64_C(35)
+#define HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_PROCESS UINT64_C(36)
+#define HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_OBJECTS UINT64_C(37)
+#define HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_HANDLES UINT64_C(38)
+#define HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS UINT64_C(39)
+#define HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_TASK_GROUP UINT64_C(40)
+#define HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_TASK_GROUP UINT64_C(41)
+#define HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN UINT64_C(42)
+#define HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN UINT64_C(43)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -316,6 +347,94 @@ HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_startup_handle_t) == 8, "
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_startup_handle_t, purpose) == 0, "startup_handle.purpose offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_startup_handle_t, flags) == 4, "startup_handle.flags offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_startup_handle_t, handle) == 8, "startup_handle.handle offset");
+
+typedef struct hyper_native_task_process_t {
+    uint64_t koid;
+    uint32_t phase;
+    uint32_t terminal_reason;
+    uint32_t pending_threads;
+    uint32_t active_threads;
+    uint32_t name_length;
+    uint32_t reserved;
+    uint8_t name[64];
+} hyper_native_task_process_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_task_process_t) == 96, "task_process size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_task_process_t) == 8, "task_process alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, koid) == 0, "task_process.koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, phase) == 8, "task_process.phase offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, terminal_reason) == 12, "task_process.terminal_reason offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, pending_threads) == 16, "task_process.pending_threads offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, active_threads) == 20, "task_process.active_threads offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, name_length) == 24, "task_process.name_length offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, reserved) == 28, "task_process.reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, name) == 32, "task_process.name offset");
+
+typedef struct hyper_native_task_thread_t {
+    uint64_t koid;
+    uint64_t process_koid;
+    uint32_t role;
+    uint32_t registry_phase;
+    uint32_t name_length;
+    uint32_t reserved;
+    uint8_t name[64];
+} hyper_native_task_thread_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_task_thread_t) == 96, "task_thread size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_task_thread_t) == 8, "task_thread alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, koid) == 0, "task_thread.koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, process_koid) == 8, "task_thread.process_koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, role) == 16, "task_thread.role offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, registry_phase) == 20, "task_thread.registry_phase offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, name_length) == 24, "task_thread.name_length offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, reserved) == 28, "task_thread.reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, name) == 32, "task_thread.name offset");
+
+typedef struct hyper_native_object_inspection_t {
+    uint64_t koid;
+    uint32_t object_kind;
+    uint32_t handle_state;
+    uint64_t active_handles;
+    uint64_t supported_rights;
+    uint64_t strong_references;
+    uint64_t kernel_service_references;
+    uint64_t scheduler_references;
+    uint64_t operation_references;
+    uint64_t user_authority_references;
+    uint64_t publication_references;
+    uint64_t diagnostic_references;
+    uint64_t retirement_references;
+} hyper_native_object_inspection_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_object_inspection_t) == 96, "object_inspection size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_object_inspection_t) == 8, "object_inspection alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, koid) == 0, "object_inspection.koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, object_kind) == 8, "object_inspection.object_kind offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, handle_state) == 12, "object_inspection.handle_state offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, active_handles) == 16, "object_inspection.active_handles offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, supported_rights) == 24, "object_inspection.supported_rights offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, strong_references) == 32, "object_inspection.strong_references offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, kernel_service_references) == 40, "object_inspection.kernel_service_references offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, scheduler_references) == 48, "object_inspection.scheduler_references offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, operation_references) == 56, "object_inspection.operation_references offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, user_authority_references) == 64, "object_inspection.user_authority_references offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, publication_references) == 72, "object_inspection.publication_references offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, diagnostic_references) == 80, "object_inspection.diagnostic_references offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, retirement_references) == 88, "object_inspection.retirement_references offset");
+
+typedef struct hyper_native_handle_inspection_t {
+    uint64_t process_koid;
+    uint64_t handle;
+    uint64_t object_koid;
+    uint64_t rights;
+    uint32_t object_kind;
+    uint32_t flags;
+} hyper_native_handle_inspection_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_handle_inspection_t) == 40, "handle_inspection size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_handle_inspection_t) == 8, "handle_inspection alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, process_koid) == 0, "handle_inspection.process_koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, handle) == 8, "handle_inspection.handle offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, object_koid) == 16, "handle_inspection.object_koid offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, rights) == 24, "handle_inspection.rights offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, object_kind) == 32, "handle_inspection.object_kind offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, flags) == 36, "handle_inspection.flags offset");
 
 #undef HYPER_ABI_ALIGNOF
 #undef HYPER_ABI_STATIC_ASSERT

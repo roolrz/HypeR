@@ -19,7 +19,7 @@ mod wait;
 
 pub(crate) use thread_object::{
     ThreadObjectObservation, ThreadObjectRegistryPhase, ThreadObjectScanCursor,
-    ThreadObjectSnapshot, ThreadObjectSnapshotPage,
+    ThreadObjectSnapshot, ThreadObjectSnapshotPage, ThreadRole,
 };
 
 pub use sleep::{SleepError, sleep_ms, sleep_ns, sleep_s, sleep_until, sleep_us};

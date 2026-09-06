@@ -72,7 +72,8 @@ initial set can use the existing batch reservation and publication transaction.
 
 The production init transaction reserves and writes only the authorities init
 currently consumes: the root `ResourceDomain`, root `TaskGroup`,
-`TaskFactory`, BootFs, and (when available) Console. Future handle values are
+`TaskFactory`, BootFs, system `TaskInspector` and `ObjectInspector` views, and
+(when available) Console. Future handle values are
 encoded while unresolved and the complete batch is published before the
 initial Thread can run. No self-Process handle is installed in its own table.
 Executable-memory and root-VMAR purposes remain part of the Native ABI, but
@@ -95,9 +96,12 @@ workers receive only the physical direction and raw byte-channel direction
 they require. The session manager owns the peer data endpoints and receives no
 physical Console capability. It routes one foreground client's input, output,
 and error channels without defining a generic byte-message envelope. The
-initial shell receives those endpoints plus attenuated BootFs, TaskFactory,
-TaskGroup, and ResourceDomain authorities. It can construct child processes,
-but cannot widen rights or delegate the authorities again. Each command gets
+initial administrative shell receives those endpoints plus attenuated BootFs,
+TaskFactory, TaskGroup, ResourceDomain, and system-inspection authorities. It
+can construct child processes, but cannot widen rights or delegate the
+construction authorities again. The shell keeps `DUPLICATE` and `TRANSFER`
+only on the inspectors so it can stage an `INSPECT`-only task or object view
+exclusively for the corresponding `ps` or `handle` command. Each command gets
 fresh handle-backed standard-I/O channels. This preserves duplex, blocking I/O
 without polling and leaves later foreground-session handoff to capability
 rendezvous without changing physical Console ownership.
@@ -125,5 +129,6 @@ entry points, and supported relocation decoding. Kernel QEMU tests use the
 test-only Linux guest path. The `test-native` contract separately builds the
 Native applications through the assembled SDK, constructs the production
 initramfs, and verifies that init loads the manifest, starts the session and
-shell Processes, and that the shell launches an external command whose output
-traverses the complete Console path.
+shell Processes, launches `ps` and `handle` through scoped inspection handles,
+and runs an external echo command whose output traverses the complete Console
+path.

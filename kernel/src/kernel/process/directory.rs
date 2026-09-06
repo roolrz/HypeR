@@ -13,7 +13,7 @@ use super::ProcessId;
 use super::owner::{Process, ProcessError, ProcessInner, ProcessSnapshot};
 use crate::kernel::capability::{HandleScanCursor, HandleSnapshotPage};
 
-const PAGE_CAPACITY: usize = 16;
+const PAGE_CAPACITY: usize = 8;
 static NEXT_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 struct Entry {
@@ -171,6 +171,20 @@ impl ProcessScanCursor {
             before_sequence: u64::MAX,
         }
     }
+
+    pub(crate) const fn from_token(token: u64) -> Self {
+        if token == 0 {
+            Self::start()
+        } else {
+            Self {
+                before_sequence: token,
+            }
+        }
+    }
+
+    pub(crate) const fn token(self) -> u64 {
+        self.before_sequence
+    }
 }
 
 /// One pinned Process entry used only while producing diagnostic snapshots.
@@ -179,6 +193,12 @@ pub(crate) struct ProcessDiagnosticRef {
 }
 
 impl ProcessDiagnosticRef {
+    pub(crate) fn clone_diagnostic(&self) -> Self {
+        Self {
+            process: self.process.clone(),
+        }
+    }
+
     /// Captures lifecycle metadata without exposing the operation-capable
     /// Process owner retained by this diagnostic pin.
     pub(crate) fn snapshot(&self) -> ProcessSnapshot {

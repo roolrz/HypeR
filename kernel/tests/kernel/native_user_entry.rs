@@ -10,7 +10,8 @@ use crate::kernel::capability::{HandleValue, ResolvedWaitable, Rights};
 use crate::kernel::mm::user_space::{UserAddress, UserSlice, prepare_native_entry_self_test};
 use crate::kernel::object::{Event, ObjectHandleState, ObjectKind, SignalWaitOutcome};
 use crate::kernel::process::{
-    MachineAbi, PreparedProcess, Process, ProcessImage, ProcessPhase, TaskGroup, TerminalReason,
+    MachineAbi, PreparedProcess, Process, ProcessImage, ProcessObject, ProcessPhase, TaskGroup,
+    TerminalReason,
 };
 use crate::kernel::task::scheduler::CpuMask;
 
@@ -301,7 +302,11 @@ fn run_program(
                 return Err(Error::Construction);
             }
         };
-    let process = prepared.publish();
+    let object = ProcessObject::try_service(prepared.process()).map_err(|_| Error::Construction)?;
+    let process = prepared.publish(
+        object,
+        crate::kernel::process::ProcessNameSnapshot::from_validated("native-test"),
+    );
     if !process_is_discoverable(&process) {
         return Err(Error::Construction);
     }

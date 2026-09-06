@@ -7,7 +7,10 @@ use alloc::boxed::Box;
 use core::cell::UnsafeCell;
 use hyper::cpu::CpuIndex;
 
-const THREAD_NAME_CAPACITY: usize = 32;
+// ProcessBuilder commits one identity label for both the Process and its
+// initial Thread. Keep the scheduler snapshot capacity aligned with that ABI
+// contract so a name accepted by the builder cannot fail later at publication.
+const THREAD_NAME_CAPACITY: usize = 64;
 
 use crate::kernel::mm::stack::KernelStack;
 use crate::kernel::task::policy::{
@@ -1082,6 +1085,10 @@ impl ThreadNameSnapshot {
         // Snapshots are built from UTF-8 input. Keep the accessor defensive if
         // a future internal constructor violates that invariant.
         core::str::from_utf8(bytes).unwrap_or("")
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
     }
 }
 

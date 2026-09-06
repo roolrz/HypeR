@@ -78,8 +78,8 @@ pub(crate) struct PreparedChildProcessStart {
     root_vmar_object: Option<PreparedHandle>,
     root_vmar_address_space: FallibleArc<NativeAddressSpace>,
     root_vmar_claimed: bool,
+    process_object: Option<PublishableRef<ProcessObject, KernelService>>,
     supervisor_object: Option<PreparedHandle>,
-    supervisor_claimed: bool,
 }
 
 pub(crate) struct CommittedChildProcessStart {
@@ -376,8 +376,8 @@ impl PreparedChildProcessStart {
                 ));
             }
         };
-        let publication = match ProcessObject::try_publication(child.clone()) {
-            Ok(publication) => publication,
+        let process_object = match ProcessObject::try_service(&child) {
+            Ok(object) => object,
             Err(error) => {
                 drop(root_vmar_object);
                 VmarObject::abort_root_publication(&root_vmar_address_space);
@@ -391,6 +391,7 @@ impl PreparedChildProcessStart {
                 ));
             }
         };
+        let publication = process_object.publication();
         let supervisor_object = match PreparedHandle::try_from_new_object(
             publication,
             ProcessObject::SUPERVISOR_RIGHTS,
@@ -398,7 +399,6 @@ impl PreparedChildProcessStart {
         ) {
             Ok(handle) => handle,
             Err(error) => {
-                child.abort_object_publication();
                 drop(root_vmar_object);
                 VmarObject::abort_root_publication(&root_vmar_address_space);
                 builder_consumption.rollback();
@@ -429,8 +429,8 @@ impl PreparedChildProcessStart {
             root_vmar_object: Some(root_vmar_object),
             root_vmar_address_space,
             root_vmar_claimed: true,
+            process_object: Some(process_object),
             supervisor_object: Some(supervisor_object),
-            supervisor_claimed: true,
         })
     }
 
@@ -439,6 +439,7 @@ impl PreparedChildProcessStart {
             Some(build) => build,
             None => process_invariant_violation(),
         };
+        let process_name = ProcessNameSnapshot::from_validated(build.thread_name());
         let (prepared_child, _, startup_capabilities) = build.into_parts();
         for capability in startup_capabilities {
             let (mut handles, storage_charge) = capability.take_authority().into_prepared_handles();
@@ -469,12 +470,15 @@ impl PreparedChildProcessStart {
         if terminal.is_some() {
             process_invariant_violation();
         }
-        let child = prepared_child.publish();
+        let process_object = match self.process_object.take() {
+            Some(object) => object,
+            None => process_invariant_violation(),
+        };
+        let child = prepared_child.publish(process_object, process_name);
         let (supervisor_handle, retired_builder) = commit_parent_builder_replacement(&mut self);
         child.commit_initial_execution(thread_id);
         drop(self.start_scratch_charge.take());
         self.root_vmar_claimed = false;
-        self.supervisor_claimed = false;
         CommittedChildProcessStart {
             child,
             initial_thread,
@@ -486,10 +490,7 @@ impl PreparedChildProcessStart {
     fn cancel(mut self) -> SealedProcessBuild {
         let supervisor_object = self.supervisor_object.take();
         drop(supervisor_object);
-        if self.supervisor_claimed {
-            self.child.abort_object_publication();
-            self.supervisor_claimed = false;
-        }
+        drop(self.process_object.take());
         if let Some(consumption) = self.builder_consumption.take() {
             consumption.rollback();
         }
@@ -522,8 +523,8 @@ impl Drop for PreparedChildProcessStart {
             || self.builder_consumption.is_some()
             || self.root_vmar_object.is_some()
             || self.root_vmar_claimed
+            || self.process_object.is_some()
             || self.supervisor_object.is_some()
-            || self.supervisor_claimed
             || self.start_scratch_charge.is_some()
         {
             process_invariant_violation();

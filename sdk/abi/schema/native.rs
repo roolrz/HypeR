@@ -97,6 +97,7 @@ pub struct Field {
 pub enum FieldKind {
     U32,
     U64,
+    Bytes(u16),
 }
 
 impl FieldKind {
@@ -104,6 +105,7 @@ impl FieldKind {
         match self {
             Self::U32 => 4,
             Self::U64 => 8,
+            Self::Bytes(size) => size,
         }
     }
 
@@ -111,6 +113,7 @@ impl FieldKind {
         match self {
             Self::U32 => 4,
             Self::U64 => 8,
+            Self::Bytes(_) => 1,
         }
     }
 }
@@ -425,6 +428,7 @@ const RIGHT_SET_LIMITS_BIT: u8 = 24;
 const RIGHT_CREATE_EXECUTABLE_BIT: u8 = 25;
 const RIGHT_TASK_GROUP_ATTACH_PROCESS_BIT: u8 = 26;
 const RIGHT_RESOURCE_DOMAIN_SPONSOR_BIT: u8 = 27;
+const RIGHT_DERIVE_BIT: u8 = 28;
 const CAPABILITY_OPERATION_MOVE: u32 = 0;
 const CAPABILITY_OPERATION_DUPLICATE: u32 = 1;
 
@@ -508,6 +512,16 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         value: 15,
         name: "process_builder",
         transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 16,
+        name: "task_inspector",
+        transfer: TransferClass::General,
+    },
+    ObjectKind {
+        value: 17,
+        name: "object_inspector",
+        transfer: TransferClass::General,
     },
 ];
 
@@ -624,6 +638,10 @@ pub const RIGHTS: &[Right] = &[
         bit: RIGHT_RESOURCE_DOMAIN_SPONSOR_BIT,
         name: "resource_domain_sponsor",
     },
+    Right {
+        bit: RIGHT_DERIVE_BIT,
+        name: "derive",
+    },
 ];
 
 pub const RIGHT_DUPLICATE: u64 = 1 << RIGHT_DUPLICATE_BIT;
@@ -644,6 +662,7 @@ pub const RIGHT_SET_LIMITS: u64 = 1 << RIGHT_SET_LIMITS_BIT;
 pub const RIGHT_CREATE_EXECUTABLE: u64 = 1 << RIGHT_CREATE_EXECUTABLE_BIT;
 pub const RIGHT_TASK_GROUP_ATTACH_PROCESS: u64 = 1 << RIGHT_TASK_GROUP_ATTACH_PROCESS_BIT;
 pub const RIGHT_RESOURCE_DOMAIN_SPONSOR: u64 = 1 << RIGHT_RESOURCE_DOMAIN_SPONSOR_BIT;
+pub const RIGHT_DERIVE: u64 = 1 << RIGHT_DERIVE_BIT;
 
 pub const EVENT_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
@@ -656,6 +675,9 @@ pub const PROCESS_BUILDER_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_START | RIGHT_REQUEST_STOP;
 pub const PROCESS_SUPERVISOR_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_REQUEST_STOP;
+pub const TASK_INSPECTOR_RIGHTS: u64 =
+    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_DERIVE;
+pub const OBJECT_INSPECTOR_RIGHTS: u64 = TASK_INSPECTOR_RIGHTS;
 
 pub const CAPABILITY_OPERATIONS: &[HandleOperation] = &[
     HandleOperation {
@@ -774,6 +796,14 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "startup_handle_purpose_boot_fs",
         value: 7,
+    },
+    AbiConstant {
+        name: "startup_handle_purpose_task_inspector",
+        value: 8,
+    },
+    AbiConstant {
+        name: "startup_handle_purpose_object_inspector",
+        value: 9,
     },
     AbiConstant {
         name: "startup_max_handles",
@@ -914,6 +944,62 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "process_terminal_task_group_stop",
         value: 6,
+    },
+    AbiConstant {
+        name: "task_inspector_process_page_capacity",
+        value: 8,
+    },
+    AbiConstant {
+        name: "task_inspector_thread_page_capacity",
+        value: 8,
+    },
+    AbiConstant {
+        name: "object_inspector_object_page_capacity",
+        value: 8,
+    },
+    AbiConstant {
+        name: "object_inspector_handle_page_capacity",
+        value: 8,
+    },
+    AbiConstant {
+        name: "thread_role_bootstrap",
+        value: 1,
+    },
+    AbiConstant {
+        name: "thread_role_idle",
+        value: 2,
+    },
+    AbiConstant {
+        name: "thread_role_kernel",
+        value: 3,
+    },
+    AbiConstant {
+        name: "thread_role_user",
+        value: 4,
+    },
+    AbiConstant {
+        name: "thread_role_vcpu",
+        value: 5,
+    },
+    AbiConstant {
+        name: "thread_registry_resident",
+        value: 1,
+    },
+    AbiConstant {
+        name: "thread_registry_retiring",
+        value: 2,
+    },
+    AbiConstant {
+        name: "object_handle_state_unpublished",
+        value: 1,
+    },
+    AbiConstant {
+        name: "object_handle_state_active",
+        value: 2,
+    },
+    AbiConstant {
+        name: "object_handle_state_retired",
+        value: 3,
     },
 ];
 
@@ -1058,6 +1144,188 @@ const STARTUP_HANDLE_FIELDS: &[Field] = &[
     },
 ];
 
+const TASK_PROCESS_FIELDS: &[Field] = &[
+    Field {
+        name: "koid",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "phase",
+        kind: FieldKind::U32,
+        offset: 8,
+    },
+    Field {
+        name: "terminal_reason",
+        kind: FieldKind::U32,
+        offset: 12,
+    },
+    Field {
+        name: "pending_threads",
+        kind: FieldKind::U32,
+        offset: 16,
+    },
+    Field {
+        name: "active_threads",
+        kind: FieldKind::U32,
+        offset: 20,
+    },
+    Field {
+        name: "name_length",
+        kind: FieldKind::U32,
+        offset: 24,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U32,
+        offset: 28,
+    },
+    Field {
+        name: "name",
+        kind: FieldKind::Bytes(64),
+        offset: 32,
+    },
+];
+
+const TASK_THREAD_FIELDS: &[Field] = &[
+    Field {
+        name: "koid",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "process_koid",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "role",
+        kind: FieldKind::U32,
+        offset: 16,
+    },
+    Field {
+        name: "registry_phase",
+        kind: FieldKind::U32,
+        offset: 20,
+    },
+    Field {
+        name: "name_length",
+        kind: FieldKind::U32,
+        offset: 24,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U32,
+        offset: 28,
+    },
+    Field {
+        name: "name",
+        kind: FieldKind::Bytes(64),
+        offset: 32,
+    },
+];
+
+const OBJECT_INSPECTION_FIELDS: &[Field] = &[
+    Field {
+        name: "koid",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "object_kind",
+        kind: FieldKind::U32,
+        offset: 8,
+    },
+    Field {
+        name: "handle_state",
+        kind: FieldKind::U32,
+        offset: 12,
+    },
+    Field {
+        name: "active_handles",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "supported_rights",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "strong_references",
+        kind: FieldKind::U64,
+        offset: 32,
+    },
+    Field {
+        name: "kernel_service_references",
+        kind: FieldKind::U64,
+        offset: 40,
+    },
+    Field {
+        name: "scheduler_references",
+        kind: FieldKind::U64,
+        offset: 48,
+    },
+    Field {
+        name: "operation_references",
+        kind: FieldKind::U64,
+        offset: 56,
+    },
+    Field {
+        name: "user_authority_references",
+        kind: FieldKind::U64,
+        offset: 64,
+    },
+    Field {
+        name: "publication_references",
+        kind: FieldKind::U64,
+        offset: 72,
+    },
+    Field {
+        name: "diagnostic_references",
+        kind: FieldKind::U64,
+        offset: 80,
+    },
+    Field {
+        name: "retirement_references",
+        kind: FieldKind::U64,
+        offset: 88,
+    },
+];
+
+const HANDLE_INSPECTION_FIELDS: &[Field] = &[
+    Field {
+        name: "process_koid",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "handle",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "object_koid",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "rights",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "object_kind",
+        kind: FieldKind::U32,
+        offset: 32,
+    },
+    Field {
+        name: "flags",
+        kind: FieldKind::U32,
+        offset: 36,
+    },
+];
+
 pub const RECORDS: &[Record] = &[
     Record {
         name: "handle_info",
@@ -1099,6 +1367,30 @@ pub const RECORDS: &[Record] = &[
         name: "startup_handle",
         fields: STARTUP_HANDLE_FIELDS,
         size: 16,
+        alignment: 8,
+    },
+    Record {
+        name: "task_process",
+        fields: TASK_PROCESS_FIELDS,
+        size: 96,
+        alignment: 8,
+    },
+    Record {
+        name: "task_thread",
+        fields: TASK_THREAD_FIELDS,
+        size: 96,
+        alignment: 8,
+    },
+    Record {
+        name: "object_inspection",
+        fields: OBJECT_INSPECTION_FIELDS,
+        size: 96,
+        alignment: 8,
+    },
+    Record {
+        name: "handle_inspection",
+        fields: HANDLE_INSPECTION_FIELDS,
+        size: 40,
         alignment: 8,
     },
 ];
@@ -2108,6 +2400,345 @@ const PROCESS_GET_INFO_ARGUMENTS: &[Argument] = &[
     },
 ];
 
+const TASK_INSPECTOR_SCAN_PROCESSES_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_inspector"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "cursor",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "records",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Elements {
+                argument: "capacity",
+                maximum_elements: 8,
+                element_size: 96,
+            },
+            record: Some("task_process"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "capacity",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const TASK_INSPECTOR_SCAN_THREADS_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_inspector"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "cursor",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "records",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Elements {
+                argument: "capacity",
+                maximum_elements: 8,
+                element_size: 96,
+            },
+            record: Some("task_thread"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "capacity",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const OBJECT_INSPECTOR_SCAN_OBJECTS_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("object_inspector"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "cursor",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "records",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Elements {
+                argument: "capacity",
+                maximum_elements: 8,
+                element_size: 96,
+            },
+            record: Some("object_inspection"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "capacity",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const OBJECT_INSPECTOR_SCAN_HANDLES_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("object_inspector"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "process_koid",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "cursor",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "records",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Elements {
+                argument: "capacity",
+                maximum_elements: 8,
+                element_size: 40,
+            },
+            record: Some("handle_inspection"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "capacity",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const INSPECTOR_SCAN_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "count",
+        kind: ValueKind::ElementCount,
+        handle: None,
+    },
+    ResultValue {
+        name: "next_cursor",
+        kind: ValueKind::U64,
+        handle: None,
+    },
+];
+
+const TASK_INSPECTOR_DERIVE_PROCESS_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_inspector"),
+            required_rights: TASK_INSPECTOR_RIGHTS,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "process",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("process"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+
+const TASK_INSPECTOR_DERIVE_PROCESS_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "inspector",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("task_inspector"),
+        rights: ProducedRights::Fixed(TASK_INSPECTOR_RIGHTS),
+    }),
+}];
+
+const OBJECT_INSPECTOR_DERIVE_PROCESS_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("object_inspector"),
+            required_rights: OBJECT_INSPECTOR_RIGHTS,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "process",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("process"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+
+const OBJECT_INSPECTOR_DERIVE_PROCESS_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "inspector",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("object_inspector"),
+        rights: ProducedRights::Fixed(OBJECT_INSPECTOR_RIGHTS),
+    }),
+}];
+
+const TASK_INSPECTOR_DERIVE_TASK_GROUP_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_inspector"),
+            required_rights: TASK_INSPECTOR_RIGHTS,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "task_group",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_group"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+
+const OBJECT_INSPECTOR_DERIVE_TASK_GROUP_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("object_inspector"),
+            required_rights: OBJECT_INSPECTOR_RIGHTS,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "task_group",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_group"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+
+const TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_inspector"),
+            required_rights: TASK_INSPECTOR_RIGHTS,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "resource_domain",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("resource_domain"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+
+const OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("object_inspector"),
+            required_rights: OBJECT_INSPECTOR_RIGHTS,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "resource_domain",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("resource_domain"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+
 const fn process_builder_argument(
     required_rights: u64,
     disposition: HandleDisposition,
@@ -2601,6 +3232,146 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 34,
+        name: "task_inspector_scan_processes",
+        feature: FeatureGate::Core,
+        arguments: TASK_INSPECTOR_SCAN_PROCESSES_ARGUMENTS,
+        results: INSPECTOR_SCAN_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 35,
+        name: "task_inspector_scan_threads",
+        feature: FeatureGate::Core,
+        arguments: TASK_INSPECTOR_SCAN_THREADS_ARGUMENTS,
+        results: INSPECTOR_SCAN_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 36,
+        name: "task_inspector_derive_process",
+        feature: FeatureGate::Core,
+        arguments: TASK_INSPECTOR_DERIVE_PROCESS_ARGUMENTS,
+        results: TASK_INSPECTOR_DERIVE_PROCESS_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 37,
+        name: "object_inspector_scan_objects",
+        feature: FeatureGate::Core,
+        arguments: OBJECT_INSPECTOR_SCAN_OBJECTS_ARGUMENTS,
+        results: INSPECTOR_SCAN_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 38,
+        name: "object_inspector_scan_handles",
+        feature: FeatureGate::Core,
+        arguments: OBJECT_INSPECTOR_SCAN_HANDLES_ARGUMENTS,
+        results: INSPECTOR_SCAN_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 39,
+        name: "object_inspector_derive_process",
+        feature: FeatureGate::Core,
+        arguments: OBJECT_INSPECTOR_DERIVE_PROCESS_ARGUMENTS,
+        results: OBJECT_INSPECTOR_DERIVE_PROCESS_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 40,
+        name: "task_inspector_derive_task_group",
+        feature: FeatureGate::Core,
+        arguments: TASK_INSPECTOR_DERIVE_TASK_GROUP_ARGUMENTS,
+        results: TASK_INSPECTOR_DERIVE_PROCESS_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 41,
+        name: "object_inspector_derive_task_group",
+        feature: FeatureGate::Core,
+        arguments: OBJECT_INSPECTOR_DERIVE_TASK_GROUP_ARGUMENTS,
+        results: OBJECT_INSPECTOR_DERIVE_PROCESS_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 42,
+        name: "task_inspector_derive_resource_domain",
+        feature: FeatureGate::Core,
+        arguments: TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN_ARGUMENTS,
+        results: TASK_INSPECTOR_DERIVE_PROCESS_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 43,
+        name: "object_inspector_derive_resource_domain",
+        feature: FeatureGate::Core,
+        arguments: OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN_ARGUMENTS,
+        results: OBJECT_INSPECTOR_DERIVE_PROCESS_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -2617,6 +3388,10 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "Native task and object inspectors are immutable capability-scoped views. Process, thread, and object KOIDs plus scan cursors are observation-only values and can never be exchanged for operational authority. Out-of-scope targeted lookup returns not_found.",
+    "Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.",
+    "Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.",
+    "Inspector scans require the exact published page capacity for their record type. Cursor zero starts a scan and a returned next_cursor of zero ends it. Pages and complete scans are weakly consistent with concurrent task, object, and handle-table mutation; generation-qualified handle values prevent slot reuse from aliasing an earlier observation.",
     "Object wait-many borrows every input handle for the complete wait, canonicalizes duplicate object identities, and selects the lowest input index whose requested mask intersects the winning object's committed level snapshot. Source-handle close after resolution does not cancel the wait.",
     "Process terminal detail fields are reason-specific: exit reasons encode the signed status as two's-complement in detail0; fault encodes class in detail0 and code in detail1; task-group stop encodes generation in detail0; unused details are zero.",
     "Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.",

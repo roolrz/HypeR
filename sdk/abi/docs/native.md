@@ -51,6 +51,8 @@ ABI revision: `0`.
 | 13 | `boot_file` | `general` |
 | 14 | `capability_channel` | `rendezvous_only` |
 | 15 | `process_builder` | `rendezvous_only` |
+| 16 | `task_inspector` | `general` |
+| 17 | `object_inspector` | `general` |
 
 ## Object signals
 
@@ -82,6 +84,8 @@ ABI revision: `0`.
 | `startup_handle_purpose_root_vmar` | `5` |
 | `startup_handle_purpose_console` | `6` |
 | `startup_handle_purpose_boot_fs` | `7` |
+| `startup_handle_purpose_task_inspector` | `8` |
+| `startup_handle_purpose_object_inspector` | `9` |
 | `startup_max_handles` | `256` |
 | `deadline_infinite` | `18446744073709551615` |
 | `object_wait_many_max_items` | `64` |
@@ -117,9 +121,27 @@ ABI revision: `0`.
 | `process_terminal_last_thread_exited` | `4` |
 | `process_terminal_fault` | `5` |
 | `process_terminal_task_group_stop` | `6` |
+| `task_inspector_process_page_capacity` | `8` |
+| `task_inspector_thread_page_capacity` | `8` |
+| `object_inspector_object_page_capacity` | `8` |
+| `object_inspector_handle_page_capacity` | `8` |
+| `thread_role_bootstrap` | `1` |
+| `thread_role_idle` | `2` |
+| `thread_role_kernel` | `3` |
+| `thread_role_user` | `4` |
+| `thread_role_vcpu` | `5` |
+| `thread_registry_resident` | `1` |
+| `thread_registry_retiring` | `2` |
+| `object_handle_state_unpublished` | `1` |
+| `object_handle_state_active` | `2` |
+| `object_handle_state_retired` | `3` |
 
 ## Semantic rules
 
+- Native task and object inspectors are immutable capability-scoped views. Process, thread, and object KOIDs plus scan cursors are observation-only values and can never be exchanged for operational authority. Out-of-scope targeted lookup returns not_found.
+- Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.
+- Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.
+- Inspector scans require the exact published page capacity for their record type. Cursor zero starts a scan and a returned next_cursor of zero ends it. Pages and complete scans are weakly consistent with concurrent task, object, and handle-table mutation; generation-qualified handle values prevent slot reuse from aliasing an earlier observation.
 - Object wait-many borrows every input handle for the complete wait, canonicalizes duplicate object identities, and selects the lowest input index whose requested mask intersects the winning object's committed level snapshot. Source-handle close after resolution does not cancel the wait.
 - Process terminal detail fields are reason-specific: exit reasons encode the signed status as two's-complement in detail0; fault encodes class in detail0 and code in detail1; task-group stop encodes generation in detail0; unused details are zero.
 - Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.
@@ -177,6 +199,16 @@ element size before any user-memory access.
 | 31 | `process_request_stop` | `process: handle` | — | `process: Borrow, kind=process, rights=0x800` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 32 | `object_wait_many` | `items: user_address`, `item_count: element_count`, `deadline: u64` | `index: element_count`, `observed: u64` | — | `items: Read, len=item_count elements, max-elements=64, element-size=16, record=object_wait_item, borrowed-handles=(handle), required-rights=0x4; order=0` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Object` |
 | 33 | `process_get_info` | `process: handle`, `info: user_address`, `info_size: byte_count` | — | `process: Borrow, kind=process, rights=0x8` | `info: Write, len=info_size bytes, max-bytes=32, record=process_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 34 | `task_inspector_scan_processes` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=task_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=96, record=task_process; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 35 | `task_inspector_scan_threads` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=task_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=96, record=task_thread; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 36 | `task_inspector_derive_process` | `inspector: handle`, `process: handle` | `inspector: handle` | `inspector: Borrow, kind=task_inspector, rights=0x1000000b`, `process: Borrow, kind=process, rights=0x8`, `inspector: produce, kind=task_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 37 | `object_inspector_scan_objects` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=object_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=96, record=object_inspection; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 38 | `object_inspector_scan_handles` | `inspector: handle`, `process_koid: u64`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=object_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=40, record=handle_inspection; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 39 | `object_inspector_derive_process` | `inspector: handle`, `process: handle` | `inspector: handle` | `inspector: Borrow, kind=object_inspector, rights=0x1000000b`, `process: Borrow, kind=process, rights=0x8`, `inspector: produce, kind=object_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 40 | `task_inspector_derive_task_group` | `inspector: handle`, `task_group: handle` | `inspector: handle` | `inspector: Borrow, kind=task_inspector, rights=0x1000000b`, `task_group: Borrow, kind=task_group, rights=0x8`, `inspector: produce, kind=task_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 41 | `object_inspector_derive_task_group` | `inspector: handle`, `task_group: handle` | `inspector: handle` | `inspector: Borrow, kind=object_inspector, rights=0x1000000b`, `task_group: Borrow, kind=task_group, rights=0x8`, `inspector: produce, kind=object_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 42 | `task_inspector_derive_resource_domain` | `inspector: handle`, `resource_domain: handle` | `inspector: handle` | `inspector: Borrow, kind=task_inspector, rights=0x1000000b`, `resource_domain: Borrow, kind=resource_domain, rights=0x8`, `inspector: produce, kind=task_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 43 | `object_inspector_derive_resource_domain` | `inspector: handle`, `resource_domain: handle` | `inspector: handle` | `inspector: Borrow, kind=object_inspector, rights=0x1000000b`, `resource_domain: Borrow, kind=resource_domain, rights=0x8`, `inspector: produce, kind=object_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
 
 ## Public records
 
@@ -189,3 +221,7 @@ element size before any user-memory access.
 | `capability_disposition` | 24 | 8 | `handle: u64 @ 0`, `rights: u64 @ 8`, `expected_kind: u32 @ 16`, `operation: u32 @ 20` |
 | `capability_receive_slot` | 24 | 8 | `handle: u64 @ 0`, `rights: u64 @ 8`, `expected_kind: u32 @ 16`, `flags: u32 @ 20` |
 | `startup_handle` | 16 | 8 | `purpose: u32 @ 0`, `flags: u32 @ 4`, `handle: u64 @ 8` |
+| `task_process` | 96 | 8 | `koid: u64 @ 0`, `phase: u32 @ 8`, `terminal_reason: u32 @ 12`, `pending_threads: u32 @ 16`, `active_threads: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `name: bytes[64] @ 32` |
+| `task_thread` | 96 | 8 | `koid: u64 @ 0`, `process_koid: u64 @ 8`, `role: u32 @ 16`, `registry_phase: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `name: bytes[64] @ 32` |
+| `object_inspection` | 96 | 8 | `koid: u64 @ 0`, `object_kind: u32 @ 8`, `handle_state: u32 @ 12`, `active_handles: u64 @ 16`, `supported_rights: u64 @ 24`, `strong_references: u64 @ 32`, `kernel_service_references: u64 @ 40`, `scheduler_references: u64 @ 48`, `operation_references: u64 @ 56`, `user_authority_references: u64 @ 64`, `publication_references: u64 @ 72`, `diagnostic_references: u64 @ 80`, `retirement_references: u64 @ 88` |
+| `handle_inspection` | 40 | 8 | `process_koid: u64 @ 0`, `handle: u64 @ 8`, `object_koid: u64 @ 16`, `rights: u64 @ 24`, `object_kind: u32 @ 32`, `flags: u32 @ 36` |

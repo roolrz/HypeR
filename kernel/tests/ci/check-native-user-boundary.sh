@@ -41,9 +41,6 @@ reject "$kernel_user_files" \
     'kernel native-user policy must not select an architecture translation mechanism'
 reject "$entry" 'mem::forget\(completion\)|cfg.*ARCH' \
     'fatal completion ownership must be abandoned by HAL, not kernel cfg policy'
-reject "$owner" 'as[[:space:]]+u8' \
-    'host-machine matching must not depend on parallel enum discriminants'
-
 require "$hal" 'struct AddressSpacePlan' \
     'HAL must own an opaque native address-space construction plan'
 require "$hal" 'struct AddressSpaceIdentifier<HostStage, SecondStage>' \
@@ -68,6 +65,8 @@ reject "$hal" 'pub\(crate\)[[:space:]]+fn[[:space:]]+abandon\(' \
     'HAL must not expose a normally returning completion-abandon operation'
 require "$owner" 'requested[[:space:]]*==[[:space:]]*crate::hal::user::host_machine\(\)' \
     'host-machine admission must compare typed values'
+reject "$owner" 'machine(\(\))?[[:space:]]+as[[:space:]]+u8' \
+    'host-machine matching must not depend on parallel enum discriminants'
 
 plan_line=$(grep -n 'let plan = crate::hal::user::address_space_plan()' "$machine" | head -n 1 | cut -d: -f1)
 allocation_line=$(grep -n 'allocation_size()' "$machine" | head -n 1 | cut -d: -f1)

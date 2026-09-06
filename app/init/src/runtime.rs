@@ -15,8 +15,9 @@ use hyper_app::{ManifestSource, ServiceGraphLauncher, bootstrap};
 use hyper_os::bootfs::{BootFileRights, BootFs};
 use hyper_os::channel;
 use hyper_os::handle::{
-    BootFsObject, ByteChannelObject, ConsoleObject, OwnedHandle, ProcessObject,
-    ResourceDomainObject, Rights, RightsOffer, TaskFactoryObject, TaskGroupObject, TypedObject,
+    BootFsObject, ByteChannelObject, ConsoleObject, ObjectInspectorObject, OwnedHandle,
+    ProcessObject, ResourceDomainObject, Rights, RightsOffer, TaskFactoryObject, TaskGroupObject,
+    TaskInspectorObject, TypedObject,
 };
 use hyper_os::startup::{self, Startup};
 use hyper_os::task::ProcessBuilder;
@@ -41,6 +42,8 @@ const BOOTSTRAP_BOOT_FS: &str = "bootstrap.boot-fs";
 const BOOTSTRAP_TASK_FACTORY: &str = "bootstrap.task-factory";
 const BOOTSTRAP_TASK_GROUP: &str = "bootstrap.task-group";
 const BOOTSTRAP_RESOURCE_DOMAIN: &str = "bootstrap.resource-domain";
+const BOOTSTRAP_TASK_INSPECTOR: &str = "bootstrap.task-inspector";
+const BOOTSTRAP_OBJECT_INSPECTOR: &str = "bootstrap.object-inspector";
 const CONSOLE_INPUT_IMAGE: &str = "/svc/console-input";
 const CONSOLE_OUTPUT_IMAGE: &str = "/svc/console-output";
 const SESSION_IMAGE: &str = "/svc/session";
@@ -122,6 +125,8 @@ struct RuntimeLauncher {
     factory: OwnedHandle<TaskFactoryObject>,
     group: OwnedHandle<TaskGroupObject>,
     domain: OwnedHandle<ResourceDomainObject>,
+    task_inspector: OwnedHandle<TaskInspectorObject>,
+    object_inspector: OwnedHandle<ObjectInspectorObject>,
     console: OwnedHandle<ConsoleObject>,
     console_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     console_output_channel: Option<OwnedHandle<ByteChannelObject>>,
@@ -158,6 +163,12 @@ impl RuntimeLauncher {
                 .map_err(|_| Error::OperatingSystem)?,
             domain: startup
                 .take(startup::RESOURCE_DOMAIN)
+                .map_err(|_| Error::OperatingSystem)?,
+            task_inspector: startup
+                .take(startup::TASK_INSPECTOR)
+                .map_err(|_| Error::OperatingSystem)?,
+            object_inspector: startup
+                .take(startup::OBJECT_INSPECTOR)
                 .map_err(|_| Error::OperatingSystem)?,
             console: startup
                 .take(startup::CONSOLE)
@@ -274,6 +285,30 @@ impl RuntimeLauncher {
                     builder
                         .add_handle_duplicate(
                             self.domain.as_handle_ref(),
+                            purpose,
+                            RightsOffer::Exact(rights),
+                        )
+                        .map_err(|_| LaunchError::OperatingSystem)?;
+                }
+                (BOOTSTRAP_TASK_INSPECTOR, CapabilityOperation::Duplicate)
+                    if plan.capability_kind(service_index, capability_index)
+                        == Some(TaskInspectorObject::KIND.as_raw()) =>
+                {
+                    builder
+                        .add_handle_duplicate(
+                            self.task_inspector.as_handle_ref(),
+                            purpose,
+                            RightsOffer::Exact(rights),
+                        )
+                        .map_err(|_| LaunchError::OperatingSystem)?;
+                }
+                (BOOTSTRAP_OBJECT_INSPECTOR, CapabilityOperation::Duplicate)
+                    if plan.capability_kind(service_index, capability_index)
+                        == Some(ObjectInspectorObject::KIND.as_raw()) =>
+                {
+                    builder
+                        .add_handle_duplicate(
+                            self.object_inspector.as_handle_ref(),
                             purpose,
                             RightsOffer::Exact(rights),
                         )
@@ -460,6 +495,22 @@ impl AuthorityPolicy for RuntimeLauncher {
                 duplicable: true,
                 creatable: false,
             }),
+            BOOTSTRAP_TASK_INSPECTOR => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: TaskInspectorObject::KIND.as_raw(),
+                rights: inspector_rights().bits(),
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            BOOTSTRAP_OBJECT_INSPECTOR => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: ObjectInspectorObject::KIND.as_raw(),
+                rights: inspector_rights().bits(),
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
             _ => None,
         }
     }
@@ -522,6 +573,14 @@ impl AuthorityPolicy for RuntimeLauncher {
                 startup::RESOURCE_DOMAIN.as_raw(),
                 ResourceDomainObject::KIND.as_raw(),
             ),
+            (SHELL_IMAGE, process_contract::TASK_INSPECTOR_NAME) => (
+                startup::TASK_INSPECTOR.as_raw(),
+                TaskInspectorObject::KIND.as_raw(),
+            ),
+            (SHELL_IMAGE, process_contract::OBJECT_INSPECTOR_NAME) => (
+                startup::OBJECT_INSPECTOR.as_raw(),
+                ObjectInspectorObject::KIND.as_raw(),
+            ),
             (SHELL_IMAGE, _) => return None,
             (_, _) => return None,
         };
@@ -539,6 +598,7 @@ impl AuthorityPolicy for RuntimeLauncher {
             "create-process" => Some(Rights::CREATE_PROCESS.bits()),
             "attach-process" => Some(Rights::TASK_GROUP_ATTACH_PROCESS.bits()),
             "sponsor" => Some(Rights::RESOURCE_DOMAIN_SPONSOR.bits()),
+            "derive" => Some(Rights::DERIVE.bits()),
             _ => None,
         }
     }
@@ -626,6 +686,13 @@ fn resource_domain_rights() -> Rights {
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
         .union(Rights::RESOURCE_DOMAIN_SPONSOR)
+}
+
+fn inspector_rights() -> Rights {
+    Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT)
+        .union(Rights::DERIVE)
 }
 
 pub(super) enum LaunchError {

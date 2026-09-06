@@ -16,9 +16,12 @@ use crate::kernel::abi::native::{
     self, AllocatingServices, ConsoleServiceError, DeferredServices, ImmediateServices,
     ObjectServiceError, ProcessBuilderServiceError, UserOutputServices,
 };
-use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceKind};
+use crate::kernel::accounting::{
+    CommittedCharge, ResourceAmount, ResourceDomainObject, ResourceKind,
+};
 use crate::kernel::capability::{HandleInfo, HandleValue, ResolvedWaitable, Rights};
 use crate::kernel::fs::BootFsServiceError;
+use crate::kernel::inspect::{ObjectInspector, TaskInspector};
 use crate::kernel::ipc::{
     ByteChannelReadOutcome, ByteChannelServiceError, CapabilityChannelServiceError,
     CapabilityReceiveOutcome,
@@ -30,8 +33,8 @@ use crate::kernel::object::{
 };
 use crate::kernel::process::{
     AbiFamily, ExecutionRoute, Process, ProcessBuilder, ProcessError, ProcessObject,
-    ProcessSnapshot, RunAdmissionError, StartupCapability, StoppedUserRun, TerminalReason,
-    UserExecution, UserThread, UserThreadPhase,
+    ProcessSnapshot, RunAdmissionError, StartupCapability, StoppedUserRun, TaskGroupObject,
+    TerminalReason, UserExecution, UserThread, UserThreadPhase,
 };
 use crate::kernel::task::scheduler::CpuMask;
 
@@ -348,8 +351,248 @@ impl DeferredServices for DeferredProcessServices<'_> {
             .process
             .resolve_handle::<ProcessObject>(process, Rights::INSPECT)?
             .object()
-            .process()
             .snapshot())
+    }
+
+    fn scan_processes(
+        &self,
+        inspector: HandleValue,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::inspect::Page<
+            ProcessSnapshot,
+            { crate::kernel::inspect::PROCESS_PAGE_CAPACITY },
+        >,
+        crate::kernel::inspect::Error,
+    > {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<TaskInspector>(inspector, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        inspector.object().scan_processes(cursor)
+    }
+
+    fn scan_threads(
+        &self,
+        inspector: HandleValue,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::inspect::Page<
+            crate::kernel::inspect::TaskThreadSnapshot,
+            { crate::kernel::inspect::THREAD_PAGE_CAPACITY },
+        >,
+        crate::kernel::inspect::Error,
+    > {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<TaskInspector>(inspector, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        inspector.object().scan_threads(cursor)
+    }
+
+    fn scan_objects(
+        &self,
+        inspector: HandleValue,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::inspect::Page<
+            crate::kernel::object::ObjectSnapshot,
+            { crate::kernel::inspect::OBJECT_PAGE_CAPACITY },
+        >,
+        crate::kernel::inspect::Error,
+    > {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<ObjectInspector>(inspector, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        inspector.object().scan_objects(cursor)
+    }
+
+    fn scan_process_handles(
+        &self,
+        inspector: HandleValue,
+        process_koid: u64,
+        cursor: u64,
+    ) -> Result<
+        crate::kernel::inspect::Page<
+            crate::kernel::inspect::ProcessHandleSnapshot,
+            { crate::kernel::inspect::HANDLE_PAGE_CAPACITY },
+        >,
+        crate::kernel::inspect::Error,
+    > {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<ObjectInspector>(inspector, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        inspector
+            .object()
+            .scan_process_handles(process_koid, cursor)
+    }
+
+    fn derive_task_inspector(
+        &self,
+        inspector: HandleValue,
+        process: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<TaskInspector>(
+                inspector,
+                <TaskInspector as KernelObject>::SUPPORTED_RIGHTS,
+            )
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let target = self
+            .session
+            .process
+            .resolve_handle::<ProcessObject>(process, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let derived = inspector
+            .object()
+            .try_derive_process(target.object(), &self.session.process.resource_domain())?;
+        self.session
+            .process
+            .create_object(derived, <TaskInspector as KernelObject>::SUPPORTED_RIGHTS)
+            .map_err(crate::kernel::inspect::Error::Process)
+    }
+
+    fn derive_object_inspector(
+        &self,
+        inspector: HandleValue,
+        process: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<ObjectInspector>(
+                inspector,
+                <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS,
+            )
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let target = self
+            .session
+            .process
+            .resolve_handle::<ProcessObject>(process, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let derived = inspector
+            .object()
+            .try_derive_process(target.object(), &self.session.process.resource_domain())?;
+        self.session
+            .process
+            .create_object(derived, <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS)
+            .map_err(crate::kernel::inspect::Error::Process)
+    }
+
+    fn derive_task_inspector_for_task_group(
+        &self,
+        inspector: HandleValue,
+        group: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<TaskInspector>(
+                inspector,
+                <TaskInspector as KernelObject>::SUPPORTED_RIGHTS,
+            )
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let target = self
+            .session
+            .process
+            .resolve_handle::<TaskGroupObject>(group, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let derived = inspector
+            .object()
+            .try_derive_task_group(target.object(), &self.session.process.resource_domain())?;
+        self.session
+            .process
+            .create_object(derived, <TaskInspector as KernelObject>::SUPPORTED_RIGHTS)
+            .map_err(crate::kernel::inspect::Error::Process)
+    }
+
+    fn derive_object_inspector_for_task_group(
+        &self,
+        inspector: HandleValue,
+        group: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<ObjectInspector>(
+                inspector,
+                <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS,
+            )
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let target = self
+            .session
+            .process
+            .resolve_handle::<TaskGroupObject>(group, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let derived = inspector
+            .object()
+            .try_derive_task_group(target.object(), &self.session.process.resource_domain())?;
+        self.session
+            .process
+            .create_object(derived, <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS)
+            .map_err(crate::kernel::inspect::Error::Process)
+    }
+
+    fn derive_task_inspector_for_resource_domain(
+        &self,
+        inspector: HandleValue,
+        domain: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<TaskInspector>(
+                inspector,
+                <TaskInspector as KernelObject>::SUPPORTED_RIGHTS,
+            )
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let target = self
+            .session
+            .process
+            .resolve_handle::<ResourceDomainObject>(domain, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let derived = inspector
+            .object()
+            .try_derive_resource_domain(target.object(), &self.session.process.resource_domain())?;
+        self.session
+            .process
+            .create_object(derived, <TaskInspector as KernelObject>::SUPPORTED_RIGHTS)
+            .map_err(crate::kernel::inspect::Error::Process)
+    }
+
+    fn derive_object_inspector_for_resource_domain(
+        &self,
+        inspector: HandleValue,
+        domain: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<ObjectInspector>(
+                inspector,
+                <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS,
+            )
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let target = self
+            .session
+            .process
+            .resolve_handle::<ResourceDomainObject>(domain, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        let derived = inspector
+            .object()
+            .try_derive_resource_domain(target.object(), &self.session.process.resource_domain())?;
+        self.session
+            .process
+            .create_object(derived, <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS)
+            .map_err(crate::kernel::inspect::Error::Process)
     }
 
     fn write_byte_channel(
@@ -610,10 +853,7 @@ impl DeferredServices for DeferredProcessServices<'_> {
             .session
             .process
             .resolve_handle::<ProcessObject>(process, Rights::REQUEST_STOP)?;
-        process
-            .object()
-            .process()
-            .request_stop(TerminalReason::Requested);
+        process.object().request_stop(TerminalReason::Requested);
         Ok(())
     }
 }

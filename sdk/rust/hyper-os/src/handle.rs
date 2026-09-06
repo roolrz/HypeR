@@ -65,6 +65,8 @@ object_types!(
         HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL
     ),
     (ProcessBuilderObject, HYPER_NATIVE_OBJECT_PROCESS_BUILDER),
+    (TaskInspectorObject, HYPER_NATIVE_OBJECT_TASK_INSPECTOR),
+    (ObjectInspectorObject, HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR),
 );
 
 /// One Native object-kind value reported by the kernel.
@@ -77,7 +79,7 @@ impl ObjectKind {
         Self(raw)
     }
 
-    fn from_kernel(raw: u32) -> Result<Self> {
+    pub(crate) fn from_kernel(raw: u32) -> Result<Self> {
         if raw == hyper_abi::HYPER_NATIVE_OBJECT_NONE {
             Err(Error::InvalidResponse)
         } else {
@@ -88,6 +90,56 @@ impl ObjectKind {
     #[must_use]
     pub const fn as_raw(self) -> u32 {
         self.0
+    }
+
+    /// Returns the stable Native name of this object kind.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self.0 {
+            hyper_abi::HYPER_NATIVE_OBJECT_EVENT => "event",
+            hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL => "byte-channel",
+            hyper_abi::HYPER_NATIVE_OBJECT_THREAD => "thread",
+            hyper_abi::HYPER_NATIVE_OBJECT_PROCESS => "process",
+            hyper_abi::HYPER_NATIVE_OBJECT_TASK_GROUP => "task-group",
+            hyper_abi::HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN => "resource-domain",
+            hyper_abi::HYPER_NATIVE_OBJECT_TASK_FACTORY => "task-factory",
+            hyper_abi::HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY => "executable-authority",
+            hyper_abi::HYPER_NATIVE_OBJECT_VMO => "vmo",
+            hyper_abi::HYPER_NATIVE_OBJECT_VMAR => "vmar",
+            hyper_abi::HYPER_NATIVE_OBJECT_CONSOLE => "console",
+            hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FS => "boot-fs",
+            hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FILE => "boot-file",
+            hyper_abi::HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL => "capability-channel",
+            hyper_abi::HYPER_NATIVE_OBJECT_PROCESS_BUILDER => "process-builder",
+            hyper_abi::HYPER_NATIVE_OBJECT_TASK_INSPECTOR => "task-inspector",
+            hyper_abi::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => "object-inspector",
+            _ => "unknown",
+        }
+    }
+
+    /// Summarizes the role carried by this object kind.
+    #[must_use]
+    pub const fn purpose(self) -> &'static str {
+        match self.0 {
+            hyper_abi::HYPER_NATIVE_OBJECT_EVENT => "notification",
+            hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL => "byte channel endpoint",
+            hyper_abi::HYPER_NATIVE_OBJECT_THREAD => "thread control",
+            hyper_abi::HYPER_NATIVE_OBJECT_PROCESS => "process supervision",
+            hyper_abi::HYPER_NATIVE_OBJECT_TASK_GROUP => "lifecycle group",
+            hyper_abi::HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN => "resource accounting",
+            hyper_abi::HYPER_NATIVE_OBJECT_TASK_FACTORY => "process creation",
+            hyper_abi::HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY => "executable mapping",
+            hyper_abi::HYPER_NATIVE_OBJECT_VMO => "memory object",
+            hyper_abi::HYPER_NATIVE_OBJECT_VMAR => "address-space region",
+            hyper_abi::HYPER_NATIVE_OBJECT_CONSOLE => "system console",
+            hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FS => "boot filesystem",
+            hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FILE => "boot file",
+            hyper_abi::HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL => "capability rendezvous",
+            hyper_abi::HYPER_NATIVE_OBJECT_PROCESS_BUILDER => "staged process construction",
+            hyper_abi::HYPER_NATIVE_OBJECT_TASK_INSPECTOR => "task observation",
+            hyper_abi::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => "object observation",
+            _ => "unrecognized object",
+        }
     }
 }
 
@@ -129,6 +181,7 @@ impl Rights {
         Self(hyper_abi::HYPER_NATIVE_RIGHT_TASK_GROUP_ATTACH_PROCESS);
     pub const RESOURCE_DOMAIN_SPONSOR: Self =
         Self(hyper_abi::HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR);
+    pub const DERIVE: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_DERIVE);
 
     #[must_use]
     pub const fn from_bits(bits: u64) -> Option<Self> {
@@ -152,6 +205,67 @@ impl Rights {
     #[must_use]
     pub const fn contains(self, required: Self) -> bool {
         self.0 & required.0 == required.0
+    }
+
+    /// Iterates stable lower-case names for every right in this set.
+    #[must_use]
+    pub const fn names(self) -> RightNames {
+        RightNames {
+            rights: self,
+            next: 0,
+        }
+    }
+}
+
+const RIGHT_NAMES: &[(Rights, &str)] = &[
+    (Rights::DUPLICATE, "duplicate"),
+    (Rights::TRANSFER, "transfer"),
+    (Rights::WAIT, "wait"),
+    (Rights::INSPECT, "inspect"),
+    (Rights::READ, "read"),
+    (Rights::WRITE, "write"),
+    (Rights::MAP, "map"),
+    (Rights::EXECUTE, "execute"),
+    (Rights::RESIZE, "resize"),
+    (Rights::PIN, "pin"),
+    (Rights::START, "start"),
+    (Rights::REQUEST_STOP, "request-stop"),
+    (Rights::RUN_VCPU, "run-vcpu"),
+    (Rights::INJECT_INTERRUPT, "inject-interrupt"),
+    (Rights::GRANT_MEMORY, "grant-memory"),
+    (Rights::ASSIGN_DEVICE, "assign-device"),
+    (Rights::MAP_DMA, "map-dma"),
+    (Rights::ACK_INTERRUPT, "ack-interrupt"),
+    (Rights::REVOKE, "revoke"),
+    (Rights::SIGNAL, "signal"),
+    (Rights::CREATE_PROCESS, "create-process"),
+    (Rights::CREATE_THREAD, "create-thread"),
+    (Rights::CREATE_TASK_GROUP, "create-task-group"),
+    (Rights::CREATE_RESOURCE_DOMAIN, "create-resource-domain"),
+    (Rights::SET_LIMITS, "set-limits"),
+    (Rights::CREATE_EXECUTABLE, "create-executable"),
+    (Rights::TASK_GROUP_ATTACH_PROCESS, "attach-process"),
+    (Rights::RESOURCE_DOMAIN_SPONSOR, "sponsor-domain"),
+    (Rights::DERIVE, "derive"),
+];
+
+/// Iterator over the stable names in one [`Rights`] set.
+pub struct RightNames {
+    rights: Rights,
+    next: usize,
+}
+
+impl Iterator for RightNames {
+    type Item = &'static str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some((right, name)) = RIGHT_NAMES.get(self.next).copied() {
+            self.next += 1;
+            if self.rights.contains(right) {
+                return Some(name);
+            }
+        }
+        None
     }
 }
 
@@ -642,5 +756,19 @@ mod tests {
         assert_eq!(recovered.as_handle_ref().raw(), raw);
         recovered.try_close().map_err(|failure| failure.error())?;
         Ok(())
+    }
+
+    #[test]
+    fn object_metadata_and_right_names_are_stable() {
+        let kind = ObjectKind::from_trusted_raw(hyper_abi::HYPER_NATIVE_OBJECT_TASK_INSPECTOR);
+        assert_eq!(kind.name(), "task-inspector");
+        assert_eq!(kind.purpose(), "task observation");
+
+        let rights = Rights::READ.union(Rights::WRITE).union(Rights::INSPECT);
+        let mut names = rights.names();
+        assert_eq!(names.next(), Some("inspect"));
+        assert_eq!(names.next(), Some("read"));
+        assert_eq!(names.next(), Some("write"));
+        assert_eq!(names.next(), None);
     }
 }

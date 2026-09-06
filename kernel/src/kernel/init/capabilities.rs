@@ -6,6 +6,7 @@
 use crate::kernel::accounting::{ResourceDomain, ResourceDomainObject};
 use crate::kernel::capability::{HandleFlags, PreparedHandle, Rights};
 use crate::kernel::fs::BootFs;
+use crate::kernel::inspect::{ObjectInspector, TaskInspector};
 use crate::kernel::object::{ObjectPublication, UserExportableObject};
 use crate::kernel::process::{TaskFactory, TaskGroup, TaskGroupObject};
 
@@ -13,15 +14,17 @@ use super::Error;
 use super::bootstrap::{self, BootProcess};
 
 #[cfg(not(feature = "kernel-self-test"))]
-pub(super) const HANDLE_COUNT: usize = 5;
+pub(super) const HANDLE_COUNT: usize = 7;
 #[cfg(feature = "kernel-self-test")]
-pub(super) const HANDLE_COUNT: usize = 4;
+pub(super) const HANDLE_COUNT: usize = 6;
 
 const PURPOSES: [u32; HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_GROUP),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_FACTORY),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_BOOT_FS),
+    purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR),
+    purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR),
     #[cfg(not(feature = "kernel-self-test"))]
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE),
 ];
@@ -47,6 +50,12 @@ fn prepare_handles(
             .map_err(Error::Object)?;
     let boot_fs = ObjectPublication::try_new(BootFs::try_new(domain).map_err(Error::BootFs)?)
         .map_err(Error::Object)?;
+    let task_inspector =
+        ObjectPublication::try_new(TaskInspector::try_system(domain).map_err(Error::Inspection)?)
+            .map_err(Error::Object)?;
+    let object_inspector =
+        ObjectPublication::try_new(ObjectInspector::try_system(domain).map_err(Error::Inspection)?)
+            .map_err(Error::Object)?;
     #[cfg(not(feature = "kernel-self-test"))]
     let console = crate::kernel::device::console::SystemConsole::try_publication(domain)
         .map_err(Error::ConsoleObject)?;
@@ -83,6 +92,20 @@ fn prepare_handles(
                 .union(Rights::TRANSFER)
                 .union(Rights::INSPECT)
                 .union(Rights::READ),
+        )?,
+        prepare_handle(
+            task_inspector,
+            Rights::DUPLICATE
+                .union(Rights::TRANSFER)
+                .union(Rights::INSPECT)
+                .union(Rights::DERIVE),
+        )?,
+        prepare_handle(
+            object_inspector,
+            Rights::DUPLICATE
+                .union(Rights::TRANSFER)
+                .union(Rights::INSPECT)
+                .union(Rights::DERIVE),
         )?,
         #[cfg(not(feature = "kernel-self-test"))]
         prepare_handle(

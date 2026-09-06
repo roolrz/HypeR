@@ -352,6 +352,127 @@ hyper_native_status_t hyper_process_get_info(
         0).status;
 }
 
+hyper_call_result_t hyper_task_inspector_scan_processes(
+    hyper_native_handle_t inspector,
+    uint64_t cursor,
+    hyper_native_task_process_t *records,
+    size_t capacity)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_PROCESSES,
+        inspector,
+        cursor,
+        (uintptr_t)records,
+        capacity,
+        0,
+        0);
+}
+
+hyper_call_result_t hyper_task_inspector_scan_threads(
+    hyper_native_handle_t inspector,
+    uint64_t cursor,
+    hyper_native_task_thread_t *records,
+    size_t capacity)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_THREADS,
+        inspector,
+        cursor,
+        (uintptr_t)records,
+        capacity,
+        0,
+        0);
+}
+
+hyper_call_result_t hyper_object_inspector_scan_objects(
+    hyper_native_handle_t inspector,
+    uint64_t cursor,
+    hyper_native_object_inspection_t *records,
+    size_t capacity)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_OBJECTS,
+        inspector,
+        cursor,
+        (uintptr_t)records,
+        capacity,
+        0,
+        0);
+}
+
+hyper_call_result_t hyper_object_inspector_scan_handles(
+    hyper_native_handle_t inspector,
+    uint64_t process_koid,
+    uint64_t cursor,
+    hyper_native_handle_inspection_t *records,
+    size_t capacity)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_HANDLES,
+        inspector,
+        process_koid,
+        cursor,
+        (uintptr_t)records,
+        capacity,
+        0);
+}
+
+static hyper_call_result_t inspector_derive(
+    uint64_t number,
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t scope)
+{
+    return hyper_native_call6(number, inspector, scope, 0, 0, 0, 0);
+}
+
+hyper_call_result_t hyper_task_inspector_derive_process(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t process)
+{
+    return inspector_derive(HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_PROCESS, inspector, process);
+}
+
+hyper_call_result_t hyper_task_inspector_derive_task_group(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t task_group)
+{
+    return inspector_derive(
+        HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_TASK_GROUP, inspector, task_group);
+}
+
+hyper_call_result_t hyper_task_inspector_derive_resource_domain(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t resource_domain)
+{
+    return inspector_derive(
+        HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN, inspector, resource_domain);
+}
+
+hyper_call_result_t hyper_object_inspector_derive_process(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t process)
+{
+    return inspector_derive(HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS, inspector, process);
+}
+
+hyper_call_result_t hyper_object_inspector_derive_task_group(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t task_group)
+{
+    return inspector_derive(
+        HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_TASK_GROUP, inspector, task_group);
+}
+
+hyper_call_result_t hyper_object_inspector_derive_resource_domain(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t resource_domain)
+{
+    return inspector_derive(
+        HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
+        inspector,
+        resource_domain);
+}
+
 hyper_native_status_t hyper_thread_yield(void)
 {
     return call0(HYPER_NATIVE_SYS_THREAD_YIELD).status;

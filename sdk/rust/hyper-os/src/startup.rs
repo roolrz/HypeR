@@ -68,6 +68,10 @@ pub const CONSOLE: StartupPurpose<ConsoleObject> =
     StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE as u32);
 pub const BOOT_FS: StartupPurpose<BootFsObject> =
     StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_BOOT_FS as u32);
+pub const TASK_INSPECTOR: StartupPurpose<crate::handle::TaskInspectorObject> =
+    StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR as u32);
+pub const OBJECT_INSPECTOR: StartupPurpose<crate::handle::ObjectInspectorObject> =
+    StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR as u32);
 
 /// Exclusive safe view of the process-startup record owned by the runtime.
 ///

@@ -12,8 +12,8 @@ use command::{CommandLine, MAX_LINE_BYTES};
 use hyper_os::bootfs::{BootFile, BootFileRights, BootFs};
 use hyper_os::channel;
 use hyper_os::handle::{
-    ByteChannelObject, OwnedHandle, ProcessObject, ResourceDomainObject, Rights, RightsOffer,
-    TaskFactoryObject, TaskGroupObject,
+    ByteChannelObject, ObjectInspectorObject, OwnedHandle, ProcessObject, ResourceDomainObject,
+    Rights, RightsOffer, TaskFactoryObject, TaskGroupObject, TaskInspectorObject,
 };
 use hyper_os::startup::{self, Startup};
 use hyper_os::task::{ProcessBuilder, ProcessInfo, ProcessTermination};
@@ -45,11 +45,17 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
     let domain = startup
         .take(startup::RESOURCE_DOMAIN)
         .map_err(Error::from)?;
+    let task_inspector = startup.take(startup::TASK_INSPECTOR).map_err(Error::from)?;
+    let object_inspector = startup
+        .take(startup::OBJECT_INSPECTOR)
+        .map_err(Error::from)?;
     let authorities = CommandAuthorities {
         boot_fs,
         factory,
         group,
         domain,
+        task_inspector,
+        object_inspector,
     };
 
     write(&output, READY_MESSAGE)?;
@@ -141,7 +147,7 @@ fn execute_line(
     match name {
         "help" => write(
             output,
-            b"builtins: clear echo exit help\nexternal commands: /bin/echo\n",
+            b"builtins: clear echo exit help\nexternal commands: /bin/echo /bin/handle /bin/ps\n",
         )?,
         "echo" => builtin_echo(&command, output)?,
         "clear" => write(output, b"\x1b[2J\x1b[H")?,
@@ -209,6 +215,23 @@ fn launch_command(
         stdio::STANDARD_OUTPUT.as_raw(),
         Rights::WAIT.union(Rights::WRITE),
     )?;
+    match name {
+        "ps" | "/bin/ps" => builder
+            .add_handle_duplicate(
+                authorities.task_inspector.as_handle_ref(),
+                startup::TASK_INSPECTOR.as_raw(),
+                RightsOffer::Exact(Rights::INSPECT),
+            )
+            .map_err(|_| Error::InvalidCommand)?,
+        "handle" | "/bin/handle" => builder
+            .add_handle_duplicate(
+                authorities.object_inspector.as_handle_ref(),
+                startup::OBJECT_INSPECTOR.as_raw(),
+                RightsOffer::Exact(Rights::INSPECT),
+            )
+            .map_err(|_| Error::InvalidCommand)?,
+        _ => {}
+    }
     add_child_channel(
         &builder,
         child_error,
@@ -361,6 +384,8 @@ struct CommandAuthorities {
     factory: OwnedHandle<TaskFactoryObject>,
     group: OwnedHandle<TaskGroupObject>,
     domain: OwnedHandle<ResourceDomainObject>,
+    task_inspector: OwnedHandle<TaskInspectorObject>,
+    object_inspector: OwnedHandle<ObjectInspectorObject>,
 }
 
 struct ChildChannels {

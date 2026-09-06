@@ -17,7 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use hyper::exec::startup::StartupHandle;
 use hyper::mm::{FallibleArc, UniqueFallibleArc, WeakFallibleArc};
-use hyper::sync::InterruptSpinLock;
+use hyper::sync::{InterruptSpinLock, PublishedOnce};
 
 use super::directory::PreparedRegistration;
 use super::image::{AbiFamily, ExecutionRoute, MachineAbi, ProcessImage, UserThreadStart};
@@ -45,8 +45,8 @@ use crate::kernel::mm::user_space::{
     UserWriteReservation, VmarObject,
 };
 use crate::kernel::object::{
-    KernelObject, Koid, ObjectCreationError, ObjectPublication, SignalMask, SignalSource,
-    SignalState, UserExportableObject,
+    KernelObject, KernelService, Koid, ObjectCreationError, ObjectPublication, PublishableRef,
+    SignalMask, UserExportableObject,
 };
 use crate::kernel::sync::Completion;
 use crate::kernel::task::scheduler::{self, CpuMask};
@@ -276,13 +276,15 @@ pub(super) struct ProcessInner {
     // are released by field destruction.
     pub(super) directory: super::directory::Membership,
     id: ProcessId,
+    group_id: super::TaskGroupId,
+    domain_id: crate::kernel::accounting::ResourceDomainId,
     image_generation: u64,
+    name: PublishedOnce<ProcessNameSnapshot>,
     image: ProcessImage,
     domain: ResourceDomain,
     handles: ProcessLock<HandleTable>,
     state: ProcessLock<ProcessState>,
-    object_published: AtomicBool,
-    signals: SignalState,
+    object: PublishedOnce<PublishableRef<ProcessObject, KernelService>>,
     stopped: Completion,
     retirement_next: ProcessLock<Option<Process>>,
     retirement_retry: ProcessLock<Option<AddressSpaceRetirement>>,
@@ -388,11 +390,42 @@ impl Drop for ProcessCreateFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ProcessSnapshot {
     pub(crate) id: ProcessId,
+    pub(crate) koid: Koid,
+    pub(crate) group_id: super::TaskGroupId,
+    pub(crate) domain_id: crate::kernel::accounting::ResourceDomainId,
     pub(crate) image_generation: u64,
+    pub(crate) name: ProcessNameSnapshot,
     pub(crate) phase: ProcessPhase,
     pub(crate) pending_threads: usize,
     pub(crate) active_threads: usize,
     pub(crate) terminal: Option<TerminalReason>,
+}
+
+/// Immutable, allocation-free Process name retained through final observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessNameSnapshot {
+    bytes: [u8; Self::CAPACITY],
+    len: u8,
+}
+
+impl ProcessNameSnapshot {
+    pub(crate) const CAPACITY: usize = 64;
+
+    pub(crate) fn from_validated(name: &str) -> Self {
+        if name.len() > Self::CAPACITY {
+            process_invariant_violation();
+        }
+        let mut bytes = [0; Self::CAPACITY];
+        bytes[..name.len()].copy_from_slice(name.as_bytes());
+        Self {
+            bytes,
+            len: name.len() as u8,
+        }
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..usize::from(self.len)]
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -456,7 +489,10 @@ impl PreparedProcess {
         let inner = ProcessInner {
             directory: super::directory::Membership::new(id),
             id,
+            group_id: group.id(),
+            domain_id: domain.id(),
             image_generation: 1,
+            name: PublishedOnce::new(),
             image,
             domain,
             handles: ProcessLock::new(HandleTable::new()),
@@ -471,8 +507,7 @@ impl PreparedProcess {
                 handle_table_charges: [const { None }; HANDLE_TABLE_STORAGE_SEGMENTS],
                 handles_retired: false,
             }),
-            object_published: AtomicBool::new(false),
-            signals: SignalState::new(),
+            object: PublishedOnce::new(),
             stopped: Completion::new(),
             retirement_next: ProcessLock::new(None),
             retirement_retry: ProcessLock::new(None),
@@ -507,7 +542,7 @@ impl PreparedProcess {
         })
     }
 
-    fn process(&self) -> &Process {
+    pub(crate) fn process(&self) -> &Process {
         match self.process.as_ref() {
             Some(process) => process,
             None => process_invariant_violation(),
@@ -587,11 +622,19 @@ impl PreparedProcess {
     }
 
     /// Publishes complete Process ownership and then makes it group-visible.
-    pub(crate) fn publish(mut self) -> Process {
+    pub(crate) fn publish(
+        mut self,
+        object: PublishableRef<ProcessObject, KernelService>,
+        name: ProcessNameSnapshot,
+    ) -> Process {
         let process = match self.process.take() {
             Some(process) => process,
             None => process_invariant_violation(),
         };
+        if process.inner.name.publish(name).is_err() {
+            process_invariant_violation();
+        }
+        process.install_object(object);
         process.inner.state.with(|state| {
             if state.lifecycle.publish().is_err() {
                 process_invariant_violation();
@@ -674,21 +717,23 @@ impl Process {
         self.inner.domain.clone()
     }
 
-    pub(super) fn claim_object_publication(&self) -> bool {
-        self.inner
-            .object_published
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+    fn install_object(&self, object: PublishableRef<ProcessObject, KernelService>) {
+        if self.inner.object.publish(object).is_err() {
+            process_invariant_violation();
+        }
     }
 
-    pub(super) fn abort_object_publication(&self) {
-        if self
-            .inner
-            .object_published
-            .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            process_invariant_violation();
+    pub(crate) fn koid(&self) -> Koid {
+        match self.inner.object.get() {
+            Some(object) => object.koid(),
+            None => process_invariant_violation(),
+        }
+    }
+
+    pub(super) fn object_publication(&self) -> ObjectPublication<ProcessObject> {
+        match self.inner.object.get() {
+            Some(object) => object.publication(),
+            None => process_invariant_violation(),
         }
     }
 
@@ -714,7 +759,14 @@ impl Process {
     pub(crate) fn snapshot(&self) -> ProcessSnapshot {
         self.inner.state.with(|state| ProcessSnapshot {
             id: self.id(),
+            koid: self.koid(),
+            group_id: self.inner.group_id,
+            domain_id: self.inner.domain_id,
             image_generation: self.image_generation(),
+            name: match self.inner.name.get() {
+                Some(name) => *name,
+                None => process_invariant_violation(),
+            },
             phase: state.lifecycle.phase(),
             pending_threads: state.lifecycle.pending_threads(),
             active_threads: state.lifecycle.active_threads(),
@@ -772,10 +824,6 @@ impl Process {
             Some(reason) => Some(reason),
             None => process_invariant_violation(),
         }
-    }
-
-    pub(super) fn signal_source(&self) -> SignalSource<'_> {
-        SignalSource::new(&self.inner.signals, Self::SUPPORTED_SIGNALS)
     }
 
     pub(crate) fn create_initial_user_thread(
@@ -2110,17 +2158,20 @@ impl Process {
                 process_invariant_violation();
             }
         });
+        let final_snapshot = self.snapshot();
+        match self.inner.object.get() {
+            Some(object) => object.object().publish_final_snapshot(final_snapshot),
+            None => process_invariant_violation(),
+        }
     }
 
     /// Publishes object-visible termination before waking Process joiners.
     fn publish_stopped(&self) {
-        if self
-            .inner
-            .signals
-            .update(SignalMask::EMPTY, Self::TERMINATED)
-            .is_err()
-            || self.inner.stopped.complete_all().is_err()
-        {
+        match self.inner.object.get() {
+            Some(object) => object.object().publish_stopped(),
+            None => process_invariant_violation(),
+        }
+        if self.inner.stopped.complete_all().is_err() {
             process_invariant_violation();
         }
         queue_retirement(self.clone());

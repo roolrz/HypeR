@@ -16,7 +16,7 @@ use hyper::sync::InterruptSpinLock;
 use super::core::ObjectRef;
 use super::{Diagnostic, ErasedKernelRef, Koid, ObjectCreationError, ObjectSnapshot};
 
-const PAGE_CAPACITY: usize = 32;
+const PAGE_CAPACITY: usize = 8;
 
 struct Entry {
     sequence: u64,
@@ -130,6 +130,20 @@ impl ObjectScanCursor {
         Self {
             before_sequence: u64::MAX,
         }
+    }
+
+    pub(crate) const fn from_token(token: u64) -> Self {
+        if token == 0 {
+            Self::start()
+        } else {
+            Self {
+                before_sequence: token,
+            }
+        }
+    }
+
+    pub(crate) const fn token(self) -> u64 {
+        self.before_sequence
     }
 }
 

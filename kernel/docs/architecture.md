@@ -224,6 +224,15 @@ counts rather than globally allocated edge records. Multi-page graph scans are
 weakly consistent and expose neither kernel pointers nor a lookup path from a
 KOID to an operational reference.
 
+Userspace observability is represented by immutable `TaskInspector` and
+`ObjectInspector` kernel objects. Their payload fixes both a scope (system,
+ResourceDomain, TaskGroup, or Process) and a visibility mask. Deriving a view
+requires a typed target capability, verifies that the target is already in the
+parent scope, and can only remove visibility. Derived non-system views exclude
+kernel Threads and global object-directory scans. Process-handle scans accept a
+KOID solely as a correlation key after the inspector has authorized the scope;
+they never return a handle to the named Process or object.
+
 Kernel-only objects have no generic conversion into userspace handles. Handle
 publication requires an explicit typed publication capability; export-policy
 flags are diagnostic metadata rather than the security boundary. Kernel
@@ -276,6 +285,9 @@ snapshots combine object headers with bounded per-Process handle-table pages,
 providing a pointer-free diagnostic graph without changing object lifetime or
 placing reverse-reference locks on capability hot paths. Rendering is allowed
 only from normal kernel context; fatal diagnostics remain lock-independent.
+Process and Thread labels are copied into bounded immutable identity snapshots
+before publication. This keeps `ps` output meaningful without retaining loader
+paths, builder storage, scheduler allocations, or authority-bearing references.
 
 AArch64 provides two implementations behind that facade. VHE keeps the
 permanent host mapping in the canonical upper range through `TTBR1_EL2` and
