@@ -6,8 +6,28 @@
 use hyper::abi::native;
 
 /// Object support ceiling and monotonically attenuated process-handle grant.
+///
+/// `Rights` is the ABI-shaped union used at syscall and object boundaries.
+/// Handle storage decomposes it into operation and propagation authority so a
+/// transfer check cannot accidentally treat `DUPLICATE` or `TRANSFER` as an
+/// ordinary object operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Rights(u64);
+
+/// Authority to invoke operations on the referenced object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OperationRights(u64);
+
+/// Authority to derive or relocate a process-local handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PropagationRights(u64);
+
+/// Compiler-visible decomposition of one handle's complete authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HandleRights {
+    operations: OperationRights,
+    propagation: PropagationRights,
+}
 
 impl Rights {
     pub(crate) const NONE: Self = Self(0);
@@ -38,7 +58,14 @@ impl Rights {
         Self(native::HYPER_NATIVE_RIGHT_CREATE_RESOURCE_DOMAIN);
     pub(crate) const SET_LIMITS: Self = Self(native::HYPER_NATIVE_RIGHT_SET_LIMITS);
     pub(crate) const CREATE_EXECUTABLE: Self = Self(native::HYPER_NATIVE_RIGHT_CREATE_EXECUTABLE);
+    /// Permits attaching a newly constructed Process to this `TaskGroup`.
+    pub(crate) const TASK_GROUP_ATTACH_PROCESS: Self =
+        Self(native::HYPER_NATIVE_RIGHT_TASK_GROUP_ATTACH_PROCESS);
+    /// Permits charging a newly constructed Process to this `ResourceDomain`.
+    pub(crate) const RESOURCE_DOMAIN_SPONSOR: Self =
+        Self(native::HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR);
     pub(crate) const KNOWN: Self = Self(native::HYPER_NATIVE_RIGHTS_MASK);
+    const PROPAGATION_MASK: u64 = Self::DUPLICATE.0 | Self::TRANSFER.0;
 
     pub(crate) const fn from_bits(bits: u64) -> Option<Self> {
         if bits & !Self::KNOWN.0 == 0 {
@@ -66,6 +93,43 @@ impl Rights {
 
     pub(crate) const fn is_empty(self) -> bool {
         self.0 == 0
+    }
+
+    pub(crate) const fn decompose(self) -> HandleRights {
+        HandleRights {
+            operations: OperationRights(self.0 & !Self::PROPAGATION_MASK),
+            propagation: PropagationRights(self.0 & Self::PROPAGATION_MASK),
+        }
+    }
+}
+
+impl HandleRights {
+    pub(crate) const fn union(self) -> Rights {
+        Rights(self.operations.0 | self.propagation.0)
+    }
+
+    pub(crate) const fn contains(self, required: Self) -> bool {
+        self.operations.contains(required.operations)
+            && self.propagation.contains(required.propagation)
+    }
+
+    pub(crate) const fn propagation(self) -> PropagationRights {
+        self.propagation
+    }
+}
+
+impl OperationRights {
+    pub(crate) const fn contains(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
+    }
+}
+
+impl PropagationRights {
+    pub(crate) const DUPLICATE: Self = Self(Rights::DUPLICATE.0);
+    pub(crate) const TRANSFER: Self = Self(Rights::TRANSFER.0);
+
+    pub(crate) const fn contains(self, required: Self) -> bool {
+        self.0 & required.0 == required.0
     }
 }
 

@@ -8,7 +8,7 @@ use crate::kernel::accounting::{
 };
 use crate::kernel::authority::Rights;
 use crate::kernel::object::{
-    KernelObject, ObjectCreationError, ObjectKind, ObjectPublication, SignalSource,
+    KernelObject, ObjectCreationError, ObjectKind, ObjectPublication, SignalSource, TransferClass,
     object_allocation_size, private,
 };
 
@@ -54,6 +54,12 @@ pub(crate) struct ProcessObject {
 }
 
 impl ProcessObject {
+    /// Authority returned to the parent by a successful builder start.
+    pub(crate) const SUPERVISOR_RIGHTS: Rights = Rights::TRANSFER
+        .union(Rights::WAIT)
+        .union(Rights::INSPECT)
+        .union(Rights::REQUEST_STOP);
+
     fn try_new(process: Process) -> Result<Self, TaskObjectError> {
         let charge = reserve_object_charge::<Self>(&process.resource_domain())?;
         Ok(Self {
@@ -87,6 +93,7 @@ impl private::UserExportable for ProcessObject {}
 
 impl KernelObject for ProcessObject {
     const KIND: ObjectKind = ObjectKind::PROCESS;
+    const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::WAIT)
@@ -99,6 +106,14 @@ impl KernelObject for ProcessObject {
         Some(self.process.signal_source())
     }
 }
+
+const _: () = assert!(
+    ProcessObject::SUPERVISOR_RIGHTS.bits()
+        == hyper::abi::native::HYPER_NATIVE_RIGHT_TRANSFER
+            | hyper::abi::native::HYPER_NATIVE_RIGHT_WAIT
+            | hyper::abi::native::HYPER_NATIVE_RIGHT_INSPECT
+            | hyper::abi::native::HYPER_NATIVE_RIGHT_REQUEST_STOP
+);
 
 /// Userspace authority over grouped Process lifecycle operations.
 pub(crate) struct TaskGroupObject {
@@ -140,10 +155,12 @@ impl private::UserExportable for TaskGroupObject {}
 
 impl KernelObject for TaskGroupObject {
     const KIND: ObjectKind = ObjectKind::TASK_GROUP;
+    const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
-        .union(Rights::REQUEST_STOP);
+        .union(Rights::REQUEST_STOP)
+        .union(Rights::TASK_GROUP_ATTACH_PROCESS);
 }
 
 /// Stateless authority required to construct task hierarchy objects.
@@ -176,6 +193,7 @@ impl private::UserExportable for TaskFactory {}
 
 impl KernelObject for TaskFactory {
     const KIND: ObjectKind = ObjectKind::TASK_FACTORY;
+    const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)

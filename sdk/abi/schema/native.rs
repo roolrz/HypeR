@@ -30,6 +30,7 @@ pub struct AbiSchema {
     pub constants: &'static [AbiConstant],
     pub records: &'static [Record],
     pub syscalls: &'static [Syscall],
+    pub semantic_rules: &'static [&'static str],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +49,14 @@ pub struct Feature {
 pub struct ObjectKind {
     pub value: u32,
     pub name: &'static str,
+    pub transfer: TransferClass,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransferClass {
+    Forbidden,
+    General,
+    RendezvousOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -179,6 +188,25 @@ pub enum ObjectConstraint {
 pub enum HandleDisposition {
     Borrow,
     ConsumeOnCommit,
+    ByOperation {
+        argument: &'static str,
+        operations: &'static [HandleOperation],
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HandleOperation {
+    pub name: &'static str,
+    pub value: u32,
+    pub disposition: OperationDisposition,
+    /// Rights required in addition to the handle argument's common rights.
+    pub additional_rights: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OperationDisposition {
+    Borrow,
+    ConsumeOnCommit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -196,6 +224,10 @@ pub enum ProducedObject {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProducedRights {
     RequestedSubsetOf(&'static str),
+    ExactRequested {
+        argument: &'static str,
+        allowed_rights: u64,
+    },
     Fixed(u64),
 }
 
@@ -223,15 +255,35 @@ pub enum MemoryLength {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndirectHandles {
-    /// Handle values in input records are moved only when the syscall commits.
+    /// Input records describe conditional borrow-or-move operations which all
+    /// commit together only when the syscall returns `OK`.
     ConsumeRecords {
         handle_field: &'static str,
         rights_field: &'static str,
         expected_kind_field: &'static str,
-        required_rights: u64,
+        operation_field: &'static str,
+        common_rights: u64,
+        operations: &'static [HandleOperation],
+        commit: CapabilityCommit,
     },
-    /// The kernel publishes transferred handles into an output element array.
-    ProduceTransferred,
+    /// In/out records declare exact receive authority before the kernel
+    /// publishes transferred handles into them.
+    ProduceTransferred {
+        handle_field: &'static str,
+        rights_field: &'static str,
+        expected_kind_field: &'static str,
+        flags_field: &'static str,
+        commit: CapabilityCommit,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityCommit {
+    /// Capability ownership and live-handle publication commit only on `OK`.
+    ///
+    /// User copies may have partially modified output storage when the call
+    /// reports `FAULT`; those bytes never constitute a published capability.
+    AtomicOnOk,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -349,6 +401,10 @@ pub const STATUSES: &[Status] = &[
         value: -15,
         name: "peer_closed",
     },
+    Status {
+        value: -16,
+        name: "not_found",
+    },
 ];
 
 const RIGHT_DUPLICATE_BIT: u8 = 0;
@@ -360,55 +416,91 @@ const RIGHT_CREATE_TASK_GROUP_BIT: u8 = 22;
 const RIGHT_CREATE_RESOURCE_DOMAIN_BIT: u8 = 23;
 const RIGHT_SET_LIMITS_BIT: u8 = 24;
 const RIGHT_CREATE_EXECUTABLE_BIT: u8 = 25;
+const RIGHT_TASK_GROUP_ATTACH_PROCESS_BIT: u8 = 26;
+const RIGHT_RESOURCE_DOMAIN_SPONSOR_BIT: u8 = 27;
+const CAPABILITY_OPERATION_MOVE: u32 = 0;
+const CAPABILITY_OPERATION_DUPLICATE: u32 = 1;
 
 pub const OBJECT_KINDS: &[ObjectKind] = &[
     ObjectKind {
         value: 0,
         name: "none",
+        transfer: TransferClass::Forbidden,
     },
     ObjectKind {
         value: 1,
         name: "event",
+        transfer: TransferClass::General,
     },
     ObjectKind {
         value: 2,
-        name: "channel",
+        name: "byte_channel",
+        transfer: TransferClass::General,
     },
     ObjectKind {
         value: 3,
         name: "thread",
+        transfer: TransferClass::RendezvousOnly,
     },
     ObjectKind {
         value: 4,
         name: "process",
+        transfer: TransferClass::RendezvousOnly,
     },
     ObjectKind {
         value: 5,
         name: "task_group",
+        transfer: TransferClass::RendezvousOnly,
     },
     ObjectKind {
         value: 6,
         name: "resource_domain",
+        transfer: TransferClass::General,
     },
     ObjectKind {
         value: 7,
         name: "task_factory",
+        transfer: TransferClass::General,
     },
     ObjectKind {
         value: 8,
         name: "executable_authority",
+        transfer: TransferClass::General,
     },
     ObjectKind {
         value: 9,
         name: "vmo",
+        transfer: TransferClass::General,
     },
     ObjectKind {
         value: 10,
         name: "vmar",
+        transfer: TransferClass::RendezvousOnly,
     },
     ObjectKind {
         value: 11,
         name: "console",
+        transfer: TransferClass::General,
+    },
+    ObjectKind {
+        value: 12,
+        name: "boot_fs",
+        transfer: TransferClass::General,
+    },
+    ObjectKind {
+        value: 13,
+        name: "boot_file",
+        transfer: TransferClass::General,
+    },
+    ObjectKind {
+        value: 14,
+        name: "capability_channel",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 15,
+        name: "process_builder",
+        transfer: TransferClass::RendezvousOnly,
     },
 ];
 
@@ -517,6 +609,14 @@ pub const RIGHTS: &[Right] = &[
         bit: RIGHT_CREATE_EXECUTABLE_BIT,
         name: "create_executable",
     },
+    Right {
+        bit: RIGHT_TASK_GROUP_ATTACH_PROCESS_BIT,
+        name: "task_group_attach_process",
+    },
+    Right {
+        bit: RIGHT_RESOURCE_DOMAIN_SPONSOR_BIT,
+        name: "resource_domain_sponsor",
+    },
 ];
 
 pub const RIGHT_DUPLICATE: u64 = 1 << RIGHT_DUPLICATE_BIT;
@@ -526,17 +626,44 @@ pub const RIGHT_WAIT: u64 = 1 << 2;
 pub const RIGHT_SIGNAL: u64 = 1 << RIGHT_SIGNAL_BIT;
 pub const RIGHT_READ: u64 = 1 << 4;
 pub const RIGHT_WRITE: u64 = 1 << 5;
+pub const RIGHT_EXECUTE: u64 = 1 << 7;
+pub const RIGHT_START: u64 = 1 << 10;
+pub const RIGHT_REQUEST_STOP: u64 = 1 << 11;
 pub const RIGHT_CREATE_PROCESS: u64 = 1 << RIGHT_CREATE_PROCESS_BIT;
 pub const RIGHT_CREATE_THREAD: u64 = 1 << RIGHT_CREATE_THREAD_BIT;
 pub const RIGHT_CREATE_TASK_GROUP: u64 = 1 << RIGHT_CREATE_TASK_GROUP_BIT;
 pub const RIGHT_CREATE_RESOURCE_DOMAIN: u64 = 1 << RIGHT_CREATE_RESOURCE_DOMAIN_BIT;
 pub const RIGHT_SET_LIMITS: u64 = 1 << RIGHT_SET_LIMITS_BIT;
 pub const RIGHT_CREATE_EXECUTABLE: u64 = 1 << RIGHT_CREATE_EXECUTABLE_BIT;
+pub const RIGHT_TASK_GROUP_ATTACH_PROCESS: u64 = 1 << RIGHT_TASK_GROUP_ATTACH_PROCESS_BIT;
+pub const RIGHT_RESOURCE_DOMAIN_SPONSOR: u64 = 1 << RIGHT_RESOURCE_DOMAIN_SPONSOR_BIT;
 
 pub const EVENT_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
-pub const CHANNEL_RIGHTS: u64 =
+pub const BYTE_CHANNEL_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE;
+pub const CAPABILITY_CHANNEL_RIGHTS: u64 = BYTE_CHANNEL_RIGHTS;
+pub const BOOT_FS_RIGHTS: u64 = RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ;
+pub const BOOT_FILE_RIGHTS: u64 = BOOT_FS_RIGHTS | RIGHT_EXECUTE;
+pub const PROCESS_BUILDER_RIGHTS: u64 =
+    RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_START | RIGHT_REQUEST_STOP;
+pub const PROCESS_SUPERVISOR_RIGHTS: u64 =
+    RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_REQUEST_STOP;
+
+pub const CAPABILITY_OPERATIONS: &[HandleOperation] = &[
+    HandleOperation {
+        name: "move",
+        value: CAPABILITY_OPERATION_MOVE,
+        disposition: OperationDisposition::ConsumeOnCommit,
+        additional_rights: 0,
+    },
+    HandleOperation {
+        name: "duplicate",
+        value: CAPABILITY_OPERATION_DUPLICATE,
+        disposition: OperationDisposition::Borrow,
+        additional_rights: RIGHT_DUPLICATE,
+    },
+];
 
 pub const SIGNALS: &[Signal] = &[
     Signal {
@@ -545,18 +672,28 @@ pub const SIGNALS: &[Signal] = &[
         name: "signaled",
     },
     Signal {
-        object: "channel",
+        object: "byte_channel",
         bit: 0,
         name: "readable",
     },
     Signal {
-        object: "channel",
+        object: "byte_channel",
         bit: 1,
         name: "writable",
     },
     Signal {
-        object: "channel",
+        object: "byte_channel",
         bit: 2,
+        name: "peer_closed",
+    },
+    Signal {
+        object: "capability_channel",
+        bit: 0,
+        name: "peer_receiving",
+    },
+    Signal {
+        object: "capability_channel",
+        bit: 1,
         name: "peer_closed",
     },
     Signal {
@@ -628,36 +765,88 @@ pub const CONSTANTS: &[AbiConstant] = &[
         value: 6,
     },
     AbiConstant {
+        name: "startup_handle_purpose_boot_fs",
+        value: 7,
+    },
+    AbiConstant {
+        name: "startup_max_handles",
+        value: 256,
+    },
+    AbiConstant {
         name: "deadline_infinite",
         value: u64::MAX,
     },
     AbiConstant {
-        name: "channel_disposition_same_rights",
+        name: "capability_disposition_same_rights",
         value: u64::MAX,
     },
     AbiConstant {
-        name: "channel_max_message_bytes",
+        name: "byte_channel_max_message_bytes",
         value: 64 * 1024,
     },
     AbiConstant {
-        name: "channel_max_message_handles",
-        value: 64,
-    },
-    AbiConstant {
-        name: "channel_max_queued_messages",
+        name: "byte_channel_max_queued_messages",
         value: 16,
     },
     AbiConstant {
-        name: "channel_max_queued_bytes",
+        name: "byte_channel_max_queued_bytes",
         value: 16 * 64 * 1024,
     },
     AbiConstant {
-        name: "channel_max_queued_handles",
-        value: 16 * 64,
+        name: "capability_channel_max_message_bytes",
+        value: 4 * 1024,
+    },
+    AbiConstant {
+        name: "capability_channel_max_handles",
+        value: 16,
+    },
+    AbiConstant {
+        name: "capability_disposition_move",
+        value: CAPABILITY_OPERATION_MOVE as u64,
+    },
+    AbiConstant {
+        name: "capability_disposition_duplicate",
+        value: CAPABILITY_OPERATION_DUPLICATE as u64,
     },
     AbiConstant {
         name: "console_max_transfer_bytes",
         value: CONSOLE_MAX_TRANSFER_BYTES as u64,
+    },
+    AbiConstant {
+        name: "bootfs_max_path_bytes",
+        value: 4096,
+    },
+    AbiConstant {
+        name: "bootfs_max_read_bytes",
+        value: 64 * 1024,
+    },
+    AbiConstant {
+        name: "process_name_max_bytes",
+        value: 64,
+    },
+    AbiConstant {
+        name: "process_argument_max_bytes",
+        value: 4 * 1024,
+    },
+    AbiConstant {
+        name: "process_environment_max_bytes",
+        value: 4 * 1024,
+    },
+    AbiConstant {
+        name: "process_max_arguments",
+        value: 64,
+    },
+    AbiConstant {
+        name: "process_max_environment",
+        value: 64,
+    },
+    AbiConstant {
+        name: "process_affinity_max_words",
+        value: 4,
+    },
+    AbiConstant {
+        name: "process_affinity_max_cpus",
+        value: 256,
     },
 ];
 
@@ -697,7 +886,7 @@ const OBJECT_BASIC_INFO_FIELDS: &[Field] = &[
     },
 ];
 
-const CHANNEL_DISPOSITION_FIELDS: &[Field] = &[
+const CAPABILITY_DISPOSITION_FIELDS: &[Field] = &[
     Field {
         name: "handle",
         kind: FieldKind::U64,
@@ -714,7 +903,30 @@ const CHANNEL_DISPOSITION_FIELDS: &[Field] = &[
         offset: 16,
     },
     Field {
-        name: "reserved",
+        name: "operation",
+        kind: FieldKind::U32,
+        offset: 20,
+    },
+];
+
+const CAPABILITY_RECEIVE_SLOT_FIELDS: &[Field] = &[
+    Field {
+        name: "handle",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "rights",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "expected_kind",
+        kind: FieldKind::U32,
+        offset: 16,
+    },
+    Field {
+        name: "flags",
         kind: FieldKind::U32,
         offset: 20,
     },
@@ -752,8 +964,14 @@ pub const RECORDS: &[Record] = &[
         alignment: 8,
     },
     Record {
-        name: "channel_disposition",
-        fields: CHANNEL_DISPOSITION_FIELDS,
+        name: "capability_disposition",
+        fields: CAPABILITY_DISPOSITION_FIELDS,
+        size: 24,
+        alignment: 8,
+    },
+    Record {
+        name: "capability_receive_slot",
+        fields: CAPABILITY_RECEIVE_SLOT_FIELDS,
         size: 24,
         alignment: 8,
     },
@@ -984,16 +1202,16 @@ const CHANNEL_CREATE_RESULTS: &[ResultValue] = &[
         name: "endpoint0",
         kind: ValueKind::Handle,
         handle: Some(ProducedHandle {
-            object: ProducedObject::Kind("channel"),
-            rights: ProducedRights::Fixed(CHANNEL_RIGHTS),
+            object: ProducedObject::Kind("byte_channel"),
+            rights: ProducedRights::Fixed(BYTE_CHANNEL_RIGHTS),
         }),
     },
     ResultValue {
         name: "endpoint1",
         kind: ValueKind::Handle,
         handle: Some(ProducedHandle {
-            object: ProducedObject::Kind("channel"),
-            rights: ProducedRights::Fixed(CHANNEL_RIGHTS),
+            object: ProducedObject::Kind("byte_channel"),
+            rights: ProducedRights::Fixed(BYTE_CHANNEL_RIGHTS),
         }),
     },
 ];
@@ -1002,7 +1220,7 @@ const CHANNEL_WRITE_ARGUMENTS: &[Argument] = &[
         name: "endpoint",
         kind: ValueKind::Handle,
         handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("channel"),
+            object: ObjectConstraint::Kind("byte_channel"),
             required_rights: RIGHT_WRITE,
             disposition: HandleDisposition::Borrow,
         }),
@@ -1035,43 +1253,13 @@ const CHANNEL_WRITE_ARGUMENTS: &[Argument] = &[
         handle: None,
         memory: None,
     },
-    Argument {
-        name: "dispositions",
-        kind: ValueKind::UserAddress,
-        handle: None,
-        memory: Some(UserMemory {
-            direction: MemoryDirection::Read,
-            length: MemoryLength::Elements {
-                argument: "disposition_count",
-                maximum_elements: 64,
-                element_size: 24,
-            },
-            record: Some("channel_disposition"),
-            // The initial implementation accepts Event handles here. Moving a
-            // Channel endpoint returns NOT_SUPPORTED until revocation and
-            // iterative teardown make queued endpoint cycles reclaimable.
-            handles: Some(IndirectHandles::ConsumeRecords {
-                handle_field: "handle",
-                rights_field: "rights",
-                expected_kind_field: "expected_kind",
-                required_rights: RIGHT_TRANSFER,
-            }),
-            validation_order: 1,
-        }),
-    },
-    Argument {
-        name: "disposition_count",
-        kind: ValueKind::ElementCount,
-        handle: None,
-        memory: None,
-    },
 ];
 const CHANNEL_READ_ARGUMENTS: &[Argument] = &[
     Argument {
         name: "endpoint",
         kind: ValueKind::Handle,
         handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("channel"),
+            object: ObjectConstraint::Kind("byte_channel"),
             required_rights: RIGHT_READ,
             disposition: HandleDisposition::Borrow,
         }),
@@ -1104,45 +1292,191 @@ const CHANNEL_READ_ARGUMENTS: &[Argument] = &[
         handle: None,
         memory: None,
     },
+];
+const CHANNEL_READ_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "actual_bytes",
+    kind: ValueKind::ByteCount,
+    handle: None,
+}];
+const CHANNEL_READ_BUFFER_TOO_SMALL_RESULTS: &[&str] = &["actual_bytes"];
+const CHANNEL_READ_FAILURE_RESULTS: &[FailureResults] = &[FailureResults {
+    status: "buffer_too_small",
+    results: CHANNEL_READ_BUFFER_TOO_SMALL_RESULTS,
+}];
+
+const CAPABILITY_CHANNEL_CREATE_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "endpoint0",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("capability_channel"),
+            rights: ProducedRights::Fixed(CAPABILITY_CHANNEL_RIGHTS),
+        }),
+    },
+    ResultValue {
+        name: "endpoint1",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("capability_channel"),
+            rights: ProducedRights::Fixed(CAPABILITY_CHANNEL_RIGHTS),
+        }),
+    },
+];
+
+const CAPABILITY_CHANNEL_SEND_ARGUMENTS: &[Argument] = &[
     Argument {
-        name: "handles",
+        name: "endpoint",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("capability_channel"),
+            required_rights: RIGHT_WRITE,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "options",
+        kind: ValueKind::U32,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "bytes",
         kind: ValueKind::UserAddress,
         handle: None,
         memory: Some(UserMemory {
-            direction: MemoryDirection::Write,
-            length: MemoryLength::Elements {
-                argument: "handle_capacity",
-                maximum_elements: 64,
-                element_size: 8,
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "byte_count",
+                maximum_bytes: 4 * 1024,
             },
             record: None,
-            handles: Some(IndirectHandles::ProduceTransferred),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "byte_count",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "dispositions",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Elements {
+                argument: "disposition_count",
+                maximum_elements: 16,
+                element_size: 24,
+            },
+            record: Some("capability_disposition"),
+            handles: Some(IndirectHandles::ConsumeRecords {
+                handle_field: "handle",
+                rights_field: "rights",
+                expected_kind_field: "expected_kind",
+                operation_field: "operation",
+                common_rights: RIGHT_TRANSFER,
+                operations: CAPABILITY_OPERATIONS,
+                commit: CapabilityCommit::AtomicOnOk,
+            }),
             validation_order: 1,
         }),
     },
     Argument {
-        name: "handle_capacity",
+        name: "disposition_count",
         kind: ValueKind::ElementCount,
         handle: None,
         memory: None,
     },
 ];
-const CHANNEL_READ_RESULTS: &[ResultValue] = &[
+
+const CAPABILITY_CHANNEL_RECEIVE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "endpoint",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("capability_channel"),
+            required_rights: RIGHT_READ,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "deadline",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "bytes",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "byte_capacity",
+                maximum_bytes: 4 * 1024,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "byte_capacity",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "capability_slots",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::ReadWrite,
+            length: MemoryLength::Elements {
+                argument: "slot_count",
+                maximum_elements: 16,
+                element_size: 24,
+            },
+            record: Some("capability_receive_slot"),
+            handles: Some(IndirectHandles::ProduceTransferred {
+                handle_field: "handle",
+                rights_field: "rights",
+                expected_kind_field: "expected_kind",
+                flags_field: "flags",
+                commit: CapabilityCommit::AtomicOnOk,
+            }),
+            validation_order: 1,
+        }),
+    },
+    Argument {
+        name: "slot_count",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+];
+const CAPABILITY_CHANNEL_RECEIVE_RESULTS: &[ResultValue] = &[
     ResultValue {
         name: "actual_bytes",
         kind: ValueKind::ByteCount,
         handle: None,
     },
     ResultValue {
-        name: "actual_handles",
+        name: "actual_capabilities",
         kind: ValueKind::ElementCount,
         handle: None,
     },
 ];
-const CHANNEL_READ_BUFFER_TOO_SMALL_RESULTS: &[&str] = &["actual_bytes", "actual_handles"];
-const CHANNEL_READ_FAILURE_RESULTS: &[FailureResults] = &[FailureResults {
+const CAPABILITY_CHANNEL_RECEIVE_BUFFER_TOO_SMALL_RESULTS: &[&str] =
+    &["actual_bytes", "actual_capabilities"];
+const CAPABILITY_CHANNEL_RECEIVE_FAILURE_RESULTS: &[FailureResults] = &[FailureResults {
     status: "buffer_too_small",
-    results: CHANNEL_READ_BUFFER_TOO_SMALL_RESULTS,
+    results: CAPABILITY_CHANNEL_RECEIVE_BUFFER_TOO_SMALL_RESULTS,
 }];
 
 const CONSOLE_READ_ARGUMENTS: &[Argument] = &[
@@ -1233,6 +1567,362 @@ const CONSOLE_IO_FAILURE_RESULTS: &[FailureResults] = &[FailureResults {
     status: "would_block",
     results: CONSOLE_IO_WOULD_BLOCK_RESULTS,
 }];
+
+const BOOTFS_OPEN_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "boot_fs",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("boot_fs"),
+            required_rights: RIGHT_READ,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "path",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "path_size",
+                maximum_bytes: 4096,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "path_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "requested_rights",
+        kind: ValueKind::Rights,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "options",
+        kind: ValueKind::U32,
+        handle: None,
+        memory: None,
+    },
+];
+const BOOTFS_OPEN_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "file",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("boot_file"),
+        rights: ProducedRights::ExactRequested {
+            argument: "requested_rights",
+            allowed_rights: BOOT_FILE_RIGHTS,
+        },
+    }),
+}];
+
+const BOOT_FILE_READ_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "file",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("boot_file"),
+            required_rights: RIGHT_READ,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "options",
+        kind: ValueKind::U32,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "offset",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "output",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "output_capacity",
+                maximum_bytes: 64 * 1024,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "output_capacity",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+const BOOT_FILE_READ_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "actual_bytes",
+        kind: ValueKind::ByteCount,
+        handle: None,
+    },
+    ResultValue {
+        name: "file_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+    },
+];
+
+const PROCESS_BUILDER_CREATE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "factory",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_factory"),
+            required_rights: RIGHT_CREATE_PROCESS,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "group",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_group"),
+            required_rights: RIGHT_TASK_GROUP_ATTACH_PROCESS,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "domain",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("resource_domain"),
+            required_rights: RIGHT_RESOURCE_DOMAIN_SPONSOR,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "executable",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("boot_file"),
+            required_rights: RIGHT_EXECUTE,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+const PROCESS_BUILDER_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "builder",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("process_builder"),
+        rights: ProducedRights::Fixed(PROCESS_BUILDER_RIGHTS),
+    }),
+}];
+
+const PROCESS_BUILDER_SET_NAME_ARGUMENTS: &[Argument] = &[
+    process_builder_argument(RIGHT_WRITE, HandleDisposition::Borrow),
+    Argument {
+        name: "name",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "name_size",
+                maximum_bytes: 64,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "name_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const PROCESS_BUILDER_ADD_ARGUMENT_ARGUMENTS: &[Argument] = &[
+    process_builder_argument(RIGHT_WRITE, HandleDisposition::Borrow),
+    Argument {
+        name: "argument",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "argument_size",
+                maximum_bytes: 4 * 1024,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "argument_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const PROCESS_BUILDER_ADD_ENVIRONMENT_ARGUMENTS: &[Argument] = &[
+    process_builder_argument(RIGHT_WRITE, HandleDisposition::Borrow),
+    Argument {
+        name: "environment",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "environment_size",
+                maximum_bytes: 4 * 1024,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "environment_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const PROCESS_BUILDER_SET_AFFINITY_ARGUMENTS: &[Argument] = &[
+    process_builder_argument(RIGHT_WRITE, HandleDisposition::Borrow),
+    Argument {
+        name: "affinity_words",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Elements {
+                argument: "word_count",
+                maximum_elements: 4,
+                element_size: 8,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "word_count",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const PROCESS_BUILDER_ADD_HANDLE_ARGUMENTS: &[Argument] = &[
+    process_builder_argument(RIGHT_WRITE, HandleDisposition::Borrow),
+    Argument {
+        name: "source",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Any,
+            required_rights: RIGHT_TRANSFER,
+            disposition: HandleDisposition::ByOperation {
+                argument: "operation",
+                operations: CAPABILITY_OPERATIONS,
+            },
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "purpose",
+        kind: ValueKind::U32,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "expected_kind",
+        kind: ValueKind::U32,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "rights",
+        kind: ValueKind::Rights,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "operation",
+        kind: ValueKind::U32,
+        handle: None,
+        memory: None,
+    },
+];
+
+const PROCESS_BUILDER_SEAL_ARGUMENTS: &[Argument] = &[process_builder_argument(
+    RIGHT_WRITE,
+    HandleDisposition::Borrow,
+)];
+const PROCESS_BUILDER_START_ARGUMENTS: &[Argument] = &[process_builder_argument(
+    RIGHT_START,
+    HandleDisposition::ConsumeOnCommit,
+)];
+const PROCESS_BUILDER_START_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "process",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("process"),
+        rights: ProducedRights::Fixed(PROCESS_SUPERVISOR_RIGHTS),
+    }),
+}];
+const PROCESS_BUILDER_ABORT_ARGUMENTS: &[Argument] = &[process_builder_argument(
+    RIGHT_REQUEST_STOP,
+    HandleDisposition::ConsumeOnCommit,
+)];
+
+const PROCESS_REQUEST_STOP_ARGUMENTS: &[Argument] = &[Argument {
+    name: "process",
+    kind: ValueKind::Handle,
+    handle: Some(HandleArgument {
+        object: ObjectConstraint::Kind("process"),
+        required_rights: RIGHT_REQUEST_STOP,
+        disposition: HandleDisposition::Borrow,
+    }),
+    memory: None,
+}];
+
+const fn process_builder_argument(
+    required_rights: u64,
+    disposition: HandleDisposition,
+) -> Argument {
+    Argument {
+        name: "builder",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("process_builder"),
+            required_rights,
+            disposition,
+        }),
+        memory: None,
+    }
+}
 
 pub const SYSCALLS: &[Syscall] = &[
     Syscall {
@@ -1405,7 +2095,7 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 12,
-        name: "channel_create",
+        name: "byte_channel_create",
         feature: FeatureGate::Core,
         arguments: CHANNEL_CREATE_ARGUMENTS,
         results: CHANNEL_CREATE_RESULTS,
@@ -1419,7 +2109,7 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 13,
-        name: "channel_write",
+        name: "byte_channel_write",
         feature: FeatureGate::Core,
         arguments: CHANNEL_WRITE_ARGUMENTS,
         results: &[],
@@ -1433,7 +2123,7 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 14,
-        name: "channel_read",
+        name: "byte_channel_read",
         feature: FeatureGate::Core,
         arguments: CHANNEL_READ_ARGUMENTS,
         results: CHANNEL_READ_RESULTS,
@@ -1473,6 +2163,216 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::Strict,
         failure_results: CONSOLE_IO_FAILURE_RESULTS,
     },
+    Syscall {
+        number: 17,
+        name: "bootfs_open",
+        feature: FeatureGate::Core,
+        arguments: BOOTFS_OPEN_ARGUMENTS,
+        results: BOOTFS_OPEN_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 18,
+        name: "boot_file_read",
+        feature: FeatureGate::Core,
+        arguments: BOOT_FILE_READ_ARGUMENTS,
+        results: BOOT_FILE_READ_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 19,
+        name: "capability_channel_create",
+        feature: FeatureGate::Core,
+        arguments: CHANNEL_CREATE_ARGUMENTS,
+        results: CAPABILITY_CHANNEL_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 20,
+        name: "capability_channel_try_send",
+        feature: FeatureGate::Core,
+        arguments: CAPABILITY_CHANNEL_SEND_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 21,
+        name: "capability_channel_receive",
+        feature: FeatureGate::Core,
+        arguments: CAPABILITY_CHANNEL_RECEIVE_ARGUMENTS,
+        results: CAPABILITY_CHANNEL_RECEIVE_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: CAPABILITY_CHANNEL_RECEIVE_FAILURE_RESULTS,
+    },
+    Syscall {
+        number: 22,
+        name: "process_builder_create",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_BUILDER_CREATE_ARGUMENTS,
+        results: PROCESS_BUILDER_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 23,
+        name: "process_builder_set_name",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_BUILDER_SET_NAME_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 24,
+        name: "process_builder_add_argument",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_BUILDER_ADD_ARGUMENT_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 25,
+        name: "process_builder_add_environment",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_BUILDER_ADD_ENVIRONMENT_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 26,
+        name: "process_builder_set_affinity",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_BUILDER_SET_AFFINITY_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 27,
+        name: "process_builder_add_handle",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_BUILDER_ADD_HANDLE_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 28,
+        name: "process_builder_seal",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_BUILDER_SEAL_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 29,
+        name: "process_builder_start",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_BUILDER_START_ARGUMENTS,
+        results: PROCESS_BUILDER_START_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 30,
+        name: "process_builder_abort",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_BUILDER_ABORT_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 31,
+        name: "process_request_stop",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_REQUEST_STOP_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -1485,7 +2385,23 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
     constants: CONSTANTS,
     records: RECORDS,
     syscalls: SYSCALLS,
+    semantic_rules: SEMANTIC_RULES,
 };
+
+pub const SEMANTIC_RULES: &[&str] = &[
+    "Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.",
+    "AtomicOnOk capability transactions commit handle-table ownership, the rendezvous message, and live output-handle installation together only when both participants return ok. Every non-ok status preserves all input owners and the message. Non-fault failures leave output memory unchanged; fault may partially modify output byte or slot memory, but no handle value written by a failed call is live or installed. Bindings must ignore every output-memory byte after any non-ok status.",
+    "A capability-channel receiver advertises peer_receiving only after its byte range, typed capability slots, and destination handle-table capacity are validated, reserved, and fully published on the endpoint's FIFO receiver queue. The signal is level-triggered but may race another sender.",
+    "A capability disposition's rights are the sender's offered ceiling; capability_disposition_same_rights offers all source rights. A receive slot's rights are the exact installed grant, so receiver rights must be a subset of the sender offer and the offer a subset of source rights. Sender and receiver expected_kind values are nonzero and must both equal the actual object kind.",
+    "A capability receive slot enters with handle and flags zero. On ok, only handle changes. Implementations reserve destination entries, prewrite their future handle values, then perform an infallible handle-table commit. Buffer-too-small changes no slot or byte memory and reports both required counts.",
+    "Capability disposition move consumes its source only on ok and requires transfer. Capability disposition duplicate retains its source and requires transfer plus duplicate. Unknown operations, repeated source handles, kind mismatches, and rights violations reject the complete transaction.",
+    "Capability-channel try_send returns peer_closed when no peer remains; otherwise it returns would_block only when no receiver is queued. It FIFO-matches the oldest fully published receiver. A size, kind, rights, operation, or copy mismatch rejects that transaction for both participants without scanning later receivers.",
+    "Capability-channel timeout, cancellation, and peer close can win only before a receiver is matched. Once matched, sender completion or rejection owns the transaction through commit, including races with the deadline, cancellation, or close; both participants observe the same committed outcome.",
+    "Process-builder create borrows its authority handles and retains kernel object references independently of the caller handles. Builders are mutable only before seal. Every successful mutator applies completely; every failure leaves the builder unchanged. Seal is irreversible. Start requires a sealed builder and returns only a supervisor process handle. Start and abort consume the builder handle only on ok; every failure preserves it.",
+    "A process-builder name is nonempty UTF-8 without embedded NUL bytes. The argv vector contains at least one entry; individual argument strings are UTF-8 and may be empty but contain no NUL byte. Every UTF-8 environment entry contains a nonempty name with no '=' followed by '=' and a NUL-free value. Counts and individual byte lengths remain within the published constants.",
+    "Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.",
+    "Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.",
+];
 
 const _: () = assert!(SYSCALL_ARGUMENT_REGISTERS == 6);
 const _: () = assert!(SYSCALL_RESULT_REGISTERS == 2);

@@ -2,16 +2,38 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "hyper-init"
+name = "hyper-app"
 version = "0.0.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/roolrz/HypeR"
 publish = false
+description = "HypeR Native bootstrap services and init supervisor"
+
+[lib]
+path = "init/src/lib.rs"
 
 [[bin]]
 name = "hyper-init"
-path = "src/main.rs"
+path = "init/src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "hyper-session-service"
+path = "session/src/main.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "hyper-console-input"
+path = "console/input.rs"
+test = false
+bench = false
+
+[[bin]]
+name = "hyper-console-output"
+path = "console/output.rs"
 test = false
 bench = false
 

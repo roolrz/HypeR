@@ -561,6 +561,19 @@ pub fn kthread_create_with_affinity(
     )
 }
 
+/// Validates that an affinity mask currently contains an admitted CPU.
+///
+/// This is a point-in-time admission check. CPU hotplug may change placement
+/// availability later, so final Thread creation repeats the same validation.
+pub(crate) fn validate_affinity(affinity: CpuMask) -> Result<(), Error> {
+    let preferred_cpu = current_cpu()?;
+    SCHEDULER.with(|slot| {
+        slot.as_ref()
+            .ok_or(Error::NotInitialized)?
+            .validate_affinity(preferred_cpu, affinity)
+    })
+}
+
 /// Creates a dormant real-time FIFO kernel thread.
 pub fn kthread_create_fifo(
     name: &str,

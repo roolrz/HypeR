@@ -87,14 +87,16 @@ The current foundation includes:
 - capability-backed Event objects with independent `WAIT` and `SIGNAL`
   authority, absolute-deadline waits, and exactly-once arbitration among
   signal, timeout, and Process cancellation;
-- bounded Channel endpoints with FIFO messages, level signals, transactional
-  user copies, and atomic capability-transfer publication;
+- bounded byte-channel endpoints with FIFO messages and level signals, plus
+  synchronous capability rendezvous with typed receive contracts;
 - strong `ProcessImage`, `Process`, object-backed `UserThread`, and `TaskGroup`
   ownership with accounted construction, explicit publication, start/ready,
   stop/join, and acknowledged retirement;
 - an immutable indexed ramfs and strict AArch64 ELF64 loader for the first
   Native `/init`, with static PIE relocation, W^X enforcement, guarded stack,
   and scheduler-owned Process publication;
+- a manifest-driven Native init which constructs services transactionally and
+  delegates monotonically attenuated capabilities;
 - an AArch64 VHE/nVHE native-EL0 proof which enters through a scheduler-owned
   user Thread, dispatches the initial handle, scheduling, lifecycle, and Event
   syscalls, contains a user fault, and retires the complete Process ownership
@@ -175,10 +177,11 @@ make defconfig
 make run
 ```
 
-`make run` builds the `no_std` Rust `app/init` only through the assembled SDK under
-`target/sdk/aarch64`; the application does not include private kernel or SDK
-source paths. Pass `INITRAMFS=/path/to/archive.cpio` to test another Native
-userspace image.
+`make run` builds the `no_std` Rust init, direction-attenuated Console workers,
+and initial session manager only through the assembled SDK under
+`target/sdk/aarch64`; the applications do not include private kernel or SDK
+source paths. Pass
+`INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.
 
 Linux guest construction and boot remain Kernel integration tests:
 

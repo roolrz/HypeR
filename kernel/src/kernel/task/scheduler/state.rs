@@ -1154,6 +1154,14 @@ impl Scheduler {
         Err(Error::NoRegisteredCpuInAffinity)
     }
 
+    pub(super) fn validate_affinity(
+        &self,
+        preferred_cpu: CpuIndex,
+        affinity: CpuMask,
+    ) -> Result<(), Error> {
+        self.select_cpu(preferred_cpu, affinity).map(|_| ())
+    }
+
     pub fn reserve_vcpu_thread(&mut self, cpu: CpuIndex) -> Result<ThreadReservation, Error> {
         self.schedulable_cpu_slot(cpu)?;
         self.reserve_thread_slot(cpu)

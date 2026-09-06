@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded ordered Channel endpoints and transactional queue ownership.
+//! Bounded ordered `ByteChannel` endpoints.
 
 mod message;
 mod pair;
@@ -15,19 +15,17 @@ use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::authority::Rights;
-use crate::kernel::capability::InTransitCapabilities;
-
 use crate::kernel::object::{
-    KernelObject, ObjectKind, ObjectRetirement, SignalMask, SignalSource, object_allocation_size,
-    private,
+    KernelObject, ObjectKind, ObjectRetirement, SignalMask, SignalSource, TransferClass,
+    object_allocation_size, private,
 };
 use message::Message;
 use pair::Pair;
 
-pub(crate) use message::PreparedMessage;
+pub(crate) use message::PreparedByteMessage;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ChannelError {
+pub(crate) enum ByteChannelError {
     Allocation,
     AllocationSize,
     MessageTooLarge,
@@ -74,33 +72,23 @@ impl MessageSequence {
 
 /// Immutable identity and sizes observed for one current queue head.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct MessageInfo {
+pub(crate) struct ByteMessageInfo {
     sequence: MessageSequence,
     bytes: usize,
-    handles: u64,
 }
 
-impl MessageInfo {
+impl ByteMessageInfo {
     const EMPTY: Self = Self {
         sequence: MessageSequence::UNASSIGNED,
         bytes: 0,
-        handles: 0,
     };
 
-    fn new(sequence: MessageSequence, bytes: usize, handles: u64) -> Self {
-        Self {
-            sequence,
-            bytes,
-            handles,
-        }
+    fn new(sequence: MessageSequence, bytes: usize) -> Self {
+        Self { sequence, bytes }
     }
 
     pub(crate) const fn bytes(self) -> usize {
         self.bytes
-    }
-
-    pub(crate) const fn handles(self) -> u64 {
-        self.handles
     }
 
     fn bytes_u64(self) -> u64 {
@@ -110,34 +98,37 @@ impl MessageInfo {
         }
     }
 
-    const fn sizes(self) -> (usize, u64) {
-        (self.bytes, self.handles)
+    const fn size(self) -> usize {
+        self.bytes
     }
 }
 
 /// One endpoint of a shared ordered Channel pair.
-pub(crate) struct ChannelEndpoint {
+pub(crate) struct ByteChannel {
     pair: FallibleArc<Pair>,
     side: Side,
 }
 
-impl ChannelEndpoint {
-    pub(crate) const READABLE: SignalMask =
-        SignalMask::from_trusted_bits(hyper::abi::native::HYPER_NATIVE_SIGNAL_CHANNEL_READABLE);
-    pub(crate) const WRITABLE: SignalMask =
-        SignalMask::from_trusted_bits(hyper::abi::native::HYPER_NATIVE_SIGNAL_CHANNEL_WRITABLE);
-    pub(crate) const PEER_CLOSED: SignalMask =
-        SignalMask::from_trusted_bits(hyper::abi::native::HYPER_NATIVE_SIGNAL_CHANNEL_PEER_CLOSED);
+impl ByteChannel {
+    pub(crate) const READABLE: SignalMask = SignalMask::from_trusted_bits(
+        hyper::abi::native::HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE,
+    );
+    pub(crate) const WRITABLE: SignalMask = SignalMask::from_trusted_bits(
+        hyper::abi::native::HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_WRITABLE,
+    );
+    pub(crate) const PEER_CLOSED: SignalMask = SignalMask::from_trusted_bits(
+        hyper::abi::native::HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_PEER_CLOSED,
+    );
     pub(crate) const SUPPORTED_SIGNALS: SignalMask = SignalMask::from_trusted_bits(
         Self::READABLE.bits() | Self::WRITABLE.bits() | Self::PEER_CLOSED.bits(),
     );
 
-    pub(crate) fn try_pair(domain: &ResourceDomain) -> Result<(Self, Self), ChannelError> {
+    pub(crate) fn try_pair(domain: &ResourceDomain) -> Result<(Self, Self), ByteChannelError> {
         let endpoint_bytes = object_allocation_size::<Self>()
             .and_then(|bytes| bytes.checked_mul(2))
             .and_then(|bytes| bytes.checked_add(FallibleArc::<Pair>::allocation_size()))
             .and_then(|bytes| u64::try_from(bytes).ok())
-            .ok_or(ChannelError::AllocationSize)?;
+            .ok_or(ByteChannelError::AllocationSize)?;
         let charge = domain
             .reserve(
                 ResourceAmount::ZERO
@@ -145,7 +136,8 @@ impl ChannelEndpoint {
                     .with(ResourceKind::KernelObjects, 2),
             )?
             .commit();
-        let pair = FallibleArc::try_new(Pair::new(charge)).map_err(|_| ChannelError::Allocation)?;
+        let pair =
+            FallibleArc::try_new(Pair::new(charge)).map_err(|_| ByteChannelError::Allocation)?;
         Ok((
             Self {
                 pair: pair.clone(),
@@ -160,16 +152,19 @@ impl ChannelEndpoint {
 
     pub(crate) fn prepare_write(
         &self,
-        message: &PreparedMessage,
-    ) -> Result<WriteReservation, ChannelError> {
+        message: &PreparedByteMessage,
+    ) -> Result<ByteWriteReservation, ByteChannelError> {
         Pair::prepare_write(&self.pair, self.side, message)
     }
 
-    pub(crate) fn peek(&self) -> Result<MessageInfo, ChannelError> {
+    pub(crate) fn peek(&self) -> Result<ByteMessageInfo, ByteChannelError> {
         self.pair.peek(self.side)
     }
 
-    pub(crate) fn claim(&self, expected: MessageInfo) -> Result<ReceiveClaim, ChannelError> {
+    pub(crate) fn claim(
+        &self,
+        expected: ByteMessageInfo,
+    ) -> Result<ByteReceiveClaim, ByteChannelError> {
         Pair::claim(&self.pair, self.side, expected)
     }
 
@@ -189,16 +184,17 @@ impl ChannelEndpoint {
     }
 }
 
-impl private::Sealed for ChannelEndpoint {}
-impl private::UserExportable for ChannelEndpoint {}
+impl private::Sealed for ByteChannel {}
+impl private::UserExportable for ByteChannel {}
 
-impl KernelObject for ChannelEndpoint {
-    const KIND: ObjectKind = ObjectKind::CHANNEL;
+impl KernelObject for ByteChannel {
+    const KIND: ObjectKind = ObjectKind::BYTE_CHANNEL;
     const SUPPORTED_RIGHTS: Rights = Rights::TRANSFER
         .union(Rights::WAIT)
         .union(Rights::INSPECT)
         .union(Rights::READ)
         .union(Rights::WRITE);
+    const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
 
     fn signal_source(&self) -> Option<SignalSource<'_>> {
         Some(SignalSource::new(
@@ -214,20 +210,20 @@ impl KernelObject for ChannelEndpoint {
 
 /// Reserved target capacity and sequence for one infallible write commit.
 #[must_use = "publish or abort the Channel write reservation"]
-pub(crate) struct WriteReservation {
+pub(crate) struct ByteWriteReservation {
     pair: FallibleArc<Pair>,
     target: Side,
     sequence: MessageSequence,
-    info: MessageInfo,
+    info: ByteMessageInfo,
     armed: bool,
 }
 
-impl WriteReservation {
+impl ByteWriteReservation {
     fn new(
         pair: FallibleArc<Pair>,
         target: Side,
         sequence: MessageSequence,
-        info: MessageInfo,
+        info: ByteMessageInfo,
     ) -> Self {
         Self {
             pair,
@@ -238,7 +234,7 @@ impl WriteReservation {
         }
     }
 
-    pub(crate) fn publish(mut self, message: PreparedMessage) {
+    pub(crate) fn publish(mut self, message: PreparedByteMessage) {
         self.armed = false;
         self.pair
             .publish_write(self.target, self.sequence, self.info, message);
@@ -250,7 +246,7 @@ impl WriteReservation {
     }
 }
 
-impl Drop for WriteReservation {
+impl Drop for ByteWriteReservation {
     fn drop(&mut self) {
         if self.armed {
             channel_invariant("unresolved Channel write reservation");
@@ -260,13 +256,13 @@ impl Drop for WriteReservation {
 
 /// Exclusive ownership of the exact queue head named by `MessageInfo`.
 #[must_use = "commit or abort the Channel receive claim"]
-pub(crate) struct ReceiveClaim {
+pub(crate) struct ByteReceiveClaim {
     pair: FallibleArc<Pair>,
     side: Side,
     message: Option<Box<Message>>,
 }
 
-impl ReceiveClaim {
+impl ByteReceiveClaim {
     fn new(pair: FallibleArc<Pair>, side: Side, message: Box<Message>) -> Self {
         Self {
             pair,
@@ -275,7 +271,7 @@ impl ReceiveClaim {
         }
     }
 
-    pub(crate) fn info(&self) -> MessageInfo {
+    pub(crate) fn info(&self) -> ByteMessageInfo {
         self.message().info()
     }
 
@@ -283,37 +279,7 @@ impl ReceiveClaim {
         self.message().bytes()
     }
 
-    /// Temporarily detaches in-transit capabilities for receiver publication.
-    pub(crate) fn take_capabilities(&mut self) -> Option<InTransitCapabilities> {
-        match self.message.as_deref_mut() {
-            Some(message) => message.take_capabilities(),
-            None => channel_invariant("resolved Channel receive claim has no message"),
-        }
-    }
-
-    /// Restores a failed receiver publication to this exact queue-head claim.
-    pub(crate) fn restore_capabilities(&mut self, capabilities: InTransitCapabilities) {
-        let message = match self.message.as_deref_mut() {
-            Some(message) => message,
-            None => channel_invariant("resolved Channel receive claim has no message"),
-        };
-        message.restore_capabilities(capabilities);
-    }
-
-    pub(crate) fn commit(mut self) -> ReceivedMessage {
-        if self.info().handles() != 0 {
-            channel_invariant("capability-bearing receive used byte-only commit");
-        }
-        let message = self.take_message();
-        self.pair.commit_receive(self.side, message)
-    }
-
-    /// Commits after the receiver has atomically published every detached handle.
-    pub(crate) fn commit_after_handle_publication(mut self) -> ReceivedMessage {
-        let message = self.message();
-        if message.info().handles() == 0 || message.has_capabilities() {
-            channel_invariant("Channel handle publication proof is inconsistent");
-        }
+    pub(crate) fn commit(mut self) -> ReceivedByteMessage {
         let message = self.take_message();
         self.pair.commit_receive(self.side, message)
     }
@@ -338,7 +304,7 @@ impl ReceiveClaim {
     }
 }
 
-impl Drop for ReceiveClaim {
+impl Drop for ByteReceiveClaim {
     fn drop(&mut self) {
         if self.message.is_some() {
             channel_invariant("unresolved Channel receive claim");
@@ -347,18 +313,18 @@ impl Drop for ReceiveClaim {
 }
 
 /// Consumed message ownership after queue counters and signals have committed.
-pub(crate) struct ReceivedMessage {
+pub(crate) struct ReceivedByteMessage {
     message: Option<Box<Message>>,
 }
 
-impl ReceivedMessage {
+impl ReceivedByteMessage {
     fn new(message: Box<Message>) -> Self {
         Self {
             message: Some(message),
         }
     }
 
-    pub(crate) fn info(&self) -> MessageInfo {
+    pub(crate) fn info(&self) -> ByteMessageInfo {
         self.message().info()
     }
 
@@ -378,7 +344,7 @@ impl ReceivedMessage {
     }
 }
 
-impl Drop for ReceivedMessage {
+impl Drop for ReceivedByteMessage {
     fn drop(&mut self) {
         if self.message.is_some() {
             channel_invariant("consumed Channel message was not released");
@@ -388,5 +354,5 @@ impl Drop for ReceivedMessage {
 
 #[cold]
 fn channel_invariant(message: &str) -> ! {
-    crate::kernel::crash::fatal(format_args!("HypeR: {message}"))
+    crate::kernel::crash::fatal(format_args!("HypeR ByteChannel: {message}"))
 }

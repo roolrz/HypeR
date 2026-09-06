@@ -671,6 +671,20 @@ impl UserWriteReservation {
         Ok(())
     }
 
+    /// Writes an initialized prefix and leaves the rest of the reserved user
+    /// range untouched.
+    pub(crate) fn copy_prefix_from(&self, source: &[u8]) -> Result<(), Error> {
+        let Some(plan) = self.plan.as_ref() else {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: completed user-write reservation reused"
+            ));
+        };
+        self.owner
+            .logical
+            .write_user_reservation_prefix(plan, source)?;
+        Ok(())
+    }
+
     pub(crate) fn complete(mut self) {
         self.release();
     }

@@ -337,6 +337,44 @@ supported rights, and required rights, then acquires a typed object reference.
 The lock is released before object code, user copy, allocation, or blocking.
 A concurrent close does not cancel an already resolved operation.
 
+### Typed handle flags
+
+The fixed-width `u32` flag field is an ABI representation, not one global flag
+namespace. Flags are interpreted as the pair `(object kind, raw flags)`. Each
+concrete object module owns a distinct typed flag vocabulary and declares which
+raw values it accepts. Reusing a numeric bit for unrelated object kinds does
+not give those flags common semantics. A type with no implemented flag
+consumer exposes an empty flag type and accepts only zero; ABI space is not a
+reason to publish speculative behavior.
+
+Rights answer whether a handle authorizes an operation. Flags may refine how a
+particular object type performs an already-authorized operation, but must not
+silently duplicate a right such as `DUPLICATE`, `TRANSFER`, `WAIT`, `READ`, or
+`WRITE`. Process inheritance is explicit through capability transfer, blocking
+is an operation contract, and revocation belongs to typed lease lineages;
+these policies are not generic handle flags.
+
+The handle table stores raw validated bits so heterogeneous entries remain
+compact. Typed resolution pairs the operation-pin reference with the concrete
+object's decoded flag type before object policy can observe it. The SDK follows
+the same rule: `OwnedHandle<T>` and its typed information associate `T` with a
+flag type, while `OwnedHandle<AnyObject>` may report only raw bits until a kind
+check and downcast establish their interpretation.
+
+Move preserves the exact flag state. Duplicate and replace preserve flags by
+default; a concrete type may define an explicit monotonic restriction, but it
+may never use either operation to remove an existing safety restriction.
+Startup publication and capability receive preserve the validated destination
+state and never trust user-authored output flags.
+
+The generic handle layer remains responsible for generations, reservations,
+accounting, lock order, and atomic namespace commits. If a type-specific flag
+affects a generic transaction, its module provides a side-effect-free policy
+for the preparation and validation phase. Flag policy may not allocate, block,
+acquire payload locks, inspect mutable hardware, or introduce a fallible step
+after commit begins. This keeps object-specific interpretation from weakening
+the all-or-nothing transfer contract.
+
 Rights only decrease through duplicate, replace, or transfer. Generic rights
 cover handle mechanics and genuinely common observation:
 
@@ -529,8 +567,8 @@ only after delivery is consumed. WaitSet size and event slots are bounded.
 `WAIT` authorizes dequeue, not subscription mutation.
 
 Subscriptions are object-lifetime operations by default, so source-handle close
-or transfer does not cancel them. ChannelEndpoint and revocable-lease
-subscriptions are explicitly `OwnerEpoch` operations in the schema; successful
+or transfer does not cancel them. CapabilityChannel endpoints and revocable
+lease subscriptions are explicitly `OwnerEpoch` operations in the schema; successful
 ownership transfer then publishes one `OwnershipLost` terminal event, while
 failed transfer changes nothing. This is distinct from implicit close
 cancellation and prevents an old endpoint owner from retaining a readiness
@@ -744,17 +782,17 @@ call through deferred unwind and re-entry, yields and resumes, exits a Thread,
 propagates Process exit to a dormant sibling, contains a breakpoint fault, and
 creates, signals, and observes an Event from EL0. It joins each Thread and
 Process and retires each ownership graph. The architecture-neutral dispatchers
-implement syscalls 0 through 14: ABI query, handle close, duplicate, replace,
-handle info, object basic info, Thread yield, Thread exit, Process exit, Event
-create, Event signal, single-object wait, and Channel create, write, and read.
-Channel operations use bounded queues, transactional user copies, and atomic
-capability publication; the initial transfer policy accepts Event handles and
-rejects Channel endpoint transfer without consuming the source.
+implement syscalls 0 through 31: capability inspection and attenuation,
+Thread and Process lifecycle, Event and object wait, byte and rendezvous
+capability channels, Console I/O, BootFs access, transactional ProcessBuilder
+construction, and Process stop requests. Channel operations use bounded
+storage, transactional user copies, and atomic capability publication.
 `object_wait_one` uses absolute
 monotonic deadlines, generation-qualified signal/timeout/cancellation
 arbitration, and a Process-stop recheck before completing the machine return.
-The checkpoint is not a static PIE loader, general runtime, init process, vDSO,
-or secondary-architecture entry.
+The checkpoint includes an AArch64 static PIE loader, a minimal init supervisor,
+and isolated Console and foreground-session services. It is not yet a general
+runtime, vDSO, or secondary-architecture Native entry.
 
 ### Phase 0: prove the boundary
 

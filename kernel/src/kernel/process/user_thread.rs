@@ -13,11 +13,12 @@ use super::lifecycle::{LifecycleError, TerminalReason, UserThreadLifecycle, User
 use super::owner::{Process, ProcessThreadMembership};
 use crate::kernel::accounting::CommittedCharge;
 use crate::kernel::authority::Rights;
+use crate::kernel::capability::{HandleError, HandleFlags, PreparedHandle};
 use crate::kernel::mm::user_space::NativeAddressSpace;
 use crate::kernel::object::{
     KernelObject, KernelRef, KernelService, ObjectCreationError, ObjectKind, ObjectPublication,
     ObjectSnapshot, OperationPin, PublishableRef, Scheduler as SchedulerReference, SignalMask,
-    SignalSource, SignalState, object_allocation_size, private,
+    SignalSource, SignalState, TransferClass, object_allocation_size, private,
 };
 use crate::kernel::sync::Completion;
 use crate::kernel::task::thread::ThreadId;
@@ -51,6 +52,7 @@ impl private::UserExportable for UserThreadObject {}
 
 impl KernelObject for UserThreadObject {
     const KIND: ObjectKind = ObjectKind::THREAD;
+    const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
     // Cross-Process transfer remains outside the initial Channel policy. It
     // can be admitted later through an explicit typed publication policy
     // without changing the handle ABI.
@@ -154,6 +156,15 @@ impl UserThread {
                 crate::hal::cpu::halt()
             }
         }
+    }
+
+    /// Prepares the first userspace handle without exposing the erased payload
+    /// type outside Process ownership.
+    pub(crate) fn prepare_public_handle(
+        &self,
+        rights: Rights,
+    ) -> Result<PreparedHandle, HandleError> {
+        PreparedHandle::try_from_new_object(self.publication(), rights, HandleFlags::NONE)
     }
 
     pub(super) fn from_operation_pin(object: KernelRef<UserThreadObject, OperationPin>) -> Self {

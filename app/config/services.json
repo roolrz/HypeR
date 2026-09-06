@@ -1,0 +1,76 @@
+{
+  "SPDX-FileCopyrightText": "2026 roolrz",
+  "SPDX-License-Identifier": "Apache-2.0",
+  "format": "hyper.service-manifest",
+  "services": [
+    {
+      "name": "console-input",
+      "image": "/svc/console-input",
+      "critical": false,
+      "restart": "never",
+      "after": [],
+      "capabilities": [
+        {
+          "source": "bootstrap.console",
+          "purpose": 1213792257,
+          "kind": "console",
+          "operation": "duplicate",
+          "rights": ["wait", "read"]
+        },
+        {
+          "source": "bootstrap.console-input-channel",
+          "purpose": 1213792258,
+          "kind": "byte-channel",
+          "operation": "move",
+          "rights": ["wait", "write"]
+        }
+      ]
+    },
+    {
+      "name": "console-output",
+      "image": "/svc/console-output",
+      "critical": false,
+      "restart": "never",
+      "after": [],
+      "capabilities": [
+        {
+          "source": "bootstrap.console",
+          "purpose": 1213792257,
+          "kind": "console",
+          "operation": "duplicate",
+          "rights": ["wait", "write"]
+        },
+        {
+          "source": "bootstrap.console-output-channel",
+          "purpose": 1213792258,
+          "kind": "byte-channel",
+          "operation": "move",
+          "rights": ["wait", "read"]
+        }
+      ]
+    },
+    {
+      "name": "session",
+      "image": "/svc/session",
+      "critical": true,
+      "restart": "never",
+      "after": ["console-input", "console-output"],
+      "capabilities": [
+        {
+          "source": "bootstrap.session-input-channel",
+          "purpose": 1213792257,
+          "kind": "byte-channel",
+          "operation": "move",
+          "rights": ["wait", "read"]
+        },
+        {
+          "source": "bootstrap.session-output-channel",
+          "purpose": 1213792258,
+          "kind": "byte-channel",
+          "operation": "move",
+          "rights": ["wait", "write"]
+        }
+      ]
+    }
+  ]
+}

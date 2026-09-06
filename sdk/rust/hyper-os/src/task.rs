@@ -1,0 +1,683 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
+//! Capability-scoped process construction and lifecycle operations.
+
+use core::num::NonZeroU64;
+
+use crate::handle::{
+    AnyObject, BootFileObject, HandleRef, OwnedHandle, ProcessBuilderObject, ProcessObject,
+    ResourceDomainObject, Rights, RightsOffer, TaskFactoryObject, TaskGroupObject, TypedObject,
+};
+use crate::{Error, Result, Status};
+
+const _: () = assert!(hyper_abi::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES <= usize::MAX as u64);
+const _: () = assert!(hyper_abi::HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES <= usize::MAX as u64);
+const _: () = assert!(hyper_abi::HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES <= usize::MAX as u64);
+const _: () = assert!(hyper_abi::HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS <= usize::MAX as u64);
+
+const MAX_NAME_BYTES: usize = hyper_abi::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES as usize;
+const MAX_ARGUMENT_BYTES: usize = hyper_abi::HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES as usize;
+const MAX_ENVIRONMENT_BYTES: usize = hyper_abi::HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES as usize;
+const MAX_AFFINITY_WORDS: usize = hyper_abi::HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS as usize;
+
+const BUILDER_RIGHTS: Rights = Rights::TRANSFER
+    .union(Rights::INSPECT)
+    .union(Rights::WRITE)
+    .union(Rights::START)
+    .union(Rights::REQUEST_STOP);
+const PROCESS_SUPERVISOR_RIGHTS: Rights = Rights::TRANSFER
+    .union(Rights::WAIT)
+    .union(Rights::INSPECT)
+    .union(Rights::REQUEST_STOP);
+
+/// Yields the calling thread's remaining scheduling opportunity.
+///
+/// This is a scheduling hint rather than a blocking primitive. Callers that
+/// poll an object should keep the poll bounded or use an object wait once the
+/// relevant signal can be waited on directly.
+pub fn yield_now() -> Result<()> {
+    Status::from_raw(raw_ops::yield_thread()).into_result()
+}
+
+/// One mutable or sealed process construction transaction.
+///
+/// The kernel owns the authoritative phase so this wrapper remains valid when
+/// transferred between processes. Mutators fail with `BAD_STATE` after seal;
+/// `start` and `abort` consume this Rust owner only when the kernel commits.
+pub struct ProcessBuilder {
+    handle: OwnedHandle<ProcessBuilderObject>,
+}
+
+impl ProcessBuilder {
+    /// Creates an empty builder from independently checked authorities.
+    pub fn create(
+        factory: HandleRef<'_, TaskFactoryObject>,
+        group: HandleRef<'_, TaskGroupObject>,
+        domain: HandleRef<'_, ResourceDomainObject>,
+        executable: HandleRef<'_, BootFileObject>,
+    ) -> Result<Self> {
+        let result = raw_ops::create(factory, group, domain, executable);
+        Status::from_raw(result.status).into_result()?;
+        let raw = NonZeroU64::new(result.value0).ok_or(Error::InvalidResponse)?;
+        // SAFETY: a successful create publishes exactly one builder owner.
+        let owner = unsafe { OwnedHandle::<AnyObject>::from_raw_owned(raw) };
+        let handle = validate_produced_handle::<ProcessBuilderObject>(owner, BUILDER_RIGHTS)?;
+        Ok(Self { handle })
+    }
+
+    /// Wraps an already typed owner received through a trusted SDK path.
+    #[must_use]
+    pub const fn from_handle(handle: OwnedHandle<ProcessBuilderObject>) -> Self {
+        Self { handle }
+    }
+
+    /// Replaces the process and initial-thread name.
+    pub fn set_name(&self, name: &str) -> Result<()> {
+        if name.is_empty() || name.len() > MAX_NAME_BYTES || name.as_bytes().contains(&0) {
+            return Err(Error::InvalidProcessName);
+        }
+        Status::from_raw(raw_ops::set_name(self.handle.as_handle_ref(), name)).into_result()
+    }
+
+    /// Appends one argv entry. Empty entries are valid.
+    pub fn add_argument(&self, argument: &str) -> Result<()> {
+        if argument.len() > MAX_ARGUMENT_BYTES || argument.as_bytes().contains(&0) {
+            return Err(Error::InvalidProcessArgument);
+        }
+        Status::from_raw(raw_ops::add_argument(self.handle.as_handle_ref(), argument)).into_result()
+    }
+
+    /// Appends one `name=value` environment entry.
+    pub fn add_environment(&self, environment: &str) -> Result<()> {
+        if environment.len() > MAX_ENVIRONMENT_BYTES || !valid_environment(environment) {
+            return Err(Error::InvalidProcessEnvironment);
+        }
+        Status::from_raw(raw_ops::add_environment(
+            self.handle.as_handle_ref(),
+            environment,
+        ))
+        .into_result()
+    }
+
+    /// Replaces the CPU affinity bitmap.
+    pub fn set_affinity(&self, words: &[u64]) -> Result<()> {
+        if words.is_empty() || words.len() > MAX_AFFINITY_WORDS {
+            return Err(Error::InvalidProcessAffinity);
+        }
+        Status::from_raw(raw_ops::set_affinity(self.handle.as_handle_ref(), words)).into_result()
+    }
+
+    /// Moves one capability into the builder on success.
+    pub fn add_handle_move<T: TypedObject>(
+        &self,
+        source: OwnedHandle<T>,
+        purpose: u32,
+        offer: RightsOffer,
+    ) -> core::result::Result<(), AddHandleFailure<T>> {
+        if purpose == 0 || T::KIND == ProcessBuilderObject::KIND {
+            return Err(AddHandleFailure {
+                error: Error::InvalidCapabilityDisposition,
+                handle: source,
+            });
+        }
+        if let Err(error) = validate_source(source.as_handle_ref(), offer, Rights::TRANSFER) {
+            return Err(AddHandleFailure {
+                error,
+                handle: source,
+            });
+        }
+        let status = Status::from_raw(raw_ops::add_handle(
+            self.handle.as_handle_ref(),
+            source.as_handle_ref().raw(),
+            purpose,
+            T::KIND.as_raw(),
+            offer,
+            hyper_abi::HYPER_NATIVE_CAPABILITY_DISPOSITION_MOVE as u32,
+        ));
+        if status != Status::OK {
+            return Err(AddHandleFailure {
+                error: Error::Status(status),
+                handle: source,
+            });
+        }
+        let _ = source.into_raw();
+        Ok(())
+    }
+
+    /// Duplicates one capability into the builder while retaining its source.
+    pub fn add_handle_duplicate<T: TypedObject>(
+        &self,
+        source: HandleRef<'_, T>,
+        purpose: u32,
+        offer: RightsOffer,
+    ) -> Result<()> {
+        if purpose == 0 || T::KIND == ProcessBuilderObject::KIND {
+            return Err(Error::InvalidCapabilityDisposition);
+        }
+        validate_source(source, offer, Rights::TRANSFER.union(Rights::DUPLICATE))?;
+        Status::from_raw(raw_ops::add_handle(
+            self.handle.as_handle_ref(),
+            source.raw(),
+            purpose,
+            T::KIND.as_raw(),
+            offer,
+            hyper_abi::HYPER_NATIVE_CAPABILITY_DISPOSITION_DUPLICATE as u32,
+        ))
+        .into_result()
+    }
+
+    /// Irreversibly seals the builder against further mutation.
+    pub fn seal(&self) -> Result<()> {
+        Status::from_raw(raw_ops::seal(self.handle.as_handle_ref())).into_result()
+    }
+
+    /// Starts the sealed process and returns only supervisor authority.
+    pub fn start(self) -> core::result::Result<OwnedHandle<ProcessObject>, StartFailure> {
+        let result = raw_ops::start(self.handle.as_handle_ref());
+        let status = Status::from_raw(result.status);
+        if status != Status::OK {
+            return Err(StartFailure::Rejected {
+                error: Error::Status(status),
+                builder: self,
+            });
+        }
+        let _ = self.handle.into_raw();
+        let Some(raw) = NonZeroU64::new(result.value0) else {
+            return Err(StartFailure::Committed(Error::InvalidResponse));
+        };
+        // SAFETY: a successful start publishes exactly one Process owner.
+        let owner = unsafe { OwnedHandle::<AnyObject>::from_raw_owned(raw) };
+        validate_produced_handle::<ProcessObject>(owner, PROCESS_SUPERVISOR_RIGHTS)
+            .map_err(StartFailure::Committed)
+    }
+
+    /// Aborts this builder and discards every capability it owns.
+    pub fn abort(self) -> core::result::Result<(), BuilderFailure> {
+        let status = Status::from_raw(raw_ops::abort(self.handle.as_handle_ref()));
+        if status == Status::OK {
+            let _ = self.handle.into_raw();
+            Ok(())
+        } else {
+            Err(BuilderFailure {
+                error: Error::Status(status),
+                builder: self,
+            })
+        }
+    }
+
+    /// Recovers the typed owner for direct rendezvous transfer.
+    #[must_use]
+    pub fn into_handle(self) -> OwnedHandle<ProcessBuilderObject> {
+        self.handle
+    }
+}
+
+/// Borrowed Process supervisor authority.
+pub struct ProcessSupervisor<'owner> {
+    handle: HandleRef<'owner, ProcessObject>,
+}
+
+impl ProcessSupervisor<'_> {
+    /// Requests asynchronous termination of the supervised Process.
+    pub fn request_stop(&self) -> Result<()> {
+        Status::from_raw(raw_ops::request_process_stop(self.handle)).into_result()
+    }
+
+    /// Waits until the Process terminates. Exit status is not part of this ABI.
+    pub fn wait_terminated(&self, deadline: u64) -> Result<()> {
+        let expected = hyper_abi::HYPER_NATIVE_SIGNAL_PROCESS_TERMINATED;
+        let result = raw_ops::wait_process(self.handle, expected, deadline);
+        Status::from_raw(result.status).into_result()?;
+        if result.value0 & expected == expected {
+            Ok(())
+        } else {
+            Err(Error::InvalidResponse)
+        }
+    }
+}
+
+impl OwnedHandle<ProcessObject> {
+    /// Borrows this Process as supervisor authority.
+    #[must_use]
+    pub fn as_process_supervisor(&self) -> ProcessSupervisor<'_> {
+        ProcessSupervisor {
+            handle: self.as_handle_ref(),
+        }
+    }
+}
+
+/// Rejected builder capability insertion with its unchanged MOVE source.
+pub struct AddHandleFailure<T: TypedObject> {
+    error: Error,
+    handle: OwnedHandle<T>,
+}
+
+impl<T: TypedObject> AddHandleFailure<T> {
+    #[must_use]
+    pub const fn error(&self) -> Error {
+        self.error
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Error, OwnedHandle<T>) {
+        (self.error, self.handle)
+    }
+}
+
+/// Rejected consuming builder operation with the unchanged builder owner.
+pub struct BuilderFailure {
+    error: Error,
+    builder: ProcessBuilder,
+}
+
+impl BuilderFailure {
+    #[must_use]
+    pub const fn error(&self) -> Error {
+        self.error
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Error, ProcessBuilder) {
+        (self.error, self.builder)
+    }
+}
+
+/// Start failure distinguishes rejection from malformed post-commit output.
+pub enum StartFailure {
+    Rejected {
+        error: Error,
+        builder: ProcessBuilder,
+    },
+    Committed(Error),
+}
+
+impl StartFailure {
+    #[must_use]
+    pub const fn error(&self) -> Error {
+        match self {
+            Self::Rejected { error, .. } | Self::Committed(error) => *error,
+        }
+    }
+
+    /// Recovers the builder only when the kernel rejected the transaction.
+    #[must_use]
+    pub fn into_builder(self) -> Option<ProcessBuilder> {
+        match self {
+            Self::Rejected { builder, .. } => Some(builder),
+            Self::Committed(_) => None,
+        }
+    }
+}
+
+fn validate_source<T: TypedObject>(
+    source: HandleRef<'_, T>,
+    offer: RightsOffer,
+    required: Rights,
+) -> Result<()> {
+    let info = source.info()?;
+    if info.kind != T::KIND {
+        return Err(Error::UnexpectedObjectKind {
+            expected: T::KIND.as_raw(),
+            actual: info.kind.as_raw(),
+        });
+    }
+    if !info.rights.contains(required) {
+        return Err(Error::Status(Status::ACCESS_DENIED));
+    }
+    if let RightsOffer::Exact(rights) = offer
+        && !info.rights.contains(rights)
+    {
+        return Err(Error::Status(Status::ACCESS_DENIED));
+    }
+    Ok(())
+}
+
+fn validate_produced_handle<T: TypedObject>(
+    owner: OwnedHandle<AnyObject>,
+    expected_rights: Rights,
+) -> Result<OwnedHandle<T>> {
+    let info = owner.info()?;
+    if info.rights != expected_rights {
+        return Err(Error::InvalidResponse);
+    }
+    owner.downcast::<T>().map_err(|failure| failure.error())
+}
+
+fn valid_environment(environment: &str) -> bool {
+    if environment.as_bytes().contains(&0) {
+        return false;
+    }
+    let Some(separator) = environment.find('=') else {
+        return false;
+    };
+    separator != 0 && !environment[..separator].contains('=')
+}
+
+#[cfg(not(test))]
+mod raw_ops {
+    use core::num::NonZeroU64;
+
+    use super::{
+        BootFileObject, HandleRef, MAX_AFFINITY_WORDS, ProcessBuilderObject, ResourceDomainObject,
+        RightsOffer, TaskFactoryObject, TaskGroupObject,
+    };
+
+    pub(super) fn create(
+        factory: HandleRef<'_, TaskFactoryObject>,
+        group: HandleRef<'_, TaskGroupObject>,
+        domain: HandleRef<'_, ResourceDomainObject>,
+        executable: HandleRef<'_, BootFileObject>,
+    ) -> hyper_sys::CallResult {
+        // SAFETY: all typed borrows remain live for this non-retaining call.
+        unsafe {
+            hyper_sys::process_builder_create(
+                factory.raw().get(),
+                group.raw().get(),
+                domain.raw().get(),
+                executable.raw().get(),
+            )
+        }
+    }
+
+    macro_rules! string_operation {
+        ($name:ident, $call:path) => {
+            pub(super) fn $name(
+                builder: HandleRef<'_, ProcessBuilderObject>,
+                value: &str,
+            ) -> hyper_abi::HyperNativeStatus {
+                // SAFETY: the typed borrow and UTF-8 buffer remain live.
+                unsafe { $call(builder.raw().get(), value.as_ptr(), value.len()) }
+            }
+        };
+    }
+
+    string_operation!(set_name, hyper_sys::process_builder_set_name);
+    string_operation!(add_argument, hyper_sys::process_builder_add_argument);
+    string_operation!(add_environment, hyper_sys::process_builder_add_environment);
+
+    pub(super) fn set_affinity(
+        builder: HandleRef<'_, ProcessBuilderObject>,
+        words: &[u64],
+    ) -> hyper_abi::HyperNativeStatus {
+        let mut little_endian = [0_u64; MAX_AFFINITY_WORDS];
+        for (encoded, word) in little_endian.iter_mut().zip(words) {
+            *encoded = word.to_le();
+        }
+        // SAFETY: the typed borrow and aligned encoded prefix remain live.
+        unsafe {
+            hyper_sys::process_builder_set_affinity(
+                builder.raw().get(),
+                little_endian.as_ptr(),
+                words.len(),
+            )
+        }
+    }
+
+    pub(super) fn add_handle(
+        builder: HandleRef<'_, ProcessBuilderObject>,
+        source: NonZeroU64,
+        purpose: u32,
+        expected_kind: u32,
+        offer: RightsOffer,
+        operation: u32,
+    ) -> hyper_abi::HyperNativeStatus {
+        let rights = match offer {
+            RightsOffer::SameRights => hyper_abi::HYPER_NATIVE_CAPABILITY_DISPOSITION_SAME_RIGHTS,
+            RightsOffer::Exact(rights) => rights.bits(),
+        };
+        // SAFETY: the caller retains both owners until the result and applies
+        // the operation-dependent ownership transition.
+        unsafe {
+            hyper_sys::process_builder_add_handle(
+                builder.raw().get(),
+                source.get(),
+                purpose,
+                expected_kind,
+                rights,
+                operation,
+            )
+        }
+    }
+
+    pub(super) fn seal(
+        builder: HandleRef<'_, ProcessBuilderObject>,
+    ) -> hyper_abi::HyperNativeStatus {
+        // SAFETY: the typed builder remains live for the call.
+        unsafe { hyper_sys::process_builder_seal(builder.raw().get()) }
+    }
+
+    pub(super) fn start(builder: HandleRef<'_, ProcessBuilderObject>) -> hyper_sys::CallResult {
+        // SAFETY: the caller owns the consume-on-success transition.
+        unsafe { hyper_sys::process_builder_start(builder.raw().get()) }
+    }
+
+    pub(super) fn abort(
+        builder: HandleRef<'_, ProcessBuilderObject>,
+    ) -> hyper_abi::HyperNativeStatus {
+        // SAFETY: the caller owns the consume-on-success transition.
+        unsafe { hyper_sys::process_builder_abort(builder.raw().get()) }
+    }
+
+    pub(super) fn wait_process(
+        process: HandleRef<'_, super::ProcessObject>,
+        signals: u64,
+        deadline: u64,
+    ) -> hyper_sys::CallResult {
+        // SAFETY: the typed borrow keeps the waitable Process live.
+        unsafe { hyper_sys::object_wait_one(process.raw().get(), signals, deadline) }
+    }
+
+    pub(super) fn request_process_stop(
+        process: HandleRef<'_, super::ProcessObject>,
+    ) -> hyper_abi::HyperNativeStatus {
+        // SAFETY: the typed borrow keeps the Process authority live.
+        unsafe { hyper_sys::process_request_stop(process.raw().get()) }
+    }
+
+    pub(super) fn yield_thread() -> hyper_abi::HyperNativeStatus {
+        // SAFETY: this safe SDK function is callable only from a Native thread.
+        unsafe { hyper_sys::thread_yield() }
+    }
+}
+
+#[cfg(test)]
+mod raw_ops {
+    use core::num::NonZeroU64;
+
+    use super::{
+        BootFileObject, HandleRef, ProcessBuilderObject, ResourceDomainObject, RightsOffer,
+        TaskFactoryObject, TaskGroupObject,
+    };
+
+    pub(super) fn create(
+        _factory: HandleRef<'_, TaskFactoryObject>,
+        _group: HandleRef<'_, TaskGroupObject>,
+        _domain: HandleRef<'_, ResourceDomainObject>,
+        _executable: HandleRef<'_, BootFileObject>,
+    ) -> hyper_sys::CallResult {
+        hyper_sys::CallResult {
+            status: hyper_abi::HYPER_NATIVE_STATUS_OK,
+            value0: hyper_abi::HYPER_NATIVE_OBJECT_PROCESS_BUILDER.into(),
+            value1: 0,
+        }
+    }
+
+    pub(super) fn set_name(
+        _builder: HandleRef<'_, ProcessBuilderObject>,
+        value: &str,
+    ) -> hyper_abi::HyperNativeStatus {
+        if value == "reject" {
+            hyper_abi::HYPER_NATIVE_STATUS_BAD_STATE
+        } else {
+            hyper_abi::HYPER_NATIVE_STATUS_OK
+        }
+    }
+
+    pub(super) fn add_argument(
+        _builder: HandleRef<'_, ProcessBuilderObject>,
+        _value: &str,
+    ) -> hyper_abi::HyperNativeStatus {
+        hyper_abi::HYPER_NATIVE_STATUS_OK
+    }
+
+    pub(super) fn add_environment(
+        _builder: HandleRef<'_, ProcessBuilderObject>,
+        _value: &str,
+    ) -> hyper_abi::HyperNativeStatus {
+        hyper_abi::HYPER_NATIVE_STATUS_OK
+    }
+
+    pub(super) fn set_affinity(
+        _builder: HandleRef<'_, ProcessBuilderObject>,
+        _words: &[u64],
+    ) -> hyper_abi::HyperNativeStatus {
+        hyper_abi::HYPER_NATIVE_STATUS_OK
+    }
+
+    pub(super) fn add_handle(
+        _builder: HandleRef<'_, ProcessBuilderObject>,
+        _source: NonZeroU64,
+        purpose: u32,
+        _expected_kind: u32,
+        _offer: RightsOffer,
+        _operation: u32,
+    ) -> hyper_abi::HyperNativeStatus {
+        if purpose == 99 {
+            hyper_abi::HYPER_NATIVE_STATUS_BAD_STATE
+        } else {
+            hyper_abi::HYPER_NATIVE_STATUS_OK
+        }
+    }
+
+    pub(super) fn seal(
+        _builder: HandleRef<'_, ProcessBuilderObject>,
+    ) -> hyper_abi::HyperNativeStatus {
+        hyper_abi::HYPER_NATIVE_STATUS_OK
+    }
+
+    pub(super) fn start(_builder: HandleRef<'_, ProcessBuilderObject>) -> hyper_sys::CallResult {
+        hyper_sys::CallResult {
+            status: hyper_abi::HYPER_NATIVE_STATUS_OK,
+            value0: hyper_abi::HYPER_NATIVE_OBJECT_PROCESS.into(),
+            value1: 0,
+        }
+    }
+
+    pub(super) fn abort(
+        _builder: HandleRef<'_, ProcessBuilderObject>,
+    ) -> hyper_abi::HyperNativeStatus {
+        hyper_abi::HYPER_NATIVE_STATUS_OK
+    }
+
+    pub(super) fn wait_process(
+        _process: HandleRef<'_, super::ProcessObject>,
+        signals: u64,
+        _deadline: u64,
+    ) -> hyper_sys::CallResult {
+        hyper_sys::CallResult {
+            status: hyper_abi::HYPER_NATIVE_STATUS_OK,
+            value0: signals,
+            value1: 0,
+        }
+    }
+
+    pub(super) fn request_process_stop(
+        _process: HandleRef<'_, super::ProcessObject>,
+    ) -> hyper_abi::HyperNativeStatus {
+        hyper_abi::HYPER_NATIVE_STATUS_OK
+    }
+
+    pub(super) fn yield_thread() -> hyper_abi::HyperNativeStatus {
+        hyper_abi::HYPER_NATIVE_STATUS_OK
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use core::num::NonZeroU64;
+
+    use super::{ProcessBuilder, yield_now};
+    use crate::handle::{
+        BootFileObject, EventObject, OwnedHandle, ResourceDomainObject, Rights, RightsOffer,
+        TaskFactoryObject, TaskGroupObject,
+    };
+    use crate::{Error, Status};
+
+    fn owner<T: crate::handle::ObjectType>(kind: u32) -> crate::Result<OwnedHandle<T>> {
+        let raw = NonZeroU64::new(kind.into()).ok_or(Error::InvalidResponse)?;
+        // SAFETY: every test invokes this helper once per distinct object kind.
+        Ok(unsafe { OwnedHandle::from_raw_owned(raw) })
+    }
+
+    fn builder() -> crate::Result<ProcessBuilder> {
+        let factory = owner::<TaskFactoryObject>(hyper_abi::HYPER_NATIVE_OBJECT_TASK_FACTORY)?;
+        let group = owner::<TaskGroupObject>(hyper_abi::HYPER_NATIVE_OBJECT_TASK_GROUP)?;
+        let domain = owner::<ResourceDomainObject>(hyper_abi::HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN)?;
+        let executable = owner::<BootFileObject>(hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FILE)?;
+        ProcessBuilder::create(
+            factory.as_handle_ref(),
+            group.as_handle_ref(),
+            domain.as_handle_ref(),
+            executable.as_handle_ref(),
+        )
+    }
+
+    #[test]
+    fn validates_staged_strings_and_affinity() -> crate::Result<()> {
+        let builder = builder()?;
+        assert!(matches!(
+            builder.set_name(""),
+            Err(Error::InvalidProcessName)
+        ));
+        builder.set_name("init")?;
+        builder.add_argument("")?;
+        assert!(matches!(
+            builder.add_environment("=bad"),
+            Err(Error::InvalidProcessEnvironment)
+        ));
+        builder.add_environment("PATH=/bin")?;
+        assert!(matches!(
+            builder.set_affinity(&[]),
+            Err(Error::InvalidProcessAffinity)
+        ));
+        builder.set_affinity(&[1])?;
+        Ok(())
+    }
+
+    #[test]
+    fn yield_reports_the_kernel_status() -> crate::Result<()> {
+        yield_now()
+    }
+
+    #[test]
+    fn rejected_move_returns_owner_and_success_consumes_it() -> crate::Result<()> {
+        let builder = builder()?;
+        let source = owner::<EventObject>(hyper_abi::HYPER_NATIVE_OBJECT_EVENT)?;
+        let failure = match builder.add_handle_move(source, 99, RightsOffer::SameRights) {
+            Ok(()) => return Err(Error::InvalidResponse),
+            Err(failure) => failure,
+        };
+        assert_eq!(failure.error(), Error::Status(Status::BAD_STATE));
+        let (_, source) = failure.into_parts();
+        builder
+            .add_handle_move(source, 1, RightsOffer::Exact(Rights::TRANSFER))
+            .map_err(|failure| failure.error())?;
+        Ok(())
+    }
+
+    #[test]
+    fn start_returns_supervisor_process_owner() -> crate::Result<()> {
+        let builder = builder()?;
+        builder.set_name("init")?;
+        builder.add_argument("init")?;
+        builder.seal()?;
+        let process = builder.start().map_err(|failure| failure.error())?;
+        assert_eq!(process.info()?.rights, super::PROCESS_SUPERVISOR_RIGHTS);
+        process.as_process_supervisor().request_stop()?;
+        process
+            .as_process_supervisor()
+            .wait_terminated(hyper_abi::HYPER_NATIVE_DEADLINE_INFINITE)?;
+        Ok(())
+    }
+}

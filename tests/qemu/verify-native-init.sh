@@ -78,18 +78,18 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         exit 1
     fi
     # The deferred writer commits a retained opaque Console TX prefix as one
-    # frame. Normalize the init runtime's explicit CRLF only; an interleaved
+    # frame. Normalize an application's explicit CRLF only; an interleaved
     # kernel record must make the line contract fail rather than be hidden.
     sed 's/\r$//' "$log" >"$native_output"
     if [ "$input_sent" = false ] &&
-        grep -Fxq 'HypeR init: console ready' "$native_output"; then
+        grep -Fxq 'HypeR session: console ready' "$native_output"; then
         printf 'HYPER_NATIVE_ECHO_OK\n' >&3
         input_sent=true
     fi
     if grep -q 'HypeR: starting Native init process' "$log" &&
-        grep -Fxq 'HypeR init: received input' "$native_output" &&
+        grep -Fxq 'HypeR session: console ready' "$native_output" &&
         grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output"; then
-        echo "verified HypeR Native init console echo"
+        echo "verified HypeR Native init-launched session console echo"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then

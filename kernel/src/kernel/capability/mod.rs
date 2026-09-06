@@ -17,12 +17,14 @@ pub(crate) use super::authority::Rights;
 #[cfg(test)]
 pub(crate) use handle::InTransitHandleBatch;
 pub(crate) use handle::{
-    ClosedHandle, HANDLE_TABLE_STORAGE_SEGMENTS, HandleBatchReservation,
+    ClosedHandle, DirectHandleTransfer, HANDLE_TABLE_STORAGE_SEGMENTS, HandleBatchReservation,
     HandleBatchReservationStorage, HandleError, HandleFlags, HandleInfo, HandleReservation,
-    HandleScanCursor, HandleSidecar, HandleSnapshot, HandleSnapshotPage, HandleTable,
-    HandleTableStoragePlan, HandleTableStorageSnapshot, HandleTransferClaim, HandleTransferRequest,
+    HandleScanCursor, HandleSidecar, HandleSidecarPlan, HandleSnapshot, HandleSnapshotPage,
+    HandleTable, HandleTableLockOrder, HandleTableStoragePlan, HandleTableStorageSnapshot,
+    HandleTransferClaim, HandleTransferOperation, HandleTransferRequest, HandleTransferRoute,
     HandleTransferStorage, HandleValue, PreparedHandle, ResolvedObject, ResolvedWaitable,
-    RetiredHandleStorage, TeardownCursor,
+    RetiredDirectHandleTransfer, RetiredHandleBatchReservationStorage, RetiredHandleStorage,
+    RetiredHandleTransferStorage, TeardownCursor,
 };
 pub(crate) use transfer::InTransitCapabilities;
 

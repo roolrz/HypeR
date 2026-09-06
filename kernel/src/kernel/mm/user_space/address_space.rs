@@ -833,6 +833,17 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         reservation.plan.copy_from(source)
     }
 
+    pub(super) fn write_user_reservation_prefix(
+        &self,
+        reservation: &PreparedUserWrite<Backend, Account>,
+        source: &[u8],
+    ) -> Result<(), AddressSpaceError<Backend::Error, Account::Error>> {
+        if reservation.address_space != self.id || reservation.completed {
+            return Err(AddressSpaceError::InvalidAddressSpace);
+        }
+        reservation.plan.copy_prefix_from(source)
+    }
+
     pub(super) fn release_user_write(&self, mut reservation: PreparedUserWrite<Backend, Account>) {
         if reservation.address_space != self.id || reservation.completed {
             address_space_invariant_violation();
@@ -864,6 +875,15 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         source: &[u8],
     ) -> Result<(), AddressSpaceError<Backend::Error, Account::Error>> {
         self.write_user_reservation(reservation, source)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_user_reservation_prefix_for_test(
+        &self,
+        reservation: &PreparedUserWrite<Backend, Account>,
+        source: &[u8],
+    ) -> Result<(), AddressSpaceError<Backend::Error, Account::Error>> {
+        self.write_user_reservation_prefix(reservation, source)
     }
 
     #[cfg(test)]
@@ -1239,6 +1259,48 @@ impl<Backend: PageBackend, Account: MemoryAccount> CopyPlan<Backend, Account> {
                 .ok_or(AddressSpaceError::SizeOverflow)?;
             segment.object.write_exposed(segment.object_offset, bytes)?;
             copied = end;
+        }
+        Ok(())
+    }
+
+    /// Copies only the initialized prefix while retaining the complete pinned
+    /// mapping plan. Capability receive uses this to leave unused output
+    /// capacity byte-for-byte unchanged.
+    fn copy_prefix_from(
+        &self,
+        source: &[u8],
+    ) -> Result<(), AddressSpaceError<Backend::Error, Account::Error>> {
+        let capacity = self.segments.iter().try_fold(0usize, |total, segment| {
+            let length =
+                usize::try_from(segment.length).map_err(|_| AddressSpaceError::SizeOverflow)?;
+            total
+                .checked_add(length)
+                .ok_or(AddressSpaceError::SizeOverflow)
+        })?;
+        if source.len() > capacity {
+            return Err(AddressSpaceError::SizeMismatch);
+        }
+
+        let mut copied = 0usize;
+        for segment in &self.segments {
+            if copied == source.len() {
+                break;
+            }
+            let segment_length =
+                usize::try_from(segment.length).map_err(|_| AddressSpaceError::SizeOverflow)?;
+            let remaining = source.len() - copied;
+            let length = segment_length.min(remaining);
+            let end = copied
+                .checked_add(length)
+                .ok_or(AddressSpaceError::SizeOverflow)?;
+            let bytes = source
+                .get(copied..end)
+                .ok_or(AddressSpaceError::SizeOverflow)?;
+            segment.object.write_exposed(segment.object_offset, bytes)?;
+            copied = end;
+        }
+        if copied != source.len() {
+            return Err(AddressSpaceError::SizeMismatch);
         }
         Ok(())
     }

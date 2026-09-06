@@ -189,8 +189,71 @@ pub struct Image<'image> {
     relocations: Vec<Relocation>,
 }
 
+/// Heap-storage upper bound established without allocating parser memory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AllocationPlan {
+    segment_capacity: usize,
+    relocation_capacity: usize,
+}
+
+impl AllocationPlan {
+    pub const fn segment_capacity(self) -> usize {
+        self.segment_capacity
+    }
+
+    /// Maximum number of decoded relocations for which parsing reserves space.
+    pub const fn relocation_capacity(self) -> usize {
+        self.relocation_capacity
+    }
+
+    pub fn parser_bytes(self) -> Option<usize> {
+        self.segment_capacity
+            .checked_mul(core::mem::size_of::<LoadSegment<'static>>())?
+            .checked_add(
+                self.relocation_capacity
+                    .checked_mul(core::mem::size_of::<Relocation>())?,
+            )
+    }
+}
+
 impl<'image> Image<'image> {
     pub fn parse(bytes: &'image [u8]) -> Result<Self, Error> {
+        let allocation = Self::allocation_plan(bytes)?;
+        Self::parse_with_plan(bytes, allocation)
+    }
+
+    /// Inspects allocation-driving ELF metadata without allocating.
+    pub fn allocation_plan(bytes: &[u8]) -> Result<AllocationPlan, Error> {
+        let header = bytes.get(..ELF_HEADER_SIZE).ok_or(Error::Truncated)?;
+        validate_ident(header)?;
+        validate_fixed_header(header)?;
+        let (program_offset, program_count) = program_table(header, bytes)?;
+        let mut dynamic = None;
+        for index in 0..program_count {
+            let offset = program_offset + index * PROGRAM_HEADER_SIZE;
+            let program = &bytes[offset..offset + PROGRAM_HEADER_SIZE];
+            if read_u32(program, 0)? == PT_DYNAMIC {
+                if dynamic.is_some() {
+                    return Err(Error::InvalidDynamicTable);
+                }
+                dynamic = Some(program_data(bytes, program)?);
+            }
+        }
+        let relocation_capacity = match dynamic {
+            Some(dynamic) => relocation_capacity(&read_dynamic_info(dynamic)?)?,
+            None => 0,
+        };
+        Ok(AllocationPlan {
+            segment_capacity: program_count,
+            relocation_capacity,
+        })
+    }
+
+    /// Parses using a previously reserved allocation plan.
+    pub fn parse_with_plan(bytes: &'image [u8], allocation: AllocationPlan) -> Result<Self, Error> {
+        if Self::allocation_plan(bytes)? != allocation {
+            return Err(Error::InvalidHeader);
+        }
         let header = bytes.get(..ELF_HEADER_SIZE).ok_or(Error::Truncated)?;
         validate_ident(header)?;
         let kind = match read_u16(header, 16)? {
@@ -202,33 +265,13 @@ impl<'image> Image<'image> {
             EM_AARCH64 => Machine::Aarch64,
             _ => return Err(Error::UnsupportedMachine),
         };
-        if read_u32(header, 20)? != 1
-            || read_u32(header, 48)? != 0
-            || usize::from(read_u16(header, 52)?) != ELF_HEADER_SIZE
-            || usize::from(read_u16(header, 54)?) != PROGRAM_HEADER_SIZE
-        {
-            return Err(Error::InvalidHeader);
-        }
+        validate_fixed_header(header)?;
         let entry = read_u64(header, 24)?;
-        let program_offset =
-            usize::try_from(read_u64(header, 32)?).map_err(|_| Error::ArithmeticOverflow)?;
-        let program_count = usize::from(read_u16(header, 56)?);
-        if program_count == 0 || program_count > MAXIMUM_PROGRAM_HEADERS {
-            return Err(Error::TooManyProgramHeaders);
-        }
-        let program_size = program_count
-            .checked_mul(PROGRAM_HEADER_SIZE)
-            .ok_or(Error::ArithmeticOverflow)?;
-        let program_end = program_offset
-            .checked_add(program_size)
-            .ok_or(Error::ArithmeticOverflow)?;
-        bytes
-            .get(program_offset..program_end)
-            .ok_or(Error::Truncated)?;
+        let (program_offset, program_count) = program_table(header, bytes)?;
 
         let mut segments = Vec::new();
         segments
-            .try_reserve_exact(program_count)
+            .try_reserve_exact(allocation.segment_capacity)
             .map_err(|_| Error::Allocation)?;
         let mut dynamic = None;
         for index in 0..program_count {
@@ -260,7 +303,7 @@ impl<'image> Image<'image> {
         segments.sort_unstable_by_key(|segment| segment.mapping_address);
         validate_segment_layout(&segments, entry)?;
         let relocations = match dynamic {
-            Some(dynamic) => parse_dynamic(dynamic, &segments)?,
+            Some(dynamic) => parse_dynamic(dynamic, &segments, allocation.relocation_capacity)?,
             None => Vec::new(),
         };
         Ok(Self {
@@ -324,6 +367,31 @@ fn validate_ident(header: &[u8]) -> Result<(), Error> {
         return Err(Error::UnsupportedAbiVersion);
     }
     Ok(())
+}
+
+fn validate_fixed_header(header: &[u8]) -> Result<(), Error> {
+    if read_u32(header, 20)? != 1
+        || read_u32(header, 48)? != 0
+        || usize::from(read_u16(header, 52)?) != ELF_HEADER_SIZE
+        || usize::from(read_u16(header, 54)?) != PROGRAM_HEADER_SIZE
+    {
+        return Err(Error::InvalidHeader);
+    }
+    Ok(())
+}
+
+fn program_table(header: &[u8], bytes: &[u8]) -> Result<(usize, usize), Error> {
+    let offset = usize::try_from(read_u64(header, 32)?).map_err(|_| Error::ArithmeticOverflow)?;
+    let count = usize::from(read_u16(header, 56)?);
+    if count == 0 || count > MAXIMUM_PROGRAM_HEADERS {
+        return Err(Error::TooManyProgramHeaders);
+    }
+    let size = count
+        .checked_mul(PROGRAM_HEADER_SIZE)
+        .ok_or(Error::ArithmeticOverflow)?;
+    let end = offset.checked_add(size).ok_or(Error::ArithmeticOverflow)?;
+    bytes.get(offset..end).ok_or(Error::Truncated)?;
+    Ok((offset, count))
 }
 
 fn parse_load_segment<'image>(
@@ -426,7 +494,29 @@ struct DynamicInfo {
     relr_entry_size: Option<u64>,
 }
 
-fn parse_dynamic(bytes: &[u8], segments: &[LoadSegment<'_>]) -> Result<Vec<Relocation>, Error> {
+fn parse_dynamic(
+    bytes: &[u8],
+    segments: &[LoadSegment<'_>],
+    relocation_capacity: usize,
+) -> Result<Vec<Relocation>, Error> {
+    let info = read_dynamic_info(bytes)?;
+    let mut relocations = Vec::new();
+    relocations
+        .try_reserve_exact(relocation_capacity)
+        .map_err(|_| Error::Allocation)?;
+    parse_rela(&info, segments, &mut relocations)?;
+    parse_relr(&info, segments, &mut relocations)?;
+    relocations.sort_unstable_by_key(|relocation| relocation.target());
+    if relocations
+        .windows(2)
+        .any(|pair| pair[0].target() == pair[1].target())
+    {
+        return Err(Error::DuplicateRelocation);
+    }
+    Ok(relocations)
+}
+
+fn read_dynamic_info(bytes: &[u8]) -> Result<DynamicInfo, Error> {
     if !bytes.len().is_multiple_of(DYNAMIC_ENTRY_SIZE) {
         return Err(Error::InvalidDynamicTable);
     }
@@ -456,18 +546,51 @@ fn parse_dynamic(bytes: &[u8], segments: &[LoadSegment<'_>]) -> Result<Vec<Reloc
     if !terminated {
         return Err(Error::InvalidDynamicTable);
     }
+    Ok(info)
+}
 
-    let mut relocations = Vec::new();
-    parse_rela(&info, segments, &mut relocations)?;
-    parse_relr(&info, segments, &mut relocations)?;
-    relocations.sort_unstable_by_key(|relocation| relocation.target());
-    if relocations
-        .windows(2)
-        .any(|pair| pair[0].target() == pair[1].target())
-    {
-        return Err(Error::DuplicateRelocation);
+fn relocation_capacity(info: &DynamicInfo) -> Result<usize, Error> {
+    let rela = optional_table_count(
+        info.rela,
+        info.rela_size,
+        info.rela_entry_size,
+        RELA_ENTRY_SIZE,
+    )?;
+    let relr_entries = optional_table_count(
+        info.relr,
+        info.relr_size,
+        info.relr_entry_size,
+        RELR_ENTRY_SIZE,
+    )?;
+    // Every RELR word expands to at most 63 relocation records.
+    let relr = relr_entries
+        .checked_mul(63)
+        .ok_or(Error::TooManyRelocations)?;
+    let total = rela.checked_add(relr).ok_or(Error::TooManyRelocations)?;
+    if total > MAXIMUM_RELOCATIONS {
+        return Err(Error::TooManyRelocations);
     }
-    Ok(relocations)
+    Ok(total)
+}
+
+fn optional_table_count(
+    address: Option<u64>,
+    size: Option<u64>,
+    entry_size: Option<u64>,
+    expected_entry_size: usize,
+) -> Result<usize, Error> {
+    let present = address.is_some() || size.is_some() || entry_size.is_some();
+    if !present {
+        return Ok(0);
+    }
+    let _ = address.ok_or(Error::InvalidDynamicTable)?;
+    let size = size.ok_or(Error::InvalidDynamicTable)?;
+    if entry_size != Some(expected_entry_size as u64)
+        || !size.is_multiple_of(expected_entry_size as u64)
+    {
+        return Err(Error::InvalidDynamicTable);
+    }
+    usize::try_from(size / expected_entry_size as u64).map_err(|_| Error::TooManyRelocations)
 }
 
 fn parse_rela(

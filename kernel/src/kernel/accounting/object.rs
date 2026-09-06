@@ -8,8 +8,8 @@ use super::{
 };
 use crate::kernel::authority::Rights;
 use crate::kernel::object::{
-    KernelObject, ObjectCreationError, ObjectKind, ObjectPublication, object_allocation_size,
-    private,
+    KernelObject, ObjectCreationError, ObjectKind, ObjectPublication, TransferClass,
+    object_allocation_size, private,
 };
 
 /// Failure while preparing an accounted `ResourceDomain` capability object.
@@ -100,10 +100,12 @@ impl private::UserExportable for ResourceDomainObject {}
 
 impl KernelObject for ResourceDomainObject {
     const KIND: ObjectKind = ObjectKind::RESOURCE_DOMAIN;
+    const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
         .union(Rights::CREATE_RESOURCE_DOMAIN)
         .union(Rights::SET_LIMITS)
-        .union(Rights::REVOKE);
+        .union(Rights::REVOKE)
+        .union(Rights::RESOURCE_DOMAIN_SPONSOR);
 }

@@ -14,8 +14,8 @@ use crate::kernel::accounting::{
 };
 use crate::kernel::authority::Rights;
 use crate::kernel::object::{
-    KernelObject, ObjectCreationError, ObjectKind, ObjectPublication, object_allocation_size,
-    private,
+    KernelObject, ObjectCreationError, ObjectKind, ObjectPublication, TransferClass,
+    object_allocation_size, private,
 };
 
 type NativeWritableVmo = WritableVmo<KernelPageBackend, DomainAccount>;
@@ -157,6 +157,7 @@ impl private::UserExportable for VmoObject {}
 
 impl KernelObject for VmoObject {
     const KIND: ObjectKind = ObjectKind::VMO;
+    const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
@@ -190,6 +191,10 @@ pub(crate) struct VmarObject {
 }
 
 impl VmarObject {
+    /// Initial authority installed for a Process's own root VMAR.
+    pub(crate) const ROOT_RIGHTS: Rights =
+        Rights::TRANSFER.union(Rights::INSPECT).union(Rights::MAP);
+
     fn root(
         address_space: FallibleArc<NativeAddressSpace>,
         sponsor: &ResourceDomain,
@@ -218,6 +223,11 @@ impl VmarObject {
         result
     }
 
+    /// Rolls back an unpublished root-object claim after authority preparation.
+    pub(crate) fn abort_root_publication(address_space: &NativeAddressSpace) {
+        address_space.abort_root_vmar_object_publication();
+    }
+
     pub(crate) fn address_space(&self) -> &NativeAddressSpace {
         &self.address_space
     }
@@ -236,6 +246,7 @@ impl private::UserExportable for VmarObject {}
 
 impl KernelObject for VmarObject {
     const KIND: ObjectKind = ObjectKind::VMAR;
+    const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)

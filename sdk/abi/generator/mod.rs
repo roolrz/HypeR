@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 pub mod schema;
 
 use schema::{
-    AbiSchema, CompletionClass, FeatureGate, FieldKind, HandleDisposition, IndirectHandles,
-    MemoryDirection, MemoryLength, ObjectConstraint, ProducedObject, ProducedRights, ValueKind,
+    AbiSchema, CapabilityCommit, CompletionClass, FeatureGate, FieldKind, HandleDisposition,
+    HandleOperation, IndirectHandles, MemoryDirection, MemoryLength, ObjectConstraint,
+    OperationDisposition, ProducedObject, ProducedRights, TransferClass, ValueKind,
 };
 
 const GENERATED_RUST: &str = "src/generated.rs";
@@ -72,7 +73,21 @@ pub fn validate(schema: &AbiSchema) -> Result<(), Error> {
     validate_constants(schema)?;
     validate_records(schema)?;
     validate_syscalls(schema, supported_rights)?;
+    validate_semantic_rules(schema)?;
     validate_generated_constant_names(schema)
+}
+
+fn validate_semantic_rules(schema: &AbiSchema) -> Result<(), Error> {
+    let mut rules = BTreeSet::new();
+    for rule in schema.semantic_rules {
+        if rule.trim().is_empty() {
+            return invalid("semantic rules must not be empty");
+        }
+        if !rules.insert(*rule) {
+            return invalid("semantic rules must not be repeated");
+        }
+    }
+    Ok(())
 }
 
 fn validate_statuses(schema: &AbiSchema) -> Result<(), Error> {
@@ -174,15 +189,20 @@ fn validate_object_kinds(schema: &AbiSchema) -> Result<(), Error> {
             ));
         }
     }
-    match schema
+    let none = schema
         .object_kinds
         .iter()
-        .find(|object| object.name == "none")
-    {
-        Some(object) if object.value == 0 => Ok(()),
-        Some(_) => invalid("the none object kind must retain reserved value zero"),
-        None => invalid("the reserved none object kind is missing"),
+        .find(|object| object.name == "none");
+    match none {
+        Some(object) if object.value == 0 && object.transfer == TransferClass::Forbidden => {}
+        Some(_) => {
+            return invalid(
+                "the none object kind must retain reserved value zero and forbidden transfer",
+            );
+        }
+        None => return invalid("the reserved none object kind is missing"),
     }
+    Ok(())
 }
 
 fn validate_rights(schema: &AbiSchema) -> Result<u64, Error> {
@@ -274,6 +294,9 @@ fn validate_generated_constant_names(schema: &AbiSchema) -> Result<(), Error> {
         "HYPER_NATIVE_ABI_REVISION".to_owned(),
         "HYPER_NATIVE_FEATURE_MASK".to_owned(),
         "HYPER_NATIVE_RIGHTS_MASK".to_owned(),
+        "HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN".to_owned(),
+        "HYPER_NATIVE_TRANSFER_CLASS_GENERAL".to_owned(),
+        "HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY".to_owned(),
     ] {
         names.insert(reserved);
     }
@@ -476,12 +499,33 @@ fn validate_arguments(
             if let ObjectConstraint::Kind(kind) = handle.object {
                 require_object_kind(schema, syscall.name, kind)?;
             }
-            if handle.disposition == HandleDisposition::ConsumeOnCommit && argument.name.is_empty()
-            {
-                return invalid(format!(
-                    "syscall {} has an unnamed consumed handle",
-                    syscall.name
-                ));
+            match handle.disposition {
+                HandleDisposition::Borrow | HandleDisposition::ConsumeOnCommit => {}
+                HandleDisposition::ByOperation {
+                    argument: operation_argument,
+                    operations,
+                } => {
+                    if !syscall.arguments.iter().any(|candidate| {
+                        candidate.name == operation_argument && candidate.kind == ValueKind::U32
+                    }) {
+                        return invalid(format!(
+                            "syscall {} handle {} names invalid operation argument {operation_argument}",
+                            syscall.name, argument.name
+                        ));
+                    }
+                    validate_handle_operations(
+                        syscall.name,
+                        argument.name,
+                        operations,
+                        supported_rights,
+                    )?;
+                    validate_transfer_operations(
+                        syscall,
+                        argument,
+                        handle.required_rights,
+                        operations,
+                    )?;
+                }
             }
         }
         if let Some(memory) = argument.memory {
@@ -643,6 +687,25 @@ fn validate_results(
                     ));
                 }
             }
+            ProducedRights::ExactRequested {
+                argument,
+                allowed_rights,
+            } => {
+                if !syscall.arguments.iter().any(|candidate| {
+                    candidate.name == argument && candidate.kind == ValueKind::Rights
+                }) {
+                    return invalid(format!(
+                        "syscall {} result {} names invalid exact-rights argument {argument}",
+                        syscall.name, result.name
+                    ));
+                }
+                if allowed_rights == 0 || allowed_rights & !supported_rights != 0 {
+                    return invalid(format!(
+                        "syscall {} result {} allows undeclared or empty object rights",
+                        syscall.name, result.name
+                    ));
+                }
+            }
             ProducedRights::Fixed(rights) if rights & !supported_rights != 0 => {
                 return invalid(format!(
                     "syscall {} result {} produces undeclared rights",
@@ -711,7 +774,10 @@ fn validate_indirect_handles(
             handle_field,
             rights_field,
             expected_kind_field,
-            required_rights,
+            operation_field,
+            common_rights,
+            operations,
+            commit: CapabilityCommit::AtomicOnOk,
         } => {
             if memory.direction != MemoryDirection::Read {
                 return invalid(format!(
@@ -719,7 +785,7 @@ fn validate_indirect_handles(
                     syscall.name, argument.name
                 ));
             }
-            if required_rights & !supported_rights != 0 {
+            if common_rights & !supported_rights != 0 {
                 return invalid(format!(
                     "syscall {} argument {} indirectly requires undeclared rights",
                     syscall.name, argument.name
@@ -740,23 +806,142 @@ fn validate_indirect_handles(
                 syscall,
                 argument,
             )?;
+            require_record_field(record, operation_field, FieldKind::U32, syscall, argument)?;
+            validate_distinct_fields(
+                syscall,
+                argument,
+                &[
+                    handle_field,
+                    rights_field,
+                    expected_kind_field,
+                    operation_field,
+                ],
+            )?;
+            validate_handle_operations(syscall.name, argument.name, operations, supported_rights)?;
+            validate_transfer_operations(syscall, argument, common_rights, operations)?;
         }
-        IndirectHandles::ProduceTransferred => {
-            if memory.direction != MemoryDirection::Write
-                || !matches!(
-                    memory.length,
-                    MemoryLength::Elements {
-                        element_size: 8,
-                        ..
-                    }
-                )
-                || memory.record.is_some()
-            {
+        IndirectHandles::ProduceTransferred {
+            handle_field,
+            rights_field,
+            expected_kind_field,
+            flags_field,
+            commit: CapabilityCommit::AtomicOnOk,
+        } => {
+            if memory.direction != MemoryDirection::ReadWrite {
                 return invalid(format!(
-                    "syscall {} transferred-handle output {} must be a raw u64 element array",
+                    "syscall {} transferred-handle output {} must be in/out memory",
                     syscall.name, argument.name
                 ));
             }
+            let Some(record) = record else {
+                return invalid(format!(
+                    "syscall {} transferred-handle output {} has no record",
+                    syscall.name, argument.name
+                ));
+            };
+            require_record_field(record, handle_field, FieldKind::U64, syscall, argument)?;
+            require_record_field(record, rights_field, FieldKind::U64, syscall, argument)?;
+            require_record_field(
+                record,
+                expected_kind_field,
+                FieldKind::U32,
+                syscall,
+                argument,
+            )?;
+            require_record_field(record, flags_field, FieldKind::U32, syscall, argument)?;
+            validate_distinct_fields(
+                syscall,
+                argument,
+                &[handle_field, rights_field, expected_kind_field, flags_field],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_distinct_fields(
+    syscall: &schema::Syscall,
+    argument: &schema::Argument,
+    fields: &[&str],
+) -> Result<(), Error> {
+    let mut names = BTreeSet::new();
+    if fields.iter().all(|field| names.insert(*field)) {
+        Ok(())
+    } else {
+        invalid(format!(
+            "syscall {} memory argument {} repeats transactional record fields",
+            syscall.name, argument.name
+        ))
+    }
+}
+
+fn validate_transfer_operations(
+    syscall: &schema::Syscall,
+    argument: &schema::Argument,
+    common_rights: u64,
+    operations: &[HandleOperation],
+) -> Result<(), Error> {
+    let move_operation = operations.iter().find(|operation| operation.name == "move");
+    let duplicate_operation = operations
+        .iter()
+        .find(|operation| operation.name == "duplicate");
+    if !matches!(
+        move_operation,
+        Some(HandleOperation {
+            value: 0,
+            disposition: OperationDisposition::ConsumeOnCommit,
+            ..
+        })
+    ) || common_rights & schema::RIGHT_TRANSFER == 0
+    {
+        return invalid(format!(
+            "syscall {} argument {} has an invalid move operation",
+            syscall.name, argument.name
+        ));
+    }
+    if !matches!(
+        duplicate_operation,
+        Some(HandleOperation {
+            value: 1,
+            disposition: OperationDisposition::Borrow,
+            additional_rights,
+            ..
+        }) if *additional_rights & schema::RIGHT_DUPLICATE != 0
+    ) || common_rights & schema::RIGHT_TRANSFER == 0
+    {
+        return invalid(format!(
+            "syscall {} argument {} has an invalid duplicate operation",
+            syscall.name, argument.name
+        ));
+    }
+    Ok(())
+}
+
+fn validate_handle_operations(
+    syscall: &str,
+    argument: &str,
+    operations: &[HandleOperation],
+    supported_rights: u64,
+) -> Result<(), Error> {
+    if operations.is_empty() {
+        return invalid(format!(
+            "syscall {syscall} handle {argument} has no operations"
+        ));
+    }
+    let mut names = BTreeSet::new();
+    let mut values = BTreeSet::new();
+    for operation in operations {
+        validate_identifier("handle operation", operation.name)?;
+        if !names.insert(operation.name) || !values.insert(operation.value) {
+            return invalid(format!(
+                "syscall {syscall} handle {argument} repeats a handle operation"
+            ));
+        }
+        if operation.additional_rights & !supported_rights != 0 {
+            return invalid(format!(
+                "syscall {syscall} handle {argument} operation {} requires undeclared rights",
+                operation.name
+            ));
         }
     }
     Ok(())
@@ -861,6 +1046,7 @@ fn render_rust(schema: &AbiSchema) -> String {
             .iter()
             .map(|value| (value.name, value.value)),
     );
+    render_rust_transfer_classes(&mut output, schema);
     render_rust_constants(
         &mut output,
         "HYPER_NATIVE_RIGHT",
@@ -960,6 +1146,33 @@ fn render_rust(schema: &AbiSchema) -> String {
         output.pop();
     }
     output
+}
+
+fn render_rust_transfer_classes(output: &mut String, schema: &AbiSchema) {
+    output.push_str("pub const HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN: u32 = 0;\n");
+    output.push_str("pub const HYPER_NATIVE_TRANSFER_CLASS_GENERAL: u32 = 1;\n");
+    output.push_str("pub const HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY: u32 = 2;\n\n");
+    output.push_str("pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {\n");
+    output.push_str("    match object_kind {\n");
+    for object in schema.object_kinds {
+        let _ = writeln!(
+            output,
+            "        HYPER_NATIVE_OBJECT_{} => {},",
+            upper_snake(object.name),
+            rust_transfer_class_constant(object.transfer)
+        );
+    }
+    output.push_str("        _ => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,\n");
+    output.push_str("    }\n");
+    output.push_str("}\n\n");
+}
+
+const fn rust_transfer_class_constant(class: TransferClass) -> &'static str {
+    match class {
+        TransferClass::Forbidden => "HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN",
+        TransferClass::General => "HYPER_NATIVE_TRANSFER_CLASS_GENERAL",
+        TransferClass::RendezvousOnly => "HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY",
+    }
 }
 
 fn render_rust_failure_result_mask(output: &mut String, schema: &AbiSchema) {
@@ -1093,6 +1306,7 @@ fn render_c(schema: &AbiSchema) -> String {
             .iter()
             .map(|value| (value.name, value.value)),
     );
+    render_c_transfer_classes(&mut output, schema);
     render_c_constants(
         &mut output,
         "HYPER_NATIVE_RIGHT",
@@ -1186,6 +1400,27 @@ fn render_c(schema: &AbiSchema) -> String {
     output
 }
 
+fn render_c_transfer_classes(output: &mut String, schema: &AbiSchema) {
+    output.push_str("#define HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN UINT32_C(0)\n");
+    output.push_str("#define HYPER_NATIVE_TRANSFER_CLASS_GENERAL UINT32_C(1)\n");
+    output.push_str("#define HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY UINT32_C(2)\n\n");
+    output.push_str(
+        "static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) {\n",
+    );
+    output.push_str("    switch (object_kind) {\n");
+    for object in schema.object_kinds {
+        let _ = writeln!(
+            output,
+            "        case HYPER_NATIVE_OBJECT_{}: return {};",
+            upper_snake(object.name),
+            rust_transfer_class_constant(object.transfer)
+        );
+    }
+    output.push_str("        default: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;\n");
+    output.push_str("    }\n");
+    output.push_str("}\n\n");
+}
+
 fn render_c_failure_result_mask(output: &mut String, schema: &AbiSchema) {
     output.push_str(
         "static inline uint64_t hyper_native_failure_result_mask(\n    uint64_t syscall_number, hyper_native_status_t status)\n{\n",
@@ -1274,6 +1509,17 @@ fn render_reference(schema: &AbiSchema) -> String {
         let _ = writeln!(output, "| {} | `{}` |", status.value, status.name);
     }
     output.push('\n');
+    output.push_str("## Object kinds\n\n| Value | Name | Transfer |\n| ---: | --- | --- |\n");
+    for object in schema.object_kinds {
+        let _ = writeln!(
+            output,
+            "| {} | `{}` | `{}` |",
+            object.value,
+            object.name,
+            transfer_class_name(object.transfer)
+        );
+    }
+    output.push('\n');
     output.push_str("## Object signals\n\n| Object | Bit | Name |\n| --- | ---: | --- |\n");
     for signal in schema.signals {
         let _ = writeln!(
@@ -1286,6 +1532,11 @@ fn render_reference(schema: &AbiSchema) -> String {
     output.push_str("## Constants\n\n| Name | Value |\n| --- | ---: |\n");
     for constant in schema.constants {
         let _ = writeln!(output, "| `{}` | `{}` |", constant.name, constant.value);
+    }
+    output.push('\n');
+    output.push_str("## Semantic rules\n\n");
+    for rule in schema.semantic_rules {
+        let _ = writeln!(output, "- {rule}");
     }
     output.push('\n');
     output.push_str(
@@ -1386,10 +1637,24 @@ fn describe_handle_argument(name: &str, handle: schema::HandleArgument) -> Strin
         ObjectConstraint::Any => String::from("any"),
         ObjectConstraint::Kind(kind) => format!("kind={kind}"),
     };
-    format!(
-        "`{name}: {:?}, {object}, rights=0x{:x}`",
-        handle.disposition, handle.required_rights
-    )
+    match handle.disposition {
+        HandleDisposition::Borrow => format!(
+            "`{name}: Borrow, {object}, rights=0x{:x}`",
+            handle.required_rights
+        ),
+        HandleDisposition::ConsumeOnCommit => format!(
+            "`{name}: ConsumeOnCommit, {object}, rights=0x{:x}`",
+            handle.required_rights
+        ),
+        HandleDisposition::ByOperation {
+            argument,
+            operations,
+        } => format!(
+            "`{name}: ByOperation({argument}: {}), {object}, common-rights=0x{:x}`",
+            describe_operations(operations, handle.required_rights),
+            handle.required_rights
+        ),
+    }
 }
 
 fn describe_produced_handle(name: &str, handle: schema::ProducedHandle) -> String {
@@ -1399,6 +1664,10 @@ fn describe_produced_handle(name: &str, handle: schema::ProducedHandle) -> Strin
     };
     let rights = match handle.rights {
         ProducedRights::RequestedSubsetOf(argument) => format!("subset-from({argument})"),
+        ProducedRights::ExactRequested {
+            argument,
+            allowed_rights,
+        } => format!("exact-from({argument}), allowed=0x{allowed_rights:x}"),
         ProducedRights::Fixed(mask) => format!("fixed=0x{mask:x}"),
     };
     format!("`{name}: produce, {object}, {rights}`")
@@ -1427,16 +1696,47 @@ fn describe_user_memory(name: &str, memory: schema::UserMemory) -> String {
             handle_field,
             rights_field,
             expected_kind_field,
-            required_rights,
+            operation_field,
+            common_rights,
+            operations,
+            commit,
         }) => format!(
-            ", consume-handles=({handle_field}, {rights_field}, {expected_kind_field}), required-rights=0x{required_rights:x}"
+            ", transactional-handles=({handle_field}, {rights_field}, {expected_kind_field}, {operation_field}), common-rights=0x{common_rights:x}, operations=[{}], commit={commit:?}",
+            describe_operations(operations, common_rights)
         ),
-        Some(IndirectHandles::ProduceTransferred) => String::from(", produce-transferred-handles"),
+        Some(IndirectHandles::ProduceTransferred {
+            handle_field,
+            rights_field,
+            expected_kind_field,
+            flags_field,
+            commit,
+        }) => format!(
+            ", typed-receive-slots=({handle_field}, {rights_field}, {expected_kind_field}, {flags_field}), produce-transferred-handles, commit={commit:?}"
+        ),
     };
     format!(
         "`{name}: {:?}, {}{}{}; order={}`",
         memory.direction, length, record, handles, memory.validation_order
     )
+}
+
+fn describe_operations(operations: &[HandleOperation], common_rights: u64) -> String {
+    operations
+        .iter()
+        .map(|operation| {
+            let disposition = match operation.disposition {
+                OperationDisposition::Borrow => "Borrow",
+                OperationDisposition::ConsumeOnCommit => "ConsumeOnCommit",
+            };
+            format!(
+                "{}={}:{disposition}/rights=0x{:x}",
+                operation.name,
+                operation.value,
+                common_rights | operation.additional_rights
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("+")
 }
 
 fn joined_failure_statuses(syscall: &schema::Syscall, result_name: &str) -> String {
@@ -1470,6 +1770,14 @@ fn field_kind_name(kind: FieldKind) -> &'static str {
     match kind {
         FieldKind::U32 => "u32",
         FieldKind::U64 => "u64",
+    }
+}
+
+const fn transfer_class_name(class: TransferClass) -> &'static str {
+    match class {
+        TransferClass::Forbidden => "forbidden",
+        TransferClass::General => "general",
+        TransferClass::RendezvousOnly => "rendezvous_only",
     }
 }
 
@@ -1581,9 +1889,9 @@ mod tests {
     #[test]
     fn rejects_element_memory_with_byte_count_length() {
         let mut calls = schema::SYSCALLS.to_vec();
-        let mut arguments = calls[13].arguments.to_vec();
+        let mut arguments = calls[21].arguments.to_vec();
         arguments[5].kind = ValueKind::ByteCount;
-        calls[13].arguments = Box::leak(arguments.into_boxed_slice());
+        calls[21].arguments = Box::leak(arguments.into_boxed_slice());
         let calls = Box::leak(calls.into_boxed_slice());
         let candidate = AbiSchema {
             syscalls: calls,
@@ -1597,13 +1905,13 @@ mod tests {
     #[test]
     fn rejects_element_stride_which_disagrees_with_record() {
         let mut calls = schema::SYSCALLS.to_vec();
-        let mut arguments = calls[13].arguments.to_vec();
+        let mut arguments = calls[21].arguments.to_vec();
         if let Some(memory) = arguments[4].memory.as_mut()
             && let MemoryLength::Elements { element_size, .. } = &mut memory.length
         {
             *element_size = 8;
         }
-        calls[13].arguments = Box::leak(arguments.into_boxed_slice());
+        calls[21].arguments = Box::leak(arguments.into_boxed_slice());
         let calls = Box::leak(calls.into_boxed_slice());
         let candidate = AbiSchema {
             syscalls: calls,
@@ -1617,23 +1925,33 @@ mod tests {
     #[test]
     fn rejects_unknown_indirect_handle_record_field() {
         let mut calls = schema::SYSCALLS.to_vec();
-        let mut arguments = calls[13].arguments.to_vec();
+        let syscall = calls
+            .iter_mut()
+            .find(|syscall| syscall.name == "capability_channel_try_send");
+        assert!(syscall.is_some());
+        let Some(syscall) = syscall else {
+            return;
+        };
+        let mut arguments = syscall.arguments.to_vec();
         if let Some(memory) = arguments[4].memory.as_mut() {
             memory.handles = Some(IndirectHandles::ConsumeRecords {
                 handle_field: "missing",
                 rights_field: "rights",
                 expected_kind_field: "expected_kind",
-                required_rights: schema::RIGHT_TRANSFER,
+                operation_field: "operation",
+                common_rights: schema::RIGHT_TRANSFER,
+                operations: schema::CAPABILITY_OPERATIONS,
+                commit: CapabilityCommit::AtomicOnOk,
             });
         }
-        calls[13].arguments = Box::leak(arguments.into_boxed_slice());
+        syscall.arguments = Box::leak(arguments.into_boxed_slice());
         let calls = Box::leak(calls.into_boxed_slice());
         let candidate = AbiSchema {
             syscalls: calls,
             ..schema::NATIVE_ABI
         };
         assert!(
-            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("invalid channel_disposition field"))
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("invalid capability_disposition field"))
         );
     }
 
@@ -1659,15 +1977,253 @@ mod tests {
     }
 
     #[test]
-    fn channel_read_declares_buffer_size_results_on_failure() {
+    fn byte_channel_read_declares_buffer_size_result_on_failure() {
         let syscall = &schema::SYSCALLS[14];
-        assert_eq!(syscall.name, "channel_read");
+        assert_eq!(syscall.name, "byte_channel_read");
         assert_eq!(syscall.failure_results.len(), 1);
         assert_eq!(syscall.failure_results[0].status, "buffer_too_small");
-        assert_eq!(
-            syscall.failure_results[0].results,
-            &["actual_bytes", "actual_handles"]
+        assert_eq!(syscall.failure_results[0].results, &["actual_bytes"]);
+    }
+
+    #[test]
+    fn capability_receive_is_flattened_and_transactionally_typed() {
+        let syscall = schema::SYSCALLS
+            .iter()
+            .find(|syscall| syscall.name == "capability_channel_receive");
+        assert!(syscall.is_some());
+        let Some(syscall) = syscall else {
+            return;
+        };
+        assert_eq!(syscall.arguments.len(), schema::SYSCALL_ARGUMENT_REGISTERS);
+        let slots = syscall
+            .arguments
+            .iter()
+            .find(|argument| argument.name == "capability_slots")
+            .and_then(|argument| argument.memory);
+        assert!(slots.is_some());
+        let Some(slots) = slots else {
+            return;
+        };
+        assert_eq!(slots.direction, MemoryDirection::ReadWrite);
+        assert_eq!(slots.record, Some("capability_receive_slot"));
+        assert!(matches!(
+            slots.handles,
+            Some(IndirectHandles::ProduceTransferred {
+                handle_field: "handle",
+                rights_field: "rights",
+                expected_kind_field: "expected_kind",
+                flags_field: "flags",
+                commit: CapabilityCommit::AtomicOnOk,
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_write_only_transferred_capability_slots() {
+        let mut calls = schema::SYSCALLS.to_vec();
+        let syscall = calls
+            .iter_mut()
+            .find(|syscall| syscall.name == "capability_channel_receive");
+        assert!(syscall.is_some());
+        let Some(syscall) = syscall else {
+            return;
+        };
+        let mut arguments = syscall.arguments.to_vec();
+        let slots = arguments
+            .iter_mut()
+            .find(|argument| argument.name == "capability_slots")
+            .and_then(|argument| argument.memory.as_mut());
+        assert!(slots.is_some());
+        let Some(slots) = slots else {
+            return;
+        };
+        slots.direction = MemoryDirection::Write;
+        syscall.arguments = Box::leak(arguments.into_boxed_slice());
+        let candidate = AbiSchema {
+            syscalls: Box::leak(calls.into_boxed_slice()),
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("must be in/out memory"))
         );
+    }
+
+    #[test]
+    fn rejects_transfer_operations_without_duplicate_authority() {
+        const INVALID_OPERATIONS: &[HandleOperation] = &[
+            HandleOperation {
+                name: "move",
+                value: 0,
+                disposition: OperationDisposition::ConsumeOnCommit,
+                additional_rights: 0,
+            },
+            HandleOperation {
+                name: "duplicate",
+                value: 1,
+                disposition: OperationDisposition::Borrow,
+                additional_rights: 0,
+            },
+        ];
+        let mut calls = schema::SYSCALLS.to_vec();
+        let syscall = calls
+            .iter_mut()
+            .find(|syscall| syscall.name == "capability_channel_try_send");
+        assert!(syscall.is_some());
+        let Some(syscall) = syscall else {
+            return;
+        };
+        let mut arguments = syscall.arguments.to_vec();
+        let dispositions = arguments
+            .iter_mut()
+            .find(|argument| argument.name == "dispositions")
+            .and_then(|argument| argument.memory.as_mut());
+        assert!(dispositions.is_some());
+        let Some(dispositions) = dispositions else {
+            return;
+        };
+        assert!(matches!(
+            dispositions.handles,
+            Some(IndirectHandles::ConsumeRecords { .. })
+        ));
+        let Some(IndirectHandles::ConsumeRecords { operations, .. }) =
+            dispositions.handles.as_mut()
+        else {
+            return;
+        };
+        *operations = INVALID_OPERATIONS;
+        syscall.arguments = Box::leak(arguments.into_boxed_slice());
+        let candidate = AbiSchema {
+            syscalls: Box::leak(calls.into_boxed_slice()),
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("invalid duplicate operation"))
+        );
+    }
+
+    #[test]
+    fn bootfs_open_grants_exact_bounded_rights() {
+        let syscall = schema::SYSCALLS
+            .iter()
+            .find(|syscall| syscall.name == "bootfs_open");
+        assert!(syscall.is_some());
+        let Some(syscall) = syscall else {
+            return;
+        };
+        assert!(matches!(
+            syscall.results[0].handle,
+            Some(schema::ProducedHandle {
+                object: ProducedObject::Kind("boot_file"),
+                rights: ProducedRights::ExactRequested {
+                    argument: "requested_rights",
+                    allowed_rights: schema::BOOT_FILE_RIGHTS,
+                },
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_exact_rights_outside_the_object_allowlist() {
+        let mut calls = schema::SYSCALLS.to_vec();
+        let syscall = calls
+            .iter_mut()
+            .find(|syscall| syscall.name == "bootfs_open");
+        assert!(syscall.is_some());
+        let Some(syscall) = syscall else {
+            return;
+        };
+        let mut results = syscall.results.to_vec();
+        let handle = results[0].handle.as_mut();
+        assert!(handle.is_some());
+        let Some(handle) = handle else {
+            return;
+        };
+        handle.rights = ProducedRights::ExactRequested {
+            argument: "requested_rights",
+            allowed_rights: 1u64 << 63,
+        };
+        syscall.results = Box::leak(results.into_boxed_slice());
+        let candidate = AbiSchema {
+            syscalls: Box::leak(calls.into_boxed_slice()),
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("undeclared or empty object rights"))
+        );
+    }
+
+    #[test]
+    fn process_builder_is_linear_and_uses_staged_syscalls() {
+        let builder = schema::OBJECT_KINDS
+            .iter()
+            .find(|object| object.name == "process_builder");
+        assert!(builder.is_some());
+        let Some(builder) = builder else {
+            return;
+        };
+        assert_eq!(builder.value, 15);
+        assert_eq!(builder.transfer, TransferClass::RendezvousOnly);
+        assert_eq!(schema::PROCESS_BUILDER_RIGHTS & schema::RIGHT_DUPLICATE, 0);
+        let calls: Vec<_> = schema::SYSCALLS
+            .iter()
+            .filter(|syscall| syscall.name.starts_with("process_builder_"))
+            .map(|syscall| (syscall.number, syscall.name))
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                (22, "process_builder_create"),
+                (23, "process_builder_set_name"),
+                (24, "process_builder_add_argument"),
+                (25, "process_builder_add_environment"),
+                (26, "process_builder_set_affinity"),
+                (27, "process_builder_add_handle"),
+                (28, "process_builder_seal"),
+                (29, "process_builder_start"),
+                (30, "process_builder_abort"),
+            ]
+        );
+        for name in ["process_builder_start", "process_builder_abort"] {
+            let syscall = schema::SYSCALLS.iter().find(|syscall| syscall.name == name);
+            assert!(syscall.is_some());
+            let Some(syscall) = syscall else {
+                return;
+            };
+            assert!(matches!(
+                syscall.arguments[0].handle,
+                Some(schema::HandleArgument {
+                    object: ObjectConstraint::Kind("process_builder"),
+                    disposition: HandleDisposition::ConsumeOnCommit,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn object_transfer_classes_match_the_audited_contract() {
+        let expected = [
+            ("none", TransferClass::Forbidden),
+            ("event", TransferClass::General),
+            ("byte_channel", TransferClass::General),
+            ("thread", TransferClass::RendezvousOnly),
+            ("process", TransferClass::RendezvousOnly),
+            ("task_group", TransferClass::RendezvousOnly),
+            ("resource_domain", TransferClass::General),
+            ("task_factory", TransferClass::General),
+            ("executable_authority", TransferClass::General),
+            ("vmo", TransferClass::General),
+            ("vmar", TransferClass::RendezvousOnly),
+            ("console", TransferClass::General),
+            ("boot_fs", TransferClass::General),
+            ("boot_file", TransferClass::General),
+            ("capability_channel", TransferClass::RendezvousOnly),
+            ("process_builder", TransferClass::RendezvousOnly),
+        ];
+        assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
+        for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {
+            assert_eq!((kind.name, kind.transfer), expected);
+        }
     }
 
     #[test]
@@ -1719,6 +2275,7 @@ mod tests {
             vec![schema::ObjectKind {
                 value: 1,
                 name: "none",
+                transfer: TransferClass::Forbidden,
             }]
             .into_boxed_slice(),
         );

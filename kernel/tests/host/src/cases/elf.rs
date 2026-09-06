@@ -161,7 +161,14 @@ fn decodes_supported_position_independent_relocations() {
     write_u64(&mut bytes, 0x2120, 0x2208);
     write_u64(&mut bytes, 0x2128, 3);
 
-    let image = crate::require_ok(Image::parse(&bytes));
+    let allocation = crate::require_ok(Image::allocation_plan(&bytes));
+    assert_eq!(allocation.segment_capacity(), 3);
+    // RELR expansion is conservatively bounded at 63 relocations per table
+    // entry before the decoder inspects whether an entry is direct or bitmap.
+    assert_eq!(allocation.relocation_capacity(), 127);
+    assert!(allocation.parser_bytes().is_some());
+
+    let image = crate::require_ok(Image::parse_with_plan(&bytes, allocation));
     assert_eq!(image.kind(), ImageKind::PositionIndependent);
     let relocations: Vec<_> = image.relocations().collect();
     assert_eq!(
@@ -180,5 +187,18 @@ fn decodes_supported_position_independent_relocations() {
     assert_eq!(
         Image::parse(&bytes).map(|_| ()),
         Err(Error::InvalidRelocation)
+    );
+}
+
+#[test]
+fn rejects_an_allocation_plan_for_different_image_metadata() {
+    let bytes = executable_image();
+    let allocation = crate::require_ok(Image::allocation_plan(&bytes));
+    let mut changed = bytes.clone();
+    write_u16(&mut changed, 56, 2);
+
+    assert_eq!(
+        Image::parse_with_plan(&changed, allocation).map(|_| ()),
+        Err(Error::InvalidHeader)
     );
 }

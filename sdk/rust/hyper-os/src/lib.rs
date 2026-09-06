@@ -10,11 +10,20 @@
 #![no_std]
 
 mod abi;
+pub mod bootfs;
+pub mod capability_channel;
+pub mod channel;
 pub mod console;
 mod error;
+pub mod handle;
 pub mod startup;
 mod status;
+pub mod task;
 
 pub use abi::require_core_abi;
 pub use error::{Error, Result};
+pub use handle::{HandleRef, OwnedHandle, Rights, RightsOffer};
 pub use status::Status;
+
+/// Absolute deadline which never expires.
+pub const DEADLINE_INFINITE: u64 = hyper_abi::HYPER_NATIVE_DEADLINE_INFINITE;

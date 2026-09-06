@@ -8,8 +8,9 @@ use crate::kernel::accounting::{
 };
 use crate::kernel::task::scheduler::{self, WaitRegistration};
 use crate::kernel::task::{
-    ArmedTimeout, PreparedTimeout, TimedWaitError, WaitMobility, WaitOutcome,
+    ArmedTimeout, PreparedTimeout, TimedWaitError, WaitMobility, WaitOutcome, WaitQueue,
 };
+use hyper::sync::InterruptMaskGuard;
 
 use super::signals::{PreparedSignalWait, SignalSource, SignalWaitError, SignalWaitOutcome};
 
@@ -120,6 +121,178 @@ enum ArmedWaitTimer {
     },
 }
 
+/// Result of preparing every fallible resource for a timed scheduler wait.
+pub(crate) enum TimedWaitPreparation {
+    /// The absolute deadline elapsed before scheduler publication.
+    Completed(WaitOutcome),
+    /// Timer and exact current-Thread wait generation are fully armed.
+    Armed(PreparedTimedWait),
+}
+
+/// Fully prepared but condition-unpublished scheduler wait.
+///
+/// A condition owner may allocate its own waiter storage first, construct this
+/// token, and then publish both its condition node and the scheduler wait while
+/// holding one IRQ-masking condition lock. No allocation or timer setup remains
+/// after this token is returned.
+#[must_use = "publish or abort the prepared timed wait"]
+pub(crate) struct PreparedTimedWait {
+    registration: Option<WaitRegistration>,
+    timer: Option<ArmedWaitTimer>,
+}
+
+/// Scheduler wait committed under a condition lock but not yet parked.
+#[must_use = "complete the committed timed wait with the retained IRQ mask"]
+pub(crate) struct PublishedTimedWait {
+    park: Option<scheduler::PrepareWait>,
+    timer: Option<ArmedWaitTimer>,
+}
+
+impl PreparedTimedWait {
+    pub(crate) fn ticket(&self) -> crate::kernel::task::WaitTicket {
+        match self.registration.as_ref() {
+            Some(registration) => registration.ticket(),
+            None => object_wait_invariant("prepared wait lost registration", None),
+        }
+    }
+
+    /// Resolves cancellation before condition publication. The exact winner is
+    /// consumed later by `publish_locked`, so this never leaves an unowned wait.
+    pub(crate) fn request_cancellation(&self) {
+        if let Err(error) = scheduler::resolve_wait(self.ticket(), WaitOutcome::Cancelled) {
+            object_wait_scheduler_invariant("prepared cancellation", error)
+        }
+    }
+
+    /// Publishes the embedded scheduler generation while the caller holds its
+    /// condition lock. Pairing the condition mutation with this call closes the
+    /// check-to-park race.
+    pub(crate) fn publish_locked(mut self, wait_queue: &WaitQueue) -> PublishedTimedWait {
+        let registration = match self.registration.take() {
+            Some(registration) => registration,
+            None => object_wait_invariant("prepared wait published twice", None),
+        };
+        let park = match scheduler::prepare_registered_park_locked(wait_queue, registration) {
+            Ok(park) => park,
+            Err(error) => object_wait_scheduler_invariant("condition wait publication", error),
+        };
+        PublishedTimedWait {
+            park: Some(park),
+            timer: self.timer.take(),
+        }
+    }
+
+    /// Cancels a preparation which could not publish its condition node.
+    pub(crate) fn abort(mut self) -> Result<WaitOutcome, ObjectWaitError> {
+        self.request_cancellation();
+        let registration = match self.registration.take() {
+            Some(registration) => registration,
+            None => object_wait_invariant("prepared wait aborted twice", None),
+        };
+        let outcome = match scheduler::finish_wait(registration) {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => object_wait_invariant("cancelled preparation remained unresolved", None),
+            Err(error) => object_wait_scheduler_invariant("prepared wait abort", error),
+        };
+        self.retire_timer(outcome)?;
+        Ok(outcome)
+    }
+
+    fn take_registration(&mut self) -> WaitRegistration {
+        match self.registration.take() {
+            Some(registration) => registration,
+            None => object_wait_invariant("prepared wait lost registration", None),
+        }
+    }
+
+    fn retire_timer(&mut self, outcome: WaitOutcome) -> Result<(), ObjectWaitError> {
+        let timer = match self.timer.take() {
+            Some(timer) => timer,
+            None => object_wait_invariant("prepared wait lost timer", Some(outcome)),
+        };
+        timer.retire(outcome)?;
+        Ok(())
+    }
+}
+
+impl Drop for PreparedTimedWait {
+    fn drop(&mut self) {
+        if self.registration.is_some() || self.timer.is_some() {
+            crate::hal::cpu::halt()
+        }
+    }
+}
+
+impl PublishedTimedWait {
+    /// True only when the current Thread must publish its condition node before
+    /// handing the retained interrupt mask into the context switch.
+    pub(crate) fn will_park(&self) -> bool {
+        matches!(self.park, Some(scheduler::PrepareWait::Park(_)))
+    }
+
+    pub(crate) fn finish(
+        mut self,
+        interrupt_mask: InterruptMaskGuard<crate::hal::irq::LocalMask>,
+    ) -> (WaitOutcome, Result<(), ObjectWaitError>) {
+        let park = match self.park.take() {
+            Some(park) => park,
+            None => object_wait_invariant("published wait completed twice", None),
+        };
+        let outcome = match park {
+            scheduler::PrepareWait::Park(commit) => {
+                scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask))
+            }
+            scheduler::PrepareWait::Completed(outcome) => {
+                drop(interrupt_mask);
+                outcome
+            }
+        };
+        let timer = match self.timer.take() {
+            Some(timer) => timer,
+            None => object_wait_invariant("published wait lost timer", Some(outcome)),
+        };
+        let retirement = timer.retire(outcome).map_err(ObjectWaitError::from);
+        (outcome, retirement)
+    }
+}
+
+impl Drop for PublishedTimedWait {
+    fn drop(&mut self) {
+        if self.park.is_some() || self.timer.is_some() {
+            crate::hal::cpu::halt()
+        }
+    }
+}
+
+/// Allocates, charges, and arms all resources needed to publish one timed
+/// condition wait. Callers must prepare their condition-specific storage first.
+pub(crate) fn prepare_timed_wait(
+    domain: &ResourceDomain,
+    deadline_nanoseconds: u64,
+) -> Result<TimedWaitPreparation, ObjectWaitError> {
+    let prepared_timer = match WaitDeadline::from_absolute_nanoseconds(deadline_nanoseconds)? {
+        WaitDeadline::Elapsed => {
+            return Ok(TimedWaitPreparation::Completed(WaitOutcome::TimedOut));
+        }
+        WaitDeadline::Infinite => PreparedWaitTimer::Infinite,
+        WaitDeadline::At(deadline) => PreparedWaitTimer::try_finite(domain, deadline)?,
+    };
+    scheduler::ensure_sleepable().map_err(SignalWaitError::Scheduler)?;
+    let registration =
+        scheduler::begin_wait(WaitMobility::Migratable).map_err(SignalWaitError::Scheduler)?;
+    let timer = match prepared_timer.arm(&registration) {
+        Ok(timer) => timer,
+        Err(error) => {
+            finish_unpublished_wait(registration)?;
+            return Err(error.into());
+        }
+    };
+    Ok(TimedWaitPreparation::Armed(PreparedTimedWait {
+        registration: Some(registration),
+        timer: Some(timer),
+    }))
+}
+
 impl ArmedWaitTimer {
     fn retire(self, outcome: WaitOutcome) -> Result<(), TimedWaitError> {
         match self {
@@ -145,48 +318,34 @@ pub(crate) fn wait_one(
         return Ok(SignalWaitOutcome::Observed(snapshot));
     }
 
-    let prepared_timer = match WaitDeadline::from_absolute_nanoseconds(deadline_nanoseconds)? {
-        WaitDeadline::Elapsed => return Ok(SignalWaitOutcome::TimedOut),
-        WaitDeadline::Infinite => PreparedWaitTimer::Infinite,
-        WaitDeadline::At(deadline) => PreparedWaitTimer::try_finite(domain, deadline)?,
-    };
-
     let waiter_charge = reserve_waiter(domain)?;
     let prepared_wait = PreparedSignalWait::try_new(requested, waiter_charge)?;
 
-    scheduler::ensure_sleepable().map_err(SignalWaitError::Scheduler)?;
-    let registration =
-        scheduler::begin_wait(WaitMobility::Migratable).map_err(SignalWaitError::Scheduler)?;
-    let armed_timer = match prepared_timer.arm(&registration) {
-        Ok(armed) => armed,
-        Err(error) => {
-            finish_unpublished_wait(registration)?;
-            return Err(error.into());
+    let mut prepared = match prepare_timed_wait(domain, deadline_nanoseconds)? {
+        TimedWaitPreparation::Completed(WaitOutcome::TimedOut) => {
+            return Ok(SignalWaitOutcome::TimedOut);
         }
+        TimedWaitPreparation::Completed(outcome) => {
+            object_wait_invariant("unexpected immediate wait outcome", Some(outcome))
+        }
+        TimedWaitPreparation::Armed(prepared) => prepared,
     };
 
     // A cancellation preceding scheduler publication could not resolve this
     // ticket. Any later cancellation observes its exact Armed or Queued
     // generation under the scheduler lock.
-    if cancellation_requested()
-        && let Err(error) = scheduler::resolve_wait(registration.ticket(), WaitOutcome::Cancelled)
-    {
-        // The armed timer may own a callback-visible raw context. A failed
-        // exact resolution leaves its detach state ambiguous, so unwinding is
-        // not a valid recovery path.
-        crate::kernel::crash::fatal(format_args!(
-            "HypeR: object-wait cancellation arbitration failed: {error:?}"
-        ));
+    if cancellation_requested() {
+        prepared.request_cancellation();
     }
 
-    let outcome = match signals.wait_registered(prepared_wait, registration) {
+    let outcome = match signals.wait_registered(prepared_wait, prepared.take_registration()) {
         Ok(outcome) => outcome,
         Err(error) => {
-            armed_timer.retire(WaitOutcome::Cancelled)?;
+            prepared.retire_timer(WaitOutcome::Cancelled)?;
             return Err(error.into());
         }
     };
-    armed_timer.retire(scheduler_outcome(outcome))?;
+    prepared.retire_timer(scheduler_outcome(outcome))?;
     Ok(outcome)
 }
 
@@ -221,5 +380,12 @@ const fn scheduler_outcome(outcome: SignalWaitOutcome) -> WaitOutcome {
 fn object_wait_invariant(message: &str, outcome: Option<WaitOutcome>) -> ! {
     crate::kernel::crash::fatal(format_args!(
         "HypeR: object wait invariant failed: {message}; outcome={outcome:?}"
+    ))
+}
+
+#[cold]
+fn object_wait_scheduler_invariant(message: &str, error: scheduler::Error) -> ! {
+    crate::kernel::crash::fatal(format_args!(
+        "HypeR: object wait scheduler invariant failed: {message}: {error:?}"
     ))
 }

@@ -1,33 +1,28 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fallibly prepared Channel messages with sender-sponsored accounting.
+//! Fallibly prepared `ByteChannel` messages with sender-sponsored accounting.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use hyper::mm::try_box;
 
+use super::{ByteChannelError, ByteMessageInfo, MessageSequence};
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
-use crate::kernel::capability::InTransitCapabilities;
-use crate::kernel::object::ObjectRetirement;
-
-use super::{ChannelError, MessageInfo, MessageSequence};
 
 pub(super) struct Message {
     sequence: MessageSequence,
     bytes: Vec<u8>,
-    handle_count: u64,
-    capabilities: Option<InTransitCapabilities>,
     pub(super) next: Option<Box<Message>>,
     _charge: CommittedCharge,
 }
 
 impl Message {
-    pub(super) fn info(&self) -> MessageInfo {
-        MessageInfo::new(self.sequence, self.bytes.len(), self.handle_count)
+    pub(super) fn info(&self) -> ByteMessageInfo {
+        ByteMessageInfo::new(self.sequence, self.bytes.len())
     }
 
     pub(super) fn bytes(&self) -> &[u8] {
@@ -45,34 +40,15 @@ impl Message {
     pub(super) fn replace_next(&mut self, next: Option<Box<Self>>) {
         self.next = next;
     }
-
-    pub(super) fn take_capabilities(&mut self) -> Option<InTransitCapabilities> {
-        self.capabilities.take()
-    }
-
-    pub(super) fn restore_capabilities(&mut self, capabilities: InTransitCapabilities) {
-        let count = match u64::try_from(capabilities.len()) {
-            Ok(count) => count,
-            Err(_) => message_invariant(),
-        };
-        if count == 0 || count != self.handle_count || self.capabilities.is_some() {
-            message_invariant();
-        }
-        self.capabilities = Some(capabilities);
-    }
-
-    pub(super) fn has_capabilities(&self) -> bool {
-        self.capabilities.is_some()
-    }
 }
 
 /// Complete message storage prepared before any Channel lock is acquired.
 #[must_use = "publish the prepared message or release its sponsored resources"]
-pub(crate) struct PreparedMessage {
+pub(crate) struct PreparedByteMessage {
     message: Option<Box<Message>>,
 }
 
-impl PreparedMessage {
+impl PreparedByteMessage {
     /// Allocates sender-sponsored storage before source capabilities are claimed.
     ///
     /// The byte buffer is zeroed so a caller can copy directly from user memory
@@ -80,45 +56,38 @@ impl PreparedMessage {
     pub(crate) fn try_new(
         domain: &ResourceDomain,
         byte_count: usize,
-        handle_count: u64,
-    ) -> Result<Self, ChannelError> {
+    ) -> Result<Self, ByteChannelError> {
         let charged_byte_count =
-            u64::try_from(byte_count).map_err(|_| ChannelError::MessageTooLarge)?;
-        if charged_byte_count > hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_MESSAGE_BYTES {
-            return Err(ChannelError::MessageTooLarge);
-        }
-        if handle_count > hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_MESSAGE_HANDLES {
-            return Err(ChannelError::MessageTooLarge);
+            u64::try_from(byte_count).map_err(|_| ByteChannelError::MessageTooLarge)?;
+        if charged_byte_count > hyper::abi::native::HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES {
+            return Err(ByteChannelError::MessageTooLarge);
         }
         let node_bytes = u64::try_from(core::mem::size_of::<Message>())
-            .map_err(|_| ChannelError::AllocationSize)?;
+            .map_err(|_| ByteChannelError::AllocationSize)?;
         let kernel_bytes = node_bytes
             .checked_add(charged_byte_count)
-            .ok_or(ChannelError::AllocationSize)?;
+            .ok_or(ByteChannelError::AllocationSize)?;
         let charge = domain
             .reserve(
                 ResourceAmount::ZERO
                     .with(ResourceKind::KernelMemoryBytes, kernel_bytes)
                     .with(ResourceKind::IpcMessages, 1)
-                    .with(ResourceKind::IpcBytes, charged_byte_count)
-                    .with(ResourceKind::IpcHandles, handle_count),
+                    .with(ResourceKind::IpcBytes, charged_byte_count),
             )?
             .commit();
 
         let mut owned = Vec::new();
         owned
             .try_reserve_exact(byte_count)
-            .map_err(|_| ChannelError::Allocation)?;
+            .map_err(|_| ByteChannelError::Allocation)?;
         owned.resize(byte_count, 0);
         let message = try_box(Message {
             sequence: MessageSequence::UNASSIGNED,
             bytes: owned,
-            handle_count,
-            capabilities: None,
             next: None,
             _charge: charge,
         })
-        .map_err(|_| ChannelError::Allocation)?;
+        .map_err(|_| ByteChannelError::Allocation)?;
         Ok(Self {
             message: Some(message),
         })
@@ -128,9 +97,8 @@ impl PreparedMessage {
     pub(crate) fn try_copy_from(
         domain: &ResourceDomain,
         bytes: &[u8],
-        handle_count: u64,
-    ) -> Result<Self, ChannelError> {
-        let mut prepared = Self::try_new(domain, bytes.len(), handle_count)?;
+    ) -> Result<Self, ByteChannelError> {
+        let mut prepared = Self::try_new(domain, bytes.len())?;
         prepared.bytes_mut().copy_from_slice(bytes);
         Ok(prepared)
     }
@@ -143,22 +111,8 @@ impl PreparedMessage {
         }
     }
 
-    pub(crate) fn info(&self) -> MessageInfo {
+    pub(crate) fn info(&self) -> ByteMessageInfo {
         self.message().info()
-    }
-
-    /// Installs an already-committed capability batch without allocation.
-    pub(crate) fn attach_handles(&mut self, capabilities: InTransitCapabilities) {
-        let message = match self.message.as_deref_mut() {
-            Some(message) => message,
-            None => message_invariant(),
-        };
-        message.restore_capabilities(capabilities);
-    }
-
-    pub(super) fn is_complete(&self) -> bool {
-        let message = self.message();
-        (message.handle_count == 0) != message.has_capabilities()
     }
 
     fn message(&self) -> &Message {
@@ -176,7 +130,7 @@ impl PreparedMessage {
     }
 }
 
-impl Drop for PreparedMessage {
+impl Drop for PreparedByteMessage {
     fn drop(&mut self) {
         // A prepared message remains ordinary local ownership. Dropping it is
         // the allocation-free transaction abort and releases its charge.
@@ -187,26 +141,22 @@ impl Drop for PreparedMessage {
 /// Iteratively releases a detached queue without retaining object locks or
 /// recursively destroying the queue's linked-list spine.
 pub(super) fn release_messages(mut current: Option<Box<Message>>) {
-    let mut retirement = ObjectRetirement::new();
-    release_messages_into(current.take(), &mut retirement);
-    retirement.drain();
+    release_messages_inner(current.take());
 }
 
-/// Releases a detached queue into an enclosing object-retirement transaction.
-pub(super) fn release_messages_into(
-    mut current: Option<Box<Message>>,
-    retirement: &mut ObjectRetirement,
-) {
+/// Releases a detached queue without recursively dropping its linked-list spine.
+pub(super) fn release_messages_into(mut current: Option<Box<Message>>) {
+    release_messages_inner(current.take());
+}
+
+fn release_messages_inner(mut current: Option<Box<Message>>) {
     while let Some(mut message) = current {
         current = message.take_next();
-        if let Some(capabilities) = message.take_capabilities() {
-            capabilities.release_into(retirement);
-        }
         drop(message);
     }
 }
 
-impl From<ResourceError> for ChannelError {
+impl From<ResourceError> for ByteChannelError {
     fn from(error: ResourceError) -> Self {
         Self::Resource(error)
     }
@@ -214,5 +164,5 @@ impl From<ResourceError> for ChannelError {
 
 #[cold]
 fn message_invariant() -> ! {
-    crate::kernel::crash::fatal(format_args!("HypeR: Channel message invariant failed"))
+    crate::kernel::crash::fatal(format_args!("HypeR: ByteChannel message invariant failed"))
 }
