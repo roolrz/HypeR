@@ -10,7 +10,9 @@ use hyper::cpu::CpuIndex;
 // ProcessBuilder commits one identity label for both the Process and its
 // initial Thread. Keep the scheduler snapshot capacity aligned with that ABI
 // contract so a name accepted by the builder cannot fail later at publication.
-const THREAD_NAME_CAPACITY: usize = 64;
+const _: () = assert!(hyper::abi::native::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES <= usize::MAX as u64);
+pub(crate) const MAX_THREAD_NAME_BYTES: usize =
+    hyper::abi::native::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES as usize;
 
 use crate::kernel::mm::stack::KernelStack;
 use crate::kernel::task::policy::{
@@ -1056,16 +1058,16 @@ impl Thread {
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct ThreadNameSnapshot {
-    bytes: [u8; THREAD_NAME_CAPACITY],
+    bytes: [u8; MAX_THREAD_NAME_BYTES],
     len: u8,
 }
 
 impl ThreadNameSnapshot {
     fn new(name: &str) -> Result<Self, Error> {
-        if name.len() > THREAD_NAME_CAPACITY {
+        if name.len() > MAX_THREAD_NAME_BYTES {
             return Err(Error::NameTooLong);
         }
-        let mut bytes = [0; THREAD_NAME_CAPACITY];
+        let mut bytes = [0; MAX_THREAD_NAME_BYTES];
         bytes[..name.len()].copy_from_slice(name.as_bytes());
         Ok(Self {
             bytes,
@@ -1075,7 +1077,7 @@ impl ThreadNameSnapshot {
 
     const fn empty() -> Self {
         Self {
-            bytes: [0; THREAD_NAME_CAPACITY],
+            bytes: [0; MAX_THREAD_NAME_BYTES],
             len: 0,
         }
     }
