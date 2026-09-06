@@ -53,7 +53,8 @@ fn prepare_handles(
     Ok([
         prepare_handle(
             resource,
-            Rights::TRANSFER
+            Rights::DUPLICATE
+                .union(Rights::TRANSFER)
                 .union(Rights::INSPECT)
                 .union(Rights::CREATE_RESOURCE_DOMAIN)
                 .union(Rights::SET_LIMITS)
@@ -62,14 +63,16 @@ fn prepare_handles(
         )?,
         prepare_handle(
             task_group,
-            Rights::TRANSFER
+            Rights::DUPLICATE
+                .union(Rights::TRANSFER)
                 .union(Rights::INSPECT)
                 .union(Rights::REQUEST_STOP)
                 .union(Rights::TASK_GROUP_ATTACH_PROCESS),
         )?,
         prepare_handle(
             task_factory,
-            Rights::TRANSFER
+            Rights::DUPLICATE
+                .union(Rights::TRANSFER)
                 .union(Rights::INSPECT)
                 .union(Rights::CREATE_PROCESS)
                 .union(Rights::CREATE_TASK_GROUP),

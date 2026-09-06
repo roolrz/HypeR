@@ -9,9 +9,10 @@
 
 #![no_std]
 
-pub mod console_contract;
 pub mod manifest;
-pub mod session_contract;
+#[cfg(test)]
+#[path = "../../shell/command.rs"]
+mod shell_command;
 pub mod supervision;
 
 use core::convert::Infallible;
@@ -76,7 +77,9 @@ mod tests {
     use core::cell::Cell;
     use core::convert::Infallible;
 
-    use super::manifest::{AuthorityDeclaration, AuthorityPolicy, LaunchPlan, Manifest};
+    use super::manifest::{
+        AuthorityDeclaration, AuthorityPolicy, LaunchPlan, Manifest, StartupPurposeDeclaration,
+    };
     use super::{BootstrapError, ManifestSource, ServiceGraphLauncher, bootstrap};
 
     const EMPTY_GRAPH: &str = r#"{"format":"hyper.service-manifest","services":[]}"#;
@@ -117,7 +120,7 @@ mod tests {
             None
         }
 
-        fn object_kind(&self, _name: &str) -> Option<u32> {
+        fn startup_purpose(&self, _image: &str, _name: &str) -> Option<StartupPurposeDeclaration> {
             None
         }
 

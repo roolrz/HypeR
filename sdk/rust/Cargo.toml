@@ -3,7 +3,7 @@
 
 [workspace]
 resolver = "3"
-members = ["hyper-os", "hyper-rt", "hyper-sys"]
+members = ["hyper-os", "hyper-rt", "hyper-service", "hyper-sys"]
 
 [workspace.package]
 version = "0.0.0"

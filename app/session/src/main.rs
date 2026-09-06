@@ -1,19 +1,20 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Initial foreground-session manager for raw Console data channels.
+//! Initial foreground-session router for one capability-bound client.
 
 #![no_std]
 #![no_main]
 
 use core::convert::Infallible;
 
-use hyper_app::session_contract;
+use hyper_os::handle::{ByteChannelObject, OwnedHandle};
 use hyper_os::startup::Startup;
+use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_rt::ExitCode;
+use hyper_service::session as session_contract;
 
 const INPUT_BYTES: usize = 256;
-const READY_MESSAGE: &[u8] = b"HypeR session: console ready\n";
 
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     match run(&mut startup) {
@@ -24,18 +25,71 @@ fn application_main(mut startup: Startup<'_>) -> ExitCode {
 
 fn run(startup: &mut Startup<'_>) -> Result<Infallible, ()> {
     hyper_os::require_core_abi().map_err(|_| ())?;
-    let input_owner = startup.take(session_contract::INPUT).map_err(|_| ())?;
-    let output_owner = startup.take(session_contract::OUTPUT).map_err(|_| ())?;
-    let input_channel = input_owner.as_byte_channel();
-    let output_channel = output_owner.as_byte_channel();
-    output_channel.send(READY_MESSAGE).map_err(|_| ())?;
-    let mut input = [0_u8; INPUT_BYTES];
+    let console_input_owner = startup
+        .take(session_contract::CONSOLE_INPUT)
+        .map_err(|_| ())?;
+    let console_output_owner = startup
+        .take(session_contract::CONSOLE_OUTPUT)
+        .map_err(|_| ())?;
+    let client_input_owner = startup
+        .take(session_contract::CLIENT_INPUT)
+        .map_err(|_| ())?;
+    let client_output_owner = startup
+        .take(session_contract::CLIENT_OUTPUT)
+        .map_err(|_| ())?;
+    let client_error_owner = startup
+        .take(session_contract::CLIENT_ERROR)
+        .map_err(|_| ())?;
+    let readable = ObjectSignals::<ByteChannelObject>::READABLE
+        .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED);
+    let waits = [
+        WaitItem::new(client_output_owner.as_handle_ref(), readable),
+        WaitItem::new(client_error_owner.as_handle_ref(), readable),
+        WaitItem::new(console_input_owner.as_handle_ref(), readable),
+    ];
+    let mut bytes = [0_u8; INPUT_BYTES];
 
     loop {
-        let count = input_channel.receive(&mut input).map_err(|_| ())?;
-        let bytes = input.get(..count).ok_or(())?;
-        output_channel.send(bytes).map_err(|_| ())?;
+        let observation = wait_many(&waits, hyper_os::DEADLINE_INFINITE).map_err(|_| ())?;
+        match observation.index {
+            0 => route(
+                &client_output_owner,
+                &console_output_owner,
+                observation.observed,
+                &mut bytes,
+            )?,
+            1 => route(
+                &client_error_owner,
+                &console_output_owner,
+                observation.observed,
+                &mut bytes,
+            )?,
+            2 => route(
+                &console_input_owner,
+                &client_input_owner,
+                observation.observed,
+                &mut bytes,
+            )?,
+            _ => return Err(()),
+        }
     }
+}
+
+fn route(
+    source: &OwnedHandle<ByteChannelObject>,
+    destination: &OwnedHandle<ByteChannelObject>,
+    observed: u64,
+    buffer: &mut [u8],
+) -> Result<(), ()> {
+    if ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed) {
+        let count = source.as_byte_channel().receive(buffer).map_err(|_| ())?;
+        destination
+            .as_byte_channel()
+            .send(buffer.get(..count).ok_or(())?)
+            .map_err(|_| ())?;
+        return Ok(());
+    }
+    Err(())
 }
 
 hyper_rt::entry!(application_main);

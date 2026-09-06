@@ -11,7 +11,7 @@ pub const MAX_RIGHTS_PER_CAPABILITY: usize = 12;
 pub(super) const MAX_SERVICE_NAME_BYTES: usize = 63;
 pub(super) const MAX_IMAGE_PATH_BYTES: usize = 255;
 pub(super) const MAX_BINDING_NAME_BYTES: usize = 95;
-pub(super) const MAX_KIND_NAME_BYTES: usize = 63;
+pub(super) const MAX_PURPOSE_NAME_BYTES: usize = 95;
 pub(super) const MAX_RIGHT_NAME_BYTES: usize = 47;
 
 /// Acquisition operation requested for one startup capability.
@@ -34,8 +34,7 @@ pub enum RestartPolicy {
 #[derive(Debug, Eq, PartialEq)]
 pub struct CapabilityBinding<'manifest> {
     pub(super) source: &'manifest str,
-    pub(super) purpose: u32,
-    pub(super) kind: &'manifest str,
+    pub(super) purpose: &'manifest str,
     pub(super) operation: CapabilityOperation,
     pub(super) rights: BoundedList<&'manifest str, MAX_RIGHTS_PER_CAPABILITY>,
 }
@@ -45,12 +44,8 @@ impl CapabilityBinding<'_> {
         self.source
     }
 
-    pub const fn purpose(&self) -> u32 {
+    pub const fn purpose(&self) -> &str {
         self.purpose
-    }
-
-    pub const fn kind(&self) -> &str {
-        self.kind
     }
 
     pub const fn operation(&self) -> CapabilityOperation {

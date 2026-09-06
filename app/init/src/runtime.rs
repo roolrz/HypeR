@@ -8,18 +8,22 @@ use core::convert::Infallible;
 use hyper_app::BootstrapError;
 use hyper_app::manifest::{
     AuthorityDeclaration, AuthorityPolicy, CapabilityOperation, LaunchPlan, MAX_MANIFEST_BYTES,
-    MAX_SERVICES, Manifest, Service,
+    MAX_SERVICES, Manifest, Service, StartupPurposeDeclaration,
 };
 use hyper_app::supervision::{self, SupportError};
 use hyper_app::{ManifestSource, ServiceGraphLauncher, bootstrap};
 use hyper_os::bootfs::{BootFileRights, BootFs};
 use hyper_os::channel;
 use hyper_os::handle::{
-    ByteChannelObject, ConsoleObject, OwnedHandle, ProcessObject, ResourceDomainObject, Rights,
-    RightsOffer, TaskFactoryObject, TaskGroupObject, TypedObject,
+    BootFsObject, ByteChannelObject, ConsoleObject, OwnedHandle, ProcessObject,
+    ResourceDomainObject, Rights, RightsOffer, TaskFactoryObject, TaskGroupObject, TypedObject,
 };
 use hyper_os::startup::{self, Startup};
 use hyper_os::task::ProcessBuilder;
+use hyper_service::{
+    console as console_contract, process as process_contract, session as session_contract,
+    stdio as stdio_contract,
+};
 
 const MANIFEST_PATH: &str = "/etc/hyper/services.json";
 const BOOTSTRAP_CONSOLE: &str = "bootstrap.console";
@@ -27,8 +31,20 @@ const CONSOLE_INPUT_CHANNEL: &str = "bootstrap.console-input-channel";
 const CONSOLE_OUTPUT_CHANNEL: &str = "bootstrap.console-output-channel";
 const SESSION_INPUT_CHANNEL: &str = "bootstrap.session-input-channel";
 const SESSION_OUTPUT_CHANNEL: &str = "bootstrap.session-output-channel";
-const CONSOLE_KIND: &str = "console";
-const BYTE_CHANNEL_KIND: &str = "byte-channel";
+const SESSION_CLIENT_INPUT_CHANNEL: &str = "bootstrap.session-client-input-channel";
+const SESSION_CLIENT_OUTPUT_CHANNEL: &str = "bootstrap.session-client-output-channel";
+const SESSION_CLIENT_ERROR_CHANNEL: &str = "bootstrap.session-client-error-channel";
+const SHELL_INPUT_CHANNEL: &str = "bootstrap.shell-input-channel";
+const SHELL_OUTPUT_CHANNEL: &str = "bootstrap.shell-output-channel";
+const SHELL_ERROR_CHANNEL: &str = "bootstrap.shell-error-channel";
+const BOOTSTRAP_BOOT_FS: &str = "bootstrap.boot-fs";
+const BOOTSTRAP_TASK_FACTORY: &str = "bootstrap.task-factory";
+const BOOTSTRAP_TASK_GROUP: &str = "bootstrap.task-group";
+const BOOTSTRAP_RESOURCE_DOMAIN: &str = "bootstrap.resource-domain";
+const CONSOLE_INPUT_IMAGE: &str = "/svc/console-input";
+const CONSOLE_OUTPUT_IMAGE: &str = "/svc/console-output";
+const SESSION_IMAGE: &str = "/svc/session";
+const SHELL_IMAGE: &str = "/bin/sh";
 
 #[inline(never)]
 pub(super) fn run(startup: &mut Startup<'_>) -> Result<Infallible, Error> {
@@ -111,6 +127,12 @@ struct RuntimeLauncher {
     console_output_channel: Option<OwnedHandle<ByteChannelObject>>,
     session_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     session_output_channel: Option<OwnedHandle<ByteChannelObject>>,
+    session_client_input_channel: Option<OwnedHandle<ByteChannelObject>>,
+    session_client_output_channel: Option<OwnedHandle<ByteChannelObject>>,
+    session_client_error_channel: Option<OwnedHandle<ByteChannelObject>>,
+    shell_input_channel: Option<OwnedHandle<ByteChannelObject>>,
+    shell_output_channel: Option<OwnedHandle<ByteChannelObject>>,
+    shell_error_channel: Option<OwnedHandle<ByteChannelObject>>,
     supervisors: [Option<OwnedHandle<ProcessObject>>; MAX_SERVICES],
 }
 
@@ -119,6 +141,12 @@ impl RuntimeLauncher {
         let (console_input_channel, session_input_channel) =
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         let (session_output_channel, console_output_channel) =
+            channel::create_pair().map_err(|_| Error::OperatingSystem)?;
+        let (session_client_input_channel, shell_input_channel) =
+            channel::create_pair().map_err(|_| Error::OperatingSystem)?;
+        let (shell_output_channel, session_client_output_channel) =
+            channel::create_pair().map_err(|_| Error::OperatingSystem)?;
+        let (shell_error_channel, session_client_error_channel) =
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         Ok(Self {
             boot_fs,
@@ -138,6 +166,12 @@ impl RuntimeLauncher {
             console_output_channel: Some(console_output_channel),
             session_input_channel: Some(session_input_channel),
             session_output_channel: Some(session_output_channel),
+            session_client_input_channel: Some(session_client_input_channel),
+            session_client_output_channel: Some(session_client_output_channel),
+            session_client_error_channel: Some(session_client_error_channel),
+            shell_input_channel: Some(shell_input_channel),
+            shell_output_channel: Some(shell_output_channel),
+            shell_error_channel: Some(shell_error_channel),
             supervisors: core::array::from_fn(|_| None),
         })
     }
@@ -181,6 +215,9 @@ impl RuntimeLauncher {
                 .capability_rights(service_index, capability_index)
                 .and_then(Rights::from_bits)
                 .ok_or(LaunchError::InvalidPlan)?;
+            let purpose = plan
+                .capability_purpose(service_index, capability_index)
+                .ok_or(LaunchError::InvalidPlan)?;
             match (capability.source(), capability.operation()) {
                 (BOOTSTRAP_CONSOLE, CapabilityOperation::Duplicate)
                     if plan.capability_kind(service_index, capability_index)
@@ -189,7 +226,55 @@ impl RuntimeLauncher {
                     builder
                         .add_handle_duplicate(
                             self.console.as_handle_ref(),
-                            capability.purpose(),
+                            purpose,
+                            RightsOffer::Exact(rights),
+                        )
+                        .map_err(|_| LaunchError::OperatingSystem)?;
+                }
+                (BOOTSTRAP_BOOT_FS, CapabilityOperation::Duplicate)
+                    if plan.capability_kind(service_index, capability_index)
+                        == Some(BootFsObject::KIND.as_raw()) =>
+                {
+                    builder
+                        .add_handle_duplicate(
+                            self.boot_fs.as_handle_ref(),
+                            purpose,
+                            RightsOffer::Exact(rights),
+                        )
+                        .map_err(|_| LaunchError::OperatingSystem)?;
+                }
+                (BOOTSTRAP_TASK_FACTORY, CapabilityOperation::Duplicate)
+                    if plan.capability_kind(service_index, capability_index)
+                        == Some(TaskFactoryObject::KIND.as_raw()) =>
+                {
+                    builder
+                        .add_handle_duplicate(
+                            self.factory.as_handle_ref(),
+                            purpose,
+                            RightsOffer::Exact(rights),
+                        )
+                        .map_err(|_| LaunchError::OperatingSystem)?;
+                }
+                (BOOTSTRAP_TASK_GROUP, CapabilityOperation::Duplicate)
+                    if plan.capability_kind(service_index, capability_index)
+                        == Some(TaskGroupObject::KIND.as_raw()) =>
+                {
+                    builder
+                        .add_handle_duplicate(
+                            self.group.as_handle_ref(),
+                            purpose,
+                            RightsOffer::Exact(rights),
+                        )
+                        .map_err(|_| LaunchError::OperatingSystem)?;
+                }
+                (BOOTSTRAP_RESOURCE_DOMAIN, CapabilityOperation::Duplicate)
+                    if plan.capability_kind(service_index, capability_index)
+                        == Some(ResourceDomainObject::KIND.as_raw()) =>
+                {
+                    builder
+                        .add_handle_duplicate(
+                            self.domain.as_handle_ref(),
+                            purpose,
                             RightsOffer::Exact(rights),
                         )
                         .map_err(|_| LaunchError::OperatingSystem)?;
@@ -198,7 +283,7 @@ impl RuntimeLauncher {
                     if plan.capability_kind(service_index, capability_index)
                         == Some(ByteChannelObject::KIND.as_raw()) =>
                 {
-                    self.move_channel_into_builder(source, &builder, capability.purpose(), rights)?;
+                    self.move_channel_into_builder(source, &builder, purpose, rights)?;
                 }
                 _ => return Err(LaunchError::UnsupportedAuthority),
             }
@@ -220,6 +305,12 @@ impl RuntimeLauncher {
             CONSOLE_OUTPUT_CHANNEL => &mut self.console_output_channel,
             SESSION_INPUT_CHANNEL => &mut self.session_input_channel,
             SESSION_OUTPUT_CHANNEL => &mut self.session_output_channel,
+            SESSION_CLIENT_INPUT_CHANNEL => &mut self.session_client_input_channel,
+            SESSION_CLIENT_OUTPUT_CHANNEL => &mut self.session_client_output_channel,
+            SESSION_CLIENT_ERROR_CHANNEL => &mut self.session_client_error_channel,
+            SHELL_INPUT_CHANNEL => &mut self.shell_input_channel,
+            SHELL_OUTPUT_CHANNEL => &mut self.shell_output_channel,
+            SHELL_ERROR_CHANNEL => &mut self.shell_error_channel,
             _ => return Err(LaunchError::UnsupportedAuthority),
         };
         let channel = slot.take().ok_or(LaunchError::AuthorityConsumed)?;
@@ -323,7 +414,13 @@ impl AuthorityPolicy for RuntimeLauncher {
             CONSOLE_INPUT_CHANNEL
             | CONSOLE_OUTPUT_CHANNEL
             | SESSION_INPUT_CHANNEL
-            | SESSION_OUTPUT_CHANNEL => Some(AuthorityDeclaration {
+            | SESSION_OUTPUT_CHANNEL
+            | SESSION_CLIENT_INPUT_CHANNEL
+            | SESSION_CLIENT_OUTPUT_CHANNEL
+            | SESSION_CLIENT_ERROR_CHANNEL
+            | SHELL_INPUT_CHANNEL
+            | SHELL_OUTPUT_CHANNEL
+            | SHELL_ERROR_CHANNEL => Some(AuthorityDeclaration {
                 provider: None,
                 object_kind: ByteChannelObject::KIND.as_raw(),
                 rights: byte_channel_rights().bits(),
@@ -331,16 +428,104 @@ impl AuthorityPolicy for RuntimeLauncher {
                 duplicable: false,
                 creatable: false,
             }),
+            BOOTSTRAP_BOOT_FS => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: BootFsObject::KIND.as_raw(),
+                rights: boot_fs_rights().bits(),
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            BOOTSTRAP_TASK_FACTORY => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: TaskFactoryObject::KIND.as_raw(),
+                rights: task_factory_rights().bits(),
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            BOOTSTRAP_TASK_GROUP => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: TaskGroupObject::KIND.as_raw(),
+                rights: task_group_rights().bits(),
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            BOOTSTRAP_RESOURCE_DOMAIN => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: ResourceDomainObject::KIND.as_raw(),
+                rights: resource_domain_rights().bits(),
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
             _ => None,
         }
     }
 
-    fn object_kind(&self, name: &str) -> Option<u32> {
-        match name {
-            CONSOLE_KIND => Some(ConsoleObject::KIND.as_raw()),
-            BYTE_CHANNEL_KIND => Some(ByteChannelObject::KIND.as_raw()),
-            _ => None,
-        }
+    fn startup_purpose(&self, image: &str, name: &str) -> Option<StartupPurposeDeclaration> {
+        let (value, object_kind) = match (image, name) {
+            (CONSOLE_INPUT_IMAGE | CONSOLE_OUTPUT_IMAGE, console_contract::SYSTEM_CONSOLE_NAME) => {
+                (
+                    console_contract::SYSTEM_CONSOLE.as_raw(),
+                    ConsoleObject::KIND.as_raw(),
+                )
+            }
+            (CONSOLE_INPUT_IMAGE | CONSOLE_OUTPUT_IMAGE, console_contract::DATA_CHANNEL_NAME) => (
+                console_contract::DATA_CHANNEL.as_raw(),
+                ByteChannelObject::KIND.as_raw(),
+            ),
+            (SESSION_IMAGE, session_contract::CONSOLE_INPUT_NAME) => (
+                session_contract::CONSOLE_INPUT.as_raw(),
+                ByteChannelObject::KIND.as_raw(),
+            ),
+            (SESSION_IMAGE, session_contract::CONSOLE_OUTPUT_NAME) => (
+                session_contract::CONSOLE_OUTPUT.as_raw(),
+                ByteChannelObject::KIND.as_raw(),
+            ),
+            (SESSION_IMAGE, session_contract::CLIENT_INPUT_NAME) => (
+                session_contract::CLIENT_INPUT.as_raw(),
+                ByteChannelObject::KIND.as_raw(),
+            ),
+            (SESSION_IMAGE, session_contract::CLIENT_OUTPUT_NAME) => (
+                session_contract::CLIENT_OUTPUT.as_raw(),
+                ByteChannelObject::KIND.as_raw(),
+            ),
+            (SESSION_IMAGE, session_contract::CLIENT_ERROR_NAME) => (
+                session_contract::CLIENT_ERROR.as_raw(),
+                ByteChannelObject::KIND.as_raw(),
+            ),
+            (SHELL_IMAGE, stdio_contract::STANDARD_INPUT_NAME) => (
+                stdio_contract::STANDARD_INPUT.as_raw(),
+                ByteChannelObject::KIND.as_raw(),
+            ),
+            (SHELL_IMAGE, stdio_contract::STANDARD_OUTPUT_NAME) => (
+                stdio_contract::STANDARD_OUTPUT.as_raw(),
+                ByteChannelObject::KIND.as_raw(),
+            ),
+            (SHELL_IMAGE, stdio_contract::STANDARD_ERROR_NAME) => (
+                stdio_contract::STANDARD_ERROR.as_raw(),
+                ByteChannelObject::KIND.as_raw(),
+            ),
+            (SHELL_IMAGE, process_contract::BOOT_FS_NAME) => {
+                (startup::BOOT_FS.as_raw(), BootFsObject::KIND.as_raw())
+            }
+            (SHELL_IMAGE, process_contract::TASK_FACTORY_NAME) => (
+                startup::TASK_FACTORY.as_raw(),
+                TaskFactoryObject::KIND.as_raw(),
+            ),
+            (SHELL_IMAGE, process_contract::TASK_GROUP_NAME) => {
+                (startup::TASK_GROUP.as_raw(), TaskGroupObject::KIND.as_raw())
+            }
+            (SHELL_IMAGE, process_contract::RESOURCE_DOMAIN_NAME) => (
+                startup::RESOURCE_DOMAIN.as_raw(),
+                ResourceDomainObject::KIND.as_raw(),
+            ),
+            (SHELL_IMAGE, _) => return None,
+            (_, _) => return None,
+        };
+        Some(StartupPurposeDeclaration { value, object_kind })
     }
 
     fn right(&self, name: &str) -> Option<u64> {
@@ -351,6 +536,9 @@ impl AuthorityPolicy for RuntimeLauncher {
             "inspect" => Some(Rights::INSPECT.bits()),
             "read" => Some(Rights::READ.bits()),
             "write" => Some(Rights::WRITE.bits()),
+            "create-process" => Some(Rights::CREATE_PROCESS.bits()),
+            "attach-process" => Some(Rights::TASK_GROUP_ATTACH_PROCESS.bits()),
+            "sponsor" => Some(Rights::RESOURCE_DOMAIN_SPONSOR.bits()),
             _ => None,
         }
     }
@@ -409,6 +597,35 @@ fn byte_channel_rights() -> Rights {
         .union(Rights::INSPECT)
         .union(Rights::READ)
         .union(Rights::WRITE)
+}
+
+fn boot_fs_rights() -> Rights {
+    Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT)
+        .union(Rights::READ)
+}
+
+fn task_factory_rights() -> Rights {
+    Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT)
+        .union(Rights::CREATE_PROCESS)
+}
+
+fn task_group_rights() -> Rights {
+    Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT)
+        .union(Rights::REQUEST_STOP)
+        .union(Rights::TASK_GROUP_ATTACH_PROCESS)
+}
+
+fn resource_domain_rights() -> Rights {
+    Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT)
+        .union(Rights::RESOURCE_DOMAIN_SPONSOR)
 }
 
 pub(super) enum LaunchError {

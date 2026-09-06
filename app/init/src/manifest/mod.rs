@@ -15,8 +15,8 @@ pub use model::{
 pub(crate) use parse::parse_into;
 pub use parse::{ParseError, ParseErrorKind, parse};
 pub use plan::{
-    AuthorityDeclaration, AuthorityPolicy, LaunchPlan, ValidationError, ValidationErrorKind,
-    validate,
+    AuthorityDeclaration, AuthorityPolicy, LaunchPlan, StartupPurposeDeclaration, ValidationError,
+    ValidationErrorKind, validate,
 };
 
 #[cfg(test)]

@@ -4,7 +4,7 @@
 use super::model::{
     BoundedList, CapabilityBinding, CapabilityOperation, MAX_BINDING_NAME_BYTES,
     MAX_CAPABILITIES_PER_SERVICE, MAX_DEPENDENCIES_PER_SERVICE, MAX_IMAGE_PATH_BYTES,
-    MAX_KIND_NAME_BYTES, MAX_MANIFEST_BYTES, MAX_RIGHT_NAME_BYTES, MAX_RIGHTS_PER_CAPABILITY,
+    MAX_MANIFEST_BYTES, MAX_PURPOSE_NAME_BYTES, MAX_RIGHT_NAME_BYTES, MAX_RIGHTS_PER_CAPABILITY,
     MAX_SERVICE_NAME_BYTES, MAX_SERVICES, Manifest, RestartPolicy, Service,
 };
 
@@ -26,7 +26,6 @@ pub enum ParseErrorKind {
     MissingField,
     InvalidFormat,
     InvalidEnum,
-    InvalidNumber,
     TooManyServices,
     TooManyDependencies,
     TooManyCapabilities,
@@ -272,7 +271,6 @@ impl<'manifest> Parser<'manifest> {
         self.open(b'{')?;
         let mut source = None;
         let mut purpose = None;
-        let mut kind = None;
         let mut operation = None;
         let mut rights = None;
         if self.consume_close(b'}') {
@@ -288,13 +286,9 @@ impl<'manifest> Parser<'manifest> {
                     self.parse_string(MAX_BINDING_NAME_BYTES)?,
                     field_offset,
                 )?,
-                "purpose" => {
-                    let value = self.parse_u32()?;
-                    assign_once(&mut purpose, value, field_offset)?;
-                }
-                "kind" => assign_once(
-                    &mut kind,
-                    self.parse_string(MAX_KIND_NAME_BYTES)?,
+                "purpose" => assign_once(
+                    &mut purpose,
+                    self.parse_string(MAX_PURPOSE_NAME_BYTES)?,
                     field_offset,
                 )?,
                 "operation" => {
@@ -322,7 +316,6 @@ impl<'manifest> Parser<'manifest> {
         Ok(CapabilityBinding {
             source: source.ok_or_else(|| self.error(ParseErrorKind::MissingField))?,
             purpose: purpose.ok_or_else(|| self.error(ParseErrorKind::MissingField))?,
-            kind: kind.ok_or_else(|| self.error(ParseErrorKind::MissingField))?,
             operation: operation.ok_or_else(|| self.error(ParseErrorKind::MissingField))?,
             rights: rights.ok_or_else(|| self.error(ParseErrorKind::MissingField))?,
         })
@@ -384,40 +377,6 @@ impl<'manifest> Parser<'manifest> {
             return Ok(false);
         }
         Err(self.error(ParseErrorKind::UnexpectedToken))
-    }
-
-    fn parse_u32(&mut self) -> Result<u32, ParseError> {
-        self.skip_whitespace();
-        let start = self.position;
-        let Some(first) = self.bytes.get(self.position).copied() else {
-            return Err(self.error(ParseErrorKind::UnexpectedEnd));
-        };
-        if !first.is_ascii_digit() {
-            return Err(self.error(ParseErrorKind::InvalidNumber));
-        }
-        if first == b'0' {
-            self.position += 1;
-            if self
-                .bytes
-                .get(self.position)
-                .is_some_and(u8::is_ascii_digit)
-            {
-                return Err(self.at(ParseErrorKind::InvalidNumber, start));
-            }
-            return Ok(0);
-        }
-        let mut value = 0u32;
-        while let Some(digit) = self.bytes.get(self.position).copied() {
-            if !digit.is_ascii_digit() {
-                break;
-            }
-            value = value
-                .checked_mul(10)
-                .and_then(|value| value.checked_add(u32::from(digit - b'0')))
-                .ok_or_else(|| self.at(ParseErrorKind::InvalidNumber, start))?;
-            self.position += 1;
-        }
-        Ok(value)
     }
 
     fn colon(&mut self) -> Result<(), ParseError> {

@@ -8,9 +8,9 @@
 
 use core::convert::Infallible;
 
-use hyper_app::console_contract;
 use hyper_os::startup::Startup;
 use hyper_rt::ExitCode;
+use hyper_service::console as console_contract;
 
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     match run(&mut startup) {

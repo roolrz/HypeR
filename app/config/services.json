@@ -12,15 +12,13 @@
       "capabilities": [
         {
           "source": "bootstrap.console",
-          "purpose": 1213792257,
-          "kind": "console",
+          "purpose": "console.system",
           "operation": "duplicate",
           "rights": ["wait", "read"]
         },
         {
           "source": "bootstrap.console-input-channel",
-          "purpose": 1213792258,
-          "kind": "byte-channel",
+          "purpose": "console.data",
           "operation": "move",
           "rights": ["wait", "write"]
         }
@@ -35,15 +33,13 @@
       "capabilities": [
         {
           "source": "bootstrap.console",
-          "purpose": 1213792257,
-          "kind": "console",
+          "purpose": "console.system",
           "operation": "duplicate",
           "rights": ["wait", "write"]
         },
         {
           "source": "bootstrap.console-output-channel",
-          "purpose": 1213792258,
-          "kind": "byte-channel",
+          "purpose": "console.data",
           "operation": "move",
           "rights": ["wait", "read"]
         }
@@ -58,17 +54,84 @@
       "capabilities": [
         {
           "source": "bootstrap.session-input-channel",
-          "purpose": 1213792257,
-          "kind": "byte-channel",
+          "purpose": "session.console-input",
           "operation": "move",
           "rights": ["wait", "read"]
         },
         {
           "source": "bootstrap.session-output-channel",
-          "purpose": 1213792258,
-          "kind": "byte-channel",
+          "purpose": "session.console-output",
           "operation": "move",
           "rights": ["wait", "write"]
+        },
+        {
+          "source": "bootstrap.session-client-input-channel",
+          "purpose": "session.client-input",
+          "operation": "move",
+          "rights": ["wait", "write"]
+        },
+        {
+          "source": "bootstrap.session-client-output-channel",
+          "purpose": "session.client-output",
+          "operation": "move",
+          "rights": ["wait", "read"]
+        },
+        {
+          "source": "bootstrap.session-client-error-channel",
+          "purpose": "session.client-error",
+          "operation": "move",
+          "rights": ["wait", "read"]
+        }
+      ]
+    },
+    {
+      "name": "shell",
+      "image": "/bin/sh",
+      "critical": false,
+      "restart": "never",
+      "after": ["session"],
+      "capabilities": [
+        {
+          "source": "bootstrap.shell-input-channel",
+          "purpose": "stdio.input",
+          "operation": "move",
+          "rights": ["wait", "read"]
+        },
+        {
+          "source": "bootstrap.shell-output-channel",
+          "purpose": "stdio.output",
+          "operation": "move",
+          "rights": ["wait", "write"]
+        },
+        {
+          "source": "bootstrap.shell-error-channel",
+          "purpose": "stdio.error",
+          "operation": "move",
+          "rights": ["wait", "write"]
+        },
+        {
+          "source": "bootstrap.boot-fs",
+          "purpose": "process.boot-fs",
+          "operation": "duplicate",
+          "rights": ["read"]
+        },
+        {
+          "source": "bootstrap.task-factory",
+          "purpose": "process.task-factory",
+          "operation": "duplicate",
+          "rights": ["create-process"]
+        },
+        {
+          "source": "bootstrap.task-group",
+          "purpose": "process.task-group",
+          "operation": "duplicate",
+          "rights": ["attach-process"]
+        },
+        {
+          "source": "bootstrap.resource-domain",
+          "purpose": "process.resource-domain",
+          "operation": "duplicate",
+          "rights": ["sponsor"]
         }
       ]
     }

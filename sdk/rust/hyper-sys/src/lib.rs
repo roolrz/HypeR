@@ -255,6 +255,33 @@ pub unsafe fn object_wait_one(
     unsafe { ffi_object_wait_one(object, signals, deadline) }
 }
 
+/// Waits for one member of a raw object-wait array.
+///
+/// # Safety
+///
+/// Every record must contain a live handle with wait rights and a valid signal
+/// mask for that object's kind. `items` must remain readable for `item_count`
+/// complete records throughout the call.
+#[inline]
+pub unsafe fn object_wait_many(
+    items: *const abi::HyperNativeObjectWaitItem,
+    item_count: usize,
+    deadline: u64,
+) -> CallResult {
+    // SAFETY: the caller establishes the array and borrowed-handle contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_OBJECT_WAIT_MANY,
+            items.addr() as u64,
+            item_count as u64,
+            deadline,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
 /// Creates one raw `ByteChannel` endpoint pair.
 ///
 /// # Safety
@@ -319,6 +346,32 @@ pub unsafe fn capability_channel_create() -> CallResult {
             0,
             0,
         )
+    }
+}
+
+/// Retrieves terminal and lifecycle information for one raw Process handle.
+///
+/// # Safety
+///
+/// `process` must remain live with inspect rights. `info` must be aligned and
+/// writable for one complete process-info record.
+#[inline]
+pub unsafe fn process_get_info(
+    process: abi::HyperNativeHandle,
+    info: *mut abi::HyperNativeProcessInfo,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes the handle and output-pointer contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PROCESS_GET_INFO,
+            process,
+            info.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeProcessInfo>() as u64,
+            0,
+            0,
+            0,
+        )
+        .status
     }
 }
 

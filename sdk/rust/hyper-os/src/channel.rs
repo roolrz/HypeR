@@ -93,55 +93,70 @@ impl<'owner> ByteChannel<'owner> {
             });
         }
         loop {
-            // SAFETY: the startup borrow keeps the endpoint live, and `bytes`
-            // remains readable for the complete non-retaining syscall.
-            let status = Status::from_raw(unsafe {
-                hyper_sys::byte_channel_write(self.handle.raw().get(), bytes.as_ptr(), bytes.len())
-            });
-            match status {
-                Status::OK => return Ok(()),
-                Status::WOULD_BLOCK => {
+            match self.try_send(bytes) {
+                Ok(()) => return Ok(()),
+                Err(Error::Status(Status::WOULD_BLOCK)) => {
                     if self.wait_writable()? == WaitOutcome::PeerClosed {
                         return Err(Error::Status(Status::PEER_CLOSED));
                     }
                 }
-                failure => return Err(Error::Status(failure)),
+                Err(error) => return Err(error),
             }
         }
     }
 
+    /// Attempts to send one complete message without waiting for capacity.
+    pub fn try_send(&self, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > MAX_MESSAGE_BYTES {
+            return Err(Error::MessageTooLarge {
+                bytes: bytes.len() as u64,
+                handles: 0,
+            });
+        }
+        // SAFETY: the owner borrow keeps the endpoint live, and `bytes`
+        // remains readable for the complete non-retaining syscall.
+        Status::from_raw(unsafe {
+            hyper_sys::byte_channel_write(self.handle.raw().get(), bytes.as_ptr(), bytes.len())
+        })
+        .into_result()
+    }
+
     /// Receives one complete handle-free message, waiting until one arrives.
     pub fn receive(&self, bytes: &mut [u8]) -> Result<usize> {
-        let capacity = bytes.len().min(MAX_MESSAGE_BYTES);
         loop {
-            // SAFETY: the startup borrow keeps the endpoint live, and `bytes`
-            // is uniquely writable for `capacity` bytes during the call.
-            let result = unsafe {
-                hyper_sys::byte_channel_read(self.handle.raw().get(), bytes.as_mut_ptr(), capacity)
-            };
-            let status = Status::from_raw(result.status);
-            match status {
-                Status::OK => {
-                    let actual =
-                        usize::try_from(result.value0).map_err(|_| Error::InvalidResponse)?;
-                    if actual > capacity || result.value1 != 0 {
-                        return Err(Error::InvalidResponse);
-                    }
-                    return Ok(actual);
-                }
-                Status::WOULD_BLOCK => {
+            match self.try_receive(bytes) {
+                Ok(actual) => return Ok(actual),
+                Err(Error::Status(Status::WOULD_BLOCK)) => {
                     if self.wait_readable()? == WaitOutcome::PeerClosed {
                         return Err(Error::Status(Status::PEER_CLOSED));
                     }
                 }
-                Status::BUFFER_TOO_SMALL => {
-                    return Err(Error::MessageTooLarge {
-                        bytes: result.value0,
-                        handles: result.value1,
-                    });
-                }
-                failure => return Err(Error::Status(failure)),
+                Err(error) => return Err(error),
             }
+        }
+    }
+
+    /// Attempts to receive one complete message without waiting.
+    pub fn try_receive(&self, bytes: &mut [u8]) -> Result<usize> {
+        let capacity = bytes.len().min(MAX_MESSAGE_BYTES);
+        // SAFETY: the owner borrow keeps the endpoint live, and `bytes` is
+        // uniquely writable for `capacity` bytes during the call.
+        let result = unsafe {
+            hyper_sys::byte_channel_read(self.handle.raw().get(), bytes.as_mut_ptr(), capacity)
+        };
+        match Status::from_raw(result.status) {
+            Status::OK => {
+                let actual = usize::try_from(result.value0).map_err(|_| Error::InvalidResponse)?;
+                if actual > capacity || result.value1 != 0 {
+                    return Err(Error::InvalidResponse);
+                }
+                Ok(actual)
+            }
+            Status::BUFFER_TOO_SMALL => Err(Error::MessageTooLarge {
+                bytes: result.value0,
+                handles: result.value1,
+            }),
+            failure => Err(Error::Status(failure)),
         }
     }
 

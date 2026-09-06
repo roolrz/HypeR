@@ -14,21 +14,24 @@ use hyper::sync::InterruptMaskGuard;
 
 use crate::kernel::abi::native::{
     self, AllocatingServices, ConsoleServiceError, DeferredServices, ImmediateServices,
-    ObjectServiceError, ProcessBuilderServiceError,
+    ObjectServiceError, ProcessBuilderServiceError, UserOutputServices,
 };
 use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceKind};
-use crate::kernel::capability::{HandleInfo, HandleValue, Rights};
+use crate::kernel::capability::{HandleInfo, HandleValue, ResolvedWaitable, Rights};
 use crate::kernel::fs::BootFsServiceError;
 use crate::kernel::ipc::{
     ByteChannelReadOutcome, ByteChannelServiceError, CapabilityChannelServiceError,
     CapabilityReceiveOutcome,
 };
 use crate::kernel::mm::user_space::UserSlice;
-use crate::kernel::object::{self, Event, KernelObject, ObjectKind, SignalWaitOutcome};
+use crate::kernel::object::{
+    self, Event, KernelObject, ObjectKind, SignalWaitManyOutcome, SignalWaitOutcome,
+    SignalWaitRequest,
+};
 use crate::kernel::process::{
     AbiFamily, ExecutionRoute, Process, ProcessBuilder, ProcessError, ProcessObject,
-    RunAdmissionError, StartupCapability, StoppedUserRun, TerminalReason, UserExecution,
-    UserThread, UserThreadPhase,
+    ProcessSnapshot, RunAdmissionError, StartupCapability, StoppedUserRun, TerminalReason,
+    UserExecution, UserThread, UserThreadPhase,
 };
 use crate::kernel::task::scheduler::CpuMask;
 
@@ -42,6 +45,12 @@ struct ProcessServices<'process> {
     process: &'process Process,
 }
 
+impl UserOutputServices for ProcessServices<'_> {
+    fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError> {
+        self.process.copy_to_user(destination, source)
+    }
+}
+
 impl ImmediateServices for ProcessServices<'_> {
     fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError> {
         self.process.close_handle(value)
@@ -53,10 +62,6 @@ impl ImmediateServices for ProcessServices<'_> {
         required_rights: Rights,
     ) -> Result<HandleInfo, ProcessError> {
         self.process.handle_info(value, required_rights)
-    }
-
-    fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError> {
-        self.process.copy_to_user(destination, source)
     }
 }
 
@@ -93,9 +98,20 @@ struct DeferredProcessServices<'session> {
     session: &'session UserSession,
 }
 
+impl UserOutputServices for DeferredProcessServices<'_> {
+    fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError> {
+        self.session.process.copy_to_user(destination, source)
+    }
+}
+
 struct ChargedBuilderInput {
     bytes: Vec<u8>,
     _charge: CommittedCharge,
+}
+
+struct ResolvedWaitEntry {
+    object: ResolvedWaitable,
+    signals: u64,
 }
 
 impl ChargedBuilderInput {
@@ -254,6 +270,86 @@ impl DeferredServices for DeferredProcessServices<'_> {
             deadline,
             || self.session.thread.snapshot().phase == UserThreadPhase::StopRequested,
         )?)
+    }
+
+    fn wait_many(
+        &self,
+        items: UserSlice,
+        item_count: usize,
+        deadline: u64,
+    ) -> Result<SignalWaitManyOutcome, ObjectServiceError> {
+        let record_size = core::mem::size_of::<hyper::abi::native::HyperNativeObjectWaitItem>();
+        let input_bytes = item_count
+            .checked_mul(record_size)
+            .ok_or(ObjectServiceError::InvalidInput)?;
+        if items.length() != u64::try_from(input_bytes).map_err(|_| ProcessError::Allocation)? {
+            return Err(ObjectServiceError::InvalidInput);
+        }
+        let scratch_bytes = input_bytes
+            .checked_add(
+                item_count
+                    .checked_mul(
+                        core::mem::size_of::<ResolvedWaitEntry>()
+                            + core::mem::size_of::<SignalWaitRequest<'_>>(),
+                    )
+                    .ok_or(ProcessError::Allocation)?,
+            )
+            .ok_or(ProcessError::Allocation)?;
+        let _scratch_charge = self
+            .session
+            .process
+            .resource_domain()
+            .reserve(ResourceAmount::ZERO.with(
+                ResourceKind::KernelMemoryBytes,
+                u64::try_from(scratch_bytes).map_err(|_| ProcessError::Allocation)?,
+            ))
+            .map_err(ProcessError::from)?
+            .commit();
+
+        let mut encoded = Vec::new();
+        encoded
+            .try_reserve_exact(input_bytes)
+            .map_err(|_| ProcessError::Allocation)?;
+        encoded.resize(input_bytes, 0);
+        self.session.process.copy_from_user(items, &mut encoded)?;
+
+        let mut resolved = Vec::new();
+        resolved
+            .try_reserve_exact(item_count)
+            .map_err(|_| ProcessError::Allocation)?;
+        for record in encoded.chunks_exact(record_size) {
+            let (raw_handle, signals) = decode_wait_item(record)?;
+            let handle = HandleValue::try_from_raw(raw_handle).map_err(ProcessError::from)?;
+            resolved.push(ResolvedWaitEntry {
+                object: self
+                    .session
+                    .process
+                    .resolve_waitable(handle, Rights::WAIT)?,
+                signals,
+            });
+        }
+
+        let mut requests = Vec::new();
+        requests
+            .try_reserve_exact(item_count)
+            .map_err(|_| ProcessError::Allocation)?;
+        for entry in &resolved {
+            requests.push(SignalWaitRequest::new(entry.object.source(), entry.signals));
+        }
+        let domain = self.session.process.resource_domain();
+        Ok(object::wait_many(&requests, &domain, deadline, || {
+            self.session.thread.snapshot().phase == UserThreadPhase::StopRequested
+        })?)
+    }
+
+    fn process_info(&self, process: HandleValue) -> Result<ProcessSnapshot, ProcessError> {
+        Ok(self
+            .session
+            .process
+            .resolve_handle::<ProcessObject>(process, Rights::INSPECT)?
+            .object()
+            .process()
+            .snapshot())
     }
 
     fn write_byte_channel(
@@ -520,6 +616,21 @@ impl DeferredServices for DeferredProcessServices<'_> {
             .request_stop(TerminalReason::Requested);
         Ok(())
     }
+}
+
+fn decode_wait_item(record: &[u8]) -> Result<(u64, u64), ObjectServiceError> {
+    type AbiWaitItem = hyper::abi::native::HyperNativeObjectWaitItem;
+    let handle = read_u64_field(record, core::mem::offset_of!(AbiWaitItem, handle))
+        .ok_or(ObjectServiceError::InvalidInput)?;
+    let signals = read_u64_field(record, core::mem::offset_of!(AbiWaitItem, signals))
+        .ok_or(ObjectServiceError::InvalidInput)?;
+    Ok((handle, signals))
+}
+
+fn read_u64_field(record: &[u8], offset: usize) -> Option<u64> {
+    let end = offset.checked_add(core::mem::size_of::<u64>())?;
+    let bytes: &[u8; core::mem::size_of::<u64>()] = record.get(offset..end)?.try_into().ok()?;
+    Some(u64::from_ne_bytes(*bytes))
 }
 
 struct NativeProcessCalls<'process> {

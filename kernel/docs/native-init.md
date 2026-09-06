@@ -93,17 +93,30 @@ launch or later critical supervision fails.
 Init retains physical Console management authority. Separate input and output
 workers receive only the physical direction and raw byte-channel direction
 they require. The session manager owns the peer data endpoints and receives no
-physical Console capability. None of the children receives duplication or
-onward-transfer authority. This preserves duplex, blocking I/O without polling
-and leaves later foreground-session handoff to capability rendezvous without
-changing physical Console ownership.
+physical Console capability. It routes one foreground client's input, output,
+and error channels without defining a generic byte-message envelope. The
+initial shell receives those endpoints plus attenuated BootFs, TaskFactory,
+TaskGroup, and ResourceDomain authorities. It can construct child processes,
+but cannot widen rights or delegate the authorities again. Each command gets
+fresh handle-backed standard-I/O channels. This preserves duplex, blocking I/O
+without polling and leaves later foreground-session handoff to capability
+rendezvous without changing physical Console ownership.
+
+Manifest capability purposes are symbolic service-contract names rather than
+raw integers. Init resolves each name in the contract selected by the service
+image, verifies its expected object kind, and rejects duplicate resolved
+purposes before any builder is created. The installed Rust SDK carries these
+typed contracts in `hyper-service`; numeric startup values remain an internal
+wire property at the Process boundary.
 
 The manifest format reserves restart policies, but the current runtime accepts
 only `never` and exactly one critical service. Init blocks on that Process's
-termination signal without polling. Multiple critical services require
-WaitSet observation; reliable restart additionally requires an observable exit
-reason and a monotonic backoff facility. Unsupported supervision graphs are
-rejected during preflight before any child is started.
+termination signal without polling. The shell uses `object_wait_many` for
+foreground command I/O and Process termination, then uses inspect authority to
+read the terminal reason. Multiple critical services still require a durable
+WaitSet; reliable restart additionally requires a monotonic backoff facility.
+Unsupported supervision graphs are rejected during preflight before any child
+is started.
 
 ## Validation boundary
 
@@ -111,5 +124,6 @@ Host tests validate archive indexing, path rejection, ELF permissions, layout,
 entry points, and supported relocation decoding. Kernel QEMU tests use the
 test-only Linux guest path. The `test-native` contract separately builds the
 Native applications through the assembled SDK, constructs the production
-initramfs, and verifies that init loads the manifest, starts the session
-Process, and exposes end-to-end Console input and output.
+initramfs, and verifies that init loads the manifest, starts the session and
+shell Processes, and that the shell launches an external command whose output
+traverses the complete Console path.

@@ -178,7 +178,7 @@ make run
 ```
 
 `make run` builds the `no_std` Rust init, direction-attenuated Console workers,
-and initial session manager only through the assembled SDK under
+initial session manager, and capability-scoped shell only through the assembled SDK under
 `target/sdk/aarch64`; the applications do not include private kernel or SDK
 source paths. Pass
 `INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.

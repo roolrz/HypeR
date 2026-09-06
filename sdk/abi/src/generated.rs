@@ -127,6 +127,7 @@ pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE: u64 = 6;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_BOOT_FS: u64 = 7;
 pub const HYPER_NATIVE_STARTUP_MAX_HANDLES: u64 = 256;
 pub const HYPER_NATIVE_DEADLINE_INFINITE: u64 = 18446744073709551615;
+pub const HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS: u64 = 64;
 pub const HYPER_NATIVE_CAPABILITY_DISPOSITION_SAME_RIGHTS: u64 = 18446744073709551615;
 pub const HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES: u64 = 65536;
 pub const HYPER_NATIVE_BYTE_CHANNEL_MAX_QUEUED_MESSAGES: u64 = 16;
@@ -145,6 +146,20 @@ pub const HYPER_NATIVE_PROCESS_MAX_ARGUMENTS: u64 = 64;
 pub const HYPER_NATIVE_PROCESS_MAX_ENVIRONMENT: u64 = 64;
 pub const HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS: u64 = 4;
 pub const HYPER_NATIVE_PROCESS_AFFINITY_MAX_CPUS: u64 = 256;
+pub const HYPER_NATIVE_PROCESS_PHASE_PREPARED: u64 = 0;
+pub const HYPER_NATIVE_PROCESS_PHASE_CREATED: u64 = 1;
+pub const HYPER_NATIVE_PROCESS_PHASE_RUNNING: u64 = 2;
+pub const HYPER_NATIVE_PROCESS_PHASE_STOPPING: u64 = 3;
+pub const HYPER_NATIVE_PROCESS_PHASE_STOPPED: u64 = 4;
+pub const HYPER_NATIVE_PROCESS_PHASE_RETIRING: u64 = 5;
+pub const HYPER_NATIVE_PROCESS_PHASE_RETIRED: u64 = 6;
+pub const HYPER_NATIVE_PROCESS_TERMINAL_NONE: u64 = 0;
+pub const HYPER_NATIVE_PROCESS_TERMINAL_REQUESTED: u64 = 1;
+pub const HYPER_NATIVE_PROCESS_TERMINAL_THREAD_EXITED: u64 = 2;
+pub const HYPER_NATIVE_PROCESS_TERMINAL_PROCESS_EXITED: u64 = 3;
+pub const HYPER_NATIVE_PROCESS_TERMINAL_LAST_THREAD_EXITED: u64 = 4;
+pub const HYPER_NATIVE_PROCESS_TERMINAL_FAULT: u64 = 5;
+pub const HYPER_NATIVE_PROCESS_TERMINAL_TASK_GROUP_STOP: u64 = 6;
 
 pub const HYPER_NATIVE_SYS_ABI_QUERY: u64 = 0;
 pub const HYPER_NATIVE_SYS_HANDLE_CLOSE: u64 = 1;
@@ -178,6 +193,8 @@ pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL: u64 = 28;
 pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_START: u64 = 29;
 pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT: u64 = 30;
 pub const HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP: u64 = 31;
+pub const HYPER_NATIVE_SYS_OBJECT_WAIT_MANY: u64 = 32;
+pub const HYPER_NATIVE_SYS_PROCESS_GET_INFO: u64 = 33;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -217,6 +234,34 @@ const _: () = assert!(core::mem::align_of::<HyperNativeObjectBasicInfo>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, koid) == 0);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, object_kind) == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, reserved) == 12);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeObjectWaitItem {
+    pub handle: u64,
+    pub signals: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeObjectWaitItem>() == 16);
+const _: () = assert!(core::mem::align_of::<HyperNativeObjectWaitItem>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeObjectWaitItem, handle) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeObjectWaitItem, signals) == 8);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeProcessInfo {
+    pub phase: u32,
+    pub terminal_reason: u32,
+    pub detail0: u64,
+    pub detail1: u64,
+    pub reserved: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeProcessInfo>() == 32);
+const _: () = assert!(core::mem::align_of::<HyperNativeProcessInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessInfo, phase) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessInfo, terminal_reason) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessInfo, detail0) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessInfo, detail1) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeProcessInfo, reserved) == 24);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

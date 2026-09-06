@@ -19,15 +19,17 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
     HYPER_NATIVE_SYS_HANDLE_CLOSE, HYPER_NATIVE_SYS_HANDLE_DUPLICATE,
     HYPER_NATIVE_SYS_HANDLE_GET_INFO, HYPER_NATIVE_SYS_HANDLE_REPLACE,
-    HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO, HYPER_NATIVE_SYS_OBJECT_WAIT_ONE,
-    HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT, HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT,
+    HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO, HYPER_NATIVE_SYS_OBJECT_WAIT_MANY,
+    HYPER_NATIVE_SYS_OBJECT_WAIT_ONE, HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT,
+    HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT, HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_HANDLE,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE, HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY, HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_START, HYPER_NATIVE_SYS_PROCESS_EXIT,
-    HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP, HYPER_NATIVE_SYS_THREAD_EXIT,
-    HYPER_NATIVE_SYS_THREAD_YIELD, HyperNativeHandleInfo, HyperNativeObjectBasicInfo,
-    HyperNativeStatus, NativeInvocation, NativeResult,
+    HYPER_NATIVE_SYS_PROCESS_GET_INFO, HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP,
+    HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD, HyperNativeHandleInfo,
+    HyperNativeObjectBasicInfo, HyperNativeProcessInfo, HyperNativeStatus, NativeInvocation,
+    NativeResult,
 };
 
 use crate::kernel::accounting::ResourceError;
@@ -41,13 +43,18 @@ use crate::kernel::mm::user_space::{
     AddressError, AddressSpaceError, MachineError, UserAddress, UserSlice,
 };
 use crate::kernel::object::{
-    EventError, ObjectCreationError, ObjectWaitError, SignalWaitError, SignalWaitOutcome,
+    EventError, ObjectCreationError, ObjectWaitError, SignalWaitError, SignalWaitManyOutcome,
+    SignalWaitOutcome,
 };
-use crate::kernel::process::{ChildProcessStartError, ProcessBuilderError, ProcessError};
+use crate::kernel::process::{
+    ChildProcessStartError, ProcessBuilderError, ProcessError, ProcessPhase, ProcessSnapshot,
+    TerminalReason,
+};
 use crate::kernel::task::TimedWaitError;
 
 const HANDLE_INFO_SIZE: usize = core::mem::size_of::<HyperNativeHandleInfo>();
 const OBJECT_BASIC_INFO_SIZE: usize = core::mem::size_of::<HyperNativeObjectBasicInfo>();
+const PROCESS_INFO_SIZE: usize = core::mem::size_of::<HyperNativeProcessInfo>();
 type Arguments = [u64; hyper::abi::native::HYPER_NATIVE_SYSCALL_ARGUMENT_REGISTERS];
 type ProcessBuilderHandleRequest = (
     HandleValue,
@@ -77,7 +84,11 @@ pub(in crate::kernel) const fn is_immediate(number: u64) -> bool {
 /// Implementations finish every handle-table operation before copying user
 /// memory. Keeping those two phases separate prevents faults or backend work
 /// from extending the Process lock graph.
-pub(in crate::kernel) trait ImmediateServices {
+pub(in crate::kernel) trait UserOutputServices {
+    fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError>;
+}
+
+pub(in crate::kernel) trait ImmediateServices: UserOutputServices {
     fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError>;
 
     fn handle_info(
@@ -85,7 +96,6 @@ pub(in crate::kernel) trait ImmediateServices {
         value: HandleValue,
         required_rights: Rights,
     ) -> Result<HandleInfo, ProcessError>;
-    fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError>;
 }
 
 /// Services which may grow storage and therefore run with interrupts enabled.
@@ -106,7 +116,9 @@ pub(in crate::kernel) trait AllocatingServices {
 }
 
 /// Sleepable object services invoked only after architecture entry unwinds.
-pub(in crate::kernel) trait DeferredServices: AllocatingServices {
+pub(in crate::kernel) trait DeferredServices:
+    AllocatingServices + UserOutputServices
+{
     fn signal_event(
         &self,
         value: HandleValue,
@@ -120,6 +132,15 @@ pub(in crate::kernel) trait DeferredServices: AllocatingServices {
         requested: u64,
         deadline: u64,
     ) -> Result<SignalWaitOutcome, ObjectServiceError>;
+
+    fn wait_many(
+        &self,
+        items: UserSlice,
+        item_count: usize,
+        deadline: u64,
+    ) -> Result<SignalWaitManyOutcome, ObjectServiceError>;
+
+    fn process_info(&self, process: HandleValue) -> Result<ProcessSnapshot, ProcessError>;
 
     fn write_byte_channel(
         &self,
@@ -270,6 +291,7 @@ impl From<crate::kernel::device::console::IoError> for ConsoleServiceError {
 
 #[derive(Debug)]
 pub(in crate::kernel) enum ObjectServiceError {
+    InvalidInput,
     Process(ProcessError),
     Event(EventError),
     Wait(ObjectWaitError),
@@ -356,6 +378,7 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_PROCESS_EXIT => sys_process_exit(invocation.arguments()),
         HYPER_NATIVE_SYS_EVENT_SIGNAL => sys_event_signal(services, invocation.arguments()),
         HYPER_NATIVE_SYS_OBJECT_WAIT_ONE => sys_object_wait_one(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_OBJECT_WAIT_MANY => sys_object_wait_many(services, invocation.arguments()),
         HYPER_NATIVE_SYS_BYTE_CHANNEL_WRITE => {
             sys_byte_channel_write(services, invocation.arguments())
         }
@@ -402,6 +425,7 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP => {
             sys_process_request_stop(services, invocation.arguments())
         }
+        HYPER_NATIVE_SYS_PROCESS_GET_INFO => sys_process_get_info(services, invocation.arguments()),
         _ => DeferredAction::Return(sys_not_supported()),
     }
 }
@@ -569,6 +593,25 @@ fn sys_object_wait_one(services: &impl DeferredServices, arguments: &Arguments) 
         Ok(SignalWaitOutcome::Observed(snapshot)) => success([snapshot.signals().bits(), 0]),
         Ok(SignalWaitOutcome::TimedOut) => failure(HYPER_NATIVE_STATUS_TIMED_OUT),
         Ok(SignalWaitOutcome::Cancelled) => failure(HYPER_NATIVE_STATUS_CANCELLED),
+        Err(status) => failure(status),
+    };
+    DeferredAction::Return(result)
+}
+
+#[inline(never)]
+fn sys_object_wait_many(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_wait_many(arguments).and_then(|(items, item_count, deadline)| {
+        services
+            .wait_many(items, item_count, deadline)
+            .map_err(status_from_object_service_error)
+    });
+    let result = match result {
+        Ok(SignalWaitManyOutcome::Observed { index, snapshot }) => match u64::try_from(index) {
+            Ok(index) => success([index, snapshot.signals().bits()]),
+            Err(_) => failure(HYPER_NATIVE_STATUS_INTERNAL),
+        },
+        Ok(SignalWaitManyOutcome::TimedOut) => failure(HYPER_NATIVE_STATUS_TIMED_OUT),
+        Ok(SignalWaitManyOutcome::Cancelled) => failure(HYPER_NATIVE_STATUS_CANCELLED),
         Err(status) => failure(status),
     };
     DeferredAction::Return(result)
@@ -822,6 +865,21 @@ fn sys_process_request_stop(
 }
 
 #[inline(never)]
+fn sys_process_get_info(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result =
+        prepare_info_request(arguments, PROCESS_INFO_SIZE).and_then(|(process, destination)| {
+            let snapshot = services
+                .process_info(process)
+                .map_err(status_from_process_error)?;
+            let record = encode_process_info(snapshot);
+            services
+                .copy_to_user(destination, &record)
+                .map_err(status_from_process_error)
+        });
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
 fn sys_console_read(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
     let result = parse_console_io(arguments).and_then(|(console, bytes)| {
         services
@@ -891,6 +949,22 @@ fn parse_handle_and_rights(
     let value = parse_handle(raw_handle)?;
     let rights = Rights::from_bits(raw_rights).ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
     Ok((value, rights))
+}
+
+fn parse_wait_many(arguments: &Arguments) -> Result<(UserSlice, usize, u64), HyperNativeStatus> {
+    if arguments[1] == 0
+        || arguments[1] > hyper::abi::native::HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS
+    {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let item_count =
+        usize::try_from(arguments[1]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    let bytes = arguments[1]
+        .checked_mul(core::mem::size_of::<hyper::abi::native::HyperNativeObjectWaitItem>() as u64)
+        .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    let items =
+        UserSlice::new(UserAddress::new(arguments[0]), bytes).map_err(status_from_address_error)?;
+    Ok((items, item_count, arguments[2]))
 }
 
 fn parse_byte_channel_io(
@@ -1114,6 +1188,78 @@ fn encode_object_basic_info_fields(koid: u64, object_kind: u32) -> [u8; OBJECT_B
     record
 }
 
+fn encode_process_info(snapshot: ProcessSnapshot) -> [u8; PROCESS_INFO_SIZE] {
+    let (reason, detail0, detail1) = match snapshot.terminal {
+        None => (hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_NONE, 0, 0),
+        Some(TerminalReason::Requested) => (
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_REQUESTED,
+            0,
+            0,
+        ),
+        Some(TerminalReason::ThreadExited { status }) => (
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_THREAD_EXITED,
+            status as u64,
+            0,
+        ),
+        Some(TerminalReason::ProcessExited { status }) => (
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_PROCESS_EXITED,
+            status as u64,
+            0,
+        ),
+        Some(TerminalReason::LastThreadExited { status }) => (
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_LAST_THREAD_EXITED,
+            status as u64,
+            0,
+        ),
+        Some(TerminalReason::Fault { class, code }) => (
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_FAULT,
+            u64::from(class),
+            code,
+        ),
+        Some(TerminalReason::TaskGroupStop { generation }) => (
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_TASK_GROUP_STOP,
+            generation,
+            0,
+        ),
+    };
+    encode_process_info_fields(
+        process_phase(snapshot.phase),
+        reason as u32,
+        detail0,
+        detail1,
+    )
+}
+
+fn encode_process_info_fields(
+    phase: u32,
+    reason: u32,
+    detail0: u64,
+    detail1: u64,
+) -> [u8; PROCESS_INFO_SIZE] {
+    const PHASE: usize = core::mem::offset_of!(HyperNativeProcessInfo, phase);
+    const REASON: usize = core::mem::offset_of!(HyperNativeProcessInfo, terminal_reason);
+    const DETAIL0: usize = core::mem::offset_of!(HyperNativeProcessInfo, detail0);
+    const DETAIL1: usize = core::mem::offset_of!(HyperNativeProcessInfo, detail1);
+    let mut record = [0_u8; PROCESS_INFO_SIZE];
+    record[PHASE..PHASE + 4].copy_from_slice(&phase.to_ne_bytes());
+    record[REASON..REASON + 4].copy_from_slice(&reason.to_ne_bytes());
+    record[DETAIL0..DETAIL0 + 8].copy_from_slice(&detail0.to_ne_bytes());
+    record[DETAIL1..DETAIL1 + 8].copy_from_slice(&detail1.to_ne_bytes());
+    record
+}
+
+const fn process_phase(phase: ProcessPhase) -> u32 {
+    match phase {
+        ProcessPhase::Prepared => hyper::abi::native::HYPER_NATIVE_PROCESS_PHASE_PREPARED as u32,
+        ProcessPhase::Created => hyper::abi::native::HYPER_NATIVE_PROCESS_PHASE_CREATED as u32,
+        ProcessPhase::Running => hyper::abi::native::HYPER_NATIVE_PROCESS_PHASE_RUNNING as u32,
+        ProcessPhase::Stopping => hyper::abi::native::HYPER_NATIVE_PROCESS_PHASE_STOPPING as u32,
+        ProcessPhase::Stopped => hyper::abi::native::HYPER_NATIVE_PROCESS_PHASE_STOPPED as u32,
+        ProcessPhase::Retiring => hyper::abi::native::HYPER_NATIVE_PROCESS_PHASE_RETIRING as u32,
+        ProcessPhase::Retired => hyper::abi::native::HYPER_NATIVE_PROCESS_PHASE_RETIRED as u32,
+    }
+}
+
 fn handle_result(result: Result<HandleValue, HyperNativeStatus>) -> NativeResult {
     match result {
         Ok(value) => success([value.get(), 0]),
@@ -1235,6 +1381,7 @@ const fn status_from_object_creation_error(error: ObjectCreationError) -> HyperN
 
 fn status_from_object_service_error(error: ObjectServiceError) -> HyperNativeStatus {
     match error {
+        ObjectServiceError::InvalidInput => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         ObjectServiceError::Process(error) => status_from_process_error(error),
         ObjectServiceError::Event(error) => status_from_event_error(error),
         ObjectServiceError::Wait(error) => status_from_object_wait_error(error),
@@ -1685,6 +1832,13 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         }
     }
 
+    impl UserOutputServices for RejectingServices {
+        fn copy_to_user(&self, _: UserSlice, _: &[u8]) -> Result<(), ProcessError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ProcessError::Allocation)
+        }
+    }
+
     impl ImmediateServices for RejectingServices {
         fn close_handle(&self, _: HandleValue) -> Result<(), ProcessError> {
             self.calls.set(self.calls.get().saturating_add(1));
@@ -1692,11 +1846,6 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         }
 
         fn handle_info(&self, _: HandleValue, _: Rights) -> Result<HandleInfo, ProcessError> {
-            self.calls.set(self.calls.get().saturating_add(1));
-            Err(ProcessError::Allocation)
-        }
-
-        fn copy_to_user(&self, _: UserSlice, _: &[u8]) -> Result<(), ProcessError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation)
         }
@@ -1743,6 +1892,21 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         ) -> Result<SignalWaitOutcome, ObjectServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation.into())
+        }
+
+        fn wait_many(
+            &self,
+            _: UserSlice,
+            _: usize,
+            _: u64,
+        ) -> Result<SignalWaitManyOutcome, ObjectServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ProcessError::Allocation.into())
+        }
+
+        fn process_info(&self, _: HandleValue) -> Result<ProcessSnapshot, ProcessError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(ProcessError::Allocation)
         }
 
         fn write_byte_channel(
@@ -2051,6 +2215,46 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     if bad_size.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT {
         return Err(SelfTestError::InvalidRecordSize);
     }
+    let empty_wait_many = dispatch_deferred(
+        &services,
+        invoke(HYPER_NATIVE_SYS_OBJECT_WAIT_MANY, [0x2000, 0, 0, 0, 0, 0]),
+    );
+    let oversized_wait_many = dispatch_deferred(
+        &services,
+        invoke(
+            HYPER_NATIVE_SYS_OBJECT_WAIT_MANY,
+            [
+                0x2000,
+                hyper::abi::native::HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS + 1,
+                0,
+                0,
+                0,
+                0,
+            ],
+        ),
+    );
+    let bad_process_info_size = dispatch_deferred(
+        &services,
+        invoke(
+            HYPER_NATIVE_SYS_PROCESS_GET_INFO,
+            [
+                1_u64 << 24 | 1,
+                0x2000,
+                PROCESS_INFO_SIZE as u64 - 1,
+                0,
+                0,
+                0,
+            ],
+        ),
+    );
+    if empty_wait_many != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+        || oversized_wait_many
+            != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+        || bad_process_info_size
+            != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+    {
+        return Err(SelfTestError::InvalidRecordSize);
+    }
     let bad_channel_create = dispatch_deferred(
         &services,
         invoke(HYPER_NATIVE_SYS_BYTE_CHANNEL_CREATE, [1, 0, 0, 0, 0, 0]),
@@ -2262,6 +2466,20 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     if object_record
         != [
             0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xcc, 0xbb, 0xaa, 0x99, 0, 0, 0, 0,
+        ]
+    {
+        return Err(SelfTestError::RecordEncoding);
+    }
+    let process_record = encode_process_info_fields(
+        0x1122_3344,
+        0x5566_7788,
+        0x99aa_bbcc_ddee_ff00,
+        0x0123_4567_89ab_cdef,
+    );
+    if process_record
+        != [
+            0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb,
+            0xaa, 0x99, 0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01, 0, 0, 0, 0, 0, 0, 0, 0,
         ]
     {
         return Err(SelfTestError::RecordEncoding);

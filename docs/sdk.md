@@ -53,6 +53,7 @@ share/hyper/abi/src/
 share/hyper/rust/hyper-sys/
 share/hyper/rust/hyper-os/
 share/hyper/rust/hyper-rt/
+share/hyper/rust/hyper-service/
 share/hyper/manifest
 ```
 
@@ -84,10 +85,11 @@ tests, and portable C runtime unit tests.
 ## Application integration
 
 `make app` first assembles the SDK and then builds the Rust init, two Console
-data-plane workers, and session manager with the installed `bin/hyper-cargo`.
-`make native-initramfs` packages all four as one deterministic `newc` archive,
-and `make test-native` boots the kernel and verifies Process startup plus the
-complete Channel-routed Console echo path under QEMU.
+data-plane workers, session manager, shell, and commands with the installed
+`bin/hyper-cargo`. `make native-initramfs` packages them as one deterministic
+`newc` archive, and `make test-native` boots the kernel and verifies that the
+shell creates an external Process and routes its output through the complete
+handle-backed Console path under QEMU.
 
 This enforced producer-consumer path is also the release boundary: a source
 change which works only through an undeclared source-tree include cannot pass

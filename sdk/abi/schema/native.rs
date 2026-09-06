@@ -255,6 +255,11 @@ pub enum MemoryLength {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IndirectHandles {
+    /// Input records borrow handles for the duration of one syscall.
+    BorrowRecords {
+        handle_field: &'static str,
+        required_rights: u64,
+    },
     /// Input records describe conditional borrow-or-move operations which all
     /// commit together only when the syscall returns `OK`.
     ConsumeRecords {
@@ -276,6 +281,8 @@ pub enum IndirectHandles {
         commit: CapabilityCommit,
     },
 }
+
+const OBJECT_WAIT_MANY_MAX_ITEMS: u32 = 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CapabilityCommit {
@@ -777,6 +784,10 @@ pub const CONSTANTS: &[AbiConstant] = &[
         value: u64::MAX,
     },
     AbiConstant {
+        name: "object_wait_many_max_items",
+        value: OBJECT_WAIT_MANY_MAX_ITEMS as u64,
+    },
+    AbiConstant {
         name: "capability_disposition_same_rights",
         value: u64::MAX,
     },
@@ -848,6 +859,62 @@ pub const CONSTANTS: &[AbiConstant] = &[
         name: "process_affinity_max_cpus",
         value: 256,
     },
+    AbiConstant {
+        name: "process_phase_prepared",
+        value: 0,
+    },
+    AbiConstant {
+        name: "process_phase_created",
+        value: 1,
+    },
+    AbiConstant {
+        name: "process_phase_running",
+        value: 2,
+    },
+    AbiConstant {
+        name: "process_phase_stopping",
+        value: 3,
+    },
+    AbiConstant {
+        name: "process_phase_stopped",
+        value: 4,
+    },
+    AbiConstant {
+        name: "process_phase_retiring",
+        value: 5,
+    },
+    AbiConstant {
+        name: "process_phase_retired",
+        value: 6,
+    },
+    AbiConstant {
+        name: "process_terminal_none",
+        value: 0,
+    },
+    AbiConstant {
+        name: "process_terminal_requested",
+        value: 1,
+    },
+    AbiConstant {
+        name: "process_terminal_thread_exited",
+        value: 2,
+    },
+    AbiConstant {
+        name: "process_terminal_process_exited",
+        value: 3,
+    },
+    AbiConstant {
+        name: "process_terminal_last_thread_exited",
+        value: 4,
+    },
+    AbiConstant {
+        name: "process_terminal_fault",
+        value: 5,
+    },
+    AbiConstant {
+        name: "process_terminal_task_group_stop",
+        value: 6,
+    },
 ];
 
 const HANDLE_INFO_FIELDS: &[Field] = &[
@@ -883,6 +950,47 @@ const OBJECT_BASIC_INFO_FIELDS: &[Field] = &[
         name: "reserved",
         kind: FieldKind::U32,
         offset: 12,
+    },
+];
+
+const OBJECT_WAIT_ITEM_FIELDS: &[Field] = &[
+    Field {
+        name: "handle",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "signals",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+];
+
+const PROCESS_INFO_FIELDS: &[Field] = &[
+    Field {
+        name: "phase",
+        kind: FieldKind::U32,
+        offset: 0,
+    },
+    Field {
+        name: "terminal_reason",
+        kind: FieldKind::U32,
+        offset: 4,
+    },
+    Field {
+        name: "detail0",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "detail1",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U64,
+        offset: 24,
     },
 ];
 
@@ -961,6 +1069,18 @@ pub const RECORDS: &[Record] = &[
         name: "object_basic_info",
         fields: OBJECT_BASIC_INFO_FIELDS,
         size: 16,
+        alignment: 8,
+    },
+    Record {
+        name: "object_wait_item",
+        fields: OBJECT_WAIT_ITEM_FIELDS,
+        size: 16,
+        alignment: 8,
+    },
+    Record {
+        name: "process_info",
+        fields: PROCESS_INFO_FIELDS,
+        size: 32,
         alignment: 8,
     },
     Record {
@@ -1190,6 +1310,52 @@ const OBJECT_WAIT_ONE_RESULTS: &[ResultValue] = &[ResultValue {
     kind: ValueKind::U64,
     handle: None,
 }];
+
+const OBJECT_WAIT_MANY_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "items",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Elements {
+                argument: "item_count",
+                maximum_elements: OBJECT_WAIT_MANY_MAX_ITEMS,
+                element_size: 16,
+            },
+            record: Some("object_wait_item"),
+            handles: Some(IndirectHandles::BorrowRecords {
+                handle_field: "handle",
+                required_rights: RIGHT_WAIT,
+            }),
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "item_count",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "deadline",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+];
+const OBJECT_WAIT_MANY_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "index",
+        kind: ValueKind::ElementCount,
+        handle: None,
+    },
+    ResultValue {
+        name: "observed",
+        kind: ValueKind::U64,
+        handle: None,
+    },
+];
 
 const CHANNEL_CREATE_ARGUMENTS: &[Argument] = &[Argument {
     name: "options",
@@ -1908,6 +2074,40 @@ const PROCESS_REQUEST_STOP_ARGUMENTS: &[Argument] = &[Argument {
     memory: None,
 }];
 
+const PROCESS_GET_INFO_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "process",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("process"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "info",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "info_size",
+                maximum_bytes: 32,
+            },
+            record: Some("process_info"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "info_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
 const fn process_builder_argument(
     required_rights: u64,
     disposition: HandleDisposition,
@@ -2373,6 +2573,34 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 32,
+        name: "object_wait_many",
+        feature: FeatureGate::Core,
+        arguments: OBJECT_WAIT_MANY_ARGUMENTS,
+        results: OBJECT_WAIT_MANY_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 33,
+        name: "process_get_info",
+        feature: FeatureGate::Core,
+        arguments: PROCESS_GET_INFO_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -2389,6 +2617,8 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "Object wait-many borrows every input handle for the complete wait, canonicalizes duplicate object identities, and selects the lowest input index whose requested mask intersects the winning object's committed level snapshot. Source-handle close after resolution does not cancel the wait.",
+    "Process terminal detail fields are reason-specific: exit reasons encode the signed status as two's-complement in detail0; fault encodes class in detail0 and code in detail1; task-group stop encodes generation in detail0; unused details are zero.",
     "Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.",
     "AtomicOnOk capability transactions commit handle-table ownership, the rendezvous message, and live output-handle installation together only when both participants return ok. Every non-ok status preserves all input owners and the message. Non-fault failures leave output memory unchanged; fault may partially modify output byte or slot memory, but no handle value written by a failed call is live or installed. Bindings must ignore every output-memory byte after any non-ok status.",
     "A capability-channel receiver advertises peer_receiving only after its byte range, typed capability slots, and destination handle-table capacity are validated, reserved, and fully published on the endpoint's FIFO receiver queue. The signal is level-triggered but may race another sender.",

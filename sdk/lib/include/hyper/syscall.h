@@ -43,6 +43,10 @@ hyper_call_result_t hyper_object_wait_one(
     hyper_native_handle_t object,
     uint64_t signals,
     uint64_t deadline);
+hyper_call_result_t hyper_object_wait_many(
+    const hyper_native_object_wait_item_t *items,
+    size_t item_count,
+    uint64_t deadline);
 hyper_native_status_t hyper_byte_channel_write(
     hyper_native_handle_t endpoint,
     const void *bytes,
@@ -115,6 +119,9 @@ hyper_native_status_t hyper_process_builder_seal(hyper_native_handle_t builder);
 hyper_call_result_t hyper_process_builder_start(hyper_native_handle_t builder);
 hyper_native_status_t hyper_process_builder_abort(hyper_native_handle_t builder);
 hyper_native_status_t hyper_process_request_stop(hyper_native_handle_t process);
+hyper_native_status_t hyper_process_get_info(
+    hyper_native_handle_t process,
+    hyper_native_process_info_t *info);
 hyper_native_status_t hyper_thread_yield(void);
 _Noreturn void hyper_thread_exit(int64_t status);
 _Noreturn void hyper_process_exit(int64_t status);
