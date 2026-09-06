@@ -5,7 +5,9 @@
 
 pub(crate) const MAX_ARGUMENTS: usize = 64;
 pub(crate) const MAX_ENVIRONMENT: usize = 64;
-pub(crate) const MAX_NAME_BYTES: usize = 64;
+const _: () = assert!(hyper::abi::native::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES <= usize::MAX as u64);
+pub(crate) const MAX_NAME_BYTES: usize =
+    hyper::abi::native::HYPER_NATIVE_PROCESS_NAME_MAX_BYTES as usize;
 pub(crate) const MAX_STRING_BYTES: usize = 4096;
 pub(crate) const MAX_TOTAL_STRING_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_STARTUP_HANDLES: usize = 256;

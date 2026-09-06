@@ -132,6 +132,18 @@
           "purpose": "process.resource-domain",
           "operation": "duplicate",
           "rights": ["sponsor"]
+        },
+        {
+          "source": "bootstrap.task-inspector",
+          "purpose": "process.task-inspector",
+          "operation": "duplicate",
+          "rights": ["duplicate", "transfer", "inspect"]
+        },
+        {
+          "source": "bootstrap.object-inspector",
+          "purpose": "process.object-inspector",
+          "operation": "duplicate",
+          "rights": ["duplicate", "transfer", "inspect"]
         }
       ]
     }

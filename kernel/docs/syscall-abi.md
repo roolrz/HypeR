@@ -319,11 +319,20 @@ each snapshot reports KOID, kind, immutable export policy, active-handle state,
 and weakly consistent counts for service, scheduler, publication,
 user-authority, operation-pin, diagnostic, and retirement owners. Published
 Processes have a corresponding weak directory, and each Process exposes
-bounded pages of generation-qualified `handle -> KOID` edges. These kernel
-interfaces are the canonical source for future privileged inspection syscalls;
-the text renderer
-is only one consumer. Multi-page results are weakly consistent with mutation,
-and no pointer value is exposed.
+bounded pages of generation-qualified `handle -> KOID` edges. Native
+`TaskInspector` and `ObjectInspector` objects turn those mechanisms into
+explicit observation capabilities. A system inspector may be monotonically
+derived into a ResourceDomain, TaskGroup, or Process view only by presenting a
+typed target handle; numeric identifiers never create a view or an operational
+handle. An out-of-scope target is indistinguishable from an absent target.
+Multi-page results are weakly consistent with mutation, use fixed ABI page
+capacities, and expose neither a pointer nor an authority-bearing identifier.
+Task records also carry bounded immutable UTF-8 names. A Process snapshot keeps
+the label committed with Process publication, including after its heavyweight
+owner is gone; the scheduler similarly retains each Thread label through the
+retiring registry phase. Numeric phases, roles, kinds, and rights remain the
+canonical ABI facts, while SDKs and diagnostic tools provide human-readable
+interpretation.
 
 `HandleValue` is a nonzero, process-local, opaque `u64` containing a slot and a
 large generation. Security does not depend on secrecy. Slot reuse never makes
@@ -401,6 +410,13 @@ Task construction and accounting policy use the equally literal
 factory or authority object grants only the named operation; every target
 `TaskGroup`, `ResourceDomain`, VMO, and VMAR remains a separately resolved
 capability.
+
+`DERIVE` is specific to immutable view construction. Derivation requires the
+source inspector's complete supported rights because the returned inspector
+has a fixed rights set; callers must attenuate that handle before delegation.
+The derived payload can only narrow scope and visibility. This avoids rights
+amplification while allowing init to build a restricted view and then pass an
+`INSPECT`-only handle to an untrusted observer.
 
 `handle_get_info` reports handle-local kind, rights, and flags. A fixed
 `object_get_basic_info` may report common identity under `INSPECT`. Lifecycle,
@@ -782,10 +798,11 @@ call through deferred unwind and re-entry, yields and resumes, exits a Thread,
 propagates Process exit to a dormant sibling, contains a breakpoint fault, and
 creates, signals, and observes an Event from EL0. It joins each Thread and
 Process and retires each ownership graph. The architecture-neutral dispatchers
-implement syscalls 0 through 33: capability inspection and attenuation,
+implement syscalls 0 through 43: capability inspection and attenuation,
 Thread and Process lifecycle, Event and object wait, byte and rendezvous
 capability channels, Console I/O, BootFs access, transactional ProcessBuilder
-construction, Process stop requests, and Process lifecycle inspection. Channel operations use bounded
+construction, Process stop requests, Process lifecycle inspection, and
+capability-scoped Process, Thread, object, and handle-graph scans. Channel operations use bounded
 storage, transactional user copies, and atomic capability publication.
 `object_wait_one` and the bounded `object_wait_many` use absolute
 monotonic deadlines, generation-qualified signal/timeout/cancellation
@@ -793,7 +810,8 @@ arbitration, and a Process-stop recheck before completing the machine return.
 Multi-wait canonicalizes duplicate object references under one scheduler wait
 generation and returns the lowest matching input index. The checkpoint includes
 an AArch64 static PIE loader, a minimal init supervisor, isolated Console and
-foreground-session services, and a capability-scoped command shell. It is not
+foreground-session services, a capability-scoped command shell, and Native
+`ps` and `handle` inspection tools. It is not
 yet a general runtime, vDSO, or secondary-architecture Native entry.
 
 ### Phase 0: prove the boundary

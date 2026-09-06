@@ -122,6 +122,45 @@ hyper_native_status_t hyper_process_request_stop(hyper_native_handle_t process);
 hyper_native_status_t hyper_process_get_info(
     hyper_native_handle_t process,
     hyper_native_process_info_t *info);
+hyper_call_result_t hyper_task_inspector_scan_processes(
+    hyper_native_handle_t inspector,
+    uint64_t cursor,
+    hyper_native_task_process_t *records,
+    size_t capacity);
+hyper_call_result_t hyper_task_inspector_scan_threads(
+    hyper_native_handle_t inspector,
+    uint64_t cursor,
+    hyper_native_task_thread_t *records,
+    size_t capacity);
+hyper_call_result_t hyper_object_inspector_scan_objects(
+    hyper_native_handle_t inspector,
+    uint64_t cursor,
+    hyper_native_object_inspection_t *records,
+    size_t capacity);
+hyper_call_result_t hyper_object_inspector_scan_handles(
+    hyper_native_handle_t inspector,
+    uint64_t process_koid,
+    uint64_t cursor,
+    hyper_native_handle_inspection_t *records,
+    size_t capacity);
+hyper_call_result_t hyper_task_inspector_derive_process(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t process);
+hyper_call_result_t hyper_task_inspector_derive_task_group(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t task_group);
+hyper_call_result_t hyper_task_inspector_derive_resource_domain(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t resource_domain);
+hyper_call_result_t hyper_object_inspector_derive_process(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t process);
+hyper_call_result_t hyper_object_inspector_derive_task_group(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t task_group);
+hyper_call_result_t hyper_object_inspector_derive_resource_domain(
+    hyper_native_handle_t inspector,
+    hyper_native_handle_t resource_domain);
 hyper_native_status_t hyper_thread_yield(void);
 _Noreturn void hyper_thread_exit(int64_t status);
 _Noreturn void hyper_process_exit(int64_t status);

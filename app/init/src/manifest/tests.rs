@@ -135,6 +135,22 @@ impl AuthorityPolicy for Policy {
                 duplicable: true,
                 creatable: false,
             }),
+            "bootstrap.task-inspector" => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: 16,
+                rights: 0b1_1000_0100,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            "bootstrap.object-inspector" => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: 17,
+                rights: 0b1_1000_0100,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
             _ => None,
         }
     }
@@ -159,6 +175,8 @@ impl AuthorityPolicy for Policy {
             ("/bin/sh", "process.task-factory") => (304, 6),
             ("/bin/sh", "process.task-group") => (305, 7),
             ("/bin/sh", "process.resource-domain") => (306, 8),
+            ("/bin/sh", "process.task-inspector") => (307, 16),
+            ("/bin/sh", "process.object-inspector") => (308, 17),
             _ => return None,
         };
         Some(StartupPurposeDeclaration { value, object_kind })
@@ -173,6 +191,8 @@ impl AuthorityPolicy for Policy {
             "create-process" => Some(0b001_0000),
             "attach-process" => Some(0b010_0000),
             "sponsor" => Some(0b100_0000),
+            "duplicate" => Some(0b1000_0000),
+            "transfer" => Some(0b1_0000_0000),
             _ => None,
         }
     }

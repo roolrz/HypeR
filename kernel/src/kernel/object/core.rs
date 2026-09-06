@@ -36,6 +36,8 @@ const CONSOLE_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_CONSOLE
 const BOOT_FS_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_BOOT_FS;
 const BOOT_FILE_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_BOOT_FILE;
 const PROCESS_BUILDER_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS_BUILDER;
+const TASK_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_TASK_INSPECTOR;
+const OBJECT_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR;
 
 const _: () = assert!(EVENT_OBJECT_KIND != 0);
 const _: () = assert!(BYTE_CHANNEL_OBJECT_KIND != 0);
@@ -50,6 +52,8 @@ const _: () = assert!(VMO_OBJECT_KIND != 0);
 const _: () = assert!(VMAR_OBJECT_KIND != 0);
 const _: () = assert!(CONSOLE_OBJECT_KIND != 0);
 const _: () = assert!(PROCESS_BUILDER_OBJECT_KIND != 0);
+const _: () = assert!(TASK_INSPECTOR_OBJECT_KIND != 0);
+const _: () = assert!(OBJECT_INSPECTOR_OBJECT_KIND != 0);
 
 static NEXT_KOID: AtomicU64 = AtomicU64::new(1);
 
@@ -135,6 +139,10 @@ impl ObjectKind {
     pub(crate) const BOOT_FILE: Self = Self(BOOT_FILE_OBJECT_KIND);
     /// Linear staged authority to construct one Native Process.
     pub(crate) const PROCESS_BUILDER: Self = Self(PROCESS_BUILDER_OBJECT_KIND);
+    /// Capability-scoped task-observation authority.
+    pub(crate) const TASK_INSPECTOR: Self = Self(TASK_INSPECTOR_OBJECT_KIND);
+    /// Capability-scoped object-graph observation authority.
+    pub(crate) const OBJECT_INSPECTOR: Self = Self(OBJECT_INSPECTOR_OBJECT_KIND);
 
     /// Validates one userspace-supplied object-kind discriminator.
     ///
@@ -156,7 +164,9 @@ impl ObjectKind {
             | CONSOLE_OBJECT_KIND
             | BOOT_FS_OBJECT_KIND
             | BOOT_FILE_OBJECT_KIND
-            | PROCESS_BUILDER_OBJECT_KIND => Some(Self(raw)),
+            | PROCESS_BUILDER_OBJECT_KIND
+            | TASK_INSPECTOR_OBJECT_KIND
+            | OBJECT_INSPECTOR_OBJECT_KIND => Some(Self(raw)),
             _ => None,
         }
     }
@@ -838,7 +848,6 @@ impl<T: UserExportableObject, C: ReferenceClass> PublishableRef<T, C> {
         self.reference.snapshot()
     }
 
-    #[cfg(test)]
     pub(crate) fn koid(&self) -> Koid {
         self.reference.koid()
     }

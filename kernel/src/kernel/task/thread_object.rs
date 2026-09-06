@@ -15,7 +15,7 @@ use crate::kernel::object::{
 };
 use crate::kernel::process::UserThread;
 
-pub(super) const THREAD_OBJECT_PAGE_CAPACITY: usize = 32;
+pub(super) const THREAD_OBJECT_PAGE_CAPACITY: usize = 8;
 
 /// Stable semantic role of one scheduler entity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +42,7 @@ impl ThreadRole {
 pub(crate) struct ThreadObjectSnapshot {
     pub(crate) object: ObjectSnapshot,
     pub(crate) role: ThreadRole,
+    pub(crate) process: Option<crate::kernel::process::ProcessId>,
 }
 
 /// Scheduler-registry phase associated with one diagnostic identity record.
@@ -58,6 +59,7 @@ pub(crate) enum ThreadObjectRegistryPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ThreadObjectObservation {
     pub(crate) thread: super::thread::ThreadId,
+    pub(crate) name: super::thread::ThreadNameSnapshot,
     pub(crate) object: ThreadObjectSnapshot,
     pub(crate) phase: ThreadObjectRegistryPhase,
 }
@@ -71,6 +73,14 @@ pub(crate) struct ThreadObjectScanCursor {
 impl ThreadObjectScanCursor {
     pub(crate) const fn start() -> Self {
         Self { next_slot: 0 }
+    }
+
+    pub(crate) const fn from_token(token: usize) -> Self {
+        Self { next_slot: token }
+    }
+
+    pub(crate) const fn token(self) -> usize {
+        self.next_slot
     }
 }
 
@@ -132,10 +142,12 @@ impl ThreadObject {
             Self::System(object) => ThreadObjectSnapshot {
                 object: object.snapshot(),
                 role: object.object().role,
+                process: None,
             },
             Self::User(thread) => ThreadObjectSnapshot {
                 object: thread.object_snapshot(),
                 role: ThreadRole::User,
+                process: Some(thread.process_id()),
             },
         }
     }

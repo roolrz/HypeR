@@ -22,6 +22,7 @@ pub(crate) enum Error {
     FileSystem(crate::kernel::fs::LookupError),
     Handle(HandleError),
     Image(crate::kernel::process::LoaderError),
+    Inspection(crate::kernel::inspect::Error),
     IncompleteThreadPublication,
     Missing,
     NotExecutable,
@@ -46,6 +47,7 @@ impl core::fmt::Debug for Error {
             Self::FileSystem(error) => formatter.debug_tuple("FileSystem").field(error).finish(),
             Self::Handle(error) => formatter.debug_tuple("Handle").field(error).finish(),
             Self::Image(error) => formatter.debug_tuple("Image").field(error).finish(),
+            Self::Inspection(error) => formatter.debug_tuple("Inspection").field(error).finish(),
             Self::IncompleteThreadPublication => formatter.write_str("IncompleteThreadPublication"),
             Self::Missing => formatter.write_str("Missing"),
             Self::NotExecutable => formatter.write_str("NotExecutable"),
@@ -97,7 +99,7 @@ pub(crate) fn start() -> Result<Infallible, Error> {
     capabilities::install(&init, INIT_ARGUMENTS, &group, &domain)?;
 
     init.process.start()?;
-    let process_id = init.process.id().get();
+    let process_koid = init.process.koid().get();
     let thread_id = init
         .thread
         .scheduler_id()
@@ -105,7 +107,7 @@ pub(crate) fn start() -> Result<Infallible, Error> {
     init.thread.ready()?;
     crate::pr_info!(
         "HypeR: starting Native init process {} as thread {}",
-        process_id,
+        process_koid,
         thread_id.get()
     );
 

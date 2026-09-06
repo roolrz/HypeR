@@ -19,7 +19,7 @@ pub(crate) use builder::{
     ProcessBuilder, ProcessBuilderError, ProcessBuilderPhase, StartupCapability,
     abort_process_builder, create_process_builder, start_process_builder,
 };
-pub(crate) use directory::{ProcessScanCursor, ProcessSnapshotPage, scan};
+pub(crate) use directory::{ProcessDiagnosticRef, ProcessScanCursor, ProcessSnapshotPage, scan};
 pub(crate) use image::{
     AbiFamily, ExecutionRoute, ImageError, MachineAbi, ProcessImage, SupervisionSessionId,
     UserThreadStart,
@@ -31,9 +31,9 @@ pub(crate) use owner::{
     ChildProcessStartError, DirectProcessHandleTransferCommitFailure, HandleBatchPublishFailure,
     HandleTransferCommitFailure, PreparedDirectProcessHandleTransfer, PreparedHandleConsumption,
     PreparedProcess, PreparedProcessHandleTransfer, Process, ProcessCreateFailure, ProcessError,
-    ProcessHandleBatchReservation, ProcessHandleReservation, ProcessId, ProcessSnapshot,
-    ProcessStartCoordinator, ProcessStopReport, StartedChildProcess, promote_delayed_retirements,
-    reap_one_process, retirement_work,
+    ProcessHandleBatchReservation, ProcessHandleReservation, ProcessId, ProcessNameSnapshot,
+    ProcessSnapshot, ProcessStartCoordinator, ProcessStopReport, StartedChildProcess,
+    promote_delayed_retirements, reap_one_process, retirement_work,
 };
 pub(crate) use task_group::{TaskGroup, TaskGroupError, TaskGroupId, TaskGroupStopReport};
 pub(in crate::kernel) use user_thread::UserExecutionOwnership;

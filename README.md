@@ -83,7 +83,8 @@ The current foundation includes:
 - a compiled capability foundation with fallible shared objects, schema-owned
   rights, 64-bit generation handles, detached unpublished slot transactions,
   deferred close, allocation-free iterative teardown, and weak global
-  object/Process discovery with bounded pointer-free handle-graph snapshots;
+  object/Process discovery with immutable, scope-derived task and object
+  inspectors plus bounded pointer-free handle-graph snapshots;
 - capability-backed Event objects with independent `WAIT` and `SIGNAL`
   authority, absolute-deadline waits, and exactly-once arbitration among
   signal, timeout, and Process cancellation;
@@ -97,6 +98,9 @@ The current foundation includes:
   and scheduler-owned Process publication;
 - a manifest-driven Native init which constructs services transactionally and
   delegates monotonically attenuated capabilities;
+- capability-scoped Native `ps` and `handle` tools with immutable task names,
+  explicit Process-to-Thread ownership, decoded object purposes and rights,
+  and KOIDs that remain diagnostic correlation values rather than authority;
 - an AArch64 VHE/nVHE native-EL0 proof which enters through a scheduler-owned
   user Thread, dispatches the initial handle, scheduling, lifecycle, and Event
   syscalls, contains a user fault, and retires the complete Process ownership

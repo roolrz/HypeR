@@ -23,6 +23,7 @@ pub(crate) mod entry;
 pub(crate) mod fs;
 #[cfg(not(feature = "kernel-self-test"))]
 pub(crate) mod init;
+pub(crate) mod inspect;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod ipc;
 pub mod irq;

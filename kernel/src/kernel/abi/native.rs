@@ -3,6 +3,8 @@
 
 //! `HypeR` Native syscall validation and dispatch.
 
+use alloc::vec::Vec;
+
 use hyper::abi::native::{
     HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_FEATURE_CORE, HYPER_NATIVE_STATUS_ACCESS_DENIED,
     HYPER_NATIVE_STATUS_BAD_HANDLE, HYPER_NATIVE_STATUS_BAD_STATE,
@@ -19,22 +21,33 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
     HYPER_NATIVE_SYS_HANDLE_CLOSE, HYPER_NATIVE_SYS_HANDLE_DUPLICATE,
     HYPER_NATIVE_SYS_HANDLE_GET_INFO, HYPER_NATIVE_SYS_HANDLE_REPLACE,
-    HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO, HYPER_NATIVE_SYS_OBJECT_WAIT_MANY,
-    HYPER_NATIVE_SYS_OBJECT_WAIT_ONE, HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT,
-    HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT,
+    HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO, HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS,
+    HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
+    HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_TASK_GROUP,
+    HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_HANDLES, HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_OBJECTS,
+    HYPER_NATIVE_SYS_OBJECT_WAIT_MANY, HYPER_NATIVE_SYS_OBJECT_WAIT_ONE,
+    HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT, HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT, HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_HANDLE,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE, HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY, HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_START, HYPER_NATIVE_SYS_PROCESS_EXIT,
     HYPER_NATIVE_SYS_PROCESS_GET_INFO, HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP,
+    HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_PROCESS,
+    HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
+    HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_TASK_GROUP,
+    HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_PROCESSES, HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_THREADS,
     HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD, HyperNativeHandleInfo,
-    HyperNativeObjectBasicInfo, HyperNativeProcessInfo, HyperNativeStatus, NativeInvocation,
-    NativeResult,
+    HyperNativeHandleInspection, HyperNativeObjectBasicInfo, HyperNativeObjectInspection,
+    HyperNativeProcessInfo, HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread,
+    NativeInvocation, NativeResult,
 };
 
 use crate::kernel::accounting::ResourceError;
 use crate::kernel::capability::{HandleError, HandleInfo, HandleValue, Rights};
 use crate::kernel::fs::{BootFsError, BootFsServiceError};
+use crate::kernel::inspect::{
+    HANDLE_PAGE_CAPACITY, OBJECT_PAGE_CAPACITY, Page, ProcessHandleSnapshot, TaskThreadSnapshot,
+};
 use crate::kernel::ipc::{
     ByteChannelError, ByteChannelReadOutcome, ByteChannelServiceError, CapabilityChannelError,
     CapabilityChannelServiceError, CapabilityReceiveOutcome,
@@ -141,6 +154,107 @@ pub(in crate::kernel) trait DeferredServices:
     ) -> Result<SignalWaitManyOutcome, ObjectServiceError>;
 
     fn process_info(&self, process: HandleValue) -> Result<ProcessSnapshot, ProcessError>;
+
+    fn scan_processes(
+        &self,
+        inspector: HandleValue,
+        cursor: u64,
+    ) -> Result<
+        Page<ProcessSnapshot, { crate::kernel::inspect::PROCESS_PAGE_CAPACITY }>,
+        crate::kernel::inspect::Error,
+    > {
+        let _ = (inspector, cursor);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn scan_threads(
+        &self,
+        inspector: HandleValue,
+        cursor: u64,
+    ) -> Result<
+        Page<TaskThreadSnapshot, { crate::kernel::inspect::THREAD_PAGE_CAPACITY }>,
+        crate::kernel::inspect::Error,
+    > {
+        let _ = (inspector, cursor);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn scan_objects(
+        &self,
+        inspector: HandleValue,
+        cursor: u64,
+    ) -> Result<
+        Page<crate::kernel::object::ObjectSnapshot, OBJECT_PAGE_CAPACITY>,
+        crate::kernel::inspect::Error,
+    > {
+        let _ = (inspector, cursor);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn scan_process_handles(
+        &self,
+        inspector: HandleValue,
+        process_koid: u64,
+        cursor: u64,
+    ) -> Result<Page<ProcessHandleSnapshot, HANDLE_PAGE_CAPACITY>, crate::kernel::inspect::Error>
+    {
+        let _ = (inspector, process_koid, cursor);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn derive_task_inspector(
+        &self,
+        inspector: HandleValue,
+        process: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let _ = (inspector, process);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn derive_object_inspector(
+        &self,
+        inspector: HandleValue,
+        process: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let _ = (inspector, process);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn derive_task_inspector_for_task_group(
+        &self,
+        inspector: HandleValue,
+        group: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let _ = (inspector, group);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn derive_object_inspector_for_task_group(
+        &self,
+        inspector: HandleValue,
+        group: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let _ = (inspector, group);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn derive_task_inspector_for_resource_domain(
+        &self,
+        inspector: HandleValue,
+        domain: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let _ = (inspector, domain);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn derive_object_inspector_for_resource_domain(
+        &self,
+        inspector: HandleValue,
+        domain: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::inspect::Error> {
+        let _ = (inspector, domain);
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
 
     fn write_byte_channel(
         &self,
@@ -426,6 +540,36 @@ pub(in crate::kernel) fn dispatch_deferred(
             sys_process_request_stop(services, invocation.arguments())
         }
         HYPER_NATIVE_SYS_PROCESS_GET_INFO => sys_process_get_info(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_PROCESSES => {
+            sys_task_inspector_scan_processes(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_THREADS => {
+            sys_task_inspector_scan_threads(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_PROCESS => {
+            sys_task_inspector_derive_process(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_OBJECTS => {
+            sys_object_inspector_scan_objects(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_HANDLES => {
+            sys_object_inspector_scan_handles(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS => {
+            sys_object_inspector_derive_process(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_TASK_GROUP => {
+            sys_task_inspector_derive_task_group(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_TASK_GROUP => {
+            sys_object_inspector_derive_task_group(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN => {
+            sys_task_inspector_derive_resource_domain(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN => {
+            sys_object_inspector_derive_resource_domain(services, invocation.arguments())
+        }
         _ => DeferredAction::Return(sys_not_supported()),
     }
 }
@@ -880,6 +1024,157 @@ fn sys_process_get_info(services: &impl DeferredServices, arguments: &Arguments)
 }
 
 #[inline(never)]
+fn sys_task_inspector_scan_processes(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_inspector_scan(
+        arguments,
+        crate::kernel::inspect::PROCESS_PAGE_CAPACITY,
+        core::mem::size_of::<HyperNativeTaskProcess>(),
+    )
+    .and_then(|(inspector, cursor, destination)| {
+        let page = services
+            .scan_processes(inspector, cursor)
+            .map_err(status_from_inspection_error)?;
+        copy_encoded_page(services, destination, &page, encode_task_process)
+    });
+    DeferredAction::Return(scan_result(result))
+}
+
+#[inline(never)]
+fn sys_task_inspector_scan_threads(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_inspector_scan(
+        arguments,
+        crate::kernel::inspect::THREAD_PAGE_CAPACITY,
+        core::mem::size_of::<HyperNativeTaskThread>(),
+    )
+    .and_then(|(inspector, cursor, destination)| {
+        let page = services
+            .scan_threads(inspector, cursor)
+            .map_err(status_from_inspection_error)?;
+        copy_encoded_page(services, destination, &page, encode_task_thread)
+    });
+    DeferredAction::Return(scan_result(result))
+}
+
+#[inline(never)]
+fn sys_object_inspector_scan_objects(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_inspector_scan(
+        arguments,
+        OBJECT_PAGE_CAPACITY,
+        core::mem::size_of::<HyperNativeObjectInspection>(),
+    )
+    .and_then(|(inspector, cursor, destination)| {
+        let page = services
+            .scan_objects(inspector, cursor)
+            .map_err(status_from_inspection_error)?;
+        copy_encoded_page(services, destination, &page, encode_object_inspection)
+    });
+    DeferredAction::Return(scan_result(result))
+}
+
+#[inline(never)]
+fn sys_object_inspector_scan_handles(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_handle_inspector_scan(arguments).and_then(
+        |(inspector, process_koid, cursor, destination)| {
+            let page = services
+                .scan_process_handles(inspector, process_koid, cursor)
+                .map_err(status_from_inspection_error)?;
+            copy_encoded_page(services, destination, &page, encode_handle_inspection)
+        },
+    );
+    DeferredAction::Return(scan_result(result))
+}
+
+#[inline(never)]
+fn sys_task_inspector_derive_process(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_inspector_derivation(arguments).and_then(|(inspector, process)| {
+        services
+            .derive_task_inspector(inspector, process)
+            .map_err(status_from_inspection_error)
+    });
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+fn sys_object_inspector_derive_process(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_inspector_derivation(arguments).and_then(|(inspector, process)| {
+        services
+            .derive_object_inspector(inspector, process)
+            .map_err(status_from_inspection_error)
+    });
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+fn sys_task_inspector_derive_task_group(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_inspector_derivation(arguments).and_then(|(inspector, group)| {
+        services
+            .derive_task_inspector_for_task_group(inspector, group)
+            .map_err(status_from_inspection_error)
+    });
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+fn sys_object_inspector_derive_task_group(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_inspector_derivation(arguments).and_then(|(inspector, group)| {
+        services
+            .derive_object_inspector_for_task_group(inspector, group)
+            .map_err(status_from_inspection_error)
+    });
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+fn sys_task_inspector_derive_resource_domain(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_inspector_derivation(arguments).and_then(|(inspector, domain)| {
+        services
+            .derive_task_inspector_for_resource_domain(inspector, domain)
+            .map_err(status_from_inspection_error)
+    });
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+fn sys_object_inspector_derive_resource_domain(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_inspector_derivation(arguments).and_then(|(inspector, domain)| {
+        services
+            .derive_object_inspector_for_resource_domain(inspector, domain)
+            .map_err(status_from_inspection_error)
+    });
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
 fn sys_console_read(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
     let result = parse_console_io(arguments).and_then(|(console, bytes)| {
         services
@@ -1116,6 +1411,10 @@ fn parse_object_kind(raw: u32) -> Result<crate::kernel::object::ObjectKind, Hype
         hyper::abi::native::HYPER_NATIVE_OBJECT_BOOT_FS => Ok(ObjectKind::BOOT_FS),
         hyper::abi::native::HYPER_NATIVE_OBJECT_BOOT_FILE => Ok(ObjectKind::BOOT_FILE),
         hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS_BUILDER => Ok(ObjectKind::PROCESS_BUILDER),
+        hyper::abi::native::HYPER_NATIVE_OBJECT_TASK_INSPECTOR => Ok(ObjectKind::TASK_INSPECTOR),
+        hyper::abi::native::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => {
+            Ok(ObjectKind::OBJECT_INSPECTOR)
+        }
         _ => Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
     }
 }
@@ -1157,6 +1456,81 @@ fn prepare_info_request(
     let destination = UserSlice::new(UserAddress::new(arguments[1]), record_size)
         .map_err(status_from_address_error)?;
     Ok((value, destination))
+}
+
+fn parse_inspector_scan(
+    arguments: &Arguments,
+    capacity: usize,
+    record_size: usize,
+) -> Result<(HandleValue, u64, UserSlice), HyperNativeStatus> {
+    let requested =
+        usize::try_from(arguments[3]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    if requested != capacity {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let bytes = capacity
+        .checked_mul(record_size)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(HYPER_NATIVE_STATUS_INTERNAL)?;
+    let destination =
+        UserSlice::new(UserAddress::new(arguments[2]), bytes).map_err(status_from_address_error)?;
+    Ok((parse_handle(arguments[0])?, arguments[1], destination))
+}
+
+fn parse_handle_inspector_scan(
+    arguments: &Arguments,
+) -> Result<(HandleValue, u64, u64, UserSlice), HyperNativeStatus> {
+    let requested =
+        usize::try_from(arguments[4]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    if requested != HANDLE_PAGE_CAPACITY || arguments[1] == 0 {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let bytes = HANDLE_PAGE_CAPACITY
+        .checked_mul(core::mem::size_of::<HyperNativeHandleInspection>())
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(HYPER_NATIVE_STATUS_INTERNAL)?;
+    let destination =
+        UserSlice::new(UserAddress::new(arguments[3]), bytes).map_err(status_from_address_error)?;
+    Ok((
+        parse_handle(arguments[0])?,
+        arguments[1],
+        arguments[2],
+        destination,
+    ))
+}
+
+fn parse_inspector_derivation(
+    arguments: &Arguments,
+) -> Result<(HandleValue, HandleValue), HyperNativeStatus> {
+    Ok((parse_handle(arguments[0])?, parse_handle(arguments[1])?))
+}
+
+fn copy_encoded_page<T: Copy, const N: usize, const R: usize>(
+    services: &impl UserOutputServices,
+    destination: UserSlice,
+    page: &Page<T, N>,
+    encode: impl Fn(T) -> [u8; R],
+) -> Result<(usize, u64), HyperNativeStatus> {
+    let byte_count = page
+        .len()
+        .checked_mul(R)
+        .ok_or(HYPER_NATIVE_STATUS_INTERNAL)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(byte_count)
+        .map_err(|_| HYPER_NATIVE_STATUS_NO_MEMORY)?;
+    for entry in page.entries() {
+        bytes.extend_from_slice(&encode(*entry));
+    }
+    let output = UserSlice::new(
+        destination.base(),
+        u64::try_from(byte_count).map_err(|_| HYPER_NATIVE_STATUS_INTERNAL)?,
+    )
+    .map_err(status_from_address_error)?;
+    services
+        .copy_to_user(output, &bytes)
+        .map_err(status_from_process_error)?;
+    Ok((page.len(), page.next()))
 }
 
 fn encode_handle_info(info: HandleInfo) -> [u8; HANDLE_INFO_SIZE] {
@@ -1248,6 +1622,171 @@ fn encode_process_info_fields(
     record
 }
 
+fn encode_task_process(snapshot: ProcessSnapshot) -> [u8; 96] {
+    let mut record = [0_u8; 96];
+    write_u64(&mut record, 0, snapshot.koid.get());
+    write_u32(&mut record, 8, process_phase(snapshot.phase));
+    write_u32(&mut record, 12, terminal_reason(snapshot.terminal));
+    write_u32(
+        &mut record,
+        16,
+        u32::try_from(snapshot.pending_threads).unwrap_or(u32::MAX),
+    );
+    write_u32(
+        &mut record,
+        20,
+        u32::try_from(snapshot.active_threads).unwrap_or(u32::MAX),
+    );
+    let name = snapshot.name.as_bytes();
+    write_u32(&mut record, 24, name.len() as u32);
+    record[32..32 + name.len()].copy_from_slice(name);
+    record
+}
+
+fn encode_task_thread(snapshot: TaskThreadSnapshot) -> [u8; 96] {
+    let mut record = [0_u8; 96];
+    write_u64(&mut record, 0, snapshot.koid.get());
+    write_u64(
+        &mut record,
+        8,
+        snapshot
+            .process_koid
+            .map_or(0, crate::kernel::object::Koid::get),
+    );
+    let role = match snapshot.role {
+        crate::kernel::task::ThreadRole::Bootstrap => {
+            hyper::abi::native::HYPER_NATIVE_THREAD_ROLE_BOOTSTRAP
+        }
+        crate::kernel::task::ThreadRole::Idle => hyper::abi::native::HYPER_NATIVE_THREAD_ROLE_IDLE,
+        crate::kernel::task::ThreadRole::Kernel => {
+            hyper::abi::native::HYPER_NATIVE_THREAD_ROLE_KERNEL
+        }
+        crate::kernel::task::ThreadRole::User => hyper::abi::native::HYPER_NATIVE_THREAD_ROLE_USER,
+        crate::kernel::task::ThreadRole::Vcpu => hyper::abi::native::HYPER_NATIVE_THREAD_ROLE_VCPU,
+    };
+    let registry_phase = match snapshot.registry_phase {
+        crate::kernel::task::ThreadObjectRegistryPhase::Resident => {
+            hyper::abi::native::HYPER_NATIVE_THREAD_REGISTRY_RESIDENT
+        }
+        crate::kernel::task::ThreadObjectRegistryPhase::Retiring => {
+            hyper::abi::native::HYPER_NATIVE_THREAD_REGISTRY_RETIRING
+        }
+    };
+    write_u32(&mut record, 16, role as u32);
+    write_u32(&mut record, 20, registry_phase as u32);
+    let name = snapshot.name.as_bytes();
+    write_u32(&mut record, 24, name.len() as u32);
+    record[32..32 + name.len()].copy_from_slice(name);
+    record
+}
+
+fn encode_object_inspection(snapshot: crate::kernel::object::ObjectSnapshot) -> [u8; 96] {
+    let mut record = [0_u8; 96];
+    write_u64(&mut record, 0, snapshot.koid.get());
+    write_u32(&mut record, 8, snapshot.kind.get());
+    let (state, active) = match snapshot.handles {
+        crate::kernel::object::ObjectHandleState::Unpublished => (
+            hyper::abi::native::HYPER_NATIVE_OBJECT_HANDLE_STATE_UNPUBLISHED,
+            0,
+        ),
+        crate::kernel::object::ObjectHandleState::Active(count) => (
+            hyper::abi::native::HYPER_NATIVE_OBJECT_HANDLE_STATE_ACTIVE,
+            u64::try_from(count).unwrap_or(u64::MAX),
+        ),
+        crate::kernel::object::ObjectHandleState::Retired => (
+            hyper::abi::native::HYPER_NATIVE_OBJECT_HANDLE_STATE_RETIRED,
+            0,
+        ),
+    };
+    write_u32(&mut record, 12, state as u32);
+    write_u64(&mut record, 16, active);
+    write_u64(&mut record, 24, snapshot.supported_rights.bits());
+    write_u64(
+        &mut record,
+        32,
+        u64::try_from(snapshot.strong_references).unwrap_or(u64::MAX),
+    );
+    write_u64(
+        &mut record,
+        40,
+        usize_to_u64(snapshot.references.kernel_service),
+    );
+    write_u64(&mut record, 48, usize_to_u64(snapshot.references.scheduler));
+    write_u64(
+        &mut record,
+        56,
+        usize_to_u64(snapshot.references.operation_pin),
+    );
+    write_u64(
+        &mut record,
+        64,
+        usize_to_u64(snapshot.references.user_authority),
+    );
+    write_u64(
+        &mut record,
+        72,
+        usize_to_u64(snapshot.references.publication),
+    );
+    write_u64(
+        &mut record,
+        80,
+        usize_to_u64(snapshot.references.diagnostic),
+    );
+    write_u64(
+        &mut record,
+        88,
+        usize_to_u64(snapshot.references.retirement),
+    );
+    record
+}
+
+fn encode_handle_inspection(snapshot: ProcessHandleSnapshot) -> [u8; 40] {
+    let mut record = [0_u8; 40];
+    write_u64(&mut record, 0, snapshot.process_koid.get());
+    write_u64(&mut record, 8, snapshot.handle.value.get());
+    write_u64(&mut record, 16, snapshot.handle.info.koid.get());
+    write_u64(&mut record, 24, snapshot.handle.info.rights.bits());
+    write_u32(&mut record, 32, snapshot.handle.info.kind.get());
+    write_u32(&mut record, 36, snapshot.handle.info.flags.bits());
+    record
+}
+
+fn terminal_reason(reason: Option<TerminalReason>) -> u32 {
+    match reason {
+        None => hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_NONE as u32,
+        Some(TerminalReason::Requested) => {
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_REQUESTED as u32
+        }
+        Some(TerminalReason::ThreadExited { .. }) => {
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_THREAD_EXITED as u32
+        }
+        Some(TerminalReason::ProcessExited { .. }) => {
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_PROCESS_EXITED as u32
+        }
+        Some(TerminalReason::LastThreadExited { .. }) => {
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_LAST_THREAD_EXITED as u32
+        }
+        Some(TerminalReason::Fault { .. }) => {
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_FAULT as u32
+        }
+        Some(TerminalReason::TaskGroupStop { .. }) => {
+            hyper::abi::native::HYPER_NATIVE_PROCESS_TERMINAL_TASK_GROUP_STOP as u32
+        }
+    }
+}
+
+fn write_u32(record: &mut [u8], offset: usize, value: u32) {
+    record[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
+}
+
+fn write_u64(record: &mut [u8], offset: usize, value: u64) {
+    record[offset..offset + 8].copy_from_slice(&value.to_ne_bytes());
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
 const fn process_phase(phase: ProcessPhase) -> u32 {
     match phase {
         ProcessPhase::Prepared => hyper::abi::native::HYPER_NATIVE_PROCESS_PHASE_PREPARED as u32,
@@ -1263,6 +1802,16 @@ const fn process_phase(phase: ProcessPhase) -> u32 {
 fn handle_result(result: Result<HandleValue, HyperNativeStatus>) -> NativeResult {
     match result {
         Ok(value) => success([value.get(), 0]),
+        Err(status) => failure(status),
+    }
+}
+
+fn scan_result(result: Result<(usize, u64), HyperNativeStatus>) -> NativeResult {
+    match result {
+        Ok((count, next)) => match u64::try_from(count) {
+            Ok(count) => success([count, next]),
+            Err(_) => failure(HYPER_NATIVE_STATUS_INTERNAL),
+        },
         Err(status) => failure(status),
     }
 }
@@ -1308,6 +1857,18 @@ fn status_from_process_error(error: ProcessError) -> HyperNativeStatus {
         ProcessError::TaskGroup(error) => status_from_task_group_error(error),
         ProcessError::UserEntry(_) => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
         ProcessError::UserMemory(error) => status_from_machine_error(error),
+    }
+}
+
+fn status_from_inspection_error(error: crate::kernel::inspect::Error) -> HyperNativeStatus {
+    match error {
+        crate::kernel::inspect::Error::AccessDenied => HYPER_NATIVE_STATUS_ACCESS_DENIED,
+        crate::kernel::inspect::Error::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+        crate::kernel::inspect::Error::NotFound => HYPER_NATIVE_STATUS_NOT_FOUND,
+        crate::kernel::inspect::Error::Object(error) => status_from_object_creation_error(error),
+        crate::kernel::inspect::Error::Process(error) => status_from_process_error(error),
+        crate::kernel::inspect::Error::Resource(error) => status_from_resource_error(error),
+        crate::kernel::inspect::Error::Scheduler(error) => status_from_scheduler_error(error),
     }
 }
 

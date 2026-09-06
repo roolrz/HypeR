@@ -10,7 +10,7 @@ use crate::kernel::accounting::ResourceDomain;
 use crate::kernel::capability::PreparedHandle;
 use crate::kernel::mm::user_space::{UserAddress, UserSlice};
 use crate::kernel::process::{
-    PreparedProcess, Process, ProcessError, TaskGroup, UserThread, load_native,
+    PreparedProcess, Process, ProcessError, ProcessObject, TaskGroup, UserThread, load_native,
 };
 use crate::kernel::task::scheduler::CpuMask;
 
@@ -71,7 +71,11 @@ pub(super) fn prepare(
             return Err(Error::Process(error));
         }
     };
-    let process = prepared.publish();
+    let object = ProcessObject::try_service(prepared.process()).map_err(Error::TaskObject)?;
+    let process = prepared.publish(
+        object,
+        crate::kernel::process::ProcessNameSnapshot::from_validated(thread_name),
+    );
     let thread = process.create_initial_user_thread(thread_name, CpuMask::ALL)?;
     Ok(BootProcess {
         process,

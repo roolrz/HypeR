@@ -23,7 +23,7 @@ const MAX_SLOTS: usize = SLOT_MASK as usize;
 const MAX_RESERVATION_SLOTS: usize = 64;
 const SLOT_SEGMENTS: usize = 19;
 const FIRST_SEGMENT_SLOTS: usize = 64;
-const DIAGNOSTIC_PAGE_CAPACITY: usize = 32;
+const DIAGNOSTIC_PAGE_CAPACITY: usize = 8;
 const DIAGNOSTIC_SLOT_BUDGET: usize = 256;
 pub(crate) const HANDLE_TABLE_STORAGE_SEGMENTS: usize = SLOT_SEGMENTS;
 
@@ -174,6 +174,14 @@ pub(crate) struct HandleScanCursor {
 impl HandleScanCursor {
     pub(crate) const fn start() -> Self {
         Self { next_slot: 0 }
+    }
+
+    pub(crate) const fn from_token(token: usize) -> Self {
+        Self { next_slot: token }
+    }
+
+    pub(crate) const fn token(self) -> usize {
+        self.next_slot
     }
 }
 

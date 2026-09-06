@@ -11,7 +11,7 @@ fn generated_rust_layouts_are_compiler_checked() {
         8
     );
     assert_eq!(generated::HYPER_NATIVE_SYS_HANDLE_CLOSE, 1);
-    assert_eq!(generated::HYPER_NATIVE_RIGHTS_MASK, 0x0fff_ffff);
+    assert_eq!(generated::HYPER_NATIVE_RIGHTS_MASK, 0x1fff_ffff);
     assert_eq!(generated::HYPER_NATIVE_SIGNAL_EVENT_SIGNALED, 1);
     assert_eq!(generated::HYPER_NATIVE_DEADLINE_INFINITE, u64::MAX);
     assert_eq!(
@@ -44,6 +44,8 @@ fn generated_rust_layouts_are_compiler_checked() {
     assert_eq!(generated::HYPER_NATIVE_OBJECT_BOOT_FILE, 13);
     assert_eq!(generated::HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL, 14);
     assert_eq!(generated::HYPER_NATIVE_OBJECT_PROCESS_BUILDER, 15);
+    assert_eq!(generated::HYPER_NATIVE_OBJECT_TASK_INSPECTOR, 16);
+    assert_eq!(generated::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR, 17);
     assert_eq!(
         generated::hyper_native_object_transfer_class(
             generated::HYPER_NATIVE_OBJECT_PROCESS_BUILDER

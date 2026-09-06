@@ -24,6 +24,10 @@ pub(super) enum ThreadRegistryStatus {
     Absent,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "retiring slots must preserve allocation-free thread diagnostics after ownership is detached"
+)]
 enum ThreadSlot {
     Vacant,
     Reserved(ThreadId),
@@ -31,6 +35,7 @@ enum ThreadSlot {
     /// Identity remains unavailable until lock-external resource teardown ends.
     Retiring {
         id: ThreadId,
+        name: super::super::thread::ThreadNameSnapshot,
         // Snapshotting preserves generation-correct diagnostics without
         // extending object lifetime. The detached Thread carries the actual
         // scheduler reference into the reaper until its resources are gone.
@@ -540,8 +545,10 @@ impl ThreadRegistry {
             registry_invariant();
         };
         let object = thread.object_snapshot();
+        let name = thread.name_snapshot();
         *slot_ref = ThreadSlot::Retiring {
             id,
+            name,
             object,
             thread: Some(thread),
         };
@@ -671,11 +678,15 @@ impl ThreadRegistry {
             let observation = match table.slot(index) {
                 Some(ThreadSlot::Occupied(thread)) => Some(ThreadObjectObservation {
                     thread: thread.id(),
+                    name: thread.name_snapshot(),
                     object: thread.object_snapshot(),
                     phase: ThreadObjectRegistryPhase::Resident,
                 }),
-                Some(ThreadSlot::Retiring { id, object, .. }) => Some(ThreadObjectObservation {
+                Some(ThreadSlot::Retiring {
+                    id, name, object, ..
+                }) => Some(ThreadObjectObservation {
                     thread: *id,
+                    name: *name,
                     object: *object,
                     phase: ThreadObjectRegistryPhase::Retiring,
                 }),

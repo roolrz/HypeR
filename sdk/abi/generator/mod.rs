@@ -365,6 +365,12 @@ fn validate_records(schema: &AbiSchema) -> Result<(), Error> {
         let mut rendered_alignment = 1u8;
         for field in record.fields {
             validate_identifier("field", field.name)?;
+            if matches!(field.kind, FieldKind::Bytes(0)) {
+                return invalid(format!(
+                    "record {} field {} has an empty byte array",
+                    record.name, field.name
+                ));
+            }
             if !field_names.insert(field.name) {
                 return invalid(format!(
                     "record {} repeats field {}",
@@ -1046,13 +1052,10 @@ fn render_rust(schema: &AbiSchema) -> String {
         "pub type HyperNativeHandle = u64;\n\
          pub type HyperNativeStatus = i64;\n\n",
     );
-    render_rust_constants(
+    render_rust_bit_constants(
         &mut output,
         "HYPER_NATIVE_FEATURE",
-        schema
-            .features
-            .iter()
-            .map(|value| (value.name, 1u64 << value.bit)),
+        schema.features.iter().map(|value| (value.name, value.bit)),
     );
     render_rust_i64_constants(
         &mut output,
@@ -1071,13 +1074,10 @@ fn render_rust(schema: &AbiSchema) -> String {
             .map(|value| (value.name, value.value)),
     );
     render_rust_transfer_classes(&mut output, schema);
-    render_rust_constants(
+    render_rust_bit_constants(
         &mut output,
         "HYPER_NATIVE_RIGHT",
-        schema
-            .rights
-            .iter()
-            .map(|value| (value.name, 1u64 << value.bit)),
+        schema.rights.iter().map(|value| (value.name, value.bit)),
     );
     let rights_mask = schema
         .rights
@@ -1085,15 +1085,15 @@ fn render_rust(schema: &AbiSchema) -> String {
         .fold(0u64, |mask, right| mask | (1u64 << right.bit));
     let _ = writeln!(
         output,
-        "pub const HYPER_NATIVE_RIGHTS_MASK: u64 = {rights_mask};\n"
+        "pub const HYPER_NATIVE_RIGHTS_MASK: u64 = {rights_mask:#x};\n"
     );
     for signal in schema.signals {
         let _ = writeln!(
             output,
-            "pub const HYPER_NATIVE_SIGNAL_{}_{}: u64 = {};",
+            "pub const HYPER_NATIVE_SIGNAL_{}_{}: u64 = 1_u64 << {};",
             upper_snake(signal.object),
             upper_snake(signal.name),
-            1u64 << signal.bit
+            signal.bit
         );
     }
     if !schema.signals.is_empty() {
@@ -1158,11 +1158,15 @@ fn render_rust(schema: &AbiSchema) -> String {
             record.alignment
         );
         for field in record.fields {
-            let _ = writeln!(
-                output,
-                "const _: () = assert!(core::mem::offset_of!(HyperNative{rust_name}, {}) == {});",
+            let assertion = format!(
+                "assert!(core::mem::offset_of!(HyperNative{rust_name}, {}) == {});",
                 field.name, field.offset
             );
+            if "const _: () = ".len() + assertion.len() <= 100 {
+                let _ = writeln!(output, "const _: () = {assertion}");
+            } else {
+                let _ = writeln!(output, "const _: () =\n    {assertion}");
+            }
         }
         output.push('\n');
     }
@@ -1241,6 +1245,21 @@ fn render_rust_constants<'a>(
     output.push('\n');
 }
 
+fn render_rust_bit_constants<'a>(
+    output: &mut String,
+    prefix: &str,
+    values: impl Iterator<Item = (&'a str, u8)>,
+) {
+    for (name, bit) in values {
+        let _ = writeln!(
+            output,
+            "pub const {prefix}_{}: u64 = 1_u64 << {bit};",
+            upper_snake(name)
+        );
+    }
+    output.push('\n');
+}
+
 fn render_rust_u32_constants<'a>(
     output: &mut String,
     prefix: &str,
@@ -1306,13 +1325,10 @@ fn render_c(schema: &AbiSchema) -> String {
         "\ntypedef uint64_t hyper_native_handle_t;\n\
          typedef int64_t hyper_native_status_t;\n\n",
     );
-    render_c_constants(
+    render_c_bit_constants(
         &mut output,
         "HYPER_NATIVE_FEATURE",
-        schema
-            .features
-            .iter()
-            .map(|value| (value.name, 1u64 << value.bit)),
+        schema.features.iter().map(|value| (value.name, value.bit)),
     );
     render_c_i64_constants(
         &mut output,
@@ -1331,13 +1347,10 @@ fn render_c(schema: &AbiSchema) -> String {
             .map(|value| (value.name, value.value)),
     );
     render_c_transfer_classes(&mut output, schema);
-    render_c_constants(
+    render_c_bit_constants(
         &mut output,
         "HYPER_NATIVE_RIGHT",
-        schema
-            .rights
-            .iter()
-            .map(|value| (value.name, 1u64 << value.bit)),
+        schema.rights.iter().map(|value| (value.name, value.bit)),
     );
     let rights_mask = schema
         .rights
@@ -1345,15 +1358,15 @@ fn render_c(schema: &AbiSchema) -> String {
         .fold(0u64, |mask, right| mask | (1u64 << right.bit));
     let _ = writeln!(
         output,
-        "#define HYPER_NATIVE_RIGHTS_MASK UINT64_C({rights_mask})\n"
+        "#define HYPER_NATIVE_RIGHTS_MASK UINT64_C({rights_mask:#x})\n"
     );
     for signal in schema.signals {
         let _ = writeln!(
             output,
-            "#define HYPER_NATIVE_SIGNAL_{}_{} UINT64_C({})",
+            "#define HYPER_NATIVE_SIGNAL_{}_{} (UINT64_C(1) << {})",
             upper_snake(signal.object),
             upper_snake(signal.name),
-            1u64 << signal.bit
+            signal.bit
         );
     }
     if !schema.signals.is_empty() {
@@ -1389,7 +1402,14 @@ fn render_c(schema: &AbiSchema) -> String {
                 );
                 padding += 1;
             }
-            let _ = writeln!(output, "    {} {};", c_field_type(field.kind), field.name);
+            match field.kind {
+                FieldKind::Bytes(size) => {
+                    let _ = writeln!(output, "    uint8_t {}[{size}];", field.name);
+                }
+                kind => {
+                    let _ = writeln!(output, "    {} {};", c_scalar_field_type(kind), field.name);
+                }
+            }
             cursor = field.offset + field.kind.size();
         }
         if record.size > cursor {
@@ -1481,6 +1501,21 @@ fn render_c_constants<'a>(
         let _ = writeln!(
             output,
             "#define {prefix}_{} UINT64_C({value})",
+            upper_snake(name)
+        );
+    }
+    output.push('\n');
+}
+
+fn render_c_bit_constants<'a>(
+    output: &mut String,
+    prefix: &str,
+    values: impl Iterator<Item = (&'a str, u8)>,
+) {
+    for (name, bit) in values {
+        let _ = writeln!(
+            output,
+            "#define {prefix}_{} (UINT64_C(1) << {bit})",
             upper_snake(name)
         );
     }
@@ -1794,10 +1829,11 @@ fn value_kind_name(kind: ValueKind) -> &'static str {
     }
 }
 
-fn field_kind_name(kind: FieldKind) -> &'static str {
+fn field_kind_name(kind: FieldKind) -> String {
     match kind {
-        FieldKind::U32 => "u32",
-        FieldKind::U64 => "u64",
+        FieldKind::U32 => String::from("u32"),
+        FieldKind::U64 => String::from("u64"),
+        FieldKind::Bytes(size) => format!("bytes[{size}]"),
     }
 }
 
@@ -1809,14 +1845,19 @@ const fn transfer_class_name(class: TransferClass) -> &'static str {
     }
 }
 
-fn rust_field_type(kind: FieldKind) -> &'static str {
-    field_kind_name(kind)
+fn rust_field_type(kind: FieldKind) -> String {
+    match kind {
+        FieldKind::U32 => String::from("u32"),
+        FieldKind::U64 => String::from("u64"),
+        FieldKind::Bytes(size) => format!("[u8; {size}]"),
+    }
 }
 
-fn c_field_type(kind: FieldKind) -> &'static str {
+fn c_scalar_field_type(kind: FieldKind) -> &'static str {
     match kind {
         FieldKind::U32 => "uint32_t",
         FieldKind::U64 => "uint64_t",
+        FieldKind::Bytes(_) => unreachable!("byte arrays require declarator-aware rendering"),
     }
 }
 
@@ -1878,6 +1919,40 @@ mod tests {
         assert_eq!(first.rust, second.rust);
         assert_eq!(first.c, second.c);
         assert_eq!(first.reference, second.reference);
+    }
+
+    #[test]
+    fn generated_bit_constants_preserve_schema_bit_positions() {
+        let generated = generate(&schema::NATIVE_ABI);
+        assert!(generated.is_ok());
+        let Ok(generated) = generated else {
+            return;
+        };
+        assert!(
+            generated
+                .rust
+                .contains("HYPER_NATIVE_FEATURE_CORE: u64 = 1_u64 << 0;")
+        );
+        assert!(
+            generated
+                .rust
+                .contains("HYPER_NATIVE_RIGHT_DERIVE: u64 = 1_u64 << 28;")
+        );
+        assert!(
+            generated
+                .rust
+                .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1fffffff;")
+        );
+        assert!(
+            generated
+                .c
+                .contains("HYPER_NATIVE_RIGHT_DERIVE (UINT64_C(1) << 28)")
+        );
+        assert!(
+            generated
+                .c
+                .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1fffffff)")
+        );
     }
 
     #[test]
@@ -2258,6 +2333,111 @@ mod tests {
     }
 
     #[test]
+    fn inspector_derivation_cannot_amplify_handle_rights() {
+        for (name, object, rights) in [
+            (
+                "task_inspector_derive_process",
+                "task_inspector",
+                schema::TASK_INSPECTOR_RIGHTS,
+            ),
+            (
+                "task_inspector_derive_task_group",
+                "task_inspector",
+                schema::TASK_INSPECTOR_RIGHTS,
+            ),
+            (
+                "task_inspector_derive_resource_domain",
+                "task_inspector",
+                schema::TASK_INSPECTOR_RIGHTS,
+            ),
+            (
+                "object_inspector_derive_process",
+                "object_inspector",
+                schema::OBJECT_INSPECTOR_RIGHTS,
+            ),
+            (
+                "object_inspector_derive_task_group",
+                "object_inspector",
+                schema::OBJECT_INSPECTOR_RIGHTS,
+            ),
+            (
+                "object_inspector_derive_resource_domain",
+                "object_inspector",
+                schema::OBJECT_INSPECTOR_RIGHTS,
+            ),
+        ] {
+            let syscall = schema::SYSCALLS.iter().find(|syscall| syscall.name == name);
+            assert!(syscall.is_some());
+            let Some(syscall) = syscall else {
+                continue;
+            };
+            assert!(matches!(
+                syscall.arguments[0].handle,
+                Some(schema::HandleArgument {
+                    object: ObjectConstraint::Kind(found),
+                    required_rights,
+                    disposition: HandleDisposition::Borrow,
+                }) if found == object && required_rights == rights
+            ));
+            assert!(matches!(
+                syscall.results[0].handle,
+                Some(schema::ProducedHandle {
+                    object: ProducedObject::Kind(found),
+                    rights: ProducedRights::Fixed(produced),
+                }) if found == object && produced == rights
+            ));
+        }
+    }
+
+    #[test]
+    fn inspector_scan_limits_match_their_published_page_capacities() {
+        for (syscall_name, constant_name, expected) in [
+            (
+                "task_inspector_scan_processes",
+                "task_inspector_process_page_capacity",
+                8,
+            ),
+            (
+                "task_inspector_scan_threads",
+                "task_inspector_thread_page_capacity",
+                8,
+            ),
+            (
+                "object_inspector_scan_objects",
+                "object_inspector_object_page_capacity",
+                8,
+            ),
+            (
+                "object_inspector_scan_handles",
+                "object_inspector_handle_page_capacity",
+                8,
+            ),
+        ] {
+            let syscall = schema::SYSCALLS
+                .iter()
+                .find(|syscall| syscall.name == syscall_name);
+            let constant = schema::CONSTANTS
+                .iter()
+                .find(|constant| constant.name == constant_name);
+            assert!(matches!(constant, Some(value) if value.value == expected));
+            assert!(matches!(
+                syscall.and_then(|value| value
+                    .arguments
+                    .iter()
+                    .find(|argument| argument.name == "records"))
+                    .and_then(|argument| argument.memory),
+                Some(schema::UserMemory {
+                    length: MemoryLength::Elements {
+                        maximum_elements,
+                        ..
+                    },
+                    ..
+                }) if u64::from(maximum_elements) == expected
+            ));
+        }
+    }
+
+    #[test]
     fn object_transfer_classes_match_the_audited_contract() {
         let expected = [
             ("none", TransferClass::Forbidden),
@@ -2276,6 +2456,8 @@ mod tests {
             ("boot_file", TransferClass::General),
             ("capability_channel", TransferClass::RendezvousOnly),
             ("process_builder", TransferClass::RendezvousOnly),
+            ("task_inspector", TransferClass::General),
+            ("object_inspector", TransferClass::General),
         ];
         assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
         for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {

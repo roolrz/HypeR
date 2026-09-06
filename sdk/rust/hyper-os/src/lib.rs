@@ -16,6 +16,7 @@ pub mod channel;
 pub mod console;
 mod error;
 pub mod handle;
+pub mod inspect;
 pub mod startup;
 mod status;
 pub mod task;
