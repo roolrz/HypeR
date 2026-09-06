@@ -25,6 +25,7 @@ impl Status {
     pub const WOULD_BLOCK: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_WOULD_BLOCK);
     pub const BUFFER_TOO_SMALL: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL);
     pub const PEER_CLOSED: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_PEER_CLOSED);
+    pub const NOT_FOUND: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_NOT_FOUND);
 
     #[must_use]
     pub const fn from_raw(raw: hyper_abi::HyperNativeStatus) -> Self {

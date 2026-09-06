@@ -3,8 +3,19 @@
 
 //! Process composition, publication, stop, and explicit retirement.
 
+mod handle_namespace;
+mod start;
+
+pub(crate) use handle_namespace::{
+    DirectProcessHandleTransferCommitFailure, HandleBatchPublishFailure, HandlePublishFailure,
+    HandleTransferCommitFailure, PreparedDirectProcessHandleTransfer, PreparedHandleConsumption,
+    PreparedProcessHandleTransfer, ProcessHandleBatchReservation, ProcessHandleReservation,
+};
+pub(crate) use start::{ChildProcessStartError, ProcessStartCoordinator, StartedChildProcess};
+
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use hyper::exec::startup::StartupHandle;
 use hyper::mm::{FallibleArc, UniqueFallibleArc, WeakFallibleArc};
 use hyper::sync::InterruptSpinLock;
 
@@ -21,14 +32,17 @@ use crate::kernel::accounting::{
     ChargeReservation, CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::capability::{
-    ClosedHandle, HANDLE_TABLE_STORAGE_SEGMENTS, HandleBatchReservation,
+    ClosedHandle, DirectHandleTransfer, HANDLE_TABLE_STORAGE_SEGMENTS, HandleBatchReservation,
     HandleBatchReservationStorage, HandleError, HandleFlags, HandleInfo, HandleReservation,
-    HandleScanCursor, HandleSidecar, HandleSnapshotPage, HandleTable, HandleTableStoragePlan,
-    HandleTableStorageSnapshot, HandleTransferClaim, HandleTransferRequest, HandleTransferStorage,
-    HandleValue, InTransitCapabilities, PreparedHandle, ResolvedObject, ResolvedWaitable, Rights,
+    HandleScanCursor, HandleSidecar, HandleSidecarPlan, HandleSnapshotPage, HandleTable,
+    HandleTableStoragePlan, HandleTableStorageSnapshot, HandleTransferClaim, HandleTransferRequest,
+    HandleTransferRoute, HandleTransferStorage, HandleValue, InTransitCapabilities, PreparedHandle,
+    ResolvedObject, ResolvedWaitable, RetiredDirectHandleTransfer,
+    RetiredHandleBatchReservationStorage, RetiredHandleTransferStorage, Rights,
 };
 use crate::kernel::mm::user_space::{
-    MachineError, NativeAddressSpace, UserSlice, UserWriteReservation,
+    MachineError, MemoryObjectError, NativeAddressSpace, UserAddress, UserSlice,
+    UserWriteReservation, VmarObject,
 };
 use crate::kernel::object::{
     KernelObject, Koid, ObjectCreationError, ObjectPublication, SignalMask, SignalSource,
@@ -37,6 +51,11 @@ use crate::kernel::object::{
 use crate::kernel::sync::Completion;
 use crate::kernel::task::scheduler::{self, CpuMask};
 use crate::kernel::task::thread::ThreadId;
+
+use super::builder::{
+    ProcessBuilderError, ProcessStartTransaction, SealedProcessBuild, StartPreparationFailure,
+};
+use super::objects::ProcessObject;
 
 type ProcessLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
@@ -236,8 +255,14 @@ struct HandleChargeLocation {
 type PreparedTableStorage = (
     Option<HandleTableStoragePlan>,
     Option<CommittedCharge>,
-    HandleSidecar<HandleChargeLocation>,
+    HandleSidecarPlan<HandleChargeLocation>,
 );
+
+#[derive(Clone, Copy)]
+enum HandleAdmission {
+    Published,
+    PreparedChild,
+}
 
 struct HandleChargeRecord {
     previous: ProcessLock<Option<WeakFallibleArc<HandleChargeRecord>>>,
@@ -482,6 +507,85 @@ impl PreparedProcess {
         })
     }
 
+    fn process(&self) -> &Process {
+        match self.process.as_ref() {
+            Some(process) => process,
+            None => process_invariant_violation(),
+        }
+    }
+
+    fn reserve_startup_handle_batches(
+        &self,
+        count: usize,
+    ) -> Result<alloc::vec::Vec<ProcessHandleBatchReservation>, ProcessError> {
+        let maximum = HandleBatchReservationStorage::maximum_count();
+        let batch_count = count
+            .checked_add(maximum.saturating_sub(1))
+            .map(|rounded| rounded / maximum)
+            .ok_or(ProcessError::Allocation)?;
+        let mut batches = alloc::vec::Vec::new();
+        batches
+            .try_reserve_exact(batch_count)
+            .map_err(|_| ProcessError::Allocation)?;
+        let mut remaining = count;
+        while remaining != 0 {
+            let batch_size = remaining.min(maximum);
+            match self
+                .process()
+                .reserve_handle_batch_for(batch_size, HandleAdmission::PreparedChild)
+            {
+                Ok(batch) => batches.push(batch),
+                Err(error) => {
+                    for batch in batches.drain(..) {
+                        self.process().abort_handle_batch(batch);
+                    }
+                    return Err(error);
+                }
+            }
+            remaining -= batch_size;
+        }
+        Ok(batches)
+    }
+
+    fn reserve_initial_stack_write(
+        &self,
+        destination: UserSlice,
+    ) -> Result<UserWriteReservation, ProcessError> {
+        let address_space = self.process().inner.state.with(|state| {
+            require_handle_admission(state.lifecycle.phase(), HandleAdmission::PreparedChild)?;
+            state
+                .address_space
+                .as_ref()
+                .cloned()
+                .ok_or(ProcessError::AddressSpaceReferenced)
+        })?;
+        Ok(NativeAddressSpace::reserve_user_write(
+            address_space,
+            destination,
+        )?)
+    }
+
+    fn address_space_owner(&self) -> FallibleArc<NativeAddressSpace> {
+        self.process().inner.state.with(|state| {
+            if state.lifecycle.phase() != ProcessPhase::Prepared {
+                process_invariant_violation();
+            }
+            match state.address_space.as_ref() {
+                Some(address_space) => address_space.clone(),
+                None => process_invariant_violation(),
+            }
+        })
+    }
+
+    fn prepare_initial_user_thread(
+        &self,
+        name: &str,
+        affinity: CpuMask,
+    ) -> Result<PreparedInitialUserThread, ProcessError> {
+        self.process()
+            .prepare_initial_user_thread_unpublished(name, affinity)
+    }
+
     /// Publishes complete Process ownership and then makes it group-visible.
     pub(crate) fn publish(mut self) -> Process {
         let process = match self.process.take() {
@@ -497,18 +601,22 @@ impl PreparedProcess {
             Some(group) => group,
             None => process_invariant_violation(),
         };
-        let (membership, pending_stop) = group.publish(process.clone());
+        let (membership, activation) = group.bind(process.clone());
         process.inner.state.with(|state| {
             if state.group_membership.replace(membership).is_some() {
                 process_invariant_violation();
             }
         });
-        if let Some(generation) = pending_stop {
-            let _ = process.request_stop(TerminalReason::TaskGroupStop { generation });
-        }
         match self.registration.take() {
             Some(registration) => registration.publish(&process),
             None => process_invariant_violation(),
+        }
+        // Directory publication must precede a pending stop. The stop path may
+        // enqueue the Process for retirement on another CPU immediately; a
+        // late directory publication would otherwise resurrect stale
+        // discoverability after the Process was already retired.
+        if let Some(generation) = activation.publish() {
+            let _ = process.request_stop(TerminalReason::TaskGroupStop { generation });
         }
         process
     }
@@ -619,6 +727,35 @@ impl Process {
         Ok(())
     }
 
+    /// Starts and publishes readiness for the precommitted initial Thread.
+    ///
+    /// Holding Process state across scheduler readiness closes the valid race
+    /// where a concurrent `TaskGroup` stop could terminate the dormant Thread
+    /// after `Created -> Running` but before ready-queue publication.
+    fn commit_initial_execution(&self, thread: ThreadId) {
+        self.inner
+            .state
+            .with(|state| match state.lifecycle.phase() {
+                ProcessPhase::Created => {
+                    if state.lifecycle.start().is_err()
+                        || scheduler::ready_user_thread(thread).is_err()
+                    {
+                        crate::hal::cpu::halt();
+                    }
+                }
+                // A pending TaskGroup stop can reach retirement on another CPU
+                // between Process publication and this final readiness step.
+                // In every terminal phase the stop path already owns Thread
+                // completion, so making the initial Thread ready is neither
+                // necessary nor valid.
+                ProcessPhase::Stopping
+                | ProcessPhase::Stopped
+                | ProcessPhase::Retiring
+                | ProcessPhase::Retired => {}
+                _ => process_invariant_violation(),
+            });
+    }
+
     pub(crate) fn join(&self) -> Result<TerminalReason, crate::kernel::sync::Error> {
         self.inner.stopped.wait()?;
         match self.snapshot().terminal {
@@ -700,6 +837,52 @@ impl Process {
             self.abort_pending_thread();
         }
         prepared
+    }
+
+    fn prepare_initial_user_thread_unpublished(
+        &self,
+        name: &str,
+        affinity: CpuMask,
+    ) -> Result<PreparedInitialUserThread, ProcessError> {
+        if !machine_matches_host(self.image().machine())
+            || self.image().family() != AbiFamily::Native
+            || self.image().route() != ExecutionRoute::NativeKernel
+        {
+            return Err(ProcessError::UserEntry(
+                crate::hal::user::UserEntryError::Unsupported,
+            ));
+        }
+        self.inner
+            .state
+            .with(|state| state.lifecycle.reserve_initial_thread())?;
+        let prepared = match self.prepare_user_thread_after_admission() {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.abort_pending_thread();
+                return Err(error);
+            }
+        };
+        let start = self.image().initial_thread();
+        let context = crate::hal::user::prepare_context(
+            start.entry().get(),
+            start.stack().get(),
+            start.tls().get(),
+        )
+        .map_err(ProcessError::UserEntry)?;
+        let execution = UserExecution::try_new(prepared.address_space.clone(), context)
+            .map_err(|()| ProcessError::Allocation)?;
+        let dormant = scheduler::prepare_user_thread(
+            name,
+            prepared.thread.clone(),
+            execution,
+            crate::kernel::entry::user::thread_entry,
+            affinity,
+        )?;
+        Ok(PreparedInitialUserThread {
+            thread: prepared.thread.clone(),
+            process_thread: Some(prepared),
+            dormant: Some(dormant),
+        })
     }
 
     fn abort_pending_thread(&self) {
@@ -837,7 +1020,7 @@ impl Process {
                         .with(|table| table.reservation_storage_snapshot_for(N))?,
                 )
             })?;
-            let (mut storage_plan, mut storage_charge, mut index_plan) =
+            let (mut storage_plan, mut storage_charge, index_plan) =
                 self.prepare_table_storage_plan(snapshot)?;
             let attempt = self.inner.state.with(|state| {
                 require_handle_phase(state.lifecycle.phase())?;
@@ -853,9 +1036,7 @@ impl Process {
                     .handles
                     .with(|table| table.reserve_with_plan(&mut storage_plan))?;
                 install_table_storage_charge(state, snapshot, &mut storage_charge);
-                state
-                    .charge_index
-                    .install(core::mem::replace(&mut index_plan, HandleSidecar::new()));
+                state.charge_index.install(index_plan);
                 Ok(Some(reservation))
             });
             match attempt {
@@ -937,6 +1118,14 @@ impl Process {
         &self,
         count: usize,
     ) -> Result<ProcessHandleBatchReservation, ProcessError> {
+        self.reserve_handle_batch_for(count, HandleAdmission::Published)
+    }
+
+    fn reserve_handle_batch_for(
+        &self,
+        count: usize,
+        admission: HandleAdmission,
+    ) -> Result<ProcessHandleBatchReservation, ProcessError> {
         HandleBatchReservationStorage::validate_count(count)?;
         let entries_bytes = count
             .checked_mul(core::mem::size_of::<HandleChargeEntry>())
@@ -966,17 +1155,17 @@ impl Process {
         let mut reservation_storage = Some(HandleBatchReservationStorage::try_new(count)?);
         let reservation = loop {
             let snapshot = self.inner.state.with(|state| {
-                require_handle_phase(state.lifecycle.phase())?;
+                require_handle_admission(state.lifecycle.phase(), admission)?;
                 Ok::<_, ProcessError>(
                     self.inner
                         .handles
                         .with(|table| table.reservation_storage_snapshot_for(count))?,
                 )
             })?;
-            let (mut storage_plan, mut storage_charge, mut index_plan) =
+            let (mut storage_plan, mut storage_charge, index_plan) =
                 self.prepare_table_storage_plan(snapshot)?;
             let attempt = self.inner.state.with(|state| {
-                require_handle_phase(state.lifecycle.phase())?;
+                require_handle_admission(state.lifecycle.phase(), admission)?;
                 let current = self
                     .inner
                     .handles
@@ -992,9 +1181,7 @@ impl Process {
                     )
                 })?;
                 install_table_storage_charge(state, snapshot, &mut storage_charge);
-                state
-                    .charge_index
-                    .install(core::mem::replace(&mut index_plan, HandleSidecar::new()));
+                state.charge_index.install(index_plan);
                 Ok(Some(reservation))
             });
             match attempt {
@@ -1086,7 +1273,8 @@ impl Process {
             )
         };
         let plan = HandleTableStoragePlan::try_new(snapshot)?;
-        Ok((Some(plan), charge, HandleSidecar::prepare(snapshot)?))
+        let sidecar = HandleSidecar::prepare(snapshot)?;
+        Ok((Some(plan), charge, sidecar))
     }
 
     pub(crate) fn publish_handles<const N: usize>(
@@ -1265,6 +1453,47 @@ impl Process {
         drop(reservation.scratch_charge.take());
     }
 
+    /// Narrows a prevalidated maximum receive reservation to the matched
+    /// capability count without allocating or publishing a handle.
+    ///
+    /// A zero-sized match releases the complete reservation. Nonzero prefixes
+    /// retain their original future values; unused tail values are generation
+    /// advanced before becoming available to another syscall.
+    pub(crate) fn trim_handle_batch(
+        &self,
+        mut reservation: ProcessHandleBatchReservation,
+        count: usize,
+    ) -> Option<ProcessHandleBatchReservation> {
+        if count == 0 {
+            self.abort_handle_batch(reservation);
+            return None;
+        }
+        if count > reservation.values().len() {
+            process_invariant_violation();
+        }
+        if count == reservation.values().len() {
+            return Some(reservation);
+        }
+
+        self.inner.state.with(|_| {
+            let token = match reservation.reservation.as_mut() {
+                Some(token) => token,
+                None => process_invariant_violation(),
+            };
+            self.inner.handles.with(|table| token.trim_to(table, count));
+            let record = match reservation.record.as_ref() {
+                Some(record) => record,
+                None => process_invariant_violation(),
+            };
+            record.state.with(|state| state.entries.truncate(count));
+        });
+        match reservation.handle_charges.as_mut() {
+            Some(charges) => charges.truncate(count),
+            None => process_invariant_violation(),
+        }
+        Some(reservation)
+    }
+
     pub(crate) fn abort_handles<const N: usize>(
         &self,
         mut reservation: ProcessHandleReservation<N>,
@@ -1330,6 +1559,7 @@ impl Process {
         requests: &[HandleTransferRequest],
         forbidden_object: Option<Koid>,
         forbidden_kind: Option<crate::kernel::object::ObjectKind>,
+        route: HandleTransferRoute,
     ) -> Result<PreparedProcessHandleTransfer, ProcessError> {
         HandleTransferStorage::validate_count(requests.len())?;
         let entry_bytes = HandleTransferClaim::entry_allocation_size(requests.len())
@@ -1342,7 +1572,8 @@ impl Process {
             .len()
             .checked_mul(
                 core::mem::size_of::<CommittedCharge>()
-                    .saturating_add(core::mem::size_of::<FallibleArc<HandleChargeRecord>>()),
+                    .saturating_add(core::mem::size_of::<FallibleArc<HandleChargeRecord>>())
+                    .saturating_add(core::mem::size_of::<HandleValue>()),
             )
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or(ProcessError::Allocation)?;
@@ -1354,7 +1585,14 @@ impl Process {
         let handle_charge = self
             .inner
             .domain
-            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, handle_bytes))?
+            .reserve(
+                ResourceAmount::ZERO
+                    .with(ResourceKind::KernelMemoryBytes, handle_bytes)
+                    .with(
+                        ResourceKind::IpcHandles,
+                        u64::try_from(requests.len()).map_err(|_| ProcessError::Allocation)?,
+                    ),
+            )?
             .commit();
         let scratch_charge = self
             .inner
@@ -1370,6 +1608,10 @@ impl Process {
         retired_records
             .try_reserve_exact(requests.len())
             .map_err(|_| ProcessError::Allocation)?;
+        let mut moved_values = alloc::vec::Vec::new();
+        moved_values
+            .try_reserve_exact(requests.len())
+            .map_err(|_| ProcessError::Allocation)?;
         let claim = self.inner.state.with(|state| {
             require_handle_phase(state.lifecycle.phase())?;
             Ok::<_, ProcessError>(self.inner.handles.with(|table| {
@@ -1377,10 +1619,12 @@ impl Process {
                     requests,
                     forbidden_object,
                     forbidden_kind,
+                    route,
                     &mut storage,
                 )
             })?)
         })?;
+        moved_values.extend(claim.values());
         Ok(PreparedProcessHandleTransfer {
             process: self.clone(),
             claim: Some(claim),
@@ -1389,6 +1633,84 @@ impl Process {
             scratch_charge: Some(scratch_charge),
             released_charges,
             retired_records,
+            moved_values,
+        })
+    }
+
+    /// Reversibly claims one typed handle for consume-on-success lifecycle use.
+    ///
+    /// Unlike capability transfer, this path requires an object operation
+    /// right and no propagation right. `expected_koid` binds the claim to the
+    /// object resolved by the syscall adapter before entering the coordinator.
+    pub(crate) fn prepare_handle_consumption(
+        &self,
+        value: HandleValue,
+        required: Rights,
+        expected_kind: crate::kernel::object::ObjectKind,
+        expected_koid: Koid,
+    ) -> Result<PreparedHandleConsumption, ProcessError> {
+        let entry_bytes = HandleTransferClaim::entry_allocation_size(1)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(ProcessError::Allocation)?;
+        let handle_bytes = HandleTransferClaim::handle_allocation_size(1)
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .ok_or(ProcessError::Allocation)?;
+        let scratch_bytes = core::mem::size_of::<CommittedCharge>()
+            .saturating_add(core::mem::size_of::<FallibleArc<HandleChargeRecord>>())
+            .saturating_add(core::mem::size_of::<HandleValue>());
+        let scratch_bytes = u64::try_from(scratch_bytes).map_err(|_| ProcessError::Allocation)?;
+        let entry_charge = self
+            .inner
+            .domain
+            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, entry_bytes))?
+            .commit();
+        let handle_charge = self
+            .inner
+            .domain
+            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, handle_bytes))?
+            .commit();
+        let scratch_charge = self
+            .inner
+            .domain
+            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, scratch_bytes))?
+            .commit();
+        let mut storage = Some(HandleTransferStorage::try_new(1)?);
+        let mut released_charges = alloc::vec::Vec::new();
+        released_charges
+            .try_reserve_exact(1)
+            .map_err(|_| ProcessError::Allocation)?;
+        let mut retired_records = alloc::vec::Vec::new();
+        retired_records
+            .try_reserve_exact(1)
+            .map_err(|_| ProcessError::Allocation)?;
+        let mut moved_values = alloc::vec::Vec::new();
+        moved_values
+            .try_reserve_exact(1)
+            .map_err(|_| ProcessError::Allocation)?;
+        let claim = self.inner.state.with(|state| {
+            require_handle_phase(state.lifecycle.phase())?;
+            Ok::<_, ProcessError>(self.inner.handles.with(|table| {
+                table.prepare_consumption_with_storage(
+                    value,
+                    required,
+                    expected_kind,
+                    expected_koid,
+                    &mut storage,
+                )
+            })?)
+        })?;
+        moved_values.push(value);
+        Ok(PreparedHandleConsumption {
+            transfer: Some(PreparedProcessHandleTransfer {
+                process: self.clone(),
+                claim: Some(claim),
+                entry_charge: Some(entry_charge),
+                handle_charge: Some(handle_charge),
+                scratch_charge: Some(scratch_charge),
+                released_charges,
+                retired_records,
+                moved_values,
+            }),
         })
     }
 
@@ -1582,9 +1904,9 @@ impl Process {
                         .with(|table| table.replace_storage_snapshot(value, rights))?,
                 )
             })?;
-            let (mut storage_plan, mut storage_charge, mut index_plan) = match snapshot {
+            let (mut storage_plan, mut storage_charge, index_plan) = match snapshot {
                 Some(snapshot) => self.prepare_table_storage_plan(snapshot)?,
-                None => (None, None, HandleSidecar::new()),
+                None => (None, None, HandleSidecarPlan::empty()),
             };
             let attempt = self.inner.state.with(|state| {
                 require_handle_phase(state.lifecycle.phase())?;
@@ -1601,9 +1923,7 @@ impl Process {
                     .with(|table| table.replace_with_plan(value, rights, &mut storage_plan))?;
                 if let Some(snapshot) = snapshot {
                     install_table_storage_charge(state, snapshot, &mut storage_charge);
-                    state
-                        .charge_index
-                        .install(core::mem::replace(&mut index_plan, HandleSidecar::new()));
+                    state.charge_index.install(index_plan);
                 }
                 replace_handle_charge_value(state, value, replacement);
                 Ok(Some(replacement))
@@ -1754,10 +2074,7 @@ impl Process {
                     state.process_charge.take(),
                     state.threads.take(),
                     state.handle_charges.take(),
-                    core::mem::replace(
-                        &mut state.handle_table_charges,
-                        [const { None }; HANDLE_TABLE_STORAGE_SEGMENTS],
-                    ),
+                    core::mem::take(&mut state.handle_table_charges),
                 )
             });
         while let Some(record) = records {
@@ -1819,180 +2136,26 @@ impl Clone for Process {
     }
 }
 
-pub(crate) struct HandlePublishFailure<const N: usize> {
-    pub(crate) error: ProcessError,
-    pub(crate) handles: [PreparedHandle; N],
+#[must_use = "publish or drop the dormant initial Thread"]
+struct PreparedInitialUserThread {
+    thread: UserThread,
+    process_thread: Option<PreparedUserThread>,
+    dormant: Option<crate::kernel::task::scheduler::DormantUserThread>,
 }
 
-/// Process-owned reversible source-handle transaction.
-#[must_use = "commit or roll back the process handle transfer"]
-pub(crate) struct PreparedProcessHandleTransfer {
-    process: Process,
-    claim: Option<HandleTransferClaim>,
-    entry_charge: Option<CommittedCharge>,
-    handle_charge: Option<CommittedCharge>,
-    scratch_charge: Option<CommittedCharge>,
-    released_charges: alloc::vec::Vec<CommittedCharge>,
-    retired_records: alloc::vec::Vec<FallibleArc<HandleChargeRecord>>,
-}
-
-impl PreparedProcessHandleTransfer {
-    /// Restores every claimed source at its original numeric value.
-    pub(crate) fn rollback(mut self) {
-        let claim = match self.claim.take() {
-            Some(claim) => claim,
+impl PreparedInitialUserThread {
+    fn publish(mut self) -> (UserThread, ThreadId, Option<TerminalReason>) {
+        let dormant = match self.dormant.take() {
+            Some(dormant) => dormant,
             None => process_invariant_violation(),
         };
-        let retired = self.process.inner.state.with(|_| {
-            self.process
-                .inner
-                .handles
-                .with(|table| claim.rollback_with_storage(table))
-        });
-        drop(retired);
-        drop(self.entry_charge.take());
-        drop(self.handle_charge.take());
-        drop(self.scratch_charge.take());
-    }
-
-    /// Permanently consumes all source values and returns their active owners.
-    ///
-    /// Admission is the only recoverable check. Once it succeeds, accounting
-    /// extraction and generation advancement are infallible and serialized by
-    /// the Process lock. Released accounting owners are dropped afterward.
-    // The recoverable error must retain this complete linear transaction.
-    // Boxing it would make rollback depend on a new allocation.
-    #[allow(clippy::result_large_err)]
-    pub(crate) fn commit(mut self) -> Result<InTransitCapabilities, HandleTransferCommitFailure> {
-        let result = self.process.inner.state.with(|state| {
-            require_handle_phase(state.lifecycle.phase())?;
-            let claim = match self.claim.as_ref() {
-                Some(claim) => claim,
-                None => process_invariant_violation(),
-            };
-            for value in claim.values() {
-                if !handle_charge_is_live(state, value) {
-                    process_invariant_violation();
-                }
-            }
-            for value in claim.values() {
-                let (charge, retired_record) = release_handle_charge(state, value);
-                self.released_charges.push(charge);
-                if let Some(record) = retired_record {
-                    self.retired_records.push(record);
-                }
-            }
-            let claim = match self.claim.take() {
-                Some(claim) => claim,
-                None => process_invariant_violation(),
-            };
-            Ok(self
-                .process
-                .inner
-                .handles
-                .with(|table| claim.commit_with_storage(table)))
-        });
-        let (handles, retired_transfer_storage) = match result {
-            Ok(handles) => handles,
-            Err(error) => {
-                return Err(HandleTransferCommitFailure {
-                    error,
-                    transfer: self,
-                });
-            }
-        };
-        drop(retired_transfer_storage);
-        drop(core::mem::take(&mut self.released_charges));
-        drop(core::mem::take(&mut self.retired_records));
-        drop(self.entry_charge.take());
-        drop(self.scratch_charge.take());
-        let storage_charge = match self.handle_charge.take() {
-            Some(charge) => charge,
+        let id = dormant.id();
+        let process_thread = match self.process_thread.take() {
+            Some(process_thread) => process_thread,
             None => process_invariant_violation(),
         };
-        Ok(InTransitCapabilities::new(handles, storage_charge))
-    }
-}
-
-impl Drop for PreparedProcessHandleTransfer {
-    fn drop(&mut self) {
-        if self.claim.is_some()
-            || self.entry_charge.is_some()
-            || self.handle_charge.is_some()
-            || self.scratch_charge.is_some()
-            || !self.released_charges.is_empty()
-            || !self.retired_records.is_empty()
-        {
-            process_invariant_violation();
-        }
-    }
-}
-
-/// Recoverable final-commit failure retaining the exact rollback owner.
-#[must_use = "inspect the error and roll back the retained transfer"]
-pub(crate) struct HandleTransferCommitFailure {
-    pub(crate) error: ProcessError,
-    pub(crate) transfer: PreparedProcessHandleTransfer,
-}
-
-#[must_use = "publish or abort the process handle reservation"]
-pub(crate) struct ProcessHandleReservation<const N: usize> {
-    reservation: Option<HandleReservation<N>>,
-    handle_charges: Option<alloc::vec::Vec<ChargeReservation>>,
-    record: Option<FallibleArc<HandleChargeRecord>>,
-}
-
-#[must_use = "publish or abort the process handle batch reservation"]
-pub(crate) struct ProcessHandleBatchReservation {
-    reservation: Option<HandleBatchReservation>,
-    handle_charges: Option<alloc::vec::Vec<ChargeReservation>>,
-    record: Option<FallibleArc<HandleChargeRecord>>,
-    scratch_charge: Option<CommittedCharge>,
-}
-
-impl<const N: usize> ProcessHandleReservation<N> {
-    /// Future generation-tagged values which resolve only after publication.
-    pub(crate) fn values(&self) -> [HandleValue; N] {
-        match self.reservation.as_ref() {
-            Some(reservation) => reservation.values(),
-            None => process_invariant_violation(),
-        }
-    }
-}
-
-impl ProcessHandleBatchReservation {
-    /// Future numeric values which remain unresolved until batch publication.
-    pub(crate) fn values(&self) -> &[HandleValue] {
-        match self.reservation.as_ref() {
-            Some(reservation) => reservation.values(),
-            None => process_invariant_violation(),
-        }
-    }
-}
-
-impl Drop for ProcessHandleBatchReservation {
-    fn drop(&mut self) {
-        if self.reservation.is_some()
-            || self.handle_charges.is_some()
-            || self.record.is_some()
-            || self.scratch_charge.is_some()
-        {
-            process_invariant_violation();
-        }
-    }
-}
-
-#[must_use = "recover the in-transit handles from the failed publication"]
-pub(crate) struct HandleBatchPublishFailure {
-    pub(crate) error: ProcessError,
-    pub(crate) handles: InTransitCapabilities,
-}
-
-impl<const N: usize> Drop for ProcessHandleReservation<N> {
-    fn drop(&mut self) {
-        if self.reservation.is_some() || self.handle_charges.is_some() || self.record.is_some() {
-            process_invariant_violation();
-        }
+        let terminal = process_thread.publish(id, dormant);
+        (self.thread.clone(), id, terminal)
     }
 }
 
@@ -2191,9 +2354,23 @@ fn install_table_storage_charge(
 }
 
 fn require_handle_phase(phase: ProcessPhase) -> Result<(), ProcessError> {
-    match phase {
-        ProcessPhase::Created | ProcessPhase::Running => Ok(()),
-        _ => Err(ProcessError::Lifecycle(LifecycleError::AdmissionClosed)),
+    require_handle_admission(phase, HandleAdmission::Published)
+}
+
+fn require_handle_admission(
+    phase: ProcessPhase,
+    admission: HandleAdmission,
+) -> Result<(), ProcessError> {
+    let admitted = match admission {
+        HandleAdmission::Published => {
+            matches!(phase, ProcessPhase::Created | ProcessPhase::Running)
+        }
+        HandleAdmission::PreparedChild => phase == ProcessPhase::Prepared,
+    };
+    if admitted {
+        Ok(())
+    } else {
+        Err(ProcessError::Lifecycle(LifecycleError::AdmissionClosed))
     }
 }
 

@@ -20,7 +20,7 @@ use crate::kernel::accounting::CommittedCharge;
 use crate::kernel::accounting::{ResourceAmount, ResourceDomain, ResourceError, ResourceKind};
 use crate::kernel::authority::Rights;
 use crate::kernel::object::{
-    KernelObject, ObjectKind, SignalMask, SignalSource, SignalState, private,
+    KernelObject, ObjectKind, SignalMask, SignalSource, SignalState, TransferClass, private,
 };
 #[cfg(not(feature = "kernel-self-test"))]
 use crate::kernel::object::{ObjectCreationError, ObjectPublication, object_allocation_size};
@@ -216,6 +216,7 @@ impl private::UserExportable for SystemConsole {}
 
 impl KernelObject for SystemConsole {
     const KIND: ObjectKind = ObjectKind::CONSOLE;
+    const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::WAIT)

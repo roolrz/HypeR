@@ -27,10 +27,11 @@ pub const HYPER_NATIVE_STATUS_CANCELLED: HyperNativeStatus = -12;
 pub const HYPER_NATIVE_STATUS_WOULD_BLOCK: HyperNativeStatus = -13;
 pub const HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL: HyperNativeStatus = -14;
 pub const HYPER_NATIVE_STATUS_PEER_CLOSED: HyperNativeStatus = -15;
+pub const HYPER_NATIVE_STATUS_NOT_FOUND: HyperNativeStatus = -16;
 
 pub const HYPER_NATIVE_OBJECT_NONE: u32 = 0;
 pub const HYPER_NATIVE_OBJECT_EVENT: u32 = 1;
-pub const HYPER_NATIVE_OBJECT_CHANNEL: u32 = 2;
+pub const HYPER_NATIVE_OBJECT_BYTE_CHANNEL: u32 = 2;
 pub const HYPER_NATIVE_OBJECT_THREAD: u32 = 3;
 pub const HYPER_NATIVE_OBJECT_PROCESS: u32 = 4;
 pub const HYPER_NATIVE_OBJECT_TASK_GROUP: u32 = 5;
@@ -40,6 +41,36 @@ pub const HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY: u32 = 8;
 pub const HYPER_NATIVE_OBJECT_VMO: u32 = 9;
 pub const HYPER_NATIVE_OBJECT_VMAR: u32 = 10;
 pub const HYPER_NATIVE_OBJECT_CONSOLE: u32 = 11;
+pub const HYPER_NATIVE_OBJECT_BOOT_FS: u32 = 12;
+pub const HYPER_NATIVE_OBJECT_BOOT_FILE: u32 = 13;
+pub const HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL: u32 = 14;
+pub const HYPER_NATIVE_OBJECT_PROCESS_BUILDER: u32 = 15;
+
+pub const HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN: u32 = 0;
+pub const HYPER_NATIVE_TRANSFER_CLASS_GENERAL: u32 = 1;
+pub const HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY: u32 = 2;
+
+pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {
+    match object_kind {
+        HYPER_NATIVE_OBJECT_NONE => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
+        HYPER_NATIVE_OBJECT_EVENT => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_BYTE_CHANNEL => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_THREAD => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_PROCESS => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_TASK_GROUP => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_TASK_FACTORY => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_VMO => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_VMAR => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_CONSOLE => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_BOOT_FS => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_BOOT_FILE => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_PROCESS_BUILDER => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        _ => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
+    }
+}
 
 pub const HYPER_NATIVE_RIGHT_DUPLICATE: u64 = 1;
 pub const HYPER_NATIVE_RIGHT_TRANSFER: u64 = 2;
@@ -67,13 +98,17 @@ pub const HYPER_NATIVE_RIGHT_CREATE_TASK_GROUP: u64 = 4194304;
 pub const HYPER_NATIVE_RIGHT_CREATE_RESOURCE_DOMAIN: u64 = 8388608;
 pub const HYPER_NATIVE_RIGHT_SET_LIMITS: u64 = 16777216;
 pub const HYPER_NATIVE_RIGHT_CREATE_EXECUTABLE: u64 = 33554432;
+pub const HYPER_NATIVE_RIGHT_TASK_GROUP_ATTACH_PROCESS: u64 = 67108864;
+pub const HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR: u64 = 134217728;
 
-pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 67108863;
+pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 268435455;
 
 pub const HYPER_NATIVE_SIGNAL_EVENT_SIGNALED: u64 = 1;
-pub const HYPER_NATIVE_SIGNAL_CHANNEL_READABLE: u64 = 1;
-pub const HYPER_NATIVE_SIGNAL_CHANNEL_WRITABLE: u64 = 2;
-pub const HYPER_NATIVE_SIGNAL_CHANNEL_PEER_CLOSED: u64 = 4;
+pub const HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE: u64 = 1;
+pub const HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_WRITABLE: u64 = 2;
+pub const HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_PEER_CLOSED: u64 = 4;
+pub const HYPER_NATIVE_SIGNAL_CAPABILITY_CHANNEL_PEER_RECEIVING: u64 = 1;
+pub const HYPER_NATIVE_SIGNAL_CAPABILITY_CHANNEL_PEER_CLOSED: u64 = 2;
 pub const HYPER_NATIVE_SIGNAL_THREAD_TERMINATED: u64 = 1;
 pub const HYPER_NATIVE_SIGNAL_PROCESS_TERMINATED: u64 = 1;
 pub const HYPER_NATIVE_SIGNAL_CONSOLE_READABLE: u64 = 1;
@@ -89,14 +124,27 @@ pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_FACTORY: u64 = 3;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_EXECUTABLE_AUTHORITY: u64 = 4;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR: u64 = 5;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE: u64 = 6;
+pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_BOOT_FS: u64 = 7;
+pub const HYPER_NATIVE_STARTUP_MAX_HANDLES: u64 = 256;
 pub const HYPER_NATIVE_DEADLINE_INFINITE: u64 = 18446744073709551615;
-pub const HYPER_NATIVE_CHANNEL_DISPOSITION_SAME_RIGHTS: u64 = 18446744073709551615;
-pub const HYPER_NATIVE_CHANNEL_MAX_MESSAGE_BYTES: u64 = 65536;
-pub const HYPER_NATIVE_CHANNEL_MAX_MESSAGE_HANDLES: u64 = 64;
-pub const HYPER_NATIVE_CHANNEL_MAX_QUEUED_MESSAGES: u64 = 16;
-pub const HYPER_NATIVE_CHANNEL_MAX_QUEUED_BYTES: u64 = 1048576;
-pub const HYPER_NATIVE_CHANNEL_MAX_QUEUED_HANDLES: u64 = 1024;
+pub const HYPER_NATIVE_CAPABILITY_DISPOSITION_SAME_RIGHTS: u64 = 18446744073709551615;
+pub const HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES: u64 = 65536;
+pub const HYPER_NATIVE_BYTE_CHANNEL_MAX_QUEUED_MESSAGES: u64 = 16;
+pub const HYPER_NATIVE_BYTE_CHANNEL_MAX_QUEUED_BYTES: u64 = 1048576;
+pub const HYPER_NATIVE_CAPABILITY_CHANNEL_MAX_MESSAGE_BYTES: u64 = 4096;
+pub const HYPER_NATIVE_CAPABILITY_CHANNEL_MAX_HANDLES: u64 = 16;
+pub const HYPER_NATIVE_CAPABILITY_DISPOSITION_MOVE: u64 = 0;
+pub const HYPER_NATIVE_CAPABILITY_DISPOSITION_DUPLICATE: u64 = 1;
 pub const HYPER_NATIVE_CONSOLE_MAX_TRANSFER_BYTES: u64 = 4096;
+pub const HYPER_NATIVE_BOOTFS_MAX_PATH_BYTES: u64 = 4096;
+pub const HYPER_NATIVE_BOOTFS_MAX_READ_BYTES: u64 = 65536;
+pub const HYPER_NATIVE_PROCESS_NAME_MAX_BYTES: u64 = 64;
+pub const HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES: u64 = 4096;
+pub const HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES: u64 = 4096;
+pub const HYPER_NATIVE_PROCESS_MAX_ARGUMENTS: u64 = 64;
+pub const HYPER_NATIVE_PROCESS_MAX_ENVIRONMENT: u64 = 64;
+pub const HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS: u64 = 4;
+pub const HYPER_NATIVE_PROCESS_AFFINITY_MAX_CPUS: u64 = 256;
 
 pub const HYPER_NATIVE_SYS_ABI_QUERY: u64 = 0;
 pub const HYPER_NATIVE_SYS_HANDLE_CLOSE: u64 = 1;
@@ -110,20 +158,36 @@ pub const HYPER_NATIVE_SYS_PROCESS_EXIT: u64 = 8;
 pub const HYPER_NATIVE_SYS_EVENT_CREATE: u64 = 9;
 pub const HYPER_NATIVE_SYS_EVENT_SIGNAL: u64 = 10;
 pub const HYPER_NATIVE_SYS_OBJECT_WAIT_ONE: u64 = 11;
-pub const HYPER_NATIVE_SYS_CHANNEL_CREATE: u64 = 12;
-pub const HYPER_NATIVE_SYS_CHANNEL_WRITE: u64 = 13;
-pub const HYPER_NATIVE_SYS_CHANNEL_READ: u64 = 14;
+pub const HYPER_NATIVE_SYS_BYTE_CHANNEL_CREATE: u64 = 12;
+pub const HYPER_NATIVE_SYS_BYTE_CHANNEL_WRITE: u64 = 13;
+pub const HYPER_NATIVE_SYS_BYTE_CHANNEL_READ: u64 = 14;
 pub const HYPER_NATIVE_SYS_CONSOLE_READ: u64 = 15;
 pub const HYPER_NATIVE_SYS_CONSOLE_WRITE: u64 = 16;
+pub const HYPER_NATIVE_SYS_BOOTFS_OPEN: u64 = 17;
+pub const HYPER_NATIVE_SYS_BOOT_FILE_READ: u64 = 18;
+pub const HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE: u64 = 19;
+pub const HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND: u64 = 20;
+pub const HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE: u64 = 21;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE: u64 = 22;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME: u64 = 23;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT: u64 = 24;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT: u64 = 25;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY: u64 = 26;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_HANDLE: u64 = 27;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL: u64 = 28;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_START: u64 = 29;
+pub const HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT: u64 = 30;
+pub const HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP: u64 = 31;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
     status: HyperNativeStatus,
 ) -> u64 {
     match (syscall_number, status) {
-        (HYPER_NATIVE_SYS_CHANNEL_READ, HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL) => 3,
+        (HYPER_NATIVE_SYS_BYTE_CHANNEL_READ, HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL) => 1,
         (HYPER_NATIVE_SYS_CONSOLE_READ, HYPER_NATIVE_STATUS_WOULD_BLOCK) => 1,
         (HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_STATUS_WOULD_BLOCK) => 1,
+        (HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL) => 3,
         _ => 0,
     }
 }
@@ -156,18 +220,33 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, reserved
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HyperNativeChannelDisposition {
+pub struct HyperNativeCapabilityDisposition {
     pub handle: u64,
     pub rights: u64,
     pub expected_kind: u32,
-    pub reserved: u32,
+    pub operation: u32,
 }
-const _: () = assert!(core::mem::size_of::<HyperNativeChannelDisposition>() == 24);
-const _: () = assert!(core::mem::align_of::<HyperNativeChannelDisposition>() == 8);
-const _: () = assert!(core::mem::offset_of!(HyperNativeChannelDisposition, handle) == 0);
-const _: () = assert!(core::mem::offset_of!(HyperNativeChannelDisposition, rights) == 8);
-const _: () = assert!(core::mem::offset_of!(HyperNativeChannelDisposition, expected_kind) == 16);
-const _: () = assert!(core::mem::offset_of!(HyperNativeChannelDisposition, reserved) == 20);
+const _: () = assert!(core::mem::size_of::<HyperNativeCapabilityDisposition>() == 24);
+const _: () = assert!(core::mem::align_of::<HyperNativeCapabilityDisposition>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityDisposition, handle) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityDisposition, rights) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityDisposition, expected_kind) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityDisposition, operation) == 20);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeCapabilityReceiveSlot {
+    pub handle: u64,
+    pub rights: u64,
+    pub expected_kind: u32,
+    pub flags: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeCapabilityReceiveSlot>() == 24);
+const _: () = assert!(core::mem::align_of::<HyperNativeCapabilityReceiveSlot>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, handle) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, rights) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, expected_kind) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, flags) == 20);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

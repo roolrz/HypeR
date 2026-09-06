@@ -6,7 +6,9 @@
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
-use crate::kernel::object::{KernelObject, ObjectKind, object_allocation_size, private};
+use crate::kernel::object::{
+    KernelObject, ObjectKind, TransferClass, object_allocation_size, private,
+};
 #[cfg(feature = "kernel-self-test")]
 use crate::kernel::task::scheduler::WaitRegistration;
 
@@ -142,6 +144,7 @@ impl private::UserExportable for Event {}
 
 impl KernelObject for Event {
     const KIND: ObjectKind = ObjectKind::EVENT;
+    const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::WAIT)

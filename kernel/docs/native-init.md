@@ -70,20 +70,46 @@ VMAR have one concurrency-safe object-publication identity. Handles remain
 process-local generation values, rights may only decrease, and a heterogeneous
 initial set can use the existing batch reservation and publication transaction.
 
-The production init transaction always reserves and writes five tagged
-authorities: the root `ResourceDomain`, root `TaskGroup`, `TaskFactory`,
-`ExecutableAuthority`, and root VMAR. When the platform selected a runtime
-system console, the same transaction includes a sixth Console authority.
-Future handle values are encoded while unresolved and the complete batch is
-published before the initial Thread can run. The Console exposes nonblocking,
-capability-checked reads and writes; `READABLE` and `WRITABLE` levels compose
-with the ordinary object-wait syscall. No self-Process handle is installed in
-its own table.
+The production init transaction reserves and writes only the authorities init
+currently consumes: the root `ResourceDomain`, root `TaskGroup`,
+`TaskFactory`, BootFs, and (when available) Console. Future handle values are
+encoded while unresolved and the complete batch is published before the
+initial Thread can run. No self-Process handle is installed in its own table.
+Executable-memory and root-VMAR purposes remain part of the Native ABI, but
+the kernel does not delegate dormant authority to init before a corresponding
+userspace operation exists.
+
+The Kernel loads only `/init`; it neither interprets the service manifest nor
+preloads system services. Init reads `/etc/hyper/services.json` through BootFs,
+validates the complete dependency and capability graph, and then uses the
+one-shot `ProcessBuilder` object to construct each child. A builder owns every
+staged startup capability immediately after successful insertion. Starting a
+sealed builder publishes the child, atomically replaces the consumed builder
+authority with a supervisor Process handle in the parent, and only then makes
+the initial child Thread runnable. Init retains `REQUEST_STOP` on every
+supervisor and requests termination of all already-started children if graph
+launch or later critical supervision fails.
+
+Init retains physical Console management authority. Separate input and output
+workers receive only the physical direction and raw byte-channel direction
+they require. The session manager owns the peer data endpoints and receives no
+physical Console capability. None of the children receives duplication or
+onward-transfer authority. This preserves duplex, blocking I/O without polling
+and leaves later foreground-session handoff to capability rendezvous without
+changing physical Console ownership.
+
+The manifest format reserves restart policies, but the current runtime accepts
+only `never` and exactly one critical service. Init blocks on that Process's
+termination signal without polling. Multiple critical services require
+WaitSet observation; reliable restart additionally requires an observable exit
+reason and a monotonic backoff facility. Unsupported supervision graphs are
+rejected during preflight before any child is started.
 
 ## Validation boundary
 
 Host tests validate archive indexing, path rejection, ELF permissions, layout,
 entry points, and supported relocation decoding. Kernel QEMU tests use the
-test-only Linux guest path. The `test-native` contract separately builds
-`app/init` through the assembled SDK, constructs the production
-initramfs, and verifies Native startup and console I/O end to end.
+test-only Linux guest path. The `test-native` contract separately builds the
+Native applications through the assembled SDK, constructs the production
+initramfs, and verifies that init loads the manifest, starts the session
+Process, and exposes end-to-end Console input and output.

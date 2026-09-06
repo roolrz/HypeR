@@ -129,7 +129,7 @@ impl ProcessLifecycle {
                 self.phase = ProcessPhase::Running;
                 Ok(())
             }
-            ProcessPhase::Running => Ok(()),
+            ProcessPhase::Running => Err(LifecycleError::AdmissionClosed),
             ProcessPhase::Prepared => Err(LifecycleError::NotStarted),
             _ => Err(LifecycleError::AdmissionClosed),
         }
@@ -139,6 +139,25 @@ impl ProcessLifecycle {
         if !matches!(self.phase, ProcessPhase::Created | ProcessPhase::Running) {
             return Err(LifecycleError::AdmissionClosed);
         }
+        self.reserve_thread_counter()
+    }
+
+    /// Reserves the one initial Thread while its Process is still unpublished.
+    ///
+    /// Only the child-start transaction may use this transition. Requiring an
+    /// empty membership prevents a generic Thread-creation path from turning
+    /// `Prepared` into a second externally usable admission phase.
+    pub(crate) fn reserve_initial_thread(&mut self) -> Result<(), LifecycleError> {
+        if self.phase != ProcessPhase::Prepared
+            || self.pending_threads != 0
+            || self.active_threads != 0
+        {
+            return Err(LifecycleError::AdmissionClosed);
+        }
+        self.reserve_thread_counter()
+    }
+
+    fn reserve_thread_counter(&mut self) -> Result<(), LifecycleError> {
         self.pending_threads = self
             .pending_threads
             .checked_add(1)

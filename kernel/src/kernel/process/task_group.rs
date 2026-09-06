@@ -3,7 +3,7 @@
 
 //! Grouped process stop and membership ownership.
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use hyper::mm::FallibleArc;
 use hyper::sync::InterruptSpinLock;
@@ -35,10 +35,18 @@ enum GroupPhase {
 }
 
 struct MemberRecord {
-    active: AtomicBool,
+    phase: AtomicU8,
     process: GroupLock<Option<Process>>,
     next: GroupLock<Option<FallibleArc<MemberRecord>>>,
     _metadata_charge: CommittedCharge,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum MemberPhase {
+    Pending,
+    Active,
+    Retired,
 }
 
 struct GroupState {
@@ -165,7 +173,7 @@ impl TaskGroup {
             )?
             .commit();
         let record = FallibleArc::try_new(MemberRecord {
-            active: AtomicBool::new(false),
+            phase: AtomicU8::new(MemberPhase::Pending as u8),
             process: GroupLock::new(None),
             next: GroupLock::new(None),
             _metadata_charge: record_charge,
@@ -266,35 +274,27 @@ pub(super) struct PreparedTaskGroupMembership {
 }
 
 impl PreparedTaskGroupMembership {
-    pub(super) fn publish(mut self, process: Process) -> (TaskGroupMembership, Option<u64>) {
+    /// Binds the Process owner while the member remains invisible to group
+    /// traversal. The returned activation token must be published only after
+    /// the Process has installed `membership` and entered its directory.
+    pub(super) fn bind(
+        mut self,
+        process: Process,
+    ) -> (TaskGroupMembership, TaskGroupMembershipActivation) {
         let record = match self.record.take() {
             Some(record) => record,
             None => group_invariant_violation(),
         };
         record.process.with(|slot| *slot = Some(process));
-        self.group.inner.state.with(|state| {
-            if state.phase == GroupPhase::Retired || state.pending_members == 0 {
-                group_invariant_violation();
-            }
-            record.next.with(|next| *next = state.head.clone());
-            record.active.store(true, Ordering::Relaxed);
-            state.head = Some(record.clone());
-            state.pending_members -= 1;
-            state.active_members = match state.active_members.checked_add(1) {
-                Some(count) => count,
-                None => group_invariant_violation(),
-            };
-        });
-        let stop_generation =
-            self.group.inner.state.with(|state| {
-                (state.phase == GroupPhase::Stopping).then_some(state.stop_generation)
-            });
         (
             TaskGroupMembership {
                 group: self.group.clone(),
+                record: Some(record.clone()),
+            },
+            TaskGroupMembershipActivation {
+                group: self.group.clone(),
                 record: Some(record),
             },
-            stop_generation,
         )
     }
 }
@@ -318,26 +318,100 @@ pub(super) struct TaskGroupMembership {
     record: Option<FallibleArc<MemberRecord>>,
 }
 
+/// Linear commit token for making one bound member visible to group policy.
+pub(super) struct TaskGroupMembershipActivation {
+    group: TaskGroup,
+    record: Option<FallibleArc<MemberRecord>>,
+}
+
+impl TaskGroupMembershipActivation {
+    /// Activates the record or observes that Process retirement won first.
+    pub(super) fn publish(mut self) -> Option<u64> {
+        let record = match self.record.take() {
+            Some(record) => record,
+            None => group_invariant_violation(),
+        };
+        self.group.inner.state.with(|state| {
+            match member_phase(&record) {
+                MemberPhase::Pending => {
+                    if state.phase == GroupPhase::Retired || state.pending_members == 0 {
+                        group_invariant_violation();
+                    }
+                    record.next.with(|next| *next = state.head.clone());
+                    record
+                        .phase
+                        .store(MemberPhase::Active as u8, Ordering::Relaxed);
+                    state.head = Some(record.clone());
+                    state.pending_members -= 1;
+                    state.active_members = match state.active_members.checked_add(1) {
+                        Some(count) => count,
+                        None => group_invariant_violation(),
+                    };
+                    (state.phase == GroupPhase::Stopping).then_some(state.stop_generation)
+                }
+                // Independent Process stop may retire a directory-visible
+                // pending member before this activation runs.
+                MemberPhase::Retired => None,
+                MemberPhase::Active => group_invariant_violation(),
+            }
+        })
+    }
+}
+
+impl Drop for TaskGroupMembershipActivation {
+    fn drop(&mut self) {
+        if self.record.is_some() {
+            group_invariant_violation();
+        }
+    }
+}
+
 impl TaskGroupMembership {
     pub(super) fn retire(mut self) {
         let record = match self.record.take() {
             Some(record) => record,
             None => group_invariant_violation(),
         };
-        if !record.active.swap(false, Ordering::AcqRel) {
-            group_invariant_violation();
-        }
+        let detached_record = self
+            .group
+            .inner
+            .state
+            .with(|state| match member_phase(&record) {
+                MemberPhase::Pending => {
+                    state.pending_members = match state.pending_members.checked_sub(1) {
+                        Some(count) => count,
+                        None => group_invariant_violation(),
+                    };
+                    record
+                        .phase
+                        .store(MemberPhase::Retired as u8, Ordering::Relaxed);
+                    None
+                }
+                MemberPhase::Active => {
+                    state.active_members = match state.active_members.checked_sub(1) {
+                        Some(count) => count,
+                        None => group_invariant_violation(),
+                    };
+                    record
+                        .phase
+                        .store(MemberPhase::Retired as u8, Ordering::Relaxed);
+                    Some(unlink_member_record(state, &record))
+                }
+                MemberPhase::Retired => group_invariant_violation(),
+            });
         let process = record.process.with(Option::take);
-        let detached_record = self.group.inner.state.with(|state| {
-            state.active_members = match state.active_members.checked_sub(1) {
-                Some(count) => count,
-                None => group_invariant_violation(),
-            };
-            unlink_member_record(state, &record)
-        });
         drop(process);
         drop(detached_record);
         drop(record);
+    }
+}
+
+fn member_phase(record: &MemberRecord) -> MemberPhase {
+    match record.phase.load(Ordering::Relaxed) {
+        value if value == MemberPhase::Pending as u8 => MemberPhase::Pending,
+        value if value == MemberPhase::Active as u8 => MemberPhase::Active,
+        value if value == MemberPhase::Retired as u8 => MemberPhase::Retired,
+        _ => group_invariant_violation(),
     }
 }
 

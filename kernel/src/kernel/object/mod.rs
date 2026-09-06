@@ -21,8 +21,8 @@ pub(crate) use core::{
     ActiveHandleError, ActiveHandleOwner, Diagnostic, ErasedKernelRef, ExportPolicy, KernelObject,
     KernelRef, KernelService, Koid, ObjectCreationError, ObjectHandleState, ObjectKind,
     ObjectPublication, ObjectReferenceSnapshot, ObjectRetirement, ObjectSnapshot, OperationPin,
-    PublishableRef, Scheduler, UserExportableObject, final_reap_pending, object_allocation_size,
-    private, reap_one_final_object,
+    PublishableRef, Scheduler, TransferClass, UserExportableObject, final_reap_pending,
+    object_allocation_size, private, reap_one_final_object,
 };
 pub(crate) use directory::{ObjectScanCursor, scan};
 pub(crate) use event::{Event, EventError};
@@ -31,4 +31,7 @@ pub(crate) use signals::PreparedSignalWait;
 pub(crate) use signals::{
     SignalMask, SignalSource, SignalState, SignalWaitError, SignalWaitOutcome,
 };
-pub(crate) use wait::{ObjectWaitError, wait_one};
+pub(crate) use wait::{
+    ObjectWaitError, PreparedTimedWait, PublishedTimedWait, TimedWaitPreparation,
+    prepare_timed_wait, wait_one,
+};

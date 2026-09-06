@@ -8,9 +8,11 @@ use core::array;
 use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use super::super::authority::{HandleRights, PropagationRights};
 use super::super::object::{
     ActiveHandleError, ActiveHandleOwner, ErasedKernelRef, KernelObject, Koid, ObjectKind,
-    ObjectPublication, ObjectRetirement, OperationPin, SignalSource, UserExportableObject,
+    ObjectPublication, ObjectRetirement, OperationPin, SignalSource, TransferClass,
+    UserExportableObject,
 };
 use super::Rights;
 
@@ -25,9 +27,14 @@ const DIAGNOSTIC_PAGE_CAPACITY: usize = 32;
 const DIAGNOSTIC_SLOT_BUDGET: usize = 256;
 pub(crate) const HANDLE_TABLE_STORAGE_SEGMENTS: usize = SLOT_SEGMENTS;
 
-const _: () = assert!(
-    MAX_RESERVATION_SLOTS as u64 == hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_MESSAGE_HANDLES
-);
+const _: () = {
+    assert!(MAX_RESERVATION_SLOTS <= FIRST_SEGMENT_SLOTS);
+    let mut segment = 1;
+    while segment < SLOT_SEGMENTS {
+        assert!(MAX_RESERVATION_SLOTS <= segment_capacity(segment));
+        segment += 1;
+    }
+};
 
 static NEXT_RESERVATION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -194,12 +201,49 @@ impl HandleSnapshotPage {
     }
 }
 
-/// One source handle and its attenuated rights in a move transaction.
+/// Ownership operation requested for one capability transfer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HandleTransferOperation {
+    Move,
+    Copy,
+}
+
+/// Storage contract of the transport receiving the capability.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HandleTransferRoute {
+    /// The transport may retain capability owners after the sender returns.
+    Buffered,
+    /// The source and destination namespaces commit directly while paired.
+    Rendezvous,
+    /// Authority is staged in a bounded, explicitly type-audited startup
+    /// container before publication into a child namespace.
+    StagedStartup,
+}
+
+impl HandleTransferRoute {
+    const fn permits(self, class: TransferClass) -> bool {
+        match (self, class) {
+            (_, TransferClass::Leaf)
+            | (Self::Rendezvous | Self::StagedStartup, TransferClass::RendezvousOnly) => true,
+            (_, TransferClass::Never) | (Self::Buffered, TransferClass::RendezvousOnly) => false,
+        }
+    }
+}
+
+/// One source handle and its attenuated rights in a transfer transaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct HandleTransferRequest {
     pub(crate) value: HandleValue,
+    /// Maximum authority offered by the sender. `None` means the complete
+    /// source-handle rights set, equivalent to an ABI `SAME_RIGHTS` request.
+    pub(crate) offered_rights: Option<Rights>,
+    /// Exact authority installed at the destination.
     pub(crate) rights: Rights,
+    /// Optional sender-side assertion about the source object kind.
+    pub(crate) offered_kind: Option<ObjectKind>,
+    /// Exact receiver-side object-kind contract.
     pub(crate) expected_kind: Option<ObjectKind>,
+    pub(crate) operation: HandleTransferOperation,
 }
 
 /// One active but not necessarily published process handle.
@@ -211,7 +255,7 @@ pub(crate) struct HandleTransferRequest {
 /// dropped only after releasing Process and object locks.
 pub(crate) struct PreparedHandle {
     object: Option<ActiveHandleOwner>,
-    rights: Rights,
+    rights: HandleRights,
     flags: HandleFlags,
 }
 
@@ -236,12 +280,13 @@ impl PreparedHandle {
         })?;
         Ok(Self {
             object: Some(object),
-            rights,
+            rights: rights.decompose(),
             flags,
         })
     }
 
-    fn try_duplicate(&self, rights: Rights) -> Result<Self, HandleError> {
+    pub(crate) fn try_duplicate(&self, rights: Rights) -> Result<Self, HandleError> {
+        let rights = rights.decompose();
         if !self.rights.contains(rights) {
             return Err(HandleError::AccessDenied);
         }
@@ -315,6 +360,7 @@ pub(crate) struct HandleTable {
     slots: SlotStore,
     free_head: Option<usize>,
     free_slots: usize,
+    active_transfers: usize,
     lifecycle: TableLifecycle,
     next_teardown_generation: u64,
 }
@@ -354,6 +400,17 @@ impl HandleTableStorageSnapshot {
         }
         Some(bytes)
     }
+
+    /// Identifies the sole segment this bounded reservation may add.
+    fn growth_segment(self) -> Option<usize> {
+        if self.segment_mask == 0 {
+            return None;
+        }
+        if self.segment_mask.count_ones() != 1 {
+            super::invariant_violation();
+        }
+        Some(self.segment_mask.trailing_zeros() as usize)
+    }
 }
 
 /// Process-owned metadata indexed by the same bounded slot geometry as handles.
@@ -361,6 +418,23 @@ impl HandleTableStorageSnapshot {
 /// or publication. Growth is prepared alongside the authoritative table plan.
 pub(crate) struct HandleSidecar<T> {
     segments: [Option<Vec<Option<T>>>; SLOT_SEGMENTS],
+}
+
+/// Storage for the one sidecar segment an individual reservation may grow.
+///
+/// Every segment holds at least [`MAX_RESERVATION_SLOTS`] entries, and a
+/// reservation cannot request more than that many slots. Since installed
+/// segments are always a contiguous prefix, one reservation can cross at most
+/// one segment boundary. Keeping only that segment here avoids carrying a
+/// table-sized array through the process-start transaction stack.
+pub(crate) struct HandleSidecarPlan<T> {
+    segment: Option<(usize, Vec<Option<T>>)>,
+}
+
+impl<T> HandleSidecarPlan<T> {
+    pub(crate) const fn empty() -> Self {
+        Self { segment: None }
+    }
 }
 
 impl<T> HandleSidecar<T> {
@@ -382,31 +456,35 @@ impl<T> HandleSidecar<T> {
         Some(bytes)
     }
 
-    pub(crate) fn prepare(snapshot: HandleTableStorageSnapshot) -> Result<Self, HandleError> {
-        let mut plan = Self::new();
-        for segment in 0..SLOT_SEGMENTS {
-            if snapshot.segment_mask & (1 << segment) != 0 {
-                let count = segment_capacity(segment);
-                let mut entries = Vec::new();
-                entries
-                    .try_reserve_exact(count)
-                    .map_err(|_| HandleError::Allocation)?;
-                entries.resize_with(count, || None);
-                plan.segments[segment] = Some(entries);
-            }
-        }
-        Ok(plan)
+    #[inline(never)]
+    pub(crate) fn prepare(
+        snapshot: HandleTableStorageSnapshot,
+    ) -> Result<HandleSidecarPlan<T>, HandleError> {
+        let Some(segment) = snapshot.growth_segment() else {
+            return Ok(HandleSidecarPlan { segment: None });
+        };
+        let count = segment_capacity(segment);
+        let mut entries = Vec::new();
+        entries
+            .try_reserve_exact(count)
+            .map_err(|_| HandleError::Allocation)?;
+        entries.resize_with(count, || None);
+        Ok(HandleSidecarPlan {
+            segment: Some((segment, entries)),
+        })
     }
 
-    pub(crate) fn install(&mut self, mut plan: Self) {
-        for (target, prepared) in self.segments.iter_mut().zip(&mut plan.segments) {
-            if let Some(entries) = prepared.take() {
-                if target.is_some() {
-                    super::invariant_violation();
-                }
-                *target = Some(entries);
-            }
+    pub(crate) fn install(&mut self, mut plan: HandleSidecarPlan<T>) {
+        let Some((segment, entries)) = plan.segment.take() else {
+            return;
+        };
+        let Some(target) = self.segments.get_mut(segment) else {
+            super::invariant_violation();
+        };
+        if target.is_some() {
+            super::invariant_violation();
         }
+        *target = Some(entries);
     }
 
     pub(crate) fn get(&self, value: HandleValue) -> Option<&T> {
@@ -432,19 +510,17 @@ impl<T> HandleSidecar<T> {
 #[must_use = "install or discard the handle-table storage plan"]
 pub(crate) struct HandleTableStoragePlan {
     snapshot: HandleTableStorageSnapshot,
-    segments: [Option<Vec<Slot>>; SLOT_SEGMENTS],
+    segment: Option<(usize, Vec<Slot>)>,
 }
 
 impl HandleTableStoragePlan {
+    #[inline(never)]
     pub(crate) fn try_new(snapshot: HandleTableStorageSnapshot) -> Result<Self, HandleError> {
-        let mut segments: [Option<Vec<Slot>>; SLOT_SEGMENTS] = [const { None }; SLOT_SEGMENTS];
-        for (index, segment) in segments.iter_mut().enumerate() {
-            if snapshot.segment_mask & (1_u32 << index) == 0 {
-                continue;
-            }
-            *segment = Some(allocate_slot_segment(segment_capacity(index))?);
-        }
-        Ok(Self { snapshot, segments })
+        let segment = match snapshot.growth_segment() {
+            Some(index) => Some((index, allocate_slot_segment(segment_capacity(index))?)),
+            None => None,
+        };
+        Ok(Self { snapshot, segment })
     }
 
     pub(crate) const fn snapshot(&self) -> HandleTableStorageSnapshot {
@@ -530,21 +606,19 @@ impl SlotStore {
     }
 
     fn install(&mut self, mut plan: HandleTableStoragePlan) {
-        for (index, prepared) in plan.segments.iter().enumerate() {
-            let required = plan.snapshot.segment_mask & (1_u32 << index) != 0;
-            if required != prepared.is_some() || (required && self.segments[index].is_some()) {
+        if plan.snapshot.segment_mask == 0 {
+            if plan.segment.is_some() {
                 super::invariant_violation();
             }
+            return;
         }
-        for (index, prepared) in plan.segments.iter_mut().enumerate() {
-            let Some(segment) = prepared.take() else {
-                continue;
-            };
-            if self.segments[index].is_some() {
-                super::invariant_violation();
-            }
-            self.segments[index] = Some(segment);
+        let Some((index, segment)) = plan.segment.take() else {
+            super::invariant_violation();
+        };
+        if plan.snapshot.segment_mask != 1_u32 << index || self.segments[index].is_some() {
+            super::invariant_violation();
         }
+        self.segments[index] = Some(segment);
     }
 
     fn push_vacant(&mut self, generation: u64, next_free: Option<usize>) -> usize {
@@ -617,6 +691,7 @@ impl HandleTable {
             slots: SlotStore::new(),
             free_head: None,
             free_slots: 0,
+            active_transfers: 0,
             lifecycle: TableLifecycle::Active,
             next_teardown_generation: 1,
         }
@@ -919,7 +994,7 @@ impl HandleTable {
         Ok(HandleInfo {
             koid: handle.object().koid(),
             kind: handle.object().kind(),
-            rights: handle.rights,
+            rights: handle.rights.union(),
             flags: handle.flags,
         })
     }
@@ -948,7 +1023,7 @@ impl HandleTable {
                     info: HandleInfo {
                         koid: handle.object().koid(),
                         kind: handle.object().kind(),
-                        rights: handle.rights,
+                        rights: handle.rights.union(),
                         flags: handle.flags,
                     },
                 });
@@ -972,7 +1047,7 @@ impl HandleTable {
     ) -> Result<ResolvedObject<T>, HandleError> {
         self.ensure_active()?;
         let handle = self.lookup(value)?;
-        if !handle.rights.contains(required) {
+        if !handle.rights.contains(required.decompose()) {
             return Err(HandleError::AccessDenied);
         }
         if handle.object().kind() != T::KIND {
@@ -994,7 +1069,7 @@ impl HandleTable {
     ) -> Result<ResolvedWaitable, HandleError> {
         self.ensure_active()?;
         let handle = self.lookup(value)?;
-        if !handle.rights.contains(required) {
+        if !handle.rights.contains(required.decompose()) {
             return Err(HandleError::AccessDenied);
         }
         let object = handle
@@ -1012,10 +1087,14 @@ impl HandleTable {
     ) -> Result<PreparedHandle, HandleError> {
         self.ensure_active()?;
         let source = self.lookup(value)?;
-        if !source.rights.contains(Rights::DUPLICATE) {
+        if !source
+            .rights
+            .propagation()
+            .contains(PropagationRights::DUPLICATE)
+        {
             return Err(HandleError::AccessDenied);
         }
-        if !source.rights.contains(rights) {
+        if !source.rights.contains(rights.decompose()) {
             return Err(HandleError::AccessDenied);
         }
         source.try_duplicate(rights)
@@ -1032,10 +1111,17 @@ impl HandleTable {
         requests: &[HandleTransferRequest],
         forbidden_object: Option<Koid>,
         forbidden_kind: Option<ObjectKind>,
+        route: HandleTransferRoute,
     ) -> Result<HandleTransferClaim, HandleError> {
         let storage = HandleTransferStorage::try_new(requests.len())?;
         let mut storage = Some(storage);
-        self.prepare_transfer_with_storage(requests, forbidden_object, forbidden_kind, &mut storage)
+        self.prepare_transfer_with_storage(
+            requests,
+            forbidden_object,
+            forbidden_kind,
+            route,
+            &mut storage,
+        )
     }
 
     pub(crate) fn prepare_transfer_with_storage(
@@ -1043,6 +1129,7 @@ impl HandleTable {
         requests: &[HandleTransferRequest],
         forbidden_object: Option<Koid>,
         forbidden_kind: Option<ObjectKind>,
+        route: HandleTransferRoute,
         storage: &mut Option<HandleTransferStorage>,
     ) -> Result<HandleTransferClaim, HandleError> {
         self.ensure_active()?;
@@ -1071,7 +1158,21 @@ impl HandleTable {
                 return Err(HandleError::InvalidHandle);
             }
             let source = self.lookup(request.value)?;
-            if !source.rights.contains(Rights::TRANSFER) || !source.rights.contains(request.rights)
+            let offered_rights = request
+                .offered_rights
+                .unwrap_or_else(|| source.rights.union());
+            let propagation = source.rights.propagation();
+            let required_propagation = match request.operation {
+                HandleTransferOperation::Move => PropagationRights::TRANSFER,
+                HandleTransferOperation::Copy => PropagationRights::TRANSFER,
+            };
+            if !propagation.contains(required_propagation)
+                || (request.operation == HandleTransferOperation::Copy
+                    && !propagation.contains(PropagationRights::DUPLICATE))
+                || !source.rights.contains(offered_rights.decompose())
+                || !offered_rights
+                    .decompose()
+                    .contains(request.rights.decompose())
             {
                 return Err(HandleError::AccessDenied);
             }
@@ -1084,46 +1185,173 @@ impl HandleTable {
             if forbidden_object == Some(source.object().koid()) {
                 return Err(HandleError::AccessDenied);
             }
+            if !route.permits(source.object().transfer_class()) {
+                return Err(HandleError::UnsupportedTransfer);
+            }
             if request
-                .expected_kind
+                .offered_kind
                 .is_some_and(|kind| kind != source.object().kind())
+                || request
+                    .expected_kind
+                    .is_some_and(|kind| kind != source.object().kind())
             {
                 return Err(HandleError::WrongObjectType);
             }
         }
 
-        // Capacity and validation are fixed above. Every exact slot below is
-        // still protected by this table's exclusive caller, so detachment is
-        // an infallible ownership move rather than a fallible loop.
-        let mut storage = match storage.take() {
+        // Acquire every fallible COPY owner before changing a source slot.
+        // On failure, returning the storage through the caller-owned option
+        // defers its destruction until after the Process lock is released.
+        let mut transaction_storage = match storage.take() {
             Some(storage) => storage,
             None => super::invariant_violation(),
         };
         for request in requests {
-            let (index, generation) = request.value.decode();
-            let slot = self.slots.replace(index, Slot::Retired);
-            let Slot::Occupied { handle, .. } = slot else {
-                unreachable_handle_value();
+            let prepared_copy = if request.operation == HandleTransferOperation::Copy {
+                let source = match self.lookup(request.value) {
+                    Ok(source) => source,
+                    Err(_) => unreachable_handle_value(),
+                };
+                match source.try_duplicate(request.rights) {
+                    Ok(handle) => Some(handle),
+                    Err(error) => {
+                        *storage = Some(transaction_storage);
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
             };
-            self.slots.replace(
-                index,
-                Slot::TransferReserved {
-                    generation,
-                    transfer,
+            let (index, generation) = request.value.decode();
+            transaction_storage.entries.push(TransferEntry {
+                source: match request.operation {
+                    HandleTransferOperation::Move => TransferSource::Move { index, generation },
+                    HandleTransferOperation::Copy => TransferSource::Copy,
                 },
-            );
-            storage.entries.push(TransferEntry {
-                index,
-                generation,
                 requested_rights: request.rights,
+                prepared_copy,
             });
-            storage.handles.push(handle);
         }
+
+        // Capacity and every fallible action are fixed above. Every exact slot
+        // below is still protected by this table's exclusive caller, so source
+        // detachment is an infallible ownership move.
+        for position in 0..requests.len() {
+            let request = match requests.get(position) {
+                Some(request) => request,
+                None => super::invariant_violation(),
+            };
+            let (index, generation) = request.value.decode();
+            let handle = match request.operation {
+                HandleTransferOperation::Move => {
+                    let slot = self.slots.replace(index, Slot::Retired);
+                    let Slot::Occupied { handle, .. } = slot else {
+                        unreachable_handle_value();
+                    };
+                    self.slots.replace(
+                        index,
+                        Slot::TransferReserved {
+                            generation,
+                            transfer,
+                        },
+                    );
+                    handle
+                }
+                HandleTransferOperation::Copy => {
+                    match transaction_storage.entries.get_mut(position) {
+                        Some(entry) => match entry.prepared_copy.take() {
+                            Some(handle) => handle,
+                            None => super::invariant_violation(),
+                        },
+                        None => super::invariant_violation(),
+                    }
+                }
+            };
+            transaction_storage.handles.push(handle);
+        }
+        self.active_transfers = match self.active_transfers.checked_add(1) {
+            Some(count) => count,
+            None => super::invariant_violation(),
+        };
 
         Ok(HandleTransferClaim {
             transfer,
-            entries: storage.entries,
-            handles: Some(storage.handles),
+            entries: transaction_storage.entries,
+            handles: Some(transaction_storage.handles),
+            completed: false,
+        })
+    }
+
+    /// Claims one handle for an object-specific consume-on-success operation.
+    ///
+    /// Consumption is not capability propagation: it requires the operation
+    /// right supplied by the owning object protocol, but deliberately does not
+    /// require `TRANSFER`. The exact kind and KOID bind a prior typed resolve
+    /// to this table mutation so close-and-reuse cannot substitute an object.
+    pub(crate) fn prepare_consumption_with_storage(
+        &mut self,
+        value: HandleValue,
+        required: Rights,
+        expected_kind: ObjectKind,
+        expected_koid: Koid,
+        storage: &mut Option<HandleTransferStorage>,
+    ) -> Result<HandleTransferClaim, HandleError> {
+        self.ensure_active()?;
+        let prepared_storage = match storage.as_ref() {
+            Some(storage) => storage,
+            None => super::invariant_violation(),
+        };
+        if prepared_storage.count != 1
+            || !prepared_storage.entries.is_empty()
+            || !prepared_storage.handles.is_empty()
+        {
+            super::invariant_violation();
+        }
+
+        let source = self.lookup(value)?;
+        if !source.rights.contains(required.decompose()) {
+            return Err(HandleError::AccessDenied);
+        }
+        if source.object().kind() != expected_kind {
+            return Err(HandleError::WrongObjectType);
+        }
+        if source.object().koid() != expected_koid {
+            return Err(HandleError::InvalidHandle);
+        }
+
+        let transfer = ReservationId::allocate()?;
+        let mut transaction_storage = match storage.take() {
+            Some(storage) => storage,
+            None => super::invariant_violation(),
+        };
+        let (index, generation) = value.decode();
+        let slot = self.slots.replace(index, Slot::Retired);
+        let Slot::Occupied { handle, .. } = slot else {
+            unreachable_handle_value();
+        };
+        let retained_rights = handle.rights.union();
+        self.slots.replace(
+            index,
+            Slot::TransferReserved {
+                generation,
+                transfer,
+            },
+        );
+        transaction_storage.entries.push(TransferEntry {
+            source: TransferSource::Move { index, generation },
+            requested_rights: retained_rights,
+            prepared_copy: None,
+        });
+        transaction_storage.handles.push(handle);
+        self.active_transfers = match self.active_transfers.checked_add(1) {
+            Some(count) => count,
+            None => super::invariant_violation(),
+        };
+
+        Ok(HandleTransferClaim {
+            transfer,
+            entries: transaction_storage.entries,
+            handles: Some(transaction_storage.handles),
             completed: false,
         })
     }
@@ -1132,17 +1360,22 @@ impl HandleTable {
         if !matches!(self.lifecycle, TableLifecycle::Active) {
             super::invariant_violation();
         }
+        if self.active_transfers == 0 {
+            super::invariant_violation();
+        }
         if claim.handles.as_ref().map(Vec::len) != Some(claim.entries.len()) {
             super::invariant_violation();
         }
         for entry in &claim.entries {
-            if !matches!(
-                self.slots.get(entry.index),
-                Some(Slot::TransferReserved {
-                    generation,
-                    transfer,
-                }) if *generation == entry.generation && *transfer == claim.transfer
-            ) {
+            if let TransferSource::Move { index, generation } = entry.source
+                && !matches!(
+                    self.slots.get(index),
+                    Some(Slot::TransferReserved {
+                        generation: found_generation,
+                        transfer,
+                    }) if *found_generation == generation && *transfer == claim.transfer
+                )
+            {
                 super::invariant_violation();
             }
         }
@@ -1157,19 +1390,27 @@ impl HandleTable {
             Some(handles) => handles,
             None => super::invariant_violation(),
         };
-        for entry in claim.entries.iter().rev() {
-            let handle = match handles.pop() {
-                Some(handle) => handle,
+        for position in (0..claim.entries.len()).rev() {
+            let entry = match claim.entries.get(position) {
+                Some(entry) => entry,
                 None => super::invariant_violation(),
             };
-            self.slots.replace(
-                entry.index,
-                Slot::Occupied {
-                    generation: entry.generation,
-                    handle,
-                },
-            );
+            match entry.source {
+                TransferSource::Move { index, generation } => {
+                    if position >= handles.len() {
+                        super::invariant_violation();
+                    }
+                    let handle = handles.swap_remove(position);
+                    self.slots
+                        .replace(index, Slot::Occupied { generation, handle });
+                }
+                // A copy owner was never installed in the table. It remains in
+                // retired storage so its potential zero-active transition runs
+                // only after the caller releases the table lock.
+                TransferSource::Copy => {}
+            }
         }
+        self.active_transfers -= 1;
         claim.completed = true;
         RetiredHandleTransferStorage {
             _entries: core::mem::take(&mut claim.entries),
@@ -1187,13 +1428,16 @@ impl HandleTable {
             None => super::invariant_violation(),
         };
         for (entry, handle) in claim.entries.iter().zip(handles.iter_mut()) {
-            handle.rights = entry.requested_rights;
-            if entry.generation == GENERATION_LIMIT {
-                self.slots.replace(entry.index, Slot::Retired);
-            } else {
-                self.publish_vacant_slot(entry.index, entry.generation + 1);
+            handle.rights = entry.requested_rights.decompose();
+            if let TransferSource::Move { index, generation } = entry.source {
+                if generation == GENERATION_LIMIT {
+                    self.slots.replace(index, Slot::Retired);
+                } else {
+                    self.publish_vacant_slot(index, generation + 1);
+                }
             }
         }
+        self.active_transfers -= 1;
         claim.completed = true;
         (
             InTransitHandleBatch {
@@ -1232,7 +1476,7 @@ impl HandleTable {
     ) -> Result<Option<HandleTableStorageSnapshot>, HandleError> {
         self.ensure_active()?;
         let source = self.lookup(value)?;
-        if !source.rights.contains(rights) {
+        if !source.rights.contains(rights.decompose()) {
             return Err(HandleError::AccessDenied);
         }
         let (_, source_generation) = value.decode();
@@ -1260,7 +1504,7 @@ impl HandleTable {
             let Slot::Occupied { mut handle, .. } = source else {
                 unreachable_handle_value();
             };
-            handle.rights = rights;
+            handle.rights = rights.decompose();
             let generation = source_generation + 1;
             self.slots
                 .replace(source_index, Slot::Occupied { generation, handle });
@@ -1280,7 +1524,7 @@ impl HandleTable {
         let Slot::Occupied { mut handle, .. } = source else {
             unreachable_handle_value();
         };
-        handle.rights = rights;
+        handle.rights = rights.decompose();
         self.slots
             .replace(destination, Slot::Occupied { generation, handle });
         Ok(HandleValue::encode(destination, generation))
@@ -1329,10 +1573,11 @@ impl HandleTable {
     /// cursor has detached every owner and completed retirement.
     pub(crate) fn begin_teardown(&mut self) -> Result<TeardownCursor, HandleError> {
         self.ensure_active()?;
-        if self
-            .slots
-            .iter()
-            .any(|slot| matches!(slot, Slot::Reserved { .. } | Slot::TransferReserved { .. }))
+        if self.active_transfers != 0
+            || self
+                .slots
+                .iter()
+                .any(|slot| matches!(slot, Slot::Reserved { .. } | Slot::TransferReserved { .. }))
         {
             return Err(HandleError::OutstandingReservation);
         }
@@ -1436,6 +1681,7 @@ impl Default for HandleTable {
 impl Drop for HandleTable {
     fn drop(&mut self) {
         if matches!(self.lifecycle, TableLifecycle::TearingDown { .. })
+            || self.active_transfers != 0
             || self.slots.iter().any(|slot| {
                 matches!(
                     slot,
@@ -1450,10 +1696,17 @@ impl Drop for HandleTable {
     }
 }
 
+#[derive(Clone, Copy)]
+enum TransferSource {
+    Move { index: usize, generation: u64 },
+    Copy,
+}
+
 struct TransferEntry {
-    index: usize,
-    generation: u64,
+    source: TransferSource,
     requested_rights: Rights,
+    /// Temporary fallible COPY owner, consumed before the claim is exposed.
+    prepared_copy: Option<PreparedHandle>,
 }
 
 /// Exact-count transfer backing prepared before Process locks are acquired.
@@ -1506,6 +1759,10 @@ pub(crate) struct RetiredHandleTransferStorage {
 }
 
 impl HandleTransferClaim {
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(crate) const fn entry_allocation_size(count: usize) -> Option<usize> {
         count.checked_mul(core::mem::size_of::<TransferEntry>())
     }
@@ -1514,10 +1771,17 @@ impl HandleTransferClaim {
         count.checked_mul(core::mem::size_of::<PreparedHandle>())
     }
 
-    pub(crate) fn values(&self) -> impl ExactSizeIterator<Item = HandleValue> + '_ {
-        self.entries
-            .iter()
-            .map(|entry| HandleValue::encode(entry.index, entry.generation))
+    /// Source values consumed by commit.
+    ///
+    /// Copy dispositions deliberately do not participate in Process handle
+    /// charge release because their source slots remain resident.
+    pub(crate) fn values(&self) -> impl Iterator<Item = HandleValue> + '_ {
+        self.entries.iter().filter_map(|entry| match entry.source {
+            TransferSource::Move { index, generation } => {
+                Some(HandleValue::encode(index, generation))
+            }
+            TransferSource::Copy => None,
+        })
     }
 
     #[cfg(test)]
@@ -1550,6 +1814,185 @@ impl HandleTransferClaim {
 impl Drop for HandleTransferClaim {
     fn drop(&mut self) {
         if !self.completed {
+            super::invariant_violation();
+        }
+    }
+}
+
+/// Canonical Process handle-table lock acquisition order.
+///
+/// Process IDs are stable nonzero identities. A coordinator computes this
+/// value before taking either Process lock, then acquires distinct tables in
+/// the returned order. Equal IDs select the one-lock same-table path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HandleTableLockOrder {
+    SameTable,
+    SourceThenDestination,
+    DestinationThenSource,
+}
+
+impl HandleTableLockOrder {
+    pub(crate) fn for_processes(source_process: u64, destination_process: u64) -> Self {
+        if source_process == 0 || destination_process == 0 {
+            super::invariant_violation();
+        }
+        match source_process.cmp(&destination_process) {
+            core::cmp::Ordering::Less => Self::SourceThenDestination,
+            core::cmp::Ordering::Equal => Self::SameTable,
+            core::cmp::Ordering::Greater => Self::DestinationThenSource,
+        }
+    }
+}
+
+/// A fully prepared direct source-to-destination capability commit.
+///
+/// Source claims and destination slots remain unpublished until the caller
+/// holds the Process locks selected by `lock_order`. Both completion paths are
+/// allocation-free. Returned storage must be dropped only after those locks
+/// are released because rollback may release duplicate authority.
+#[must_use = "commit or roll back the direct handle transfer"]
+pub(crate) struct DirectHandleTransfer {
+    source: Option<HandleTransferClaim>,
+    destination: Option<HandleBatchReservation>,
+    lock_order: HandleTableLockOrder,
+}
+
+/// Detached transaction storage safe to destroy after Process locks release.
+pub(crate) struct RetiredDirectHandleTransfer {
+    _source: RetiredHandleTransferStorage,
+    _destination: RetiredHandleBatchReservationStorage,
+}
+
+impl DirectHandleTransfer {
+    pub(crate) fn new(
+        source_process: u64,
+        destination_process: u64,
+        source: HandleTransferClaim,
+        destination: HandleBatchReservation,
+    ) -> Self {
+        if source.entries.len() != destination.values.len() {
+            // Both tokens are private kernel products. Pairing reservations of
+            // different sizes is an internal transaction-construction bug,
+            // not a recoverable user request failure.
+            super::invariant_violation();
+        }
+        let lock_order = HandleTableLockOrder::for_processes(source_process, destination_process);
+        Self {
+            source: Some(source),
+            destination: Some(destination),
+            lock_order,
+        }
+    }
+
+    pub(crate) const fn lock_order(&self) -> HandleTableLockOrder {
+        self.lock_order
+    }
+
+    pub(crate) fn destination_values(&self) -> &[HandleValue] {
+        match self.destination.as_ref() {
+            Some(destination) => destination.values(),
+            None => super::invariant_violation(),
+        }
+    }
+
+    pub(crate) fn commit_between(
+        mut self,
+        source_table: &mut HandleTable,
+        destination_table: &mut HandleTable,
+    ) -> RetiredDirectHandleTransfer {
+        if self.lock_order == HandleTableLockOrder::SameTable {
+            super::invariant_violation();
+        }
+        self.commit_locked(source_table, destination_table)
+    }
+
+    pub(crate) fn commit_within(mut self, table: &mut HandleTable) -> RetiredDirectHandleTransfer {
+        if self.lock_order != HandleTableLockOrder::SameTable {
+            super::invariant_violation();
+        }
+        let source = self.take_source();
+        let destination = self.take_destination();
+        let (handles, source_storage) = table.commit_transfer(source);
+        let destination_storage = destination.publish(table, handles.into_prepared_handles());
+        RetiredDirectHandleTransfer {
+            _source: source_storage,
+            _destination: destination_storage,
+        }
+    }
+
+    pub(crate) fn rollback_between(
+        mut self,
+        source_table: &mut HandleTable,
+        destination_table: &mut HandleTable,
+    ) -> RetiredDirectHandleTransfer {
+        if self.lock_order == HandleTableLockOrder::SameTable {
+            super::invariant_violation();
+        }
+        self.rollback_locked(source_table, destination_table)
+    }
+
+    pub(crate) fn rollback_within(
+        mut self,
+        table: &mut HandleTable,
+    ) -> RetiredDirectHandleTransfer {
+        if self.lock_order != HandleTableLockOrder::SameTable {
+            super::invariant_violation();
+        }
+        let source_storage = table.rollback_transfer(self.take_source());
+        let destination_storage = self.take_destination().abort(table);
+        RetiredDirectHandleTransfer {
+            _source: source_storage,
+            _destination: destination_storage,
+        }
+    }
+
+    fn commit_locked(
+        &mut self,
+        source_table: &mut HandleTable,
+        destination_table: &mut HandleTable,
+    ) -> RetiredDirectHandleTransfer {
+        let source = self.take_source();
+        let destination = self.take_destination();
+        let (handles, source_storage) = source_table.commit_transfer(source);
+        let destination_storage =
+            destination.publish(destination_table, handles.into_prepared_handles());
+        RetiredDirectHandleTransfer {
+            _source: source_storage,
+            _destination: destination_storage,
+        }
+    }
+
+    fn rollback_locked(
+        &mut self,
+        source_table: &mut HandleTable,
+        destination_table: &mut HandleTable,
+    ) -> RetiredDirectHandleTransfer {
+        let source_storage = source_table.rollback_transfer(self.take_source());
+        let destination_storage = self.take_destination().abort(destination_table);
+        RetiredDirectHandleTransfer {
+            _source: source_storage,
+            _destination: destination_storage,
+        }
+    }
+
+    fn take_source(&mut self) -> HandleTransferClaim {
+        match self.source.take() {
+            Some(source) => source,
+            None => super::invariant_violation(),
+        }
+    }
+
+    fn take_destination(&mut self) -> HandleBatchReservation {
+        match self.destination.take() {
+            Some(destination) => destination,
+            None => super::invariant_violation(),
+        }
+    }
+}
+
+impl Drop for DirectHandleTransfer {
+    fn drop(&mut self) {
+        if self.source.is_some() || self.destination.is_some() {
             super::invariant_violation();
         }
     }
@@ -1664,6 +2107,10 @@ pub(crate) struct HandleBatchReservationStorage {
 }
 
 impl HandleBatchReservationStorage {
+    pub(crate) const fn maximum_count() -> usize {
+        MAX_RESERVATION_SLOTS
+    }
+
     pub(crate) fn validate_count(count: usize) -> Result<(), HandleError> {
         validate_batch_count(count)
     }
@@ -1726,6 +2173,33 @@ impl HandleBatchReservation {
         &self.values
     }
 
+    /// Retains the prefix needed by a matched rendezvous and releases every
+    /// unused tail slot without allocating.
+    pub(crate) fn trim_to(&mut self, table: &mut HandleTable, count: usize) {
+        if count == 0 || count > self.slots.len() || self.completed {
+            super::invariant_violation();
+        }
+        for slot in &self.slots {
+            if !matches!(
+                table.slots.get(slot.index),
+                Some(Slot::Reserved { generation, reservation })
+                    if *generation == slot.generation && *reservation == self.reservation
+            ) {
+                super::invariant_violation();
+            }
+        }
+
+        for slot in &self.slots[count..] {
+            if slot.generation == GENERATION_LIMIT {
+                table.slots.replace(slot.index, Slot::Retired);
+            } else {
+                table.publish_vacant_slot(slot.index, slot.generation + 1);
+            }
+        }
+        self.slots.truncate(count);
+        self.values.truncate(count);
+    }
+
     pub(crate) fn publish(
         mut self,
         table: &mut HandleTable,
@@ -1764,6 +2238,50 @@ impl HandleBatchReservation {
             _slots: core::mem::take(&mut self.slots),
             _values: core::mem::take(&mut self.values),
             _handles: handles,
+        }
+    }
+
+    /// Publishes this reservation from the tail of one preallocated batch.
+    ///
+    /// Callers reverse the complete source batch once, then commit consecutive
+    /// reservations in value order without allocating per-reservation Vecs.
+    /// The source Vec allocation remains caller-owned for destruction after
+    /// the table lock is released.
+    pub(crate) fn publish_from_reversed(
+        mut self,
+        table: &mut HandleTable,
+        handles: &mut Vec<PreparedHandle>,
+    ) -> RetiredHandleBatchReservationStorage {
+        if handles.len() < self.slots.len() || !matches!(table.lifecycle, TableLifecycle::Active) {
+            super::invariant_violation();
+        }
+        for slot in &self.slots {
+            if !matches!(
+                table.slots.get(slot.index),
+                Some(Slot::Reserved { generation, reservation })
+                    if *generation == slot.generation && *reservation == self.reservation
+            ) {
+                super::invariant_violation();
+            }
+        }
+        for slot in &self.slots {
+            let handle = match handles.pop() {
+                Some(handle) => handle,
+                None => super::invariant_violation(),
+            };
+            table.slots.replace(
+                slot.index,
+                Slot::Occupied {
+                    generation: slot.generation,
+                    handle,
+                },
+            );
+        }
+        self.completed = true;
+        RetiredHandleBatchReservationStorage {
+            _slots: core::mem::take(&mut self.slots),
+            _values: core::mem::take(&mut self.values),
+            _handles: Vec::new(),
         }
     }
 

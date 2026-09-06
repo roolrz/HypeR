@@ -7,7 +7,7 @@ name = "hyper-abi"
 version = "0.0.0"
 
 [[package]]
-name = "hyper-init"
+name = "hyper-app"
 version = "0.0.0"
 dependencies = [
  "hyper-os",

@@ -313,6 +313,33 @@ local owned state, validation completes before visibility, and a failed
 pre-publication step rolls back through ownership or an explicit guard. Each
 lifecycle transition has one owner and one publication point.
 
+Kernel objects and userspace handles deliberately have different ownership
+interfaces. Kernel subsystems retain compiler-typed, purpose-classified object
+references; userspace receives process-local, generation-qualified handles to
+the same object identity. Kernel code must not create a private handle table or
+perform a handle lookup where a direct typed reference expresses the actual
+ownership relationship.
+
+Handle rights and handle flags are separate concepts. Rights authorize named
+operations and may only attenuate. Flags modify the behavior of one handle and
+are defined by that handle's concrete object type; the raw ABI `u32` is only a
+storage and transport representation. A flag bit has no standalone meaning
+without the object kind. Object modules own their typed flag vocabulary,
+validation, propagation rules, and operational interpretation. Types with no
+implemented flag semantics use an explicit empty flag type and reject every
+nonzero raw value rather than reserving speculative behavior.
+
+The generic handle core continues to own slot generations, table storage,
+accounting, reservations, and atomic publication. An object-specific flag
+which affects duplicate, replace, transfer, or another generic transaction
+must expose that constraint as a pure, bounded policy evaluated during
+preparation. It must not hide allocation, blocking, locking, or fallible work
+inside the final commit. Typed SDK bindings associate each object marker with
+its flag type; type-erased diagnostics may carry raw bits, but applications
+must establish the object kind before interpreting them. The complete object,
+rights, flags, and transfer contract is specified in the
+[userspace and syscall architecture](syscall-abi.md#typed-handle-flags).
+
 Use `pub(crate)` by default. Add a public interface only for a demonstrated
 consumer, and prefer domain types for addresses, identifiers, units, and
 lifecycle states when interchange would be unsafe.

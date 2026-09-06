@@ -13,7 +13,7 @@ use hyper::exec::{
 use hyper::mm::{PAGE_SIZE, UniqueFallibleArc};
 
 use super::{ImageError, MachineAbi, ProcessImage};
-use crate::kernel::accounting::ResourceDomain;
+use crate::kernel::accounting::{ResourceAmount, ResourceDomain, ResourceError, ResourceKind};
 use crate::kernel::mm::user_space::{
     MachineError, NativeAddressSpace, NativeImageSegment, Permissions, UserAddress, UserSlice,
 };
@@ -32,6 +32,7 @@ pub(crate) enum Error {
     Elf(hyper::exec::elf::Error),
     Image(ImageError),
     Machine(MachineError),
+    Resource(ResourceError),
     Scheduler(crate::kernel::task::scheduler::Error),
     UnsupportedMachine,
 }
@@ -48,6 +49,12 @@ impl From<crate::kernel::task::scheduler::Error> for Error {
     }
 }
 
+impl From<ResourceError> for Error {
+    fn from(error: ResourceError) -> Self {
+        Self::Resource(error)
+    }
+}
+
 pub(crate) struct LoadedProcessImage {
     pub(crate) image: ProcessImage,
     pub(crate) address_space: UniqueFallibleArc<NativeAddressSpace>,
@@ -61,7 +68,21 @@ pub(crate) fn load_native(
     if bytes.len() > MAXIMUM_IMAGE_BYTES as usize {
         return Err(Error::Address);
     }
-    let executable = Image::parse(bytes).map_err(Error::Elf)?;
+    let allocation = Image::allocation_plan(bytes).map_err(Error::Elf)?;
+    let scratch_bytes = allocation
+        .parser_bytes()
+        .and_then(|bytes| {
+            allocation
+                .segment_capacity()
+                .checked_mul(core::mem::size_of::<NativeImageSegment>())
+                .and_then(|segments| bytes.checked_add(segments))
+        })
+        .and_then(|bytes| u64::try_from(bytes).ok())
+        .ok_or(Error::Allocation)?;
+    let _scratch_charge = domain
+        .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, scratch_bytes))?
+        .commit();
+    let executable = Image::parse_with_plan(bytes, allocation).map_err(Error::Elf)?;
     if executable.machine() != Machine::Aarch64
         || crate::hal::user::host_machine() != crate::hal::user::HostMachine::Aarch64
     {

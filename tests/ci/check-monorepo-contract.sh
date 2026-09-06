@@ -72,7 +72,11 @@ for required in \
     sdk/rust/hyper-sys/Cargo.toml \
     sdk/toolchain/bin/hyper-cargo \
     sdk/toolchain/bin/hyper-clang \
-    app/init/Cargo.toml \
-    app/init/src/main.rs; do
+    app/Cargo.toml \
+    app/config/services.json \
+    app/init/src/lib.rs \
+    app/init/src/main.rs \
+    app/init/src/manifest/mod.rs \
+    app/session/src/main.rs; do
     [ -f "$required" ] || fail "missing monorepo component: $required"
 done

@@ -132,6 +132,11 @@ impl Layout {
         self.stack_top
     }
 
+    /// Exact allocation size required by [`Self::encode`].
+    pub const fn total_bytes(self) -> usize {
+        self.total_bytes
+    }
+
     pub fn encode(
         self,
         entry: u64,

@@ -20,7 +20,9 @@ use super::{Rights, signals::SignalSource};
 const RETIRED: usize = 1 << (usize::BITS - 1);
 const ACTIVE_LIMIT: usize = RETIRED - 1;
 const EVENT_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_EVENT;
-const CHANNEL_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_CHANNEL;
+const BYTE_CHANNEL_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_BYTE_CHANNEL;
+const CAPABILITY_CHANNEL_OBJECT_KIND: u32 =
+    hyper::abi::native::HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL;
 const THREAD_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_THREAD;
 const PROCESS_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS;
 const TASK_GROUP_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_TASK_GROUP;
@@ -31,9 +33,13 @@ const EXECUTABLE_AUTHORITY_OBJECT_KIND: u32 =
 const VMO_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_VMO;
 const VMAR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_VMAR;
 const CONSOLE_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_CONSOLE;
+const BOOT_FS_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_BOOT_FS;
+const BOOT_FILE_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_BOOT_FILE;
+const PROCESS_BUILDER_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS_BUILDER;
 
 const _: () = assert!(EVENT_OBJECT_KIND != 0);
-const _: () = assert!(CHANNEL_OBJECT_KIND != 0);
+const _: () = assert!(BYTE_CHANNEL_OBJECT_KIND != 0);
+const _: () = assert!(CAPABILITY_CHANNEL_OBJECT_KIND != 0);
 const _: () = assert!(THREAD_OBJECT_KIND != 0);
 const _: () = assert!(PROCESS_OBJECT_KIND != 0);
 const _: () = assert!(TASK_GROUP_OBJECT_KIND != 0);
@@ -43,6 +49,7 @@ const _: () = assert!(EXECUTABLE_AUTHORITY_OBJECT_KIND != 0);
 const _: () = assert!(VMO_OBJECT_KIND != 0);
 const _: () = assert!(VMAR_OBJECT_KIND != 0);
 const _: () = assert!(CONSOLE_OBJECT_KIND != 0);
+const _: () = assert!(PROCESS_BUILDER_OBJECT_KIND != 0);
 
 static NEXT_KOID: AtomicU64 = AtomicU64::new(1);
 
@@ -100,8 +107,10 @@ pub(crate) struct ObjectKind(u32);
 impl ObjectKind {
     /// Native Event object kind declared by the generated ABI schema.
     pub(crate) const EVENT: Self = Self(EVENT_OBJECT_KIND);
-    /// Native Channel endpoint kind declared by the generated ABI schema.
-    pub(crate) const CHANNEL: Self = Self(CHANNEL_OBJECT_KIND);
+    /// Buffered byte-stream endpoint kind declared by the generated ABI schema.
+    pub(crate) const BYTE_CHANNEL: Self = Self(BYTE_CHANNEL_OBJECT_KIND);
+    /// Synchronous capability-rendezvous endpoint kind.
+    pub(crate) const CAPABILITY_CHANNEL: Self = Self(CAPABILITY_CHANNEL_OBJECT_KIND);
     /// Native user-thread kind declared by the generated ABI schema.
     pub(crate) const THREAD: Self = Self(THREAD_OBJECT_KIND);
     /// Native process-control kind declared by the generated ABI schema.
@@ -120,6 +129,37 @@ impl ObjectKind {
     pub(crate) const VMAR: Self = Self(VMAR_OBJECT_KIND);
     /// Capability-scoped host-console kind declared by the generated ABI schema.
     pub(crate) const CONSOLE: Self = Self(CONSOLE_OBJECT_KIND);
+    /// Read-only mounted boot-filesystem namespace authority.
+    pub(crate) const BOOT_FS: Self = Self(BOOT_FS_OBJECT_KIND);
+    /// Immutable regular file resolved from the boot filesystem.
+    pub(crate) const BOOT_FILE: Self = Self(BOOT_FILE_OBJECT_KIND);
+    /// Linear staged authority to construct one Native Process.
+    pub(crate) const PROCESS_BUILDER: Self = Self(PROCESS_BUILDER_OBJECT_KIND);
+
+    /// Validates one userspace-supplied object-kind discriminator.
+    ///
+    /// `NONE` is deliberately rejected: capability receive contracts are
+    /// typed and never use a wildcard object kind.
+    pub(crate) const fn try_from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            EVENT_OBJECT_KIND
+            | BYTE_CHANNEL_OBJECT_KIND
+            | CAPABILITY_CHANNEL_OBJECT_KIND
+            | THREAD_OBJECT_KIND
+            | PROCESS_OBJECT_KIND
+            | TASK_GROUP_OBJECT_KIND
+            | RESOURCE_DOMAIN_OBJECT_KIND
+            | TASK_FACTORY_OBJECT_KIND
+            | EXECUTABLE_AUTHORITY_OBJECT_KIND
+            | VMO_OBJECT_KIND
+            | VMAR_OBJECT_KIND
+            | CONSOLE_OBJECT_KIND
+            | BOOT_FS_OBJECT_KIND
+            | BOOT_FILE_OBJECT_KIND
+            | PROCESS_BUILDER_OBJECT_KIND => Some(Self(raw)),
+            _ => None,
+        }
+    }
 
     /// Constructs a synthetic kind for host-only mechanism tests.
     ///
@@ -147,6 +187,20 @@ pub(crate) enum ObjectCreationError {
 pub(crate) enum ExportPolicy {
     KernelOnly,
     User,
+}
+
+/// Audit classification for moving authority between process namespaces.
+///
+/// `Leaf` objects never retain another userspace capability and may therefore
+/// be stored by buffered transports. `RendezvousOnly` objects can participate
+/// in ownership graphs and therefore require either a direct namespace commit
+/// or an explicitly type-audited, bounded startup container. `Never` is the
+/// default-deny class for objects without a reviewed transfer contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TransferClass {
+    Never,
+    Leaf,
+    RendezvousOnly,
 }
 
 /// Strong-reference classes exposed by authority-free diagnostics.
@@ -238,6 +292,7 @@ pub(crate) trait KernelObject: private::Sealed + Any + Send + Sync {
     const KIND: ObjectKind;
     /// Type-wide ceiling for every instance of this object payload.
     const SUPPORTED_RIGHTS: Rights;
+    const TRANSFER_CLASS: TransferClass = TransferClass::Never;
 
     /// Rights supported by this particular immutable object instance.
     ///
@@ -296,6 +351,7 @@ struct ObjectHeader {
     koid: Koid,
     kind: ObjectKind,
     supported_rights: Rights,
+    transfer_class: TransferClass,
     payload_type: TypeId,
     export_policy: ExportPolicy,
     active_handles: AtomicUsize,
@@ -490,6 +546,7 @@ impl ObjectRef {
                 koid,
                 kind: T::KIND,
                 supported_rights,
+                transfer_class: T::TRANSFER_CLASS,
                 payload_type: TypeId::of::<T>(),
                 export_policy,
                 active_handles: AtomicUsize::new(0),
@@ -520,6 +577,10 @@ impl ObjectRef {
 
     pub(crate) fn supported_rights(&self) -> Rights {
         self.allocation.header.supported_rights
+    }
+
+    pub(crate) fn transfer_class(&self) -> TransferClass {
+        self.allocation.header.transfer_class
     }
 
     pub(super) fn downgrade(&self) -> WeakObjectRef {
@@ -887,6 +948,10 @@ impl ActiveHandleOwner {
 
     pub(crate) fn kind(&self) -> ObjectKind {
         self.object().kind()
+    }
+
+    pub(crate) fn transfer_class(&self) -> TransferClass {
+        self.object().owner.transfer_class()
     }
 
     pub(crate) fn pin<T: KernelObject>(&self) -> Option<KernelRef<T, OperationPin>> {

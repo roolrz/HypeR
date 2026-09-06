@@ -83,10 +83,11 @@ tests, and portable C runtime unit tests.
 
 ## Application integration
 
-`make app` first assembles the SDK and then builds the Rust `app/init` with
-the installed `bin/hyper-cargo`. `make native-initramfs` packages that result
-as a deterministic `newc` archive, and `make test-native` boots the kernel and
-verifies startup, blocking console input, and echo under QEMU.
+`make app` first assembles the SDK and then builds the Rust init, two Console
+data-plane workers, and session manager with the installed `bin/hyper-cargo`.
+`make native-initramfs` packages all four as one deterministic `newc` archive,
+and `make test-native` boots the kernel and verifies Process startup plus the
+complete Channel-routed Console echo path under QEMU.
 
 This enforced producer-consumer path is also the release boundary: a source
 change which works only through an undeclared source-tree include cannot pass

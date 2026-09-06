@@ -3,7 +3,12 @@
 
 //! Initial root-filesystem ownership and lookup policy.
 
-#[cfg(not(feature = "kernel-self-test"))]
+mod objects;
+mod service;
+
+pub(crate) use objects::{BootFile, BootFs, BootFsError};
+pub(crate) use service::{BootFsServiceError, open as open_bootfs, read as read_boot_file};
+
 use hyper::fs::ramfs::Node;
 use hyper::fs::ramfs::RamFs;
 use hyper::sync::PublishedOnce;
@@ -14,7 +19,6 @@ pub(crate) enum InitializationError {
     AlreadyInitialized,
 }
 
-#[cfg(not(feature = "kernel-self-test"))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LookupError {
     InvalidPath,
@@ -32,7 +36,6 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
     Ok(())
 }
 
-#[cfg(not(feature = "kernel-self-test"))]
 pub(crate) fn lookup(path: &str) -> Result<Option<Node<'static>>, LookupError> {
     let root = ROOT.get().ok_or(LookupError::NotInitialized)?;
     root.lookup(path).map_err(|_| LookupError::InvalidPath)

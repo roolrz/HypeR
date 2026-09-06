@@ -36,6 +36,15 @@ type DomainLock<T> = InterruptSpinLock<T, TestInterruptMask>;
 /// kernel stack while preserving allocation-free transaction completion.
 const MAX_DOMAIN_DEPTH: usize = 32;
 const RESOURCE_KIND_COUNT: usize = 19;
+/// Maximum distinct dimensions in one atomic accounting transaction.
+///
+/// Charges are intentionally compact because their linear owners are embedded
+/// throughout kernel transactions. Limits and diagnostic snapshots retain the
+/// complete dense vector below. The widest production request is the native
+/// address-space charge, which uses all six entries.
+const MAX_CHARGE_DIMENSIONS: usize = 6;
+const RESOURCE_KIND_MASK: u32 = (1_u32 << RESOURCE_KIND_COUNT) - 1;
+const OVERFLOWED_AMOUNT_MASK: u32 = 1_u32 << 31;
 
 static NEXT_DOMAIN_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -123,37 +132,135 @@ impl ResourceKind {
     }
 }
 
-/// One atomic request spanning every resource dimension.
+/// One compact atomic resource delta.
+///
+/// Set bits identify dimensions and `values` stores their nonzero values in
+/// ascending [`ResourceKind`] order. An overflow marker is sticky so fluent
+/// constant construction cannot silently discard a dimension; admission then
+/// rejects the malformed request before changing any counter.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct ResourceAmount([u64; RESOURCE_KIND_COUNT]);
+pub(crate) struct ResourceAmount {
+    mask: u32,
+    values: [u64; MAX_CHARGE_DIMENSIONS],
+}
 
 impl ResourceAmount {
-    pub(crate) const ZERO: Self = Self([0; RESOURCE_KIND_COUNT]);
+    pub(crate) const ZERO: Self = Self {
+        mask: 0,
+        values: [0; MAX_CHARGE_DIMENSIONS],
+    };
 
-    /// Returns a new vector with the selected dimension replaced by `value`.
+    /// Returns a new delta with the selected dimension replaced by `value`.
+    ///
+    /// Supplying zero removes the dimension. Adding more than
+    /// [`MAX_CHARGE_DIMENSIONS`] distinct nonzero dimensions produces a delta
+    /// which [`ResourceDomain::reserve`] rejects atomically.
     pub(crate) const fn with(mut self, kind: ResourceKind, value: u64) -> Self {
-        self.0[kind.index()] = value;
+        if self.overflowed() {
+            return self;
+        }
+
+        let bit = 1_u32 << kind.index();
+        let index = (self.mask & bit.wrapping_sub(1)).count_ones() as usize;
+        if self.mask & bit != 0 {
+            if value != 0 {
+                self.values[index] = value;
+                return self;
+            }
+            let mut cursor = index;
+            let length = self.mask.count_ones() as usize;
+            while cursor + 1 < length {
+                self.values[cursor] = self.values[cursor + 1];
+                cursor += 1;
+            }
+            self.values[length - 1] = 0;
+            self.mask &= !bit;
+            return self;
+        }
+
+        if value == 0 {
+            return self;
+        }
+        let length = self.mask.count_ones() as usize;
+        if length == MAX_CHARGE_DIMENSIONS {
+            self.mask |= OVERFLOWED_AMOUNT_MASK;
+            return self;
+        }
+        let mut cursor = length;
+        while cursor > index {
+            self.values[cursor] = self.values[cursor - 1];
+            cursor -= 1;
+        }
+        self.values[index] = value;
+        self.mask |= bit;
         self
     }
 
     pub(crate) const fn get(self, kind: ResourceKind) -> u64 {
-        self.0[kind.index()]
+        let bit = 1_u32 << kind.index();
+        if self.mask & bit == 0 {
+            return 0;
+        }
+        self.values[(self.mask & bit.wrapping_sub(1)).count_ones() as usize]
     }
 
-    pub(crate) fn is_empty(self) -> bool {
-        self.0.iter().all(|value| *value == 0)
+    pub(crate) const fn is_empty(self) -> bool {
+        self.mask == 0
+    }
+
+    const fn overflowed(self) -> bool {
+        self.mask & OVERFLOWED_AMOUNT_MASK != 0
+    }
+
+    fn entries(&self) -> ResourceAmountEntries<'_> {
+        ResourceAmountEntries {
+            amount: self,
+            remaining: self.mask & RESOURCE_KIND_MASK,
+        }
+    }
+}
+
+struct ResourceAmountEntries<'amount> {
+    amount: &'amount ResourceAmount,
+    remaining: u32,
+}
+
+impl Iterator for ResourceAmountEntries<'_> {
+    type Item = (ResourceKind, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let raw_index = self.remaining.trailing_zeros() as usize;
+        let bit = 1_u32 << raw_index;
+        self.remaining &= !bit;
+        let kind = ResourceKind::ALL[raw_index];
+        Some((kind, self.amount.get(kind)))
+    }
+}
+
+/// Dense storage used where all resource dimensions must remain observable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ResourceVector([u64; RESOURCE_KIND_COUNT]);
+
+impl ResourceVector {
+    const ZERO: Self = Self([0; RESOURCE_KIND_COUNT]);
+
+    const fn get(self, kind: ResourceKind) -> u64 {
+        self.0[kind.index()]
     }
 }
 
 /// Local ceilings. Ancestors remain independently authoritative ceilings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ResourceLimits(ResourceAmount);
+pub(crate) struct ResourceLimits(ResourceVector);
 
 impl ResourceLimits {
-    pub(crate) const UNLIMITED: Self = Self(ResourceAmount([u64::MAX; RESOURCE_KIND_COUNT]));
+    pub(crate) const UNLIMITED: Self = Self(ResourceVector([u64::MAX; RESOURCE_KIND_COUNT]));
 
     pub(crate) const fn with(mut self, kind: ResourceKind, limit: u64) -> Self {
-        self.0 = self.0.with(kind, limit);
+        self.0.0[kind.index()] = limit;
         self
     }
 
@@ -175,8 +282,8 @@ impl Default for ResourceLimits {
 /// admission and local-limit changes use `total` under the control lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResourceUsage {
-    total: ResourceAmount,
-    pending: ResourceAmount,
+    total: ResourceVector,
+    pending: ResourceVector,
 }
 
 impl ResourceUsage {
@@ -202,6 +309,7 @@ pub(crate) enum ResourceError {
     DomainIdExhausted,
     HierarchyTooDeep,
     EmptyCharge,
+    TooManyChargeDimensions,
     DomainInactive(ResourceDomainId),
     LimitExceeded {
         domain: ResourceDomainId,
@@ -413,11 +521,14 @@ impl ResourceDomain {
         &self,
         amount: ResourceAmount,
     ) -> Result<ChargeReservation, ResourceError> {
+        if amount.overflowed() {
+            return Err(ResourceError::TooManyChargeDimensions);
+        }
         if amount.is_empty() {
             return Err(ResourceError::EmptyCharge);
         }
         let path = DomainPath::new(self);
-        path.reserve(amount)?;
+        path.reserve(&amount)?;
         Ok(ChargeReservation {
             domain: Some(self.clone()),
             amount,
@@ -584,7 +695,7 @@ impl<'domain> DomainPath<'domain> {
 
     /// Admits one node at a time. Prefix usage is conservative and grants no
     /// authority; a later failure removes that prefix leaf-to-root.
-    fn reserve(&self, amount: ResourceAmount) -> Result<(), ResourceError> {
+    fn reserve(&self, amount: &ResourceAmount) -> Result<(), ResourceError> {
         let mut admitted = 0;
         while admitted < self.len {
             let domain = self.node(admitted);
@@ -592,9 +703,8 @@ impl<'domain> DomainPath<'domain> {
                 if control.lifecycle != DomainLifecycle::Active {
                     return Err(ResourceError::DomainInactive(domain.id));
                 }
-                for kind in ResourceKind::ALL {
+                for (kind, requested) in amount.entries() {
                     let used = domain.total[kind.index()].load(Ordering::Relaxed);
-                    let requested = amount.get(kind);
                     let Some(projected) = used.checked_add(requested) else {
                         return Err(ResourceError::UsageOverflow {
                             domain: domain.id,
@@ -625,17 +735,17 @@ impl<'domain> DomainPath<'domain> {
         Ok(())
     }
 
-    fn commit(&self, amount: ResourceAmount) {
+    fn commit(&self, amount: &ResourceAmount) {
         for index in (0..self.len).rev() {
             subtract_pending_counters(&self.node(index).pending, amount);
         }
     }
 
-    fn release_pending(&self, amount: ResourceAmount) {
+    fn release_pending(&self, amount: &ResourceAmount) {
         self.release_pending_prefix(self.len, amount);
     }
 
-    fn release_pending_prefix(&self, admitted: usize, amount: ResourceAmount) {
+    fn release_pending_prefix(&self, admitted: usize, amount: &ResourceAmount) {
         for index in (0..admitted).rev() {
             let domain = self.node(index);
             subtract_pending_counters(&domain.pending, amount);
@@ -643,23 +753,23 @@ impl<'domain> DomainPath<'domain> {
         }
     }
 
-    fn release_committed(&self, amount: ResourceAmount) {
+    fn release_committed(&self, amount: &ResourceAmount) {
         for index in (0..self.len).rev() {
             subtract_total_counters(&self.node(index).total, amount);
         }
     }
 }
 
-fn load_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT]) -> ResourceAmount {
-    let mut amount = ResourceAmount::ZERO;
+fn load_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT]) -> ResourceVector {
+    let mut amount = ResourceVector::ZERO;
     for kind in ResourceKind::ALL {
         amount.0[kind.index()] = counters[kind.index()].load(Ordering::Relaxed);
     }
     amount
 }
 
-fn load_total_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT]) -> ResourceAmount {
-    let mut amount = ResourceAmount::ZERO;
+fn load_total_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT]) -> ResourceVector {
+    let mut amount = ResourceVector::ZERO;
     for kind in ResourceKind::ALL {
         // Acquire pairs with the releasing total decrement performed after a
         // pending decrement. Observing the new total therefore also observes
@@ -669,29 +779,29 @@ fn load_total_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT]) -> ResourceA
     amount
 }
 
-fn add_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT], amount: ResourceAmount) {
-    for kind in ResourceKind::ALL {
-        counters[kind.index()].fetch_add(amount.get(kind), Ordering::Relaxed);
+fn add_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT], amount: &ResourceAmount) {
+    for (kind, value) in amount.entries() {
+        counters[kind.index()].fetch_add(value, Ordering::Relaxed);
     }
 }
 
-fn subtract_pending_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT], amount: ResourceAmount) {
-    for kind in ResourceKind::ALL {
-        let previous = counters[kind.index()].fetch_sub(amount.get(kind), Ordering::Relaxed);
-        if previous < amount.get(kind) {
+fn subtract_pending_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT], amount: &ResourceAmount) {
+    for (kind, value) in amount.entries() {
+        let previous = counters[kind.index()].fetch_sub(value, Ordering::Relaxed);
+        if previous < value {
             accounting_invariant_violation();
         }
     }
 }
 
-fn subtract_total_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT], amount: ResourceAmount) {
-    for kind in ResourceKind::ALL {
+fn subtract_total_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT], amount: &ResourceAmount) {
+    for (kind, value) in amount.entries() {
         // Every pending decrement is sequenced before this publication. AcqRel
         // also carries pending publications from an earlier concurrent total
         // RMW, so a reader of the newest total cannot miss either decrement on
         // a weakly ordered machine.
-        let previous = counters[kind.index()].fetch_sub(amount.get(kind), Ordering::AcqRel);
-        if previous < amount.get(kind) {
+        let previous = counters[kind.index()].fetch_sub(value, Ordering::AcqRel);
+        if previous < value {
             accounting_invariant_violation();
         }
     }
@@ -722,7 +832,7 @@ impl ChargeReservation {
             Some(domain) => domain,
             None => accounting_invariant_violation(),
         };
-        DomainPath::new(domain).commit(self.amount);
+        DomainPath::new(domain).commit(&self.amount);
         let domain = match self.domain.take() {
             Some(domain) => domain,
             None => accounting_invariant_violation(),
@@ -739,7 +849,7 @@ impl ChargeReservation {
             Some(domain) => domain,
             None => accounting_invariant_violation(),
         };
-        DomainPath::new(domain).release_pending(self.amount);
+        DomainPath::new(domain).release_pending(&self.amount);
         self.domain = None;
     }
 }
@@ -749,7 +859,7 @@ impl Drop for ChargeReservation {
         let Some(domain) = self.domain.as_ref() else {
             return;
         };
-        DomainPath::new(domain).release_pending(self.amount);
+        DomainPath::new(domain).release_pending(&self.amount);
     }
 }
 
@@ -775,7 +885,7 @@ impl CommittedCharge {
 
 impl Drop for CommittedCharge {
     fn drop(&mut self) {
-        DomainPath::new(&self.domain).release_committed(self.amount);
+        DomainPath::new(&self.domain).release_committed(&self.amount);
     }
 }
 

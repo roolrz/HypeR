@@ -3,14 +3,22 @@
 
 //! Kernel IPC objects and message transport policy.
 
+mod capability_channel;
+mod capability_wire;
 mod channel;
 mod service;
 
+pub(crate) use capability_channel::{
+    CapabilityChannel, CapabilityChannelError, CapabilityDeliveryInfo, CapabilityReceiveClaim,
+    CapabilityReceiveContract, CapabilityReceiveOutcome, CapabilitySlotContract,
+    PendingCapabilityReceive, PreparedCapabilityReceive,
+};
 pub(crate) use channel::{
-    ChannelEndpoint, ChannelError, MessageInfo, PreparedMessage, ReceiveClaim, ReceivedMessage,
-    WriteReservation,
+    ByteChannel, ByteChannelError, ByteMessageInfo, ByteReceiveClaim, ByteWriteReservation,
+    PreparedByteMessage, ReceivedByteMessage,
 };
 pub(crate) use service::{
-    ChannelReadOutcome, ChannelServiceError, ReadBuffers, channel_create, channel_read,
-    channel_write,
+    ByteChannelReadOutcome, ByteChannelServiceError, CapabilityChannelServiceError,
+    byte_channel_create, byte_channel_read, byte_channel_write, capability_channel_create,
+    capability_channel_receive, capability_channel_try_send,
 };

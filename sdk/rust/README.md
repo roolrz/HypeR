@@ -24,6 +24,14 @@ application-independent semantic layer and is intended to support a future
 HypeR port of the Rust standard library without adopting the standard
 library's unstable internal platform interfaces as its own API.
 
+The safe layer includes bounded byte streams, transactional capability
+rendezvous, startup-capability parsing, BootFS access, physical and emergency
+Console access, object waits, and staged Process construction. Rust owners keep
+MOVE operations recoverable until the kernel commits them, while typed receive
+slots validate object kind and exact rights before publishing a capability to
+application code. Service protocols remain application policy and are
+deliberately kept outside the SDK.
+
 The initial runtime reuses the C startup parser and AArch64 syscall veneer from
 `sdk/lib`. This preserves one machine entry contract while the Rust API is
 established. Heap allocation is not yet provided; applications currently use

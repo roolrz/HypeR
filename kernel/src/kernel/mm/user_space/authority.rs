@@ -7,7 +7,9 @@ use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::authority::Rights;
-use crate::kernel::object::{KernelObject, ObjectKind, object_allocation_size, private};
+use crate::kernel::object::{
+    KernelObject, ObjectKind, TransferClass, object_allocation_size, private,
+};
 
 /// Failure while preparing an accounted executable-authority object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,6 +64,7 @@ impl private::UserExportable for ExecutableAuthority {}
 
 impl KernelObject for ExecutableAuthority {
     const KIND: ObjectKind = ObjectKind::EXECUTABLE_AUTHORITY;
+    const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
     const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)

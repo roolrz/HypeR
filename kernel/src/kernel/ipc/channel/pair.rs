@@ -11,8 +11,8 @@ use hyper::sync::InterruptSpinLock;
 
 use super::message::{Message, release_messages, release_messages_into};
 use super::{
-    ChannelError, MessageInfo, MessageSequence, PreparedMessage, ReceiveClaim, ReceivedMessage,
-    Side, WriteReservation,
+    ByteChannelError, ByteMessageInfo, ByteReceiveClaim, ByteWriteReservation, MessageSequence,
+    PreparedByteMessage, ReceivedByteMessage, Side,
 };
 use crate::kernel::accounting::CommittedCharge;
 use crate::kernel::object::{ObjectRetirement, SignalMask, SignalState};
@@ -30,7 +30,6 @@ struct MessageQueue {
     head: Option<Box<Message>>,
     messages: u64,
     bytes: u64,
-    handles: u64,
 }
 
 impl MessageQueue {
@@ -39,7 +38,6 @@ impl MessageQueue {
             head: None,
             messages: 0,
             bytes: 0,
-            handles: 0,
         }
     }
 
@@ -65,7 +63,6 @@ impl MessageQueue {
     fn detach(&mut self) -> Option<Box<Message>> {
         self.messages = 0;
         self.bytes = 0;
-        self.handles = 0;
         self.head.take()
     }
 }
@@ -75,7 +72,6 @@ struct EndpointState {
     incoming: MessageQueue,
     incoming_reservations: u64,
     reserved_bytes: u64,
-    reserved_handles: u64,
     receive_claimed: bool,
 }
 
@@ -86,7 +82,6 @@ impl EndpointState {
             incoming: MessageQueue::new(),
             incoming_reservations: 0,
             reserved_bytes: 0,
-            reserved_handles: 0,
             receive_claimed: false,
         }
     }
@@ -112,8 +107,8 @@ impl Pair {
                 next_message_sequence: 1,
             }),
             signals: [
-                SignalState::with_initial_level(super::ChannelEndpoint::WRITABLE),
-                SignalState::with_initial_level(super::ChannelEndpoint::WRITABLE),
+                SignalState::with_initial_level(super::ByteChannel::WRITABLE),
+                SignalState::with_initial_level(super::ByteChannel::WRITABLE),
             ],
             publishing: [AtomicBool::new(false), AtomicBool::new(false)],
             _charge: charge,
@@ -127,33 +122,32 @@ impl Pair {
     pub(super) fn prepare_write(
         pair: &FallibleArc<Self>,
         side: Side,
-        message: &PreparedMessage,
-    ) -> Result<WriteReservation, ChannelError> {
+        message: &PreparedByteMessage,
+    ) -> Result<ByteWriteReservation, ByteChannelError> {
         let info = message.info();
         let sequence = pair.state.with(|state| {
             let source = &state.endpoints[side.index()];
             let target = &state.endpoints[side.peer().index()];
             if source.lifecycle != SideLifecycle::Open {
-                return Err(ChannelError::EndpointClosed);
+                return Err(ByteChannelError::EndpointClosed);
             }
             if target.lifecycle != SideLifecycle::Open {
-                return Err(ChannelError::PeerClosed);
+                return Err(ByteChannelError::PeerClosed);
             }
             ensure_capacity(target, info)?;
             let sequence = MessageSequence::new(state.next_message_sequence)
-                .ok_or(ChannelError::SequenceExhausted)?;
+                .ok_or(ByteChannelError::SequenceExhausted)?;
             state.next_message_sequence = state
                 .next_message_sequence
                 .checked_add(1)
-                .ok_or(ChannelError::SequenceExhausted)?;
+                .ok_or(ByteChannelError::SequenceExhausted)?;
             let target = &mut state.endpoints[side.peer().index()];
             target.incoming_reservations = checked_add(target.incoming_reservations, 1);
             target.reserved_bytes = checked_add(target.reserved_bytes, info.bytes_u64());
-            target.reserved_handles = checked_add(target.reserved_handles, info.handles());
             Ok(sequence)
         })?;
         pair.reconcile(side);
-        Ok(WriteReservation::new(
+        Ok(ByteWriteReservation::new(
             pair.clone(),
             side.peer(),
             sequence,
@@ -165,14 +159,11 @@ impl Pair {
         &self,
         target: Side,
         sequence: MessageSequence,
-        expected: MessageInfo,
-        prepared: PreparedMessage,
+        expected: ByteMessageInfo,
+        prepared: PreparedByteMessage,
     ) {
-        if !prepared.is_complete() {
-            pair_invariant("Channel write committed without its capability batch");
-        }
         let mut message = prepared.take();
-        if message.info().sizes() != expected.sizes() {
+        if message.info().size() != expected.size() {
             pair_invariant("write reservation message changed");
         }
         message.set_sequence(sequence);
@@ -181,7 +172,6 @@ impl Pair {
             release_reservation(endpoint, expected);
             endpoint.incoming.messages = checked_add(endpoint.incoming.messages, 1);
             endpoint.incoming.bytes = checked_add(endpoint.incoming.bytes, expected.bytes_u64());
-            endpoint.incoming.handles = checked_add(endpoint.incoming.handles, expected.handles());
             endpoint.incoming.push_back(message);
             finalize_close(endpoint)
         });
@@ -189,7 +179,7 @@ impl Pair {
         release_messages(detached);
     }
 
-    pub(super) fn abort_write(&self, target: Side, expected: MessageInfo) {
+    pub(super) fn abort_write(&self, target: Side, expected: ByteMessageInfo) {
         let detached = self.state.with(|state| {
             let endpoint = &mut state.endpoints[target.index()];
             release_reservation(endpoint, expected);
@@ -199,22 +189,22 @@ impl Pair {
         release_messages(detached);
     }
 
-    pub(super) fn peek(&self, side: Side) -> Result<MessageInfo, ChannelError> {
+    pub(super) fn peek(&self, side: Side) -> Result<ByteMessageInfo, ByteChannelError> {
         self.state.with(|state| {
             let endpoint = &state.endpoints[side.index()];
             if endpoint.lifecycle == SideLifecycle::Closed {
-                return Err(ChannelError::EndpointClosed);
+                return Err(ByteChannelError::EndpointClosed);
             }
             if endpoint.receive_claimed {
-                return Err(ChannelError::Busy);
+                return Err(ByteChannelError::Busy);
             }
             if let Some(message) = endpoint.incoming.head.as_deref() {
                 return Ok(message.info());
             }
             if state.endpoints[side.peer().index()].lifecycle == SideLifecycle::Closed {
-                Err(ChannelError::PeerClosed)
+                Err(ByteChannelError::PeerClosed)
             } else {
-                Err(ChannelError::WouldBlock)
+                Err(ByteChannelError::WouldBlock)
             }
         })
     }
@@ -222,21 +212,21 @@ impl Pair {
     pub(super) fn claim(
         pair: &FallibleArc<Self>,
         side: Side,
-        expected: MessageInfo,
-    ) -> Result<ReceiveClaim, ChannelError> {
+        expected: ByteMessageInfo,
+    ) -> Result<ByteReceiveClaim, ByteChannelError> {
         let message = pair.state.with(|state| {
             let endpoint = &mut state.endpoints[side.index()];
             if endpoint.lifecycle == SideLifecycle::Closed {
-                return Err(ChannelError::EndpointClosed);
+                return Err(ByteChannelError::EndpointClosed);
             }
             if endpoint.receive_claimed {
-                return Err(ChannelError::Busy);
+                return Err(ByteChannelError::Busy);
             }
             let Some(head) = endpoint.incoming.head.as_deref() else {
-                return Err(ChannelError::StaleMessage);
+                return Err(ByteChannelError::StaleMessage);
             };
             if head.info() != expected {
-                return Err(ChannelError::StaleMessage);
+                return Err(ByteChannelError::StaleMessage);
             }
             endpoint.receive_claimed = true;
             match endpoint.incoming.pop_front() {
@@ -245,10 +235,10 @@ impl Pair {
             }
         })?;
         pair.reconcile(side);
-        Ok(ReceiveClaim::new(pair.clone(), side, message))
+        Ok(ByteReceiveClaim::new(pair.clone(), side, message))
     }
 
-    pub(super) fn commit_receive(&self, side: Side, message: Box<Message>) -> ReceivedMessage {
+    pub(super) fn commit_receive(&self, side: Side, message: Box<Message>) -> ReceivedByteMessage {
         let info = message.info();
         let detached = self.state.with(|state| {
             let endpoint = &mut state.endpoints[side.index()];
@@ -258,12 +248,11 @@ impl Pair {
             endpoint.receive_claimed = false;
             endpoint.incoming.messages = checked_sub(endpoint.incoming.messages, 1);
             endpoint.incoming.bytes = checked_sub(endpoint.incoming.bytes, info.bytes_u64());
-            endpoint.incoming.handles = checked_sub(endpoint.incoming.handles, info.handles());
             finalize_close(endpoint)
         });
         self.reconcile_all();
         release_messages(detached);
-        ReceivedMessage::new(message)
+        ReceivedByteMessage::new(message)
     }
 
     pub(super) fn abort_receive(&self, side: Side, message: Box<Message>) {
@@ -290,7 +279,8 @@ impl Pair {
             finalize_close(endpoint)
         });
         self.reconcile_all();
-        release_messages_into(detached, retirement);
+        let _ = retirement;
+        release_messages_into(detached);
     }
 
     fn reconcile_all(&self) {
@@ -309,8 +299,8 @@ impl Pair {
 
         loop {
             let desired = self.state.with(|state| signal_level(state, side));
-            if let Err(error) = self.signals[side.index()]
-                .update(super::ChannelEndpoint::SUPPORTED_SIGNALS, desired)
+            if let Err(error) =
+                self.signals[side.index()].update(super::ByteChannel::SUPPORTED_SIGNALS, desired)
             {
                 crate::kernel::crash::fatal(format_args!(
                     "HypeR: Channel signal publication failed after commit: {error:?}"
@@ -332,36 +322,34 @@ impl Pair {
     }
 }
 
-fn ensure_capacity(endpoint: &EndpointState, info: MessageInfo) -> Result<(), ChannelError> {
+fn ensure_capacity(
+    endpoint: &EndpointState,
+    info: ByteMessageInfo,
+) -> Result<(), ByteChannelError> {
     if endpoint
         .incoming
         .messages
         .checked_add(endpoint.incoming_reservations)
         .and_then(|used| used.checked_add(1))
-        .is_none_or(|used| used > hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_QUEUED_MESSAGES)
+        .is_none_or(|used| used > hyper::abi::native::HYPER_NATIVE_BYTE_CHANNEL_MAX_QUEUED_MESSAGES)
         || endpoint
             .incoming
             .bytes
             .checked_add(endpoint.reserved_bytes)
             .and_then(|used| used.checked_add(info.bytes_u64()))
-            .is_none_or(|used| used > hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_QUEUED_BYTES)
-        || endpoint
-            .incoming
-            .handles
-            .checked_add(endpoint.reserved_handles)
-            .and_then(|used| used.checked_add(info.handles()))
-            .is_none_or(|used| used > hyper::abi::native::HYPER_NATIVE_CHANNEL_MAX_QUEUED_HANDLES)
+            .is_none_or(|used| {
+                used > hyper::abi::native::HYPER_NATIVE_BYTE_CHANNEL_MAX_QUEUED_BYTES
+            })
     {
-        Err(ChannelError::WouldBlock)
+        Err(ByteChannelError::WouldBlock)
     } else {
         Ok(())
     }
 }
 
-fn release_reservation(endpoint: &mut EndpointState, info: MessageInfo) {
+fn release_reservation(endpoint: &mut EndpointState, info: ByteMessageInfo) {
     endpoint.incoming_reservations = checked_sub(endpoint.incoming_reservations, 1);
     endpoint.reserved_bytes = checked_sub(endpoint.reserved_bytes, info.bytes_u64());
-    endpoint.reserved_handles = checked_sub(endpoint.reserved_handles, info.handles());
 }
 
 fn finalize_close(endpoint: &mut EndpointState) -> Option<Box<Message>> {
@@ -381,20 +369,17 @@ fn signal_level(state: &PairState, side: Side) -> SignalMask {
     let peer = &state.endpoints[side.peer().index()];
     let mut level = SignalMask::EMPTY;
     if endpoint.incoming.head.is_some() && !endpoint.receive_claimed {
-        level =
-            SignalMask::from_trusted_bits(level.bits() | super::ChannelEndpoint::READABLE.bits());
+        level = SignalMask::from_trusted_bits(level.bits() | super::ByteChannel::READABLE.bits());
     }
     if endpoint.lifecycle == SideLifecycle::Open
         && peer.lifecycle == SideLifecycle::Open
-        && ensure_capacity(peer, MessageInfo::EMPTY).is_ok()
+        && ensure_capacity(peer, ByteMessageInfo::EMPTY).is_ok()
     {
-        level =
-            SignalMask::from_trusted_bits(level.bits() | super::ChannelEndpoint::WRITABLE.bits());
+        level = SignalMask::from_trusted_bits(level.bits() | super::ByteChannel::WRITABLE.bits());
     }
     if peer.lifecycle == SideLifecycle::Closed {
-        level = SignalMask::from_trusted_bits(
-            level.bits() | super::ChannelEndpoint::PEER_CLOSED.bits(),
-        );
+        level =
+            SignalMask::from_trusted_bits(level.bits() | super::ByteChannel::PEER_CLOSED.bits());
     }
     level
 }
