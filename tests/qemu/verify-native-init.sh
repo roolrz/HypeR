@@ -83,13 +83,13 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
     sed 's/\r$//' "$log" >"$native_output"
     if [ "$input_sent" = false ] &&
         grep -Fxq 'HypeR session: console ready' "$native_output"; then
-        printf 'HYPER_NATIVE_ECHO_OK\n' >&3
+        printf '/bin/echo HYPER_NATIVE_ECHO_OK\n' >&3
         input_sent=true
     fi
     if grep -q 'HypeR: starting Native init process' "$log" &&
         grep -Fxq 'HypeR session: console ready' "$native_output" &&
         grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output"; then
-        echo "verified HypeR Native init-launched session console echo"
+        echo "verified HypeR Native shell-launched external command"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then

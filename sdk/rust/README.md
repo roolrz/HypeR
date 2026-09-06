@@ -17,6 +17,7 @@ them with the Rust toolchain selected for the application.
 | `hyper-sys` | Raw syscall, C-runtime, pointer, and handle bindings |
 | `hyper-os` | Safe capability-oriented operating-system interfaces |
 | `hyper-rt` | Rust application entry, panic termination, and exit status |
+| `hyper-service` | Shared typed startup contracts for Native system services |
 
 Unsafe machine interactions are confined to `hyper-sys`. Application code
 should normally depend only on `hyper-os` and `hyper-rt`. `hyper-os` is an
@@ -29,8 +30,10 @@ rendezvous, startup-capability parsing, BootFS access, physical and emergency
 Console access, object waits, and staged Process construction. Rust owners keep
 MOVE operations recoverable until the kernel commits them, while typed receive
 slots validate object kind and exact rights before publishing a capability to
-application code. Service protocols remain application policy and are
-deliberately kept outside the SDK.
+application code. `hyper-service` standardizes symbolic contract names and
+typed startup purposes shared by providers and consumers; each service still
+owns its message payload semantics, and the SDK imposes no generic IPC wire
+envelope.
 
 The initial runtime reuses the C startup parser and AArch64 syscall veneer from
 `sdk/lib`. This preserves one machine entry contract while the Rust API is

@@ -770,6 +770,30 @@ fn validate_indirect_handles(
         ));
     }
     match handles {
+        IndirectHandles::BorrowRecords {
+            handle_field,
+            required_rights,
+        } => {
+            if memory.direction != MemoryDirection::Read {
+                return invalid(format!(
+                    "syscall {} borrowed-handle argument {} is not input memory",
+                    syscall.name, argument.name
+                ));
+            }
+            if required_rights & !supported_rights != 0 {
+                return invalid(format!(
+                    "syscall {} argument {} indirectly requires undeclared rights",
+                    syscall.name, argument.name
+                ));
+            }
+            let Some(record) = record else {
+                return invalid(format!(
+                    "syscall {} borrowed-handle argument {} has no record",
+                    syscall.name, argument.name
+                ));
+            };
+            require_record_field(record, handle_field, FieldKind::U64, syscall, argument)?;
+        }
         IndirectHandles::ConsumeRecords {
             handle_field,
             rights_field,
@@ -1692,6 +1716,10 @@ fn describe_user_memory(name: &str, memory: schema::UserMemory) -> String {
     };
     let handles = match memory.handles {
         None => String::new(),
+        Some(IndirectHandles::BorrowRecords {
+            handle_field,
+            required_rights,
+        }) => format!(", borrowed-handles=({handle_field}), required-rights=0x{required_rights:x}"),
         Some(IndirectHandles::ConsumeRecords {
             handle_field,
             rights_field,
@@ -2014,6 +2042,35 @@ mod tests {
                 expected_kind_field: "expected_kind",
                 flags_field: "flags",
                 commit: CapabilityCommit::AtomicOnOk,
+            })
+        ));
+    }
+
+    #[test]
+    fn object_wait_many_declares_borrowed_wait_authority() {
+        let syscall = schema::SYSCALLS
+            .iter()
+            .find(|syscall| syscall.name == "object_wait_many");
+        assert!(syscall.is_some());
+        let Some(syscall) = syscall else {
+            return;
+        };
+        let items = syscall
+            .arguments
+            .iter()
+            .find(|argument| argument.name == "items")
+            .and_then(|argument| argument.memory);
+        assert!(items.is_some());
+        let Some(items) = items else {
+            return;
+        };
+        assert_eq!(items.direction, MemoryDirection::Read);
+        assert_eq!(items.record, Some("object_wait_item"));
+        assert!(matches!(
+            items.handles,
+            Some(IndirectHandles::BorrowRecords {
+                handle_field: "handle",
+                required_rights: schema::RIGHT_WAIT,
             })
         ));
     }

@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Blocking transaction for object-signal observation.
+//! Blocking transactions for object-signal observation.
+
+use alloc::vec::Vec;
 
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
@@ -13,6 +15,42 @@ use crate::kernel::task::{
 use hyper::sync::InterruptMaskGuard;
 
 use super::signals::{PreparedSignalWait, SignalSource, SignalWaitError, SignalWaitOutcome};
+
+/// One borrowed signal source in an ordered multi-object wait request.
+#[derive(Clone, Copy)]
+pub(crate) struct SignalWaitRequest<'object> {
+    source: SignalSource<'object>,
+    requested: u64,
+}
+
+impl<'object> SignalWaitRequest<'object> {
+    pub(crate) const fn new(source: SignalSource<'object>, requested: u64) -> Self {
+        Self { source, requested }
+    }
+}
+
+/// Terminal result of one multi-object wait transaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SignalWaitManyOutcome {
+    Observed {
+        index: usize,
+        snapshot: super::signals::SignalSnapshot,
+    },
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Clone, Copy)]
+struct CanonicalWait<'object> {
+    source: SignalSource<'object>,
+    requested: super::signals::SignalMask,
+}
+
+#[derive(Clone, Copy)]
+struct ValidatedWait<'object> {
+    source: SignalSource<'object>,
+    requested: super::signals::SignalMask,
+}
 
 /// Failure before a signal, timeout, or cancellation outcome is selected.
 #[derive(Debug)]
@@ -347,6 +385,151 @@ pub(crate) fn wait_one(
     };
     prepared.retire_timer(scheduler_outcome(outcome))?;
     Ok(outcome)
+}
+
+/// Waits for the first ready member of an ordered, bounded object set.
+///
+/// Duplicate object identities share one signal-state registration. When its
+/// notification wins, the lowest original item whose requested mask matches
+/// the committed snapshot is reported.
+pub(crate) fn wait_many(
+    requests: &[SignalWaitRequest<'_>],
+    domain: &ResourceDomain,
+    deadline_nanoseconds: u64,
+    cancellation_requested: impl FnOnce() -> bool,
+) -> Result<SignalWaitManyOutcome, ObjectWaitError> {
+    if requests.is_empty()
+        || requests.len() > hyper::abi::native::HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS as usize
+    {
+        return Err(ObjectWaitError::InvalidSignals);
+    }
+
+    let scratch_bytes = requests
+        .len()
+        .checked_mul(
+            core::mem::size_of::<ValidatedWait<'_>>()
+                + core::mem::size_of::<CanonicalWait<'_>>()
+                + core::mem::size_of::<Option<PreparedSignalWait>>(),
+        )
+        .ok_or(ObjectWaitError::AllocationSize)?;
+    let _scratch_charge = domain
+        .reserve(ResourceAmount::ZERO.with(
+            ResourceKind::KernelMemoryBytes,
+            allocation_bytes(scratch_bytes)?,
+        ))?
+        .commit();
+    let mut validated = Vec::new();
+    validated
+        .try_reserve_exact(requests.len())
+        .map_err(|_| SignalWaitError::Allocation)?;
+    for request in requests {
+        let requested = request
+            .source
+            .validate(request.requested, false)
+            .ok_or(ObjectWaitError::InvalidSignals)?;
+        validated.push(ValidatedWait {
+            source: request.source,
+            requested,
+        });
+    }
+
+    for (index, request) in validated.iter().enumerate() {
+        if let Some(snapshot) = request.source.state().observe(request.requested) {
+            return Ok(SignalWaitManyOutcome::Observed { index, snapshot });
+        }
+    }
+
+    let mut canonical = Vec::new();
+    canonical
+        .try_reserve_exact(requests.len())
+        .map_err(|_| SignalWaitError::Allocation)?;
+    for request in &validated {
+        match canonical
+            .iter_mut()
+            .find(|candidate: &&mut CanonicalWait<'_>| candidate.source.same_state(request.source))
+        {
+            Some(candidate) => candidate.requested = candidate.requested.union(request.requested),
+            None => canonical.push(CanonicalWait {
+                source: request.source,
+                requested: request.requested,
+            }),
+        }
+    }
+
+    let mut waiters = Vec::new();
+    waiters
+        .try_reserve_exact(canonical.len())
+        .map_err(|_| SignalWaitError::Allocation)?;
+    for request in &canonical {
+        let charge = reserve_waiter(domain)?;
+        waiters.push(Some(PreparedSignalWait::try_new(
+            request.requested,
+            charge,
+        )?));
+    }
+
+    let mut prepared = match prepare_timed_wait(domain, deadline_nanoseconds)? {
+        TimedWaitPreparation::Completed(WaitOutcome::TimedOut) => {
+            return Ok(SignalWaitManyOutcome::TimedOut);
+        }
+        TimedWaitPreparation::Completed(outcome) => {
+            object_wait_invariant("unexpected immediate multi-wait outcome", Some(outcome))
+        }
+        TimedWaitPreparation::Armed(prepared) => prepared,
+    };
+    if cancellation_requested() {
+        prepared.request_cancellation();
+    }
+    let ticket = prepared.ticket();
+    for (request, waiter) in canonical.iter().zip(waiters.iter_mut()) {
+        let waiter = match waiter.take() {
+            Some(waiter) => waiter,
+            None => object_wait_invariant("multi-wait storage consumed twice", None),
+        };
+        request.source.state().register_shared_wait(waiter, ticket);
+    }
+
+    let scheduler_outcome = match canonical[0]
+        .source
+        .state()
+        .park_shared_wait(prepared.take_registration())
+    {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            for request in &canonical {
+                let _ = request.source.state().unregister_shared_wait(ticket);
+            }
+            prepared.retire_timer(WaitOutcome::Cancelled)?;
+            return Err(error.into());
+        }
+    };
+
+    let mut winner = None;
+    for request in &canonical {
+        if let Some(snapshot) = request.source.state().unregister_shared_wait(ticket) {
+            if winner.is_some() {
+                object_wait_invariant("multi-wait selected more than one signal winner", None);
+            }
+            winner = Some((request.source, snapshot));
+        }
+    }
+    prepared.retire_timer(scheduler_outcome)?;
+
+    match (scheduler_outcome, winner) {
+        (WaitOutcome::Notified, Some((source, snapshot))) => {
+            let index = match validated.iter().position(|request| {
+                request.source.same_state(source)
+                    && snapshot.signals().intersects(request.requested)
+            }) {
+                Some(index) => index,
+                None => object_wait_invariant("multi-wait winner matched no input item", None),
+            };
+            Ok(SignalWaitManyOutcome::Observed { index, snapshot })
+        }
+        (WaitOutcome::TimedOut, None) => Ok(SignalWaitManyOutcome::TimedOut),
+        (WaitOutcome::Cancelled, None) => Ok(SignalWaitManyOutcome::Cancelled),
+        _ => object_wait_invariant("multi-wait outcome disagreed with signal winner", None),
+    }
 }
 
 fn reserve_waiter(domain: &ResourceDomain) -> Result<CommittedCharge, ObjectWaitError> {

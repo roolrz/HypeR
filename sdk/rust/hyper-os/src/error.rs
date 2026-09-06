@@ -42,6 +42,8 @@ pub enum Error {
     InvalidProcessEnvironment,
     /// A CPU affinity bitmap was empty or exceeded the ABI bound.
     InvalidProcessAffinity,
+    /// A multi-object wait was empty or exceeded the ABI item bound.
+    InvalidWaitSet,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

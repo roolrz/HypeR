@@ -8,7 +8,7 @@ use std::string::String;
 
 use super::{
     AuthorityDeclaration, AuthorityPolicy, MAX_MANIFEST_BYTES, MAX_SERVICES, ParseErrorKind,
-    ValidationErrorKind, parse, validate,
+    StartupPurposeDeclaration, ValidationErrorKind, parse, validate,
 };
 
 const VALID: &str = r#"
@@ -24,8 +24,7 @@ const VALID: &str = r#"
       "capabilities": [
         {
           "source": "network.primary",
-          "purpose": 100,
-          "kind": "network-endpoint",
+          "purpose": "vmm.network-primary",
           "operation": "duplicate",
           "rights": ["read", "write"]
         }
@@ -48,8 +47,7 @@ const VALID: &str = r#"
       "capabilities": [
         {
           "source": "bootstrap.console-manager",
-          "purpose": 100,
-          "kind": "console-manager",
+          "purpose": "session.console-manager",
           "operation": "create",
           "rights": ["inspect"]
         }
@@ -91,7 +89,13 @@ impl AuthorityPolicy for Policy {
             "bootstrap.console-input-channel"
             | "bootstrap.console-output-channel"
             | "bootstrap.session-input-channel"
-            | "bootstrap.session-output-channel" => Some(AuthorityDeclaration {
+            | "bootstrap.session-output-channel"
+            | "bootstrap.session-client-input-channel"
+            | "bootstrap.session-client-output-channel"
+            | "bootstrap.session-client-error-channel"
+            | "bootstrap.shell-input-channel"
+            | "bootstrap.shell-output-channel"
+            | "bootstrap.shell-error-channel" => Some(AuthorityDeclaration {
                 provider: None,
                 object_kind: 4,
                 rights: 0b1011,
@@ -99,18 +103,65 @@ impl AuthorityPolicy for Policy {
                 duplicable: false,
                 creatable: false,
             }),
+            "bootstrap.boot-fs" => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: 5,
+                rights: 0b000_0001,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            "bootstrap.task-factory" => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: 6,
+                rights: 0b001_0000,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            "bootstrap.task-group" => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: 7,
+                rights: 0b010_0000,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            "bootstrap.resource-domain" => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: 8,
+                rights: 0b100_0000,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
             _ => None,
         }
     }
 
-    fn object_kind(&self, name: &str) -> Option<u32> {
-        match name {
-            "network-endpoint" => Some(1),
-            "console-manager" => Some(2),
-            "console" => Some(3),
-            "byte-channel" => Some(4),
-            _ => None,
-        }
+    fn startup_purpose(&self, image: &str, name: &str) -> Option<StartupPurposeDeclaration> {
+        let (value, object_kind) = match (image, name) {
+            ("/svc/vmm", "vmm.network-primary") => (100, 1),
+            ("/svc/session-manager", "session.console-manager")
+            | ("/svc/session-manager", "session.console-manager-alias") => (100, 2),
+            ("/svc/network-manager", "network.console-manager") => (101, 2),
+            ("/svc/console-input" | "/svc/console-output", "console.system") => (200, 3),
+            ("/svc/console-input" | "/svc/console-output", "console.data") => (201, 4),
+            ("/svc/session", "session.console-input") => (202, 4),
+            ("/svc/session", "session.console-output") => (203, 4),
+            ("/svc/session", "session.client-input") => (204, 4),
+            ("/svc/session", "session.client-output") => (205, 4),
+            ("/svc/session", "session.client-error") => (206, 4),
+            ("/bin/sh", "stdio.input") => (300, 4),
+            ("/bin/sh", "stdio.output") => (301, 4),
+            ("/bin/sh", "stdio.error") => (302, 4),
+            ("/bin/sh", "process.boot-fs") => (303, 5),
+            ("/bin/sh", "process.task-factory") => (304, 6),
+            ("/bin/sh", "process.task-group") => (305, 7),
+            ("/bin/sh", "process.resource-domain") => (306, 8),
+            _ => return None,
+        };
+        Some(StartupPurposeDeclaration { value, object_kind })
     }
 
     fn right(&self, name: &str) -> Option<u64> {
@@ -119,6 +170,9 @@ impl AuthorityPolicy for Policy {
             "write" => Some(0b010),
             "inspect" => Some(0b100),
             "wait" => Some(0b1000),
+            "create-process" => Some(0b001_0000),
+            "attach-process" => Some(0b010_0000),
+            "sponsor" => Some(0b100_0000),
             _ => None,
         }
     }
@@ -133,7 +187,7 @@ fn production_manifest_matches_the_validated_schema() {
     };
     let validated = validate(&manifest, &Policy);
     assert!(validated.is_ok());
-    assert_eq!(manifest.service_count(), 3);
+    assert_eq!(manifest.service_count(), 4);
 }
 
 #[test]
@@ -155,6 +209,8 @@ fn parses_and_plans_a_complete_manifest_before_launch() {
     assert_eq!(plan.service_index(2), Some(2));
     assert_eq!(plan.capability_rights(0, 0), Some(0b11));
     assert_eq!(plan.capability_kind(2, 0), Some(2));
+    assert_eq!(plan.capability_purpose(0, 0), Some(100));
+    assert_eq!(plan.capability_purpose(2, 0), Some(100));
 }
 
 #[test]
@@ -285,8 +341,7 @@ fn rejects_reuse_of_a_moved_authority() {
             "\"capabilities\": []",
             r#""capabilities": [{
           "source":"bootstrap.console-manager",
-          "purpose":101,
-          "kind":"console-manager",
+          "purpose":"network.console-manager",
           "operation":"duplicate",
           "rights":["inspect"]
         }]"#,
@@ -305,15 +360,19 @@ fn rejects_reuse_of_a_moved_authority() {
 
 #[test]
 fn rejects_invalid_and_duplicate_startup_purposes() {
-    let zero = VALID.replacen("\"purpose\": 100", "\"purpose\": 0", 1);
-    let parsed = parse(&zero);
+    let invalid = VALID.replacen(
+        "\"purpose\": \"vmm.network-primary\"",
+        "\"purpose\": \"0bad\"",
+        1,
+    );
+    let parsed = parse(&invalid);
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
         return;
     };
     assert_eq!(
         validate(&manifest, &Policy).map_err(|error| error.kind()),
-        Err(ValidationErrorKind::InvalidCapabilityPurpose)
+        Err(ValidationErrorKind::InvalidPurposeName)
     );
 
     let duplicate = VALID.replace(
@@ -321,8 +380,7 @@ fn rejects_invalid_and_duplicate_startup_purposes() {
         r#""rights": ["inspect"]
         }, {
           "source": "bootstrap.console-manager",
-          "purpose": 100,
-          "kind": "console-manager",
+          "purpose": "session.console-manager-alias",
           "operation": "duplicate",
           "rights": ["inspect"]"#,
     );
@@ -336,9 +394,18 @@ fn rejects_invalid_and_duplicate_startup_purposes() {
         Err(ValidationErrorKind::DuplicateCapabilityPurpose)
     );
 
-    let overflow = VALID.replacen("\"purpose\": 100", "\"purpose\": 4294967296", 1);
+    let unknown = VALID.replacen(
+        "\"purpose\": \"vmm.network-primary\"",
+        "\"purpose\": \"vmm.unknown\"",
+        1,
+    );
+    let parsed = parse(&unknown);
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
     assert_eq!(
-        parse(&overflow).map_err(|error| error.kind()),
-        Err(ParseErrorKind::InvalidNumber)
+        validate(&manifest, &Policy).map_err(|error| error.kind()),
+        Err(ValidationErrorKind::UnknownCapabilityPurpose)
     );
 }

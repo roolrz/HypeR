@@ -9,9 +9,12 @@ use hyper::abi::native;
 ///
 /// `TransferClass` alone is insufficient: a builder is a persistent capability
 /// container and can outlive or cross out of the process that configured it.
-/// Lifecycle-bearing Process, Thread, `TaskGroup`, and VMAR objects are excluded
-/// until their ownership graphs have dedicated lifecycle tests. Nested
-/// `ProcessBuilder` authority is always forbidden.
+/// Lifecycle-bearing Process, Thread, and VMAR objects are excluded. A
+/// `TaskGroup` is admitted because a delegated process launcher must name the
+/// group of every child it creates; staged startup remains an audited,
+/// non-buffered transfer route, and Process retirement closes the delegated
+/// handle before retiring its membership edge. Nested `ProcessBuilder`
+/// authority is always forbidden.
 pub(crate) struct BuilderStorable;
 
 impl BuilderStorable {
@@ -19,6 +22,7 @@ impl BuilderStorable {
         kind == native::HYPER_NATIVE_OBJECT_EVENT
             || kind == native::HYPER_NATIVE_OBJECT_BYTE_CHANNEL
             || kind == native::HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL
+            || kind == native::HYPER_NATIVE_OBJECT_TASK_GROUP
             || kind == native::HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN
             || kind == native::HYPER_NATIVE_OBJECT_TASK_FACTORY
             || kind == native::HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY

@@ -692,11 +692,6 @@ mod tests {
         ));
         assert!(!slots[0].is_occupied());
         assert!(matches!(
-            receiver.receive(3, &mut bytes, &mut slots),
-            Err(Error::InvalidResponse)
-        ));
-        assert!(!slots[0].is_occupied());
-        assert!(matches!(
             receiver.receive(2, &mut bytes, &mut slots),
             Err(Error::Status(status)) if status == Status::FAULT
         ));

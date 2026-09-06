@@ -31,6 +31,36 @@ const PROCESS_SUPERVISOR_RIGHTS: Rights = Rights::TRANSFER
     .union(Rights::INSPECT)
     .union(Rights::REQUEST_STOP);
 
+/// Lifecycle phase reported for a Process object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessPhase {
+    Prepared,
+    Created,
+    Running,
+    Stopping,
+    Stopped,
+    Retiring,
+    Retired,
+}
+
+/// Immutable reason latched when a Process begins termination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessTermination {
+    Requested,
+    ThreadExited { status: i64 },
+    ProcessExited { status: i64 },
+    LastThreadExited { status: i64 },
+    Fault { class: u32, code: u64 },
+    TaskGroupStop { generation: u64 },
+}
+
+/// Stable lifecycle information obtained through Process inspect authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessInfo {
+    pub phase: ProcessPhase,
+    pub terminal: Option<ProcessTermination>,
+}
+
 /// Yields the calling thread's remaining scheduling opportunity.
 ///
 /// This is a scheduling hint rather than a blocking primitive. Callers that
@@ -235,6 +265,67 @@ impl ProcessSupervisor<'_> {
             Err(Error::InvalidResponse)
         }
     }
+
+    /// Retrieves the Process lifecycle and reason-specific terminal details.
+    pub fn info(&self) -> Result<ProcessInfo> {
+        decode_process_info(raw_ops::process_info(self.handle)?)
+    }
+}
+
+fn decode_process_info(record: hyper_abi::HyperNativeProcessInfo) -> Result<ProcessInfo> {
+    if record.reserved != 0 {
+        return Err(Error::InvalidResponse);
+    }
+    let phase = match u64::from(record.phase) {
+        hyper_abi::HYPER_NATIVE_PROCESS_PHASE_PREPARED => ProcessPhase::Prepared,
+        hyper_abi::HYPER_NATIVE_PROCESS_PHASE_CREATED => ProcessPhase::Created,
+        hyper_abi::HYPER_NATIVE_PROCESS_PHASE_RUNNING => ProcessPhase::Running,
+        hyper_abi::HYPER_NATIVE_PROCESS_PHASE_STOPPING => ProcessPhase::Stopping,
+        hyper_abi::HYPER_NATIVE_PROCESS_PHASE_STOPPED => ProcessPhase::Stopped,
+        hyper_abi::HYPER_NATIVE_PROCESS_PHASE_RETIRING => ProcessPhase::Retiring,
+        hyper_abi::HYPER_NATIVE_PROCESS_PHASE_RETIRED => ProcessPhase::Retired,
+        _ => return Err(Error::InvalidResponse),
+    };
+    let terminal = match u64::from(record.terminal_reason) {
+        hyper_abi::HYPER_NATIVE_PROCESS_TERMINAL_NONE
+            if record.detail0 == 0 && record.detail1 == 0 =>
+        {
+            None
+        }
+        hyper_abi::HYPER_NATIVE_PROCESS_TERMINAL_REQUESTED
+            if record.detail0 == 0 && record.detail1 == 0 =>
+        {
+            Some(ProcessTermination::Requested)
+        }
+        hyper_abi::HYPER_NATIVE_PROCESS_TERMINAL_THREAD_EXITED if record.detail1 == 0 => {
+            Some(ProcessTermination::ThreadExited {
+                status: record.detail0 as i64,
+            })
+        }
+        hyper_abi::HYPER_NATIVE_PROCESS_TERMINAL_PROCESS_EXITED if record.detail1 == 0 => {
+            Some(ProcessTermination::ProcessExited {
+                status: record.detail0 as i64,
+            })
+        }
+        hyper_abi::HYPER_NATIVE_PROCESS_TERMINAL_LAST_THREAD_EXITED if record.detail1 == 0 => {
+            Some(ProcessTermination::LastThreadExited {
+                status: record.detail0 as i64,
+            })
+        }
+        hyper_abi::HYPER_NATIVE_PROCESS_TERMINAL_FAULT if record.detail0 <= u32::MAX.into() => {
+            Some(ProcessTermination::Fault {
+                class: record.detail0 as u32,
+                code: record.detail1,
+            })
+        }
+        hyper_abi::HYPER_NATIVE_PROCESS_TERMINAL_TASK_GROUP_STOP if record.detail1 == 0 => {
+            Some(ProcessTermination::TaskGroupStop {
+                generation: record.detail0,
+            })
+        }
+        _ => return Err(Error::InvalidResponse),
+    };
+    Ok(ProcessInfo { phase, terminal })
 }
 
 impl OwnedHandle<ProcessObject> {
@@ -356,6 +447,7 @@ fn valid_environment(environment: &str) -> bool {
 
 #[cfg(not(test))]
 mod raw_ops {
+    use core::mem::MaybeUninit;
     use core::num::NonZeroU64;
 
     use super::{
@@ -475,6 +567,20 @@ mod raw_ops {
         unsafe { hyper_sys::process_request_stop(process.raw().get()) }
     }
 
+    pub(super) fn process_info(
+        process: HandleRef<'_, super::ProcessObject>,
+    ) -> crate::Result<hyper_abi::HyperNativeProcessInfo> {
+        let mut record = MaybeUninit::<hyper_abi::HyperNativeProcessInfo>::uninit();
+        // SAFETY: the typed Process borrow remains live and `record` is
+        // writable for the complete fixed-width ABI output.
+        let status = crate::Status::from_raw(unsafe {
+            hyper_sys::process_get_info(process.raw().get(), record.as_mut_ptr())
+        });
+        status.into_result()?;
+        // SAFETY: an OK result initializes the complete record.
+        Ok(unsafe { record.assume_init() })
+    }
+
     pub(super) fn yield_thread() -> hyper_abi::HyperNativeStatus {
         // SAFETY: this safe SDK function is callable only from a Native thread.
         unsafe { hyper_sys::thread_yield() }
@@ -588,6 +694,18 @@ mod raw_ops {
         hyper_abi::HYPER_NATIVE_STATUS_OK
     }
 
+    pub(super) fn process_info(
+        _process: HandleRef<'_, super::ProcessObject>,
+    ) -> crate::Result<hyper_abi::HyperNativeProcessInfo> {
+        Ok(hyper_abi::HyperNativeProcessInfo {
+            phase: hyper_abi::HYPER_NATIVE_PROCESS_PHASE_STOPPED as u32,
+            terminal_reason: hyper_abi::HYPER_NATIVE_PROCESS_TERMINAL_LAST_THREAD_EXITED as u32,
+            detail0: (-7_i64) as u64,
+            detail1: 0,
+            reserved: 0,
+        })
+    }
+
     pub(super) fn yield_thread() -> hyper_abi::HyperNativeStatus {
         hyper_abi::HYPER_NATIVE_STATUS_OK
     }
@@ -597,7 +715,7 @@ mod raw_ops {
 mod tests {
     use core::num::NonZeroU64;
 
-    use super::{ProcessBuilder, yield_now};
+    use super::{ProcessBuilder, ProcessPhase, ProcessTermination, yield_now};
     use crate::handle::{
         BootFileObject, EventObject, OwnedHandle, ResourceDomainObject, Rights, RightsOffer,
         TaskFactoryObject, TaskGroupObject,
@@ -678,6 +796,12 @@ mod tests {
         process
             .as_process_supervisor()
             .wait_terminated(hyper_abi::HYPER_NATIVE_DEADLINE_INFINITE)?;
+        let info = process.as_process_supervisor().info()?;
+        assert_eq!(info.phase, ProcessPhase::Stopped);
+        assert_eq!(
+            info.terminal,
+            Some(ProcessTermination::LastThreadExited { status: -7 })
+        );
         Ok(())
     }
 }

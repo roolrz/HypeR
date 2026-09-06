@@ -143,6 +143,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_BOOT_FS UINT64_C(7)
 #define HYPER_NATIVE_STARTUP_MAX_HANDLES UINT64_C(256)
 #define HYPER_NATIVE_DEADLINE_INFINITE UINT64_C(18446744073709551615)
+#define HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS UINT64_C(64)
 #define HYPER_NATIVE_CAPABILITY_DISPOSITION_SAME_RIGHTS UINT64_C(18446744073709551615)
 #define HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES UINT64_C(65536)
 #define HYPER_NATIVE_BYTE_CHANNEL_MAX_QUEUED_MESSAGES UINT64_C(16)
@@ -161,6 +162,20 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_PROCESS_MAX_ENVIRONMENT UINT64_C(64)
 #define HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS UINT64_C(4)
 #define HYPER_NATIVE_PROCESS_AFFINITY_MAX_CPUS UINT64_C(256)
+#define HYPER_NATIVE_PROCESS_PHASE_PREPARED UINT64_C(0)
+#define HYPER_NATIVE_PROCESS_PHASE_CREATED UINT64_C(1)
+#define HYPER_NATIVE_PROCESS_PHASE_RUNNING UINT64_C(2)
+#define HYPER_NATIVE_PROCESS_PHASE_STOPPING UINT64_C(3)
+#define HYPER_NATIVE_PROCESS_PHASE_STOPPED UINT64_C(4)
+#define HYPER_NATIVE_PROCESS_PHASE_RETIRING UINT64_C(5)
+#define HYPER_NATIVE_PROCESS_PHASE_RETIRED UINT64_C(6)
+#define HYPER_NATIVE_PROCESS_TERMINAL_NONE UINT64_C(0)
+#define HYPER_NATIVE_PROCESS_TERMINAL_REQUESTED UINT64_C(1)
+#define HYPER_NATIVE_PROCESS_TERMINAL_THREAD_EXITED UINT64_C(2)
+#define HYPER_NATIVE_PROCESS_TERMINAL_PROCESS_EXITED UINT64_C(3)
+#define HYPER_NATIVE_PROCESS_TERMINAL_LAST_THREAD_EXITED UINT64_C(4)
+#define HYPER_NATIVE_PROCESS_TERMINAL_FAULT UINT64_C(5)
+#define HYPER_NATIVE_PROCESS_TERMINAL_TASK_GROUP_STOP UINT64_C(6)
 
 #define HYPER_NATIVE_SYS_ABI_QUERY UINT64_C(0)
 #define HYPER_NATIVE_SYS_HANDLE_CLOSE UINT64_C(1)
@@ -194,6 +209,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_PROCESS_BUILDER_START UINT64_C(29)
 #define HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT UINT64_C(30)
 #define HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP UINT64_C(31)
+#define HYPER_NATIVE_SYS_OBJECT_WAIT_MANY UINT64_C(32)
+#define HYPER_NATIVE_SYS_PROCESS_GET_INFO UINT64_C(33)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -238,6 +255,30 @@ HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_object_basic_info_t) == 8
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_basic_info_t, koid) == 0, "object_basic_info.koid offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_basic_info_t, object_kind) == 8, "object_basic_info.object_kind offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_basic_info_t, reserved) == 12, "object_basic_info.reserved offset");
+
+typedef struct hyper_native_object_wait_item_t {
+    uint64_t handle;
+    uint64_t signals;
+} hyper_native_object_wait_item_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_object_wait_item_t) == 16, "object_wait_item size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_object_wait_item_t) == 8, "object_wait_item alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_wait_item_t, handle) == 0, "object_wait_item.handle offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_wait_item_t, signals) == 8, "object_wait_item.signals offset");
+
+typedef struct hyper_native_process_info_t {
+    uint32_t phase;
+    uint32_t terminal_reason;
+    uint64_t detail0;
+    uint64_t detail1;
+    uint64_t reserved;
+} hyper_native_process_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_process_info_t) == 32, "process_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_process_info_t) == 8, "process_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_info_t, phase) == 0, "process_info.phase offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_info_t, terminal_reason) == 4, "process_info.terminal_reason offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_info_t, detail0) == 8, "process_info.detail0 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_info_t, detail1) == 16, "process_info.detail1 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_info_t, reserved) == 24, "process_info.reserved offset");
 
 typedef struct hyper_native_capability_disposition_t {
     uint64_t handle;

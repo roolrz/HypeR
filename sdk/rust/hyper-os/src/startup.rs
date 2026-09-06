@@ -3,6 +3,7 @@
 
 //! Validated, linearly claimed process-startup capabilities.
 
+use core::ffi::{CStr, c_char};
 use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use core::ptr::NonNull;
@@ -75,6 +76,8 @@ pub const BOOT_FS: StartupPurpose<BootFsObject> =
 /// unclaimed handle. Temporary operation wrappers borrow it and therefore
 /// cannot overlap a later take of the same startup state.
 pub struct Startup<'runtime> {
+    arguments: Option<NonNull<*const c_char>>,
+    argument_count: usize,
     records: Option<NonNull<hyper_abi::HyperNativeStartupHandle>>,
     count: usize,
     claimed: [u64; CLAIM_WORDS],
@@ -104,6 +107,8 @@ impl<'runtime> Startup<'runtime> {
             Some(NonNull::new(startup.handles.cast_mut()).ok_or(Error::InvalidStartup)?)
         };
         let candidate = Self {
+            arguments: NonNull::new(startup.arguments.cast_mut()),
+            argument_count: startup.argument_count,
             records,
             count: startup.handle_count,
             claimed: [0; CLAIM_WORDS],
@@ -111,6 +116,30 @@ impl<'runtime> Startup<'runtime> {
         };
         candidate.validate_records()?;
         Ok(candidate)
+    }
+
+    /// Returns the number of validated process arguments.
+    #[must_use]
+    pub const fn argument_count(&self) -> usize {
+        self.argument_count
+    }
+
+    /// Borrows one UTF-8 argument from the immutable startup stack.
+    pub fn argument(&self, index: usize) -> Result<&str> {
+        if index >= self.argument_count {
+            return Err(Error::InvalidStartup);
+        }
+        let arguments = self.arguments.ok_or(Error::InvalidStartup)?;
+        // SAFETY: the matching C runtime validated the pointer array and a
+        // bounded NUL terminator for every entry before constructing RawStartup.
+        let pointer = unsafe { arguments.as_ptr().add(index).read() };
+        if pointer.is_null() {
+            return Err(Error::InvalidStartup);
+        }
+        // SAFETY: the runtime's bounded validation establishes a live C string
+        // within the immutable startup stack for this runtime lifetime.
+        let string = unsafe { CStr::from_ptr(pointer) };
+        string.to_str().map_err(|_| Error::InvalidStartup)
     }
 
     /// Moves one typed startup capability out of this owner exactly once.

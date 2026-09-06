@@ -84,6 +84,7 @@ ABI revision: `0`.
 | `startup_handle_purpose_boot_fs` | `7` |
 | `startup_max_handles` | `256` |
 | `deadline_infinite` | `18446744073709551615` |
+| `object_wait_many_max_items` | `64` |
 | `capability_disposition_same_rights` | `18446744073709551615` |
 | `byte_channel_max_message_bytes` | `65536` |
 | `byte_channel_max_queued_messages` | `16` |
@@ -102,9 +103,25 @@ ABI revision: `0`.
 | `process_max_environment` | `64` |
 | `process_affinity_max_words` | `4` |
 | `process_affinity_max_cpus` | `256` |
+| `process_phase_prepared` | `0` |
+| `process_phase_created` | `1` |
+| `process_phase_running` | `2` |
+| `process_phase_stopping` | `3` |
+| `process_phase_stopped` | `4` |
+| `process_phase_retiring` | `5` |
+| `process_phase_retired` | `6` |
+| `process_terminal_none` | `0` |
+| `process_terminal_requested` | `1` |
+| `process_terminal_thread_exited` | `2` |
+| `process_terminal_process_exited` | `3` |
+| `process_terminal_last_thread_exited` | `4` |
+| `process_terminal_fault` | `5` |
+| `process_terminal_task_group_stop` | `6` |
 
 ## Semantic rules
 
+- Object wait-many borrows every input handle for the complete wait, canonicalizes duplicate object identities, and selects the lowest input index whose requested mask intersects the winning object's committed level snapshot. Source-handle close after resolution does not cancel the wait.
+- Process terminal detail fields are reason-specific: exit reasons encode the signed status as two's-complement in detail0; fault encodes class in detail0 and code in detail1; task-group stop encodes generation in detail0; unused details are zero.
 - Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.
 - AtomicOnOk capability transactions commit handle-table ownership, the rendezvous message, and live output-handle installation together only when both participants return ok. Every non-ok status preserves all input owners and the message. Non-fault failures leave output memory unchanged; fault may partially modify output byte or slot memory, but no handle value written by a failed call is live or installed. Bindings must ignore every output-memory byte after any non-ok status.
 - A capability-channel receiver advertises peer_receiving only after its byte range, typed capability slots, and destination handle-table capacity are validated, reserved, and fully published on the endpoint's FIFO receiver queue. The signal is level-triggered but may race another sender.
@@ -158,6 +175,8 @@ element size before any user-memory access.
 | 29 | `process_builder_start` | `builder: handle` | `process: handle` | `builder: ConsumeOnCommit, kind=process_builder, rights=0x400`, `process: produce, kind=process, fixed=0x80e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 30 | `process_builder_abort` | `builder: handle` | — | `builder: ConsumeOnCommit, kind=process_builder, rights=0x800` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 31 | `process_request_stop` | `process: handle` | — | `process: Borrow, kind=process, rights=0x800` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 32 | `object_wait_many` | `items: user_address`, `item_count: element_count`, `deadline: u64` | `index: element_count`, `observed: u64` | — | `items: Read, len=item_count elements, max-elements=64, element-size=16, record=object_wait_item, borrowed-handles=(handle), required-rights=0x4; order=0` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Object` |
+| 33 | `process_get_info` | `process: handle`, `info: user_address`, `info_size: byte_count` | — | `process: Borrow, kind=process, rights=0x8` | `info: Write, len=info_size bytes, max-bytes=32, record=process_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 
 ## Public records
 
@@ -165,6 +184,8 @@ element size before any user-memory access.
 | --- | ---: | ---: | --- |
 | `handle_info` | 16 | 8 | `object_kind: u32 @ 0`, `flags: u32 @ 4`, `rights: u64 @ 8` |
 | `object_basic_info` | 16 | 8 | `koid: u64 @ 0`, `object_kind: u32 @ 8`, `reserved: u32 @ 12` |
+| `object_wait_item` | 16 | 8 | `handle: u64 @ 0`, `signals: u64 @ 8` |
+| `process_info` | 32 | 8 | `phase: u32 @ 0`, `terminal_reason: u32 @ 4`, `detail0: u64 @ 8`, `detail1: u64 @ 16`, `reserved: u64 @ 24` |
 | `capability_disposition` | 24 | 8 | `handle: u64 @ 0`, `rights: u64 @ 8`, `expected_kind: u32 @ 16`, `operation: u32 @ 20` |
 | `capability_receive_slot` | 24 | 8 | `handle: u64 @ 0`, `rights: u64 @ 8`, `expected_kind: u32 @ 16`, `flags: u32 @ 20` |
 | `startup_handle` | 16 | 8 | `purpose: u32 @ 0`, `flags: u32 @ 4`, `handle: u64 @ 8` |

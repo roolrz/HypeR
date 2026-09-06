@@ -58,6 +58,21 @@ hyper_call_result_t hyper_object_wait_one(
         HYPER_NATIVE_SYS_OBJECT_WAIT_ONE, object, signals, deadline, 0, 0, 0);
 }
 
+hyper_call_result_t hyper_object_wait_many(
+    const hyper_native_object_wait_item_t *items,
+    size_t item_count,
+    uint64_t deadline)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_OBJECT_WAIT_MANY,
+        (uintptr_t)items,
+        item_count,
+        deadline,
+        0,
+        0,
+        0);
+}
+
 hyper_native_status_t hyper_byte_channel_write(
     hyper_native_handle_t endpoint,
     const void *bytes,
@@ -321,6 +336,20 @@ hyper_native_status_t hyper_process_request_stop(hyper_native_handle_t process)
 {
     return hyper_native_call6(
         HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP, process, 0, 0, 0, 0, 0).status;
+}
+
+hyper_native_status_t hyper_process_get_info(
+    hyper_native_handle_t process,
+    hyper_native_process_info_t *info)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_PROCESS_GET_INFO,
+        process,
+        (uintptr_t)info,
+        sizeof(*info),
+        0,
+        0,
+        0).status;
 }
 
 hyper_native_status_t hyper_thread_yield(void)

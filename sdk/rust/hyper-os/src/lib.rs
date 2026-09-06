@@ -19,6 +19,7 @@ pub mod handle;
 pub mod startup;
 mod status;
 pub mod task;
+pub mod wait;
 
 pub use abi::require_core_abi;
 pub use error::{Error, Result};

@@ -3,7 +3,7 @@
 
 use super::model::{
     CapabilityBinding, CapabilityOperation, MAX_BINDING_NAME_BYTES, MAX_CAPABILITIES_PER_SERVICE,
-    MAX_DEPENDENCY_EDGES, MAX_IMAGE_PATH_BYTES, MAX_KIND_NAME_BYTES, MAX_RIGHT_NAME_BYTES,
+    MAX_DEPENDENCY_EDGES, MAX_IMAGE_PATH_BYTES, MAX_PURPOSE_NAME_BYTES, MAX_RIGHT_NAME_BYTES,
     MAX_SERVICE_NAME_BYTES, MAX_SERVICES, Manifest, RestartPolicy,
 };
 
@@ -25,11 +25,19 @@ pub struct AuthorityDeclaration<'policy> {
     pub creatable: bool,
 }
 
+/// One service-contract name resolved to a typed startup-stack purpose.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StartupPurposeDeclaration {
+    pub value: u32,
+    pub object_kind: u32,
+}
+
 /// Adapter from manifest vocabulary to the actual bootstrap authority policy.
 pub trait AuthorityPolicy {
     fn authority<'policy>(&'policy self, source: &str) -> Option<AuthorityDeclaration<'policy>>;
 
-    fn object_kind(&self, name: &str) -> Option<u32>;
+    /// Resolves a symbolic purpose in the contract selected by `image`.
+    fn startup_purpose(&self, image: &str, name: &str) -> Option<StartupPurposeDeclaration>;
 
     /// Resolves one named right to exactly one bit.
     fn right(&self, name: &str) -> Option<u64>;
@@ -49,12 +57,12 @@ pub enum ValidationErrorKind {
     DependencyCycle,
     InvalidBindingName,
     DuplicateCapabilityPurpose,
-    InvalidCapabilityPurpose,
+    InvalidPurposeName,
+    InvalidPurposeDeclaration,
+    UnknownCapabilityPurpose,
     UnknownAuthority,
     UnknownAuthorityProvider,
     MissingProviderDependency,
-    InvalidKindName,
-    UnknownObjectKind,
     ObjectKindMismatch,
     InvalidRightName,
     UnknownRight,
@@ -96,6 +104,7 @@ pub struct LaunchPlan {
     order: [usize; MAX_SERVICES],
     rights: [[u64; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
     kinds: [[u32; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
+    purposes: [[u32; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
 }
 
 impl LaunchPlan {
@@ -123,6 +132,13 @@ impl LaunchPlan {
         }
         Some(self.kinds[service][capability])
     }
+
+    pub fn capability_purpose(&self, service: usize, capability: usize) -> Option<u32> {
+        if service >= self.service_count || capability >= MAX_CAPABILITIES_PER_SERVICE {
+            return None;
+        }
+        Some(self.purposes[service][capability])
+    }
 }
 
 /// Validates the complete graph before any `ProcessBuilder` may start a service.
@@ -141,6 +157,7 @@ pub fn validate(
         order: [0; MAX_SERVICES],
         rights: [[0; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
         kinds: [[0; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
+        purposes: [[0; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
     };
     validate_capabilities(manifest, policy, &mut plan)?;
     build_topological_order(manifest, &mut plan)?;
@@ -245,18 +262,6 @@ fn validate_capabilities(
     for (service_index, service) in manifest.services.iter().enumerate() {
         for (capability_index, capability) in service.capabilities.iter().enumerate() {
             validate_binding_names(capability, service_index, capability_index)?;
-            if service
-                .capabilities
-                .iter()
-                .take(capability_index)
-                .any(|candidate| candidate.purpose == capability.purpose)
-            {
-                return Err(error(
-                    ValidationErrorKind::DuplicateCapabilityPurpose,
-                    Some(service_index),
-                    Some(capability_index),
-                ));
-            }
             reject_reused_move_source(manifest, service_index, capability_index, capability)?;
             let declaration = policy.authority(capability.source).ok_or_else(|| {
                 error(
@@ -278,14 +283,30 @@ fn validate_capabilities(
                 service_index,
                 capability_index,
             )?;
-            let expected_kind = policy.object_kind(capability.kind).ok_or_else(|| {
-                error(
-                    ValidationErrorKind::UnknownObjectKind,
+            let purpose = policy
+                .startup_purpose(service.image, capability.purpose)
+                .ok_or_else(|| {
+                    error(
+                        ValidationErrorKind::UnknownCapabilityPurpose,
+                        Some(service_index),
+                        Some(capability_index),
+                    )
+                })?;
+            if purpose.value == 0 || purpose.object_kind == 0 {
+                return Err(error(
+                    ValidationErrorKind::InvalidPurposeDeclaration,
                     Some(service_index),
                     Some(capability_index),
-                )
-            })?;
-            if expected_kind != declaration.object_kind {
+                ));
+            }
+            if plan.purposes[service_index][..capability_index].contains(&purpose.value) {
+                return Err(error(
+                    ValidationErrorKind::DuplicateCapabilityPurpose,
+                    Some(service_index),
+                    Some(capability_index),
+                ));
+            }
+            if purpose.object_kind != declaration.object_kind {
                 return Err(error(
                     ValidationErrorKind::ObjectKindMismatch,
                     Some(service_index),
@@ -302,7 +323,8 @@ fn validate_capabilities(
                 ));
             }
             plan.rights[service_index][capability_index] = requested_rights;
-            plan.kinds[service_index][capability_index] = expected_kind;
+            plan.kinds[service_index][capability_index] = purpose.object_kind;
+            plan.purposes[service_index][capability_index] = purpose.value;
         }
     }
     Ok(())
@@ -320,16 +342,9 @@ fn validate_binding_names(
             Some(index),
         ));
     }
-    if capability.purpose == 0 {
+    if !valid_identifier(capability.purpose, MAX_PURPOSE_NAME_BYTES) {
         return Err(error(
-            ValidationErrorKind::InvalidCapabilityPurpose,
-            Some(service),
-            Some(index),
-        ));
-    }
-    if !valid_identifier(capability.kind, MAX_KIND_NAME_BYTES) {
-        return Err(error(
-            ValidationErrorKind::InvalidKindName,
+            ValidationErrorKind::InvalidPurposeName,
             Some(service),
             Some(index),
         ));

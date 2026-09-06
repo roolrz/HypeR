@@ -782,17 +782,19 @@ call through deferred unwind and re-entry, yields and resumes, exits a Thread,
 propagates Process exit to a dormant sibling, contains a breakpoint fault, and
 creates, signals, and observes an Event from EL0. It joins each Thread and
 Process and retires each ownership graph. The architecture-neutral dispatchers
-implement syscalls 0 through 31: capability inspection and attenuation,
+implement syscalls 0 through 33: capability inspection and attenuation,
 Thread and Process lifecycle, Event and object wait, byte and rendezvous
 capability channels, Console I/O, BootFs access, transactional ProcessBuilder
-construction, and Process stop requests. Channel operations use bounded
+construction, Process stop requests, and Process lifecycle inspection. Channel operations use bounded
 storage, transactional user copies, and atomic capability publication.
-`object_wait_one` uses absolute
+`object_wait_one` and the bounded `object_wait_many` use absolute
 monotonic deadlines, generation-qualified signal/timeout/cancellation
 arbitration, and a Process-stop recheck before completing the machine return.
-The checkpoint includes an AArch64 static PIE loader, a minimal init supervisor,
-and isolated Console and foreground-session services. It is not yet a general
-runtime, vDSO, or secondary-architecture Native entry.
+Multi-wait canonicalizes duplicate object references under one scheduler wait
+generation and returns the lowest matching input index. The checkpoint includes
+an AArch64 static PIE loader, a minimal init supervisor, isolated Console and
+foreground-session services, and a capability-scoped command shell. It is not
+yet a general runtime, vDSO, or secondary-architecture Native entry.
 
 ### Phase 0: prove the boundary
 

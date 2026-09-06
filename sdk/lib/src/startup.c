@@ -12,6 +12,19 @@ enum {
     MAXIMUM_STARTUP_HANDLES = 256,
 };
 
+static bool bounded_string(const char *string, size_t maximum_bytes)
+{
+    if (string == NULL) {
+        return false;
+    }
+    for (size_t index = 0; index <= maximum_bytes; ++index) {
+        if (string[index] == '\0') {
+            return true;
+        }
+    }
+    return false;
+}
+
 static hyper_native_status_t parse_auxiliary(
     const hyper_auxiliary_entry_t *auxiliary,
     hyper_startup_t *startup)
@@ -74,6 +87,11 @@ hyper_native_status_t hyper_startup_parse(
     if (arguments[argument_count] != NULL) {
         return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
     }
+    for (size_t index = 0; index < argument_count; ++index) {
+        if (!bounded_string(arguments[index], HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES)) {
+            return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+        }
+    }
 
     char *const *environment = arguments + argument_count + 1;
     size_t environment_count = 0;
@@ -83,6 +101,11 @@ hyper_native_status_t hyper_startup_parse(
     }
     if (environment_count == MAXIMUM_ENVIRONMENT) {
         return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+    }
+    for (size_t index = 0; index < environment_count; ++index) {
+        if (!bounded_string(environment[index], HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES)) {
+            return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+        }
     }
 
     startup->argument_count = argument_count;

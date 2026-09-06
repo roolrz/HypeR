@@ -86,6 +86,10 @@ impl<'object> SignalSource<'object> {
     pub(super) const fn has_empty_mask(self) -> bool {
         self.supported.is_empty()
     }
+
+    pub(super) fn same_state(self, other: Self) -> bool {
+        core::ptr::eq(self.state, other.state)
+    }
 }
 
 /// Signal value committed by the exact winning notification.
@@ -298,6 +302,62 @@ impl SignalState {
         };
         let waiter = self.state.with(|state| unlink_waiter(state, ticket));
         classify_outcome(outcome, waiter.observed)
+    }
+
+    /// Links one member of a multi-object wait to an already armed scheduler
+    /// generation and immediately rechecks level state under the same lock.
+    pub(super) fn register_shared_wait(
+        &self,
+        mut prepared: PreparedSignalWait,
+        ticket: WaitTicket,
+    ) {
+        prepared.waiter.ticket = Some(ticket);
+        self.state.with(|state| {
+            link_waiter(state, prepared.waiter);
+            if let Err(error) = notify_ticket_if_matching(state, ticket) {
+                signal_scheduler_invariant(error)
+            }
+        });
+    }
+
+    /// Parks a shared wait registration after every participating signal state
+    /// has published its waiter node.
+    pub(super) fn park_shared_wait(
+        &self,
+        registration: WaitRegistration,
+    ) -> Result<WaitOutcome, SignalWaitError> {
+        // SAFETY: the retained local mask is consumed by the exact context
+        // switch or dropped before this function returns. Holding one member's
+        // state lock closes its notification-to-queue edge; every other member
+        // has already published a waiter and can resolve the armed generation.
+        let (park, interrupt_mask) = unsafe {
+            self.state.with_mask_retained(|state| {
+                scheduler::prepare_registered_park_locked(&state.park_queue, registration)
+            })
+        };
+        let park = match park {
+            Ok(park) => park,
+            Err(error) => {
+                drop(interrupt_mask);
+                return Err(error.into());
+            }
+        };
+        Ok(match park {
+            PrepareWait::Park(commit) => {
+                scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask))
+            }
+            PrepareWait::Completed(outcome) => {
+                drop(interrupt_mask);
+                outcome
+            }
+        })
+    }
+
+    /// Removes one member of a completed shared wait and returns only the
+    /// snapshot whose notification won scheduler arbitration.
+    pub(super) fn unregister_shared_wait(&self, ticket: WaitTicket) -> Option<SignalSnapshot> {
+        let waiter = self.state.with(|state| unlink_waiter(state, ticket));
+        waiter.observed
     }
 }
 
