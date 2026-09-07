@@ -22,9 +22,11 @@ mod rights_contract;
 mod service;
 
 pub(crate) use executable::ExecutableSnapshot;
-pub(crate) use objects::{DirectoryObject, Error, Error as VfsError, FileObject};
+pub(crate) use objects::{
+    DirectoryEntrySnapshot, DirectoryObject, DirectoryPage, Error, Error as VfsError, FileObject,
+};
 pub(crate) use service::{
-    ServiceError as VfsServiceError, open_directory, open_file, read_file_at,
+    ServiceError as VfsServiceError, open_directory, open_file, read_directory, read_file_at,
 };
 
 use hyper::fs::ramfs::RamFs;

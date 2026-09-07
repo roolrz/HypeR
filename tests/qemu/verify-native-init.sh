@@ -16,7 +16,7 @@ cpu=$4
 cpus=$5
 memory=$6
 bootargs=$7
-timeout_seconds=${QEMU_BOOT_TIMEOUT_SECONDS:-30}
+timeout_seconds=${QEMU_BOOT_TIMEOUT_SECONDS:-60}
 temp=$(mktemp -d -t hyper-native-init.XXXXXX)
 input=$temp/input
 native_output=$temp/native-output
@@ -132,6 +132,35 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             ;;
         static)
             if grep -Fxq 'HYPER_STATIC_LINK_OK' "$native_output"; then
+                printf 'ls\n' >&3
+                command_phase='ls_root'
+            fi
+            ;;
+        ls_root)
+            if grep -Fxq 'bin/' "$native_output" &&
+                grep -Fxq 'etc/' "$native_output" &&
+                grep -Fxq 'lib/' "$native_output"; then
+                printf 'cd /bin\npwd\nls\n' >&3
+                command_phase='ls_bin'
+            fi
+            ;;
+        ls_bin)
+            if grep -Fxq 'echo' "$native_output" &&
+                grep -Fxq 'ls' "$native_output" &&
+                grep -Fxq 'sh' "$native_output" &&
+                grep -Fxq '/bin' "$native_output"; then
+                printf './echo HYPER_CD_CHILD_OK\n' >&3
+                command_phase='cd_child'
+            fi
+            ;;
+        cd_child)
+            if grep -Fxq 'HYPER_CD_CHILD_OK' "$native_output"; then
+                printf 'cd ..\npwd\nbin/echo HYPER_CD_PARENT_OK\n' >&3
+                command_phase='cd_parent'
+            fi
+            ;;
+        cd_parent)
+            if grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output"; then
                 printf '/bin/echo HYPER_NATIVE_ECHO_OK\n' >&3
                 command_phase='echo'
             fi
@@ -145,8 +174,12 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         grep -Fxq 'KOID       KIND                    HANDLE-STATE HANDLES REFS PURPOSE' "$native_output" &&
         grep -Fxq 'HYPER_DYNAMIC_LINK_OK' "$native_output" &&
         grep -Fxq 'HYPER_STATIC_LINK_OK' "$native_output" &&
+        grep -Fxq '/bin' "$native_output" &&
+        grep -Fxq '/' "$native_output" &&
+        grep -Fxq 'HYPER_CD_CHILD_OK' "$native_output" &&
+        grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output" &&
         grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output"; then
-        echo "verified HypeR Native inspection, dynamic and static linking, and shell-launched commands"
+        echo "verified Native inspection, linking, directory enumeration, and shell cwd semantics"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then

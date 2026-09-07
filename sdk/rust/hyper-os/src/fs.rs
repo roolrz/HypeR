@@ -10,8 +10,13 @@ use crate::{Error, Result, Status};
 
 const _: () = assert!(hyper_abi::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES <= usize::MAX as u64);
 const _: () = assert!(hyper_abi::HYPER_NATIVE_FILE_MAX_READ_BYTES <= usize::MAX as u64);
-const MAX_PATH_BYTES: usize = hyper_abi::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES as usize;
+const _: () = assert!(hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY <= usize::MAX as u64);
+const _: () = assert!(hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_NAME_MAX_BYTES <= usize::MAX as u64);
+pub const MAX_PATH_BYTES: usize = hyper_abi::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES as usize;
+pub const MAX_NAME_BYTES: usize = hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_NAME_MAX_BYTES as usize;
 const MAX_READ_BYTES: usize = hyper_abi::HYPER_NATIVE_FILE_MAX_READ_BYTES as usize;
+const DIRECTORY_PAGE_CAPACITY: usize =
+    hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY as usize;
 
 /// Rights which may be requested for a newly opened file.
 #[repr(transparent)]
@@ -147,6 +152,50 @@ impl Directory {
         Ok(Self { handle })
     }
 
+    /// Starts a bounded directory scan owned by this Directory borrow.
+    #[must_use]
+    pub const fn reader(&self) -> DirectoryReader<'_> {
+        DirectoryReader {
+            directory: self,
+            next_cookie: Some(0),
+        }
+    }
+
+    fn read_page(&self, cursor: u64) -> Result<(DirectoryPage, Option<u64>)> {
+        let mut records = [EMPTY_RAW_DIRECTORY_ENTRY; DIRECTORY_PAGE_CAPACITY];
+        let result = raw_ops::read_directory(self.handle.as_handle_ref(), cursor, &mut records);
+        Status::from_raw(result.status).into_result()?;
+        let count = usize::try_from(result.value0).map_err(|_| Error::InvalidResponse)?;
+        if count > DIRECTORY_PAGE_CAPACITY
+            || (count == 0 && result.value1 != 0)
+            || (count < DIRECTORY_PAGE_CAPACITY && result.value1 != 0)
+            || (result.value1 != 0 && result.value1 == cursor)
+        {
+            return Err(Error::InvalidResponse);
+        }
+
+        let mut entries = [None; DIRECTORY_PAGE_CAPACITY];
+        for (slot, raw) in entries.iter_mut().zip(records.iter()).take(count) {
+            *slot = Some(decode_directory_entry(raw)?);
+        }
+        if records
+            .get(count..)
+            .ok_or(Error::InvalidResponse)?
+            .iter()
+            .any(|record| *record != EMPTY_RAW_DIRECTORY_ENTRY)
+        {
+            return Err(Error::InvalidResponse);
+        }
+
+        Ok((
+            DirectoryPage {
+                entries,
+                len: count,
+            },
+            NonZeroU64::new(result.value1).map(NonZeroU64::get),
+        ))
+    }
+
     /// Recovers the generic typed owner for delegation or explicit close.
     #[must_use]
     pub fn into_handle(self) -> OwnedHandle<DirectoryObject> {
@@ -267,6 +316,128 @@ pub struct ReadOutcome {
     pub file_size: u64,
 }
 
+/// Stateful cursor which cannot be detached from its Directory authority.
+pub struct DirectoryReader<'directory> {
+    directory: &'directory Directory,
+    next_cookie: Option<u64>,
+}
+
+impl DirectoryReader<'_> {
+    /// Reads the next page, or returns `None` after the scan reaches its end.
+    pub fn next_page(&mut self) -> Result<Option<DirectoryPage>> {
+        let Some(cookie) = self.next_cookie else {
+            return Ok(None);
+        };
+        let (page, next_cookie) = self.directory.read_page(cookie)?;
+        self.next_cookie = next_cookie;
+        if page.len == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(page))
+        }
+    }
+}
+
+/// One validated, bounded directory-enumeration page.
+pub struct DirectoryPage {
+    entries: [Option<DirectoryEntry>; DIRECTORY_PAGE_CAPACITY],
+    len: usize,
+}
+
+impl DirectoryPage {
+    pub fn entries(&self) -> impl Iterator<Item = &DirectoryEntry> {
+        self.entries[..self.len].iter().filter_map(Option::as_ref)
+    }
+}
+
+/// One owned directory entry validated at the syscall boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryEntry {
+    name: [u8; MAX_NAME_BYTES],
+    name_length: usize,
+    kind: DirectoryEntryKind,
+    mode: u32,
+    size: u64,
+}
+
+impl DirectoryEntry {
+    /// Returns the validated UTF-8 name bytes without trailing storage.
+    #[must_use]
+    pub fn name_bytes(&self) -> &[u8] {
+        self.name.get(..self.name_length).unwrap_or(&[])
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> DirectoryEntryKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> u32 {
+        self.mode
+    }
+
+    #[must_use]
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectoryEntryKind {
+    File,
+    Directory,
+    Symlink,
+    Other,
+}
+
+const EMPTY_RAW_DIRECTORY_ENTRY: hyper_abi::HyperNativeDirectoryEntry =
+    hyper_abi::HyperNativeDirectoryEntry {
+        size: 0,
+        mode: 0,
+        kind: 0,
+        name_length: 0,
+        reserved: 0,
+        name: [0; 256],
+    };
+
+fn decode_directory_entry(raw: &hyper_abi::HyperNativeDirectoryEntry) -> Result<DirectoryEntry> {
+    let name_length = usize::try_from(raw.name_length).map_err(|_| Error::InvalidResponse)?;
+    if raw.reserved != 0 || name_length == 0 || name_length > MAX_NAME_BYTES {
+        return Err(Error::InvalidResponse);
+    }
+    let name = raw.name.get(..name_length).ok_or(Error::InvalidResponse)?;
+    core::str::from_utf8(name).map_err(|_| Error::InvalidResponse)?;
+    if raw
+        .name
+        .get(name_length..)
+        .ok_or(Error::InvalidResponse)?
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err(Error::InvalidResponse);
+    }
+    let kind = match u64::from(raw.kind) {
+        hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_FILE => DirectoryEntryKind::File,
+        hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_DIRECTORY => DirectoryEntryKind::Directory,
+        hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_SYMLINK => DirectoryEntryKind::Symlink,
+        hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_OTHER => DirectoryEntryKind::Other,
+        _ => return Err(Error::InvalidResponse),
+    };
+    let mut owned_name = [0; MAX_NAME_BYTES];
+    owned_name
+        .get_mut(..name_length)
+        .ok_or(Error::InvalidResponse)?
+        .copy_from_slice(name);
+    Ok(DirectoryEntry {
+        name: owned_name,
+        name_length,
+        kind,
+        mode: raw.mode,
+        size: raw.size,
+    })
+}
+
 fn validate_path(path: &str) -> Result<()> {
     if path.is_empty() || path.len() > MAX_PATH_BYTES || path.as_bytes().contains(&0) {
         Err(Error::InvalidPath)
@@ -308,6 +479,23 @@ mod raw_ops {
                 path.as_ptr(),
                 path.len(),
                 rights.bits(),
+            )
+        }
+    }
+
+    pub(super) fn read_directory(
+        directory: HandleRef<'_, DirectoryObject>,
+        cookie: u64,
+        records: &mut [hyper_abi::HyperNativeDirectoryEntry; super::DIRECTORY_PAGE_CAPACITY],
+    ) -> hyper_sys::CallResult {
+        // SAFETY: the typed borrow keeps the directory live and the unique
+        // fixed-capacity array remains writable for the complete syscall.
+        unsafe {
+            hyper_sys::directory_read(
+                directory.raw().get(),
+                cookie,
+                records.as_mut_ptr(),
+                records.len(),
             )
         }
     }
@@ -368,6 +556,42 @@ mod raw_ops {
         }
     }
 
+    pub(super) fn read_directory(
+        _directory: HandleRef<'_, DirectoryObject>,
+        cookie: u64,
+        records: &mut [hyper_abi::HyperNativeDirectoryEntry; super::DIRECTORY_PAGE_CAPACITY],
+    ) -> hyper_sys::CallResult {
+        if cookie != 0 {
+            return hyper_sys::CallResult {
+                status: hyper_abi::HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+                value0: 0,
+                value1: 0,
+            };
+        }
+        let entries = [
+            (b"bin".as_slice(), 0o040_755, 0_u64),
+            (b"init".as_slice(), 0o100_755, 20),
+        ];
+        for (record, (name, mode, size)) in records.iter_mut().zip(entries) {
+            record.size = size;
+            record.mode = mode;
+            record.kind = if mode & 0o040_000 != 0 {
+                hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_DIRECTORY as u32
+            } else {
+                hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_FILE as u32
+            };
+            record.name_length = name.len() as u32;
+            if let Some(destination) = record.name.get_mut(..name.len()) {
+                destination.copy_from_slice(name);
+            }
+        }
+        hyper_sys::CallResult {
+            status: hyper_abi::HYPER_NATIVE_STATUS_OK,
+            value0: entries.len() as u64,
+            value1: 0,
+        }
+    }
+
     pub(super) fn read(
         _file: HandleRef<'_, super::FileObject>,
         offset: u64,
@@ -395,7 +619,7 @@ mod raw_ops {
 mod tests {
     use core::num::NonZeroU64;
 
-    use super::{Directory, DirectoryRights, FileRights};
+    use super::{Directory, DirectoryEntryKind, DirectoryRights, FileRights};
     use crate::Error;
     use crate::handle::{AnyObject, DirectoryObject, FileObject, OwnedHandle, Rights};
 
@@ -421,6 +645,30 @@ mod tests {
     fn opens_typed_child_directory() -> Result<(), Error> {
         let child = root_directory()?.open_directory("lib", DirectoryRights::READ)?;
         let _ = child.as_handle_ref();
+        Ok(())
+    }
+
+    #[test]
+    fn directory_pages_expose_validated_names_and_kinds() -> Result<(), Error> {
+        let directory = root_directory()?;
+        let mut reader = directory.reader();
+        let Some(page) = reader.next_page()? else {
+            return Err(Error::InvalidResponse);
+        };
+        let mut entries = page.entries();
+        let Some(bin) = entries.next() else {
+            return Err(Error::InvalidResponse);
+        };
+        assert_eq!(bin.name_bytes(), b"bin");
+        assert_eq!(bin.kind(), DirectoryEntryKind::Directory);
+        let Some(init) = entries.next() else {
+            return Err(Error::InvalidResponse);
+        };
+        assert_eq!(init.name_bytes(), b"init");
+        assert_eq!(init.kind(), DirectoryEntryKind::File);
+        assert_eq!(init.size(), 20);
+        assert!(entries.next().is_none());
+        assert!(reader.next_page()?.is_none());
         Ok(())
     }
 

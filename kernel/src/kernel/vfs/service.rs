@@ -10,7 +10,7 @@ use crate::kernel::capability::HandleValue;
 use crate::kernel::mm::user_space::{UserSlice, UserWriteReservation};
 use crate::kernel::process::{Process, ProcessError};
 
-use super::{DirectoryObject, Error as VfsError, FileObject};
+use super::{DirectoryObject, DirectoryPage, Error as VfsError, FileObject};
 
 const MAX_PATH_BYTES: usize = hyper::abi::native::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES as usize;
 const MAX_READ_BYTES: usize = hyper::abi::native::HYPER_NATIVE_FILE_MAX_READ_BYTES as usize;
@@ -68,6 +68,15 @@ pub(crate) fn open_directory(
         .object()
         .open_directory(&path, &process.resource_domain())?;
     Ok(process.create_object(child, rights)?)
+}
+
+pub(crate) fn read_directory(
+    process: &Process,
+    directory: HandleValue,
+    cookie: u64,
+) -> Result<DirectoryPage, ServiceError> {
+    let directory = process.resolve_handle::<DirectoryObject>(directory, Rights::READ)?;
+    directory.object().read_page(cookie).map_err(Into::into)
 }
 
 fn copy_path(process: &Process, path: UserSlice) -> Result<alloc::string::String, ServiceError> {

@@ -7,10 +7,11 @@
 #![no_main]
 
 mod command;
+mod path;
 
 use command::{CommandLine, MAX_LINE_BYTES};
 use hyper_os::channel;
-use hyper_os::fs::{Directory, File, FileRights};
+use hyper_os::fs::{Directory, DirectoryRights, File, FileRights};
 use hyper_os::handle::{
     ByteChannelObject, ObjectInspectorObject, OwnedHandle, ProcessObject, ResourceDomainObject,
     Rights, RightsOffer, TaskFactoryObject, TaskGroupObject, TaskInspectorObject,
@@ -20,12 +21,17 @@ use hyper_os::task::{ProcessBuilder, ProcessInfo, ProcessTermination};
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_os::{Error as OsError, Status};
 use hyper_rt::ExitCode;
-use hyper_service::stdio;
+use hyper_service::{process, stdio};
+use path::CanonicalPath;
 
 const INPUT_CHUNK_BYTES: usize = 256;
 const COMMAND_PATH_BYTES: usize = MAX_LINE_BYTES + 5;
 const READY_MESSAGE: &[u8] = b"HypeR session: console ready\n";
 const PROMPT: &[u8] = b"hyper> ";
+const WORKING_DIRECTORY_RIGHTS: DirectoryRights = DirectoryRights::READ
+    .union(DirectoryRights::EXECUTE)
+    .union(DirectoryRights::DUPLICATE)
+    .union(DirectoryRights::TRANSFER);
 
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     match run(&mut startup) {
@@ -40,6 +46,9 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
     let output = startup.take(stdio::STANDARD_OUTPUT).map_err(Error::from)?;
     let error = startup.take(stdio::STANDARD_ERROR).map_err(Error::from)?;
     let root_directory = startup.take_root_directory().map_err(Error::from)?;
+    let current_directory = root_directory
+        .open_directory("/", WORKING_DIRECTORY_RIGHTS)
+        .map_err(Error::from)?;
     let library_directory = Directory::from_handle(
         startup
             .take(startup::DYNAMIC_LIBRARY_DIRECTORY)
@@ -54,8 +63,10 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
     let object_inspector = startup
         .take(startup::OBJECT_INSPECTOR)
         .map_err(Error::from)?;
-    let authorities = CommandAuthorities {
+    let mut authorities = CommandAuthorities {
         root_directory,
+        current_directory,
+        current_path: CanonicalPath::root(),
         library_directory,
         factory,
         group,
@@ -91,7 +102,7 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
                         write(&error, b"sh: command line is too long\n")?;
                     } else if line_length != 0 {
                         let command = line.get(..line_length).ok_or(Error::Protocol)?;
-                        match execute_line(command, &authorities, &input, &output, &error) {
+                        match execute_line(command, &mut authorities, &input, &output, &error) {
                             Ok(CommandFlow::Continue) => {}
                             Ok(CommandFlow::Exit) => return Ok(ExitCode::SUCCESS),
                             Err(command_error) => write(&error, command_error.message())?,
@@ -132,7 +143,7 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
 
 fn execute_line(
     bytes: &[u8],
-    authorities: &CommandAuthorities,
+    authorities: &mut CommandAuthorities,
     input: &OwnedHandle<ByteChannelObject>,
     output: &OwnedHandle<ByteChannelObject>,
     error: &OwnedHandle<ByteChannelObject>,
@@ -154,8 +165,10 @@ fn execute_line(
     match name {
         "help" => write(
             output,
-            b"builtins: clear echo exit help\nexternal commands: /bin/echo /bin/handle /bin/ps\n",
+            b"builtins: cd clear echo exit help pwd\nexternal commands: ls /bin/echo /bin/handle /bin/ps\n",
         )?,
+        "cd" => builtin_cd(&command, authorities, error)?,
+        "pwd" => builtin_pwd(&command, authorities, output, error)?,
         "echo" => builtin_echo(&command, output)?,
         "clear" => write(output, b"\x1b[2J\x1b[H")?,
         "exit" => return Ok(CommandFlow::Exit),
@@ -178,6 +191,60 @@ fn builtin_echo(
     write(output, b"\n")
 }
 
+fn builtin_cd(
+    command: &CommandLine,
+    authorities: &mut CommandAuthorities,
+    error: &OwnedHandle<ByteChannelObject>,
+) -> Result<(), Error> {
+    let target = match command.len() {
+        1 => "/",
+        2 => command.argument(1).ok_or(Error::InvalidCommand)?,
+        _ => {
+            write(error, b"usage: cd [directory]\n")?;
+            return Ok(());
+        }
+    };
+    let path = match authorities.current_path.resolve(target) {
+        Ok(path) => path,
+        Err(_) => {
+            write(error, b"cd: invalid directory path\n")?;
+            return Ok(());
+        }
+    };
+    let path_text = path.as_str().map_err(|_| Error::InvalidCommand)?;
+    let directory = match authorities
+        .root_directory
+        .open_directory(path_text, WORKING_DIRECTORY_RIGHTS)
+    {
+        Ok(directory) => directory,
+        Err(_) => {
+            write(error, b"cd: cannot open directory\n")?;
+            return Ok(());
+        }
+    };
+    authorities.current_directory = directory;
+    authorities.current_path = path;
+    Ok(())
+}
+
+fn builtin_pwd(
+    command: &CommandLine,
+    authorities: &CommandAuthorities,
+    output: &OwnedHandle<ByteChannelObject>,
+    error: &OwnedHandle<ByteChannelObject>,
+) -> Result<(), Error> {
+    if command.len() != 1 {
+        write(error, b"usage: pwd\n")?;
+        return Ok(());
+    }
+    let path = authorities
+        .current_path
+        .as_str()
+        .map_err(|_| Error::InvalidCommand)?;
+    write(output, path.as_bytes())?;
+    write(output, b"\n")
+}
+
 fn launch_command(
     command: &CommandLine,
     authorities: &CommandAuthorities,
@@ -186,7 +253,7 @@ fn launch_command(
     error: &OwnedHandle<ByteChannelObject>,
 ) -> Result<(), Error> {
     let name = command.argument(0).ok_or(Error::InvalidCommand)?;
-    let executable = match open_command(&authorities.root_directory, name) {
+    let executable = match open_command(authorities, name) {
         Ok(executable) => executable,
         Err(_) => {
             write(error, b"sh: command not found\n")?;
@@ -211,6 +278,13 @@ fn launch_command(
             authorities.library_directory.as_handle_ref(),
             startup::DYNAMIC_LIBRARY_DIRECTORY.as_raw(),
             RightsOffer::Exact(Rights::READ.union(Rights::EXECUTE)),
+        )
+        .map_err(|_| Error::InvalidCommand)?;
+    builder
+        .add_handle_duplicate(
+            authorities.current_directory.as_handle_ref(),
+            process::WORKING_DIRECTORY.as_raw(),
+            RightsOffer::Exact(Rights::READ),
         )
         .map_err(|_| Error::InvalidCommand)?;
 
@@ -368,9 +442,19 @@ fn process_succeeded(info: ProcessInfo) -> bool {
     )
 }
 
-fn open_command(root_directory: &Directory, name: &str) -> Result<File, OsError> {
+fn open_command(authorities: &CommandAuthorities, name: &str) -> Result<File, OsError> {
     if name.starts_with('/') {
-        return root_directory.open(name, FileRights::EXECUTE);
+        return authorities.root_directory.open(name, FileRights::EXECUTE);
+    }
+    if name.contains('/') {
+        let path = authorities
+            .current_path
+            .resolve(name)
+            .map_err(|_| OsError::InvalidPath)?;
+        return authorities.root_directory.open(
+            path.as_str().map_err(|_| OsError::InvalidPath)?,
+            FileRights::EXECUTE,
+        );
     }
     let mut path = [0_u8; COMMAND_PATH_BYTES];
     let prefix = b"/bin/";
@@ -383,7 +467,7 @@ fn open_command(root_directory: &Directory, name: &str) -> Result<File, OsError>
     prefix_target.copy_from_slice(prefix);
     name_target.copy_from_slice(name.as_bytes());
     let path = core::str::from_utf8(destination).map_err(|_| OsError::InvalidPath)?;
-    root_directory.open(path, FileRights::EXECUTE)
+    authorities.root_directory.open(path, FileRights::EXECUTE)
 }
 
 fn write(destination: &OwnedHandle<ByteChannelObject>, bytes: &[u8]) -> Result<(), Error> {
@@ -395,6 +479,8 @@ fn write(destination: &OwnedHandle<ByteChannelObject>, bytes: &[u8]) -> Result<(
 
 struct CommandAuthorities {
     root_directory: Directory,
+    current_directory: Directory,
+    current_path: CanonicalPath,
     library_directory: Directory,
     factory: OwnedHandle<TaskFactoryObject>,
     group: OwnedHandle<TaskGroupObject>,

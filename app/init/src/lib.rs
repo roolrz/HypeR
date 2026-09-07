@@ -9,10 +9,16 @@
 
 #![no_std]
 
+#[cfg(test)]
+#[path = "../../command/directory_path.rs"]
+mod command_directory_path;
 pub mod manifest;
 #[cfg(test)]
 #[path = "../../shell/command.rs"]
 mod shell_command;
+#[cfg(test)]
+#[path = "../../shell/path.rs"]
+mod shell_path;
 pub mod supervision;
 
 use core::convert::Infallible;

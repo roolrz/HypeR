@@ -19,7 +19,7 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND,
     HYPER_NATIVE_SYS_CONSOLE_READ, HYPER_NATIVE_SYS_CONSOLE_WRITE,
     HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY, HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE,
-    HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
+    HYPER_NATIVE_SYS_DIRECTORY_READ, HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
     HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO, HYPER_NATIVE_SYS_FILE_READ_AT,
     HYPER_NATIVE_SYS_HANDLE_CLOSE, HYPER_NATIVE_SYS_HANDLE_DUPLICATE,
     HYPER_NATIVE_SYS_HANDLE_GET_INFO, HYPER_NATIVE_SYS_HANDLE_REPLACE,
@@ -41,10 +41,10 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD, HYPER_NATIVE_SYS_VMAR_ALLOCATE,
     HYPER_NATIVE_SYS_VMAR_DESTROY, HYPER_NATIVE_SYS_VMAR_MAP, HYPER_NATIVE_SYS_VMAR_PROTECT,
     HYPER_NATIVE_SYS_VMAR_UNMAP, HYPER_NATIVE_SYS_VMO_CREATE, HYPER_NATIVE_SYS_VMO_READ,
-    HYPER_NATIVE_SYS_VMO_WRITE, HyperNativeHandleInfo, HyperNativeHandleInspection,
-    HyperNativeObjectBasicInfo, HyperNativeObjectInspection, HyperNativeProcessInfo,
-    HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread, NativeInvocation,
-    NativeResult,
+    HYPER_NATIVE_SYS_VMO_WRITE, HyperNativeDirectoryEntry, HyperNativeHandleInfo,
+    HyperNativeHandleInspection, HyperNativeObjectBasicInfo, HyperNativeObjectInspection,
+    HyperNativeProcessInfo, HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread,
+    NativeInvocation, NativeResult,
 };
 
 use crate::kernel::accounting::ResourceError;
@@ -69,7 +69,7 @@ use crate::kernel::process::{
     TerminalReason,
 };
 use crate::kernel::task::TimedWaitError;
-use crate::kernel::vfs::{VfsError, VfsServiceError};
+use crate::kernel::vfs::{DirectoryPage, VfsError, VfsServiceError};
 
 const HANDLE_INFO_SIZE: usize = core::mem::size_of::<HyperNativeHandleInfo>();
 const OBJECT_BASIC_INFO_SIZE: usize = core::mem::size_of::<HyperNativeObjectBasicInfo>();
@@ -314,6 +314,12 @@ pub(in crate::kernel) trait DeferredServices:
         path: UserSlice,
         rights: Rights,
     ) -> Result<HandleValue, VfsServiceError>;
+
+    fn read_directory(
+        &self,
+        directory: HandleValue,
+        cookie: u64,
+    ) -> Result<DirectoryPage, VfsServiceError>;
 
     fn read_file_at(
         &self,
@@ -574,6 +580,7 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY => {
             sys_directory_open_directory(services, invocation.arguments())
         }
+        HYPER_NATIVE_SYS_DIRECTORY_READ => sys_directory_read(services, invocation.arguments()),
         HYPER_NATIVE_SYS_FILE_READ_AT => sys_file_read_at(services, invocation.arguments()),
         HYPER_NATIVE_SYS_VMO_CREATE => sys_vmo_create(services, invocation.arguments()),
         HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO => {
@@ -1325,6 +1332,34 @@ fn parse_directory_open(
 }
 
 #[inline(never)]
+fn sys_directory_read(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_directory_read(arguments).and_then(|(directory, cookie, destination)| {
+        let page = services
+            .read_directory(directory, cookie)
+            .map_err(status_from_vfs_service_error)?;
+        copy_directory_page(services, destination, &page)
+    });
+    DeferredAction::Return(scan_result(result))
+}
+
+fn parse_directory_read(
+    arguments: &Arguments,
+) -> Result<(HandleValue, u64, UserSlice), HyperNativeStatus> {
+    if arguments[3] != hyper::abi::native::HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY
+        || arguments[4] != 0
+        || arguments[5] != 0
+    {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let bytes = arguments[3]
+        .checked_mul(core::mem::size_of::<HyperNativeDirectoryEntry>() as u64)
+        .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    let destination =
+        UserSlice::new(UserAddress::new(arguments[2]), bytes).map_err(status_from_address_error)?;
+    Ok((parse_handle(arguments[0])?, arguments[1], destination))
+}
+
+#[inline(never)]
 fn sys_file_read_at(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
     let result = parse_handle(arguments[0]).and_then(|file| {
         if arguments[1] != 0 || arguments[4] > hyper::abi::native::HYPER_NATIVE_FILE_MAX_READ_BYTES
@@ -1784,6 +1819,86 @@ fn copy_encoded_page<T: Copy, const N: usize, const R: usize>(
         .copy_to_user(output, &bytes)
         .map_err(status_from_process_error)?;
     Ok((page.len(), page.next()))
+}
+
+fn copy_directory_page(
+    services: &impl UserOutputServices,
+    destination: UserSlice,
+    page: &DirectoryPage,
+) -> Result<(usize, u64), HyperNativeStatus> {
+    const RECORD_SIZE: usize = core::mem::size_of::<HyperNativeDirectoryEntry>();
+
+    let byte_count = page
+        .len()
+        .checked_mul(RECORD_SIZE)
+        .ok_or(HYPER_NATIVE_STATUS_INTERNAL)?;
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(byte_count)
+        .map_err(|_| HYPER_NATIVE_STATUS_NO_MEMORY)?;
+    for entry in page.entries() {
+        bytes.extend_from_slice(&encode_directory_entry(*entry)?);
+    }
+    let output = UserSlice::new(
+        destination.base(),
+        u64::try_from(byte_count).map_err(|_| HYPER_NATIVE_STATUS_INTERNAL)?,
+    )
+    .map_err(status_from_address_error)?;
+    services
+        .copy_to_user(output, &bytes)
+        .map_err(status_from_process_error)?;
+    Ok((page.len(), page.next_cookie()))
+}
+
+fn encode_directory_entry(
+    snapshot: crate::kernel::vfs::DirectoryEntrySnapshot,
+) -> Result<[u8; core::mem::size_of::<HyperNativeDirectoryEntry>()], HyperNativeStatus> {
+    const SIZE: usize = core::mem::offset_of!(HyperNativeDirectoryEntry, size);
+    const MODE: usize = core::mem::offset_of!(HyperNativeDirectoryEntry, mode);
+    const KIND: usize = core::mem::offset_of!(HyperNativeDirectoryEntry, kind);
+    const NAME_LENGTH: usize = core::mem::offset_of!(HyperNativeDirectoryEntry, name_length);
+    const NAME: usize = core::mem::offset_of!(HyperNativeDirectoryEntry, name);
+
+    let mut record = [0_u8; core::mem::size_of::<HyperNativeDirectoryEntry>()];
+    write_u64(&mut record, SIZE, snapshot.attributes.size());
+    write_u32(&mut record, MODE, snapshot.attributes.mode());
+    write_u32(
+        &mut record,
+        KIND,
+        directory_entry_kind(snapshot.attributes.kind()),
+    );
+    write_u32(&mut record, NAME_LENGTH, snapshot.name_length);
+    let name_length =
+        usize::try_from(snapshot.name_length).map_err(|_| HYPER_NATIVE_STATUS_INTERNAL)?;
+    let source = snapshot
+        .name
+        .get(..name_length)
+        .ok_or(HYPER_NATIVE_STATUS_INTERNAL)?;
+    let end = NAME
+        .checked_add(name_length)
+        .ok_or(HYPER_NATIVE_STATUS_INTERNAL)?;
+    let destination = record
+        .get_mut(NAME..end)
+        .ok_or(HYPER_NATIVE_STATUS_INTERNAL)?;
+    destination.copy_from_slice(source);
+    Ok(record)
+}
+
+const fn directory_entry_kind(kind: hyper::fs::NodeKind) -> u32 {
+    match kind {
+        hyper::fs::NodeKind::File => {
+            hyper::abi::native::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_FILE as u32
+        }
+        hyper::fs::NodeKind::Directory => {
+            hyper::abi::native::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_DIRECTORY as u32
+        }
+        hyper::fs::NodeKind::Symlink => {
+            hyper::abi::native::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_SYMLINK as u32
+        }
+        hyper::fs::NodeKind::Other => {
+            hyper::abi::native::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_OTHER as u32
+        }
+    }
 }
 
 fn encode_handle_info(info: HandleInfo) -> [u8; HANDLE_INFO_SIZE] {
@@ -2474,6 +2589,7 @@ const fn status_from_vfs_error(error: VfsError) -> HyperNativeStatus {
             HYPER_NATIVE_STATUS_NO_MEMORY
         }
         VfsError::Cache(_) => HYPER_NATIVE_STATUS_INTERNAL,
+        VfsError::InvalidDirectoryCookie => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         VfsError::InvalidPath => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         VfsError::Missing => HYPER_NATIVE_STATUS_NOT_FOUND,
         VfsError::NotDirectory | VfsError::NotRegularFile => HYPER_NATIVE_STATUS_BAD_STATE,
@@ -2846,6 +2962,11 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(VfsServiceError::Process(ProcessError::Allocation))
         }
 
+        fn read_directory(&self, _: HandleValue, _: u64) -> Result<DirectoryPage, VfsServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(VfsServiceError::Process(ProcessError::Allocation))
+        }
+
         fn read_file_at(
             &self,
             _: HandleValue,
@@ -3190,10 +3311,26 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             ],
         ),
     );
+    let bad_directory_page_capacity = dispatch_deferred(
+        &services,
+        invoke(
+            HYPER_NATIVE_SYS_DIRECTORY_READ,
+            [
+                1_u64 << 24 | 1,
+                0,
+                0x2000,
+                hyper::abi::native::HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY - 1,
+                0,
+                0,
+            ],
+        ),
+    );
     if empty_wait_many != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
         || oversized_wait_many
             != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
         || bad_process_info_size
+            != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+        || bad_directory_page_capacity
             != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
     {
         return Err(SelfTestError::InvalidRecordSize);

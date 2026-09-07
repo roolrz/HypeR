@@ -106,7 +106,7 @@ impl AuthorityPolicy for Policy {
             "bootstrap.root-directory" => Some(AuthorityDeclaration {
                 provider: None,
                 object_kind: 5,
-                rights: 0b10_0000_0001,
+                rights: 0b11_1000_0001,
                 movable: false,
                 duplicable: true,
                 creatable: false,

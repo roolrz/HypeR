@@ -149,6 +149,12 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR UINT64_C(8)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR UINT64_C(9)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY UINT64_C(10)
+#define HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY UINT64_C(4)
+#define HYPER_NATIVE_DIRECTORY_ENTRY_NAME_MAX_BYTES UINT64_C(255)
+#define HYPER_NATIVE_DIRECTORY_ENTRY_KIND_FILE UINT64_C(1)
+#define HYPER_NATIVE_DIRECTORY_ENTRY_KIND_DIRECTORY UINT64_C(2)
+#define HYPER_NATIVE_DIRECTORY_ENTRY_KIND_SYMLINK UINT64_C(3)
+#define HYPER_NATIVE_DIRECTORY_ENTRY_KIND_OTHER UINT64_C(4)
 #define HYPER_NATIVE_STARTUP_MAX_HANDLES UINT64_C(256)
 #define HYPER_NATIVE_DEADLINE_INFINITE UINT64_C(18446744073709551615)
 #define HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS UINT64_C(64)
@@ -258,6 +264,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_VMAR_PROTECT UINT64_C(51)
 #define HYPER_NATIVE_SYS_VMAR_UNMAP UINT64_C(52)
 #define HYPER_NATIVE_SYS_VMAR_DESTROY UINT64_C(53)
+#define HYPER_NATIVE_SYS_DIRECTORY_READ UINT64_C(54)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -451,6 +458,23 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, object_koid) 
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, rights) == 24, "handle_inspection.rights offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, object_kind) == 32, "handle_inspection.object_kind offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, flags) == 36, "handle_inspection.flags offset");
+
+typedef struct hyper_native_directory_entry_t {
+    uint64_t size;
+    uint32_t mode;
+    uint32_t kind;
+    uint32_t name_length;
+    uint32_t reserved;
+    uint8_t name[256];
+} hyper_native_directory_entry_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_directory_entry_t) == 280, "directory_entry size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_directory_entry_t) == 8, "directory_entry alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, size) == 0, "directory_entry.size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, mode) == 8, "directory_entry.mode offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, kind) == 12, "directory_entry.kind offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, name_length) == 16, "directory_entry.name_length offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, reserved) == 20, "directory_entry.reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, name) == 24, "directory_entry.name offset");
 
 #undef HYPER_ABI_ALIGNOF
 #undef HYPER_ABI_STATIC_ASSERT
