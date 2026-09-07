@@ -33,23 +33,22 @@ mv "$fixture/modified.rs" "$fixture/cross_call.rs"
 expect_rejection "removing the publisher pin must be rejected"
 
 cp "$root/src/kernel/irq/cross_call.rs" "$fixture/cross_call.rs"
-sed '/^    service_local_irq_mailbox();$/i\
-    let _ = crate::kernel::task::scheduler::preempt_enable_and_reschedule(publisher_pin);' \
-    "$fixture/cross_call.rs" >"$fixture/modified.rs"
-mv "$fixture/modified.rs" "$fixture/cross_call.rs"
-expect_rejection "releasing the publisher pin before local service must be rejected"
-
-cp "$root/src/kernel/irq/cross_call.rs" "$fixture/cross_call.rs"
-sed 's/preempt_enable_without_reschedule(publisher_pin)/drop(publisher_pin)/' \
+sed 's/release_owner_pin(pin)/drop(pin)/g' \
     "$fixture/cross_call.rs" >"$fixture/modified.rs"
 mv "$fixture/modified.rs" "$fixture/cross_call.rs"
 expect_rejection "unchecked publisher pin release must be rejected"
 
 cp "$root/src/kernel/irq/cross_call.rs" "$fixture/cross_call.rs"
-sed 's/preempt_enable_without_reschedule(publisher_pin)/preempt_enable_and_reschedule(publisher_pin)/' \
+sed 's/release_owner_pin(pin)/preempt_enable_and_reschedule(pin)/g' \
     "$fixture/cross_call.rs" >"$fixture/modified.rs"
 mv "$fixture/modified.rs" "$fixture/cross_call.rs"
 expect_rejection "publisher completion must not schedule under an outer owner"
+
+cp "$root/src/kernel/irq/cross_call.rs" "$fixture/cross_call.rs"
+sed '/OWNER.store(false, Ordering::Release);/d' \
+    "$fixture/cross_call.rs" >"$fixture/modified.rs"
+mv "$fixture/modified.rs" "$fixture/cross_call.rs"
+expect_rejection "releasing the owner pin before mailbox ownership must be rejected"
 
 cp "$root/src/kernel/task/scheduler/mod.rs" "$fixture/scheduler.rs"
 sed '/guard\.0\.release().map(|_| ()).map_err(Into::into)/a\

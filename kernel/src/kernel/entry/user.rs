@@ -707,6 +707,15 @@ impl DeferredServices for DeferredProcessServices<'_> {
         crate::kernel::vfs::open_file(&self.session.process, root, path, rights)
     }
 
+    fn open_directory(
+        &self,
+        root: HandleValue,
+        path: UserSlice,
+        rights: Rights,
+    ) -> Result<HandleValue, VfsServiceError> {
+        crate::kernel::vfs::open_directory(&self.session.process, root, path, rights)
+    }
+
     fn read_file_at(
         &self,
         file: HandleValue,
@@ -714,6 +723,99 @@ impl DeferredServices for DeferredProcessServices<'_> {
         output: Option<UserSlice>,
     ) -> Result<(u64, u64), VfsServiceError> {
         crate::kernel::vfs::read_file_at(&self.session.process, file, offset, output)
+    }
+
+    fn create_vmo(
+        &self,
+        size: u64,
+    ) -> Result<HandleValue, crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::create_vmo(&self.session.process, size)
+    }
+
+    fn create_file_executable_vmo(
+        &self,
+        file: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::create_file_executable_vmo(&self.session.process, file)
+    }
+
+    fn read_vmo(
+        &self,
+        vmo: HandleValue,
+        offset: u64,
+        output: Option<UserSlice>,
+    ) -> Result<(), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::read_vmo(&self.session.process, vmo, offset, output)
+    }
+
+    fn write_vmo(
+        &self,
+        vmo: HandleValue,
+        offset: u64,
+        input: Option<UserSlice>,
+    ) -> Result<(), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::write_vmo(&self.session.process, vmo, offset, input)
+    }
+
+    fn allocate_vmar(
+        &self,
+        parent: HandleValue,
+        address: u64,
+        size: u64,
+    ) -> Result<HandleValue, crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::allocate_vmar(&self.session.process, parent, address, size)
+    }
+
+    fn map_vmo(
+        &self,
+        vmar: HandleValue,
+        vmo: HandleValue,
+        vmo_offset: u64,
+        address: u64,
+        size: u64,
+        permissions: crate::kernel::mm::user_space::Permissions,
+    ) -> Result<(), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::map_vmo(
+            &self.session.process,
+            vmar,
+            vmo,
+            vmo_offset,
+            address,
+            size,
+            permissions,
+        )
+    }
+
+    fn protect_vmar(
+        &self,
+        vmar: HandleValue,
+        address: u64,
+        size: u64,
+        permissions: crate::kernel::mm::user_space::Permissions,
+    ) -> Result<(), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::protect(
+            &self.session.process,
+            vmar,
+            address,
+            size,
+            permissions,
+        )
+    }
+
+    fn unmap_vmar(
+        &self,
+        vmar: HandleValue,
+        address: u64,
+        size: u64,
+    ) -> Result<(), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::unmap(&self.session.process, vmar, address, size)
+    }
+
+    fn destroy_vmar(
+        &self,
+        vmar: HandleValue,
+    ) -> Result<(), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::destroy_vmar(&self.session.process, vmar)
     }
 
     fn create_process_builder(

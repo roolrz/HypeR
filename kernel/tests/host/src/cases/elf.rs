@@ -134,6 +134,19 @@ fn rejects_page_overlapping_load_segments() {
 }
 
 #[test]
+fn rejects_load_alignment_larger_than_the_native_page_contract() {
+    let mut bytes = executable_image();
+    write_u64(&mut bytes, 24, 0x20_1000);
+    write_u64(&mut bytes, ELF_HEADER_SIZE + 16, 0x20_1000);
+    write_u64(&mut bytes, ELF_HEADER_SIZE + 48, 0x2000);
+
+    assert_eq!(
+        Image::parse(&bytes).map(|_| ()),
+        Err(Error::InvalidAlignment)
+    );
+}
+
+#[test]
 fn decodes_supported_position_independent_relocations() {
     let mut bytes = vec![0u8; 0x3000];
     initialize_header(&mut bytes, 3, 0, 3);
@@ -188,6 +201,42 @@ fn decodes_supported_position_independent_relocations() {
         Image::parse(&bytes).map(|_| ()),
         Err(Error::InvalidRelocation)
     );
+}
+
+#[test]
+fn exposes_the_runtime_linker_contract_for_dynamic_processes() {
+    let mut bytes = vec![0u8; 0x2000];
+    initialize_header(&mut bytes, 3, 0x400, 5);
+    write_program_header(&mut bytes, 0, 1, 5, 0, 0, 0x1000, 0x1000, 0x1000);
+    write_program_header(&mut bytes, 1, 1, 6, 0x1000, 0x1000, 0x1000, 0x1000, 0x1000);
+    write_program_header(&mut bytes, 2, 3, 4, 0x300, 0x300, 25, 25, 1);
+    write_program_header(&mut bytes, 3, 2, 6, 0x1000, 0x1000, 16, 16, 8);
+    write_program_header(
+        &mut bytes,
+        4,
+        6,
+        4,
+        ELF_HEADER_SIZE as u64,
+        ELF_HEADER_SIZE as u64,
+        (5 * PROGRAM_HEADER_SIZE) as u64,
+        (5 * PROGRAM_HEADER_SIZE) as u64,
+        8,
+    );
+    bytes[0x300..0x319].copy_from_slice(b"/lib/ld-hyper-aarch64.so\0");
+    write_i64(&mut bytes, 0x1000, 0);
+    bytes[0x400..0x404].copy_from_slice(&[0xc0, 0x03, 0x5f, 0xd6]);
+
+    assert_eq!(
+        Image::parse(&bytes).map(|_| ()),
+        Err(Error::UnsupportedInterpreter)
+    );
+    let allocation = crate::require_ok(Image::process_allocation_plan(&bytes));
+    let image = crate::require_ok(Image::parse_process_with_plan(&bytes, allocation));
+    assert_eq!(image.kind(), ImageKind::PositionIndependent);
+    assert_eq!(image.interpreter(), Some("/lib/ld-hyper-aarch64.so"));
+    assert_eq!(image.program_header_address(), ELF_HEADER_SIZE as u64);
+    assert_eq!(image.program_header_count(), 5);
+    assert_eq!(image.relocations().len(), 0);
 }
 
 #[test]

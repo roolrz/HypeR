@@ -575,17 +575,37 @@ impl NativeAddressSpace {
     /// tagged invalidation.
     // Returning the owner is intentional: a recoverable pre-publication Busy
     // result must preserve the address space without allocation or leakage.
-    pub(crate) fn retire(mut owner: UniqueFallibleArc<Self>) -> Result<(), RetirementFailure> {
-        let mut transport =
-            match crate::kernel::irq::cross_call::UserAddressSpaceTransaction::try_acquire() {
-                Ok(transport) => transport,
-                Err(()) => {
-                    return Err(RetirementFailure {
-                        error: Error::Transport,
-                        owner,
-                    });
-                }
-            };
+    pub(crate) fn retire(owner: UniqueFallibleArc<Self>) -> Result<(), RetirementFailure> {
+        let transport = crate::kernel::irq::cross_call::UserAddressSpaceTransaction::try_acquire();
+        Self::retire_with_transport(owner, transport)
+    }
+
+    /// Retires an address space which has never been published to a Process.
+    ///
+    /// Construction rollback has no reaper-owned retry token. It therefore
+    /// waits through benign mailbox contention instead of leaking a complete
+    /// address space merely because another loader is updating its mappings.
+    pub(crate) fn retire_unpublished(
+        owner: UniqueFallibleArc<Self>,
+    ) -> Result<(), RetirementFailure> {
+        let transport =
+            crate::kernel::irq::cross_call::UserAddressSpaceTransaction::acquire_waiting();
+        Self::retire_with_transport(owner, transport)
+    }
+
+    fn retire_with_transport(
+        mut owner: UniqueFallibleArc<Self>,
+        transport: Result<crate::kernel::irq::cross_call::UserAddressSpaceTransaction, ()>,
+    ) -> Result<(), RetirementFailure> {
+        let mut transport = match transport {
+            Ok(transport) => transport,
+            Err(()) => {
+                return Err(RetirementFailure {
+                    error: Error::Transport,
+                    owner,
+                });
+            }
+        };
         let cut_and_image = owner.state.with(|state| {
             let cut = state.residency.begin_retirement(state.current.epoch)?;
             Ok::<_, Error>((cut, state.current.clone()))
@@ -857,7 +877,7 @@ impl PreparedNativeChange<'_> {
             image,
         } = self;
         let mut transport =
-            crate::kernel::irq::cross_call::UserAddressSpaceTransaction::try_acquire()
+            crate::kernel::irq::cross_call::UserAddressSpaceTransaction::acquire_waiting()
                 .map_err(|()| Error::Transport)?;
         let cut = owner
             .state
@@ -1114,7 +1134,7 @@ pub(crate) fn run_dormant_self_test() -> Result<(), Error> {
         Permissions::read_write(),
     )?;
     native.prepare_change(prepared)?.commit()?;
-    match NativeAddressSpace::retire(native) {
+    match NativeAddressSpace::retire_unpublished(native) {
         Ok(()) => Ok(()),
         Err(failure) => {
             let (error, _owner) = failure.into_parts();

@@ -5,7 +5,7 @@
 #include <hyper/startup.h>
 #include <hyper/syscall.h>
 
-__attribute__((noreturn, visibility("hidden"))) void __hyper_crt_start(
+__attribute__((noreturn)) void __hyper_crt_start(
     const uintptr_t *initial_stack)
 {
     hyper_startup_t startup;

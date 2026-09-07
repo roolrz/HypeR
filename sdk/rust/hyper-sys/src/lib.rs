@@ -677,6 +677,242 @@ pub unsafe fn directory_open_file(
     }
 }
 
+/// Opens one child directory relative to a `Directory` capability.
+///
+/// # Safety
+///
+/// `directory` must remain live with read rights and every requested right.
+/// `path` must be readable for `path_size` bytes. On `OK`, the caller assumes
+/// exclusive ownership of the nonzero Directory handle in `value0`.
+#[inline]
+pub unsafe fn directory_open_directory(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_size: usize,
+    requested_rights: u64,
+) -> CallResult {
+    // SAFETY: the caller establishes all raw handle and buffer contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY,
+            directory,
+            path.addr() as u64,
+            path_size as u64,
+            requested_rights,
+            0,
+            0,
+        )
+    }
+}
+
+/// Creates one zero-filled writable VMO.
+///
+/// # Safety
+///
+/// On `OK`, the caller assumes exclusive ownership of the VMO in `value0`.
+#[inline]
+pub unsafe fn vmo_create(size: u64) -> CallResult {
+    // SAFETY: ownership of the successful raw result transfers to the caller.
+    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_VMO_CREATE, size, 0, 0, 0, 0, 0) }
+}
+
+/// Creates an immutable executable VMO snapshot of one file.
+///
+/// # Safety
+///
+/// `file` must remain live with read and execute authority. On `OK`, the caller
+/// assumes exclusive ownership of the VMO in `value0`.
+#[inline]
+pub unsafe fn file_create_executable_vmo(file: abi::HyperNativeHandle) -> CallResult {
+    // SAFETY: the caller establishes the borrowed file and result ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO,
+            file,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Reads bytes from a VMO.
+///
+/// # Safety
+///
+/// `vmo` must remain live with read rights and `output` must be writable for
+/// `length` bytes.
+#[inline]
+pub unsafe fn vmo_read(
+    vmo: abi::HyperNativeHandle,
+    offset: u64,
+    output: *mut u8,
+    length: usize,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes the raw handle and output range.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMO_READ,
+            vmo,
+            offset,
+            output.addr() as u64,
+            length as u64,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Writes bytes into a writable VMO.
+///
+/// # Safety
+///
+/// `vmo` must remain live with write rights and `input` must be readable for
+/// `length` bytes.
+#[inline]
+pub unsafe fn vmo_write(
+    vmo: abi::HyperNativeHandle,
+    offset: u64,
+    input: *const u8,
+    length: usize,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes the raw handle and input range.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMO_WRITE,
+            vmo,
+            offset,
+            input.addr() as u64,
+            length as u64,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Allocates an exact child VMAR.
+///
+/// # Safety
+///
+/// `parent` must remain live with map rights. On `OK`, the caller assumes
+/// exclusive ownership of the child VMAR in `value0`.
+#[inline]
+pub unsafe fn vmar_allocate(parent: abi::HyperNativeHandle, address: u64, size: u64) -> CallResult {
+    // SAFETY: the caller establishes the parent and result ownership contract.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMAR_ALLOCATE,
+            parent,
+            address,
+            size,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Maps a VMO into an exact VMAR range.
+///
+/// # Safety
+///
+/// Both handles must remain live with map rights and all offsets, ranges, and
+/// permissions must satisfy the Native VMAR contract.
+#[inline]
+pub unsafe fn vmar_map(
+    vmar: abi::HyperNativeHandle,
+    vmo: abi::HyperNativeHandle,
+    object_offset: u64,
+    address: u64,
+    size: u64,
+    permissions: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes both handles and the complete map range.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMAR_MAP,
+            vmar,
+            vmo,
+            object_offset,
+            address,
+            size,
+            permissions,
+        )
+        .status
+    }
+}
+
+/// Changes permissions on a mapped VMAR range.
+///
+/// # Safety
+///
+/// `vmar` must remain live with map rights and the range must be fully owned
+/// by it.
+#[inline]
+pub unsafe fn vmar_protect(
+    vmar: abi::HyperNativeHandle,
+    address: u64,
+    size: u64,
+    permissions: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes the authority and exact range contract.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMAR_PROTECT,
+            vmar,
+            address,
+            size,
+            permissions,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Removes mappings from a VMAR range.
+///
+/// # Safety
+///
+/// `vmar` must remain live with map rights and the range must be fully owned
+/// by it.
+#[inline]
+pub unsafe fn vmar_unmap(
+    vmar: abi::HyperNativeHandle,
+    address: u64,
+    size: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes the authority and exact range contract.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMAR_UNMAP,
+            vmar,
+            address,
+            size,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Destroys and consumes one empty child VMAR.
+///
+/// # Safety
+///
+/// The caller must exclusively own `vmar`. `OK` consumes it; every failure
+/// preserves ownership.
+#[inline]
+pub unsafe fn vmar_destroy(vmar: abi::HyperNativeHandle) -> abi::HyperNativeStatus {
+    // SAFETY: the caller owns the consume-on-success transition.
+    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_VMAR_DESTROY, vmar, 0, 0, 0, 0, 0).status }
+}
+
 /// Reads one bounded range from a `File`.
 ///
 /// # Safety

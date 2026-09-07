@@ -77,6 +77,35 @@ impl DirectoryObject {
         let location = super::resolve::file(&self.namespace, &self.root, path)?;
         FileObject::try_new(location, self.namespace.cache(), sponsor)
     }
+
+    pub(crate) fn open_directory(
+        &self,
+        path: &str,
+        sponsor: &ResourceDomain,
+    ) -> Result<Self, Error> {
+        let location = super::resolve::directory(&self.namespace, &self.root, path)?;
+        Self::try_new(self.namespace.clone(), location, sponsor)
+    }
+
+    fn try_new(
+        namespace: FallibleArc<MountNamespace>,
+        root: Location,
+        sponsor: &ResourceDomain,
+    ) -> Result<Self, Error> {
+        let attributes = root
+            .mount()
+            .filesystem()
+            .attributes(root.node())
+            .map_err(Error::Backend)?;
+        if attributes.kind() != NodeKind::Directory {
+            return Err(Error::NotDirectory);
+        }
+        Ok(Self {
+            namespace,
+            root,
+            _object_charge: reserve_object_charge::<Self>(sponsor)?,
+        })
+    }
 }
 
 impl private::Sealed for DirectoryObject {}

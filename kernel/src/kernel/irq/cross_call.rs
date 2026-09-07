@@ -112,17 +112,37 @@ pub(crate) struct Outcome {
     pub(crate) ambiguous_cpu: Option<usize>,
 }
 
-struct Owner;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AcquireError {
+    Busy,
+    Unavailable,
+}
+
+/// Exclusive mailbox owner pinned to the CPU which acquired it.
+///
+/// A user-address-space transaction can span more than one RPC publication.
+/// Keeping the pin in this outer owner closes the otherwise-valid migration
+/// window between those publications and guarantees that a competing thread
+/// can make progress on another CPU while this transaction remains active.
+struct Owner {
+    pin: Option<crate::kernel::task::scheduler::PreemptionGuard>,
+}
 
 impl Owner {
-    fn acquire() -> Result<Self, ()> {
+    fn acquire() -> Result<Self, AcquireError> {
+        let pin = crate::kernel::task::scheduler::preempt_disable()
+            .map_err(|_| AcquireError::Unavailable)?;
         if POISONED.load(Ordering::Acquire) {
-            return Err(());
+            release_owner_pin(pin);
+            return Err(AcquireError::Unavailable);
         }
-        OWNER
-            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .map(|_| Self)
-            .map_err(|_| ())
+        match OWNER.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed) {
+            Ok(_) => Ok(Self { pin: Some(pin) }),
+            Err(_) => {
+                release_owner_pin(pin);
+                Err(AcquireError::Busy)
+            }
+        }
     }
 }
 
@@ -146,7 +166,9 @@ pub(in crate::kernel) struct GuestStage2Transaction {
 
 impl GuestStage2Transaction {
     pub(in crate::kernel) fn try_acquire() -> Result<Self, ()> {
-        Owner::acquire().map(|owner| Self { _owner: owner })
+        Owner::acquire()
+            .map(|owner| Self { _owner: owner })
+            .map_err(|_| ())
     }
 
     pub(in crate::kernel) fn execute(
@@ -155,20 +177,36 @@ impl GuestStage2Transaction {
         count: usize,
         targets: &[bool; hyper::cpu::MAX_CPUS],
     ) -> Outcome {
-        match execute_owned(
+        execute_owned(
             KernelRpc::GuestStage2(GuestStage2Call { request }),
             count,
             targets,
-        ) {
-            Ok(outcome) => outcome,
-            Err(()) => poison("reserved guest stage-2 RPC failed"),
-        }
+        )
     }
 }
 
 impl UserAddressSpaceTransaction {
     pub(crate) fn try_acquire() -> Result<Self, ()> {
-        Owner::acquire().map(|owner| Self { _owner: owner })
+        Owner::acquire()
+            .map(|owner| Self { _owner: owner })
+            .map_err(|_| ())
+    }
+
+    /// Waits for ordinary mailbox contention from a sleepable kernel context.
+    ///
+    /// Contention is not a machine failure: concurrent process loaders can
+    /// legitimately update independent address spaces. Poisoned transport or
+    /// a context which cannot yield remains an immediate error.
+    pub(crate) fn acquire_waiting() -> Result<Self, ()> {
+        loop {
+            match Owner::acquire() {
+                Ok(owner) => return Ok(Self { _owner: owner }),
+                Err(AcquireError::Busy) => {
+                    crate::kernel::task::scheduler::yield_now().map_err(|_| ())?;
+                }
+                Err(AcquireError::Unavailable) => return Err(()),
+            }
+        }
     }
 
     pub(crate) fn execute(
@@ -194,10 +232,7 @@ impl UserAddressSpaceTransaction {
             expected_active: execution.expected.local_identity(),
             request,
         };
-        match execute_owned(KernelRpc::UserAddressSpace(call), count, targets) {
-            Ok(outcome) => outcome,
-            Err(()) => poison("reserved user-address-space RPC failed"),
-        }
+        execute_owned(KernelRpc::UserAddressSpace(call), count, targets)
     }
 }
 
@@ -213,6 +248,19 @@ impl Drop for Owner {
             *GUEST_STAGE2_PAYLOAD.0.get() = None;
         }
         OWNER.store(false, Ordering::Release);
+        let Some(pin) = self.pin.take() else {
+            poison("kernel RPC owner pin is missing");
+        };
+        release_owner_pin(pin);
+    }
+}
+
+fn release_owner_pin(pin: crate::kernel::task::scheduler::PreemptionGuard) {
+    // Mailbox ownership is an inner synchronization protocol, not a scheduling
+    // point. The enclosing kernel path observes any deferred request after its
+    // own linear state has been committed or rolled back.
+    if crate::kernel::task::scheduler::preempt_enable_without_reschedule(pin).is_err() {
+        poison("kernel RPC owner pin release failed");
     }
 }
 
@@ -221,24 +269,11 @@ pub(crate) fn execute(
     count: usize,
     targets: &[bool; hyper::cpu::MAX_CPUS],
 ) -> Result<Outcome, ()> {
-    let _owner = Owner::acquire()?;
-    execute_owned(rpc, count, targets)
+    let _owner = Owner::acquire().map_err(|_| ())?;
+    Ok(execute_owned(rpc, count, targets))
 }
 
-fn execute_owned(
-    rpc: KernelRpc,
-    count: usize,
-    targets: &[bool; hyper::cpu::MAX_CPUS],
-) -> Result<Outcome, ()> {
-    // Acquiring the pin is the last recoverable operation before publication.
-    // The guard preserves the caller's steady-state IRQ mask while preventing
-    // an IRQ-tail scheduling point from migrating this publisher between local
-    // service, remote notification, and exact-generation acknowledgement
-    // collection.
-    let publisher_pin = match crate::kernel::task::scheduler::preempt_disable() {
-        Ok(guard) => guard,
-        Err(_) => return Err(()),
-    };
+fn execute_owned(rpc: KernelRpc, count: usize, targets: &[bool; hyper::cpu::MAX_CPUS]) -> Outcome {
     let generation = next_generation();
     publish(rpc);
     GENERATION.store(generation, Ordering::Relaxed);
@@ -248,15 +283,7 @@ fn execute_owned(
     notify_remote_targets(rpc, count, targets);
     await_acknowledgements(generation, count, targets);
     PUBLISHED_GENERATION.store(0, Ordering::Release);
-    let outcome = collect_outcome(rpc, generation, count, targets);
-    // Do not schedule here: the caller may still own the outer mailbox
-    // reservation or a multi-cut translation transaction, and may itself have
-    // entered with IRQs masked. Its enclosing safe point observes any deferred
-    // request after those linear owners are released.
-    if crate::kernel::task::scheduler::preempt_enable_without_reschedule(publisher_pin).is_err() {
-        poison("kernel RPC publisher pin release failed");
-    }
-    Ok(outcome)
+    collect_outcome(rpc, generation, count, targets)
 }
 
 fn next_generation() -> u32 {

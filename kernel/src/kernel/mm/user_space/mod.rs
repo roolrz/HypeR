@@ -19,6 +19,8 @@ mod kernel_adapter;
 mod machine;
 #[cfg(not(test))]
 mod objects;
+#[cfg(not(test))]
+mod service;
 mod vmo;
 
 pub(crate) use address_space::{
@@ -47,6 +49,13 @@ pub(crate) use machine::{
 pub(crate) use machine::{prepare_native_entry_self_test, run_dormant_self_test};
 #[cfg(not(test))]
 pub(crate) use objects::{MemoryObjectError, VmarObject, VmoObject};
+#[cfg(not(test))]
+pub(crate) use service::{ServiceError as MemoryServiceError, permissions as abi_permissions};
+#[cfg(not(test))]
+pub(crate) use service::{
+    allocate_vmar, create_file_executable_vmo, create_vmo, destroy as destroy_vmar, map_vmo,
+    protect, read_vmo, unmap, write_vmo,
+};
 
 #[cfg(not(test))]
 pub(crate) use machine::service_local_rpc;

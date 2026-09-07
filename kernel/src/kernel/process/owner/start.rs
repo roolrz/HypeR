@@ -261,7 +261,7 @@ impl PreparedChildProcessStart {
             process_invariant_violation();
         }
         let stack = match build.stack_layout().encode(
-            child.image().entry().get(),
+            child.image().auxiliary(),
             &arguments,
             &environment,
             &startup_records,

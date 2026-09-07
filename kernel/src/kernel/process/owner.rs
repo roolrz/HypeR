@@ -1773,6 +1773,20 @@ impl Process {
         rights: Rights,
     ) -> Result<HandleValue, ProcessError> {
         let reservation = self.reserve_handles::<1>()?;
+        self.publish_reserved_object(reservation, payload, rights)
+    }
+
+    /// Publishes a new object into a slot reserved before fallible payload
+    /// construction began.
+    ///
+    /// Stateful payload factories use this ordering when dropping an
+    /// unpublished payload cannot itself undo an external logical mutation.
+    pub(crate) fn publish_reserved_object<T: UserExportableObject>(
+        &self,
+        reservation: ProcessHandleReservation<1>,
+        payload: T,
+        rights: Rights,
+    ) -> Result<HandleValue, ProcessError> {
         let object = match ObjectPublication::try_new(payload) {
             Ok(object) => object,
             Err(error) => {

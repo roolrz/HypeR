@@ -19,9 +19,10 @@ Native services, but its contracts do not belong in HypeR Lib.
 - AArch64 Native syscall entry using the published machine convention;
 - Native startup-stack parsing, CRT entry, and bootstrap-handle discovery;
 - capability-scoped console and filesystem I/O, object wait, byte and capability
-  channels, staged Process construction, and core lifecycle wrappers;
+  channels, VMO/VMAR operations, staged Process construction, and core
+  lifecycle wrappers;
 - freestanding `memcpy`, `memmove`, `memset`, `memcmp`, and `strlen`;
-- Clang-only cross compilation into `libhyper.a`; and
+- Clang-only cross compilation into `libhyper.a` and `libhyper.so`; and
 - a public-interface-only Native application fixture for product integration.
 
 Native userspace is currently implemented only on AArch64. Additional
@@ -44,6 +45,7 @@ cmake -S sdk/lib -B target/sdk-lib/aarch64 \
   -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
   -DCMAKE_C_COMPILER_TARGET=aarch64-none-elf \
   -DCMAKE_ASM_COMPILER_TARGET=aarch64-none-elf \
+  -DHYPER_LD=ld.lld \
   -DHYPER_ABI_INCLUDE_DIR="$PWD/sdk/abi/include"
 cmake --build target/sdk-lib/aarch64
 ```
