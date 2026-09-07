@@ -716,6 +716,14 @@ impl DeferredServices for DeferredProcessServices<'_> {
         crate::kernel::vfs::open_directory(&self.session.process, root, path, rights)
     }
 
+    fn read_directory(
+        &self,
+        directory: HandleValue,
+        cookie: u64,
+    ) -> Result<crate::kernel::vfs::DirectoryPage, VfsServiceError> {
+        crate::kernel::vfs::read_directory(&self.session.process, directory, cookie)
+    }
+
     fn read_file_at(
         &self,
         file: HandleValue,

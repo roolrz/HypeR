@@ -758,6 +758,9 @@ pub const SIGNALS: &[Signal] = &[
 ];
 
 const CONSOLE_MAX_TRANSFER_BYTES: u32 = 4 * 1024;
+const DIRECTORY_ENTRY_PAGE_CAPACITY: u32 = 4;
+const DIRECTORY_ENTRY_NAME_CAPACITY: u32 = 256;
+const DIRECTORY_ENTRY_RECORD_SIZE: u16 = 24 + DIRECTORY_ENTRY_NAME_CAPACITY as u16;
 
 pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
@@ -818,6 +821,30 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "startup_handle_purpose_dynamic_library_directory",
         value: 10,
+    },
+    AbiConstant {
+        name: "directory_entry_page_capacity",
+        value: DIRECTORY_ENTRY_PAGE_CAPACITY as u64,
+    },
+    AbiConstant {
+        name: "directory_entry_name_max_bytes",
+        value: (DIRECTORY_ENTRY_NAME_CAPACITY - 1) as u64,
+    },
+    AbiConstant {
+        name: "directory_entry_kind_file",
+        value: 1,
+    },
+    AbiConstant {
+        name: "directory_entry_kind_directory",
+        value: 2,
+    },
+    AbiConstant {
+        name: "directory_entry_kind_symlink",
+        value: 3,
+    },
+    AbiConstant {
+        name: "directory_entry_kind_other",
+        value: 4,
     },
     AbiConstant {
         name: "startup_max_handles",
@@ -1360,6 +1387,39 @@ const HANDLE_INSPECTION_FIELDS: &[Field] = &[
     },
 ];
 
+const DIRECTORY_ENTRY_FIELDS: &[Field] = &[
+    Field {
+        name: "size",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "mode",
+        kind: FieldKind::U32,
+        offset: 8,
+    },
+    Field {
+        name: "kind",
+        kind: FieldKind::U32,
+        offset: 12,
+    },
+    Field {
+        name: "name_length",
+        kind: FieldKind::U32,
+        offset: 16,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U32,
+        offset: 20,
+    },
+    Field {
+        name: "name",
+        kind: FieldKind::Bytes(DIRECTORY_ENTRY_NAME_CAPACITY as u16),
+        offset: 24,
+    },
+];
+
 pub const RECORDS: &[Record] = &[
     Record {
         name: "handle_info",
@@ -1425,6 +1485,12 @@ pub const RECORDS: &[Record] = &[
         name: "handle_inspection",
         fields: HANDLE_INSPECTION_FIELDS,
         size: 40,
+        alignment: 8,
+    },
+    Record {
+        name: "directory_entry",
+        fields: DIRECTORY_ENTRY_FIELDS,
+        size: DIRECTORY_ENTRY_RECORD_SIZE,
         alignment: 8,
     },
 ];
@@ -2130,6 +2196,66 @@ const DIRECTORY_OPEN_DIRECTORY_RESULTS: &[ResultValue] = &[ResultValue {
         },
     }),
 }];
+
+const DIRECTORY_READ_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "directory",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("directory"),
+            required_rights: RIGHT_READ,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "cookie",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "records",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Elements {
+                argument: "capacity",
+                maximum_elements: DIRECTORY_ENTRY_PAGE_CAPACITY,
+                element_size: DIRECTORY_ENTRY_RECORD_SIZE,
+            },
+            record: Some("directory_entry"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "capacity",
+        kind: ValueKind::ElementCount,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "options",
+        kind: ValueKind::U32,
+        handle: None,
+        memory: None,
+    },
+];
+
+const DIRECTORY_READ_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "count",
+        kind: ValueKind::ElementCount,
+        handle: None,
+    },
+    ResultValue {
+        name: "next_cookie",
+        kind: ValueKind::U64,
+        handle: None,
+    },
+];
 
 const VMO_CREATE_ARGUMENTS: &[Argument] = &[Argument {
     name: "size",
@@ -3756,6 +3882,20 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 54,
+        name: "directory_read",
+        feature: FeatureGate::Core,
+        arguments: DIRECTORY_READ_ARGUMENTS,
+        results: DIRECTORY_READ_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -3773,6 +3913,7 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 
 pub const SEMANTIC_RULES: &[&str] = &[
     "Directory lookup is capability-relative. A leading slash restarts at that Directory's traversal root, and parent components cannot escape it. Every open requires read traversal authority, and every requested File right must already be present on the source Directory before the result is further bounded by the File object's node-specific ceiling.",
+    "Directory reads require the exact published page capacity. Cookie zero starts a scan and a returned next_cookie of zero ends it. Every name is one valid path component encoded as name_length UTF-8 bytes followed by zero-filled capacity. Pages are weakly consistent with concurrent filesystem mutation; callers must neither interpret nor synthesize cookies.",
     "Native task and object inspectors are immutable capability-scoped views. Process, thread, and object KOIDs plus scan cursors are observation-only values and can never be exchanged for operational authority. Out-of-scope targeted lookup returns not_found.",
     "Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.",
     "Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.",

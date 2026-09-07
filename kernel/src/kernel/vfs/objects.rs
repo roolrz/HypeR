@@ -3,7 +3,7 @@
 
 //! Capability objects for namespace traversal and immutable file access.
 
-use hyper::fs::{NodeAttributes, NodeKind};
+use hyper::fs::{MAX_NAME_BYTES, Name, NodeAttributes, NodeKind};
 use hyper::mm::FallibleArc;
 
 use crate::kernel::accounting::{
@@ -22,6 +22,7 @@ pub(crate) enum Error {
     AllocationSize,
     Backend(super::instance::Error),
     Cache(crate::kernel::io_cache::CacheError),
+    InvalidDirectoryCookie,
     InvalidPath,
     Missing,
     NotDirectory,
@@ -45,7 +46,43 @@ impl From<ResourceError> for Error {
 
 impl From<super::instance::Error> for Error {
     fn from(error: super::instance::Error) -> Self {
-        Self::Backend(error)
+        match error {
+            super::instance::Error::InvalidDirectoryCookie => Self::InvalidDirectoryCookie,
+            other => Self::Backend(other),
+        }
+    }
+}
+
+pub(crate) const DIRECTORY_PAGE_CAPACITY: usize =
+    hyper::abi::native::HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY as usize;
+const _: () = assert!(
+    MAX_NAME_BYTES == hyper::abi::native::HYPER_NATIVE_DIRECTORY_ENTRY_NAME_MAX_BYTES as usize
+);
+
+#[derive(Clone, Copy)]
+pub(crate) struct DirectoryEntrySnapshot {
+    pub(crate) name: [u8; MAX_NAME_BYTES],
+    pub(crate) name_length: u32,
+    pub(crate) attributes: NodeAttributes,
+}
+
+pub(crate) struct DirectoryPage {
+    entries: [Option<DirectoryEntrySnapshot>; DIRECTORY_PAGE_CAPACITY],
+    len: usize,
+    next_cookie: u64,
+}
+
+impl DirectoryPage {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = &DirectoryEntrySnapshot> {
+        self.entries[..self.len].iter().filter_map(Option::as_ref)
+    }
+
+    pub(crate) const fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) const fn next_cookie(&self) -> u64 {
+        self.next_cookie
     }
 }
 
@@ -85,6 +122,48 @@ impl DirectoryObject {
     ) -> Result<Self, Error> {
         let location = super::resolve::directory(&self.namespace, &self.root, path)?;
         Self::try_new(self.namespace.clone(), location, sponsor)
+    }
+
+    pub(crate) fn read_page(&self, cookie: u64) -> Result<DirectoryPage, Error> {
+        let mut page = DirectoryPage {
+            entries: [None; DIRECTORY_PAGE_CAPACITY],
+            len: 0,
+            next_cookie: 0,
+        };
+        let mut cursor = cookie;
+        while page.len < DIRECTORY_PAGE_CAPACITY {
+            let Some(entry) = self.namespace.read_directory_entry(&self.root, cursor)? else {
+                return Ok(page);
+            };
+            if Name::new(entry.name).is_err()
+                || entry.next_cookie == 0
+                || entry.next_cookie == cursor
+            {
+                return Err(Error::Backend(super::instance::Error::InvalidBackendResult));
+            }
+            let mut name = [0_u8; MAX_NAME_BYTES];
+            let Some(destination) = name.get_mut(..entry.name.len()) else {
+                return Err(Error::Backend(super::instance::Error::InvalidBackendResult));
+            };
+            destination.copy_from_slice(entry.name.as_bytes());
+            page.entries[page.len] = Some(DirectoryEntrySnapshot {
+                name,
+                name_length: u32::try_from(entry.name.len())
+                    .map_err(|_| Error::Backend(super::instance::Error::InvalidBackendResult))?,
+                attributes: entry.attributes,
+            });
+            page.len += 1;
+            cursor = entry.next_cookie;
+        }
+
+        if self
+            .namespace
+            .read_directory_entry(&self.root, cursor)?
+            .is_some()
+        {
+            page.next_cookie = cursor;
+        }
+        Ok(page)
     }
 
     fn try_new(

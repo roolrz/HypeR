@@ -6,7 +6,7 @@
 use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use hyper::fs::ramfs::{Error as RamFsError, RamFs};
+use hyper::fs::ramfs::{DirectoryCookie, Error as RamFsError, RamFs};
 use hyper::fs::{Name, NodeAttributes, NodeId, NodeKind};
 use hyper::mm::{AllocationError, FallibleArc};
 
@@ -33,6 +33,7 @@ pub(crate) struct MountId(u64);
 pub(crate) enum Error {
     Allocation,
     IdentifierExhausted,
+    InvalidDirectoryCookie,
     InvalidBackendResult,
     NotDirectory,
     NotRegularFile,
@@ -65,6 +66,13 @@ enum Backend {
 pub(crate) struct FilesystemInstance {
     id: FilesystemId,
     backend: Backend,
+}
+
+/// One borrowed backend directory entry and its continuation cookie.
+pub(super) struct DirectoryEntry<'entry> {
+    pub(super) name: &'entry str,
+    pub(super) attributes: NodeAttributes,
+    pub(super) next_cookie: u64,
 }
 
 impl FilesystemInstance {
@@ -133,6 +141,28 @@ impl FilesystemInstance {
         validate_buffer_result(actual, destination.len())
     }
 
+    pub(super) fn read_directory_entry(
+        &self,
+        node: NodeId,
+        cookie: u64,
+    ) -> Result<Option<DirectoryEntry<'_>>, Error> {
+        match &self.backend {
+            Backend::RamFs(ramfs) => {
+                let mut entries = ramfs
+                    .enumerate(node, DirectoryCookie::new(cookie))
+                    .map_err(map_ramfs_error)?;
+                Ok(entries.next().map(|entry| {
+                    let node = entry.node();
+                    DirectoryEntry {
+                        name: node.name(),
+                        attributes: node.attributes(),
+                        next_cookie: entry.next_cookie().get(),
+                    }
+                }))
+            }
+        }
+    }
+
     /// Returns immutable executable storage for the bootstrap loader.
     ///
     /// This is intentionally narrower than general file I/O. A future mutable
@@ -187,6 +217,7 @@ impl Mount {
 
 fn map_ramfs_error(error: RamFsError) -> Error {
     match error {
+        RamFsError::InvalidDirectoryCookie => Error::InvalidDirectoryCookie,
         RamFsError::InvalidNode => Error::InvalidBackendResult,
         RamFsError::NotDirectory => Error::NotDirectory,
         RamFsError::NotRegularFile => Error::NotRegularFile,
@@ -259,6 +290,17 @@ impl MountNamespace {
         &self,
     ) -> FallibleArc<crate::kernel::io_cache::FileDataCache<super::read::FilePage>> {
         self.cache.clone()
+    }
+
+    pub(super) fn read_directory_entry<'entry>(
+        &self,
+        directory: &'entry Location,
+        cookie: u64,
+    ) -> Result<Option<DirectoryEntry<'entry>>, Error> {
+        directory
+            .mount()
+            .filesystem()
+            .read_directory_entry(directory.node(), cookie)
     }
 }
 

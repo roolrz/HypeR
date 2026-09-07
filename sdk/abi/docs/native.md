@@ -87,6 +87,12 @@ ABI revision: `0`.
 | `startup_handle_purpose_task_inspector` | `8` |
 | `startup_handle_purpose_object_inspector` | `9` |
 | `startup_handle_purpose_dynamic_library_directory` | `10` |
+| `directory_entry_page_capacity` | `4` |
+| `directory_entry_name_max_bytes` | `255` |
+| `directory_entry_kind_file` | `1` |
+| `directory_entry_kind_directory` | `2` |
+| `directory_entry_kind_symlink` | `3` |
+| `directory_entry_kind_other` | `4` |
 | `startup_max_handles` | `256` |
 | `deadline_infinite` | `18446744073709551615` |
 | `object_wait_many_max_items` | `64` |
@@ -145,6 +151,7 @@ ABI revision: `0`.
 ## Semantic rules
 
 - Directory lookup is capability-relative. A leading slash restarts at that Directory's traversal root, and parent components cannot escape it. Every open requires read traversal authority, and every requested File right must already be present on the source Directory before the result is further bounded by the File object's node-specific ceiling.
+- Directory reads require the exact published page capacity. Cookie zero starts a scan and a returned next_cookie of zero ends it. Every name is one valid path component encoded as name_length UTF-8 bytes followed by zero-filled capacity. Pages are weakly consistent with concurrent filesystem mutation; callers must neither interpret nor synthesize cookies.
 - Native task and object inspectors are immutable capability-scoped views. Process, thread, and object KOIDs plus scan cursors are observation-only values and can never be exchanged for operational authority. Out-of-scope targeted lookup returns not_found.
 - Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.
 - Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.
@@ -226,6 +233,7 @@ element size before any user-memory access.
 | 51 | `vmar_protect` | `vmar: handle`, `address: u64`, `size: byte_count`, `permissions: u32` | — | `vmar: Borrow, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 52 | `vmar_unmap` | `vmar: handle`, `address: u64`, `size: byte_count` | — | `vmar: Borrow, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 53 | `vmar_destroy` | `vmar: handle` | — | `vmar: ConsumeOnCommit, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 54 | `directory_read` | `directory: handle`, `cookie: u64`, `records: user_address`, `capacity: element_count`, `options: u32` | `count: element_count`, `next_cookie: u64` | `directory: Borrow, kind=directory, rights=0x10` | `records: Write, len=capacity elements, max-elements=4, element-size=280, record=directory_entry; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
 
 ## Public records
 
@@ -242,3 +250,4 @@ element size before any user-memory access.
 | `task_thread` | 96 | 8 | `koid: u64 @ 0`, `process_koid: u64 @ 8`, `role: u32 @ 16`, `registry_phase: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `name: bytes[64] @ 32` |
 | `object_inspection` | 96 | 8 | `koid: u64 @ 0`, `object_kind: u32 @ 8`, `handle_state: u32 @ 12`, `active_handles: u64 @ 16`, `supported_rights: u64 @ 24`, `strong_references: u64 @ 32`, `kernel_service_references: u64 @ 40`, `scheduler_references: u64 @ 48`, `operation_references: u64 @ 56`, `user_authority_references: u64 @ 64`, `publication_references: u64 @ 72`, `diagnostic_references: u64 @ 80`, `retirement_references: u64 @ 88` |
 | `handle_inspection` | 40 | 8 | `process_koid: u64 @ 0`, `handle: u64 @ 8`, `object_koid: u64 @ 16`, `rights: u64 @ 24`, `object_kind: u32 @ 32`, `flags: u32 @ 36` |
+| `directory_entry` | 280 | 8 | `size: u64 @ 0`, `mode: u32 @ 8`, `kind: u32 @ 12`, `name_length: u32 @ 16`, `reserved: u32 @ 20`, `name: bytes[256] @ 24` |

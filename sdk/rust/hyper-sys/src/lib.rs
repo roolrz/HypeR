@@ -705,6 +705,36 @@ pub unsafe fn directory_open_directory(
     }
 }
 
+/// Reads one fixed-capacity page from a Directory enumeration.
+///
+/// # Safety
+///
+/// `directory` must remain live with read rights. `records` must identify
+/// writable storage for `capacity` directory-entry records for the complete
+/// syscall. Callers must pass the exact capacity published by the Native ABI
+/// and treat the returned continuation cookie as opaque.
+#[inline]
+pub unsafe fn directory_read(
+    directory: abi::HyperNativeHandle,
+    cookie: u64,
+    records: *mut abi::HyperNativeDirectoryEntry,
+    capacity: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes the borrowed handle, output-buffer, and
+    // exact-capacity contracts of the raw Native operation.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_READ,
+            directory,
+            cookie,
+            records.addr() as u64,
+            capacity as u64,
+            0,
+            0,
+        )
+    }
+}
+
 /// Creates one zero-filled writable VMO.
 ///
 /// # Safety

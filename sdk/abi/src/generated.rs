@@ -133,6 +133,12 @@ pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_DIRECTORY: u64 = 7;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR: u64 = 8;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR: u64 = 9;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY: u64 = 10;
+pub const HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY: u64 = 4;
+pub const HYPER_NATIVE_DIRECTORY_ENTRY_NAME_MAX_BYTES: u64 = 255;
+pub const HYPER_NATIVE_DIRECTORY_ENTRY_KIND_FILE: u64 = 1;
+pub const HYPER_NATIVE_DIRECTORY_ENTRY_KIND_DIRECTORY: u64 = 2;
+pub const HYPER_NATIVE_DIRECTORY_ENTRY_KIND_SYMLINK: u64 = 3;
+pub const HYPER_NATIVE_DIRECTORY_ENTRY_KIND_OTHER: u64 = 4;
 pub const HYPER_NATIVE_STARTUP_MAX_HANDLES: u64 = 256;
 pub const HYPER_NATIVE_DEADLINE_INFINITE: u64 = 18446744073709551615;
 pub const HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS: u64 = 64;
@@ -242,6 +248,7 @@ pub const HYPER_NATIVE_SYS_VMAR_MAP: u64 = 50;
 pub const HYPER_NATIVE_SYS_VMAR_PROTECT: u64 = 51;
 pub const HYPER_NATIVE_SYS_VMAR_UNMAP: u64 = 52;
 pub const HYPER_NATIVE_SYS_VMAR_DESTROY: u64 = 53;
+pub const HYPER_NATIVE_SYS_DIRECTORY_READ: u64 = 54;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -455,3 +462,22 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInspection, object_
 const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInspection, rights) == 24);
 const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInspection, object_kind) == 32);
 const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInspection, flags) == 36);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeDirectoryEntry {
+    pub size: u64,
+    pub mode: u32,
+    pub kind: u32,
+    pub name_length: u32,
+    pub reserved: u32,
+    pub name: [u8; 256],
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeDirectoryEntry>() == 280);
+const _: () = assert!(core::mem::align_of::<HyperNativeDirectoryEntry>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, size) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, mode) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, kind) == 12);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, name_length) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, reserved) == 20);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, name) == 24);

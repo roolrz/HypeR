@@ -205,6 +205,22 @@ hyper_call_result_t hyper_directory_open_directory(
         0);
 }
 
+hyper_call_result_t hyper_directory_read(
+    hyper_native_handle_t directory,
+    uint64_t cookie,
+    hyper_native_directory_entry_t *records,
+    size_t capacity)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_DIRECTORY_READ,
+        directory,
+        cookie,
+        (uintptr_t)records,
+        capacity,
+        0,
+        0);
+}
+
 hyper_call_result_t hyper_file_read_at(
     hyper_native_handle_t file,
     uint64_t offset,
