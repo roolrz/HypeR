@@ -151,6 +151,22 @@ impl AuthorityPolicy for Policy {
                 duplicable: true,
                 creatable: false,
             }),
+            "bootstrap.memory-inspector" => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: 18,
+                rights: 0b1_1000_0100,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            "bootstrap.cpu-inspector" => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: 19,
+                rights: 0b1_1000_0100,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
             _ => None,
         }
     }
@@ -177,6 +193,8 @@ impl AuthorityPolicy for Policy {
             ("/bin/sh", "process.resource-domain") => (306, 8),
             ("/bin/sh", "process.task-inspector") => (307, 16),
             ("/bin/sh", "process.object-inspector") => (308, 17),
+            ("/bin/sh", "process.memory-inspector") => (309, 18),
+            ("/bin/sh", "process.cpu-inspector") => (310, 19),
             _ => return None,
         };
         Some(StartupPurposeDeclaration { value, object_kind })

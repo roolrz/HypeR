@@ -399,7 +399,7 @@ Further documentation:
 - [Native init contract](kernel/docs/native-init.md)
 - [Userspace and syscall architecture](kernel/docs/syscall-abi.md)
 - [Virtual filesystem architecture](kernel/docs/vfs.md)
-- [Native SDK contract](docs/sdk.md)
+- [Native SDK contract](sdk/README.md)
 - [HypeR Native ABI reference](sdk/abi/docs/native.md)
 - [VM bundle format](kernel/docs/vm-bundle.md)
 - [RISC-V execution profile](kernel/docs/riscv64.md)

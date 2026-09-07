@@ -402,6 +402,32 @@ pressure recovery but is not a teardown barrier while allocations continue.
 The current immutable topology has no offline transition; future CPU hotplug
 must quiesce and drain a departing CPU before withdrawing its slot.
 
+## System accounting observations
+
+Runtime accounting remains owned by the subsystem that mutates the underlying
+state. The physical allocator produces a copied `MemoryInspector` observation
+while holding its existing state lock, then releases that lock before user
+memory is accessed. Scheduler ticks update CPU-local atomic counters and each
+current Thread's monotonic runtime counter. Readers aggregate those independent
+counters without taking scheduler locks; the result is a deliberately weakly
+consistent point-in-time observation, not a transaction across CPUs.
+
+These observations are exposed only through typed, read-only inspector
+handles. Applications cannot map or modify accounting storage, and delegating
+an inspector follows the ordinary handle rights and transfer rules. Memory
+observations contain identities that consumers can validate (`total = reserved
++ managed`, `managed = free + used`, and the ownership categories sum to
+`used`). CPU categories describe scheduler-entity residency—idle, kernel
+Thread, user Thread, and vCPU—not architectural privilege-level cycle counts.
+The configured scheduler tick frequency is part of every CPU observation.
+
+Relaxed atomics are sufficient for CPU-time counters because they convey no
+ownership or synchronization state. Each tick changes exactly one monotonic
+category, so there is no multi-field publication that a reader could observe
+half committed. A future observation containing mutually dependent lock-free
+fields must add an explicit sequence counter or immutable snapshot publication
+instead of relying on this weaker contract.
+
 ## Kernel RPC and replicated-local IRQs
 
 Crash-stop and scheduler reschedule retain dedicated emergency semantics. All

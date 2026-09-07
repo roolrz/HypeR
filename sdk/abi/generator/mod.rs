@@ -2507,6 +2507,8 @@ mod tests {
             ("process_builder", TransferClass::RendezvousOnly),
             ("task_inspector", TransferClass::General),
             ("object_inspector", TransferClass::General),
+            ("memory_inspector", TransferClass::General),
+            ("cpu_inspector", TransferClass::General),
         ];
         assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
         for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {

@@ -5,6 +5,7 @@
 
 use alloc::boxed::Box;
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicU64, Ordering};
 use hyper::cpu::CpuIndex;
 
 // ProcessBuilder commits one identity label for both the Process and its
@@ -345,6 +346,8 @@ pub struct Thread {
     /// This cell is independent from the CPU-owned scheduling domain so a
     /// global control queue may safely link neighbors owned by different CPUs.
     control_queue_links: UnsafeCell<QueueLinks>,
+    /// Monotonic scheduler ticks charged while this Thread is current.
+    runtime_ticks: AtomicU64,
     resources: Box<ThreadResources>,
 }
 
@@ -442,6 +445,18 @@ impl FairRuntime {
 }
 
 impl Thread {
+    pub(super) fn account_runtime_ticks(&self, elapsed: u64) {
+        self.runtime_ticks.fetch_add(elapsed, Ordering::Relaxed);
+    }
+
+    pub(super) fn runtime_ticks(&self) -> u64 {
+        self.runtime_ticks.load(Ordering::Relaxed)
+    }
+
+    pub(super) fn role(&self) -> ThreadRole {
+        self.object.role()
+    }
+
     pub(super) fn schedule_is_coordinator_owned(&self) -> bool {
         self.schedule_owner == ScheduleOwner::Coordinator
     }
@@ -495,6 +510,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 crate::hal::context::ThreadContext::empty(),
                 None,
@@ -534,6 +550,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(context, Some(stack), ThreadExecution::Kernel)?,
         })
     }
@@ -566,6 +583,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(context, Some(stack), ThreadExecution::Kernel)?,
         })
     }
@@ -596,6 +614,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 crate::hal::context::ThreadContext::empty(),
                 Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
@@ -632,6 +651,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 scheduling_context,
                 Some(stack),
@@ -675,6 +695,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 context,
                 Some(stack),

@@ -18,6 +18,118 @@ const MAX_READ_BYTES: usize = hyper_abi::HYPER_NATIVE_FILE_MAX_READ_BYTES as usi
 const DIRECTORY_PAGE_CAPACITY: usize =
     hyper_abi::HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY as usize;
 
+/// Stable identity of one mounted filesystem instance.
+///
+/// This value is observation-only and cannot be resolved into a capability.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct FilesystemId(NonZeroU64);
+
+impl FilesystemId {
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Stable identity of one mount in a process-visible namespace.
+///
+/// This value is observation-only and cannot be resolved into a capability.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct MountId(NonZeroU64);
+
+impl MountId {
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// Stable identity of one node within its filesystem instance.
+///
+/// Node zero is valid. Pair this value with [`FilesystemId`] when correlating
+/// observations from distinct mounts.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct NodeId(u64);
+
+impl NodeId {
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Namespace location identity reported for one opened filesystem object.
+///
+/// This is deliberately not a pathname: links, renames, unlinks, and mount
+/// namespaces can give one node several names or no current name at all.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct NodeLocation {
+    filesystem: FilesystemId,
+    mount: MountId,
+    node: NodeId,
+}
+
+impl NodeLocation {
+    #[must_use]
+    pub const fn filesystem(self) -> FilesystemId {
+        self.filesystem
+    }
+
+    #[must_use]
+    pub const fn mount(self) -> MountId {
+        self.mount
+    }
+
+    #[must_use]
+    pub const fn node(self) -> NodeId {
+        self.node
+    }
+}
+
+/// Immutable metadata for one opened File object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FileInfo {
+    location: NodeLocation,
+    size: u64,
+    mode: u32,
+}
+
+impl FileInfo {
+    #[must_use]
+    pub const fn location(self) -> NodeLocation {
+        self.location
+    }
+
+    #[must_use]
+    pub const fn size(self) -> u64 {
+        self.size
+    }
+
+    #[must_use]
+    pub const fn mode(self) -> u32 {
+        self.mode
+    }
+}
+
+/// Immutable metadata for one opened Directory object.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryInfo {
+    location: NodeLocation,
+    mode: u32,
+}
+
+impl DirectoryInfo {
+    #[must_use]
+    pub const fn location(self) -> NodeLocation {
+        self.location
+    }
+
+    #[must_use]
+    pub const fn mode(self) -> u32 {
+        self.mode
+    }
+}
+
 /// Rights which may be requested for a newly opened file.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +227,13 @@ impl Directory {
     #[must_use]
     pub fn as_handle_ref(&self) -> HandleRef<'_, DirectoryObject> {
         self.handle.as_handle_ref()
+    }
+
+    /// Returns immutable identity and attributes for this Directory.
+    ///
+    /// The Directory handle must carry [`Rights::INSPECT`].
+    pub fn info(&self) -> Result<DirectoryInfo> {
+        decode_directory_info(raw_ops::directory_info(self.handle.as_handle_ref())?)
     }
 
     /// Opens one UTF-8 path and returns the unique new `File` owner.
@@ -221,6 +340,13 @@ impl File {
     #[must_use]
     pub fn as_handle_ref(&self) -> HandleRef<'_, FileObject> {
         self.handle.as_handle_ref()
+    }
+
+    /// Returns immutable identity and attributes for this File.
+    ///
+    /// The File handle must carry [`Rights::INSPECT`].
+    pub fn info(&self) -> Result<FileInfo> {
+        decode_file_info(raw_ops::file_info(self.handle.as_handle_ref())?)
     }
 
     /// Returns the immutable file size reported by the kernel.
@@ -438,6 +564,41 @@ fn decode_directory_entry(raw: &hyper_abi::HyperNativeDirectoryEntry) -> Result<
     })
 }
 
+fn decode_location(filesystem_id: u64, mount_id: u64, node_id: u64) -> Result<NodeLocation> {
+    let filesystem = NonZeroU64::new(filesystem_id)
+        .map(FilesystemId)
+        .ok_or(Error::InvalidResponse)?;
+    let mount = NonZeroU64::new(mount_id)
+        .map(MountId)
+        .ok_or(Error::InvalidResponse)?;
+    Ok(NodeLocation {
+        filesystem,
+        mount,
+        node: NodeId(node_id),
+    })
+}
+
+fn decode_file_info(raw: hyper_abi::HyperNativeFileInfo) -> Result<FileInfo> {
+    if raw.reserved != 0 {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(FileInfo {
+        location: decode_location(raw.filesystem_id, raw.mount_id, raw.node_id)?,
+        size: raw.size,
+        mode: raw.mode,
+    })
+}
+
+fn decode_directory_info(raw: hyper_abi::HyperNativeDirectoryInfo) -> Result<DirectoryInfo> {
+    if raw.reserved != 0 {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(DirectoryInfo {
+        location: decode_location(raw.filesystem_id, raw.mount_id, raw.node_id)?,
+        mode: raw.mode,
+    })
+}
+
 fn validate_path(path: &str) -> Result<()> {
     if path.is_empty() || path.len() > MAX_PATH_BYTES || path.as_bytes().contains(&0) {
         Err(Error::InvalidPath)
@@ -449,6 +610,7 @@ fn validate_path(path: &str) -> Result<()> {
 #[cfg(not(test))]
 mod raw_ops {
     use super::{DirectoryObject, HandleRef, Rights};
+    use crate::{Result, Status};
 
     pub(super) fn open(
         root: HandleRef<'_, DirectoryObject>,
@@ -500,6 +662,25 @@ mod raw_ops {
         }
     }
 
+    pub(super) fn directory_info(
+        directory: HandleRef<'_, DirectoryObject>,
+    ) -> Result<hyper_abi::HyperNativeDirectoryInfo> {
+        let mut record = hyper_abi::HyperNativeDirectoryInfo {
+            filesystem_id: 0,
+            mount_id: 0,
+            node_id: 0,
+            mode: 0,
+            reserved: 0,
+        };
+        // SAFETY: the typed borrow keeps the directory live and `record` is
+        // writable for the exact fixed-width output record.
+        let status = Status::from_raw(unsafe {
+            hyper_sys::directory_get_info(directory.raw().get(), &mut record)
+        });
+        status.into_result()?;
+        Ok(record)
+    }
+
     pub(super) fn read(
         file: HandleRef<'_, super::FileObject>,
         offset: u64,
@@ -511,11 +692,31 @@ mod raw_ops {
             hyper_sys::file_read_at(file.raw().get(), offset, output.as_mut_ptr(), output.len())
         }
     }
+
+    pub(super) fn file_info(
+        file: HandleRef<'_, super::FileObject>,
+    ) -> Result<hyper_abi::HyperNativeFileInfo> {
+        let mut record = hyper_abi::HyperNativeFileInfo {
+            filesystem_id: 0,
+            mount_id: 0,
+            node_id: 0,
+            size: 0,
+            mode: 0,
+            reserved: 0,
+        };
+        // SAFETY: the typed borrow keeps the file live and `record` is
+        // writable for the exact fixed-width output record.
+        let status =
+            Status::from_raw(unsafe { hyper_sys::file_get_info(file.raw().get(), &mut record) });
+        status.into_result()?;
+        Ok(record)
+    }
 }
 
 #[cfg(test)]
 mod raw_ops {
     use super::{DirectoryObject, HandleRef, Rights};
+    use crate::Result;
 
     const CONTENT: &[u8] = b"HypeR VFS test image";
 
@@ -592,6 +793,18 @@ mod raw_ops {
         }
     }
 
+    pub(super) fn directory_info(
+        _directory: HandleRef<'_, DirectoryObject>,
+    ) -> Result<hyper_abi::HyperNativeDirectoryInfo> {
+        Ok(hyper_abi::HyperNativeDirectoryInfo {
+            filesystem_id: 11,
+            mount_id: 17,
+            node_id: 0,
+            mode: 0o040_755,
+            reserved: 0,
+        })
+    }
+
     pub(super) fn read(
         _file: HandleRef<'_, super::FileObject>,
         offset: u64,
@@ -612,6 +825,19 @@ mod raw_ops {
             value0: actual as u64,
             value1: CONTENT.len() as u64,
         }
+    }
+
+    pub(super) fn file_info(
+        _file: HandleRef<'_, super::FileObject>,
+    ) -> Result<hyper_abi::HyperNativeFileInfo> {
+        Ok(hyper_abi::HyperNativeFileInfo {
+            filesystem_id: 11,
+            mount_id: 17,
+            node_id: 2,
+            size: CONTENT.len() as u64,
+            mode: 0o100_755,
+            reserved: 0,
+        })
     }
 }
 
@@ -681,6 +907,50 @@ mod tests {
         assert_eq!(&bytes, b"HypeR VFS test image");
         assert_eq!(file.size()?, bytes.len() as u64);
         Ok(())
+    }
+
+    #[test]
+    fn typed_info_reports_stable_location_and_attributes() -> Result<(), Error> {
+        let directory = root_directory()?;
+        let directory_info = directory.info()?;
+        assert_eq!(directory_info.location().filesystem().get(), 11);
+        assert_eq!(directory_info.location().mount().get(), 17);
+        assert_eq!(directory_info.location().node().get(), 0);
+        assert_eq!(directory_info.mode(), 0o040_755);
+
+        let file = directory.open("bin/init", FileRights::READ.union(FileRights::INSPECT))?;
+        let file_info = file.info()?;
+        assert_eq!(file_info.location().filesystem().get(), 11);
+        assert_eq!(file_info.location().mount().get(), 17);
+        assert_eq!(file_info.location().node().get(), 2);
+        assert_eq!(file_info.size(), 20);
+        assert_eq!(file_info.mode(), 0o100_755);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_info_rejects_reserved_data_and_zero_scope_identity() {
+        assert_eq!(
+            super::decode_file_info(hyper_abi::HyperNativeFileInfo {
+                filesystem_id: 0,
+                mount_id: 1,
+                node_id: 0,
+                size: 0,
+                mode: 0,
+                reserved: 0,
+            }),
+            Err(Error::InvalidResponse)
+        );
+        assert_eq!(
+            super::decode_directory_info(hyper_abi::HyperNativeDirectoryInfo {
+                filesystem_id: 1,
+                mount_id: 1,
+                node_id: 0,
+                mode: 0,
+                reserved: 1,
+            }),
+            Err(Error::InvalidResponse)
+        );
     }
 
     #[test]

@@ -342,9 +342,15 @@ pub(super) fn account_tick(cpu: CpuIndex, elapsed: u64) -> Result<bool, Error> {
         let current = local.current;
         let has_fair_ready = local.run_queue.has_fair_threads();
         let mut threads = local.thread_authority();
-        threads.with_thread_mut(current, |_thread, schedule| match schedule.state {
-            ThreadState::Idle => Ok(false),
+        threads.with_thread_mut(current, |thread, schedule| match schedule.state {
+            ThreadState::Idle => {
+                thread.account_runtime_ticks(elapsed);
+                super::account_cpu_time(cpu, thread.role(), elapsed);
+                Ok(false)
+            }
             ThreadState::Running => {
+                thread.account_runtime_ticks(elapsed);
+                super::account_cpu_time(cpu, thread.role(), elapsed);
                 if !schedule.account_fair_ticks(elapsed, super::FAIR_QUANTUM_TICKS) {
                     return Ok(false);
                 }

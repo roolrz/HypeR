@@ -5,7 +5,7 @@
 
 use crate::kernel::accounting::{ResourceDomain, ResourceDomainObject};
 use crate::kernel::capability::{HandleFlags, PreparedHandle, Rights};
-use crate::kernel::inspect::{ObjectInspector, TaskInspector};
+use crate::kernel::inspect::{CpuInspector, MemoryInspector, ObjectInspector, TaskInspector};
 use crate::kernel::mm::user_space::VmarObject;
 use crate::kernel::object::{ObjectPublication, UserExportableObject};
 use crate::kernel::process::{TaskFactory, TaskGroup, TaskGroupObject};
@@ -14,9 +14,9 @@ use super::Error;
 use super::bootstrap::{self, BootProcess};
 
 #[cfg(not(feature = "kernel-self-test"))]
-pub(super) const HANDLE_COUNT: usize = 9;
+pub(super) const HANDLE_COUNT: usize = 11;
 #[cfg(feature = "kernel-self-test")]
-pub(super) const HANDLE_COUNT: usize = 8;
+pub(super) const HANDLE_COUNT: usize = 10;
 
 const PURPOSES: [u32; HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN),
@@ -26,6 +26,8 @@ const PURPOSES: [u32; HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR),
+    purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR),
+    purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR),
     #[cfg(not(feature = "kernel-self-test"))]
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE),
@@ -111,6 +113,20 @@ fn prepare_handles(
             .union(Rights::INSPECT)
             .union(Rights::DERIVE),
     )?;
+    let memory_inspector = prepare_handle(
+        ObjectPublication::try_new(MemoryInspector::try_system(domain).map_err(Error::Inspection)?)
+            .map_err(Error::Object)?,
+        Rights::DUPLICATE
+            .union(Rights::TRANSFER)
+            .union(Rights::INSPECT),
+    )?;
+    let cpu_inspector = prepare_handle(
+        ObjectPublication::try_new(CpuInspector::try_system(domain).map_err(Error::Inspection)?)
+            .map_err(Error::Object)?,
+        Rights::DUPLICATE
+            .union(Rights::TRANSFER)
+            .union(Rights::INSPECT),
+    )?;
     #[cfg(not(feature = "kernel-self-test"))]
     let console = prepare_handle(
         crate::kernel::device::console::SystemConsole::try_publication(domain)
@@ -146,6 +162,8 @@ fn prepare_handles(
         library_directory,
         task_inspector,
         object_inspector,
+        memory_inspector,
+        cpu_inspector,
         root_vmar,
         #[cfg(not(feature = "kernel-self-test"))]
         console,

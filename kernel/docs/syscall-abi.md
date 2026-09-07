@@ -422,6 +422,9 @@ amplification while allowing init to build a restricted view and then pass an
 `object_get_basic_info` may report common identity under `INSPECT`. Lifecycle,
 memory, peer, task, accounting, and hardware state use typed calls such as
 `vmo_get_info` or `resource_domain_get_usage`; there is no topic selector.
+`file_get_info` and `directory_get_info` follow that typed model. They expose
+immutable attributes and observation-only filesystem, mount, and node
+identities, but no reverse lookup and no alleged canonical pathname.
 
 The shared-reference count and active-handle count are different. Process handles
 and in-transit capabilities are active; wait registrations and internal kernel

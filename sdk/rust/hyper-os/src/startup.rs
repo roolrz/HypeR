@@ -72,6 +72,10 @@ pub const TASK_INSPECTOR: StartupPurpose<crate::handle::TaskInspectorObject> =
     StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR as u32);
 pub const OBJECT_INSPECTOR: StartupPurpose<crate::handle::ObjectInspectorObject> =
     StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR as u32);
+pub const MEMORY_INSPECTOR: StartupPurpose<crate::handle::MemoryInspectorObject> =
+    StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR as u32);
+pub const CPU_INSPECTOR: StartupPurpose<crate::handle::CpuInspectorObject> =
+    StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR as u32);
 pub const DYNAMIC_LIBRARY_DIRECTORY: StartupPurpose<DirectoryObject> = StartupPurpose::new(
     hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY as u32,
 );

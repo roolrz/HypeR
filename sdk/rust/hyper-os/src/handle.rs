@@ -67,6 +67,8 @@ object_types!(
     (ProcessBuilderObject, HYPER_NATIVE_OBJECT_PROCESS_BUILDER),
     (TaskInspectorObject, HYPER_NATIVE_OBJECT_TASK_INSPECTOR),
     (ObjectInspectorObject, HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR),
+    (MemoryInspectorObject, HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR),
+    (CpuInspectorObject, HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
 );
 
 /// One Native object-kind value reported by the kernel.
@@ -113,6 +115,8 @@ impl ObjectKind {
             hyper_abi::HYPER_NATIVE_OBJECT_PROCESS_BUILDER => "process-builder",
             hyper_abi::HYPER_NATIVE_OBJECT_TASK_INSPECTOR => "task-inspector",
             hyper_abi::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => "object-inspector",
+            hyper_abi::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => "memory-inspector",
+            hyper_abi::HYPER_NATIVE_OBJECT_CPU_INSPECTOR => "cpu-inspector",
             _ => "unknown",
         }
     }
@@ -138,8 +142,31 @@ impl ObjectKind {
             hyper_abi::HYPER_NATIVE_OBJECT_PROCESS_BUILDER => "staged process construction",
             hyper_abi::HYPER_NATIVE_OBJECT_TASK_INSPECTOR => "task observation",
             hyper_abi::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => "object observation",
+            hyper_abi::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => "memory observation",
+            hyper_abi::HYPER_NATIVE_OBJECT_CPU_INSPECTOR => "CPU-time observation",
             _ => "unrecognized object",
         }
+    }
+}
+
+/// Stable observation identity which never grants object authority.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Koid(NonZeroU64);
+
+impl Koid {
+    pub(crate) const fn from_nonzero(raw: NonZeroU64) -> Self {
+        Self(raw)
+    }
+
+    pub fn from_raw(raw: u64) -> Result<Self> {
+        NonZeroU64::new(raw)
+            .map(Self::from_nonzero)
+            .ok_or(Error::InvalidResponse)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
     }
 }
 
@@ -295,6 +322,13 @@ pub struct HandleInfo {
     pub flags: u32,
 }
 
+/// Kernel-authored identity and kind for the object behind one handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectBasicInfo {
+    pub koid: Koid,
+    pub kind: ObjectKind,
+}
+
 /// Exclusive userspace ownership of one process-local Native handle.
 ///
 /// This type is deliberately neither `Copy` nor `Clone`. Use [`Self::duplicate`]
@@ -342,6 +376,14 @@ impl<T: ObjectType> OwnedHandle<T> {
     /// Queries the kernel-authored kind, rights, and flags for this handle.
     pub fn info(&self) -> Result<HandleInfo> {
         query_info(self.live_raw())
+    }
+
+    /// Queries stable object identity and kind through this handle.
+    ///
+    /// The handle must carry [`Rights::INSPECT`]. The returned KOID is
+    /// observation-only and cannot be converted back into authority.
+    pub fn basic_info(&self) -> Result<ObjectBasicInfo> {
+        query_basic_info(self.live_raw())
     }
 
     /// Creates one independently owned handle with attenuated rights.
@@ -488,6 +530,11 @@ impl<'owner, T: ObjectType> HandleRef<'owner, T> {
         query_info(self.raw)
     }
 
+    /// Queries stable object identity and kind through this borrowed handle.
+    pub fn basic_info(&self) -> Result<ObjectBasicInfo> {
+        query_basic_info(self.raw)
+    }
+
     /// Erases only the borrowed compile-time object kind.
     #[must_use]
     pub fn erase(self) -> HandleRef<'owner, AnyObject> {
@@ -545,6 +592,20 @@ fn query_info(raw: NonZeroU64) -> Result<HandleInfo> {
     })
 }
 
+fn query_basic_info(raw: NonZeroU64) -> Result<ObjectBasicInfo> {
+    decode_basic_info(raw_ops::object_basic_info(raw)?)
+}
+
+fn decode_basic_info(record: hyper_abi::HyperNativeObjectBasicInfo) -> Result<ObjectBasicInfo> {
+    if record.reserved != 0 {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(ObjectBasicInfo {
+        koid: Koid::from_raw(record.koid)?,
+        kind: ObjectKind::from_kernel(record.object_kind)?,
+    })
+}
+
 fn close_raw(raw: NonZeroU64) -> Status {
     raw_ops::close(raw)
 }
@@ -593,6 +654,22 @@ mod raw_ops {
         if record.object_kind == hyper_abi::HYPER_NATIVE_OBJECT_NONE {
             return Err(Error::InvalidResponse);
         }
+        Ok(record)
+    }
+
+    pub(super) fn object_basic_info(
+        raw: NonZeroU64,
+    ) -> Result<hyper_abi::HyperNativeObjectBasicInfo> {
+        let mut record = hyper_abi::HyperNativeObjectBasicInfo {
+            koid: 0,
+            object_kind: 0,
+            reserved: 0,
+        };
+        // SAFETY: `record` is writable for the exact ABI record and the
+        // borrowed handle remains live throughout the syscall.
+        let status =
+            Status::from_raw(unsafe { hyper_sys::object_get_basic_info(raw.get(), &mut record) });
+        status.into_result()?;
         Ok(record)
     }
 }
@@ -658,6 +735,16 @@ mod raw_ops {
             object_kind,
             flags: 0,
             rights,
+        })
+    }
+
+    pub(super) fn object_basic_info(
+        raw: NonZeroU64,
+    ) -> Result<hyper_abi::HyperNativeObjectBasicInfo> {
+        Ok(hyper_abi::HyperNativeObjectBasicInfo {
+            koid: raw.get().saturating_add(0x1_0000),
+            object_kind: (raw.get() & 0xff) as u32,
+            reserved: 0,
         })
     }
 }
@@ -736,6 +823,43 @@ mod tests {
             ObjectKind::from_trusted_raw(hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL)
         );
         Ok(())
+    }
+
+    #[test]
+    fn basic_info_reports_object_identity_without_changing_ownership() -> crate::Result<()> {
+        let raw = NonZeroU64::new(hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL.into())
+            .ok_or(crate::Error::InvalidResponse)?;
+        // SAFETY: the test backend treats this nonzero value as one owner.
+        let handle = unsafe { OwnedHandle::<ByteChannelObject>::from_raw_owned(raw) };
+        let info = handle.basic_info()?;
+        assert_eq!(
+            info.kind,
+            ObjectKind::from_trusted_raw(hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL)
+        );
+        assert_eq!(info.koid.get(), raw.get() + 0x1_0000);
+        assert_eq!(handle.as_handle_ref().basic_info()?, info);
+        Ok(())
+    }
+
+    #[test]
+    fn basic_info_rejects_reserved_data_and_zero_identity() {
+        let valid_kind = hyper_abi::HYPER_NATIVE_OBJECT_EVENT;
+        assert_eq!(
+            super::decode_basic_info(hyper_abi::HyperNativeObjectBasicInfo {
+                koid: 1,
+                object_kind: valid_kind,
+                reserved: 1,
+            }),
+            Err(crate::Error::InvalidResponse)
+        );
+        assert_eq!(
+            super::decode_basic_info(hyper_abi::HyperNativeObjectBasicInfo {
+                koid: 0,
+                object_kind: valid_kind,
+                reserved: 0,
+            }),
+            Err(crate::Error::InvalidResponse)
+        );
     }
 
     #[test]

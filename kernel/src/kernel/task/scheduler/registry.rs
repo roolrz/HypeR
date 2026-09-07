@@ -40,6 +40,7 @@ enum ThreadSlot {
         // extending object lifetime. The detached Thread carries the actual
         // scheduler reference into the reaper until its resources are gone.
         object: crate::kernel::task::ThreadObjectSnapshot,
+        runtime_ticks: u64,
         thread: Option<Box<Thread>>,
     },
 }
@@ -546,10 +547,12 @@ impl ThreadRegistry {
         };
         let object = thread.object_snapshot();
         let name = thread.name_snapshot();
+        let runtime_ticks = thread.runtime_ticks();
         *slot_ref = ThreadSlot::Retiring {
             id,
             name,
             object,
+            runtime_ticks,
             thread: Some(thread),
         };
         Ok(())
@@ -681,14 +684,20 @@ impl ThreadRegistry {
                     name: thread.name_snapshot(),
                     object: thread.object_snapshot(),
                     phase: ThreadObjectRegistryPhase::Resident,
+                    runtime_ticks: thread.runtime_ticks(),
                 }),
                 Some(ThreadSlot::Retiring {
-                    id, name, object, ..
+                    id,
+                    name,
+                    object,
+                    runtime_ticks,
+                    ..
                 }) => Some(ThreadObjectObservation {
                     thread: *id,
                     name: *name,
                     object: *object,
                     phase: ThreadObjectRegistryPhase::Retiring,
+                    runtime_ticks: *runtime_ticks,
                 }),
                 Some(ThreadSlot::Vacant | ThreadSlot::Reserved(_)) | None => None,
             };

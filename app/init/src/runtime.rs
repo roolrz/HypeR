@@ -15,9 +15,9 @@ use hyper_app::{ManifestSource, ServiceGraphLauncher, bootstrap};
 use hyper_os::channel;
 use hyper_os::fs::{Directory, FileRights};
 use hyper_os::handle::{
-    ByteChannelObject, ConsoleObject, DirectoryObject, ObjectInspectorObject, OwnedHandle,
-    ProcessObject, ResourceDomainObject, Rights, RightsOffer, TaskFactoryObject, TaskGroupObject,
-    TaskInspectorObject, TypedObject,
+    ByteChannelObject, ConsoleObject, CpuInspectorObject, DirectoryObject, MemoryInspectorObject,
+    ObjectInspectorObject, OwnedHandle, ProcessObject, ResourceDomainObject, Rights, RightsOffer,
+    TaskFactoryObject, TaskGroupObject, TaskInspectorObject, TypedObject,
 };
 use hyper_os::startup::{self, Startup};
 use hyper_os::task::ProcessBuilder;
@@ -44,6 +44,8 @@ const BOOTSTRAP_TASK_GROUP: &str = "bootstrap.task-group";
 const BOOTSTRAP_RESOURCE_DOMAIN: &str = "bootstrap.resource-domain";
 const BOOTSTRAP_TASK_INSPECTOR: &str = "bootstrap.task-inspector";
 const BOOTSTRAP_OBJECT_INSPECTOR: &str = "bootstrap.object-inspector";
+const BOOTSTRAP_MEMORY_INSPECTOR: &str = "bootstrap.memory-inspector";
+const BOOTSTRAP_CPU_INSPECTOR: &str = "bootstrap.cpu-inspector";
 const CONSOLE_INPUT_IMAGE: &str = "/svc/console-input";
 const CONSOLE_OUTPUT_IMAGE: &str = "/svc/console-output";
 const SESSION_IMAGE: &str = "/svc/session";
@@ -130,6 +132,8 @@ struct RuntimeLauncher {
     domain: OwnedHandle<ResourceDomainObject>,
     task_inspector: OwnedHandle<TaskInspectorObject>,
     object_inspector: OwnedHandle<ObjectInspectorObject>,
+    memory_inspector: OwnedHandle<MemoryInspectorObject>,
+    cpu_inspector: OwnedHandle<CpuInspectorObject>,
     console: OwnedHandle<ConsoleObject>,
     console_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     console_output_channel: Option<OwnedHandle<ByteChannelObject>>,
@@ -177,6 +181,12 @@ impl RuntimeLauncher {
                 .map_err(|_| Error::OperatingSystem)?,
             object_inspector: startup
                 .take(startup::OBJECT_INSPECTOR)
+                .map_err(|_| Error::OperatingSystem)?,
+            memory_inspector: startup
+                .take(startup::MEMORY_INSPECTOR)
+                .map_err(|_| Error::OperatingSystem)?,
+            cpu_inspector: startup
+                .take(startup::CPU_INSPECTOR)
                 .map_err(|_| Error::OperatingSystem)?,
             console: startup
                 .take(startup::CONSOLE)
@@ -329,6 +339,30 @@ impl RuntimeLauncher {
                     builder
                         .add_handle_duplicate(
                             self.object_inspector.as_handle_ref(),
+                            purpose,
+                            RightsOffer::Exact(rights),
+                        )
+                        .map_err(|_| LaunchError::OperatingSystem)?;
+                }
+                (BOOTSTRAP_MEMORY_INSPECTOR, CapabilityOperation::Duplicate)
+                    if plan.capability_kind(service_index, capability_index)
+                        == Some(MemoryInspectorObject::KIND.as_raw()) =>
+                {
+                    builder
+                        .add_handle_duplicate(
+                            self.memory_inspector.as_handle_ref(),
+                            purpose,
+                            RightsOffer::Exact(rights),
+                        )
+                        .map_err(|_| LaunchError::OperatingSystem)?;
+                }
+                (BOOTSTRAP_CPU_INSPECTOR, CapabilityOperation::Duplicate)
+                    if plan.capability_kind(service_index, capability_index)
+                        == Some(CpuInspectorObject::KIND.as_raw()) =>
+                {
+                    builder
+                        .add_handle_duplicate(
+                            self.cpu_inspector.as_handle_ref(),
                             purpose,
                             RightsOffer::Exact(rights),
                         )
@@ -531,6 +565,22 @@ impl AuthorityPolicy for RuntimeLauncher {
                 duplicable: true,
                 creatable: false,
             }),
+            BOOTSTRAP_MEMORY_INSPECTOR => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: MemoryInspectorObject::KIND.as_raw(),
+                rights: observation_rights().bits(),
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            BOOTSTRAP_CPU_INSPECTOR => Some(AuthorityDeclaration {
+                provider: None,
+                object_kind: CpuInspectorObject::KIND.as_raw(),
+                rights: observation_rights().bits(),
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
             _ => None,
         }
     }
@@ -601,6 +651,14 @@ impl AuthorityPolicy for RuntimeLauncher {
             (SHELL_IMAGE, process_contract::OBJECT_INSPECTOR_NAME) => (
                 startup::OBJECT_INSPECTOR.as_raw(),
                 ObjectInspectorObject::KIND.as_raw(),
+            ),
+            (SHELL_IMAGE, process_contract::MEMORY_INSPECTOR_NAME) => (
+                startup::MEMORY_INSPECTOR.as_raw(),
+                MemoryInspectorObject::KIND.as_raw(),
+            ),
+            (SHELL_IMAGE, process_contract::CPU_INSPECTOR_NAME) => (
+                startup::CPU_INSPECTOR.as_raw(),
+                CpuInspectorObject::KIND.as_raw(),
             ),
             (SHELL_IMAGE, _) => return None,
             (_, _) => return None,
@@ -716,6 +774,12 @@ fn inspector_rights() -> Rights {
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
         .union(Rights::DERIVE)
+}
+
+fn observation_rights() -> Rights {
+    Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT)
 }
 
 pub(super) enum LaunchError {

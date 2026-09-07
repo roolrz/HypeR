@@ -3,9 +3,19 @@
 
 //! Public scheduler operations and architecture context-switch boundary.
 
+#[cfg(not(test))]
+mod cpu_time;
 mod queue;
 mod registry;
 mod state;
+
+#[cfg(not(test))]
+use cpu_time::account_cpu_time;
+#[cfg(not(test))]
+pub(crate) use cpu_time::{CpuTimeSnapshot, snapshot as cpu_time_snapshot};
+
+#[cfg(test)]
+pub(super) fn account_cpu_time<T>(_cpu: hyper::cpu::CpuIndex, _role: T, _elapsed: u64) {}
 
 use alloc::boxed::Box;
 use alloc::rc::Rc;

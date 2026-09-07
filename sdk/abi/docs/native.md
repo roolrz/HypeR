@@ -53,6 +53,8 @@ ABI revision: `0`.
 | 15 | `process_builder` | `rendezvous_only` |
 | 16 | `task_inspector` | `general` |
 | 17 | `object_inspector` | `general` |
+| 18 | `memory_inspector` | `general` |
+| 19 | `cpu_inspector` | `general` |
 
 ## Object signals
 
@@ -87,6 +89,8 @@ ABI revision: `0`.
 | `startup_handle_purpose_task_inspector` | `8` |
 | `startup_handle_purpose_object_inspector` | `9` |
 | `startup_handle_purpose_dynamic_library_directory` | `10` |
+| `startup_handle_purpose_memory_inspector` | `11` |
+| `startup_handle_purpose_cpu_inspector` | `12` |
 | `directory_entry_page_capacity` | `4` |
 | `directory_entry_name_max_bytes` | `255` |
 | `directory_entry_kind_file` | `1` |
@@ -156,6 +160,8 @@ ABI revision: `0`.
 - Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.
 - Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.
 - Inspector scans require the exact published page capacity for their record type. Cursor zero starts a scan and a returned next_cursor of zero ends it. Pages and complete scans are weakly consistent with concurrent task, object, and handle-table mutation; generation-qualified handle values prevent slot reuse from aliasing an earlier observation.
+- Memory and CPU inspectors publish immutable point-in-time copies. Their handles grant observation only; they never expose writable accounting storage or allocator and scheduler synchronization to userspace. CPU categories are scheduler-tick observations and a multi-CPU snapshot is weakly consistent across CPUs.
+- File and Directory information reports immutable attributes plus filesystem, mount, and node identities for diagnostics and correlation. These identities do not grant authority, cannot be resolved back into handles, and do not define a pathname; directory entries, hard links, renames, mount namespaces, and unlinks make pathnames namespace-dependent observations rather than object identity.
 - Object wait-many borrows every input handle for the complete wait, canonicalizes duplicate object identities, and selects the lowest input index whose requested mask intersects the winning object's committed level snapshot. Source-handle close after resolution does not cancel the wait.
 - Process terminal detail fields are reason-specific: exit reasons encode the signed status as two's-complement in detail0; fault encodes class in detail0 and code in detail1; task-group stop encodes generation in detail0; unused details are zero.
 - Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.
@@ -214,7 +220,7 @@ element size before any user-memory access.
 | 32 | `object_wait_many` | `items: user_address`, `item_count: element_count`, `deadline: u64` | `index: element_count`, `observed: u64` | — | `items: Read, len=item_count elements, max-elements=64, element-size=16, record=object_wait_item, borrowed-handles=(handle), required-rights=0x4; order=0` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Object` |
 | 33 | `process_get_info` | `process: handle`, `info: user_address`, `info_size: byte_count` | — | `process: Borrow, kind=process, rights=0x8` | `info: Write, len=info_size bytes, max-bytes=32, record=process_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 34 | `task_inspector_scan_processes` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=task_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=96, record=task_process; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
-| 35 | `task_inspector_scan_threads` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=task_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=96, record=task_thread; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 35 | `task_inspector_scan_threads` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=task_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=104, record=task_thread; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 36 | `task_inspector_derive_process` | `inspector: handle`, `process: handle` | `inspector: handle` | `inspector: Borrow, kind=task_inspector, rights=0x1000000b`, `process: Borrow, kind=process, rights=0x8`, `inspector: produce, kind=task_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 37 | `object_inspector_scan_objects` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=object_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=96, record=object_inspection; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
 | 38 | `object_inspector_scan_handles` | `inspector: handle`, `process_koid: u64`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=object_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=40, record=handle_inspection; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
@@ -234,6 +240,10 @@ element size before any user-memory access.
 | 52 | `vmar_unmap` | `vmar: handle`, `address: u64`, `size: byte_count` | — | `vmar: Borrow, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 53 | `vmar_destroy` | `vmar: handle` | — | `vmar: ConsumeOnCommit, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 54 | `directory_read` | `directory: handle`, `cookie: u64`, `records: user_address`, `capacity: element_count`, `options: u32` | `count: element_count`, `next_cookie: u64` | `directory: Borrow, kind=directory, rights=0x10` | `records: Write, len=capacity elements, max-elements=4, element-size=280, record=directory_entry; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
+| 55 | `memory_inspector_read` | `inspector: handle`, `observation: user_address`, `observation_size: byte_count` | — | `inspector: Borrow, kind=memory_inspector, rights=0x8` | `observation: Write, len=observation_size bytes, max-bytes=112, record=memory_observation; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 56 | `cpu_inspector_read` | `inspector: handle`, `observation: user_address`, `observation_size: byte_count` | — | `inspector: Borrow, kind=cpu_inspector, rights=0x8` | `observation: Write, len=observation_size bytes, max-bytes=64, record=cpu_observation; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 57 | `file_get_info` | `file: handle`, `output: user_address`, `output_size: byte_count` | — | `file: Borrow, kind=file, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=40, record=file_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 58 | `directory_get_info` | `directory: handle`, `output: user_address`, `output_size: byte_count` | — | `directory: Borrow, kind=directory, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=32, record=directory_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
 
 ## Public records
 
@@ -247,7 +257,11 @@ element size before any user-memory access.
 | `capability_receive_slot` | 24 | 8 | `handle: u64 @ 0`, `rights: u64 @ 8`, `expected_kind: u32 @ 16`, `flags: u32 @ 20` |
 | `startup_handle` | 16 | 8 | `purpose: u32 @ 0`, `flags: u32 @ 4`, `handle: u64 @ 8` |
 | `task_process` | 96 | 8 | `koid: u64 @ 0`, `phase: u32 @ 8`, `terminal_reason: u32 @ 12`, `pending_threads: u32 @ 16`, `active_threads: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `name: bytes[64] @ 32` |
-| `task_thread` | 96 | 8 | `koid: u64 @ 0`, `process_koid: u64 @ 8`, `role: u32 @ 16`, `registry_phase: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `name: bytes[64] @ 32` |
+| `task_thread` | 104 | 8 | `koid: u64 @ 0`, `process_koid: u64 @ 8`, `role: u32 @ 16`, `registry_phase: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `runtime_ticks: u64 @ 32`, `name: bytes[64] @ 40` |
+| `memory_observation` | 112 | 8 | `captured_at_ns: u64 @ 0`, `page_size: u64 @ 8`, `total_bytes: u64 @ 16`, `reserved_bytes: u64 @ 24`, `managed_bytes: u64 @ 32`, `free_bytes: u64 @ 40`, `used_bytes: u64 @ 48`, `kernel_bytes: u64 @ 56`, `heap_bytes: u64 @ 64`, `page_table_bytes: u64 @ 72`, `user_bytes: u64 @ 80`, `guest_bytes: u64 @ 88`, `unattributed_bytes: u64 @ 96`, `reclaimable_bytes: u64 @ 104` |
+| `cpu_observation` | 64 | 8 | `captured_at_ns: u64 @ 0`, `ticks_per_second: u64 @ 8`, `online_cpus: u64 @ 16`, `idle_ticks: u64 @ 24`, `kernel_thread_ticks: u64 @ 32`, `user_thread_ticks: u64 @ 40`, `vcpu_ticks: u64 @ 48`, `reserved: u64 @ 56` |
 | `object_inspection` | 96 | 8 | `koid: u64 @ 0`, `object_kind: u32 @ 8`, `handle_state: u32 @ 12`, `active_handles: u64 @ 16`, `supported_rights: u64 @ 24`, `strong_references: u64 @ 32`, `kernel_service_references: u64 @ 40`, `scheduler_references: u64 @ 48`, `operation_references: u64 @ 56`, `user_authority_references: u64 @ 64`, `publication_references: u64 @ 72`, `diagnostic_references: u64 @ 80`, `retirement_references: u64 @ 88` |
 | `handle_inspection` | 40 | 8 | `process_koid: u64 @ 0`, `handle: u64 @ 8`, `object_koid: u64 @ 16`, `rights: u64 @ 24`, `object_kind: u32 @ 32`, `flags: u32 @ 36` |
 | `directory_entry` | 280 | 8 | `size: u64 @ 0`, `mode: u32 @ 8`, `kind: u32 @ 12`, `name_length: u32 @ 16`, `reserved: u32 @ 20`, `name: bytes[256] @ 24` |
+| `file_info` | 40 | 8 | `filesystem_id: u64 @ 0`, `mount_id: u64 @ 8`, `node_id: u64 @ 16`, `size: u64 @ 24`, `mode: u32 @ 32`, `reserved: u32 @ 36` |
+| `directory_info` | 32 | 8 | `filesystem_id: u64 @ 0`, `mount_id: u64 @ 8`, `node_id: u64 @ 16`, `mode: u32 @ 24`, `reserved: u32 @ 28` |

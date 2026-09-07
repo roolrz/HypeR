@@ -90,7 +90,29 @@ impl DirectoryPage {
 pub(crate) struct DirectoryObject {
     namespace: FallibleArc<MountNamespace>,
     root: Location,
+    attributes: NodeAttributes,
     _object_charge: CommittedCharge,
+}
+
+/// Observation-only identity for one node at one namespace location.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct NodeLocationInfo {
+    pub(crate) filesystem_id: u64,
+    pub(crate) mount_id: u64,
+    pub(crate) node_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FileInfo {
+    pub(crate) location: NodeLocationInfo,
+    pub(crate) size: u64,
+    pub(crate) mode: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DirectoryInfo {
+    pub(crate) location: NodeLocationInfo,
+    pub(crate) mode: u32,
 }
 
 impl DirectoryObject {
@@ -99,11 +121,7 @@ impl DirectoryObject {
         sponsor: &ResourceDomain,
     ) -> Result<Self, Error> {
         let root = namespace.root();
-        Ok(Self {
-            namespace,
-            root,
-            _object_charge: reserve_object_charge::<Self>(sponsor)?,
-        })
+        Self::try_new(namespace, root, sponsor)
     }
 
     pub(crate) fn open_file(
@@ -166,6 +184,13 @@ impl DirectoryObject {
         Ok(page)
     }
 
+    pub(crate) fn info(&self) -> DirectoryInfo {
+        DirectoryInfo {
+            location: location_info(&self.root),
+            mode: self.attributes.mode(),
+        }
+    }
+
     fn try_new(
         namespace: FallibleArc<MountNamespace>,
         root: Location,
@@ -182,6 +207,7 @@ impl DirectoryObject {
         Ok(Self {
             namespace,
             root,
+            attributes,
             _object_charge: reserve_object_charge::<Self>(sponsor)?,
         })
     }
@@ -232,6 +258,14 @@ impl FileObject {
 
     pub(crate) fn len(&self) -> u64 {
         self.attributes.size()
+    }
+
+    pub(crate) fn info(&self) -> FileInfo {
+        FileInfo {
+            location: location_info(&self.location),
+            size: self.attributes.size(),
+            mode: self.attributes.mode(),
+        }
     }
 
     pub(crate) fn read(&self, offset: u64, destination: &mut [u8]) -> Result<usize, Error> {
@@ -293,6 +327,14 @@ impl KernelObject for FileObject {
         } else {
             common
         }
+    }
+}
+
+fn location_info(location: &Location) -> NodeLocationInfo {
+    NodeLocationInfo {
+        filesystem_id: location.mount().filesystem().id().get(),
+        mount_id: location.mount().id().get(),
+        node_id: location.node().get(),
     }
 }
 

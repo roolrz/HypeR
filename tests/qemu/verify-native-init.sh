@@ -161,6 +161,26 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             ;;
         cd_parent)
             if grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output"; then
+                printf '/bin/free\n' >&3
+                command_phase='free'
+            fi
+            ;;
+        free)
+            if grep -Eq '^Mem:[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB$' "$native_output" &&
+                grep -Eq '^Owners:[[:space:]]+kernel=[0-9]+ MiB heap=[0-9]+ MiB tables=[0-9]+ MiB user=[0-9]+ MiB guest=[0-9]+ MiB other=[0-9]+ MiB$' "$native_output"; then
+                printf '/bin/top\n' >&3
+                command_phase='top'
+            fi
+            ;;
+        top)
+            if grep -Eq 'top - [0-9]+ CPUs[[:space:]]+ticks=[0-9]+ Hz' "$native_output" &&
+                grep -Fxq 'Press q to quit.' "$native_output"; then
+                printf 'q' >&3
+                command_phase='top_exit'
+            fi
+            ;;
+        top_exit)
+            if grep -Eq '^hyper> q?$' "$native_output"; then
                 printf '/bin/echo HYPER_NATIVE_ECHO_OK\n' >&3
                 command_phase='echo'
             fi
@@ -178,8 +198,10 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         grep -Fxq '/' "$native_output" &&
         grep -Fxq 'HYPER_CD_CHILD_OK' "$native_output" &&
         grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output" &&
+        grep -Eq '^Mem:[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB' "$native_output" &&
+        grep -Fxq 'Press q to quit.' "$native_output" &&
         grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output"; then
-        echo "verified Native inspection, linking, directory enumeration, and shell cwd semantics"
+        echo "verified Native inspection, profiling, linking, directory enumeration, and shell cwd semantics"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then

@@ -20,7 +20,7 @@ use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomainObject, ResourceKind,
 };
 use crate::kernel::capability::{HandleInfo, HandleValue, ResolvedWaitable, Rights};
-use crate::kernel::inspect::{ObjectInspector, TaskInspector};
+use crate::kernel::inspect::{CpuInspector, MemoryInspector, ObjectInspector, TaskInspector};
 use crate::kernel::ipc::{
     ByteChannelReadOutcome, ByteChannelServiceError, CapabilityChannelServiceError,
     CapabilityReceiveOutcome,
@@ -244,6 +244,31 @@ impl AllocatingServices for DeferredProcessServices<'_> {
 }
 
 impl DeferredServices for DeferredProcessServices<'_> {
+    fn memory_observation(
+        &self,
+        inspector: HandleValue,
+    ) -> Result<crate::kernel::inspect::MemoryObservation, crate::kernel::inspect::Error> {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<MemoryInspector>(inspector, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        inspector.object().snapshot()
+    }
+
+    fn cpu_observation(
+        &self,
+        inspector: HandleValue,
+    ) -> Result<crate::kernel::task::scheduler::CpuTimeSnapshot, crate::kernel::inspect::Error>
+    {
+        let inspector = self
+            .session
+            .process
+            .resolve_handle::<CpuInspector>(inspector, Rights::INSPECT)
+            .map_err(crate::kernel::inspect::Error::Process)?;
+        Ok(inspector.object().snapshot())
+    }
+
     fn signal_event(
         &self,
         value: HandleValue,
@@ -731,6 +756,20 @@ impl DeferredServices for DeferredProcessServices<'_> {
         output: Option<UserSlice>,
     ) -> Result<(u64, u64), VfsServiceError> {
         crate::kernel::vfs::read_file_at(&self.session.process, file, offset, output)
+    }
+
+    fn file_info(
+        &self,
+        file: HandleValue,
+    ) -> Result<crate::kernel::vfs::FileInfo, VfsServiceError> {
+        crate::kernel::vfs::file_info(&self.session.process, file)
+    }
+
+    fn directory_info(
+        &self,
+        directory: HandleValue,
+    ) -> Result<crate::kernel::vfs::DirectoryInfo, VfsServiceError> {
+        crate::kernel::vfs::directory_info(&self.session.process, directory)
     }
 
     fn create_vmo(

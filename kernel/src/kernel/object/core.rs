@@ -38,6 +38,8 @@ const FILE_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_FILE;
 const PROCESS_BUILDER_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS_BUILDER;
 const TASK_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_TASK_INSPECTOR;
 const OBJECT_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR;
+const MEMORY_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR;
+const CPU_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_CPU_INSPECTOR;
 
 const _: () = assert!(EVENT_OBJECT_KIND != 0);
 const _: () = assert!(BYTE_CHANNEL_OBJECT_KIND != 0);
@@ -54,6 +56,8 @@ const _: () = assert!(CONSOLE_OBJECT_KIND != 0);
 const _: () = assert!(PROCESS_BUILDER_OBJECT_KIND != 0);
 const _: () = assert!(TASK_INSPECTOR_OBJECT_KIND != 0);
 const _: () = assert!(OBJECT_INSPECTOR_OBJECT_KIND != 0);
+const _: () = assert!(MEMORY_INSPECTOR_OBJECT_KIND != 0);
+const _: () = assert!(CPU_INSPECTOR_OBJECT_KIND != 0);
 
 static NEXT_KOID: AtomicU64 = AtomicU64::new(1);
 
@@ -143,6 +147,10 @@ impl ObjectKind {
     pub(crate) const TASK_INSPECTOR: Self = Self(TASK_INSPECTOR_OBJECT_KIND);
     /// Capability-scoped object-graph observation authority.
     pub(crate) const OBJECT_INSPECTOR: Self = Self(OBJECT_INSPECTOR_OBJECT_KIND);
+    /// Capability-scoped physical-memory observation authority.
+    pub(crate) const MEMORY_INSPECTOR: Self = Self(MEMORY_INSPECTOR_OBJECT_KIND);
+    /// Capability-scoped scheduler CPU-time observation authority.
+    pub(crate) const CPU_INSPECTOR: Self = Self(CPU_INSPECTOR_OBJECT_KIND);
 
     /// Validates one userspace-supplied object-kind discriminator.
     ///
@@ -166,7 +174,9 @@ impl ObjectKind {
             | FILE_OBJECT_KIND
             | PROCESS_BUILDER_OBJECT_KIND
             | TASK_INSPECTOR_OBJECT_KIND
-            | OBJECT_INSPECTOR_OBJECT_KIND => Some(Self(raw)),
+            | OBJECT_INSPECTOR_OBJECT_KIND
+            | MEMORY_INSPECTOR_OBJECT_KIND
+            | CPU_INSPECTOR_OBJECT_KIND => Some(Self(raw)),
             _ => None,
         }
     }
