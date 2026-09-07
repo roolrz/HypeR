@@ -18,7 +18,7 @@ Native services, but its contracts do not belong in HypeR Lib.
 
 - AArch64 Native syscall entry using the published machine convention;
 - Native startup-stack parsing, CRT entry, and bootstrap-handle discovery;
-- capability-scoped console and BootFS I/O, object wait, byte and capability
+- capability-scoped console and filesystem I/O, object wait, byte and capability
   channels, staged Process construction, and core lifecycle wrappers;
 - freestanding `memcpy`, `memmove`, `memset`, `memcmp`, and `strlen`;
 - Clang-only cross compilation into `libhyper.a`; and

@@ -230,6 +230,9 @@ pub enum ProducedRights {
     ExactRequested {
         argument: &'static str,
         allowed_rights: u64,
+        /// Optional source handle which must already carry every requested
+        /// right before the produced handle can be published.
+        authority_source: Option<&'static str>,
     },
     Fixed(u64),
 }
@@ -495,12 +498,12 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
     },
     ObjectKind {
         value: 12,
-        name: "boot_fs",
+        name: "directory",
         transfer: TransferClass::General,
     },
     ObjectKind {
         value: 13,
-        name: "boot_file",
+        name: "file",
         transfer: TransferClass::General,
     },
     ObjectKind {
@@ -669,8 +672,9 @@ pub const EVENT_RIGHTS: u64 =
 pub const BYTE_CHANNEL_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE;
 pub const CAPABILITY_CHANNEL_RIGHTS: u64 = BYTE_CHANNEL_RIGHTS;
-pub const BOOT_FS_RIGHTS: u64 = RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ;
-pub const BOOT_FILE_RIGHTS: u64 = BOOT_FS_RIGHTS | RIGHT_EXECUTE;
+pub const DIRECTORY_RIGHTS: u64 =
+    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_EXECUTE;
+pub const FILE_RIGHTS: u64 = DIRECTORY_RIGHTS;
 pub const PROCESS_BUILDER_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_START | RIGHT_REQUEST_STOP;
 pub const PROCESS_SUPERVISOR_RIGHTS: u64 =
@@ -794,7 +798,7 @@ pub const CONSTANTS: &[AbiConstant] = &[
         value: 6,
     },
     AbiConstant {
-        name: "startup_handle_purpose_boot_fs",
+        name: "startup_handle_purpose_root_directory",
         value: 7,
     },
     AbiConstant {
@@ -854,11 +858,11 @@ pub const CONSTANTS: &[AbiConstant] = &[
         value: CONSOLE_MAX_TRANSFER_BYTES as u64,
     },
     AbiConstant {
-        name: "bootfs_max_path_bytes",
+        name: "directory_max_path_bytes",
         value: 4096,
     },
     AbiConstant {
-        name: "bootfs_max_read_bytes",
+        name: "file_max_read_bytes",
         value: 64 * 1024,
     },
     AbiConstant {
@@ -2026,12 +2030,12 @@ const CONSOLE_IO_FAILURE_RESULTS: &[FailureResults] = &[FailureResults {
     results: CONSOLE_IO_WOULD_BLOCK_RESULTS,
 }];
 
-const BOOTFS_OPEN_ARGUMENTS: &[Argument] = &[
+const DIRECTORY_OPEN_FILE_ARGUMENTS: &[Argument] = &[
     Argument {
-        name: "boot_fs",
+        name: "directory",
         kind: ValueKind::Handle,
         handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("boot_fs"),
+            object: ObjectConstraint::Kind("directory"),
             required_rights: RIGHT_READ,
             disposition: HandleDisposition::Borrow,
         }),
@@ -2071,24 +2075,25 @@ const BOOTFS_OPEN_ARGUMENTS: &[Argument] = &[
         memory: None,
     },
 ];
-const BOOTFS_OPEN_RESULTS: &[ResultValue] = &[ResultValue {
+const DIRECTORY_OPEN_FILE_RESULTS: &[ResultValue] = &[ResultValue {
     name: "file",
     kind: ValueKind::Handle,
     handle: Some(ProducedHandle {
-        object: ProducedObject::Kind("boot_file"),
+        object: ProducedObject::Kind("file"),
         rights: ProducedRights::ExactRequested {
             argument: "requested_rights",
-            allowed_rights: BOOT_FILE_RIGHTS,
+            allowed_rights: FILE_RIGHTS,
+            authority_source: Some("directory"),
         },
     }),
 }];
 
-const BOOT_FILE_READ_ARGUMENTS: &[Argument] = &[
+const FILE_READ_AT_ARGUMENTS: &[Argument] = &[
     Argument {
         name: "file",
         kind: ValueKind::Handle,
         handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("boot_file"),
+            object: ObjectConstraint::Kind("file"),
             required_rights: RIGHT_READ,
             disposition: HandleDisposition::Borrow,
         }),
@@ -2128,7 +2133,7 @@ const BOOT_FILE_READ_ARGUMENTS: &[Argument] = &[
         memory: None,
     },
 ];
-const BOOT_FILE_READ_RESULTS: &[ResultValue] = &[
+const FILE_READ_AT_RESULTS: &[ResultValue] = &[
     ResultValue {
         name: "actual_bytes",
         kind: ValueKind::ByteCount,
@@ -2176,7 +2181,7 @@ const PROCESS_BUILDER_CREATE_ARGUMENTS: &[Argument] = &[
         name: "executable",
         kind: ValueKind::Handle,
         handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("boot_file"),
+            object: ObjectConstraint::Kind("file"),
             required_rights: RIGHT_EXECUTE,
             disposition: HandleDisposition::Borrow,
         }),
@@ -2996,10 +3001,10 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 17,
-        name: "bootfs_open",
+        name: "directory_open_file",
         feature: FeatureGate::Core,
-        arguments: BOOTFS_OPEN_ARGUMENTS,
-        results: BOOTFS_OPEN_RESULTS,
+        arguments: DIRECTORY_OPEN_FILE_ARGUMENTS,
+        results: DIRECTORY_OPEN_FILE_RESULTS,
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
@@ -3010,10 +3015,10 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 18,
-        name: "boot_file_read",
+        name: "file_read_at",
         feature: FeatureGate::Core,
-        arguments: BOOT_FILE_READ_ARGUMENTS,
-        results: BOOT_FILE_READ_RESULTS,
+        arguments: FILE_READ_AT_ARGUMENTS,
+        results: FILE_READ_AT_RESULTS,
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
@@ -3388,6 +3393,7 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "Directory lookup is capability-relative. A leading slash restarts at that Directory's traversal root, and parent components cannot escape it. Every open requires read traversal authority, and every requested File right must already be present on the source Directory before the result is further bounded by the File object's node-specific ceiling.",
     "Native task and object inspectors are immutable capability-scoped views. Process, thread, and object KOIDs plus scan cursors are observation-only values and can never be exchanged for operational authority. Out-of-scope targeted lookup returns not_found.",
     "Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.",
     "Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.",

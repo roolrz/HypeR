@@ -12,10 +12,10 @@ use hyper_app::manifest::{
 };
 use hyper_app::supervision::{self, SupportError};
 use hyper_app::{ManifestSource, ServiceGraphLauncher, bootstrap};
-use hyper_os::bootfs::{BootFileRights, BootFs};
 use hyper_os::channel;
+use hyper_os::fs::{Directory, FileRights};
 use hyper_os::handle::{
-    BootFsObject, ByteChannelObject, ConsoleObject, ObjectInspectorObject, OwnedHandle,
+    ByteChannelObject, ConsoleObject, DirectoryObject, ObjectInspectorObject, OwnedHandle,
     ProcessObject, ResourceDomainObject, Rights, RightsOffer, TaskFactoryObject, TaskGroupObject,
     TaskInspectorObject, TypedObject,
 };
@@ -38,7 +38,7 @@ const SESSION_CLIENT_ERROR_CHANNEL: &str = "bootstrap.session-client-error-chann
 const SHELL_INPUT_CHANNEL: &str = "bootstrap.shell-input-channel";
 const SHELL_OUTPUT_CHANNEL: &str = "bootstrap.shell-output-channel";
 const SHELL_ERROR_CHANNEL: &str = "bootstrap.shell-error-channel";
-const BOOTSTRAP_BOOT_FS: &str = "bootstrap.boot-fs";
+const BOOTSTRAP_ROOT_DIRECTORY: &str = "bootstrap.root-directory";
 const BOOTSTRAP_TASK_FACTORY: &str = "bootstrap.task-factory";
 const BOOTSTRAP_TASK_GROUP: &str = "bootstrap.task-group";
 const BOOTSTRAP_RESOURCE_DOMAIN: &str = "bootstrap.resource-domain";
@@ -52,10 +52,12 @@ const SHELL_IMAGE: &str = "/bin/sh";
 #[inline(never)]
 pub(super) fn run(startup: &mut Startup<'_>) -> Result<Infallible, Error> {
     hyper_os::require_core_abi().map_err(|_| Error::OperatingSystem)?;
-    let boot_fs = startup.take_boot_fs().map_err(|_| Error::OperatingSystem)?;
+    let root_directory = startup
+        .take_root_directory()
+        .map_err(|_| Error::OperatingSystem)?;
     let mut manifest_buffer = [0_u8; MAX_MANIFEST_BYTES];
-    let source = LoadedManifest::load(&boot_fs, &mut manifest_buffer)?;
-    let mut launcher = RuntimeLauncher::from_startup(startup, boot_fs)?;
+    let source = LoadedManifest::load(&root_directory, &mut manifest_buffer)?;
+    let mut launcher = RuntimeLauncher::from_startup(startup, root_directory)?;
     match bootstrap(&source, &mut launcher) {
         Ok(never) => match never {},
         Err(error) => {
@@ -88,11 +90,11 @@ struct LoadedManifest<'buffer> {
 impl<'buffer> LoadedManifest<'buffer> {
     #[inline(never)]
     fn load(
-        boot_fs: &BootFs,
+        root_directory: &Directory,
         buffer: &'buffer mut [u8; MAX_MANIFEST_BYTES],
     ) -> Result<Self, Error> {
-        let file = boot_fs
-            .open(MANIFEST_PATH, BootFileRights::READ)
+        let file = root_directory
+            .open(MANIFEST_PATH, FileRights::READ)
             .map_err(|_| Error::OperatingSystem)?;
         let file_size = file.size().map_err(|_| Error::OperatingSystem)?;
         let length = usize::try_from(file_size)
@@ -100,7 +102,7 @@ impl<'buffer> LoadedManifest<'buffer> {
             .filter(|length| *length <= MAX_MANIFEST_BYTES)
             .ok_or(Error::Source)?;
         let target = buffer.get_mut(..length).ok_or(Error::Source)?;
-        file.read_exact(0, target)
+        file.read_exact_at(0, target)
             .map_err(|_| Error::OperatingSystem)?;
         core::str::from_utf8(target).map_err(|_| Error::Source)?;
         Ok(Self { bytes: target })
@@ -121,7 +123,7 @@ impl ManifestSource for LoadedManifest<'_> {
 }
 
 struct RuntimeLauncher {
-    boot_fs: BootFs,
+    root_directory: Directory,
     factory: OwnedHandle<TaskFactoryObject>,
     group: OwnedHandle<TaskGroupObject>,
     domain: OwnedHandle<ResourceDomainObject>,
@@ -142,7 +144,7 @@ struct RuntimeLauncher {
 }
 
 impl RuntimeLauncher {
-    fn from_startup(startup: &mut Startup<'_>, boot_fs: BootFs) -> Result<Self, Error> {
+    fn from_startup(startup: &mut Startup<'_>, root_directory: Directory) -> Result<Self, Error> {
         let (console_input_channel, session_input_channel) =
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         let (session_output_channel, console_output_channel) =
@@ -154,7 +156,7 @@ impl RuntimeLauncher {
         let (shell_error_channel, session_client_error_channel) =
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         Ok(Self {
-            boot_fs,
+            root_directory,
             factory: startup
                 .take(startup::TASK_FACTORY)
                 .map_err(|_| Error::OperatingSystem)?,
@@ -204,8 +206,8 @@ impl RuntimeLauncher {
         plan: &LaunchPlan,
     ) -> Result<OwnedHandle<ProcessObject>, LaunchError> {
         let executable = self
-            .boot_fs
-            .open(service.image(), BootFileRights::EXECUTE)
+            .root_directory
+            .open(service.image(), FileRights::EXECUTE)
             .map_err(|_| LaunchError::OperatingSystem)?;
         let builder = ProcessBuilder::create(
             self.factory.as_handle_ref(),
@@ -242,13 +244,13 @@ impl RuntimeLauncher {
                         )
                         .map_err(|_| LaunchError::OperatingSystem)?;
                 }
-                (BOOTSTRAP_BOOT_FS, CapabilityOperation::Duplicate)
+                (BOOTSTRAP_ROOT_DIRECTORY, CapabilityOperation::Duplicate)
                     if plan.capability_kind(service_index, capability_index)
-                        == Some(BootFsObject::KIND.as_raw()) =>
+                        == Some(DirectoryObject::KIND.as_raw()) =>
                 {
                     builder
                         .add_handle_duplicate(
-                            self.boot_fs.as_handle_ref(),
+                            self.root_directory.as_handle_ref(),
                             purpose,
                             RightsOffer::Exact(rights),
                         )
@@ -463,10 +465,10 @@ impl AuthorityPolicy for RuntimeLauncher {
                 duplicable: false,
                 creatable: false,
             }),
-            BOOTSTRAP_BOOT_FS => Some(AuthorityDeclaration {
+            BOOTSTRAP_ROOT_DIRECTORY => Some(AuthorityDeclaration {
                 provider: None,
-                object_kind: BootFsObject::KIND.as_raw(),
-                rights: boot_fs_rights().bits(),
+                object_kind: DirectoryObject::KIND.as_raw(),
+                rights: root_directory_rights().bits(),
                 movable: false,
                 duplicable: true,
                 creatable: false,
@@ -559,9 +561,10 @@ impl AuthorityPolicy for RuntimeLauncher {
                 stdio_contract::STANDARD_ERROR.as_raw(),
                 ByteChannelObject::KIND.as_raw(),
             ),
-            (SHELL_IMAGE, process_contract::BOOT_FS_NAME) => {
-                (startup::BOOT_FS.as_raw(), BootFsObject::KIND.as_raw())
-            }
+            (SHELL_IMAGE, process_contract::ROOT_DIRECTORY_NAME) => (
+                startup::ROOT_DIRECTORY.as_raw(),
+                DirectoryObject::KIND.as_raw(),
+            ),
             (SHELL_IMAGE, process_contract::TASK_FACTORY_NAME) => (
                 startup::TASK_FACTORY.as_raw(),
                 TaskFactoryObject::KIND.as_raw(),
@@ -595,6 +598,7 @@ impl AuthorityPolicy for RuntimeLauncher {
             "inspect" => Some(Rights::INSPECT.bits()),
             "read" => Some(Rights::READ.bits()),
             "write" => Some(Rights::WRITE.bits()),
+            "execute" => Some(Rights::EXECUTE.bits()),
             "create-process" => Some(Rights::CREATE_PROCESS.bits()),
             "attach-process" => Some(Rights::TASK_GROUP_ATTACH_PROCESS.bits()),
             "sponsor" => Some(Rights::RESOURCE_DOMAIN_SPONSOR.bits()),
@@ -659,11 +663,12 @@ fn byte_channel_rights() -> Rights {
         .union(Rights::WRITE)
 }
 
-fn boot_fs_rights() -> Rights {
+fn root_directory_rights() -> Rights {
     Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
         .union(Rights::READ)
+        .union(Rights::EXECUTE)
 }
 
 fn task_factory_rights() -> Rights {

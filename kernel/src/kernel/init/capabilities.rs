@@ -5,7 +5,6 @@
 
 use crate::kernel::accounting::{ResourceDomain, ResourceDomainObject};
 use crate::kernel::capability::{HandleFlags, PreparedHandle, Rights};
-use crate::kernel::fs::BootFs;
 use crate::kernel::inspect::{ObjectInspector, TaskInspector};
 use crate::kernel::object::{ObjectPublication, UserExportableObject};
 use crate::kernel::process::{TaskFactory, TaskGroup, TaskGroupObject};
@@ -22,7 +21,7 @@ const PURPOSES: [u32; HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_GROUP),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_FACTORY),
-    purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_BOOT_FS),
+    purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_DIRECTORY),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR),
     #[cfg(not(feature = "kernel-self-test"))]
@@ -48,8 +47,10 @@ fn prepare_handles(
     let task_factory =
         ObjectPublication::try_new(TaskFactory::try_new(domain).map_err(Error::TaskObject)?)
             .map_err(Error::Object)?;
-    let boot_fs = ObjectPublication::try_new(BootFs::try_new(domain).map_err(Error::BootFs)?)
-        .map_err(Error::Object)?;
+    let root_directory = ObjectPublication::try_new(
+        crate::kernel::vfs::root_directory(domain).map_err(Error::RootDirectory)?,
+    )
+    .map_err(Error::Object)?;
     let task_inspector =
         ObjectPublication::try_new(TaskInspector::try_system(domain).map_err(Error::Inspection)?)
             .map_err(Error::Object)?;
@@ -87,11 +88,12 @@ fn prepare_handles(
                 .union(Rights::CREATE_TASK_GROUP),
         )?,
         prepare_handle(
-            boot_fs,
+            root_directory,
             Rights::DUPLICATE
                 .union(Rights::TRANSFER)
                 .union(Rights::INSPECT)
-                .union(Rights::READ),
+                .union(Rights::READ)
+                .union(Rights::EXECUTE),
         )?,
         prepare_handle(
             task_inspector,

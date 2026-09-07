@@ -26,7 +26,7 @@ HypeR port of the Rust standard library without adopting the standard
 library's unstable internal platform interfaces as its own API.
 
 The safe layer includes bounded byte streams, transactional capability
-rendezvous, startup-capability parsing, BootFS access, physical and emergency
+rendezvous, startup-capability parsing, directory access, physical and emergency
 Console access, object waits, and staged Process construction. Rust owners keep
 MOVE operations recoverable until the kernel commits them, while typed receive
 slots validate object kind and exact rights before publishing a capability to

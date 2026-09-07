@@ -20,7 +20,6 @@ use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomainObject, ResourceKind,
 };
 use crate::kernel::capability::{HandleInfo, HandleValue, ResolvedWaitable, Rights};
-use crate::kernel::fs::BootFsServiceError;
 use crate::kernel::inspect::{ObjectInspector, TaskInspector};
 use crate::kernel::ipc::{
     ByteChannelReadOutcome, ByteChannelServiceError, CapabilityChannelServiceError,
@@ -37,6 +36,7 @@ use crate::kernel::process::{
     TerminalReason, UserExecution, UserThread, UserThreadPhase,
 };
 use crate::kernel::task::scheduler::CpuMask;
+use crate::kernel::vfs::VfsServiceError;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum NativeRunAction {
@@ -698,22 +698,22 @@ impl DeferredServices for DeferredProcessServices<'_> {
         Ok(console.object().try_write(&bytes[..length])?)
     }
 
-    fn open_bootfs(
+    fn open_file(
         &self,
         root: HandleValue,
         path: UserSlice,
         rights: Rights,
-    ) -> Result<HandleValue, BootFsServiceError> {
-        crate::kernel::fs::open_bootfs(&self.session.process, root, path, rights)
+    ) -> Result<HandleValue, VfsServiceError> {
+        crate::kernel::vfs::open_file(&self.session.process, root, path, rights)
     }
 
-    fn read_boot_file(
+    fn read_file_at(
         &self,
         file: HandleValue,
         offset: u64,
         output: Option<UserSlice>,
-    ) -> Result<(u64, u64), BootFsServiceError> {
-        crate::kernel::fs::read_boot_file(&self.session.process, file, offset, output)
+    ) -> Result<(u64, u64), VfsServiceError> {
+        crate::kernel::vfs::read_file_at(&self.session.process, file, offset, output)
     }
 
     fn create_process_builder(

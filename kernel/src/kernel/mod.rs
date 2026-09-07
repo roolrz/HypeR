@@ -20,10 +20,11 @@ pub mod crash;
 pub mod debug;
 pub mod device;
 pub(crate) mod entry;
-pub(crate) mod fs;
 #[cfg(not(feature = "kernel-self-test"))]
 pub(crate) mod init;
 pub(crate) mod inspect;
+#[allow(dead_code)]
+pub(crate) mod io_cache;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod ipc;
 pub mod irq;
@@ -36,4 +37,5 @@ pub(crate) mod reaper;
 pub mod sync;
 pub mod task;
 pub mod time;
+pub(crate) mod vfs;
 pub mod vm;

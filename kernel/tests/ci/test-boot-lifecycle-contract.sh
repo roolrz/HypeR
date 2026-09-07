@@ -59,9 +59,9 @@ check
 swap_calls 'memory must precede scheduler initialization' \
     'crate::kernel::mm::initialize' 'crate::kernel::task::initialize'
 swap_calls 'memory must precede initial-root publication' \
-    'crate::kernel::mm::initialize' 'crate::kernel::fs::initialize'
+    'crate::kernel::mm::initialize' 'crate::kernel::vfs::initialize'
 swap_calls 'initial-root publication must precede scheduler initialization' \
-    'crate::kernel::fs::initialize' 'crate::kernel::task::initialize'
+    'crate::kernel::vfs::initialize' 'crate::kernel::task::initialize'
 swap_calls 'SMP must precede address-space sealing' \
     'crate::kernel::cpu::initialize' 'crate::kernel::mm::seal_address_space'
 swap_calls 'allocator caches must follow frozen SMP admission' \

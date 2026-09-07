@@ -173,15 +173,15 @@ hyper_call_result_t hyper_console_write(
         0);
 }
 
-hyper_call_result_t hyper_bootfs_open(
-    hyper_native_handle_t boot_fs,
+hyper_call_result_t hyper_directory_open_file(
+    hyper_native_handle_t directory,
     const void *path,
     size_t path_size,
     uint64_t requested_rights)
 {
     return hyper_native_call6(
-        HYPER_NATIVE_SYS_BOOTFS_OPEN,
-        boot_fs,
+        HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE,
+        directory,
         (uintptr_t)path,
         path_size,
         requested_rights,
@@ -189,14 +189,14 @@ hyper_call_result_t hyper_bootfs_open(
         0);
 }
 
-hyper_call_result_t hyper_boot_file_read(
+hyper_call_result_t hyper_file_read_at(
     hyper_native_handle_t file,
     uint64_t offset,
     void *output,
     size_t output_capacity)
 {
     return hyper_native_call6(
-        HYPER_NATIVE_SYS_BOOT_FILE_READ,
+        HYPER_NATIVE_SYS_FILE_READ_AT,
         file,
         0,
         offset,

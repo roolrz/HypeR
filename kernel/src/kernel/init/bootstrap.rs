@@ -4,7 +4,7 @@
 //! Fallible construction of one dormant boot Process.
 
 use hyper::exec::startup::{Layout as StackLayout, StartupHandle};
-use hyper::fs::ramfs::NodeKind;
+use hyper::fs::NodeKind;
 
 use crate::kernel::accounting::ResourceDomain;
 use crate::kernel::capability::PreparedHandle;
@@ -32,7 +32,7 @@ pub(super) fn prepare(
     group: &TaskGroup,
     domain: &ResourceDomain,
 ) -> Result<BootProcess, Error> {
-    let executable = crate::kernel::fs::lookup(path)
+    let executable = crate::kernel::vfs::lookup(path, domain)
         .map_err(Error::FileSystem)?
         .ok_or(Error::Missing)?;
     if executable.kind() != NodeKind::File {
@@ -41,6 +41,7 @@ pub(super) fn prepare(
     if !executable.is_executable() {
         return Err(Error::NotExecutable);
     }
+    let executable = executable.into_executable().ok_or(Error::NotExecutable)?;
     let stack_layout = StackLayout::try_new(
         crate::kernel::process::INITIAL_STACK_TOP,
         arguments,
@@ -49,7 +50,7 @@ pub(super) fn prepare(
     )
     .map_err(Error::Stack)?;
     let loaded =
-        load_native(executable.data(), domain.clone(), stack_layout).map_err(Error::Image)?;
+        load_native(executable.bytes(), domain.clone(), stack_layout).map_err(Error::Image)?;
     let prepared = match PreparedProcess::try_new(
         loaded.image,
         group.clone(),

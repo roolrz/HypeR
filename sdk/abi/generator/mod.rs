@@ -696,6 +696,7 @@ fn validate_results(
             ProducedRights::ExactRequested {
                 argument,
                 allowed_rights,
+                authority_source,
             } => {
                 if !syscall.arguments.iter().any(|candidate| {
                     candidate.name == argument && candidate.kind == ValueKind::Rights
@@ -708,6 +709,16 @@ fn validate_results(
                 if allowed_rights == 0 || allowed_rights & !supported_rights != 0 {
                     return invalid(format!(
                         "syscall {} result {} allows undeclared or empty object rights",
+                        syscall.name, result.name
+                    ));
+                }
+                if let Some(source) = authority_source
+                    && !syscall.arguments.iter().any(|candidate| {
+                        candidate.name == source && candidate.kind == ValueKind::Handle
+                    })
+                {
+                    return invalid(format!(
+                        "syscall {} result {} names invalid authority source handle {source}",
                         syscall.name, result.name
                     ));
                 }
@@ -1726,7 +1737,12 @@ fn describe_produced_handle(name: &str, handle: schema::ProducedHandle) -> Strin
         ProducedRights::ExactRequested {
             argument,
             allowed_rights,
-        } => format!("exact-from({argument}), allowed=0x{allowed_rights:x}"),
+            authority_source,
+        } => {
+            let authority = authority_source
+                .map_or_else(String::new, |source| format!(", required-from={source}"));
+            format!("exact-from({argument}), allowed=0x{allowed_rights:x}{authority}")
+        }
         ProducedRights::Fixed(mask) => format!("fixed=0x{mask:x}"),
     };
     format!("`{name}: produce, {object}, {rights}`")
@@ -2234,10 +2250,10 @@ mod tests {
     }
 
     #[test]
-    fn bootfs_open_grants_exact_bounded_rights() {
+    fn directory_open_file_grants_exact_bounded_rights() {
         let syscall = schema::SYSCALLS
             .iter()
-            .find(|syscall| syscall.name == "bootfs_open");
+            .find(|syscall| syscall.name == "directory_open_file");
         assert!(syscall.is_some());
         let Some(syscall) = syscall else {
             return;
@@ -2245,10 +2261,11 @@ mod tests {
         assert!(matches!(
             syscall.results[0].handle,
             Some(schema::ProducedHandle {
-                object: ProducedObject::Kind("boot_file"),
+                object: ProducedObject::Kind("file"),
                 rights: ProducedRights::ExactRequested {
                     argument: "requested_rights",
-                    allowed_rights: schema::BOOT_FILE_RIGHTS,
+                    allowed_rights: schema::FILE_RIGHTS,
+                    authority_source: Some("directory"),
                 },
             })
         ));
@@ -2259,7 +2276,7 @@ mod tests {
         let mut calls = schema::SYSCALLS.to_vec();
         let syscall = calls
             .iter_mut()
-            .find(|syscall| syscall.name == "bootfs_open");
+            .find(|syscall| syscall.name == "directory_open_file");
         assert!(syscall.is_some());
         let Some(syscall) = syscall else {
             return;
@@ -2273,6 +2290,7 @@ mod tests {
         handle.rights = ProducedRights::ExactRequested {
             argument: "requested_rights",
             allowed_rights: 1u64 << 63,
+            authority_source: Some("directory"),
         };
         syscall.results = Box::leak(results.into_boxed_slice());
         let candidate = AbiSchema {
@@ -2281,6 +2299,37 @@ mod tests {
         };
         assert!(
             matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("undeclared or empty object rights"))
+        );
+    }
+
+    #[test]
+    fn rejects_an_unknown_exact_rights_authority_source() {
+        let mut calls = schema::SYSCALLS.to_vec();
+        let syscall = calls
+            .iter_mut()
+            .find(|syscall| syscall.name == "directory_open_file");
+        assert!(syscall.is_some());
+        let Some(syscall) = syscall else {
+            return;
+        };
+        let mut results = syscall.results.to_vec();
+        let handle = results[0].handle.as_mut();
+        assert!(handle.is_some());
+        let Some(handle) = handle else {
+            return;
+        };
+        handle.rights = ProducedRights::ExactRequested {
+            argument: "requested_rights",
+            allowed_rights: schema::FILE_RIGHTS,
+            authority_source: Some("missing_source"),
+        };
+        syscall.results = Box::leak(results.into_boxed_slice());
+        let candidate = AbiSchema {
+            syscalls: Box::leak(calls.into_boxed_slice()),
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("invalid authority source handle"))
         );
     }
 
@@ -2452,8 +2501,8 @@ mod tests {
             ("vmo", TransferClass::General),
             ("vmar", TransferClass::RendezvousOnly),
             ("console", TransferClass::General),
-            ("boot_fs", TransferClass::General),
-            ("boot_file", TransferClass::General),
+            ("directory", TransferClass::General),
+            ("file", TransferClass::General),
             ("capability_channel", TransferClass::RendezvousOnly),
             ("process_builder", TransferClass::RendezvousOnly),
             ("task_inspector", TransferClass::General),
