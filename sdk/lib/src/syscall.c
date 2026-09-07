@@ -189,6 +189,22 @@ hyper_call_result_t hyper_directory_open_file(
         0);
 }
 
+hyper_call_result_t hyper_directory_open_directory(
+    hyper_native_handle_t directory,
+    const void *path,
+    size_t path_size,
+    uint64_t requested_rights)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY,
+        directory,
+        (uintptr_t)path,
+        path_size,
+        requested_rights,
+        0,
+        0);
+}
+
 hyper_call_result_t hyper_file_read_at(
     hyper_native_handle_t file,
     uint64_t offset,
@@ -203,6 +219,106 @@ hyper_call_result_t hyper_file_read_at(
         (uintptr_t)output,
         output_capacity,
         0);
+}
+
+hyper_call_result_t hyper_vmo_create(uint64_t size)
+{
+    return hyper_native_call6(HYPER_NATIVE_SYS_VMO_CREATE, size, 0, 0, 0, 0, 0);
+}
+
+hyper_call_result_t hyper_file_create_executable_vmo(hyper_native_handle_t file)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO, file, 0, 0, 0, 0, 0);
+}
+
+hyper_native_status_t hyper_vmo_read(
+    hyper_native_handle_t vmo,
+    uint64_t offset,
+    void *output,
+    size_t byte_count)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VMO_READ,
+        vmo,
+        offset,
+        (uintptr_t)output,
+        byte_count,
+        0,
+        0).status;
+}
+
+hyper_native_status_t hyper_vmo_write(
+    hyper_native_handle_t vmo,
+    uint64_t offset,
+    const void *input,
+    size_t byte_count)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VMO_WRITE,
+        vmo,
+        offset,
+        (uintptr_t)input,
+        byte_count,
+        0,
+        0).status;
+}
+
+hyper_call_result_t hyper_vmar_allocate(
+    hyper_native_handle_t parent,
+    uintptr_t address,
+    size_t size)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VMAR_ALLOCATE, parent, address, size, 0, 0, 0);
+}
+
+hyper_native_status_t hyper_vmar_map(
+    hyper_native_handle_t vmar,
+    hyper_native_handle_t vmo,
+    uint64_t vmo_offset,
+    uintptr_t address,
+    size_t size,
+    uint32_t permissions)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VMAR_MAP,
+        vmar,
+        vmo,
+        vmo_offset,
+        address,
+        size,
+        permissions).status;
+}
+
+hyper_native_status_t hyper_vmar_protect(
+    hyper_native_handle_t vmar,
+    uintptr_t address,
+    size_t size,
+    uint32_t permissions)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VMAR_PROTECT,
+        vmar,
+        address,
+        size,
+        permissions,
+        0,
+        0).status;
+}
+
+hyper_native_status_t hyper_vmar_unmap(
+    hyper_native_handle_t vmar,
+    uintptr_t address,
+    size_t size)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VMAR_UNMAP, vmar, address, size, 0, 0, 0).status;
+}
+
+hyper_native_status_t hyper_vmar_destroy(hyper_native_handle_t vmar)
+{
+    return hyper_native_call6(HYPER_NATIVE_SYS_VMAR_DESTROY, vmar, 0, 0, 0, 0, 0).status;
 }
 
 hyper_call_result_t hyper_process_builder_create(

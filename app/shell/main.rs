@@ -40,6 +40,11 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
     let output = startup.take(stdio::STANDARD_OUTPUT).map_err(Error::from)?;
     let error = startup.take(stdio::STANDARD_ERROR).map_err(Error::from)?;
     let root_directory = startup.take_root_directory().map_err(Error::from)?;
+    let library_directory = Directory::from_handle(
+        startup
+            .take(startup::DYNAMIC_LIBRARY_DIRECTORY)
+            .map_err(Error::from)?,
+    );
     let factory = startup.take(startup::TASK_FACTORY).map_err(Error::from)?;
     let group = startup.take(startup::TASK_GROUP).map_err(Error::from)?;
     let domain = startup
@@ -51,6 +56,7 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
         .map_err(Error::from)?;
     let authorities = CommandAuthorities {
         root_directory,
+        library_directory,
         factory,
         group,
         domain,
@@ -85,9 +91,10 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
                         write(&error, b"sh: command line is too long\n")?;
                     } else if line_length != 0 {
                         let command = line.get(..line_length).ok_or(Error::Protocol)?;
-                        match execute_line(command, &authorities, &input, &output, &error)? {
-                            CommandFlow::Continue => {}
-                            CommandFlow::Exit => return Ok(ExitCode::SUCCESS),
+                        match execute_line(command, &authorities, &input, &output, &error) {
+                            Ok(CommandFlow::Continue) => {}
+                            Ok(CommandFlow::Exit) => return Ok(ExitCode::SUCCESS),
+                            Err(command_error) => write(&error, command_error.message())?,
                         }
                     }
                     line_length = 0;
@@ -199,6 +206,13 @@ fn launch_command(
             .add_argument(command.argument(index).ok_or(Error::InvalidCommand)?)
             .map_err(Error::from)?;
     }
+    builder
+        .add_handle_duplicate(
+            authorities.library_directory.as_handle_ref(),
+            startup::DYNAMIC_LIBRARY_DIRECTORY.as_raw(),
+            RightsOffer::Exact(Rights::READ.union(Rights::EXECUTE)),
+        )
+        .map_err(|_| Error::InvalidCommand)?;
 
     let (parent_input, child_input) = channel::create_pair().map_err(Error::from)?;
     let (child_output, parent_output) = channel::create_pair().map_err(Error::from)?;
@@ -381,6 +395,7 @@ fn write(destination: &OwnedHandle<ByteChannelObject>, bytes: &[u8]) -> Result<(
 
 struct CommandAuthorities {
     root_directory: Directory,
+    library_directory: Directory,
     factory: OwnedHandle<TaskFactoryObject>,
     group: OwnedHandle<TaskGroupObject>,
     domain: OwnedHandle<ResourceDomainObject>,
@@ -410,6 +425,17 @@ enum Error {
     InvalidCommand,
     InputClosed,
     Protocol,
+}
+
+impl Error {
+    const fn message(&self) -> &'static [u8] {
+        match self {
+            Self::OperatingSystem => b"sh: operating-system request failed\n",
+            Self::InvalidCommand => b"sh: command launch failed\n",
+            Self::InputClosed => b"sh: input channel closed\n",
+            Self::Protocol => b"sh: protocol violation\n",
+        }
+    }
 }
 
 impl From<OsError> for Error {

@@ -124,6 +124,7 @@ impl ManifestSource for LoadedManifest<'_> {
 
 struct RuntimeLauncher {
     root_directory: Directory,
+    library_directory: Directory,
     factory: OwnedHandle<TaskFactoryObject>,
     group: OwnedHandle<TaskGroupObject>,
     domain: OwnedHandle<ResourceDomainObject>,
@@ -157,6 +158,11 @@ impl RuntimeLauncher {
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         Ok(Self {
             root_directory,
+            library_directory: Directory::from_handle(
+                startup
+                    .take(startup::DYNAMIC_LIBRARY_DIRECTORY)
+                    .map_err(|_| Error::OperatingSystem)?,
+            ),
             factory: startup
                 .take(startup::TASK_FACTORY)
                 .map_err(|_| Error::OperatingSystem)?,
@@ -221,6 +227,18 @@ impl RuntimeLauncher {
             .map_err(|_| LaunchError::OperatingSystem)?;
         builder
             .add_argument(service.image())
+            .map_err(|_| LaunchError::OperatingSystem)?;
+        builder
+            .add_handle_duplicate(
+                self.library_directory.as_handle_ref(),
+                startup::DYNAMIC_LIBRARY_DIRECTORY.as_raw(),
+                RightsOffer::Exact(
+                    Rights::READ
+                        .union(Rights::EXECUTE)
+                        .union(Rights::DUPLICATE)
+                        .union(Rights::TRANSFER),
+                ),
+            )
             .map_err(|_| LaunchError::OperatingSystem)?;
 
         for (capability_index, capability) in service.capabilities().enumerate() {

@@ -357,7 +357,11 @@ aarch64_activate_final_address_space:
     mov     sp, x22
     mov     x29, xzr
     mov     x30, xzr
-    adr     x3, start_kernel
+    // `start_kernel` may move beyond ADR's +/-1 MiB reach as the kernel grows.
+    // ADRP remains position independent and covers the complete 4 GiB image
+    // envelope enforced by the AArch64 linker contract.
+    adrp    x3, start_kernel
+    add     x3, x3, :lo12:start_kernel
     sub     x3, x3, x24
     add     x3, x21, x3
     br      x3

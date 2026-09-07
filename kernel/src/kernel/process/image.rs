@@ -104,6 +104,7 @@ pub(crate) struct ProcessImage {
     entry: UserAddress,
     stack: UserAddress,
     tls: UserAddress,
+    auxiliary: hyper::exec::startup::AuxiliaryValues,
 }
 
 impl ProcessImage {
@@ -113,6 +114,22 @@ impl ProcessImage {
         stack: UserAddress,
         tls: UserAddress,
     ) -> Result<Self, ImageError> {
+        Self::try_native_with_auxiliary(
+            machine,
+            entry,
+            stack,
+            tls,
+            hyper::exec::startup::AuxiliaryValues::minimal(entry.get()),
+        )
+    }
+
+    pub(crate) fn try_native_with_auxiliary(
+        machine: MachineAbi,
+        entry: UserAddress,
+        stack: UserAddress,
+        tls: UserAddress,
+        auxiliary: hyper::exec::startup::AuxiliaryValues,
+    ) -> Result<Self, ImageError> {
         Self::try_new(
             machine,
             AbiFamily::Native,
@@ -121,6 +138,7 @@ impl ProcessImage {
             entry,
             stack,
             tls,
+            auxiliary,
         )
     }
 
@@ -133,6 +151,7 @@ impl ProcessImage {
         entry: UserAddress,
         stack: UserAddress,
         tls: UserAddress,
+        auxiliary: hyper::exec::startup::AuxiliaryValues,
     ) -> Result<Self, ImageError> {
         if entry.get() == 0 {
             return Err(ImageError::InvalidEntry);
@@ -161,6 +180,7 @@ impl ProcessImage {
             entry,
             stack,
             tls,
+            auxiliary,
         })
     }
 
@@ -190,6 +210,10 @@ impl ProcessImage {
 
     pub(crate) const fn tls(&self) -> UserAddress {
         self.tls
+    }
+
+    pub(crate) const fn auxiliary(&self) -> hyper::exec::startup::AuxiliaryValues {
+        self.auxiliary
     }
 
     pub(crate) const fn initial_thread(&self) -> UserThreadStart {

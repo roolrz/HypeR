@@ -120,6 +120,18 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             ;;
         objects)
             if grep -Eq '^[0-9]+[[:space:]]+[a-z][a-z-]+[[:space:]]+(unpublished|active|retired)' "$native_output"; then
+                printf '/bin/dynamic-test\n' >&3
+                command_phase='dynamic'
+            fi
+            ;;
+        dynamic)
+            if grep -Fxq 'HYPER_DYNAMIC_LINK_OK' "$native_output"; then
+                printf '/bin/echo-static HYPER_STATIC_LINK_OK\n' >&3
+                command_phase='static'
+            fi
+            ;;
+        static)
+            if grep -Fxq 'HYPER_STATIC_LINK_OK' "$native_output"; then
                 printf '/bin/echo HYPER_NATIVE_ECHO_OK\n' >&3
                 command_phase='echo'
             fi
@@ -131,8 +143,10 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         grep -Fxq 'TYPE     KOID       OWNER      NAME                 STATE' "$native_output" &&
         grep -Fxq 'HANDLE             OBJECT     KIND                    RIGHTS                           PURPOSE' "$native_output" &&
         grep -Fxq 'KOID       KIND                    HANDLE-STATE HANDLES REFS PURPOSE' "$native_output" &&
+        grep -Fxq 'HYPER_DYNAMIC_LINK_OK' "$native_output" &&
+        grep -Fxq 'HYPER_STATIC_LINK_OK' "$native_output" &&
         grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output"; then
-        echo "verified HypeR Native inspection and shell-launched external command"
+        echo "verified HypeR Native inspection, dynamic and static linking, and shell-launched commands"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then

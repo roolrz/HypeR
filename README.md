@@ -93,9 +93,10 @@ The current foundation includes:
 - strong `ProcessImage`, `Process`, object-backed `UserThread`, and `TaskGroup`
   ownership with accounted construction, explicit publication, start/ready,
   stop/join, and acknowledged retirement;
-- an immutable indexed ramfs and strict AArch64 ELF64 loader for the first
-  Native `/init`, with static PIE relocation, W^X enforcement, guarded stack,
-  and scheduler-owned Process publication;
+- an immutable indexed ramfs, strict AArch64 ELF64 process loader, and
+  capability-relative userspace runtime linker for Native `/init` and its
+  services, with eager relocation, W^X/RELRO enforcement, guarded stacks, and
+  scheduler-owned Process publication;
 - a manifest-driven Native init which constructs services transactionally and
   delegates monotonically attenuated capabilities;
 - capability-scoped Native `ps` and `handle` tools with immutable task names,
@@ -184,7 +185,10 @@ make run
 `make run` builds the `no_std` Rust init, direction-attenuated Console workers,
 initial session manager, and capability-scoped shell only through the assembled SDK under
 `target/sdk/aarch64`; the applications do not include private kernel or SDK
-source paths. Pass
+source paths. Native applications are dynamic PIEs by default and share the
+capability-loaded `libhyper.so` runtime through the in-tree AArch64 ELF
+interpreter. SDK consumers can select a self-contained static PIE backed by
+the matching `libhyper.a` with `HYPER_LINK_MODE=static`. Pass
 `INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.
 
 Linux guest construction and boot remain Kernel integration tests:
@@ -380,6 +384,7 @@ secondary architectures.
 | `kernel/src/mm/`, `kernel/src/sync/`, `kernel/src/time/` | Reusable allocation, synchronization, and timing mechanisms |
 | `sdk/abi/` | Native ABI schema, generated Rust definitions, C header, and reference |
 | `sdk/lib/` | Freestanding Native C runtime and architecture syscall veneers |
+| `sdk/loader/` | Native userspace ELF interpreter, relocation, and runtime loading |
 | `sdk/rust/` | Safe `no_std` Native OS binding, raw syscalls, and Rust runtime entry |
 | `sdk/toolchain/` | Clang/Cargo drivers, linker contract, and transactional SDK assembly |
 | `app/` | Native system applications built only against the assembled SDK |

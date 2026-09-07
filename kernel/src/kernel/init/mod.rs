@@ -25,6 +25,7 @@ pub(crate) enum Error {
     Inspection(crate::kernel::inspect::Error),
     IncompleteThreadPublication,
     Missing,
+    MemoryObject(crate::kernel::mm::user_space::MemoryObjectError),
     NotExecutable,
     NotRegularFile,
     Object(crate::kernel::object::ObjectCreationError),
@@ -52,6 +53,9 @@ impl core::fmt::Debug for Error {
             Self::Inspection(error) => formatter.debug_tuple("Inspection").field(error).finish(),
             Self::IncompleteThreadPublication => formatter.write_str("IncompleteThreadPublication"),
             Self::Missing => formatter.write_str("Missing"),
+            Self::MemoryObject(error) => {
+                formatter.debug_tuple("MemoryObject").field(error).finish()
+            }
             Self::NotExecutable => formatter.write_str("NotExecutable"),
             Self::NotRegularFile => formatter.write_str("NotRegularFile"),
             Self::Object(error) => formatter.debug_tuple("Object").field(error).finish(),

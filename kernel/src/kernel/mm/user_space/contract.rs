@@ -143,6 +143,10 @@ impl Permissions {
     pub(crate) const fn is_subset_of(self, maximum: Self) -> bool {
         self.0 & !maximum.0 == 0
     }
+
+    pub(crate) const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
 }
 
 /// Semantic resource ownership requested before the corresponding allocation.

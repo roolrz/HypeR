@@ -41,13 +41,40 @@ pub(crate) fn open_file(
     path: UserSlice,
     rights: Rights,
 ) -> Result<HandleValue, ServiceError> {
+    let path = copy_path(process, path)?;
+
+    let required = super::rights_contract::directory_rights_for_file(rights.bits())
+        .and_then(Rights::from_bits)
+        .ok_or(ServiceError::InvalidInput)?;
+    let directory = process.resolve_handle::<DirectoryObject>(directory, required)?;
+    let file = directory
+        .object()
+        .open_file(&path, &process.resource_domain())?;
+    Ok(process.create_object(file, rights)?)
+}
+
+pub(crate) fn open_directory(
+    process: &Process,
+    directory: HandleValue,
+    path: UserSlice,
+    rights: Rights,
+) -> Result<HandleValue, ServiceError> {
+    let path = copy_path(process, path)?;
+    let required = super::rights_contract::directory_rights_for_directory(rights.bits())
+        .and_then(Rights::from_bits)
+        .ok_or(ServiceError::InvalidInput)?;
+    let directory = process.resolve_handle::<DirectoryObject>(directory, required)?;
+    let child = directory
+        .object()
+        .open_directory(&path, &process.resource_domain())?;
+    Ok(process.create_object(child, rights)?)
+}
+
+fn copy_path(process: &Process, path: UserSlice) -> Result<alloc::string::String, ServiceError> {
     let length = usize::try_from(path.length()).map_err(|_| ServiceError::InvalidInput)?;
     if length == 0 || length > MAX_PATH_BYTES {
         return Err(ServiceError::InvalidInput);
     }
-
-    // Copy faultable input before retaining an operation pin to the source
-    // capability. VFS and handle-table locks are never held across this copy.
     let mut path_bytes = Vec::new();
     path_bytes
         .try_reserve_exact(length)
@@ -58,15 +85,12 @@ pub(crate) fn open_file(
     if path.as_bytes().contains(&0) {
         return Err(ServiceError::InvalidInput);
     }
-
-    let required = super::rights_contract::directory_rights_for_file(rights.bits())
-        .and_then(Rights::from_bits)
-        .ok_or(ServiceError::InvalidInput)?;
-    let directory = process.resolve_handle::<DirectoryObject>(directory, required)?;
-    let file = directory
-        .object()
-        .open_file(path, &process.resource_domain())?;
-    Ok(process.create_object(file, rights)?)
+    let mut owned = alloc::string::String::new();
+    owned
+        .try_reserve_exact(path.len())
+        .map_err(|_| ProcessError::Allocation)?;
+    owned.push_str(path);
+    Ok(owned)
 }
 
 pub(crate) fn read_file_at(

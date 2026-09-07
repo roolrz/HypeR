@@ -21,9 +21,13 @@ const STARTUP_HANDLE_VALUE_OFFSET: usize = core::mem::offset_of!(AbiStartupHandl
 const STACK_ALIGNMENT: usize = 16;
 const MAXIMUM_INITIAL_BYTES: usize = 64 * 1024;
 const AT_NULL: u64 = 0;
+const AT_PHDR: u64 = 3;
+const AT_PHENT: u64 = 4;
+const AT_PHNUM: u64 = 5;
 const AT_PAGESZ: u64 = 6;
+const AT_BASE: u64 = 7;
 const AT_ENTRY: u64 = 9;
-const STANDARD_AUXILIARY_ENTRIES: usize = 2;
+const STANDARD_AUXILIARY_ENTRIES: usize = 6;
 const HYPER_AUXILIARY_ENTRIES: usize = 2;
 const AUXILIARY_TERMINATORS: usize = 1;
 const AUXILIARY_ENTRY_COUNT: usize =
@@ -43,6 +47,27 @@ pub enum Error {
 pub struct StartupHandle {
     pub purpose: u32,
     pub handle: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuxiliaryValues {
+    pub program_header: u64,
+    pub program_header_entry_size: u64,
+    pub program_header_count: u64,
+    pub interpreter_base: u64,
+    pub program_entry: u64,
+}
+
+impl AuxiliaryValues {
+    pub const fn minimal(program_entry: u64) -> Self {
+        Self {
+            program_header: 0,
+            program_header_entry_size: 0,
+            program_header_count: 0,
+            interpreter_base: 0,
+            program_entry,
+        }
+    }
 }
 
 /// Immutable sizing decision shared by the loader and final encoder.
@@ -139,7 +164,7 @@ impl Layout {
 
     pub fn encode(
         self,
-        entry: u64,
+        auxiliary: AuxiliaryValues,
         arguments: &[&str],
         environment: &[&str],
         handles: &[StartupHandle],
@@ -178,8 +203,37 @@ impl Layout {
             write_string(&mut bytes, &mut string_offset, variable)?;
         }
         write_word(&mut bytes, &mut word_offset, 0)?;
+        write_auxiliary(
+            &mut bytes,
+            &mut word_offset,
+            AT_PHDR,
+            auxiliary.program_header,
+        )?;
+        write_auxiliary(
+            &mut bytes,
+            &mut word_offset,
+            AT_PHENT,
+            auxiliary.program_header_entry_size,
+        )?;
+        write_auxiliary(
+            &mut bytes,
+            &mut word_offset,
+            AT_PHNUM,
+            auxiliary.program_header_count,
+        )?;
         write_auxiliary(&mut bytes, &mut word_offset, AT_PAGESZ, PAGE_SIZE)?;
-        write_auxiliary(&mut bytes, &mut word_offset, AT_ENTRY, entry)?;
+        write_auxiliary(
+            &mut bytes,
+            &mut word_offset,
+            AT_BASE,
+            auxiliary.interpreter_base,
+        )?;
+        write_auxiliary(
+            &mut bytes,
+            &mut word_offset,
+            AT_ENTRY,
+            auxiliary.program_entry,
+        )?;
         write_auxiliary(
             &mut bytes,
             &mut word_offset,

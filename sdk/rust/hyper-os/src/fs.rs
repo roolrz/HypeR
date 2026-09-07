@@ -53,6 +53,44 @@ impl FileRights {
     }
 }
 
+/// Rights which may be requested for a newly opened directory.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DirectoryRights(Rights);
+
+impl DirectoryRights {
+    pub const READ: Self = Self(Rights::READ);
+    pub const INSPECT: Self = Self(Rights::INSPECT);
+    pub const DUPLICATE: Self = Self(Rights::DUPLICATE);
+    pub const TRANSFER: Self = Self(Rights::TRANSFER);
+    pub const EXECUTE: Self = Self(Rights::EXECUTE);
+
+    const ALLOWED: Rights = Rights::READ
+        .union(Rights::INSPECT)
+        .union(Rights::DUPLICATE)
+        .union(Rights::TRANSFER)
+        .union(Rights::EXECUTE);
+
+    #[must_use]
+    pub const fn from_rights(rights: Rights) -> Option<Self> {
+        if Self::ALLOWED.contains(rights) {
+            Some(Self(rights))
+        } else {
+            None
+        }
+    }
+
+    #[must_use]
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0.union(other.0))
+    }
+
+    #[must_use]
+    pub const fn as_rights(self) -> Rights {
+        self.0
+    }
+}
+
 /// Exclusive authority to resolve paths relative to one directory capability.
 pub struct Directory {
     handle: OwnedHandle<DirectoryObject>,
@@ -91,6 +129,22 @@ impl Directory {
         // handle owner to this process.
         let handle = unsafe { OwnedHandle::from_raw_owned(raw) };
         Ok(File { handle })
+    }
+
+    /// Opens a child directory relative to this capability.
+    pub fn open_directory(&self, path: &str, requested_rights: DirectoryRights) -> Result<Self> {
+        validate_path(path)?;
+        let result = raw_ops::open_directory(
+            self.handle.as_handle_ref(),
+            path,
+            requested_rights.as_rights(),
+        );
+        Status::from_raw(result.status).into_result()?;
+        let raw = NonZeroU64::new(result.value0).ok_or(Error::InvalidResponse)?;
+        // SAFETY: successful DIRECTORY_OPEN_DIRECTORY publishes exactly one
+        // child Directory handle to this process.
+        let handle = unsafe { OwnedHandle::from_raw_owned(raw) };
+        Ok(Self { handle })
     }
 
     /// Recovers the generic typed owner for delegation or explicit close.
@@ -242,6 +296,22 @@ mod raw_ops {
         }
     }
 
+    pub(super) fn open_directory(
+        root: HandleRef<'_, DirectoryObject>,
+        path: &str,
+        rights: Rights,
+    ) -> hyper_sys::CallResult {
+        // SAFETY: the typed borrow and path slice remain live for the syscall.
+        unsafe {
+            hyper_sys::directory_open_directory(
+                root.raw().get(),
+                path.as_ptr(),
+                path.len(),
+                rights.bits(),
+            )
+        }
+    }
+
     pub(super) fn read(
         file: HandleRef<'_, super::FileObject>,
         offset: u64,
@@ -281,6 +351,23 @@ mod raw_ops {
         }
     }
 
+    pub(super) fn open_directory(
+        _root: HandleRef<'_, DirectoryObject>,
+        path: &str,
+        _rights: Rights,
+    ) -> hyper_sys::CallResult {
+        let status = if path == "lib" {
+            hyper_abi::HYPER_NATIVE_STATUS_OK
+        } else {
+            hyper_abi::HYPER_NATIVE_STATUS_NOT_FOUND
+        };
+        hyper_sys::CallResult {
+            status,
+            value0: hyper_abi::HYPER_NATIVE_OBJECT_DIRECTORY.into(),
+            value1: 0,
+        }
+    }
+
     pub(super) fn read(
         _file: HandleRef<'_, super::FileObject>,
         offset: u64,
@@ -308,7 +395,7 @@ mod raw_ops {
 mod tests {
     use core::num::NonZeroU64;
 
-    use super::{Directory, FileRights};
+    use super::{Directory, DirectoryRights, FileRights};
     use crate::Error;
     use crate::handle::{AnyObject, DirectoryObject, FileObject, OwnedHandle, Rights};
 
@@ -326,6 +413,15 @@ mod tests {
     fn rights_narrowing_rejects_non_file_authority() {
         assert!(FileRights::from_rights(Rights::READ.union(Rights::TRANSFER)).is_some());
         assert!(FileRights::from_rights(Rights::WRITE).is_none());
+        assert!(DirectoryRights::from_rights(Rights::READ.union(Rights::EXECUTE)).is_some());
+        assert!(DirectoryRights::from_rights(Rights::WRITE).is_none());
+    }
+
+    #[test]
+    fn opens_typed_child_directory() -> Result<(), Error> {
+        let child = root_directory()?.open_directory("lib", DirectoryRights::READ)?;
+        let _ = child.as_handle_ref();
+        Ok(())
     }
 
     #[test]

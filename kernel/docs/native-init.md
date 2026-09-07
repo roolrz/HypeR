@@ -30,21 +30,28 @@ startup.
 
 ## Executable image
 
-The initial loader currently accepts little-endian AArch64 ELF64 images branded
-with HypeR ELF OSABI 63, ABI version 0, and either `ET_EXEC` or `ET_DYN` type. Every load segment
-must be readable, page-congruent with its file offset, nonempty in memory, and
-free of page-level overlap. Writable and executable permissions are mutually
+The kernel process loader accepts little-endian AArch64 ELF64 images branded
+with HypeR ELF OSABI 63, ABI version 0, and either `ET_EXEC` or `ET_DYN` type.
+Every load segment must be readable, use at most 4 KiB alignment, be
+page-congruent with its file offset, remain nonempty in memory, and be free of
+page-level overlap. Writable and executable permissions are mutually
 exclusive, and the entry point must lie in executable segment memory.
 
-The loader rejects an interpreter, dynamic dependencies, text relocations,
+Static images reject an interpreter, dynamic dependencies, text relocations,
 nonempty TLS segments, an executable stack, symbol-based relocations, and
 unsupported relocation tables. Static PIE images may use
 `R_AARCH64_RELATIVE` RELA entries and AArch64 RELR entries. Relocation targets
 must be aligned, unique, and contained in writable declared segment memory;
 relocations can never modify code or a read-only segment.
-`PT_GNU_RELRO` subranges are not split from their containing `PT_LOAD`
-mapping yet, so the userspace toolchain must not treat RELRO as an enforced
-permission boundary.
+The process loader also recognizes an absolute `PT_INTERP` path. It maps the
+trusted interpreter at 256 MiB and transfers the main image's program-header,
+entry, and interpreter-base values through standard auxiliary entries. The
+userspace interpreter performs eager AArch64 symbol relocation, seals
+`PT_GNU_RELRO`, and resolves dependencies relative to a delegated `/lib`
+Directory capability. A dynamic main image must expose its mapped program
+header table through one consistent `PT_PHDR` entry. Main images remain below
+the interpreter, and runtime libraries occupy a separate range beginning at
+512 MiB.
 
 The current process layout reserves the user range from 1 MiB through 4 GiB.
 An `ET_DYN` image is biased so its lowest mapped page begins at 2 MiB. Total
@@ -72,19 +79,18 @@ initial set can use the existing batch reservation and publication transaction.
 
 The production init transaction reserves and writes only the authorities init
 currently consumes: the root `ResourceDomain`, root `TaskGroup`,
-`TaskFactory`, a root `Directory`, system `TaskInspector` and `ObjectInspector`
-views, and
-(when available) Console. Future handle values are
+`TaskFactory`, root and `/lib` `Directory` capabilities, system `TaskInspector`
+and `ObjectInspector` views, the process root VMAR, and (when available)
+Console. Future handle values are
 encoded while unresolved and the complete batch is published before the
 initial Thread can run. No self-Process handle is installed in its own table.
-Executable-memory and root-VMAR purposes remain part of the Native ABI, but
-the kernel does not delegate dormant authority to init before a corresponding
-userspace operation exists.
+The root VMAR and executable File-to-VMO path are delegated with narrowly
+typed rights for runtime linking; writable and executable VMO variants retain
+disjoint authority ceilings.
 
 The Kernel loads only `/init`; it neither interprets the service manifest nor
 preloads system services. Init reads `/etc/hyper/services.json` through its root
-`Directory`,
-validates the complete dependency and capability graph, and then uses the
+`Directory`, validates the complete dependency and capability graph, and then uses the
 one-shot `ProcessBuilder` object to construct each child. A builder owns every
 staged startup capability immediately after successful insertion. Starting a
 sealed builder publishes the child, atomically replaces the consumed builder
@@ -133,5 +139,5 @@ test-only Linux guest path. The `test-native` contract separately builds the
 Native applications through the assembled SDK, constructs the production
 initramfs, and verifies that init loads the manifest, starts the session and
 shell Processes, launches `ps` and `handle` through scoped inspection handles,
-and runs an external echo command whose output traverses the complete Console
-path.
+executes a constructor-bearing shared-object fixture through `dlopen`, and runs
+an external echo command whose output traverses the complete Console path.

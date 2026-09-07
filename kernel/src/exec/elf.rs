@@ -22,6 +22,7 @@ const EM_AARCH64: u16 = 183;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
+const PT_PHDR: u32 = 6;
 const PT_TLS: u32 = 7;
 const PT_GNU_STACK: u32 = 0x6474_e551;
 
@@ -187,6 +188,9 @@ pub struct Image<'image> {
     entry: u64,
     segments: Vec<LoadSegment<'image>>,
     relocations: Vec<Relocation>,
+    interpreter: Option<&'image str>,
+    program_header_address: u64,
+    program_header_count: u16,
 }
 
 /// Heap-storage upper bound established without allocating parser memory.
@@ -194,6 +198,7 @@ pub struct Image<'image> {
 pub struct AllocationPlan {
     segment_capacity: usize,
     relocation_capacity: usize,
+    dynamic_executable: bool,
 }
 
 impl AllocationPlan {
@@ -224,11 +229,23 @@ impl<'image> Image<'image> {
 
     /// Inspects allocation-driving ELF metadata without allocating.
     pub fn allocation_plan(bytes: &[u8]) -> Result<AllocationPlan, Error> {
+        Self::allocation_plan_for_process(bytes, false)
+    }
+
+    pub fn process_allocation_plan(bytes: &[u8]) -> Result<AllocationPlan, Error> {
+        Self::allocation_plan_for_process(bytes, true)
+    }
+
+    fn allocation_plan_for_process(
+        bytes: &[u8],
+        permit_dynamic_executable: bool,
+    ) -> Result<AllocationPlan, Error> {
         let header = bytes.get(..ELF_HEADER_SIZE).ok_or(Error::Truncated)?;
         validate_ident(header)?;
         validate_fixed_header(header)?;
         let (program_offset, program_count) = program_table(header, bytes)?;
         let mut dynamic = None;
+        let mut interpreter = false;
         for index in 0..program_count {
             let offset = program_offset + index * PROGRAM_HEADER_SIZE;
             let program = &bytes[offset..offset + PROGRAM_HEADER_SIZE];
@@ -237,15 +254,25 @@ impl<'image> Image<'image> {
                     return Err(Error::InvalidDynamicTable);
                 }
                 dynamic = Some(program_data(bytes, program)?);
+            } else if read_u32(program, 0)? == PT_INTERP {
+                if interpreter {
+                    return Err(Error::UnsupportedInterpreter);
+                }
+                interpreter = true;
             }
         }
-        let relocation_capacity = match dynamic {
-            Some(dynamic) => relocation_capacity(&read_dynamic_info(dynamic)?)?,
-            None => 0,
+        if interpreter && !permit_dynamic_executable {
+            return Err(Error::UnsupportedInterpreter);
+        }
+        let relocation_capacity = match (dynamic, interpreter) {
+            (_, true) => 0,
+            (Some(dynamic), false) => relocation_capacity(&read_dynamic_info(dynamic)?)?,
+            (None, false) => 0,
         };
         Ok(AllocationPlan {
             segment_capacity: program_count,
             relocation_capacity,
+            dynamic_executable: interpreter,
         })
     }
 
@@ -254,6 +281,10 @@ impl<'image> Image<'image> {
         if Self::allocation_plan(bytes)? != allocation {
             return Err(Error::InvalidHeader);
         }
+        Self::parse_inner(bytes, allocation)
+    }
+
+    fn parse_inner(bytes: &'image [u8], allocation: AllocationPlan) -> Result<Self, Error> {
         let header = bytes.get(..ELF_HEADER_SIZE).ok_or(Error::Truncated)?;
         validate_ident(header)?;
         let kind = match read_u16(header, 16)? {
@@ -268,12 +299,23 @@ impl<'image> Image<'image> {
         validate_fixed_header(header)?;
         let entry = read_u64(header, 24)?;
         let (program_offset, program_count) = program_table(header, bytes)?;
+        // A dynamically linked process needs a mapped program-header table for
+        // the runtime linker's `AT_PHDR` contract. Static images do not consume
+        // that auxiliary value and remain valid when their headers are outside
+        // every loadable segment.
+        let program_header_address = if allocation.dynamic_executable {
+            program_header_virtual_address(bytes, header)?
+        } else {
+            0
+        };
 
         let mut segments = Vec::new();
         segments
             .try_reserve_exact(allocation.segment_capacity)
             .map_err(|_| Error::Allocation)?;
         let mut dynamic = None;
+        let mut interpreter = None;
+        let mut program_header_segment = false;
         for index in 0..program_count {
             let offset = program_offset + index * PROGRAM_HEADER_SIZE;
             let header = &bytes[offset..offset + PROGRAM_HEADER_SIZE];
@@ -291,7 +333,28 @@ impl<'image> Image<'image> {
                     }
                     dynamic = Some(program_data(bytes, header)?);
                 }
-                PT_INTERP => return Err(Error::UnsupportedInterpreter),
+                PT_INTERP => {
+                    if !allocation.dynamic_executable || interpreter.is_some() {
+                        return Err(Error::UnsupportedInterpreter);
+                    }
+                    interpreter = Some(parse_interpreter(bytes, header)?);
+                }
+                PT_PHDR => {
+                    if program_header_segment {
+                        return Err(Error::InvalidHeader);
+                    }
+                    if allocation.dynamic_executable
+                        && !valid_program_header_segment(
+                            header,
+                            read_u64(bytes, 32)?,
+                            program_header_address,
+                            program_count,
+                        )?
+                    {
+                        return Err(Error::InvalidHeader);
+                    }
+                    program_header_segment = true;
+                }
                 PT_TLS if read_u64(header, 40)? != 0 => return Err(Error::UnsupportedTls),
                 PT_GNU_STACK if flags & PF_EXECUTE != 0 => return Err(Error::ExecutableStack),
                 _ => {}
@@ -302,9 +365,23 @@ impl<'image> Image<'image> {
         }
         segments.sort_unstable_by_key(|segment| segment.mapping_address);
         validate_segment_layout(&segments, entry)?;
-        let relocations = match dynamic {
-            Some(dynamic) => parse_dynamic(dynamic, &segments, allocation.relocation_capacity)?,
-            None => Vec::new(),
+        if allocation.dynamic_executable
+            && (kind != ImageKind::PositionIndependent
+                || interpreter.is_none()
+                || dynamic.is_none()
+                || !program_header_segment)
+        {
+            return Err(Error::UnsupportedInterpreter);
+        }
+        let relocations = match (dynamic, allocation.dynamic_executable) {
+            (Some(dynamic), false) => {
+                parse_dynamic(dynamic, &segments, allocation.relocation_capacity)?
+            }
+            (Some(dynamic), true) => {
+                validate_dynamic_executable(dynamic)?;
+                Vec::new()
+            }
+            (None, _) => Vec::new(),
         };
         Ok(Self {
             kind,
@@ -312,7 +389,20 @@ impl<'image> Image<'image> {
             entry,
             segments,
             relocations,
+            interpreter,
+            program_header_address,
+            program_header_count: u16::try_from(program_count).map_err(|_| Error::InvalidHeader)?,
         })
+    }
+
+    pub fn parse_process_with_plan(
+        bytes: &'image [u8],
+        allocation: AllocationPlan,
+    ) -> Result<Self, Error> {
+        if Self::process_allocation_plan(bytes)? != allocation {
+            return Err(Error::InvalidHeader);
+        }
+        Self::parse_inner(bytes, allocation)
     }
 
     pub const fn kind(&self) -> ImageKind {
@@ -325,6 +415,18 @@ impl<'image> Image<'image> {
 
     pub const fn entry(&self) -> u64 {
         self.entry
+    }
+
+    pub const fn interpreter(&self) -> Option<&'image str> {
+        self.interpreter
+    }
+
+    pub const fn program_header_address(&self) -> u64 {
+        self.program_header_address
+    }
+
+    pub const fn program_header_count(&self) -> u16 {
+        self.program_header_count
     }
 
     pub fn segments(&self) -> impl ExactSizeIterator<Item = LoadSegment<'image>> + '_ {
@@ -345,6 +447,25 @@ impl<'image> Image<'image> {
             .and_then(|segment| segment.mapping_address.checked_add(segment.mapping_size))
             .unwrap_or(u64::MAX)
     }
+}
+
+fn valid_program_header_segment(
+    segment: &[u8],
+    table_offset: u64,
+    table_address: u64,
+    table_count: usize,
+) -> Result<bool, Error> {
+    let table_size = u64::try_from(table_count)
+        .ok()
+        .and_then(|count| count.checked_mul(PROGRAM_HEADER_SIZE as u64))
+        .ok_or(Error::ArithmeticOverflow)?;
+    Ok(
+        table_address.is_multiple_of(core::mem::align_of::<u64>() as u64)
+            && read_u64(segment, 8)? == table_offset
+            && read_u64(segment, 16)? == table_address
+            && read_u64(segment, 32)? >= table_size
+            && read_u64(segment, 40)? >= table_size,
+    )
 }
 
 fn validate_ident(header: &[u8]) -> Result<(), Error> {
@@ -394,6 +515,67 @@ fn program_table(header: &[u8], bytes: &[u8]) -> Result<(usize, usize), Error> {
     Ok((offset, count))
 }
 
+fn program_header_virtual_address(bytes: &[u8], elf_header: &[u8]) -> Result<u64, Error> {
+    let table_offset = read_u64(elf_header, 32)?;
+    let table_count = u64::from(read_u16(elf_header, 56)?);
+    let table_size = table_count
+        .checked_mul(PROGRAM_HEADER_SIZE as u64)
+        .ok_or(Error::ArithmeticOverflow)?;
+    let table_end = table_offset
+        .checked_add(table_size)
+        .ok_or(Error::ArithmeticOverflow)?;
+    let (program_offset, program_count) = program_table(elf_header, bytes)?;
+    for index in 0..program_count {
+        let offset = program_offset + index * PROGRAM_HEADER_SIZE;
+        let program = &bytes[offset..offset + PROGRAM_HEADER_SIZE];
+        if read_u32(program, 0)? != PT_LOAD {
+            continue;
+        }
+        let file_offset = read_u64(program, 8)?;
+        let file_size = read_u64(program, 32)?;
+        let file_end = file_offset
+            .checked_add(file_size)
+            .ok_or(Error::ArithmeticOverflow)?;
+        if file_offset <= table_offset && table_end <= file_end {
+            return read_u64(program, 16)?
+                .checked_add(table_offset - file_offset)
+                .ok_or(Error::ArithmeticOverflow);
+        }
+    }
+    Err(Error::InvalidHeader)
+}
+
+fn parse_interpreter<'image>(bytes: &'image [u8], header: &[u8]) -> Result<&'image str, Error> {
+    const MAXIMUM_INTERPRETER_BYTES: usize = 256;
+    let data = program_data(bytes, header)?;
+    if data.len() < 2 || data.len() > MAXIMUM_INTERPRETER_BYTES || data.last() != Some(&0) {
+        return Err(Error::UnsupportedInterpreter);
+    }
+    let path =
+        core::str::from_utf8(&data[..data.len() - 1]).map_err(|_| Error::UnsupportedInterpreter)?;
+    if !path.starts_with('/')
+        || path.as_bytes().contains(&0)
+        || path.split('/').any(|component| component == "..")
+    {
+        return Err(Error::UnsupportedInterpreter);
+    }
+    Ok(path)
+}
+
+fn validate_dynamic_executable(bytes: &[u8]) -> Result<(), Error> {
+    if !bytes.len().is_multiple_of(DYNAMIC_ENTRY_SIZE) {
+        return Err(Error::InvalidDynamicTable);
+    }
+    for entry in bytes.chunks_exact(DYNAMIC_ENTRY_SIZE) {
+        match read_i64(entry, 0)? {
+            DT_NULL => return Ok(()),
+            DT_TEXTREL => return Err(Error::InvalidDynamicTable),
+            _ => {}
+        }
+    }
+    Err(Error::InvalidDynamicTable)
+}
+
 fn parse_load_segment<'image>(
     bytes: &'image [u8],
     header: &[u8],
@@ -417,7 +599,9 @@ fn parse_load_segment<'image>(
         return Err(Error::InvalidLoadSegment);
     }
     if alignment > 1
-        && (!alignment.is_power_of_two() || virtual_address % alignment != file_offset % alignment)
+        && (alignment > PAGE_SIZE
+            || !alignment.is_power_of_two()
+            || virtual_address % alignment != file_offset % alignment)
     {
         return Err(Error::InvalidAlignment);
     }

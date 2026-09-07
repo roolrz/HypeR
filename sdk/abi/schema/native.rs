@@ -654,6 +654,7 @@ pub const RIGHT_WAIT: u64 = 1 << 2;
 pub const RIGHT_SIGNAL: u64 = 1 << RIGHT_SIGNAL_BIT;
 pub const RIGHT_READ: u64 = 1 << 4;
 pub const RIGHT_WRITE: u64 = 1 << 5;
+pub const RIGHT_MAP: u64 = 1 << 6;
 pub const RIGHT_EXECUTE: u64 = 1 << 7;
 pub const RIGHT_START: u64 = 1 << 10;
 pub const RIGHT_REQUEST_STOP: u64 = 1 << 11;
@@ -675,6 +676,11 @@ pub const CAPABILITY_CHANNEL_RIGHTS: u64 = BYTE_CHANNEL_RIGHTS;
 pub const DIRECTORY_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_EXECUTE;
 pub const FILE_RIGHTS: u64 = DIRECTORY_RIGHTS;
+pub const VMO_WRITABLE_RIGHTS: u64 =
+    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE | RIGHT_MAP;
+pub const VMO_EXECUTABLE_RIGHTS: u64 =
+    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_EXECUTE | RIGHT_MAP;
+pub const VMAR_RIGHTS: u64 = RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_MAP;
 pub const PROCESS_BUILDER_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_START | RIGHT_REQUEST_STOP;
 pub const PROCESS_SUPERVISOR_RIGHTS: u64 =
@@ -810,6 +816,10 @@ pub const CONSTANTS: &[AbiConstant] = &[
         value: 9,
     },
     AbiConstant {
+        name: "startup_handle_purpose_dynamic_library_directory",
+        value: 10,
+    },
+    AbiConstant {
         name: "startup_max_handles",
         value: 256,
     },
@@ -864,6 +874,26 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "file_max_read_bytes",
         value: 64 * 1024,
+    },
+    AbiConstant {
+        name: "vmo_max_size_bytes",
+        value: 64 * 1024 * 1024,
+    },
+    AbiConstant {
+        name: "vmo_max_transfer_bytes",
+        value: 64 * 1024,
+    },
+    AbiConstant {
+        name: "vmar_permission_read",
+        value: 1 << 0,
+    },
+    AbiConstant {
+        name: "vmar_permission_write",
+        value: 1 << 1,
+    },
+    AbiConstant {
+        name: "vmar_permission_execute",
+        value: 1 << 2,
     },
     AbiConstant {
         name: "process_name_max_bytes",
@@ -2088,6 +2118,180 @@ const DIRECTORY_OPEN_FILE_RESULTS: &[ResultValue] = &[ResultValue {
     }),
 }];
 
+const DIRECTORY_OPEN_DIRECTORY_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "child",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("directory"),
+        rights: ProducedRights::ExactRequested {
+            argument: "requested_rights",
+            allowed_rights: DIRECTORY_RIGHTS,
+            authority_source: Some("directory"),
+        },
+    }),
+}];
+
+const VMO_CREATE_ARGUMENTS: &[Argument] = &[Argument {
+    name: "size",
+    kind: ValueKind::ByteCount,
+    handle: None,
+    memory: None,
+}];
+const VMO_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "vmo",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("vmo"),
+        rights: ProducedRights::Fixed(VMO_WRITABLE_RIGHTS),
+    }),
+}];
+
+const FILE_CREATE_EXECUTABLE_VMO_ARGUMENTS: &[Argument] = &[Argument {
+    name: "file",
+    kind: ValueKind::Handle,
+    handle: Some(HandleArgument {
+        object: ObjectConstraint::Kind("file"),
+        required_rights: RIGHT_READ | RIGHT_EXECUTE,
+        disposition: HandleDisposition::Borrow,
+    }),
+    memory: None,
+}];
+const FILE_CREATE_EXECUTABLE_VMO_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "vmo",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("vmo"),
+        rights: ProducedRights::Fixed(VMO_EXECUTABLE_RIGHTS),
+    }),
+}];
+
+const VMO_READ_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "vmo",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("vmo"),
+            required_rights: RIGHT_READ,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "offset",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "bytes",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "byte_count",
+                maximum_bytes: 64 * 1024,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "byte_count",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const VMO_WRITE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "vmo",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("vmo"),
+            required_rights: RIGHT_WRITE,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "offset",
+        kind: ValueKind::U64,
+        handle: None,
+        memory: None,
+    },
+    Argument {
+        name: "bytes",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "byte_count",
+                maximum_bytes: 64 * 1024,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "byte_count",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const VMAR_ALLOCATE_ARGUMENTS: &[Argument] = &[
+    vmar_argument(RIGHT_MAP),
+    scalar_argument("address", ValueKind::U64),
+    scalar_argument("size", ValueKind::ByteCount),
+];
+const VMAR_ALLOCATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "child",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("vmar"),
+        rights: ProducedRights::Fixed(VMAR_RIGHTS),
+    }),
+}];
+
+const VMAR_MAP_ARGUMENTS: &[Argument] = &[
+    vmar_argument(RIGHT_MAP),
+    vmo_argument(RIGHT_MAP),
+    scalar_argument("vmo_offset", ValueKind::U64),
+    scalar_argument("address", ValueKind::U64),
+    scalar_argument("size", ValueKind::ByteCount),
+    scalar_argument("permissions", ValueKind::U32),
+];
+
+const VMAR_RANGE_ARGUMENTS: &[Argument] = &[
+    vmar_argument(RIGHT_MAP),
+    scalar_argument("address", ValueKind::U64),
+    scalar_argument("size", ValueKind::ByteCount),
+    scalar_argument("permissions", ValueKind::U32),
+];
+
+const VMAR_UNMAP_ARGUMENTS: &[Argument] = &[
+    vmar_argument(RIGHT_MAP),
+    scalar_argument("address", ValueKind::U64),
+    scalar_argument("size", ValueKind::ByteCount),
+];
+
+const VMAR_DESTROY_ARGUMENTS: &[Argument] = &[Argument {
+    name: "vmar",
+    kind: ValueKind::Handle,
+    handle: Some(HandleArgument {
+        object: ObjectConstraint::Kind("vmar"),
+        required_rights: RIGHT_MAP,
+        disposition: HandleDisposition::ConsumeOnCommit,
+    }),
+    memory: None,
+}];
+
 const FILE_READ_AT_ARGUMENTS: &[Argument] = &[
     Argument {
         name: "file",
@@ -2760,6 +2964,41 @@ const fn process_builder_argument(
     }
 }
 
+const fn scalar_argument(name: &'static str, kind: ValueKind) -> Argument {
+    Argument {
+        name,
+        kind,
+        handle: None,
+        memory: None,
+    }
+}
+
+const fn vmar_argument(required_rights: u64) -> Argument {
+    Argument {
+        name: "vmar",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("vmar"),
+            required_rights,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    }
+}
+
+const fn vmo_argument(required_rights: u64) -> Argument {
+    Argument {
+        name: "vmo",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("vmo"),
+            required_rights,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    }
+}
+
 pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 0,
@@ -3374,6 +3613,146 @@ pub const SYSCALLS: &[Syscall] = &[
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
         audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 44,
+        name: "directory_open_directory",
+        feature: FeatureGate::Core,
+        arguments: DIRECTORY_OPEN_FILE_ARGUMENTS,
+        results: DIRECTORY_OPEN_DIRECTORY_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 45,
+        name: "vmo_create",
+        feature: FeatureGate::Core,
+        arguments: VMO_CREATE_ARGUMENTS,
+        results: VMO_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 46,
+        name: "file_create_executable_vmo",
+        feature: FeatureGate::Core,
+        arguments: FILE_CREATE_EXECUTABLE_VMO_ARGUMENTS,
+        results: FILE_CREATE_EXECUTABLE_VMO_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 47,
+        name: "vmo_read",
+        feature: FeatureGate::Core,
+        arguments: VMO_READ_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 48,
+        name: "vmo_write",
+        feature: FeatureGate::Core,
+        arguments: VMO_WRITE_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 49,
+        name: "vmar_allocate",
+        feature: FeatureGate::Core,
+        arguments: VMAR_ALLOCATE_ARGUMENTS,
+        results: VMAR_ALLOCATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 50,
+        name: "vmar_map",
+        feature: FeatureGate::Core,
+        arguments: VMAR_MAP_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 51,
+        name: "vmar_protect",
+        feature: FeatureGate::Core,
+        arguments: VMAR_RANGE_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 52,
+        name: "vmar_unmap",
+        feature: FeatureGate::Core,
+        arguments: VMAR_UNMAP_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 53,
+        name: "vmar_destroy",
+        feature: FeatureGate::Core,
+        arguments: VMAR_DESTROY_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
         flags: FlagPolicy::None,
         failure_results: &[],
     },

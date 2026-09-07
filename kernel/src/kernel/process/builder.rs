@@ -1096,7 +1096,7 @@ fn reserve_builder_charge(
 fn retire_unpublished_address_space(
     address_space: hyper::mm::UniqueFallibleArc<NativeAddressSpace>,
 ) {
-    if let Err(failure) = NativeAddressSpace::retire(address_space) {
+    if let Err(failure) = NativeAddressSpace::retire_unpublished(address_space) {
         let (error, retained) = failure.into_parts();
         crate::pr_err!(
             "HypeR: retaining an aborted ProcessBuilder address space after cleanup error: {error:?}"

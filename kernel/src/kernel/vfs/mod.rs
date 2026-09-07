@@ -23,7 +23,9 @@ mod service;
 
 pub(crate) use executable::ExecutableSnapshot;
 pub(crate) use objects::{DirectoryObject, Error, Error as VfsError, FileObject};
-pub(crate) use service::{ServiceError as VfsServiceError, open_file, read_file_at};
+pub(crate) use service::{
+    ServiceError as VfsServiceError, open_directory, open_file, read_file_at,
+};
 
 use hyper::fs::ramfs::RamFs;
 use hyper::fs::{NodeAttributes, NodeKind};

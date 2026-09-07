@@ -18,11 +18,12 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_BYTE_CHANNEL_WRITE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE,
     HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND,
     HYPER_NATIVE_SYS_CONSOLE_READ, HYPER_NATIVE_SYS_CONSOLE_WRITE,
-    HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE, HYPER_NATIVE_SYS_EVENT_CREATE,
-    HYPER_NATIVE_SYS_EVENT_SIGNAL, HYPER_NATIVE_SYS_FILE_READ_AT, HYPER_NATIVE_SYS_HANDLE_CLOSE,
-    HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
-    HYPER_NATIVE_SYS_HANDLE_REPLACE, HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO,
-    HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS,
+    HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY, HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE,
+    HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
+    HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO, HYPER_NATIVE_SYS_FILE_READ_AT,
+    HYPER_NATIVE_SYS_HANDLE_CLOSE, HYPER_NATIVE_SYS_HANDLE_DUPLICATE,
+    HYPER_NATIVE_SYS_HANDLE_GET_INFO, HYPER_NATIVE_SYS_HANDLE_REPLACE,
+    HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO, HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS,
     HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
     HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_TASK_GROUP,
     HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_HANDLES, HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_OBJECTS,
@@ -37,10 +38,13 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
     HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_TASK_GROUP,
     HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_PROCESSES, HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_THREADS,
-    HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD, HyperNativeHandleInfo,
-    HyperNativeHandleInspection, HyperNativeObjectBasicInfo, HyperNativeObjectInspection,
-    HyperNativeProcessInfo, HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread,
-    NativeInvocation, NativeResult,
+    HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD, HYPER_NATIVE_SYS_VMAR_ALLOCATE,
+    HYPER_NATIVE_SYS_VMAR_DESTROY, HYPER_NATIVE_SYS_VMAR_MAP, HYPER_NATIVE_SYS_VMAR_PROTECT,
+    HYPER_NATIVE_SYS_VMAR_UNMAP, HYPER_NATIVE_SYS_VMO_CREATE, HYPER_NATIVE_SYS_VMO_READ,
+    HYPER_NATIVE_SYS_VMO_WRITE, HyperNativeHandleInfo, HyperNativeHandleInspection,
+    HyperNativeObjectBasicInfo, HyperNativeObjectInspection, HyperNativeProcessInfo,
+    HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread, NativeInvocation,
+    NativeResult,
 };
 
 use crate::kernel::accounting::ResourceError;
@@ -53,7 +57,8 @@ use crate::kernel::ipc::{
     CapabilityChannelServiceError, CapabilityReceiveOutcome,
 };
 use crate::kernel::mm::user_space::{
-    AddressError, AddressSpaceError, MachineError, UserAddress, UserSlice,
+    AddressError, AddressSpaceError, MachineError, MemoryServiceError, Permissions, UserAddress,
+    UserSlice,
 };
 use crate::kernel::object::{
     EventError, ObjectCreationError, ObjectWaitError, SignalWaitError, SignalWaitManyOutcome,
@@ -303,12 +308,67 @@ pub(in crate::kernel) trait DeferredServices:
         rights: Rights,
     ) -> Result<HandleValue, VfsServiceError>;
 
+    fn open_directory(
+        &self,
+        root: HandleValue,
+        path: UserSlice,
+        rights: Rights,
+    ) -> Result<HandleValue, VfsServiceError>;
+
     fn read_file_at(
         &self,
         file: HandleValue,
         offset: u64,
         output: Option<UserSlice>,
     ) -> Result<(u64, u64), VfsServiceError>;
+
+    fn create_vmo(&self, size: u64) -> Result<HandleValue, MemoryServiceError>;
+    fn create_file_executable_vmo(
+        &self,
+        file: HandleValue,
+    ) -> Result<HandleValue, MemoryServiceError>;
+    fn read_vmo(
+        &self,
+        vmo: HandleValue,
+        offset: u64,
+        output: Option<UserSlice>,
+    ) -> Result<(), MemoryServiceError>;
+    fn write_vmo(
+        &self,
+        vmo: HandleValue,
+        offset: u64,
+        input: Option<UserSlice>,
+    ) -> Result<(), MemoryServiceError>;
+    #[allow(clippy::too_many_arguments)]
+    fn map_vmo(
+        &self,
+        vmar: HandleValue,
+        vmo: HandleValue,
+        vmo_offset: u64,
+        address: u64,
+        size: u64,
+        permissions: Permissions,
+    ) -> Result<(), MemoryServiceError>;
+    fn allocate_vmar(
+        &self,
+        parent: HandleValue,
+        address: u64,
+        size: u64,
+    ) -> Result<HandleValue, MemoryServiceError>;
+    fn protect_vmar(
+        &self,
+        vmar: HandleValue,
+        address: u64,
+        size: u64,
+        permissions: Permissions,
+    ) -> Result<(), MemoryServiceError>;
+    fn unmap_vmar(
+        &self,
+        vmar: HandleValue,
+        address: u64,
+        size: u64,
+    ) -> Result<(), MemoryServiceError>;
+    fn destroy_vmar(&self, vmar: HandleValue) -> Result<(), MemoryServiceError>;
 
     fn create_process_builder(
         &self,
@@ -511,7 +571,21 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE => {
             sys_directory_open_file(services, invocation.arguments())
         }
+        HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY => {
+            sys_directory_open_directory(services, invocation.arguments())
+        }
         HYPER_NATIVE_SYS_FILE_READ_AT => sys_file_read_at(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_VMO_CREATE => sys_vmo_create(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO => {
+            sys_file_create_executable_vmo(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_VMO_READ => sys_vmo_read(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_VMO_WRITE => sys_vmo_write(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_VMAR_ALLOCATE => sys_vmar_allocate(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_VMAR_MAP => sys_vmar_map(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_VMAR_PROTECT => sys_vmar_protect(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_VMAR_UNMAP => sys_vmar_unmap(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_VMAR_DESTROY => sys_vmar_destroy(services, invocation.arguments()),
         HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE => {
             sys_process_builder_create(services, invocation.arguments())
         }
@@ -1204,6 +1278,7 @@ fn sys_directory_open_file(
 ) -> DeferredAction {
     let result = parse_handle(arguments[0]).and_then(|root| {
         if arguments[4] != 0
+            || arguments[5] != 0
             || arguments[2] == 0
             || arguments[2] > hyper::abi::native::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES
         {
@@ -1217,6 +1292,36 @@ fn sys_directory_open_file(
             .map_err(status_from_vfs_service_error)
     });
     DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+fn sys_directory_open_directory(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_directory_open(arguments).and_then(|(root, path, rights)| {
+        services
+            .open_directory(root, path, rights)
+            .map_err(status_from_vfs_service_error)
+    });
+    DeferredAction::Return(handle_result(result))
+}
+
+fn parse_directory_open(
+    arguments: &Arguments,
+) -> Result<(HandleValue, UserSlice, Rights), HyperNativeStatus> {
+    let root = parse_handle(arguments[0])?;
+    if arguments[4] != 0
+        || arguments[5] != 0
+        || arguments[2] == 0
+        || arguments[2] > hyper::abi::native::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES
+    {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let path = UserSlice::new(UserAddress::new(arguments[1]), arguments[2])
+        .map_err(status_from_address_error)?;
+    let rights = Rights::from_bits(arguments[3]).ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    Ok((root, path, rights))
 }
 
 #[inline(never)]
@@ -1236,6 +1341,149 @@ fn sys_file_read_at(services: &impl DeferredServices, arguments: &Arguments) -> 
         Err(status) => failure(status),
     };
     DeferredAction::Return(result)
+}
+
+#[inline(never)]
+fn sys_vmo_create(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = if arguments[1..].iter().any(|value| *value != 0) {
+        Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+    } else {
+        services
+            .create_vmo(arguments[0])
+            .map_err(status_from_memory_service_error)
+    };
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+fn sys_file_create_executable_vmo(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = if arguments[1..].iter().any(|value| *value != 0) {
+        Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+    } else {
+        parse_handle(arguments[0]).and_then(|file| {
+            services
+                .create_file_executable_vmo(file)
+                .map_err(status_from_memory_service_error)
+        })
+    };
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+fn sys_vmo_read(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_vmo_transfer(arguments).and_then(|(vmo, offset, bytes)| {
+        services
+            .read_vmo(vmo, offset, bytes)
+            .map_err(status_from_memory_service_error)
+    });
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+fn sys_vmo_write(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_vmo_transfer(arguments).and_then(|(vmo, offset, bytes)| {
+        services
+            .write_vmo(vmo, offset, bytes)
+            .map_err(status_from_memory_service_error)
+    });
+    DeferredAction::Return(status_only(result))
+}
+
+fn parse_vmo_transfer(
+    arguments: &Arguments,
+) -> Result<(HandleValue, u64, Option<UserSlice>), HyperNativeStatus> {
+    if arguments[4] != 0
+        || arguments[5] != 0
+        || arguments[3] > hyper::abi::native::HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES
+    {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    Ok((
+        parse_handle(arguments[0])?,
+        arguments[1],
+        optional_user_slice(arguments[2], arguments[3])?,
+    ))
+}
+
+#[inline(never)]
+fn sys_vmar_allocate(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = if arguments[3..].iter().any(|value| *value != 0) {
+        Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+    } else {
+        parse_handle(arguments[0]).and_then(|parent| {
+            services
+                .allocate_vmar(parent, arguments[1], arguments[2])
+                .map_err(status_from_memory_service_error)
+        })
+    };
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+fn sys_vmar_map(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = parse_handle(arguments[0]).and_then(|vmar| {
+        let vmo = parse_handle(arguments[1])?;
+        let permissions = crate::kernel::mm::user_space::abi_permissions(arguments[5])
+            .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        services
+            .map_vmo(
+                vmar,
+                vmo,
+                arguments[2],
+                arguments[3],
+                arguments[4],
+                permissions,
+            )
+            .map_err(status_from_memory_service_error)
+    });
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+fn sys_vmar_protect(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = if arguments[4] != 0 || arguments[5] != 0 {
+        Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+    } else {
+        parse_handle(arguments[0]).and_then(|vmar| {
+            let permissions = crate::kernel::mm::user_space::abi_permissions(arguments[3])
+                .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+            services
+                .protect_vmar(vmar, arguments[1], arguments[2], permissions)
+                .map_err(status_from_memory_service_error)
+        })
+    };
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+fn sys_vmar_unmap(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = if arguments[3..].iter().any(|value| *value != 0) {
+        Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+    } else {
+        parse_handle(arguments[0]).and_then(|vmar| {
+            services
+                .unmap_vmar(vmar, arguments[1], arguments[2])
+                .map_err(status_from_memory_service_error)
+        })
+    };
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+fn sys_vmar_destroy(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = if arguments[1..].iter().any(|value| *value != 0) {
+        Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+    } else {
+        parse_handle(arguments[0]).and_then(|vmar| {
+            services
+                .destroy_vmar(vmar)
+                .map_err(status_from_memory_service_error)
+        })
+    };
+    DeferredAction::Return(status_only(result))
 }
 
 fn parse_handle(raw: u64) -> Result<HandleValue, HyperNativeStatus> {
@@ -2116,10 +2364,46 @@ const fn status_from_memory_object_error(
         crate::kernel::mm::user_space::MemoryObjectError::Resource(error) => {
             status_from_resource_error(error)
         }
-        crate::kernel::mm::user_space::MemoryObjectError::Vmo(_)
-        | crate::kernel::mm::user_space::MemoryObjectError::WrongVariant => {
-            HYPER_NATIVE_STATUS_INTERNAL
+        crate::kernel::mm::user_space::MemoryObjectError::AddressSpace(error) => {
+            status_from_logical_error(error)
         }
+        crate::kernel::mm::user_space::MemoryObjectError::Vmo(error) => {
+            status_from_vmo_error(error)
+        }
+        crate::kernel::mm::user_space::MemoryObjectError::WrongVariant => {
+            HYPER_NATIVE_STATUS_BAD_STATE
+        }
+    }
+}
+
+const fn status_from_vmo_error(
+    error: crate::kernel::mm::user_space::VmoError<
+        crate::kernel::mm::user_space::KernelPageError,
+        ResourceError,
+    >,
+) -> HyperNativeStatus {
+    match error {
+        crate::kernel::mm::user_space::VmoError::Account(error) => {
+            status_from_resource_error(error)
+        }
+        crate::kernel::mm::user_space::VmoError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+        crate::kernel::mm::user_space::VmoError::Backend(error) => status_from_page_error(error),
+        crate::kernel::mm::user_space::VmoError::Busy => HYPER_NATIVE_STATUS_BUSY,
+        crate::kernel::mm::user_space::VmoError::InvalidRange
+        | crate::kernel::mm::user_space::VmoError::SizeOverflow => {
+            HYPER_NATIVE_STATUS_INVALID_ARGUMENT
+        }
+    }
+}
+
+fn status_from_memory_service_error(error: MemoryServiceError) -> HyperNativeStatus {
+    match error {
+        MemoryServiceError::InvalidInput => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        MemoryServiceError::Machine(error) => status_from_machine_error(error),
+        MemoryServiceError::MemoryObject(error) => status_from_memory_object_error(error),
+        MemoryServiceError::Process(error) => status_from_process_error(error),
+        MemoryServiceError::Scheduler(error) => status_from_scheduler_error(error),
+        MemoryServiceError::Vfs(error) => status_from_vfs_error(error),
     }
 }
 
@@ -2552,6 +2836,16 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(VfsServiceError::Process(ProcessError::Allocation))
         }
 
+        fn open_directory(
+            &self,
+            _: HandleValue,
+            _: UserSlice,
+            _: Rights,
+        ) -> Result<HandleValue, VfsServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(VfsServiceError::Process(ProcessError::Allocation))
+        }
+
         fn read_file_at(
             &self,
             _: HandleValue,
@@ -2560,6 +2854,83 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         ) -> Result<(u64, u64), VfsServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(VfsServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn create_vmo(&self, _: u64) -> Result<HandleValue, MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn create_file_executable_vmo(
+            &self,
+            _: HandleValue,
+        ) -> Result<HandleValue, MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn read_vmo(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: Option<UserSlice>,
+        ) -> Result<(), MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn write_vmo(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: Option<UserSlice>,
+        ) -> Result<(), MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn map_vmo(
+            &self,
+            _: HandleValue,
+            _: HandleValue,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: Permissions,
+        ) -> Result<(), MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn allocate_vmar(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: u64,
+        ) -> Result<HandleValue, MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn protect_vmar(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: u64,
+            _: Permissions,
+        ) -> Result<(), MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn unmap_vmar(&self, _: HandleValue, _: u64, _: u64) -> Result<(), MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn destroy_vmar(&self, _: HandleValue) -> Result<(), MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
         }
 
         fn create_process_builder(

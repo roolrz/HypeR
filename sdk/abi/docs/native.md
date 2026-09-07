@@ -86,6 +86,7 @@ ABI revision: `0`.
 | `startup_handle_purpose_root_directory` | `7` |
 | `startup_handle_purpose_task_inspector` | `8` |
 | `startup_handle_purpose_object_inspector` | `9` |
+| `startup_handle_purpose_dynamic_library_directory` | `10` |
 | `startup_max_handles` | `256` |
 | `deadline_infinite` | `18446744073709551615` |
 | `object_wait_many_max_items` | `64` |
@@ -100,6 +101,11 @@ ABI revision: `0`.
 | `console_max_transfer_bytes` | `4096` |
 | `directory_max_path_bytes` | `4096` |
 | `file_max_read_bytes` | `65536` |
+| `vmo_max_size_bytes` | `67108864` |
+| `vmo_max_transfer_bytes` | `65536` |
+| `vmar_permission_read` | `1` |
+| `vmar_permission_write` | `2` |
+| `vmar_permission_execute` | `4` |
 | `process_name_max_bytes` | `64` |
 | `process_argument_max_bytes` | `4096` |
 | `process_environment_max_bytes` | `4096` |
@@ -210,6 +216,16 @@ element size before any user-memory access.
 | 41 | `object_inspector_derive_task_group` | `inspector: handle`, `task_group: handle` | `inspector: handle` | `inspector: Borrow, kind=object_inspector, rights=0x1000000b`, `task_group: Borrow, kind=task_group, rights=0x8`, `inspector: produce, kind=object_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
 | 42 | `task_inspector_derive_resource_domain` | `inspector: handle`, `resource_domain: handle` | `inspector: handle` | `inspector: Borrow, kind=task_inspector, rights=0x1000000b`, `resource_domain: Borrow, kind=resource_domain, rights=0x8`, `inspector: produce, kind=task_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 43 | `object_inspector_derive_resource_domain` | `inspector: handle`, `resource_domain: handle` | `inspector: handle` | `inspector: Borrow, kind=object_inspector, rights=0x1000000b`, `resource_domain: Borrow, kind=resource_domain, rights=0x8`, `inspector: produce, kind=object_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 44 | `directory_open_directory` | `directory: handle`, `path: user_address`, `path_size: byte_count`, `requested_rights: rights`, `options: u32` | `child: handle` | `directory: Borrow, kind=directory, rights=0x10`, `child: produce, kind=directory, exact-from(requested_rights), allowed=0x9b, required-from=directory` | `path: Read, len=path_size bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
+| 45 | `vmo_create` | `size: byte_count` | `vmo: handle` | `vmo: produce, kind=vmo, fixed=0x7b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 46 | `file_create_executable_vmo` | `file: handle` | `vmo: handle` | `file: Borrow, kind=file, rights=0x90`, `vmo: produce, kind=vmo, fixed=0xdb` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 47 | `vmo_read` | `vmo: handle`, `offset: u64`, `bytes: user_address`, `byte_count: byte_count` | — | `vmo: Borrow, kind=vmo, rights=0x10` | `bytes: Write, len=byte_count bytes, max-bytes=65536; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 48 | `vmo_write` | `vmo: handle`, `offset: u64`, `bytes: user_address`, `byte_count: byte_count` | — | `vmo: Borrow, kind=vmo, rights=0x20` | `bytes: Read, len=byte_count bytes, max-bytes=65536; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 49 | `vmar_allocate` | `vmar: handle`, `address: u64`, `size: byte_count` | `child: handle` | `vmar: Borrow, kind=vmar, rights=0x40`, `child: produce, kind=vmar, fixed=0x4b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 50 | `vmar_map` | `vmar: handle`, `vmo: handle`, `vmo_offset: u64`, `address: u64`, `size: byte_count`, `permissions: u32` | — | `vmar: Borrow, kind=vmar, rights=0x40`, `vmo: Borrow, kind=vmo, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 51 | `vmar_protect` | `vmar: handle`, `address: u64`, `size: byte_count`, `permissions: u32` | — | `vmar: Borrow, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 52 | `vmar_unmap` | `vmar: handle`, `address: u64`, `size: byte_count` | — | `vmar: Borrow, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 53 | `vmar_destroy` | `vmar: handle` | — | `vmar: ConsumeOnCommit, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 
 ## Public records
 

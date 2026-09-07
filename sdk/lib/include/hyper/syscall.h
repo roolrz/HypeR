@@ -82,11 +82,49 @@ hyper_call_result_t hyper_directory_open_file(
     const void *path,
     size_t path_size,
     uint64_t requested_rights);
+hyper_call_result_t hyper_directory_open_directory(
+    hyper_native_handle_t directory,
+    const void *path,
+    size_t path_size,
+    uint64_t requested_rights);
 hyper_call_result_t hyper_file_read_at(
     hyper_native_handle_t file,
     uint64_t offset,
     void *output,
     size_t output_capacity);
+hyper_call_result_t hyper_vmo_create(uint64_t size);
+hyper_call_result_t hyper_file_create_executable_vmo(hyper_native_handle_t file);
+hyper_native_status_t hyper_vmo_read(
+    hyper_native_handle_t vmo,
+    uint64_t offset,
+    void *output,
+    size_t byte_count);
+hyper_native_status_t hyper_vmo_write(
+    hyper_native_handle_t vmo,
+    uint64_t offset,
+    const void *input,
+    size_t byte_count);
+hyper_call_result_t hyper_vmar_allocate(
+    hyper_native_handle_t parent,
+    uintptr_t address,
+    size_t size);
+hyper_native_status_t hyper_vmar_map(
+    hyper_native_handle_t vmar,
+    hyper_native_handle_t vmo,
+    uint64_t vmo_offset,
+    uintptr_t address,
+    size_t size,
+    uint32_t permissions);
+hyper_native_status_t hyper_vmar_protect(
+    hyper_native_handle_t vmar,
+    uintptr_t address,
+    size_t size,
+    uint32_t permissions);
+hyper_native_status_t hyper_vmar_unmap(
+    hyper_native_handle_t vmar,
+    uintptr_t address,
+    size_t size);
+hyper_native_status_t hyper_vmar_destroy(hyper_native_handle_t vmar);
 hyper_call_result_t hyper_process_builder_create(
     hyper_native_handle_t factory,
     hyper_native_handle_t group,

@@ -61,7 +61,7 @@ pub(super) fn prepare(
         Err(failure) => {
             let (error, address_space) = failure.into_parts();
             if let Err(failure) =
-                crate::kernel::mm::user_space::NativeAddressSpace::retire(address_space)
+                crate::kernel::mm::user_space::NativeAddressSpace::retire_unpublished(address_space)
             {
                 let (cleanup_error, retained) = failure.into_parts();
                 crate::pr_err!(
@@ -98,7 +98,7 @@ pub(super) fn install_handles<const N: usize>(
         handle: values[index].get(),
     });
     let stack = match boot.stack_layout.encode(
-        boot.process.image().entry().get(),
+        boot.process.image().auxiliary(),
         arguments,
         ENVIRONMENT,
         &startup_handles,

@@ -13,9 +13,26 @@ use super::objects::Error;
 use super::resolve_state::{PendingComponent, PendingPath, StateError, Traversal};
 
 pub(super) fn file(
+    namespace: &FallibleArc<MountNamespace>,
+    traversal_root: &Location,
+    value: &str,
+) -> Result<Location, Error> {
+    resolve(namespace, traversal_root, value, NodeKind::File)
+}
+
+pub(super) fn directory(
+    namespace: &FallibleArc<MountNamespace>,
+    traversal_root: &Location,
+    value: &str,
+) -> Result<Location, Error> {
+    resolve(namespace, traversal_root, value, NodeKind::Directory)
+}
+
+fn resolve(
     _namespace: &FallibleArc<MountNamespace>,
     traversal_root: &Location,
     value: &str,
+    expected_kind: NodeKind,
 ) -> Result<Location, Error> {
     let path = Path::new(value).map_err(|_| Error::InvalidPath)?;
     let mut pending = PendingPath::new(path).map_err(map_state_error)?;
@@ -67,8 +84,11 @@ pub(super) fn file(
         .filesystem()
         .attributes(traversal.current().node())
         .map_err(Error::Backend)?;
-    if attributes.kind() != NodeKind::File {
-        return Err(Error::NotRegularFile);
+    if attributes.kind() != expected_kind {
+        return Err(match expected_kind {
+            NodeKind::Directory => Error::NotDirectory,
+            _ => Error::NotRegularFile,
+        });
     }
     Ok(traversal.current().clone())
 }

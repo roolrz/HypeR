@@ -3,7 +3,7 @@
 
 //! Native initial-stack layout and rejection tests.
 
-use hyper::exec::startup::{Error, Layout, StartupHandle};
+use hyper::exec::startup::{AuxiliaryValues, Error, Layout, StartupHandle};
 
 fn word(bytes: &[u8], offset: usize) -> u64 {
     let mut encoded = [0_u8; 8];
@@ -16,8 +16,15 @@ fn encodes_system_v_vectors_and_tagged_handles() {
     let arguments = ["/init"];
     let environment = ["MODE=test"];
     let layout = crate::require_ok(Layout::try_new(0x1_0000, &arguments, &environment, 1));
+    let auxiliary = AuxiliaryValues {
+        program_header: 0x20_0040,
+        program_header_entry_size: 56,
+        program_header_count: 9,
+        interpreter_base: 0x1000_0000,
+        program_entry: 0x20_1000,
+    };
     let stack = crate::require_ok(layout.encode(
-        0x20_1000,
+        auxiliary,
         &arguments,
         &environment,
         &[StartupHandle {
@@ -35,22 +42,30 @@ fn encodes_system_v_vectors_and_tagged_handles() {
     assert_eq!(word(bytes, 16), 0);
     let env0 = word(bytes, 24);
     assert_eq!(word(bytes, 32), 0);
-    assert_eq!(word(bytes, 40), 6);
-    assert_eq!(word(bytes, 48), hyper::mm::PAGE_SIZE);
-    assert_eq!(word(bytes, 56), 9);
-    assert_eq!(word(bytes, 64), 0x20_1000);
+    assert_eq!(word(bytes, 40), 3);
+    assert_eq!(word(bytes, 48), auxiliary.program_header);
+    assert_eq!(word(bytes, 56), 4);
+    assert_eq!(word(bytes, 64), auxiliary.program_header_entry_size);
+    assert_eq!(word(bytes, 72), 5);
+    assert_eq!(word(bytes, 80), auxiliary.program_header_count);
+    assert_eq!(word(bytes, 88), 6);
+    assert_eq!(word(bytes, 96), hyper::mm::PAGE_SIZE);
+    assert_eq!(word(bytes, 104), 7);
+    assert_eq!(word(bytes, 112), auxiliary.interpreter_base);
+    assert_eq!(word(bytes, 120), 9);
+    assert_eq!(word(bytes, 128), auxiliary.program_entry);
     assert_eq!(
-        word(bytes, 72),
+        word(bytes, 136),
         hyper::abi::native::HYPER_NATIVE_AUXV_STARTUP_HANDLES
     );
-    let records = word(bytes, 80);
+    let records = word(bytes, 144);
     assert_eq!(
-        word(bytes, 88),
+        word(bytes, 152),
         hyper::abi::native::HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT
     );
-    assert_eq!(word(bytes, 96), 1);
-    assert_eq!(word(bytes, 104), 0);
-    assert_eq!(word(bytes, 112), 0);
+    assert_eq!(word(bytes, 160), 1);
+    assert_eq!(word(bytes, 168), 0);
+    assert_eq!(word(bytes, 176), 0);
 
     let argv_offset = crate::require_ok(usize::try_from(argv0 - stack.base()));
     let env_offset = crate::require_ok(usize::try_from(env0 - stack.base()));
@@ -77,7 +92,7 @@ fn rejects_embedded_nul_and_layout_mismatch() {
     let layout = crate::require_ok(Layout::try_new(0x1_0000, &["/init"], &[], 0));
     assert!(matches!(
         layout.encode(
-            0x20_1000,
+            AuxiliaryValues::minimal(0x20_1000),
             &["/a-much-longer-different-startup-image-name"],
             &[],
             &[],
@@ -96,9 +111,14 @@ fn supports_optional_and_console_startup_handle_sets() {
                 handle: crate::require_ok(u64::try_from(index + 0x100)),
             })
             .collect();
-        let stack = crate::require_ok(layout.encode(0x20_1000, &["/init"], &[], &handles));
+        let stack = crate::require_ok(layout.encode(
+            AuxiliaryValues::minimal(0x20_1000),
+            &["/init"],
+            &[],
+            &handles,
+        ));
         assert_eq!(
-            word(stack.bytes(), 88),
+            word(stack.bytes(), 152),
             crate::require_ok(u64::try_from(handle_count))
         );
         assert_eq!(stack.base() & 0xf, 0);

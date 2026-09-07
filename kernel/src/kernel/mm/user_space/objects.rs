@@ -28,6 +28,7 @@ pub(crate) enum MemoryObjectError {
     AllocationSize,
     Object(ObjectCreationError),
     Resource(ResourceError),
+    AddressSpace(super::AddressSpaceError<super::KernelPageError, ResourceError>),
     Vmo(VmoError<KernelPageError, ResourceError>),
     WrongVariant,
 }
@@ -103,11 +104,19 @@ impl VmoObject {
         }
     }
 
+    pub(crate) fn writable_clone(&self) -> Option<NativeWritableVmo> {
+        self.writable().cloned()
+    }
+
     pub(crate) fn executable(&self) -> Option<&NativeExecutableVmo> {
         match &self.storage {
             VmoStorage::Writable(_) => None,
             VmoStorage::Executable(storage) => Some(storage),
         }
+    }
+
+    pub(crate) fn executable_clone(&self) -> Option<NativeExecutableVmo> {
+        self.executable().cloned()
     }
 
     pub(crate) fn size(&self) -> u64 {
@@ -148,6 +157,19 @@ impl VmoObject {
     ) -> Result<Self, MemoryObjectError> {
         let writable = self.writable().ok_or(MemoryObjectError::WrongVariant)?;
         let executable = writable.try_executable_snapshot(&authority.provenance(), pin)?;
+        Self::from_executable(executable, sponsor)
+    }
+
+    pub(crate) fn try_loader_executable_snapshot<P: hyper::cpu::PinnedExecution + 'static>(
+        &self,
+        pin: &P,
+        sponsor: &ResourceDomain,
+    ) -> Result<Self, MemoryObjectError> {
+        let writable = self.writable().ok_or(MemoryObjectError::WrongVariant)?;
+        let executable = writable.try_executable_snapshot(
+            &super::ExecutableProvenance::for_native_image_loader(),
+            pin,
+        )?;
         Self::from_executable(executable, sponsor)
     }
 }
@@ -204,6 +226,24 @@ impl VmarObject {
             address_space,
             token,
             _object_charge: reserve_object_charge::<Self>(sponsor)?,
+        })
+    }
+
+    pub(crate) fn try_child(
+        parent: &Self,
+        range: UserSlice,
+        sponsor: &ResourceDomain,
+    ) -> Result<Self, MemoryObjectError> {
+        let object_charge = reserve_object_charge::<Self>(sponsor)?;
+        let token = parent
+            .address_space
+            .logical()
+            .try_create_vmar(parent.token, range)
+            .map_err(MemoryObjectError::AddressSpace)?;
+        Ok(Self {
+            address_space: parent.address_space.clone(),
+            token,
+            _object_charge: object_charge,
         })
     }
 
