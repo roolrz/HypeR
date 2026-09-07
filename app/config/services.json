@@ -144,6 +144,18 @@
           "purpose": "process.object-inspector",
           "operation": "duplicate",
           "rights": ["duplicate", "transfer", "inspect"]
+        },
+        {
+          "source": "bootstrap.memory-inspector",
+          "purpose": "process.memory-inspector",
+          "operation": "duplicate",
+          "rights": ["duplicate", "transfer", "inspect"]
+        },
+        {
+          "source": "bootstrap.cpu-inspector",
+          "purpose": "process.cpu-inspector",
+          "operation": "duplicate",
+          "rights": ["duplicate", "transfer", "inspect"]
         }
       ]
     }

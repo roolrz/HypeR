@@ -23,10 +23,12 @@ mod service;
 
 pub(crate) use executable::ExecutableSnapshot;
 pub(crate) use objects::{
-    DirectoryEntrySnapshot, DirectoryObject, DirectoryPage, Error, Error as VfsError, FileObject,
+    DirectoryEntrySnapshot, DirectoryInfo, DirectoryObject, DirectoryPage, Error,
+    Error as VfsError, FileInfo, FileObject,
 };
 pub(crate) use service::{
-    ServiceError as VfsServiceError, open_directory, open_file, read_directory, read_file_at,
+    ServiceError as VfsServiceError, directory_info, file_info, open_directory, open_file,
+    read_directory, read_file_at,
 };
 
 use hyper::fs::ramfs::RamFs;

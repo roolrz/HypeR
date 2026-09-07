@@ -32,5 +32,7 @@ impl BuilderStorable {
             || kind == native::HYPER_NATIVE_OBJECT_FILE
             || kind == native::HYPER_NATIVE_OBJECT_TASK_INSPECTOR
             || kind == native::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR
+            || kind == native::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR
+            || kind == native::HYPER_NATIVE_OBJECT_CPU_INSPECTOR
     }
 }

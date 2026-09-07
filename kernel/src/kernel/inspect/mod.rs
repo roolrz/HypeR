@@ -112,6 +112,8 @@ pub(crate) enum Error {
     Process(crate::kernel::process::ProcessError),
     Resource(ResourceError),
     Scheduler(crate::kernel::task::scheduler::Error),
+    Unavailable,
+    InconsistentAccounting,
 }
 
 impl From<ObjectCreationError> for Error {
@@ -145,6 +147,7 @@ pub(crate) struct TaskThreadSnapshot {
     pub(crate) name: crate::kernel::task::scheduler::ThreadNameSnapshot,
     pub(crate) role: ThreadRole,
     pub(crate) registry_phase: ThreadObjectRegistryPhase,
+    pub(crate) runtime_ticks: u64,
 }
 
 pub(crate) struct Page<T: Copy, const N: usize> {
@@ -303,6 +306,7 @@ impl TaskInspector {
                     name: thread.name,
                     role: thread.object.role,
                     registry_phase: thread.phase,
+                    runtime_ticks: thread.runtime_ticks,
                 });
             }
         }
@@ -459,6 +463,151 @@ impl KernelObject for ObjectInspector {
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
         .union(Rights::DERIVE);
+}
+
+/// Immutable physical-memory accounting snapshot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MemoryObservation {
+    pub(crate) captured_at_ns: u64,
+    pub(crate) page_size: u64,
+    pub(crate) total_bytes: u64,
+    pub(crate) reserved_bytes: u64,
+    pub(crate) managed_bytes: u64,
+    pub(crate) free_bytes: u64,
+    pub(crate) used_bytes: u64,
+    pub(crate) kernel_bytes: u64,
+    pub(crate) heap_bytes: u64,
+    pub(crate) page_table_bytes: u64,
+    pub(crate) user_bytes: u64,
+    pub(crate) guest_bytes: u64,
+    pub(crate) unattributed_bytes: u64,
+    pub(crate) reclaimable_bytes: u64,
+}
+
+/// Read-only authority over system physical-memory accounting.
+pub(crate) struct MemoryInspector {
+    _object_charge: CommittedCharge,
+}
+
+impl MemoryInspector {
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        expect(
+            dead_code,
+            reason = "The kernel self-test image does not enter Native process bootstrap"
+        )
+    )]
+    pub(crate) fn try_system(domain: &ResourceDomain) -> Result<Self, Error> {
+        Ok(Self {
+            _object_charge: reserve_object_charge::<Self>(domain)?,
+        })
+    }
+
+    pub(crate) fn snapshot(&self) -> Result<MemoryObservation, Error> {
+        let stats = crate::kernel::mm::statistics().ok_or(Error::Unavailable)?;
+        let page_size = hyper::mm::PAGE_SIZE;
+        let pages_to_bytes = |pages: usize| {
+            u64::try_from(pages)
+                .ok()
+                .and_then(|pages| pages.checked_mul(page_size))
+                .ok_or(Error::InconsistentAccounting)
+        };
+        let runtime = stats.runtime;
+        let buddy = runtime.buddy;
+        let total_bytes = pages_to_bytes(stats.boot.ram_pages)?;
+        let managed_bytes = pages_to_bytes(buddy.managed_pages)?;
+        let free_bytes = pages_to_bytes(buddy.free_pages)?;
+        let used_bytes = managed_bytes
+            .checked_sub(free_bytes)
+            .ok_or(Error::InconsistentAccounting)?;
+        let heap_bytes = pages_to_bytes(
+            runtime
+                .slab_pages
+                .checked_add(runtime.large_heap_pages)
+                .ok_or(Error::InconsistentAccounting)?,
+        )?;
+        let kernel_bytes = pages_to_bytes(runtime.kernel_pages.pages)?;
+        let page_table_bytes = pages_to_bytes(runtime.page_table_pages.pages)?;
+        let user_bytes = pages_to_bytes(runtime.user_pages.pages)?;
+        let guest_bytes = pages_to_bytes(runtime.guest_pages.pages)?;
+        let attributed = kernel_bytes
+            .checked_add(heap_bytes)
+            .and_then(|value| value.checked_add(page_table_bytes))
+            .and_then(|value| value.checked_add(user_bytes))
+            .and_then(|value| value.checked_add(guest_bytes))
+            .ok_or(Error::InconsistentAccounting)?;
+        let unattributed_bytes = used_bytes
+            .checked_sub(attributed)
+            .ok_or(Error::InconsistentAccounting)?;
+        let reserved_bytes = total_bytes
+            .checked_sub(managed_bytes)
+            .ok_or(Error::InconsistentAccounting)?;
+        let captured_at_ns = crate::kernel::time::monotonic_nanoseconds().unwrap_or_default();
+        Ok(MemoryObservation {
+            captured_at_ns,
+            page_size,
+            total_bytes,
+            reserved_bytes,
+            managed_bytes,
+            free_bytes,
+            used_bytes,
+            kernel_bytes,
+            heap_bytes,
+            page_table_bytes,
+            user_bytes,
+            guest_bytes,
+            unattributed_bytes,
+            // No allocator state currently proves that a complete page can be
+            // reclaimed without affecting a live allocation.
+            reclaimable_bytes: 0,
+        })
+    }
+}
+
+impl private::Sealed for MemoryInspector {}
+impl private::UserExportable for MemoryInspector {}
+
+impl KernelObject for MemoryInspector {
+    const KIND: ObjectKind = ObjectKind::MEMORY_INSPECTOR;
+    const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
+    const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT);
+}
+
+/// Read-only authority over scheduler-owned CPU-time accounting.
+pub(crate) struct CpuInspector {
+    _object_charge: CommittedCharge,
+}
+
+impl CpuInspector {
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        expect(
+            dead_code,
+            reason = "The kernel self-test image does not enter Native process bootstrap"
+        )
+    )]
+    pub(crate) fn try_system(domain: &ResourceDomain) -> Result<Self, Error> {
+        Ok(Self {
+            _object_charge: reserve_object_charge::<Self>(domain)?,
+        })
+    }
+
+    pub(crate) fn snapshot(&self) -> crate::kernel::task::scheduler::CpuTimeSnapshot {
+        crate::kernel::task::scheduler::cpu_time_snapshot()
+    }
+}
+
+impl private::Sealed for CpuInspector {}
+impl private::UserExportable for CpuInspector {}
+
+impl KernelObject for CpuInspector {
+    const KIND: ObjectKind = ObjectKind::CPU_INSPECTOR;
+    const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
+    const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT);
 }
 
 fn find_process(id: ProcessId) -> Option<ProcessSnapshot> {

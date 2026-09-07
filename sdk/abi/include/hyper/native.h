@@ -63,6 +63,8 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_OBJECT_PROCESS_BUILDER UINT32_C(15)
 #define HYPER_NATIVE_OBJECT_TASK_INSPECTOR UINT32_C(16)
 #define HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR UINT32_C(17)
+#define HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR UINT32_C(18)
+#define HYPER_NATIVE_OBJECT_CPU_INSPECTOR UINT32_C(19)
 
 #define HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN UINT32_C(0)
 #define HYPER_NATIVE_TRANSFER_CLASS_GENERAL UINT32_C(1)
@@ -88,6 +90,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
         case HYPER_NATIVE_OBJECT_PROCESS_BUILDER: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_TASK_INSPECTOR: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
         case HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
+        case HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
+        case HYPER_NATIVE_OBJECT_CPU_INSPECTOR: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
         default: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
     }
 }
@@ -149,6 +153,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR UINT64_C(8)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR UINT64_C(9)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY UINT64_C(10)
+#define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR UINT64_C(11)
+#define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR UINT64_C(12)
 #define HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY UINT64_C(4)
 #define HYPER_NATIVE_DIRECTORY_ENTRY_NAME_MAX_BYTES UINT64_C(255)
 #define HYPER_NATIVE_DIRECTORY_ENTRY_KIND_FILE UINT64_C(1)
@@ -265,6 +271,10 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_VMAR_UNMAP UINT64_C(52)
 #define HYPER_NATIVE_SYS_VMAR_DESTROY UINT64_C(53)
 #define HYPER_NATIVE_SYS_DIRECTORY_READ UINT64_C(54)
+#define HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ UINT64_C(55)
+#define HYPER_NATIVE_SYS_CPU_INSPECTOR_READ UINT64_C(56)
+#define HYPER_NATIVE_SYS_FILE_GET_INFO UINT64_C(57)
+#define HYPER_NATIVE_SYS_DIRECTORY_GET_INFO UINT64_C(58)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -399,9 +409,10 @@ typedef struct hyper_native_task_thread_t {
     uint32_t registry_phase;
     uint32_t name_length;
     uint32_t reserved;
+    uint64_t runtime_ticks;
     uint8_t name[64];
 } hyper_native_task_thread_t;
-HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_task_thread_t) == 96, "task_thread size");
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_task_thread_t) == 104, "task_thread size");
 HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_task_thread_t) == 8, "task_thread alignment");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, koid) == 0, "task_thread.koid offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, process_koid) == 8, "task_thread.process_koid offset");
@@ -409,7 +420,62 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, role) == 16, "task_
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, registry_phase) == 20, "task_thread.registry_phase offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, name_length) == 24, "task_thread.name_length offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, reserved) == 28, "task_thread.reserved offset");
-HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, name) == 32, "task_thread.name offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, runtime_ticks) == 32, "task_thread.runtime_ticks offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, name) == 40, "task_thread.name offset");
+
+typedef struct hyper_native_memory_observation_t {
+    uint64_t captured_at_ns;
+    uint64_t page_size;
+    uint64_t total_bytes;
+    uint64_t reserved_bytes;
+    uint64_t managed_bytes;
+    uint64_t free_bytes;
+    uint64_t used_bytes;
+    uint64_t kernel_bytes;
+    uint64_t heap_bytes;
+    uint64_t page_table_bytes;
+    uint64_t user_bytes;
+    uint64_t guest_bytes;
+    uint64_t unattributed_bytes;
+    uint64_t reclaimable_bytes;
+} hyper_native_memory_observation_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_memory_observation_t) == 112, "memory_observation size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_memory_observation_t) == 8, "memory_observation alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, captured_at_ns) == 0, "memory_observation.captured_at_ns offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, page_size) == 8, "memory_observation.page_size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, total_bytes) == 16, "memory_observation.total_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, reserved_bytes) == 24, "memory_observation.reserved_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, managed_bytes) == 32, "memory_observation.managed_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, free_bytes) == 40, "memory_observation.free_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, used_bytes) == 48, "memory_observation.used_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, kernel_bytes) == 56, "memory_observation.kernel_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, heap_bytes) == 64, "memory_observation.heap_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, page_table_bytes) == 72, "memory_observation.page_table_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, user_bytes) == 80, "memory_observation.user_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, guest_bytes) == 88, "memory_observation.guest_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, unattributed_bytes) == 96, "memory_observation.unattributed_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, reclaimable_bytes) == 104, "memory_observation.reclaimable_bytes offset");
+
+typedef struct hyper_native_cpu_observation_t {
+    uint64_t captured_at_ns;
+    uint64_t ticks_per_second;
+    uint64_t online_cpus;
+    uint64_t idle_ticks;
+    uint64_t kernel_thread_ticks;
+    uint64_t user_thread_ticks;
+    uint64_t vcpu_ticks;
+    uint64_t reserved;
+} hyper_native_cpu_observation_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_cpu_observation_t) == 64, "cpu_observation size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_cpu_observation_t) == 8, "cpu_observation alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, captured_at_ns) == 0, "cpu_observation.captured_at_ns offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, ticks_per_second) == 8, "cpu_observation.ticks_per_second offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, online_cpus) == 16, "cpu_observation.online_cpus offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, idle_ticks) == 24, "cpu_observation.idle_ticks offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, kernel_thread_ticks) == 32, "cpu_observation.kernel_thread_ticks offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, user_thread_ticks) == 40, "cpu_observation.user_thread_ticks offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, vcpu_ticks) == 48, "cpu_observation.vcpu_ticks offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, reserved) == 56, "cpu_observation.reserved offset");
 
 typedef struct hyper_native_object_inspection_t {
     uint64_t koid;
@@ -475,6 +541,38 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, kind) == 12, "d
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, name_length) == 16, "directory_entry.name_length offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, reserved) == 20, "directory_entry.reserved offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, name) == 24, "directory_entry.name offset");
+
+typedef struct hyper_native_file_info_t {
+    uint64_t filesystem_id;
+    uint64_t mount_id;
+    uint64_t node_id;
+    uint64_t size;
+    uint32_t mode;
+    uint32_t reserved;
+} hyper_native_file_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_file_info_t) == 40, "file_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_file_info_t) == 8, "file_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_info_t, filesystem_id) == 0, "file_info.filesystem_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_info_t, mount_id) == 8, "file_info.mount_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_info_t, node_id) == 16, "file_info.node_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_info_t, size) == 24, "file_info.size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_info_t, mode) == 32, "file_info.mode offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_info_t, reserved) == 36, "file_info.reserved offset");
+
+typedef struct hyper_native_directory_info_t {
+    uint64_t filesystem_id;
+    uint64_t mount_id;
+    uint64_t node_id;
+    uint32_t mode;
+    uint32_t reserved;
+} hyper_native_directory_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_directory_info_t) == 32, "directory_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_directory_info_t) == 8, "directory_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_info_t, filesystem_id) == 0, "directory_info.filesystem_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_info_t, mount_id) == 8, "directory_info.mount_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_info_t, node_id) == 16, "directory_info.node_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_info_t, mode) == 24, "directory_info.mode offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_info_t, reserved) == 28, "directory_info.reserved offset");
 
 #undef HYPER_ABI_ALIGNOF
 #undef HYPER_ABI_STATIC_ASSERT

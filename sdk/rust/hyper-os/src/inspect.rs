@@ -9,9 +9,11 @@
 
 use core::num::NonZeroU64;
 
+pub use crate::handle::Koid;
+
 use crate::handle::{
-    AnyObject, ObjectInspectorObject, ObjectKind, ProcessObject, ResourceDomainObject,
-    TaskGroupObject, TaskInspectorObject, TypedObject,
+    AnyObject, CpuInspectorObject, MemoryInspectorObject, ObjectInspectorObject, ObjectKind,
+    ProcessObject, ResourceDomainObject, TaskGroupObject, TaskInspectorObject, TypedObject,
 };
 use crate::{Error, HandleRef, OwnedHandle, Result, Rights, Status};
 
@@ -30,21 +32,6 @@ const INSPECTOR_RIGHTS: Rights = Rights::DUPLICATE
     .union(Rights::TRANSFER)
     .union(Rights::INSPECT)
     .union(Rights::DERIVE);
-
-/// Stable observation identity which never grants object authority.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct Koid(NonZeroU64);
-
-impl Koid {
-    pub fn from_raw(raw: u64) -> Result<Self> {
-        NonZeroU64::new(raw).map(Self).ok_or(Error::InvalidResponse)
-    }
-
-    #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0.get()
-    }
-}
 
 /// Validated immutable task name returned by an inspector scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -285,6 +272,38 @@ pub struct ThreadObservation {
     pub name: TaskName,
     pub role: ThreadRole,
     pub registry_phase: ThreadRegistryPhase,
+    pub runtime_ticks: u64,
+}
+
+/// One immutable physical-memory accounting observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MemoryObservation {
+    pub captured_at_ns: u64,
+    pub page_size: u64,
+    pub total_bytes: u64,
+    pub reserved_bytes: u64,
+    pub managed_bytes: u64,
+    pub free_bytes: u64,
+    pub used_bytes: u64,
+    pub kernel_bytes: u64,
+    pub heap_bytes: u64,
+    pub page_table_bytes: u64,
+    pub user_bytes: u64,
+    pub guest_bytes: u64,
+    pub unattributed_bytes: u64,
+    pub reclaimable_bytes: u64,
+}
+
+/// One immutable aggregate scheduler CPU-time observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CpuObservation {
+    pub captured_at_ns: u64,
+    pub ticks_per_second: u64,
+    pub online_cpus: u64,
+    pub idle_ticks: u64,
+    pub kernel_thread_ticks: u64,
+    pub user_thread_ticks: u64,
+    pub vcpu_ticks: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -368,10 +387,11 @@ impl TaskInspector {
         for record in &records[..count] {
             page.push(ThreadObservation {
                 koid: Koid::from_raw(record.koid)?,
-                process_koid: NonZeroU64::new(record.process_koid).map(Koid),
+                process_koid: NonZeroU64::new(record.process_koid).map(Koid::from_nonzero),
                 name: TaskName::decode(record.name, record.name_length)?,
                 role: ThreadRole::decode(record.role)?,
                 registry_phase: ThreadRegistryPhase::decode(record.registry_phase)?,
+                runtime_ticks: record.runtime_ticks,
             })?;
         }
         Ok(page)
@@ -411,6 +431,96 @@ impl TaskInspector {
     pub fn as_handle_ref(&self) -> HandleRef<'_, TaskInspectorObject> {
         self.handle.as_handle_ref()
     }
+}
+
+/// Immutable physical-memory observation authority.
+pub struct MemoryInspector {
+    handle: OwnedHandle<MemoryInspectorObject>,
+}
+
+impl MemoryInspector {
+    #[must_use]
+    pub const fn from_handle(handle: OwnedHandle<MemoryInspectorObject>) -> Self {
+        Self { handle }
+    }
+
+    pub fn read(&self) -> Result<MemoryObservation> {
+        let mut record = ZERO_MEMORY;
+        // SAFETY: the typed handle remains borrowed and `record` is writable.
+        let status = unsafe {
+            hyper_sys::memory_inspector_read(self.handle.as_handle_ref().raw().get(), &mut record)
+        };
+        Status::from_raw(status).into_result()?;
+        validate_memory_observation(&record)?;
+        Ok(MemoryObservation {
+            captured_at_ns: record.captured_at_ns,
+            page_size: record.page_size,
+            total_bytes: record.total_bytes,
+            reserved_bytes: record.reserved_bytes,
+            managed_bytes: record.managed_bytes,
+            free_bytes: record.free_bytes,
+            used_bytes: record.used_bytes,
+            kernel_bytes: record.kernel_bytes,
+            heap_bytes: record.heap_bytes,
+            page_table_bytes: record.page_table_bytes,
+            user_bytes: record.user_bytes,
+            guest_bytes: record.guest_bytes,
+            unattributed_bytes: record.unattributed_bytes,
+            reclaimable_bytes: record.reclaimable_bytes,
+        })
+    }
+}
+
+/// Immutable scheduler CPU-time observation authority.
+pub struct CpuInspector {
+    handle: OwnedHandle<CpuInspectorObject>,
+}
+
+impl CpuInspector {
+    #[must_use]
+    pub const fn from_handle(handle: OwnedHandle<CpuInspectorObject>) -> Self {
+        Self { handle }
+    }
+
+    pub fn read(&self) -> Result<CpuObservation> {
+        let mut record = ZERO_CPU;
+        // SAFETY: the typed handle remains borrowed and `record` is writable.
+        let status = unsafe {
+            hyper_sys::cpu_inspector_read(self.handle.as_handle_ref().raw().get(), &mut record)
+        };
+        Status::from_raw(status).into_result()?;
+        if record.reserved != 0 || record.ticks_per_second == 0 || record.online_cpus == 0 {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(CpuObservation {
+            captured_at_ns: record.captured_at_ns,
+            ticks_per_second: record.ticks_per_second,
+            online_cpus: record.online_cpus,
+            idle_ticks: record.idle_ticks,
+            kernel_thread_ticks: record.kernel_thread_ticks,
+            user_thread_ticks: record.user_thread_ticks,
+            vcpu_ticks: record.vcpu_ticks,
+        })
+    }
+}
+
+fn validate_memory_observation(record: &hyper_abi::HyperNativeMemoryObservation) -> Result<()> {
+    let owner_bytes = record
+        .kernel_bytes
+        .checked_add(record.heap_bytes)
+        .and_then(|value| value.checked_add(record.page_table_bytes))
+        .and_then(|value| value.checked_add(record.user_bytes))
+        .and_then(|value| value.checked_add(record.guest_bytes))
+        .and_then(|value| value.checked_add(record.unattributed_bytes));
+    let valid = record.page_size != 0
+        && record.reserved_bytes.checked_add(record.managed_bytes) == Some(record.total_bytes)
+        && record.free_bytes.checked_add(record.used_bytes) == Some(record.managed_bytes)
+        && owner_bytes == Some(record.used_bytes)
+        && record.reclaimable_bytes <= record.used_bytes;
+    if !valid {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(())
 }
 
 /// Immutable kernel-object and Process-handle observation authority.
@@ -589,7 +699,37 @@ const ZERO_THREAD: hyper_abi::HyperNativeTaskThread = hyper_abi::HyperNativeTask
     registry_phase: 0,
     name_length: 0,
     reserved: 0,
+    runtime_ticks: 0,
     name: [0; 64],
+};
+
+const ZERO_MEMORY: hyper_abi::HyperNativeMemoryObservation =
+    hyper_abi::HyperNativeMemoryObservation {
+        captured_at_ns: 0,
+        page_size: 0,
+        total_bytes: 0,
+        reserved_bytes: 0,
+        managed_bytes: 0,
+        free_bytes: 0,
+        used_bytes: 0,
+        kernel_bytes: 0,
+        heap_bytes: 0,
+        page_table_bytes: 0,
+        user_bytes: 0,
+        guest_bytes: 0,
+        unattributed_bytes: 0,
+        reclaimable_bytes: 0,
+    };
+
+const ZERO_CPU: hyper_abi::HyperNativeCpuObservation = hyper_abi::HyperNativeCpuObservation {
+    captured_at_ns: 0,
+    ticks_per_second: 0,
+    online_cpus: 0,
+    idle_ticks: 0,
+    kernel_thread_ticks: 0,
+    user_thread_ticks: 0,
+    vcpu_ticks: 0,
+    reserved: 0,
 };
 
 const ZERO_OBJECT: hyper_abi::HyperNativeObjectInspection =
@@ -743,7 +883,8 @@ mod raw_ops {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcessPhase, TASK_NAME_CAPACITY, TaskName, TerminalReason, ThreadRegistryPhase, ThreadRole,
+        ProcessPhase, TASK_NAME_CAPACITY, TaskName, TerminalReason, ThreadRegistryPhase,
+        ThreadRole, validate_memory_observation,
     };
 
     #[test]
@@ -785,6 +926,33 @@ mod tests {
             Err(crate::Error::InvalidResponse)
         );
         Ok(())
+    }
+
+    #[test]
+    fn memory_observations_require_complete_accounting_identities() {
+        let mut record = hyper_abi::HyperNativeMemoryObservation {
+            captured_at_ns: 1,
+            page_size: 4096,
+            total_bytes: 100,
+            reserved_bytes: 20,
+            managed_bytes: 80,
+            free_bytes: 30,
+            used_bytes: 50,
+            kernel_bytes: 10,
+            heap_bytes: 10,
+            page_table_bytes: 5,
+            user_bytes: 15,
+            guest_bytes: 5,
+            unattributed_bytes: 5,
+            reclaimable_bytes: 10,
+        };
+        assert_eq!(validate_memory_observation(&record), Ok(()));
+
+        record.used_bytes = 49;
+        assert_eq!(
+            validate_memory_observation(&record),
+            Err(crate::Error::InvalidResponse)
+        );
     }
 }
 

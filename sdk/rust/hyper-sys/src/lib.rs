@@ -240,6 +240,33 @@ pub unsafe fn handle_get_info(
     }
 }
 
+/// Retrieves object identity and kind into one ABI record.
+///
+/// # Safety
+///
+/// `handle` must remain live during the call and carry `INSPECT` rights.
+/// `info` must be aligned and writable for one complete
+/// [`abi::HyperNativeObjectBasicInfo`] record.
+#[inline]
+pub unsafe fn object_get_basic_info(
+    handle: abi::HyperNativeHandle,
+    info: *mut abi::HyperNativeObjectBasicInfo,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes both handle and output-pointer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO,
+            handle,
+            info.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeObjectBasicInfo>() as u64,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
 /// Waits for signals on one raw process handle.
 ///
 /// # Safety
@@ -735,6 +762,80 @@ pub unsafe fn directory_read(
     }
 }
 
+/// Retrieves immutable attributes for one Directory.
+///
+/// # Safety
+///
+/// `directory` must remain live with inspect rights. `info` must be aligned
+/// and writable for one complete [`abi::HyperNativeDirectoryInfo`] record.
+#[inline]
+pub unsafe fn directory_get_info(
+    directory: abi::HyperNativeHandle,
+    info: *mut abi::HyperNativeDirectoryInfo,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes both handle and output-pointer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_GET_INFO,
+            directory,
+            info.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeDirectoryInfo>() as u64,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Reads one immutable physical-memory accounting snapshot.
+///
+/// # Safety
+///
+/// `observation` must designate one writable ABI observation record.
+pub unsafe fn memory_inspector_read(
+    inspector: abi::HyperNativeHandle,
+    observation: *mut abi::HyperNativeMemoryObservation,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller owns the pointer contract stated above.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ,
+            inspector,
+            observation.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeMemoryObservation>() as u64,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Reads one immutable scheduler CPU-time snapshot.
+///
+/// # Safety
+///
+/// `observation` must designate one writable ABI observation record.
+pub unsafe fn cpu_inspector_read(
+    inspector: abi::HyperNativeHandle,
+    observation: *mut abi::HyperNativeCpuObservation,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller owns the pointer contract stated above.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_CPU_INSPECTOR_READ,
+            inspector,
+            observation.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeCpuObservation>() as u64,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
 /// Creates one zero-filled writable VMO.
 ///
 /// # Safety
@@ -967,6 +1068,32 @@ pub unsafe fn file_read_at(
             output_capacity as u64,
             0,
         )
+    }
+}
+
+/// Retrieves immutable attributes for one File.
+///
+/// # Safety
+///
+/// `file` must remain live with inspect rights. `info` must be aligned and
+/// writable for one complete [`abi::HyperNativeFileInfo`] record.
+#[inline]
+pub unsafe fn file_get_info(
+    file: abi::HyperNativeHandle,
+    info: *mut abi::HyperNativeFileInfo,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes both handle and output-pointer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_FILE_GET_INFO,
+            file,
+            info.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeFileInfo>() as u64,
+            0,
+            0,
+            0,
+        )
+        .status
     }
 }
 

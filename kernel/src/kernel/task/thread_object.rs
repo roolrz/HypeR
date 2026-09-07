@@ -62,6 +62,7 @@ pub(crate) struct ThreadObjectObservation {
     pub(crate) name: super::thread::ThreadNameSnapshot,
     pub(crate) object: ThreadObjectSnapshot,
     pub(crate) phase: ThreadObjectRegistryPhase,
+    pub(crate) runtime_ticks: u64,
 }
 
 /// Position in a bounded scheduler Thread-object scan.
@@ -126,6 +127,13 @@ pub(super) enum ThreadObject {
 }
 
 impl ThreadObject {
+    pub(super) fn role(&self) -> ThreadRole {
+        match self {
+            Self::System(object) => object.object().role,
+            Self::User(_) => ThreadRole::User,
+        }
+    }
+
     pub(super) fn try_system(role: ThreadRole) -> Result<Self, ObjectCreationError> {
         if role == ThreadRole::User {
             thread_object_invariant_violation();

@@ -29,6 +29,12 @@ impl FilesystemId {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct MountId(u64);
 
+impl MountId {
+    pub(crate) const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Error {
     Allocation,

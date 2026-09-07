@@ -526,6 +526,16 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         name: "object_inspector",
         transfer: TransferClass::General,
     },
+    ObjectKind {
+        value: 18,
+        name: "memory_inspector",
+        transfer: TransferClass::General,
+    },
+    ObjectKind {
+        value: 19,
+        name: "cpu_inspector",
+        transfer: TransferClass::General,
+    },
 ];
 
 pub const RIGHTS: &[Right] = &[
@@ -821,6 +831,14 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "startup_handle_purpose_dynamic_library_directory",
         value: 10,
+    },
+    AbiConstant {
+        name: "startup_handle_purpose_memory_inspector",
+        value: 11,
+    },
+    AbiConstant {
+        name: "startup_handle_purpose_cpu_inspector",
+        value: 12,
     },
     AbiConstant {
         name: "directory_entry_page_capacity",
@@ -1280,9 +1298,130 @@ const TASK_THREAD_FIELDS: &[Field] = &[
         offset: 28,
     },
     Field {
+        name: "runtime_ticks",
+        kind: FieldKind::U64,
+        offset: 32,
+    },
+    Field {
         name: "name",
         kind: FieldKind::Bytes(64),
+        offset: 40,
+    },
+];
+
+const MEMORY_OBSERVATION_FIELDS: &[Field] = &[
+    Field {
+        name: "captured_at_ns",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "page_size",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "total_bytes",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "reserved_bytes",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "managed_bytes",
+        kind: FieldKind::U64,
         offset: 32,
+    },
+    Field {
+        name: "free_bytes",
+        kind: FieldKind::U64,
+        offset: 40,
+    },
+    Field {
+        name: "used_bytes",
+        kind: FieldKind::U64,
+        offset: 48,
+    },
+    Field {
+        name: "kernel_bytes",
+        kind: FieldKind::U64,
+        offset: 56,
+    },
+    Field {
+        name: "heap_bytes",
+        kind: FieldKind::U64,
+        offset: 64,
+    },
+    Field {
+        name: "page_table_bytes",
+        kind: FieldKind::U64,
+        offset: 72,
+    },
+    Field {
+        name: "user_bytes",
+        kind: FieldKind::U64,
+        offset: 80,
+    },
+    Field {
+        name: "guest_bytes",
+        kind: FieldKind::U64,
+        offset: 88,
+    },
+    Field {
+        name: "unattributed_bytes",
+        kind: FieldKind::U64,
+        offset: 96,
+    },
+    Field {
+        name: "reclaimable_bytes",
+        kind: FieldKind::U64,
+        offset: 104,
+    },
+];
+
+const CPU_OBSERVATION_FIELDS: &[Field] = &[
+    Field {
+        name: "captured_at_ns",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "ticks_per_second",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "online_cpus",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "idle_ticks",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "kernel_thread_ticks",
+        kind: FieldKind::U64,
+        offset: 32,
+    },
+    Field {
+        name: "user_thread_ticks",
+        kind: FieldKind::U64,
+        offset: 40,
+    },
+    Field {
+        name: "vcpu_ticks",
+        kind: FieldKind::U64,
+        offset: 48,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U64,
+        offset: 56,
     },
 ];
 
@@ -1420,6 +1559,67 @@ const DIRECTORY_ENTRY_FIELDS: &[Field] = &[
     },
 ];
 
+const FILE_INFO_FIELDS: &[Field] = &[
+    Field {
+        name: "filesystem_id",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "mount_id",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "node_id",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "size",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "mode",
+        kind: FieldKind::U32,
+        offset: 32,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U32,
+        offset: 36,
+    },
+];
+
+const DIRECTORY_INFO_FIELDS: &[Field] = &[
+    Field {
+        name: "filesystem_id",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "mount_id",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "node_id",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "mode",
+        kind: FieldKind::U32,
+        offset: 24,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U32,
+        offset: 28,
+    },
+];
+
 pub const RECORDS: &[Record] = &[
     Record {
         name: "handle_info",
@@ -1472,7 +1672,19 @@ pub const RECORDS: &[Record] = &[
     Record {
         name: "task_thread",
         fields: TASK_THREAD_FIELDS,
-        size: 96,
+        size: 104,
+        alignment: 8,
+    },
+    Record {
+        name: "memory_observation",
+        fields: MEMORY_OBSERVATION_FIELDS,
+        size: 112,
+        alignment: 8,
+    },
+    Record {
+        name: "cpu_observation",
+        fields: CPU_OBSERVATION_FIELDS,
+        size: 64,
         alignment: 8,
     },
     Record {
@@ -1491,6 +1703,18 @@ pub const RECORDS: &[Record] = &[
         name: "directory_entry",
         fields: DIRECTORY_ENTRY_FIELDS,
         size: DIRECTORY_ENTRY_RECORD_SIZE,
+        alignment: 8,
+    },
+    Record {
+        name: "file_info",
+        fields: FILE_INFO_FIELDS,
+        size: 40,
+        alignment: 8,
+    },
+    Record {
+        name: "directory_info",
+        fields: DIRECTORY_INFO_FIELDS,
+        size: 32,
         alignment: 8,
     },
 ];
@@ -2257,6 +2481,74 @@ const DIRECTORY_READ_RESULTS: &[ResultValue] = &[
     },
 ];
 
+const FILE_GET_INFO_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "file",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("file"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "output",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "output_size",
+                maximum_bytes: 40,
+            },
+            record: Some("file_info"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "output_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const DIRECTORY_GET_INFO_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "directory",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("directory"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "output",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "output_size",
+                maximum_bytes: 32,
+            },
+            record: Some("directory_info"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "output_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
 const VMO_CREATE_ARGUMENTS: &[Argument] = &[Argument {
     name: "size",
     kind: ValueKind::ByteCount,
@@ -2802,7 +3094,7 @@ const TASK_INSPECTOR_SCAN_THREADS_ARGUMENTS: &[Argument] = &[
             length: MemoryLength::Elements {
                 argument: "capacity",
                 maximum_elements: 8,
-                element_size: 96,
+                element_size: 104,
             },
             record: Some("task_thread"),
             handles: None,
@@ -2981,6 +3273,74 @@ const OBJECT_INSPECTOR_DERIVE_PROCESS_RESULTS: &[ResultValue] = &[ResultValue {
         rights: ProducedRights::Fixed(OBJECT_INSPECTOR_RIGHTS),
     }),
 }];
+
+const MEMORY_INSPECTOR_READ_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("memory_inspector"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "observation",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "observation_size",
+                maximum_bytes: 112,
+            },
+            record: Some("memory_observation"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "observation_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const CPU_INSPECTOR_READ_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "inspector",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("cpu_inspector"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "observation",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "observation_size",
+                maximum_bytes: 64,
+            },
+            record: Some("cpu_observation"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "observation_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
 
 const TASK_INSPECTOR_DERIVE_TASK_GROUP_ARGUMENTS: &[Argument] = &[
     Argument {
@@ -3896,6 +4256,62 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::Strict,
         failure_results: &[],
     },
+    Syscall {
+        number: 55,
+        name: "memory_inspector_read",
+        feature: FeatureGate::Core,
+        arguments: MEMORY_INSPECTOR_READ_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 56,
+        name: "cpu_inspector_read",
+        feature: FeatureGate::Core,
+        arguments: CPU_INSPECTOR_READ_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 57,
+        name: "file_get_info",
+        feature: FeatureGate::Core,
+        arguments: FILE_GET_INFO_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 58,
+        name: "directory_get_info",
+        feature: FeatureGate::Core,
+        arguments: DIRECTORY_GET_INFO_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -3918,6 +4334,8 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.",
     "Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.",
     "Inspector scans require the exact published page capacity for their record type. Cursor zero starts a scan and a returned next_cursor of zero ends it. Pages and complete scans are weakly consistent with concurrent task, object, and handle-table mutation; generation-qualified handle values prevent slot reuse from aliasing an earlier observation.",
+    "Memory and CPU inspectors publish immutable point-in-time copies. Their handles grant observation only; they never expose writable accounting storage or allocator and scheduler synchronization to userspace. CPU categories are scheduler-tick observations and a multi-CPU snapshot is weakly consistent across CPUs.",
+    "File and Directory information reports immutable attributes plus filesystem, mount, and node identities for diagnostics and correlation. These identities do not grant authority, cannot be resolved back into handles, and do not define a pathname; directory entries, hard links, renames, mount namespaces, and unlinks make pathnames namespace-dependent observations rather than object identity.",
     "Object wait-many borrows every input handle for the complete wait, canonicalizes duplicate object identities, and selects the lowest input index whose requested mask intersects the winning object's committed level snapshot. Source-handle close after resolution does not cancel the wait.",
     "Process terminal detail fields are reason-specific: exit reasons encode the signed status as two's-complement in detail0; fault encodes class in detail0 and code in detail1; task-group stop encodes generation in detail0; unused details are zero.",
     "Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.",

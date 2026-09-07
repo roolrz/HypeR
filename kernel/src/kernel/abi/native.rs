@@ -18,11 +18,13 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_BYTE_CHANNEL_WRITE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE,
     HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND,
     HYPER_NATIVE_SYS_CONSOLE_READ, HYPER_NATIVE_SYS_CONSOLE_WRITE,
+    HYPER_NATIVE_SYS_CPU_INSPECTOR_READ, HYPER_NATIVE_SYS_DIRECTORY_GET_INFO,
     HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY, HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE,
     HYPER_NATIVE_SYS_DIRECTORY_READ, HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
-    HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO, HYPER_NATIVE_SYS_FILE_READ_AT,
-    HYPER_NATIVE_SYS_HANDLE_CLOSE, HYPER_NATIVE_SYS_HANDLE_DUPLICATE,
-    HYPER_NATIVE_SYS_HANDLE_GET_INFO, HYPER_NATIVE_SYS_HANDLE_REPLACE,
+    HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO, HYPER_NATIVE_SYS_FILE_GET_INFO,
+    HYPER_NATIVE_SYS_FILE_READ_AT, HYPER_NATIVE_SYS_HANDLE_CLOSE,
+    HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
+    HYPER_NATIVE_SYS_HANDLE_REPLACE, HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ,
     HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO, HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS,
     HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
     HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_TASK_GROUP,
@@ -41,10 +43,11 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD, HYPER_NATIVE_SYS_VMAR_ALLOCATE,
     HYPER_NATIVE_SYS_VMAR_DESTROY, HYPER_NATIVE_SYS_VMAR_MAP, HYPER_NATIVE_SYS_VMAR_PROTECT,
     HYPER_NATIVE_SYS_VMAR_UNMAP, HYPER_NATIVE_SYS_VMO_CREATE, HYPER_NATIVE_SYS_VMO_READ,
-    HYPER_NATIVE_SYS_VMO_WRITE, HyperNativeDirectoryEntry, HyperNativeHandleInfo,
-    HyperNativeHandleInspection, HyperNativeObjectBasicInfo, HyperNativeObjectInspection,
-    HyperNativeProcessInfo, HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread,
-    NativeInvocation, NativeResult,
+    HYPER_NATIVE_SYS_VMO_WRITE, HyperNativeCpuObservation, HyperNativeDirectoryEntry,
+    HyperNativeDirectoryInfo, HyperNativeFileInfo, HyperNativeHandleInfo,
+    HyperNativeHandleInspection, HyperNativeMemoryObservation, HyperNativeObjectBasicInfo,
+    HyperNativeObjectInspection, HyperNativeProcessInfo, HyperNativeStatus, HyperNativeTaskProcess,
+    HyperNativeTaskThread, NativeInvocation, NativeResult,
 };
 
 use crate::kernel::accounting::ResourceError;
@@ -69,7 +72,7 @@ use crate::kernel::process::{
     TerminalReason,
 };
 use crate::kernel::task::TimedWaitError;
-use crate::kernel::vfs::{DirectoryPage, VfsError, VfsServiceError};
+use crate::kernel::vfs::{DirectoryInfo, DirectoryPage, FileInfo, VfsError, VfsServiceError};
 
 const HANDLE_INFO_SIZE: usize = core::mem::size_of::<HyperNativeHandleInfo>();
 const OBJECT_BASIC_INFO_SIZE: usize = core::mem::size_of::<HyperNativeObjectBasicInfo>();
@@ -160,6 +163,23 @@ pub(in crate::kernel) trait DeferredServices:
     ) -> Result<SignalWaitManyOutcome, ObjectServiceError>;
 
     fn process_info(&self, process: HandleValue) -> Result<ProcessSnapshot, ProcessError>;
+
+    fn memory_observation(
+        &self,
+        inspector: HandleValue,
+    ) -> Result<crate::kernel::inspect::MemoryObservation, crate::kernel::inspect::Error> {
+        let _ = inspector;
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
+
+    fn cpu_observation(
+        &self,
+        inspector: HandleValue,
+    ) -> Result<crate::kernel::task::scheduler::CpuTimeSnapshot, crate::kernel::inspect::Error>
+    {
+        let _ = inspector;
+        Err(crate::kernel::inspect::Error::AccessDenied)
+    }
 
     fn scan_processes(
         &self,
@@ -327,6 +347,10 @@ pub(in crate::kernel) trait DeferredServices:
         offset: u64,
         output: Option<UserSlice>,
     ) -> Result<(u64, u64), VfsServiceError>;
+
+    fn file_info(&self, file: HandleValue) -> Result<FileInfo, VfsServiceError>;
+
+    fn directory_info(&self, directory: HandleValue) -> Result<DirectoryInfo, VfsServiceError>;
 
     fn create_vmo(&self, size: u64) -> Result<HandleValue, MemoryServiceError>;
     fn create_file_executable_vmo(
@@ -582,6 +606,10 @@ pub(in crate::kernel) fn dispatch_deferred(
         }
         HYPER_NATIVE_SYS_DIRECTORY_READ => sys_directory_read(services, invocation.arguments()),
         HYPER_NATIVE_SYS_FILE_READ_AT => sys_file_read_at(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_FILE_GET_INFO => sys_file_get_info(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_DIRECTORY_GET_INFO => {
+            sys_directory_get_info(services, invocation.arguments())
+        }
         HYPER_NATIVE_SYS_VMO_CREATE => sys_vmo_create(services, invocation.arguments()),
         HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO => {
             sys_file_create_executable_vmo(services, invocation.arguments())
@@ -653,6 +681,12 @@ pub(in crate::kernel) fn dispatch_deferred(
         }
         HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN => {
             sys_object_inspector_derive_resource_domain(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ => {
+            sys_memory_inspector_read(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_CPU_INSPECTOR_READ => {
+            sys_cpu_inspector_read(services, invocation.arguments())
         }
         _ => DeferredAction::Return(sys_not_supported()),
     }
@@ -1259,6 +1293,43 @@ fn sys_object_inspector_derive_resource_domain(
 }
 
 #[inline(never)]
+fn sys_memory_inspector_read(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = prepare_info_request(
+        arguments,
+        core::mem::size_of::<HyperNativeMemoryObservation>(),
+    )
+    .and_then(|(inspector, destination)| {
+        let observation = services
+            .memory_observation(inspector)
+            .map_err(status_from_inspection_error)?;
+        services
+            .copy_to_user(destination, &encode_memory_observation(observation))
+            .map_err(status_from_process_error)
+    });
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+fn sys_cpu_inspector_read(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = prepare_info_request(arguments, core::mem::size_of::<HyperNativeCpuObservation>())
+        .and_then(|(inspector, destination)| {
+            let observation = services
+                .cpu_observation(inspector)
+                .map_err(status_from_inspection_error)?;
+            services
+                .copy_to_user(destination, &encode_cpu_observation(observation))
+                .map_err(status_from_process_error)
+        });
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
 fn sys_console_read(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
     let result = parse_console_io(arguments).and_then(|(console, bytes)| {
         services
@@ -1376,6 +1447,37 @@ fn sys_file_read_at(services: &impl DeferredServices, arguments: &Arguments) -> 
         Err(status) => failure(status),
     };
     DeferredAction::Return(result)
+}
+
+#[inline(never)]
+fn sys_file_get_info(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+    let result = prepare_info_request(arguments, core::mem::size_of::<HyperNativeFileInfo>())
+        .and_then(|(file, destination)| {
+            let info = services
+                .file_info(file)
+                .map_err(status_from_vfs_service_error)?;
+            services
+                .copy_to_user(destination, &encode_file_info(info))
+                .map_err(status_from_process_error)
+        });
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+fn sys_directory_get_info(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = prepare_info_request(arguments, core::mem::size_of::<HyperNativeDirectoryInfo>())
+        .and_then(|(directory, destination)| {
+            let info = services
+                .directory_info(directory)
+                .map_err(status_from_vfs_service_error)?;
+            services
+                .copy_to_user(destination, &encode_directory_info(info))
+                .map_err(status_from_process_error)
+        });
+    DeferredAction::Return(status_only(result))
 }
 
 #[inline(never)]
@@ -1703,6 +1805,10 @@ fn parse_object_kind(raw: u32) -> Result<crate::kernel::object::ObjectKind, Hype
         hyper::abi::native::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => {
             Ok(ObjectKind::OBJECT_INSPECTOR)
         }
+        hyper::abi::native::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => {
+            Ok(ObjectKind::MEMORY_INSPECTOR)
+        }
+        hyper::abi::native::HYPER_NATIVE_OBJECT_CPU_INSPECTOR => Ok(ObjectKind::CPU_INSPECTOR),
         _ => Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
     }
 }
@@ -1901,6 +2007,93 @@ const fn directory_entry_kind(kind: hyper::fs::NodeKind) -> u32 {
     }
 }
 
+fn encode_file_info(info: FileInfo) -> [u8; core::mem::size_of::<HyperNativeFileInfo>()] {
+    encode_file_info_fields(
+        info.location.filesystem_id,
+        info.location.mount_id,
+        info.location.node_id,
+        info.size,
+        info.mode,
+    )
+}
+
+fn encode_file_info_fields(
+    filesystem_id: u64,
+    mount_id: u64,
+    node_id: u64,
+    size: u64,
+    mode: u32,
+) -> [u8; core::mem::size_of::<HyperNativeFileInfo>()] {
+    let mut record = [0_u8; core::mem::size_of::<HyperNativeFileInfo>()];
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(HyperNativeFileInfo, filesystem_id),
+        filesystem_id,
+    );
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(HyperNativeFileInfo, mount_id),
+        mount_id,
+    );
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(HyperNativeFileInfo, node_id),
+        node_id,
+    );
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(HyperNativeFileInfo, size),
+        size,
+    );
+    write_u32(
+        &mut record,
+        core::mem::offset_of!(HyperNativeFileInfo, mode),
+        mode,
+    );
+    record
+}
+
+fn encode_directory_info(
+    info: DirectoryInfo,
+) -> [u8; core::mem::size_of::<HyperNativeDirectoryInfo>()] {
+    encode_directory_info_fields(
+        info.location.filesystem_id,
+        info.location.mount_id,
+        info.location.node_id,
+        info.mode,
+    )
+}
+
+fn encode_directory_info_fields(
+    filesystem_id: u64,
+    mount_id: u64,
+    node_id: u64,
+    mode: u32,
+) -> [u8; core::mem::size_of::<HyperNativeDirectoryInfo>()] {
+    let mut record = [0_u8; core::mem::size_of::<HyperNativeDirectoryInfo>()];
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(HyperNativeDirectoryInfo, filesystem_id),
+        filesystem_id,
+    );
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(HyperNativeDirectoryInfo, mount_id),
+        mount_id,
+    );
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(HyperNativeDirectoryInfo, node_id),
+        node_id,
+    );
+    write_u32(
+        &mut record,
+        core::mem::offset_of!(HyperNativeDirectoryInfo, mode),
+        mode,
+    );
+    record
+}
+
 fn encode_handle_info(info: HandleInfo) -> [u8; HANDLE_INFO_SIZE] {
     encode_handle_info_fields(info.kind.get(), info.flags.bits(), info.rights.bits())
 }
@@ -2011,8 +2204,8 @@ fn encode_task_process(snapshot: ProcessSnapshot) -> [u8; 96] {
     record
 }
 
-fn encode_task_thread(snapshot: TaskThreadSnapshot) -> [u8; 96] {
-    let mut record = [0_u8; 96];
+fn encode_task_thread(snapshot: TaskThreadSnapshot) -> [u8; 104] {
+    let mut record = [0_u8; 104];
     write_u64(&mut record, 0, snapshot.koid.get());
     write_u64(
         &mut record,
@@ -2044,7 +2237,54 @@ fn encode_task_thread(snapshot: TaskThreadSnapshot) -> [u8; 96] {
     write_u32(&mut record, 20, registry_phase as u32);
     let name = snapshot.name.as_bytes();
     write_u32(&mut record, 24, name.len() as u32);
-    record[32..32 + name.len()].copy_from_slice(name);
+    write_u64(&mut record, 32, snapshot.runtime_ticks);
+    record[40..40 + name.len()].copy_from_slice(name);
+    record
+}
+
+fn encode_memory_observation(snapshot: crate::kernel::inspect::MemoryObservation) -> [u8; 112] {
+    let mut record = [0_u8; 112];
+    for (index, value) in [
+        snapshot.captured_at_ns,
+        snapshot.page_size,
+        snapshot.total_bytes,
+        snapshot.reserved_bytes,
+        snapshot.managed_bytes,
+        snapshot.free_bytes,
+        snapshot.used_bytes,
+        snapshot.kernel_bytes,
+        snapshot.heap_bytes,
+        snapshot.page_table_bytes,
+        snapshot.user_bytes,
+        snapshot.guest_bytes,
+        snapshot.unattributed_bytes,
+        snapshot.reclaimable_bytes,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        write_u64(&mut record, index * core::mem::size_of::<u64>(), value);
+    }
+    record
+}
+
+fn encode_cpu_observation(snapshot: crate::kernel::task::scheduler::CpuTimeSnapshot) -> [u8; 64] {
+    let mut record = [0_u8; 64];
+    for (index, value) in [
+        snapshot.captured_at_ns,
+        snapshot.ticks_per_second,
+        snapshot.online_cpus,
+        snapshot.idle_ticks,
+        snapshot.kernel_thread_ticks,
+        snapshot.user_thread_ticks,
+        snapshot.vcpu_ticks,
+        0,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        write_u64(&mut record, index * core::mem::size_of::<u64>(), value);
+    }
     record
 }
 
@@ -2237,6 +2477,8 @@ fn status_from_inspection_error(error: crate::kernel::inspect::Error) -> HyperNa
         crate::kernel::inspect::Error::Process(error) => status_from_process_error(error),
         crate::kernel::inspect::Error::Resource(error) => status_from_resource_error(error),
         crate::kernel::inspect::Error::Scheduler(error) => status_from_scheduler_error(error),
+        crate::kernel::inspect::Error::Unavailable => HYPER_NATIVE_STATUS_BAD_STATE,
+        crate::kernel::inspect::Error::InconsistentAccounting => HYPER_NATIVE_STATUS_INTERNAL,
     }
 }
 
@@ -2977,6 +3219,16 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(VfsServiceError::Process(ProcessError::Allocation))
         }
 
+        fn file_info(&self, _: HandleValue) -> Result<FileInfo, VfsServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(VfsServiceError::Process(ProcessError::Allocation))
+        }
+
+        fn directory_info(&self, _: HandleValue) -> Result<DirectoryInfo, VfsServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(VfsServiceError::Process(ProcessError::Allocation))
+        }
+
         fn create_vmo(&self, _: u64) -> Result<HandleValue, MemoryServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(MemoryServiceError::Process(ProcessError::Allocation))
@@ -3325,12 +3577,44 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             ],
         ),
     );
+    let bad_file_info_size = dispatch_deferred(
+        &services,
+        invoke(
+            HYPER_NATIVE_SYS_FILE_GET_INFO,
+            [
+                1_u64 << 24 | 1,
+                0x2000,
+                core::mem::size_of::<HyperNativeFileInfo>() as u64 - 1,
+                0,
+                0,
+                0,
+            ],
+        ),
+    );
+    let bad_directory_info_size = dispatch_deferred(
+        &services,
+        invoke(
+            HYPER_NATIVE_SYS_DIRECTORY_GET_INFO,
+            [
+                1_u64 << 24 | 1,
+                0x2000,
+                core::mem::size_of::<HyperNativeDirectoryInfo>() as u64 - 1,
+                0,
+                0,
+                0,
+            ],
+        ),
+    );
     if empty_wait_many != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
         || oversized_wait_many
             != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
         || bad_process_info_size
             != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
         || bad_directory_page_capacity
+            != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+        || bad_file_info_size
+            != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+        || bad_directory_info_size
             != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
     {
         return Err(SelfTestError::InvalidRecordSize);
@@ -3561,6 +3845,25 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55, 0x00, 0xff, 0xee, 0xdd, 0xcc, 0xbb,
             0xaa, 0x99, 0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01, 0, 0, 0, 0, 0, 0, 0, 0,
         ]
+    {
+        return Err(SelfTestError::RecordEncoding);
+    }
+    let file_record = encode_file_info_fields(11, 17, 23, 29, 0o100_755);
+    if file_record[0..8] != 11_u64.to_ne_bytes()
+        || file_record[8..16] != 17_u64.to_ne_bytes()
+        || file_record[16..24] != 23_u64.to_ne_bytes()
+        || file_record[24..32] != 29_u64.to_ne_bytes()
+        || file_record[32..36] != 0o100_755_u32.to_ne_bytes()
+        || file_record[36..40] != [0; 4]
+    {
+        return Err(SelfTestError::RecordEncoding);
+    }
+    let directory_record = encode_directory_info_fields(31, 37, 0, 0o040_755);
+    if directory_record[0..8] != 31_u64.to_ne_bytes()
+        || directory_record[8..16] != 37_u64.to_ne_bytes()
+        || directory_record[16..24] != 0_u64.to_ne_bytes()
+        || directory_record[24..28] != 0o040_755_u32.to_ne_bytes()
+        || directory_record[28..32] != [0; 4]
     {
         return Err(SelfTestError::RecordEncoding);
     }

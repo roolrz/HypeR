@@ -79,6 +79,22 @@ pub(crate) fn read_directory(
     directory.object().read_page(cookie).map_err(Into::into)
 }
 
+pub(crate) fn directory_info(
+    process: &Process,
+    directory: HandleValue,
+) -> Result<super::DirectoryInfo, ServiceError> {
+    let directory = process.resolve_handle::<DirectoryObject>(directory, Rights::INSPECT)?;
+    Ok(directory.object().info())
+}
+
+pub(crate) fn file_info(
+    process: &Process,
+    file: HandleValue,
+) -> Result<super::FileInfo, ServiceError> {
+    let file = process.resolve_handle::<FileObject>(file, Rights::INSPECT)?;
+    Ok(file.object().info())
+}
+
 fn copy_path(process: &Process, path: UserSlice) -> Result<alloc::string::String, ServiceError> {
     let length = usize::try_from(path.length()).map_err(|_| ServiceError::InvalidInput)?;
     if length == 0 || length > MAX_PATH_BYTES {

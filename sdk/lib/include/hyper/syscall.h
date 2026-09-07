@@ -39,6 +39,9 @@ hyper_call_result_t hyper_handle_replace(
 hyper_native_status_t hyper_handle_get_info(
     hyper_native_handle_t handle,
     hyper_native_handle_info_t *info);
+hyper_native_status_t hyper_object_get_basic_info(
+    hyper_native_handle_t handle,
+    hyper_native_object_basic_info_t *info);
 hyper_call_result_t hyper_object_wait_one(
     hyper_native_handle_t object,
     uint64_t signals,
@@ -92,11 +95,17 @@ hyper_call_result_t hyper_directory_read(
     uint64_t cookie,
     hyper_native_directory_entry_t *records,
     size_t capacity);
+hyper_native_status_t hyper_directory_get_info(
+    hyper_native_handle_t directory,
+    hyper_native_directory_info_t *info);
 hyper_call_result_t hyper_file_read_at(
     hyper_native_handle_t file,
     uint64_t offset,
     void *output,
     size_t output_capacity);
+hyper_native_status_t hyper_file_get_info(
+    hyper_native_handle_t file,
+    hyper_native_file_info_t *info);
 hyper_call_result_t hyper_vmo_create(uint64_t size);
 hyper_call_result_t hyper_file_create_executable_vmo(hyper_native_handle_t file);
 hyper_native_status_t hyper_vmo_read(
@@ -186,6 +195,12 @@ hyper_call_result_t hyper_object_inspector_scan_handles(
     uint64_t cursor,
     hyper_native_handle_inspection_t *records,
     size_t capacity);
+hyper_native_status_t hyper_memory_inspector_read(
+    hyper_native_handle_t inspector,
+    hyper_native_memory_observation_t *observation);
+hyper_native_status_t hyper_cpu_inspector_read(
+    hyper_native_handle_t inspector,
+    hyper_native_cpu_observation_t *observation);
 hyper_call_result_t hyper_task_inspector_derive_process(
     hyper_native_handle_t inspector,
     hyper_native_handle_t process);

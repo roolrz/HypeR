@@ -13,8 +13,9 @@ use command::{CommandLine, MAX_LINE_BYTES};
 use hyper_os::channel;
 use hyper_os::fs::{Directory, DirectoryRights, File, FileRights};
 use hyper_os::handle::{
-    ByteChannelObject, ObjectInspectorObject, OwnedHandle, ProcessObject, ResourceDomainObject,
-    Rights, RightsOffer, TaskFactoryObject, TaskGroupObject, TaskInspectorObject,
+    ByteChannelObject, CpuInspectorObject, MemoryInspectorObject, ObjectInspectorObject,
+    OwnedHandle, ProcessObject, ResourceDomainObject, Rights, RightsOffer, TaskFactoryObject,
+    TaskGroupObject, TaskInspectorObject,
 };
 use hyper_os::startup::{self, Startup};
 use hyper_os::task::{ProcessBuilder, ProcessInfo, ProcessTermination};
@@ -63,6 +64,10 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
     let object_inspector = startup
         .take(startup::OBJECT_INSPECTOR)
         .map_err(Error::from)?;
+    let memory_inspector = startup
+        .take(startup::MEMORY_INSPECTOR)
+        .map_err(Error::from)?;
+    let cpu_inspector = startup.take(startup::CPU_INSPECTOR).map_err(Error::from)?;
     let mut authorities = CommandAuthorities {
         root_directory,
         current_directory,
@@ -73,6 +78,8 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
         domain,
         task_inspector,
         object_inspector,
+        memory_inspector,
+        cpu_inspector,
     };
 
     write(&output, READY_MESSAGE)?;
@@ -163,10 +170,7 @@ fn execute_line(
         return Ok(CommandFlow::Continue);
     };
     match name {
-        "help" => write(
-            output,
-            b"builtins: cd clear echo exit help pwd\nexternal commands: ls /bin/echo /bin/handle /bin/ps\n",
-        )?,
+        "help" => write(output, b"builtins: cd clear echo exit help pwd\n")?,
         "cd" => builtin_cd(&command, authorities, error)?,
         "pwd" => builtin_pwd(&command, authorities, output, error)?,
         "echo" => builtin_echo(&command, output)?,
@@ -318,6 +322,36 @@ fn launch_command(
                 RightsOffer::Exact(Rights::INSPECT),
             )
             .map_err(|_| Error::InvalidCommand)?,
+        "free" | "/bin/free" => builder
+            .add_handle_duplicate(
+                authorities.memory_inspector.as_handle_ref(),
+                startup::MEMORY_INSPECTOR.as_raw(),
+                RightsOffer::Exact(Rights::INSPECT),
+            )
+            .map_err(|_| Error::InvalidCommand)?,
+        "top" | "/bin/top" => {
+            builder
+                .add_handle_duplicate(
+                    authorities.task_inspector.as_handle_ref(),
+                    startup::TASK_INSPECTOR.as_raw(),
+                    RightsOffer::Exact(Rights::INSPECT),
+                )
+                .map_err(|_| Error::InvalidCommand)?;
+            builder
+                .add_handle_duplicate(
+                    authorities.memory_inspector.as_handle_ref(),
+                    startup::MEMORY_INSPECTOR.as_raw(),
+                    RightsOffer::Exact(Rights::INSPECT),
+                )
+                .map_err(|_| Error::InvalidCommand)?;
+            builder
+                .add_handle_duplicate(
+                    authorities.cpu_inspector.as_handle_ref(),
+                    startup::CPU_INSPECTOR.as_raw(),
+                    RightsOffer::Exact(Rights::INSPECT),
+                )
+                .map_err(|_| Error::InvalidCommand)?;
+        }
         _ => {}
     }
     add_child_channel(
@@ -487,6 +521,8 @@ struct CommandAuthorities {
     domain: OwnedHandle<ResourceDomainObject>,
     task_inspector: OwnedHandle<TaskInspectorObject>,
     object_inspector: OwnedHandle<ObjectInspectorObject>,
+    memory_inspector: OwnedHandle<MemoryInspectorObject>,
+    cpu_inspector: OwnedHandle<CpuInspectorObject>,
 }
 
 struct ChildChannels {

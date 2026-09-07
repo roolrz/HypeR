@@ -47,6 +47,8 @@ pub const HYPER_NATIVE_OBJECT_CAPABILITY_CHANNEL: u32 = 14;
 pub const HYPER_NATIVE_OBJECT_PROCESS_BUILDER: u32 = 15;
 pub const HYPER_NATIVE_OBJECT_TASK_INSPECTOR: u32 = 16;
 pub const HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR: u32 = 17;
+pub const HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR: u32 = 18;
+pub const HYPER_NATIVE_OBJECT_CPU_INSPECTOR: u32 = 19;
 
 pub const HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN: u32 = 0;
 pub const HYPER_NATIVE_TRANSFER_CLASS_GENERAL: u32 = 1;
@@ -72,6 +74,8 @@ pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {
         HYPER_NATIVE_OBJECT_PROCESS_BUILDER => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         HYPER_NATIVE_OBJECT_TASK_INSPECTOR => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
         HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_CPU_INSPECTOR => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
         _ => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
     }
 }
@@ -133,6 +137,8 @@ pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_DIRECTORY: u64 = 7;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR: u64 = 8;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR: u64 = 9;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY: u64 = 10;
+pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR: u64 = 11;
+pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR: u64 = 12;
 pub const HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY: u64 = 4;
 pub const HYPER_NATIVE_DIRECTORY_ENTRY_NAME_MAX_BYTES: u64 = 255;
 pub const HYPER_NATIVE_DIRECTORY_ENTRY_KIND_FILE: u64 = 1;
@@ -249,6 +255,10 @@ pub const HYPER_NATIVE_SYS_VMAR_PROTECT: u64 = 51;
 pub const HYPER_NATIVE_SYS_VMAR_UNMAP: u64 = 52;
 pub const HYPER_NATIVE_SYS_VMAR_DESTROY: u64 = 53;
 pub const HYPER_NATIVE_SYS_DIRECTORY_READ: u64 = 54;
+pub const HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ: u64 = 55;
+pub const HYPER_NATIVE_SYS_CPU_INSPECTOR_READ: u64 = 56;
+pub const HYPER_NATIVE_SYS_FILE_GET_INFO: u64 = 57;
+pub const HYPER_NATIVE_SYS_DIRECTORY_GET_INFO: u64 = 58;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -392,9 +402,10 @@ pub struct HyperNativeTaskThread {
     pub registry_phase: u32,
     pub name_length: u32,
     pub reserved: u32,
+    pub runtime_ticks: u64,
     pub name: [u8; 64],
 }
-const _: () = assert!(core::mem::size_of::<HyperNativeTaskThread>() == 96);
+const _: () = assert!(core::mem::size_of::<HyperNativeTaskThread>() == 104);
 const _: () = assert!(core::mem::align_of::<HyperNativeTaskThread>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, koid) == 0);
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, process_koid) == 8);
@@ -402,7 +413,68 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, role) == 16);
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, registry_phase) == 20);
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, name_length) == 24);
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, reserved) == 28);
-const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, name) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, runtime_ticks) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, name) == 40);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeMemoryObservation {
+    pub captured_at_ns: u64,
+    pub page_size: u64,
+    pub total_bytes: u64,
+    pub reserved_bytes: u64,
+    pub managed_bytes: u64,
+    pub free_bytes: u64,
+    pub used_bytes: u64,
+    pub kernel_bytes: u64,
+    pub heap_bytes: u64,
+    pub page_table_bytes: u64,
+    pub user_bytes: u64,
+    pub guest_bytes: u64,
+    pub unattributed_bytes: u64,
+    pub reclaimable_bytes: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeMemoryObservation>() == 112);
+const _: () = assert!(core::mem::align_of::<HyperNativeMemoryObservation>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, captured_at_ns) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, page_size) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, total_bytes) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, reserved_bytes) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, managed_bytes) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, free_bytes) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, used_bytes) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, kernel_bytes) == 56);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, heap_bytes) == 64);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, page_table_bytes) == 72);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, user_bytes) == 80);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, guest_bytes) == 88);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeMemoryObservation, unattributed_bytes) == 96);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeMemoryObservation, reclaimable_bytes) == 104);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeCpuObservation {
+    pub captured_at_ns: u64,
+    pub ticks_per_second: u64,
+    pub online_cpus: u64,
+    pub idle_ticks: u64,
+    pub kernel_thread_ticks: u64,
+    pub user_thread_ticks: u64,
+    pub vcpu_ticks: u64,
+    pub reserved: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeCpuObservation>() == 64);
+const _: () = assert!(core::mem::align_of::<HyperNativeCpuObservation>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, captured_at_ns) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, ticks_per_second) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, online_cpus) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, idle_ticks) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, kernel_thread_ticks) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, user_thread_ticks) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, vcpu_ticks) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, reserved) == 56);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -481,3 +553,39 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, kind) == 
 const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, name_length) == 16);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, reserved) == 20);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, name) == 24);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeFileInfo {
+    pub filesystem_id: u64,
+    pub mount_id: u64,
+    pub node_id: u64,
+    pub size: u64,
+    pub mode: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeFileInfo>() == 40);
+const _: () = assert!(core::mem::align_of::<HyperNativeFileInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileInfo, filesystem_id) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileInfo, mount_id) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileInfo, node_id) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileInfo, size) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileInfo, mode) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileInfo, reserved) == 36);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeDirectoryInfo {
+    pub filesystem_id: u64,
+    pub mount_id: u64,
+    pub node_id: u64,
+    pub mode: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeDirectoryInfo>() == 32);
+const _: () = assert!(core::mem::align_of::<HyperNativeDirectoryInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryInfo, filesystem_id) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryInfo, mount_id) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryInfo, node_id) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryInfo, mode) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryInfo, reserved) == 28);

@@ -49,6 +49,20 @@ hyper_native_status_t hyper_handle_get_info(
         0).status;
 }
 
+hyper_native_status_t hyper_object_get_basic_info(
+    hyper_native_handle_t handle,
+    hyper_native_object_basic_info_t *info)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO,
+        handle,
+        (uintptr_t)info,
+        sizeof(*info),
+        0,
+        0,
+        0).status;
+}
+
 hyper_call_result_t hyper_object_wait_one(
     hyper_native_handle_t object,
     uint64_t signals,
@@ -221,6 +235,20 @@ hyper_call_result_t hyper_directory_read(
         0);
 }
 
+hyper_native_status_t hyper_directory_get_info(
+    hyper_native_handle_t directory,
+    hyper_native_directory_info_t *info)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_DIRECTORY_GET_INFO,
+        directory,
+        (uintptr_t)info,
+        sizeof(*info),
+        0,
+        0,
+        0).status;
+}
+
 hyper_call_result_t hyper_file_read_at(
     hyper_native_handle_t file,
     uint64_t offset,
@@ -235,6 +263,20 @@ hyper_call_result_t hyper_file_read_at(
         (uintptr_t)output,
         output_capacity,
         0);
+}
+
+hyper_native_status_t hyper_file_get_info(
+    hyper_native_handle_t file,
+    hyper_native_file_info_t *info)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_FILE_GET_INFO,
+        file,
+        (uintptr_t)info,
+        sizeof(*info),
+        0,
+        0,
+        0).status;
 }
 
 hyper_call_result_t hyper_vmo_create(uint64_t size)
@@ -547,6 +589,34 @@ hyper_call_result_t hyper_object_inspector_scan_handles(
         (uintptr_t)records,
         capacity,
         0);
+}
+
+hyper_native_status_t hyper_memory_inspector_read(
+    hyper_native_handle_t inspector,
+    hyper_native_memory_observation_t *observation)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ,
+        inspector,
+        (uintptr_t)observation,
+        sizeof(*observation),
+        0,
+        0,
+        0).status;
+}
+
+hyper_native_status_t hyper_cpu_inspector_read(
+    hyper_native_handle_t inspector,
+    hyper_native_cpu_observation_t *observation)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_CPU_INSPECTOR_READ,
+        inspector,
+        (uintptr_t)observation,
+        sizeof(*observation),
+        0,
+        0,
+        0).status;
 }
 
 static hyper_call_result_t inspector_derive(
