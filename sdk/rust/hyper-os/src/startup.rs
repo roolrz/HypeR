@@ -8,10 +8,10 @@ use core::marker::PhantomData;
 use core::num::NonZeroU64;
 use core::ptr::NonNull;
 
-use crate::bootfs::BootFs;
 use crate::console::Console;
+use crate::fs::Directory;
 use crate::handle::{
-    AnyObject, BootFsObject, ConsoleObject, ExecutableAuthorityObject, HandleRef, ObjectType,
+    AnyObject, ConsoleObject, DirectoryObject, ExecutableAuthorityObject, HandleRef, ObjectType,
     OwnedHandle, ResourceDomainObject, TaskFactoryObject, TaskGroupObject, TypedObject, VmarObject,
 };
 use crate::{Error, Result};
@@ -66,8 +66,8 @@ pub const ROOT_VMAR: StartupPurpose<VmarObject> =
     StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR as u32);
 pub const CONSOLE: StartupPurpose<ConsoleObject> =
     StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE as u32);
-pub const BOOT_FS: StartupPurpose<BootFsObject> =
-    StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_BOOT_FS as u32);
+pub const ROOT_DIRECTORY: StartupPurpose<DirectoryObject> =
+    StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_DIRECTORY as u32);
 pub const TASK_INSPECTOR: StartupPurpose<crate::handle::TaskInspectorObject> =
     StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_INSPECTOR as u32);
 pub const OBJECT_INSPECTOR: StartupPurpose<crate::handle::ObjectInspectorObject> =
@@ -204,9 +204,9 @@ impl<'runtime> Startup<'runtime> {
         self.take(CONSOLE)
     }
 
-    /// Moves the initial read-only `BootFS` namespace out exactly once.
-    pub fn take_boot_fs(&mut self) -> Result<BootFs> {
-        self.take(BOOT_FS).map(BootFs::from_handle)
+    /// Moves the initial root-directory authority out exactly once.
+    pub fn take_root_directory(&mut self) -> Result<Directory> {
+        self.take(ROOT_DIRECTORY).map(Directory::from_handle)
     }
 
     fn validate_records(&self) -> Result<()> {
@@ -333,7 +333,7 @@ fn validate_kind<T: TypedObject>(raw: NonZeroU64) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BOOT_FS, Startup, StartupPurpose};
+    use super::{ROOT_DIRECTORY, Startup, StartupPurpose};
     use crate::Error;
     use crate::handle::ByteChannelObject;
 
@@ -412,21 +412,24 @@ mod tests {
     }
 
     #[test]
-    fn take_boot_fs_moves_the_typed_owner_once() -> Result<(), Error> {
+    fn take_root_directory_moves_the_typed_owner_once() -> Result<(), Error> {
         let handles = [hyper_abi::HyperNativeStartupHandle {
-            purpose: BOOT_FS.as_raw(),
+            purpose: ROOT_DIRECTORY.as_raw(),
             flags: 0,
-            handle: hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FS.into(),
+            handle: hyper_abi::HYPER_NATIVE_OBJECT_DIRECTORY.into(),
         }];
         let raw = raw_startup(&handles);
         // SAFETY: `raw` and its immutable local handle array outlive Startup.
         let mut startup = unsafe { Startup::from_raw(&raw)? };
-        let boot_fs = startup.take_boot_fs()?;
+        let root_directory = startup.take_root_directory()?;
         assert_eq!(
-            boot_fs.into_handle().info()?.kind.as_raw(),
-            hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FS
+            root_directory.into_handle().info()?.kind.as_raw(),
+            hyper_abi::HYPER_NATIVE_OBJECT_DIRECTORY
         );
-        assert!(matches!(startup.take_boot_fs(), Err(Error::InvalidStartup)));
+        assert!(matches!(
+            startup.take_root_directory(),
+            Err(Error::InvalidStartup)
+        ));
         Ok(())
     }
 }

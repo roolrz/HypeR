@@ -10,11 +10,11 @@
 #![no_std]
 
 mod abi;
-pub mod bootfs;
 pub mod capability_channel;
 pub mod channel;
 pub mod console;
 mod error;
+pub mod fs;
 pub mod handle;
 pub mod inspect;
 pub mod startup;

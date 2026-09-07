@@ -47,8 +47,8 @@ ABI revision: `0`.
 | 9 | `vmo` | `general` |
 | 10 | `vmar` | `rendezvous_only` |
 | 11 | `console` | `general` |
-| 12 | `boot_fs` | `general` |
-| 13 | `boot_file` | `general` |
+| 12 | `directory` | `general` |
+| 13 | `file` | `general` |
 | 14 | `capability_channel` | `rendezvous_only` |
 | 15 | `process_builder` | `rendezvous_only` |
 | 16 | `task_inspector` | `general` |
@@ -83,7 +83,7 @@ ABI revision: `0`.
 | `startup_handle_purpose_executable_authority` | `4` |
 | `startup_handle_purpose_root_vmar` | `5` |
 | `startup_handle_purpose_console` | `6` |
-| `startup_handle_purpose_boot_fs` | `7` |
+| `startup_handle_purpose_root_directory` | `7` |
 | `startup_handle_purpose_task_inspector` | `8` |
 | `startup_handle_purpose_object_inspector` | `9` |
 | `startup_max_handles` | `256` |
@@ -98,8 +98,8 @@ ABI revision: `0`.
 | `capability_disposition_move` | `0` |
 | `capability_disposition_duplicate` | `1` |
 | `console_max_transfer_bytes` | `4096` |
-| `bootfs_max_path_bytes` | `4096` |
-| `bootfs_max_read_bytes` | `65536` |
+| `directory_max_path_bytes` | `4096` |
+| `file_max_read_bytes` | `65536` |
 | `process_name_max_bytes` | `64` |
 | `process_argument_max_bytes` | `4096` |
 | `process_environment_max_bytes` | `4096` |
@@ -138,6 +138,7 @@ ABI revision: `0`.
 
 ## Semantic rules
 
+- Directory lookup is capability-relative. A leading slash restarts at that Directory's traversal root, and parent components cannot escape it. Every open requires read traversal authority, and every requested File right must already be present on the source Directory before the result is further bounded by the File object's node-specific ceiling.
 - Native task and object inspectors are immutable capability-scoped views. Process, thread, and object KOIDs plus scan cursors are observation-only values and can never be exchanged for operational authority. Out-of-scope targeted lookup returns not_found.
 - Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.
 - Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.
@@ -182,12 +183,12 @@ element size before any user-memory access.
 | 14 | `byte_channel_read` | `endpoint: handle`, `options: u32`, `bytes: user_address`, `byte_capacity: byte_count` | `actual_bytes: byte_count; also-on=buffer_too_small` | `endpoint: Borrow, kind=byte_channel, rights=0x10` | `bytes: Write, len=byte_capacity bytes, max-bytes=65536; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
 | 15 | `console_read` | `console: handle`, `options: u32`, `bytes: user_address`, `byte_capacity: byte_count` | `actual_bytes: byte_count; also-on=would_block` | `console: Borrow, kind=console, rights=0x10` | `bytes: Write, len=byte_capacity bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
 | 16 | `console_write` | `console: handle`, `options: u32`, `bytes: user_address`, `byte_count: byte_count` | `actual_bytes: byte_count; also-on=would_block` | `console: Borrow, kind=console, rights=0x20` | `bytes: Read, len=byte_count bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
-| 17 | `bootfs_open` | `boot_fs: handle`, `path: user_address`, `path_size: byte_count`, `requested_rights: rights`, `options: u32` | `file: handle` | `boot_fs: Borrow, kind=boot_fs, rights=0x10`, `file: produce, kind=boot_file, exact-from(requested_rights), allowed=0x9b` | `path: Read, len=path_size bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
-| 18 | `boot_file_read` | `file: handle`, `options: u32`, `offset: u64`, `output: user_address`, `output_capacity: byte_count` | `actual_bytes: byte_count`, `file_size: byte_count` | `file: Borrow, kind=boot_file, rights=0x10` | `output: Write, len=output_capacity bytes, max-bytes=65536; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
+| 17 | `directory_open_file` | `directory: handle`, `path: user_address`, `path_size: byte_count`, `requested_rights: rights`, `options: u32` | `file: handle` | `directory: Borrow, kind=directory, rights=0x10`, `file: produce, kind=file, exact-from(requested_rights), allowed=0x9b, required-from=directory` | `path: Read, len=path_size bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
+| 18 | `file_read_at` | `file: handle`, `options: u32`, `offset: u64`, `output: user_address`, `output_capacity: byte_count` | `actual_bytes: byte_count`, `file_size: byte_count` | `file: Borrow, kind=file, rights=0x10` | `output: Write, len=output_capacity bytes, max-bytes=65536; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
 | 19 | `capability_channel_create` | `options: u32` | `endpoint0: handle`, `endpoint1: handle` | `endpoint0: produce, kind=capability_channel, fixed=0x3e`, `endpoint1: produce, kind=capability_channel, fixed=0x3e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Object` |
 | 20 | `capability_channel_try_send` | `endpoint: handle`, `options: u32`, `bytes: user_address`, `byte_count: byte_count`, `dispositions: user_address`, `disposition_count: element_count` | — | `endpoint: Borrow, kind=capability_channel, rights=0x20` | `bytes: Read, len=byte_count bytes, max-bytes=4096; order=0`, `dispositions: Read, len=disposition_count elements, max-elements=16, element-size=24, record=capability_disposition, transactional-handles=(handle, rights, expected_kind, operation), common-rights=0x2, operations=[move=0:ConsumeOnCommit/rights=0x2+duplicate=1:Borrow/rights=0x3], commit=AtomicOnOk; order=1` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
 | 21 | `capability_channel_receive` | `endpoint: handle`, `deadline: u64`, `bytes: user_address`, `byte_capacity: byte_count`, `capability_slots: user_address`, `slot_count: element_count` | `actual_bytes: byte_count; also-on=buffer_too_small`, `actual_capabilities: element_count; also-on=buffer_too_small` | `endpoint: Borrow, kind=capability_channel, rights=0x10` | `bytes: Write, len=byte_capacity bytes, max-bytes=4096; order=0`, `capability_slots: ReadWrite, len=slot_count elements, max-elements=16, element-size=24, record=capability_receive_slot, typed-receive-slots=(handle, rights, expected_kind, flags), produce-transferred-handles, commit=AtomicOnOk; order=1` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 22 | `process_builder_create` | `factory: handle`, `group: handle`, `domain: handle`, `executable: handle` | `builder: handle` | `factory: Borrow, kind=task_factory, rights=0x100000`, `group: Borrow, kind=task_group, rights=0x4000000`, `domain: Borrow, kind=resource_domain, rights=0x8000000`, `executable: Borrow, kind=boot_file, rights=0x80`, `builder: produce, kind=process_builder, fixed=0xc2a` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 22 | `process_builder_create` | `factory: handle`, `group: handle`, `domain: handle`, `executable: handle` | `builder: handle` | `factory: Borrow, kind=task_factory, rights=0x100000`, `group: Borrow, kind=task_group, rights=0x4000000`, `domain: Borrow, kind=resource_domain, rights=0x8000000`, `executable: Borrow, kind=file, rights=0x80`, `builder: produce, kind=process_builder, fixed=0xc2a` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 23 | `process_builder_set_name` | `builder: handle`, `name: user_address`, `name_size: byte_count` | — | `builder: Borrow, kind=process_builder, rights=0x20` | `name: Read, len=name_size bytes, max-bytes=64; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 24 | `process_builder_add_argument` | `builder: handle`, `argument: user_address`, `argument_size: byte_count` | — | `builder: Borrow, kind=process_builder, rights=0x20` | `argument: Read, len=argument_size bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 25 | `process_builder_add_environment` | `builder: handle`, `environment: user_address`, `environment_size: byte_count` | — | `builder: Borrow, kind=process_builder, rights=0x20` | `environment: Read, len=environment_size bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |

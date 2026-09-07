@@ -21,13 +21,13 @@ use crate::kernel::capability::{
     HandleFlags, HandleInfo, HandleTransferOperation, HandleTransferRequest, HandleTransferRoute,
     HandleValue, InTransitCapabilities, PreparedHandle,
 };
-use crate::kernel::fs::{BootFile, BootFsError};
 use crate::kernel::mm::user_space::NativeAddressSpace;
 use crate::kernel::object::{
     KernelObject, ObjectCreationError, ObjectKind, ObjectPublication, TransferClass,
     object_allocation_size, private,
 };
 use crate::kernel::task::scheduler::CpuMask;
+use crate::kernel::vfs::{ExecutableSnapshot, FileObject, VfsError};
 use hyper::sync::InterruptSpinLock;
 
 use super::builder_input::{
@@ -58,7 +58,7 @@ pub(crate) enum ProcessBuilderError<E> {
     AlreadySealed,
     AlreadyStarted,
     Aborted,
-    BootFile(BootFsError),
+    ExecutableFile(VfsError),
     Busy,
     DuplicateStartupPurpose,
     EmptyArguments,
@@ -221,7 +221,7 @@ struct BuilderPlan {
     // lookup after construction.
     group: TaskGroup,
     domain: ResourceDomain,
-    executable: &'static [u8],
+    executable: ExecutableSnapshot,
     strings: LaunchStrings,
     thread_name: Option<String>,
     affinity: CpuMask,
@@ -437,11 +437,11 @@ impl ProcessBuilder {
         _factory: &TaskFactory,
         group: &TaskGroupObject,
         domain: &ResourceDomainObject,
-        executable: &BootFile,
+        executable: &FileObject,
     ) -> Result<ObjectPublication<Self>, ProcessBuilderError<()>> {
         let executable = executable
-            .executable_bytes()
-            .map_err(ProcessBuilderError::BootFile)?;
+            .executable_snapshot(domain.domain())
+            .map_err(ProcessBuilderError::ExecutableFile)?;
         let object_charge = reserve_builder_charge(domain.domain())?;
         let strings = LaunchStrings::try_new()?;
         let mut startup = Vec::new();
@@ -841,7 +841,7 @@ pub(crate) fn create_process_builder(
         )
         .map_err(ProcessBuilderError::Process)?;
     let executable = caller
-        .resolve_handle::<BootFile>(executable, crate::kernel::authority::Rights::EXECUTE)
+        .resolve_handle::<FileObject>(executable, crate::kernel::authority::Rights::EXECUTE)
         .map_err(ProcessBuilderError::Process)?;
 
     let reservation = caller
@@ -1009,7 +1009,7 @@ fn prepare_sealed_process(
     )
     .map_err(ProcessBuilderError::Stack)?;
     let domain = plan.domain.clone();
-    let loaded = load_native(plan.executable, domain.clone(), stack_layout)
+    let loaded = load_native(plan.executable.bytes(), domain.clone(), stack_layout)
         .map_err(ProcessBuilderError::Image)?;
     let prepared = match PreparedProcess::try_new(
         loaded.image,

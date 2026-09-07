@@ -16,10 +16,10 @@ mod capabilities;
 const INIT_PATH: &str = "/init";
 const INIT_ARGUMENTS: &[&str] = &[INIT_PATH];
 pub(crate) enum Error {
-    BootFs(crate::kernel::fs::BootFsError),
+    RootDirectory(crate::kernel::vfs::VfsError),
     #[cfg(not(feature = "kernel-self-test"))]
     ConsoleObject(crate::kernel::device::console::ObjectError),
-    FileSystem(crate::kernel::fs::LookupError),
+    FileSystem(crate::kernel::vfs::LookupError),
     Handle(HandleError),
     Image(crate::kernel::process::LoaderError),
     Inspection(crate::kernel::inspect::Error),
@@ -39,7 +39,9 @@ pub(crate) enum Error {
 impl core::fmt::Debug for Error {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::BootFs(error) => formatter.debug_tuple("BootFs").field(error).finish(),
+            Self::RootDirectory(error) => {
+                formatter.debug_tuple("RootDirectory").field(error).finish()
+            }
             #[cfg(not(feature = "kernel-self-test"))]
             Self::ConsoleObject(error) => {
                 formatter.debug_tuple("ConsoleObject").field(error).finish()

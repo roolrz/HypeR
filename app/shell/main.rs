@@ -9,8 +9,8 @@
 mod command;
 
 use command::{CommandLine, MAX_LINE_BYTES};
-use hyper_os::bootfs::{BootFile, BootFileRights, BootFs};
 use hyper_os::channel;
+use hyper_os::fs::{Directory, File, FileRights};
 use hyper_os::handle::{
     ByteChannelObject, ObjectInspectorObject, OwnedHandle, ProcessObject, ResourceDomainObject,
     Rights, RightsOffer, TaskFactoryObject, TaskGroupObject, TaskInspectorObject,
@@ -39,7 +39,7 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
     let input = startup.take(stdio::STANDARD_INPUT).map_err(Error::from)?;
     let output = startup.take(stdio::STANDARD_OUTPUT).map_err(Error::from)?;
     let error = startup.take(stdio::STANDARD_ERROR).map_err(Error::from)?;
-    let boot_fs = startup.take_boot_fs().map_err(Error::from)?;
+    let root_directory = startup.take_root_directory().map_err(Error::from)?;
     let factory = startup.take(startup::TASK_FACTORY).map_err(Error::from)?;
     let group = startup.take(startup::TASK_GROUP).map_err(Error::from)?;
     let domain = startup
@@ -50,7 +50,7 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
         .take(startup::OBJECT_INSPECTOR)
         .map_err(Error::from)?;
     let authorities = CommandAuthorities {
-        boot_fs,
+        root_directory,
         factory,
         group,
         domain,
@@ -179,7 +179,7 @@ fn launch_command(
     error: &OwnedHandle<ByteChannelObject>,
 ) -> Result<(), Error> {
     let name = command.argument(0).ok_or(Error::InvalidCommand)?;
-    let executable = match open_command(&authorities.boot_fs, name) {
+    let executable = match open_command(&authorities.root_directory, name) {
         Ok(executable) => executable,
         Err(_) => {
             write(error, b"sh: command not found\n")?;
@@ -354,9 +354,9 @@ fn process_succeeded(info: ProcessInfo) -> bool {
     )
 }
 
-fn open_command(boot_fs: &BootFs, name: &str) -> Result<BootFile, OsError> {
+fn open_command(root_directory: &Directory, name: &str) -> Result<File, OsError> {
     if name.starts_with('/') {
-        return boot_fs.open(name, BootFileRights::EXECUTE);
+        return root_directory.open(name, FileRights::EXECUTE);
     }
     let mut path = [0_u8; COMMAND_PATH_BYTES];
     let prefix = b"/bin/";
@@ -369,7 +369,7 @@ fn open_command(boot_fs: &BootFs, name: &str) -> Result<BootFile, OsError> {
     prefix_target.copy_from_slice(prefix);
     name_target.copy_from_slice(name.as_bytes());
     let path = core::str::from_utf8(destination).map_err(|_| OsError::InvalidPath)?;
-    boot_fs.open(path, BootFileRights::EXECUTE)
+    root_directory.open(path, FileRights::EXECUTE)
 }
 
 fn write(destination: &OwnedHandle<ByteChannelObject>, bytes: &[u8]) -> Result<(), Error> {
@@ -380,7 +380,7 @@ fn write(destination: &OwnedHandle<ByteChannelObject>, bytes: &[u8]) -> Result<(
 }
 
 struct CommandAuthorities {
-    boot_fs: BootFs,
+    root_directory: Directory,
     factory: OwnedHandle<TaskFactoryObject>,
     group: OwnedHandle<TaskGroupObject>,
     domain: OwnedHandle<ResourceDomainObject>,

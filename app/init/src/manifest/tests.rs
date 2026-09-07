@@ -103,10 +103,10 @@ impl AuthorityPolicy for Policy {
                 duplicable: false,
                 creatable: false,
             }),
-            "bootstrap.boot-fs" => Some(AuthorityDeclaration {
+            "bootstrap.root-directory" => Some(AuthorityDeclaration {
                 provider: None,
                 object_kind: 5,
-                rights: 0b000_0001,
+                rights: 0b10_0000_0001,
                 movable: false,
                 duplicable: true,
                 creatable: false,
@@ -171,7 +171,7 @@ impl AuthorityPolicy for Policy {
             ("/bin/sh", "stdio.input") => (300, 4),
             ("/bin/sh", "stdio.output") => (301, 4),
             ("/bin/sh", "stdio.error") => (302, 4),
-            ("/bin/sh", "process.boot-fs") => (303, 5),
+            ("/bin/sh", "process.root-directory") => (303, 5),
             ("/bin/sh", "process.task-factory") => (304, 6),
             ("/bin/sh", "process.task-group") => (305, 7),
             ("/bin/sh", "process.resource-domain") => (306, 8),
@@ -193,6 +193,7 @@ impl AuthorityPolicy for Policy {
             "sponsor" => Some(0b100_0000),
             "duplicate" => Some(0b1000_0000),
             "transfer" => Some(0b1_0000_0000),
+            "execute" => Some(0b10_0000_0000),
             _ => None,
         }
     }

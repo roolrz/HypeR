@@ -95,7 +95,7 @@ impl Service<'_> {
     }
 }
 
-/// A parsed manifest which borrows immutable text from its `BootFs` image.
+/// A parsed manifest which borrows immutable text loaded from the root directory.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Manifest<'manifest> {
     pub(super) services: BoundedList<Service<'manifest>, MAX_SERVICES>,

@@ -13,15 +13,16 @@ use hyper::abi::native::{
     HYPER_NATIVE_STATUS_NO_MEMORY, HYPER_NATIVE_STATUS_NOT_FOUND,
     HYPER_NATIVE_STATUS_NOT_SUPPORTED, HYPER_NATIVE_STATUS_PEER_CLOSED,
     HYPER_NATIVE_STATUS_RESOURCE_LIMIT, HYPER_NATIVE_STATUS_TIMED_OUT,
-    HYPER_NATIVE_STATUS_WOULD_BLOCK, HYPER_NATIVE_SYS_ABI_QUERY, HYPER_NATIVE_SYS_BOOT_FILE_READ,
-    HYPER_NATIVE_SYS_BOOTFS_OPEN, HYPER_NATIVE_SYS_BYTE_CHANNEL_CREATE,
-    HYPER_NATIVE_SYS_BYTE_CHANNEL_READ, HYPER_NATIVE_SYS_BYTE_CHANNEL_WRITE,
-    HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE,
-    HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND, HYPER_NATIVE_SYS_CONSOLE_READ,
-    HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
-    HYPER_NATIVE_SYS_HANDLE_CLOSE, HYPER_NATIVE_SYS_HANDLE_DUPLICATE,
-    HYPER_NATIVE_SYS_HANDLE_GET_INFO, HYPER_NATIVE_SYS_HANDLE_REPLACE,
-    HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO, HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS,
+    HYPER_NATIVE_STATUS_WOULD_BLOCK, HYPER_NATIVE_SYS_ABI_QUERY,
+    HYPER_NATIVE_SYS_BYTE_CHANNEL_CREATE, HYPER_NATIVE_SYS_BYTE_CHANNEL_READ,
+    HYPER_NATIVE_SYS_BYTE_CHANNEL_WRITE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE,
+    HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND,
+    HYPER_NATIVE_SYS_CONSOLE_READ, HYPER_NATIVE_SYS_CONSOLE_WRITE,
+    HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE, HYPER_NATIVE_SYS_EVENT_CREATE,
+    HYPER_NATIVE_SYS_EVENT_SIGNAL, HYPER_NATIVE_SYS_FILE_READ_AT, HYPER_NATIVE_SYS_HANDLE_CLOSE,
+    HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
+    HYPER_NATIVE_SYS_HANDLE_REPLACE, HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO,
+    HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS,
     HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
     HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_TASK_GROUP,
     HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_HANDLES, HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_OBJECTS,
@@ -44,7 +45,6 @@ use hyper::abi::native::{
 
 use crate::kernel::accounting::ResourceError;
 use crate::kernel::capability::{HandleError, HandleInfo, HandleValue, Rights};
-use crate::kernel::fs::{BootFsError, BootFsServiceError};
 use crate::kernel::inspect::{
     HANDLE_PAGE_CAPACITY, OBJECT_PAGE_CAPACITY, Page, ProcessHandleSnapshot, TaskThreadSnapshot,
 };
@@ -64,6 +64,7 @@ use crate::kernel::process::{
     TerminalReason,
 };
 use crate::kernel::task::TimedWaitError;
+use crate::kernel::vfs::{VfsError, VfsServiceError};
 
 const HANDLE_INFO_SIZE: usize = core::mem::size_of::<HyperNativeHandleInfo>();
 const OBJECT_BASIC_INFO_SIZE: usize = core::mem::size_of::<HyperNativeObjectBasicInfo>();
@@ -295,19 +296,19 @@ pub(in crate::kernel) trait DeferredServices:
         bytes: Option<UserSlice>,
     ) -> Result<usize, ConsoleServiceError>;
 
-    fn open_bootfs(
+    fn open_file(
         &self,
         root: HandleValue,
         path: UserSlice,
         rights: Rights,
-    ) -> Result<HandleValue, BootFsServiceError>;
+    ) -> Result<HandleValue, VfsServiceError>;
 
-    fn read_boot_file(
+    fn read_file_at(
         &self,
         file: HandleValue,
         offset: u64,
         output: Option<UserSlice>,
-    ) -> Result<(u64, u64), BootFsServiceError>;
+    ) -> Result<(u64, u64), VfsServiceError>;
 
     fn create_process_builder(
         &self,
@@ -507,8 +508,10 @@ pub(in crate::kernel) fn dispatch_deferred(
         }
         HYPER_NATIVE_SYS_CONSOLE_READ => sys_console_read(services, invocation.arguments()),
         HYPER_NATIVE_SYS_CONSOLE_WRITE => sys_console_write(services, invocation.arguments()),
-        HYPER_NATIVE_SYS_BOOTFS_OPEN => sys_bootfs_open(services, invocation.arguments()),
-        HYPER_NATIVE_SYS_BOOT_FILE_READ => sys_boot_file_read(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE => {
+            sys_directory_open_file(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_FILE_READ_AT => sys_file_read_at(services, invocation.arguments()),
         HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE => {
             sys_process_builder_create(services, invocation.arguments())
         }
@@ -1195,11 +1198,14 @@ fn sys_console_write(services: &impl DeferredServices, arguments: &Arguments) ->
 }
 
 #[inline(never)]
-fn sys_bootfs_open(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+fn sys_directory_open_file(
+    services: &impl DeferredServices,
+    arguments: &Arguments,
+) -> DeferredAction {
     let result = parse_handle(arguments[0]).and_then(|root| {
         if arguments[4] != 0
             || arguments[2] == 0
-            || arguments[2] > hyper::abi::native::HYPER_NATIVE_BOOTFS_MAX_PATH_BYTES
+            || arguments[2] > hyper::abi::native::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES
         {
             return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
         }
@@ -1207,24 +1213,23 @@ fn sys_bootfs_open(services: &impl DeferredServices, arguments: &Arguments) -> D
             .map_err(status_from_address_error)?;
         let rights = Rights::from_bits(arguments[3]).ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
         services
-            .open_bootfs(root, path, rights)
-            .map_err(status_from_bootfs_service_error)
+            .open_file(root, path, rights)
+            .map_err(status_from_vfs_service_error)
     });
     DeferredAction::Return(handle_result(result))
 }
 
 #[inline(never)]
-fn sys_boot_file_read(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
+fn sys_file_read_at(services: &impl DeferredServices, arguments: &Arguments) -> DeferredAction {
     let result = parse_handle(arguments[0]).and_then(|file| {
-        if arguments[1] != 0
-            || arguments[4] > hyper::abi::native::HYPER_NATIVE_BOOTFS_MAX_READ_BYTES
+        if arguments[1] != 0 || arguments[4] > hyper::abi::native::HYPER_NATIVE_FILE_MAX_READ_BYTES
         {
             return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
         }
         let output = optional_user_slice(arguments[3], arguments[4])?;
         services
-            .read_boot_file(file, arguments[2], output)
-            .map_err(status_from_bootfs_service_error)
+            .read_file_at(file, arguments[2], output)
+            .map_err(status_from_vfs_service_error)
     });
     let result = match result {
         Ok((actual, file_size)) => success([actual, file_size]),
@@ -1408,8 +1413,8 @@ fn parse_object_kind(raw: u32) -> Result<crate::kernel::object::ObjectKind, Hype
         hyper::abi::native::HYPER_NATIVE_OBJECT_VMO => Ok(ObjectKind::VMO),
         hyper::abi::native::HYPER_NATIVE_OBJECT_VMAR => Ok(ObjectKind::VMAR),
         hyper::abi::native::HYPER_NATIVE_OBJECT_CONSOLE => Ok(ObjectKind::CONSOLE),
-        hyper::abi::native::HYPER_NATIVE_OBJECT_BOOT_FS => Ok(ObjectKind::BOOT_FS),
-        hyper::abi::native::HYPER_NATIVE_OBJECT_BOOT_FILE => Ok(ObjectKind::BOOT_FILE),
+        hyper::abi::native::HYPER_NATIVE_OBJECT_DIRECTORY => Ok(ObjectKind::DIRECTORY),
+        hyper::abi::native::HYPER_NATIVE_OBJECT_FILE => Ok(ObjectKind::FILE),
         hyper::abi::native::HYPER_NATIVE_OBJECT_PROCESS_BUILDER => Ok(ObjectKind::PROCESS_BUILDER),
         hyper::abi::native::HYPER_NATIVE_OBJECT_TASK_INSPECTOR => Ok(ObjectKind::TASK_INSPECTOR),
         hyper::abi::native::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => {
@@ -2021,7 +2026,7 @@ fn status_from_process_builder_start_error(
         | ProcessBuilderError::MissingName
         | ProcessBuilderError::NotSealed => HYPER_NATIVE_STATUS_BAD_STATE,
         ProcessBuilderError::Busy => HYPER_NATIVE_STATUS_BUSY,
-        ProcessBuilderError::BootFile(error) => status_from_bootfs_error(error),
+        ProcessBuilderError::ExecutableFile(error) => status_from_vfs_error(error),
         ProcessBuilderError::DuplicateStartupPurpose
         | ProcessBuilderError::EmptyArguments
         | ProcessBuilderError::InvalidEnvironment
@@ -2050,7 +2055,7 @@ fn status_from_process_builder_error(error: ProcessBuilderError<()>) -> HyperNat
         | ProcessBuilderError::MissingName
         | ProcessBuilderError::NotSealed => HYPER_NATIVE_STATUS_BAD_STATE,
         ProcessBuilderError::Busy => HYPER_NATIVE_STATUS_BUSY,
-        ProcessBuilderError::BootFile(error) => status_from_bootfs_error(error),
+        ProcessBuilderError::ExecutableFile(error) => status_from_vfs_error(error),
         ProcessBuilderError::DuplicateStartupPurpose
         | ProcessBuilderError::EmptyArguments
         | ProcessBuilderError::InvalidEnvironment
@@ -2168,23 +2173,29 @@ fn status_from_console_service_error(error: ConsoleServiceError) -> HyperNativeS
     }
 }
 
-fn status_from_bootfs_service_error(error: BootFsServiceError) -> HyperNativeStatus {
+fn status_from_vfs_service_error(error: VfsServiceError) -> HyperNativeStatus {
     match error {
-        BootFsServiceError::InvalidPath => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
-        BootFsServiceError::Process(error) => status_from_process_error(error),
-        BootFsServiceError::FileSystem(error) => status_from_bootfs_error(error),
+        VfsServiceError::InvalidInput => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        VfsServiceError::Process(error) => status_from_process_error(error),
+        VfsServiceError::FileSystem(error) => status_from_vfs_error(error),
     }
 }
 
-const fn status_from_bootfs_error(error: BootFsError) -> HyperNativeStatus {
+const fn status_from_vfs_error(error: VfsError) -> HyperNativeStatus {
     match error {
-        BootFsError::AllocationSize => HYPER_NATIVE_STATUS_INTERNAL,
-        BootFsError::InvalidPath => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
-        BootFsError::Missing => HYPER_NATIVE_STATUS_NOT_FOUND,
-        BootFsError::NotExecutable => HYPER_NATIVE_STATUS_ACCESS_DENIED,
-        BootFsError::NotRegularFile => HYPER_NATIVE_STATUS_BAD_STATE,
-        BootFsError::Object(error) => status_from_object_creation_error(error),
-        BootFsError::Resource(error) => status_from_resource_error(error),
+        VfsError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+        VfsError::AllocationSize => HYPER_NATIVE_STATUS_INTERNAL,
+        VfsError::Backend(_) => HYPER_NATIVE_STATUS_INTERNAL,
+        VfsError::Cache(crate::kernel::io_cache::CacheError::Allocation) => {
+            HYPER_NATIVE_STATUS_NO_MEMORY
+        }
+        VfsError::Cache(_) => HYPER_NATIVE_STATUS_INTERNAL,
+        VfsError::InvalidPath => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        VfsError::Missing => HYPER_NATIVE_STATUS_NOT_FOUND,
+        VfsError::NotDirectory | VfsError::NotRegularFile => HYPER_NATIVE_STATUS_BAD_STATE,
+        VfsError::NotExecutable => HYPER_NATIVE_STATUS_ACCESS_DENIED,
+        VfsError::Object(error) => status_from_object_creation_error(error),
+        VfsError::Resource(error) => status_from_resource_error(error),
     }
 }
 
@@ -2531,24 +2542,24 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(ConsoleServiceError::Process(ProcessError::Allocation))
         }
 
-        fn open_bootfs(
+        fn open_file(
             &self,
             _: HandleValue,
             _: UserSlice,
             _: Rights,
-        ) -> Result<HandleValue, BootFsServiceError> {
+        ) -> Result<HandleValue, VfsServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
-            Err(BootFsServiceError::Process(ProcessError::Allocation))
+            Err(VfsServiceError::Process(ProcessError::Allocation))
         }
 
-        fn read_boot_file(
+        fn read_file_at(
             &self,
             _: HandleValue,
             _: u64,
             _: Option<UserSlice>,
-        ) -> Result<(u64, u64), BootFsServiceError> {
+        ) -> Result<(u64, u64), VfsServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
-            Err(BootFsServiceError::Process(ProcessError::Allocation))
+            Err(VfsServiceError::Process(ProcessError::Allocation))
         }
 
         fn create_process_builder(

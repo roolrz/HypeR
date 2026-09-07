@@ -800,7 +800,7 @@ creates, signals, and observes an Event from EL0. It joins each Thread and
 Process and retires each ownership graph. The architecture-neutral dispatchers
 implement syscalls 0 through 43: capability inspection and attenuation,
 Thread and Process lifecycle, Event and object wait, byte and rendezvous
-capability channels, Console I/O, BootFs access, transactional ProcessBuilder
+capability channels, Console I/O, root directory access, transactional ProcessBuilder
 construction, Process stop requests, Process lifecycle inspection, and
 capability-scoped Process, Thread, object, and handle-graph scans. Channel operations use bounded
 storage, transactional user copies, and atomic capability publication.

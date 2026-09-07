@@ -647,16 +647,17 @@ pub unsafe fn console_write(
     unsafe { ffi_console_write(console, bytes, count) }
 }
 
-/// Opens one file from a `BootFS` namespace.
+/// Opens one file relative to a `Directory` capability.
 ///
 /// # Safety
 ///
-/// `boot_fs` must remain live with read rights. `path` must be readable for
-/// `path_size` bytes. On `OK`, the caller assumes exclusive ownership of the
-/// nonzero `BootFile` handle returned in `value0`.
+/// `directory` must remain live with read rights and every right named by
+/// `requested_rights`. `path` must be readable for `path_size` bytes. On `OK`,
+/// the caller assumes exclusive ownership of the nonzero `File` handle
+/// returned in `value0`.
 #[inline]
-pub unsafe fn bootfs_open(
-    boot_fs: abi::HyperNativeHandle,
+pub unsafe fn directory_open_file(
+    directory: abi::HyperNativeHandle,
     path: *const u8,
     path_size: usize,
     requested_rights: u64,
@@ -665,8 +666,8 @@ pub unsafe fn bootfs_open(
     // contracts of the raw Native operation.
     unsafe {
         ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_BOOTFS_OPEN,
-            boot_fs,
+            abi::HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE,
+            directory,
             path.addr() as u64,
             path_size as u64,
             requested_rights,
@@ -676,14 +677,14 @@ pub unsafe fn bootfs_open(
     }
 }
 
-/// Reads one bounded range from a `BootFile`.
+/// Reads one bounded range from a `File`.
 ///
 /// # Safety
 ///
 /// `file` must remain live with read rights. For nonzero `output_capacity`,
 /// `output` must be writable for that many bytes for the duration of the call.
 #[inline]
-pub unsafe fn boot_file_read(
+pub unsafe fn file_read_at(
     file: abi::HyperNativeHandle,
     offset: u64,
     output: *mut u8,
@@ -692,7 +693,7 @@ pub unsafe fn boot_file_read(
     // SAFETY: the caller establishes the handle and output-buffer contracts.
     unsafe {
         ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_BOOT_FILE_READ,
+            abi::HYPER_NATIVE_SYS_FILE_READ_AT,
             file,
             0,
             offset,

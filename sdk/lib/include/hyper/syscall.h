@@ -77,12 +77,12 @@ hyper_call_result_t hyper_console_write(
     hyper_native_handle_t console,
     const void *bytes,
     size_t count);
-hyper_call_result_t hyper_bootfs_open(
-    hyper_native_handle_t boot_fs,
+hyper_call_result_t hyper_directory_open_file(
+    hyper_native_handle_t directory,
     const void *path,
     size_t path_size,
     uint64_t requested_rights);
-hyper_call_result_t hyper_boot_file_read(
+hyper_call_result_t hyper_file_read_at(
     hyper_native_handle_t file,
     uint64_t offset,
     void *output,

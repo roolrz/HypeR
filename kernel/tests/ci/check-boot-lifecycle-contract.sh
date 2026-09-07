@@ -43,7 +43,7 @@ for call in \
     'crate::kernel::crash::early_initialize' \
     'crate::kernel::device::early_initialize' \
     'crate::kernel::mm::initialize' \
-    'crate::kernel::fs::initialize' \
+    'crate::kernel::vfs::initialize' \
     'crate::kernel::debug::initialize' \
     'crate::kernel::task::initialize' \
     'crate::kernel::irq::initialize' \

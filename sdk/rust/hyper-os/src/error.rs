@@ -24,7 +24,7 @@ pub enum Error {
     InvalidStartup,
     /// A typed capability did not identify the object kind its contract names.
     UnexpectedObjectKind { expected: u32, actual: u32 },
-    /// A `BootFS` path was empty, too long, or contained an embedded NUL byte.
+    /// A `Directory` path was empty, too long, or contained an embedded NUL byte.
     InvalidPath,
     /// A requested file range cannot be represented by the Native ABI.
     OffsetOverflow,

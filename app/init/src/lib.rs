@@ -4,7 +4,7 @@
 //! Policy mechanisms for the `HypeR` Native init supervisor.
 //!
 //! Parsing and planning deliberately depend on no operating-system binding.
-//! The runtime adapter must obtain real `BootFs` and process-construction
+//! The runtime adapter must obtain real root-`Directory` and process-construction
 //! capabilities before it can apply a validated launch plan.
 
 #![no_std]
@@ -21,9 +21,9 @@ use manifest::{AuthorityPolicy, LaunchPlan, Manifest, ParseError, ValidationErro
 
 /// Read-only source for the complete service-manifest image.
 ///
-/// The production implementation must borrow bytes from a real `BootFs` object;
-/// embedding a second manifest in the init executable would bypass the boot
-/// image's measured configuration.
+/// The production implementation must load bytes through the real root
+/// `Directory` capability; embedding a second manifest in the init executable
+/// would bypass the boot image's measured configuration.
 pub trait ManifestSource {
     type Error;
 

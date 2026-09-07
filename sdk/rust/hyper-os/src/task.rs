@@ -6,7 +6,7 @@
 use core::num::NonZeroU64;
 
 use crate::handle::{
-    AnyObject, BootFileObject, HandleRef, OwnedHandle, ProcessBuilderObject, ProcessObject,
+    AnyObject, FileObject, HandleRef, OwnedHandle, ProcessBuilderObject, ProcessObject,
     ResourceDomainObject, Rights, RightsOffer, TaskFactoryObject, TaskGroupObject, TypedObject,
 };
 use crate::{Error, Result, Status};
@@ -85,7 +85,7 @@ impl ProcessBuilder {
         factory: HandleRef<'_, TaskFactoryObject>,
         group: HandleRef<'_, TaskGroupObject>,
         domain: HandleRef<'_, ResourceDomainObject>,
-        executable: HandleRef<'_, BootFileObject>,
+        executable: HandleRef<'_, FileObject>,
     ) -> Result<Self> {
         let result = raw_ops::create(factory, group, domain, executable);
         Status::from_raw(result.status).into_result()?;
@@ -451,7 +451,7 @@ mod raw_ops {
     use core::num::NonZeroU64;
 
     use super::{
-        BootFileObject, HandleRef, MAX_AFFINITY_WORDS, ProcessBuilderObject, ResourceDomainObject,
+        FileObject, HandleRef, MAX_AFFINITY_WORDS, ProcessBuilderObject, ResourceDomainObject,
         RightsOffer, TaskFactoryObject, TaskGroupObject,
     };
 
@@ -459,7 +459,7 @@ mod raw_ops {
         factory: HandleRef<'_, TaskFactoryObject>,
         group: HandleRef<'_, TaskGroupObject>,
         domain: HandleRef<'_, ResourceDomainObject>,
-        executable: HandleRef<'_, BootFileObject>,
+        executable: HandleRef<'_, FileObject>,
     ) -> hyper_sys::CallResult {
         // SAFETY: all typed borrows remain live for this non-retaining call.
         unsafe {
@@ -592,7 +592,7 @@ mod raw_ops {
     use core::num::NonZeroU64;
 
     use super::{
-        BootFileObject, HandleRef, ProcessBuilderObject, ResourceDomainObject, RightsOffer,
+        FileObject, HandleRef, ProcessBuilderObject, ResourceDomainObject, RightsOffer,
         TaskFactoryObject, TaskGroupObject,
     };
 
@@ -600,7 +600,7 @@ mod raw_ops {
         _factory: HandleRef<'_, TaskFactoryObject>,
         _group: HandleRef<'_, TaskGroupObject>,
         _domain: HandleRef<'_, ResourceDomainObject>,
-        _executable: HandleRef<'_, BootFileObject>,
+        _executable: HandleRef<'_, FileObject>,
     ) -> hyper_sys::CallResult {
         hyper_sys::CallResult {
             status: hyper_abi::HYPER_NATIVE_STATUS_OK,
@@ -717,7 +717,7 @@ mod tests {
 
     use super::{ProcessBuilder, ProcessPhase, ProcessTermination, yield_now};
     use crate::handle::{
-        BootFileObject, EventObject, OwnedHandle, ResourceDomainObject, Rights, RightsOffer,
+        EventObject, FileObject, OwnedHandle, ResourceDomainObject, Rights, RightsOffer,
         TaskFactoryObject, TaskGroupObject,
     };
     use crate::{Error, Status};
@@ -732,7 +732,7 @@ mod tests {
         let factory = owner::<TaskFactoryObject>(hyper_abi::HYPER_NATIVE_OBJECT_TASK_FACTORY)?;
         let group = owner::<TaskGroupObject>(hyper_abi::HYPER_NATIVE_OBJECT_TASK_GROUP)?;
         let domain = owner::<ResourceDomainObject>(hyper_abi::HYPER_NATIVE_OBJECT_RESOURCE_DOMAIN)?;
-        let executable = owner::<BootFileObject>(hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FILE)?;
+        let executable = owner::<FileObject>(hyper_abi::HYPER_NATIVE_OBJECT_FILE)?;
         ProcessBuilder::create(
             factory.as_handle_ref(),
             group.as_handle_ref(),

@@ -1,24 +1,24 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Owned access to the immutable process-startup `BootFS` namespace.
+//! Owned access to a capability-relative filesystem directory.
 
 use core::num::NonZeroU64;
 
-use crate::handle::{BootFileObject, BootFsObject, HandleRef, OwnedHandle, Rights};
+use crate::handle::{DirectoryObject, FileObject, HandleRef, OwnedHandle, Rights};
 use crate::{Error, Result, Status};
 
-const _: () = assert!(hyper_abi::HYPER_NATIVE_BOOTFS_MAX_PATH_BYTES <= usize::MAX as u64);
-const _: () = assert!(hyper_abi::HYPER_NATIVE_BOOTFS_MAX_READ_BYTES <= usize::MAX as u64);
-const MAX_PATH_BYTES: usize = hyper_abi::HYPER_NATIVE_BOOTFS_MAX_PATH_BYTES as usize;
-const MAX_READ_BYTES: usize = hyper_abi::HYPER_NATIVE_BOOTFS_MAX_READ_BYTES as usize;
+const _: () = assert!(hyper_abi::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES <= usize::MAX as u64);
+const _: () = assert!(hyper_abi::HYPER_NATIVE_FILE_MAX_READ_BYTES <= usize::MAX as u64);
+const MAX_PATH_BYTES: usize = hyper_abi::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES as usize;
+const MAX_READ_BYTES: usize = hyper_abi::HYPER_NATIVE_FILE_MAX_READ_BYTES as usize;
 
-/// Rights which may be requested for a newly opened immutable `BootFile`.
+/// Rights which may be requested for a newly opened file.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct BootFileRights(Rights);
+pub struct FileRights(Rights);
 
-impl BootFileRights {
+impl FileRights {
     pub const NONE: Self = Self(Rights::NONE);
     pub const READ: Self = Self(Rights::READ);
     pub const INSPECT: Self = Self(Rights::INSPECT);
@@ -32,7 +32,7 @@ impl BootFileRights {
         .union(Rights::TRANSFER)
         .union(Rights::EXECUTE);
 
-    /// Narrows generic rights to those meaningful for immutable `BootFile`s.
+    /// Narrows generic rights to those meaningful for files.
     #[must_use]
     pub const fn from_rights(rights: Rights) -> Option<Self> {
         if Self::ALLOWED.contains(rights) {
@@ -53,29 +53,32 @@ impl BootFileRights {
     }
 }
 
-/// Exclusive authority to resolve paths in the immutable boot namespace.
-pub struct BootFs {
-    handle: OwnedHandle<BootFsObject>,
+/// Exclusive authority to resolve paths relative to one directory capability.
+pub struct Directory {
+    handle: OwnedHandle<DirectoryObject>,
 }
 
-impl BootFs {
-    /// Restores `BootFS` operations from an exclusively owned typed handle.
+impl Directory {
+    /// Restores directory operations from an exclusively owned typed handle.
     ///
     /// This consumes the owner and is therefore safe for handles delegated at
     /// startup or received through a capability channel.
     #[must_use]
-    pub const fn from_handle(handle: OwnedHandle<BootFsObject>) -> Self {
+    pub const fn from_handle(handle: OwnedHandle<DirectoryObject>) -> Self {
         Self { handle }
     }
 
-    /// Borrows the underlying `BootFS` authority for delegation.
+    /// Borrows the underlying directory authority for delegation.
     #[must_use]
-    pub fn as_handle_ref(&self) -> HandleRef<'_, BootFsObject> {
+    pub fn as_handle_ref(&self) -> HandleRef<'_, DirectoryObject> {
         self.handle.as_handle_ref()
     }
 
-    /// Opens one UTF-8 path and returns the unique new `BootFile` owner.
-    pub fn open(&self, path: &str, requested_rights: BootFileRights) -> Result<BootFile> {
+    /// Opens one UTF-8 path and returns the unique new `File` owner.
+    ///
+    /// The source Directory must carry `READ` and every requested File right;
+    /// the kernel then applies the resolved node's immutable rights ceiling.
+    pub fn open(&self, path: &str, requested_rights: FileRights) -> Result<File> {
         validate_path(path)?;
         let result = raw_ops::open(
             self.handle.as_handle_ref(),
@@ -84,50 +87,50 @@ impl BootFs {
         );
         Status::from_raw(result.status).into_result()?;
         let raw = NonZeroU64::new(result.value0).ok_or(Error::InvalidResponse)?;
-        // SAFETY: a successful BOOTFS_OPEN publishes exactly one BootFile
+        // SAFETY: a successful DIRECTORY_OPEN_FILE publishes exactly one File
         // handle owner to this process.
         let handle = unsafe { OwnedHandle::from_raw_owned(raw) };
-        Ok(BootFile { handle })
+        Ok(File { handle })
     }
 
     /// Recovers the generic typed owner for delegation or explicit close.
     #[must_use]
-    pub fn into_handle(self) -> OwnedHandle<BootFsObject> {
+    pub fn into_handle(self) -> OwnedHandle<DirectoryObject> {
         self.handle
     }
 }
 
-/// Exclusive ownership of one immutable `BootFS` file.
-pub struct BootFile {
-    handle: OwnedHandle<BootFileObject>,
+/// Exclusive ownership of one filesystem file.
+pub struct File {
+    handle: OwnedHandle<FileObject>,
 }
 
-impl BootFile {
+impl File {
     /// Restores file operations from an exclusively owned typed handle.
     ///
     /// This consumes the owner and is therefore safe for a delegated file.
     #[must_use]
-    pub const fn from_handle(handle: OwnedHandle<BootFileObject>) -> Self {
+    pub const fn from_handle(handle: OwnedHandle<FileObject>) -> Self {
         Self { handle }
     }
 
-    /// Borrows the underlying immutable file capability.
+    /// Borrows the underlying file capability.
     #[must_use]
-    pub fn as_handle_ref(&self) -> HandleRef<'_, BootFileObject> {
+    pub fn as_handle_ref(&self) -> HandleRef<'_, FileObject> {
         self.handle.as_handle_ref()
     }
 
     /// Returns the immutable file size reported by the kernel.
     pub fn size(&self) -> Result<u64> {
-        self.read(0, &mut []).map(|outcome| outcome.file_size)
+        self.read_at(0, &mut []).map(|outcome| outcome.file_size)
     }
 
     /// Reads at most one ABI-bounded chunk from `offset`.
     ///
     /// When `output` is larger than the ABI limit, only its first bounded
     /// prefix is considered. The returned file size is immutable for the life
-    /// of this `BootFile` object.
-    pub fn read(&self, offset: u64, output: &mut [u8]) -> Result<ReadOutcome> {
+    /// of this `File` object.
+    pub fn read_at(&self, offset: u64, output: &mut [u8]) -> Result<ReadOutcome> {
         let capacity = output.len().min(MAX_READ_BYTES);
         let output = output.get_mut(..capacity).ok_or(Error::InvalidResponse)?;
         let result = raw_ops::read(self.handle.as_handle_ref(), offset, output);
@@ -153,7 +156,7 @@ impl BootFile {
     ///
     /// On an unexpected end of file, the completed prefix remains initialized
     /// and the error reports its exact length.
-    pub fn read_exact(&self, offset: u64, output: &mut [u8]) -> Result<()> {
+    pub fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<()> {
         if output.is_empty() {
             return Ok(());
         }
@@ -178,7 +181,7 @@ impl BootFile {
                 .checked_add(completed_u64)
                 .ok_or(Error::OffsetOverflow)?;
             let remaining = output.get_mut(completed..).ok_or(Error::InvalidResponse)?;
-            let outcome = self.read(chunk_offset, remaining)?;
+            let outcome = self.read_at(chunk_offset, remaining)?;
             if outcome.file_size != file_size {
                 return Err(Error::InvalidResponse);
             }
@@ -198,12 +201,12 @@ impl BootFile {
 
     /// Recovers the generic typed owner for delegation or explicit close.
     #[must_use]
-    pub fn into_handle(self) -> OwnedHandle<BootFileObject> {
+    pub fn into_handle(self) -> OwnedHandle<FileObject> {
         self.handle
     }
 }
 
-/// Result metadata from one bounded `BootFile` read.
+/// Result metadata from one bounded `File` read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReadOutcome {
     pub bytes_read: usize,
@@ -220,48 +223,53 @@ fn validate_path(path: &str) -> Result<()> {
 
 #[cfg(not(test))]
 mod raw_ops {
-    use super::{BootFsObject, HandleRef, Rights};
+    use super::{DirectoryObject, HandleRef, Rights};
 
     pub(super) fn open(
-        root: HandleRef<'_, BootFsObject>,
+        root: HandleRef<'_, DirectoryObject>,
         path: &str,
         rights: Rights,
     ) -> hyper_sys::CallResult {
-        // SAFETY: the typed borrow keeps the BootFS root live, and the UTF-8
+        // SAFETY: the typed borrow keeps the directory root live, and the UTF-8
         // path remains readable for its complete length during the syscall.
         unsafe {
-            hyper_sys::bootfs_open(root.raw().get(), path.as_ptr(), path.len(), rights.bits())
+            hyper_sys::directory_open_file(
+                root.raw().get(),
+                path.as_ptr(),
+                path.len(),
+                rights.bits(),
+            )
         }
     }
 
     pub(super) fn read(
-        file: HandleRef<'_, super::BootFileObject>,
+        file: HandleRef<'_, super::FileObject>,
         offset: u64,
         output: &mut [u8],
     ) -> hyper_sys::CallResult {
         // SAFETY: the typed borrow keeps the file live and the unique output
         // slice remains writable for its complete length during the syscall.
         unsafe {
-            hyper_sys::boot_file_read(file.raw().get(), offset, output.as_mut_ptr(), output.len())
+            hyper_sys::file_read_at(file.raw().get(), offset, output.as_mut_ptr(), output.len())
         }
     }
 }
 
 #[cfg(test)]
 mod raw_ops {
-    use super::{BootFsObject, HandleRef, Rights};
+    use super::{DirectoryObject, HandleRef, Rights};
 
-    const CONTENT: &[u8] = b"HypeR BootFS test image";
+    const CONTENT: &[u8] = b"HypeR VFS test image";
 
     pub(super) fn open(
-        _root: HandleRef<'_, BootFsObject>,
+        _root: HandleRef<'_, DirectoryObject>,
         path: &str,
         _rights: Rights,
     ) -> hyper_sys::CallResult {
         if path == "bin/init" {
             hyper_sys::CallResult {
                 status: hyper_abi::HYPER_NATIVE_STATUS_OK,
-                value0: hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FILE.into(),
+                value0: hyper_abi::HYPER_NATIVE_OBJECT_FILE.into(),
                 value1: 0,
             }
         } else {
@@ -274,7 +282,7 @@ mod raw_ops {
     }
 
     pub(super) fn read(
-        _file: HandleRef<'_, super::BootFileObject>,
+        _file: HandleRef<'_, super::FileObject>,
         offset: u64,
         output: &mut [u8],
     ) -> hyper_sys::CallResult {
@@ -300,80 +308,78 @@ mod raw_ops {
 mod tests {
     use core::num::NonZeroU64;
 
-    use super::{BootFileRights, BootFs};
+    use super::{Directory, FileRights};
     use crate::Error;
-    use crate::handle::{AnyObject, BootFileObject, BootFsObject, OwnedHandle, Rights};
+    use crate::handle::{AnyObject, DirectoryObject, FileObject, OwnedHandle, Rights};
 
-    fn boot_fs() -> Result<BootFs, Error> {
-        let raw = NonZeroU64::new(hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FS.into())
+    fn root_directory() -> Result<Directory, Error> {
+        let raw = NonZeroU64::new(hyper_abi::HYPER_NATIVE_OBJECT_DIRECTORY.into())
             .ok_or(Error::InvalidResponse)?;
         // SAFETY: the host backend treats this one nonzero value as a unique
-        // BootFS owner for the duration of the test.
-        Ok(BootFs::from_handle(unsafe {
-            OwnedHandle::<BootFsObject>::from_raw_owned(raw)
+        // directory owner for the duration of the test.
+        Ok(Directory::from_handle(unsafe {
+            OwnedHandle::<DirectoryObject>::from_raw_owned(raw)
         }))
     }
 
     #[test]
     fn rights_narrowing_rejects_non_file_authority() {
-        assert!(BootFileRights::from_rights(Rights::READ.union(Rights::TRANSFER)).is_some());
-        assert!(BootFileRights::from_rights(Rights::WRITE).is_none());
+        assert!(FileRights::from_rights(Rights::READ.union(Rights::TRANSFER)).is_some());
+        assert!(FileRights::from_rights(Rights::WRITE).is_none());
     }
 
     #[test]
     fn open_and_exact_read_are_typed_and_bounded() -> Result<(), Error> {
-        let file = boot_fs()?.open(
-            "bin/init",
-            BootFileRights::READ.union(BootFileRights::TRANSFER),
-        )?;
-        let mut bytes = [0_u8; 23];
-        file.read_exact(0, &mut bytes)?;
-        assert_eq!(&bytes, b"HypeR BootFS test image");
+        let file =
+            root_directory()?.open("bin/init", FileRights::READ.union(FileRights::TRANSFER))?;
+        let mut bytes = [0_u8; 20];
+        file.read_exact_at(0, &mut bytes)?;
+        assert_eq!(&bytes, b"HypeR VFS test image");
         assert_eq!(file.size()?, bytes.len() as u64);
         Ok(())
     }
 
     #[test]
-    fn delegated_typed_owners_reenter_safe_bootfs_apis() -> Result<(), Error> {
-        let fs_raw = NonZeroU64::new(hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FS.into())
+    fn delegated_typed_owners_reenter_safe_filesystem_apis() -> Result<(), Error> {
+        let directory_raw = NonZeroU64::new(hyper_abi::HYPER_NATIVE_OBJECT_DIRECTORY.into())
             .ok_or(Error::InvalidResponse)?;
         // SAFETY: this models one type-erased owner received from the kernel.
-        let fs = unsafe { OwnedHandle::<AnyObject>::from_raw_owned(fs_raw) }
-            .downcast::<BootFsObject>()
+        let directory = unsafe { OwnedHandle::<AnyObject>::from_raw_owned(directory_raw) }
+            .downcast::<DirectoryObject>()
             .map_err(|failure| failure.error())?;
-        let fs = BootFs::from_handle(fs);
-        let _ = fs.as_handle_ref();
+        let directory = Directory::from_handle(directory);
+        let _ = directory.as_handle_ref();
 
-        let file_raw = NonZeroU64::new(hyper_abi::HYPER_NATIVE_OBJECT_BOOT_FILE.into())
+        let file_raw = NonZeroU64::new(hyper_abi::HYPER_NATIVE_OBJECT_FILE.into())
             .ok_or(Error::InvalidResponse)?;
         // SAFETY: this models a distinct type-erased owner received from the
         // kernel for the duration of this host test.
         let file = unsafe { OwnedHandle::<AnyObject>::from_raw_owned(file_raw) }
-            .downcast::<BootFileObject>()
+            .downcast::<FileObject>()
             .map_err(|failure| failure.error())?;
-        let file = super::BootFile::from_handle(file);
-        assert_eq!(file.size()?, 23);
+        let file = super::File::from_handle(file);
+        assert_eq!(file.size()?, 20);
         Ok(())
     }
 
     #[test]
     fn invalid_path_and_short_exact_read_fail_before_partial_copy() -> Result<(), Error> {
         assert!(matches!(
-            boot_fs()?.open("bad\0path", BootFileRights::READ),
+            root_directory()?.open("bad\0path", FileRights::READ),
             Err(Error::InvalidPath)
         ));
-        let file = boot_fs()?.open("bin/init", BootFileRights::READ)?;
-        let mut bytes = [0xaa_u8; 24];
+        let file = root_directory()?.open("bin/init", FileRights::READ)?;
+        let mut bytes = [0xaa_u8; 21];
         assert!(matches!(
-            file.read_exact(0, &mut bytes),
+            file.read_exact_at(0, &mut bytes),
             Err(Error::UnexpectedEndOfFile {
                 completed: 0,
-                expected: 24,
-                file_size: 23,
+                expected: 21,
+                file_size: 20,
             })
         ));
-        assert_eq!(bytes, [0xaa; 24]);
-        file.read_exact(u64::MAX, &mut [])?;
+        assert_eq!(bytes, [0xaa; 21]);
+        file.read_exact_at(u64::MAX, &mut [])?;
         Ok(())
     }
 }

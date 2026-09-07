@@ -53,7 +53,7 @@ impl ParseError {
 ///
 /// Manifest strings are canonical UTF-8 text and may not contain JSON escape
 /// sequences. This deliberate schema restriction gives names and paths one
-/// byte representation and lets the parsed model borrow immutable `BootFs` data.
+/// byte representation and lets the parsed model borrow immutable file data.
 pub fn parse(input: &str) -> Result<Manifest<'_>, ParseError> {
     let mut manifest = Manifest::empty();
     parse_into(input, &mut manifest)?;
