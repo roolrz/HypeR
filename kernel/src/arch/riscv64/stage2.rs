@@ -6,7 +6,7 @@
 use core::ptr::{read_volatile, write_volatile};
 
 use hyper::mm::{PAGE_SIZE, PhysicalAddress};
-use hyper::vm::translation::{ActiveMappingError, publish_active_mapping};
+use hyper::vm::translation::{ActiveMappingError, Stage2PagePermissions, publish_active_mapping};
 
 use super::memory::Riscv64AddressTranslation;
 use super::registers;
@@ -15,6 +15,16 @@ use hyper::hal::memory::AddressTranslation;
 const LEVEL_SHIFTS: [u64; 3] = [30, 21, 12];
 const LEVEL_SIZES: [u64; 3] = [1 << 30, 1 << 21, PAGE_SIZE];
 const ROOT_ENTRIES: u64 = 2048;
+
+const _: () = {
+    assert!(
+        normal_leaf_permissions(Stage2PagePermissions::ReadWrite) & registers::PTE_EXECUTE == 0
+    );
+    assert!(
+        normal_leaf_permissions(Stage2PagePermissions::ReadWriteExecute) & registers::PTE_EXECUTE
+            != 0
+    );
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -89,7 +99,15 @@ impl Stage2AddressSpace {
         while offset < size {
             let level = best_level(ipa + offset, physical + offset, size - offset);
             // SAFETY: The method contract covers all allocator pages and serialized mutation.
-            unsafe { self.map_leaf(ipa + offset, physical + offset, level, allocator)? };
+            unsafe {
+                self.map_leaf(
+                    ipa + offset,
+                    physical + offset,
+                    level,
+                    Stage2PagePermissions::ReadWriteExecute,
+                    allocator,
+                )?
+            };
             offset += LEVEL_SIZES[level];
         }
         Ok(())
@@ -105,17 +123,19 @@ impl Stage2AddressSpace {
         &mut self,
         ipa: u64,
         physical: u64,
+        permissions: Stage2PagePermissions,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         validate_range(ipa, physical, PAGE_SIZE)?;
         // SAFETY: The method contract covers allocator pages and serialized mutation.
-        unsafe { self.map_leaf(ipa, physical, 2, allocator) }
+        unsafe { self.map_leaf(ipa, physical, 2, permissions, allocator) }
     }
 
     pub unsafe fn map_normal_page_active(
         &mut self,
         ipa: u64,
         physical: u64,
+        permissions: Stage2PagePermissions,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), ActiveMappingError<Error>> {
         publish_active_mapping(
@@ -123,10 +143,36 @@ impl Stage2AddressSpace {
             |stage2| {
                 // SAFETY: This function has the same allocator and
                 // serialization contract.
-                unsafe { stage2.map_normal_page(ipa, physical, allocator) }
+                unsafe { stage2.map_normal_page(ipa, physical, permissions, allocator) }
             },
             |stage2| {
                 // SAFETY: The caller guarantees this VMID is active.
+                unsafe { invalidate(ipa, stage2.vmid) }
+            },
+        )
+    }
+
+    /// Grants execute permission to an inactive normal-memory leaf.
+    pub fn make_normal_page_executable(&mut self, ipa: u64) -> Result<(), Error> {
+        self.install_execute_permission(ipa)
+    }
+
+    /// Grants execute permission to an active normal-memory leaf and flushes
+    /// the affected guest translation on the current hart.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own the only active vCPU for this address space.
+    pub unsafe fn make_normal_page_executable_active(
+        &mut self,
+        ipa: u64,
+    ) -> Result<(), ActiveMappingError<Error>> {
+        publish_active_mapping(
+            self,
+            |stage2| stage2.install_execute_permission(ipa),
+            |stage2| {
+                // SAFETY: The caller guarantees this VMID is active and the
+                // exclusive execution lease excludes another consumer.
                 unsafe { invalidate(ipa, stage2.vmid) }
             },
         )
@@ -171,6 +217,7 @@ impl Stage2AddressSpace {
         ipa: u64,
         physical: u64,
         leaf_level: usize,
+        permissions: Stage2PagePermissions,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         let mut table = self.root;
@@ -197,10 +244,10 @@ impl Stage2AddressSpace {
             | registers::PTE_VALID
             | registers::PTE_READ
             | registers::PTE_WRITE
-            | registers::PTE_EXECUTE
             | registers::PTE_USER
             | registers::PTE_ACCESSED
-            | registers::PTE_DIRTY;
+            | registers::PTE_DIRTY
+            | normal_leaf_permissions(permissions);
         // SAFETY: The walk established a live mapped leaf table.
         let existing = unsafe { read_entry(table, slot)? };
         if existing != 0 && existing != value {
@@ -208,6 +255,54 @@ impl Stage2AddressSpace {
         }
         // SAFETY: Mutation is serialized and the leaf table is live and mapped.
         unsafe { write_entry(table, slot, value) }
+    }
+
+    fn install_execute_permission(&mut self, ipa: u64) -> Result<(), Error> {
+        let (pointer, entry) = self.normal_page_leaf(ipa)?;
+        if entry & registers::PTE_EXECUTE != 0 {
+            return Ok(());
+        }
+        // SAFETY: Serialized mutation owns this validated final-level slot.
+        unsafe { write_volatile(pointer, entry | registers::PTE_EXECUTE) };
+        Ok(())
+    }
+
+    fn normal_page_leaf(&self, ipa: u64) -> Result<(*mut u64, u64), Error> {
+        if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= registers::STAGE2_IPA_LIMIT {
+            return Err(Error::InvalidAddress);
+        }
+        let mut table = self.root;
+        for level in 0..2 {
+            // SAFETY: The root and every valid non-leaf child are retained by
+            // this address space.
+            let entry = unsafe { read_entry(table, index(ipa, level))? };
+            if entry & registers::PTE_VALID == 0
+                || entry & (registers::PTE_READ | registers::PTE_WRITE | registers::PTE_EXECUTE)
+                    != 0
+            {
+                return Err(Error::Conflict);
+            }
+            table = PhysicalAddress::new(pte_address(entry));
+        }
+        let pointer = table_pointer(table)? as *mut u64;
+        // SAFETY: The walk validated the live final-level table.
+        let pointer = unsafe { pointer.add(index(ipa, 2)) };
+        // SAFETY: Address-space mutation is serialized by the caller.
+        let entry = unsafe { read_volatile(pointer) };
+        let required =
+            registers::PTE_VALID | registers::PTE_READ | registers::PTE_WRITE | registers::PTE_USER;
+        if entry & required != required {
+            return Err(Error::Conflict);
+        }
+        Ok((pointer, entry))
+    }
+}
+
+const fn normal_leaf_permissions(permissions: Stage2PagePermissions) -> u64 {
+    if permissions.is_executable() {
+        registers::PTE_EXECUTE
+    } else {
+        0
     }
 }
 

@@ -27,13 +27,13 @@ pub(crate) const fn services() -> crate::hal::vm::ExitServices {
 /// `Retry`. `ForwardToDevice` performs no frame mutation and lets the backend
 /// decode an MMIO operation from its still-private exit state.
 pub(crate) fn dispatch_memory_fault(fault: GuestMemoryFault) -> MemoryFaultAction {
-    match crate::kernel::vm::active_vcpu::with(|execution, _| {
+    match crate::kernel::vm::active_vcpu::with_pinned(|execution, pin| {
         let vm = execution
             .vm_binding()
             .ok_or(crate::kernel::vm::memory::Error::Registry(
                 crate::kernel::vm::registry::Error::NotInstalled,
             ))?;
-        crate::kernel::vm::memory::resolve_guest_memory_fault(vm, fault)
+        crate::kernel::vm::memory::resolve_guest_memory_fault(vm, fault, pin)
     }) {
         Ok(Some(Ok(true))) => MemoryFaultAction::Retry,
         Ok(Some(Ok(false))) => MemoryFaultAction::ForwardToDevice,

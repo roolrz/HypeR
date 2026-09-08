@@ -232,9 +232,10 @@ riscv64_restore_host_floating_point:
 riscv64_activate_stage2:
     # The old VS root must not remain live while HGATP changes: speculative
     # VS-stage walks could otherwise populate translations under the new VMID.
+    # HFENCE.GVMA itself orders earlier visible page-table stores before later
+    # implicit G-stage reads, so a separate full memory FENCE is unnecessary.
     csrw vsatp, zero
     hfence.vvma zero, zero
-    fence rw, rw
     csrw hgatp, a0
     hfence.gvma zero, zero
     ret
@@ -243,7 +244,8 @@ riscv64_activate_stage2:
 .global riscv64_invalidate_stage2_page
 .type riscv64_invalidate_stage2_page, @function
 riscv64_invalidate_stage2_page:
-    fence rw, rw
+    # HFENCE.GVMA supplies the architectural page-table publication ordering;
+    # the calling ownership protocol makes any remote stores visible locally.
     hfence.gvma a0, a1
     ret
 .size riscv64_invalidate_stage2_page, . - riscv64_invalidate_stage2_page

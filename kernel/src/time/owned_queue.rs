@@ -91,6 +91,10 @@ impl PendingTimer {
 pub struct ReservedTimerNode(Box<TimerNode>);
 
 impl ReservedTimerNode {
+    pub const fn allocation_size() -> usize {
+        core::mem::size_of::<TimerNode>()
+    }
+
     pub fn try_new() -> Result<Self, Error> {
         crate::mm::try_box(TimerNode {
             identity: 0,

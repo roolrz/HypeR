@@ -33,6 +33,7 @@ pub enum Error {
 pub(crate) struct VirtualDeviceSet {
     console: ConsoleLock,
     console_interrupt: GicInterruptId,
+    console_output: Option<super::super::ConsoleOutputBinding>,
 }
 
 struct MmioOutcome {
@@ -40,12 +41,13 @@ struct MmioOutcome {
 }
 
 impl VirtualDeviceSet {
-    fn new() -> Result<Self, Error> {
+    fn new(console_output: Option<super::super::ConsoleOutputBinding>) -> Result<Self, Error> {
         let console_interrupt =
             GicInterruptId::new(REFERENCE_INTERRUPT).ok_or(Error::InvalidInterrupt)?;
         Ok(Self {
             console: InterruptSpinLock::new(VirtualPl011::new()),
             console_interrupt,
+            console_output,
         })
     }
 
@@ -73,8 +75,10 @@ impl VirtualDeviceSet {
             Ok::<_, Error>(outcome)
         })?;
         // Host output occurs after both device and controller locks release.
-        if let Some(byte) = outcome.transmitted {
-            crate::kernel::log::console::write_guest_console_byte(byte);
+        if let Some(byte) = outcome.transmitted
+            && let Some(output) = &self.console_output
+        {
+            output.write_byte(byte);
         }
         Ok(Some(MmioOutcome {
             value: outcome.value,
@@ -93,8 +97,24 @@ impl VirtualDeviceSet {
     }
 }
 
-pub(super) fn prepare() -> Result<VirtualDeviceSet, Error> {
-    VirtualDeviceSet::new()
+pub(super) fn prepare(
+    console_output: Option<super::super::ConsoleOutputBinding>,
+) -> Result<VirtualDeviceSet, Error> {
+    VirtualDeviceSet::new(console_output)
+}
+
+pub(super) fn supports_configuration(profile: u32, memory_base: u64, memory_size: u64) -> bool {
+    profile == hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE as u32
+        && memory_base
+            == hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GUEST_RAM_BASE
+        && memory_size != 0
+        && memory_base.checked_add(memory_size).is_some()
+}
+
+pub(super) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualInterruptId {
+    hyper::vm::interrupt::VirtualInterruptId::new(
+        hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_TIMER_INTERRUPT as u32,
+    )
 }
 
 #[must_use]
@@ -113,8 +133,7 @@ impl MmioDispatch {
 }
 
 pub(super) fn dispatch_mmio(
-    execution: &mut crate::kernel::task::thread::VcpuExecution,
-    interrupts: &super::super::super::VmInterruptController,
+    execution: &mut crate::kernel::vm::vcpu::VcpuExecution,
     access: MmioAccess,
 ) -> MmioDispatch {
     enum Resolution {
@@ -133,7 +152,7 @@ pub(super) fn dispatch_mmio(
     }
 
     let Some((vcpu_id, resolution)) = (|| {
-        let (binding, hardware, vcpu_id) = execution.device_context()?;
+        let (binding, hardware, vcpu_id, interrupts) = execution.device_context()?;
         let resolution = match handle_mmio(binding, hardware, interrupts, vcpu_id, access) {
             Ok(Some(outcome)) => resolve_access(access.operation(), outcome),
             Ok(None) => match handle_gic(hardware, interrupts, vcpu_id, access) {
@@ -186,7 +205,7 @@ fn handle_gic(
 }
 
 fn publish_terminal_mmio_report(
-    execution: &mut crate::kernel::task::thread::VcpuExecution,
+    execution: &mut crate::kernel::vm::vcpu::VcpuExecution,
     vcpu_id: u32,
     report: Option<super::super::super::UnhandledMmioReport>,
 ) {
@@ -249,6 +268,7 @@ enum ConsoleDeliveryError {
 }
 
 /// Selects the first Linux VM as the host-console input recipient.
+#[cfg(feature = "kernel-self-test")]
 pub(super) fn try_publish_console_route(
     vm: VmId,
     vcpu: u32,

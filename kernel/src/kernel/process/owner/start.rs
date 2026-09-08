@@ -599,6 +599,7 @@ fn publish_unpublished_startup_handles(prepared: &mut PreparedChildProcessStart)
             process_invariant_violation();
         }
         while let Some(mut reservation) = prepared.child_handle_batches.pop() {
+            reservation.require_owner(&prepared.child);
             let token = match reservation.reservation.take() {
                 Some(token) => token,
                 None => process_invariant_violation(),
@@ -661,6 +662,7 @@ fn commit_parent_builder_replacement(
         Some(destination) => destination,
         None => process_invariant_violation(),
     };
+    destination.require_owner(&prepared.parent);
     let mut supervisor = match prepared.supervisor_object.take() {
         Some(supervisor) => Some(supervisor),
         None => process_invariant_violation(),

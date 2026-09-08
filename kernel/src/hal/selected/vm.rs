@@ -15,6 +15,38 @@
 
 use hyper::hal::interrupt::{HostInterruptBinding, InterruptId};
 
+/// Native ABI instruction-set identity accepted by the selected backend.
+pub(crate) const fn guest_architecture_abi() -> u32 {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_AARCH64 as u32
+    }
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_RISCV64 as u32
+    }
+    #[cfg(CONFIG_ARCH_X86_64)]
+    {
+        hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_X86_64 as u32
+    }
+}
+
+/// Reports whether this backend supports the complete userspace-owned VM
+/// lifecycle, including administrative stop and acknowledged stage-2
+/// retirement.
+///
+/// Guest entry alone is insufficient: publishing a handle whose last-close
+/// path cannot retire its hardware state would make otherwise ordinary
+/// process termination fatal. Keep admission closed until every lifecycle
+/// operation is implemented for the selected backend.
+pub(crate) const fn userspace_vm_lifecycle_available() -> bool {
+    cfg!(CONFIG_ARCH_AARCH64)
+}
+
+const _: () = assert!(
+    hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_X86_64 <= u32::MAX as u64
+);
+
 #[cfg(CONFIG_ARCH_AARCH64)]
 pub(crate) use crate::arch::vm::GicAccessError;
 pub(crate) use crate::arch::vm::{
@@ -230,6 +262,41 @@ pub(crate) fn prepare_initial_context(
             .get_mut(assignment.index)
             .ok_or(InitialContextError)?;
         *register = assignment.value;
+    }
+    Ok(context)
+}
+
+/// Realizes the architecture-neutral Native bootstrap record.
+///
+/// The four argument slots map to the first four integer argument registers
+/// of the selected guest ISA. A nonzero stack is applied where the selected
+/// context exposes a boot stack pointer; zero preserves the architectural
+/// reset convention.
+pub(crate) fn prepare_native_bootstrap_context(
+    entry: u64,
+    stack: u64,
+    arguments: [u64; 4],
+) -> Result<VcpuContext, InitialContextError> {
+    let assignments = [
+        InitialRegisterAssignment::new(0, arguments[0]),
+        InitialRegisterAssignment::new(1, arguments[1]),
+        InitialRegisterAssignment::new(2, arguments[2]),
+        InitialRegisterAssignment::new(3, arguments[3]),
+    ];
+    let mut context = prepare_initial_context(entry, &assignments)?;
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        context.stack_pointer_el1 = stack;
+    }
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        const SP: usize = 2;
+        context.general[SP] = stack;
+    }
+    #[cfg(CONFIG_ARCH_X86_64)]
+    {
+        const RSP: usize = 4;
+        context.general[RSP] = stack;
     }
     Ok(context)
 }
@@ -456,9 +523,10 @@ pub(crate) enum StoppedVcpuQueryError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(CONFIG_ARCH_AARCH64, allow(dead_code))]
 pub enum ActiveInterruptReconcileError {
+    #[cfg_attr(CONFIG_ARCH_AARCH64, allow(dead_code))]
     Unsupported,
+    #[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
     Backend(VcpuInterruptError),
 }
 
@@ -780,22 +848,82 @@ pub(crate) fn prepare_timer_validation(
     }
 }
 
-pub(crate) fn create_interrupt_controller(
+/// Allocation-free construction plan for one bounded virtual interrupt model.
+///
+/// Kernel policy admits `allocation_size` before consuming this plan. The
+/// realized controller verifies that its retained layout matches the same
+/// architecture-owned contract before it can be published.
+pub(crate) struct PreparedInterruptController {
     vcpu_count: u32,
     timer_interrupt: hyper::vm::interrupt::VirtualInterruptId,
-) -> Result<InterruptController, InterruptError> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    list_registers: usize,
+    allocation_size: usize,
+}
+
+pub(crate) fn prepare_interrupt_controller(
+    vcpu_count: u32,
+    timer_interrupt: hyper::vm::interrupt::VirtualInterruptId,
+) -> Result<PreparedInterruptController, InterruptError> {
     #[cfg(CONFIG_ARCH_AARCH64)]
     {
-        let timer = hyper::vm::arm::gic::GicInterruptId::new(timer_interrupt.get())
+        let _timer = hyper::vm::arm::gic::GicInterruptId::new(timer_interrupt.get())
             .ok_or(InterruptError::InvalidInterrupt)?;
         let description =
             interrupt_virtualization_description().ok_or(InterruptError::MissingCapabilities)?;
-        InterruptController::new(vcpu_count, timer, usize::from(description.list_registers))
+        let list_registers = usize::from(description.list_registers);
+        let allocation_size =
+            InterruptController::allocation_requirement(vcpu_count, list_registers)?;
+        Ok(PreparedInterruptController {
+            vcpu_count,
+            timer_interrupt,
+            list_registers,
+            allocation_size,
+        })
     }
     #[cfg(not(CONFIG_ARCH_AARCH64))]
     {
-        InterruptController::new(vcpu_count, timer_interrupt)
+        Ok(PreparedInterruptController {
+            vcpu_count,
+            timer_interrupt,
+            allocation_size: 0,
+        })
     }
+}
+
+pub(crate) const fn prepared_interrupt_controller_allocation_size(
+    prepared: &PreparedInterruptController,
+) -> usize {
+    prepared.allocation_size
+}
+
+pub(crate) fn create_prepared_interrupt_controller(
+    prepared: PreparedInterruptController,
+) -> Result<InterruptController, InterruptError> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        let timer = hyper::vm::arm::gic::GicInterruptId::new(prepared.timer_interrupt.get())
+            .ok_or(InterruptError::InvalidInterrupt)?;
+        let controller =
+            InterruptController::new(prepared.vcpu_count, timer, prepared.list_registers)?;
+        if interrupt_controller_allocation_size(&controller) != Some(prepared.allocation_size) {
+            return Err(InterruptError::Build(
+                hyper::vm::arm::gic::BuildError::InvalidStoragePlan,
+            ));
+        }
+        Ok(controller)
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        InterruptController::new(prepared.vcpu_count, prepared.timer_interrupt)
+    }
+}
+
+#[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) fn interrupt_controller_allocation_size(
+    controller: &InterruptController,
+) -> Option<usize> {
+    controller.allocation_size()
 }
 
 pub(crate) fn inject_timer_for_validation(
@@ -916,12 +1044,12 @@ pub(crate) fn access_guest_gic(
     crate::arch::vm::access_guest_gic(&mut state.context, vcpu_id, interrupts, access, operation)
 }
 
-#[cfg(any(CONFIG_ARCH_X86_64, feature = "kernel-self-test"))]
+#[cfg(feature = "kernel-self-test")]
 pub(crate) fn guest_execution_available() -> bool {
     crate::arch::vm::guest_execution_available()
 }
 
-#[cfg(CONFIG_ARCH_X86_64)]
+#[cfg(all(CONFIG_ARCH_X86_64, feature = "kernel-self-test"))]
 pub(crate) fn virtualization_backend_name() -> &'static str {
     crate::arch::vm::virtualization_backend_name()
 }

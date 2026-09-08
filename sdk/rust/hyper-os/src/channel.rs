@@ -3,9 +3,7 @@
 
 //! Safe handle-free `ByteChannel` message transport.
 
-use core::num::NonZeroU64;
-
-use crate::handle::{AnyObject, ByteChannelObject, HandleRef, OwnedHandle};
+use crate::handle::{ByteChannelObject, HandleRef, OwnedHandle};
 use crate::{Error, Result, Status};
 
 const _: () = assert!(hyper_abi::HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES <= usize::MAX as u64);
@@ -22,23 +20,9 @@ pub fn create_pair() -> Result<(
     // successful results before exposing them.
     let result = raw_create_pair();
     Status::from_raw(result.status).into_result()?;
-    let (Some(first), Some(second)) = (
-        NonZeroU64::new(result.value0),
-        NonZeroU64::new(result.value1),
-    ) else {
-        close_malformed_handles(&[result.value0, result.value1]);
-        return Err(Error::InvalidResponse);
-    };
-    if first == second {
-        close_malformed_handles(&[first.get()]);
-        return Err(Error::InvalidResponse);
-    }
-    // SAFETY: one successful create publishes exactly these two distinct
-    // endpoint owners.
-    let first = unsafe { OwnedHandle::from_raw_owned(first) };
-    // SAFETY: the checked value is the distinct second owner from that call.
-    let second = unsafe { OwnedHandle::from_raw_owned(second) };
-    Ok((first, second))
+    // SAFETY: an OK BYTE_CHANNEL_CREATE result transfers ownership of every
+    // distinct nonzero output, including malformed output pairs.
+    unsafe { crate::handle::adopt_produced_handle_pair([result.value0, result.value1]) }
 }
 
 #[cfg(not(test))]
@@ -56,20 +40,6 @@ fn raw_create_pair() -> hyper_sys::CallResult {
     }
 }
 
-fn close_malformed_handles(values: &[u64]) {
-    for (index, value) in values.iter().copied().enumerate() {
-        let Some(raw) = NonZeroU64::new(value) else {
-            continue;
-        };
-        if values[..index].contains(&value) {
-            continue;
-        }
-        // SAFETY: `OK` publishes every distinct nonzero result as one owner,
-        // even when another result violates the ABI contract.
-        drop(unsafe { OwnedHandle::<AnyObject>::from_raw_owned(raw) });
-    }
-}
-
 /// Borrowed `ByteChannel` endpoint supplied by process startup.
 ///
 /// This initial binding deliberately does not expose capability transfer. A
@@ -82,6 +52,12 @@ pub struct ByteChannel<'owner> {
 impl<'owner> ByteChannel<'owner> {
     pub(crate) const fn from_handle(handle: HandleRef<'owner, ByteChannelObject>) -> Self {
         Self { handle }
+    }
+
+    /// Returns the borrowed endpoint authority for typed multi-object waits.
+    #[must_use]
+    pub const fn as_handle_ref(&self) -> HandleRef<'owner, ByteChannelObject> {
+        self.handle
     }
 
     /// Sends one complete message, waiting while peer capacity is exhausted.

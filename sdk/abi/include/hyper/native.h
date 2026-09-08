@@ -65,6 +65,11 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR UINT32_C(17)
 #define HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR UINT32_C(18)
 #define HYPER_NATIVE_OBJECT_CPU_INSPECTOR UINT32_C(19)
+#define HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY UINT32_C(20)
+#define HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE UINT32_C(21)
+#define HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE UINT32_C(22)
+#define HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE UINT32_C(23)
+#define HYPER_NATIVE_OBJECT_VIRTUAL_CPU UINT32_C(24)
 
 #define HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN UINT32_C(0)
 #define HYPER_NATIVE_TRANSFER_CLASS_GENERAL UINT32_C(1)
@@ -92,6 +97,11 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
         case HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
         case HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
         case HYPER_NATIVE_OBJECT_CPU_INSPECTOR: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
+        case HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
+        case HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_VIRTUAL_CPU: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         default: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
     }
 }
@@ -125,8 +135,9 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_RIGHT_TASK_GROUP_ATTACH_PROCESS (UINT64_C(1) << 26)
 #define HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR (UINT64_C(1) << 27)
 #define HYPER_NATIVE_RIGHT_DERIVE (UINT64_C(1) << 28)
+#define HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE (UINT64_C(1) << 29)
 
-#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1fffffff)
+#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x3fffffff)
 
 #define HYPER_NATIVE_SIGNAL_EVENT_SIGNALED (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE (UINT64_C(1) << 0)
@@ -138,7 +149,11 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SIGNAL_PROCESS_TERMINATED (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_CONSOLE_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_CONSOLE_WRITABLE (UINT64_C(1) << 1)
+#define HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED (UINT64_C(1) << 0)
 
+#define HYPER_NATIVE_PAGE_SIZE UINT64_C(4096)
+#define HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES UINT64_C(4096)
 #define HYPER_NATIVE_ELF_OSABI UINT64_C(63)
 #define HYPER_NATIVE_ELF_ABI_VERSION UINT64_C(0)
 #define HYPER_NATIVE_AUXV_STARTUP_HANDLES UINT64_C(1213792257)
@@ -155,6 +170,33 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY UINT64_C(10)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR UINT64_C(11)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR UINT64_C(12)
+#define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_VIRTUAL_MACHINE_CREATION_AUTHORITY UINT64_C(13)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_AARCH64 UINT64_C(1)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_RISCV64 UINT64_C(2)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_X86_64 UINT64_C(3)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE UINT64_C(1)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GUEST_RAM_BASE UINT64_C(1073741824)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DTB_OFFSET UINT64_C(65536)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_BASE UINT64_C(134217728)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_SIZE UINT64_C(65536)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_BASE UINT64_C(134873088)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_SIZE UINT64_C(131072)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_BASE UINT64_C(150994944)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_SIZE UINT64_C(4096)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_INTERRUPT UINT64_C(33)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_TIMER_INTERRUPT UINT64_C(27)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_INSTALLED UINT64_C(1)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_RUNNING UINT64_C(2)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPING UINT64_C(3)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPED UINT64_C(4)
+#define HYPER_NATIVE_VIRTUAL_CPU_PHASE_DORMANT UINT64_C(1)
+#define HYPER_NATIVE_VIRTUAL_CPU_PHASE_STARTED UINT64_C(2)
+#define HYPER_NATIVE_VIRTUAL_CPU_PHASE_STOPPED UINT64_C(3)
+#define HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_NONE UINT64_C(0)
+#define HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_MEMORY_FAULT UINT64_C(1)
+#define HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_MMIO UINT64_C(2)
+#define HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_SYNCHRONOUS UINT64_C(3)
+#define HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_ADMINISTRATIVE UINT64_C(4)
 #define HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY UINT64_C(4)
 #define HYPER_NATIVE_DIRECTORY_ENTRY_NAME_MAX_BYTES UINT64_C(255)
 #define HYPER_NATIVE_DIRECTORY_ENTRY_KIND_FILE UINT64_C(1)
@@ -175,7 +217,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_CONSOLE_MAX_TRANSFER_BYTES UINT64_C(4096)
 #define HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES UINT64_C(4096)
 #define HYPER_NATIVE_FILE_MAX_READ_BYTES UINT64_C(65536)
-#define HYPER_NATIVE_VMO_MAX_SIZE_BYTES UINT64_C(67108864)
+#define HYPER_NATIVE_VMO_MAX_SIZE_BYTES UINT64_C(4294967296)
 #define HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES UINT64_C(65536)
 #define HYPER_NATIVE_VMAR_PERMISSION_READ UINT64_C(1)
 #define HYPER_NATIVE_VMAR_PERMISSION_WRITE UINT64_C(2)
@@ -275,6 +317,21 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_CPU_INSPECTOR_READ UINT64_C(56)
 #define HYPER_NATIVE_SYS_FILE_GET_INFO UINT64_C(57)
 #define HYPER_NATIVE_SYS_DIRECTORY_GET_INFO UINT64_C(58)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_CREATE UINT64_C(59)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATE UINT64_C(60)
+#define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_MEMORY UINT64_C(61)
+#define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP UINT64_C(62)
+#define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SEAL UINT64_C(63)
+#define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_INSTALL UINT64_C(64)
+#define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_ABORT UINT64_C(65)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REQUEST_STOP UINT64_C(66)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO UINT64_C(67)
+#define HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO UINT64_C(68)
+#define HYPER_NATIVE_SYS_RESOURCE_DOMAIN_CREATE UINT64_C(69)
+#define HYPER_NATIVE_SYS_TASK_GROUP_CREATE UINT64_C(70)
+#define HYPER_NATIVE_SYS_VIRTUAL_CPU_START UINT64_C(71)
+#define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT UINT64_C(72)
+#define HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC UINT64_C(73)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -298,6 +355,7 @@ static inline uint64_t hyper_native_failure_result_mask(
     return UINT64_C(0);
 }
 
+#define HYPER_NATIVE_HANDLE_INFO_MIN_SIZE UINT64_C(16)
 typedef struct hyper_native_handle_info_t {
     uint32_t object_kind;
     uint32_t flags;
@@ -309,6 +367,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_info_t, object_kind) == 0, 
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_info_t, flags) == 4, "handle_info.flags offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_info_t, rights) == 8, "handle_info.rights offset");
 
+#define HYPER_NATIVE_OBJECT_BASIC_INFO_MIN_SIZE UINT64_C(16)
 typedef struct hyper_native_object_basic_info_t {
     uint64_t koid;
     uint32_t object_kind;
@@ -320,6 +379,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_basic_info_t, koid) == 0, "
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_basic_info_t, object_kind) == 8, "object_basic_info.object_kind offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_basic_info_t, reserved) == 12, "object_basic_info.reserved offset");
 
+#define HYPER_NATIVE_OBJECT_WAIT_ITEM_MIN_SIZE UINT64_C(16)
 typedef struct hyper_native_object_wait_item_t {
     uint64_t handle;
     uint64_t signals;
@@ -329,6 +389,7 @@ HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_object_wait_item_t) == 8,
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_wait_item_t, handle) == 0, "object_wait_item.handle offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_wait_item_t, signals) == 8, "object_wait_item.signals offset");
 
+#define HYPER_NATIVE_PROCESS_INFO_MIN_SIZE UINT64_C(32)
 typedef struct hyper_native_process_info_t {
     uint32_t phase;
     uint32_t terminal_reason;
@@ -344,6 +405,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_info_t, detail0) == 8, "pr
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_info_t, detail1) == 16, "process_info.detail1 offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_process_info_t, reserved) == 24, "process_info.reserved offset");
 
+#define HYPER_NATIVE_CAPABILITY_DISPOSITION_MIN_SIZE UINT64_C(24)
 typedef struct hyper_native_capability_disposition_t {
     uint64_t handle;
     uint64_t rights;
@@ -357,6 +419,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_disposition_t, rights) 
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_disposition_t, expected_kind) == 16, "capability_disposition.expected_kind offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_disposition_t, operation) == 20, "capability_disposition.operation offset");
 
+#define HYPER_NATIVE_CAPABILITY_RECEIVE_SLOT_MIN_SIZE UINT64_C(24)
 typedef struct hyper_native_capability_receive_slot_t {
     uint64_t handle;
     uint64_t rights;
@@ -370,6 +433,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_receive_slot_t, rights)
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_receive_slot_t, expected_kind) == 16, "capability_receive_slot.expected_kind offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_capability_receive_slot_t, flags) == 20, "capability_receive_slot.flags offset");
 
+#define HYPER_NATIVE_STARTUP_HANDLE_MIN_SIZE UINT64_C(16)
 typedef struct hyper_native_startup_handle_t {
     uint32_t purpose;
     uint32_t flags;
@@ -381,6 +445,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_startup_handle_t, purpose) == 0, "
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_startup_handle_t, flags) == 4, "startup_handle.flags offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_startup_handle_t, handle) == 8, "startup_handle.handle offset");
 
+#define HYPER_NATIVE_TASK_PROCESS_MIN_SIZE UINT64_C(96)
 typedef struct hyper_native_task_process_t {
     uint64_t koid;
     uint32_t phase;
@@ -402,6 +467,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, name_length) == 24
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, reserved) == 28, "task_process.reserved offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_process_t, name) == 32, "task_process.name offset");
 
+#define HYPER_NATIVE_TASK_THREAD_MIN_SIZE UINT64_C(104)
 typedef struct hyper_native_task_thread_t {
     uint64_t koid;
     uint64_t process_koid;
@@ -423,6 +489,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, reserved) == 28, "t
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, runtime_ticks) == 32, "task_thread.runtime_ticks offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, name) == 40, "task_thread.name offset");
 
+#define HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE UINT64_C(112)
 typedef struct hyper_native_memory_observation_t {
     uint64_t captured_at_ns;
     uint64_t page_size;
@@ -456,6 +523,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, guest_bytes)
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, unattributed_bytes) == 96, "memory_observation.unattributed_bytes offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, reclaimable_bytes) == 104, "memory_observation.reclaimable_bytes offset");
 
+#define HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE UINT64_C(64)
 typedef struct hyper_native_cpu_observation_t {
     uint64_t captured_at_ns;
     uint64_t ticks_per_second;
@@ -477,6 +545,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, user_thread_tic
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, vcpu_ticks) == 48, "cpu_observation.vcpu_ticks offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_cpu_observation_t, reserved) == 56, "cpu_observation.reserved offset");
 
+#define HYPER_NATIVE_OBJECT_INSPECTION_MIN_SIZE UINT64_C(104)
 typedef struct hyper_native_object_inspection_t {
     uint64_t koid;
     uint32_t object_kind;
@@ -491,8 +560,9 @@ typedef struct hyper_native_object_inspection_t {
     uint64_t publication_references;
     uint64_t diagnostic_references;
     uint64_t retirement_references;
+    uint64_t vm_device_binding_references;
 } hyper_native_object_inspection_t;
-HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_object_inspection_t) == 96, "object_inspection size");
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_object_inspection_t) == 104, "object_inspection size");
 HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_object_inspection_t) == 8, "object_inspection alignment");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, koid) == 0, "object_inspection.koid offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, object_kind) == 8, "object_inspection.object_kind offset");
@@ -507,7 +577,9 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, user_authorit
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, publication_references) == 72, "object_inspection.publication_references offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, diagnostic_references) == 80, "object_inspection.diagnostic_references offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, retirement_references) == 88, "object_inspection.retirement_references offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_object_inspection_t, vm_device_binding_references) == 96, "object_inspection.vm_device_binding_references offset");
 
+#define HYPER_NATIVE_HANDLE_INSPECTION_MIN_SIZE UINT64_C(40)
 typedef struct hyper_native_handle_inspection_t {
     uint64_t process_koid;
     uint64_t handle;
@@ -525,6 +597,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, rights) == 24
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, object_kind) == 32, "handle_inspection.object_kind offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_handle_inspection_t, flags) == 36, "handle_inspection.flags offset");
 
+#define HYPER_NATIVE_DIRECTORY_ENTRY_MIN_SIZE UINT64_C(280)
 typedef struct hyper_native_directory_entry_t {
     uint64_t size;
     uint32_t mode;
@@ -542,6 +615,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, name_length) ==
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, reserved) == 20, "directory_entry.reserved offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_entry_t, name) == 24, "directory_entry.name offset");
 
+#define HYPER_NATIVE_FILE_INFO_MIN_SIZE UINT64_C(40)
 typedef struct hyper_native_file_info_t {
     uint64_t filesystem_id;
     uint64_t mount_id;
@@ -559,6 +633,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_info_t, size) == 24, "file_in
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_info_t, mode) == 32, "file_info.mode offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_info_t, reserved) == 36, "file_info.reserved offset");
 
+#define HYPER_NATIVE_DIRECTORY_INFO_MIN_SIZE UINT64_C(32)
 typedef struct hyper_native_directory_info_t {
     uint64_t filesystem_id;
     uint64_t mount_id;
@@ -573,6 +648,128 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_info_t, mount_id) == 8, 
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_info_t, node_id) == 16, "directory_info.node_id offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_info_t, mode) == 24, "directory_info.mode offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_directory_info_t, reserved) == 28, "directory_info.reserved offset");
+
+#define HYPER_NATIVE_VIRTUAL_MACHINE_CONFIGURATION_MIN_SIZE UINT64_C(32)
+typedef struct hyper_native_virtual_machine_configuration_t {
+    uint64_t guest_physical_base;
+    uint64_t memory_size;
+    uint32_t vcpu_count;
+    uint32_t architecture;
+    uint32_t platform_profile;
+    uint32_t flags;
+} hyper_native_virtual_machine_configuration_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_machine_configuration_t) == 32, "virtual_machine_configuration size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_machine_configuration_t) == 8, "virtual_machine_configuration alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_configuration_t, guest_physical_base) == 0, "virtual_machine_configuration.guest_physical_base offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_configuration_t, memory_size) == 8, "virtual_machine_configuration.memory_size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_configuration_t, vcpu_count) == 16, "virtual_machine_configuration.vcpu_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_configuration_t, architecture) == 20, "virtual_machine_configuration.architecture offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_configuration_t, platform_profile) == 24, "virtual_machine_configuration.platform_profile offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_configuration_t, flags) == 28, "virtual_machine_configuration.flags offset");
+
+#define HYPER_NATIVE_VIRTUAL_CPU_BOOTSTRAP_MIN_SIZE UINT64_C(64)
+typedef struct hyper_native_virtual_cpu_bootstrap_t {
+    uint64_t entry;
+    uint64_t stack;
+    uint64_t argument0;
+    uint64_t argument1;
+    uint64_t argument2;
+    uint64_t argument3;
+    uint32_t vcpu_id;
+    uint32_t flags;
+    uint64_t reserved;
+} hyper_native_virtual_cpu_bootstrap_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_cpu_bootstrap_t) == 64, "virtual_cpu_bootstrap size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_cpu_bootstrap_t) == 8, "virtual_cpu_bootstrap alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, entry) == 0, "virtual_cpu_bootstrap.entry offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, stack) == 8, "virtual_cpu_bootstrap.stack offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, argument0) == 16, "virtual_cpu_bootstrap.argument0 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, argument1) == 24, "virtual_cpu_bootstrap.argument1 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, argument2) == 32, "virtual_cpu_bootstrap.argument2 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, argument3) == 40, "virtual_cpu_bootstrap.argument3 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, vcpu_id) == 48, "virtual_cpu_bootstrap.vcpu_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, flags) == 52, "virtual_cpu_bootstrap.flags offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, reserved) == 56, "virtual_cpu_bootstrap.reserved offset");
+
+#define HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE UINT64_C(32)
+typedef struct hyper_native_virtual_machine_info_t {
+    uint32_t phase;
+    uint32_t vcpu_count;
+    uint64_t guest_physical_base;
+    uint64_t memory_size;
+    uint32_t architecture;
+    uint32_t platform_profile;
+} hyper_native_virtual_machine_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_machine_info_t) == 32, "virtual_machine_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_machine_info_t) == 8, "virtual_machine_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, phase) == 0, "virtual_machine_info.phase offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, vcpu_count) == 4, "virtual_machine_info.vcpu_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, guest_physical_base) == 8, "virtual_machine_info.guest_physical_base offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, memory_size) == 16, "virtual_machine_info.memory_size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, architecture) == 24, "virtual_machine_info.architecture offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, platform_profile) == 28, "virtual_machine_info.platform_profile offset");
+
+#define HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE UINT64_C(24)
+typedef struct hyper_native_virtual_cpu_info_t {
+    uint32_t vcpu_id;
+    uint32_t phase;
+    uint64_t scheduler_thread_id;
+    uint32_t terminal_reason;
+    uint32_t reserved;
+} hyper_native_virtual_cpu_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_cpu_info_t) == 24, "virtual_cpu_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_cpu_info_t) == 8, "virtual_cpu_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, vcpu_id) == 0, "virtual_cpu_info.vcpu_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, phase) == 4, "virtual_cpu_info.phase offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, scheduler_thread_id) == 8, "virtual_cpu_info.scheduler_thread_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, terminal_reason) == 16, "virtual_cpu_info.terminal_reason offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, reserved) == 20, "virtual_cpu_info.reserved offset");
+
+#define HYPER_NATIVE_RESOURCE_LIMITS_MIN_SIZE UINT64_C(160)
+typedef struct hyper_native_resource_limits_t {
+    uint64_t kernel_memory_bytes;
+    uint64_t processes;
+    uint64_t threads;
+    uint64_t handles;
+    uint64_t kernel_objects;
+    uint64_t committed_pages;
+    uint64_t pinned_pages;
+    uint64_t guest_pages;
+    uint64_t ipc_messages;
+    uint64_t ipc_bytes;
+    uint64_t ipc_handles;
+    uint64_t subscriptions;
+    uint64_t timers;
+    uint64_t virtual_machines;
+    uint64_t virtual_cpus;
+    uint64_t device_leases;
+    uint64_t dma_mappings;
+    uint64_t user_address_spaces;
+    uint64_t user_mappings;
+    uint64_t reserved;
+} hyper_native_resource_limits_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_resource_limits_t) == 160, "resource_limits size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_resource_limits_t) == 8, "resource_limits alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, kernel_memory_bytes) == 0, "resource_limits.kernel_memory_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, processes) == 8, "resource_limits.processes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, threads) == 16, "resource_limits.threads offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, handles) == 24, "resource_limits.handles offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, kernel_objects) == 32, "resource_limits.kernel_objects offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, committed_pages) == 40, "resource_limits.committed_pages offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, pinned_pages) == 48, "resource_limits.pinned_pages offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, guest_pages) == 56, "resource_limits.guest_pages offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, ipc_messages) == 64, "resource_limits.ipc_messages offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, ipc_bytes) == 72, "resource_limits.ipc_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, ipc_handles) == 80, "resource_limits.ipc_handles offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, subscriptions) == 88, "resource_limits.subscriptions offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, timers) == 96, "resource_limits.timers offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, virtual_machines) == 104, "resource_limits.virtual_machines offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, virtual_cpus) == 112, "resource_limits.virtual_cpus offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, device_leases) == 120, "resource_limits.device_leases offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, dma_mappings) == 128, "resource_limits.dma_mappings offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, user_address_spaces) == 136, "resource_limits.user_address_spaces offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, user_mappings) == 144, "resource_limits.user_mappings offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_resource_limits_t, reserved) == 152, "resource_limits.reserved offset");
 
 #undef HYPER_ABI_ALIGNOF
 #undef HYPER_ABI_STATIC_ASSERT

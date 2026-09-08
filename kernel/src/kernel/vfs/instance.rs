@@ -69,6 +69,18 @@ enum Backend {
     RamFs(RamFs<'static>),
 }
 
+/// Whether immutable reads benefit from copying backend data into page cache.
+///
+/// A memory-resident filesystem already owns stable bytes, so caching it would
+/// create a second physical copy without avoiding I/O. Block and remote
+/// backends added later can opt into `PageCache` at their adapter boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ReadCachePolicy {
+    Direct,
+    #[allow(dead_code, reason = "no block-backed filesystem adapter exists yet")]
+    PageCache,
+}
+
 pub(crate) struct FilesystemInstance {
     id: FilesystemId,
     backend: Backend,
@@ -99,6 +111,12 @@ impl FilesystemInstance {
             instance_invariant_violation();
         };
         crate::kernel::io_cache::FilesystemGeneration::new(generation)
+    }
+
+    pub(super) const fn read_cache_policy(&self) -> ReadCachePolicy {
+        match &self.backend {
+            Backend::RamFs(_) => ReadCachePolicy::Direct,
+        }
     }
 
     pub(crate) fn root(&self) -> NodeId {

@@ -201,6 +201,25 @@ pub(crate) fn scan(cursor: ObjectScanCursor) -> ObjectSnapshotPage {
     ObjectSnapshotPage { entries, len, next }
 }
 
+/// Retains one diagnostic-only object reference for a lifecycle self-test.
+///
+/// Production diagnostics intentionally return pointer-free snapshots. This
+/// hook exists solely to prove that object-owned accounting follows the exact
+/// refcounted allocation rather than its scheduler registry entry.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn retain_for_test(koid: Koid) -> Option<ErasedKernelRef<Diagnostic>> {
+    DIRECTORY.with(|directory| {
+        let mut entry = directory.head.as_deref();
+        while let Some(current) = entry {
+            if current.koid == koid {
+                return current.object.upgrade();
+            }
+            entry = current.next.as_deref();
+        }
+        None
+    })
+}
+
 fn has_older_live(mut entry: Option<&Entry>, sequence: u64) -> bool {
     while let Some(current) = entry {
         if current.sequence < sequence && current.object.is_alive() {

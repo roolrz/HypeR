@@ -77,6 +77,12 @@ impl CacheMaintenance for X86_64Cache {
         super::barrier::X86_64Barrier::instruction_synchronization();
     }
 
+    fn synchronize_guest_instruction_migration() {
+        // Coherent instruction and data caches make guest-observed stores
+        // visible across logical processors; the scheduler's release/acquire
+        // execution handoff supplies the memory-ordering edge.
+    }
+
     fn invalidate_instruction_all() {
         super::barrier::X86_64Barrier::instruction_synchronization();
     }

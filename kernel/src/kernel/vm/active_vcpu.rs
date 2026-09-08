@@ -16,8 +16,7 @@ use hyper::cpu::{CpuIndex, PerCpu};
 use hyper::sync::atomic::{Ordering, compiler_fence};
 use hyper::sync::{AtomicBorrowClaim, AtomicBorrowError, AtomicBorrowPtr};
 
-use super::VmInterruptController;
-use crate::kernel::task::thread::VcpuExecution;
+use crate::kernel::vm::vcpu::VcpuExecution;
 
 static ACTIVE: PerCpu<AtomicBorrowPtr<VcpuExecution>> =
     PerCpu::new([const { AtomicBorrowPtr::new() }; hyper::cpu::MAX_CPUS]);
@@ -195,8 +194,18 @@ impl Drop for PublicationFailure {
     }
 }
 
-pub fn with<R>(
-    operation: impl FnOnce(&mut VcpuExecution, &VmInterruptController) -> R,
+pub fn with<R>(operation: impl FnOnce(&mut VcpuExecution) -> R) -> Result<Option<R>, Error> {
+    with_pinned(|execution, _pin| operation(execution))
+}
+
+/// Borrows the active vCPU together with proof that the callback cannot
+/// migrate between CPUs.
+///
+/// Most VM-exit handlers should use [`with`]. This variant exists for bounded
+/// architecture protocols, such as multi-pass cache maintenance, whose HAL
+/// contract requires an explicit CPU-affinity witness.
+pub(crate) fn with_pinned<R>(
+    operation: impl FnOnce(&mut VcpuExecution, &dyn hyper::cpu::PinnedExecution) -> R,
 ) -> Result<Option<R>, Error> {
     ensure_interrupts_masked()?;
     // A local IRQ mask prevents asynchronous scheduler entry, while this guard
@@ -227,15 +236,11 @@ pub fn with<R>(
     // tagged atomic state makes exception re-entry observe Borrowed, while the
     // preemption guard pins the continuation. No hardware barrier is needed.
     compiler_fence(Ordering::Acquire);
-    // SAFETY: set requires the execution to remain pinned and exclusively
-    // associated with this CPU. Its VmBinding supplies the VM-owned interrupt
-    // model. Exception entry keeps local IRQs masked and scopes both references
-    // to this callback rather than a caller-selected lifetime.
-    let result = unsafe {
-        let execution = &mut *execution.as_ptr();
-        let interrupts = core::ptr::from_ref(execution.interrupts());
-        operation(execution, &*interrupts)
-    };
+    // SAFETY: publication requires the execution to remain pinned and
+    // exclusively associated with this CPU. Exception entry keeps local IRQs
+    // masked and scopes the reconstructed reference to this callback rather
+    // than a caller-selected lifetime.
+    let result = unsafe { operation(&mut *execution.as_ptr(), &preemption) };
     borrow.complete();
     drop(preemption);
     Ok(Some(result))

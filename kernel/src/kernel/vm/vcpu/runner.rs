@@ -7,19 +7,17 @@ pub(crate) fn create_thread(
     vm: super::registry::VmBinding,
     vcpu_id: u32,
     context: crate::hal::vm::VcpuContext,
+    resources: crate::kernel::task::thread::ThreadResourceOwnership,
 ) -> Result<crate::kernel::task::scheduler::DormantVcpuThread, crate::kernel::task::scheduler::Error>
 {
     let Some(entry_ready) = crate::kernel::vm::entry_ready() else {
         return Err(crate::kernel::task::scheduler::Error::VmEntryUnavailable);
     };
-    crate::kernel::task::scheduler::vcpu_create(
-        "vcpu/0",
-        vm,
-        vcpu_id,
-        context,
-        &entry_ready,
-        thread_entry,
-    )
+    let execution = super::VcpuExecution::installed(vm, vcpu_id, context, &entry_ready)?;
+    let execution = hyper::mm::try_box(core::cell::UnsafeCell::new(execution))
+        .map_err(|_| crate::kernel::task::scheduler::Error::Allocation)?;
+    let execution = crate::kernel::task::thread::ExternalThreadExecution::from_box(execution);
+    crate::kernel::task::scheduler::vcpu_create("vcpu/0", execution, resources, thread_entry)
 }
 
 extern "C" fn thread_entry(_argument: usize) {
@@ -36,10 +34,10 @@ fn run_current() {
         Err(error) => fail_start(RunError::Scheduler(error)),
     };
     validate_stack(current);
-    let execution = current.execution;
-    if execution.is_null() || !execution.is_aligned() {
-        fail_start(RunError::InvalidExecution);
-    }
+    let execution = match current.execution.downcast::<super::VcpuExecution>() {
+        Some(execution) => execution.as_ptr(),
+        None => fail_start(RunError::InvalidExecution),
+    };
     // SAFETY: The scheduler-origin pointer is pinned and exclusively owned.
     let execution_ref = unsafe { &*execution };
     let Some(binding) = execution_ref.vm_binding() else {
@@ -184,7 +182,7 @@ fn run_current() {
                             execution,
                             current.thread,
                             detached,
-                            crate::kernel::vm::registry::AdministrativeStopReason::Requested,
+                            crate::kernel::vm::endpoint_state::AdministrativeStopReason::Requested,
                         );
                         return;
                     }
@@ -194,7 +192,9 @@ fn run_current() {
                     arm_reap(
                         execution_ref,
                         current.thread,
-                        crate::kernel::vm::registry::VcpuClosureReason::Guest(reason),
+                        crate::kernel::vm::endpoint_state::ClosureReason::Guest(terminal_reason(
+                            reason,
+                        )),
                     );
                     let report = execution_ref.take_terminal_mmio_report();
                     // Remain IRQ-masked until the scheduler thread-exit trampoline commits;
@@ -222,7 +222,7 @@ fn run_current() {
                         execution,
                         current.thread,
                         detached,
-                        crate::kernel::vm::registry::AdministrativeStopReason::Requested,
+                        crate::kernel::vm::endpoint_state::AdministrativeStopReason::Requested,
                     );
                     return;
                 }
@@ -232,9 +232,9 @@ fn run_current() {
 }
 
 fn administrative_stop_reason(
-    execution: *mut crate::kernel::task::thread::VcpuExecution,
+    execution: *mut super::VcpuExecution,
     thread: crate::kernel::task::thread::ThreadId,
-) -> Option<crate::kernel::vm::registry::AdministrativeStopReason> {
+) -> Option<crate::kernel::vm::endpoint_state::AdministrativeStopReason> {
     // SAFETY: the scheduler owns and pins this inactive execution while its
     // fixed runner is current. This borrow ends before any activation.
     let execution = unsafe { &*execution };
@@ -252,9 +252,9 @@ fn administrative_stop_reason(
 }
 
 fn finish_inactive_administrative_stop(
-    execution: *mut crate::kernel::task::thread::VcpuExecution,
+    execution: *mut super::VcpuExecution,
     thread: crate::kernel::task::thread::ThreadId,
-    reason: crate::kernel::vm::registry::AdministrativeStopReason,
+    reason: crate::kernel::vm::endpoint_state::AdministrativeStopReason,
 ) {
     // SAFETY: no architecture hardware or execution claim is active at runner
     // checkpoints outside `activate`/`detach_stopped`.
@@ -263,10 +263,10 @@ fn finish_inactive_administrative_stop(
 }
 
 fn finish_detached_administrative_stop(
-    execution: *mut crate::kernel::task::thread::VcpuExecution,
+    execution: *mut super::VcpuExecution,
     thread: crate::kernel::task::thread::ThreadId,
     detached: super::transition::DetachedVcpuExecution,
-    reason: crate::kernel::vm::registry::AdministrativeStopReason,
+    reason: crate::kernel::vm::endpoint_state::AdministrativeStopReason,
 ) {
     // HardwareDetached means every architecture transition, host-timer
     // restoration, exclusive-execution release, and run-admission release has
@@ -280,9 +280,9 @@ fn finish_detached_administrative_stop(
 }
 
 fn publish_hardware_detached_and_arm_reap(
-    execution: &mut crate::kernel::task::thread::VcpuExecution,
+    execution: &mut super::VcpuExecution,
     thread: crate::kernel::task::thread::ThreadId,
-    reason: crate::kernel::vm::registry::AdministrativeStopReason,
+    reason: crate::kernel::vm::endpoint_state::AdministrativeStopReason,
 ) {
     let Some(binding) = execution.vm_binding() else {
         crate::kernel::crash::fatal(format_args!(
@@ -297,17 +297,33 @@ fn publish_hardware_detached_and_arm_reap(
     arm_reap(
         execution,
         thread,
-        crate::kernel::vm::registry::VcpuClosureReason::Administrative(reason),
+        crate::kernel::vm::endpoint_state::ClosureReason::Administrative(reason),
     );
 }
 
 fn arm_reap(
-    execution: &mut crate::kernel::task::thread::VcpuExecution,
+    execution: &mut super::VcpuExecution,
     thread: crate::kernel::task::thread::ThreadId,
-    reason: crate::kernel::vm::registry::VcpuClosureReason,
+    reason: crate::kernel::vm::endpoint_state::ClosureReason,
 ) {
     if execution.arm_reap_publication(thread, reason).is_err() {
         crate::kernel::crash::fatal(format_args!("HypeR: vCPU reap publication was armed twice"));
+    }
+}
+
+const fn terminal_reason(
+    reason: crate::hal::vm::VcpuTerminalReason,
+) -> crate::kernel::vm::endpoint_state::TerminalReason {
+    match reason {
+        crate::hal::vm::VcpuTerminalReason::MemoryFault => {
+            crate::kernel::vm::endpoint_state::TerminalReason::MemoryFault
+        }
+        crate::hal::vm::VcpuTerminalReason::Mmio => {
+            crate::kernel::vm::endpoint_state::TerminalReason::Mmio
+        }
+        crate::hal::vm::VcpuTerminalReason::Synchronous => {
+            crate::kernel::vm::endpoint_state::TerminalReason::Synchronous
+        }
     }
 }
 
@@ -349,11 +365,10 @@ fn fail_start(error: RunError) -> ! {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RunError {
+pub(crate) enum RunError {
     InvalidExecution,
     MissingVmBinding,
     InvalidStack((usize, usize)),
-    Memory(super::memory::Error),
     Scheduler(crate::kernel::task::scheduler::Error),
     VirtualHardware(super::HardwareTransitionError),
 }

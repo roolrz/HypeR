@@ -46,3 +46,20 @@ if(NOT EXISTS "${HYPER_ABI_INCLUDE_DIR}/hyper/native.h")
 endif()
 
 add_test(NAME startup-stack COMMAND hyper-startup-test)
+
+add_executable(hyper-syscall-test
+    ../../src/syscall.c
+    syscall.c
+)
+target_compile_features(hyper-syscall-test PRIVATE c_std_17)
+target_compile_options(hyper-syscall-test PRIVATE
+    -Wall
+    -Wextra
+    -Werror
+)
+target_include_directories(hyper-syscall-test PRIVATE
+    ../../include
+    ${HYPER_ABI_INCLUDE_DIR}
+)
+
+add_test(NAME syscall-veneer COMMAND hyper-syscall-test)

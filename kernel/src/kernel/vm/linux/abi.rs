@@ -35,7 +35,7 @@ pub(in crate::kernel::vm) trait PayloadMemory {
 
     fn copy_to(&mut self, address: GuestPhysicalAddress, bytes: &[u8]) -> Result<(), Self::Error>;
     fn publish_instruction(
-        &self,
+        &mut self,
         address: GuestPhysicalAddress,
         length: usize,
     ) -> Result<(), Self::Error>;

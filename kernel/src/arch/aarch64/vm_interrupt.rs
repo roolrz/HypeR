@@ -18,6 +18,8 @@ use hyper::vm::interrupt::VirtualCpuId;
 type ControllerLock = InterruptSpinLock<ControllerState, super::LocalInterruptMask>;
 
 const TIMER_PRIORITY: u8 = 0x80;
+const PRIVATE_ENTRIES_PER_VCPU: usize = 32;
+const SHARED_ENTRIES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -57,12 +59,29 @@ struct ControllerState {
 }
 
 impl VmInterruptController {
+    pub fn allocation_requirement(vcpu_count: u32, list_registers: usize) -> Result<usize, Error> {
+        VirtualGic::allocation_requirement(
+            vcpu_count,
+            PRIVATE_ENTRIES_PER_VCPU,
+            SHARED_ENTRIES,
+            list_registers,
+        )
+        .map_err(Error::Build)
+    }
+
     pub fn new(
         vcpu_count: u32,
         timer_interrupt: GicInterruptId,
         list_registers: usize,
     ) -> Result<Self, Error> {
-        let mut builder = VirtualGicBuilder::new(vcpu_count)?;
+        let cpu_count =
+            usize::try_from(vcpu_count).map_err(|_| Error::Build(VgicBuildError::Allocation))?;
+        let entry_capacity = PRIVATE_ENTRIES_PER_VCPU
+            .checked_mul(cpu_count)
+            .and_then(|count| count.checked_add(SHARED_ENTRIES))
+            .ok_or(Error::Build(VgicBuildError::Allocation))?;
+        let expected_allocation = Self::allocation_requirement(vcpu_count, list_registers)?;
+        let mut builder = VirtualGicBuilder::new_with_entry_capacity(vcpu_count, entry_capacity)?;
         for index in 0..vcpu_count {
             let vcpu = VirtualCpuId::new(index);
             for id in 0..32 {
@@ -90,6 +109,9 @@ impl VmInterruptController {
             )?;
         }
         let mut controller = builder.finish(list_registers)?;
+        if controller.allocation_size() != Some(expected_allocation) {
+            return Err(Error::Build(VgicBuildError::InvalidStoragePlan));
+        }
         for index in 0..vcpu_count {
             let vcpu = VirtualCpuId::new(index);
             controller.set_maintenance_on_eoi(timer_interrupt, vcpu, true)?;
@@ -111,6 +133,10 @@ impl VmInterruptController {
 
     pub const fn vcpu_count(&self) -> u32 {
         self.vcpu_count
+    }
+
+    pub fn allocation_size(&self) -> Option<usize> {
+        self.state.with(|state| state.controller.allocation_size())
     }
 
     pub(super) fn with<R>(&self, operation: impl FnOnce(&mut VirtualGic) -> R) -> R {

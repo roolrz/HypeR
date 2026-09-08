@@ -47,7 +47,8 @@ define_asm_constants! {
     HCR_EL2_VI = 1 << 7;
     HCR_EL2_VSE = 1 << 8;
     HCR_EL2_FB = 1 << 9;
-    HCR_EL2_BSU_MASK = 3 << 10;
+    HCR_EL2_BSU_MASK = 1 << 10;
+    HCR_EL2_BSU_IS = 1 << 10;
     HCR_EL2_DC = 1 << 12;
     HCR_EL2_TWI = 1 << 13;
     HCR_EL2_TWE = 1 << 14;
@@ -90,6 +91,13 @@ define_asm_constants! {
     // ID_AA64MMFR1_EL1.Privileged Access Never.
     ID_AA64MMFR1_PAN_SHIFT = 20;
     ID_AA64MMFR1_PAN_MASK = 0xf;
+    // ID_AA64PFR0_EL1 floating-point and Advanced SIMD fields.
+    ID_AA64PFR0_FP_SHIFT = 16;
+    ID_AA64PFR0_FP_MASK = 0xf;
+    ID_AA64PFR0_FP_NONE = 0xf;
+    ID_AA64PFR0_ADVSIMD_SHIFT = 20;
+    ID_AA64PFR0_ADVSIMD_MASK = 0xf;
+    ID_AA64PFR0_ADVSIMD_NONE = 0xf;
 
     // VHE redirects CPACR_EL1 accesses to the EL2 host trap controls.
     CPACR_EL1_FPEN_SHIFT = 20;
@@ -500,6 +508,8 @@ pub const ESR_SYSREG_OP0_MASK: u64 = 0x3;
 pub const ESR_ABORT_FSC_MASK: u64 = 0x3f;
 pub const ESR_ABORT_TRANSLATION_FAULT_LEVEL0: u64 = 0b000100;
 pub const ESR_ABORT_TRANSLATION_FAULT_LEVEL3: u64 = 0b000111;
+pub const ESR_ABORT_PERMISSION_FAULT_LEVEL0: u64 = 0b001100;
+pub const ESR_ABORT_PERMISSION_FAULT_LEVEL3: u64 = 0b001111;
 pub const ESR_DATA_ABORT_WNR: u64 = 1 << 6;
 pub const ESR_DATA_ABORT_S1PTW: u64 = 1 << 7;
 pub const ESR_DATA_ABORT_SF: u64 = 1 << 15;
@@ -615,6 +625,7 @@ pub const ID_AA64PFR0_GUEST_BASE: u64 = 0x11;
 pub const ID_AA64DFR0_GUEST_BASE: u64 = 0x0000_0000_0000_0f0f;
 pub const ID_AA64ISAR0_TME_MASK: u64 = 0xf << 52;
 pub const ID_AA64ISAR1_POINTER_AUTH_MASK: u64 = (0xf << 4) | (0xf << 8) | (0xf << 24) | (0xf << 28);
+pub const ID_AA64MMFR2_NV_MASK: u64 = 0xf << 24;
 pub const MPIDR_LINEAR_AFF3_MASK: u64 = 0xff00_0000;
 
 // GICv3 permits up to sixteen virtual list registers.

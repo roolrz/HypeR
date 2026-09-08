@@ -35,6 +35,7 @@ pub(crate) enum Error {
     Stack(hyper::exec::startup::Error),
     TaskGroup(TaskGroupError),
     TaskObject(crate::kernel::process::TaskObjectError),
+    VirtualMachineObject(crate::kernel::vm::objects::Error),
 }
 
 impl core::fmt::Debug for Error {
@@ -68,6 +69,10 @@ impl core::fmt::Debug for Error {
             Self::Stack(error) => formatter.debug_tuple("Stack").field(error).finish(),
             Self::TaskGroup(error) => formatter.debug_tuple("TaskGroup").field(error).finish(),
             Self::TaskObject(error) => formatter.debug_tuple("TaskObject").field(error).finish(),
+            Self::VirtualMachineObject(error) => formatter
+                .debug_tuple("VirtualMachineObject")
+                .field(error)
+                .finish(),
         }
     }
 }

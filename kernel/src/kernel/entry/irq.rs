@@ -155,11 +155,11 @@ fn guest_irq_tail(tail: crate::hal::exception::IrqTailCapability) {
     };
 
     if let Some(current) = current_vcpu {
+        let execution = typed_vcpu_execution(current);
         // SAFETY: The scheduler supplied its pinned current-vCPU owner pointer.
         // IRQ dispatch has returned, so no active-vCPU callback borrow remains,
         // and local interrupts stay masked across unpublication and save.
-        if let Err(error) = unsafe { crate::kernel::vm::vcpu::deactivate(&mut *current.execution) }
-        {
+        if let Err(error) = unsafe { crate::kernel::vm::vcpu::deactivate(&mut *execution) } {
             fail_vcpu_tail("failed to deactivate interrupted vCPU", error)
         }
     }
@@ -184,6 +184,7 @@ fn guest_irq_tail(tail: crate::hal::exception::IrqTailCapability) {
                 "HypeR: detached vCPU IRQ-tail resumed with different scheduler ownership"
             ));
         }
+        let execution = typed_vcpu_execution(resumed);
         // SAFETY: ordinary IRQ-tail deactivation completed before scheduling,
         // the query above returned the exact current continuation, and local
         // interrupts remain masked.
@@ -202,7 +203,7 @@ fn guest_irq_tail(tail: crate::hal::exception::IrqTailCapability) {
         // SAFETY: This continuation can resume only when its pinned vCPU Thread
         // is current again. The preceding deactivation removed all local
         // architectural ownership, and interrupts are still masked.
-        if let Err(error) = unsafe { crate::kernel::vm::vcpu::activate(resumed.execution) } {
+        if let Err(error) = unsafe { crate::kernel::vm::vcpu::activate(execution) } {
             if error
                 == crate::kernel::vm::vcpu::HardwareTransitionError::Execution(
                     crate::kernel::vm::registry::VmExecutionError::AdmissionClosed,
@@ -228,6 +229,20 @@ fn guest_irq_tail(tail: crate::hal::exception::IrqTailCapability) {
             }
             fail_vcpu_tail("failed to reactivate interrupted vCPU", error)
         }
+    }
+}
+
+fn typed_vcpu_execution(
+    current: crate::kernel::task::scheduler::CurrentVcpu,
+) -> *mut crate::kernel::vm::vcpu::VcpuExecution {
+    match current
+        .execution
+        .downcast::<crate::kernel::vm::vcpu::VcpuExecution>()
+    {
+        Some(execution) => execution.as_ptr(),
+        None => crate::kernel::crash::fatal(format_args!(
+            "HypeR: scheduler returned a vCPU with the wrong execution payload type"
+        )),
     }
 }
 

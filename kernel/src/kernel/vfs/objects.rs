@@ -269,7 +269,12 @@ impl FileObject {
     }
 
     pub(crate) fn read(&self, offset: u64, destination: &mut [u8]) -> Result<usize, Error> {
-        super::read::cached(self, offset, destination)
+        match self.location.mount().filesystem().read_cache_policy() {
+            super::instance::ReadCachePolicy::Direct => self.read_uncached(offset, destination),
+            super::instance::ReadCachePolicy::PageCache => {
+                super::read::cached(self, offset, destination)
+            }
+        }
     }
 
     pub(super) fn read_uncached(

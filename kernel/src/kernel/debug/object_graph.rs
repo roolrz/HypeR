@@ -32,7 +32,7 @@ pub(super) fn report() {
             };
             let references: ObjectReferenceSnapshot = object.references;
             pr_debug!(
-                "HypeR object: koid={} kind={} state={} export={} handles={} refs={} classes=[service:{},scheduler:{},publication:{},user:{},pin:{},diagnostic:{},retirement:{}] rights={:#x}",
+                "HypeR object: koid={} kind={} state={} export={} handles={} refs={} classes=[service:{},vm-device:{},scheduler:{},publication:{},user:{},pin:{},diagnostic:{},retirement:{}] rights={:#x}",
                 object.koid.get(),
                 object.kind.get(),
                 handles,
@@ -40,6 +40,7 @@ pub(super) fn report() {
                 active_handles,
                 object.strong_references,
                 references.kernel_service,
+                references.vm_device_binding,
                 references.scheduler,
                 references.publication,
                 references.user_authority,

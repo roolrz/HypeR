@@ -52,7 +52,7 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
         .map_err(Error::from)?;
     let library_directory = Directory::from_handle(
         startup
-            .take(startup::DYNAMIC_LIBRARY_DIRECTORY)
+            .take(process::CHILD_LIBRARY_DIRECTORY)
             .map_err(Error::from)?,
     );
     let factory = startup.take(startup::TASK_FACTORY).map_err(Error::from)?;

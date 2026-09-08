@@ -15,15 +15,19 @@ pub(in crate::kernel) use diagnostics::UnhandledMmioReport;
 mod endpoint;
 mod endpoint_state;
 mod endpoint_wait;
+mod installed;
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use endpoint::{WaitSelfTestError, run_wait_self_test};
-mod lifecycle;
+pub(crate) mod lifecycle;
+#[cfg(feature = "kernel-self-test")]
 pub(crate) mod linux;
 pub mod memory;
+pub(crate) mod objects;
 mod reconcile;
 pub(crate) mod registry;
 mod residency_state;
 mod run_admission;
+pub(crate) mod service;
 mod timer;
 pub(crate) mod vcpu;
 
@@ -37,10 +41,13 @@ static ENTRY_READY: PublishedOnce<crate::hal::vm::VmEntryReady> = PublishedOnce:
 pub use crate::hal::vm::{
     InterruptController as VmInterruptController, InterruptError as VmInterruptError,
 };
+#[cfg(feature = "kernel-self-test")]
 pub use hyper::vm::bundle::{Error as VmBundleError, VmBundle};
-pub use linux::Error as LinuxBootError;
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use linux::Error as LinuxBootError;
 pub use registry::VmId;
-pub use vcpu::{RunError as VcpuRunError, VcpuInterruptError};
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use vcpu::VcpuInterruptError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InitializationError {
@@ -53,17 +60,29 @@ pub(crate) enum InitializationError {
     TimerValidation(timer::ValidationError),
 }
 
-#[derive(Debug)]
-pub enum StartError {
+#[cfg(feature = "kernel-self-test")]
+pub(crate) enum StartError {
     Bundle(VmBundleError),
     Linux(LinuxBootError),
 }
 
-pub fn select_default(ramdisk: &[u8]) -> Result<VmBundle<'_>, VmBundleError> {
+#[cfg(feature = "kernel-self-test")]
+impl core::fmt::Debug for StartError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Bundle(error) => formatter.debug_tuple("Bundle").field(error).finish(),
+            Self::Linux(error) => formatter.debug_tuple("Linux").field(error).finish(),
+        }
+    }
+}
+
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn select_default(ramdisk: &[u8]) -> Result<VmBundle<'_>, VmBundleError> {
     hyper::vm::bundle::select_default(ramdisk)
 }
 
-pub fn boot_linux(
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn boot_linux(
     guest: VmBundle<'_>,
 ) -> Result<crate::kernel::task::thread::ThreadId, LinuxBootError> {
     linux::boot(guest)

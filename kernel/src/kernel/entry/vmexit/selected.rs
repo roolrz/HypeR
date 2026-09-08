@@ -31,8 +31,8 @@ pub(super) const fn services() -> crate::hal::vm::ExitServices {
 
 #[cfg(CONFIG_ARCH_AARCH64)]
 fn dispatch_mmio(access: hyper::vm::exit::MmioAccess) -> hyper::vm::exit::MmioAction {
-    match crate::kernel::vm::active_vcpu::with(|execution, interrupts| {
-        crate::kernel::vm::device::selected::dispatch_mmio(execution, interrupts, access)
+    match crate::kernel::vm::active_vcpu::with(|execution| {
+        crate::kernel::vm::device::selected::dispatch_mmio(execution, access)
     }) {
         Ok(Some(dispatch)) => dispatch.into_action(),
         Ok(None) => crate::kernel::crash::fatal(format_args!(
@@ -46,18 +46,16 @@ fn dispatch_mmio(access: hyper::vm::exit::MmioAccess) -> hyper::vm::exit::MmioAc
 
 #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 fn dispatch_guest_sync(exit: crate::hal::vm::GuestSyncExit) -> crate::hal::vm::GuestSyncAction {
-    match crate::kernel::vm::active_vcpu::with(|execution, interrupts| {
+    match crate::kernel::vm::active_vcpu::with(|execution| {
         #[cfg(CONFIG_ARCH_RISCV64)]
         if let Some(byte) = exit.legacy_console_byte() {
-            crate::kernel::log::console::write_guest_console_byte(byte);
+            if !crate::kernel::vm::device::selected::write_console_byte(execution, byte) {
+                return crate::hal::vm::GuestSyncAction::Stop;
+            }
             return crate::hal::vm::GuestSyncAction::complete_legacy_console();
         }
-        crate::hal::vm::handle_guest_sync(
-            &mut execution.hardware,
-            execution.vcpu_id,
-            interrupts,
-            exit,
-        )
+        let (hardware, vcpu_id, interrupts) = execution.interrupt_context();
+        crate::hal::vm::handle_guest_sync(hardware, vcpu_id, interrupts, exit)
     }) {
         Ok(Some(action)) => action,
         Ok(None) => crate::kernel::crash::fatal(format_args!(

@@ -62,10 +62,10 @@ pub(crate) use super::imp::{
     quiesce_virtual_interrupt_delivery, validate_vsysreg as validate_register_interface,
 };
 
-#[cfg(any(CONFIG_ARCH_X86_64, feature = "kernel-self-test"))]
+#[cfg(feature = "kernel-self-test")]
 pub(crate) use super::imp::guest_execution_available;
 
-#[cfg(CONFIG_ARCH_X86_64)]
+#[cfg(all(CONFIG_ARCH_X86_64, feature = "kernel-self-test"))]
 pub(crate) use super::imp::virtualization_backend_name;
 
 pub(crate) use super::imp::{

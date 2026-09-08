@@ -98,6 +98,7 @@ pub enum BuildError {
     AlreadyConfigured,
     InvalidCpu,
     InvalidListRegisterCount,
+    InvalidStoragePlan,
     TooManyInterrupts,
 }
 
@@ -188,6 +189,7 @@ struct ValidatedSlots {
 /// returned [`VirtualGic`] has no configuration or capacity-growth API.
 pub struct VirtualGicBuilder {
     entries: Vec<Interrupt>,
+    entry_limit: Option<usize>,
     private: Vec<Option<DirectorySlot>>,
     shared: Vec<Option<DirectorySlot>>,
     vcpu_count: u32,
@@ -204,10 +206,34 @@ impl VirtualGicBuilder {
             .ok_or(BuildError::Allocation)?;
         Ok(Self {
             entries: Vec::new(),
+            entry_limit: None,
             private: empty_slots(private_count)?,
             shared: empty_slots(SHARED_INTERRUPT_COUNT)?,
             vcpu_count,
         })
+    }
+
+    /// Creates a builder whose complete interrupt-entry store is allocated up
+    /// front according to an externally admitted storage plan.
+    pub fn new_with_entry_capacity(
+        vcpu_count: u32,
+        entry_capacity: usize,
+    ) -> Result<Self, BuildError> {
+        let mut builder = Self::new(vcpu_count)?;
+        let maximum_entries = builder
+            .private
+            .len()
+            .checked_add(builder.shared.len())
+            .ok_or(BuildError::Allocation)?;
+        if entry_capacity > maximum_entries {
+            return Err(BuildError::InvalidStoragePlan);
+        }
+        builder
+            .entries
+            .try_reserve_exact(entry_capacity)
+            .map_err(|_| BuildError::Allocation)?;
+        builder.entry_limit = Some(entry_capacity);
+        Ok(builder)
     }
 
     pub fn configure(
@@ -234,9 +260,17 @@ impl VirtualGicBuilder {
         if configured {
             return Err(BuildError::AlreadyConfigured);
         }
-        self.entries
-            .try_reserve(1)
-            .map_err(|_| BuildError::Allocation)?;
+        if self
+            .entry_limit
+            .is_some_and(|limit| self.entries.len() == limit)
+        {
+            return Err(BuildError::InvalidStoragePlan);
+        }
+        if self.entries.len() == self.entries.capacity() {
+            self.entries
+                .try_reserve(1)
+                .map_err(|_| BuildError::Allocation)?;
+        }
         let index = DirectorySlot::new(self.entries.len())?;
         self.entries.push(Interrupt {
             id: interrupt,
@@ -314,6 +348,93 @@ pub struct VirtualGic {
 }
 
 impl VirtualGic {
+    /// Requested heap layout retained by a controller with fixed capacities.
+    ///
+    /// This is a pre-allocation contract. The caller supplies the exact number
+    /// of configured private entries per vCPU and shared entries; construction
+    /// must use matching capacities and verify the realized layout before
+    /// publication.
+    pub fn allocation_requirement(
+        vcpu_count: u32,
+        private_entries_per_vcpu: usize,
+        shared_entries: usize,
+        list_register_count: usize,
+    ) -> Result<usize, BuildError> {
+        if vcpu_count == 0
+            || private_entries_per_vcpu > PRIVATE_INTERRUPT_COUNT
+            || shared_entries > SHARED_INTERRUPT_COUNT
+            || list_register_count == 0
+            || list_register_count > MAX_LIST_REGISTERS
+        {
+            return Err(BuildError::InvalidStoragePlan);
+        }
+        let cpu_count = usize::try_from(vcpu_count).map_err(|_| BuildError::Allocation)?;
+        let entry_count = private_entries_per_vcpu
+            .checked_mul(cpu_count)
+            .and_then(|count| count.checked_add(shared_entries))
+            .ok_or(BuildError::Allocation)?;
+        let private_directory = PRIVATE_INTERRUPT_COUNT
+            .checked_mul(cpu_count)
+            .and_then(|count| count.checked_mul(core::mem::size_of::<Option<DirectorySlot>>()))
+            .ok_or(BuildError::Allocation)?;
+        let shared_directory = SHARED_INTERRUPT_COUNT
+            .checked_mul(core::mem::size_of::<Option<DirectorySlot>>())
+            .ok_or(BuildError::Allocation)?;
+        let entries = entry_count
+            .checked_mul(core::mem::size_of::<Interrupt>())
+            .ok_or(BuildError::Allocation)?;
+        let deliveries = cpu_count
+            .checked_mul(core::mem::size_of::<VcpuDelivery>())
+            .ok_or(BuildError::Allocation)?;
+        let ready_entries = private_entries_per_vcpu
+            .checked_add(shared_entries)
+            .and_then(|count| count.checked_mul(core::mem::size_of::<EntryIndex>()))
+            .and_then(|bytes| bytes.checked_mul(cpu_count))
+            .ok_or(BuildError::Allocation)?;
+        let listed_entries = list_register_count
+            .checked_mul(core::mem::size_of::<EntryIndex>())
+            .and_then(|bytes| bytes.checked_mul(cpu_count))
+            .ok_or(BuildError::Allocation)?;
+        entries
+            .checked_add(private_directory)
+            .and_then(|bytes| bytes.checked_add(shared_directory))
+            .and_then(|bytes| bytes.checked_add(deliveries))
+            .and_then(|bytes| bytes.checked_add(ready_entries))
+            .and_then(|bytes| bytes.checked_add(listed_entries))
+            .ok_or(BuildError::Allocation)
+    }
+
+    /// Reports heap storage retained by this sealed interrupt model.
+    ///
+    /// Construction may use temporary scratch vectors, but every capacity
+    /// included here remains allocated for the complete controller lifetime.
+    pub fn allocation_size(&self) -> Option<usize> {
+        let mut bytes = self
+            .entries
+            .capacity()
+            .checked_mul(core::mem::size_of::<Interrupt>())?;
+        bytes = bytes.checked_add(
+            self.private
+                .capacity()
+                .checked_mul(core::mem::size_of::<Option<DirectorySlot>>())?,
+        )?;
+        bytes = bytes.checked_add(
+            self.shared
+                .capacity()
+                .checked_mul(core::mem::size_of::<Option<DirectorySlot>>())?,
+        )?;
+        bytes = bytes.checked_add(
+            self.deliveries
+                .capacity()
+                .checked_mul(core::mem::size_of::<VcpuDelivery>())?,
+        )?;
+        for delivery in &self.deliveries {
+            bytes = bytes.checked_add(delivery.ready.allocation_size()?)?;
+            bytes = bytes.checked_add(delivery.listed.allocation_size()?)?;
+        }
+        Some(bytes)
+    }
+
     /// Conservatively reports whether saved interrupt state may wake `WFI`.
     ///
     /// CPU-interface priority and group masks are deliberately ignored. That

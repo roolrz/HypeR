@@ -13,7 +13,7 @@ fixture=$(mktemp -d "${TMPDIR:-/tmp}/hyper-boot-lifecycle-check.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 sed -n '/^extern "C" fn start_kernel()/,/^}/p' src/main.rs >"$fixture/start-kernel.rs"
 sed -n '/^    pub(crate) fn install(self)/,/^    }/p' \
-    src/kernel/vm/registry.rs >"$fixture/vm-install.rs"
+    src/kernel/vm/registry/construction.rs >"$fixture/vm-install.rs"
 
 require() {
     pattern=$1

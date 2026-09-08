@@ -65,7 +65,7 @@ waiter=$(mktemp "${TMPDIR:-/tmp}/hyper-log-waiter.XXXXXX")
 runtime=$(mktemp "${TMPDIR:-/tmp}/hyper-log-runtime.XXXXXX")
 trap 'rm -f "$producer" "$console_tx" "$prompt" "$rpc" "$riscv_private" "$aarch64_private" "$x86_private" "$x86_vmx_private" "$request" "$retire" "$barrier" "$registration" "$waiter" "$runtime"' EXIT HUP INT TERM
 sed -n '/^pub fn log(/,/^}/p' "$log" >"$producer"
-sed -n '/^pub(crate) fn write_guest_console_byte(/,/^}/p' "$console" >"$console_tx"
+sed -n '/^pub(crate) fn write_test_guest_console_byte(/,/^}/p' "$console" >"$console_tx"
 sed -n '/^pub(crate) fn dispatch(/,/^}/p' "$irq" >"$prompt"
 sed -n '/^pub(crate) fn dispatch_kernel_rpc(/,/^}/p' "$irq" >"$rpc"
 sed -n '/^extern "C" fn dispatch_trap(/,/^fn fatal_trap(/p' "$riscv_irq" >"$riscv_private"

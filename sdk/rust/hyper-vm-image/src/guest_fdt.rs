@@ -1,0 +1,426 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
+//! Fixed-storage Linux device-tree construction for the reference `AArch64` VM.
+
+const FDT_MAGIC: u32 = 0xd00d_feed;
+const FDT_BEGIN_NODE: u32 = 1;
+const FDT_END_NODE: u32 = 2;
+const FDT_PROP: u32 = 3;
+const FDT_END: u32 = 9;
+const HEADER_SIZE: usize = 40;
+const RESERVATION_SIZE: usize = 16;
+const GIC_PHANDLE: u32 = 1;
+const UART_CLOCK_PHANDLE: u32 = 2;
+const APB_CLOCK_PHANDLE: u32 = 3;
+const GIC_DISTRIBUTOR_BASE: u64 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_BASE;
+const GIC_DISTRIBUTOR_SIZE: u64 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_SIZE;
+const GIC_REDISTRIBUTOR_BASE: u64 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_BASE;
+const GIC_REDISTRIBUTOR_SIZE: u64 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_SIZE;
+const UART_BASE: u64 = hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_BASE;
+const UART_SIZE: u64 = hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_SIZE;
+const UART_SPI: u32 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_INTERRUPT as u32 - 32;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Error {
+    OutputTooSmall,
+    StructureTooSmall,
+    StringsTooSmall,
+    InvalidInput,
+    AddressOverflow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Aarch64LinuxBoot<'arguments> {
+    pub memory_base: u64,
+    pub memory_size: u64,
+    pub vcpu_count: u32,
+    pub initramfs: Option<(u64, u64)>,
+    pub boot_arguments: &'arguments str,
+}
+
+/// Builds a complete Linux-format DTB into caller-owned fixed storage.
+pub fn build_aarch64_linux(
+    boot: Aarch64LinuxBoot<'_>,
+    structure: &mut [u8],
+    strings: &mut [u8],
+    output: &mut [u8],
+) -> Result<usize, Error> {
+    let memory_end = boot
+        .memory_base
+        .checked_add(boot.memory_size)
+        .ok_or(Error::AddressOverflow)?;
+    if boot.memory_size == 0
+        || boot.vcpu_count != 1
+        || boot.boot_arguments.as_bytes().contains(&0)
+        || boot.initramfs.is_some_and(|(start, end)| {
+            start < boot.memory_base || start >= end || end > memory_end
+        })
+    {
+        return Err(Error::InvalidInput);
+    }
+    let mut builder = Builder::new(structure, strings);
+    builder.begin_node("")?;
+    builder.property_u32("#address-cells", 2)?;
+    builder.property_u32("#size-cells", 2)?;
+    builder.property_u32("interrupt-parent", GIC_PHANDLE)?;
+    builder.property_string("compatible", "hyper,virtual-machine")?;
+    builder.property_string("model", "HypeR AArch64 virtual machine")?;
+
+    builder.begin_node("chosen")?;
+    builder.property_string("bootargs", boot.boot_arguments)?;
+    builder.property_string("stdout-path", "/pl011@9000000")?;
+    if let Some((start, end)) = boot.initramfs {
+        builder.property_u64("linux,initrd-start", start)?;
+        builder.property_u64("linux,initrd-end", end)?;
+    }
+    builder.end_node()?;
+
+    builder.begin_node("aliases")?;
+    builder.property_string("serial0", "/pl011@9000000")?;
+    builder.end_node()?;
+
+    let mut node_name = [0u8; 32];
+    let memory_name = hex_node_name("memory@", boot.memory_base, &mut node_name)?;
+    builder.begin_node(memory_name)?;
+    builder.property_string("device_type", "memory")?;
+    builder.property_u64_pair("reg", boot.memory_base, boot.memory_size)?;
+    builder.end_node()?;
+
+    builder.begin_node("cpus")?;
+    builder.property_u32("#address-cells", 2)?;
+    builder.property_u32("#size-cells", 0)?;
+    for index in 0..boot.vcpu_count {
+        let cpu_name = hex_node_name("cpu@", u64::from(index), &mut node_name)?;
+        builder.begin_node(cpu_name)?;
+        builder.property_string("device_type", "cpu")?;
+        builder.property_string("compatible", "arm,armv8")?;
+        builder.property_string("enable-method", "psci")?;
+        builder.property_u64("reg", u64::from(index))?;
+        builder.end_node()?;
+    }
+    builder.end_node()?;
+
+    builder.begin_node("psci")?;
+    builder.property_string_list("compatible", &["arm,psci-1.0", "arm,psci-0.2"])?;
+    builder.property_string("method", "hvc")?;
+    builder.end_node()?;
+
+    builder.begin_node("intc@8000000")?;
+    builder.property_empty("interrupt-controller")?;
+    builder.property_u32("#interrupt-cells", 3)?;
+    builder.property_string("compatible", "arm,gic-v3")?;
+    builder.property_u32("phandle", GIC_PHANDLE)?;
+    builder.property_cells(
+        "reg",
+        &[
+            0,
+            GIC_DISTRIBUTOR_BASE as u32,
+            0,
+            GIC_DISTRIBUTOR_SIZE as u32,
+            0,
+            GIC_REDISTRIBUTOR_BASE as u32,
+            0,
+            GIC_REDISTRIBUTOR_SIZE as u32,
+        ],
+    )?;
+    builder.end_node()?;
+
+    builder.begin_node("timer")?;
+    builder.property_string("compatible", "arm,armv8-timer")?;
+    builder.property_empty("always-on")?;
+    builder.property_cells("interrupts", &[1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4])?;
+    builder.end_node()?;
+
+    fixed_clock(&mut builder, "clock-uart", UART_CLOCK_PHANDLE)?;
+    fixed_clock(&mut builder, "clock-apb", APB_CLOCK_PHANDLE)?;
+    builder.begin_node("pl011@9000000")?;
+    builder.property_string_list("compatible", &["arm,pl011", "arm,primecell"])?;
+    builder.property_u64_pair("reg", UART_BASE, UART_SIZE)?;
+    builder.property_cells("interrupts", &[0, UART_SPI, 4])?;
+    builder.property_cells("clocks", &[UART_CLOCK_PHANDLE, APB_CLOCK_PHANDLE])?;
+    builder.property_string_list("clock-names", &["uartclk", "apb_pclk"])?;
+    builder.end_node()?;
+
+    builder.end_node()?;
+    builder.finish(output)
+}
+
+fn fixed_clock(builder: &mut Builder<'_>, name: &str, phandle: u32) -> Result<(), Error> {
+    builder.begin_node(name)?;
+    builder.property_string("compatible", "fixed-clock")?;
+    builder.property_u32("#clock-cells", 0)?;
+    builder.property_u32("clock-frequency", 24_000_000)?;
+    builder.property_u32("phandle", phandle)?;
+    builder.end_node()
+}
+
+struct Builder<'storage> {
+    structure: &'storage mut [u8],
+    structure_length: usize,
+    strings: &'storage mut [u8],
+    strings_length: usize,
+}
+
+impl<'storage> Builder<'storage> {
+    const fn new(structure: &'storage mut [u8], strings: &'storage mut [u8]) -> Self {
+        Self {
+            structure,
+            structure_length: 0,
+            strings,
+            strings_length: 0,
+        }
+    }
+
+    fn begin_node(&mut self, name: &str) -> Result<(), Error> {
+        self.push_u32(FDT_BEGIN_NODE)?;
+        self.push(name.as_bytes())?;
+        self.push(&[0])?;
+        self.pad()
+    }
+
+    fn end_node(&mut self) -> Result<(), Error> {
+        self.push_u32(FDT_END_NODE)
+    }
+
+    fn property(&mut self, name: &str, value: &[u8]) -> Result<(), Error> {
+        let name_offset = self.name_offset(name)?;
+        self.push_u32(FDT_PROP)?;
+        self.push_u32(u32::try_from(value.len()).map_err(|_| Error::AddressOverflow)?)?;
+        self.push_u32(name_offset)?;
+        self.push(value)?;
+        self.pad()
+    }
+
+    fn property_empty(&mut self, name: &str) -> Result<(), Error> {
+        self.property(name, &[])
+    }
+
+    fn property_u32(&mut self, name: &str, value: u32) -> Result<(), Error> {
+        self.property(name, &value.to_be_bytes())
+    }
+
+    fn property_u64(&mut self, name: &str, value: u64) -> Result<(), Error> {
+        self.property_cells(name, &[(value >> 32) as u32, value as u32])
+    }
+
+    fn property_u64_pair(&mut self, name: &str, first: u64, second: u64) -> Result<(), Error> {
+        self.property_cells(
+            name,
+            &[
+                (first >> 32) as u32,
+                first as u32,
+                (second >> 32) as u32,
+                second as u32,
+            ],
+        )
+    }
+
+    fn property_cells(&mut self, name: &str, values: &[u32]) -> Result<(), Error> {
+        let name_offset = self.name_offset(name)?;
+        let byte_length = values.len().checked_mul(4).ok_or(Error::AddressOverflow)?;
+        self.push_u32(FDT_PROP)?;
+        self.push_u32(u32::try_from(byte_length).map_err(|_| Error::AddressOverflow)?)?;
+        self.push_u32(name_offset)?;
+        for value in values {
+            self.push(&value.to_be_bytes())?;
+        }
+        self.pad()
+    }
+
+    fn property_string(&mut self, name: &str, value: &str) -> Result<(), Error> {
+        let name_offset = self.name_offset(name)?;
+        let length = value.len().checked_add(1).ok_or(Error::AddressOverflow)?;
+        self.push_u32(FDT_PROP)?;
+        self.push_u32(u32::try_from(length).map_err(|_| Error::AddressOverflow)?)?;
+        self.push_u32(name_offset)?;
+        self.push(value.as_bytes())?;
+        self.push(&[0])?;
+        self.pad()
+    }
+
+    fn property_string_list(&mut self, name: &str, values: &[&str]) -> Result<(), Error> {
+        let name_offset = self.name_offset(name)?;
+        let length = values
+            .iter()
+            .try_fold(0usize, |total, value| {
+                total.checked_add(value.len().checked_add(1)?)
+            })
+            .ok_or(Error::AddressOverflow)?;
+        self.push_u32(FDT_PROP)?;
+        self.push_u32(u32::try_from(length).map_err(|_| Error::AddressOverflow)?)?;
+        self.push_u32(name_offset)?;
+        for value in values {
+            self.push(value.as_bytes())?;
+            self.push(&[0])?;
+        }
+        self.pad()
+    }
+
+    fn name_offset(&mut self, name: &str) -> Result<u32, Error> {
+        let mut offset = 0usize;
+        while offset < self.strings_length {
+            let tail = self
+                .strings
+                .get(offset..self.strings_length)
+                .ok_or(Error::StringsTooSmall)?;
+            let length = tail
+                .iter()
+                .position(|byte| *byte == 0)
+                .ok_or(Error::StringsTooSmall)?;
+            if tail.get(..length) == Some(name.as_bytes()) {
+                return u32::try_from(offset).map_err(|_| Error::AddressOverflow);
+            }
+            offset = offset
+                .checked_add(length + 1)
+                .ok_or(Error::AddressOverflow)?;
+        }
+        let result = u32::try_from(self.strings_length).map_err(|_| Error::AddressOverflow)?;
+        let end = self
+            .strings_length
+            .checked_add(name.len() + 1)
+            .ok_or(Error::AddressOverflow)?;
+        let destination = self
+            .strings
+            .get_mut(self.strings_length..end)
+            .ok_or(Error::StringsTooSmall)?;
+        let name_end = name.len();
+        destination
+            .get_mut(..name_end)
+            .ok_or(Error::StringsTooSmall)?
+            .copy_from_slice(name.as_bytes());
+        *destination
+            .get_mut(name_end)
+            .ok_or(Error::StringsTooSmall)? = 0;
+        self.strings_length = end;
+        Ok(result)
+    }
+
+    fn push_u32(&mut self, value: u32) -> Result<(), Error> {
+        self.push(&value.to_be_bytes())
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        let end = self
+            .structure_length
+            .checked_add(bytes.len())
+            .ok_or(Error::AddressOverflow)?;
+        self.structure
+            .get_mut(self.structure_length..end)
+            .ok_or(Error::StructureTooSmall)?
+            .copy_from_slice(bytes);
+        self.structure_length = end;
+        Ok(())
+    }
+
+    fn pad(&mut self) -> Result<(), Error> {
+        while !self.structure_length.is_multiple_of(4) {
+            self.push(&[0])?;
+        }
+        Ok(())
+    }
+
+    fn finish(mut self, output: &mut [u8]) -> Result<usize, Error> {
+        self.push_u32(FDT_END)?;
+        let structure_offset = HEADER_SIZE + RESERVATION_SIZE;
+        let strings_offset = structure_offset
+            .checked_add(self.structure_length)
+            .ok_or(Error::AddressOverflow)?;
+        let total_size = strings_offset
+            .checked_add(self.strings_length)
+            .ok_or(Error::AddressOverflow)?;
+        let output = output.get_mut(..total_size).ok_or(Error::OutputTooSmall)?;
+        let values = [
+            FDT_MAGIC,
+            u32::try_from(total_size).map_err(|_| Error::AddressOverflow)?,
+            u32::try_from(structure_offset).map_err(|_| Error::AddressOverflow)?,
+            u32::try_from(strings_offset).map_err(|_| Error::AddressOverflow)?,
+            HEADER_SIZE as u32,
+            17,
+            16,
+            0,
+            u32::try_from(self.strings_length).map_err(|_| Error::AddressOverflow)?,
+            u32::try_from(self.structure_length).map_err(|_| Error::AddressOverflow)?,
+        ];
+        for (chunk, value) in output[..HEADER_SIZE].chunks_exact_mut(4).zip(values) {
+            chunk.copy_from_slice(&value.to_be_bytes());
+        }
+        output[HEADER_SIZE..structure_offset].fill(0);
+        output[structure_offset..strings_offset]
+            .copy_from_slice(&self.structure[..self.structure_length]);
+        output[strings_offset..total_size].copy_from_slice(&self.strings[..self.strings_length]);
+        Ok(total_size)
+    }
+}
+
+fn hex_node_name<'buffer>(
+    prefix: &str,
+    value: u64,
+    output: &'buffer mut [u8],
+) -> Result<&'buffer str, Error> {
+    if prefix.len() >= output.len() {
+        return Err(Error::OutputTooSmall);
+    }
+    output
+        .get_mut(..prefix.len())
+        .ok_or(Error::OutputTooSmall)?
+        .copy_from_slice(prefix.as_bytes());
+    let digits = if value == 0 {
+        1
+    } else {
+        ((u64::BITS - value.leading_zeros()) as usize).div_ceil(4)
+    };
+    let end = prefix
+        .len()
+        .checked_add(digits)
+        .ok_or(Error::AddressOverflow)?;
+    let destination = output
+        .get_mut(prefix.len()..end)
+        .ok_or(Error::OutputTooSmall)?;
+    for (index, byte) in destination.iter_mut().enumerate() {
+        let shift = (digits - index - 1) * 4;
+        let nibble = ((value >> shift) & 0xf) as u8;
+        *byte = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        };
+    }
+    core::str::from_utf8(&output[..end]).map_err(|_| Error::InvalidInput)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Aarch64LinuxBoot, FDT_MAGIC, build_aarch64_linux};
+
+    #[test]
+    fn builds_a_bounded_single_cpu_linux_tree() -> Result<(), super::Error> {
+        let mut structure = [0u8; 8192];
+        let mut strings = [0u8; 2048];
+        let mut output = [0u8; 12 * 1024];
+        let size = build_aarch64_linux(
+            Aarch64LinuxBoot {
+                memory_base: 0x4000_0000,
+                memory_size: 128 * 1024 * 1024,
+                vcpu_count: 1,
+                initramfs: Some((0x4700_0000, 0x4780_0000)),
+                boot_arguments: "console=ttyAMA0",
+            },
+            &mut structure,
+            &mut strings,
+            &mut output,
+        )?;
+        assert!(size < output.len());
+        let mut word = [0u8; 4];
+        word.copy_from_slice(&output[..4]);
+        assert_eq!(u32::from_be_bytes(word), FDT_MAGIC);
+        word.copy_from_slice(&output[4..8]);
+        assert_eq!(u32::from_be_bytes(word) as usize, size);
+        Ok(())
+    }
+}

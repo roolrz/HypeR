@@ -133,6 +133,9 @@ pub(crate) fn read_file_at(
     if capacity > MAX_READ_BYTES {
         return Err(ServiceError::InvalidInput);
     }
+    // A file read is allowed to complete short. Bounding the kernel bounce
+    // buffer keeps this untrusted-size syscall allocation-free; SDK
+    // `read_exact_at` performs the required continuation for exact reads.
     let capacity = capacity.min(TRANSFER_BATCH_BYTES);
     let mut bytes = [0_u8; TRANSFER_BATCH_BYTES];
     let actual = file.object().read(offset, &mut bytes[..capacity])?;

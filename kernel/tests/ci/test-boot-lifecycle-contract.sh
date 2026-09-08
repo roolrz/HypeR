@@ -12,11 +12,13 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 copy_sources() {
     rm -rf "$fixture/src"
     mkdir -p "$fixture/src/kernel/mm" "$fixture/src/kernel/cpu" \
-        "$fixture/src/kernel/vm"
+        "$fixture/src/kernel/vm/registry"
     cp "$root/src/main.rs" "$fixture/src/main.rs"
     cp "$root/src/kernel/mm/mod.rs" "$fixture/src/kernel/mm/mod.rs"
     cp "$root/src/kernel/cpu/smp.rs" "$fixture/src/kernel/cpu/smp.rs"
     cp "$root/src/kernel/vm/registry.rs" "$fixture/src/kernel/vm/registry.rs"
+    cp "$root/src/kernel/vm/registry/construction.rs" \
+        "$fixture/src/kernel/vm/registry/construction.rs"
 }
 
 check() {
@@ -114,8 +116,8 @@ awk '
         gsub(/self\.machine/, "machine");
     }
     { print }
-' "$fixture/src/kernel/vm/registry.rs" >"$fixture/mutated"
-mv "$fixture/mutated" "$fixture/src/kernel/vm/registry.rs"
+' "$fixture/src/kernel/vm/registry/construction.rs" >"$fixture/mutated"
+mv "$fixture/mutated" "$fixture/src/kernel/vm/registry/construction.rs"
 if check >/dev/null 2>&1; then
     echo 'early PreparedVm destructuring was accepted' >&2
     exit 1

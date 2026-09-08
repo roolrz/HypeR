@@ -33,13 +33,6 @@ pub(crate) const fn linux_abi() -> LinuxAbi {
     )
 }
 
-pub(crate) fn validate_linux_host() -> Result<(), Error> {
-    if !crate::hal::vm::guest_execution_available() {
-        return Err(Error::VirtualizationUnavailable);
-    }
-    Ok(())
-}
-
 pub(crate) fn describe_linux_host(mut emit: impl FnMut(core::fmt::Arguments<'_>)) {
     emit(format_args!(
         "HypeR: {} guest-execution backend selected",

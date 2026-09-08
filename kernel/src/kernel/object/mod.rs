@@ -21,9 +21,11 @@ pub(crate) use core::{
     ActiveHandleError, ActiveHandleOwner, Diagnostic, ErasedKernelRef, ExportPolicy, KernelObject,
     KernelRef, KernelService, Koid, ObjectCreationError, ObjectHandleState, ObjectKind,
     ObjectPublication, ObjectReferenceSnapshot, ObjectRetirement, ObjectSnapshot, OperationPin,
-    PublishableRef, Scheduler, TransferClass, UserExportableObject, final_reap_pending,
-    object_allocation_size, private, reap_one_final_object,
+    PublishableRef, Scheduler, TransferClass, UserExportableObject, VmDeviceBinding,
+    final_reap_pending, object_allocation_size, private, reap_one_final_object,
 };
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use directory::retain_for_test;
 pub(crate) use directory::{ObjectScanCursor, scan};
 pub(crate) use event::{Event, EventError};
 #[cfg(feature = "kernel-self-test")]

@@ -88,6 +88,14 @@ impl CacheMaintenance for Riscv64Cache {
         unsafe { asm!("fence.i", options(nostack)) };
     }
 
+    fn synchronize_guest_instruction_migration() {
+        // Guest FENCE.I affects only the physical hart which executed it. A
+        // migrated virtual hart therefore needs one local FENCE.I before it
+        // can consume guest-modified instructions on the destination hart.
+        // SAFETY: FENCE.I has no pointer operands and is valid in HS mode.
+        unsafe { asm!("fence.i", options(nostack)) };
+    }
+
     fn invalidate_instruction_all() {
         // SAFETY: FENCE.I has no pointer operands and is valid in HS mode.
         unsafe { asm!("fence.i", options(nostack)) };

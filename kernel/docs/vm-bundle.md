@@ -3,108 +3,195 @@ SPDX-FileCopyrightText: 2026 roolrz
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# VM boot ramdisk format
+# VM image and boot ownership
 
-This format is consumed directly by Kernel repository images built with the
-`kernel-self-test` feature. Production images mount the firmware ramdisk as
-their Native root filesystem and start `/init`; a userspace VMM will consume VM
-bundles through the Native capability interface.
+HypeR keeps firmware boot, system userspace, and guest boot as separate trust
+and ownership layers. U-Boot selects and authenticates the HypeR system image,
+loads the HypeR kernel and its system initramfs, and describes both through the
+standard platform DTB. It does not select, relocate, or modify a guest VM.
 
-## Firmware handoff
+The system initramfs is an uncompressed SVR4 `newc` or `crc` CPIO archive. It
+contains `/init`, system services, SDK runtime libraries, configuration, and
+zero or more guest FIT images under `/vm`. Early boot validates and reserves
+the complete firmware-provided archive before making it the immutable ramfs
+backing for the Native root filesystem.
 
-HypeR is intended to be selected as the kernel component of a signed FIT image.
-The selected FIT configuration supplies a ramdisk component alongside HypeR and
-the platform DTB. U-Boot must publish the resulting physical half-open ramdisk
-range through the standard `/chosen/linux,initrd-start` and
-`/chosen/linux,initrd-end` properties.
+## Userspace ownership
 
-The bytes handed to HypeR must be an uncompressed SVR4 `newc` or `crc` CPIO
-archive. A FIT implementation may store a compressed component only when
-U-Boot decompresses it before setting the DTB range. HypeR deliberately does
-not couple its early boot path to FIT parsing, a compression codec, or a
-particular U-Boot storage backend.
+The initial service graph identifies exactly one VM manager by its validated
+provisioning purpose, then starts it inside an init-created fleet resource
+domain and task group. That bounded ancestor accounts the manager and every
+domain it creates, so delegated domain-creation authority cannot charge init's
+shared service domain without limit. Init retains the peer CapabilityChannel
+endpoint, opens the selected guest image, creates a per-instance ByteChannel
+control pair, and transfers the image plus the manager-side control endpoint in
+one typed rendezvous. Each transport right survives until its final ownership
+hop: the manager attenuates it from the image and control endpoint, while the
+runtime retains it on the optional Console until that capability is consumed
+into the VM. The retained control endpoint is the
+instance's authority-bearing identity; lifecycle requests do not use ambient
+numeric VM identifiers. The request shape supports an optional third Console
+capability for an explicitly authorized output binding. Initial boot policy
+supplies an attenuated duplicate while init retains emergency authority; the
+manager moves that capability into the selected runtime and never receives
+ambient console policy.
 
-Early boot validates that the complete ramdisk lies in ordinary DTB-described
-RAM and does not overlap a `no-map` reservation. It reserves the range before
-the buddy allocator receives memory, then accesses it through the permanent
-linear map. The archive remains immutable for the lifetime of every loaded VM.
+The initial aggregate policy admits one VM and one vCPU, 32,768 guest pages,
+128 MiB of kernel allocation, 12 processes, 24 threads, 512 handles, and 2,048
+kernel objects. Every other accounting dimension is likewise the sum of the
+one-instance limit and explicit control-plane headroom. This is an admission
+boundary rather than a usage target; changing fleet cardinality requires a
+reviewed policy update, not merely a larger collection in the manager.
 
-## Outer boot archive
+The initial manager deliberately supports one active instance and represents
+that limit as explicit `Empty` and `Active` states. After an instance is fully
+retired and its terminal event is published, the manager releases all
+instance-owned handles and returns to `Empty` to accept another provisioning
+request. Extending this policy to multiple instances changes the state storage,
+not the provisioning or per-instance control contracts.
 
-The outer archive is a boot catalog and may contain multiple VM bundles:
+For each provisioned VM, the manager creates a child resource domain and task
+group, derives a one-shot VM creation lease, and starts an isolated
+`/svc/vm-runtime` process. The guest image is moved into that runtime rather
+than retained by the manager. The runtime receives only its guest image,
+creation lease, read-and-execute runtime libraries, and its own process
+resources.
+
+Each runtime:
+
+1. validates and parses its guest FIT through bounded random-access reads;
+2. creates and retains the guest-memory VMO;
+3. streams the selected kernel and initramfs payloads into that VMO;
+4. constructs guest firmware data, including the Linux DTB;
+5. seals a pending VM and atomically publishes the installed VM and boot-vCPU
+   handles; and
+6. retains supervision handles until acknowledged VM retirement.
+
+The kernel owns stage-2 translation, interrupt virtualization, vCPU execution,
+and teardown. It retains an independent reference to the guest-memory backing
+through stage-2 invalidation, so process or handle teardown cannot free pages
+still reachable by hardware. Attaching the VMO acquires an exclusive hardware
+write lease: it fails if a Native writable mapping or direct access is active,
+and later direct access, snapshots, or writable mappings stay closed until
+acknowledged VM retirement. Read-only Native mappings may coexist.
+
+Stage-2 demand pages are initially read/write and execute-never. A final guest
+instruction fault publishes that page's instruction bytes and then promotes
+only its stage-2 execute permission using the selected architecture's required
+translation invalidation. Faults raised while walking guest page tables remain
+data-only. Sealing conservatively publishes and promotes every loader-resident
+page because executable-range metadata is not yet part of the VM ABI; sparse
+pages retain the demand-promotion path.
+
+A userspace-created VM has no implicit route to the physical host console.
+Before sealing, its VMM may explicitly transfer a write-capable Console handle
+into the PendingVirtualMachine. A successful transfer consumes that handle and
+commits a VM-owned output binding whose lifetime ends with VM retirement; a
+rejected transfer preserves the handle. Guest transmit exits enqueue into the
+Console's bounded, allocation-free output path, and output from an unbound
+guest console is discarded. Which VMM receives such authority remains service
+policy rather than VM-creation policy.
+
+The manager validates the runtime's monotonic lifecycle records and publishes
+one terminal event on the per-instance endpoint. Loss of either control peer or
+malformed protocol data triggers an idempotent forced-stop transition; it does
+not terminate the fleet manager. A client stop first requests cooperative
+shutdown. The state machine also defines an explicit grace-deadline escalation
+transition. The manager computes a finite absolute deadline from the Native
+monotonic clock, passes it directly to the same multi-object wait, and forces
+the runtime Process when the deadline expires. It does not approximate time
+with polling, scheduler yields, or unrelated inspection authority.
+
+## Guest FIT contract
+
+Guest images use the standard flattened image tree container with embedded
+payload data. The current packer emits this shape:
 
 ```text
-hypervisor/
-  boot.conf
-  vms/
-    alpine.cpio
-    service.cpio
+/
+  images/
+    kernel@1/
+      data
+      type = "kernel"
+      arch = "arm64"
+      os = "linux"
+      compression = "none"
+      load
+      entry
+    ramdisk@1/
+      data
+      type = "ramdisk"
+      arch = "arm64"
+      os = "linux"
+      compression = "gzip"
+      load
+  configurations/
+    default = "conf@1"
+    conf@1/
+      compatible = "hyper,guest-image-v1"
+      kernel = "kernel@1"
+      ramdisk = "ramdisk@1"
+      bootargs
+      hyper,memory-size
+      hyper,vcpu-count
+      hyper,platform-profile = "aarch64-reference"
 ```
 
-`hypervisor/boot.conf` uses UTF-8 `key=value` records:
+`load`, `entry`, and `hyper,memory-size` must each be encoded as exactly one
+64-bit big-endian value.
+`hyper,vcpu-count` is one 32-bit cell. The selected configuration must identify
+the `hyper,guest-image-v1` storage contract and one supported immutable virtual
+platform profile. References and strings are exact, NUL-terminated UTF-8
+values. Selected configuration and image records are property-only schema
+leaves; child nodes are rejected. Duplicate selected nodes or properties,
+embedded NUL bytes, overlapping FDT blocks, invalid ranges, unsupported image
+types, and architecture mismatches are rejected before VM construction.
 
-```text
-format=hyper-boot-v1
-default=alpine
-```
+The current AArch64 runtime supports one vCPU, power-of-two page-aligned RAM of
+at least 64 MiB, an uncompressed Linux kernel, and an optional Linux-supported
+compressed initramfs. It validates the raw Linux `Image` magic, entry and
+`text_offset` placement, and nonzero `image_size`; placement reserves that
+complete occupied extent rather than only the bytes embedded in the FIT. Both
+the 2 MiB-aligned placement base and the occupied image extent must lie in
+guest RAM. The loader rejects overlap between that extent, the initramfs, and
+the generated DTB, and verifies that every selected payload range lies within
+the FIT source.
+FIT validation also requires an aligned, zero-terminated memory reservation
+map which does not overlap the structure or string blocks. Parsing has fixed
+budgets for reservation records, structure tokens, and nesting depth; embedded
+payload properties are skipped in constant parser work and copied only after
+the complete metadata contract succeeds. These are runtime implementation
+limits, not a storage-format promise for other architectures or future VMM
+implementations.
 
-Blank lines and lines beginning with `#` are ignored. Version 1 accepts exactly
-`format` and `default`; duplicate and unknown keys are errors. A VM name is 1
-to 64 ASCII alphanumeric, dot, underscore, or hyphen characters, but cannot be
-`.` or `..`. The selected bundle path is `hypervisor/vms/<default>.cpio`.
+`hyper,vcpu-count` fixes the machine's immutable processor topology before
+construction. `pending_virtual_machine_set_bootstrap` configures only boot vCPU
+0, and installation returns the machine and that boot-vCPU handle; it does not
+represent the complete topology as a variable-length syscall result. Secondary
+processors begin in their architecture-defined powered-off state. AArch64 PSCI
+`CPU_ON` or x86 INIT-SIPI supplies their runtime entry state. Future secondary
+vCPU control handles will therefore be exposed by an additive
+`virtual_machine_open_vcpu(machine, id)` operation over the predeclared topology,
+without changing the existing construction calls. Creating or publishing a
+secondary vCPU must use a generation-qualified installed-machine lease and bind
+its endpoint while holding the `InstalledMachine` runtime lock. The lifecycle
+state check and endpoint publication are one transaction: publication is
+permitted only while the machine is `Installed` or `Running`, and must fail once
+it is `Stopping` or `Stopped`. This prevents retirement from observing an
+unbound endpoint and then racing a late secondary-vCPU publication. The current
+implementation rejects a `vcpu_count` other than one until those architecture
+startup paths and concurrent vCPU execution are implemented.
 
-This single-default policy is an initial boot policy rather than a limitation
-of the archive layout. A later VM manager can add an explicitly versioned boot
-catalog format for multiple autostart VMs without changing bundle v1.
-
-## VM bundle
-
-Each VM bundle is another uncompressed `newc` or `crc` CPIO archive. It keeps
-large opaque payloads separate from policy metadata:
-
-```text
-manifest
-kernel/Image
-initramfs/initramfs.cpio.gz
-```
-
-The v1 manifest is strict UTF-8 `key=value` data:
-
-```text
-format=hyper-vm-v1
-type=linux
-architecture=aarch64
-memory=134217728
-vcpus=1
-command_line=console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init
-kernel=kernel/Image
-initramfs=initramfs/initramfs.cpio.gz
-```
-
-All fields are required except `initramfs`, which may be absent or empty. Paths
-must be relative and cannot contain empty, `.` or `..` components. `memory` is
-a decimal byte count, at least 64 MiB, page aligned, and a power of two.
-`vcpus` must be nonzero. The package parser preserves `type`, `architecture`,
-and `vcpus` without applying the current machine's execution limits. This keeps
-the storage ABI independent from a particular runner or host configuration.
-The current AArch64, RISC-V, and x86-64 Linux runners support one vCPU and
-contiguous RAM from 64 MiB through 1 GiB, and report distinct runtime errors
-for other valid bundles.
-
-The package layer verifies that selected archive entries are unique regular
-files. The selected runner then validates guest-specific requirements; the
-selected Linux runner requires the standard `ARMd` or RISC-V `RSC\x05` Image
-magic, or a 64-bit relocatable x86 bzImage header with the configured preferred
-load address. HypeR does not decompress the guest initramfs: Linux receives
-those bytes and handles its own supported compression formats.
+`tools/fit-pack` creates deterministic development and CI images from an
+external kernel and initramfs. Generated guest artifacts remain ignored by Git.
 
 ## Integrity and licensing
 
-The CPIO layer provides bounds and structural validation, not authenticity.
-Production deployments should use FIT hashes and signatures to authenticate
-HypeR, the DTB, and the complete outer ramdisk as one boot configuration.
-Future per-bundle signatures can be added through a new catalog or manifest
-version without weakening FIT verification.
+FDT structural validation is not authenticity. Production composition must
+authenticate the HypeR kernel, platform DTB, system initramfs, and guest images
+according to deployment policy before granting VM creation authority. FIT hash
+or signature nodes can be added without moving image selection into U-Boot or
+the kernel.
 
-Guest kernels and userspace retain their upstream licenses. They are generated
-test artifacts, ignored by Git, and are not part of HypeR's Apache-2.0 source.
+Guest kernels and userspace retain their upstream licenses. Downloaded guest
+payloads are test artifacts and are not part of HypeR's Apache-2.0 source.

@@ -8,6 +8,8 @@ mod cache;
 mod context;
 mod exception;
 mod gic_cpu_interface;
+mod guest_cpu_contract;
+mod guest_cpu_model;
 mod host;
 mod interrupt_controller;
 mod interrupt_virtualization;
@@ -166,6 +168,7 @@ pub fn secondary_cpu_is_compatible() -> bool {
     address::current_cpu_is_compatible()
         && atomics::current_cpu_supports_selected_backend()
         && cache::current_cpu_is_compatible()
+        && guest_cpu_model::current_cpu_is_compatible()
         && host::current_cpu_is_compatible()
         && user::current_cpu_is_compatible()
 }
@@ -328,6 +331,9 @@ extern "C" fn aarch64_bootstrap(dtb_address: usize, boot_counter_ticks: u64) -> 
     address::initialize().unwrap_or_else(|_| halt());
     atomics::initialize();
     if host::initialize().is_err() {
+        halt()
+    }
+    if !guest_cpu_model::initialize_boot_cpu() {
         halt()
     }
     if !smp::initialize_boot_cpu() {

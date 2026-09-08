@@ -10,7 +10,8 @@ cd "$root"
 
 vcpu=src/kernel/vm/vcpu/transition.rs
 device=src/kernel/vm/device/aarch64.rs
-registry=src/kernel/vm/registry.rs
+execution=src/kernel/vm/registry/execution.rs
+construction=src/kernel/vm/registry/construction.rs
 scheduler=src/kernel/task/scheduler/state.rs
 irq=src/kernel/entry/irq.rs
 linux=src/kernel/vm/linux/mod.rs
@@ -91,7 +92,7 @@ rg -q 'update_saved_guest_device_interrupt' "$device" || {
     echo 'console input must update saved interrupt state without active hardware' >&2
     exit 1
 }
-rg -q 'running_vcpu_cpu' "$registry" && rg -q 'request_guest_exit' "$registry" || {
+rg -q 'running_vcpu_cpu' "$execution" && rg -q 'request_guest_exit' "$execution" || {
     echo 'VM publication must query scheduler authority before a guest-exit prompt' >&2
     exit 1
 }
@@ -109,7 +110,7 @@ rg -U -q 'Error::EndpointClosed[\s\S]*clear_console_route_exact\(route\.vm, rout
     echo 'closed vCPU endpoints must retire the exact console route without crossing into Native input' >&2
     exit 1
 }
-if rg -q 'try_publish_console_route' "$registry" ||
+if rg -q 'try_publish_console_route' "$execution" "$construction" ||
     ! rg -q 'try_publish_console_route' "$linux"; then
     echo 'host-console selection must remain explicit Linux service policy, not registry policy' >&2
     exit 1

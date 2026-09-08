@@ -36,3 +36,10 @@ version = "0.0.0"
 dependencies = [
  "hyper-abi",
 ]
+
+[[package]]
+name = "hyper-vm-image"
+version = "0.0.0"
+dependencies = [
+ "hyper-abi",
+]

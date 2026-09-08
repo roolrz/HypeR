@@ -13,8 +13,10 @@ use hyper::hal::user::{
 use hyper::sync::InterruptMaskGuard;
 
 use crate::kernel::abi::native::{
-    self, AllocatingServices, ConsoleServiceError, DeferredServices, ImmediateServices,
-    ObjectServiceError, ProcessBuilderServiceError, UserOutputServices,
+    self, ConsoleServiceError, ConsoleServices, HandleServices, HierarchyServices, InspectServices,
+    IpcServices, MemoryServices, ObjectServiceError, ObjectServices, ProcessBuilderServiceError,
+    ProcessBuilderServices, SystemInspectServices, TaskServices, UserMemoryServices, VfsServices,
+    VmServices,
 };
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomainObject, ResourceKind,
@@ -48,13 +50,21 @@ struct ProcessServices<'process> {
     process: &'process Process,
 }
 
-impl UserOutputServices for ProcessServices<'_> {
+impl UserMemoryServices for ProcessServices<'_> {
     fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError> {
         self.process.copy_to_user(destination, source)
     }
+
+    fn copy_from_user(
+        &self,
+        source: UserSlice,
+        destination: &mut [u8],
+    ) -> Result<(), ProcessError> {
+        self.process.copy_from_user(source, destination)
+    }
 }
 
-impl ImmediateServices for ProcessServices<'_> {
+impl HandleServices for ProcessServices<'_> {
     fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError> {
         self.process.close_handle(value)
     }
@@ -66,9 +76,7 @@ impl ImmediateServices for ProcessServices<'_> {
     ) -> Result<HandleInfo, ProcessError> {
         self.process.handle_info(value, required_rights)
     }
-}
 
-impl AllocatingServices for ProcessServices<'_> {
     fn duplicate_handle(
         &self,
         value: HandleValue,
@@ -83,27 +91,23 @@ impl AllocatingServices for ProcessServices<'_> {
     ) -> Result<HandleValue, ProcessError> {
         self.process.replace_handle(value, rights)
     }
-    fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
-        let event = Event::try_new(&self.process.resource_domain())?;
-        Ok(self
-            .process
-            .create_object(event, <Event as KernelObject>::SUPPORTED_RIGHTS)?)
-    }
-    fn create_byte_channel(&self) -> Result<[HandleValue; 2], ByteChannelServiceError> {
-        crate::kernel::ipc::byte_channel_create(self.process)
-    }
-    fn create_capability_channel(&self) -> Result<[HandleValue; 2], CapabilityChannelServiceError> {
-        crate::kernel::ipc::capability_channel_create(self.process)
-    }
 }
 
 struct DeferredProcessServices<'session> {
     session: &'session UserSession,
 }
 
-impl UserOutputServices for DeferredProcessServices<'_> {
+impl UserMemoryServices for DeferredProcessServices<'_> {
     fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError> {
         self.session.process.copy_to_user(destination, source)
+    }
+
+    fn copy_from_user(
+        &self,
+        source: UserSlice,
+        destination: &mut [u8],
+    ) -> Result<(), ProcessError> {
+        self.session.process.copy_from_user(source, destination)
     }
 }
 
@@ -208,7 +212,19 @@ impl DeferredProcessServices<'_> {
     }
 }
 
-impl AllocatingServices for DeferredProcessServices<'_> {
+impl HandleServices for DeferredProcessServices<'_> {
+    fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError> {
+        self.session.process.close_handle(value)
+    }
+
+    fn handle_info(
+        &self,
+        value: HandleValue,
+        required_rights: Rights,
+    ) -> Result<HandleInfo, ProcessError> {
+        self.session.process.handle_info(value, required_rights)
+    }
+
     fn duplicate_handle(
         &self,
         value: HandleValue,
@@ -223,27 +239,129 @@ impl AllocatingServices for DeferredProcessServices<'_> {
     ) -> Result<HandleValue, ProcessError> {
         self.session.process.replace_handle(value, rights)
     }
-    fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
-        ProcessServices {
-            process: &self.session.process,
-        }
-        .create_event()
+}
+
+impl HierarchyServices for DeferredProcessServices<'_> {
+    fn create_resource_domain(
+        &self,
+        parent: HandleValue,
+        limits: crate::kernel::accounting::ResourceLimits,
+    ) -> Result<HandleValue, crate::kernel::process::hierarchy::Error> {
+        crate::kernel::process::hierarchy::create_resource_domain(
+            &self.session.process,
+            parent,
+            limits,
+        )
     }
-    fn create_byte_channel(&self) -> Result<[HandleValue; 2], ByteChannelServiceError> {
-        ProcessServices {
-            process: &self.session.process,
-        }
-        .create_byte_channel()
-    }
-    fn create_capability_channel(&self) -> Result<[HandleValue; 2], CapabilityChannelServiceError> {
-        ProcessServices {
-            process: &self.session.process,
-        }
-        .create_capability_channel()
+
+    fn create_task_group(
+        &self,
+        factory: HandleValue,
+        domain: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::process::hierarchy::Error> {
+        crate::kernel::process::hierarchy::create_task_group(&self.session.process, factory, domain)
     }
 }
 
-impl DeferredServices for DeferredProcessServices<'_> {
+impl VmServices for DeferredProcessServices<'_> {
+    fn derive_virtual_machine_creation_lease(
+        &self,
+        authority: HandleValue,
+        domain: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::derive_creation_lease(&self.session.process, authority, domain)
+    }
+
+    fn create_pending_virtual_machine(
+        &self,
+        lease: HandleValue,
+        configuration: crate::kernel::vm::objects::VirtualMachineConfiguration,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::create_pending(&self.session.process, lease, configuration)
+    }
+
+    fn set_pending_virtual_machine_memory(
+        &self,
+        pending: HandleValue,
+        vmo: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::set_memory(&self.session.process, pending, vmo)
+    }
+
+    fn set_pending_virtual_machine_bootstrap(
+        &self,
+        pending: HandleValue,
+        bootstrap: crate::kernel::vm::objects::VirtualCpuBootstrap,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::set_bootstrap(&self.session.process, pending, bootstrap)
+    }
+
+    fn set_pending_virtual_machine_console_output(
+        &self,
+        pending: HandleValue,
+        console: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::set_console_output(&self.session.process, pending, console)
+    }
+
+    fn seal_pending_virtual_machine(
+        &self,
+        pending: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::seal(&self.session.process, pending)
+    }
+
+    fn install_pending_virtual_machine(
+        &self,
+        pending: HandleValue,
+    ) -> Result<[HandleValue; 2], crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::install(&self.session.process, pending)
+    }
+
+    fn abort_pending_virtual_machine(
+        &self,
+        pending: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::abort(&self.session.process, pending)
+    }
+
+    fn request_virtual_machine_stop(
+        &self,
+        machine: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::request_stop(&self.session.process, machine)
+    }
+
+    fn virtual_machine_info(
+        &self,
+        machine: HandleValue,
+    ) -> Result<
+        (
+            crate::kernel::vm::objects::VirtualMachineConfiguration,
+            crate::kernel::vm::objects::VirtualMachineSnapshot,
+        ),
+        crate::kernel::vm::service::Error,
+    > {
+        crate::kernel::vm::service::machine_info(&self.session.process, machine)
+    }
+
+    fn virtual_cpu_info(
+        &self,
+        vcpu: HandleValue,
+    ) -> Result<crate::kernel::vm::objects::VirtualCpuSnapshot, crate::kernel::vm::service::Error>
+    {
+        crate::kernel::vm::service::vcpu_info(&self.session.process, vcpu)
+    }
+
+    fn start_virtual_cpu(
+        &self,
+        vcpu: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::start_vcpu(&self.session.process, vcpu)
+    }
+}
+
+impl SystemInspectServices for DeferredProcessServices<'_> {
     fn memory_observation(
         &self,
         inspector: HandleValue,
@@ -267,6 +385,16 @@ impl DeferredServices for DeferredProcessServices<'_> {
             .resolve_handle::<CpuInspector>(inspector, Rights::INSPECT)
             .map_err(crate::kernel::inspect::Error::Process)?;
         Ok(inspector.object().snapshot())
+    }
+}
+
+impl ObjectServices for DeferredProcessServices<'_> {
+    fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
+        let event = Event::try_new(&self.session.process.resource_domain())?;
+        Ok(self
+            .session
+            .process
+            .create_object(event, <Event as KernelObject>::SUPPORTED_RIGHTS)?)
     }
 
     fn signal_event(
@@ -369,7 +497,9 @@ impl DeferredServices for DeferredProcessServices<'_> {
             self.session.thread.snapshot().phase == UserThreadPhase::StopRequested
         })?)
     }
+}
 
+impl TaskServices for DeferredProcessServices<'_> {
     fn process_info(&self, process: HandleValue) -> Result<ProcessSnapshot, ProcessError> {
         Ok(self
             .session
@@ -379,6 +509,17 @@ impl DeferredServices for DeferredProcessServices<'_> {
             .snapshot())
     }
 
+    fn request_process_stop(&self, process: HandleValue) -> Result<(), ProcessError> {
+        let process = self
+            .session
+            .process
+            .resolve_handle::<ProcessObject>(process, Rights::REQUEST_STOP)?;
+        process.object().request_stop(TerminalReason::Requested);
+        Ok(())
+    }
+}
+
+impl InspectServices for DeferredProcessServices<'_> {
     fn scan_processes(
         &self,
         inspector: HandleValue,
@@ -619,6 +760,16 @@ impl DeferredServices for DeferredProcessServices<'_> {
             .create_object(derived, <ObjectInspector as KernelObject>::SUPPORTED_RIGHTS)
             .map_err(crate::kernel::inspect::Error::Process)
     }
+}
+
+impl IpcServices for DeferredProcessServices<'_> {
+    fn create_byte_channel(&self) -> Result<[HandleValue; 2], ByteChannelServiceError> {
+        crate::kernel::ipc::byte_channel_create(&self.session.process)
+    }
+
+    fn create_capability_channel(&self) -> Result<[HandleValue; 2], CapabilityChannelServiceError> {
+        crate::kernel::ipc::capability_channel_create(&self.session.process)
+    }
 
     fn write_byte_channel(
         &self,
@@ -666,7 +817,9 @@ impl DeferredServices for DeferredProcessServices<'_> {
             || self.session.thread.snapshot().phase == UserThreadPhase::StopRequested,
         )
     }
+}
 
+impl ConsoleServices for DeferredProcessServices<'_> {
     fn read_console(
         &self,
         value: HandleValue,
@@ -722,7 +875,9 @@ impl DeferredServices for DeferredProcessServices<'_> {
             .copy_from_user(source, &mut bytes[..length])?;
         Ok(console.object().try_write(&bytes[..length])?)
     }
+}
 
+impl VfsServices for DeferredProcessServices<'_> {
     fn open_file(
         &self,
         root: HandleValue,
@@ -771,7 +926,9 @@ impl DeferredServices for DeferredProcessServices<'_> {
     ) -> Result<crate::kernel::vfs::DirectoryInfo, VfsServiceError> {
         crate::kernel::vfs::directory_info(&self.session.process, directory)
     }
+}
 
+impl MemoryServices for DeferredProcessServices<'_> {
     fn create_vmo(
         &self,
         size: u64,
@@ -864,7 +1021,9 @@ impl DeferredServices for DeferredProcessServices<'_> {
     ) -> Result<(), crate::kernel::mm::user_space::MemoryServiceError> {
         crate::kernel::mm::user_space::destroy_vmar(&self.session.process, vmar)
     }
+}
 
+impl ProcessBuilderServices for DeferredProcessServices<'_> {
     fn create_process_builder(
         &self,
         factory: HandleValue,
@@ -994,15 +1153,6 @@ impl DeferredServices for DeferredProcessServices<'_> {
         builder: HandleValue,
     ) -> Result<(), ProcessBuilderServiceError> {
         crate::kernel::process::abort_process_builder(&self.session.process, builder)?;
-        Ok(())
-    }
-
-    fn request_process_stop(&self, process: HandleValue) -> Result<(), ProcessError> {
-        let process = self
-            .session
-            .process
-            .resolve_handle::<ProcessObject>(process, Rights::REQUEST_STOP)?;
-        process.object().request_stop(TerminalReason::Requested);
         Ok(())
     }
 }

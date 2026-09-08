@@ -10,8 +10,103 @@
 
 use crate::cpu::CpuIndex;
 use crate::sync::atomic::{AtomicUsize, Ordering};
+use crate::vm::exit::MemoryAccess;
 
 const INACTIVE_CPU: usize = usize::MAX;
+
+/// Execute authority carried by one normal-memory stage-2 leaf.
+///
+/// Demand-zero memory starts data-only. Instruction-cache publication and the
+/// transition to [`Self::ReadWriteExecute`] form one ordered transaction; this
+/// keeps ordinary read/write faults off the instruction-maintenance path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stage2PagePermissions {
+    ReadWrite,
+    ReadWriteExecute,
+}
+
+/// Architecture-neutral action for one fault against the stage-2 page model.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stage2FaultResolution {
+    Map(Stage2PagePermissions),
+    PromoteExecute,
+    Refresh,
+}
+
+impl Stage2PagePermissions {
+    /// Selects the least authority required to retry a decoded memory fault.
+    ///
+    /// A fault raised while hardware walks the guest's own page tables names a
+    /// data page even when the original guest access was an instruction fetch.
+    /// Executable permission is therefore granted only for a final-stage
+    /// execute fault.
+    pub const fn for_fault(access: MemoryAccess, during_guest_page_walk: bool) -> Self {
+        if matches!(access, MemoryAccess::Execute) && !during_guest_page_walk {
+            Self::ReadWriteExecute
+        } else {
+            Self::ReadWrite
+        }
+    }
+
+    pub const fn is_executable(self) -> bool {
+        matches!(self, Self::ReadWriteExecute)
+    }
+}
+
+/// Resolves translation-versus-permission state without architecture policy.
+pub const fn resolve_stage2_fault(
+    mapped: bool,
+    instruction_ready: bool,
+    access: MemoryAccess,
+    during_guest_page_walk: bool,
+) -> Stage2FaultResolution {
+    let required = Stage2PagePermissions::for_fault(access, during_guest_page_walk);
+    if !mapped {
+        Stage2FaultResolution::Map(required)
+    } else if required.is_executable() && !instruction_ready {
+        Stage2FaultResolution::PromoteExecute
+    } else {
+        Stage2FaultResolution::Refresh
+    }
+}
+
+/// Physical-CPU history needed for guest instruction-context migration.
+///
+/// Host instruction publication is tracked independently by address-space
+/// epochs. This state covers instructions made visible by the guest itself:
+/// architectures with hart-local instruction synchronization can repair that
+/// state exactly when a movable vCPU changes physical CPU.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct GuestInstructionContext {
+    last_cpu: Option<CpuIndex>,
+}
+
+impl GuestInstructionContext {
+    pub const fn new() -> Self {
+        Self { last_cpu: None }
+    }
+
+    /// Records an imminent execution interval and reports whether it migrated.
+    ///
+    /// The first activation is not a migration. Normal address-space
+    /// instruction-publication synchronization owns its initial visibility.
+    pub fn enter(&mut self, cpu: CpuIndex) -> GuestInstructionContextTransition {
+        let transition = match self.last_cpu {
+            None => GuestInstructionContextTransition::First,
+            Some(previous) if previous == cpu => GuestInstructionContextTransition::SameCpu,
+            Some(_) => GuestInstructionContextTransition::Migrated,
+        };
+        self.last_cpu = Some(cpu);
+        transition
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuestInstructionContextTransition {
+    First,
+    SameCpu,
+    Migrated,
+}
 
 /// Failure phase for an active second-stage mapping update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

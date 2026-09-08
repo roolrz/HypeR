@@ -65,6 +65,8 @@ impl Rights {
     pub(crate) const RESOURCE_DOMAIN_SPONSOR: Self =
         Self(native::HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR);
     pub(crate) const DERIVE: Self = Self(native::HYPER_NATIVE_RIGHT_DERIVE);
+    pub(crate) const CREATE_VIRTUAL_MACHINE: Self =
+        Self(native::HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE);
     pub(crate) const KNOWN: Self = Self(native::HYPER_NATIVE_RIGHTS_MASK);
     const PROPAGATION_MASK: u64 = Self::DUPLICATE.0 | Self::TRANSFER.0;
 

@@ -45,6 +45,7 @@ const IA32_VMX_CR0_FIXED1: u32 = 0x487;
 const IA32_VMX_CR4_FIXED0: u32 = 0x488;
 const IA32_VMX_CR4_FIXED1: u32 = 0x489;
 const IA32_VMX_PROCBASED_CTLS2: u32 = 0x48b;
+#[cfg(feature = "kernel-self-test")]
 const IA32_VMX_EPT_VPID_CAP: u32 = 0x48c;
 const IA32_VMX_TRUE_PINBASED_CTLS: u32 = 0x48d;
 const IA32_VMX_TRUE_PROCBASED_CTLS: u32 = 0x48e;
@@ -323,6 +324,7 @@ pub unsafe fn enter(context: *mut VcpuContext) -> ! {
     unsafe { x86_64_vmlaunch(context.cast_const()) }
 }
 
+#[cfg(feature = "kernel-self-test")]
 pub(super) fn validate() -> Result<(), super::guest::ValidationError> {
     let basic_features = core::arch::x86_64::__cpuid(1);
     if basic_features.ecx & (1 << 5) == 0 {

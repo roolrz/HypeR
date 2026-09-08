@@ -9,12 +9,11 @@ mod selected;
 use hyper::mm::{BuddyError, PAGE_SIZE};
 
 use crate::kernel::task::thread::ThreadId;
+use crate::kernel::vm::VmBundle;
 use crate::kernel::vm::memory::GuestAddressSpace;
 use crate::kernel::vm::registry::VmBuilder;
-use crate::kernel::vm::{VmBundle, VmInterruptController};
 
-#[derive(Debug)]
-pub enum Error {
+pub(crate) enum Error {
     AddressOverflow,
     Allocation(BuddyError),
     Cache(hyper::hal::cache::CacheError),
@@ -25,14 +24,39 @@ pub enum Error {
     InvalidLayout,
     Memory(crate::kernel::vm::memory::Error),
     Registry(crate::kernel::vm::registry::Error),
+    Resource(crate::kernel::accounting::ResourceError),
     Scheduler(crate::kernel::task::scheduler::Error),
     UnsupportedArchitecture,
     UnsupportedGuestType,
-    UnsupportedMemorySize,
     UnsupportedVcpuCount,
     VirtualizationUnavailable,
     Stage2(crate::hal::vm::Stage2Error),
     Vcpu(crate::kernel::vm::VcpuInterruptError),
+}
+
+impl core::fmt::Debug for Error {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::AddressOverflow => formatter.write_str("AddressOverflow"),
+            Self::Allocation(error) => formatter.debug_tuple("Allocation").field(error).finish(),
+            Self::Cache(error) => formatter.debug_tuple("Cache").field(error).finish(),
+            Self::DeviceTree(error) => formatter.debug_tuple("DeviceTree").field(error).finish(),
+            Self::Interrupts(error) => formatter.debug_tuple("Interrupts").field(error).finish(),
+            Self::Devices(error) => formatter.debug_tuple("Devices").field(error).finish(),
+            Self::InvalidKernel => formatter.write_str("InvalidKernel"),
+            Self::InvalidLayout => formatter.write_str("InvalidLayout"),
+            Self::Memory(error) => formatter.debug_tuple("Memory").field(error).finish(),
+            Self::Registry(error) => formatter.debug_tuple("Registry").field(error).finish(),
+            Self::Resource(error) => formatter.debug_tuple("Resource").field(error).finish(),
+            Self::Scheduler(error) => formatter.debug_tuple("Scheduler").field(error).finish(),
+            Self::UnsupportedArchitecture => formatter.write_str("UnsupportedArchitecture"),
+            Self::UnsupportedGuestType => formatter.write_str("UnsupportedGuestType"),
+            Self::UnsupportedVcpuCount => formatter.write_str("UnsupportedVcpuCount"),
+            Self::VirtualizationUnavailable => formatter.write_str("VirtualizationUnavailable"),
+            Self::Stage2(error) => formatter.debug_tuple("Stage2").field(error).finish(),
+            Self::Vcpu(error) => formatter.debug_tuple("Vcpu").field(error).finish(),
+        }
+    }
 }
 
 impl From<BuddyError> for Error {
@@ -80,6 +104,25 @@ impl From<crate::kernel::vm::registry::Error> for Error {
     }
 }
 
+impl From<crate::kernel::vm::registry::VcpuPreparationError> for Error {
+    fn from(error: crate::kernel::vm::registry::VcpuPreparationError) -> Self {
+        match error {
+            crate::kernel::vm::registry::VcpuPreparationError::Registry(error) => {
+                Self::Registry(error)
+            }
+            crate::kernel::vm::registry::VcpuPreparationError::Scheduler(error) => {
+                Self::Scheduler(error)
+            }
+        }
+    }
+}
+
+impl From<crate::kernel::accounting::ResourceError> for Error {
+    fn from(error: crate::kernel::accounting::ResourceError) -> Self {
+        Self::Resource(error)
+    }
+}
+
 impl From<crate::kernel::task::scheduler::Error> for Error {
     fn from(error: crate::kernel::task::scheduler::Error) -> Self {
         Self::Scheduler(error)
@@ -109,12 +152,20 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     let abi = selected::linux_abi();
     let image = guest.kernel();
     let initramfs = guest.initramfs();
+    let resource_domain = crate::kernel::accounting::ResourceDomain::try_new_root(
+        crate::kernel::accounting::ResourceLimits::UNLIMITED,
+    )?;
+    let lifecycle_resources = crate::kernel::vm::registry::VmLifecycleResources::try_reserve(
+        &resource_domain,
+        guest.vcpu_count(),
+    )?;
     let mut reservation = crate::kernel::vm::registry::reserve()?;
     let virtual_machine = reservation.id();
     let mut address_space = GuestAddressSpace::new(
         reservation.take_hardware_vmid()?,
         abi.ram_base().get(),
         guest.memory_size(),
+        &resource_domain,
     )?;
     let initramfs_range = layout_payload(image, initramfs, guest.memory_size())?;
 
@@ -134,8 +185,14 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     address_space.finish_boot_loading();
     let stage2_root = address_space.root_address();
     let guest_memory = address_space.statistics();
-    let (interrupts, context) = prepare_boot_vcpu(guest.vcpu_count())?;
-    let devices = crate::kernel::vm::device::prepare()?;
+    let (interrupt_plan, context) = prepare_boot_vcpu(guest.vcpu_count())?;
+    let interrupt_controller_charge = lifecycle_resources.reserve_interrupt_controller(
+        crate::hal::vm::prepared_interrupt_controller_allocation_size(&interrupt_plan),
+    )?;
+    let interrupts = crate::hal::vm::create_prepared_interrupt_controller(interrupt_plan)?;
+    let devices = crate::kernel::vm::device::prepare(Some(
+        crate::kernel::vm::device::ConsoleOutputBinding::for_host_test(),
+    ))?;
 
     report_guest_layout(&guest, initramfs_range, stage2_root, guest_memory);
     crate::kernel::mm::report_statistics("guest prepared");
@@ -143,23 +200,33 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     // publication and scheduler ownership are committed below.
     let builder = VmBuilder::new(
         reservation,
+        lifecycle_resources,
+        crate::kernel::vm::installed::VirtualMachineConfiguration {
+            guest_physical_base: abi.ram_base().get(),
+            memory_size: guest.memory_size(),
+            vcpu_count: guest.vcpu_count(),
+            architecture: crate::hal::vm::guest_architecture_abi(),
+            platform_profile: hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE
+                as u32,
+        },
         address_space,
         interrupts,
+        interrupt_controller_charge,
         devices,
-        guest.vcpu_count(),
     )?;
     let prepared = builder.prepare_boot_vcpu(0, context)?;
     let installed = prepared.install()?;
-    let (installed_id, thread, control) = installed.into_boot_parts();
+    let (installed_id, thread, control) = installed.into_started_boot_parts();
     debug_assert_eq!(installed_id, virtual_machine);
     let _ = crate::kernel::vm::device::try_publish_console_route(installed_id, 0, thread);
     crate::kernel::vm::lifecycle::retain_default(control);
-    crate::kernel::task::scheduler::thread_ready(thread)?;
     Ok(thread)
 }
 
 fn validate_guest(guest: &VmBundle<'_>) -> Result<(), Error> {
-    selected::validate_linux_host()?;
+    if !crate::hal::vm::guest_execution_available() {
+        return Err(Error::VirtualizationUnavailable);
+    }
     selected::describe_linux_host(|description| {
         crate::pr_info!("{description}");
     });
@@ -225,8 +292,14 @@ fn layout_payload(
 
 fn prepare_boot_vcpu(
     vcpu_count: u32,
-) -> Result<(VmInterruptController, crate::hal::vm::VcpuContext), Error> {
-    let interrupts = crate::hal::vm::create_interrupt_controller(
+) -> Result<
+    (
+        crate::hal::vm::PreparedInterruptController,
+        crate::hal::vm::VcpuContext,
+    ),
+    Error,
+> {
+    let interrupts = crate::hal::vm::prepare_interrupt_controller(
         vcpu_count,
         selected::linux_abi().timer_interrupt(),
     )?;

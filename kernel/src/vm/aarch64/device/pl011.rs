@@ -12,9 +12,12 @@ const FIFO_CAPACITY: usize = 32;
 /// Keeping the guest-visible ABI beside the reusable model gives the board
 /// builder and VM-owned instance one canonical description without making an
 /// architecture backend own mutable device state.
-pub const REFERENCE_BASE: u64 = 0x0900_0000;
-pub const REFERENCE_SIZE: u64 = 0x1000;
-pub const REFERENCE_INTERRUPT: u32 = 33;
+pub const REFERENCE_BASE: u64 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_BASE;
+pub const REFERENCE_SIZE: u64 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_SIZE;
+pub const REFERENCE_INTERRUPT: u32 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_INTERRUPT as u32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VirtualPl011Error {

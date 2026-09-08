@@ -7,8 +7,8 @@ use std::fmt::Write;
 use std::string::String;
 
 use super::{
-    AuthorityDeclaration, AuthorityPolicy, MAX_MANIFEST_BYTES, MAX_SERVICES, ParseErrorKind,
-    StartupPurposeDeclaration, ValidationErrorKind, parse, validate,
+    AuthorityDeclaration, AuthorityKey, AuthorityPolicy, MAX_MANIFEST_BYTES, MAX_SERVICES,
+    ParseErrorKind, StartupPurposeDeclaration, ValidationErrorKind, parse, validate,
 };
 
 const VALID: &str = r#"
@@ -59,10 +59,32 @@ const VALID: &str = r#"
 
 struct Policy;
 
+const READ: u64 = 0b0000_0001;
+const WRITE: u64 = 0b0000_0010;
+const INSPECT: u64 = 0b0000_0100;
+const WAIT: u64 = 0b0000_1000;
+const CREATE_PROCESS: u64 = 0b0001_0000;
+const ATTACH_PROCESS: u64 = 0b0010_0000;
+const SPONSOR: u64 = 0b0100_0000;
+const DUPLICATE: u64 = 0b1000_0000;
+const TRANSFER: u64 = 0b1_0000_0000;
+const EXECUTE: u64 = 0b10_0000_0000;
+const CREATE_TASK_GROUP: u64 = 0b1_0000_0000_0000;
+const CREATE_RESOURCE_DOMAIN: u64 = 0b10_0000_0000_0000;
+const DERIVE: u64 = 0b0100_0000_0000_0000;
+const CREATE_VIRTUAL_MACHINE: u64 = 0b1000_0000_0000_0000;
+fn test_authority_key(source: &str) -> AuthorityKey {
+    let value = source
+        .bytes()
+        .fold(0_u16, |hash, byte| hash.wrapping_mul(31) ^ u16::from(byte));
+    AuthorityKey::new(value)
+}
+
 impl AuthorityPolicy for Policy {
     fn authority<'policy>(&'policy self, source: &str) -> Option<AuthorityDeclaration<'policy>> {
         match source {
             "network.primary" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: Some("network"),
                 object_kind: 1,
                 rights: 0b11,
@@ -71,6 +93,7 @@ impl AuthorityPolicy for Policy {
                 creatable: false,
             }),
             "bootstrap.console-manager" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 2,
                 rights: 0b100,
@@ -79,6 +102,7 @@ impl AuthorityPolicy for Policy {
                 creatable: true,
             }),
             "bootstrap.console" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 3,
                 rights: 0b1011,
@@ -96,6 +120,7 @@ impl AuthorityPolicy for Policy {
             | "bootstrap.shell-input-channel"
             | "bootstrap.shell-output-channel"
             | "bootstrap.shell-error-channel" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 4,
                 rights: 0b1011,
@@ -104,6 +129,7 @@ impl AuthorityPolicy for Policy {
                 creatable: false,
             }),
             "bootstrap.root-directory" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 5,
                 rights: 0b11_1000_0001,
@@ -111,15 +137,26 @@ impl AuthorityPolicy for Policy {
                 duplicable: true,
                 creatable: false,
             }),
+            "bootstrap.dynamic-library-directory" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
+                provider: None,
+                object_kind: 5,
+                rights: READ | EXECUTE | DUPLICATE | TRANSFER,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
             "bootstrap.task-factory" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 6,
-                rights: 0b001_0000,
+                rights: 0b1_0000_0000_0000 | 0b001_0000 | 0b1000_0000 | 0b1_0000_0000,
                 movable: false,
                 duplicable: true,
                 creatable: false,
             }),
             "bootstrap.task-group" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 7,
                 rights: 0b010_0000,
@@ -128,14 +165,16 @@ impl AuthorityPolicy for Policy {
                 creatable: false,
             }),
             "bootstrap.resource-domain" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 8,
-                rights: 0b100_0000,
+                rights: 0b10_0000_0000_0000 | 0b100_0000 | 0b1000_0000 | 0b1_0000_0000,
                 movable: false,
                 duplicable: true,
                 creatable: false,
             }),
             "bootstrap.task-inspector" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 16,
                 rights: 0b1_1000_0100,
@@ -144,6 +183,7 @@ impl AuthorityPolicy for Policy {
                 creatable: false,
             }),
             "bootstrap.object-inspector" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 17,
                 rights: 0b1_1000_0100,
@@ -152,6 +192,7 @@ impl AuthorityPolicy for Policy {
                 creatable: false,
             }),
             "bootstrap.memory-inspector" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 18,
                 rights: 0b1_1000_0100,
@@ -160,6 +201,7 @@ impl AuthorityPolicy for Policy {
                 creatable: false,
             }),
             "bootstrap.cpu-inspector" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
                 provider: None,
                 object_kind: 19,
                 rights: 0b1_1000_0100,
@@ -167,53 +209,128 @@ impl AuthorityPolicy for Policy {
                 duplicable: true,
                 creatable: false,
             }),
+            "bootstrap.vm-creation-authority" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
+                provider: None,
+                object_kind: 20,
+                rights: 0b1100_0000_0000_0000 | 0b1000_0000 | 0b1_0000_0000,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            "bootstrap.vm-runtime-image" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
+                provider: None,
+                object_kind: 21,
+                rights: EXECUTE,
+                movable: false,
+                duplicable: false,
+                creatable: true,
+            }),
+            "bootstrap.vm-provisioning-channel" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
+                provider: None,
+                object_kind: 22,
+                rights: WAIT | READ | WRITE | TRANSFER,
+                movable: true,
+                duplicable: false,
+                creatable: false,
+            }),
             _ => None,
         }
     }
 
     fn startup_purpose(&self, image: &str, name: &str) -> Option<StartupPurposeDeclaration> {
-        let (value, object_kind) = match (image, name) {
-            ("/svc/vmm", "vmm.network-primary") => (100, 1),
+        let (value, object_kind, required_rights) = match (image, name) {
+            ("/svc/vmm", "vmm.network-primary") => (100, 1, READ | WRITE),
             ("/svc/session-manager", "session.console-manager")
-            | ("/svc/session-manager", "session.console-manager-alias") => (100, 2),
-            ("/svc/network-manager", "network.console-manager") => (101, 2),
-            ("/svc/console-input" | "/svc/console-output", "console.system") => (200, 3),
-            ("/svc/console-input" | "/svc/console-output", "console.data") => (201, 4),
-            ("/svc/session", "session.console-input") => (202, 4),
-            ("/svc/session", "session.console-output") => (203, 4),
-            ("/svc/session", "session.client-input") => (204, 4),
-            ("/svc/session", "session.client-output") => (205, 4),
-            ("/svc/session", "session.client-error") => (206, 4),
-            ("/bin/sh", "stdio.input") => (300, 4),
-            ("/bin/sh", "stdio.output") => (301, 4),
-            ("/bin/sh", "stdio.error") => (302, 4),
-            ("/bin/sh", "process.root-directory") => (303, 5),
-            ("/bin/sh", "process.task-factory") => (304, 6),
-            ("/bin/sh", "process.task-group") => (305, 7),
-            ("/bin/sh", "process.resource-domain") => (306, 8),
-            ("/bin/sh", "process.task-inspector") => (307, 16),
-            ("/bin/sh", "process.object-inspector") => (308, 17),
-            ("/bin/sh", "process.memory-inspector") => (309, 18),
-            ("/bin/sh", "process.cpu-inspector") => (310, 19),
+            | ("/svc/session-manager", "session.console-manager-alias") => (100, 2, INSPECT),
+            ("/svc/network-manager", "network.console-manager") => (101, 2, INSPECT),
+            ("/svc/console-input", "console.system") => (200, 3, WAIT | READ),
+            ("/svc/console-output", "console.system") => (200, 3, WAIT | WRITE),
+            ("/svc/console-input", "console.data") => (201, 4, WAIT | WRITE),
+            ("/svc/console-output", "console.data") => (201, 4, WAIT | READ),
+            ("/svc/session", "session.console-input") => (202, 4, WAIT | READ),
+            ("/svc/session", "session.console-output") => (203, 4, WAIT | WRITE),
+            ("/svc/session", "session.client-input") => (204, 4, WAIT | WRITE),
+            ("/svc/session", "session.client-output") => (205, 4, WAIT | READ),
+            ("/svc/session", "session.client-error") => (206, 4, WAIT | READ),
+            ("/bin/sh", "stdio.input") => (300, 4, WAIT | READ),
+            ("/bin/sh", "stdio.output") => (301, 4, WAIT | WRITE),
+            ("/bin/sh", "stdio.error") => (302, 4, WAIT | WRITE),
+            ("/bin/sh", "process.root-directory") => {
+                (303, 5, READ | DUPLICATE | TRANSFER | EXECUTE)
+            }
+            ("/bin/sh", "process.task-factory") => (304, 6, CREATE_PROCESS),
+            ("/bin/sh", "process.task-group") => (305, 7, ATTACH_PROCESS),
+            ("/bin/sh", "process.resource-domain") => (306, 8, SPONSOR),
+            ("/bin/sh", "process.task-inspector") => (307, 16, DUPLICATE | TRANSFER | INSPECT),
+            ("/bin/sh", "process.object-inspector") => (308, 17, DUPLICATE | TRANSFER | INSPECT),
+            ("/bin/sh", "process.memory-inspector") => (309, 18, DUPLICATE | TRANSFER | INSPECT),
+            ("/bin/sh", "process.cpu-inspector") => (310, 19, DUPLICATE | TRANSFER | INSPECT),
+            ("/bin/sh", "process.child-library-directory")
+            | ("/svc/vm-manager", "process.child-library-directory") => {
+                (315, 5, READ | EXECUTE | DUPLICATE | TRANSFER)
+            }
+            ("/svc/vm-manager", "vm.runtime-image") => (312, 21, EXECUTE),
+            ("/svc/vm-manager", "vm.provisioning") => {
+                (hyper_service::vm::PROVISIONING.as_raw(), 22, WAIT | READ)
+            }
+            ("/svc/vm-manager", "process.task-factory") => {
+                (304, 6, CREATE_PROCESS | CREATE_TASK_GROUP)
+            }
+            ("/svc/vm-manager", "process.resource-domain") => (306, 8, CREATE_RESOURCE_DOMAIN),
+            ("/svc/vm-manager", "vm.creation-authority") => {
+                (311, 20, DERIVE | CREATE_VIRTUAL_MACHINE)
+            }
             _ => return None,
         };
-        Some(StartupPurposeDeclaration { value, object_kind })
+        Some(StartupPurposeDeclaration {
+            value,
+            object_kind,
+            required_rights,
+            allowed_rights: required_rights,
+        })
     }
 
     fn right(&self, name: &str) -> Option<u64> {
         match name {
-            "read" => Some(0b001),
-            "write" => Some(0b010),
-            "inspect" => Some(0b100),
-            "wait" => Some(0b1000),
-            "create-process" => Some(0b001_0000),
-            "attach-process" => Some(0b010_0000),
-            "sponsor" => Some(0b100_0000),
-            "duplicate" => Some(0b1000_0000),
-            "transfer" => Some(0b1_0000_0000),
-            "execute" => Some(0b10_0000_0000),
+            "read" => Some(READ),
+            "write" => Some(WRITE),
+            "inspect" => Some(INSPECT),
+            "wait" => Some(WAIT),
+            "create-process" => Some(CREATE_PROCESS),
+            "attach-process" => Some(ATTACH_PROCESS),
+            "sponsor" => Some(SPONSOR),
+            "duplicate" => Some(DUPLICATE),
+            "transfer" => Some(TRANSFER),
+            "execute" => Some(EXECUTE),
+            "create-task-group" => Some(CREATE_TASK_GROUP),
+            "create-resource-domain" => Some(CREATE_RESOURCE_DOMAIN),
+            "derive" => Some(DERIVE),
+            "create-virtual-machine" => Some(CREATE_VIRTUAL_MACHINE),
             _ => None,
         }
+    }
+}
+
+struct CollidingPolicy;
+
+impl AuthorityPolicy for CollidingPolicy {
+    fn authority<'policy>(&'policy self, source: &str) -> Option<AuthorityDeclaration<'policy>> {
+        let declaration = Policy.authority(source)?;
+        Some(AuthorityDeclaration {
+            key: AuthorityKey::new(7),
+            ..declaration
+        })
+    }
+
+    fn startup_purpose(&self, image: &str, name: &str) -> Option<StartupPurposeDeclaration> {
+        Policy.startup_purpose(image, name)
+    }
+
+    fn right(&self, name: &str) -> Option<u64> {
+        Policy.right(name)
     }
 }
 
@@ -226,7 +343,116 @@ fn production_manifest_matches_the_validated_schema() {
     };
     let validated = validate(&manifest, &Policy);
     assert!(validated.is_ok());
-    assert_eq!(manifest.service_count(), 4);
+    let Ok(plan) = validated else {
+        return;
+    };
+    assert_eq!(manifest.service_count(), 5);
+    assert_eq!(plan.initial_vm_image(), Some("/vm/alpine.itb"));
+}
+
+#[test]
+fn rejects_a_noncanonical_initial_vm_image() {
+    let text = include_str!("../../../config/services.json")
+        .replace("/vm/alpine.itb", "/vm/../alpine.itb");
+    let parsed = parse(&text);
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    assert_eq!(
+        validate(&manifest, &Policy).map_err(|error| error.kind()),
+        Err(ValidationErrorKind::InvalidInitialVmImage)
+    );
+}
+
+#[test]
+fn production_vm_manager_is_bound_by_its_unique_provisioning_role() {
+    let parsed = parse(include_str!("../../../config/services.json"));
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    let validated = validate(&manifest, &Policy);
+    assert!(validated.is_ok());
+    let Ok(plan) = validated else {
+        return;
+    };
+    let expected = manifest
+        .services()
+        .enumerate()
+        .find_map(|(index, service)| (service.name() == "vm-manager").then_some(index));
+    assert_eq!(
+        plan.unique_service_for_purpose(hyper_service::vm::PROVISIONING.as_raw()),
+        expected
+    );
+}
+
+#[test]
+fn singleton_role_lookup_rejects_an_ambiguous_purpose() {
+    let parsed = parse(VALID);
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    let validated = validate(&manifest, &Policy);
+    assert!(validated.is_ok());
+    let Ok(plan) = validated else {
+        return;
+    };
+    assert_eq!(plan.unique_service_for_purpose(100), None);
+    assert_eq!(plan.unique_service_for_purpose(0), None);
+}
+
+#[test]
+fn production_manifest_marks_required_data_plane_services_critical() {
+    let parsed = parse(include_str!("../../../config/services.json"));
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    for name in ["console-input", "console-output", "session", "vm-manager"] {
+        let service = manifest.services().find(|service| service.name() == name);
+        assert!(service.is_some_and(|service| service.critical()));
+    }
+    let shell = manifest
+        .services()
+        .find(|service| service.name() == "shell");
+    assert!(shell.is_some_and(|service| !service.critical()));
+}
+
+#[test]
+fn process_launchers_receive_a_separate_delegatable_library_capability() {
+    let parsed = parse(include_str!("../../../config/services.json"));
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    let validated = validate(&manifest, &Policy);
+    assert!(validated.is_ok());
+    let Ok(plan) = validated else {
+        return;
+    };
+    let expected = READ | EXECUTE | DUPLICATE | TRANSFER;
+    for image in ["/bin/sh", "/svc/vm-manager"] {
+        let delegated = manifest
+            .services()
+            .enumerate()
+            .find(|(_, service)| service.image() == image)
+            .and_then(|(service_index, service)| {
+                service
+                    .capabilities()
+                    .enumerate()
+                    .find(|(_, capability)| {
+                        capability.source() == "bootstrap.dynamic-library-directory"
+                            && capability.purpose() == "process.child-library-directory"
+                    })
+                    .and_then(|(capability_index, _)| {
+                        plan.capability_grant(service_index, capability_index)
+                            .map(super::CapabilityGrant::rights)
+                    })
+            });
+        assert_eq!(delegated, Some(expected));
+    }
 }
 
 #[test]
@@ -246,10 +472,38 @@ fn parses_and_plans_a_complete_manifest_before_launch() {
     assert_eq!(plan.service_index(0), Some(1));
     assert_eq!(plan.service_index(1), Some(0));
     assert_eq!(plan.service_index(2), Some(2));
-    assert_eq!(plan.capability_rights(0, 0), Some(0b11));
-    assert_eq!(plan.capability_kind(2, 0), Some(2));
-    assert_eq!(plan.capability_purpose(0, 0), Some(100));
-    assert_eq!(plan.capability_purpose(2, 0), Some(100));
+    let first = plan.capability_grant(0, 0);
+    assert!(first.is_some());
+    let Some(first) = first else {
+        return;
+    };
+    assert_eq!(first.rights(), 0b11);
+    assert_eq!(first.object_kind(), 1);
+    assert_eq!(first.purpose(), 100);
+    assert_eq!(first.authority(), test_authority_key("network.primary"));
+    assert_eq!(
+        plan.capability_grant(2, 0)
+            .map(super::CapabilityGrant::object_kind),
+        Some(2)
+    );
+    assert_eq!(
+        plan.capability_grant(2, 0)
+            .map(super::CapabilityGrant::purpose),
+        Some(100)
+    );
+}
+
+#[test]
+fn rejects_authority_key_reuse_for_distinct_sources() {
+    let parsed = parse(VALID);
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    assert_eq!(
+        validate(&manifest, &CollidingPolicy).map_err(|error| error.kind()),
+        Err(ValidationErrorKind::ConflictingAuthorityKey)
+    );
 }
 
 #[test]
@@ -343,6 +597,76 @@ fn rejects_rights_escalation() {
         validate(&manifest, &Policy).map_err(|error| error.kind()),
         Err(ValidationErrorKind::RightsEscalation)
     );
+}
+
+#[test]
+fn rejects_rights_below_the_destination_contract() {
+    let under_delegated = VALID.replace(
+        "\"rights\": [\"read\", \"write\"]",
+        "\"rights\": [\"read\"]",
+    );
+    let parsed = parse(&under_delegated);
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    let error = validate(&manifest, &Policy);
+    assert_eq!(
+        error.map_err(|error| (error.kind(), error.service(), error.capability())),
+        Err((ValidationErrorKind::MissingRequiredRights, Some(0), Some(0)))
+    );
+}
+
+#[test]
+fn rejects_rights_above_the_destination_contract() {
+    let production = include_str!("../../../config/services.json");
+    let over_delegated =
+        production.replacen("[\"wait\", \"read\"]", "[\"wait\", \"read\", \"write\"]", 1);
+    let parsed = parse(&over_delegated);
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    assert_eq!(
+        validate(&manifest, &Policy).map_err(|error| (
+            error.kind(),
+            error.service(),
+            error.capability()
+        )),
+        Err((ValidationErrorKind::ExcessPurposeRights, Some(0), Some(0),))
+    );
+}
+
+#[test]
+fn production_launch_contract_rejects_under_delegated_directory_authority() {
+    let production = include_str!("../../../config/services.json");
+    for (under_delegated, service, capability) in [(
+        production.replacen(
+            "[\"read\", \"duplicate\", \"transfer\", \"execute\"]",
+            "[\"read\", \"execute\"]",
+            1,
+        ),
+        3,
+        3,
+    )] {
+        let parsed = parse(&under_delegated);
+        assert!(parsed.is_ok());
+        let Ok(manifest) = parsed else {
+            continue;
+        };
+        assert_eq!(
+            validate(&manifest, &Policy).map_err(|error| (
+                error.kind(),
+                error.service(),
+                error.capability()
+            )),
+            Err((
+                ValidationErrorKind::MissingRequiredRights,
+                Some(service),
+                Some(capability),
+            ))
+        );
+    }
 }
 
 #[test]

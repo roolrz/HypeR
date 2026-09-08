@@ -76,6 +76,11 @@ pub const MEMORY_INSPECTOR: StartupPurpose<crate::handle::MemoryInspectorObject>
     StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR as u32);
 pub const CPU_INSPECTOR: StartupPurpose<crate::handle::CpuInspectorObject> =
     StartupPurpose::new(hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR as u32);
+pub const VIRTUAL_MACHINE_CREATION_AUTHORITY: StartupPurpose<
+    crate::handle::VirtualMachineCreationAuthorityObject,
+> = StartupPurpose::new(
+    hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_VIRTUAL_MACHINE_CREATION_AUTHORITY as u32,
+);
 pub const DYNAMIC_LIBRARY_DIRECTORY: StartupPurpose<DirectoryObject> = StartupPurpose::new(
     hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY as u32,
 );
@@ -197,6 +202,10 @@ impl<'runtime> Startup<'runtime> {
     }
 
     /// Moves the process's `TaskGroup` authority out exactly once.
+    ///
+    /// The handle remains a shared lifetime owner even when its operational
+    /// rights are attenuated. Closing the last group handle asynchronously
+    /// requests stop for all group members.
     pub fn take_task_group(&mut self) -> Result<OwnedHandle<TaskGroupObject>> {
         self.take(TASK_GROUP)
     }

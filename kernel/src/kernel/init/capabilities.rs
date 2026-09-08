@@ -14,9 +14,9 @@ use super::Error;
 use super::bootstrap::{self, BootProcess};
 
 #[cfg(not(feature = "kernel-self-test"))]
-pub(super) const HANDLE_COUNT: usize = 11;
+pub(super) const HANDLE_COUNT: usize = 12;
 #[cfg(feature = "kernel-self-test")]
-pub(super) const HANDLE_COUNT: usize = 10;
+pub(super) const HANDLE_COUNT: usize = 11;
 
 const PURPOSES: [u32; HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN),
@@ -28,6 +28,9 @@ const PURPOSES: [u32; HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR),
+    purpose(
+        hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_VIRTUAL_MACHINE_CREATION_AUTHORITY,
+    ),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR),
     #[cfg(not(feature = "kernel-self-test"))]
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE),
@@ -127,6 +130,14 @@ fn prepare_handles(
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT),
     )?;
+    let vm_authority = prepare_handle(
+        ObjectPublication::try_new(
+            crate::kernel::vm::objects::VirtualMachineCreationAuthority::try_new(domain)
+                .map_err(Error::VirtualMachineObject)?,
+        )
+        .map_err(Error::Object)?,
+        <crate::kernel::vm::objects::VirtualMachineCreationAuthority as crate::kernel::object::KernelObject>::SUPPORTED_RIGHTS,
+    )?;
     #[cfg(not(feature = "kernel-self-test"))]
     let console = prepare_handle(
         crate::kernel::device::console::SystemConsole::try_publication(domain)
@@ -164,6 +175,7 @@ fn prepare_handles(
         object_inspector,
         memory_inspector,
         cpu_inspector,
+        vm_authority,
         root_vmar,
         #[cfg(not(feature = "kernel-self-test"))]
         console,

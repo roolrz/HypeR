@@ -13,12 +13,18 @@ copy_tree() {
     rm -rf "$fixture/src"
     mkdir -p "$fixture/src/arch/aarch64" "$fixture/src/hal/selected" \
         "$fixture/src/kernel/entry/vmexit" "$fixture/src/kernel/time" \
-        "$fixture/src/kernel/task/scheduler" "$fixture/src/kernel/vm/vcpu" "$fixture/src/kernel/vm/device" \
+        "$fixture/src/kernel/task/scheduler" "$fixture/src/kernel/vm/vcpu" \
+        "$fixture/src/kernel/vm/device" "$fixture/src/kernel/vm/memory" \
         "$fixture/src/time"
     cp "$root/src/arch/aarch64/context.S" "$fixture/src/arch/aarch64/context.S"
     cp "$root/src/arch/aarch64/context.rs" "$fixture/src/arch/aarch64/context.rs"
     cp "$root/src/arch/aarch64/exception.rs" "$fixture/src/arch/aarch64/exception.rs"
+    cp "$root/src/arch/aarch64/guest_cpu_contract.rs" \
+        "$fixture/src/arch/aarch64/guest_cpu_contract.rs"
+    cp "$root/src/arch/aarch64/guest_cpu_model.rs" "$fixture/src/arch/aarch64/guest_cpu_model.rs"
+    cp "$root/src/arch/aarch64/mod.rs" "$fixture/src/arch/aarch64/mod.rs"
     cp "$root/src/arch/aarch64/registers.rs" "$fixture/src/arch/aarch64/registers.rs"
+    cp "$root/src/arch/aarch64/vm_vcpu.rs" "$fixture/src/arch/aarch64/vm_vcpu.rs"
     cp "$root/src/arch/aarch64/vsysreg.rs" "$fixture/src/arch/aarch64/vsysreg.rs"
     cp "$root/src/arch/aarch64/vectors.S" "$fixture/src/arch/aarch64/vectors.S"
     cp "$root/src/hal/selected/vm.rs" "$fixture/src/hal/selected/vm.rs"
@@ -33,9 +39,12 @@ copy_tree() {
     cp "$root/src/kernel/vm/endpoint_wait.rs" "$fixture/src/kernel/vm/endpoint_wait.rs"
     cp "$root/src/kernel/vm/endpoint_state.rs" "$fixture/src/kernel/vm/endpoint_state.rs"
     cp "$root/src/kernel/vm/memory.rs" "$fixture/src/kernel/vm/memory.rs"
+    cp "$root/src/kernel/vm/memory/construction.rs" \
+        "$fixture/src/kernel/vm/memory/construction.rs"
     cp "$root/src/kernel/vm/registry.rs" "$fixture/src/kernel/vm/registry.rs"
     cp "$root/src/kernel/time/timers.rs" "$fixture/src/kernel/time/timers.rs"
     cp "$root/src/kernel/vm/vcpu/runner.rs" "$fixture/src/kernel/vm/vcpu/runner.rs"
+    cp "$root/src/kernel/vm/vcpu/execution.rs" "$fixture/src/kernel/vm/vcpu/execution.rs"
     cp "$root/src/kernel/vm/vcpu/lifecycle.rs" "$fixture/src/kernel/vm/vcpu/lifecycle.rs"
     cp "$root/src/kernel/vm/vcpu/transition.rs" "$fixture/src/kernel/vm/vcpu/transition.rs"
     cp "$root/src/time/owned_queue.rs" "$fixture/src/time/owned_queue.rs"
@@ -81,6 +90,23 @@ mutate 'synchronous terminal payload must retain the decoded exit' \
 mutate 'synchronous emulation failure must retain its typed error' \
     src/arch/aarch64/vsysreg.rs \
     's/Err(error) =>/Err(_error) =>/'
+mutate 'stage-2 execute permission faults must remain recoverable' \
+    src/arch/aarch64/vsysreg.rs \
+    's/ESR_ABORT_PERMISSION_FAULT_LEVEL0/ESR_ABORT_TRANSLATION_FAULT_LEVEL0/'
+mutate 'guest identity must initialize VMPIDR_EL2' \
+    src/arch/aarch64/vsysreg.rs 's/msr VMPIDR_EL2/msr TPIDR_EL2/'
+mutate 'guest feature discovery must hide nested virtualization' \
+    src/arch/aarch64/guest_cpu_contract.rs \
+    's/raw.mmfr2 & !registers::ID_AA64MMFR2_NV_MASK/raw.mmfr2/'
+mutate 'secondary admission must enforce the frozen guest CPU model' \
+    src/arch/aarch64/mod.rs \
+    's/guest_cpu_model::current_cpu_is_compatible()/guest_cpu_model::admission_bypassed()/'
+mutate 'virtual processor identity must remain frozen across migration' \
+    src/arch/aarch64/vsysreg.rs \
+    's/super::guest_cpu_model::processor_identity()/read_midr_el1()/'
+mutate 'guest activation must install its virtual processor identity' \
+    src/arch/aarch64/vm_vcpu.rs \
+    's/activate_virtual_identity(vcpu_id)/skip_virtual_identity(vcpu_id)/'
 mutate 'a CPU-affine guard must not span a migratable guest run' \
     src/kernel/vm/vcpu/runner.rs \
     's/fn run_current() {/fn run_current() { let _migration_bug: Option<InterruptMaskGuard<LocalMask>> = None;/'
@@ -116,11 +142,11 @@ mutate 'HardwareDetached must not precede execution release' \
     src/kernel/vm/vcpu/runner.rs \
     's/publish_hardware_detached_and_arm_reap/publish_hardware_detached_before_release/'
 mutate 'vCPU reap publication must follow payload destruction' \
-    src/kernel/task/scheduler/mod.rs 's/complete_vcpu_reap/complete_vcpu_reap_before_drop/'
+    src/kernel/task/scheduler/mod.rs 's/publication\.complete()/publication.complete_before_thread_drop()/'
 mutate 'exact vCPU reap completion must remain non-cloneable' \
-    src/kernel/vm/registry.rs \
-    's/#\[derive(Debug, Eq, PartialEq)\]/#[derive(Clone, Copy, Debug, Eq, PartialEq)]/'
+    src/kernel/vm/vcpu/execution.rs \
+    's/pub(in crate::kernel) struct VcpuReapPublication/#[derive(Clone)]\npub(in crate::kernel) struct VcpuReapPublication/'
 mutate 'active address spaces must not reach field destruction' \
     src/kernel/vm/memory.rs 's/destruction_is_safe(state)/true/'
 mutate 'repeated VMID activation must preserve Active ownership' \
-    src/kernel/vm/memory.rs 's/activation_may_begin(state)/true/'
+    src/kernel/vm/memory/construction.rs 's/activation_may_begin(state)/true/'

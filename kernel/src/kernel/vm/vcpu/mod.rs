@@ -3,18 +3,20 @@
 
 //! vCPU scheduler runner and local hardware-transition facade.
 
+mod execution;
 mod lifecycle;
 mod runner;
 mod transition;
 
 use super::{active_vcpu, memory, registry, timer};
 
+#[cfg(feature = "kernel-self-test")]
 pub use crate::hal::vm::VcpuInterruptError;
+pub(in crate::kernel) use execution::VcpuExecution;
 #[allow(unused_imports)]
 pub(crate) use lifecycle::{DetachedStopError, complete_detached_stop_if_requested};
-pub use runner::RunError;
 pub(super) use runner::create_thread;
-pub use transition::HardwareTransitionError;
+pub(crate) use transition::HardwareTransitionError;
 pub(crate) use transition::{activate, deactivate};
 #[allow(unused_imports)]
 pub(crate) use transition::{

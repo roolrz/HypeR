@@ -317,6 +317,7 @@ pub enum ObjectHandleState {
 pub struct ObjectReferenceCounts {
     pub strong: u64,
     pub kernel_service: u64,
+    pub vm_device_binding: u64,
     pub scheduler: u64,
     pub operation: u64,
     pub user_authority: u64,
@@ -398,10 +399,11 @@ impl TaskInspector {
     }
 
     pub fn derive_process(&self, process: HandleRef<'_, ProcessObject>) -> Result<TaskInspector> {
-        adopt_inspector(raw_ops::derive_task_process(
-            self.handle.as_handle_ref(),
-            process,
-        ))
+        let inspector = self.handle.as_handle_ref();
+        adopt_inspector(
+            raw_ops::derive_task_process(inspector, process),
+            &[inspector.raw(), process.raw()],
+        )
         .map(TaskInspector::from_handle)
     }
 
@@ -409,10 +411,11 @@ impl TaskInspector {
         &self,
         group: HandleRef<'_, TaskGroupObject>,
     ) -> Result<TaskInspector> {
-        adopt_inspector(raw_ops::derive_task_group(
-            self.handle.as_handle_ref(),
-            group,
-        ))
+        let inspector = self.handle.as_handle_ref();
+        adopt_inspector(
+            raw_ops::derive_task_group(inspector, group),
+            &[inspector.raw(), group.raw()],
+        )
         .map(TaskInspector::from_handle)
     }
 
@@ -420,10 +423,11 @@ impl TaskInspector {
         &self,
         domain: HandleRef<'_, ResourceDomainObject>,
     ) -> Result<TaskInspector> {
-        adopt_inspector(raw_ops::derive_task_domain(
-            self.handle.as_handle_ref(),
-            domain,
-        ))
+        let inspector = self.handle.as_handle_ref();
+        adopt_inspector(
+            raw_ops::derive_task_domain(inspector, domain),
+            &[inspector.raw(), domain.raw()],
+        )
         .map(TaskInspector::from_handle)
     }
 
@@ -447,10 +451,13 @@ impl MemoryInspector {
     pub fn read(&self) -> Result<MemoryObservation> {
         let mut record = ZERO_MEMORY;
         // SAFETY: the typed handle remains borrowed and `record` is writable.
-        let status = unsafe {
+        let result = unsafe {
             hyper_sys::memory_inspector_read(self.handle.as_handle_ref().raw().get(), &mut record)
         };
-        Status::from_raw(status).into_result()?;
+        let _supported_size = crate::validate_info_result(
+            result,
+            hyper_abi::HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE,
+        )?;
         validate_memory_observation(&record)?;
         Ok(MemoryObservation {
             captured_at_ns: record.captured_at_ns,
@@ -485,10 +492,11 @@ impl CpuInspector {
     pub fn read(&self) -> Result<CpuObservation> {
         let mut record = ZERO_CPU;
         // SAFETY: the typed handle remains borrowed and `record` is writable.
-        let status = unsafe {
+        let result = unsafe {
             hyper_sys::cpu_inspector_read(self.handle.as_handle_ref().raw().get(), &mut record)
         };
-        Status::from_raw(status).into_result()?;
+        let _supported_size =
+            crate::validate_info_result(result, hyper_abi::HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE)?;
         if record.reserved != 0 || record.ticks_per_second == 0 || record.online_cpus == 0 {
             return Err(Error::InvalidResponse);
         }
@@ -543,33 +551,7 @@ impl ObjectInspector {
         let (count, next) = decode_scan_result(result, OBJECT_PAGE_CAPACITY)?;
         let mut page = InspectionPage::empty(next);
         for record in &records[..count] {
-            let handles = match record.handle_state as u64 {
-                hyper_abi::HYPER_NATIVE_OBJECT_HANDLE_STATE_UNPUBLISHED => {
-                    ObjectHandleState::Unpublished
-                }
-                hyper_abi::HYPER_NATIVE_OBJECT_HANDLE_STATE_ACTIVE => {
-                    ObjectHandleState::Active(record.active_handles)
-                }
-                hyper_abi::HYPER_NATIVE_OBJECT_HANDLE_STATE_RETIRED => ObjectHandleState::Retired,
-                _ => return Err(Error::InvalidResponse),
-            };
-            page.push(ObjectObservation {
-                koid: Koid::from_raw(record.koid)?,
-                object_kind: ObjectKind::from_kernel(record.object_kind)?,
-                handles,
-                supported_rights: Rights::from_bits(record.supported_rights)
-                    .ok_or(Error::InvalidResponse)?,
-                references: ObjectReferenceCounts {
-                    strong: record.strong_references,
-                    kernel_service: record.kernel_service_references,
-                    scheduler: record.scheduler_references,
-                    operation: record.operation_references,
-                    user_authority: record.user_authority_references,
-                    publication: record.publication_references,
-                    diagnostic: record.diagnostic_references,
-                    retirement: record.retirement_references,
-                },
-            })?;
+            page.push(decode_object_observation(record)?)?;
         }
         Ok(page)
     }
@@ -602,10 +584,11 @@ impl ObjectInspector {
     }
 
     pub fn derive_process(&self, process: HandleRef<'_, ProcessObject>) -> Result<ObjectInspector> {
-        adopt_object_inspector(raw_ops::derive_object_process(
-            self.handle.as_handle_ref(),
-            process,
-        ))
+        let inspector = self.handle.as_handle_ref();
+        adopt_object_inspector(
+            raw_ops::derive_object_process(inspector, process),
+            &[inspector.raw(), process.raw()],
+        )
         .map(ObjectInspector::from_handle)
     }
 
@@ -613,10 +596,11 @@ impl ObjectInspector {
         &self,
         group: HandleRef<'_, TaskGroupObject>,
     ) -> Result<ObjectInspector> {
-        adopt_object_inspector(raw_ops::derive_object_group(
-            self.handle.as_handle_ref(),
-            group,
-        ))
+        let inspector = self.handle.as_handle_ref();
+        adopt_object_inspector(
+            raw_ops::derive_object_group(inspector, group),
+            &[inspector.raw(), group.raw()],
+        )
         .map(ObjectInspector::from_handle)
     }
 
@@ -624,10 +608,11 @@ impl ObjectInspector {
         &self,
         domain: HandleRef<'_, ResourceDomainObject>,
     ) -> Result<ObjectInspector> {
-        adopt_object_inspector(raw_ops::derive_object_domain(
-            self.handle.as_handle_ref(),
-            domain,
-        ))
+        let inspector = self.handle.as_handle_ref();
+        adopt_object_inspector(
+            raw_ops::derive_object_domain(inspector, domain),
+            &[inspector.raw(), domain.raw()],
+        )
         .map(ObjectInspector::from_handle)
     }
 
@@ -635,6 +620,37 @@ impl ObjectInspector {
     pub fn as_handle_ref(&self) -> HandleRef<'_, ObjectInspectorObject> {
         self.handle.as_handle_ref()
     }
+}
+
+fn decode_object_observation(
+    record: &hyper_abi::HyperNativeObjectInspection,
+) -> Result<ObjectObservation> {
+    let handles = match record.handle_state as u64 {
+        hyper_abi::HYPER_NATIVE_OBJECT_HANDLE_STATE_UNPUBLISHED => ObjectHandleState::Unpublished,
+        hyper_abi::HYPER_NATIVE_OBJECT_HANDLE_STATE_ACTIVE => {
+            ObjectHandleState::Active(record.active_handles)
+        }
+        hyper_abi::HYPER_NATIVE_OBJECT_HANDLE_STATE_RETIRED => ObjectHandleState::Retired,
+        _ => return Err(Error::InvalidResponse),
+    };
+    Ok(ObjectObservation {
+        koid: Koid::from_raw(record.koid)?,
+        object_kind: ObjectKind::from_kernel(record.object_kind)?,
+        handles,
+        supported_rights: Rights::from_bits(record.supported_rights)
+            .ok_or(Error::InvalidResponse)?,
+        references: ObjectReferenceCounts {
+            strong: record.strong_references,
+            kernel_service: record.kernel_service_references,
+            vm_device_binding: record.vm_device_binding_references,
+            scheduler: record.scheduler_references,
+            operation: record.operation_references,
+            user_authority: record.user_authority_references,
+            publication: record.publication_references,
+            diagnostic: record.diagnostic_references,
+            retirement: record.retirement_references,
+        },
+    })
 }
 
 fn decode_scan_result(
@@ -652,16 +668,20 @@ fn decode_scan_result(
     ))
 }
 
-fn adopt_inspector(result: hyper_sys::CallResult) -> Result<OwnedHandle<TaskInspectorObject>> {
-    adopt_handle(result, TaskInspectorObject::KIND.as_raw())?
+fn adopt_inspector(
+    result: hyper_sys::CallResult,
+    live_inputs: &[NonZeroU64],
+) -> Result<OwnedHandle<TaskInspectorObject>> {
+    adopt_handle(result, TaskInspectorObject::KIND.as_raw(), live_inputs)?
         .downcast()
         .map_err(|failure| failure.error())
 }
 
 fn adopt_object_inspector(
     result: hyper_sys::CallResult,
+    live_inputs: &[NonZeroU64],
 ) -> Result<OwnedHandle<ObjectInspectorObject>> {
-    adopt_handle(result, ObjectInspectorObject::KIND.as_raw())?
+    adopt_handle(result, ObjectInspectorObject::KIND.as_raw(), live_inputs)?
         .downcast()
         .map_err(|failure| failure.error())
 }
@@ -669,11 +689,14 @@ fn adopt_object_inspector(
 fn adopt_handle(
     result: hyper_sys::CallResult,
     expected_kind: u32,
+    live_inputs: &[NonZeroU64],
 ) -> Result<OwnedHandle<AnyObject>> {
     Status::from_raw(result.status).into_result()?;
-    let raw = NonZeroU64::new(result.value0).ok_or(Error::InvalidResponse)?;
-    // SAFETY: each successful derivation publishes one uniquely owned handle.
-    let owner = unsafe { OwnedHandle::<AnyObject>::from_raw_owned(raw) };
+    // SAFETY: successful derivation publishes one new owner unless malformed
+    // output aliases an explicitly retained input borrow.
+    let owner = unsafe {
+        crate::handle::adopt_produced_handle_excluding::<AnyObject>(result.value0, live_inputs)?
+    };
     let info = owner.info()?;
     if info.kind.as_raw() != expected_kind || info.rights != INSPECTOR_RIGHTS {
         return Err(Error::InvalidResponse);
@@ -741,6 +764,7 @@ const ZERO_OBJECT: hyper_abi::HyperNativeObjectInspection =
         supported_rights: 0,
         strong_references: 0,
         kernel_service_references: 0,
+        vm_device_binding_references: 0,
         scheduler_references: 0,
         operation_references: 0,
         user_authority_references: 0,
@@ -883,8 +907,8 @@ mod raw_ops {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProcessPhase, TASK_NAME_CAPACITY, TaskName, TerminalReason, ThreadRegistryPhase,
-        ThreadRole, validate_memory_observation,
+        ObjectHandleState, ProcessPhase, TASK_NAME_CAPACITY, TaskName, TerminalReason,
+        ThreadRegistryPhase, ThreadRole, decode_object_observation, validate_memory_observation,
     };
 
     #[test]
@@ -953,6 +977,39 @@ mod tests {
             validate_memory_observation(&record),
             Err(crate::Error::InvalidResponse)
         );
+    }
+
+    #[test]
+    fn object_observation_preserves_every_reference_class() -> crate::Result<()> {
+        let record = hyper_abi::HyperNativeObjectInspection {
+            koid: 7,
+            object_kind: hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE,
+            handle_state: hyper_abi::HYPER_NATIVE_OBJECT_HANDLE_STATE_ACTIVE as u32,
+            active_handles: 2,
+            supported_rights: hyper_abi::HYPER_NATIVE_RIGHT_INSPECT,
+            strong_references: 11,
+            kernel_service_references: 1,
+            vm_device_binding_references: 2,
+            scheduler_references: 3,
+            operation_references: 4,
+            user_authority_references: 5,
+            publication_references: 6,
+            diagnostic_references: 7,
+            retirement_references: 8,
+        };
+
+        let observation = decode_object_observation(&record)?;
+        assert_eq!(observation.handles, ObjectHandleState::Active(2));
+        assert_eq!(observation.references.strong, 11);
+        assert_eq!(observation.references.kernel_service, 1);
+        assert_eq!(observation.references.vm_device_binding, 2);
+        assert_eq!(observation.references.scheduler, 3);
+        assert_eq!(observation.references.operation, 4);
+        assert_eq!(observation.references.user_authority, 5);
+        assert_eq!(observation.references.publication, 6);
+        assert_eq!(observation.references.diagnostic, 7);
+        assert_eq!(observation.references.retirement, 8);
+        Ok(())
     }
 }
 

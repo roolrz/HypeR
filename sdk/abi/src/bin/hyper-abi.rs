@@ -18,8 +18,8 @@ fn main() -> ExitCode {
     }
 
     let result = match operation.as_deref().and_then(|value| value.to_str()) {
-        Some("check") => generator::check_repository_outputs(Path::new(".")),
-        Some("write") => generator::write_repository_outputs(Path::new(".")),
+        Some("check") => generator::check_repository_outputs(Path::new(env!("CARGO_MANIFEST_DIR"))),
+        Some("write") => generator::write_repository_outputs(Path::new(env!("CARGO_MANIFEST_DIR"))),
         _ => {
             eprintln!("usage: hyper-abi {{check|write}}");
             return ExitCode::from(2);

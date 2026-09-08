@@ -9,6 +9,7 @@ root=${HYPER_THREAD_RESOURCE_ALIAS_ROOT:-$(CDPATH='' cd -- "$(dirname "$0")/../.
 cd "$root"
 
 thread=src/kernel/task/thread.rs
+external_execution=src/kernel/task/external_execution.rs
 state=src/kernel/task/scheduler/state.rs
 scheduler=src/kernel/task/scheduler/mod.rs
 user_entry=src/kernel/entry/user.rs
@@ -37,8 +38,12 @@ require 'struct Thread \{[\s\S]*resources: Box<ThreadResources>' \
     "$thread" 'Thread resources must occupy a private stable allocation'
 require 'struct ThreadResources \{[\s\S]*context: UnsafeCell<crate::hal::context::ThreadContext>' \
     "$thread" 'assembly-owned ThreadContext must be reached through UnsafeCell'
-require 'Vcpu\(Box<UnsafeCell<VcpuExecution>>\)' \
-    "$thread" 'repeated current-vCPU queries must not mint overlapping mutable references'
+require 'Vcpu\(ExternalThreadExecution\)' \
+    "$thread" 'scheduler Threads must own vCPU payloads through one type-erased allocation'
+require '#\[derive\(Clone, Copy, Eq, PartialEq\)\][\s\S]*struct ExternalExecutionPointer[\s\S]*pointer: NonNull<\(\)>[\s\S]*type_id: TypeId' \
+    "$external_execution" 'current-vCPU queries must return a copyable typed raw witness'
+require 'fn downcast<T: '\''static>\(self\) -> Option<NonNull<T>>' \
+    "$external_execution" 'execution witnesses must recover typed raw pointers, never mutable references'
 require 'User\(Box<UnsafeCell<crate::kernel::process::UserExecution>>\)' \
     "$thread" 'repeated current-user queries must not retag the stable payload'
 require 'fn allocate_resources[\s\S]*try_box\(ThreadResources' \
@@ -47,7 +52,7 @@ require 'fn allocation_size\(\) -> usize \{[\s\S]*size_of::<Self>\(\)[\s\S]*size
     "$thread" 'resource accounting must include the private allocation'
 require 'fn context_pointer\(&self\)[\s\S]*self\.resources\.context\.get\(\)' \
     "$thread" 'context pointers must come from the dedicated cell without a Rust reference'
-require 'fn vcpu_execution_pointer\(&self\)[\s\S]*ThreadExecution::Vcpu\(execution\) => Some\(execution\.get\(\)\)' \
+require 'fn vcpu_execution_pointer\([\s\S]*&self[\s\S]*ThreadExecution::Vcpu\(execution\) => Some\(execution\.pointer\(\)\)' \
     "$thread" 'vCPU pointers must come from the payload cell without an exclusive borrow'
 require 'fn user_execution_pointer[\s\S]*NonNull::new\(execution\.get\(\)\)' \
     "$thread" 'user payload pointers must come from the payload cell without an exclusive borrow'
@@ -63,6 +68,8 @@ reject 'fn context_mut\(' "$thread" \
     'ThreadContext must not be exposed through a repeatable mutable reference'
 reject 'fn (vcpu|user)_execution_mut\(' "$thread" \
     'execution payloads must not expose repeatable whole-object mutable borrows'
+reject 'fn downcast<T:[^>]*>\(self\) -> Option<&mut T>' "$external_execution" \
+    'the copyable execution witness must never mint an exclusive Rust reference'
 reject 'execution\.as_mut\(\)' "$user_entry" \
     'native-user entry must not turn its shared-derived owner pointer into &mut'
 reject 'self\.resources[[:space:]]*=' "$thread" \

@@ -335,6 +335,12 @@ fn validate_generated_constant_names(schema: &AbiSchema) -> Result<(), Error> {
     for constant in schema.constants {
         insert(format!("HYPER_NATIVE_{}", upper_snake(constant.name)))?;
     }
+    for record in schema.records {
+        insert(format!(
+            "HYPER_NATIVE_{}_MIN_SIZE",
+            upper_snake(record.name)
+        ))?;
+    }
     for syscall in schema.syscalls {
         insert(format!("HYPER_NATIVE_SYS_{}", upper_snake(syscall.name)))?;
     }
@@ -348,7 +354,10 @@ fn validate_records(schema: &AbiSchema) -> Result<(), Error> {
         if !names.insert(record.name) {
             return invalid(format!("record {} is declared more than once", record.name));
         }
-        if !matches!(record.alignment, 1 | 2 | 4 | 8) || record.size == 0 {
+        if !matches!(record.alignment, 1 | 2 | 4 | 8)
+            || record.minimum_size == 0
+            || record.size == 0
+        {
             return invalid(format!(
                 "record {} has an invalid size or alignment",
                 record.name
@@ -358,6 +367,12 @@ fn validate_records(schema: &AbiSchema) -> Result<(), Error> {
             || record.size % u16::from(record.alignment) != 0
         {
             return invalid(format!("record {} size is not aligned", record.name));
+        }
+        if record.minimum_size > record.size {
+            return invalid(format!(
+                "record {} minimum size exceeds its current size",
+                record.name
+            ));
         }
 
         let mut field_names = BTreeSet::new();
@@ -396,6 +411,12 @@ fn validate_records(schema: &AbiSchema) -> Result<(), Error> {
             if end > record.size {
                 return invalid(format!(
                     "record {} field {} exceeds its size",
+                    record.name, field.name
+                ));
+            }
+            if field.offset < record.minimum_size && end > record.minimum_size {
+                return invalid(format!(
+                    "record {} minimum size splits field {}",
                     record.name, field.name
                 ));
             }
@@ -1129,6 +1150,12 @@ fn render_rust(schema: &AbiSchema) -> String {
     render_rust_failure_result_mask(&mut output, schema);
     for record in schema.records {
         let rust_name = upper_camel(record.name);
+        let _ = writeln!(
+            output,
+            "pub const HYPER_NATIVE_{}_MIN_SIZE: usize = {};",
+            upper_snake(record.name),
+            record.minimum_size
+        );
         output.push_str("#[repr(C)]\n#[derive(Clone, Copy, Debug, Eq, PartialEq)]\n");
         let _ = writeln!(output, "pub struct HyperNative{rust_name} {{");
         let mut cursor = 0u16;
@@ -1175,8 +1202,14 @@ fn render_rust(schema: &AbiSchema) -> String {
             );
             if "const _: () = ".len() + assertion.len() <= 100 {
                 let _ = writeln!(output, "const _: () = {assertion}");
-            } else {
+            } else if "    ".len() + assertion.len() <= 100 {
                 let _ = writeln!(output, "const _: () =\n    {assertion}");
+            } else {
+                let _ = writeln!(
+                    output,
+                    "const _: () = assert!(\n    core::mem::offset_of!(HyperNative{rust_name}, {}) == {}\n);",
+                    field.name, field.offset
+                );
             }
         }
         output.push('\n');
@@ -1194,12 +1227,17 @@ fn render_rust_transfer_classes(output: &mut String, schema: &AbiSchema) {
     output.push_str("pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {\n");
     output.push_str("    match object_kind {\n");
     for object in schema.object_kinds {
-        let _ = writeln!(
-            output,
-            "        HYPER_NATIVE_OBJECT_{} => {},",
-            upper_snake(object.name),
-            rust_transfer_class_constant(object.transfer)
-        );
+        let object_constant = format!("HYPER_NATIVE_OBJECT_{}", upper_snake(object.name));
+        let class_constant = rust_transfer_class_constant(object.transfer);
+        let arm = format!("        {object_constant} => {class_constant},");
+        if arm.len() <= 100 {
+            let _ = writeln!(output, "{arm}");
+        } else {
+            let _ = writeln!(
+                output,
+                "        {object_constant} => {{\n            {class_constant}\n        }}"
+            );
+        }
     }
     output.push_str("        _ => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,\n");
     output.push_str("    }\n");
@@ -1401,6 +1439,12 @@ fn render_c(schema: &AbiSchema) -> String {
     );
     render_c_failure_result_mask(&mut output, schema);
     for record in schema.records {
+        let _ = writeln!(
+            output,
+            "#define HYPER_NATIVE_{}_MIN_SIZE UINT64_C({})",
+            upper_snake(record.name),
+            record.minimum_size
+        );
         let _ = writeln!(output, "typedef struct hyper_native_{}_t {{", record.name);
         let mut cursor = 0u16;
         let mut padding = 0usize;
@@ -1674,7 +1718,7 @@ fn render_reference(schema: &AbiSchema) -> String {
             syscall.audit
         );
     }
-    output.push_str("\n## Public records\n\n| Name | Size | Alignment | Fields |\n| --- | ---: | ---: | --- |\n");
+    output.push_str("\n## Public records\n\n| Name | Minimum prefix | Size | Alignment | Fields |\n| --- | ---: | ---: | ---: | --- |\n");
     for record in schema.records {
         let fields = joined_values(record.fields.iter().map(|field| {
             format!(
@@ -1686,8 +1730,8 @@ fn render_reference(schema: &AbiSchema) -> String {
         }));
         let _ = writeln!(
             output,
-            "| `{}` | {} | {} | {} |",
-            record.name, record.size, record.alignment, fields
+            "| `{}` | {} | {} | {} | {} |",
+            record.name, record.minimum_size, record.size, record.alignment, fields
         );
     }
     output
@@ -1957,7 +2001,12 @@ mod tests {
         assert!(
             generated
                 .rust
-                .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1fffffff;")
+                .contains("HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1_u64 << 29;")
+        );
+        assert!(
+            generated
+                .rust
+                .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x3fffffff;")
         );
         assert!(
             generated
@@ -1967,8 +2016,84 @@ mod tests {
         assert!(
             generated
                 .c
-                .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1fffffff)")
+                .contains("HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE (UINT64_C(1) << 29)")
         );
+        assert!(
+            generated
+                .c
+                .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x3fffffff)")
+        );
+    }
+
+    #[test]
+    fn rejects_record_minimum_size_outside_current_layout() {
+        let mut records = schema::RECORDS.to_vec();
+        records[0].minimum_size = records[0].size + 1;
+        let candidate = AbiSchema {
+            records: Box::leak(records.into_boxed_slice()),
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("minimum size"))
+        );
+    }
+
+    #[test]
+    fn rejects_record_minimum_size_inside_a_field() {
+        let mut records = schema::RECORDS.to_vec();
+        records[0].minimum_size = 1;
+        let candidate = AbiSchema {
+            records: Box::leak(records.into_boxed_slice()),
+            ..schema::NATIVE_ABI
+        };
+        assert!(
+            matches!(validate(&candidate), Err(Error::InvalidSchema(message)) if message.contains("minimum size splits field"))
+        );
+    }
+
+    #[test]
+    fn accepts_trailing_fields_after_the_minimum_prefix() {
+        let mut records = schema::RECORDS.to_vec();
+        let mut fields = records[0].fields.to_vec();
+        fields.push(schema::Field {
+            name: "extension",
+            kind: FieldKind::U64,
+            offset: records[0].size,
+        });
+        records[0].fields = Box::leak(fields.into_boxed_slice());
+        records[0].size += 8;
+        let candidate = AbiSchema {
+            records: Box::leak(records.into_boxed_slice()),
+            ..schema::NATIVE_ABI
+        };
+        assert!(validate(&candidate).is_ok());
+    }
+
+    #[test]
+    fn every_info_record_call_reports_its_supported_size() {
+        for syscall in schema::SYSCALLS {
+            let has_info_output = syscall.arguments.iter().any(|argument| {
+                argument.memory.is_some_and(|memory| {
+                    memory.direction == MemoryDirection::Write
+                        && memory.record.is_some()
+                        && matches!(memory.length, MemoryLength::Bytes { .. })
+                })
+            });
+            if has_info_output {
+                assert_eq!(syscall.results.len(), 1, "{}", syscall.name);
+                assert_eq!(
+                    syscall.results[0].name, "supported_size",
+                    "{}",
+                    syscall.name
+                );
+                assert_eq!(
+                    syscall.results[0].kind,
+                    ValueKind::ByteCount,
+                    "{}",
+                    syscall.name
+                );
+            }
+        }
     }
 
     #[test]
@@ -2164,6 +2289,37 @@ mod tests {
                 required_rights: schema::RIGHT_WAIT,
             })
         ));
+    }
+
+    #[test]
+    fn console_write_borrows_but_vm_binding_consumes_console_authority() {
+        let console_write = schema::SYSCALLS
+            .iter()
+            .find(|syscall| syscall.name == "console_write")
+            .and_then(|syscall| syscall.arguments.first())
+            .and_then(|argument| argument.handle);
+        assert_eq!(
+            console_write,
+            Some(schema::HandleArgument {
+                object: schema::ObjectConstraint::Kind("console"),
+                required_rights: schema::RIGHT_WRITE,
+                disposition: schema::HandleDisposition::Borrow,
+            })
+        );
+
+        let vm_console = schema::SYSCALLS
+            .iter()
+            .find(|syscall| syscall.name == "pending_virtual_machine_set_console_output")
+            .and_then(|syscall| syscall.arguments.get(1))
+            .and_then(|argument| argument.handle);
+        assert_eq!(
+            vm_console,
+            Some(schema::HandleArgument {
+                object: schema::ObjectConstraint::Kind("console"),
+                required_rights: schema::RIGHT_TRANSFER | schema::RIGHT_WRITE,
+                disposition: schema::HandleDisposition::ConsumeOnCommit,
+            })
+        );
     }
 
     #[test]
@@ -2382,6 +2538,24 @@ mod tests {
     }
 
     #[test]
+    fn monotonic_clock_has_the_declared_nonblocking_contract() {
+        let clock = schema::SYSCALLS
+            .iter()
+            .find(|syscall| syscall.name == "clock_get_monotonic");
+        assert!(clock.is_some());
+        let Some(clock) = clock else {
+            return;
+        };
+        assert!(clock.arguments.is_empty());
+        assert_eq!(clock.results.len(), 1);
+        assert_eq!(clock.results[0].name, "nanoseconds");
+        assert_eq!(clock.results[0].kind, ValueKind::U64);
+        assert_eq!(clock.blocking, schema::BlockingClass::Never);
+        assert_eq!(clock.completion, schema::CompletionClass::Returns);
+        assert_eq!(clock.audit, schema::AuditClass::Abi);
+    }
+
+    #[test]
     fn inspector_derivation_cannot_amplify_handle_rights() {
         for (name, object, rights) in [
             (
@@ -2509,6 +2683,14 @@ mod tests {
             ("object_inspector", TransferClass::General),
             ("memory_inspector", TransferClass::General),
             ("cpu_inspector", TransferClass::General),
+            ("virtual_machine_creation_authority", TransferClass::General),
+            (
+                "virtual_machine_creation_lease",
+                TransferClass::RendezvousOnly,
+            ),
+            ("pending_virtual_machine", TransferClass::RendezvousOnly),
+            ("virtual_machine", TransferClass::RendezvousOnly),
+            ("virtual_cpu", TransferClass::RendezvousOnly),
         ];
         assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
         for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {

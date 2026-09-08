@@ -12,7 +12,7 @@
 /// `execution` must be the scheduler-origin, non-null, aligned, pinned, and
 /// exclusively owned current-vCPU pointer. Local interrupts must be masked.
 pub(crate) unsafe fn activate(
-    execution: *mut crate::kernel::task::thread::VcpuExecution,
+    execution: *mut super::VcpuExecution,
 ) -> Result<(), HardwareTransitionError> {
     if execution.is_null() || !execution.is_aligned() {
         return Err(HardwareTransitionError::InvalidExecution);
@@ -25,6 +25,11 @@ pub(crate) unsafe fn activate(
         let cpu =
             crate::kernel::cpu::current_index().ok_or(HardwareTransitionError::InvalidExecution)?;
         execution_claim = claim_execution(execution, cpu)?;
+        if execution.enter_instruction_context(cpu)
+            == hyper::vm::translation::GuestInstructionContextTransition::Migrated
+        {
+            crate::hal::cache::synchronize_guest_instruction_migration();
+        }
         if let Some(claim) = execution_claim.as_mut() {
             let Some(binding) = execution.vm_binding() else {
                 release_execution_or_fail(execution, execution_claim);
@@ -191,7 +196,7 @@ pub(crate) unsafe fn activate(
 /// `execution` must exclusively own the active local vCPU and local interrupts
 /// must remain masked throughout this transaction.
 pub(crate) unsafe fn deactivate(
-    execution: &mut crate::kernel::task::thread::VcpuExecution,
+    execution: &mut super::VcpuExecution,
 ) -> Result<(), HardwareTransitionError> {
     let claim = super::active_vcpu::clear(execution).map_err(HardwareTransitionError::Active)?;
     let interrupts = core::ptr::from_ref(execution.interrupts());
@@ -226,7 +231,7 @@ pub(crate) unsafe fn deactivate(
 /// `execution` must be the exact active local vCPU represented by `stopped`.
 /// Local interrupts must remain masked throughout the transaction.
 pub(super) unsafe fn detach_stopped(
-    execution: &mut crate::kernel::task::thread::VcpuExecution,
+    execution: &mut super::VcpuExecution,
     stopped: crate::hal::vm::StoppedVcpuRun,
 ) -> DetachedVcpuExecution {
     let claim = match super::active_vcpu::clear(execution) {
@@ -271,7 +276,7 @@ pub(super) unsafe fn detach_stopped(
 /// Linear interval after stopped hardware detach but before claim release.
 #[must_use = "stopped-vCPU policy must complete before execution release"]
 pub(super) struct DetachedVcpuExecution {
-    execution: core::ptr::NonNull<crate::kernel::task::thread::VcpuExecution>,
+    execution: core::ptr::NonNull<super::VcpuExecution>,
     claim: Option<super::registry::VmExecutionClaim>,
     cpu: hyper::cpu::CpuIndex,
     armed: bool,
@@ -331,7 +336,7 @@ impl Drop for DetachedVcpuExecution {
 }
 
 fn release_execution_or_fail(
-    execution: &crate::kernel::task::thread::VcpuExecution,
+    execution: &super::VcpuExecution,
     mut claim: Option<super::registry::VmExecutionClaim>,
 ) {
     let Some(cpu) = crate::kernel::cpu::current_index() else {
@@ -370,10 +375,7 @@ fn release_execution_or_fail(
     }
 }
 
-fn restore_reconcile_if_claimed(
-    execution: &crate::kernel::task::thread::VcpuExecution,
-    claimed: bool,
-) {
+fn restore_reconcile_if_claimed(execution: &super::VcpuExecution, claimed: bool) {
     if !claimed {
         return;
     }
@@ -389,7 +391,7 @@ fn restore_reconcile_if_claimed(
 }
 
 fn rollback_unpublished_activation(
-    execution: &mut crate::kernel::task::thread::VcpuExecution,
+    execution: &mut super::VcpuExecution,
     claim: Option<super::registry::VmExecutionClaim>,
     restore_reconcile: bool,
 ) {
@@ -422,7 +424,7 @@ fn rollback_unpublished_activation(
 }
 
 fn claim_execution(
-    execution: &crate::kernel::task::thread::VcpuExecution,
+    execution: &super::VcpuExecution,
     cpu: hyper::cpu::CpuIndex,
 ) -> Result<Option<super::registry::VmExecutionClaim>, HardwareTransitionError> {
     match execution.vm_binding() {
@@ -442,7 +444,7 @@ fn fatal_ambiguous_hardware(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HardwareTransitionError {
+pub(crate) enum HardwareTransitionError {
     Active(super::active_vcpu::Error),
     Hardware(crate::hal::vm::VcpuInterruptError),
     Execution(super::registry::VmExecutionError),
@@ -455,7 +457,7 @@ pub enum HardwareTransitionError {
 #[allow(dead_code)]
 pub(crate) fn current_interrupt_reconcile_pending() -> Result<bool, super::ReconcileObservationError>
 {
-    match super::active_vcpu::with(|execution, _| {
+    match super::active_vcpu::with(|execution| {
         let Some(binding) = execution.vm_binding() else {
             return Ok(false);
         };
@@ -476,7 +478,7 @@ pub(crate) fn current_administrative_stop_requested()
     let Some(current) = current else {
         return Ok(false);
     };
-    match super::active_vcpu::with(|execution, _| {
+    match super::active_vcpu::with(|execution| {
         let Some(binding) = execution.vm_binding() else {
             return Ok(false);
         };

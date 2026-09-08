@@ -122,14 +122,32 @@ purposes before any builder is created. The installed Rust SDK carries these
 typed contracts in `hyper-service`; numeric startup values remain an internal
 wire property at the Process boundary.
 
+The manifest schema's optional `initial-vm.image` field selects an initial
+guest by canonical absolute path; the production init profile currently
+requires it. The validated launch plan carries that path unchanged. Init opens
+it through the root Directory capability and transfers an opaque File
+capability to the unique service that declares the VM provisioning startup
+contract. VM services do not assign guest identity from image paths.
+
+Every dynamically linked service receives the loader's library Directory with
+exactly `READ|EXECUTE`. Services which construct child processes receive a
+second, explicitly declared `process.child-library-directory` capability with
+the transport rights required to attenuate it into a child's loader slot. This
+keeps ordinary services from inheriting delegation authority merely because
+they use the dynamic runtime.
+
 The manifest format reserves restart policies, but the current runtime accepts
-only `never` and exactly one critical service. Init blocks on that Process's
-termination signal without polling. The shell uses `object_wait_many` for
-foreground command I/O and Process termination, then uses inspect authority to
-read the terminal reason. Multiple critical services still require a durable
-WaitSet; reliable restart additionally requires a monotonic backoff facility.
-Unsupported supervision graphs are rejected during preflight before any child
-is started.
+only `never` and requires at least one critical service. The physical Console
+input and output workers, the session service, and the VM manager are critical;
+the interactive shell is replaceable and remains noncritical. Init observes every
+service Process and its initial VM instance endpoint in one bounded
+`object_wait_many` set without polling. It reports terminal Process information
+before releasing each dead supervisor handle. A noncritical service exit is
+recorded and removed from the set; a critical exit or failed initial VM stops
+the remaining graph. A clean initial-VM shutdown is nonfatal and leaves the VM
+manager resident for later provisioning. Reliable restart additionally
+requires a monotonic backoff facility. Unsupported supervision graphs are
+rejected during preflight before any child is started.
 
 ## Validation boundary
 

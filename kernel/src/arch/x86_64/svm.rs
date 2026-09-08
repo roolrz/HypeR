@@ -10,7 +10,9 @@ use core::ptr::{read_volatile, write_volatile};
 use hyper::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use hyper::vm::exit::{GuestMemoryFault, GuestPhysicalAddress, MemoryAccess, MemoryFaultAction};
 use hyper::vm::x86::exit::{PendingInterruptAction, PortIoExit, PortIoOperation, PortIoWidth};
-use hyper::vm::x86::svm::{IoDirection, IoExit, NptAccess, NptViolation, SvmFeatures};
+#[cfg(feature = "kernel-self-test")]
+use hyper::vm::x86::svm::SvmFeatures;
+use hyper::vm::x86::svm::{IoDirection, IoExit, NptAccess, NptViolation};
 use hyper::vm::x86::{CpuidResult, GuestMsr, hypervisor_cpuid, sanitize_cpuid};
 
 use super::context::VcpuContext;
@@ -63,6 +65,7 @@ unsafe extern "C" {
     fn x86_64_svm_run(context: *mut VcpuContext, vmcb: u64, host_save: u64) -> !;
 }
 
+#[cfg(feature = "kernel-self-test")]
 pub(super) fn validate() -> Result<(), super::guest::ValidationError> {
     if read_msr(MSR_VM_CR) & VM_CR_SVM_DISABLE != 0 {
         return Err(super::guest::ValidationError::HardwareUnavailable);

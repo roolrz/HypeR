@@ -55,6 +55,11 @@ ABI revision: `0`.
 | 17 | `object_inspector` | `general` |
 | 18 | `memory_inspector` | `general` |
 | 19 | `cpu_inspector` | `general` |
+| 20 | `virtual_machine_creation_authority` | `general` |
+| 21 | `virtual_machine_creation_lease` | `rendezvous_only` |
+| 22 | `pending_virtual_machine` | `rendezvous_only` |
+| 23 | `virtual_machine` | `rendezvous_only` |
+| 24 | `virtual_cpu` | `rendezvous_only` |
 
 ## Object signals
 
@@ -70,11 +75,15 @@ ABI revision: `0`.
 | `process` | 0 | `terminated` |
 | `console` | 0 | `readable` |
 | `console` | 1 | `writable` |
+| `virtual_machine` | 0 | `terminated` |
+| `virtual_cpu` | 0 | `terminated` |
 
 ## Constants
 
 | Name | Value |
 | --- | ---: |
+| `page_size` | `4096` |
+| `extensible_record_max_bytes` | `4096` |
 | `elf_osabi` | `63` |
 | `elf_abi_version` | `0` |
 | `auxv_startup_handles` | `1213792257` |
@@ -91,6 +100,33 @@ ABI revision: `0`.
 | `startup_handle_purpose_dynamic_library_directory` | `10` |
 | `startup_handle_purpose_memory_inspector` | `11` |
 | `startup_handle_purpose_cpu_inspector` | `12` |
+| `startup_handle_purpose_virtual_machine_creation_authority` | `13` |
+| `virtual_machine_architecture_aarch64` | `1` |
+| `virtual_machine_architecture_riscv64` | `2` |
+| `virtual_machine_architecture_x86_64` | `3` |
+| `virtual_platform_aarch64_reference` | `1` |
+| `virtual_platform_aarch64_reference_guest_ram_base` | `1073741824` |
+| `virtual_platform_aarch64_reference_dtb_offset` | `65536` |
+| `virtual_platform_aarch64_reference_gic_distributor_base` | `134217728` |
+| `virtual_platform_aarch64_reference_gic_distributor_size` | `65536` |
+| `virtual_platform_aarch64_reference_gic_redistributor_base` | `134873088` |
+| `virtual_platform_aarch64_reference_gic_redistributor_size` | `131072` |
+| `virtual_platform_aarch64_reference_uart_base` | `150994944` |
+| `virtual_platform_aarch64_reference_uart_size` | `4096` |
+| `virtual_platform_aarch64_reference_uart_interrupt` | `33` |
+| `virtual_platform_aarch64_reference_timer_interrupt` | `27` |
+| `virtual_machine_phase_installed` | `1` |
+| `virtual_machine_phase_running` | `2` |
+| `virtual_machine_phase_stopping` | `3` |
+| `virtual_machine_phase_stopped` | `4` |
+| `virtual_cpu_phase_dormant` | `1` |
+| `virtual_cpu_phase_started` | `2` |
+| `virtual_cpu_phase_stopped` | `3` |
+| `virtual_cpu_terminal_none` | `0` |
+| `virtual_cpu_terminal_memory_fault` | `1` |
+| `virtual_cpu_terminal_mmio` | `2` |
+| `virtual_cpu_terminal_synchronous` | `3` |
+| `virtual_cpu_terminal_administrative` | `4` |
 | `directory_entry_page_capacity` | `4` |
 | `directory_entry_name_max_bytes` | `255` |
 | `directory_entry_kind_file` | `1` |
@@ -111,7 +147,7 @@ ABI revision: `0`.
 | `console_max_transfer_bytes` | `4096` |
 | `directory_max_path_bytes` | `4096` |
 | `file_max_read_bytes` | `65536` |
-| `vmo_max_size_bytes` | `67108864` |
+| `vmo_max_size_bytes` | `4294967296` |
 | `vmo_max_transfer_bytes` | `65536` |
 | `vmar_permission_read` | `1` |
 | `vmar_permission_write` | `2` |
@@ -154,11 +190,14 @@ ABI revision: `0`.
 
 ## Semantic rules
 
+- The monotonic clock syscall returns absolute nanoseconds from the kernel's monotonic clock domain. Ambient monotonic observation is intentionally not a capability because reading it conveys no mutable authority; future virtual or adjustable clocks may be represented by handle objects without changing this clock domain.
+- Extensible input records carry their caller size in the syscall's explicit byte-count argument. The size must be at least the record's published minimum prefix and no greater than extensible_record_max_bytes; missing bytes through the kernel's current record size default to zero, while bytes beyond that size must be zero. Extensible information outputs accept any capacity from the record's minimum prefix through extensible_record_max_bytes, write only the intersection of caller capacity and kernel-supported size, and return the kernel-supported size in value0 on ok. Bytes beyond that intersection remain untouched.
 - Directory lookup is capability-relative. A leading slash restarts at that Directory's traversal root, and parent components cannot escape it. Every open requires read traversal authority, and every requested File right must already be present on the source Directory before the result is further bounded by the File object's node-specific ceiling.
 - Directory reads require the exact published page capacity. Cookie zero starts a scan and a returned next_cookie of zero ends it. Every name is one valid path component encoded as name_length UTF-8 bytes followed by zero-filled capacity. Pages are weakly consistent with concurrent filesystem mutation; callers must neither interpret nor synthesize cookies.
 - Native task and object inspectors are immutable capability-scoped views. Process, thread, and object KOIDs plus scan cursors are observation-only values and can never be exchanged for operational authority. Out-of-scope targeted lookup returns not_found.
 - Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.
 - Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.
+- Every live TaskGroup handle participates in shared group-lifetime ownership regardless of its attenuated rights. Closing the last TaskGroup handle asynchronously requests stop for every member. Rights control operations available through a handle; they do not change this ownership effect.
 - Inspector scans require the exact published page capacity for their record type. Cursor zero starts a scan and a returned next_cursor of zero ends it. Pages and complete scans are weakly consistent with concurrent task, object, and handle-table mutation; generation-qualified handle values prevent slot reuse from aliasing an earlier observation.
 - Memory and CPU inspectors publish immutable point-in-time copies. Their handles grant observation only; they never expose writable accounting storage or allocator and scheduler synchronization to userspace. CPU categories are scheduler-tick observations and a multi-CPU snapshot is weakly consistent across CPUs.
 - File and Directory information reports immutable attributes plus filesystem, mount, and node identities for diagnostics and correlation. These identities do not grant authority, cannot be resolved back into handles, and do not define a pathname; directory entries, hard links, renames, mount namespaces, and unlinks make pathnames namespace-dependent observations rather than object identity.
@@ -176,6 +215,9 @@ ABI revision: `0`.
 - A process-builder name is nonempty UTF-8 without embedded NUL bytes. The argv vector contains at least one entry; individual argument strings are UTF-8 and may be empty but contain no NUL byte. Every UTF-8 environment entry contains a nonempty name with no '=' followed by '=' and a NUL-free value. Counts and individual byte lengths remain within the published constants.
 - Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.
 - Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.
+- A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.
+- A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A host-console output route is optional and exists only when a caller transfers a Console handle with write authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Unbound guest console output is discarded. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.
+- The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.
 
 ## Syscalls
 
@@ -189,8 +231,8 @@ element size before any user-memory access.
 | 1 | `handle_close` | `handle: handle` | — | `handle: ConsumeOnCommit, any, rights=0x0` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 2 | `handle_duplicate` | `source: handle`, `requested_rights: rights` | `handle: handle` | `source: Borrow, any, rights=0x1`, `handle: produce, same-as(source), subset-from(requested_rights)` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 3 | `handle_replace` | `source: handle`, `requested_rights: rights` | `handle: handle` | `source: ConsumeOnCommit, any, rights=0x0`, `handle: produce, same-as(source), subset-from(requested_rights)` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 4 | `handle_get_info` | `handle: handle`, `output: user_address`, `output_size: byte_count` | — | `handle: Borrow, any, rights=0x0` | `output: Write, len=output_size bytes, max-bytes=16, record=handle_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 5 | `object_get_basic_info` | `handle: handle`, `output: user_address`, `output_size: byte_count` | — | `handle: Borrow, any, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=16, record=object_basic_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 4 | `handle_get_info` | `handle: handle`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `handle: Borrow, any, rights=0x0` | `output: Write, len=output_size bytes, max-bytes=4096, record=handle_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 5 | `object_get_basic_info` | `handle: handle`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `handle: Borrow, any, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=4096, record=object_basic_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
 | 6 | `thread_yield` | — | — | — | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 7 | `thread_exit` | `status: i64` | — | — | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=NoReturn, flags=None` | `Task` |
 | 8 | `process_exit` | `status: i64` | — | — | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=NoReturn, flags=None` | `Task` |
@@ -218,11 +260,11 @@ element size before any user-memory access.
 | 30 | `process_builder_abort` | `builder: handle` | — | `builder: ConsumeOnCommit, kind=process_builder, rights=0x800` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 31 | `process_request_stop` | `process: handle` | — | `process: Borrow, kind=process, rights=0x800` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 32 | `object_wait_many` | `items: user_address`, `item_count: element_count`, `deadline: u64` | `index: element_count`, `observed: u64` | — | `items: Read, len=item_count elements, max-elements=64, element-size=16, record=object_wait_item, borrowed-handles=(handle), required-rights=0x4; order=0` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Object` |
-| 33 | `process_get_info` | `process: handle`, `info: user_address`, `info_size: byte_count` | — | `process: Borrow, kind=process, rights=0x8` | `info: Write, len=info_size bytes, max-bytes=32, record=process_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
+| 33 | `process_get_info` | `process: handle`, `info: user_address`, `info_size: byte_count` | `supported_size: byte_count` | `process: Borrow, kind=process, rights=0x8` | `info: Write, len=info_size bytes, max-bytes=4096, record=process_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 34 | `task_inspector_scan_processes` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=task_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=96, record=task_process; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 35 | `task_inspector_scan_threads` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=task_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=104, record=task_thread; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
 | 36 | `task_inspector_derive_process` | `inspector: handle`, `process: handle` | `inspector: handle` | `inspector: Borrow, kind=task_inspector, rights=0x1000000b`, `process: Borrow, kind=process, rights=0x8`, `inspector: produce, kind=task_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
-| 37 | `object_inspector_scan_objects` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=object_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=96, record=object_inspection; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 37 | `object_inspector_scan_objects` | `inspector: handle`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=object_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=104, record=object_inspection; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
 | 38 | `object_inspector_scan_handles` | `inspector: handle`, `process_koid: u64`, `cursor: u64`, `records: user_address`, `capacity: element_count` | `count: element_count`, `next_cursor: u64` | `inspector: Borrow, kind=object_inspector, rights=0x8` | `records: Write, len=capacity elements, max-elements=8, element-size=40, record=handle_inspection; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
 | 39 | `object_inspector_derive_process` | `inspector: handle`, `process: handle` | `inspector: handle` | `inspector: Borrow, kind=object_inspector, rights=0x1000000b`, `process: Borrow, kind=process, rights=0x8`, `inspector: produce, kind=object_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
 | 40 | `task_inspector_derive_task_group` | `inspector: handle`, `task_group: handle` | `inspector: handle` | `inspector: Borrow, kind=task_inspector, rights=0x1000000b`, `task_group: Borrow, kind=task_group, rights=0x8`, `inspector: produce, kind=task_inspector, fixed=0x1000000b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Task` |
@@ -240,28 +282,48 @@ element size before any user-memory access.
 | 52 | `vmar_unmap` | `vmar: handle`, `address: u64`, `size: byte_count` | — | `vmar: Borrow, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 53 | `vmar_destroy` | `vmar: handle` | — | `vmar: ConsumeOnCommit, kind=vmar, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 54 | `directory_read` | `directory: handle`, `cookie: u64`, `records: user_address`, `capacity: element_count`, `options: u32` | `count: element_count`, `next_cookie: u64` | `directory: Borrow, kind=directory, rights=0x10` | `records: Write, len=capacity elements, max-elements=4, element-size=280, record=directory_entry; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
-| 55 | `memory_inspector_read` | `inspector: handle`, `observation: user_address`, `observation_size: byte_count` | — | `inspector: Borrow, kind=memory_inspector, rights=0x8` | `observation: Write, len=observation_size bytes, max-bytes=112, record=memory_observation; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
-| 56 | `cpu_inspector_read` | `inspector: handle`, `observation: user_address`, `observation_size: byte_count` | — | `inspector: Borrow, kind=cpu_inspector, rights=0x8` | `observation: Write, len=observation_size bytes, max-bytes=64, record=cpu_observation; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
-| 57 | `file_get_info` | `file: handle`, `output: user_address`, `output_size: byte_count` | — | `file: Borrow, kind=file, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=40, record=file_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
-| 58 | `directory_get_info` | `directory: handle`, `output: user_address`, `output_size: byte_count` | — | `directory: Borrow, kind=directory, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=32, record=directory_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 55 | `memory_inspector_read` | `inspector: handle`, `observation: user_address`, `observation_size: byte_count` | `supported_size: byte_count` | `inspector: Borrow, kind=memory_inspector, rights=0x8` | `observation: Write, len=observation_size bytes, max-bytes=4096, record=memory_observation; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 56 | `cpu_inspector_read` | `inspector: handle`, `observation: user_address`, `observation_size: byte_count` | `supported_size: byte_count` | `inspector: Borrow, kind=cpu_inspector, rights=0x8` | `observation: Write, len=observation_size bytes, max-bytes=4096, record=cpu_observation; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 57 | `file_get_info` | `file: handle`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `file: Borrow, kind=file, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=4096, record=file_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 58 | `directory_get_info` | `directory: handle`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `directory: Borrow, kind=directory, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=4096, record=directory_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 59 | `virtual_machine_creation_lease_create` | `authority: handle`, `resource_domain: handle` | `lease: handle` | `authority: Borrow, kind=virtual_machine_creation_authority, rights=0x30000000`, `resource_domain: Borrow, kind=resource_domain, rights=0x8000000`, `lease: produce, kind=virtual_machine_creation_lease, fixed=0x2000000a` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 60 | `virtual_machine_create` | `lease: handle`, `configuration: user_address`, `configuration_size: byte_count` | `pending_virtual_machine: handle` | `lease: ConsumeOnCommit, kind=virtual_machine_creation_lease, rights=0x20000000`, `pending_virtual_machine: produce, kind=pending_virtual_machine, fixed=0xc2a` | `configuration: Read, len=configuration_size bytes, max-bytes=4096, record=virtual_machine_configuration; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 61 | `pending_virtual_machine_set_memory` | `pending_virtual_machine: handle`, `vmo: handle` | — | `pending_virtual_machine: Borrow, kind=pending_virtual_machine, rights=0x20`, `vmo: Borrow, kind=vmo, rights=0x70` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 62 | `pending_virtual_machine_set_bootstrap` | `pending_virtual_machine: handle`, `bootstrap: user_address`, `bootstrap_size: byte_count` | — | `pending_virtual_machine: Borrow, kind=pending_virtual_machine, rights=0x20` | `bootstrap: Read, len=bootstrap_size bytes, max-bytes=4096, record=virtual_cpu_bootstrap; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 63 | `pending_virtual_machine_seal` | `pending_virtual_machine: handle` | — | `pending_virtual_machine: Borrow, kind=pending_virtual_machine, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 64 | `pending_virtual_machine_install` | `pending_virtual_machine: handle` | `virtual_machine: handle`, `boot_virtual_cpu: handle` | `pending_virtual_machine: ConsumeOnCommit, kind=pending_virtual_machine, rights=0x400`, `virtual_machine: produce, kind=virtual_machine, fixed=0x80e`, `boot_virtual_cpu: produce, kind=virtual_cpu, fixed=0x40e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 65 | `pending_virtual_machine_abort` | `pending_virtual_machine: handle` | — | `pending_virtual_machine: ConsumeOnCommit, kind=pending_virtual_machine, rights=0x800` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 66 | `virtual_machine_request_stop` | `virtual_machine: handle` | — | `virtual_machine: Borrow, kind=virtual_machine, rights=0x800` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 67 | `virtual_machine_get_info` | `virtual_machine: handle`, `info: user_address`, `info_size: byte_count` | `supported_size: byte_count` | `virtual_machine: Borrow, kind=virtual_machine, rights=0x8` | `info: Write, len=info_size bytes, max-bytes=4096, record=virtual_machine_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 68 | `virtual_cpu_get_info` | `virtual_cpu: handle`, `info: user_address`, `info_size: byte_count` | `supported_size: byte_count` | `virtual_cpu: Borrow, kind=virtual_cpu, rights=0x8` | `info: Write, len=info_size bytes, max-bytes=4096, record=virtual_cpu_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
+| 69 | `resource_domain_create` | `parent: handle`, `limits: user_address`, `limits_size: byte_count` | `child: handle` | `parent: Borrow, kind=resource_domain, rights=0x800000`, `child: produce, kind=resource_domain, fixed=0x984000b` | `limits: Read, len=limits_size bytes, max-bytes=4096, record=resource_limits; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 70 | `task_group_create` | `factory: handle`, `resource_domain: handle` | `group: handle` | `factory: Borrow, kind=task_factory, rights=0x400000`, `resource_domain: Borrow, kind=resource_domain, rights=0x8000000`, `group: produce, kind=task_group, fixed=0x400080b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 71 | `virtual_cpu_start` | `virtual_cpu: handle` | — | `virtual_cpu: Borrow, kind=virtual_cpu, rights=0x400` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 72 | `pending_virtual_machine_set_console_output` | `pending_virtual_machine: handle`, `console: handle` | — | `pending_virtual_machine: Borrow, kind=pending_virtual_machine, rights=0x20`, `console: ConsumeOnCommit, kind=console, rights=0x22` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 73 | `clock_get_monotonic` | — | `nanoseconds: u64` | — | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Abi` |
 
 ## Public records
 
-| Name | Size | Alignment | Fields |
-| --- | ---: | ---: | --- |
-| `handle_info` | 16 | 8 | `object_kind: u32 @ 0`, `flags: u32 @ 4`, `rights: u64 @ 8` |
-| `object_basic_info` | 16 | 8 | `koid: u64 @ 0`, `object_kind: u32 @ 8`, `reserved: u32 @ 12` |
-| `object_wait_item` | 16 | 8 | `handle: u64 @ 0`, `signals: u64 @ 8` |
-| `process_info` | 32 | 8 | `phase: u32 @ 0`, `terminal_reason: u32 @ 4`, `detail0: u64 @ 8`, `detail1: u64 @ 16`, `reserved: u64 @ 24` |
-| `capability_disposition` | 24 | 8 | `handle: u64 @ 0`, `rights: u64 @ 8`, `expected_kind: u32 @ 16`, `operation: u32 @ 20` |
-| `capability_receive_slot` | 24 | 8 | `handle: u64 @ 0`, `rights: u64 @ 8`, `expected_kind: u32 @ 16`, `flags: u32 @ 20` |
-| `startup_handle` | 16 | 8 | `purpose: u32 @ 0`, `flags: u32 @ 4`, `handle: u64 @ 8` |
-| `task_process` | 96 | 8 | `koid: u64 @ 0`, `phase: u32 @ 8`, `terminal_reason: u32 @ 12`, `pending_threads: u32 @ 16`, `active_threads: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `name: bytes[64] @ 32` |
-| `task_thread` | 104 | 8 | `koid: u64 @ 0`, `process_koid: u64 @ 8`, `role: u32 @ 16`, `registry_phase: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `runtime_ticks: u64 @ 32`, `name: bytes[64] @ 40` |
-| `memory_observation` | 112 | 8 | `captured_at_ns: u64 @ 0`, `page_size: u64 @ 8`, `total_bytes: u64 @ 16`, `reserved_bytes: u64 @ 24`, `managed_bytes: u64 @ 32`, `free_bytes: u64 @ 40`, `used_bytes: u64 @ 48`, `kernel_bytes: u64 @ 56`, `heap_bytes: u64 @ 64`, `page_table_bytes: u64 @ 72`, `user_bytes: u64 @ 80`, `guest_bytes: u64 @ 88`, `unattributed_bytes: u64 @ 96`, `reclaimable_bytes: u64 @ 104` |
-| `cpu_observation` | 64 | 8 | `captured_at_ns: u64 @ 0`, `ticks_per_second: u64 @ 8`, `online_cpus: u64 @ 16`, `idle_ticks: u64 @ 24`, `kernel_thread_ticks: u64 @ 32`, `user_thread_ticks: u64 @ 40`, `vcpu_ticks: u64 @ 48`, `reserved: u64 @ 56` |
-| `object_inspection` | 96 | 8 | `koid: u64 @ 0`, `object_kind: u32 @ 8`, `handle_state: u32 @ 12`, `active_handles: u64 @ 16`, `supported_rights: u64 @ 24`, `strong_references: u64 @ 32`, `kernel_service_references: u64 @ 40`, `scheduler_references: u64 @ 48`, `operation_references: u64 @ 56`, `user_authority_references: u64 @ 64`, `publication_references: u64 @ 72`, `diagnostic_references: u64 @ 80`, `retirement_references: u64 @ 88` |
-| `handle_inspection` | 40 | 8 | `process_koid: u64 @ 0`, `handle: u64 @ 8`, `object_koid: u64 @ 16`, `rights: u64 @ 24`, `object_kind: u32 @ 32`, `flags: u32 @ 36` |
-| `directory_entry` | 280 | 8 | `size: u64 @ 0`, `mode: u32 @ 8`, `kind: u32 @ 12`, `name_length: u32 @ 16`, `reserved: u32 @ 20`, `name: bytes[256] @ 24` |
-| `file_info` | 40 | 8 | `filesystem_id: u64 @ 0`, `mount_id: u64 @ 8`, `node_id: u64 @ 16`, `size: u64 @ 24`, `mode: u32 @ 32`, `reserved: u32 @ 36` |
-| `directory_info` | 32 | 8 | `filesystem_id: u64 @ 0`, `mount_id: u64 @ 8`, `node_id: u64 @ 16`, `mode: u32 @ 24`, `reserved: u32 @ 28` |
+| Name | Minimum prefix | Size | Alignment | Fields |
+| --- | ---: | ---: | ---: | --- |
+| `handle_info` | 16 | 16 | 8 | `object_kind: u32 @ 0`, `flags: u32 @ 4`, `rights: u64 @ 8` |
+| `object_basic_info` | 16 | 16 | 8 | `koid: u64 @ 0`, `object_kind: u32 @ 8`, `reserved: u32 @ 12` |
+| `object_wait_item` | 16 | 16 | 8 | `handle: u64 @ 0`, `signals: u64 @ 8` |
+| `process_info` | 32 | 32 | 8 | `phase: u32 @ 0`, `terminal_reason: u32 @ 4`, `detail0: u64 @ 8`, `detail1: u64 @ 16`, `reserved: u64 @ 24` |
+| `capability_disposition` | 24 | 24 | 8 | `handle: u64 @ 0`, `rights: u64 @ 8`, `expected_kind: u32 @ 16`, `operation: u32 @ 20` |
+| `capability_receive_slot` | 24 | 24 | 8 | `handle: u64 @ 0`, `rights: u64 @ 8`, `expected_kind: u32 @ 16`, `flags: u32 @ 20` |
+| `startup_handle` | 16 | 16 | 8 | `purpose: u32 @ 0`, `flags: u32 @ 4`, `handle: u64 @ 8` |
+| `task_process` | 96 | 96 | 8 | `koid: u64 @ 0`, `phase: u32 @ 8`, `terminal_reason: u32 @ 12`, `pending_threads: u32 @ 16`, `active_threads: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `name: bytes[64] @ 32` |
+| `task_thread` | 104 | 104 | 8 | `koid: u64 @ 0`, `process_koid: u64 @ 8`, `role: u32 @ 16`, `registry_phase: u32 @ 20`, `name_length: u32 @ 24`, `reserved: u32 @ 28`, `runtime_ticks: u64 @ 32`, `name: bytes[64] @ 40` |
+| `memory_observation` | 112 | 112 | 8 | `captured_at_ns: u64 @ 0`, `page_size: u64 @ 8`, `total_bytes: u64 @ 16`, `reserved_bytes: u64 @ 24`, `managed_bytes: u64 @ 32`, `free_bytes: u64 @ 40`, `used_bytes: u64 @ 48`, `kernel_bytes: u64 @ 56`, `heap_bytes: u64 @ 64`, `page_table_bytes: u64 @ 72`, `user_bytes: u64 @ 80`, `guest_bytes: u64 @ 88`, `unattributed_bytes: u64 @ 96`, `reclaimable_bytes: u64 @ 104` |
+| `cpu_observation` | 64 | 64 | 8 | `captured_at_ns: u64 @ 0`, `ticks_per_second: u64 @ 8`, `online_cpus: u64 @ 16`, `idle_ticks: u64 @ 24`, `kernel_thread_ticks: u64 @ 32`, `user_thread_ticks: u64 @ 40`, `vcpu_ticks: u64 @ 48`, `reserved: u64 @ 56` |
+| `object_inspection` | 104 | 104 | 8 | `koid: u64 @ 0`, `object_kind: u32 @ 8`, `handle_state: u32 @ 12`, `active_handles: u64 @ 16`, `supported_rights: u64 @ 24`, `strong_references: u64 @ 32`, `kernel_service_references: u64 @ 40`, `scheduler_references: u64 @ 48`, `operation_references: u64 @ 56`, `user_authority_references: u64 @ 64`, `publication_references: u64 @ 72`, `diagnostic_references: u64 @ 80`, `retirement_references: u64 @ 88`, `vm_device_binding_references: u64 @ 96` |
+| `handle_inspection` | 40 | 40 | 8 | `process_koid: u64 @ 0`, `handle: u64 @ 8`, `object_koid: u64 @ 16`, `rights: u64 @ 24`, `object_kind: u32 @ 32`, `flags: u32 @ 36` |
+| `directory_entry` | 280 | 280 | 8 | `size: u64 @ 0`, `mode: u32 @ 8`, `kind: u32 @ 12`, `name_length: u32 @ 16`, `reserved: u32 @ 20`, `name: bytes[256] @ 24` |
+| `file_info` | 40 | 40 | 8 | `filesystem_id: u64 @ 0`, `mount_id: u64 @ 8`, `node_id: u64 @ 16`, `size: u64 @ 24`, `mode: u32 @ 32`, `reserved: u32 @ 36` |
+| `directory_info` | 32 | 32 | 8 | `filesystem_id: u64 @ 0`, `mount_id: u64 @ 8`, `node_id: u64 @ 16`, `mode: u32 @ 24`, `reserved: u32 @ 28` |
+| `virtual_machine_configuration` | 32 | 32 | 8 | `guest_physical_base: u64 @ 0`, `memory_size: u64 @ 8`, `vcpu_count: u32 @ 16`, `architecture: u32 @ 20`, `platform_profile: u32 @ 24`, `flags: u32 @ 28` |
+| `virtual_cpu_bootstrap` | 64 | 64 | 8 | `entry: u64 @ 0`, `stack: u64 @ 8`, `argument0: u64 @ 16`, `argument1: u64 @ 24`, `argument2: u64 @ 32`, `argument3: u64 @ 40`, `vcpu_id: u32 @ 48`, `flags: u32 @ 52`, `reserved: u64 @ 56` |
+| `virtual_machine_info` | 32 | 32 | 8 | `phase: u32 @ 0`, `vcpu_count: u32 @ 4`, `guest_physical_base: u64 @ 8`, `memory_size: u64 @ 16`, `architecture: u32 @ 24`, `platform_profile: u32 @ 28` |
+| `virtual_cpu_info` | 24 | 24 | 8 | `vcpu_id: u32 @ 0`, `phase: u32 @ 4`, `scheduler_thread_id: u64 @ 8`, `terminal_reason: u32 @ 16`, `reserved: u32 @ 20` |
+| `resource_limits` | 160 | 160 | 8 | `kernel_memory_bytes: u64 @ 0`, `processes: u64 @ 8`, `threads: u64 @ 16`, `handles: u64 @ 24`, `kernel_objects: u64 @ 32`, `committed_pages: u64 @ 40`, `pinned_pages: u64 @ 48`, `guest_pages: u64 @ 56`, `ipc_messages: u64 @ 64`, `ipc_bytes: u64 @ 72`, `ipc_handles: u64 @ 80`, `subscriptions: u64 @ 88`, `timers: u64 @ 96`, `virtual_machines: u64 @ 104`, `virtual_cpus: u64 @ 112`, `device_leases: u64 @ 120`, `dma_mappings: u64 @ 128`, `user_address_spaces: u64 @ 136`, `user_mappings: u64 @ 144`, `reserved: u64 @ 152` |

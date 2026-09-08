@@ -13,13 +13,13 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use hyper::sync::{DeferredWork, WorkDisposition};
 
 const REAP_BATCH: usize = 16;
-const PROCESS_RETRY_NS: u64 = 10_000_000;
+const RETIREMENT_RETRY_NS: u64 = 10_000_000;
 
 static WORK: DeferredWork = DeferredWork::new();
 static WAKE: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
 static WORKER_PUBLISHED: AtomicBool = AtomicBool::new(false);
 static IRQ_PROMPTS_READY: AtomicBool = AtomicBool::new(false);
-static PROCESS_RETRY_DUE: AtomicBool = AtomicBool::new(false);
+static RETRY_DUE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "kernel-self-test")]
 static TEST_WORKER: hyper::sync::InterruptSpinLock<
@@ -145,14 +145,14 @@ extern "C" fn worker_entry(_argument: usize) {
     };
     let mut armed_retry: Option<crate::kernel::time::ArmedReservedTimer<'_>> = None;
     loop {
-        // Unrelated retirement work may wake the worker while a Process retry
+        // Unrelated retirement work may wake the worker while a delayed retry
         // remains delayed. Preserve that timer so a steady producer stream
-        // cannot postpone the older Process indefinitely.
-        if PROCESS_RETRY_DUE.swap(false, Ordering::AcqRel) {
+        // cannot postpone older Process or VM retirement indefinitely.
+        if RETRY_DUE.swap(false, Ordering::AcqRel) {
             let timer = match armed_retry.take() {
                 Some(timer) => timer,
                 None => crate::kernel::crash::fatal(format_args!(
-                    "HypeR: Process retry expired without timer ownership"
+                    "HypeR: retirement retry expired without timer ownership"
                 )),
             };
             if let Err(error) = timer.retire() {
@@ -164,7 +164,9 @@ extern "C" fn worker_entry(_argument: usize) {
         }
         WORK.begin_batch();
         crate::kernel::process::reap_one_process(&mut access);
+        let first_vm_pass = crate::kernel::vm::lifecycle::reap_batch(&mut access);
         let mut subsystem_work = false;
+        let mut subsystem_progress = false;
         for _ in 0..REAP_BATCH {
             let result = if prefer_objects {
                 reap_object_or_thread(&mut access)
@@ -173,7 +175,10 @@ extern "C" fn worker_entry(_argument: usize) {
             };
             prefer_objects = !prefer_objects;
             match result {
-                Ok(ReapStep::Reaped { more }) => subsystem_work = more,
+                Ok(ReapStep::Reaped { more }) => {
+                    subsystem_progress = true;
+                    subsystem_work = more;
+                }
                 Ok(ReapStep::Empty) => {
                     subsystem_work = false;
                     break;
@@ -183,9 +188,17 @@ extern "C" fn worker_entry(_argument: usize) {
                 )),
             }
         }
+        // A vCPU Thread reaped above may have completed the exact endpoint
+        // which blocked the first VM pass. Revisit each remaining VM once so
+        // that completion does not pay an unconditional retry interval.
+        let vm_retirement = if first_vm_pass.needs_retry && subsystem_progress {
+            crate::kernel::vm::lifecycle::reap_batch(&mut access)
+        } else {
+            first_vm_pass
+        };
         let process_work = crate::kernel::process::retirement_work(&access);
-        if process_work.delayed && armed_retry.is_none() {
-            let deadline = match crate::kernel::time::deadline_after(PROCESS_RETRY_NS) {
+        if (process_work.delayed || vm_retirement.needs_retry) && armed_retry.is_none() {
+            let deadline = match crate::kernel::time::deadline_after(RETIREMENT_RETRY_NS) {
                 Ok(deadline) => deadline,
                 Err(error) => crate::kernel::crash::fatal(format_args!(
                     "HypeR: reaper retry deadline failed: {error:?}"
@@ -198,7 +211,8 @@ extern "C" fn worker_entry(_argument: usize) {
                 )),
             });
         }
-        let more_work = subsystem_work || process_work.ready;
+        let more_work =
+            subsystem_work || process_work.ready || vm_retirement.continue_immediately();
         // Arm before relinquishing work ownership. An expiry or producer racing
         // this handoff sets durable work and cannot be lost before WAKE.wait.
         match WORK.finish_batch(more_work) {
@@ -268,6 +282,6 @@ fn retry_expired(_context: usize) {
         crate::kernel::cpu::current_index().map_or(usize::MAX, |cpu| cpu.get()),
         Ordering::Release,
     );
-    PROCESS_RETRY_DUE.store(true, Ordering::Release);
+    RETRY_DUE.store(true, Ordering::Release);
     request();
 }

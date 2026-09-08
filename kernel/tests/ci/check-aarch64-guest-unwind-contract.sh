@@ -25,8 +25,8 @@ sed -n '/^fn capture_waiting_guest(/,/^}/p' src/arch/aarch64/exception.rs >"$fix
 sed -n '/^fn guest_irq_tail(/,/^}/p' src/kernel/entry/irq.rs >"$fixture/guest-irq-tail.rs"
 sed -n '/^fn finish_detached_administrative_stop(/,/^}/p' \
     src/kernel/vm/vcpu/runner.rs >"$fixture/admin-detach.rs"
-sed -n '/^    pub(super) fn activate_identifier_for_install(/,/^    }/p' \
-    src/kernel/vm/memory.rs >"$fixture/vmid-activate.rs"
+sed -n '/^    pub(in crate::kernel::vm) fn activate_identifier_for_install(/,/^    }/p' \
+    src/kernel/vm/memory/construction.rs >"$fixture/vmid-activate.rs"
 
 require() {
     file=$1
@@ -103,6 +103,30 @@ require src/arch/aarch64/exception.rs \
 require src/arch/aarch64/vsysreg.rs \
     '(?s)enum GuestSyncAction.*Stop\(GuestSyncFailure\).*enum GuestSyncFailure.*VirtualInterrupt\(super::vm_vcpu::Error\).*fn software_interrupt_completion.*Err\(error\).*GuestSyncAction::Stop\(GuestSyncFailure::VirtualInterrupt\(error\)\)' \
     'synchronous emulation stop must retain the exact typed failure'
+require src/arch/aarch64/vsysreg.rs \
+    '(?s)fn decode_guest_memory_fault.*ESR_ABORT_TRANSLATION_FAULT_LEVEL0.*ESR_ABORT_TRANSLATION_FAULT_LEVEL3.*ESR_ABORT_PERMISSION_FAULT_LEVEL0.*ESR_ABORT_PERMISSION_FAULT_LEVEL3.*!translation_fault && !permission_fault' \
+    'guest stage-2 recovery must decode both translation and permission faults'
+require src/arch/aarch64/vsysreg.rs \
+    '(?s)fn activate_virtual_identity\(vcpu_id: u32\).*msr VPIDR_EL2.*msr VMPIDR_EL2.*isb' \
+    'guest identity must initialize both architected virtual ID registers before entry'
+require src/arch/aarch64/guest_cpu_contract.rs \
+    '(?s)struct GuestCpuModel.*from_raw.*ID_AA64ISAR0_TME_MASK.*ID_AA64ISAR1_POINTER_AUTH_MASK.*ID_AA64MMFR1_VH_FIELD_MASK.*ID_AA64MMFR2_NV_MASK' \
+    'the frozen guest CPU model must remove unsupported architectural state'
+require src/arch/aarch64/guest_cpu_model.rs \
+    '(?s)fn initialize_boot_cpu.*STATE\.store\(READY, Ordering::Release\).*fn current_cpu_is_compatible.*load_frozen\(\).*frozen == current' \
+    'secondary admission must match the boot CPU frozen guest model'
+require src/arch/aarch64/mod.rs \
+    '(?s)fn secondary_cpu_is_compatible.*guest_cpu_model::current_cpu_is_compatible\(\).*fn aarch64_bootstrap.*guest_cpu_model::initialize_boot_cpu\(\).*smp::initialize_boot_cpu\(\)' \
+    'the guest model must freeze before secondaries start and gate every admitted PE'
+require src/arch/aarch64/vsysreg.rs \
+    '(?s)fn activate_virtual_identity.*guest_cpu_model::processor_identity\(\).*fn read_virtual_register.*guest_cpu_model::frozen\(\).*SYSREG_MIDR_EL1 => Some\(model\.midr\(\)\).*SYSREG_ID_AA64MMFR2_EL1 => Some\(model\.mmfr2\(\)\)' \
+    'guest identity reads must consume only the frozen model'
+reject src/arch/aarch64/vsysreg.rs \
+    'read_id_aa64[a-z0-9_]*_el1\(' \
+    'guest ID emulation must not reread migration-sensitive physical features'
+require src/arch/aarch64/vm_vcpu.rs \
+    '(?s)activate_system_registers\(\).*activate_virtual_identity\(vcpu_id\).*activate_timer\(\)' \
+    'virtual processor identity must be installed inside every stopped-vCPU activation'
 require src/arch/aarch64/exception.rs \
     '(?s)GuestSyncAction::Stop\(failure\).*GuestSynchronousTerminal::Failed \{ exit, failure \}' \
     'terminal synchronous unwind must retain the decoded exit and failure'
@@ -185,9 +209,9 @@ require "$fixture/runner.rs" \
     '(?s)timer\.retire\(\).*if let Some\(reason\) = administrative_stop_reason\(execution, current\.thread\).*continue' \
     'a WFI continuation must retire its timer and observe stop before reentry'
 require src/kernel/task/scheduler/mod.rs \
-    '(?s)take_vcpu_reap_publication\(\).*drop\(thread\).*complete_vcpu_reap\(publication\)' \
+    '(?s)take_vcpu_reap_publication\(\).*drop\(thread\).*publication\.complete\(\)' \
     'Reaped publication must follow Thread, vCPU execution, and strong VM binding destruction'
-reject src/kernel/vm/registry.rs \
+reject src/kernel/vm/vcpu/execution.rs \
     '(?s)#\[derive\([^]]*(?:Clone|Copy)[^]]*\)\][[:space:]]*pub\(in crate::kernel\) struct VcpuReapPublication' \
     'exact vCPU reap completion authority must remain linear and non-cloneable'
 require src/kernel/vm/endpoint_state.rs \

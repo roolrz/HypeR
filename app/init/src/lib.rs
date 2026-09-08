@@ -12,6 +12,7 @@
 #[cfg(test)]
 #[path = "../../command/directory_path.rs"]
 mod command_directory_path;
+pub mod diagnostics;
 pub mod manifest;
 #[cfg(test)]
 #[path = "../../shell/command.rs"]
@@ -20,6 +21,10 @@ mod shell_command;
 #[path = "../../shell/path.rs"]
 mod shell_path;
 pub mod supervision;
+pub mod vm_policy;
+#[cfg(test)]
+#[path = "../../vm/profile.rs"]
+mod vm_profile;
 
 use core::convert::Infallible;
 
@@ -41,13 +46,13 @@ pub trait ManifestSource {
 /// `LaunchPlan` contains declarations only. An implementation must resolve
 /// every live source handle again, prepare every `ProcessBuilder`, and let the
 /// kernel revalidate type and attenuated rights at the final commit.
-pub trait ServiceGraphLauncher: AuthorityPolicy {
+pub trait ServiceGraphLauncher {
     type Error;
 
     fn launch(
         &mut self,
         manifest: &Manifest<'_>,
-        plan: &LaunchPlan,
+        plan: &LaunchPlan<'_>,
     ) -> Result<Infallible, Self::Error>;
 }
 
@@ -61,18 +66,20 @@ pub enum BootstrapError<SourceError, LaunchError> {
 
 /// Parses and validates the whole graph before crossing the launch boundary.
 #[inline(never)]
-pub fn bootstrap<Source, Launcher>(
+pub fn bootstrap<Source, Policy, Launcher>(
     source: &Source,
+    policy: &Policy,
     launcher: &mut Launcher,
 ) -> Result<Infallible, BootstrapError<Source::Error, Launcher::Error>>
 where
     Source: ManifestSource,
+    Policy: AuthorityPolicy,
     Launcher: ServiceGraphLauncher,
 {
     let text = source.manifest().map_err(BootstrapError::Source)?;
     let mut manifest = Manifest::empty();
     manifest::parse_into(text, &mut manifest).map_err(BootstrapError::Parse)?;
-    let plan = manifest::validate(&manifest, launcher).map_err(BootstrapError::Validate)?;
+    let plan = manifest::validate(&manifest, policy).map_err(BootstrapError::Validate)?;
     launcher
         .launch(&manifest, &plan)
         .map_err(BootstrapError::Launch)
@@ -114,11 +121,13 @@ mod tests {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct LaunchStopped;
 
+    struct Policy;
+
     struct Launcher {
         launches: Cell<usize>,
     }
 
-    impl AuthorityPolicy for Launcher {
+    impl AuthorityPolicy for Policy {
         fn authority<'policy>(
             &'policy self,
             _source: &str,
@@ -141,7 +150,7 @@ mod tests {
         fn launch(
             &mut self,
             _manifest: &Manifest<'_>,
-            _plan: &LaunchPlan,
+            _plan: &LaunchPlan<'_>,
         ) -> Result<Infallible, Self::Error> {
             self.launches.set(self.launches.get() + 1);
             Err(LaunchStopped)
@@ -153,7 +162,7 @@ mod tests {
         let mut launcher = Launcher {
             launches: Cell::new(0),
         };
-        let result = bootstrap(&Source(EMPTY_GRAPH), &mut launcher);
+        let result = bootstrap(&Source(EMPTY_GRAPH), &Policy, &mut launcher);
         assert!(matches!(result, Err(BootstrapError::Validate(_))));
         assert_eq!(launcher.launches.get(), 0);
     }
@@ -163,7 +172,7 @@ mod tests {
         let mut launcher = Launcher {
             launches: Cell::new(0),
         };
-        let result = bootstrap(&Source(ONE_SERVICE), &mut launcher);
+        let result = bootstrap(&Source(ONE_SERVICE), &Policy, &mut launcher);
         assert_eq!(result, Err(BootstrapError::Launch(LaunchStopped)));
         assert_eq!(launcher.launches.get(), 1);
     }

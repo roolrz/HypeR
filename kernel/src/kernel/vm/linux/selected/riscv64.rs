@@ -30,10 +30,6 @@ pub(crate) const fn linux_abi() -> LinuxAbi {
     )
 }
 
-pub(crate) const fn validate_linux_host() -> Result<(), Error> {
-    Ok(())
-}
-
 pub(crate) fn describe_linux_host(_emit: impl FnMut(core::fmt::Arguments<'_>)) {}
 
 pub(crate) fn validate_linux_kernel(image: &[u8]) -> Result<(), Error> {

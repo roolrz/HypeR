@@ -48,7 +48,7 @@ pub(crate) use machine::{
 #[cfg(all(not(test), feature = "kernel-self-test"))]
 pub(crate) use machine::{prepare_native_entry_self_test, run_dormant_self_test};
 #[cfg(not(test))]
-pub(crate) use objects::{MemoryObjectError, VmarObject, VmoObject};
+pub(crate) use objects::{GuestMemoryBacking, MemoryObjectError, VmarObject, VmoObject};
 #[cfg(not(test))]
 pub(crate) use service::{ServiceError as MemoryServiceError, permissions as abi_permissions};
 #[cfg(not(test))]

@@ -13,6 +13,8 @@ copy_sources() {
     rm -rf "$fixture/src"
     mkdir -p "$fixture/src/kernel/task/scheduler" "$fixture/src/kernel/entry"
     cp "$root/src/kernel/task/thread.rs" "$fixture/src/kernel/task/thread.rs"
+    cp "$root/src/kernel/task/external_execution.rs" \
+        "$fixture/src/kernel/task/external_execution.rs"
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
     cp "$root/src/kernel/task/scheduler/mod.rs" "$fixture/src/kernel/task/scheduler/mod.rs"
     cp "$root/src/kernel/entry/user.rs" "$fixture/src/kernel/entry/user.rs"
@@ -46,8 +48,8 @@ mutate 'ThreadContext lost interior raw-pointer ownership' \
     'context: UnsafeCell<crate::hal::context::ThreadContext>' \
     'context: crate::hal::context::ThreadContext'
 mutate 'vCPU payload lost interior raw-pointer ownership' \
-    src/kernel/task/thread.rs \
-    'Vcpu(Box<UnsafeCell<VcpuExecution>>)' 'Vcpu(Box<VcpuExecution>)'
+    src/kernel/task/external_execution.rs \
+    'derive(Clone, Copy, Eq, PartialEq)' 'derive(Eq, PartialEq)'
 mutate 'user payload lost interior raw-pointer ownership' \
     src/kernel/task/thread.rs \
     'User(Box<UnsafeCell<crate::kernel::process::UserExecution>>)' \

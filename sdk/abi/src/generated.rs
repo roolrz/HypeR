@@ -49,6 +49,11 @@ pub const HYPER_NATIVE_OBJECT_TASK_INSPECTOR: u32 = 16;
 pub const HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR: u32 = 17;
 pub const HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR: u32 = 18;
 pub const HYPER_NATIVE_OBJECT_CPU_INSPECTOR: u32 = 19;
+pub const HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY: u32 = 20;
+pub const HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE: u32 = 21;
+pub const HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE: u32 = 22;
+pub const HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE: u32 = 23;
+pub const HYPER_NATIVE_OBJECT_VIRTUAL_CPU: u32 = 24;
 
 pub const HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN: u32 = 0;
 pub const HYPER_NATIVE_TRANSFER_CLASS_GENERAL: u32 = 1;
@@ -76,6 +81,15 @@ pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {
         HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
         HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
         HYPER_NATIVE_OBJECT_CPU_INSPECTOR => HYPER_NATIVE_TRANSFER_CLASS_GENERAL,
+        HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY => {
+            HYPER_NATIVE_TRANSFER_CLASS_GENERAL
+        }
+        HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE => {
+            HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY
+        }
+        HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_VIRTUAL_CPU => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         _ => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
     }
 }
@@ -109,8 +123,9 @@ pub const HYPER_NATIVE_RIGHT_CREATE_EXECUTABLE: u64 = 1_u64 << 25;
 pub const HYPER_NATIVE_RIGHT_TASK_GROUP_ATTACH_PROCESS: u64 = 1_u64 << 26;
 pub const HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR: u64 = 1_u64 << 27;
 pub const HYPER_NATIVE_RIGHT_DERIVE: u64 = 1_u64 << 28;
+pub const HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1_u64 << 29;
 
-pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1fffffff;
+pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x3fffffff;
 
 pub const HYPER_NATIVE_SIGNAL_EVENT_SIGNALED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE: u64 = 1_u64 << 0;
@@ -122,7 +137,11 @@ pub const HYPER_NATIVE_SIGNAL_THREAD_TERMINATED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_PROCESS_TERMINATED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_CONSOLE_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_CONSOLE_WRITABLE: u64 = 1_u64 << 1;
+pub const HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED: u64 = 1_u64 << 0;
+pub const HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED: u64 = 1_u64 << 0;
 
+pub const HYPER_NATIVE_PAGE_SIZE: u64 = 4096;
+pub const HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES: u64 = 4096;
 pub const HYPER_NATIVE_ELF_OSABI: u64 = 63;
 pub const HYPER_NATIVE_ELF_ABI_VERSION: u64 = 0;
 pub const HYPER_NATIVE_AUXV_STARTUP_HANDLES: u64 = 1213792257;
@@ -139,6 +158,33 @@ pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR: u64 = 9;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY: u64 = 10;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR: u64 = 11;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR: u64 = 12;
+pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_VIRTUAL_MACHINE_CREATION_AUTHORITY: u64 = 13;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_AARCH64: u64 = 1;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_RISCV64: u64 = 2;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_X86_64: u64 = 3;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE: u64 = 1;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GUEST_RAM_BASE: u64 = 1073741824;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DTB_OFFSET: u64 = 65536;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_BASE: u64 = 134217728;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_SIZE: u64 = 65536;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_BASE: u64 = 134873088;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_SIZE: u64 = 131072;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_BASE: u64 = 150994944;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_SIZE: u64 = 4096;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_INTERRUPT: u64 = 33;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_TIMER_INTERRUPT: u64 = 27;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_INSTALLED: u64 = 1;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_RUNNING: u64 = 2;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPING: u64 = 3;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPED: u64 = 4;
+pub const HYPER_NATIVE_VIRTUAL_CPU_PHASE_DORMANT: u64 = 1;
+pub const HYPER_NATIVE_VIRTUAL_CPU_PHASE_STARTED: u64 = 2;
+pub const HYPER_NATIVE_VIRTUAL_CPU_PHASE_STOPPED: u64 = 3;
+pub const HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_NONE: u64 = 0;
+pub const HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_MEMORY_FAULT: u64 = 1;
+pub const HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_MMIO: u64 = 2;
+pub const HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_SYNCHRONOUS: u64 = 3;
+pub const HYPER_NATIVE_VIRTUAL_CPU_TERMINAL_ADMINISTRATIVE: u64 = 4;
 pub const HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY: u64 = 4;
 pub const HYPER_NATIVE_DIRECTORY_ENTRY_NAME_MAX_BYTES: u64 = 255;
 pub const HYPER_NATIVE_DIRECTORY_ENTRY_KIND_FILE: u64 = 1;
@@ -159,7 +205,7 @@ pub const HYPER_NATIVE_CAPABILITY_DISPOSITION_DUPLICATE: u64 = 1;
 pub const HYPER_NATIVE_CONSOLE_MAX_TRANSFER_BYTES: u64 = 4096;
 pub const HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES: u64 = 4096;
 pub const HYPER_NATIVE_FILE_MAX_READ_BYTES: u64 = 65536;
-pub const HYPER_NATIVE_VMO_MAX_SIZE_BYTES: u64 = 67108864;
+pub const HYPER_NATIVE_VMO_MAX_SIZE_BYTES: u64 = 4294967296;
 pub const HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES: u64 = 65536;
 pub const HYPER_NATIVE_VMAR_PERMISSION_READ: u64 = 1;
 pub const HYPER_NATIVE_VMAR_PERMISSION_WRITE: u64 = 2;
@@ -259,6 +305,21 @@ pub const HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ: u64 = 55;
 pub const HYPER_NATIVE_SYS_CPU_INSPECTOR_READ: u64 = 56;
 pub const HYPER_NATIVE_SYS_FILE_GET_INFO: u64 = 57;
 pub const HYPER_NATIVE_SYS_DIRECTORY_GET_INFO: u64 = 58;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_CREATE: u64 = 59;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATE: u64 = 60;
+pub const HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_MEMORY: u64 = 61;
+pub const HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP: u64 = 62;
+pub const HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SEAL: u64 = 63;
+pub const HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_INSTALL: u64 = 64;
+pub const HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_ABORT: u64 = 65;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REQUEST_STOP: u64 = 66;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO: u64 = 67;
+pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO: u64 = 68;
+pub const HYPER_NATIVE_SYS_RESOURCE_DOMAIN_CREATE: u64 = 69;
+pub const HYPER_NATIVE_SYS_TASK_GROUP_CREATE: u64 = 70;
+pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_START: u64 = 71;
+pub const HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT: u64 = 72;
+pub const HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC: u64 = 73;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -273,6 +334,7 @@ pub const fn hyper_native_failure_result_mask(
     }
 }
 
+pub const HYPER_NATIVE_HANDLE_INFO_MIN_SIZE: usize = 16;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeHandleInfo {
@@ -286,6 +348,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInfo, object_kind) 
 const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInfo, flags) == 4);
 const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInfo, rights) == 8);
 
+pub const HYPER_NATIVE_OBJECT_BASIC_INFO_MIN_SIZE: usize = 16;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeObjectBasicInfo {
@@ -299,6 +362,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, koid) ==
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, object_kind) == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectBasicInfo, reserved) == 12);
 
+pub const HYPER_NATIVE_OBJECT_WAIT_ITEM_MIN_SIZE: usize = 16;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeObjectWaitItem {
@@ -310,6 +374,7 @@ const _: () = assert!(core::mem::align_of::<HyperNativeObjectWaitItem>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectWaitItem, handle) == 0);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectWaitItem, signals) == 8);
 
+pub const HYPER_NATIVE_PROCESS_INFO_MIN_SIZE: usize = 32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeProcessInfo {
@@ -327,6 +392,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeProcessInfo, detail0) == 
 const _: () = assert!(core::mem::offset_of!(HyperNativeProcessInfo, detail1) == 16);
 const _: () = assert!(core::mem::offset_of!(HyperNativeProcessInfo, reserved) == 24);
 
+pub const HYPER_NATIVE_CAPABILITY_DISPOSITION_MIN_SIZE: usize = 24;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeCapabilityDisposition {
@@ -342,6 +408,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityDisposition, ri
 const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityDisposition, expected_kind) == 16);
 const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityDisposition, operation) == 20);
 
+pub const HYPER_NATIVE_CAPABILITY_RECEIVE_SLOT_MIN_SIZE: usize = 24;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeCapabilityReceiveSlot {
@@ -357,6 +424,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, ri
 const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, expected_kind) == 16);
 const _: () = assert!(core::mem::offset_of!(HyperNativeCapabilityReceiveSlot, flags) == 20);
 
+pub const HYPER_NATIVE_STARTUP_HANDLE_MIN_SIZE: usize = 16;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeStartupHandle {
@@ -370,6 +438,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeStartupHandle, purpose) =
 const _: () = assert!(core::mem::offset_of!(HyperNativeStartupHandle, flags) == 4);
 const _: () = assert!(core::mem::offset_of!(HyperNativeStartupHandle, handle) == 8);
 
+pub const HYPER_NATIVE_TASK_PROCESS_MIN_SIZE: usize = 96;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeTaskProcess {
@@ -393,6 +462,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeTaskProcess, name_length)
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskProcess, reserved) == 28);
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskProcess, name) == 32);
 
+pub const HYPER_NATIVE_TASK_THREAD_MIN_SIZE: usize = 104;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeTaskThread {
@@ -416,6 +486,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, reserved) == 
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, runtime_ticks) == 32);
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, name) == 40);
 
+pub const HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE: usize = 112;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeMemoryObservation {
@@ -453,6 +524,7 @@ const _: () =
 const _: () =
     assert!(core::mem::offset_of!(HyperNativeMemoryObservation, reclaimable_bytes) == 104);
 
+pub const HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE: usize = 64;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeCpuObservation {
@@ -476,6 +548,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, user_thre
 const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, vcpu_ticks) == 48);
 const _: () = assert!(core::mem::offset_of!(HyperNativeCpuObservation, reserved) == 56);
 
+pub const HYPER_NATIVE_OBJECT_INSPECTION_MIN_SIZE: usize = 104;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeObjectInspection {
@@ -492,8 +565,9 @@ pub struct HyperNativeObjectInspection {
     pub publication_references: u64,
     pub diagnostic_references: u64,
     pub retirement_references: u64,
+    pub vm_device_binding_references: u64,
 }
-const _: () = assert!(core::mem::size_of::<HyperNativeObjectInspection>() == 96);
+const _: () = assert!(core::mem::size_of::<HyperNativeObjectInspection>() == 104);
 const _: () = assert!(core::mem::align_of::<HyperNativeObjectInspection>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectInspection, koid) == 0);
 const _: () = assert!(core::mem::offset_of!(HyperNativeObjectInspection, object_kind) == 8);
@@ -515,7 +589,10 @@ const _: () =
     assert!(core::mem::offset_of!(HyperNativeObjectInspection, diagnostic_references) == 80);
 const _: () =
     assert!(core::mem::offset_of!(HyperNativeObjectInspection, retirement_references) == 88);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeObjectInspection, vm_device_binding_references) == 96);
 
+pub const HYPER_NATIVE_HANDLE_INSPECTION_MIN_SIZE: usize = 40;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeHandleInspection {
@@ -535,6 +612,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInspection, rights)
 const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInspection, object_kind) == 32);
 const _: () = assert!(core::mem::offset_of!(HyperNativeHandleInspection, flags) == 36);
 
+pub const HYPER_NATIVE_DIRECTORY_ENTRY_MIN_SIZE: usize = 280;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeDirectoryEntry {
@@ -554,6 +632,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, name_leng
 const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, reserved) == 20);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryEntry, name) == 24);
 
+pub const HYPER_NATIVE_FILE_INFO_MIN_SIZE: usize = 40;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeFileInfo {
@@ -573,6 +652,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeFileInfo, size) == 24);
 const _: () = assert!(core::mem::offset_of!(HyperNativeFileInfo, mode) == 32);
 const _: () = assert!(core::mem::offset_of!(HyperNativeFileInfo, reserved) == 36);
 
+pub const HYPER_NATIVE_DIRECTORY_INFO_MIN_SIZE: usize = 32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeDirectoryInfo {
@@ -589,3 +669,142 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryInfo, mount_id) 
 const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryInfo, node_id) == 16);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryInfo, mode) == 24);
 const _: () = assert!(core::mem::offset_of!(HyperNativeDirectoryInfo, reserved) == 28);
+
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_CONFIGURATION_MIN_SIZE: usize = 32;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeVirtualMachineConfiguration {
+    pub guest_physical_base: u64,
+    pub memory_size: u64,
+    pub vcpu_count: u32,
+    pub architecture: u32,
+    pub platform_profile: u32,
+    pub flags: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualMachineConfiguration>() == 32);
+const _: () = assert!(core::mem::align_of::<HyperNativeVirtualMachineConfiguration>() == 8);
+const _: () = assert!(
+    core::mem::offset_of!(HyperNativeVirtualMachineConfiguration, guest_physical_base) == 0
+);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachineConfiguration, memory_size) == 8);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachineConfiguration, vcpu_count) == 16);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachineConfiguration, architecture) == 20);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachineConfiguration, platform_profile) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineConfiguration, flags) == 28);
+
+pub const HYPER_NATIVE_VIRTUAL_CPU_BOOTSTRAP_MIN_SIZE: usize = 64;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeVirtualCpuBootstrap {
+    pub entry: u64,
+    pub stack: u64,
+    pub argument0: u64,
+    pub argument1: u64,
+    pub argument2: u64,
+    pub argument3: u64,
+    pub vcpu_id: u32,
+    pub flags: u32,
+    pub reserved: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualCpuBootstrap>() == 64);
+const _: () = assert!(core::mem::align_of::<HyperNativeVirtualCpuBootstrap>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, entry) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, stack) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, argument0) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, argument1) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, argument2) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, argument3) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, vcpu_id) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, flags) == 52);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, reserved) == 56);
+
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE: usize = 32;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeVirtualMachineInfo {
+    pub phase: u32,
+    pub vcpu_count: u32,
+    pub guest_physical_base: u64,
+    pub memory_size: u64,
+    pub architecture: u32,
+    pub platform_profile: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualMachineInfo>() == 32);
+const _: () = assert!(core::mem::align_of::<HyperNativeVirtualMachineInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, phase) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, vcpu_count) == 4);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, guest_physical_base) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, memory_size) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, architecture) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, platform_profile) == 28);
+
+pub const HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE: usize = 24;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeVirtualCpuInfo {
+    pub vcpu_id: u32,
+    pub phase: u32,
+    pub scheduler_thread_id: u64,
+    pub terminal_reason: u32,
+    pub reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualCpuInfo>() == 24);
+const _: () = assert!(core::mem::align_of::<HyperNativeVirtualCpuInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, vcpu_id) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, phase) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, scheduler_thread_id) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, terminal_reason) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, reserved) == 20);
+
+pub const HYPER_NATIVE_RESOURCE_LIMITS_MIN_SIZE: usize = 160;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeResourceLimits {
+    pub kernel_memory_bytes: u64,
+    pub processes: u64,
+    pub threads: u64,
+    pub handles: u64,
+    pub kernel_objects: u64,
+    pub committed_pages: u64,
+    pub pinned_pages: u64,
+    pub guest_pages: u64,
+    pub ipc_messages: u64,
+    pub ipc_bytes: u64,
+    pub ipc_handles: u64,
+    pub subscriptions: u64,
+    pub timers: u64,
+    pub virtual_machines: u64,
+    pub virtual_cpus: u64,
+    pub device_leases: u64,
+    pub dma_mappings: u64,
+    pub user_address_spaces: u64,
+    pub user_mappings: u64,
+    pub reserved: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeResourceLimits>() == 160);
+const _: () = assert!(core::mem::align_of::<HyperNativeResourceLimits>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, kernel_memory_bytes) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, processes) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, threads) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, handles) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, kernel_objects) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, committed_pages) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, pinned_pages) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, guest_pages) == 56);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, ipc_messages) == 64);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, ipc_bytes) == 72);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, ipc_handles) == 80);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, subscriptions) == 88);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, timers) == 96);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, virtual_machines) == 104);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, virtual_cpus) == 112);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, device_leases) == 120);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, dma_mappings) == 128);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, user_address_spaces) == 136);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, user_mappings) == 144);
+const _: () = assert!(core::mem::offset_of!(HyperNativeResourceLimits, reserved) == 152);

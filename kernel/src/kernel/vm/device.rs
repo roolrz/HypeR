@@ -7,13 +7,62 @@
 //! per-VM model instances, host bindings, and guest-ISA exit decoding. Device
 //! policy deliberately remains in the kernel VM service rather than the HAL.
 
+use crate::kernel::device::console::SystemConsole;
+use crate::kernel::object::{KernelRef, VmDeviceBinding};
+
 pub(in crate::kernel) mod selected;
 
 pub use selected::Error;
 pub(crate) use selected::VirtualDeviceSet;
 
-pub(crate) fn prepare() -> Result<VirtualDeviceSet, Error> {
-    selected::prepare()
+/// Console output authority committed into one VM's device set.
+///
+/// Production bindings retain a typed reference derived from an explicitly
+/// supplied Console handle. The VM-exit path can therefore enqueue output
+/// without a handle-table lookup or allocation. Kernel self-tests opt into the
+/// same host sink through a visibly test-only route.
+pub(crate) enum ConsoleOutputBinding {
+    Console(KernelRef<SystemConsole, VmDeviceBinding>),
+    #[cfg(feature = "kernel-self-test")]
+    HostTest,
+}
+
+impl ConsoleOutputBinding {
+    pub(crate) const fn from_console(console: KernelRef<SystemConsole, VmDeviceBinding>) -> Self {
+        Self::Console(console)
+    }
+
+    #[cfg(feature = "kernel-self-test")]
+    pub(crate) const fn for_host_test() -> Self {
+        Self::HostTest
+    }
+
+    /// Best-effort, allocation-free publication into the bounded host queue.
+    pub(super) fn write_byte(&self, byte: u8) {
+        match self {
+            Self::Console(console) => {
+                let _ = console.object().try_write(core::slice::from_ref(&byte));
+            }
+            #[cfg(feature = "kernel-self-test")]
+            Self::HostTest => crate::kernel::log::console::write_test_guest_console_byte(byte),
+        }
+    }
+}
+
+pub(crate) fn prepare(
+    console_output: Option<ConsoleOutputBinding>,
+) -> Result<VirtualDeviceSet, Error> {
+    selected::prepare(console_output)
+}
+
+/// Validates guest RAM against the selected immutable platform profile.
+pub(crate) fn supports_configuration(profile: u32, memory_base: u64, memory_size: u64) -> bool {
+    selected::supports_configuration(profile, memory_base, memory_size)
+}
+
+/// Returns the architected timer interrupt used by the selected guest board.
+pub(crate) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualInterruptId {
+    selected::default_timer_interrupt()
 }
 
 /// Clears an optional host-console route for this VM.
@@ -44,6 +93,7 @@ pub(super) fn receive_console_input(byte: u8) -> ConsoleInputDisposition {
     selected::receive_console_input(byte)
 }
 
+#[cfg(feature = "kernel-self-test")]
 pub(super) fn try_publish_console_route(
     vm: super::registry::VmId,
     vcpu: u32,

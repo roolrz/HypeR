@@ -1156,6 +1156,7 @@ impl Process {
             }
         };
         Ok(ProcessHandleReservation {
+            owner: self.id(),
             reservation: Some(reservation),
             handle_charges: Some(handle_charges),
             record: Some(record),
@@ -1288,6 +1289,7 @@ impl Process {
             }
         };
         Ok(ProcessHandleBatchReservation {
+            owner: self.id(),
             reservation: Some(reservation),
             handle_charges: Some(charges),
             record: Some(record),
@@ -1330,6 +1332,7 @@ impl Process {
         mut reservation: ProcessHandleReservation<N>,
         handles: [PreparedHandle; N],
     ) -> Result<[HandleValue; N], HandlePublishFailure<N>> {
+        reservation.require_owner(self);
         let mut handles = Some(handles);
         let mut retired_charge_storage = None;
         let result = self.inner.state.with(|state| {
@@ -1405,6 +1408,7 @@ impl Process {
         mut reservation: ProcessHandleBatchReservation,
         handles: InTransitCapabilities,
     ) -> Result<(), HandleBatchPublishFailure> {
+        reservation.require_owner(self);
         let (handles, storage_charge) = handles.into_prepared_handles();
         let mut handles = Some(handles);
         let mut storage_charge = Some(storage_charge);
@@ -1487,6 +1491,7 @@ impl Process {
     }
 
     pub(crate) fn abort_handle_batch(&self, mut reservation: ProcessHandleBatchReservation) {
+        reservation.require_owner(self);
         let token = match reservation.reservation.take() {
             Some(token) => token,
             None => process_invariant_violation(),
@@ -1512,6 +1517,7 @@ impl Process {
         mut reservation: ProcessHandleBatchReservation,
         count: usize,
     ) -> Option<ProcessHandleBatchReservation> {
+        reservation.require_owner(self);
         if count == 0 {
             self.abort_handle_batch(reservation);
             return None;
@@ -1546,6 +1552,7 @@ impl Process {
         &self,
         mut reservation: ProcessHandleReservation<N>,
     ) {
+        reservation.require_owner(self);
         let token = match reservation.reservation.take() {
             Some(token) => token,
             None => process_invariant_violation(),

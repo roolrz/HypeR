@@ -29,6 +29,8 @@ hyper_call_result_t hyper_native_call6(
     uint64_t argument5);
 
 hyper_call_result_t hyper_abi_query(void);
+/* Returns absolute nanoseconds from the kernel monotonic clock domain. */
+hyper_call_result_t hyper_clock_get_monotonic(void);
 hyper_native_status_t hyper_handle_close(hyper_native_handle_t handle);
 hyper_call_result_t hyper_handle_duplicate(
     hyper_native_handle_t source,
@@ -36,10 +38,10 @@ hyper_call_result_t hyper_handle_duplicate(
 hyper_call_result_t hyper_handle_replace(
     hyper_native_handle_t source,
     uint64_t requested_rights);
-hyper_native_status_t hyper_handle_get_info(
+hyper_call_result_t hyper_handle_get_info(
     hyper_native_handle_t handle,
     hyper_native_handle_info_t *info);
-hyper_native_status_t hyper_object_get_basic_info(
+hyper_call_result_t hyper_object_get_basic_info(
     hyper_native_handle_t handle,
     hyper_native_object_basic_info_t *info);
 hyper_call_result_t hyper_object_wait_one(
@@ -95,7 +97,7 @@ hyper_call_result_t hyper_directory_read(
     uint64_t cookie,
     hyper_native_directory_entry_t *records,
     size_t capacity);
-hyper_native_status_t hyper_directory_get_info(
+hyper_call_result_t hyper_directory_get_info(
     hyper_native_handle_t directory,
     hyper_native_directory_info_t *info);
 hyper_call_result_t hyper_file_read_at(
@@ -103,9 +105,42 @@ hyper_call_result_t hyper_file_read_at(
     uint64_t offset,
     void *output,
     size_t output_capacity);
-hyper_native_status_t hyper_file_get_info(
+hyper_call_result_t hyper_file_get_info(
     hyper_native_handle_t file,
     hyper_native_file_info_t *info);
+hyper_call_result_t hyper_resource_domain_create(
+    hyper_native_handle_t parent,
+    const hyper_native_resource_limits_t *limits);
+hyper_call_result_t hyper_task_group_create(
+    hyper_native_handle_t factory,
+    hyper_native_handle_t resource_domain);
+hyper_call_result_t hyper_virtual_machine_creation_lease_create(
+    hyper_native_handle_t authority,
+    hyper_native_handle_t resource_domain);
+hyper_call_result_t hyper_virtual_machine_create(
+    hyper_native_handle_t lease,
+    const hyper_native_virtual_machine_configuration_t *configuration);
+hyper_native_status_t hyper_pending_virtual_machine_set_memory(
+    hyper_native_handle_t pending,
+    hyper_native_handle_t vmo);
+/* Consumes console only when the binding succeeds. */
+hyper_native_status_t hyper_pending_virtual_machine_set_console_output(
+    hyper_native_handle_t pending,
+    hyper_native_handle_t console);
+hyper_native_status_t hyper_pending_virtual_machine_set_bootstrap(
+    hyper_native_handle_t pending,
+    const hyper_native_virtual_cpu_bootstrap_t *bootstrap);
+hyper_native_status_t hyper_pending_virtual_machine_seal(hyper_native_handle_t pending);
+hyper_call_result_t hyper_pending_virtual_machine_install(hyper_native_handle_t pending);
+hyper_native_status_t hyper_virtual_cpu_start(hyper_native_handle_t virtual_cpu);
+hyper_native_status_t hyper_pending_virtual_machine_abort(hyper_native_handle_t pending);
+hyper_native_status_t hyper_virtual_machine_request_stop(hyper_native_handle_t machine);
+hyper_call_result_t hyper_virtual_machine_get_info(
+    hyper_native_handle_t machine,
+    hyper_native_virtual_machine_info_t *info);
+hyper_call_result_t hyper_virtual_cpu_get_info(
+    hyper_native_handle_t vcpu,
+    hyper_native_virtual_cpu_info_t *info);
 hyper_call_result_t hyper_vmo_create(uint64_t size);
 hyper_call_result_t hyper_file_create_executable_vmo(hyper_native_handle_t file);
 hyper_native_status_t hyper_vmo_read(
@@ -171,7 +206,7 @@ hyper_native_status_t hyper_process_builder_seal(hyper_native_handle_t builder);
 hyper_call_result_t hyper_process_builder_start(hyper_native_handle_t builder);
 hyper_native_status_t hyper_process_builder_abort(hyper_native_handle_t builder);
 hyper_native_status_t hyper_process_request_stop(hyper_native_handle_t process);
-hyper_native_status_t hyper_process_get_info(
+hyper_call_result_t hyper_process_get_info(
     hyper_native_handle_t process,
     hyper_native_process_info_t *info);
 hyper_call_result_t hyper_task_inspector_scan_processes(
@@ -195,10 +230,10 @@ hyper_call_result_t hyper_object_inspector_scan_handles(
     uint64_t cursor,
     hyper_native_handle_inspection_t *records,
     size_t capacity);
-hyper_native_status_t hyper_memory_inspector_read(
+hyper_call_result_t hyper_memory_inspector_read(
     hyper_native_handle_t inspector,
     hyper_native_memory_observation_t *observation);
-hyper_native_status_t hyper_cpu_inspector_read(
+hyper_call_result_t hyper_cpu_inspector_read(
     hyper_native_handle_t inspector,
     hyper_native_cpu_observation_t *observation);
 hyper_call_result_t hyper_task_inspector_derive_process(

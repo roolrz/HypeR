@@ -71,6 +71,9 @@ pub unsafe fn activate(
 
     // SAFETY: The caller owns this stopped vCPU and IRQs remain masked.
     unsafe { context.activate_system_registers() };
+    // Keep the direct-read virtual identity coherent even though the current
+    // TID3 policy normally routes MIDR/MPIDR through software emulation.
+    super::vsysreg::activate_virtual_identity(vcpu_id);
     // SAFETY: The same exclusive stopped-vCPU contract covers its timer.
     unsafe { context.activate_timer() };
     let result = interrupts.with(|controller| {

@@ -113,16 +113,19 @@ The current foundation includes:
 - PSCI and SBI CPU-power backends;
 - a compatibility-matched platform driver framework, PL011 and NS16550 UARTs,
   and reusable virtual-device models;
-- versioned CPIO VM bundles delivered through the firmware ramdisk;
+- Linux guest FIT images delivered through the Native root initramfs;
 - rollback-safe VM construction with one generational registry publication for
   guest memory, virtual interrupts, devices, and the dormant boot vCPU;
+- a capability-scoped Native VM manager contained by a bounded fleet resource
+  domain, plus isolated per-VM runtimes which parse FIT images, own guest VMOs,
+  construct Linux firmware data, and supervise installed VMs from EL0;
 - boot-relative, severity-tagged kernel log buffering, lock-independent Thread
   name snapshots for diagnostics, kallsyms, guarded kernel/IRQ/emergency
   stacks, and an optional allocation-free crash console.
 
 This list describes implemented foundations, not a claim of production
-completeness. In particular, a general-purpose Native runtime, an EL0 VMM, a
-published capability syscall ABI, device assignment, strong
+completeness. In particular, a general-purpose Native runtime, multi-vCPU EL0
+VMM policy, a published capability syscall ABI, device assignment, strong
 guest isolation policy, cross-architecture asynchronous preemption, controlled
 vCPU migration, automatic load balancing, broad hardware discovery, stable
 management APIs, and a general-purpose virtual I/O stack are still under
@@ -183,15 +186,18 @@ make run
 ```
 
 `make run` builds the `no_std` Rust init, direction-attenuated Console workers,
-initial session manager, and capability-scoped shell only through the assembled SDK under
-`target/sdk/aarch64`; the applications do not include private kernel or SDK
-source paths. Native applications are dynamic PIEs by default and share the
-capability-loaded `libhyper.so` runtime through the in-tree AArch64 ELF
-interpreter. SDK consumers can select a self-contained static PIE backed by
-the matching `libhyper.a` with `HYPER_LINK_MODE=static`. Pass
-`INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.
+session manager, capability-scoped shell, VM manager, and isolated VM runtime
+only through the assembled SDK under `target/sdk/aarch64`. It also downloads
+the checksum-pinned AArch64 Linux inputs, packages the guest FIT, and places it
+in the Native initramfs for userspace-managed boot. The applications do not
+include private kernel or SDK source paths. Native applications are dynamic
+PIEs by default and share the capability-loaded `libhyper.so` runtime through
+the in-tree AArch64 ELF interpreter. SDK consumers can select a self-contained
+static PIE backed by the matching `libhyper.a` with `HYPER_LINK_MODE=static`.
+Pass `INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.
 
-Linux guest construction and boot remain Kernel integration tests:
+The separate Kernel self-test guest path remains available as an integration
+test:
 
 ```sh
 make test-qemu ARCH=aarch64
@@ -319,21 +325,19 @@ secondary architectures.
 
 ### 2. Extend VM lifetime and topology
 
-- replace the current non-removable binding with allocator-safe VM leases and
-  cross-CPU vCPU retirement;
-- add stage-2/TLB teardown and hardware VMID retirement before registry reuse;
 - install and start multi-vCPU groups transactionally without parallel global
   registries;
-- add explicit pause, resume, shutdown, and resource-accounting lifecycles.
+- add explicit pause, resume, shutdown, interrupt injection, and richer
+  resource-accounting lifecycles on the current lease-backed teardown path.
 
-### 3. Move VMM policy to native userspace
+### 3. Evolve native VMM policy
 
-- expose VM, vCPU, guest-memory, interrupt, and lifecycle operations through
-  typed capabilities without duplicating the kernel VM registry;
-- start a native EL0 VMM and move bundle selection, VM construction policy, and
-  management orchestration out of EL2;
-- retain architecture entry, translation, IRQ, and world-switch mechanisms
-  behind the selected HAL.
+- replace the initial single-guest manager policy with a validated fleet
+  manifest, restart policy, and per-VM health reporting;
+- add explicit guest-memory grants and virtual-device sessions without sharing
+  whole-VM authority with backend services;
+- extend the userspace-owned lifecycle to RISC-V and x86-64 after their stop and
+  stage-2 retirement mechanisms meet the AArch64 contract.
 
 ### 4. Build device-isolation resources
 
@@ -401,7 +405,7 @@ Further documentation:
 - [Virtual filesystem architecture](kernel/docs/vfs.md)
 - [Native SDK contract](sdk/README.md)
 - [HypeR Native ABI reference](sdk/abi/docs/native.md)
-- [VM bundle format](kernel/docs/vm-bundle.md)
+- [VM image format and boot ownership](kernel/docs/vm-bundle.md)
 - [RISC-V execution profile](kernel/docs/riscv64.md)
 - [x86-64 execution profile](kernel/docs/x86_64.md)
 - [Crash console](kernel/docs/crash-console.md)

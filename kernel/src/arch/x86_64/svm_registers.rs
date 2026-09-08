@@ -3,9 +3,11 @@
 
 //! AMD SVM MSR, VMCB, intercept, and exit-code definitions.
 
+#[cfg(feature = "kernel-self-test")]
 pub(super) const MSR_VM_CR: u32 = 0xc001_0114;
 pub(super) const MSR_VM_HSAVE_PA: u32 = 0xc001_0117;
 pub(super) const EFER_SVME: u64 = 1 << 12;
+#[cfg(feature = "kernel-self-test")]
 pub(super) const VM_CR_SVM_DISABLE: u64 = 1 << 4;
 
 pub(super) const VMCB_INTERCEPT_WORD3: usize = 0x0c;

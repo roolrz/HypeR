@@ -11,12 +11,17 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
 copy_sources() {
     rm -rf "$fixture/src"
-    mkdir -p "$fixture/src/kernel/vm/vcpu" "$fixture/src/kernel/vm/device" "$fixture/src/kernel/task/scheduler" \
+    mkdir -p "$fixture/src/kernel/vm/vcpu" "$fixture/src/kernel/vm/device" \
+        "$fixture/src/kernel/vm/registry" "$fixture/src/kernel/task/scheduler" \
         "$fixture/src/kernel/entry" "$fixture/src/kernel/vm/linux"
     cp "$root/src/kernel/vm/vcpu/transition.rs" "$fixture/src/kernel/vm/vcpu/transition.rs"
     cp "$root/src/kernel/vm/device.rs" "$fixture/src/kernel/vm/device.rs"
     cp "$root/src/kernel/vm/device/aarch64.rs" "$fixture/src/kernel/vm/device/aarch64.rs"
     cp "$root/src/kernel/vm/registry.rs" "$fixture/src/kernel/vm/registry.rs"
+    cp "$root/src/kernel/vm/registry/execution.rs" \
+        "$fixture/src/kernel/vm/registry/execution.rs"
+    cp "$root/src/kernel/vm/registry/construction.rs" \
+        "$fixture/src/kernel/vm/registry/construction.rs"
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
     cp "$root/src/kernel/entry/irq.rs" "$fixture/src/kernel/entry/irq.rs"
     cp "$root/src/kernel/vm/linux/mod.rs" "$fixture/src/kernel/vm/linux/mod.rs"
@@ -60,7 +65,7 @@ mutate 'closed endpoint console delivery must retain guest ownership on failure'
 mutate 'failed claimed console delivery must not cross into Native input' \
     src/kernel/vm/device/aarch64.rs 'from_guest_claim(true)' 'from_guest_claim(false)'
 mutate 'generic registry installation must not select host-console policy' \
-    src/kernel/vm/registry.rs 'control: VmControl::mint_for_install(id),' 'control: { super::device::try_publish_console_route(id, 0, boot_vcpu); VmControl::mint_for_install(id) },'
+    src/kernel/vm/registry/construction.rs 'control: VmControl::mint_for_install(id),' 'control: { crate::kernel::vm::device::try_publish_console_route(id, 0, boot_vcpu); VmControl::mint_for_install(id) },'
 mutate 'non-running vCPU states must not be guessed prompt targets' \
     src/kernel/task/scheduler/state.rs 'ThreadState::Migrating' 'ThreadState::Running'
 mutate 'VM work must trigger the independent guest IRQ tail' \
