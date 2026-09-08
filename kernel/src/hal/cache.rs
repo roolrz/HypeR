@@ -221,6 +221,14 @@ pub trait CacheMaintenance {
     /// instructions published by another CPU.
     fn synchronize_instruction_execution();
 
+    /// Repairs architecture-local guest instruction state after vCPU migration.
+    ///
+    /// This is distinct from host instruction publication. Every architecture
+    /// must state its migration contract explicitly so a newly selected backend
+    /// cannot silently inherit a no-op that is invalid for its instruction
+    /// coherence model.
+    fn synchronize_guest_instruction_migration();
+
     /// Invalidates instruction-cache entries throughout the kernel's
     /// instruction-coherence domain. Other CPUs still require a local context
     /// synchronization event before executing affected instructions.

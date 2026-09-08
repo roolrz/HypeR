@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::model::{
-    BoundedList, CapabilityBinding, CapabilityOperation, MAX_BINDING_NAME_BYTES,
+    BoundedList, CapabilityBinding, CapabilityOperation, InitialVm, MAX_BINDING_NAME_BYTES,
     MAX_CAPABILITIES_PER_SERVICE, MAX_DEPENDENCIES_PER_SERVICE, MAX_IMAGE_PATH_BYTES,
     MAX_MANIFEST_BYTES, MAX_PURPOSE_NAME_BYTES, MAX_RIGHT_NAME_BYTES, MAX_RIGHTS_PER_CAPABILITY,
     MAX_SERVICE_NAME_BYTES, MAX_SERVICES, Manifest, RestartPolicy, Service,
@@ -115,6 +115,7 @@ impl<'manifest> Parser<'manifest> {
         let mut format = None;
         let mut copyright_present = false;
         let mut license_present = false;
+        let mut initial_vm = None;
         let mut services_present = false;
         if self.consume_close(b'}') {
             return Err(self.error(ParseErrorKind::MissingField));
@@ -135,6 +136,9 @@ impl<'manifest> Parser<'manifest> {
                     self.parse_string(MAX_BINDING_NAME_BYTES)?,
                     field_offset,
                 )?,
+                "initial-vm" => {
+                    assign_once(&mut initial_vm, self.parse_initial_vm()?, field_offset)?
+                }
                 "services" => {
                     if services_present {
                         return Err(self.at(ParseErrorKind::DuplicateField, field_offset));
@@ -157,7 +161,35 @@ impl<'manifest> Parser<'manifest> {
         if !services_present {
             return Err(self.error(ParseErrorKind::MissingField));
         }
+        manifest.initial_vm = initial_vm;
         Ok(())
+    }
+
+    fn parse_initial_vm(&mut self) -> Result<InitialVm<'manifest>, ParseError> {
+        self.open(b'{')?;
+        let mut image = None;
+        if self.consume_close(b'}') {
+            return Err(self.error(ParseErrorKind::MissingField));
+        }
+        loop {
+            let field_offset = self.position;
+            let field = self.parse_string(MAX_BINDING_NAME_BYTES)?;
+            self.colon()?;
+            match field {
+                "image" => assign_once(
+                    &mut image,
+                    self.parse_string(MAX_IMAGE_PATH_BYTES)?,
+                    field_offset,
+                )?,
+                _ => return Err(self.at(ParseErrorKind::UnknownField, field_offset)),
+            }
+            if self.next_field_or_close(b'}')? {
+                break;
+            }
+        }
+        Ok(InitialVm {
+            image: image.ok_or_else(|| self.error(ParseErrorKind::MissingField))?,
+        })
     }
 
     fn parse_services(

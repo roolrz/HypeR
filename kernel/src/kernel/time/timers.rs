@@ -61,6 +61,10 @@ pub(crate) struct ReservedTimer {
 }
 
 impl ReservedTimer {
+    pub(crate) const fn allocation_size() -> usize {
+        ReservedTimerNode::allocation_size()
+    }
+
     pub(crate) fn try_new() -> Result<Self, super::Error> {
         let node = ReservedTimerNode::try_new()?;
         Ok(Self {

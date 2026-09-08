@@ -5,6 +5,7 @@
 
 use hyper::mm::FallibleArc;
 
+use super::vmo::ExclusiveHardwareWriteLease;
 use super::{
     DomainAccount, ExecutableAuthority, ExecutableVmo, KernelPageBackend, KernelPageError,
     NativeAddressSpace, UserSlice, Vmar, VmoError, WritableVmo,
@@ -20,6 +21,81 @@ use crate::kernel::object::{
 
 type NativeWritableVmo = WritableVmo<KernelPageBackend, DomainAccount>;
 type NativeExecutableVmo = ExecutableVmo<KernelPageBackend, DomainAccount>;
+
+/// Stable writable VMO backing shared with a hardware address space.
+///
+/// This owner is intentionally independent of userspace handles. Retaining it
+/// keeps every committed page stable after the source handle closes, while the
+/// exclusive hardware lease prevents direct writers, writable Native mappings,
+/// or snapshot publication from racing hardware writes.
+pub(crate) struct GuestMemoryBacking {
+    storage: NativeWritableVmo,
+    _mapping: ExclusiveHardwareWriteLease<KernelPageBackend, DomainAccount>,
+}
+
+impl GuestMemoryBacking {
+    pub(crate) fn try_from_vmo(vmo: &VmoObject) -> Result<Self, MemoryObjectError> {
+        let storage = vmo
+            .writable_clone()
+            .ok_or(MemoryObjectError::WrongVariant)?;
+        let mapping = storage.try_exclusive_hardware_write_lease()?;
+        Ok(Self {
+            storage,
+            _mapping: mapping,
+        })
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.storage.size()
+    }
+
+    pub(crate) fn populate_page(&self, offset: u64) -> Result<(), MemoryObjectError> {
+        self.storage
+            .populate(offset, hyper::mm::PAGE_SIZE)
+            .map_err(|failure| MemoryObjectError::Vmo(failure.cause))
+    }
+
+    pub(crate) fn physical_page(
+        &self,
+        offset: u64,
+    ) -> Result<hyper::mm::PhysicalAddress, MemoryObjectError> {
+        self.storage
+            .resident_physical_page(offset)
+            .map_err(MemoryObjectError::Vmo)
+    }
+
+    pub(crate) fn read_exposed(
+        &self,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<(), MemoryObjectError> {
+        self.storage
+            .read_exposed(offset, destination)
+            .map_err(MemoryObjectError::Vmo)
+    }
+
+    pub(crate) fn write_exposed(
+        &self,
+        offset: u64,
+        source: &[u8],
+    ) -> Result<(), MemoryObjectError> {
+        self.storage
+            .write_exposed(offset, source)
+            .map_err(MemoryObjectError::Vmo)
+    }
+
+    pub(crate) fn resident_page_count(&self) -> Result<usize, MemoryObjectError> {
+        self.storage
+            .resident_page_count()
+            .map_err(MemoryObjectError::Vmo)
+    }
+
+    pub(crate) fn page_is_resident(&self, offset: u64) -> Result<bool, MemoryObjectError> {
+        self.storage
+            .page_is_resident(offset)
+            .map_err(MemoryObjectError::Vmo)
+    }
+}
 
 /// Failure while preparing an accounted virtual-memory capability object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

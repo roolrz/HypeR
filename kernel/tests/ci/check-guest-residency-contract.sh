@@ -9,16 +9,18 @@ root=${HYPER_GUEST_RESIDENCY_ROOT:-$(CDPATH='' cd -- "$(dirname "$0")/../.." && 
 cd "$root"
 
 residency=src/mm/address_space_state.rs
-memory=src/kernel/vm/memory.rs
-registry=src/kernel/vm/registry.rs
+memory_access=src/kernel/vm/memory/access.rs
+memory_residency=src/kernel/vm/memory/residency.rs
+execution=src/kernel/vm/registry/execution.rs
 thread=src/kernel/task/thread.rs
+vcpu_execution=src/kernel/vm/vcpu/execution.rs
 active=src/kernel/vm/active_vcpu.rs
 transition=src/kernel/vm/vcpu/transition.rs
 native=src/kernel/mm/user_space/machine.rs
 process=src/kernel/process/owner.rs
 
 activate=$(sed -n '/^pub(crate) unsafe fn activate(/,/^}/p' "$transition")
-leave=$(sed -n '/^pub(in crate::kernel) fn leave(/,/^}/p' "$memory")
+leave=$(sed -n '/^pub(in crate::kernel) fn leave(/,/^}/p' "$memory_residency")
 release=$(sed -n '/^fn release_execution_or_fail(/,/^}/p' "$transition")
 native_retire=$(sed -n '/^    pub(crate) fn retire(/,/^\/\/\/ Owned guard/p' "$native")
 
@@ -60,8 +62,8 @@ LC_ALL=C rg -q 'self.phase = ResidencyPhase::Retired' "$residency" &&
     exit 1
 }
 
-LC_ALL=C rg -q 'cpu_affine: PhantomData<\*mut \(\)>' "$memory" &&
-    LC_ALL=C rg -q 'impl Drop for GuestResidencyClaim' "$memory" || {
+LC_ALL=C rg -q 'cpu_affine: PhantomData<\*mut \(\)>' "$memory_residency" &&
+    LC_ALL=C rg -q 'impl Drop for GuestResidencyClaim' "$memory_residency" || {
     echo 'guest residency must remain a CPU-affine linear capability' >&2
     exit 1
 }
@@ -73,16 +75,17 @@ printf '%s\n' "$leave" | LC_ALL=C rg -q \
     exit 1
 }
 
-LC_ALL=C rg -q 'residency: Option<super::memory::GuestResidencyClaim>' "$registry" &&
-    LC_ALL=C rg -q 'if claim.residency.is_some\(\)' "$registry" || {
+LC_ALL=C rg -q 'residency: Option<crate::kernel::vm::memory::GuestResidencyClaim>' "$execution" &&
+    LC_ALL=C rg -q 'if claim.residency.is_some\(\)' "$execution" || {
     echo 'guest residency must be structurally coupled to VM execution ownership' >&2
     exit 1
 }
-if LC_ALL=C rg -q 'unsafe impl Send for VcpuExecution|active_execution:' "$thread"; then
+if LC_ALL=C rg -q 'unsafe impl Send for VcpuExecution|active_execution:' \
+    "$thread" "$vcpu_execution"; then
     echo 'migratable VcpuExecution must not contain or override CPU-affine ownership' >&2
     exit 1
 fi
-LC_ALL=C rg -q 'assert_send::<VcpuExecution>\(\)' "$thread" || {
+LC_ALL=C rg -q 'assert_send::<VcpuExecution>\(\)' "$vcpu_execution" || {
     echo 'VcpuExecution migration safety must remain compiler-proven' >&2
     exit 1
 }
@@ -107,7 +110,7 @@ printf '%s\n' "$release" | LC_ALL=C rg -q \
 }
 
 LC_ALL=C rg -q 'advance_single_active\(cpu\.get\(\), previous_epoch, self\.translation_epoch\)' \
-    "$memory" || {
+    "$memory_access" || {
     echo 'active mapping publication must advance the admitted residency epoch' >&2
     exit 1
 }

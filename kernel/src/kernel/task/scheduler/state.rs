@@ -37,7 +37,7 @@ pub(super) struct ThreadObservation {
     schedule: Option<ThreadScheduleObservation>,
     execution: ExecutionKind,
     context: *mut crate::hal::context::ThreadContext,
-    vcpu: Option<*mut crate::kernel::task::thread::VcpuExecution>,
+    vcpu: Option<crate::kernel::task::external_execution::ExternalExecutionPointer>,
     user: Option<core::ptr::NonNull<crate::kernel::process::UserExecution>>,
     stack_bounds: Option<(usize, usize)>,
 }
@@ -155,9 +155,9 @@ impl ThreadObservation {
     const fn context_pointer(self) -> *mut crate::hal::context::ThreadContext {
         self.context
     }
-    const fn vcpu_execution_pointer(
+    fn vcpu_execution_pointer(
         self,
-    ) -> Option<*mut crate::kernel::task::thread::VcpuExecution> {
+    ) -> Option<crate::kernel::task::external_execution::ExternalExecutionPointer> {
         self.vcpu
     }
     const fn user_execution_pointer(

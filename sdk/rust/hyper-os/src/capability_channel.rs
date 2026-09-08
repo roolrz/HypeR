@@ -3,7 +3,6 @@
 
 //! Transactional capability rendezvous with failure-safe Rust ownership.
 
-use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::num::NonZeroU64;
 use core::slice;
@@ -28,8 +27,7 @@ const MAX_CAPABILITIES: usize = hyper_abi::HYPER_NATIVE_CAPABILITY_CHANNEL_MAX_H
 /// after an `OK` result commits the kernel transfer.
 pub struct CapabilityDisposition<'source> {
     record: hyper_abi::HyperNativeCapabilityDisposition,
-    move_commit: Option<MoveCommit<'source>>,
-    _source: PhantomData<&'source ()>,
+    move_source: Option<&'source mut dyn MoveSource>,
 }
 
 impl<'source> CapabilityDisposition<'source> {
@@ -47,8 +45,7 @@ impl<'source> CapabilityDisposition<'source> {
                 T::KIND.as_raw(),
                 hyper_abi::HYPER_NATIVE_CAPABILITY_DISPOSITION_MOVE as u32,
             ),
-            move_commit: Some(MoveCommit::new(source)),
-            _source: PhantomData,
+            move_source: Some(source),
         })
     }
 
@@ -65,14 +62,13 @@ impl<'source> CapabilityDisposition<'source> {
                 T::KIND.as_raw(),
                 hyper_abi::HYPER_NATIVE_CAPABILITY_DISPOSITION_DUPLICATE as u32,
             ),
-            move_commit: None,
-            _source: PhantomData,
+            move_source: None,
         })
     }
 
     fn commit(&mut self) {
-        if let Some(commit) = self.move_commit.take() {
-            commit.apply();
+        if let Some(source) = self.move_source.take() {
+            source.commit_move();
         }
     }
 }
@@ -114,36 +110,22 @@ fn disposition_record(
     }
 }
 
-struct MoveCommit<'source> {
-    slot: *mut (),
-    apply: unsafe fn(*mut ()),
-    _borrow: PhantomData<&'source mut ()>,
+/// Type-erased ownership slot retained across a fallible MOVE operation.
+///
+/// Dynamic dispatch preserves the source's concrete `OwnedHandle` type while
+/// Rust itself carries the exclusive borrow and lifetime. No raw-pointer
+/// reconstruction is needed at the commit boundary.
+trait MoveSource {
+    fn commit_move(&mut self);
 }
 
-impl<'source> MoveCommit<'source> {
-    fn new<T: ObjectType>(source: &'source mut Option<OwnedHandle<T>>) -> Self {
-        Self {
-            slot: (source as *mut Option<OwnedHandle<T>>).cast(),
-            apply: disarm_move::<T>,
-            _borrow: PhantomData,
-        }
+impl<T: ObjectType> MoveSource for Option<OwnedHandle<T>> {
+    fn commit_move(&mut self) {
+        let Some(owner) = self.take() else {
+            ownership_invariant();
+        };
+        let _ = owner.into_raw();
     }
-
-    fn apply(self) {
-        // SAFETY: construction retains an exclusive borrow of the typed slot
-        // for `'source`, and the function pointer preserves its exact type.
-        unsafe { (self.apply)(self.slot) }
-    }
-}
-
-unsafe fn disarm_move<T: ObjectType>(slot: *mut ()) {
-    // SAFETY: `MoveCommit::new` created this pointer from the same typed slot
-    // and its exclusive borrow remains active until this call.
-    let slot = unsafe { &mut *slot.cast::<Option<OwnedHandle<T>>>() };
-    let Some(owner) = slot.take() else {
-        ownership_invariant();
-    };
-    let _ = owner.into_raw();
 }
 
 /// One typed destination request and its optional received owner.
@@ -238,27 +220,20 @@ impl CapabilityChannel {
         Self { handle }
     }
 
+    /// Borrows this endpoint for typed signal waits.
+    #[must_use]
+    pub fn as_handle_ref(&self) -> HandleRef<'_, CapabilityChannelObject> {
+        self.handle.as_handle_ref()
+    }
+
     /// Creates a connected endpoint pair.
     pub fn create() -> Result<(Self, Self)> {
         let result = raw_ops::create();
         Status::from_raw(result.status).into_result()?;
-        let (Some(first), Some(second)) = (
-            NonZeroU64::new(result.value0),
-            NonZeroU64::new(result.value1),
-        ) else {
-            close_malformed_handles(&[result.value0, result.value1]);
-            return Err(Error::InvalidResponse);
-        };
-        if first == second {
-            close_malformed_handles(&[first.get()]);
-            return Err(Error::InvalidResponse);
-        }
-        // SAFETY: one successful create publishes exactly these two distinct
-        // endpoint owners.
-        let first = unsafe { OwnedHandle::from_raw_owned(first) };
-        // SAFETY: the values were checked distinct, so this is the second
-        // unique owner published by the same successful operation.
-        let second = unsafe { OwnedHandle::from_raw_owned(second) };
+        // SAFETY: an OK CAPABILITY_CHANNEL_CREATE result transfers ownership
+        // of every distinct nonzero output, including malformed output pairs.
+        let (first, second) =
+            unsafe { crate::handle::adopt_produced_handle_pair([result.value0, result.value1])? };
         Ok((Self::from_handle(first), Self::from_handle(second)))
     }
 
@@ -323,8 +298,9 @@ impl CapabilityChannel {
         for (raw, slot) in raw_slots.iter_mut().zip(slots.iter()) {
             *raw = slot.raw_request()?;
         }
+        let endpoint = self.handle.as_handle_ref();
         let result = raw_ops::receive(
-            self.handle.as_handle_ref(),
+            endpoint,
             deadline,
             bytes
                 .get_mut(..byte_capacity)
@@ -346,7 +322,7 @@ impl CapabilityChannel {
         }
         // Take ownership of every distinct nonzero successful output before
         // any fallible count conversion or validation can return.
-        let mut owners = collect_successful_owners(&raw_slots)?;
+        let mut owners = collect_successful_owners(&raw_slots, endpoint.raw())?;
         let actual_bytes = usize::try_from(result.value0).map_err(|_| Error::InvalidResponse)?;
         let actual_capabilities =
             usize::try_from(result.value1).map_err(|_| Error::InvalidResponse)?;
@@ -393,6 +369,7 @@ const fn empty_receive_slot() -> hyper_abi::HyperNativeCapabilityReceiveSlot {
 
 fn collect_successful_owners(
     raw_slots: &[hyper_abi::HyperNativeCapabilityReceiveSlot; MAX_CAPABILITIES],
+    endpoint: NonZeroU64,
 ) -> Result<[Option<OwnedHandle<AnyObject>>; MAX_CAPABILITIES]> {
     let mut owners = [const { None }; MAX_CAPABILITIES];
     let mut repeated = false;
@@ -408,9 +385,11 @@ fn collect_successful_owners(
             continue;
         }
         // SAFETY: `OK` designates each distinct nonzero output value as one
-        // newly installed owner. Keeping even malformed outputs owned ensures
-        // deterministic cleanup before reporting a protocol violation.
-        owners[index] = Some(unsafe { OwnedHandle::from_raw_owned(raw) });
+        // newly installed owner. A malformed alias of the retained endpoint is
+        // rejected before constructing or closing an owner for that value.
+        owners[index] = Some(unsafe {
+            crate::handle::adopt_produced_handle_excluding(raw.get(), &[endpoint])?
+        });
     }
     if repeated {
         Err(Error::InvalidResponse)
@@ -448,20 +427,6 @@ fn validate_received_slots(
         }
     }
     Ok(())
-}
-
-fn close_malformed_handles(values: &[u64]) {
-    for (index, value) in values.iter().copied().enumerate() {
-        let Some(raw) = NonZeroU64::new(value) else {
-            continue;
-        };
-        if values[..index].contains(&value) {
-            continue;
-        }
-        // SAFETY: an `OK` result publishes each distinct nonzero result as one
-        // owner even when another result field violates the ABI contract.
-        drop(unsafe { OwnedHandle::<AnyObject>::from_raw_owned(raw) });
-    }
 }
 
 #[cfg(not(test))]

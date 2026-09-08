@@ -11,9 +11,12 @@ fn generated_rust_layouts_are_compiler_checked() {
         8
     );
     assert_eq!(generated::HYPER_NATIVE_SYS_HANDLE_CLOSE, 1);
-    assert_eq!(generated::HYPER_NATIVE_RIGHTS_MASK, 0x1fff_ffff);
+    assert_eq!(generated::HYPER_NATIVE_RIGHTS_MASK, 0x3fff_ffff);
     assert_eq!(generated::HYPER_NATIVE_SIGNAL_EVENT_SIGNALED, 1);
     assert_eq!(generated::HYPER_NATIVE_DEADLINE_INFINITE, u64::MAX);
+    assert_eq!(generated::HYPER_NATIVE_HANDLE_INFO_MIN_SIZE, 16);
+    assert_eq!(generated::HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE, 32);
+    assert_eq!(generated::HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES, 4096);
     assert_eq!(
         core::mem::size_of::<generated::HyperNativeCapabilityDisposition>(),
         24
@@ -46,6 +49,11 @@ fn generated_rust_layouts_are_compiler_checked() {
     assert_eq!(generated::HYPER_NATIVE_OBJECT_PROCESS_BUILDER, 15);
     assert_eq!(generated::HYPER_NATIVE_OBJECT_TASK_INSPECTOR, 16);
     assert_eq!(generated::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR, 17);
+    assert_eq!(
+        generated::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY,
+        20
+    );
+    assert_eq!(generated::HYPER_NATIVE_OBJECT_VIRTUAL_CPU, 24);
     assert_eq!(
         generated::hyper_native_object_transfer_class(
             generated::HYPER_NATIVE_OBJECT_PROCESS_BUILDER
@@ -139,6 +147,19 @@ fn generated_rust_layouts_are_compiler_checked() {
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL, 28);
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_START, 29);
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT, 30);
+    assert_eq!(
+        generated::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT,
+        72
+    );
+    assert_eq!(generated::HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC, 73);
+    assert_eq!(
+        core::mem::offset_of!(generated::HyperNativeVirtualMachineInfo, architecture),
+        24
+    );
+    assert_eq!(
+        core::mem::offset_of!(generated::HyperNativeVirtualMachineInfo, platform_profile),
+        28
+    );
     assert_eq!(generated::HYPER_NATIVE_STATUS_WOULD_BLOCK, -13);
     assert_eq!(generated::HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL, -14);
     assert_eq!(generated::HYPER_NATIVE_STATUS_PEER_CLOSED, -15);

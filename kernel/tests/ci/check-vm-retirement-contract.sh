@@ -9,18 +9,23 @@ root=${HYPER_VM_RETIREMENT_ROOT:-$(CDPATH='' cd -- "$(dirname "$0")/../.." && pw
 cd "$root"
 
 registry=src/kernel/vm/registry.rs
+construction=src/kernel/vm/registry/construction.rs
+control=src/kernel/vm/registry/control.rs
+execution=src/kernel/vm/registry/execution.rs
 lifecycle=src/kernel/vm/lifecycle.rs
 device=src/kernel/vm/device/aarch64.rs
 runner=src/kernel/vm/vcpu/runner.rs
 irq=src/kernel/entry/irq.rs
 linux=src/kernel/vm/linux/mod.rs
-memory=src/kernel/vm/memory.rs
+memory=src/kernel/vm/memory/retirement.rs
 cross_call=src/kernel/irq/cross_call.rs
 hal_vm=src/hal/selected/vm.rs
 hal_interrupt=src/hal/interrupt.rs
 aarch_stage2=src/arch/aarch64/stage2.rs
+vcpu_execution=src/kernel/vm/vcpu/execution.rs
 
-if rg -n 'CONFIG_ARCH_' "$registry" "$memory" "$cross_call"; then
+if rg -n 'CONFIG_ARCH_' "$registry" "$construction" "$control" "$execution" \
+    "$memory" "$cross_call"; then
     echo 'common VM lifecycle and retirement policy must not select a host architecture' >&2
     exit 1
 fi
@@ -31,8 +36,9 @@ promotion=$(mktemp "${TMPDIR:-/tmp}/hyper-vm-retirement-promotion.XXXXXX")
 runner_activation=$(mktemp "${TMPDIR:-/tmp}/hyper-vm-retirement-runner.XXXXXX")
 arch_retire=$(mktemp "${TMPDIR:-/tmp}/hyper-vm-retirement-arch.XXXXXX")
 trap 'rm -f "$begin" "$stops" "$promotion" "$runner_activation" "$arch_retire"' EXIT HUP INT TERM
-sed -n '/^fn begin_quiesce_control(/,/^}/p' "$registry" >"$begin"
-sed -n '/^    fn request_all_stops(/,/^    fn is_quiescent(/p' "$registry" | sed '$d' >"$stops"
+sed -n '/^fn begin_quiesce_control(/,/^}/p' "$control" >"$begin"
+sed -n '/^    pub(super) fn request_all_stops(/,/^    pub(super) fn is_quiescent(/p' \
+    "$execution" | sed '$d' >"$stops"
 sed -n '/^    fn try_hold_quiescent(/,/^}/p' "$registry" >"$promotion"
 sed -n '/if let Err(error) = super::activate(execution)/,/prepare_interrupts_for_entry/p' \
     "$runner" >"$runner_activation"
@@ -52,22 +58,23 @@ require_order() {
     fi
 }
 
-rg -q 'control: VmControl' "$registry" &&
+rg -q 'control: VmControl' "$construction" &&
     rg -q 'static DEFAULT_VM: ControlLock' "$lifecycle" &&
     rg -q 'retain_default\(control\)' "$linux" || {
     echo 'installation must mint and boot policy must retain one linear VM control' >&2
     exit 1
 }
-if rg -U -q 'derive\([^)]*(Clone|Copy)[^)]*\)\][[:space:]]*pub\(super\) struct VmControl' \
-    "$registry"; then
+if rg -U -q 'derive\([^)]*(Clone|Copy)[^)]*\)\][[:space:]]*pub\(in crate::kernel::vm\) struct VmControl' \
+    "$construction"; then
     echo 'VM lifecycle authority must not be cloneable' >&2
     exit 1
 fi
-rg -q '^    const fn mint_for_install\(id: VmId\)' "$registry" || {
+rg -q '^    const fn mint_for_install\(id: VmId\)' "$construction" || {
     echo 'only registry installation may privately mint VM lifecycle authority' >&2
     exit 1
 }
-if rg -q 'pub.*fn (mint_for_install|begin_quiesce_control|poll_quiescent_control)' "$registry" ||
+if rg -q 'pub.*fn mint_for_install' "$construction" ||
+    rg -q 'pub.*fn (begin_quiesce_control|poll_quiescent_control)' "$control" ||
     rg -q 'VmControl[[:space:]]*\{' "$lifecycle"; then
     echo 'raw VmId retirement transitions and token construction must remain registry-private' >&2
     exit 1
@@ -80,7 +87,7 @@ rg -q 'Installed\(FallibleArc<VirtualMachine>\)' "$registry" &&
     echo 'registry must retain Installed, Quiescing, and unique-held typestates' >&2
     exit 1
 }
-if rg -q 'strong_count' "$registry"; then
+if rg -q 'strong_count' "$registry" "$control" "$execution"; then
     echo 'VM retirement must use try_into_unique instead of refcount polling' >&2
     exit 1
 fi
@@ -107,12 +114,14 @@ rg -q 'clear_console_route_for_vm' "$device" || {
     echo 'quiescence must have a standalone exact VM console cut' >&2
     exit 1
 }
-rg -q 'lifecycle_machine\(publication.vm\)' "$registry" || {
-    echo 'exact reaper completion must remain valid while the VM is Quiescing' >&2
+rg -q 'endpoint: hyper::mm::FallibleArc' "$vcpu_execution" &&
+    rg -q '\.publish_reaped\(thread, reason\)' "$vcpu_execution" &&
+    ! rg -q 'REGISTRY' "$vcpu_execution" || {
+    echo 'exact reaper completion must retain its endpoint without a registry lookup' >&2
     exit 1
 }
-rg -q 'VcpuClosureReason::Guest' "$runner" &&
-    rg -q 'VcpuClosureReason::Administrative' "$runner" || {
+rg -q 'ClosureReason::Guest' "$runner" &&
+    rg -q 'ClosureReason::Administrative' "$runner" || {
     echo 'guest and administrative vCPU closure must both arm exact reaping' >&2
     exit 1
 }
@@ -130,20 +139,20 @@ rg -F -q 'RetiringHeld(FallibleArc<VirtualMachine>)' "$registry" &&
     echo 'final retirement must retain explicit shared, unique, and destruction tombstones' >&2
     exit 1
 }
-require_order "$registry" 'try_guest_stage2_retirement\(\)' \
+require_order "$control" 'try_guest_stage2_retirement\(\)' \
     'registry\.begin_retirement\(self\.id\)' \
     'stage-2 retirement capability must be acquired before registry mutation'
-require_order "$registry" 'GuestStage2Transaction::try_acquire\(\)' \
+require_order "$control" 'GuestStage2Transaction::try_acquire\(\)' \
     'registry\.begin_retirement\(self\.id\)' \
     'the fallible RPC reservation must precede the irreversible registry cut'
-require_order "$registry" 'transport\.execute\(retirement\.local_request\(\)' \
+require_order "$control" 'transport\.execute\(retirement\.local_request\(\)' \
     'address_space\.finish_retirement\(retirement\)' \
     'every target must acknowledge before stage-2 and VMID completion'
-require_order "$registry" 'drop\(transport\)' 'registry\.promote_retired\(self\.id\)' \
+require_order "$control" 'drop\(transport\)' 'registry\.promote_retired\(self\.id\)' \
     'the RPC owner must be released before recovering unique VM ownership'
-require_order "$registry" 'registry\.begin_destroy\(self\.id\)' 'drop\(owner\)' \
+require_order "$control" 'registry\.begin_destroy\(self\.id\)' 'drop\(owner\)' \
     'the registry must publish a destruction tombstone before owner drop'
-require_order "$registry" 'drop\(owner\)' 'registry\.finish_destroy\(self\.id\)' \
+require_order "$control" 'drop\(owner\)' 'registry\.finish_destroy\(self\.id\)' \
     'the VM aggregate must be destroyed before slot generation advances'
 
 require_order "$memory" 'self\.residency\.finish_retirement\(cut\)' \

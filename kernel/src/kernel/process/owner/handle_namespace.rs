@@ -28,12 +28,122 @@ impl PreparedHandleConsumption {
         }
     }
 
-    pub(crate) fn commit(mut self) -> InTransitCapabilities {
+    /// Commits the consume-only transaction and releases its object owners.
+    ///
+    /// Unlike a transfer transaction, successful consumption has no next
+    /// namespace. Keeping release inside this linear API prevents callers from
+    /// accidentally dropping an unreleased in-transit owner.
+    pub(crate) fn commit_and_release(mut self) {
         let transfer = match self.transfer.take() {
             Some(transfer) => transfer,
             None => process_invariant_violation(),
         };
-        transfer.commit_pre_admitted()
+        transfer.commit_pre_admitted().release();
+    }
+
+    /// Atomically replaces the claimed source handle with prepared outputs.
+    ///
+    /// Both the source claim and destination reservation were admitted before
+    /// this commit point. Consequently this operation deliberately does not
+    /// re-check the Process lifecycle: a racing stop cannot turn a successful
+    /// kernel operation into an ABI failure after its source capability was
+    /// consumed. The table mutation and its accounting publication share the
+    /// Process lock and are allocation-free.
+    pub(crate) fn commit_replacement<const N: usize>(
+        mut self,
+        mut destination: ProcessHandleReservation<N>,
+        handles: [PreparedHandle; N],
+    ) -> [HandleValue; N] {
+        let mut source = match self.transfer.take() {
+            Some(source) => source,
+            None => process_invariant_violation(),
+        };
+        let process = source.process.clone();
+        destination.require_owner(&process);
+        let mut handles = Some(handles);
+        let mut detached_source = None;
+        let mut retired_transfer_storage = None;
+        let mut retired_charge_storage = None;
+        let values = process.inner.state.with(|state| {
+            for value in source.moved_values.iter().copied() {
+                if !handle_charge_is_live(state, value) {
+                    process_invariant_violation();
+                }
+            }
+            let source_claim = match source.claim.take() {
+                Some(claim) => claim,
+                None => process_invariant_violation(),
+            };
+            let destination_token = match destination.reservation.take() {
+                Some(reservation) => reservation,
+                None => process_invariant_violation(),
+            };
+            let published = match handles.take() {
+                Some(handles) => handles,
+                None => process_invariant_violation(),
+            };
+            let ((detached, retired), values) = process.inner.handles.with(|table| {
+                let detached = source_claim.commit_with_storage(table);
+                let values = destination_token.publish(table, published);
+                (detached, values)
+            });
+            detached_source = Some(detached);
+            retired_transfer_storage = Some(retired);
+
+            for value in source.moved_values.drain(..) {
+                let (charge, retired_record) = release_handle_charge(state, value);
+                source.released_charges.push(charge);
+                if let Some(record) = retired_record {
+                    source.retired_records.push(record);
+                }
+            }
+
+            let mut charges = match destination.handle_charges.take() {
+                Some(charges) => charges,
+                None => process_invariant_violation(),
+            };
+            let record = match destination.record.take() {
+                Some(record) => record,
+                None => process_invariant_violation(),
+            };
+            record.state.with(|record_state| {
+                if record_state.entries.len() != charges.len() {
+                    process_invariant_violation();
+                }
+                for entry in record_state.entries.iter_mut().rev() {
+                    let charge = match charges.pop() {
+                        Some(charge) => charge,
+                        None => process_invariant_violation(),
+                    };
+                    entry.charge = Some(charge.commit());
+                }
+                if !charges.is_empty() {
+                    process_invariant_violation();
+                }
+            });
+            install_handle_charge_record(state, record);
+            retired_charge_storage = Some(charges);
+            values
+        });
+
+        drop(retired_transfer_storage.take());
+        drop(retired_charge_storage.take());
+        drop(core::mem::take(&mut source.released_charges));
+        drop(core::mem::take(&mut source.retired_records));
+        drop(source.entry_charge.take());
+        drop(source.scratch_charge.take());
+        let source_storage_charge = match source.handle_charge.take() {
+            Some(charge) => charge,
+            None => process_invariant_violation(),
+        };
+        let detached_source = match detached_source.take() {
+            Some(handles) => handles,
+            None => process_invariant_violation(),
+        };
+        InTransitCapabilities::new(detached_source, source_storage_charge).release();
+        drop(destination.handle_charges.take());
+        drop(destination.record.take());
+        values
     }
 }
 
@@ -198,6 +308,7 @@ impl PreparedDirectProcessHandleTransfer {
         if source.handle_count() != destination.values().len() {
             process_invariant_violation();
         }
+        destination.require_owner(&destination_process);
         Self {
             source: Some(source),
             destination_process,
@@ -497,6 +608,7 @@ pub(crate) struct HandleTransferCommitFailure {
 
 #[must_use = "publish or abort the process handle reservation"]
 pub(crate) struct ProcessHandleReservation<const N: usize> {
+    pub(super) owner: ProcessId,
     pub(super) reservation: Option<HandleReservation<N>>,
     pub(super) handle_charges: Option<alloc::vec::Vec<ChargeReservation>>,
     pub(super) record: Option<FallibleArc<HandleChargeRecord>>,
@@ -504,6 +616,7 @@ pub(crate) struct ProcessHandleReservation<const N: usize> {
 
 #[must_use = "publish or abort the process handle batch reservation"]
 pub(crate) struct ProcessHandleBatchReservation {
+    pub(super) owner: ProcessId,
     pub(super) reservation: Option<HandleBatchReservation>,
     pub(super) handle_charges: Option<alloc::vec::Vec<ChargeReservation>>,
     pub(super) record: Option<FallibleArc<HandleChargeRecord>>,
@@ -511,6 +624,17 @@ pub(crate) struct ProcessHandleBatchReservation {
 }
 
 impl<const N: usize> ProcessHandleReservation<N> {
+    pub(super) fn require_owner(&self, process: &Process) {
+        if self.owner != process.id() {
+            process_invariant_violation();
+        }
+    }
+
+    #[cfg(feature = "kernel-self-test")]
+    pub(crate) fn belongs_to(&self, process: &Process) -> bool {
+        self.owner == process.id()
+    }
+
     /// Future generation-tagged values which resolve only after publication.
     pub(crate) fn values(&self) -> [HandleValue; N] {
         match self.reservation.as_ref() {
@@ -521,6 +645,17 @@ impl<const N: usize> ProcessHandleReservation<N> {
 }
 
 impl ProcessHandleBatchReservation {
+    pub(super) fn require_owner(&self, process: &Process) {
+        if self.owner != process.id() {
+            process_invariant_violation();
+        }
+    }
+
+    #[cfg(feature = "kernel-self-test")]
+    pub(crate) fn belongs_to(&self, process: &Process) -> bool {
+        self.owner == process.id()
+    }
+
     /// Future numeric values which remain unresolved until batch publication.
     pub(crate) fn values(&self) -> &[HandleValue] {
         match self.reservation.as_ref() {

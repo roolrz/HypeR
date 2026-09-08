@@ -918,7 +918,7 @@ pub(crate) fn abort_process_builder(
         .map_err(ProcessBuilderError::Process)?;
     match resolved.object().abort() {
         Ok(()) => {
-            consumption.commit().release();
+            consumption.commit_and_release();
             Ok(())
         }
         Err(error) => {

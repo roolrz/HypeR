@@ -31,6 +31,7 @@ pub(super) enum Stage2InvalidationError {
 }
 
 impl Backend {
+    #[cfg(feature = "kernel-self-test")]
     pub(super) const fn name(self) -> &'static str {
         match self {
             Self::Vmx => "Intel VMX/EPT",
@@ -63,6 +64,7 @@ impl Backend {
     }
 }
 
+#[cfg(feature = "kernel-self-test")]
 pub(super) fn validate() -> Result<Backend, super::guest::ValidationError> {
     if let Some(backend) = selected() {
         return Ok(backend);
@@ -95,6 +97,7 @@ pub(super) fn selected() -> Option<Backend> {
     }
 }
 
+#[cfg(feature = "kernel-self-test")]
 pub(super) fn backend_name() -> &'static str {
     selected().map_or("unselected x86 virtualization", Backend::name)
 }
@@ -130,6 +133,7 @@ pub(super) fn fail_stop(operation: &str, detail: impl core::fmt::Debug) -> ! {
     )
 }
 
+#[cfg(feature = "kernel-self-test")]
 const fn encode(backend: Backend) -> u8 {
     match backend {
         Backend::Vmx => VMX,

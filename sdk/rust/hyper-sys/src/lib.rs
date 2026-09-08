@@ -71,6 +71,9 @@ unsafe extern "C" {
     #[link_name = "hyper_abi_query"]
     fn ffi_abi_query() -> CallResult;
 
+    #[link_name = "hyper_clock_get_monotonic"]
+    fn ffi_clock_get_monotonic() -> CallResult;
+
     #[link_name = "hyper_startup_find_handle"]
     fn ffi_startup_find_handle(
         startup: *const RawStartup,
@@ -136,6 +139,18 @@ unsafe extern "C" {
 pub unsafe fn abi_query() -> CallResult {
     // SAFETY: the caller establishes the Native runtime and syscall contract.
     unsafe { ffi_abi_query() }
+}
+
+/// Reads absolute nanoseconds from the kernel monotonic clock domain.
+///
+/// # Safety
+///
+/// The caller must be executing as a `HypeR` Native process through the runtime
+/// and syscall veneer installed with this crate.
+#[inline]
+pub unsafe fn clock_get_monotonic() -> CallResult {
+    // SAFETY: the caller establishes the Native runtime and syscall contract.
+    unsafe { ffi_clock_get_monotonic() }
 }
 
 /// Finds one handle in a C-runtime-validated startup record.
@@ -224,7 +239,7 @@ pub unsafe fn handle_replace(source: abi::HyperNativeHandle, rights: u64) -> Cal
 pub unsafe fn handle_get_info(
     handle: abi::HyperNativeHandle,
     info: *mut abi::HyperNativeHandleInfo,
-) -> abi::HyperNativeStatus {
+) -> CallResult {
     // SAFETY: the caller establishes both handle and output-pointer validity.
     unsafe {
         ffi_native_call6(
@@ -236,7 +251,6 @@ pub unsafe fn handle_get_info(
             0,
             0,
         )
-        .status
     }
 }
 
@@ -251,7 +265,7 @@ pub unsafe fn handle_get_info(
 pub unsafe fn object_get_basic_info(
     handle: abi::HyperNativeHandle,
     info: *mut abi::HyperNativeObjectBasicInfo,
-) -> abi::HyperNativeStatus {
+) -> CallResult {
     // SAFETY: the caller establishes both handle and output-pointer validity.
     unsafe {
         ffi_native_call6(
@@ -263,7 +277,6 @@ pub unsafe fn object_get_basic_info(
             0,
             0,
         )
-        .status
     }
 }
 
@@ -302,6 +315,338 @@ pub unsafe fn object_wait_many(
             items.addr() as u64,
             item_count as u64,
             deadline,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Derives one resource-domain-bound VM creation lease.
+///
+/// # Safety
+///
+/// Both input handles must remain live. On success, the caller owns the
+/// returned nonzero handle in `value0`.
+#[inline]
+pub unsafe fn virtual_machine_creation_lease_create(
+    authority: abi::HyperNativeHandle,
+    resource_domain: abi::HyperNativeHandle,
+) -> CallResult {
+    // SAFETY: the caller establishes the borrowed input and output ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_CREATE,
+            authority,
+            resource_domain,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Creates an independently accounted child resource domain.
+///
+/// # Safety
+///
+/// `parent` must remain live with create-resource-domain rights and `limits`
+/// must identify one readable ABI limits record. On success, the caller owns
+/// the returned nonzero handle in `value0`.
+#[inline]
+pub unsafe fn resource_domain_create(
+    parent: abi::HyperNativeHandle,
+    limits: *const abi::HyperNativeResourceLimits,
+) -> CallResult {
+    // SAFETY: the caller establishes the borrowed input and output ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_RESOURCE_DOMAIN_CREATE,
+            parent,
+            limits as u64,
+            core::mem::size_of::<abi::HyperNativeResourceLimits>() as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Creates a task group charged to `resource_domain`.
+///
+/// # Safety
+///
+/// Both input handles must remain live with their required rights. On
+/// success, the caller owns the returned nonzero handle in `value0`.
+#[inline]
+pub unsafe fn task_group_create(
+    factory: abi::HyperNativeHandle,
+    resource_domain: abi::HyperNativeHandle,
+) -> CallResult {
+    // SAFETY: the caller establishes borrowed inputs and output ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_TASK_GROUP_CREATE,
+            factory,
+            resource_domain,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Creates a pending VM and consumes `lease` only on success.
+///
+/// # Safety
+///
+/// `configuration` must remain readable for the complete call. The caller
+/// must honor the consume-on-success contract for `lease` and adopt the
+/// returned handle in `value0` only on success.
+#[inline]
+pub unsafe fn virtual_machine_create(
+    lease: abi::HyperNativeHandle,
+    configuration: *const abi::HyperNativeVirtualMachineConfiguration,
+) -> CallResult {
+    // SAFETY: the caller establishes input pointer and handle ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATE,
+            lease,
+            configuration.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeVirtualMachineConfiguration>() as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Attaches the writable guest-memory VMO to a pending VM.
+///
+/// # Safety
+///
+/// Both handles must remain live for the complete call.
+#[inline]
+pub unsafe fn pending_virtual_machine_set_memory(
+    pending: abi::HyperNativeHandle,
+    vmo: abi::HyperNativeHandle,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes both borrowed handle lifetimes.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_MEMORY,
+            pending,
+            vmo,
+            0,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Commits a Console output capability into a pending VM.
+///
+/// # Safety
+///
+/// Both handles must remain live for the complete call. The caller must honor
+/// the consume-on-success contract for `console`.
+#[inline]
+pub unsafe fn pending_virtual_machine_set_console_output(
+    pending: abi::HyperNativeHandle,
+    console: abi::HyperNativeHandle,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes both handle lifetimes and ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT,
+            pending,
+            console,
+            0,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Sets the boot-vCPU initial machine state.
+///
+/// # Safety
+///
+/// `bootstrap` must remain readable and `pending` live for the complete call.
+#[inline]
+pub unsafe fn pending_virtual_machine_set_bootstrap(
+    pending: abi::HyperNativeHandle,
+    bootstrap: *const abi::HyperNativeVirtualCpuBootstrap,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes pointer validity and handle lifetime.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP,
+            pending,
+            bootstrap.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeVirtualCpuBootstrap>() as u64,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Seals a fully configured pending VM.
+///
+/// # Safety
+///
+/// `pending` must remain live for the complete call.
+#[inline]
+pub unsafe fn pending_virtual_machine_seal(
+    pending: abi::HyperNativeHandle,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes the borrowed handle lifetime.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SEAL,
+            pending,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Installs a sealed VM in a dormant state and consumes `pending` only on
+/// success.
+///
+/// # Safety
+///
+/// The caller must honor the consume-on-success contract and adopt both
+/// returned handles only when the result status is `OK`.
+#[inline]
+pub unsafe fn pending_virtual_machine_install(pending: abi::HyperNativeHandle) -> CallResult {
+    // SAFETY: the caller establishes input and returned-handle ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_INSTALL,
+            pending,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Makes one installed dormant vCPU scheduler-runnable.
+///
+/// # Safety
+///
+/// `vcpu` must remain live with start rights for the complete call.
+#[inline]
+pub unsafe fn virtual_cpu_start(vcpu: abi::HyperNativeHandle) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes the borrowed handle lifetime.
+    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_START, vcpu, 0, 0, 0, 0, 0).status }
+}
+
+/// Aborts and consumes one pending VM only on success.
+///
+/// # Safety
+///
+/// The caller must honor the consume-on-success contract for `pending`.
+#[inline]
+pub unsafe fn pending_virtual_machine_abort(
+    pending: abi::HyperNativeHandle,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes consuming handle ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_ABORT,
+            pending,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Requests asynchronous VM stop.
+///
+/// # Safety
+///
+/// `machine` must remain live for the complete call.
+#[inline]
+pub unsafe fn virtual_machine_request_stop(
+    machine: abi::HyperNativeHandle,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes the borrowed handle lifetime.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REQUEST_STOP,
+            machine,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Reads installed VM metadata.
+///
+/// # Safety
+///
+/// `machine` must remain live and `info` writable for the complete call.
+#[inline]
+pub unsafe fn virtual_machine_get_info(
+    machine: abi::HyperNativeHandle,
+    info: *mut abi::HyperNativeVirtualMachineInfo,
+) -> CallResult {
+    // SAFETY: the caller establishes handle and pointer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO,
+            machine,
+            info.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeVirtualMachineInfo>() as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Reads installed vCPU metadata.
+///
+/// # Safety
+///
+/// `vcpu` must remain live and `info` writable for the complete call.
+#[inline]
+pub unsafe fn virtual_cpu_get_info(
+    vcpu: abi::HyperNativeHandle,
+    info: *mut abi::HyperNativeVirtualCpuInfo,
+) -> CallResult {
+    // SAFETY: the caller establishes handle and pointer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO,
+            vcpu,
+            info.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeVirtualCpuInfo>() as u64,
             0,
             0,
             0,
@@ -386,7 +731,7 @@ pub unsafe fn capability_channel_create() -> CallResult {
 pub unsafe fn process_get_info(
     process: abi::HyperNativeHandle,
     info: *mut abi::HyperNativeProcessInfo,
-) -> abi::HyperNativeStatus {
+) -> CallResult {
     // SAFETY: the caller establishes the handle and output-pointer contracts.
     unsafe {
         ffi_native_call6(
@@ -398,7 +743,6 @@ pub unsafe fn process_get_info(
             0,
             0,
         )
-        .status
     }
 }
 
@@ -772,7 +1116,7 @@ pub unsafe fn directory_read(
 pub unsafe fn directory_get_info(
     directory: abi::HyperNativeHandle,
     info: *mut abi::HyperNativeDirectoryInfo,
-) -> abi::HyperNativeStatus {
+) -> CallResult {
     // SAFETY: the caller establishes both handle and output-pointer validity.
     unsafe {
         ffi_native_call6(
@@ -784,7 +1128,6 @@ pub unsafe fn directory_get_info(
             0,
             0,
         )
-        .status
     }
 }
 
@@ -796,7 +1139,7 @@ pub unsafe fn directory_get_info(
 pub unsafe fn memory_inspector_read(
     inspector: abi::HyperNativeHandle,
     observation: *mut abi::HyperNativeMemoryObservation,
-) -> abi::HyperNativeStatus {
+) -> CallResult {
     // SAFETY: the caller owns the pointer contract stated above.
     unsafe {
         ffi_native_call6(
@@ -808,7 +1151,6 @@ pub unsafe fn memory_inspector_read(
             0,
             0,
         )
-        .status
     }
 }
 
@@ -820,7 +1162,7 @@ pub unsafe fn memory_inspector_read(
 pub unsafe fn cpu_inspector_read(
     inspector: abi::HyperNativeHandle,
     observation: *mut abi::HyperNativeCpuObservation,
-) -> abi::HyperNativeStatus {
+) -> CallResult {
     // SAFETY: the caller owns the pointer contract stated above.
     unsafe {
         ffi_native_call6(
@@ -832,7 +1174,6 @@ pub unsafe fn cpu_inspector_read(
             0,
             0,
         )
-        .status
     }
 }
 
@@ -1081,7 +1422,7 @@ pub unsafe fn file_read_at(
 pub unsafe fn file_get_info(
     file: abi::HyperNativeHandle,
     info: *mut abi::HyperNativeFileInfo,
-) -> abi::HyperNativeStatus {
+) -> CallResult {
     // SAFETY: the caller establishes both handle and output-pointer validity.
     unsafe {
         ffi_native_call6(
@@ -1093,7 +1434,6 @@ pub unsafe fn file_get_info(
             0,
             0,
         )
-        .status
     }
 }
 

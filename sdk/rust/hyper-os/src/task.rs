@@ -30,6 +30,18 @@ const PROCESS_SUPERVISOR_RIGHTS: Rights = Rights::TRANSFER
     .union(Rights::WAIT)
     .union(Rights::INSPECT)
     .union(Rights::REQUEST_STOP);
+const CHILD_RESOURCE_DOMAIN_RIGHTS: Rights = Rights::DUPLICATE
+    .union(Rights::TRANSFER)
+    .union(Rights::INSPECT)
+    .union(Rights::CREATE_RESOURCE_DOMAIN)
+    .union(Rights::SET_LIMITS)
+    .union(Rights::REVOKE)
+    .union(Rights::RESOURCE_DOMAIN_SPONSOR);
+const CHILD_TASK_GROUP_RIGHTS: Rights = Rights::DUPLICATE
+    .union(Rights::TRANSFER)
+    .union(Rights::INSPECT)
+    .union(Rights::REQUEST_STOP)
+    .union(Rights::TASK_GROUP_ATTACH_PROCESS);
 
 /// Lifecycle phase reported for a Process object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,6 +82,133 @@ pub fn yield_now() -> Result<()> {
     Status::from_raw(raw_ops::yield_thread()).into_result()
 }
 
+/// Creates an independently accounted child of `parent`.
+///
+/// The limits become authoritative in the same transaction that publishes the
+/// child, so no temporarily unlimited domain can admit work between creation
+/// and policy installation. Every ancestor limit remains independently
+/// authoritative.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceLimits {
+    pub kernel_memory_bytes: u64,
+    pub processes: u64,
+    pub threads: u64,
+    pub handles: u64,
+    pub kernel_objects: u64,
+    pub committed_pages: u64,
+    pub pinned_pages: u64,
+    pub guest_pages: u64,
+    pub ipc_messages: u64,
+    pub ipc_bytes: u64,
+    pub ipc_handles: u64,
+    pub subscriptions: u64,
+    pub timers: u64,
+    pub virtual_machines: u64,
+    pub virtual_cpus: u64,
+    pub device_leases: u64,
+    pub dma_mappings: u64,
+    pub user_address_spaces: u64,
+    pub user_mappings: u64,
+}
+
+impl ResourceLimits {
+    pub const UNLIMITED: Self = Self {
+        kernel_memory_bytes: u64::MAX,
+        processes: u64::MAX,
+        threads: u64::MAX,
+        handles: u64::MAX,
+        kernel_objects: u64::MAX,
+        committed_pages: u64::MAX,
+        pinned_pages: u64::MAX,
+        guest_pages: u64::MAX,
+        ipc_messages: u64::MAX,
+        ipc_bytes: u64::MAX,
+        ipc_handles: u64::MAX,
+        subscriptions: u64::MAX,
+        timers: u64::MAX,
+        virtual_machines: u64::MAX,
+        virtual_cpus: u64::MAX,
+        device_leases: u64::MAX,
+        dma_mappings: u64::MAX,
+        user_address_spaces: u64::MAX,
+        user_mappings: u64::MAX,
+    };
+
+    fn abi(self) -> hyper_abi::HyperNativeResourceLimits {
+        hyper_abi::HyperNativeResourceLimits {
+            kernel_memory_bytes: self.kernel_memory_bytes,
+            processes: self.processes,
+            threads: self.threads,
+            handles: self.handles,
+            kernel_objects: self.kernel_objects,
+            committed_pages: self.committed_pages,
+            pinned_pages: self.pinned_pages,
+            guest_pages: self.guest_pages,
+            ipc_messages: self.ipc_messages,
+            ipc_bytes: self.ipc_bytes,
+            ipc_handles: self.ipc_handles,
+            subscriptions: self.subscriptions,
+            timers: self.timers,
+            virtual_machines: self.virtual_machines,
+            virtual_cpus: self.virtual_cpus,
+            device_leases: self.device_leases,
+            dma_mappings: self.dma_mappings,
+            user_address_spaces: self.user_address_spaces,
+            user_mappings: self.user_mappings,
+            reserved: 0,
+        }
+    }
+}
+
+pub fn create_resource_domain(
+    parent: HandleRef<'_, ResourceDomainObject>,
+    limits: ResourceLimits,
+) -> Result<OwnedHandle<ResourceDomainObject>> {
+    let limits = limits.abi();
+    let parent_raw = parent.raw();
+    // SAFETY: the typed parent borrow remains live for the complete call.
+    let result = unsafe { hyper_sys::resource_domain_create(parent_raw.get(), &limits) };
+    Status::from_raw(result.status).into_result()?;
+    adopt_produced_handle::<ResourceDomainObject>(
+        result.value0,
+        CHILD_RESOURCE_DOMAIN_RIGHTS,
+        &[parent_raw],
+    )
+}
+
+/// Creates an empty process task group charged to `domain`.
+///
+/// Every returned or duplicated group handle is a shared lifetime owner,
+/// independently of its attenuated rights. Closing the last owner
+/// asynchronously requests stop for every member of the group.
+pub fn create_task_group(
+    factory: HandleRef<'_, TaskFactoryObject>,
+    domain: HandleRef<'_, ResourceDomainObject>,
+) -> Result<OwnedHandle<TaskGroupObject>> {
+    let factory_raw = factory.raw();
+    let domain_raw = domain.raw();
+    // SAFETY: both typed input borrows remain live for the complete call.
+    let result = unsafe { hyper_sys::task_group_create(factory_raw.get(), domain_raw.get()) };
+    Status::from_raw(result.status).into_result()?;
+    adopt_produced_handle::<TaskGroupObject>(
+        result.value0,
+        CHILD_TASK_GROUP_RIGHTS,
+        &[factory_raw, domain_raw],
+    )
+}
+
+fn adopt_produced_handle<T: TypedObject>(
+    raw: u64,
+    rights: Rights,
+    live_inputs: &[NonZeroU64],
+) -> Result<OwnedHandle<T>> {
+    // SAFETY: successful creation publishes one new owner unless malformed
+    // output aliases one of the explicitly retained input borrows.
+    let owner =
+        unsafe { crate::handle::adopt_produced_handle_excluding::<AnyObject>(raw, live_inputs)? };
+    validate_produced_handle::<T>(owner, rights)
+}
+
 /// One mutable or sealed process construction transaction.
 ///
 /// The kernel owns the authoritative phase so this wrapper remains valid when
@@ -87,11 +226,17 @@ impl ProcessBuilder {
         domain: HandleRef<'_, ResourceDomainObject>,
         executable: HandleRef<'_, FileObject>,
     ) -> Result<Self> {
+        let live_inputs = [factory.raw(), group.raw(), domain.raw(), executable.raw()];
         let result = raw_ops::create(factory, group, domain, executable);
         Status::from_raw(result.status).into_result()?;
-        let raw = NonZeroU64::new(result.value0).ok_or(Error::InvalidResponse)?;
-        // SAFETY: a successful create publishes exactly one builder owner.
-        let owner = unsafe { OwnedHandle::<AnyObject>::from_raw_owned(raw) };
+        // SAFETY: successful create publishes one new builder owner unless a
+        // malformed output aliases a retained input borrow.
+        let owner = unsafe {
+            crate::handle::adopt_produced_handle_excluding::<AnyObject>(
+                result.value0,
+                &live_inputs,
+            )?
+        };
         let handle = validate_produced_handle::<ProcessBuilderObject>(owner, BUILDER_RIGHTS)?;
         Ok(Self { handle })
     }
@@ -213,11 +358,12 @@ impl ProcessBuilder {
             });
         }
         let _ = self.handle.into_raw();
-        let Some(raw) = NonZeroU64::new(result.value0) else {
-            return Err(StartFailure::Committed(Error::InvalidResponse));
-        };
-        // SAFETY: a successful start publishes exactly one Process owner.
-        let owner = unsafe { OwnedHandle::<AnyObject>::from_raw_owned(raw) };
+        // SAFETY: after the consume-on-success input is disarmed, the
+        // successful start result is the sole live owner of its raw value.
+        let owner = unsafe {
+            crate::handle::adopt_produced_handle_excluding::<AnyObject>(result.value0, &[])
+        }
+        .map_err(StartFailure::Committed)?;
         validate_produced_handle::<ProcessObject>(owner, PROCESS_SUPERVISOR_RIGHTS)
             .map_err(StartFailure::Committed)
     }
@@ -447,7 +593,6 @@ fn valid_environment(environment: &str) -> bool {
 
 #[cfg(not(test))]
 mod raw_ops {
-    use core::mem::MaybeUninit;
     use core::num::NonZeroU64;
 
     use super::{
@@ -570,15 +715,19 @@ mod raw_ops {
     pub(super) fn process_info(
         process: HandleRef<'_, super::ProcessObject>,
     ) -> crate::Result<hyper_abi::HyperNativeProcessInfo> {
-        let mut record = MaybeUninit::<hyper_abi::HyperNativeProcessInfo>::uninit();
+        let mut record = hyper_abi::HyperNativeProcessInfo {
+            phase: 0,
+            terminal_reason: 0,
+            detail0: 0,
+            detail1: 0,
+            reserved: 0,
+        };
         // SAFETY: the typed Process borrow remains live and `record` is
         // writable for the complete fixed-width ABI output.
-        let status = crate::Status::from_raw(unsafe {
-            hyper_sys::process_get_info(process.raw().get(), record.as_mut_ptr())
-        });
-        status.into_result()?;
-        // SAFETY: an OK result initializes the complete record.
-        Ok(unsafe { record.assume_init() })
+        let result = unsafe { hyper_sys::process_get_info(process.raw().get(), &mut record) };
+        let _supported_size =
+            crate::validate_info_result(result, hyper_abi::HYPER_NATIVE_PROCESS_INFO_MIN_SIZE)?;
+        Ok(record)
     }
 
     pub(super) fn yield_thread() -> hyper_abi::HyperNativeStatus {

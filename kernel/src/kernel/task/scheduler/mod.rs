@@ -29,7 +29,10 @@ use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
 use self::registry::ThreadReservation;
 use self::state::{PreparedContextSwitch, Scheduler};
 pub use super::thread::ThreadNameSnapshot;
-use super::thread::{KernelThreadEntry, Thread, ThreadId, ThreadState, VcpuExecution};
+use super::thread::{
+    ExternalThreadExecution, KernelThreadEntry, Thread, ThreadId, ThreadResourceOwnership,
+    ThreadState,
+};
 
 use super::policy::SchedulingPolicy;
 pub use super::policy::{CpuMask, ThreadPriority};
@@ -282,7 +285,7 @@ pub struct SecondaryStack {
 #[derive(Clone, Copy)]
 pub(crate) struct CurrentVcpu {
     pub thread: ThreadId,
-    pub execution: *mut VcpuExecution,
+    pub execution: super::external_execution::ExternalExecutionPointer,
     pub stack: (usize, usize),
 }
 
@@ -675,24 +678,27 @@ pub(crate) fn discard_dormant_kernel_thread(id: ThreadId) -> Result<(), Error> {
 
 pub(in crate::kernel) fn vcpu_create(
     name: &str,
-    vm: crate::kernel::vm::registry::VmBinding,
-    vcpu_id: u32,
-    context: crate::hal::vm::VcpuContext,
-    entry_ready: &crate::hal::vm::VmEntryReady,
+    execution: ExternalThreadExecution,
+    resources: ThreadResourceOwnership,
     entry: KernelThreadEntry,
 ) -> Result<DormantVcpuThread, Error> {
     let cpu = current_cpu()?;
-    let execution = VcpuExecution::installed(vm, vcpu_id, context, entry_ready)?;
     let reservation = reserve_thread(|scheduler| scheduler.reserve_vcpu_thread(cpu))?;
     let id = reservation.id();
-    let thread =
-        match prepare_boxed_thread(Thread::vcpu(id, reservation.cpu(), name, execution, entry)) {
-            Ok(thread) => thread,
-            Err(error) => {
-                abandon_reservation(reservation)?;
-                return Err(error);
-            }
-        };
+    let thread = match prepare_boxed_thread(Thread::vcpu(
+        id,
+        reservation.cpu(),
+        name,
+        execution,
+        resources,
+        entry,
+    )) {
+        Ok(thread) => thread,
+        Err(error) => {
+            abandon_reservation(reservation)?;
+            return Err(error);
+        }
+    };
     publish_thread(reservation, thread)?;
     Ok(DormantVcpuThread {
         thread: id,
@@ -1647,7 +1653,7 @@ fn retire_detached_thread(mut thread: Box<Thread>) {
     let vcpu_reap = thread.take_vcpu_reap_publication();
     drop(thread);
     if let Some(publication) = vcpu_reap
-        && let Err(error) = crate::kernel::vm::registry::complete_vcpu_reap(publication)
+        && let Err(error) = publication.complete()
     {
         crate::kernel::crash::fatal(format_args!(
             "HypeR: exact vCPU reap publication failed: {error:?}"

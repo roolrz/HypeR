@@ -13,7 +13,10 @@ use hyper::abi::native;
 /// `TaskGroup` is admitted because a delegated process launcher must name the
 /// group of every child it creates; staged startup remains an audited,
 /// non-buffered transfer route, and Process retirement closes the delegated
-/// handle before retiring its membership edge. Nested `ProcessBuilder`
+/// handle before retiring its membership edge. VM creation authorities are
+/// admitted so the initial supervisor can delegate construction to a fleet
+/// manager and move a one-shot lease into an isolated VM runtime. Installed
+/// VM and vCPU control objects remain excluded. Nested `ProcessBuilder`
 /// authority is always forbidden.
 pub(crate) struct BuilderStorable;
 
@@ -34,5 +37,7 @@ impl BuilderStorable {
             || kind == native::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR
             || kind == native::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR
             || kind == native::HYPER_NATIVE_OBJECT_CPU_INSPECTOR
+            || kind == native::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY
+            || kind == native::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE
     }
 }

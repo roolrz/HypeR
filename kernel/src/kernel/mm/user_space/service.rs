@@ -291,7 +291,7 @@ pub(crate) fn destroy(process: &Process, value: HandleValue) -> Result<(), Servi
         .destroy_vmar(vmar.object().token())
     {
         Ok(()) => {
-            consumption.commit().release();
+            consumption.commit_and_release();
             Ok(())
         }
         Err(error) => {

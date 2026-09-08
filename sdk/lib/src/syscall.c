@@ -14,6 +14,11 @@ hyper_call_result_t hyper_abi_query(void)
     return call0(HYPER_NATIVE_SYS_ABI_QUERY);
 }
 
+hyper_call_result_t hyper_clock_get_monotonic(void)
+{
+    return call0(HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC);
+}
+
 hyper_native_status_t hyper_handle_close(hyper_native_handle_t handle)
 {
     return hyper_native_call6(HYPER_NATIVE_SYS_HANDLE_CLOSE, handle, 0, 0, 0, 0, 0).status;
@@ -35,7 +40,7 @@ hyper_call_result_t hyper_handle_replace(
         HYPER_NATIVE_SYS_HANDLE_REPLACE, source, requested_rights, 0, 0, 0, 0);
 }
 
-hyper_native_status_t hyper_handle_get_info(
+hyper_call_result_t hyper_handle_get_info(
     hyper_native_handle_t handle,
     hyper_native_handle_info_t *info)
 {
@@ -46,10 +51,10 @@ hyper_native_status_t hyper_handle_get_info(
         sizeof(*info),
         0,
         0,
-        0).status;
+        0);
 }
 
-hyper_native_status_t hyper_object_get_basic_info(
+hyper_call_result_t hyper_object_get_basic_info(
     hyper_native_handle_t handle,
     hyper_native_object_basic_info_t *info)
 {
@@ -60,7 +65,7 @@ hyper_native_status_t hyper_object_get_basic_info(
         sizeof(*info),
         0,
         0,
-        0).status;
+        0);
 }
 
 hyper_call_result_t hyper_object_wait_one(
@@ -235,7 +240,7 @@ hyper_call_result_t hyper_directory_read(
         0);
 }
 
-hyper_native_status_t hyper_directory_get_info(
+hyper_call_result_t hyper_directory_get_info(
     hyper_native_handle_t directory,
     hyper_native_directory_info_t *info)
 {
@@ -246,7 +251,7 @@ hyper_native_status_t hyper_directory_get_info(
         sizeof(*info),
         0,
         0,
-        0).status;
+        0);
 }
 
 hyper_call_result_t hyper_file_read_at(
@@ -265,7 +270,7 @@ hyper_call_result_t hyper_file_read_at(
         0);
 }
 
-hyper_native_status_t hyper_file_get_info(
+hyper_call_result_t hyper_file_get_info(
     hyper_native_handle_t file,
     hyper_native_file_info_t *info)
 {
@@ -276,7 +281,7 @@ hyper_native_status_t hyper_file_get_info(
         sizeof(*info),
         0,
         0,
-        0).status;
+        0);
 }
 
 hyper_call_result_t hyper_vmo_create(uint64_t size)
@@ -391,6 +396,150 @@ hyper_call_result_t hyper_process_builder_create(
         group,
         domain,
         executable,
+        0,
+        0);
+}
+
+hyper_call_result_t hyper_resource_domain_create(
+    hyper_native_handle_t parent,
+    const hyper_native_resource_limits_t *limits)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_RESOURCE_DOMAIN_CREATE,
+        parent,
+        (uint64_t)(uintptr_t)limits,
+        sizeof(*limits),
+        0,
+        0,
+        0);
+}
+
+hyper_call_result_t hyper_task_group_create(
+    hyper_native_handle_t factory,
+    hyper_native_handle_t resource_domain)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_TASK_GROUP_CREATE, factory, resource_domain, 0, 0, 0, 0);
+}
+
+hyper_call_result_t hyper_virtual_machine_creation_lease_create(
+    hyper_native_handle_t authority,
+    hyper_native_handle_t resource_domain)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_CREATE,
+        authority,
+        resource_domain,
+        0,
+        0,
+        0,
+        0);
+}
+
+hyper_call_result_t hyper_virtual_machine_create(
+    hyper_native_handle_t lease,
+    const hyper_native_virtual_machine_configuration_t *configuration)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATE,
+        lease,
+        (uintptr_t)configuration,
+        sizeof(*configuration),
+        0,
+        0,
+        0);
+}
+
+hyper_native_status_t hyper_pending_virtual_machine_set_memory(
+    hyper_native_handle_t pending,
+    hyper_native_handle_t vmo)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_MEMORY, pending, vmo, 0, 0, 0, 0).status;
+}
+
+hyper_native_status_t hyper_pending_virtual_machine_set_console_output(
+    hyper_native_handle_t pending,
+    hyper_native_handle_t console)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT,
+        pending,
+        console,
+        0,
+        0,
+        0,
+        0).status;
+}
+
+hyper_native_status_t hyper_pending_virtual_machine_set_bootstrap(
+    hyper_native_handle_t pending,
+    const hyper_native_virtual_cpu_bootstrap_t *bootstrap)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP,
+        pending,
+        (uintptr_t)bootstrap,
+        sizeof(*bootstrap),
+        0,
+        0,
+        0).status;
+}
+
+hyper_native_status_t hyper_pending_virtual_machine_seal(hyper_native_handle_t pending)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SEAL, pending, 0, 0, 0, 0, 0).status;
+}
+
+hyper_call_result_t hyper_pending_virtual_machine_install(hyper_native_handle_t pending)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_INSTALL, pending, 0, 0, 0, 0, 0);
+}
+
+hyper_native_status_t hyper_virtual_cpu_start(hyper_native_handle_t virtual_cpu)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VIRTUAL_CPU_START, virtual_cpu, 0, 0, 0, 0, 0).status;
+}
+
+hyper_native_status_t hyper_pending_virtual_machine_abort(hyper_native_handle_t pending)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_ABORT, pending, 0, 0, 0, 0, 0).status;
+}
+
+hyper_native_status_t hyper_virtual_machine_request_stop(hyper_native_handle_t machine)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REQUEST_STOP, machine, 0, 0, 0, 0, 0).status;
+}
+
+hyper_call_result_t hyper_virtual_machine_get_info(
+    hyper_native_handle_t machine,
+    hyper_native_virtual_machine_info_t *info)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO,
+        machine,
+        (uintptr_t)info,
+        sizeof(*info),
+        0,
+        0,
+        0);
+}
+
+hyper_call_result_t hyper_virtual_cpu_get_info(
+    hyper_native_handle_t vcpu,
+    hyper_native_virtual_cpu_info_t *info)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO,
+        vcpu,
+        (uintptr_t)info,
+        sizeof(*info),
+        0,
         0,
         0);
 }
@@ -512,7 +661,7 @@ hyper_native_status_t hyper_process_request_stop(hyper_native_handle_t process)
         HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP, process, 0, 0, 0, 0, 0).status;
 }
 
-hyper_native_status_t hyper_process_get_info(
+hyper_call_result_t hyper_process_get_info(
     hyper_native_handle_t process,
     hyper_native_process_info_t *info)
 {
@@ -523,7 +672,7 @@ hyper_native_status_t hyper_process_get_info(
         sizeof(*info),
         0,
         0,
-        0).status;
+        0);
 }
 
 hyper_call_result_t hyper_task_inspector_scan_processes(
@@ -591,7 +740,7 @@ hyper_call_result_t hyper_object_inspector_scan_handles(
         0);
 }
 
-hyper_native_status_t hyper_memory_inspector_read(
+hyper_call_result_t hyper_memory_inspector_read(
     hyper_native_handle_t inspector,
     hyper_native_memory_observation_t *observation)
 {
@@ -602,10 +751,10 @@ hyper_native_status_t hyper_memory_inspector_read(
         sizeof(*observation),
         0,
         0,
-        0).status;
+        0);
 }
 
-hyper_native_status_t hyper_cpu_inspector_read(
+hyper_call_result_t hyper_cpu_inspector_read(
     hyper_native_handle_t inspector,
     hyper_native_cpu_observation_t *observation)
 {
@@ -616,7 +765,7 @@ hyper_native_status_t hyper_cpu_inspector_read(
         sizeof(*observation),
         0,
         0,
-        0).status;
+        0);
 }
 
 static hyper_call_result_t inspector_derive(

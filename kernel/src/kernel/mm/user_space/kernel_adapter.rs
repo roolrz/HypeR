@@ -209,7 +209,7 @@ impl PageBackend for KernelPageBackend {
 
     fn publish_instruction_pages(
         &self,
-        _context: &Self::InstructionPublicationContext,
+        context: &Self::InstructionPublicationContext,
         mut pages: impl FnMut(&mut dyn FnMut(&mut Self::Page)),
     ) -> Result<(), Self::Error> {
         let mut range_error = None;
@@ -217,7 +217,7 @@ impl PageBackend for KernelPageBackend {
         // its VMO page lock excludes modification/execution, and repeated
         // enumeration yields the same immutable set for every cache pass.
         let result = unsafe {
-            crate::hal::cache::publish_instruction_ranges(|visit_range| {
+            crate::hal::cache::publish_instruction_ranges(context, |visit_range| {
                 pages(
                     &mut |page| match page_address(page, 0, PAGE_SIZE as usize) {
                         Ok(start) => visit_range(start as usize, PAGE_SIZE as usize),

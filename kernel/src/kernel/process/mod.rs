@@ -7,6 +7,7 @@ mod builder;
 mod builder_input;
 mod builder_policy;
 mod directory;
+pub(crate) mod hierarchy;
 mod image;
 mod lifecycle;
 mod loader;

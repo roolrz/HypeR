@@ -173,8 +173,9 @@ fn emergency_device() -> Option<ConsoleDevice> {
     unsafe { ConsoleDevice::from_emergency_handle(handle, crate::hal::platform::port_io()) }
 }
 
-/// Enqueues one guest Console byte for the sole runtime UART writer.
-pub(crate) fn write_guest_console_byte(byte: u8) {
+/// Explicit test-only bridge from the legacy in-kernel guest harness.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn write_test_guest_console_byte(byte: u8) {
     super::drain::enqueue_console_tx_byte(byte);
 }
 

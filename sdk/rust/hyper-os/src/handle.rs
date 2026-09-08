@@ -69,6 +69,20 @@ object_types!(
     (ObjectInspectorObject, HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR),
     (MemoryInspectorObject, HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR),
     (CpuInspectorObject, HYPER_NATIVE_OBJECT_CPU_INSPECTOR),
+    (
+        VirtualMachineCreationAuthorityObject,
+        HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY
+    ),
+    (
+        VirtualMachineCreationLeaseObject,
+        HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE
+    ),
+    (
+        PendingVirtualMachineObject,
+        HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE
+    ),
+    (VirtualMachineObject, HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE),
+    (VirtualCpuObject, HYPER_NATIVE_OBJECT_VIRTUAL_CPU),
 );
 
 /// One Native object-kind value reported by the kernel.
@@ -117,6 +131,15 @@ impl ObjectKind {
             hyper_abi::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => "object-inspector",
             hyper_abi::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => "memory-inspector",
             hyper_abi::HYPER_NATIVE_OBJECT_CPU_INSPECTOR => "cpu-inspector",
+            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY => {
+                "virtual-machine-creation-authority"
+            }
+            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE => {
+                "virtual-machine-creation-lease"
+            }
+            hyper_abi::HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => "pending-virtual-machine",
+            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => "virtual-machine",
+            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_CPU => "virtual-cpu",
             _ => "unknown",
         }
     }
@@ -144,6 +167,17 @@ impl ObjectKind {
             hyper_abi::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR => "object observation",
             hyper_abi::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => "memory observation",
             hyper_abi::HYPER_NATIVE_OBJECT_CPU_INSPECTOR => "CPU-time observation",
+            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY => {
+                "virtual-machine creation authority"
+            }
+            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE => {
+                "one-shot virtual-machine construction"
+            }
+            hyper_abi::HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => {
+                "staged virtual-machine construction"
+            }
+            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => "virtual-machine supervision",
+            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_CPU => "virtual-CPU supervision",
             _ => "unrecognized object",
         }
     }
@@ -209,6 +243,8 @@ impl Rights {
     pub const RESOURCE_DOMAIN_SPONSOR: Self =
         Self(hyper_abi::HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR);
     pub const DERIVE: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_DERIVE);
+    pub const CREATE_VIRTUAL_MACHINE: Self =
+        Self(hyper_abi::HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE);
 
     #[must_use]
     pub const fn from_bits(bits: u64) -> Option<Self> {
@@ -274,6 +310,7 @@ const RIGHT_NAMES: &[(Rights, &str)] = &[
     (Rights::TASK_GROUP_ATTACH_PROCESS, "attach-process"),
     (Rights::RESOURCE_DOMAIN_SPONSOR, "sponsor-domain"),
     (Rights::DERIVE, "derive"),
+    (Rights::CREATE_VIRTUAL_MACHINE, "create-virtual-machine"),
 ];
 
 /// Iterator over the stable names in one [`Rights`] set.
@@ -388,11 +425,13 @@ impl<T: ObjectType> OwnedHandle<T> {
 
     /// Creates one independently owned handle with attenuated rights.
     pub fn duplicate(&self, rights: Rights) -> Result<Self> {
-        let result = duplicate_raw(self.live_raw(), rights);
+        let source = self.live_raw();
+        let result = duplicate_raw(source, rights);
         Status::from_raw(result.status).into_result()?;
-        let raw = NonZeroU64::new(result.value0).ok_or(Error::InvalidResponse)?;
-        // SAFETY: successful HANDLE_DUPLICATE publishes exactly one new owner.
-        Ok(unsafe { Self::from_raw_owned(raw) })
+        // SAFETY: successful HANDLE_DUPLICATE publishes one new owner unless a
+        // malformed result aliases the still-live source, which the helper
+        // rejects before constructing or closing any owner.
+        unsafe { adopt_produced_handle_excluding(result.value0, &[source]) }
     }
 
     /// Replaces this handle with an attenuated generation-qualified value.
@@ -449,6 +488,83 @@ impl<T: ObjectType> OwnedHandle<T> {
             Some(raw) => raw,
             None => ownership_invariant(),
         }
+    }
+}
+
+/// Adopts one output from a successful handle-producing operation.
+///
+/// A malformed output which aliases a still-live input is rejected before an
+/// `OwnedHandle` is constructed. In particular, the aliased input must not be
+/// closed: it remains owned by its original safe wrapper.
+///
+/// # Safety
+///
+/// The successful syscall must transfer ownership of a nonzero `raw` value
+/// when it does not equal one of `live_inputs`. Every value in `live_inputs`
+/// must remain live and untransferred after the syscall returns.
+pub(crate) unsafe fn adopt_produced_handle_excluding<T: ObjectType>(
+    raw: u64,
+    live_inputs: &[NonZeroU64],
+) -> Result<OwnedHandle<T>> {
+    let raw = NonZeroU64::new(raw).ok_or(Error::InvalidResponse)?;
+    if live_inputs.contains(&raw) {
+        return Err(Error::InvalidResponse);
+    }
+    // SAFETY: the caller establishes ownership transfer for every non-aliased
+    // successful output, and the check above preserves all live inputs.
+    Ok(unsafe { OwnedHandle::from_raw_owned(raw) })
+}
+
+/// Adopts both outputs of one successful two-handle creation operation.
+///
+/// Malformed output is still an ownership-bearing result: every distinct
+/// nonzero value is closed exactly once before the protocol error is returned.
+/// Keeping this rule beside `OwnedHandle` prevents pair-returning wrappers from
+/// accidentally manufacturing duplicate Rust owners while validating results.
+///
+/// # Safety
+///
+/// The successful syscall must transfer ownership of every distinct nonzero
+/// value in `raw` to the caller, including when the pair is malformed.
+pub(crate) unsafe fn adopt_produced_handle_pair<First: ObjectType, Second: ObjectType>(
+    raw: [u64; 2],
+) -> Result<(OwnedHandle<First>, OwnedHandle<Second>)> {
+    let [first, second] = match classify_produced_handle_pair(raw) {
+        Ok(pair) => pair,
+        Err(error) => {
+            close_distinct_raw_owners(&raw);
+            return Err(error);
+        }
+    };
+    // SAFETY: the caller establishes that the successful operation transferred
+    // both distinct outputs, which the checks above prove are nonzero.
+    let first = unsafe { OwnedHandle::from_raw_owned(first) };
+    // SAFETY: this is the second distinct owner from the same operation.
+    let second = unsafe { OwnedHandle::from_raw_owned(second) };
+    Ok((first, second))
+}
+
+fn classify_produced_handle_pair(raw: [u64; 2]) -> Result<[NonZeroU64; 2]> {
+    let (Some(first), Some(second)) = (NonZeroU64::new(raw[0]), NonZeroU64::new(raw[1])) else {
+        return Err(Error::InvalidResponse);
+    };
+    if first == second {
+        return Err(Error::InvalidResponse);
+    }
+    Ok([first, second])
+}
+
+fn close_distinct_raw_owners(raw: &[u64]) {
+    for (index, value) in raw.iter().copied().enumerate() {
+        let Some(value) = NonZeroU64::new(value) else {
+            continue;
+        };
+        if raw[..index].contains(&value.get()) {
+            continue;
+        }
+        // SAFETY: this helper is reached only for ownership-bearing successful
+        // results and de-duplication constructs exactly one owner per value.
+        drop(unsafe { OwnedHandle::<AnyObject>::from_raw_owned(value) });
     }
 }
 
@@ -620,7 +736,6 @@ fn replace_raw(raw: NonZeroU64, rights: Rights) -> hyper_sys::CallResult {
 
 #[cfg(not(test))]
 mod raw_ops {
-    use core::mem::MaybeUninit;
     use core::num::NonZeroU64;
 
     use super::{Rights, Status};
@@ -643,14 +758,16 @@ mod raw_ops {
     }
 
     pub(super) fn handle_info(raw: NonZeroU64) -> Result<hyper_abi::HyperNativeHandleInfo> {
-        let mut record = MaybeUninit::<hyper_abi::HyperNativeHandleInfo>::uninit();
+        let mut record = hyper_abi::HyperNativeHandleInfo {
+            object_kind: 0,
+            flags: 0,
+            rights: 0,
+        };
         // SAFETY: `record` is writable for the ABI's exact fixed-width output,
         // and the borrowed source handle remains live throughout the syscall.
-        let status =
-            Status::from_raw(unsafe { hyper_sys::handle_get_info(raw.get(), record.as_mut_ptr()) });
-        status.into_result()?;
-        // SAFETY: an OK HANDLE_GET_INFO result initializes the complete record.
-        let record = unsafe { record.assume_init() };
+        let result = unsafe { hyper_sys::handle_get_info(raw.get(), &mut record) };
+        let _supported_size =
+            crate::validate_info_result(result, hyper_abi::HYPER_NATIVE_HANDLE_INFO_MIN_SIZE)?;
         if record.object_kind == hyper_abi::HYPER_NATIVE_OBJECT_NONE {
             return Err(Error::InvalidResponse);
         }
@@ -667,9 +784,11 @@ mod raw_ops {
         };
         // SAFETY: `record` is writable for the exact ABI record and the
         // borrowed handle remains live throughout the syscall.
-        let status =
-            Status::from_raw(unsafe { hyper_sys::object_get_basic_info(raw.get(), &mut record) });
-        status.into_result()?;
+        let result = unsafe { hyper_sys::object_get_basic_info(raw.get(), &mut record) };
+        let _supported_size = crate::validate_info_result(
+            result,
+            hyper_abi::HYPER_NATIVE_OBJECT_BASIC_INFO_MIN_SIZE,
+        )?;
         Ok(record)
     }
 }
@@ -683,10 +802,14 @@ mod raw_ops {
     use crate::Result;
 
     static SENTINEL_CLOSE_COUNT: AtomicU64 = AtomicU64::new(0);
+    static ALIAS_CLOSE_COUNT: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn close(raw: NonZeroU64) -> Status {
         if raw.get() == super::TEST_SENTINEL_HANDLE {
             let _ = SENTINEL_CLOSE_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        if raw.get() == super::TEST_ALIAS_HANDLE {
+            let _ = ALIAS_CLOSE_COUNT.fetch_add(1, Ordering::Relaxed);
         }
         Status::OK
     }
@@ -695,10 +818,18 @@ mod raw_ops {
         SENTINEL_CLOSE_COUNT.load(Ordering::Relaxed)
     }
 
+    pub(crate) fn alias_close_count() -> u64 {
+        ALIAS_CLOSE_COUNT.load(Ordering::Relaxed)
+    }
+
     pub(super) fn duplicate(raw: NonZeroU64, _rights: Rights) -> hyper_sys::CallResult {
         hyper_sys::CallResult {
             status: hyper_abi::HYPER_NATIVE_STATUS_OK,
-            value0: raw.get().saturating_add(256),
+            value0: if raw.get() == super::TEST_ALIAS_HANDLE {
+                raw.get()
+            } else {
+                raw.get().saturating_add(256)
+            },
             value1: 0,
         }
     }
@@ -753,13 +884,21 @@ mod raw_ops {
 pub(crate) const TEST_SENTINEL_HANDLE: u64 = u64::MAX - 1;
 
 #[cfg(test)]
+const TEST_ALIAS_HANDLE: u64 = u64::MAX - 2;
+
+#[cfg(test)]
 pub(crate) fn test_sentinel_close_count() -> u64 {
     raw_ops::sentinel_close_count()
 }
 
+#[cfg(test)]
+fn test_alias_close_count() -> u64 {
+    raw_ops::alias_close_count()
+}
+
 #[cold]
 #[cfg(not(test))]
-fn ownership_invariant() -> ! {
+pub(crate) fn ownership_invariant() -> ! {
     // Safe callers cannot observe a disarmed owner; this branch exists only
     // to contain an internal SDK bug without manufacturing a second owner.
     // SAFETY: this path is terminal and intentionally skips destructors.
@@ -768,7 +907,7 @@ fn ownership_invariant() -> ! {
 
 #[cold]
 #[cfg(test)]
-fn ownership_invariant() -> ! {
+pub(crate) fn ownership_invariant() -> ! {
     // Tests cannot link the Native terminal syscall. This path is unreachable
     // through the safe API and exists only to give both cfgs the same shape.
     loop {
@@ -781,6 +920,20 @@ mod tests {
     use core::num::NonZeroU64;
 
     use super::{AnyObject, ByteChannelObject, ObjectKind, OwnedHandle, Rights, TypedObject};
+
+    #[test]
+    fn produced_pair_classification_requires_two_distinct_nonzero_values() {
+        assert_eq!(
+            super::classify_produced_handle_pair([0, 2]),
+            Err(crate::Error::InvalidResponse)
+        );
+        assert_eq!(
+            super::classify_produced_handle_pair([1, 1]),
+            Err(crate::Error::InvalidResponse)
+        );
+        let pair = super::classify_produced_handle_pair([1, 2]);
+        assert_eq!(pair.map(|pair| [pair[0].get(), pair[1].get()]), Ok([1, 2]));
+    }
 
     #[test]
     fn owned_handle_duplicate_and_replace_keep_one_owner() -> crate::Result<()> {
@@ -801,6 +954,23 @@ mod tests {
             source.as_handle_ref().raw(),
             replacement.as_handle_ref().raw()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_duplicate_alias_preserves_the_live_source_owner() -> crate::Result<()> {
+        let raw = NonZeroU64::new(super::TEST_ALIAS_HANDLE).ok_or(crate::Error::InvalidResponse)?;
+        let closed_before = super::test_alias_close_count();
+        // SAFETY: this test creates the sole owner of the dedicated raw value.
+        let source = unsafe { OwnedHandle::<ByteChannelObject>::from_raw_owned(raw) };
+        assert!(matches!(
+            source.duplicate(Rights::READ),
+            Err(crate::Error::InvalidResponse)
+        ));
+        assert_eq!(super::test_alias_close_count(), closed_before);
+        assert_eq!(source.as_handle_ref().raw(), raw);
+        source.try_close().map_err(|failure| failure.error())?;
+        assert_eq!(super::test_alias_close_count(), closed_before + 1);
         Ok(())
     }
 
@@ -893,6 +1063,10 @@ mod tests {
         assert_eq!(names.next(), Some("inspect"));
         assert_eq!(names.next(), Some("read"));
         assert_eq!(names.next(), Some("write"));
+        assert_eq!(names.next(), None);
+
+        let mut names = Rights::CREATE_VIRTUAL_MACHINE.names();
+        assert_eq!(names.next(), Some("create-virtual-machine"));
         assert_eq!(names.next(), None);
     }
 }

@@ -85,10 +85,9 @@ const _: () = {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValidationError {
-    InvalidCompletion,
-    InvalidDecoder,
-    InvalidTopology,
-    UnsafeFeatureExposure,
+    Completion,
+    Decoder,
+    Topology,
 }
 
 pub fn validate() -> Result<(), ValidationError> {
@@ -103,27 +102,47 @@ pub fn validate() -> Result<(), ValidationError> {
         || access.target != 17
         || access.direction != Direction::Read
     {
-        return Err(ValidationError::InvalidDecoder);
+        return Err(ValidationError::Decoder);
     }
     if virtual_mpidr(0x1234_5678) != 0x0000_0012_0034_5678 {
-        return Err(ValidationError::InvalidTopology);
-    }
-    if sanitize_pfr0(u64::MAX) != registers::ID_AA64PFR0_GUEST_BASE {
-        return Err(ValidationError::UnsafeFeatureExposure);
-    }
-    if sanitize_mmfr1(u64::MAX) & registers::ID_AA64MMFR1_VH_FIELD_MASK != 0 {
-        return Err(ValidationError::UnsafeFeatureExposure);
+        return Err(ValidationError::Topology);
     }
     if !validate_guest_memory_fault_decoder() {
-        return Err(ValidationError::InvalidDecoder);
+        return Err(ValidationError::Decoder);
     }
     if !validate_owned_exit_completion() {
-        return Err(ValidationError::InvalidCompletion);
+        return Err(ValidationError::Completion);
     }
     if !validate_typed_sync_failure() {
-        return Err(ValidationError::InvalidCompletion);
+        return Err(ValidationError::Completion);
     }
     Ok(())
+}
+
+/// Installs the architected virtual processor identity for one vCPU.
+///
+/// `MIDR_EL1` and `MPIDR_EL1` are redirected to `VPIDR_EL2` and
+/// `VMPIDR_EL2` when their accesses are not trapped. The current guest policy
+/// traps them through `HCR_EL2.TID3`, but the virtual registers are still the
+/// architectural direct-read fallback and have architecturally unknown reset
+/// values. Install a coherent identity on every activation rather than making
+/// correctness depend on a particular trap policy.
+pub(super) fn activate_virtual_identity(vcpu_id: u32) {
+    let processor = super::guest_cpu_model::processor_identity();
+    let affinity = virtual_mpidr(vcpu_id);
+    // SAFETY: The caller owns the stopped local guest context at EL2. These
+    // registers affect only lower-EL identity reads, and ISB makes both writes
+    // effective before guest execution can resume.
+    unsafe {
+        asm!(
+            "msr VPIDR_EL2, {processor}",
+            "msr VMPIDR_EL2, {affinity}",
+            "isb",
+            processor = in(reg) processor,
+            affinity = in(reg) affinity,
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 fn validate_typed_sync_failure() -> bool {
@@ -294,7 +313,7 @@ fn validate_guest_memory_fault_decoder() -> bool {
             true,
         ));
     let execute_syndrome = (registers::ESR_EC_INSTRUCTION_ABORT_LOWER << registers::ESR_EC_SHIFT)
-        | registers::ESR_ABORT_TRANSLATION_FAULT_LEVEL0;
+        | registers::ESR_ABORT_PERMISSION_FAULT_LEVEL3;
     let execute_valid = decode_guest_memory_fault(execute_syndrome, 0x8000_1000)
         == Some(GuestMemoryFault::new(
             GuestPhysicalAddress::new(0x8000_1000),
@@ -314,12 +333,12 @@ fn validate_guest_memory_fault_decoder() -> bool {
         0,
     )
     .is_none();
-    let non_translation_rejected = decode_guest_memory_fault(
+    let unsupported_fault_rejected = decode_guest_memory_fault(
         registers::ESR_EC_DATA_ABORT_LOWER << registers::ESR_EC_SHIFT,
         0,
     )
     .is_none();
-    write_valid && execute_valid && read_valid && unrelated_rejected && non_translation_rejected
+    write_valid && execute_valid && read_valid && unrelated_rejected && unsupported_fault_rejected
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -513,7 +532,7 @@ pub(crate) fn decode_guest_mmio_access(
     ))
 }
 
-/// Decodes an owned stage-2 translation-fault event from an `AArch64` syndrome.
+/// Decodes an owned, recoverable stage-2 fault from an `AArch64` syndrome.
 ///
 /// The returned value carries no reference to the exception frame. Raw ESR and
 /// HPFAR encodings remain private to the `AArch64` backend.
@@ -529,10 +548,13 @@ pub(crate) fn decode_guest_memory_fault(
         return None;
     }
     let fault_status = syndrome & registers::ESR_ABORT_FSC_MASK;
-    if !(registers::ESR_ABORT_TRANSLATION_FAULT_LEVEL0
+    let translation_fault = (registers::ESR_ABORT_TRANSLATION_FAULT_LEVEL0
         ..=registers::ESR_ABORT_TRANSLATION_FAULT_LEVEL3)
-        .contains(&fault_status)
-    {
+        .contains(&fault_status);
+    let permission_fault = (registers::ESR_ABORT_PERMISSION_FAULT_LEVEL0
+        ..=registers::ESR_ABORT_PERMISSION_FAULT_LEVEL3)
+        .contains(&fault_status);
+    if !translation_fault && !permission_fault {
         return None;
     }
     let access = if exception_class == registers::ESR_EC_INSTRUCTION_ABORT_LOWER {
@@ -708,11 +730,12 @@ fn decode_access(esr: u64) -> Access {
 }
 
 fn read_virtual_register(_context: &VcpuContext, vcpu_id: u32, encoding: Encoding) -> Option<u64> {
+    let model = super::guest_cpu_model::frozen();
     match encoding {
-        registers::SYSREG_MIDR_EL1 => Some(read_midr_el1()),
+        registers::SYSREG_MIDR_EL1 => Some(model.midr()),
         registers::SYSREG_MPIDR_EL1 => Some(virtual_mpidr(vcpu_id)),
-        registers::SYSREG_REVIDR_EL1 => Some(read_revidr_el1()),
-        registers::SYSREG_ID_AA64PFR0_EL1 => Some(sanitize_pfr0(read_id_aa64pfr0_el1())),
+        registers::SYSREG_REVIDR_EL1 => Some(model.revidr()),
+        registers::SYSREG_ID_AA64PFR0_EL1 => Some(model.pfr0()),
         registers::SYSREG_ID_AA64PFR1_EL1
         | registers::SYSREG_ID_AA64PFR2_EL1
         | registers::SYSREG_ID_AA64FPFR0_EL1
@@ -725,15 +748,15 @@ fn read_virtual_register(_context: &VcpuContext, vcpu_id: u32, encoding: Encodin
         | registers::SYSREG_ID_AA64ZFR0_EL1
         | registers::SYSREG_ID_AA64SMFR0_EL1 => Some(0),
         registers::SYSREG_ID_AA64DFR0_EL1 => Some(registers::ID_AA64DFR0_GUEST_BASE),
-        registers::SYSREG_ID_AA64ISAR0_EL1 => Some(sanitize_isar0(read_id_aa64isar0_el1())),
-        registers::SYSREG_ID_AA64ISAR1_EL1 => Some(sanitize_isar1(read_id_aa64isar1_el1())),
-        registers::SYSREG_ID_AA64ISAR2_EL1 => Some(sanitize_isar2(read_id_aa64isar2_el1())),
-        registers::SYSREG_ID_AA64MMFR0_EL1 => Some(read_id_aa64mmfr0_el1()),
-        registers::SYSREG_ID_AA64MMFR1_EL1 => Some(sanitize_mmfr1(read_id_aa64mmfr1_el1())),
-        registers::SYSREG_ID_AA64MMFR2_EL1 => Some(read_id_aa64mmfr2_el1()),
-        registers::SYSREG_CTR_EL0 => Some(read_ctr_el0()),
-        registers::SYSREG_DCZID_EL0 => Some(read_dczid_el0()),
-        registers::SYSREG_CNTFRQ_EL0 => Some(read_cntfrq_el0()),
+        registers::SYSREG_ID_AA64ISAR0_EL1 => Some(model.isar0()),
+        registers::SYSREG_ID_AA64ISAR1_EL1 => Some(model.isar1()),
+        registers::SYSREG_ID_AA64ISAR2_EL1 => Some(model.isar2()),
+        registers::SYSREG_ID_AA64MMFR0_EL1 => Some(model.mmfr0()),
+        registers::SYSREG_ID_AA64MMFR1_EL1 => Some(model.mmfr1()),
+        registers::SYSREG_ID_AA64MMFR2_EL1 => Some(model.mmfr2()),
+        registers::SYSREG_CTR_EL0 => Some(model.ctr()),
+        registers::SYSREG_DCZID_EL0 => Some(model.dczid()),
+        registers::SYSREG_CNTFRQ_EL0 => Some(model.cntfrq()),
         registers::SYSREG_CNTPCT_EL0 => Some(read_cntvct_el0()),
         registers::SYSREG_ACTLR_EL1 => Some(0),
         _ => None,
@@ -830,36 +853,6 @@ const fn virtual_mpidr(vcpu_id: u32) -> u64 {
         | ((id & registers::MPIDR_LINEAR_AFF3_MASK) << registers::MPIDR_AFF3_FROM_LINEAR_ID_SHIFT)
 }
 
-fn sanitize_pfr0(_value: u64) -> u64 {
-    // Present a deliberately small, internally coherent CPU contract:
-    // AArch64 EL0 and EL1 plus the base FP/Advanced-SIMD implementation.
-    // Optional fields use feature-specific absence encodings, so copying a
-    // common all-ones mask across them would incorrectly advertise SVE.
-    registers::ID_AA64PFR0_GUEST_BASE
-}
-
-fn sanitize_isar1(value: u64) -> u64 {
-    value & !registers::ID_AA64ISAR1_POINTER_AUTH_MASK
-}
-
-fn sanitize_isar0(value: u64) -> u64 {
-    // Transactional Memory state is not part of the vCPU context contract.
-    value & !registers::ID_AA64ISAR0_TME_MASK
-}
-
-fn sanitize_isar2(_value: u64) -> u64 {
-    // Do not advertise newer pointer-authentication algorithms until their
-    // key registers are part of the vCPU context-switch contract. ISAR2 only
-    // reports optional extensions, so zero is a conservative coherent model.
-    0
-}
-
-const fn sanitize_mmfr1(value: u64) -> u64 {
-    // Nested virtualization is not part of the guest CPU contract. VHE is an
-    // EL2 implementation feature and must not be advertised to an EL1 guest.
-    value & !registers::ID_AA64MMFR1_VH_FIELD_MASK
-}
-
 macro_rules! read_register {
     ($function:ident, $register:literal) => {
         fn $function() -> u64 {
@@ -878,16 +871,4 @@ macro_rules! read_register {
     };
 }
 
-read_register!(read_midr_el1, "MIDR_EL1");
-read_register!(read_revidr_el1, "REVIDR_EL1");
-read_register!(read_id_aa64pfr0_el1, "ID_AA64PFR0_EL1");
-read_register!(read_id_aa64isar0_el1, "ID_AA64ISAR0_EL1");
-read_register!(read_id_aa64isar1_el1, "ID_AA64ISAR1_EL1");
-read_register!(read_id_aa64isar2_el1, "ID_AA64ISAR2_EL1");
-read_register!(read_id_aa64mmfr0_el1, "ID_AA64MMFR0_EL1");
-read_register!(read_id_aa64mmfr1_el1, "ID_AA64MMFR1_EL1");
-read_register!(read_id_aa64mmfr2_el1, "ID_AA64MMFR2_EL1");
-read_register!(read_ctr_el0, "CTR_EL0");
-read_register!(read_dczid_el0, "DCZID_EL0");
-read_register!(read_cntfrq_el0, "CNTFRQ_EL0");
 read_register!(read_cntvct_el0, "CNTVCT_EL0");

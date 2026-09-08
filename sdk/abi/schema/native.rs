@@ -82,6 +82,11 @@ pub struct AbiConstant {
 pub struct Record {
     pub name: &'static str,
     pub fields: &'static [Field],
+    /// Smallest prefix which preserves this record's original ABI contract.
+    ///
+    /// Future extensions may increase `size`, but must not increase this value
+    /// while the original prefix remains supported.
+    pub minimum_size: u16,
     pub size: u16,
     pub alignment: u8,
 }
@@ -432,6 +437,7 @@ const RIGHT_CREATE_EXECUTABLE_BIT: u8 = 25;
 const RIGHT_TASK_GROUP_ATTACH_PROCESS_BIT: u8 = 26;
 const RIGHT_RESOURCE_DOMAIN_SPONSOR_BIT: u8 = 27;
 const RIGHT_DERIVE_BIT: u8 = 28;
+const RIGHT_CREATE_VIRTUAL_MACHINE_BIT: u8 = 29;
 const CAPABILITY_OPERATION_MOVE: u32 = 0;
 const CAPABILITY_OPERATION_DUPLICATE: u32 = 1;
 
@@ -535,6 +541,31 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         value: 19,
         name: "cpu_inspector",
         transfer: TransferClass::General,
+    },
+    ObjectKind {
+        value: 20,
+        name: "virtual_machine_creation_authority",
+        transfer: TransferClass::General,
+    },
+    ObjectKind {
+        value: 21,
+        name: "virtual_machine_creation_lease",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 22,
+        name: "pending_virtual_machine",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 23,
+        name: "virtual_machine",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 24,
+        name: "virtual_cpu",
+        transfer: TransferClass::RendezvousOnly,
     },
 ];
 
@@ -655,6 +686,10 @@ pub const RIGHTS: &[Right] = &[
         bit: RIGHT_DERIVE_BIT,
         name: "derive",
     },
+    Right {
+        bit: RIGHT_CREATE_VIRTUAL_MACHINE_BIT,
+        name: "create_virtual_machine",
+    },
 ];
 
 pub const RIGHT_DUPLICATE: u64 = 1 << RIGHT_DUPLICATE_BIT;
@@ -668,6 +703,9 @@ pub const RIGHT_MAP: u64 = 1 << 6;
 pub const RIGHT_EXECUTE: u64 = 1 << 7;
 pub const RIGHT_START: u64 = 1 << 10;
 pub const RIGHT_REQUEST_STOP: u64 = 1 << 11;
+pub const RIGHT_RUN_VCPU: u64 = 1 << 12;
+pub const RIGHT_INJECT_INTERRUPT: u64 = 1 << 13;
+pub const RIGHT_REVOKE: u64 = 1 << 18;
 pub const RIGHT_CREATE_PROCESS: u64 = 1 << RIGHT_CREATE_PROCESS_BIT;
 pub const RIGHT_CREATE_THREAD: u64 = 1 << RIGHT_CREATE_THREAD_BIT;
 pub const RIGHT_CREATE_TASK_GROUP: u64 = 1 << RIGHT_CREATE_TASK_GROUP_BIT;
@@ -677,6 +715,7 @@ pub const RIGHT_CREATE_EXECUTABLE: u64 = 1 << RIGHT_CREATE_EXECUTABLE_BIT;
 pub const RIGHT_TASK_GROUP_ATTACH_PROCESS: u64 = 1 << RIGHT_TASK_GROUP_ATTACH_PROCESS_BIT;
 pub const RIGHT_RESOURCE_DOMAIN_SPONSOR: u64 = 1 << RIGHT_RESOURCE_DOMAIN_SPONSOR_BIT;
 pub const RIGHT_DERIVE: u64 = 1 << RIGHT_DERIVE_BIT;
+pub const RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1 << RIGHT_CREATE_VIRTUAL_MACHINE_BIT;
 
 pub const EVENT_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
@@ -698,6 +737,15 @@ pub const PROCESS_SUPERVISOR_RIGHTS: u64 =
 pub const TASK_INSPECTOR_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_DERIVE;
 pub const OBJECT_INSPECTOR_RIGHTS: u64 = TASK_INSPECTOR_RIGHTS;
+pub const VIRTUAL_MACHINE_CREATION_AUTHORITY_RIGHTS: u64 =
+    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_DERIVE | RIGHT_CREATE_VIRTUAL_MACHINE;
+pub const VIRTUAL_MACHINE_CREATION_LEASE_RIGHTS: u64 =
+    RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_CREATE_VIRTUAL_MACHINE;
+pub const PENDING_VIRTUAL_MACHINE_RIGHTS: u64 =
+    RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_START | RIGHT_REQUEST_STOP;
+pub const VIRTUAL_MACHINE_RIGHTS: u64 =
+    RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_REQUEST_STOP;
+pub const VIRTUAL_CPU_RIGHTS: u64 = RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_START;
 
 pub const CAPABILITY_OPERATIONS: &[HandleOperation] = &[
     HandleOperation {
@@ -765,14 +813,33 @@ pub const SIGNALS: &[Signal] = &[
         bit: 1,
         name: "writable",
     },
+    Signal {
+        object: "virtual_machine",
+        bit: 0,
+        name: "terminated",
+    },
+    Signal {
+        object: "virtual_cpu",
+        bit: 0,
+        name: "terminated",
+    },
 ];
 
 const CONSOLE_MAX_TRANSFER_BYTES: u32 = 4 * 1024;
+const EXTENSIBLE_RECORD_MAX_BYTES: u32 = 4 * 1024;
 const DIRECTORY_ENTRY_PAGE_CAPACITY: u32 = 4;
 const DIRECTORY_ENTRY_NAME_CAPACITY: u32 = 256;
 const DIRECTORY_ENTRY_RECORD_SIZE: u16 = 24 + DIRECTORY_ENTRY_NAME_CAPACITY as u16;
 
 pub const CONSTANTS: &[AbiConstant] = &[
+    AbiConstant {
+        name: "page_size",
+        value: 4096,
+    },
+    AbiConstant {
+        name: "extensible_record_max_bytes",
+        value: EXTENSIBLE_RECORD_MAX_BYTES as u64,
+    },
     AbiConstant {
         name: "elf_osabi",
         value: 63,
@@ -839,6 +906,117 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "startup_handle_purpose_cpu_inspector",
         value: 12,
+    },
+    AbiConstant {
+        name: "startup_handle_purpose_virtual_machine_creation_authority",
+        value: 13,
+    },
+    AbiConstant {
+        name: "virtual_machine_architecture_aarch64",
+        value: 1,
+    },
+    AbiConstant {
+        name: "virtual_machine_architecture_riscv64",
+        value: 2,
+    },
+    AbiConstant {
+        name: "virtual_machine_architecture_x86_64",
+        value: 3,
+    },
+    // Immutable guest-visible layout of the first HypeR AArch64 virtual
+    // platform. Kernel device construction and userspace boot metadata must
+    // consume these values rather than maintain parallel board descriptions.
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference",
+        value: 1,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_guest_ram_base",
+        value: 0x4000_0000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_dtb_offset",
+        value: 0x0001_0000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_gic_distributor_base",
+        value: 0x0800_0000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_gic_distributor_size",
+        value: 0x0001_0000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_gic_redistributor_base",
+        value: 0x080a_0000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_gic_redistributor_size",
+        value: 0x0002_0000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_uart_base",
+        value: 0x0900_0000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_uart_size",
+        value: 0x1000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_uart_interrupt",
+        value: 33,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_timer_interrupt",
+        value: 27,
+    },
+    AbiConstant {
+        name: "virtual_machine_phase_installed",
+        value: 1,
+    },
+    AbiConstant {
+        name: "virtual_machine_phase_running",
+        value: 2,
+    },
+    AbiConstant {
+        name: "virtual_machine_phase_stopping",
+        value: 3,
+    },
+    AbiConstant {
+        name: "virtual_machine_phase_stopped",
+        value: 4,
+    },
+    AbiConstant {
+        name: "virtual_cpu_phase_dormant",
+        value: 1,
+    },
+    AbiConstant {
+        name: "virtual_cpu_phase_started",
+        value: 2,
+    },
+    AbiConstant {
+        name: "virtual_cpu_phase_stopped",
+        value: 3,
+    },
+    AbiConstant {
+        name: "virtual_cpu_terminal_none",
+        value: 0,
+    },
+    AbiConstant {
+        name: "virtual_cpu_terminal_memory_fault",
+        value: 1,
+    },
+    AbiConstant {
+        name: "virtual_cpu_terminal_mmio",
+        value: 2,
+    },
+    AbiConstant {
+        name: "virtual_cpu_terminal_synchronous",
+        value: 3,
+    },
+    AbiConstant {
+        name: "virtual_cpu_terminal_administrative",
+        value: 4,
     },
     AbiConstant {
         name: "directory_entry_page_capacity",
@@ -922,7 +1100,7 @@ pub const CONSTANTS: &[AbiConstant] = &[
     },
     AbiConstant {
         name: "vmo_max_size_bytes",
-        value: 64 * 1024 * 1024,
+        value: 4 * 1024 * 1024 * 1024,
     },
     AbiConstant {
         name: "vmo_max_transfer_bytes",
@@ -1491,6 +1669,11 @@ const OBJECT_INSPECTION_FIELDS: &[Field] = &[
         kind: FieldKind::U64,
         offset: 88,
     },
+    Field {
+        name: "vm_device_binding_references",
+        kind: FieldKind::U64,
+        offset: 96,
+    },
 ];
 
 const HANDLE_INSPECTION_FIELDS: &[Field] = &[
@@ -1620,101 +1803,397 @@ const DIRECTORY_INFO_FIELDS: &[Field] = &[
     },
 ];
 
+const VIRTUAL_MACHINE_CONFIGURATION_FIELDS: &[Field] = &[
+    Field {
+        name: "guest_physical_base",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "memory_size",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "vcpu_count",
+        kind: FieldKind::U32,
+        offset: 16,
+    },
+    Field {
+        name: "architecture",
+        kind: FieldKind::U32,
+        offset: 20,
+    },
+    Field {
+        name: "platform_profile",
+        kind: FieldKind::U32,
+        offset: 24,
+    },
+    Field {
+        name: "flags",
+        kind: FieldKind::U32,
+        offset: 28,
+    },
+];
+
+const VIRTUAL_CPU_BOOTSTRAP_FIELDS: &[Field] = &[
+    Field {
+        name: "entry",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "stack",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "argument0",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "argument1",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "argument2",
+        kind: FieldKind::U64,
+        offset: 32,
+    },
+    Field {
+        name: "argument3",
+        kind: FieldKind::U64,
+        offset: 40,
+    },
+    Field {
+        name: "vcpu_id",
+        kind: FieldKind::U32,
+        offset: 48,
+    },
+    Field {
+        name: "flags",
+        kind: FieldKind::U32,
+        offset: 52,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U64,
+        offset: 56,
+    },
+];
+
+const VIRTUAL_MACHINE_INFO_FIELDS: &[Field] = &[
+    Field {
+        name: "phase",
+        kind: FieldKind::U32,
+        offset: 0,
+    },
+    Field {
+        name: "vcpu_count",
+        kind: FieldKind::U32,
+        offset: 4,
+    },
+    Field {
+        name: "guest_physical_base",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "memory_size",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "architecture",
+        kind: FieldKind::U32,
+        offset: 24,
+    },
+    Field {
+        name: "platform_profile",
+        kind: FieldKind::U32,
+        offset: 28,
+    },
+];
+
+const VIRTUAL_CPU_INFO_FIELDS: &[Field] = &[
+    Field {
+        name: "vcpu_id",
+        kind: FieldKind::U32,
+        offset: 0,
+    },
+    Field {
+        name: "phase",
+        kind: FieldKind::U32,
+        offset: 4,
+    },
+    Field {
+        name: "scheduler_thread_id",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "terminal_reason",
+        kind: FieldKind::U32,
+        offset: 16,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U32,
+        offset: 20,
+    },
+];
+
+const RESOURCE_LIMITS_FIELDS: &[Field] = &[
+    Field {
+        name: "kernel_memory_bytes",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "processes",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "threads",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "handles",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "kernel_objects",
+        kind: FieldKind::U64,
+        offset: 32,
+    },
+    Field {
+        name: "committed_pages",
+        kind: FieldKind::U64,
+        offset: 40,
+    },
+    Field {
+        name: "pinned_pages",
+        kind: FieldKind::U64,
+        offset: 48,
+    },
+    Field {
+        name: "guest_pages",
+        kind: FieldKind::U64,
+        offset: 56,
+    },
+    Field {
+        name: "ipc_messages",
+        kind: FieldKind::U64,
+        offset: 64,
+    },
+    Field {
+        name: "ipc_bytes",
+        kind: FieldKind::U64,
+        offset: 72,
+    },
+    Field {
+        name: "ipc_handles",
+        kind: FieldKind::U64,
+        offset: 80,
+    },
+    Field {
+        name: "subscriptions",
+        kind: FieldKind::U64,
+        offset: 88,
+    },
+    Field {
+        name: "timers",
+        kind: FieldKind::U64,
+        offset: 96,
+    },
+    Field {
+        name: "virtual_machines",
+        kind: FieldKind::U64,
+        offset: 104,
+    },
+    Field {
+        name: "virtual_cpus",
+        kind: FieldKind::U64,
+        offset: 112,
+    },
+    Field {
+        name: "device_leases",
+        kind: FieldKind::U64,
+        offset: 120,
+    },
+    Field {
+        name: "dma_mappings",
+        kind: FieldKind::U64,
+        offset: 128,
+    },
+    Field {
+        name: "user_address_spaces",
+        kind: FieldKind::U64,
+        offset: 136,
+    },
+    Field {
+        name: "user_mappings",
+        kind: FieldKind::U64,
+        offset: 144,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U64,
+        offset: 152,
+    },
+];
+
 pub const RECORDS: &[Record] = &[
     Record {
         name: "handle_info",
         fields: HANDLE_INFO_FIELDS,
+        minimum_size: 16,
         size: 16,
         alignment: 8,
     },
     Record {
         name: "object_basic_info",
         fields: OBJECT_BASIC_INFO_FIELDS,
+        minimum_size: 16,
         size: 16,
         alignment: 8,
     },
     Record {
         name: "object_wait_item",
         fields: OBJECT_WAIT_ITEM_FIELDS,
+        minimum_size: 16,
         size: 16,
         alignment: 8,
     },
     Record {
         name: "process_info",
         fields: PROCESS_INFO_FIELDS,
+        minimum_size: 32,
         size: 32,
         alignment: 8,
     },
     Record {
         name: "capability_disposition",
         fields: CAPABILITY_DISPOSITION_FIELDS,
+        minimum_size: 24,
         size: 24,
         alignment: 8,
     },
     Record {
         name: "capability_receive_slot",
         fields: CAPABILITY_RECEIVE_SLOT_FIELDS,
+        minimum_size: 24,
         size: 24,
         alignment: 8,
     },
     Record {
         name: "startup_handle",
         fields: STARTUP_HANDLE_FIELDS,
+        minimum_size: 16,
         size: 16,
         alignment: 8,
     },
     Record {
         name: "task_process",
         fields: TASK_PROCESS_FIELDS,
+        minimum_size: 96,
         size: 96,
         alignment: 8,
     },
     Record {
         name: "task_thread",
         fields: TASK_THREAD_FIELDS,
+        minimum_size: 104,
         size: 104,
         alignment: 8,
     },
     Record {
         name: "memory_observation",
         fields: MEMORY_OBSERVATION_FIELDS,
+        minimum_size: 112,
         size: 112,
         alignment: 8,
     },
     Record {
         name: "cpu_observation",
         fields: CPU_OBSERVATION_FIELDS,
+        minimum_size: 64,
         size: 64,
         alignment: 8,
     },
     Record {
         name: "object_inspection",
         fields: OBJECT_INSPECTION_FIELDS,
-        size: 96,
+        minimum_size: 104,
+        size: 104,
         alignment: 8,
     },
     Record {
         name: "handle_inspection",
         fields: HANDLE_INSPECTION_FIELDS,
+        minimum_size: 40,
         size: 40,
         alignment: 8,
     },
     Record {
         name: "directory_entry",
         fields: DIRECTORY_ENTRY_FIELDS,
+        minimum_size: DIRECTORY_ENTRY_RECORD_SIZE,
         size: DIRECTORY_ENTRY_RECORD_SIZE,
         alignment: 8,
     },
     Record {
         name: "file_info",
         fields: FILE_INFO_FIELDS,
+        minimum_size: 40,
         size: 40,
         alignment: 8,
     },
     Record {
         name: "directory_info",
         fields: DIRECTORY_INFO_FIELDS,
+        minimum_size: 32,
         size: 32,
+        alignment: 8,
+    },
+    Record {
+        name: "virtual_machine_configuration",
+        fields: VIRTUAL_MACHINE_CONFIGURATION_FIELDS,
+        minimum_size: 32,
+        size: 32,
+        alignment: 8,
+    },
+    Record {
+        name: "virtual_cpu_bootstrap",
+        fields: VIRTUAL_CPU_BOOTSTRAP_FIELDS,
+        minimum_size: 64,
+        size: 64,
+        alignment: 8,
+    },
+    Record {
+        name: "virtual_machine_info",
+        fields: VIRTUAL_MACHINE_INFO_FIELDS,
+        minimum_size: 32,
+        size: 32,
+        alignment: 8,
+    },
+    Record {
+        name: "virtual_cpu_info",
+        fields: VIRTUAL_CPU_INFO_FIELDS,
+        minimum_size: 24,
+        size: 24,
+        alignment: 8,
+    },
+    Record {
+        name: "resource_limits",
+        fields: RESOURCE_LIMITS_FIELDS,
+        minimum_size: 160,
+        size: 160,
         alignment: 8,
     },
 ];
@@ -1732,6 +2211,16 @@ const ABI_QUERY_RESULTS: &[ResultValue] = &[
         handle: None,
     },
 ];
+const CLOCK_GET_MONOTONIC_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "nanoseconds",
+    kind: ValueKind::U64,
+    handle: None,
+}];
+const INFO_RECORD_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "supported_size",
+    kind: ValueKind::ByteCount,
+    handle: None,
+}];
 const HANDLE_CLOSE_ARGUMENTS: &[Argument] = &[Argument {
     name: "handle",
     kind: ValueKind::Handle,
@@ -1806,7 +2295,7 @@ const HANDLE_GET_INFO_ARGUMENTS: &[Argument] = &[
             direction: MemoryDirection::Write,
             length: MemoryLength::Bytes {
                 argument: "output_size",
-                maximum_bytes: 16,
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
             },
             record: Some("handle_info"),
             handles: None,
@@ -1839,7 +2328,7 @@ const OBJECT_GET_BASIC_INFO_ARGUMENTS: &[Argument] = &[
             direction: MemoryDirection::Write,
             length: MemoryLength::Bytes {
                 argument: "output_size",
-                maximum_bytes: 16,
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
             },
             record: Some("object_basic_info"),
             handles: None,
@@ -2500,7 +2989,7 @@ const FILE_GET_INFO_ARGUMENTS: &[Argument] = &[
             direction: MemoryDirection::Write,
             length: MemoryLength::Bytes {
                 argument: "output_size",
-                maximum_bytes: 40,
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
             },
             record: Some("file_info"),
             handles: None,
@@ -2534,7 +3023,7 @@ const DIRECTORY_GET_INFO_ARGUMENTS: &[Argument] = &[
             direction: MemoryDirection::Write,
             length: MemoryLength::Bytes {
                 argument: "output_size",
-                maximum_bytes: 32,
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
             },
             record: Some("directory_info"),
             handles: None,
@@ -3012,7 +3501,7 @@ const PROCESS_GET_INFO_ARGUMENTS: &[Argument] = &[
             direction: MemoryDirection::Write,
             length: MemoryLength::Bytes {
                 argument: "info_size",
-                maximum_bytes: 32,
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
             },
             record: Some("process_info"),
             handles: None,
@@ -3135,7 +3624,7 @@ const OBJECT_INSPECTOR_SCAN_OBJECTS_ARGUMENTS: &[Argument] = &[
             length: MemoryLength::Elements {
                 argument: "capacity",
                 maximum_elements: 8,
-                element_size: 96,
+                element_size: 104,
             },
             record: Some("object_inspection"),
             handles: None,
@@ -3293,7 +3782,7 @@ const MEMORY_INSPECTOR_READ_ARGUMENTS: &[Argument] = &[
             direction: MemoryDirection::Write,
             length: MemoryLength::Bytes {
                 argument: "observation_size",
-                maximum_bytes: 112,
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
             },
             record: Some("memory_observation"),
             handles: None,
@@ -3327,7 +3816,7 @@ const CPU_INSPECTOR_READ_ARGUMENTS: &[Argument] = &[
             direction: MemoryDirection::Write,
             length: MemoryLength::Bytes {
                 argument: "observation_size",
-                maximum_bytes: 64,
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
             },
             record: Some("cpu_observation"),
             handles: None,
@@ -3485,6 +3974,368 @@ const fn vmo_argument(required_rights: u64) -> Argument {
     }
 }
 
+const VIRTUAL_MACHINE_CREATION_LEASE_CREATE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "authority",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("virtual_machine_creation_authority"),
+            required_rights: RIGHT_DERIVE | RIGHT_CREATE_VIRTUAL_MACHINE,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "resource_domain",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("resource_domain"),
+            required_rights: RIGHT_RESOURCE_DOMAIN_SPONSOR,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+const VIRTUAL_MACHINE_CREATION_LEASE_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "lease",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("virtual_machine_creation_lease"),
+        rights: ProducedRights::Fixed(VIRTUAL_MACHINE_CREATION_LEASE_RIGHTS),
+    }),
+}];
+
+const RESOURCE_DOMAIN_CREATE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "parent",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("resource_domain"),
+            required_rights: RIGHT_CREATE_RESOURCE_DOMAIN,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "limits",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "limits_size",
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+            },
+            record: Some("resource_limits"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    scalar_argument("limits_size", ValueKind::ByteCount),
+];
+const RESOURCE_DOMAIN_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "child",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("resource_domain"),
+        rights: ProducedRights::Fixed(
+            RIGHT_DUPLICATE
+                | RIGHT_TRANSFER
+                | RIGHT_INSPECT
+                | RIGHT_CREATE_RESOURCE_DOMAIN
+                | RIGHT_SET_LIMITS
+                | RIGHT_REVOKE
+                | RIGHT_RESOURCE_DOMAIN_SPONSOR,
+        ),
+    }),
+}];
+
+const TASK_GROUP_CREATE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "factory",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("task_factory"),
+            required_rights: RIGHT_CREATE_TASK_GROUP,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "resource_domain",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("resource_domain"),
+            required_rights: RIGHT_RESOURCE_DOMAIN_SPONSOR,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+const TASK_GROUP_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "group",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("task_group"),
+        rights: ProducedRights::Fixed(
+            RIGHT_DUPLICATE
+                | RIGHT_TRANSFER
+                | RIGHT_INSPECT
+                | RIGHT_REQUEST_STOP
+                | RIGHT_TASK_GROUP_ATTACH_PROCESS,
+        ),
+    }),
+}];
+
+const VIRTUAL_MACHINE_CREATE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "lease",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("virtual_machine_creation_lease"),
+            required_rights: RIGHT_CREATE_VIRTUAL_MACHINE,
+            disposition: HandleDisposition::ConsumeOnCommit,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "configuration",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "configuration_size",
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+            },
+            record: Some("virtual_machine_configuration"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "configuration_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+const VIRTUAL_MACHINE_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "pending_virtual_machine",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("pending_virtual_machine"),
+        rights: ProducedRights::Fixed(PENDING_VIRTUAL_MACHINE_RIGHTS),
+    }),
+}];
+
+const PENDING_VIRTUAL_MACHINE_SET_MEMORY_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "pending_virtual_machine",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("pending_virtual_machine"),
+            required_rights: RIGHT_WRITE,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "vmo",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("vmo"),
+            required_rights: RIGHT_READ | RIGHT_WRITE | RIGHT_MAP,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+];
+
+const PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "pending_virtual_machine",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("pending_virtual_machine"),
+            required_rights: RIGHT_WRITE,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "console",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("console"),
+            required_rights: RIGHT_TRANSFER | RIGHT_WRITE,
+            disposition: HandleDisposition::ConsumeOnCommit,
+        }),
+        memory: None,
+    },
+];
+
+const PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "pending_virtual_machine",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("pending_virtual_machine"),
+            required_rights: RIGHT_WRITE,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "bootstrap",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "bootstrap_size",
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+            },
+            record: Some("virtual_cpu_bootstrap"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "bootstrap_size",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const fn pending_virtual_machine_argument(
+    required_rights: u64,
+    disposition: HandleDisposition,
+) -> Argument {
+    Argument {
+        name: "pending_virtual_machine",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("pending_virtual_machine"),
+            required_rights,
+            disposition,
+        }),
+        memory: None,
+    }
+}
+
+const PENDING_VIRTUAL_MACHINE_SEAL_ARGUMENTS: &[Argument] = &[pending_virtual_machine_argument(
+    RIGHT_WRITE,
+    HandleDisposition::Borrow,
+)];
+const PENDING_VIRTUAL_MACHINE_INSTALL_ARGUMENTS: &[Argument] = &[pending_virtual_machine_argument(
+    RIGHT_START,
+    HandleDisposition::ConsumeOnCommit,
+)];
+const PENDING_VIRTUAL_MACHINE_INSTALL_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "virtual_machine",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("virtual_machine"),
+            rights: ProducedRights::Fixed(VIRTUAL_MACHINE_RIGHTS),
+        }),
+    },
+    ResultValue {
+        name: "boot_virtual_cpu",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("virtual_cpu"),
+            rights: ProducedRights::Fixed(VIRTUAL_CPU_RIGHTS),
+        }),
+    },
+];
+const PENDING_VIRTUAL_MACHINE_ABORT_ARGUMENTS: &[Argument] = &[pending_virtual_machine_argument(
+    RIGHT_REQUEST_STOP,
+    HandleDisposition::ConsumeOnCommit,
+)];
+
+const VIRTUAL_MACHINE_REQUEST_STOP_ARGUMENTS: &[Argument] = &[Argument {
+    name: "virtual_machine",
+    kind: ValueKind::Handle,
+    handle: Some(HandleArgument {
+        object: ObjectConstraint::Kind("virtual_machine"),
+        required_rights: RIGHT_REQUEST_STOP,
+        disposition: HandleDisposition::Borrow,
+    }),
+    memory: None,
+}];
+
+const VIRTUAL_MACHINE_GET_INFO_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "virtual_machine",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("virtual_machine"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "info",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "info_size",
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+            },
+            record: Some("virtual_machine_info"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    scalar_argument("info_size", ValueKind::ByteCount),
+];
+
+const VIRTUAL_CPU_GET_INFO_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "virtual_cpu",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("virtual_cpu"),
+            required_rights: RIGHT_INSPECT,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "info",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "info_size",
+                maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+            },
+            record: Some("virtual_cpu_info"),
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    scalar_argument("info_size", ValueKind::ByteCount),
+];
+
+const VIRTUAL_CPU_START_ARGUMENTS: &[Argument] = &[Argument {
+    name: "virtual_cpu",
+    kind: ValueKind::Handle,
+    handle: Some(HandleArgument {
+        object: ObjectConstraint::Kind("virtual_cpu"),
+        required_rights: RIGHT_START,
+        disposition: HandleDisposition::Borrow,
+    }),
+    memory: None,
+}];
+
 pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 0,
@@ -3547,7 +4398,7 @@ pub const SYSCALLS: &[Syscall] = &[
         name: "handle_get_info",
         feature: FeatureGate::Core,
         arguments: HANDLE_GET_INFO_ARGUMENTS,
-        results: &[],
+        results: INFO_RECORD_RESULTS,
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
@@ -3561,7 +4412,7 @@ pub const SYSCALLS: &[Syscall] = &[
         name: "object_get_basic_info",
         feature: FeatureGate::Core,
         arguments: OBJECT_GET_BASIC_INFO_ARGUMENTS,
-        results: &[],
+        results: INFO_RECORD_RESULTS,
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
@@ -3953,7 +4804,7 @@ pub const SYSCALLS: &[Syscall] = &[
         name: "process_get_info",
         feature: FeatureGate::Core,
         arguments: PROCESS_GET_INFO_ARGUMENTS,
-        results: &[],
+        results: INFO_RECORD_RESULTS,
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
@@ -4261,7 +5112,7 @@ pub const SYSCALLS: &[Syscall] = &[
         name: "memory_inspector_read",
         feature: FeatureGate::Core,
         arguments: MEMORY_INSPECTOR_READ_ARGUMENTS,
-        results: &[],
+        results: INFO_RECORD_RESULTS,
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
@@ -4275,7 +5126,7 @@ pub const SYSCALLS: &[Syscall] = &[
         name: "cpu_inspector_read",
         feature: FeatureGate::Core,
         arguments: CPU_INSPECTOR_READ_ARGUMENTS,
-        results: &[],
+        results: INFO_RECORD_RESULTS,
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
@@ -4289,7 +5140,7 @@ pub const SYSCALLS: &[Syscall] = &[
         name: "file_get_info",
         feature: FeatureGate::Core,
         arguments: FILE_GET_INFO_ARGUMENTS,
-        results: &[],
+        results: INFO_RECORD_RESULTS,
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
@@ -4303,12 +5154,222 @@ pub const SYSCALLS: &[Syscall] = &[
         name: "directory_get_info",
         feature: FeatureGate::Core,
         arguments: DIRECTORY_GET_INFO_ARGUMENTS,
-        results: &[],
+        results: INFO_RECORD_RESULTS,
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
         audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 59,
+        name: "virtual_machine_creation_lease_create",
+        feature: FeatureGate::Core,
+        arguments: VIRTUAL_MACHINE_CREATION_LEASE_CREATE_ARGUMENTS,
+        results: VIRTUAL_MACHINE_CREATION_LEASE_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 60,
+        name: "virtual_machine_create",
+        feature: FeatureGate::Core,
+        arguments: VIRTUAL_MACHINE_CREATE_ARGUMENTS,
+        results: VIRTUAL_MACHINE_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 61,
+        name: "pending_virtual_machine_set_memory",
+        feature: FeatureGate::Core,
+        arguments: PENDING_VIRTUAL_MACHINE_SET_MEMORY_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 62,
+        name: "pending_virtual_machine_set_bootstrap",
+        feature: FeatureGate::Core,
+        arguments: PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 63,
+        name: "pending_virtual_machine_seal",
+        feature: FeatureGate::Core,
+        arguments: PENDING_VIRTUAL_MACHINE_SEAL_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 64,
+        name: "pending_virtual_machine_install",
+        feature: FeatureGate::Core,
+        arguments: PENDING_VIRTUAL_MACHINE_INSTALL_ARGUMENTS,
+        results: PENDING_VIRTUAL_MACHINE_INSTALL_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 65,
+        name: "pending_virtual_machine_abort",
+        feature: FeatureGate::Core,
+        arguments: PENDING_VIRTUAL_MACHINE_ABORT_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 66,
+        name: "virtual_machine_request_stop",
+        feature: FeatureGate::Core,
+        arguments: VIRTUAL_MACHINE_REQUEST_STOP_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 67,
+        name: "virtual_machine_get_info",
+        feature: FeatureGate::Core,
+        arguments: VIRTUAL_MACHINE_GET_INFO_ARGUMENTS,
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 68,
+        name: "virtual_cpu_get_info",
+        feature: FeatureGate::Core,
+        arguments: VIRTUAL_CPU_GET_INFO_ARGUMENTS,
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 69,
+        name: "resource_domain_create",
+        feature: FeatureGate::Core,
+        arguments: RESOURCE_DOMAIN_CREATE_ARGUMENTS,
+        results: RESOURCE_DOMAIN_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 70,
+        name: "task_group_create",
+        feature: FeatureGate::Core,
+        arguments: TASK_GROUP_CREATE_ARGUMENTS,
+        results: TASK_GROUP_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 71,
+        name: "virtual_cpu_start",
+        feature: FeatureGate::Core,
+        arguments: VIRTUAL_CPU_START_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 72,
+        name: "pending_virtual_machine_set_console_output",
+        feature: FeatureGate::Core,
+        arguments: PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 73,
+        name: "clock_get_monotonic",
+        feature: FeatureGate::Core,
+        arguments: NO_ARGUMENTS,
+        results: CLOCK_GET_MONOTONIC_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Abi,
         flags: FlagPolicy::None,
         failure_results: &[],
     },
@@ -4328,11 +5389,14 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "The monotonic clock syscall returns absolute nanoseconds from the kernel's monotonic clock domain. Ambient monotonic observation is intentionally not a capability because reading it conveys no mutable authority; future virtual or adjustable clocks may be represented by handle objects without changing this clock domain.",
+    "Extensible input records carry their caller size in the syscall's explicit byte-count argument. The size must be at least the record's published minimum prefix and no greater than extensible_record_max_bytes; missing bytes through the kernel's current record size default to zero, while bytes beyond that size must be zero. Extensible information outputs accept any capacity from the record's minimum prefix through extensible_record_max_bytes, write only the intersection of caller capacity and kernel-supported size, and return the kernel-supported size in value0 on ok. Bytes beyond that intersection remain untouched.",
     "Directory lookup is capability-relative. A leading slash restarts at that Directory's traversal root, and parent components cannot escape it. Every open requires read traversal authority, and every requested File right must already be present on the source Directory before the result is further bounded by the File object's node-specific ceiling.",
     "Directory reads require the exact published page capacity. Cookie zero starts a scan and a returned next_cookie of zero ends it. Every name is one valid path component encoded as name_length UTF-8 bytes followed by zero-filled capacity. Pages are weakly consistent with concurrent filesystem mutation; callers must neither interpret nor synthesize cookies.",
     "Native task and object inspectors are immutable capability-scoped views. Process, thread, and object KOIDs plus scan cursors are observation-only values and can never be exchanged for operational authority. Out-of-scope targeted lookup returns not_found.",
     "Task inspector records carry a bounded UTF-8 name as name_length bytes followed by zero-filled capacity. Process names are the immutable labels committed by ProcessBuilder publication; Thread names are immutable scheduler identity labels retained through the retiring registry phase.",
     "Inspector derivation is monotonic: a derived Process, TaskGroup, or ResourceDomain view cannot widen its parent's task scope, object scope, visibility, or rights. Derivation requires the inspector's complete supported rights because the returned handle carries that fixed rights set; callers attenuate it before delegation. Native task operations remain handle-based; numeric PID and TID namespaces belong exclusively to compatibility personalities.",
+    "Every live TaskGroup handle participates in shared group-lifetime ownership regardless of its attenuated rights. Closing the last TaskGroup handle asynchronously requests stop for every member. Rights control operations available through a handle; they do not change this ownership effect.",
     "Inspector scans require the exact published page capacity for their record type. Cursor zero starts a scan and a returned next_cursor of zero ends it. Pages and complete scans are weakly consistent with concurrent task, object, and handle-table mutation; generation-qualified handle values prevent slot reuse from aliasing an earlier observation.",
     "Memory and CPU inspectors publish immutable point-in-time copies. Their handles grant observation only; they never expose writable accounting storage or allocator and scheduler synchronization to userspace. CPU categories are scheduler-tick observations and a multi-CPU snapshot is weakly consistent across CPUs.",
     "File and Directory information reports immutable attributes plus filesystem, mount, and node identities for diagnostics and correlation. These identities do not grant authority, cannot be resolved back into handles, and do not define a pathname; directory entries, hard links, renames, mount namespaces, and unlinks make pathnames namespace-dependent observations rather than object identity.",
@@ -4350,6 +5414,9 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "A process-builder name is nonempty UTF-8 without embedded NUL bytes. The argv vector contains at least one entry; individual argument strings are UTF-8 and may be empty but contain no NUL byte. Every UTF-8 environment entry contains a nonempty name with no '=' followed by '=' and a NUL-free value. Counts and individual byte lengths remain within the published constants.",
     "Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.",
     "Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.",
+    "A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.",
+    "A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A host-console output route is optional and exists only when a caller transfers a Console handle with write authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Unbound guest console output is discarded. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.",
+    "The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.",
 ];
 
 const _: () = assert!(SYSCALL_ARGUMENT_REGISTERS == 6);

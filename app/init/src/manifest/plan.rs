@@ -13,7 +13,26 @@ use super::model::{
 /// resolve and revalidate the real handle immediately before `ProcessBuilder`
 /// commit; a validated plan can never manufacture authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorityKey(u16);
+
+impl AuthorityKey {
+    /// Creates one policy-local authority identity.
+    ///
+    /// Keys are opaque to the manifest and need only be unique within one
+    /// `AuthorityPolicy` implementation. The runtime consumes the resolved key
+    /// instead of interpreting the manifest's source string a second time.
+    pub const fn new(value: u16) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_raw(self) -> u16 {
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AuthorityDeclaration<'policy> {
+    pub key: AuthorityKey,
     pub provider: Option<&'policy str>,
     pub object_kind: u32,
     pub rights: u64,
@@ -26,10 +45,53 @@ pub struct AuthorityDeclaration<'policy> {
 }
 
 /// One service-contract name resolved to a typed startup-stack purpose.
+///
+/// The required and allowed masks define the complete authority contract for
+/// this purpose. The manifest may attenuate within that interval, but cannot
+/// silently grant an implementation more authority merely because the source
+/// object happens to support it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StartupPurposeDeclaration {
     pub value: u32,
     pub object_kind: u32,
+    pub required_rights: u64,
+    pub allowed_rights: u64,
+}
+
+/// One capability grant fully resolved by manifest validation.
+///
+/// Keeping these facts together prevents launch code from accidentally
+/// combining the authority, operation, kind, purpose, or rights of different
+/// capability rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CapabilityGrant {
+    authority: AuthorityKey,
+    operation: CapabilityOperation,
+    object_kind: u32,
+    purpose: u32,
+    rights: u64,
+}
+
+impl CapabilityGrant {
+    pub const fn authority(self) -> AuthorityKey {
+        self.authority
+    }
+
+    pub const fn operation(self) -> CapabilityOperation {
+        self.operation
+    }
+
+    pub const fn object_kind(self) -> u32 {
+        self.object_kind
+    }
+
+    pub const fn purpose(self) -> u32 {
+        self.purpose
+    }
+
+    pub const fn rights(self) -> u64 {
+        self.rights
+    }
 }
 
 /// Adapter from manifest vocabulary to the actual bootstrap authority policy.
@@ -55,6 +117,8 @@ pub enum ValidationErrorKind {
     UnknownDependency,
     TooManyDependencyEdges,
     DependencyCycle,
+    ConflictingAuthorityKey,
+    InvalidInitialVmImage,
     InvalidBindingName,
     DuplicateCapabilityPurpose,
     InvalidPurposeName,
@@ -69,6 +133,8 @@ pub enum ValidationErrorKind {
     InvalidRightDeclaration,
     DuplicateRight,
     RightsEscalation,
+    MissingRequiredRights,
+    ExcessPurposeRights,
     TransferForbidden,
     DuplicateForbidden,
     CreateForbidden,
@@ -99,17 +165,20 @@ impl ValidationError {
 
 /// Deterministic topological order plus resolved, attenuated capability facts.
 #[derive(Debug, Eq, PartialEq)]
-pub struct LaunchPlan {
+pub struct LaunchPlan<'manifest> {
     service_count: usize,
+    initial_vm_image: Option<&'manifest str>,
     order: [usize; MAX_SERVICES],
-    rights: [[u64; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
-    kinds: [[u32; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
-    purposes: [[u32; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
+    grants: [[Option<CapabilityGrant>; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
 }
 
-impl LaunchPlan {
+impl LaunchPlan<'_> {
     pub const fn service_count(&self) -> usize {
         self.service_count
+    }
+
+    pub const fn initial_vm_image(&self) -> Option<&str> {
+        self.initial_vm_image
     }
 
     pub fn service_index(&self, launch_position: usize) -> Option<usize> {
@@ -119,45 +188,57 @@ impl LaunchPlan {
             .filter(|_| launch_position < self.service_count)
     }
 
-    pub fn capability_rights(&self, service: usize, capability: usize) -> Option<u64> {
+    /// Returns one complete resolved row or no row at all.
+    pub fn capability_grant(&self, service: usize, capability: usize) -> Option<CapabilityGrant> {
         if service >= self.service_count || capability >= MAX_CAPABILITIES_PER_SERVICE {
             return None;
         }
-        Some(self.rights[service][capability])
+        self.grants[service][capability]
     }
 
-    pub fn capability_kind(&self, service: usize, capability: usize) -> Option<u32> {
-        if service >= self.service_count || capability >= MAX_CAPABILITIES_PER_SERVICE {
+    /// Finds the only service which receives `purpose`.
+    ///
+    /// Singleton service roles are bound to a validated capability contract,
+    /// not to a mutable executable path. Zero or ambiguous matches are both
+    /// rejected so callers cannot accidentally provision the wrong process.
+    pub fn unique_service_for_purpose(&self, purpose: u32) -> Option<usize> {
+        if purpose == 0 {
             return None;
         }
-        Some(self.kinds[service][capability])
-    }
-
-    pub fn capability_purpose(&self, service: usize, capability: usize) -> Option<u32> {
-        if service >= self.service_count || capability >= MAX_CAPABILITIES_PER_SERVICE {
-            return None;
+        let mut selected = None;
+        for service in 0..self.service_count {
+            if self.grants[service]
+                .iter()
+                .flatten()
+                .any(|grant| grant.purpose() == purpose)
+            {
+                if selected.is_some() {
+                    return None;
+                }
+                selected = Some(service);
+            }
         }
-        Some(self.purposes[service][capability])
+        selected
     }
 }
 
 /// Validates the complete graph before any `ProcessBuilder` may start a service.
-pub fn validate(
-    manifest: &Manifest<'_>,
+pub fn validate<'manifest>(
+    manifest: &Manifest<'manifest>,
     policy: &impl AuthorityPolicy,
-) -> Result<LaunchPlan, ValidationError> {
+) -> Result<LaunchPlan<'manifest>, ValidationError> {
     if manifest.services.is_empty() {
         return Err(error(ValidationErrorKind::EmptyManifest, None, None));
     }
     validate_service_identities(manifest)?;
+    validate_initial_vm(manifest)?;
     validate_dependencies(manifest)?;
 
     let mut plan = LaunchPlan {
         service_count: manifest.services.len(),
+        initial_vm_image: manifest.initial_vm_image(),
         order: [0; MAX_SERVICES],
-        rights: [[0; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
-        kinds: [[0; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
-        purposes: [[0; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
+        grants: [[None; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
     };
     validate_capabilities(manifest, policy, &mut plan)?;
     build_topological_order(manifest, &mut plan)?;
@@ -194,6 +275,20 @@ fn validate_service_identities(manifest: &Manifest<'_>) -> Result<(), Validation
                 ));
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_initial_vm(manifest: &Manifest<'_>) -> Result<(), ValidationError> {
+    if manifest
+        .initial_vm()
+        .is_some_and(|initial_vm| !valid_image_path(initial_vm.image(), MAX_IMAGE_PATH_BYTES))
+    {
+        return Err(error(
+            ValidationErrorKind::InvalidInitialVmImage,
+            None,
+            None,
+        ));
     }
     Ok(())
 }
@@ -257,7 +352,7 @@ fn validate_dependencies(manifest: &Manifest<'_>) -> Result<(), ValidationError>
 fn validate_capabilities(
     manifest: &Manifest<'_>,
     policy: &impl AuthorityPolicy,
-    plan: &mut LaunchPlan,
+    plan: &mut LaunchPlan<'_>,
 ) -> Result<(), ValidationError> {
     for (service_index, service) in manifest.services.iter().enumerate() {
         for (capability_index, capability) in service.capabilities.iter().enumerate() {
@@ -270,6 +365,14 @@ fn validate_capabilities(
                     Some(capability_index),
                 )
             })?;
+            reject_conflicting_authority_key(
+                manifest,
+                plan,
+                service_index,
+                capability_index,
+                capability.source,
+                declaration.key,
+            )?;
             validate_provider_dependency(
                 manifest,
                 service_index,
@@ -292,14 +395,21 @@ fn validate_capabilities(
                         Some(capability_index),
                     )
                 })?;
-            if purpose.value == 0 || purpose.object_kind == 0 {
+            if purpose.value == 0
+                || purpose.object_kind == 0
+                || purpose.required_rights & !purpose.allowed_rights != 0
+            {
                 return Err(error(
                     ValidationErrorKind::InvalidPurposeDeclaration,
                     Some(service_index),
                     Some(capability_index),
                 ));
             }
-            if plan.purposes[service_index][..capability_index].contains(&purpose.value) {
+            if plan.grants[service_index][..capability_index]
+                .iter()
+                .flatten()
+                .any(|grant| grant.purpose() == purpose.value)
+            {
                 return Err(error(
                     ValidationErrorKind::DuplicateCapabilityPurpose,
                     Some(service_index),
@@ -322,9 +432,73 @@ fn validate_capabilities(
                     Some(capability_index),
                 ));
             }
-            plan.rights[service_index][capability_index] = requested_rights;
-            plan.kinds[service_index][capability_index] = purpose.object_kind;
-            plan.purposes[service_index][capability_index] = purpose.value;
+            if purpose.required_rights & !requested_rights != 0 {
+                return Err(error(
+                    ValidationErrorKind::MissingRequiredRights,
+                    Some(service_index),
+                    Some(capability_index),
+                ));
+            }
+            if requested_rights & !purpose.allowed_rights != 0 {
+                return Err(error(
+                    ValidationErrorKind::ExcessPurposeRights,
+                    Some(service_index),
+                    Some(capability_index),
+                ));
+            }
+            plan.grants[service_index][capability_index] = Some(CapabilityGrant {
+                authority: declaration.key,
+                operation: capability.operation,
+                object_kind: purpose.object_kind,
+                purpose: purpose.value,
+                rights: requested_rights,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn reject_conflicting_authority_key(
+    manifest: &Manifest<'_>,
+    plan: &LaunchPlan<'_>,
+    service_index: usize,
+    capability_index: usize,
+    source: &str,
+    key: AuthorityKey,
+) -> Result<(), ValidationError> {
+    for previous_service in 0..=service_index {
+        let Some(service) = manifest.services.get(previous_service) else {
+            return Err(error(
+                ValidationErrorKind::ConflictingAuthorityKey,
+                Some(service_index),
+                Some(capability_index),
+            ));
+        };
+        let limit = if previous_service == service_index {
+            capability_index
+        } else {
+            service.capabilities.len()
+        };
+        for previous_capability in 0..limit {
+            if plan.grants[previous_service][previous_capability].map(CapabilityGrant::authority)
+                != Some(key)
+            {
+                continue;
+            }
+            let Some(previous) = service.capabilities.get(previous_capability) else {
+                return Err(error(
+                    ValidationErrorKind::ConflictingAuthorityKey,
+                    Some(service_index),
+                    Some(capability_index),
+                ));
+            };
+            if previous.source != source {
+                return Err(error(
+                    ValidationErrorKind::ConflictingAuthorityKey,
+                    Some(service_index),
+                    Some(capability_index),
+                ));
+            }
         }
     }
     Ok(())
@@ -505,7 +679,7 @@ fn reject_reused_move_source(
 
 fn build_topological_order(
     manifest: &Manifest<'_>,
-    plan: &mut LaunchPlan,
+    plan: &mut LaunchPlan<'_>,
 ) -> Result<(), ValidationError> {
     let mut emitted = [false; MAX_SERVICES];
     for position in 0..manifest.services.len() {

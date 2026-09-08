@@ -8,6 +8,7 @@
 //! remain in `task::thread::Thread` so retaining an object reference can never
 //! retain a terminated Thread's heavyweight execution resources.
 
+use crate::kernel::accounting::CommittedCharge;
 use crate::kernel::authority::Rights;
 use crate::kernel::object::{
     KernelObject, KernelRef, ObjectCreationError, ObjectKind, ObjectSnapshot,
@@ -104,6 +105,7 @@ impl ThreadObjectSnapshotPage {
 
 pub(super) struct SystemThreadObject {
     role: ThreadRole,
+    _object_charge: Option<CommittedCharge>,
 }
 
 impl private::Sealed for SystemThreadObject {}
@@ -127,6 +129,10 @@ pub(super) enum ThreadObject {
 }
 
 impl ThreadObject {
+    pub(super) const fn system_allocation_size() -> Option<usize> {
+        crate::kernel::object::object_allocation_size::<SystemThreadObject>()
+    }
+
     pub(super) fn role(&self) -> ThreadRole {
         match self {
             Self::System(object) => object.object().role,
@@ -138,7 +144,25 @@ impl ThreadObject {
         if role == ThreadRole::User {
             thread_object_invariant_violation();
         }
-        KernelRef::try_new_scheduler(SystemThreadObject { role }).map(Self::System)
+        KernelRef::try_new_scheduler(SystemThreadObject {
+            role,
+            _object_charge: None,
+        })
+        .map(Self::System)
+    }
+
+    pub(super) fn try_accounted_system(
+        role: ThreadRole,
+        object_charge: CommittedCharge,
+    ) -> Result<Self, ObjectCreationError> {
+        if role == ThreadRole::User {
+            thread_object_invariant_violation();
+        }
+        KernelRef::try_new_scheduler(SystemThreadObject {
+            role,
+            _object_charge: Some(object_charge),
+        })
+        .map(Self::System)
     }
 
     pub(super) fn user(thread: UserThread) -> Self {

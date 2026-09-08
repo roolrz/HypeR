@@ -279,10 +279,12 @@ pub fn validate_vsysreg() -> Result<(), guest::ValidationError> {
     guest::validate()
 }
 
+#[cfg(feature = "kernel-self-test")]
 pub fn guest_execution_available() -> bool {
     virtualization::validate().is_ok()
 }
 
+#[cfg(feature = "kernel-self-test")]
 pub fn virtualization_backend_name() -> &'static str {
     virtualization::backend_name()
 }

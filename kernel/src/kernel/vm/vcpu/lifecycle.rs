@@ -28,10 +28,11 @@ pub(crate) enum DetachedStopError {
 pub(crate) unsafe fn complete_detached_stop_if_requested(
     current: crate::kernel::task::scheduler::CurrentVcpu,
 ) -> Result<bool, DetachedStopError> {
-    let execution = current.execution;
-    if execution.is_null() || !execution.is_aligned() {
-        return Err(DetachedStopError::InvalidExecution);
-    }
+    let execution = current
+        .execution
+        .downcast::<super::VcpuExecution>()
+        .ok_or(DetachedStopError::InvalidExecution)?
+        .as_ptr();
     // SAFETY: the caller provides the scheduler-reobserved, pinned, exclusive
     // current vCPU after complete local hardware detachment.
     let execution = unsafe { &mut *execution };
@@ -50,7 +51,7 @@ pub(crate) unsafe fn complete_detached_stop_if_requested(
     execution
         .arm_reap_publication(
             current.thread,
-            crate::kernel::vm::registry::VcpuClosureReason::Administrative(reason),
+            crate::kernel::vm::endpoint_state::ClosureReason::Administrative(reason),
         )
         .map_err(|()| DetachedStopError::ReapAlreadyArmed)?;
     Ok(true)

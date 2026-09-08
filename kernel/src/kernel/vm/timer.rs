@@ -195,20 +195,16 @@ pub(super) fn validate_hardware(
     // SAFETY: `interrupts` remains fixed and outlives execution activation,
     // publication, deactivation, and drop.
     let mut execution = unsafe {
-        crate::kernel::task::thread::VcpuExecution::for_timer_validation(hardware, &interrupts)
+        crate::kernel::vm::vcpu::VcpuExecution::for_timer_validation(hardware, &interrupts)
     };
     let execution_pointer = core::ptr::addr_of_mut!(execution);
     // SAFETY: This boot-local validation object is pinned on the stack, is
     // exclusively owned, and local interrupts remain masked.
     unsafe { super::vcpu::activate(execution_pointer) }.map_err(ValidationError::Hardware)?;
     let validation = (|| {
-        super::active_vcpu::with(|execution, active_interrupts| {
-            crate::hal::vm::inject_timer_for_validation(
-                &capability,
-                &mut execution.hardware,
-                execution.vcpu_id,
-                active_interrupts,
-            )
+        super::active_vcpu::with(|execution| {
+            let (hardware, vcpu_id, interrupts) = execution.interrupt_context();
+            crate::hal::vm::inject_timer_for_validation(&capability, hardware, vcpu_id, interrupts)
         })
         .map_err(ValidationError::Active)?
         .ok_or(ValidationError::StateMismatch)?
@@ -322,12 +318,9 @@ pub(super) fn prepare(
 }
 
 fn handle_interrupt(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
-    match super::active_vcpu::with(|execution, interrupts| {
-        crate::hal::vm::handle_virtual_timer_interrupt(
-            &mut execution.hardware,
-            execution.vcpu_id,
-            interrupts,
-        )
+    match super::active_vcpu::with(|execution| {
+        let (hardware, vcpu_id, interrupts) = execution.interrupt_context();
+        crate::hal::vm::handle_virtual_timer_interrupt(hardware, vcpu_id, interrupts)
     }) {
         Ok(Some(Ok(true))) => {
             set_local_source_masked(true);
@@ -356,12 +349,9 @@ fn handle_maintenance_interrupt(_interrupt: VirtualInterrupt, context: usize) ->
     if !crate::hal::vm::maintenance_interrupt_pending() {
         return HandlerResult::NotHandled;
     }
-    match super::active_vcpu::with(|execution, interrupts| {
-        crate::hal::vm::handle_maintenance_interrupt(
-            &mut execution.hardware,
-            execution.vcpu_id,
-            interrupts,
-        )
+    match super::active_vcpu::with(|execution| {
+        let (hardware, vcpu_id, interrupts) = execution.interrupt_context();
+        crate::hal::vm::handle_maintenance_interrupt(hardware, vcpu_id, interrupts)
     }) {
         Ok(Some(Ok(true))) => {
             let Some(raw) = context
@@ -411,12 +401,9 @@ fn handle_source_recovery(_interrupt: VirtualInterrupt, context: usize) -> Handl
         crate::pr_err!("HypeR: invalid virtual-timer recovery binding");
         return HandlerResult::Handled;
     };
-    let can_unmask = match super::active_vcpu::with(|execution, interrupts| {
-        crate::hal::vm::handle_maintenance_interrupt(
-            &mut execution.hardware,
-            execution.vcpu_id,
-            interrupts,
-        )
+    let can_unmask = match super::active_vcpu::with(|execution| {
+        let (hardware, vcpu_id, interrupts) = execution.interrupt_context();
+        crate::hal::vm::handle_maintenance_interrupt(hardware, vcpu_id, interrupts)
     }) {
         Ok(Some(Ok(can_unmask))) => can_unmask,
         Ok(None) => true,

@@ -92,8 +92,24 @@ struct WritableMappingLeaseInner<Backend: PageBackend, Account: MemoryAccount> {
     _charge: Account::Charge,
 }
 
-pub(super) struct WritableMappingLease<Backend: PageBackend, Account: MemoryAccount> {
+pub(crate) struct WritableMappingLease<Backend: PageBackend, Account: MemoryAccount> {
     inner: FallibleArc<WritableMappingLeaseInner<Backend, Account>>,
+}
+
+struct ExclusiveHardwareWriteLeaseInner<Backend: PageBackend, Account: MemoryAccount> {
+    vmo: FallibleArc<VmoInner<Backend, Account>>,
+    _charge: Account::Charge,
+}
+
+/// Persistent, exclusive hardware-write ownership of one writable VMO.
+///
+/// Acquisition rejects writable Native mappings, direct kernel access, and
+/// snapshots. While this lease exists, those operations remain closed;
+/// read-only Native mappings may coexist. This is the quiescence proof required
+/// before publishing executable bytes and later exposing the same pages through
+/// a guest translation regime.
+pub(crate) struct ExclusiveHardwareWriteLease<Backend: PageBackend, Account: MemoryAccount> {
+    inner: FallibleArc<ExclusiveHardwareWriteLeaseInner<Backend, Account>>,
 }
 
 /// Opaque authority to publish bytes as native executable provenance.
@@ -186,7 +202,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
     ///
     /// The lease remains live through address-space retirement, so executable
     /// snapshot admission cannot race a stale writable translation.
-    pub(super) fn try_mapping_write_lease(
+    pub(crate) fn try_mapping_write_lease(
         &self,
     ) -> VmoResult<Backend, Account, WritableMappingLease<Backend, Account>> {
         let admission = MappingAdmission::acquire(&self.inner)?;
@@ -211,6 +227,34 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
         admission.commit();
         let inner = FallibleArc::try_new(lease_inner).map_err(map_allocation)?;
         Ok(WritableMappingLease { inner })
+    }
+
+    /// Acquires the sole hardware-write lease for this VMO.
+    pub(crate) fn try_exclusive_hardware_write_lease(
+        &self,
+    ) -> VmoResult<Backend, Account, ExclusiveHardwareWriteLease<Backend, Account>> {
+        let admission = ExclusiveHardwareAdmission::acquire(&self.inner)?;
+        let charge =
+            self.inner
+                .account
+                .try_charge(
+                    MemoryCharge {
+                        kernel_bytes: FallibleArc::<
+                            ExclusiveHardwareWriteLeaseInner<Backend, Account>,
+                        >::allocation_size() as u64,
+                        kernel_objects: 1,
+                        ..MemoryCharge::default()
+                    },
+                )
+                .map_err(VmoError::Account)?;
+        let lease_inner = ExclusiveHardwareWriteLeaseInner {
+            vmo: self.inner.clone(),
+            _charge: charge,
+        };
+        // The allocation owns admission release even when allocation fails.
+        admission.commit();
+        let inner = FallibleArc::try_new(lease_inner).map_err(map_allocation)?;
+        Ok(ExclusiveHardwareWriteLease { inner })
     }
 
     pub(crate) fn read(
@@ -261,6 +305,60 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
                 cause: failure.cause,
                 committed_pages: failure.committed_pages,
             })
+    }
+
+    /// Returns the stable physical page backing one resident object offset.
+    ///
+    /// The caller must retain this VMO, and any hardware mapping which may
+    /// write the page must additionally retain an
+    /// [`ExclusiveHardwareWriteLease`].
+    /// The returned address remains stable because resident pages are never
+    /// removed before the final VMO owner is destroyed.
+    pub(crate) fn resident_physical_page(
+        &self,
+        offset: u64,
+    ) -> Result<PhysicalAddress, VmoError<Backend::Error, Account::Error>> {
+        if !offset.is_multiple_of(PAGE_SIZE) || offset >= self.inner.size {
+            return Err(VmoError::InvalidRange);
+        }
+        let index = usize::try_from(offset / PAGE_SIZE).map_err(|_| VmoError::SizeOverflow)?;
+        let page = page_ref(&self.inner, index)?;
+        Ok(page.with(|owned| self.inner.backend.physical_address(&owned.page)))
+    }
+
+    /// Reads a resident range which may be concurrently visible to a machine.
+    pub(crate) fn read_exposed(
+        &self,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<(), VmoError<Backend::Error, Account::Error>> {
+        read_exposed_inner(&self.inner, offset, destination)
+    }
+
+    /// Writes a resident range which may be concurrently visible to a machine.
+    pub(crate) fn write_exposed(
+        &self,
+        offset: u64,
+        source: &[u8],
+    ) -> Result<(), VmoError<Backend::Error, Account::Error>> {
+        write_exposed_inner(&self.inner, offset, source)
+    }
+
+    pub(crate) fn resident_page_count(
+        &self,
+    ) -> Result<usize, VmoError<Backend::Error, Account::Error>> {
+        resident_count(&self.inner, 0, page_count(self.inner.size)?)
+    }
+
+    pub(crate) fn page_is_resident(
+        &self,
+        offset: u64,
+    ) -> Result<bool, VmoError<Backend::Error, Account::Error>> {
+        if !offset.is_multiple_of(PAGE_SIZE) || offset >= self.inner.size {
+            return Err(VmoError::InvalidRange);
+        }
+        let index = usize::try_from(offset / PAGE_SIZE).map_err(|_| VmoError::SizeOverflow)?;
+        Ok(optional_page_ref(&self.inner, index)?.is_some())
     }
 
     /// Ensures every page in the range has stable physical backing.
@@ -495,6 +593,14 @@ impl<Backend: PageBackend, Account: MemoryAccount> Drop
     }
 }
 
+impl<Backend: PageBackend, Account: MemoryAccount> Drop
+    for ExclusiveHardwareWriteLeaseInner<Backend, Account>
+{
+    fn drop(&mut self) {
+        release_exclusive_hardware_admission(&self.vmo);
+    }
+}
+
 pub(super) enum MappingObject<Backend: PageBackend, Account: MemoryAccount> {
     Writable(WritableVmo<Backend, Account>),
     Executable(ExecutableVmo<Backend, Account>),
@@ -576,6 +682,42 @@ struct MappingAdmission<'a, Backend: PageBackend, Account: MemoryAccount> {
     armed: bool,
 }
 
+struct ExclusiveHardwareAdmission<'a, Backend: PageBackend, Account: MemoryAccount> {
+    inner: &'a VmoInner<Backend, Account>,
+    armed: bool,
+}
+
+impl<'a, Backend: PageBackend, Account: MemoryAccount>
+    ExclusiveHardwareAdmission<'a, Backend, Account>
+{
+    fn acquire(inner: &'a VmoInner<Backend, Account>) -> VmoResult<Backend, Account, Self> {
+        inner
+            .access_state
+            .compare_exchange(
+                0,
+                EXCLUSIVE_HARDWARE_BIT,
+                Ordering::Acquire,
+                Ordering::Relaxed,
+            )
+            .map_err(|_| VmoError::Busy)?;
+        Ok(Self { inner, armed: true })
+    }
+
+    fn commit(mut self) {
+        self.armed = false;
+    }
+}
+
+impl<Backend: PageBackend, Account: MemoryAccount> Drop
+    for ExclusiveHardwareAdmission<'_, Backend, Account>
+{
+    fn drop(&mut self) {
+        if self.armed {
+            release_exclusive_hardware_admission(self.inner);
+        }
+    }
+}
+
 impl<'a, Backend: PageBackend, Account: MemoryAccount> MappingAdmission<'a, Backend, Account> {
     fn acquire(inner: &'a VmoInner<Backend, Account>) -> VmoResult<Backend, Account, Self> {
         acquire_mapping_admission(inner)?;
@@ -617,7 +759,7 @@ fn acquire_kernel_access<Backend: PageBackend, Account: MemoryAccount>(
 ) -> VmoResult<Backend, Account, ()> {
     let mut current = inner.access_state.load(Ordering::Relaxed);
     loop {
-        if current & (SNAPSHOT_BIT | MAPPING_ACCESS_MASK) != 0 {
+        if current & (SNAPSHOT_BIT | EXCLUSIVE_HARDWARE_BIT | MAPPING_ACCESS_MASK) != 0 {
             return Err(VmoError::Busy);
         }
         let next = current.checked_add(1).ok_or(VmoError::SizeOverflow)?;
@@ -650,13 +792,13 @@ fn acquire_mapping_admission<Backend: PageBackend, Account: MemoryAccount>(
 ) -> VmoResult<Backend, Account, ()> {
     let mut current = inner.access_state.load(Ordering::Relaxed);
     loop {
-        if current & (SNAPSHOT_BIT | KERNEL_ACCESS_MASK) != 0 {
+        if current & (SNAPSHOT_BIT | EXCLUSIVE_HARDWARE_BIT | KERNEL_ACCESS_MASK) != 0 {
             return Err(VmoError::Busy);
         }
         let next = current
             .checked_add(MAPPING_UNIT)
             .ok_or(VmoError::SizeOverflow)?;
-        if next & SNAPSHOT_BIT != 0 {
+        if next & (SNAPSHOT_BIT | EXCLUSIVE_HARDWARE_BIT) != 0 {
             return Err(VmoError::SizeOverflow);
         }
         match inner.access_state.compare_exchange_weak(
@@ -677,7 +819,26 @@ fn release_mapping_admission<Backend: PageBackend, Account: MemoryAccount>(
     let previous = inner
         .access_state
         .fetch_sub(MAPPING_UNIT, Ordering::Release);
-    if previous & MAPPING_ACCESS_MASK == 0 || previous & (SNAPSHOT_BIT | KERNEL_ACCESS_MASK) != 0 {
+    if previous & MAPPING_ACCESS_MASK == 0
+        || previous & (SNAPSHOT_BIT | EXCLUSIVE_HARDWARE_BIT | KERNEL_ACCESS_MASK) != 0
+    {
+        vmo_invariant_violation();
+    }
+}
+
+fn release_exclusive_hardware_admission<Backend: PageBackend, Account: MemoryAccount>(
+    inner: &VmoInner<Backend, Account>,
+) {
+    if inner
+        .access_state
+        .compare_exchange(
+            EXCLUSIVE_HARDWARE_BIT,
+            0,
+            Ordering::Release,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
         vmo_invariant_violation();
     }
 }
@@ -944,9 +1105,10 @@ fn map_allocation<BackendError, AccountError>(
 }
 
 const SNAPSHOT_BIT: usize = 1usize << (usize::BITS - 1);
+const EXCLUSIVE_HARDWARE_BIT: usize = 1usize << (usize::BITS - 2);
 const MAPPING_UNIT: usize = 1usize << (usize::BITS / 2);
 const KERNEL_ACCESS_MASK: usize = MAPPING_UNIT - 1;
-const MAPPING_ACCESS_MASK: usize = SNAPSHOT_BIT - MAPPING_UNIT;
+const MAPPING_ACCESS_MASK: usize = EXCLUSIVE_HARDWARE_BIT - MAPPING_UNIT;
 
 #[cold]
 fn vmo_invariant_violation() -> ! {

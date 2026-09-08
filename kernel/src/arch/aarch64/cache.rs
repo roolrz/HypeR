@@ -146,6 +146,13 @@ impl CacheMaintenance for Aarch64Cache {
         Aarch64Barrier::instruction_synchronization();
     }
 
+    fn synchronize_guest_instruction_migration() {
+        // Guest maintenance executes with HCR_EL2.FB, so architecturally local
+        // instruction and translation maintenance is promoted to the guest's
+        // inner-shareable domain before the vCPU can migrate. No additional
+        // destination-PE operation is required here.
+    }
+
     fn invalidate_instruction_all() {
         // SAFETY: IALLUIS invalidates instruction-cache entries in the
         // inner-shareable domain and does not dereference a virtual address.

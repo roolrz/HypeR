@@ -40,6 +40,14 @@ const TASK_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_
 const OBJECT_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_OBJECT_INSPECTOR;
 const MEMORY_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR;
 const CPU_INSPECTOR_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_CPU_INSPECTOR;
+const VIRTUAL_MACHINE_CREATION_AUTHORITY_OBJECT_KIND: u32 =
+    hyper::abi::native::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY;
+const VIRTUAL_MACHINE_CREATION_LEASE_OBJECT_KIND: u32 =
+    hyper::abi::native::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE;
+const PENDING_VIRTUAL_MACHINE_OBJECT_KIND: u32 =
+    hyper::abi::native::HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE;
+const VIRTUAL_MACHINE_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE;
+const VIRTUAL_CPU_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_VIRTUAL_CPU;
 
 const _: () = assert!(EVENT_OBJECT_KIND != 0);
 const _: () = assert!(BYTE_CHANNEL_OBJECT_KIND != 0);
@@ -58,6 +66,11 @@ const _: () = assert!(TASK_INSPECTOR_OBJECT_KIND != 0);
 const _: () = assert!(OBJECT_INSPECTOR_OBJECT_KIND != 0);
 const _: () = assert!(MEMORY_INSPECTOR_OBJECT_KIND != 0);
 const _: () = assert!(CPU_INSPECTOR_OBJECT_KIND != 0);
+const _: () = assert!(VIRTUAL_MACHINE_CREATION_AUTHORITY_OBJECT_KIND != 0);
+const _: () = assert!(VIRTUAL_MACHINE_CREATION_LEASE_OBJECT_KIND != 0);
+const _: () = assert!(PENDING_VIRTUAL_MACHINE_OBJECT_KIND != 0);
+const _: () = assert!(VIRTUAL_MACHINE_OBJECT_KIND != 0);
+const _: () = assert!(VIRTUAL_CPU_OBJECT_KIND != 0);
 
 static NEXT_KOID: AtomicU64 = AtomicU64::new(1);
 
@@ -151,6 +164,18 @@ impl ObjectKind {
     pub(crate) const MEMORY_INSPECTOR: Self = Self(MEMORY_INSPECTOR_OBJECT_KIND);
     /// Capability-scoped scheduler CPU-time observation authority.
     pub(crate) const CPU_INSPECTOR: Self = Self(CPU_INSPECTOR_OBJECT_KIND);
+    /// Root authority for deriving one-shot VM construction leases.
+    pub(crate) const VIRTUAL_MACHINE_CREATION_AUTHORITY: Self =
+        Self(VIRTUAL_MACHINE_CREATION_AUTHORITY_OBJECT_KIND);
+    /// Resource-domain-bound, one-shot VM construction authority.
+    pub(crate) const VIRTUAL_MACHINE_CREATION_LEASE: Self =
+        Self(VIRTUAL_MACHINE_CREATION_LEASE_OBJECT_KIND);
+    /// Unpublished VM construction transaction.
+    pub(crate) const PENDING_VIRTUAL_MACHINE: Self = Self(PENDING_VIRTUAL_MACHINE_OBJECT_KIND);
+    /// Installed virtual-machine lifecycle authority.
+    pub(crate) const VIRTUAL_MACHINE: Self = Self(VIRTUAL_MACHINE_OBJECT_KIND);
+    /// Installed virtual-CPU observation and execution authority.
+    pub(crate) const VIRTUAL_CPU: Self = Self(VIRTUAL_CPU_OBJECT_KIND);
 
     /// Validates one userspace-supplied object-kind discriminator.
     ///
@@ -176,7 +201,12 @@ impl ObjectKind {
             | TASK_INSPECTOR_OBJECT_KIND
             | OBJECT_INSPECTOR_OBJECT_KIND
             | MEMORY_INSPECTOR_OBJECT_KIND
-            | CPU_INSPECTOR_OBJECT_KIND => Some(Self(raw)),
+            | CPU_INSPECTOR_OBJECT_KIND
+            | VIRTUAL_MACHINE_CREATION_AUTHORITY_OBJECT_KIND
+            | VIRTUAL_MACHINE_CREATION_LEASE_OBJECT_KIND
+            | PENDING_VIRTUAL_MACHINE_OBJECT_KIND
+            | VIRTUAL_MACHINE_OBJECT_KIND
+            | VIRTUAL_CPU_OBJECT_KIND => Some(Self(raw)),
             _ => None,
         }
     }
@@ -227,6 +257,7 @@ pub(crate) enum TransferClass {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ObjectReferenceSnapshot {
     pub(crate) kernel_service: usize,
+    pub(crate) vm_device_binding: usize,
     pub(crate) scheduler: usize,
     pub(crate) publication: usize,
     pub(crate) user_authority: usize,
@@ -238,6 +269,7 @@ pub(crate) struct ObjectReferenceSnapshot {
 #[derive(Clone, Copy)]
 pub(crate) enum ReferenceKind {
     KernelService,
+    VmDeviceBinding,
     Scheduler,
     Publication,
     UserAuthority,
@@ -247,7 +279,7 @@ pub(crate) enum ReferenceKind {
 }
 
 impl ReferenceKind {
-    const COUNT: usize = 7;
+    const COUNT: usize = 8;
 
     const fn index(self) -> usize {
         self as usize
@@ -277,6 +309,7 @@ macro_rules! reference_classes {
 
 reference_classes! {
     KernelService => KernelService,
+    VmDeviceBinding => VmDeviceBinding,
     Scheduler => Scheduler,
     Publication => Publication,
     UserAuthority => UserAuthority,
@@ -806,6 +839,18 @@ impl<T: KernelObject> KernelRef<T, Scheduler> {
     }
 }
 
+impl<T: KernelObject> KernelRef<T, OperationPin> {
+    /// Commits a validated operation reference into persistent VM-device
+    /// ownership after the corresponding userspace handle is consumed.
+    ///
+    /// This conversion is the sole bridge from transient handle resolution to
+    /// a device binding which may outlive the source handle. Callers must
+    /// complete the matching consume-on-success handle-table transaction.
+    pub(crate) fn into_vm_device_binding(self) -> KernelRef<T, VmDeviceBinding> {
+        KernelRef::from_owner(self.owner.into_class(ReferenceKind::VmDeviceBinding))
+    }
+}
+
 impl<T: KernelObject, C: ReferenceClass> KernelRef<T, C> {
     fn from_owner(owner: ObjectRef) -> Self {
         if owner.downcast_ref::<T>().is_none() || owner.class.index() != C::KIND.index() {
@@ -1171,6 +1216,8 @@ fn validate_final_release(object: &DeferredArcDrop<SharedObject>) {
 fn reference_snapshot(references: &[AtomicUsize; ReferenceKind::COUNT]) -> ObjectReferenceSnapshot {
     ObjectReferenceSnapshot {
         kernel_service: references[ReferenceKind::KernelService.index()].load(Ordering::Relaxed),
+        vm_device_binding: references[ReferenceKind::VmDeviceBinding.index()]
+            .load(Ordering::Relaxed),
         scheduler: references[ReferenceKind::Scheduler.index()].load(Ordering::Relaxed),
         publication: references[ReferenceKind::Publication.index()].load(Ordering::Relaxed),
         user_authority: references[ReferenceKind::UserAuthority.index()].load(Ordering::Relaxed),

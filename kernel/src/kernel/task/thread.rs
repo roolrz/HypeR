@@ -24,6 +24,155 @@ use crate::kernel::task::wait::WaitRecord;
 
 pub type KernelThreadEntry = extern "C" fn(usize);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::kernel) enum ThreadRetirementError {
+    PublicationRejected,
+}
+
+/// Type-erased completion owned after a subsystem execution is detached.
+pub(in crate::kernel) trait ThreadRetirementAction: Send {
+    fn complete(self: Box<Self>) -> Result<(), ThreadRetirementError>;
+}
+
+#[must_use = "detached execution retirement must be completed"]
+pub(in crate::kernel) struct ThreadRetirement {
+    action: Box<dyn ThreadRetirementAction>,
+    _resource_charge: Option<crate::kernel::accounting::CommittedCharge>,
+}
+
+/// Subsystem hook for a scheduler-owned external execution allocation.
+pub(in crate::kernel) trait ExternalThreadExecutionLifecycle: Send {
+    fn take_thread_retirement(&mut self) -> Option<ThreadRetirement>;
+}
+
+/// Compiler-managed type erasure for one scheduler-owned execution cell.
+trait ErasedExternalThreadExecution: Send {
+    fn take_thread_retirement(&mut self) -> Option<ThreadRetirement>;
+}
+
+impl<T> ErasedExternalThreadExecution for UnsafeCell<T>
+where
+    T: ExternalThreadExecutionLifecycle + 'static,
+{
+    fn take_thread_retirement(&mut self) -> Option<ThreadRetirement> {
+        self.get_mut().take_thread_retirement()
+    }
+}
+
+/// Type-erased, uniquely owned execution payload with a stable address.
+pub(in crate::kernel) struct ExternalThreadExecution {
+    pointer: super::external_execution::ExternalExecutionPointer,
+    owner: Box<dyn ErasedExternalThreadExecution>,
+}
+
+// SAFETY: `owner` proves the erased payload is Send and keeps the allocation
+// fixed. The copied pointer is never dereferenced merely by moving this unique
+// wrapper; scheduler activation establishes exclusive access after migration.
+unsafe impl Send for ExternalThreadExecution {}
+
+impl ExternalThreadExecution {
+    pub(in crate::kernel) fn from_box<T>(payload: Box<UnsafeCell<T>>) -> Self
+    where
+        T: ExternalThreadExecutionLifecycle + 'static,
+    {
+        let pointer = core::ptr::NonNull::from(payload.as_ref());
+        Self {
+            pointer: super::external_execution::ExternalExecutionPointer::from_cell(pointer),
+            owner: payload,
+        }
+    }
+
+    fn pointer(&self) -> super::external_execution::ExternalExecutionPointer {
+        self.pointer
+    }
+
+    fn take_retirement(&mut self) -> Option<ThreadRetirement> {
+        self.owner.take_thread_retirement()
+    }
+}
+
+impl ThreadRetirement {
+    pub(in crate::kernel) fn from_box<T>(action: Box<T>) -> Self
+    where
+        T: ThreadRetirementAction + 'static,
+    {
+        Self {
+            action,
+            _resource_charge: None,
+        }
+    }
+
+    pub(super) fn complete(self) -> Result<(), ThreadRetirementError> {
+        let Self {
+            action,
+            _resource_charge,
+        } = self;
+        action.complete()
+    }
+
+    fn retain_charge(&mut self, charge: crate::kernel::accounting::CommittedCharge) {
+        if self._resource_charge.replace(charge).is_some() {
+            crate::hal::cpu::halt();
+        }
+    }
+}
+
+#[cfg(feature = "kernel-self-test")]
+struct RetirementAccountingProbe {
+    domain: crate::kernel::accounting::ResourceDomain,
+    baseline: u64,
+    retained: u64,
+}
+
+#[cfg(feature = "kernel-self-test")]
+impl ThreadRetirementAction for RetirementAccountingProbe {
+    fn complete(self: Box<Self>) -> Result<(), ThreadRetirementError> {
+        let observed = self
+            .domain
+            .usage()
+            .total(crate::kernel::accounting::ResourceKind::KernelMemoryBytes);
+        if self.baseline.checked_add(self.retained) == Some(observed) {
+            Ok(())
+        } else {
+            Err(ThreadRetirementError::PublicationRejected)
+        }
+    }
+}
+
+/// Verifies that an extracted retirement action remains charged while its
+/// terminal callback executes and releases the charge immediately afterward.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn verify_retirement_charge_lifetime() -> bool {
+    use crate::kernel::accounting::{ResourceAmount, ResourceDomain, ResourceKind, ResourceLimits};
+
+    let domain = match ResourceDomain::try_new_root(ResourceLimits::UNLIMITED) {
+        Ok(domain) => domain,
+        Err(_) => return false,
+    };
+    let baseline = domain.usage().total(ResourceKind::KernelMemoryBytes);
+    let retained = 64_u64;
+    let charge = match domain
+        .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, retained))
+    {
+        Ok(reservation) => reservation.commit(),
+        Err(_) => return false,
+    };
+    let action = match hyper::mm::try_box(RetirementAccountingProbe {
+        domain: domain.clone(),
+        baseline,
+        retained,
+    }) {
+        Ok(action) => action,
+        Err(_) => return false,
+    };
+    let mut retirement = ThreadRetirement::from_box(action);
+    retirement.retain_charge(charge);
+    let charged = baseline.checked_add(retained)
+        == Some(domain.usage().total(ResourceKind::KernelMemoryBytes));
+    let completed = retirement.complete().is_ok();
+    charged && completed && domain.usage().total(ResourceKind::KernelMemoryBytes) == baseline
+}
+
 /// Queue position to use if a running FIFO thread must leave the CPU after a
 /// priority change. The value is replaced by every subsequent priority change
 /// and consumed by the next scheduling decision.
@@ -125,168 +274,9 @@ impl QueueLinks {
     };
 }
 
-pub struct VcpuExecution {
-    vm: VcpuVm,
-    terminal_mmio_report: Option<crate::kernel::vm::UnhandledMmioReport>,
-    reap_publication: Option<crate::kernel::vm::registry::VcpuReapPublication>,
-    pub(crate) vcpu_id: u32,
-    pub(crate) hardware: crate::hal::vm::VcpuHardwareState,
-}
-
-// Keep migration eligibility compiler-proven. CPU-affine execution and
-// residency claims live exclusively in `vm::active_vcpu`, never in this
-// scheduler-owned payload.
-const _: fn() = || {
-    fn assert_send<T: Send>() {}
-    assert_send::<VcpuExecution>();
-};
-
-enum VcpuVm {
-    Installed(crate::kernel::vm::registry::VmBinding),
-    TimerValidation { interrupts: usize },
-}
-
-impl VcpuExecution {
-    pub(in crate::kernel) fn installed(
-        vm: crate::kernel::vm::registry::VmBinding,
-        vcpu_id: u32,
-        context: crate::hal::vm::VcpuContext,
-        entry_ready: &crate::hal::vm::VmEntryReady,
-    ) -> Result<Self, Error> {
-        let mut hardware = crate::hal::vm::VcpuHardwareState::new(context, entry_ready);
-        crate::hal::vm::initialize_vcpu_interrupts(&mut hardware)?;
-        Ok(Self {
-            vm: VcpuVm::Installed(vm),
-            terminal_mmio_report: None,
-            reap_publication: None,
-            vcpu_id,
-            hardware,
-        })
-    }
-
-    pub(in crate::kernel) fn vm_binding(&self) -> Option<&crate::kernel::vm::registry::VmBinding> {
-        match &self.vm {
-            VcpuVm::Installed(binding) => Some(binding),
-            VcpuVm::TimerValidation { .. } => None,
-        }
-    }
-
-    // Only selected guest platforms with in-kernel MMIO models consume this
-    // view today. Keep the stable Thread payload API available to those
-    // modules without changing VcpuExecution's layout by host architecture.
-    #[allow(dead_code)]
-    pub(in crate::kernel) fn device_context(
-        &mut self,
-    ) -> Option<(
-        &crate::kernel::vm::registry::VmBinding,
-        &mut crate::hal::vm::VcpuHardwareState,
-        u32,
-    )> {
-        match &self.vm {
-            VcpuVm::Installed(binding) => Some((binding, &mut self.hardware, self.vcpu_id)),
-            VcpuVm::TimerValidation { .. } => None,
-        }
-    }
-
-    pub(crate) fn interrupts(&self) -> &crate::kernel::vm::VmInterruptController {
-        match &self.vm {
-            VcpuVm::Installed(binding) => binding.interrupts(),
-            VcpuVm::TimerValidation { interrupts } => {
-                // SAFETY: `for_timer_validation` requires the pointed-to model
-                // to remain fixed and live until this execution is deactivated
-                // and dropped. The reference is scoped to the execution borrow.
-                unsafe {
-                    &*core::ptr::with_exposed_provenance::<crate::kernel::vm::VmInterruptController>(
-                        *interrupts,
-                    )
-                }
-            }
-        }
-    }
-
-    /// Retains a terminal MMIO diagnostic until stopped hardware is detached.
-    // Terminal MMIO diagnostics are currently produced by the AArch64 guest
-    // platform; the storage and ownership protocol remain architecture-neutral.
-    #[allow(dead_code)]
-    pub(in crate::kernel) fn publish_terminal_mmio_report(
-        &mut self,
-        report: crate::kernel::vm::UnhandledMmioReport,
-    ) -> Result<(), ()> {
-        if self.terminal_mmio_report.is_some() {
-            return Err(());
-        }
-        self.terminal_mmio_report = Some(report);
-        Ok(())
-    }
-
-    pub(in crate::kernel) const fn terminal_mmio_report_pending(&self) -> bool {
-        self.terminal_mmio_report.is_some()
-    }
-
-    /// Takes the owned report only after terminal hardware detachment.
-    pub(in crate::kernel) fn take_terminal_mmio_report(
-        &mut self,
-    ) -> Option<crate::kernel::vm::UnhandledMmioReport> {
-        self.terminal_mmio_report.take()
-    }
-
-    pub(in crate::kernel) fn arm_reap_publication(
-        &mut self,
-        thread: ThreadId,
-        reason: crate::kernel::vm::registry::VcpuClosureReason,
-    ) -> Result<(), ()> {
-        if self.reap_publication.is_some() {
-            return Err(());
-        }
-        let Some(binding) = self.vm_binding() else {
-            return Err(());
-        };
-        self.reap_publication = Some(crate::kernel::vm::registry::VcpuReapPublication::new(
-            binding.id(),
-            self.vcpu_id,
-            thread,
-            reason,
-        ));
-        Ok(())
-    }
-
-    fn take_reap_publication(
-        &mut self,
-    ) -> Option<crate::kernel::vm::registry::VcpuReapPublication> {
-        self.reap_publication.take()
-    }
-
-    /// Builds the non-runnable execution used by architecture timer checks.
-    ///
-    /// This execution may activate and deactivate local virtual hardware, but
-    /// it must never enter a guest or perform a VM-registry lookup.
-    ///
-    /// # Safety
-    ///
-    /// `interrupts` must remain at a fixed address and live until the returned
-    /// execution has been deactivated and dropped.
-    // Only AArch64 currently performs this validation. Keep the constructor
-    // architecture-neutral so kernel policy contains no target cfg.
-    #[allow(dead_code)]
-    pub(crate) unsafe fn for_timer_validation(
-        hardware: crate::hal::vm::VcpuHardwareState,
-        interrupts: &crate::kernel::vm::VmInterruptController,
-    ) -> Self {
-        Self {
-            vm: VcpuVm::TimerValidation {
-                interrupts: core::ptr::from_ref(interrupts).expose_provenance(),
-            },
-            terminal_mmio_report: None,
-            reap_publication: None,
-            vcpu_id: 0,
-            hardware,
-        }
-    }
-}
-
-pub(crate) enum ThreadExecution {
+enum ThreadExecution {
     Kernel,
-    Vcpu(Box<UnsafeCell<VcpuExecution>>),
+    Vcpu(ExternalThreadExecution),
     User(Box<UnsafeCell<crate::kernel::process::UserExecution>>),
 }
 
@@ -427,6 +417,50 @@ struct ThreadResources {
     context: UnsafeCell<crate::hal::context::ThreadContext>,
     kernel_stack: Option<KernelStack>,
     execution: ThreadExecution,
+    _ownership: Option<ThreadResourceOwnership>,
+}
+
+/// Accounting ownership whose lifetime is exactly one scheduler Thread.
+///
+/// Payload-producing subsystems reserve these generic resources before
+/// construction. The scheduler consumes the object charge while publishing
+/// the canonical Thread object and retains the execution charge until the
+/// detached Thread is destroyed by the reaper. A separately admitted
+/// retirement charge follows an extracted terminal action through completion,
+/// so destroying the Thread never leaves deferred work unaccounted.
+#[must_use = "thread resources must move into a scheduler Thread"]
+pub(in crate::kernel) struct ThreadResourceOwnership {
+    _execution_charge: crate::kernel::accounting::CommittedCharge,
+    retirement_charge: Option<crate::kernel::accounting::CommittedCharge>,
+    object_charge: Option<crate::kernel::accounting::CommittedCharge>,
+}
+
+impl ThreadResourceOwnership {
+    pub(in crate::kernel) const fn new(
+        execution_charge: crate::kernel::accounting::CommittedCharge,
+        retirement_charge: crate::kernel::accounting::CommittedCharge,
+        object_charge: crate::kernel::accounting::CommittedCharge,
+    ) -> Self {
+        Self {
+            _execution_charge: execution_charge,
+            retirement_charge: Some(retirement_charge),
+            object_charge: Some(object_charge),
+        }
+    }
+
+    fn take_object_charge(&mut self) -> crate::kernel::accounting::CommittedCharge {
+        match self.object_charge.take() {
+            Some(charge) => charge,
+            None => crate::hal::cpu::halt(),
+        }
+    }
+
+    fn take_retirement_charge(&mut self) -> crate::kernel::accounting::CommittedCharge {
+        match self.retirement_charge.take() {
+            Some(charge) => charge,
+            None => crate::hal::cpu::halt(),
+        }
+    }
 }
 
 /// Runtime owned by the replaceable Fair scheduling implementation.
@@ -474,15 +508,35 @@ impl Thread {
         core::mem::size_of::<Self>() + core::mem::size_of::<ThreadResources>()
     }
 
+    /// Heap and guarded-stack bytes retained by one scheduler-owned vCPU.
+    ///
+    /// This excludes both the VM binding's shared aggregate and the canonical
+    /// system Thread object. Each is independently refcounted and therefore
+    /// owns accounting whose lifetime follows that allocation directly.
+    pub(crate) const fn external_execution_allocation_size(payload_size: usize) -> Option<usize> {
+        let bytes = Self::allocation_size();
+        let bytes = match bytes.checked_add(payload_size) {
+            Some(bytes) => bytes,
+            None => return None,
+        };
+        let bytes = match bytes.checked_add(crate::kernel::mm::stack::thread_stack_bytes()) {
+            Some(bytes) => bytes,
+            None => return None,
+        };
+        Some(bytes)
+    }
+
     fn allocate_resources(
         context: crate::hal::context::ThreadContext,
         kernel_stack: Option<KernelStack>,
         execution: ThreadExecution,
+        ownership: Option<ThreadResourceOwnership>,
     ) -> Result<Box<ThreadResources>, Error> {
         hyper::mm::try_box(ThreadResources {
             context: UnsafeCell::new(context),
             kernel_stack,
             execution,
+            _ownership: ownership,
         })
         .map_err(|_| Error::Allocation)
     }
@@ -515,6 +569,7 @@ impl Thread {
                 crate::hal::context::ThreadContext::empty(),
                 None,
                 ThreadExecution::Kernel,
+                None,
             )?,
         })
     }
@@ -551,7 +606,12 @@ impl Thread {
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
             runtime_ticks: AtomicU64::new(0),
-            resources: Self::allocate_resources(context, Some(stack), ThreadExecution::Kernel)?,
+            resources: Self::allocate_resources(
+                context,
+                Some(stack),
+                ThreadExecution::Kernel,
+                None,
+            )?,
         })
     }
 
@@ -584,7 +644,12 @@ impl Thread {
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
             runtime_ticks: AtomicU64::new(0),
-            resources: Self::allocate_resources(context, Some(stack), ThreadExecution::Kernel)?,
+            resources: Self::allocate_resources(
+                context,
+                Some(stack),
+                ThreadExecution::Kernel,
+                None,
+            )?,
         })
     }
 
@@ -619,6 +684,7 @@ impl Thread {
                 crate::hal::context::ThreadContext::empty(),
                 Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
                 ThreadExecution::Kernel,
+                None,
             )?,
         })
     }
@@ -627,7 +693,8 @@ impl Thread {
         id: ThreadId,
         cpu_index: CpuIndex,
         name: &str,
-        execution: VcpuExecution,
+        execution: ExternalThreadExecution,
+        mut ownership: ThreadResourceOwnership,
         entry: KernelThreadEntry,
     ) -> Result<Self, Error> {
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
@@ -638,7 +705,10 @@ impl Thread {
                 id,
                 name: ThreadNameSnapshot::new(name)?,
             },
-            object: ThreadObject::try_system(ThreadRole::Vcpu)?,
+            object: ThreadObject::try_accounted_system(
+                ThreadRole::Vcpu,
+                ownership.take_object_charge(),
+            )?,
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
                 placement: ThreadPlacement::prefer(cpu_index),
@@ -655,10 +725,8 @@ impl Thread {
             resources: Self::allocate_resources(
                 scheduling_context,
                 Some(stack),
-                ThreadExecution::Vcpu(
-                    hyper::mm::try_box(UnsafeCell::new(execution))
-                        .map_err(|_| Error::Allocation)?,
-                ),
+                ThreadExecution::Vcpu(execution),
+                Some(ownership),
             )?,
         })
     }
@@ -700,6 +768,7 @@ impl Thread {
                 context,
                 Some(stack),
                 ThreadExecution::User(execution),
+                None,
             )?,
         })
     }
@@ -972,9 +1041,11 @@ impl Thread {
     /// Current-vCPU admission and hardware ownership serialize all dereference
     /// of this pointer. Repeated scheduler queries therefore cannot invalidate
     /// a previously issued raw capability by retagging an exclusive reference.
-    pub(super) fn vcpu_execution_pointer(&self) -> Option<*mut VcpuExecution> {
+    pub(super) fn vcpu_execution_pointer(
+        &self,
+    ) -> Option<super::external_execution::ExternalExecutionPointer> {
         match &self.resources.execution {
-            ThreadExecution::Vcpu(execution) => Some(execution.get()),
+            ThreadExecution::Vcpu(execution) => Some(execution.pointer()),
             _ => None,
         }
     }
@@ -1026,15 +1097,19 @@ impl Thread {
         }
     }
 
-    pub(super) fn take_vcpu_reap_publication(
-        &mut self,
-    ) -> Option<crate::kernel::vm::registry::VcpuReapPublication> {
-        match &mut self.resources.execution {
+    pub(super) fn take_vcpu_reap_publication(&mut self) -> Option<ThreadRetirement> {
+        let mut retirement = match &mut self.resources.execution {
             // `detach_terminated` proved no CPU or switch tail owns this
             // payload, so the cell's unique owner may safely use `get_mut`.
-            ThreadExecution::Vcpu(execution) => execution.get_mut().take_reap_publication(),
+            ThreadExecution::Vcpu(execution) => execution.take_retirement(),
             _ => None,
-        }
+        }?;
+        let ownership = match self.resources._ownership.as_mut() {
+            Some(ownership) => ownership,
+            None => crate::hal::cpu::halt(),
+        };
+        retirement.retain_charge(ownership.take_retirement_charge());
+        Some(retirement)
     }
 
     pub const fn owns_kernel_stack(&self) -> bool {

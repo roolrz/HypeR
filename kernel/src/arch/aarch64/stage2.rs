@@ -7,7 +7,7 @@ use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
 
 use hyper::mm::{PAGE_SIZE, PhysicalAddress};
-use hyper::vm::translation::{ActiveMappingError, publish_active_mapping};
+use hyper::vm::translation::{ActiveMappingError, Stage2PagePermissions, publish_active_mapping};
 
 use super::{address, memory, registers};
 
@@ -19,6 +19,14 @@ const _: () = {
             >= address::STAGE2_IPA_LIMIT
     );
     assert!(registers::VTCR_EL2_GUEST_BASE & registers::VTCR_EL2_T0SZ_MASK == 0);
+    assert!(
+        normal_memory_attributes(Stage2PagePermissions::ReadWrite) & registers::STAGE2_DESC_XN != 0
+    );
+    assert!(
+        normal_memory_attributes(Stage2PagePermissions::ReadWriteExecute)
+            & registers::STAGE2_DESC_XN
+            == 0
+    );
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,10 +123,11 @@ impl Stage2AddressSpace {
         &mut self,
         ipa: u64,
         physical: u64,
+        permissions: Stage2PagePermissions,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         validate_page(ipa, physical)?;
-        self.map_leaf(ipa, physical, 2, MemoryType::Normal, allocator)
+        self.map_leaf(ipa, physical, 2, MemoryType::Normal, permissions, allocator)
     }
 
     /// Adds a 4 KiB invalid-to-valid mapping while this VMID is active, then
@@ -134,6 +143,7 @@ impl Stage2AddressSpace {
         &mut self,
         ipa: u64,
         physical: u64,
+        permissions: Stage2PagePermissions,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), ActiveMappingError<Error>> {
         publish_active_mapping(
@@ -141,7 +151,7 @@ impl Stage2AddressSpace {
             |stage2| {
                 // SAFETY: This method inherits the allocator and serialization
                 // requirements in addition to requiring the hierarchy active.
-                unsafe { stage2.map_normal_page(ipa, physical, allocator) }
+                unsafe { stage2.map_normal_page(ipa, physical, permissions, allocator) }
             },
             |_| {
                 // SAFETY: The caller guarantees this VMID remains active while
@@ -150,6 +160,57 @@ impl Stage2AddressSpace {
                 Ok(())
             },
         )
+    }
+
+    /// Grants execute permission to an existing inactive normal-memory page.
+    ///
+    /// Instruction bytes must already have been published to the instruction
+    /// coherence domain. The next activation publishes this descriptor store.
+    pub fn make_normal_page_executable(&mut self, ipa: u64) -> Result<(), Error> {
+        let (pointer, descriptor) = self.normal_page_leaf(ipa)?;
+        if descriptor & registers::STAGE2_DESC_XN == 0 {
+            return Ok(());
+        }
+        // SAFETY: The validated leaf belongs to this exclusively mutated,
+        // inactive hierarchy.
+        unsafe { write_volatile(pointer, descriptor & !registers::STAGE2_DESC_XN) };
+        Ok(())
+    }
+
+    /// Grants execute permission to an existing active normal-memory page.
+    ///
+    /// # Safety
+    ///
+    /// This address space must be active on the current CPU and serialized by
+    /// its single-active-vCPU ownership contract. Instruction bytes must have
+    /// completed cache publication before this call.
+    pub unsafe fn make_normal_page_executable_active(
+        &mut self,
+        ipa: u64,
+    ) -> Result<(), ActiveMappingError<Error>> {
+        let (pointer, descriptor) = self
+            .normal_page_leaf(ipa)
+            .map_err(ActiveMappingError::BeforeInstall)?;
+        if descriptor & registers::STAGE2_DESC_XN == 0 {
+            return Ok(());
+        }
+        let executable = descriptor & !registers::STAGE2_DESC_XN;
+        // Permission replacement uses break-before-make. All validation is
+        // complete before the break, so no recoverable failure can strand the
+        // live address space with an invalid descriptor.
+        // SAFETY: The method contract guarantees exclusive mutation while the
+        // exact VMID is active.
+        unsafe { write_volatile(pointer, 0) };
+        // SAFETY: The invalid descriptor is visible to the current guest
+        // regime only after the architecture-mandated break invalidation.
+        unsafe { invalidate_broken_ipa(ipa) };
+        // SAFETY: The same validated leaf remains owned and fixed throughout
+        // the IRQ-masked VM-exit transaction.
+        unsafe { write_volatile(pointer, executable) };
+        // SAFETY: Publish the new valid descriptor before ERET retries the
+        // faulting instruction. ERET supplies the local context sync event.
+        unsafe { publish_new_leaf() };
+        Ok(())
     }
 
     /// Reissues new-leaf publication for one unchanged active guest page.
@@ -243,7 +304,14 @@ impl Stage2AddressSpace {
             let current_physical = physical + offset;
             let remaining = size - offset;
             let level = best_level(current_ipa, current_physical, remaining);
-            self.map_leaf(current_ipa, current_physical, level, memory, allocator)?;
+            self.map_leaf(
+                current_ipa,
+                current_physical,
+                level,
+                memory,
+                Stage2PagePermissions::ReadWriteExecute,
+                allocator,
+            )?;
             offset += registers::STAGE2_LEVEL_SIZES_4K[level];
         }
         Ok(())
@@ -255,6 +323,7 @@ impl Stage2AddressSpace {
         physical: u64,
         leaf_level: usize,
         memory: MemoryType,
+        permissions: Stage2PagePermissions,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), Error> {
         let mut table = self.root;
@@ -287,10 +356,7 @@ impl Stage2AddressSpace {
         let attributes = registers::STAGE2_DESC_ACCESS_FLAG
             | registers::STAGE2_DESC_READ_WRITE
             | match memory {
-                MemoryType::Normal => {
-                    registers::STAGE2_DESC_INNER_SHAREABLE
-                        | registers::STAGE2_DESC_MEMATTR_NORMAL_WB
-                }
+                MemoryType::Normal => normal_memory_attributes(permissions),
                 MemoryType::Device => {
                     registers::STAGE2_DESC_MEMATTR_DEVICE_NGNRE | registers::STAGE2_DESC_XN
                 }
@@ -304,6 +370,45 @@ impl Stage2AddressSpace {
         }
         write_entry(table, slot, descriptor)
     }
+
+    fn normal_page_leaf(&self, ipa: u64) -> Result<(*mut u64, u64), Error> {
+        if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= address::STAGE2_IPA_LIMIT {
+            return Err(Error::InvalidAddress);
+        }
+        let mut table = self.root;
+        for level in 0..2 {
+            let entry = read_entry(table, index(ipa, level))?;
+            if entry & registers::TRANSLATION_DESC_TYPE_MASK != registers::STAGE2_DESC_TABLE_OR_PAGE
+            {
+                return Err(Error::Conflict);
+            }
+            table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
+        }
+        let pointer = table_pointer(table)?;
+        // SAFETY: The walk validated both parent descriptors and the computed
+        // slot belongs to their live final-level table.
+        let pointer = unsafe { pointer.add(index(ipa, 2)) };
+        // SAFETY: The address-space owner retains and serializes this table.
+        let descriptor = unsafe { read_volatile(pointer) };
+        const MEMATTR_MASK: u64 = 0xf << 2;
+        if descriptor & registers::TRANSLATION_DESC_TYPE_MASK
+            != registers::STAGE2_DESC_TABLE_OR_PAGE
+            || descriptor & MEMATTR_MASK != registers::STAGE2_DESC_MEMATTR_NORMAL_WB
+        {
+            return Err(Error::Conflict);
+        }
+        Ok((pointer, descriptor))
+    }
+}
+
+const fn normal_memory_attributes(permissions: Stage2PagePermissions) -> u64 {
+    registers::STAGE2_DESC_INNER_SHAREABLE
+        | registers::STAGE2_DESC_MEMATTR_NORMAL_WB
+        | if permissions.is_executable() {
+            0
+        } else {
+            registers::STAGE2_DESC_XN
+        }
 }
 
 /// Invalidates one retained guest translation identity on the current CPU.
@@ -469,6 +574,36 @@ unsafe fn invalidate_replaced_ipa(ipa: u64) {
     // SAFETY: The caller guarantees that VTTBR_EL2 selects the updated address
     // space. HCR.TGE is cleared while guest-regime TLBIs execute, then restored
     // only after both invalidations complete in the inner-shareable domain.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "mrs {host_hcr}, HCR_EL2",
+            "bic {guest_hcr}, {host_hcr}, {tge}",
+            "msr HCR_EL2, {guest_hcr}",
+            "isb",
+            "tlbi ipas2e1is, {operand}",
+            "dsb ish",
+            "tlbi vmalle1is",
+            "dsb ish",
+            "isb",
+            "msr HCR_EL2, {host_hcr}",
+            "isb",
+            operand = in(reg) operand,
+            tge = in(reg) registers::HCR_EL2_TGE,
+            host_hcr = out(reg) _,
+            guest_hcr = out(reg) _,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Completes the break phase of an active break-before-make update.
+unsafe fn invalidate_broken_ipa(ipa: u64) {
+    let operand = ipa >> registers::TLBI_IPAS2E1_IPA_SHIFT;
+    // SAFETY: The old descriptor is already invalid, and the caller retains
+    // exclusive ownership of the active guest regime. The first TLBI removes
+    // stage-2 entries; VMALLE1IS also removes combined stage-1/stage-2 entries
+    // which may cache the old execute denial.
     unsafe {
         asm!(
             "dsb ishst",

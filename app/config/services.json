@@ -2,11 +2,14 @@
   "SPDX-FileCopyrightText": "2026 roolrz",
   "SPDX-License-Identifier": "Apache-2.0",
   "format": "hyper.service-manifest",
+  "initial-vm": {
+    "image": "/vm/alpine.itb"
+  },
   "services": [
     {
       "name": "console-input",
       "image": "/svc/console-input",
-      "critical": false,
+      "critical": true,
       "restart": "never",
       "after": [],
       "capabilities": [
@@ -27,7 +30,7 @@
     {
       "name": "console-output",
       "image": "/svc/console-output",
-      "critical": false,
+      "critical": true,
       "restart": "never",
       "after": [],
       "capabilities": [
@@ -156,6 +159,57 @@
           "purpose": "process.cpu-inspector",
           "operation": "duplicate",
           "rights": ["duplicate", "transfer", "inspect"]
+        },
+        {
+          "source": "bootstrap.dynamic-library-directory",
+          "purpose": "process.child-library-directory",
+          "operation": "duplicate",
+          "rights": ["read", "execute", "duplicate", "transfer"]
+        }
+      ]
+    },
+    {
+      "name": "vm-manager",
+      "image": "/svc/vm-manager",
+      "critical": true,
+      "restart": "never",
+      "after": [],
+      "capabilities": [
+        {
+          "source": "bootstrap.vm-runtime-image",
+          "purpose": "vm.runtime-image",
+          "operation": "create",
+          "rights": ["execute"]
+        },
+        {
+          "source": "bootstrap.vm-provisioning-channel",
+          "purpose": "vm.provisioning",
+          "operation": "move",
+          "rights": ["wait", "read"]
+        },
+        {
+          "source": "bootstrap.task-factory",
+          "purpose": "process.task-factory",
+          "operation": "duplicate",
+          "rights": ["create-process", "create-task-group"]
+        },
+        {
+          "source": "bootstrap.resource-domain",
+          "purpose": "process.resource-domain",
+          "operation": "duplicate",
+          "rights": ["create-resource-domain"]
+        },
+        {
+          "source": "bootstrap.vm-creation-authority",
+          "purpose": "vm.creation-authority",
+          "operation": "duplicate",
+          "rights": ["derive", "create-virtual-machine"]
+        },
+        {
+          "source": "bootstrap.dynamic-library-directory",
+          "purpose": "process.child-library-directory",
+          "operation": "duplicate",
+          "rights": ["read", "execute", "duplicate", "transfer"]
         }
       ]
     }

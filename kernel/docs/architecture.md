@@ -148,6 +148,17 @@ exit: VM policy snapshots pending virtual interrupts and the architectural
 timer deadline, then either re-enters immediately or parks the scheduler-owned
 vCPU Thread on its stable endpoint.
 
+Each installed VM has one shared lifecycle aggregate retained independently by
+the hardware registry and its handle objects. Its stable vCPU endpoints are the
+sole Dormant/Started/terminal state and signal authority; handle inspection and
+the scheduler-reaper publication both observe that same state machine. The
+aggregate never owns a registry machine lease, so surviving diagnostic handles
+cannot prevent hardware ownership from becoming unique for retirement.
+VM-specific execution state is type-erased at the task boundary. The scheduler
+owns only a stable external-execution allocation, generic resource ownership,
+and an opaque detach-completion action; VM endpoint publication remains in the
+VM subsystem after the Thread allocation has been destroyed.
+
 The guest virtual-timer PPI is a level source. Injection may mask the host
 mapping while a list register owns the pending interrupt; maintenance
 reconciliation unmasks it only after the virtual interrupt can no longer be
@@ -176,6 +187,10 @@ observable. A borrowed Rust reference is scoped to one counted owner and is not
 itself an ownership edge. User-authority count is distinct from total lifetime:
 closing the final userspace handle may close an endpoint or publish another
 object-specific transition while an already resolved operation safely finishes.
+VM device bindings use their own persistent reference class. Such a binding can
+be created only by converting a resolved operation pin as part of a successful
+consume-on-success handle transaction, and remains separately visible from
+ordinary kernel-service ownership until the VM device set is retired.
 
 The scheduler retains a counted scheduler-class reference to every resident
 Thread object. CPU residence and scheduler authority continue to govern access

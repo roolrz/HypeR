@@ -59,6 +59,12 @@ impl<T> BoundedVec<T> {
         self.entries.len()
     }
 
+    pub(super) fn allocation_size(&self) -> Option<usize> {
+        self.entries
+            .capacity()
+            .checked_mul(core::mem::size_of::<T>())
+    }
+
     pub(super) fn remaining(&self) -> usize {
         self.limit - self.entries.len()
     }
@@ -115,6 +121,10 @@ impl ReadyQueue {
         Ok(Self {
             entries: BoundedVec::try_new(capacity)?,
         })
+    }
+
+    pub(super) fn allocation_size(&self) -> Option<usize> {
+        self.entries.allocation_size()
     }
 
     pub(super) fn contains<S: ReadyEntries>(

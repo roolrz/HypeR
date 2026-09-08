@@ -8,15 +8,15 @@ mod parse;
 mod plan;
 
 pub use model::{
-    CapabilityBinding, CapabilityOperation, MAX_CAPABILITIES_PER_SERVICE,
+    CapabilityBinding, CapabilityOperation, InitialVm, MAX_CAPABILITIES_PER_SERVICE,
     MAX_DEPENDENCIES_PER_SERVICE, MAX_DEPENDENCY_EDGES, MAX_MANIFEST_BYTES,
     MAX_RIGHTS_PER_CAPABILITY, MAX_SERVICES, Manifest, RestartPolicy, Service,
 };
 pub(crate) use parse::parse_into;
 pub use parse::{ParseError, ParseErrorKind, parse};
 pub use plan::{
-    AuthorityDeclaration, AuthorityPolicy, LaunchPlan, StartupPurposeDeclaration, ValidationError,
-    ValidationErrorKind, validate,
+    AuthorityDeclaration, AuthorityKey, AuthorityPolicy, CapabilityGrant, LaunchPlan,
+    StartupPurposeDeclaration, ValidationError, ValidationErrorKind, validate,
 };
 
 #[cfg(test)]

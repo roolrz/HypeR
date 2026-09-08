@@ -5,6 +5,7 @@
 
 use hyper::sync::atomic::{AtomicBool, Ordering};
 
+mod external_execution;
 pub(crate) mod policy;
 pub(crate) mod preempt;
 mod reschedule;
@@ -21,6 +22,10 @@ pub(crate) use thread_object::{
     ThreadObjectObservation, ThreadObjectRegistryPhase, ThreadObjectScanCursor,
     ThreadObjectSnapshot, ThreadObjectSnapshotPage, ThreadRole,
 };
+
+pub(crate) const fn system_thread_object_allocation_size() -> Option<usize> {
+    thread_object::ThreadObject::system_allocation_size()
+}
 
 pub use sleep::{SleepError, sleep_ms, sleep_ns, sleep_s, sleep_until, sleep_us};
 #[cfg(feature = "kernel-self-test")]

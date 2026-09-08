@@ -69,6 +69,18 @@ pub struct Service<'manifest> {
         BoundedList<CapabilityBinding<'manifest>, MAX_CAPABILITIES_PER_SERVICE>,
 }
 
+/// Initial guest selected by immutable bootstrap configuration.
+#[derive(Debug, Eq, PartialEq)]
+pub struct InitialVm<'manifest> {
+    pub(super) image: &'manifest str,
+}
+
+impl<'manifest> InitialVm<'manifest> {
+    pub const fn image(&self) -> &'manifest str {
+        self.image
+    }
+}
+
 impl Service<'_> {
     pub const fn name(&self) -> &str {
         self.name
@@ -98,12 +110,14 @@ impl Service<'_> {
 /// A parsed manifest which borrows immutable text loaded from the root directory.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Manifest<'manifest> {
+    pub(super) initial_vm: Option<InitialVm<'manifest>>,
     pub(super) services: BoundedList<Service<'manifest>, MAX_SERVICES>,
 }
 
-impl Manifest<'_> {
+impl<'manifest> Manifest<'manifest> {
     pub(crate) fn empty() -> Self {
         Self {
+            initial_vm: None,
             services: BoundedList::new(),
         }
     }
@@ -118,6 +132,17 @@ impl Manifest<'_> {
 
     pub fn service(&self, index: usize) -> Option<&Service<'_>> {
         self.services.get(index)
+    }
+
+    pub const fn initial_vm(&self) -> Option<&InitialVm<'manifest>> {
+        self.initial_vm.as_ref()
+    }
+
+    pub const fn initial_vm_image(&self) -> Option<&'manifest str> {
+        match &self.initial_vm {
+            Some(initial_vm) => Some(initial_vm.image),
+            None => None,
+        }
     }
 }
 

@@ -881,6 +881,67 @@ impl CommittedCharge {
     pub(crate) const fn amount(&self) -> ResourceAmount {
         self.amount
     }
+
+    /// Extends this linear owner with another atomic resource delta.
+    ///
+    /// Admission happens before the owner changes. On success the temporary
+    /// committed charge is disarmed and this owner releases the combined usage
+    /// exactly once. This permits resources which grow incrementally, such as
+    /// sparse machine address spaces, to retain one bounded accounting owner
+    /// rather than allocating one owner per page.
+    pub(crate) fn try_extend(&mut self, additional: ResourceAmount) -> Result<(), ResourceError> {
+        if additional.overflowed() {
+            return Err(ResourceError::TooManyChargeDimensions);
+        }
+        if additional.is_empty() {
+            return Ok(());
+        }
+
+        let mut combined = self.amount;
+        for (kind, value) in additional.entries() {
+            let Some(value) = combined.get(kind).checked_add(value) else {
+                return Err(ResourceError::UsageOverflow {
+                    domain: self.domain.id(),
+                    resource: kind,
+                });
+            };
+            combined = combined.with(kind, value);
+        }
+        if combined.overflowed() {
+            return Err(ResourceError::TooManyChargeDimensions);
+        }
+
+        let extension = self.domain.reserve(additional)?.commit();
+        self.absorb_pre_admitted(extension);
+        Ok(())
+    }
+
+    /// Coalesces an already committed delta from the same domain.
+    ///
+    /// This is the irreversible tail for resource creation which had to reserve
+    /// quota before publishing an allocation. Resource-domain admission proves
+    /// the combined values cannot overflow; a mismatch here is kernel ownership
+    /// corruption rather than a recoverable resource failure.
+    pub(crate) fn absorb_pre_admitted(&mut self, mut extension: Self) {
+        if self.domain.id() != extension.domain.id() {
+            accounting_invariant_violation();
+        }
+        let mut combined = self.amount;
+        for (kind, value) in extension.amount.entries() {
+            let Some(value) = combined.get(kind).checked_add(value) else {
+                accounting_invariant_violation();
+            };
+            combined = combined.with(kind, value);
+        }
+        if combined.overflowed() {
+            accounting_invariant_violation();
+        }
+        self.amount = combined;
+        // The combined owner now carries the exact counter delta. Clearing the
+        // temporary amount makes its Drop release no counters while still
+        // releasing its strong ResourceDomain reference normally.
+        extension.amount = ResourceAmount::ZERO;
+    }
 }
 
 impl Drop for CommittedCharge {

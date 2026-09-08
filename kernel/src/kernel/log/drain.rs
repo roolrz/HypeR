@@ -215,6 +215,7 @@ fn prompt_local_cpu() {
 }
 
 /// Enqueues one guest Console byte without touching the physical UART.
+#[cfg(feature = "kernel-self-test")]
 pub(super) fn enqueue_console_tx_byte(byte: u8) {
     if MODE.load(Ordering::Acquire) == EMERGENCY {
         return;

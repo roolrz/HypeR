@@ -16,7 +16,7 @@ cpu=$4
 cpus=$5
 memory=$6
 bootargs=$7
-timeout_seconds=${QEMU_BOOT_TIMEOUT_SECONDS:-60}
+timeout_seconds=${QEMU_BOOT_TIMEOUT_SECONDS:-90}
 temp=$(mktemp -d -t hyper-native-init.XXXXXX)
 input=$temp/input
 native_output=$temp/native-output
@@ -72,7 +72,8 @@ attempt=0
 command_phase='console'
 while [ "$attempt" -lt "$attempt_limit" ]; do
     if grep -Eq 'HypeR: kernel startup.*failed|HypeR crash monitor' "$log" ||
-        grep -Eq '(^|[^[:alnum:]_])(PANIC|BUG)([^[:alnum:]_]|$)' "$log"; then
+        grep -Eq '(^|[^[:alnum:]_])(PANIC|BUG)([^[:alnum:]_]|$)' "$log" ||
+        grep -Eq 'HypeR init: (critical service |initial VM (failed|protocol failed)|VM (manager terminated|provisioning channel closed))' "$log"; then
         cat "$log" >&2
         echo "HypeR reported a fatal failure before Native init completed" >&2
         exit 1
@@ -83,7 +84,12 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
     sed 's/\r$//' "$log" >"$native_output"
     case "$command_phase" in
         console)
-            if grep -Fxq 'HypeR session: console ready' "$native_output"; then
+            # Guest PL011 currently shares the host Console sink. Wait until
+            # the guest's boot-and-timer probe is complete before issuing
+            # line-oriented Native commands, so unrelated guest bytes cannot
+            # split their strict output records.
+            if grep -Fxq 'HypeR session: console ready' "$native_output" &&
+                grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
                 printf '/bin/ps\n' >&3
                 command_phase='ps'
             fi
@@ -200,8 +206,11 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output" &&
         grep -Eq '^Mem:[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB' "$native_output" &&
         grep -Fxq 'Press q to quit.' "$native_output" &&
-        grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output"; then
-        echo "verified Native inspection, profiling, linking, directory enumeration, and shell cwd semantics"
+        grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output" &&
+        grep -q 'Run /init as init process' "$log" &&
+        grep -q 'HypeR guest: /init reached' "$log" &&
+        grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
+        echo "verified Native services and userspace-managed Linux VM startup"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then

@@ -167,9 +167,9 @@ pub(super) enum LowerElReturnRegime {
 impl LowerElReturnRegime {
     /// Produces the `HCR_EL2` value required before `ERET`.
     ///
-    /// Native values are built from kernel policy rather than inherited from
-    /// a preceding guest. Guest values preserve unrelated controls while
-    /// selecting the lower-EL guest regime. The selected host mode must
+    /// Native and guest values are both built from explicit policy rather than
+    /// inherited from the preceding lower-EL context. Only the host's `E2H`
+    /// register regime crosses into guest policy. The selected host mode must
     /// already match `E2H`.
     pub(super) const fn transition_hcr(
         self,
@@ -197,12 +197,37 @@ impl LowerElReturnRegime {
     }
 
     pub(super) const fn guest_hcr(current_hcr: u64) -> u64 {
-        (current_hcr
+        // FB broadcasts guest cache and translation maintenance, while BSU_IS
+        // upgrades the completing guest barriers to the same inner-shareable
+        // domain. Without the pair, a migratable vCPU can leave stale guest
+        // translations or instructions on a physical PE and later return to
+        // them. SWIO prevents guest set/way invalidation from discarding dirty
+        // cache state, and PTW keeps guest table walks subject to stage-2 write
+        // permission.
+        // Preserve only the host's VHE mode. TID3 is guest policy: it routes
+        // the feature-ID register family through the sanitized virtual CPU
+        // model. TSC keeps guest SMCs out of EL3, while TACR and TIDCP prevent
+        // implementation-defined EL1 controls from exposing host policy; the
+        // virtual system-register path returns the supported ACTLR contract and
+        // injects Undefined Instruction for unknown accesses. The remaining
+        // native-EL0 discovery, cache-maintenance, and TLB-maintenance traps
+        // must not leak through a scheduler transition into Linux EL1.
+        (current_hcr & registers::HCR_EL2_E2H)
             | registers::HCR_EL2_VM
+            | registers::HCR_EL2_SWIO
+            | registers::HCR_EL2_PTW
             | registers::HCR_EL2_RW
+            | registers::HCR_EL2_FMO
+            | registers::HCR_EL2_IMO
+            | registers::HCR_EL2_AMO
             | registers::HCR_EL2_TWI
-            | registers::HCR_EL2_TWE)
-            & !(registers::HCR_EL2_TGE | registers::HCR_EL2_DC)
+            | registers::HCR_EL2_TWE
+            | registers::HCR_EL2_TID3
+            | registers::HCR_EL2_TSC
+            | registers::HCR_EL2_TACR
+            | registers::HCR_EL2_TIDCP
+            | registers::HCR_EL2_FB
+            | registers::HCR_EL2_BSU_IS
     }
 }
 

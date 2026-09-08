@@ -60,8 +60,11 @@ pub(crate) unsafe fn publish_data_range(start: usize, length: usize) -> Result<(
 /// Every yielded range must remain mapped and writable, with concurrent
 /// execution and modification excluded across every enumeration pass. Every
 /// CPU that later executes it must call [`synchronize_instruction_execution`]
-/// after observing publication.
+/// after observing publication. `pin` proves that every architecture-requested
+/// maintenance pass executes on one CPU; it must remain held for the complete
+/// call.
 pub(crate) unsafe fn publish_instruction_ranges(
+    _pin: &dyn hyper::cpu::PinnedExecution,
     ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
 ) -> Result<(), CacheError> {
     // SAFETY: The facade forwards the stable-enumeration, mapping, ownership,
@@ -72,4 +75,9 @@ pub(crate) unsafe fn publish_instruction_ranges(
 /// Completes local instruction-stream synchronization after code publication.
 pub(crate) fn synchronize_instruction_execution() {
     crate::arch::memory::Cache::synchronize_instruction_execution();
+}
+
+/// Repairs guest-owned instruction visibility after a vCPU changes CPU.
+pub(crate) fn synchronize_guest_instruction_migration() {
+    crate::arch::memory::Cache::synchronize_guest_instruction_migration();
 }

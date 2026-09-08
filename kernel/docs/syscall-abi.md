@@ -620,9 +620,11 @@ capability, and membership in one TaskGroup and one ResourceDomain. TaskGroup
 owns grouped lifecycle and stop. ResourceDomain owns hierarchical accounting.
 Neither relationship grants privileged operations.
 
-The bootstrap process receives explicit typed factories such as TaskFactory,
-VmFactory, ExecutableAuthority, DeviceAuthority, IrqAuthority, and DmaAuthority,
-plus a bootstrap Channel. There is no pseudo self handle or implicit root.
+The bootstrap process receives explicit typed authorities such as TaskFactory,
+VirtualMachineCreationAuthority, ExecutableAuthority, DeviceAuthority,
+IrqAuthority, and DmaAuthority, plus a bootstrap Channel. Derived one-shot
+leases bind individual VM construction transactions to a ResourceDomain. There
+is no pseudo self handle or implicit root.
 
 VMO and VMAR provide memory ownership and mapping policy. Executable mappings
 require immutable executable provenance; writable authority cannot be upgraded
@@ -854,13 +856,15 @@ yet a general runtime, vDSO, or secondary-architecture Native entry.
 
 ### Phase 4: EL0 VMM
 
-- replace the current non-removable VM binding with safe leases, vCPU
-  retirement, stage-2 teardown, and VMID retirement before exposing general
-  lifecycle capabilities;
-- expose installed VM/vCPU, interrupt injection, guest mapping, and lifecycle
-  through typed capabilities; and
-- move VM bundle selection and orchestration policy from the kernel into the
-  native VMM without duplicating ownership.
+- extend the implemented creation authority, one-shot lease, pending VM,
+  installed VM/vCPU, shared guest-VMO, and acknowledged retirement objects to
+  multi-vCPU execution. Creation-time `vcpu_count` fixes topology and bootstrap
+  state applies only to vCPU 0; architecture power-on protocols supply secondary
+  entry state, and an additive VM operation exposes their control handles;
+- add interrupt injection and bounded guest-memory grants for isolated device
+  backend processes; and
+- evolve the initial EL0 VM manager and per-VM runtime into a validated fleet
+  configuration and supervision service without duplicating kernel ownership.
 
 ### Phase 5: Linux driver domain
 

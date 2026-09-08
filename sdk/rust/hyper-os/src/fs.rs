@@ -242,32 +242,28 @@ impl Directory {
     /// the kernel then applies the resolved node's immutable rights ceiling.
     pub fn open(&self, path: &str, requested_rights: FileRights) -> Result<File> {
         validate_path(path)?;
-        let result = raw_ops::open(
-            self.handle.as_handle_ref(),
-            path,
-            requested_rights.as_rights(),
-        );
+        let directory = self.handle.as_handle_ref();
+        let result = raw_ops::open(directory, path, requested_rights.as_rights());
         Status::from_raw(result.status).into_result()?;
-        let raw = NonZeroU64::new(result.value0).ok_or(Error::InvalidResponse)?;
-        // SAFETY: a successful DIRECTORY_OPEN_FILE publishes exactly one File
-        // handle owner to this process.
-        let handle = unsafe { OwnedHandle::from_raw_owned(raw) };
+        // SAFETY: successful DIRECTORY_OPEN_FILE publishes one new File owner
+        // unless malformed output aliases the retained Directory borrow.
+        let handle = unsafe {
+            crate::handle::adopt_produced_handle_excluding(result.value0, &[directory.raw()])?
+        };
         Ok(File { handle })
     }
 
     /// Opens a child directory relative to this capability.
     pub fn open_directory(&self, path: &str, requested_rights: DirectoryRights) -> Result<Self> {
         validate_path(path)?;
-        let result = raw_ops::open_directory(
-            self.handle.as_handle_ref(),
-            path,
-            requested_rights.as_rights(),
-        );
+        let directory = self.handle.as_handle_ref();
+        let result = raw_ops::open_directory(directory, path, requested_rights.as_rights());
         Status::from_raw(result.status).into_result()?;
-        let raw = NonZeroU64::new(result.value0).ok_or(Error::InvalidResponse)?;
-        // SAFETY: successful DIRECTORY_OPEN_DIRECTORY publishes exactly one
-        // child Directory handle to this process.
-        let handle = unsafe { OwnedHandle::from_raw_owned(raw) };
+        // SAFETY: successful DIRECTORY_OPEN_DIRECTORY publishes one new owner
+        // unless malformed output aliases the retained parent Directory.
+        let handle = unsafe {
+            crate::handle::adopt_produced_handle_excluding(result.value0, &[directory.raw()])?
+        };
         Ok(Self { handle })
     }
 
@@ -610,7 +606,7 @@ fn validate_path(path: &str) -> Result<()> {
 #[cfg(not(test))]
 mod raw_ops {
     use super::{DirectoryObject, HandleRef, Rights};
-    use crate::{Result, Status};
+    use crate::Result;
 
     pub(super) fn open(
         root: HandleRef<'_, DirectoryObject>,
@@ -674,10 +670,9 @@ mod raw_ops {
         };
         // SAFETY: the typed borrow keeps the directory live and `record` is
         // writable for the exact fixed-width output record.
-        let status = Status::from_raw(unsafe {
-            hyper_sys::directory_get_info(directory.raw().get(), &mut record)
-        });
-        status.into_result()?;
+        let result = unsafe { hyper_sys::directory_get_info(directory.raw().get(), &mut record) };
+        let _supported_size =
+            crate::validate_info_result(result, hyper_abi::HYPER_NATIVE_DIRECTORY_INFO_MIN_SIZE)?;
         Ok(record)
     }
 
@@ -706,9 +701,9 @@ mod raw_ops {
         };
         // SAFETY: the typed borrow keeps the file live and `record` is
         // writable for the exact fixed-width output record.
-        let status =
-            Status::from_raw(unsafe { hyper_sys::file_get_info(file.raw().get(), &mut record) });
-        status.into_result()?;
+        let result = unsafe { hyper_sys::file_get_info(file.raw().get(), &mut record) };
+        let _supported_size =
+            crate::validate_info_result(result, hyper_abi::HYPER_NATIVE_FILE_INFO_MIN_SIZE)?;
         Ok(record)
     }
 }
@@ -752,7 +747,7 @@ mod raw_ops {
         };
         hyper_sys::CallResult {
             status,
-            value0: hyper_abi::HYPER_NATIVE_OBJECT_DIRECTORY.into(),
+            value0: 0x100_u64 | u64::from(hyper_abi::HYPER_NATIVE_OBJECT_DIRECTORY),
             value1: 0,
         }
     }

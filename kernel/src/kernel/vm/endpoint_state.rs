@@ -6,16 +6,17 @@
 use hyper::sync::atomic::{AtomicU8, Ordering};
 
 const UNBOUND: u8 = 0;
-const OPEN: u8 = 1;
-const TERMINAL_MEMORY_FAULT: u8 = 2;
-const TERMINAL_MMIO: u8 = 3;
-const TERMINAL_SYNCHRONOUS: u8 = 4;
-const STOP_REQUESTED: u8 = 5;
-const HARDWARE_DETACHED: u8 = 6;
-const REAPED_GUEST_MEMORY_FAULT: u8 = 7;
-const REAPED_GUEST_MMIO: u8 = 8;
-const REAPED_GUEST_SYNCHRONOUS: u8 = 9;
-const REAPED_ADMINISTRATIVE: u8 = 10;
+const DORMANT: u8 = 1;
+const STARTED: u8 = 2;
+const TERMINAL_MEMORY_FAULT: u8 = 3;
+const TERMINAL_MMIO: u8 = 4;
+const TERMINAL_SYNCHRONOUS: u8 = 5;
+const STOP_REQUESTED: u8 = 6;
+const HARDWARE_DETACHED: u8 = 7;
+const REAPED_GUEST_MEMORY_FAULT: u8 = 8;
+const REAPED_GUEST_MMIO: u8 = 9;
+const REAPED_GUEST_SYNCHRONOUS: u8 = 10;
+const REAPED_ADMINISTRATIVE: u8 = 11;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum TerminalReason {
@@ -38,7 +39,8 @@ pub(super) enum ClosureReason {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Lifecycle {
     Unbound,
-    Open,
+    Dormant,
+    Started,
     GuestTerminal(TerminalReason),
     StopRequested(AdministrativeStopReason),
     HardwareDetached(AdministrativeStopReason),
@@ -85,13 +87,17 @@ impl EndpointState {
         }
     }
 
-    pub(super) fn publish_bound(&self) -> Result<(), TransitionError> {
-        transition_exact(&self.state, UNBOUND, OPEN)
+    pub(super) fn publish_dormant(&self) -> Result<(), TransitionError> {
+        transition_exact(&self.state, UNBOUND, DORMANT)
     }
 
-    pub(super) fn ensure_open(&self) -> Result<(), StateError> {
+    pub(super) fn publish_started(&self) -> Result<(), TransitionError> {
+        transition_exact(&self.state, DORMANT, STARTED)
+    }
+
+    pub(super) fn ensure_live(&self) -> Result<(), StateError> {
         match decode(self.state.load(Ordering::Acquire)) {
-            Ok(Lifecycle::Open) => Ok(()),
+            Ok(Lifecycle::Dormant | Lifecycle::Started) => Ok(()),
             Ok(lifecycle) => Err(StateError::Closed(lifecycle)),
             Err(()) => Err(StateError::Corrupt),
         }
@@ -125,7 +131,7 @@ impl EndpointState {
         reason: TerminalReason,
     ) -> Result<GuestCloseOutcome, TransitionError> {
         match self.state.compare_exchange(
-            OPEN,
+            STARTED,
             encode_terminal(reason),
             Ordering::AcqRel,
             Ordering::Acquire,
@@ -143,23 +149,33 @@ impl EndpointState {
         &self,
         reason: AdministrativeStopReason,
     ) -> Result<StopRequestOutcome, StateError> {
-        match self.state.compare_exchange(
-            OPEN,
-            encode_stop_requested(reason),
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
-            Ok(_) => Ok(StopRequestOutcome::Published),
-            Err(observed) => match decode(observed) {
-                Ok(Lifecycle::StopRequested(_)) => Ok(StopRequestOutcome::AlreadyRequested),
-                Ok(Lifecycle::GuestTerminal(reason)) => {
-                    Ok(StopRequestOutcome::GuestTerminal(reason))
+        let mut observed = self.state.load(Ordering::Acquire);
+        loop {
+            match decode(observed) {
+                Ok(Lifecycle::Dormant | Lifecycle::Started) => {
+                    match self.state.compare_exchange_weak(
+                        observed,
+                        encode_stop_requested(reason),
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => return Ok(StopRequestOutcome::Published),
+                        Err(next) => observed = next,
+                    }
                 }
-                Ok(Lifecycle::HardwareDetached(_)) => Ok(StopRequestOutcome::HardwareDetached),
-                Ok(Lifecycle::Reaped(_)) => Ok(StopRequestOutcome::Reaped),
-                Ok(Lifecycle::Unbound) => Ok(StopRequestOutcome::Inactive),
-                Ok(Lifecycle::Open) | Err(()) => Err(StateError::Corrupt),
-            },
+                Ok(Lifecycle::StopRequested(_)) => {
+                    return Ok(StopRequestOutcome::AlreadyRequested);
+                }
+                Ok(Lifecycle::GuestTerminal(reason)) => {
+                    return Ok(StopRequestOutcome::GuestTerminal(reason));
+                }
+                Ok(Lifecycle::HardwareDetached(_)) => {
+                    return Ok(StopRequestOutcome::HardwareDetached);
+                }
+                Ok(Lifecycle::Reaped(_)) => return Ok(StopRequestOutcome::Reaped),
+                Ok(Lifecycle::Unbound) => return Ok(StopRequestOutcome::Inactive),
+                Err(()) => return Err(StateError::Corrupt),
+            }
         }
     }
 
@@ -221,7 +237,8 @@ const fn encode_reaped(reason: ClosureReason) -> u8 {
 const fn decode(value: u8) -> Result<Lifecycle, ()> {
     match value {
         UNBOUND => Ok(Lifecycle::Unbound),
-        OPEN => Ok(Lifecycle::Open),
+        DORMANT => Ok(Lifecycle::Dormant),
+        STARTED => Ok(Lifecycle::Started),
         TERMINAL_MEMORY_FAULT => Ok(Lifecycle::GuestTerminal(TerminalReason::MemoryFault)),
         TERMINAL_MMIO => Ok(Lifecycle::GuestTerminal(TerminalReason::Mmio)),
         TERMINAL_SYNCHRONOUS => Ok(Lifecycle::GuestTerminal(TerminalReason::Synchronous)),
@@ -251,15 +268,21 @@ const fn decode(value: u8) -> Result<Lifecycle, ()> {
 mod tests {
     use super::*;
 
-    fn bound() -> EndpointState {
+    fn dormant() -> EndpointState {
         let endpoint = EndpointState::unbound();
-        assert_eq!(endpoint.publish_bound(), Ok(()));
+        assert_eq!(endpoint.publish_dormant(), Ok(()));
+        endpoint
+    }
+
+    fn started() -> EndpointState {
+        let endpoint = dormant();
+        assert_eq!(endpoint.publish_started(), Ok(()));
         endpoint
     }
 
     #[test]
     fn administrative_lifecycle_is_one_way() {
-        let endpoint = bound();
+        let endpoint = dormant();
         let reason = AdministrativeStopReason::Requested;
         assert_eq!(
             endpoint.request_stop(reason),
@@ -282,14 +305,14 @@ mod tests {
         );
         assert_eq!(endpoint.lifecycle(), Ok(Lifecycle::Reaped(closure)));
         assert_eq!(
-            endpoint.ensure_open(),
+            endpoint.ensure_live(),
             Err(StateError::Closed(Lifecycle::Reaped(closure)))
         );
     }
 
     #[test]
     fn guest_terminal_and_administrative_stop_have_distinct_ownership() {
-        let terminal = bound();
+        let terminal = started();
         assert_eq!(
             terminal.close_guest(TerminalReason::Mmio),
             Ok(GuestCloseOutcome::Published)
@@ -299,7 +322,7 @@ mod tests {
             Ok(StopRequestOutcome::GuestTerminal(TerminalReason::Mmio))
         );
 
-        let stopped = bound();
+        let stopped = started();
         assert_eq!(
             stopped.request_stop(AdministrativeStopReason::Requested),
             Ok(StopRequestOutcome::Published)
@@ -318,13 +341,78 @@ mod tests {
             endpoint.request_stop(AdministrativeStopReason::Requested),
             Ok(StopRequestOutcome::Inactive)
         );
-        assert_eq!(endpoint.publish_bound(), Ok(()));
-        assert_eq!(endpoint.lifecycle(), Ok(Lifecycle::Open));
+        assert_eq!(endpoint.publish_dormant(), Ok(()));
+        assert_eq!(endpoint.lifecycle(), Ok(Lifecycle::Dormant));
+        assert_eq!(endpoint.publish_started(), Ok(()));
+        assert_eq!(endpoint.lifecycle(), Ok(Lifecycle::Started));
+    }
+
+    #[test]
+    fn dormant_and_started_are_distinct_one_way_states() {
+        let endpoint = dormant();
+        assert_eq!(endpoint.lifecycle(), Ok(Lifecycle::Dormant));
+        assert_eq!(
+            endpoint.close_guest(TerminalReason::Mmio),
+            Err(TransitionError::Unexpected(Lifecycle::Dormant))
+        );
+        assert_eq!(endpoint.publish_started(), Ok(()));
+        assert_eq!(endpoint.lifecycle(), Ok(Lifecycle::Started));
+        assert_eq!(
+            endpoint.publish_started(),
+            Err(TransitionError::Unexpected(Lifecycle::Started))
+        );
+    }
+
+    #[test]
+    fn independently_started_endpoints_reject_duplicate_start_and_stop_races() {
+        let boot = dormant();
+        let secondary = dormant();
+
+        assert_eq!(boot.publish_started(), Ok(()));
+        assert_eq!(secondary.publish_started(), Ok(()));
+        assert_eq!(boot.lifecycle(), Ok(Lifecycle::Started));
+        assert_eq!(secondary.lifecycle(), Ok(Lifecycle::Started));
+        assert_eq!(
+            secondary.publish_started(),
+            Err(TransitionError::Unexpected(Lifecycle::Started))
+        );
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| secondary.request_stop(AdministrativeStopReason::Requested));
+            let second =
+                scope.spawn(|| secondary.request_stop(AdministrativeStopReason::Requested));
+            let first = match first.join() {
+                Ok(result) => result,
+                Err(_) => panic!("first stop request panicked"),
+            };
+            let second = match second.join() {
+                Ok(result) => result,
+                Err(_) => panic!("second stop request panicked"),
+            };
+            assert!(matches!(
+                (first, second),
+                (
+                    Ok(StopRequestOutcome::Published),
+                    Ok(StopRequestOutcome::AlreadyRequested)
+                ) | (
+                    Ok(StopRequestOutcome::AlreadyRequested),
+                    Ok(StopRequestOutcome::Published)
+                )
+            ));
+        });
+
+        assert_eq!(boot.lifecycle(), Ok(Lifecycle::Started));
+        assert_eq!(
+            secondary.lifecycle(),
+            Ok(Lifecycle::StopRequested(
+                AdministrativeStopReason::Requested
+            ))
+        );
     }
 
     #[test]
     fn guest_reap_preserves_the_exact_terminal_reason() {
-        let endpoint = bound();
+        let endpoint = started();
         let closure = ClosureReason::Guest(TerminalReason::MemoryFault);
         assert_eq!(
             endpoint.close_guest(TerminalReason::MemoryFault),
@@ -336,19 +424,19 @@ mod tests {
 
     #[test]
     fn invalid_and_skipped_transitions_do_not_mutate_state() {
-        let endpoint = bound();
+        let endpoint = started();
         assert_eq!(
             endpoint.publish_reaped(ClosureReason::Administrative(
                 AdministrativeStopReason::Requested
             )),
-            Err(TransitionError::Unexpected(Lifecycle::Open))
+            Err(TransitionError::Unexpected(Lifecycle::Started))
         );
-        assert_eq!(endpoint.lifecycle(), Ok(Lifecycle::Open));
+        assert_eq!(endpoint.lifecycle(), Ok(Lifecycle::Started));
     }
 
     #[test]
     fn guest_terminal_and_stop_request_have_one_atomic_winner() {
-        let endpoint = bound();
+        let endpoint = started();
         std::thread::scope(|scope| {
             let guest = scope.spawn(|| endpoint.close_guest(TerminalReason::Synchronous));
             let stop = scope.spawn(|| endpoint.request_stop(AdministrativeStopReason::Requested));
@@ -379,7 +467,7 @@ mod tests {
     fn stop_published_while_irq_tail_is_suspended_blocks_reactivation() {
         use std::sync::atomic::{AtomicU8 as HostAtomicU8, Ordering as HostOrdering};
 
-        let endpoint = bound();
+        let endpoint = started();
         let phase = HostAtomicU8::new(0);
         std::thread::scope(|scope| {
             let tail = scope.spawn(|| {
@@ -413,7 +501,7 @@ mod tests {
 
     #[test]
     fn scheduler_prompt_loss_is_benign_only_after_terminal_progress() {
-        let requested = bound();
+        let requested = dormant();
         assert_eq!(
             requested.request_stop(AdministrativeStopReason::Requested),
             Ok(StopRequestOutcome::Published)
@@ -425,7 +513,7 @@ mod tests {
         );
         assert_eq!(requested.thread_absence_is_terminal(), Ok(true));
 
-        let guest = bound();
+        let guest = started();
         assert_eq!(
             guest.close_guest(TerminalReason::Synchronous),
             Ok(GuestCloseOutcome::Published)

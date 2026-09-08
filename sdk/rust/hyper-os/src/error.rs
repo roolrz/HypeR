@@ -44,6 +44,10 @@ pub enum Error {
     InvalidProcessAffinity,
     /// A multi-object wait was empty or exceeded the ABI item bound.
     InvalidWaitSet,
+    /// A relative duration cannot form a finite absolute monotonic deadline.
+    DeadlineOverflow,
+    /// A VMO size or transfer range was empty, unaligned, or out of bounds.
+    InvalidMemoryRange,
 }
 
 pub type Result<T> = core::result::Result<T, Error>;

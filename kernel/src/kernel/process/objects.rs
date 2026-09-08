@@ -189,6 +189,14 @@ impl KernelObject for TaskGroupObject {
         .union(Rights::INSPECT)
         .union(Rights::REQUEST_STOP)
         .union(Rights::TASK_GROUP_ATTACH_PROCESS);
+
+    fn on_zero_active_handles(&self, _retirement: &mut crate::kernel::object::ObjectRetirement) {
+        // A TaskGroup handle is an ownership lease, not merely an inspector.
+        // Process teardown closes handles even when userspace destructors do
+        // not run, so the last manager owner reliably initiates stop for every
+        // member and prevents orphaned service processes.
+        let _ = self.group.request_stop();
+    }
 }
 
 /// Stateless authority required to construct task hierarchy objects.

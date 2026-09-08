@@ -11,6 +11,7 @@ use hyper::sync::InterruptSpinLock;
 use hyper::sync::PublishedOnce;
 
 use super::reconcile::ReconcilePublication;
+use crate::kernel::object::{SignalMask, SignalState};
 use crate::kernel::task::thread::ThreadId;
 
 pub(super) struct VcpuEndpoint {
@@ -22,6 +23,7 @@ pub(super) struct VcpuEndpoint {
     thread: PublishedOnce<ThreadId>,
     reconcile: ReconcilePublication,
     state: super::endpoint_state::EndpointState,
+    signals: SignalState,
     wait: InterruptSpinLock<WaitState, crate::hal::irq::LocalMask>,
     waiters: crate::kernel::task::WaitQueue,
 }
@@ -72,6 +74,7 @@ impl VcpuEndpoint {
             thread: PublishedOnce::new(),
             reconcile: ReconcilePublication::new(),
             state: super::endpoint_state::EndpointState::unbound(),
+            signals: SignalState::new(),
             wait: InterruptSpinLock::new(WaitState {
                 publication: super::endpoint_wait::WaitPublication::new(),
             }),
@@ -84,8 +87,22 @@ impl VcpuEndpoint {
             return Err(());
         }
         self.thread.publish(thread).map_err(|_| ())?;
-        self.state.publish_bound().map_err(|_| ())?;
+        self.state.publish_dormant().map_err(|_| ())?;
         Ok(())
+    }
+
+    /// Publishes runnable lifecycle before the scheduler can enter the guest.
+    pub(super) fn start(&self) -> Result<(), super::endpoint_state::TransitionError> {
+        let Some(thread) = self.thread() else {
+            return Err(super::endpoint_state::TransitionError::Corrupt);
+        };
+        self.state.publish_started()?;
+        match crate::kernel::task::scheduler::thread_ready(thread) {
+            Ok(true) => Ok(()),
+            Ok(false) | Err(_) => crate::kernel::crash::fatal(format_args!(
+                "HypeR: committed vCPU readiness could not be published"
+            )),
+        }
     }
 
     pub(super) fn thread(&self) -> Option<ThreadId> {
@@ -98,7 +115,7 @@ impl VcpuEndpoint {
         // memory-safe because the installed VM/controller remain strongly
         // owned. Future removal must stop and drain backend producers before
         // reclaiming endpoint storage; close alone is not quiescence.
-        self.state.ensure_open()?;
+        self.state.ensure_live()?;
         self.reconcile.publish();
         Ok(())
     }
@@ -308,7 +325,18 @@ impl VcpuEndpoint {
         if self.thread() != Some(expected_thread) {
             return Err(super::endpoint_state::TransitionError::Corrupt);
         }
-        self.state.publish_reaped(reason)
+        self.state.publish_reaped(reason)?;
+        let terminated = SignalMask::from_trusted_bits(
+            hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED,
+        );
+        if self.signals.update(SignalMask::EMPTY, terminated).is_err() {
+            crate::hal::cpu::halt();
+        }
+        Ok(())
+    }
+
+    pub(super) const fn signals(&self) -> &SignalState {
+        &self.signals
     }
 
     pub(super) fn lifecycle(
