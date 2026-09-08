@@ -24,8 +24,8 @@ use hyper::abi::native::{
     HYPER_NATIVE_OBJECT_TASK_GROUP, HYPER_NATIVE_OBJECT_TASK_INSPECTOR, HYPER_NATIVE_OBJECT_THREAD,
     HYPER_NATIVE_OBJECT_VIRTUAL_CPU, HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE,
     HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY,
-    HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE, HYPER_NATIVE_OBJECT_VMAR,
-    HYPER_NATIVE_OBJECT_VMO, HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS,
+    HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE, HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL,
+    HYPER_NATIVE_OBJECT_VMAR, HYPER_NATIVE_OBJECT_VMO, HYPER_NATIVE_OBJECT_WAIT_MANY_MAX_ITEMS,
     HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS, HYPER_NATIVE_PROCESS_PHASE_CREATED,
     HYPER_NATIVE_PROCESS_PHASE_PREPARED, HYPER_NATIVE_PROCESS_PHASE_RETIRED,
     HYPER_NATIVE_PROCESS_PHASE_RETIRING, HYPER_NATIVE_PROCESS_PHASE_RUNNING,
@@ -39,7 +39,8 @@ use hyper::abi::native::{
     HYPER_NATIVE_THREAD_REGISTRY_RETIRING, HYPER_NATIVE_THREAD_ROLE_BOOTSTRAP,
     HYPER_NATIVE_THREAD_ROLE_IDLE, HYPER_NATIVE_THREAD_ROLE_KERNEL, HYPER_NATIVE_THREAD_ROLE_USER,
     HYPER_NATIVE_THREAD_ROLE_VCPU, HYPER_NATIVE_VIRTUAL_CPU_BOOTSTRAP_MIN_SIZE,
-    HYPER_NATIVE_VIRTUAL_MACHINE_CONFIGURATION_MIN_SIZE, HyperNativeCapabilityDisposition,
+    HYPER_NATIVE_VIRTUAL_MACHINE_CONFIGURATION_MIN_SIZE,
+    HYPER_NATIVE_VIRTUAL_SERIAL_MAX_TRANSFER_BYTES, HyperNativeCapabilityDisposition,
     HyperNativeCapabilityReceiveSlot, HyperNativeCpuObservation, HyperNativeDirectoryEntry,
     HyperNativeDirectoryInfo, HyperNativeFileInfo, HyperNativeHandleInfo,
     HyperNativeHandleInspection, HyperNativeMemoryObservation, HyperNativeObjectBasicInfo,
@@ -449,6 +450,7 @@ pub(super) fn parse_object_kind(
         HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => Ok(ObjectKind::PENDING_VIRTUAL_MACHINE),
         HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => Ok(ObjectKind::VIRTUAL_MACHINE),
         HYPER_NATIVE_OBJECT_VIRTUAL_CPU => Ok(ObjectKind::VIRTUAL_CPU),
+        HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL => Ok(ObjectKind::VIRTUAL_SERIAL),
         _ => Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
     }
 }
@@ -462,6 +464,19 @@ pub(super) fn parse_console_io(
     let console = parse_handle(arguments[0])?;
     let bytes = optional_user_slice(arguments[2], arguments[3])?;
     Ok((console, bytes))
+}
+
+pub(super) fn parse_virtual_serial_io(
+    arguments: &Arguments,
+) -> Result<(HandleValue, Option<UserSlice>), HyperNativeStatus> {
+    if arguments[2] > HYPER_NATIVE_VIRTUAL_SERIAL_MAX_TRANSFER_BYTES
+        || arguments[3..].iter().any(|argument| *argument != 0)
+    {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let serial = parse_handle(arguments[0])?;
+    let bytes = optional_user_slice(arguments[1], arguments[2])?;
+    Ok((serial, bytes))
 }
 
 pub(super) fn optional_user_slice(

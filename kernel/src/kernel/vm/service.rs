@@ -5,7 +5,6 @@
 
 use crate::kernel::accounting::ResourceDomainObject;
 use crate::kernel::capability::{HandleFlags, HandleValue, PreparedHandle, Rights};
-use crate::kernel::device::console::SystemConsole;
 use crate::kernel::mm::user_space::VmoObject;
 use crate::kernel::object::{KernelObject, ObjectPublication};
 use crate::kernel::process::{Process, ProcessError};
@@ -60,6 +59,13 @@ const fn classify_object_error(error: ObjectError) -> Error {
         ObjectError::Registry(error) => classify_registry_error(error),
         ObjectError::MemoryLayout(error) => classify_guest_memory_error(error),
         ObjectError::VirtualDevice(_) | ObjectError::VirtualInterrupt(_) => Error::Internal,
+        ObjectError::VirtualSerial(error) => match error {
+            super::virtual_serial::Error::Allocation => Error::NoMemory,
+            super::virtual_serial::Error::AllocationSize => Error::Internal,
+            super::virtual_serial::Error::Disconnected => Error::BadState,
+            super::virtual_serial::Error::Resource(error) => classify_resource_error(error),
+            super::virtual_serial::Error::WouldBlock => Error::Busy,
+        },
     }
 }
 
@@ -403,22 +409,23 @@ pub(crate) fn set_bootstrap(
     Ok(())
 }
 
-pub(crate) fn set_console_output(
+pub(crate) fn set_virtual_serial(
     process: &Process,
     pending: HandleValue,
-    console: HandleValue,
+    serial: HandleValue,
 ) -> Result<(), Error> {
     let pending = process.resolve_handle::<PendingVirtualMachine>(pending, Rights::WRITE)?;
-    let required = Rights::WRITE.union(Rights::TRANSFER);
-    let console_object = process.resolve_handle::<SystemConsole>(console, required)?;
+    let required = Rights::ASSIGN_DEVICE.union(Rights::TRANSFER);
+    let serial_object =
+        process.resolve_handle::<super::virtual_serial::VirtualSerial>(serial, required)?;
     let consumption = process.prepare_handle_consumption(
-        console,
+        serial,
         required,
-        SystemConsole::KIND,
-        console_object.koid(),
+        super::virtual_serial::VirtualSerial::KIND,
+        serial_object.koid(),
     )?;
-    let binding = console_object.into_operation_pin().into_vm_device_binding();
-    match pending.object().set_console_output(binding) {
+    let binding = serial_object.into_operation_pin().into_vm_device_binding();
+    match pending.object().set_virtual_serial(binding) {
         Ok(()) => {
             consumption.commit_and_release();
             Ok(())
@@ -428,6 +435,15 @@ pub(crate) fn set_console_output(
             Err(error.into())
         }
     }
+}
+
+pub(crate) fn create_virtual_serial(process: &Process) -> Result<HandleValue, Error> {
+    let serial = super::virtual_serial::VirtualSerial::try_new(&process.resource_domain())
+        .map_err(ObjectError::from)?;
+    Ok(process.create_object(
+        serial,
+        <super::virtual_serial::VirtualSerial as KernelObject>::SUPPORTED_RIGHTS,
+    )?)
 }
 
 pub(crate) fn seal(process: &Process, pending: HandleValue) -> Result<(), Error> {

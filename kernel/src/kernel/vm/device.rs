@@ -7,29 +7,31 @@
 //! per-VM model instances, host bindings, and guest-ISA exit decoding. Device
 //! policy deliberately remains in the kernel VM service rather than the HAL.
 
-use crate::kernel::device::console::SystemConsole;
 use crate::kernel::object::{KernelRef, VmDeviceBinding};
+use crate::kernel::vm::virtual_serial::{Route, VirtualSerial};
 
 pub(in crate::kernel) mod selected;
 
 pub use selected::Error;
 pub(crate) use selected::VirtualDeviceSet;
 
-/// Console output authority committed into one VM's device set.
+/// Virtual-serial authority committed into one VM's device set.
 ///
 /// Production bindings retain a typed reference derived from an explicitly
-/// supplied Console handle. The VM-exit path can therefore enqueue output
-/// without a handle-table lookup or allocation. Kernel self-tests opt into the
-/// same host sink through a visibly test-only route.
-pub(crate) enum ConsoleOutputBinding {
-    Console(KernelRef<SystemConsole, VmDeviceBinding>),
+/// supplied `VirtualSerial` handle. The VM-exit path can therefore exchange
+/// bytes without a handle-table lookup or allocation. Kernel self-tests opt
+/// into the physical host sink through a visibly test-only route.
+pub(crate) enum VirtualSerialBinding {
+    VirtualSerial(KernelRef<VirtualSerial, VmDeviceBinding>),
     #[cfg(feature = "kernel-self-test")]
     HostTest,
 }
 
-impl ConsoleOutputBinding {
-    pub(crate) const fn from_console(console: KernelRef<SystemConsole, VmDeviceBinding>) -> Self {
-        Self::Console(console)
+impl VirtualSerialBinding {
+    pub(crate) const fn from_virtual_serial(
+        serial: KernelRef<VirtualSerial, VmDeviceBinding>,
+    ) -> Self {
+        Self::VirtualSerial(serial)
     }
 
     #[cfg(feature = "kernel-self-test")]
@@ -40,19 +42,45 @@ impl ConsoleOutputBinding {
     /// Best-effort, allocation-free publication into the bounded host queue.
     pub(super) fn write_byte(&self, byte: u8) {
         match self {
-            Self::Console(console) => {
-                let _ = console.object().try_write(core::slice::from_ref(&byte));
-            }
+            Self::VirtualSerial(serial) => serial.object().publish_guest_output(byte),
             #[cfg(feature = "kernel-self-test")]
             Self::HostTest => crate::kernel::log::console::write_test_guest_console_byte(byte),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "selected guest UART backends consume input only when they implement receive injection"
+    )]
+    pub(super) fn pop_guest_input(&self) -> Option<u8> {
+        match self {
+            Self::VirtualSerial(serial) => serial.object().pop_guest_input(),
+            #[cfg(feature = "kernel-self-test")]
+            Self::HostTest => None,
+        }
+    }
+
+    pub(super) fn bind(&self, route: Route) {
+        match self {
+            Self::VirtualSerial(serial) => serial.object().bind(route),
+            #[cfg(feature = "kernel-self-test")]
+            Self::HostTest => {}
+        }
+    }
+
+    pub(super) fn disconnect(&self, vm: super::registry::VmId) {
+        match self {
+            Self::VirtualSerial(serial) => serial.object().disconnect(vm),
+            #[cfg(feature = "kernel-self-test")]
+            Self::HostTest => {}
         }
     }
 }
 
 pub(crate) fn prepare(
-    console_output: Option<ConsoleOutputBinding>,
+    virtual_serial: Option<VirtualSerialBinding>,
 ) -> Result<VirtualDeviceSet, Error> {
-    selected::prepare(console_output)
+    selected::prepare(virtual_serial)
 }
 
 /// Validates guest RAM against the selected immutable platform profile.
@@ -68,6 +96,10 @@ pub(crate) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualIn
 /// Clears an optional host-console route for this VM.
 pub(super) fn clear_console_route_for_vm(expected_vm: super::registry::VmId) {
     selected::clear_console_route_for_vm(expected_vm);
+}
+
+pub(super) fn kick_virtual_serial(route: Route) {
+    selected::kick_virtual_serial(route);
 }
 
 /// Guest ownership decision for one byte received from the host console.

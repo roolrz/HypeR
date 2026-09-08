@@ -25,9 +25,9 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_INSTALL,
     HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SEAL,
     HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP,
-    HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT,
-    HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_MEMORY, HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT,
-    HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT,
+    HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_MEMORY,
+    HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL,
+    HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT, HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ARGUMENT,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_ENVIRONMENT, HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_HANDLE,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE, HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY, HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME,
@@ -43,9 +43,11 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATE,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_CREATE,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO, HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REQUEST_STOP,
-    HYPER_NATIVE_SYS_VMAR_ALLOCATE, HYPER_NATIVE_SYS_VMAR_DESTROY, HYPER_NATIVE_SYS_VMAR_MAP,
-    HYPER_NATIVE_SYS_VMAR_PROTECT, HYPER_NATIVE_SYS_VMAR_UNMAP, HYPER_NATIVE_SYS_VMO_CREATE,
-    HYPER_NATIVE_SYS_VMO_READ, HYPER_NATIVE_SYS_VMO_WRITE, NativeInvocation, NativeResult,
+    HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ,
+    HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE, HYPER_NATIVE_SYS_VMAR_ALLOCATE,
+    HYPER_NATIVE_SYS_VMAR_DESTROY, HYPER_NATIVE_SYS_VMAR_MAP, HYPER_NATIVE_SYS_VMAR_PROTECT,
+    HYPER_NATIVE_SYS_VMAR_UNMAP, HYPER_NATIVE_SYS_VMO_CREATE, HYPER_NATIVE_SYS_VMO_READ,
+    HYPER_NATIVE_SYS_VMO_WRITE, NativeInvocation, NativeResult,
 };
 
 use super::handlers::{
@@ -61,7 +63,7 @@ use super::handlers::{
     sys_object_inspector_scan_handles, sys_object_inspector_scan_objects, sys_object_wait_many,
     sys_object_wait_one, sys_pending_virtual_machine_abort, sys_pending_virtual_machine_install,
     sys_pending_virtual_machine_seal, sys_pending_virtual_machine_set_bootstrap,
-    sys_pending_virtual_machine_set_console_output, sys_pending_virtual_machine_set_memory,
+    sys_pending_virtual_machine_set_memory, sys_pending_virtual_machine_set_virtual_serial,
     sys_process_builder_abort, sys_process_builder_add_argument,
     sys_process_builder_add_environment, sys_process_builder_add_handle,
     sys_process_builder_create, sys_process_builder_seal, sys_process_builder_set_affinity,
@@ -72,8 +74,9 @@ use super::handlers::{
     sys_task_inspector_scan_processes, sys_task_inspector_scan_threads, sys_thread_exit,
     sys_thread_yield, sys_virtual_cpu_get_info, sys_virtual_cpu_start, sys_virtual_machine_create,
     sys_virtual_machine_creation_lease_create, sys_virtual_machine_get_info,
-    sys_virtual_machine_request_stop, sys_vmar_allocate, sys_vmar_destroy, sys_vmar_map,
-    sys_vmar_protect, sys_vmar_unmap, sys_vmo_create, sys_vmo_read, sys_vmo_write,
+    sys_virtual_machine_request_stop, sys_virtual_serial_create, sys_virtual_serial_read,
+    sys_virtual_serial_write, sys_vmar_allocate, sys_vmar_destroy, sys_vmar_map, sys_vmar_protect,
+    sys_vmar_unmap, sys_vmo_create, sys_vmo_read, sys_vmo_write,
 };
 use super::services::{DeferredAction, DeferredServices, ImmediateServices};
 
@@ -188,8 +191,17 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP => {
             sys_pending_virtual_machine_set_bootstrap(services, invocation.arguments())
         }
-        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT => {
-            sys_pending_virtual_machine_set_console_output(services, invocation.arguments())
+        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL => {
+            sys_pending_virtual_machine_set_virtual_serial(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE => {
+            sys_virtual_serial_create(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ => {
+            sys_virtual_serial_read(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE => {
+            sys_virtual_serial_write(services, invocation.arguments())
         }
         HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SEAL => {
             sys_pending_virtual_machine_seal(services, invocation.arguments())

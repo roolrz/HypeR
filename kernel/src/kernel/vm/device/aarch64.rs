@@ -33,7 +33,7 @@ pub enum Error {
 pub(crate) struct VirtualDeviceSet {
     console: ConsoleLock,
     console_interrupt: GicInterruptId,
-    console_output: Option<super::super::ConsoleOutputBinding>,
+    virtual_serial: Option<super::super::VirtualSerialBinding>,
 }
 
 struct MmioOutcome {
@@ -41,13 +41,13 @@ struct MmioOutcome {
 }
 
 impl VirtualDeviceSet {
-    fn new(console_output: Option<super::super::ConsoleOutputBinding>) -> Result<Self, Error> {
+    fn new(virtual_serial: Option<super::super::VirtualSerialBinding>) -> Result<Self, Error> {
         let console_interrupt =
             GicInterruptId::new(REFERENCE_INTERRUPT).ok_or(Error::InvalidInterrupt)?;
         Ok(Self {
             console: InterruptSpinLock::new(VirtualPl011::new()),
             console_interrupt,
-            console_output,
+            virtual_serial,
         })
     }
 
@@ -64,11 +64,13 @@ impl VirtualDeviceSet {
             return Ok(None);
         }
         let outcome = self.console.with(|console| {
+            pump_serial_input(console, self.virtual_serial.as_ref());
             let outcome = match access.operation() {
                 MmioOperation::Read => console.read(offset, access.size()),
                 MmioOperation::Write(value) => console.write(offset, access.size(), value),
             }
             .map_err(Error::Model)?;
+            pump_serial_input(console, self.virtual_serial.as_ref());
             // The console lock precedes the guest interrupt-controller lock.
             // This preserves FIFO mutation -> line publication ordering.
             update(self.console_interrupt, outcome.interrupt_asserted)?;
@@ -76,13 +78,30 @@ impl VirtualDeviceSet {
         })?;
         // Host output occurs after both device and controller locks release.
         if let Some(byte) = outcome.transmitted
-            && let Some(output) = &self.console_output
+            && let Some(output) = &self.virtual_serial
         {
             output.write_byte(byte);
         }
         Ok(Some(MmioOutcome {
             value: outcome.value,
         }))
+    }
+
+    pub(in crate::kernel::vm) fn bind_virtual_serial(
+        &self,
+        vm: VmId,
+        vcpu: u32,
+        thread: crate::kernel::task::thread::ThreadId,
+    ) {
+        if let Some(output) = &self.virtual_serial {
+            output.bind(crate::kernel::vm::virtual_serial::Route { vm, vcpu, thread });
+        }
+    }
+
+    pub(in crate::kernel::vm) fn disconnect_virtual_serial(&self, vm: VmId) {
+        if let Some(output) = &self.virtual_serial {
+            output.disconnect(vm);
+        }
     }
 
     fn receive(
@@ -95,12 +114,37 @@ impl VirtualDeviceSet {
             update(self.console_interrupt, asserted)
         })
     }
+
+    fn receive_from_virtual_serial(
+        &self,
+        update: impl FnOnce(GicInterruptId, bool) -> Result<(), Error>,
+    ) -> Result<(), Error> {
+        self.console.with(|console| {
+            pump_serial_input(console, self.virtual_serial.as_ref());
+            update(self.console_interrupt, console.interrupt_asserted())
+        })
+    }
+}
+
+fn pump_serial_input(
+    console: &mut VirtualPl011,
+    binding: Option<&super::super::VirtualSerialBinding>,
+) {
+    let Some(binding) = binding else {
+        return;
+    };
+    while console.can_receive() {
+        let Some(byte) = binding.pop_guest_input() else {
+            break;
+        };
+        let _ = console.receive(byte);
+    }
 }
 
 pub(super) fn prepare(
-    console_output: Option<super::super::ConsoleOutputBinding>,
+    virtual_serial: Option<super::super::VirtualSerialBinding>,
 ) -> Result<VirtualDeviceSet, Error> {
-    VirtualDeviceSet::new(console_output)
+    VirtualDeviceSet::new(virtual_serial)
 }
 
 pub(super) fn supports_configuration(profile: u32, memory_base: u64, memory_size: u64) -> bool {
@@ -305,6 +349,31 @@ pub(super) fn clear_console_route_for_vm(expected_vm: VmId) {
             *route = None;
         }
     });
+}
+
+pub(super) fn kick_virtual_serial(route: crate::kernel::vm::virtual_serial::Route) {
+    let delivery = super::super::super::registry::with_binding(route.vm, |binding| {
+        binding
+            .devices()
+            .receive_from_virtual_serial(|interrupt, asserted| {
+                crate::hal::vm::update_saved_guest_device_interrupt(
+                    binding.interrupts(),
+                    route.vcpu,
+                    interrupt,
+                    asserted,
+                )
+                .map_err(|_| Error::InvalidInterrupt)
+            })
+            .map_err(|_| ())?;
+        binding
+            .publish_interrupt_reconcile(route.vcpu, route.thread)
+            .map_err(|_| ())
+    });
+    if !matches!(delivery, Ok(Ok(()))) {
+        let _ = super::super::super::registry::with_binding(route.vm, |binding| {
+            binding.devices().disconnect_virtual_serial(route.vm);
+        });
+    }
 }
 
 fn clear_console_route_exact(

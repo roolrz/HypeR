@@ -101,14 +101,9 @@ impl InitialVmProvisioner {
                 RightsOffer::Exact(vm_contract::PROVISIONED_INSTANCE_CONTROL_RIGHTS),
             )
             .map_err(|_| LaunchError::OperatingSystem)?;
-            let console_disposition = CapabilityDisposition::duplicate(
-                console.as_handle_ref(),
-                RightsOffer::Exact(vm_contract::PROVISIONED_CONSOLE_RIGHTS),
-            )
-            .map_err(|_| LaunchError::OperatingSystem)?;
             match self.init_vm_provisioning_channel.try_send(
-                &vm_contract::ProvisionRequest::LaunchInstance { console: true }.encode(),
-                &mut [image_disposition, control_disposition, console_disposition],
+                &vm_contract::ProvisionRequest::LaunchInstance.encode(),
+                &mut [image_disposition, control_disposition],
             ) {
                 Ok(()) => return Ok(()),
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}

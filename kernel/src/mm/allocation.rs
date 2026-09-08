@@ -496,6 +496,27 @@ pub fn try_box<T>(value: T) -> Result<Box<T>, AllocationError> {
     try_box_or_return(value).map_err(|(error, _)| error)
 }
 
+/// Fallibly allocates one uninitialized `Box` without materializing `T` on the
+/// caller's stack.
+///
+/// Large fixed-capacity objects can initialize this storage in place before
+/// converting it to `Box<T>`.
+pub fn try_box_uninit<T>() -> Result<Box<MaybeUninit<T>>, AllocationError> {
+    let layout = Layout::new::<MaybeUninit<T>>();
+    if layout.size() == 0 {
+        return Ok(Box::new(MaybeUninit::uninit()));
+    }
+    // SAFETY: a successful allocation has the exact layout required by
+    // `MaybeUninit<T>` and does not claim that a `T` is initialized.
+    let Some(pointer) = NonNull::new(unsafe { alloc::alloc::alloc(layout) } as *mut MaybeUninit<T>)
+    else {
+        return Err(AllocationError);
+    };
+    // SAFETY: `pointer` is aligned, uniquely owned, and was allocated with the
+    // layout used by `Box<MaybeUninit<T>>`.
+    Ok(unsafe { Box::from_raw(pointer.as_ptr()) })
+}
+
 /// Allocates one owned value while preserving it on allocation failure.
 pub fn try_box_or_return<T>(value: T) -> Result<Box<T>, (AllocationError, T)> {
     let layout = Layout::new::<T>();

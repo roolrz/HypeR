@@ -38,8 +38,7 @@ pub(super) fn run(startup: &mut Startup<'_>) -> Result<Infallible, Error> {
     let root_directory = startup
         .take_root_directory()
         .map_err(|_| Error::OperatingSystem)?;
-    let mut manifest_buffer = [0_u8; MAX_MANIFEST_BYTES];
-    let source = LoadedManifest::load(&root_directory, &mut manifest_buffer)?;
+    let source = LoadedManifest::load(&root_directory)?;
     let policy = BootstrapPolicy;
     let mut runtime = Runtime::from_startup(startup, root_directory)?;
     match bootstrap(&source, &policy, &mut runtime) {
@@ -71,12 +70,22 @@ struct LoadedManifest<'buffer> {
     bytes: &'buffer [u8],
 }
 
-impl<'buffer> LoadedManifest<'buffer> {
+impl LoadedManifest<'static> {
     #[inline(never)]
-    fn load(
-        root_directory: &Directory,
-        buffer: &'buffer mut [u8; MAX_MANIFEST_BYTES],
-    ) -> Result<Self, Error> {
+    fn load(root_directory: &Directory) -> Result<LoadedManifest<'static>, Error> {
+        // `/init` has exactly one initial thread and enters this bootstrap path
+        // once. Keeping the bounded manifest scratch in BSS avoids nesting a
+        // 64-KiB array beneath the deliberately large, fixed-size parser and
+        // launch-plan frames on the Native stack. `bootstrap` never returns on
+        // success, and every error terminates the process before re-entry.
+        static mut MANIFEST_BUFFER: [u8; MAX_MANIFEST_BYTES] = [0; MAX_MANIFEST_BYTES];
+        // The raw address avoids forming an intermediate reference to a
+        // mutable static.
+        let pointer = (&raw mut MANIFEST_BUFFER).cast::<u8>();
+        // SAFETY: the single-entry ownership argument above guarantees that no
+        // other reference can exist for the returned process lifetime.
+        let buffer: &'static mut [u8] =
+            unsafe { core::slice::from_raw_parts_mut(pointer, MAX_MANIFEST_BYTES) };
         let file = root_directory
             .open(MANIFEST_PATH, FileRights::READ)
             .map_err(|_| Error::OperatingSystem)?;
@@ -126,6 +135,8 @@ impl Runtime {
         let (shell_error_channel, session_client_error_channel) =
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         let (init_vm_provisioning_channel, vm_provisioning_channel) =
+            CapabilityChannel::create().map_err(|_| Error::OperatingSystem)?;
+        let (vm_client_connection_channel, vm_manager_connection_channel) =
             CapabilityChannel::create().map_err(|_| Error::OperatingSystem)?;
         let (vm_instance_control_channel, manager_vm_instance_control_channel) =
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
@@ -185,6 +196,8 @@ impl Runtime {
             shell_output_channel: Some(shell_output_channel),
             shell_error_channel: Some(shell_error_channel),
             vm_provisioning_channel: Some(vm_provisioning_channel.into_handle()),
+            vm_client_connection_channel: vm_client_connection_channel.into_handle(),
+            vm_manager_connection_channel: Some(vm_manager_connection_channel.into_handle()),
         };
         Ok(Self {
             launcher: ServiceLauncher { authorities },

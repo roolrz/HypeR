@@ -9,7 +9,6 @@ use hyper::sync::InterruptSpinLock;
 use super::{Error, VirtualCpuBootstrap, reserve_object_charge};
 use crate::kernel::accounting::{CommittedCharge, ResourceDomain};
 use crate::kernel::authority::Rights;
-use crate::kernel::device::console::SystemConsole;
 use crate::kernel::mm::user_space::{GuestMemoryBacking, VmoObject};
 use crate::kernel::object::{
     KernelObject, KernelRef, ObjectKind, TransferClass, VmDeviceBinding, private,
@@ -26,7 +25,8 @@ enum PendingState {
         lifecycle_resources: VmLifecycleResources,
         memory: Option<GuestMemoryBacking>,
         bootstrap: Option<VirtualCpuBootstrap>,
-        console_output: Option<KernelRef<SystemConsole, VmDeviceBinding>>,
+        virtual_serial:
+            Option<KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>>,
     },
     Transition,
     Sealed(Option<PreparedVm>),
@@ -57,7 +57,7 @@ impl PendingVirtualMachine {
                 lifecycle_resources,
                 memory: None,
                 bootstrap: None,
-                console_output: None,
+                virtual_serial: None,
             }),
             domain: domain.clone(),
             _object_charge: reserve_object_charge::<Self>(domain)?,
@@ -106,13 +106,13 @@ impl PendingVirtualMachine {
     /// The retained typed reference is independent of the caller's handle and
     /// moves into the installed device set at seal. No route exists unless a
     /// userspace VMM performs this operation before sealing.
-    pub(crate) fn set_console_output(
+    pub(crate) fn set_virtual_serial(
         &self,
-        console: KernelRef<SystemConsole, VmDeviceBinding>,
+        serial: KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>,
     ) -> Result<(), Error> {
         self.state.with(|state| match state {
-            PendingState::Configuring { console_output, .. } if console_output.is_none() => {
-                *console_output = Some(console);
+            PendingState::Configuring { virtual_serial, .. } if virtual_serial.is_none() => {
+                *virtual_serial = Some(serial);
                 Ok(())
             }
             PendingState::Configuring { .. }
@@ -132,13 +132,13 @@ impl PendingVirtualMachine {
                     lifecycle_resources,
                     memory: Some(memory),
                     bootstrap: Some(bootstrap),
-                    console_output,
+                    virtual_serial,
                 } => Ok((
                     reservation,
                     lifecycle_resources,
                     memory,
                     bootstrap,
-                    console_output,
+                    virtual_serial,
                 )),
                 other => {
                     *state = other;
@@ -165,7 +165,9 @@ impl PendingVirtualMachine {
         lifecycle_resources: VmLifecycleResources,
         memory: GuestMemoryBacking,
         bootstrap: VirtualCpuBootstrap,
-        console_output: Option<KernelRef<SystemConsole, VmDeviceBinding>>,
+        virtual_serial: Option<
+            KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>,
+        >,
     ) -> Result<PreparedVm, Error> {
         let mut address_space = GuestAddressSpace::from_vmo(
             reservation.take_hardware_vmid()?,
@@ -184,9 +186,9 @@ impl PendingVirtualMachine {
             crate::hal::vm::prepared_interrupt_controller_allocation_size(&interrupt_plan),
         )?;
         let interrupts = crate::hal::vm::create_prepared_interrupt_controller(interrupt_plan)?;
-        let console_output =
-            console_output.map(crate::kernel::vm::device::ConsoleOutputBinding::from_console);
-        let devices = crate::kernel::vm::device::prepare(console_output)?;
+        let virtual_serial = virtual_serial
+            .map(crate::kernel::vm::device::VirtualSerialBinding::from_virtual_serial);
+        let devices = crate::kernel::vm::device::prepare(virtual_serial)?;
         let mut context = crate::hal::vm::prepare_native_bootstrap_context(
             bootstrap.entry,
             bootstrap.stack,

@@ -6,10 +6,9 @@
 use core::num::NonZeroU64;
 
 use crate::handle::{
-    AnyObject, ConsoleObject, HandleRef, OwnedHandle, PendingVirtualMachineObject,
-    ResourceDomainObject, Rights, TypedObject, VirtualCpuObject,
-    VirtualMachineCreationAuthorityObject, VirtualMachineCreationLeaseObject, VirtualMachineObject,
-    VmoObject,
+    AnyObject, HandleRef, OwnedHandle, PendingVirtualMachineObject, ResourceDomainObject, Rights,
+    TypedObject, VirtualCpuObject, VirtualMachineCreationAuthorityObject,
+    VirtualMachineCreationLeaseObject, VirtualMachineObject, VirtualSerialObject, VmoObject,
 };
 use crate::{Error, Result, Status};
 
@@ -202,26 +201,26 @@ pub fn set_memory(
     .into_result()
 }
 
-/// Transfers write access to `console` into the pending VM's output device.
+/// Transfers device-binding authority into the pending VM's serial device.
 ///
-/// On failure, the returned value contains the unchanged Console handle.
-pub fn set_console_output(
+/// On failure, the returned value contains the unchanged virtual-serial handle.
+pub fn set_virtual_serial(
     pending: HandleRef<'_, PendingVirtualMachineObject>,
-    console: OwnedHandle<ConsoleObject>,
-) -> core::result::Result<(), ConsumingFailure<ConsoleObject>> {
-    let raw = console.as_handle_ref().raw();
+    serial: OwnedHandle<VirtualSerialObject>,
+) -> core::result::Result<(), ConsumingFailure<VirtualSerialObject>> {
+    let raw = serial.as_handle_ref().raw();
     // SAFETY: both handles remain live for the complete call. Ownership of
-    // `console` is relinquished only after the kernel reports success.
+    // `serial` is relinquished only after the kernel reports success.
     let status = Status::from_raw(unsafe {
-        hyper_sys::pending_virtual_machine_set_console_output(pending.raw().get(), raw.get())
+        hyper_sys::pending_virtual_machine_set_virtual_serial(pending.raw().get(), raw.get())
     });
     if status != Status::OK {
         return Err(ConsumingFailure {
             error: Error::Status(status),
-            handle: console,
+            handle: serial,
         });
     }
-    let _ = console.into_raw();
+    let _ = serial.into_raw();
     Ok(())
 }
 

@@ -27,14 +27,11 @@ endpoint, opens the selected guest image, creates a per-instance ByteChannel
 control pair, and transfers the image plus the manager-side control endpoint in
 one typed rendezvous. Each transport right survives until its final ownership
 hop: the manager attenuates it from the image and control endpoint, while the
-runtime retains it on the optional Console until that capability is consumed
-into the VM. The retained control endpoint is the
+runtime retains device-assignment authority on a newly created VirtualSerial
+until that capability is consumed into the VM. The retained control endpoint is the
 instance's authority-bearing identity; lifecycle requests do not use ambient
-numeric VM identifiers. The request shape supports an optional third Console
-capability for an explicitly authorized output binding. Initial boot policy
-supplies an attenuated duplicate while init retains emergency authority; the
-manager moves that capability into the selected runtime and never receives
-ambient console policy.
+numeric VM identifiers. Neither the manager nor a VM runtime receives physical
+Console authority.
 
 The initial aggregate policy admits one VM and one vCPU, 32,768 guest pages,
 128 MiB of kernel allocation, 12 processes, 24 threads, 512 handles, and 2,048
@@ -43,19 +40,18 @@ one-instance limit and explicit control-plane headroom. This is an admission
 boundary rather than a usage target; changing fleet cardinality requires a
 reviewed policy update, not merely a larger collection in the manager.
 
-The initial manager deliberately supports one active instance and represents
-that limit as explicit `Empty` and `Active` states. After an instance is fully
-retired and its terminal event is published, the manager releases all
-instance-owned handles and returns to `Empty` to accept another provisioning
-request. Extending this policy to multiple instances changes the state storage,
-not the provisioning or per-instance control contracts.
+The initial manager deliberately supports one named definition and one active
+instance. It retains a read-only duplicate of the image so a stopped instance
+can be started again with a fresh resource domain, task group, creation lease,
+runtime process, and VirtualSerial. Extending the fleet changes definition and
+instance storage rather than the per-instance construction contract.
 
 For each provisioned VM, the manager creates a child resource domain and task
 group, derives a one-shot VM creation lease, and starts an isolated
-`/svc/vm-runtime` process. The guest image is moved into that runtime rather
-than retained by the manager. The runtime receives only its guest image,
-creation lease, read-and-execute runtime libraries, and its own process
-resources.
+`/svc/vm-runtime` process. The guest image is duplicated into that runtime.
+The runtime receives only its guest image, creation lease, read-and-execute
+runtime libraries, its own process resources, and one assign-only VirtualSerial
+capability.
 
 Each runtime:
 
@@ -84,13 +80,21 @@ page because executable-range metadata is not yet part of the VM ABI; sparse
 pages retain the demand-promotion path.
 
 A userspace-created VM has no implicit route to the physical host console.
-Before sealing, its VMM may explicitly transfer a write-capable Console handle
-into the PendingVirtualMachine. A successful transfer consumes that handle and
-commits a VM-owned output binding whose lifetime ends with VM retirement; a
-rejected transfer preserves the handle. Guest transmit exits enqueue into the
-Console's bounded, allocation-free output path, and output from an unbound
-guest console is discarded. Which VMM receives such authority remains service
-policy rather than VM-creation policy.
+Before sealing, its VMM may explicitly transfer an assign-capable
+VirtualSerial handle into the PendingVirtualMachine. The kernel retains bounded
+guest output independently of client attachment and injects host input through
+the virtual UART. VM retirement disconnects the port without discarding output
+that a client has not yet read.
+
+The shell holds only a duplicable manager-connector endpoint. Every invocation
+of `/bin/vmm` creates private byte and capability channels and transfers their
+manager endpoints through a short rendezvous, so one slow client cannot own the
+shared listener. Lifecycle commands are short control-plane exchanges and may
+run concurrently from different physical sessions. `vmm console` additionally
+requests an attenuated VirtualSerial data-plane handle. The manager admits only
+one console client per VM; disconnecting the private control channel releases
+that attachment while leaving other management clients unaffected. The local
+Ctrl-] menu detaches without changing VM power state.
 
 The manager validates the runtime's monotonic lifecycle records and publishes
 one terminal event on the per-instance endpoint. Loss of either control peer or

@@ -30,6 +30,7 @@ mod run_admission;
 pub(crate) mod service;
 mod timer;
 pub(crate) mod vcpu;
+pub(crate) mod virtual_serial;
 
 #[cfg(feature = "kernel-self-test")]
 use core::convert::Infallible;

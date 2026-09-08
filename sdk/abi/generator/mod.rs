@@ -2292,7 +2292,7 @@ mod tests {
     }
 
     #[test]
-    fn console_write_borrows_but_vm_binding_consumes_console_authority() {
+    fn console_write_borrows_but_vm_binding_consumes_device_authority() {
         let console_write = schema::SYSCALLS
             .iter()
             .find(|syscall| syscall.name == "console_write")
@@ -2307,16 +2307,16 @@ mod tests {
             })
         );
 
-        let vm_console = schema::SYSCALLS
+        let vm_serial = schema::SYSCALLS
             .iter()
-            .find(|syscall| syscall.name == "pending_virtual_machine_set_console_output")
+            .find(|syscall| syscall.name == "pending_virtual_machine_set_virtual_serial")
             .and_then(|syscall| syscall.arguments.get(1))
             .and_then(|argument| argument.handle);
         assert_eq!(
-            vm_console,
+            vm_serial,
             Some(schema::HandleArgument {
-                object: schema::ObjectConstraint::Kind("console"),
-                required_rights: schema::RIGHT_TRANSFER | schema::RIGHT_WRITE,
+                object: schema::ObjectConstraint::Kind("virtual_serial"),
+                required_rights: schema::RIGHT_TRANSFER | schema::RIGHT_ASSIGN_DEVICE,
                 disposition: schema::HandleDisposition::ConsumeOnCommit,
             })
         );
@@ -2691,6 +2691,7 @@ mod tests {
             ("pending_virtual_machine", TransferClass::RendezvousOnly),
             ("virtual_machine", TransferClass::RendezvousOnly),
             ("virtual_cpu", TransferClass::RendezvousOnly),
+            ("virtual_serial", TransferClass::General),
         ];
         assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
         for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {

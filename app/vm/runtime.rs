@@ -56,8 +56,8 @@ fn run(
     let lease = startup
         .take(vm_contract::CREATION_LEASE)
         .map_err(Error::OperatingSystem)?;
-    let console = startup
-        .take_optional(vm_contract::CONSOLE_OUTPUT)
+    let virtual_serial = startup
+        .take(vm_contract::VIRTUAL_SERIAL)
         .map_err(Error::OperatingSystem)?;
     let image = hyper_vm_image::parse(&source).map_err(classify_image_error)?;
     let selected = profile::select(image.architecture, image.platform_profile, image.vcpu_count)
@@ -99,10 +99,8 @@ fn run(
         },
     )
     .map_err(Error::OperatingSystem)?;
-    if let Some(console) = console {
-        hyper_os::vm::set_console_output(pending.as_handle_ref(), console)
-            .map_err(|failure| Error::OperatingSystem(failure.error()))?;
-    }
+    hyper_os::vm::set_virtual_serial(pending.as_handle_ref(), virtual_serial)
+        .map_err(|failure| Error::OperatingSystem(failure.error()))?;
     hyper_os::vm::seal(pending.as_handle_ref()).map_err(Error::OperatingSystem)?;
     let (machine, vcpu) = hyper_os::vm::install(pending)
         .map_err(|failure| Error::OperatingSystem(failure.error()))?;

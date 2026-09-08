@@ -398,7 +398,8 @@ impl private::UserExportable for CapabilityChannel {}
 
 impl KernelObject for CapabilityChannel {
     const KIND: ObjectKind = ObjectKind::CAPABILITY_CHANNEL;
-    const SUPPORTED_RIGHTS: Rights = Rights::TRANSFER
+    const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
+        .union(Rights::TRANSFER)
         .union(Rights::WAIT)
         .union(Rights::INSPECT)
         .union(Rights::READ)

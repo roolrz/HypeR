@@ -42,6 +42,8 @@ pub(super) struct AuthorityInventory {
     pub(super) shell_output_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) shell_error_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) vm_provisioning_channel: Option<OwnedHandle<CapabilityChannelObject>>,
+    pub(super) vm_client_connection_channel: OwnedHandle<CapabilityChannelObject>,
+    pub(super) vm_manager_connection_channel: Option<OwnedHandle<CapabilityChannelObject>>,
 }
 
 impl AuthorityInventory {
@@ -132,6 +134,20 @@ impl AuthorityInventory {
             {
                 return self.move_vm_provisioning_into_builder(builder, purpose, rights);
             }
+            (BootstrapAuthority::VmManagerConnectionChannel, CapabilityOperation::Move)
+                if kind == CapabilityChannelObject::KIND.as_raw() =>
+            {
+                return self.move_vm_manager_connection_into_builder(builder, purpose, rights);
+            }
+            (BootstrapAuthority::VmClientConnectionChannel, CapabilityOperation::Duplicate)
+                if kind == CapabilityChannelObject::KIND.as_raw() =>
+            {
+                builder.add_handle_duplicate(
+                    self.vm_client_connection_channel.as_handle_ref(),
+                    purpose,
+                    offer,
+                )
+            }
             (BootstrapAuthority::VmRuntimeImage, CapabilityOperation::Create)
                 if kind == FileObject::KIND.as_raw() =>
             {
@@ -212,5 +228,25 @@ impl AuthorityInventory {
         builder
             .add_handle_move(file.into_handle(), purpose, RightsOffer::Exact(rights))
             .map_err(|_| LaunchError::OperatingSystem)
+    }
+
+    fn move_vm_manager_connection_into_builder(
+        &mut self,
+        builder: &ProcessBuilder,
+        purpose: u32,
+        rights: Rights,
+    ) -> Result<(), LaunchError> {
+        let channel = self
+            .vm_manager_connection_channel
+            .take()
+            .ok_or(LaunchError::AuthorityConsumed)?;
+        match builder.add_handle_move(channel, purpose, RightsOffer::Exact(rights)) {
+            Ok(()) => Ok(()),
+            Err(failure) => {
+                let (_, channel) = failure.into_parts();
+                self.vm_manager_connection_channel = Some(channel);
+                Err(LaunchError::OperatingSystem)
+            }
+        }
     }
 }

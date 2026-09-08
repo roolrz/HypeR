@@ -83,6 +83,7 @@ object_types!(
     ),
     (VirtualMachineObject, HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE),
     (VirtualCpuObject, HYPER_NATIVE_OBJECT_VIRTUAL_CPU),
+    (VirtualSerialObject, HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL),
 );
 
 /// One Native object-kind value reported by the kernel.
@@ -140,6 +141,7 @@ impl ObjectKind {
             hyper_abi::HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => "pending-virtual-machine",
             hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => "virtual-machine",
             hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_CPU => "virtual-cpu",
+            hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL => "virtual-serial",
             _ => "unknown",
         }
     }

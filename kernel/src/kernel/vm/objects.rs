@@ -42,6 +42,7 @@ pub(crate) enum Error {
     UnsupportedArchitecture,
     VirtualDevice(super::device::Error),
     VirtualInterrupt(crate::hal::vm::InterruptError),
+    VirtualSerial(super::virtual_serial::Error),
 }
 
 impl From<MemoryObjectError> for Error {
@@ -98,6 +99,12 @@ impl From<super::device::Error> for Error {
 impl From<crate::hal::vm::InterruptError> for Error {
     fn from(error: crate::hal::vm::InterruptError) -> Self {
         Self::VirtualInterrupt(error)
+    }
+}
+
+impl From<super::virtual_serial::Error> for Error {
+    fn from(error: super::virtual_serial::Error) -> Self {
+        Self::VirtualSerial(error)
     }
 }
 

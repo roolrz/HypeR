@@ -123,10 +123,19 @@ hyper_call_result_t hyper_virtual_machine_create(
 hyper_native_status_t hyper_pending_virtual_machine_set_memory(
     hyper_native_handle_t pending,
     hyper_native_handle_t vmo);
-/* Consumes console only when the binding succeeds. */
-hyper_native_status_t hyper_pending_virtual_machine_set_console_output(
+/* Consumes virtual_serial only when the binding succeeds. */
+hyper_native_status_t hyper_pending_virtual_machine_set_virtual_serial(
     hyper_native_handle_t pending,
-    hyper_native_handle_t console);
+    hyper_native_handle_t virtual_serial);
+hyper_call_result_t hyper_virtual_serial_create(void);
+hyper_call_result_t hyper_virtual_serial_read(
+    hyper_native_handle_t virtual_serial,
+    void *bytes,
+    size_t byte_capacity);
+hyper_call_result_t hyper_virtual_serial_write(
+    hyper_native_handle_t virtual_serial,
+    const void *bytes,
+    size_t byte_count);
 hyper_native_status_t hyper_pending_virtual_machine_set_bootstrap(
     hyper_native_handle_t pending,
     const hyper_native_virtual_cpu_bootstrap_t *bootstrap);

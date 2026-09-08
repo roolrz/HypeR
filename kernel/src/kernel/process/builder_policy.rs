@@ -16,8 +16,10 @@ use hyper::abi::native;
 /// handle before retiring its membership edge. VM creation authorities are
 /// admitted so the initial supervisor can delegate construction to a fleet
 /// manager and move a one-shot lease into an isolated VM runtime. Installed
-/// VM and vCPU control objects remain excluded. Nested `ProcessBuilder`
-/// authority is always forbidden.
+/// VM and vCPU control objects remain excluded. A virtual serial port is
+/// admitted because its attenuated device-binding authority must cross this
+/// boundary into that runtime; it remains disconnected until VM installation
+/// consumes the handle. Nested `ProcessBuilder` authority is always forbidden.
 pub(crate) struct BuilderStorable;
 
 impl BuilderStorable {
@@ -39,5 +41,6 @@ impl BuilderStorable {
             || kind == native::HYPER_NATIVE_OBJECT_CPU_INSPECTOR
             || kind == native::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY
             || kind == native::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE
+            || kind == native::HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL
     }
 }
