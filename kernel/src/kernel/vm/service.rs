@@ -60,6 +60,7 @@ const fn classify_object_error(error: ObjectError) -> Error {
         ObjectError::MemoryLayout(error) => classify_guest_memory_error(error),
         ObjectError::VirtualDevice(_) | ObjectError::VirtualInterrupt(_) => Error::Internal,
         ObjectError::VirtualSerial(error) => match error {
+            super::virtual_serial::Error::Memory(error) => classify_memory_object_error(error),
             super::virtual_serial::Error::Allocation => Error::NoMemory,
             super::virtual_serial::Error::AllocationSize => Error::Internal,
             super::virtual_serial::Error::Disconnected => Error::BadState,
@@ -444,6 +445,24 @@ pub(crate) fn create_virtual_serial(process: &Process) -> Result<HandleValue, Er
         serial,
         <super::virtual_serial::VirtualSerial as KernelObject>::SUPPORTED_RIGHTS,
     )?)
+}
+
+pub(crate) fn register_virtual_serial_output(
+    process: &Process,
+    value: HandleValue,
+    buffer: HandleValue,
+) -> Result<(), Error> {
+    let serial =
+        process.resolve_handle::<super::virtual_serial::VirtualSerial>(value, Rights::WRITE)?;
+    let buffer = process.resolve_handle::<VmoObject>(
+        buffer,
+        Rights::READ.union(Rights::WRITE).union(Rights::MAP),
+    )?;
+    serial
+        .object()
+        .register_output(buffer.object(), &process.resource_domain())
+        .map_err(ObjectError::from)
+        .map_err(Into::into)
 }
 
 pub(crate) fn seal(process: &Process, pending: HandleValue) -> Result<(), Error> {

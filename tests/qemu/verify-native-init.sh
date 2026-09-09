@@ -82,6 +82,11 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
     # frame. Normalize an application's explicit CRLF only; an interleaved
     # kernel record must make the line contract fail rather than be hidden.
     sed 's/\r$//' "$log" >"$native_output"
+    if grep -Eq '^(hyper-sh\$ )*sh: (Native operation failed|I/O failed|input channel closed|protocol violation|command launch failed|operating-system request failed)' "$native_output"; then
+        cat "$log" >&2
+        echo "Native shell reported an unexpected runtime failure" >&2
+        exit 1
+    fi
     case "$command_phase" in
         console)
             if grep -Fxq 'HypeR session: console ready' "$native_output"; then
@@ -195,6 +200,60 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         std_panic)
             if grep -q 'HYPER_STD_EXPECTED_PANIC' "$native_output" &&
                 [ "$(grep -Ec '^(hyper-sh\$ )*sh: command failed$' "$native_output")" -eq 2 ]; then
+                printf 'ps --help\n' >&3
+                command_phase='cli_ps'
+            fi
+            ;;
+        cli_ps)
+            if grep -Fq 'List Native processes and threads' "$native_output"; then
+                printf 'handle --help\n' >&3
+                command_phase='cli_handle'
+            fi
+            ;;
+        cli_handle)
+            if grep -Fq 'Inspect Native kernel objects or a process' "$native_output"; then
+                printf 'ls --help\n' >&3
+                command_phase='cli_ls'
+            fi
+            ;;
+        cli_ls)
+            if grep -Fq 'List a delegated directory' "$native_output"; then
+                printf 'free --help\n' >&3
+                command_phase='cli_free'
+            fi
+            ;;
+        cli_free)
+            if grep -Fq 'Display physical memory usage' "$native_output"; then
+                printf 'top --help\n' >&3
+                command_phase='cli_top'
+            fi
+            ;;
+        cli_top)
+            if grep -Fq 'Monitor Native CPU, memory and processes' "$native_output"; then
+                printf 'vmm --help\n' >&3
+                command_phase='cli_vmm'
+            fi
+            ;;
+        cli_vmm)
+            if grep -Fq 'Manage the default virtual machine' "$native_output"; then
+                printf 'sh --help\n' >&3
+                command_phase='cli_shell'
+            fi
+            ;;
+        cli_shell)
+            if grep -Fq 'Native capability-scoped command shell' "$native_output"; then
+                printf 'cd --help\n' >&3
+                command_phase='cli_builtin'
+            fi
+            ;;
+        cli_builtin)
+            if grep -Fq 'Usage: sh cd' "$native_output"; then
+                printf 'echo HYPER_CLAP_BUILTIN_OK\n' >&3
+                command_phase='cli_echo'
+            fi
+            ;;
+        cli_echo)
+            if grep -Fq 'HYPER_CLAP_BUILTIN_OK' "$native_output"; then
                 printf 'ls\n' >&3
                 command_phase='ls_root'
             fi
@@ -243,14 +302,26 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             fi
             ;;
         top_exit)
-            if grep -Eq '^hyper-sh\$ q?$' "$native_output"; then
+            if awk '/^Press q to quit[.]$/ { seen = 1; ready = 0; next }
+                seen && /^hyper-sh\$ q?$/ { ready = 1 }
+                END { exit !ready }' "$native_output"; then
                 printf '/bin/echo HYPER_NATIVE_ECHO_OK\n' >&3
                 command_phase='echo'
             fi
             ;;
-        echo) ;;
+        echo)
+            # Wait for this command's prompt, not any earlier prompt in the log.
+            if awk '/^HYPER_NATIVE_ECHO_OK$/ { seen = 1; next }
+                seen && /^hyper-sh\$ $/ { ready = 1 }
+                END { exit !ready }' "$native_output"; then
+                command_phase='echo_done'
+            fi
+            ;;
+        echo_done) ;;
+
     esac
-    if grep -q 'HypeR: starting Native init process' "$log" &&
+    if [ "$command_phase" = echo_done ] &&
+        grep -q 'HypeR: starting Native init process' "$log" &&
         grep -Fxq 'HypeR session: console ready' "$native_output" &&
         grep -Fxq 'TYPE     KOID       OWNER      NAME                 STATE' "$native_output" &&
         grep -Fxq 'HANDLE             OBJECT     KIND                    RIGHTS                           PURPOSE' "$native_output" &&
@@ -263,6 +334,7 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         [ "$(grep -Ec '^(hyper-sh\$ )*HYPER_STD_STDERR_OK$' "$native_output")" -eq 2 ] &&
         grep -Fxq '/bin' "$native_output" &&
         grep -Fxq '/' "$native_output" &&
+        grep -Fxq 'HYPER_CLAP_BUILTIN_OK' "$native_output" &&
         grep -Fxq 'HYPER_CD_CHILD_OK' "$native_output" &&
         grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output" &&
         grep -Eq '^Mem:[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB' "$native_output" &&

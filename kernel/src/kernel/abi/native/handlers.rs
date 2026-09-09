@@ -16,13 +16,12 @@ use hyper::abi::native::{
     HYPER_NATIVE_STATUS_INVALID_ARGUMENT, HYPER_NATIVE_STATUS_NOT_SUPPORTED,
     HYPER_NATIVE_STATUS_TIMED_OUT, HYPER_NATIVE_SYS_BYTE_CHANNEL_READ,
     HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_CONSOLE_READ,
-    HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ,
-    HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE, HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE,
-    HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE, HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES,
-    HyperNativeCpuObservation, HyperNativeDirectoryEntry, HyperNativeDirectoryInfo,
-    HyperNativeFileInfo, HyperNativeMemoryObservation, HyperNativeObjectInspection,
-    HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread, HyperNativeVirtualCpuInfo,
-    HyperNativeVirtualMachineInfo, NativeResult,
+    HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
+    HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE, HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE,
+    HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES, HyperNativeCpuObservation, HyperNativeDirectoryEntry,
+    HyperNativeDirectoryInfo, HyperNativeFileInfo, HyperNativeMemoryObservation,
+    HyperNativeObjectInspection, HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread,
+    HyperNativeVirtualCpuInfo, HyperNativeVirtualMachineInfo, NativeResult,
 };
 
 use crate::kernel::capability::{HandleValue, Rights};
@@ -1028,19 +1027,17 @@ pub(super) fn sys_virtual_serial_create(
 }
 
 #[inline(never)]
-pub(super) fn sys_virtual_serial_read(
+pub(super) fn sys_virtual_serial_register_output(
     services: &impl VmServices,
     arguments: &Arguments,
 ) -> DeferredAction {
-    let result = parse_virtual_serial_io(arguments).and_then(|(serial, bytes)| {
-        services
-            .read_virtual_serial(serial, bytes)
-            .map_err(status_from_vm_service_error)
-    });
-    DeferredAction::Return(console_io_result(
-        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ,
-        result,
-    ))
+    DeferredAction::Return(status_only(parse_two_handles(arguments).and_then(
+        |[serial, buffer]| {
+            services
+                .register_virtual_serial_output(serial, buffer)
+                .map_err(status_from_vm_service_error)
+        },
+    )))
 }
 
 #[inline(never)]

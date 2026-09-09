@@ -3,7 +3,7 @@
 
 //! Live bootstrap authority inventory and typed capability offers.
 
-use hyper_app::manifest::{CapabilityGrant, CapabilityOperation};
+use hyper_init::manifest::{CapabilityGrant, CapabilityOperation};
 use hyper_os::fs::{Directory, FileRights};
 use hyper_os::handle::{
     ByteChannelObject, CapabilityChannelObject, ConsoleObject, CpuInspectorObject, DirectoryObject,
@@ -30,7 +30,7 @@ pub(super) struct AuthorityInventory {
     pub(super) memory_inspector: OwnedHandle<MemoryInspectorObject>,
     pub(super) cpu_inspector: OwnedHandle<CpuInspectorObject>,
     pub(super) vm_authority: OwnedHandle<VirtualMachineCreationAuthorityObject>,
-    pub(super) console: OwnedHandle<ConsoleObject>,
+    pub(super) console: &'static OwnedHandle<ConsoleObject>,
     pub(super) console_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) console_output_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) session_input_channel: Option<OwnedHandle<ByteChannelObject>>,

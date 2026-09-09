@@ -178,7 +178,7 @@ impl ObjectKind {
     pub(crate) const VIRTUAL_MACHINE: Self = Self(VIRTUAL_MACHINE_OBJECT_KIND);
     /// Installed virtual-CPU observation and execution authority.
     pub(crate) const VIRTUAL_CPU: Self = Self(VIRTUAL_CPU_OBJECT_KIND);
-    /// Buffered virtual-machine serial stream.
+    /// Runtime-owned guest input and shared output registration.
     pub(crate) const VIRTUAL_SERIAL: Self = Self(VIRTUAL_SERIAL_OBJECT_KIND);
 
     /// Validates one userspace-supplied object-kind discriminator.

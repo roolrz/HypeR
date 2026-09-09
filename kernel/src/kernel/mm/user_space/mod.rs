@@ -22,6 +22,8 @@ mod objects;
 #[cfg(not(test))]
 mod service;
 mod vmo;
+#[cfg(not(test))]
+pub(crate) use vmo::WritableMappingLease;
 
 pub(crate) use address_space::{
     AddressSpaceError, AddressSpaceId, CommittedMappingChange, MappingChange, MappingSnapshot,

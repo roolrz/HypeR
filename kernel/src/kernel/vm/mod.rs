@@ -199,3 +199,7 @@ pub(crate) fn start_test_default(ramdisk: &[u8]) -> Result<Infallible, StartErro
 pub(crate) fn receive_console_input(byte: u8) -> ConsoleInputDisposition {
     device::receive_console_input(byte)
 }
+
+mod serial_output;
+
+mod serial_ring;

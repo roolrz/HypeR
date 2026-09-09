@@ -51,3 +51,11 @@ pub enum Error {
 }
 
 pub type Result<T> = core::result::Result<T, Error>;
+
+impl core::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(formatter, "{self:?}")
+    }
+}
+
+impl core::error::Error for Error {}

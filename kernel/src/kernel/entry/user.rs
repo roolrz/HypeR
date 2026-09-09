@@ -308,41 +308,17 @@ impl VmServices for DeferredProcessServices<'_> {
         crate::kernel::vm::service::create_virtual_serial(&self.session.process)
     }
 
-    fn read_virtual_serial(
+    fn register_virtual_serial_output(
         &self,
-        value: HandleValue,
-        destination: Option<UserSlice>,
-    ) -> Result<usize, crate::kernel::vm::service::Error> {
-        let serial = self
-            .session
-            .process
-            .resolve_handle::<crate::kernel::vm::virtual_serial::VirtualSerial>(
-                value,
-                Rights::READ,
-            )?;
-        let Some(destination) = destination else {
-            return Ok(0);
-        };
-        let capacity = usize::try_from(destination.length())
-            .map_err(|_| crate::kernel::vm::service::Error::InvalidArgument)?;
-        let claim = serial
-            .object()
-            .claim_output(capacity)
-            .map_err(crate::kernel::vm::objects::Error::from)?;
-        let actual = claim.bytes().len();
-        let actual_bytes =
-            u64::try_from(actual).map_err(|_| crate::kernel::vm::service::Error::Internal)?;
-        let destination = UserSlice::new(destination.base(), actual_bytes)
-            .map_err(|_| crate::kernel::vm::service::Error::Fault)?;
-        let write = self.session.process.reserve_user_write(destination)?;
-        write
-            .copy_from(claim.bytes())
-            .map_err(|_| crate::kernel::vm::service::Error::Fault)?;
-        write.complete();
-        claim.commit();
-        Ok(actual)
+        serial: HandleValue,
+        buffer: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::register_virtual_serial_output(
+            &self.session.process,
+            serial,
+            buffer,
+        )
     }
-
     fn write_virtual_serial(
         &self,
         value: HandleValue,

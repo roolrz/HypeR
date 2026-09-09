@@ -5,8 +5,7 @@ pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_SERVICES: usize = 24;
 pub const MAX_DEPENDENCIES_PER_SERVICE: usize = 12;
 pub const MAX_DEPENDENCY_EDGES: usize = 128;
-// This limit contributes directly to the fixed-size manifest and launch-plan
-// frames retained by init, so grow it only with a reviewed production contract.
+// Schema limits bound bootstrap resource use independently of heap storage.
 pub const MAX_CAPABILITIES_PER_SERVICE: usize = 13;
 pub const MAX_RIGHTS_PER_CAPABILITY: usize = 12;
 
@@ -148,85 +147,39 @@ impl<'manifest> Manifest<'manifest> {
     }
 }
 
+/// A schema limit over ordinary Vec storage, not a second container implementation.
 #[derive(Debug, Eq, PartialEq)]
-pub(super) struct BoundedList<T, const N: usize> {
-    entries: [Option<T>; N],
-    length: usize,
-}
+pub(super) struct BoundedList<T, const N: usize>(Vec<T>);
 
 impl<T, const N: usize> BoundedList<T, N> {
     pub(super) fn new() -> Self {
-        Self {
-            entries: core::array::from_fn(|_| None),
-            length: 0,
-        }
+        Self(Vec::new())
     }
-
     pub(super) fn push(&mut self, value: T) -> Result<(), T> {
-        let Some(slot) = self.entries.get_mut(self.length) else {
+        if self.0.len() == N {
             return Err(value);
-        };
-        *slot = Some(value);
-        self.length += 1;
+        }
+        self.0.push(value);
         Ok(())
     }
-
     pub(super) const fn len(&self) -> usize {
-        self.length
+        self.0.len()
     }
-
     pub(super) const fn is_empty(&self) -> bool {
-        self.length == 0
+        self.0.is_empty()
     }
-
     pub(super) fn get(&self, index: usize) -> Option<&T> {
-        self.entries.get(index)?.as_ref()
+        self.0.get(index)
     }
-
-    pub(super) fn iter(&self) -> impl Iterator<Item = &T> {
-        self.entries[..self.length]
-            .iter()
-            .filter_map(Option::as_ref)
+    pub(super) fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
     }
 }
 
 impl<T, const N: usize> IntoIterator for BoundedList<T, N> {
     type Item = T;
-    type IntoIter = ListIntoIter<T, N>;
-
+    type IntoIter = std::vec::IntoIter<T>;
     fn into_iter(self) -> Self::IntoIter {
-        ListIntoIter {
-            entries: self.entries,
-            position: 0,
-            length: self.length,
-        }
+        self.0.into_iter()
     }
 }
-
-pub(super) struct ListIntoIter<T, const N: usize> {
-    entries: [Option<T>; N],
-    position: usize,
-    length: usize,
-}
-
-impl<T, const N: usize> Iterator for ListIntoIter<T, N> {
-    type Item = T;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.position == self.length {
-            return None;
-        }
-        let entry = self.entries.get_mut(self.position)?.take();
-        self.position += 1;
-        entry
-    }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.length.saturating_sub(self.position);
-        (remaining, Some(remaining))
-    }
-}
-
-impl<T, const N: usize> ExactSizeIterator for ListIntoIter<T, N> {}
-
-impl<T, const N: usize> core::iter::FusedIterator for ListIntoIter<T, N> {}

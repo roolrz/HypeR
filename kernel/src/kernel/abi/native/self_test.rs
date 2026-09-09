@@ -602,14 +602,13 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
 
-        fn read_virtual_serial(
+        fn register_virtual_serial_output(
             &self,
             _: HandleValue,
-            _: Option<UserSlice>,
-        ) -> Result<usize, crate::kernel::vm::service::Error> {
+            _: HandleValue,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
-
         fn write_virtual_serial(
             &self,
             _: HandleValue,

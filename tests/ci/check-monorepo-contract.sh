@@ -32,10 +32,35 @@ fi
 if rg -n '#[[:space:]]*include[[:space:]]*[<"](\.\./|sdk/)' app >/dev/null; then
     fail "Native applications must include only installed SDK interfaces"
 fi
-if rg -n '^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=[[:space:]]*\{[^}]*path[[:space:]]*=' \
-    app --glob Cargo.toml >/dev/null; then
-    fail "Native Rust applications must not use source-tree path dependencies"
-fi
+# App packages may share app policy through workspace members. SDK bindings
+# must still resolve through the assembled SDK, never a source-tree path.
+python3 - <<'PYTHON'
+from pathlib import Path
+import tomllib
+
+root = Path("app").resolve()
+root_manifest = tomllib.loads((root / "Cargo.toml").read_text())
+workspace = root_manifest["workspace"]
+members = {}
+for member in workspace["members"]:
+    directory = (root / member).resolve()
+    if not directory.is_relative_to(root):
+        raise SystemExit("app member escapes app/")
+    manifest = tomllib.loads((directory / "Cargo.toml").read_text())
+    members[directory] = manifest
+for directory, manifest in [(root, root_manifest), *members.items()]:
+    contexts = [manifest, manifest.get("workspace", {}), *manifest.get("target", {}).values()]
+    groups = [context.get(section, {}) for context in contexts
+              for section in ("dependencies", "dev-dependencies", "build-dependencies")]
+    groups.extend(manifest.get("patch", {}).values())
+    for dependencies in groups:
+        for name, dependency in dependencies.items():
+            if not isinstance(dependency, dict) or "path" not in dependency:
+                continue
+            target = (directory / dependency["path"]).resolve()
+            if target not in members or members[target]["package"]["name"] != dependency.get("package", name):
+                raise SystemExit(f"app dependency {name} must use the installed SDK or an app workspace member")
+PYTHON
 if rg -n 'hyper[_-]sys' app --glob Cargo.toml --glob '*.rs' >/dev/null; then
     fail "Native applications must use safe OS bindings rather than raw syscalls"
 fi
@@ -73,7 +98,7 @@ for required in \
     sdk/toolchain/bin/hyper-cargo \
     sdk/toolchain/bin/hyper-clang \
     app/Cargo.toml \
-    app/config/services.json \
+    app/init/config/services.json \
     app/init/src/lib.rs \
     app/init/src/main.rs \
     app/init/src/manifest/mod.rs \
