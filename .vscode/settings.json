@@ -8,6 +8,7 @@
         "sdk/rust/Cargo.toml",
         "app/Cargo.toml",
         "sdk/toolchain/tests/rust-smoke/Cargo.toml",
+        "sdk/toolchain/tests/std-smoke/Cargo.toml",
         "tools/fit-pack/Cargo.toml"
     ],
     "rust-analyzer.cargo.configPath": ".vscode/rust-analyzer.toml"

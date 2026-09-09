@@ -21,9 +21,8 @@ them with the Rust toolchain selected for the application.
 
 Unsafe machine interactions are confined to `hyper-sys`. Application code
 should normally depend only on `hyper-os` and `hyper-rt`. `hyper-os` is an
-application-independent semantic layer and is intended to support a future
-HypeR port of the Rust standard library without adopting the standard
-library's unstable internal platform interfaces as its own API.
+application-independent semantic layer and keeps Rust standard-library
+platform adapters separate from its stable-facing capability interfaces.
 
 The safe layer includes bounded byte streams, transactional capability
 rendezvous, startup-capability parsing, directory access, physical and emergency
@@ -52,7 +51,7 @@ let bytes: Vec<u8> = [b"hyper> ".as_slice(), message.as_bytes()].concat();
 ```
 
 `hyper_rt::alloc` also re-exports the crate. This provides `String`, `Vec`,
-`Box`, collections, `.concat()`, and `format!`; it does not provide `std` or
+`Box`, collections, `.concat()`, and `format!`; the freestanding mode does not provide `std` or
 POSIX APIs. The allocator supports over-aligned Rust layouts, reclaims empty
 mapped regions, and preserves the original buffer when reallocation fails.
 Use fallible collection APIs such as `try_reserve` where OOM is recoverable;
@@ -60,7 +59,7 @@ infallible allocation failure follows Rust's allocation-error path and the
 runtime's aborting panic policy. Memory use remains charged to the process's
 resource domain. See [the C heap contract](../lib/README.md#process-heap).
 
-`hyper-cargo` rebuilds `core` and `alloc` as PIC for Native PIE linking using
+`hyper-cargo` in freestanding mode rebuilds `core` and `alloc` as PIC for Native PIE linking using
 the pinned compiler's `rust-src`. The driver locally enables Cargo's unstable
 `build-std` through `RUSTC_BOOTSTRAP=1`; this is a toolchain dependency, not a
 stable Rust target support claim. SDK assembly fetches the compiler-library
@@ -87,3 +86,13 @@ dependencies.
 
 Licensed under the Apache License, Version 2.0. See
 [the project license](../../LICENSE).
+
+## Standard Rust applications
+
+The SDK now also provides a partial platform port of Rust `std`, including
+ordinary `main()`, standard streams, startup arguments, and clap support.
+`hyper-cargo` selects this mode by default. Existing `hyper_rt::entry!`
+applications select `HYPER_RUST_STD=0`; std applications using this crate
+enable its `std` feature and use ordinary `main()`. See the
+[Native std guide](../toolchain/rust-std/README.md) for the support matrix,
+build contract, and thread backend extension points.
