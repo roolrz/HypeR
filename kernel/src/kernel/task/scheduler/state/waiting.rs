@@ -22,6 +22,13 @@ impl Scheduler {
         unsafe { wait_queue.with_state(operation) }
     }
 
+    pub fn wait_queue_snapshot(&self, wait_queue: &WaitQueue) -> Result<ThreadQueue, Error> {
+        self.with_wait_queue(wait_queue, |queue| match (queue.head, queue.tail, queue.len) {
+            (None, None, 0) | (Some(_), Some(_), 1..) => Ok(*queue),
+            _ => Err(Error::QueueCorrupted),
+        })
+    }
+
     pub fn arm_wait_shared(
         &self,
         cpu: CpuIndex,
@@ -256,7 +263,7 @@ impl Scheduler {
     ) -> Result<Option<(ThreadId, ReadyOutcome)>, Error> {
         let mut before_ready = Some(before_ready);
         loop {
-            let head = self.with_wait_queue(wait_queue, |queue| queue.head);
+            let head = self.wait_queue_snapshot(wait_queue)?.head;
             let Some(id) = head else {
                 return Ok(None);
             };

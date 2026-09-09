@@ -1392,7 +1392,7 @@ pub(crate) fn wake_all(wait_queue: &WaitQueue) -> Result<usize, Error> {
         let mut targets = [false; hyper::cpu::MAX_CPUS];
         // Bound the batch by its initial population. New/requeued waiters
         // cannot keep an IRQ-masked wake-all operation alive indefinitely.
-        let limit = scheduler.with_wait_queue(wait_queue, |queue| queue.len);
+        let limit = scheduler.wait_queue_snapshot(wait_queue)?.len;
         for _ in 0..limit {
             let Some((_, outcome)) = scheduler.notify_one_shared(wait_queue, |_| {})? else {
                 break;
@@ -1418,6 +1418,54 @@ pub(crate) fn wake_all(wait_queue: &WaitQueue) -> Result<usize, Error> {
         crate::hal::cpu::send_event();
     }
     Ok(count)
+}
+
+/// Exercises the public wake paths with inconsistent queue metadata, without
+/// linking actual waiters or exposing a corruption hook to production callers.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn test_wait_queue_topology() -> Result<(), Error> {
+    use super::wait::ThreadQueue;
+
+    let queue = WaitQueue::new();
+    if wake_one(&queue)?.is_some() || wake_all(&queue)? != 0 {
+        return Err(Error::InvalidThreadState);
+    }
+    for head in [None, Some(ThreadId::BOOTSTRAP)] {
+        for tail in [None, Some(ThreadId::BOOTSTRAP)] {
+            for len in [0, 1] {
+                // Valid empty and populated shapes are covered by normal
+                // wait/wake tests; the dummy identity is never linked here.
+                if (head.is_none() && tail.is_none() && len == 0)
+                    || (head.is_some() && tail.is_some() && len != 0)
+                {
+                    continue;
+                }
+                let damaged = ThreadQueue { head, tail, len };
+                read_scheduler(|scheduler| {
+                    scheduler.with_wait_queue(&queue, |state| *state = damaged);
+                    Ok(())
+                })?;
+                let mut callback_ran = false;
+                let one = wake_one_with(&queue, |_| callback_ran = true);
+                let all = wake_all(&queue);
+                let unchanged = read_scheduler(|scheduler| {
+                    Ok(scheduler.with_wait_queue(&queue, |state| {
+                        let unchanged = *state == damaged;
+                        *state = ThreadQueue::new();
+                        unchanged
+                    }))
+                })?;
+                if one != Err(Error::QueueCorrupted)
+                    || all != Err(Error::QueueCorrupted)
+                    || callback_ran
+                    || !unchanged
+                {
+                    return Err(Error::InvalidThreadState);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Attempts exact-ticket timeout or cancellation arbitration.
