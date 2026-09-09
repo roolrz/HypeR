@@ -9,6 +9,8 @@
 
 #![no_std]
 
+pub mod allocator;
+
 pub use hyper_abi as abi;
 
 use core::ffi::c_char;

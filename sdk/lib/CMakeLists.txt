@@ -27,6 +27,9 @@ endif()
 
 set(HYPER_RUNTIME_SOURCES
     src/arch/aarch64/syscall.S
+    src/runtime.c
+    src/heap.c
+    src/stdlib.c
     src/dlfcn.c
     src/memory.c
     src/startup.c

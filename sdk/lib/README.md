@@ -21,6 +21,7 @@ Native services, but its contracts do not belong in HypeR Lib.
 - capability-scoped console and filesystem I/O, object wait, byte and capability
   channels, VMO/VMAR operations, staged Process construction, and core
   lifecycle wrappers;
+- a shared process heap with `malloc`, `calloc`, `realloc`, `free`, and `aligned_alloc`;
 - freestanding `memcpy`, `memmove`, `memset`, `memcmp`, and `strlen`;
 - Clang-only cross compilation into `libhyper.a` and `libhyper.so`; and
 - a public-interface-only Native application fixture for product integration.
@@ -28,6 +29,36 @@ Native services, but its contracts do not belong in HypeR Lib.
 Native userspace is currently implemented only on AArch64. Additional
 architecture veneers will be added only when the corresponding Kernel entry is
 functional.
+
+## Process heap
+
+The loader initializes the shared runtime after relocation and before any
+application or DSO constructors; CRT performs the same idempotent initialization
+before calling `hyper_main` (including static applications), using the process's
+bootstrap ROOT_VMAR capability. It reserves `[0xe0000000, 0xf0000000)` for the
+heap, after the loader's shared-library range and below the user stack. This
+is a Native address-layout contract; applications must not destroy or replace
+that reservation. Initialization borrows ROOT_VMAR and retains its own child
+VMAR, so normal startup-handle ownership remains with the application.
+
+Reservation allocates no backing pages. Allocations map read/write, non-executable
+VMOs in regions of at least 64 KiB, bounded by the 256 MiB virtual reservation
+and the process's resource budget. First-fit blocks are split and neighboring
+free blocks coalesced. Fully free regions are unmapped and their backing pages
+released; partially occupied regions remain available for reuse. All metadata
+is serialized by a process-local atomic lock, yielding while contended.
+This is a general-purpose initial allocator, not a constant-time or real-time
+allocation contract. It is not reentrant from asynchronous handlers.
+
+`<stdlib.h>` exposes the C allocation subset. Failure returns NULL without
+an errno facility; `calloc` detects multiplication overflow; `malloc(0)` returns
+a freeable minimum allocation when memory is available; `free(NULL)` is a no-op;
+`realloc(p, 0)` frees and returns NULL. Failed nonzero realloc preserves the old
+allocation. `aligned_alloc` requires a power-of-two alignment and a size divisible
+by it. `<hyper/heap.h>` exposes the arbitrary-size aligned allocation interface
+used by Rust. Each pointer must be released through the same process heap.
+Dynamic applications and their DSOs share the allocator in `libhyper.so`;
+static applications use the same implementation from `libhyper.a`.
 
 ## Build
 

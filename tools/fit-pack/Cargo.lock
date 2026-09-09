@@ -19,3 +19,19 @@ version = "0.0.0"
 dependencies = [
  "hyper-abi",
 ]
+
+[[patch.unused]]
+name = "hyper-os"
+version = "0.0.0"
+
+[[patch.unused]]
+name = "hyper-rt"
+version = "0.0.0"
+
+[[patch.unused]]
+name = "hyper-service"
+version = "0.0.0"
+
+[[patch.unused]]
+name = "hyper-sys"
+version = "0.0.0"

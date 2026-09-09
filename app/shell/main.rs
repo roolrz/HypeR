@@ -6,6 +6,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod command;
 mod path;
 
@@ -29,7 +31,7 @@ use path::CanonicalPath;
 const INPUT_CHUNK_BYTES: usize = 256;
 const COMMAND_PATH_BYTES: usize = MAX_LINE_BYTES + 5;
 const READY_MESSAGE: &[u8] = b"HypeR session: console ready\n";
-const PROMPT: &[u8] = b"hyper> ";
+const PROMPT: &[u8] = b"hyper-sh$ ";
 const WORKING_DIRECTORY_RIGHTS: DirectoryRights = DirectoryRights::READ
     .union(DirectoryRights::EXECUTE)
     .union(DirectoryRights::DUPLICATE)
@@ -89,7 +91,7 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
     write(&output, READY_MESSAGE)?;
     write(&output, PROMPT)?;
 
-    let mut line = [0_u8; MAX_LINE_BYTES];
+    let mut line = alloc::vec![0_u8; MAX_LINE_BYTES];
     let mut line_length = 0;
     let mut discard_line = false;
     let mut previous_was_carriage_return = false;
@@ -110,7 +112,10 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
                 b'\r' | b'\n' => {
                     write(&output, b"\r\n")?;
                     if discard_line {
-                        write(&error, b"sh: command line is too long\n")?;
+                        write(
+                            &error,
+                            &[PROMPT, b"sh: command line is too long\n"].concat(),
+                        )?;
                     } else if line_length != 0 {
                         let command = line.get(..line_length).ok_or(Error::Protocol)?;
                         match execute_line(command, &mut authorities, &input, &output, &error) {

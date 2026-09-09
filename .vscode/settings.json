@@ -1,0 +1,14 @@
+// "SPDX-FileCopyrightText": "2026 roolrz"
+// "SPDX-License-Identifier": "Apache-2.0"
+
+{
+    "rust-analyzer.linkedProjects": [
+        "kernel/Cargo.toml",
+        "sdk/abi/Cargo.toml",
+        "sdk/rust/Cargo.toml",
+        "app/Cargo.toml",
+        "sdk/toolchain/tests/rust-smoke/Cargo.toml",
+        "tools/fit-pack/Cargo.toml"
+    ],
+    "rust-analyzer.cargo.configPath": ".vscode/rust-analyzer.toml"
+}

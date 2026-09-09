@@ -198,7 +198,7 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             fi
             ;;
         top_exit)
-            if grep -Eq '^hyper> q?$' "$native_output"; then
+            if grep -Eq '^hyper-sh\$ q?$' "$native_output"; then
                 printf '/bin/echo HYPER_NATIVE_ECHO_OK\n' >&3
                 command_phase='echo'
             fi

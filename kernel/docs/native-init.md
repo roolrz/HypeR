@@ -60,7 +60,11 @@ Thread receives a 256 KiB read/write stack below `0xffff0000`, separated from
 the image by an unmapped guard page. Its 16-byte-aligned entry stack follows
 the LP64 System V ordering for `argc`, `argv`, `envp`, and `auxv`. HypeR-private
 auxiliary entries point to a bounded array of generated, fixed-width startup
-handle records. TLS starts at zero.
+handle records. TLS starts at zero. Before application entry, the SDK CRT reserves
+`[0xe0000000, 0xf0000000)` under ROOT_VMAR for the process heap. This is separate
+from the loader's `[0x20000000, 0xe0000000)` library range; backing pages are
+mapped only on allocation. The kernel still owns the root address space and
+resource accounting; allocator policy lives in `sdk/lib`.
 
 Executable bytes are copied into writable unpublished staging memory,
 relocated, then snapshotted into immutable instruction-coherent storage before

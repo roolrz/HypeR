@@ -1297,6 +1297,20 @@ static int initialize_main(const uintptr_t *stack)
     for (size_t index = object_count; index > 0; --index) {
         if (!relocate_object(&objects[index - 1])) return 0;
     }
+    /* Heap setup must precede every application/DSO constructor. Resolve the
+     * hook in the shared runtime itself, never in the interpreter's static
+     * libhyper primitives or an interposing application symbol. */
+    Object *runtime = find_object("libhyper.so");
+    if (runtime != NULL) {
+        int weak = 0;
+        void *hook = find_symbol_in(runtime, "hyper_runtime_initialize", &weak);
+        if (hook == NULL
+            || ((hyper_native_status_t (*)(const uintptr_t *))hook)(stack)
+                != HYPER_NATIVE_STATUS_OK) {
+            last_error = "Native runtime initialization failed";
+            return 0;
+        }
+    }
     for (size_t index = object_count; index > 1; --index) {
         if (!initialize_object(&objects[index - 1])) return 0;
     }

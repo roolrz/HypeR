@@ -38,6 +38,10 @@ hyper_native_status_t hyper_startup_find_handle(
     uint32_t purpose,
     hyper_native_handle_t *handle);
 
+/* Loader startup hook: after relocation and before constructors. Static
+ * applications initialize through CRT instead; repeated initialization is safe. */
+hyper_native_status_t hyper_runtime_initialize(const uintptr_t *initial_stack);
+
 int hyper_main(const hyper_startup_t *startup);
 
 #ifdef __cplusplus
