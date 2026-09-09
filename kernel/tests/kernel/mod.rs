@@ -21,6 +21,7 @@ mod object_directory;
 mod object_wait;
 #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
 mod reschedule_ipi;
+mod scheduler_parallel;
 mod scheduler_sync;
 mod stack_model;
 mod startup_readiness;
@@ -38,6 +39,10 @@ pub(crate) fn run() {
     #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_X86_64))]
     run_case("reschedule IPI runtime proof", reschedule_ipi::run);
     run_case("kernel scheduler/sync tests", scheduler_sync::run);
+    run_case(
+        "parallel scheduler wait/wake tests",
+        scheduler_parallel::run,
+    );
     run_case(
         "kernel log flush-barrier cancellation tests",
         log_flush_barrier::run,

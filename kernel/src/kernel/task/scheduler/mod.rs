@@ -24,7 +24,7 @@ use core::ptr::NonNull;
 
 use hyper::cpu::CpuIndex;
 use hyper::sync::atomic::{AtomicUsize, Ordering};
-use hyper::sync::{InterruptMaskGuard, InterruptSpinLock};
+use hyper::sync::{InterruptMaskGuard, InterruptShardedLock};
 
 use self::registry::ThreadReservation;
 use self::state::{PreparedContextSwitch, Scheduler};
@@ -56,12 +56,39 @@ const FAIR_QUANTUM_TICKS: u64 = if CONFIGURED_FAIR_QUANTUM_TICKS == 0 {
     CONFIGURED_FAIR_QUANTUM_TICKS
 };
 
-type SchedulerLock = InterruptSpinLock<Option<Scheduler>, crate::hal::irq::LocalMask>;
+type CoordinatorLock =
+    InterruptShardedLock<Option<Scheduler>, crate::hal::irq::LocalMask, { hyper::cpu::MAX_CPUS }>;
 type TransitionMask = InterruptMaskGuard<crate::hal::irq::LocalMask>;
 type TransitionMaskState =
     <crate::hal::irq::LocalMask as hyper::hal::interrupt::InterruptMask>::State;
 
-static SCHEDULER: SchedulerLock = InterruptSpinLock::new(None);
+static SCHEDULER: CoordinatorLock = InterruptShardedLock::new(None);
+
+/// Pins registry lifetime and placement without serializing other CPUs.
+/// No reader may upgrade to exclusive coordination or enter another reader.
+fn read_scheduler<R>(operation: impl FnOnce(&Scheduler) -> Result<R, Error>) -> Result<R, Error> {
+    // SAFETY: masks remain lexical; choosing the reader lane and using it
+    // happen on the same CPU, before any possible rescheduling.
+    let mask = unsafe { TransitionMask::acquire() };
+    let cpu = current_cpu()?;
+    let result = SCHEDULER
+        .read(cpu.get(), |slot| {
+            operation(slot.as_ref().ok_or(Error::NotInitialized)?)
+        })
+        .ok_or(Error::InvalidCpuIndex)?;
+    drop(mask);
+    result
+}
+
+/// Holds one reader lane for the SMP progress proof. The callback must not
+/// enter scheduler APIs or retain the IRQ mask beyond this call.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn hold_reader_for_test(operation: impl FnOnce()) -> Result<(), Error> {
+    read_scheduler(|_scheduler| {
+        operation();
+        Ok(())
+    })
+}
 static RETIREMENTS_IN_PROGRESS: AtomicUsize = AtomicUsize::new(0);
 
 /// Locks scheduler-detached resources into the observable retirement epoch.
@@ -446,11 +473,7 @@ pub fn current_thread_id() -> Result<ThreadId, Error> {
 
 /// Returns an owned name snapshot for the identified scheduler Thread.
 pub fn thread_name(id: ThreadId) -> Result<ThreadNameSnapshot, Error> {
-    SCHEDULER.with(|slot| {
-        slot.as_ref()
-            .ok_or(Error::NotInitialized)?
-            .with_thread(id, Thread::name_snapshot)
-    })
+    read_scheduler(|scheduler| scheduler.with_thread(id, Thread::name_snapshot))
 }
 
 /// Returns authority-free canonical object identity for a scheduler Thread.
@@ -458,30 +481,18 @@ pub fn thread_name(id: ThreadId) -> Result<ThreadNameSnapshot, Error> {
 pub(crate) fn thread_object_snapshot(
     id: ThreadId,
 ) -> Result<crate::kernel::task::ThreadObjectSnapshot, Error> {
-    SCHEDULER.with(|slot| {
-        slot.as_ref()
-            .ok_or(Error::NotInitialized)?
-            .thread_object_snapshot(id)
-    })
+    read_scheduler(|scheduler| scheduler.thread_object_snapshot(id))
 }
 
 /// Captures one pointer-free page of scheduler-to-object relationships.
 pub(crate) fn scan_thread_objects(
     cursor: crate::kernel::task::ThreadObjectScanCursor,
 ) -> Result<crate::kernel::task::ThreadObjectSnapshotPage, Error> {
-    SCHEDULER.with(|slot| {
-        slot.as_ref()
-            .ok_or(Error::NotInitialized)
-            .map(|scheduler| scheduler.scan_thread_objects(cursor))
-    })
+    read_scheduler(|scheduler| Ok(scheduler.scan_thread_objects(cursor)))
 }
 
 pub fn statistics() -> Result<Statistics, Error> {
-    let mut statistics = SCHEDULER.with(|slot| {
-        slot.as_ref()
-            .ok_or(Error::NotInitialized)
-            .map(Scheduler::statistics)
-    })?;
+    let mut statistics = read_scheduler(|scheduler| Ok(scheduler.statistics()))?;
     // Population must be observed first. A concurrent detach either remains
     // represented in that snapshot or increments the counter under the same
     // scheduler critical section before this acquire observation.
@@ -493,15 +504,9 @@ pub fn thread_stack_statistics(
     id: ThreadId,
 ) -> Result<Option<crate::kernel::mm::stack::StackStatistics>, Error> {
     SCHEDULER.with(|slot| {
-        let scheduler = slot.as_ref().ok_or(Error::NotInitialized)?;
-        let thread = scheduler.thread(id)?;
-        if thread.schedule_owner_cpu().is_some()
-            || matches!(thread.state(), ThreadState::Migrating)
-            || !scheduler.context_is_stopped(id)?
-        {
-            return Err(Error::InvalidThreadState);
-        }
-        scheduler.with_thread(id, Thread::kernel_stack_statistics)
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .stack_statistics(id)
     })
 }
 
@@ -580,11 +585,7 @@ pub fn kthread_create_with_affinity(
 /// availability later, so final Thread creation repeats the same validation.
 pub(crate) fn validate_affinity(affinity: CpuMask) -> Result<(), Error> {
     let preferred_cpu = current_cpu()?;
-    SCHEDULER.with(|slot| {
-        slot.as_ref()
-            .ok_or(Error::NotInitialized)?
-            .validate_affinity(preferred_cpu, affinity)
-    })
+    read_scheduler(|scheduler| scheduler.validate_affinity(preferred_cpu, affinity))
 }
 
 /// Creates a dormant real-time FIFO kernel thread.
@@ -836,12 +837,7 @@ fn abandon_reservation(mut reservation: ThreadReservation) -> Result<(), Error> 
 
 /// Returns the pinned vCPU payload owned by the calling CPU's current Thread.
 pub(crate) fn current_vcpu() -> Result<CurrentVcpu, Error> {
-    let cpu = current_cpu()?;
-    SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .current_vcpu(cpu)
-    })
+    state::local_current_vcpu(current_cpu()?)?.ok_or(Error::InvalidThreadState)
 }
 
 /// Returns the CPU which the scheduler currently proves is running `thread`.
@@ -850,11 +846,7 @@ pub(crate) fn current_vcpu() -> Result<CurrentVcpu, Error> {
 /// prompting and must tolerate the Thread stopping or migrating after the
 /// scheduler lock is released.
 pub(in crate::kernel) fn running_vcpu_cpu(thread: ThreadId) -> Result<Option<CpuIndex>, Error> {
-    SCHEDULER.with(|slot| {
-        slot.as_ref()
-            .ok_or(Error::NotInitialized)?
-            .running_vcpu_cpu(thread)
-    })
+    read_scheduler(|scheduler| scheduler.running_vcpu_cpu(thread))
 }
 
 /// Prompts the exact scheduler-owned vCPU after its endpoint accepted a stop.
@@ -907,17 +899,12 @@ pub(in crate::kernel) fn request_vcpu_stop(thread: ThreadId) -> Result<(), Error
 /// Reports generation-qualified scheduler reaping without blocking.
 #[allow(dead_code)]
 pub(in crate::kernel) fn vcpu_reaped(thread: ThreadId) -> Result<bool, Error> {
-    SCHEDULER.with(|slot| {
-        let scheduler = slot.as_ref().ok_or(Error::NotInitialized)?;
-        match scheduler.thread_registry_status(thread) {
-            registry::ThreadRegistryStatus::Occupied(super::thread::ExecutionKind::Vcpu)
-            | registry::ThreadRegistryStatus::Retiring(super::thread::ExecutionKind::Vcpu) => {
-                Ok(false)
-            }
-            registry::ThreadRegistryStatus::Occupied(_)
-            | registry::ThreadRegistryStatus::Retiring(_) => Err(Error::InvalidThreadState),
-            registry::ThreadRegistryStatus::Absent => Ok(true),
-        }
+    read_scheduler(|scheduler| match scheduler.thread_registry_status(thread) {
+        registry::ThreadRegistryStatus::Occupied(super::thread::ExecutionKind::Vcpu)
+        | registry::ThreadRegistryStatus::Retiring(super::thread::ExecutionKind::Vcpu) => Ok(false),
+        registry::ThreadRegistryStatus::Occupied(_)
+        | registry::ThreadRegistryStatus::Retiring(_) => Err(Error::InvalidThreadState),
+        registry::ThreadRegistryStatus::Absent => Ok(true),
     })
 }
 
@@ -926,12 +913,7 @@ pub(in crate::kernel) fn vcpu_reaped(thread: ThreadId) -> Result<bool, Error> {
 /// The dedicated guard proves that the non-null payload address remains pinned
 /// and cannot be reclaimed until the caller closes its machine-active borrow.
 pub(crate) fn current_user(_pin: &UserRunGuard) -> Result<CurrentUser, Error> {
-    let cpu = current_cpu()?;
-    SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .current_user(cpu)
-    })
+    state::local_current_user(current_cpu()?)
 }
 
 /// Returns the pinned vCPU payload when the current Thread owns one.
@@ -1294,11 +1276,7 @@ pub(crate) fn prepare_park(wait_queue: &WaitQueue) -> Result<ParkToken, Error> {
 
 /// Arms a generation-qualified wait owned by the current Thread.
 pub(crate) fn begin_wait(mobility: WaitMobility) -> Result<WaitRegistration, Error> {
-    let cpu = current_cpu()?;
-    let ticket = SCHEDULER.with(|slot| {
-        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.arm_wait(cpu, mobility)
-    })?;
+    let ticket = read_scheduler(|scheduler| scheduler.arm_wait_shared(current_cpu()?, mobility))?;
     Ok(WaitRegistration {
         ticket,
         active: true,
@@ -1314,11 +1292,8 @@ pub(crate) fn begin_wait(mobility: WaitMobility) -> Result<WaitRegistration, Err
 pub(crate) fn finish_wait(
     mut registration: WaitRegistration,
 ) -> Result<Option<WaitOutcome>, Error> {
-    let cpu = current_cpu()?;
-    let result = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .finish_unqueued_wait(cpu, registration.ticket)
+    let result = read_scheduler(|scheduler| {
+        scheduler.finish_wait_shared(current_cpu()?, registration.ticket, false)
     });
     if result.is_ok() {
         registration.disarm();
@@ -1330,15 +1305,14 @@ pub(crate) fn finish_wait(
 ///
 /// The caller holds the condition object's IRQ-masking lock, closing the
 /// condition-check-to-park window. Queue membership and the embedded wait
-/// record are published in one scheduler-lock transaction.
+/// record are published under the owner CPU lock and the queue lock.
 pub(crate) fn prepare_registered_park_locked(
     wait_queue: &WaitQueue,
     mut registration: WaitRegistration,
 ) -> Result<PrepareWait, Error> {
     let cpu = current_cpu()?;
-    let result = SCHEDULER.with(|slot| {
-        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        match scheduler.prepare_registered_park(cpu, wait_queue, registration.ticket)? {
+    let result = read_scheduler(|scheduler| {
+        match scheduler.park_shared(cpu, wait_queue, registration.ticket)? {
             state::PreparedWait::Park { switch, ticket } => {
                 Ok(PrepareWait::Park(ParkCommit { switch, ticket }))
             }
@@ -1386,13 +1360,10 @@ pub(crate) fn retain_park_mask(commit: ParkCommit, interrupt_mask: TransitionMas
 
 pub(crate) fn complete_park(token: ParkToken) -> WaitOutcome {
     token.transition.activate();
-    let result = current_cpu().and_then(|cpu| {
-        SCHEDULER.with(|slot| {
-            slot.as_mut()
-                .ok_or(Error::NotInitialized)?
-                .finish_completed_wait(cpu, token.ticket)
-        })
-    });
+    let result = read_scheduler(|scheduler| {
+        scheduler.finish_wait_shared(current_cpu()?, token.ticket, true)
+    })
+    .and_then(|outcome| outcome.ok_or(Error::InvalidWaitRegistration));
     match result {
         Ok(outcome) => outcome,
         Err(error) => scheduler_invariant("committed wait completion", error),
@@ -1407,10 +1378,8 @@ pub(crate) fn wake_one_with(
     wait_queue: &WaitQueue,
     before_ready: impl FnOnce(ThreadId),
 ) -> Result<Option<ThreadId>, Error> {
-    let awakened = SCHEDULER.with(|slot| {
-        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.notify_one_with(wait_queue, before_ready)
-    })?;
+    let awakened =
+        read_scheduler(|scheduler| scheduler.notify_one_shared(wait_queue, before_ready))?;
     if let Some((_, outcome)) = awakened {
         publish_committed_ready(outcome);
     }
@@ -1418,11 +1387,16 @@ pub(crate) fn wake_one_with(
 }
 
 pub(crate) fn wake_all(wait_queue: &WaitQueue) -> Result<usize, Error> {
-    let (count, targets) = SCHEDULER.with(|slot| {
-        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+    let (count, targets) = read_scheduler(|scheduler| {
         let mut count = 0usize;
         let mut targets = [false; hyper::cpu::MAX_CPUS];
-        while let Some((_, outcome)) = scheduler.notify_one_with(wait_queue, |_| {})? {
+        // Bound the batch by its initial population. New/requeued waiters
+        // cannot keep an IRQ-masked wake-all operation alive indefinitely.
+        let limit = scheduler.with_wait_queue(wait_queue, |queue| queue.len);
+        for _ in 0..limit {
+            let Some((_, outcome)) = scheduler.notify_one_shared(wait_queue, |_| {})? else {
+                break;
+            };
             if outcome.should_preempt {
                 targets[outcome.target_cpu.get()] = true;
             }
@@ -1449,16 +1423,14 @@ pub(crate) fn wake_all(wait_queue: &WaitQueue) -> Result<usize, Error> {
 /// Attempts exact-ticket timeout or cancellation arbitration.
 ///
 /// Stale tickets and already-completed registrations are clean losers. A
-/// queued winner is made runnable under the scheduler lock; reschedule/event
-/// publication happens only after releasing that lock.
+/// queued winner is made runnable under its CPU lock; reschedule/event
+/// publication happens only after releasing scheduler protection.
 pub(crate) fn resolve_wait(ticket: WaitTicket, outcome: WaitOutcome) -> Result<ResolveWait, Error> {
     if outcome == WaitOutcome::Notified {
         return Err(Error::InvalidWaitRegistration);
     }
-    let resolved = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .resolve_wait(ticket, outcome)
+    let resolved = read_scheduler(|scheduler| {
+        scheduler.resolve_wait_shared(ticket, outcome, state::WakePreemption::Policy, || {})
     })?;
     if let Some(ready) = resolved.ready {
         publish_committed_ready(ready);
@@ -1471,7 +1443,7 @@ pub(crate) fn resolve_wait(ticket: WaitTicket, outcome: WaitOutcome) -> Result<R
 
 /// Notifies one exact wait generation and commits caller-owned result state.
 ///
-/// `on_commit` executes synchronously under the scheduler lock only when this
+/// `on_commit` executes synchronously under the owner CPU lock only when this
 /// notification wins over timeout and cancellation. It runs before a queued
 /// Thread becomes Ready, so an object may publish a typed observation without
 /// storing that payload in scheduler policy. The callback must be bounded,
@@ -1480,10 +1452,13 @@ pub(crate) fn notify_registered_with(
     ticket: WaitTicket,
     on_commit: impl FnOnce(),
 ) -> Result<ResolveWait, Error> {
-    let resolved = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .resolve_wait_with(ticket, WaitOutcome::Notified, on_commit)
+    let resolved = read_scheduler(|scheduler| {
+        scheduler.resolve_wait_shared(
+            ticket,
+            WaitOutcome::Notified,
+            state::WakePreemption::Policy,
+            on_commit,
+        )
     })?;
     if let Some(ready) = resolved.ready {
         publish_committed_ready(ready);
@@ -1500,15 +1475,13 @@ pub(crate) fn notify_registered_with(
 /// class ordering while ensuring an ordinary Fair service thread cannot retain
 /// the CPU beyond the IRQ tail after an equally Fair execution endpoint wakes.
 pub(crate) fn notify_registered_fair_boundary(ticket: WaitTicket) -> Result<ResolveWait, Error> {
-    let resolved = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .resolve_wait_with_preemption(
-                ticket,
-                WaitOutcome::Notified,
-                state::WakePreemption::FairBoundary,
-                || {},
-            )
+    let resolved = read_scheduler(|scheduler| {
+        scheduler.resolve_wait_shared(
+            ticket,
+            WaitOutcome::Notified,
+            state::WakePreemption::FairBoundary,
+            || {},
+        )
     })?;
     if let Some(ready) = resolved.ready {
         publish_committed_ready(ready);
@@ -1520,11 +1493,7 @@ pub(crate) fn notify_registered_fair_boundary(ticket: WaitTicket) -> Result<Reso
 }
 
 pub(crate) fn cancel_waiter(wait_queue: &WaitQueue, id: ThreadId) -> Result<bool, Error> {
-    let resolved = SCHEDULER.with(|slot| {
-        slot.as_mut()
-            .ok_or(Error::NotInitialized)?
-            .cancel_waiter(wait_queue, id)
-    })?;
+    let resolved = read_scheduler(|scheduler| scheduler.cancel_waiter_shared(wait_queue, id))?;
     if let Some(ready) = resolved.ready {
         publish_committed_ready(ready);
     }
@@ -1532,11 +1501,7 @@ pub(crate) fn cancel_waiter(wait_queue: &WaitQueue, id: ThreadId) -> Result<bool
 }
 
 pub(crate) fn waiter_count(wait_queue: &WaitQueue) -> Result<usize, Error> {
-    SCHEDULER.with(|slot| {
-        let _ = slot.as_ref().ok_or(Error::NotInitialized)?;
-        // SAFETY: SCHEDULER is held exclusively for all WaitQueue access.
-        Ok(unsafe { &*wait_queue.state_pointer() }.len)
-    })
+    read_scheduler(|scheduler| Ok(scheduler.with_wait_queue(wait_queue, |queue| queue.len)))
 }
 
 pub(crate) fn ensure_sleepable() -> Result<(), Error> {
@@ -1641,7 +1606,7 @@ pub(crate) fn reap_one_thread(
 
 /// Reports whether scheduler-detached execution awaits the shared reaper.
 pub(crate) fn retirement_pending(_access: &crate::kernel::reaper::ReaperAccess) -> bool {
-    SCHEDULER.with(|slot| slot.as_ref().is_some_and(Scheduler::has_retirements))
+    read_scheduler(|scheduler| Ok(scheduler.has_retirements())).unwrap_or(false)
 }
 
 fn retire_detached_thread(mut thread: Box<Thread>) {

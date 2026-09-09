@@ -78,8 +78,16 @@ reject 'if[^\n]*schedule_owner_cpu\([^\n]*\n([^\n]*\n){0,4}[^\n]*with_cpu_schedu
     "$state" 'CPU-owned entry routing must use cpu_lock_required_for instead of recursive observation checks'
 require 'let local = core::ptr::NonNull::from\(&mut \*local\);[\s\S]*operation\(self, unsafe \{ &mut \*local\.as_ptr\(\) \}\)' \
     "$state" 'top-level and nested CPU-domain borrows must derive from one raw provenance'
-require 'pub fn notify_one_with[\s\S]*cpu_lock_required_for\(id\)\?[\s\S]*thread\(id\)\?[\s\S]*wait_record\(\)' \
-    "$state" 'wait-queue consumers must route a CPU-owned head before reading its schedule'
+require 'pub fn notify_one_shared[\s\S]*wait_owner\(id\)[\s\S]*CPU_SCHEDULERS\[cpu\]\.with[\s\S]*queue.head != Some\(id\)[\s\S]*queued_ticket' \
+    src/kernel/task/scheduler/state/waiting.rs 'wait consumers must lock the owner and revalidate the queue head before accessing its wait record'
+require 'type CoordinatorLock =[[:space:]]*InterruptShardedLock' \
+    "$scheduler" 'registry readers must use independent CPU lanes'
+require 'fn begin_wait[\s\S]*read_scheduler[\s\S]*arm_wait_shared' \
+    "$scheduler" 'wait registration must bypass exclusive coordination'
+require 'fn wake_one_with[\s\S]*read_scheduler[\s\S]*notify_one_shared' \
+    "$scheduler" 'wakeups must bypass exclusive coordination'
+require 'fn move_blocked_thread[\s\S]*release_schedule[\s\S]*reassign_stopped_with_affinity[\s\S]*deferred_blocked_handoff' \
+    "$state" 'blocked migration must transfer CPU residence after releasing the source lock'
 require 'pub fn queue_terminated_retirement[\s\S]*schedule_owner_cpu[\s\S]*QueueMembership::Terminated[\s\S]*registry\.begin_retirement' \
     "$state" 'termination must stage exact identity-directed retirement'
 require 'request_user_stop\(id, reason\)[\s\S]*queue_terminated_retirement\(id\)[\s\S]*crate::kernel::reaper::request' \

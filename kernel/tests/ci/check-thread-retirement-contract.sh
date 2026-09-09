@@ -85,7 +85,7 @@ require 'fetch_update\(Ordering::Relaxed, Ordering::Relaxed,[\s\S]*count < THREA
     "$scheduler" 'retirement admission must reject counter overflow'
 require 'fetch_update\(Ordering::Release, Ordering::Relaxed,[\s\S]*count\.checked_sub\(1\)' \
     "$scheduler" 'retirement completion must release-publish and reject underflow'
-require_order "$statistics" 'SCHEDULER\.with' \
+require_order "$statistics" 'read_scheduler' \
     'RETIREMENTS_IN_PROGRESS\.load\(Ordering::Acquire\)' \
     'scheduler population must be observed before detached retirement completion'
 require 'wait_for_test_progress[\s\S]*statistics\.retirements_in_progress == 0' \

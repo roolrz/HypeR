@@ -75,9 +75,9 @@ unsafe impl Sync for ThreadTable {}
 impl ThreadTable {
     fn slot(&self, index: usize) -> Option<&ThreadSlot> {
         let cell = self.slots.get(index)?;
-        // SAFETY: immutable authorities are minted from `&ThreadRegistry`.
-        // Every mutable authority requires `&mut ThreadRegistry`, so Rust's
-        // borrow rules prevent concurrent mutation in this Phase-A design.
+        // SAFETY: coordinator readers pin slot lifetime through a reader
+        // lane; writers own every lane. CPU-only authorities reference only
+        // owned current/ready/blocked IDs, whose retirement needs that CPU lock.
         Some(unsafe { &*cell.0.get() })
     }
 
@@ -256,14 +256,14 @@ pub(super) struct ThreadTableWriteAuthority<'table> {
     _exclusive: PhantomData<&'table mut ThreadSlot>,
 }
 
-/// Exclusive authority over global waiting/terminated queue topology.
+/// Authority over waiting/terminated topology, independent of CPU schedules.
 ///
-/// Control links live outside the movable scheduling domain. This authority
-/// therefore needs only the TransitionLock-owned registry token and may
-/// update adjacent nodes whose schedules are owned by different CPUs.
+/// Exclusive coordination protects lifecycle operations. Shared wait operations
+/// instead retain a registry reader lane and the affected queue lock. Either
+/// authority can update adjacent links without borrowing their CPU schedules.
 pub(super) struct ThreadControlAuthority<'table> {
     table: ThreadTableAccess<'table>,
-    _token: &'table mut ThreadTableAuthorityToken,
+    _token: &'table ThreadTableAuthorityToken,
     _exclusive: PhantomData<&'table mut ThreadSlot>,
 }
 
@@ -275,7 +275,8 @@ impl ThreadControlAuthority<'_> {
         let slot = id.scheduler_slot().ok_or(Error::ThreadNotFound)?;
         match self.table.table().slot(slot) {
             Some(ThreadSlot::Occupied(thread)) if thread.id() == id => {
-                // SAFETY: this authority borrows the registry's control token.
+                // SAFETY: this authority holds exclusive coordination or
+                // was minted under the affected queue lock and reader lane.
                 Ok(unsafe { thread.control_queue_links() })
             }
             _ => Err(Error::ThreadNotFound),
@@ -290,8 +291,8 @@ impl ThreadControlAuthority<'_> {
         let slot = id.scheduler_slot().ok_or(Error::ThreadNotFound)?;
         match self.table.table().slot(slot) {
             Some(ThreadSlot::Occupied(thread)) if thread.id() == id => {
-                // SAFETY: this authority exclusively borrows the registry's
-                // private control token for the closure duration.
+                // SAFETY: exclusive coordination or the matching queue lock
+                // serializes these links, and registry protection pins the slot.
                 Ok(unsafe { thread.with_control_queue_links_mut(operation) })
             }
             _ => Err(Error::ThreadNotFound),
@@ -386,6 +387,21 @@ pub(super) struct ThreadRegistry {
 }
 
 impl ThreadRegistry {
+    /// Creates topology authority while a registry reader lane pins all slots.
+    ///
+    /// # Safety
+    ///
+    /// The caller must hold the affected `WaitQueue` lock throughout use. All
+    /// referenced nodes must belong to that queue, except an insertion/removal
+    /// candidate whose CPU scheduler lock the caller also holds.
+    pub(super) unsafe fn wait_control_authority(&self) -> ThreadControlAuthority<'_> {
+        ThreadControlAuthority {
+            table: self.table.access(),
+            _token: &self.table_authority,
+            _exclusive: PhantomData,
+        }
+    }
+
     pub fn new(bootstrap: Box<Thread>, idle: Box<Thread>) -> Result<Self, Error> {
         let mut slots = Vec::new();
         slots

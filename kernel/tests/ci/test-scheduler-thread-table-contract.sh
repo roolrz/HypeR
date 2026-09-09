@@ -50,8 +50,8 @@ mutate 'crash observation resumed scanning the current stack' \
     src/kernel/task/scheduler/state.rs 'stack_statistics: None' \
     'stack_statistics: thread.kernel_stack_statistics()'
 mutate 'stopped-stack scan lost its closure-bounded second lookup' \
-    src/kernel/task/scheduler/mod.rs \
-    'scheduler.with_thread(id, Thread::kernel_stack_statistics)' \
+    src/kernel/task/scheduler/state.rs \
+    'self.with_thread(id, Thread::kernel_stack_statistics)' \
     'Ok(thread.kernel_stack_statistics())'
 mutate 'control links re-entered the CPU-owned scheduling domain' \
     src/kernel/task/thread.rs 'control_queue_links: UnsafeCell<QueueLinks>' \

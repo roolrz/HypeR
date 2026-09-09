@@ -331,10 +331,10 @@ pub struct Thread {
     object: ThreadObject,
     schedule_owner: ScheduleOwner,
     schedule: UnsafeCell<ThreadScheduleState>,
-    /// Waiting/terminated intrusive links owned only by `TransitionLock`.
-    ///
-    /// This cell is independent from the CPU-owned scheduling domain so a
-    /// global control queue may safely link neighbors owned by different CPUs.
+    /// Intrusive links protected by their `WaitQueue` lock plus a registry
+    /// reader lane, or by exclusive coordination for lifecycle operations.
+    /// Independent storage lets one queue link neighbors owned by different
+    /// CPUs without borrowing their schedules.
     control_queue_links: UnsafeCell<QueueLinks>,
     /// Monotonic scheduler ticks charged while this Thread is current.
     runtime_ticks: AtomicU64,
@@ -345,7 +345,7 @@ pub struct Thread {
 enum ScheduleOwner {
     /// Owned by the transition coordinator and absent from every ready queue.
     Coordinator,
-    /// Owned by one CPU domain, either as current or on that CPU's ready queue.
+    /// Owned by one CPU domain, as current, ready, or blocked.
     Cpu(CpuIndex),
 }
 
@@ -815,7 +815,10 @@ impl Thread {
         }
         let schedule = self.schedule.get_mut();
         if schedule.placement.assigned_cpu() != cpu
-            || !matches!(schedule.state, ThreadState::Running | ThreadState::Idle)
+            || !matches!(
+                schedule.state,
+                ThreadState::Running | ThreadState::Idle | ThreadState::Blocked
+            )
             || schedule.ready_queue_links.membership != QueueMembership::None
         {
             return false;
@@ -991,10 +994,10 @@ impl Thread {
         }
     }
 
-    /// Returns links owned exclusively by the transition coordinator.
+    /// Returns links under exclusive coordination or matching queue authority.
     pub(super) unsafe fn control_queue_links(&self) -> QueueLinks {
-        // SAFETY: the caller holds TransitionLock control authority and the
-        // cell is disjoint from schedule.
+        // SAFETY: the caller owns exclusive coordination or the matching
+        // queue authority. The cell is disjoint from CPU schedule storage.
         unsafe { *self.control_queue_links.get() }
     }
 
@@ -1003,7 +1006,9 @@ impl Thread {
     ///
     /// # Safety
     ///
-    /// The caller must hold the registry's unique control-queue authority.
+    /// The caller must hold exclusive coordination, or the affected queue
+    /// lock and a registry reader lane. An unlinked candidate also requires
+    /// its CPU lock. Other referenced nodes must belong to the locked queue.
     pub(super) unsafe fn with_control_queue_links_mut<R>(
         &self,
         operation: impl FnOnce(&mut QueueLinks) -> R,

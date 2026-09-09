@@ -485,9 +485,38 @@ threads default to Fair. Fair currently uses a replaceable round-robin backend;
 `CONFIG_TIMER_HZ` tick. The public Fair policy deliberately exposes no RR-
 specific parameters so a CFS- or EEVDF-like backend can replace it.
 
+Scheduling synchronization has three domains:
+
+- Each CPU lock owns its current/ready/blocked schedules, run queues, tick
+  accounting and in-flight context switch. Tick, ordinary yield, preemption,
+  current-execution lookup and ordinary switch tails use only that CPU lock.
+- Each `WaitQueue` lock owns its FIFO topology. Wait generation arbitration and
+  ready publication also hold the waiter's CPU lock. Unrelated CPU/queue pairs
+  can park and wake concurrently, including from IRQ context.
+- The coordinator owns registry slots, CPU admission, policy changes, migration
+  and retirement. Its cache-line-separated reader lanes pin registry lifetime
+  and residence: a wait operation takes only its calling CPU's lane. Exclusive
+  operations acquire every lane in CPU order before any CPU lock. There is no
+  global reader count updated by all CPUs. Writers still exclude wait readers;
+  frequent creation, destruction or explicit migration can therefore remain a
+  source of contention.
+
+The lock order is condition-object lock, registry reader lane (or all lanes for
+coordination), owner CPU lock, then wait-queue lock. A FIFO-head lookup releases
+its queue lock before acquiring the owner CPU, then revalidates the head under
+both locks. Readers never upgrade or nest. No queue/CPU/registry guard crosses
+an assembly context switch; the separate retained IRQ mask still does.
+
+Blocked threads retain CPU residence. Wake-before-context-save can make the
+outgoing thread Ready only on its source CPU; its switch ticket still prevents
+migration until the incoming tail completes the save. Blocked migration removes
+source residence under its CPU lock, releases that lock, and publishes target
+residence before ending exclusive coordination. Stack-watermark inspection
+checks that a blocked thread is absent from the in-flight context handoff.
+
 Each runnable class owns a distinct intrusive queue. Explicit FIFO and Fair
-policy-transition APIs move a ready thread between queues under the global
-scheduler lock. A Fair slice expiry moves the running thread to its class tail
+policy-transition APIs move a ready thread between queues under exclusive
+coordination and its CPU lock. A Fair slice expiry moves the running thread to its class tail
 only when a Fair peer is ready. Voluntary yield replenishes the slice, while
 blocking and interruption by real-time work retain its remainder. Idle threads
 never enter an ordinary run queue.
@@ -497,7 +526,7 @@ explicit `CpuMask`; creation prefers the calling CPU when admitted, then the
 lowest-numbered registered CPU in the mask. Empty masks and masks with no
 registered CPU are rejected. Explicit migration and affinity updates move
 dormant, ready, and fully stopped blocked kernel threads synchronously under the
-global scheduler lock. A running or switch-in-flight thread retains the request
+exclusive coordinator. A running or switch-in-flight thread retains the request
 on its own `Thread`; the source CPU commits a switch and the incoming switch tail
 publishes target membership only after assembly has saved the complete source
 context. vCPU and future user threads do not yet have certified execution-state
@@ -507,7 +536,7 @@ The kernel always builds the SMP-capable scheduler and per-CPU infrastructure;
 the same image remains valid when firmware admits only the boot CPU. There is
 no separate uniprocessor configuration or single-CPU scheduler implementation.
 Run queues store stable `ThreadId` values and do not own Thread allocations, so
-future per-CPU queue locks and load selection need not move object ownership.
+CPU placement changes do not move object ownership.
 Exited threads enter a scheduler-owned intrusive reclamation queue. Reaping
 therefore scales with pending exits rather than the lifetime `ThreadId` space,
 and releases an allocation only after no CPU retains it as a current or
@@ -515,8 +544,10 @@ switching-from thread.
 
 Every `Thread` embeds one generation-tagged wait record. Its
 `Idle -> Armed -> Queued -> Completed -> Idle` transaction and intrusive queue
-links are updated under the global scheduler lock, so notification, timeout,
-and cancellation select exactly one terminal `WaitOutcome`. A resolver which
+links are updated under its owner CPU lock and the affected queue lock, so
+notification, timeout, and cancellation select exactly one terminal
+`WaitOutcome`. Exclusive lifecycle operations use the same CPU authority while
+excluding reader lanes. A resolver which
 arrives while the wait is only Armed records its result for the caller instead
 of losing the event; a stale generation cannot resolve a later wait on the same
 queue. Queueing and wakeup allocate no memory. Condition-based primitives hold
@@ -542,7 +573,7 @@ tracks explicit disable guards and IRQ nesting, and is online before the local
 timer can deliver interrupts. The pending bit is the durable scheduling
 condition, not the IPI: Release publication follows ready-queue publication,
 Acquire observation precedes the scheduling decision, and consumption occurs
-only under the scheduler lock. Its `false -> true` publisher owns target
+only under the target CPU scheduler lock. Its `false -> true` publisher owns target
 notification; later publishers coalesce until the target consumes the bit.
 When a request is made inside an interrupt on its owning CPU, the active
 outermost IRQ already supplies the notification and avoids a redundant
