@@ -20,3 +20,12 @@ support and no writable-executable mapping transition.
 does not run destructors or reclaim mappings. This conservative lifetime rule
 avoids invalidating code while other threads may still execute it; unload will
 require an explicit process-wide quiescence protocol.
+
+## Runtime initialization
+
+After relocating the initial dependency graph and before running constructors,
+the loader resolves `hyper_runtime_initialize` directly in `libhyper.so` and
+passes it the original startup stack. This initializes the shared process heap
+before a constructor can allocate. The interpreter's statically linked runtime
+primitives do not own a second heap. CRT repeats initialization idempotently
+before application entry; later `dlopen` constructors use the existing heap.

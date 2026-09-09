@@ -81,6 +81,13 @@ SECTIONS
         *(.data .data.*)
     } :data
 
+    /* PIC Rust core/alloc may introduce a GOT. Keep relocation targets in
+     * writable data and never let an orphan extend the PT_DYNAMIC table. */
+    .got : ALIGN(8)
+    {
+        *(.got .got.*)
+    } :data
+
     .bss (NOLOAD) : ALIGN(16)
     {
         *(.bss .bss.*)

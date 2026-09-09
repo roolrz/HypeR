@@ -5,6 +5,13 @@
 
 #![no_std]
 
+/// Rust's standard heap-backed collections and formatting facilities.
+pub extern crate alloc;
+
+#[cfg(all(not(test), target_os = "none"))]
+#[global_allocator]
+static ALLOCATOR: hyper_sys::allocator::NativeAllocator = hyper_sys::allocator::NativeAllocator;
+
 pub use hyper_os::startup::Startup;
 pub use hyper_sys::RawStartup;
 

@@ -16,7 +16,7 @@ them with the Rust toolchain selected for the application.
 | --- | --- |
 | `hyper-sys` | Raw syscall, C-runtime, pointer, and handle bindings |
 | `hyper-os` | Safe capability-oriented operating-system interfaces |
-| `hyper-rt` | Rust application entry, panic termination, and exit status |
+| `hyper-rt` | Rust application entry, process-heap allocator, panic termination, and exit status |
 | `hyper-service` | Shared typed startup contracts for Native system services |
 
 Unsafe machine interactions are confined to `hyper-sys`. Application code
@@ -37,8 +37,34 @@ envelope.
 
 The initial runtime reuses the C startup parser and AArch64 syscall veneer from
 `sdk/lib`. This preserves one machine entry contract while the Rust API is
-established. Heap allocation is not yet provided; applications currently use
-`core` without `alloc` or `std`.
+established. Loader/CRT startup reserves a private heap VMAR before application entry, and
+`hyper-rt` installs the `libhyper` process heap as Rust's global allocator.
+Applications can use `alloc` without implementing an allocator:
+
+```rust
+extern crate alloc;
+
+use alloc::{format, string::String, vec::Vec};
+
+let name = String::from("shell");
+let message = format!("hello from {name}");
+let bytes: Vec<u8> = [b"hyper> ".as_slice(), message.as_bytes()].concat();
+```
+
+`hyper_rt::alloc` also re-exports the crate. This provides `String`, `Vec`,
+`Box`, collections, `.concat()`, and `format!`; it does not provide `std` or
+POSIX APIs. The allocator supports over-aligned Rust layouts, reclaims empty
+mapped regions, and preserves the original buffer when reallocation fails.
+Use fallible collection APIs such as `try_reserve` where OOM is recoverable;
+infallible allocation failure follows Rust's allocation-error path and the
+runtime's aborting panic policy. Memory use remains charged to the process's
+resource domain. See [the C heap contract](../lib/README.md#process-heap).
+
+`hyper-cargo` rebuilds `core` and `alloc` as PIC for Native PIE linking using
+the pinned compiler's `rust-src`. The driver locally enables Cargo's unstable
+`build-std` through `RUSTC_BOOTSTRAP=1`; this is a toolchain dependency, not a
+stable Rust target support claim. SDK assembly fetches the compiler-library
+lockfile's dependencies before offline application builds.
 
 ## Build boundary
 

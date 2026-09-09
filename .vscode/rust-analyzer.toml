@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
+# Used only by rust-analyzer, not by the SDK-based production build.
+# Cargo resolves paths relative to the repository root (parent of .vscode).
+[patch.crates-io]
+hyper-abi = { path = "sdk/abi" }
+hyper-os = { path = "sdk/rust/hyper-os" }
+hyper-rt = { path = "sdk/rust/hyper-rt" }
+hyper-service = { path = "sdk/rust/hyper-service" }
+hyper-sys = { path = "sdk/rust/hyper-sys" }
+hyper-vm-image = { path = "sdk/rust/hyper-vm-image" }
+
+[env]
+HYPER_CONFIG = { value = "kernel/configs/qemu_aarch64_defconfig", relative = true }
