@@ -119,6 +119,9 @@ The current foundation includes:
 - a capability-scoped Native VM manager contained by a bounded fleet resource
   domain, plus isolated per-VM runtimes which parse FIT images, own guest VMOs,
   construct Linux firmware data, and supervise installed VMs from EL0;
+- a multi-client VM control plane and `/bin/vmm` lifecycle client, with one
+  exclusive capability-scoped virtual-serial attachment per VM and guest output
+  buffered independently of the physical Console;
 - boot-relative, severity-tagged kernel log buffering, lock-independent Thread
   name snapshots for diagnostics, kallsyms, guarded kernel/IRQ/emergency
   stacks, and an optional allocation-free crash console.
@@ -232,7 +235,7 @@ Useful targets:
 | `make sdk-check` / `make sdk-test` | Verify SDK generation, publication, compilation, and portable runtime behavior |
 | `make native-initramfs` | Build Native `/init` through the SDK and package it as deterministic `newc` |
 | `make run ARCH=aarch64` | Build and start the complete Native system |
-| `make test-native` | Verify Native init startup, blocking console input, and echo under QEMU |
+| `make test-native` | Verify the Native service graph, command execution, and managed Linux VM console attach/detach under QEMU |
 | `make guest-assets ARCH=<arch>` | Download and package the pinned Linux guest inputs |
 | `make check ARCH=<arch>` | Run target checks and Clippy, including kernel self-test builds |
 | `make test ARCH=<arch>` | Run kernel host, Kconfig, and kallsyms tests |

@@ -115,6 +115,13 @@ fresh handle-backed standard-I/O channels. This preserves duplex, blocking I/O
 without polling and leaves later foreground-session handoff to capability
 rendezvous without changing physical Console ownership.
 
+The shell also receives one persistent manager connector with exactly
+`WAIT|WRITE`. It cannot duplicate that authority. Each `/bin/vmm` launch
+creates private control and capability-channel pairs, transfers only their
+manager endpoints through the connector, and gives the client endpoints to the
+new process. Consequently an attached guest console cannot monopolize the
+manager connection or prevent independent lifecycle requests.
+
 Manifest capability purposes are symbolic service-contract names rather than
 raw integers. Init resolves each name in the contract selected by the service
 image, verifies its expected object kind, and rejects duplicate resolved
@@ -157,5 +164,8 @@ test-only Linux guest path. The `test-native` contract separately builds the
 Native applications through the assembled SDK, constructs the production
 initramfs, and verifies that init loads the manifest, starts the session and
 shell Processes, launches `ps` and `handle` through scoped inspection handles,
-executes a constructor-bearing shared-object fixture through `dlopen`, and runs
-an external echo command whose output traverses the complete Console path.
+executes a constructor-bearing shared-object fixture through `dlopen`, runs an
+external echo command through the complete physical Console path, and attaches
+`/bin/vmm` to the separately buffered guest serial stream. The VM portion must
+observe repeated Linux timer wakeups, deliver guest-console input, and detach
+through the local Ctrl-] menu.
