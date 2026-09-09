@@ -3,6 +3,8 @@
 
 //! Scheduler-owned thread registry, CPU state, and lifecycle transitions.
 
+mod waiting;
+
 use alloc::boxed::Box;
 use hyper::cpu::{CpuIndex, PerCpu};
 use hyper::sync::InterruptSpinLock;
@@ -33,13 +35,9 @@ use crate::kernel::task::wait::{
 /// Rust reference into a Thread slot can escape the authority closure.
 #[derive(Clone, Copy)]
 pub(super) struct ThreadObservation {
-    schedule_owner: Option<CpuIndex>,
     schedule: Option<ThreadScheduleObservation>,
     execution: ExecutionKind,
     context: *mut crate::hal::context::ThreadContext,
-    vcpu: Option<crate::kernel::task::external_execution::ExternalExecutionPointer>,
-    user: Option<core::ptr::NonNull<crate::kernel::process::UserExecution>>,
-    stack_bounds: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Copy)]
@@ -60,7 +58,6 @@ impl ThreadObservation {
     fn capture(thread: &Thread) -> Self {
         let schedule_owner = thread.schedule_owner_cpu();
         Self {
-            schedule_owner,
             schedule: schedule_owner.is_none().then(|| ThreadScheduleObservation {
                 cpu: thread.cpu_index(),
                 affinity: thread.affinity(),
@@ -75,15 +72,11 @@ impl ThreadObservation {
             }),
             execution: thread.execution_kind(),
             context: thread.context_pointer(),
-            vcpu: thread.vcpu_execution_pointer(),
-            user: thread.user_execution_pointer(),
-            stack_bounds: thread.kernel_stack_bounds(),
         }
     }
 
-    fn capture_cpu(thread: &Thread, cpu: CpuIndex, schedule: &ThreadScheduleState) -> Self {
+    fn capture_cpu(thread: &Thread, schedule: &ThreadScheduleState) -> Self {
         Self {
-            schedule_owner: Some(cpu),
             schedule: Some(ThreadScheduleObservation {
                 cpu: schedule.placement.assigned_cpu(),
                 affinity: schedule.placement.affinity(),
@@ -100,9 +93,6 @@ impl ThreadObservation {
             }),
             execution: thread.execution_kind(),
             context: thread.context_pointer(),
-            vcpu: thread.vcpu_execution_pointer(),
-            user: thread.user_execution_pointer(),
-            stack_bounds: thread.kernel_stack_bounds(),
         }
     }
 
@@ -110,9 +100,6 @@ impl ThreadObservation {
         self.schedule.unwrap_or_else(|| crate::hal::cpu::halt())
     }
 
-    pub(super) const fn schedule_owner_cpu(self) -> Option<CpuIndex> {
-        self.schedule_owner
-    }
     fn cpu_index(self) -> CpuIndex {
         self.schedule().cpu
     }
@@ -155,19 +142,7 @@ impl ThreadObservation {
     const fn context_pointer(self) -> *mut crate::hal::context::ThreadContext {
         self.context
     }
-    fn vcpu_execution_pointer(
-        self,
-    ) -> Option<crate::kernel::task::external_execution::ExternalExecutionPointer> {
-        self.vcpu
-    }
-    const fn user_execution_pointer(
-        self,
-    ) -> Option<core::ptr::NonNull<crate::kernel::process::UserExecution>> {
-        self.user
-    }
-    pub(super) const fn kernel_stack_bounds(self) -> Option<(usize, usize)> {
-        self.stack_bounds
-    }
+
     fn can_run_on(self, cpu: CpuIndex) -> bool {
         self.schedule().affinity.contains(cpu)
     }
@@ -555,7 +530,12 @@ pub(super) fn complete_local_switch_tail(
                 (schedule.state, schedule.pending_migration)
             })?
         };
-        if pending.is_some() || !matches!(state, ThreadState::Ready | ThreadState::Idle) {
+        if pending.is_some()
+            || !matches!(
+                state,
+                ThreadState::Ready | ThreadState::Idle | ThreadState::Blocked
+            )
+        {
             return Ok(LocalTailCompletion::NeedsCoordinator);
         }
         if local.switching_from != Some(switching) {
@@ -618,6 +598,31 @@ pub(super) fn local_current_vcpu(cpu: CpuIndex) -> Result<Option<CurrentVcpu>, E
                 stack,
             }))
         })?
+    })
+}
+
+pub(super) fn local_current_user(cpu: CpuIndex) -> Result<CurrentUser, Error> {
+    CPU_SCHEDULERS[cpu].with(|slot| {
+        let local = slot.as_mut().ok_or(Error::CpuNotRegistered)?;
+        let id = local.current;
+        local
+            .thread_authority()
+            .with_thread(id, |thread, schedule| {
+                if schedule.state != ThreadState::Running {
+                    return Err(Error::InvalidThreadState);
+                }
+                Ok(CurrentUser {
+                    thread: id,
+                    object: thread
+                        .user_thread()
+                        .cloned()
+                        .ok_or(Error::InvalidThreadState)?,
+                    execution: thread
+                        .user_execution_pointer()
+                        .ok_or(Error::InvalidThreadState)?,
+                    stack: thread.kernel_stack_bounds().ok_or(Error::Allocation)?,
+                })
+            })?
     })
 }
 
@@ -738,9 +743,16 @@ pub(super) struct Scheduler {
     /// Coordinator-owned entity awaiting publication after a source CPU lock
     /// is released. `TransitionLock` keeps this handoff invisible externally.
     deferred_ready_handoff: Option<(ThreadId, CpuIndex)>,
+    deferred_blocked_handoff: Option<(ThreadId, CpuIndex)>,
     terminated: ThreadQueue,
     retirements: RetirementQueue,
 }
+
+// SAFETY: registry slots, residence changes and coordinator metadata are
+// mutated only with all reader lanes held. Shared operations pin those slots
+// and use CPU locks for schedule cells and WaitQueue locks for control links.
+// The stack-scoped active_domain is installed only during exclusive access.
+unsafe impl Sync for Scheduler {}
 
 /// CPU-local scheduling state that may be touched without the transition lock.
 ///
@@ -830,14 +842,17 @@ impl CpuScheduler {
             let previous =
                 threads.with_thread(current, |thread, _schedule| thread.context_pointer())?;
             let next_context = threads.with_thread_mut(next, |thread, schedule| {
-                if schedule.state != ThreadState::Ready {
-                    return Err(Error::InvalidThreadState);
+                match schedule.state {
+                    ThreadState::Ready => {
+                        let Some(placement) = schedule.placement.mark_running(cpu) else {
+                            return Err(Error::InvalidThreadState);
+                        };
+                        schedule.placement = placement;
+                        schedule.state = ThreadState::Running;
+                    }
+                    ThreadState::Idle => {}
+                    _ => return Err(Error::InvalidThreadState),
                 }
-                let Some(placement) = schedule.placement.mark_running(cpu) else {
-                    return Err(Error::InvalidThreadState);
-                };
-                schedule.placement = placement;
-                schedule.state = ThreadState::Running;
                 if schedule.fair_slice_expired() {
                     schedule.replenish_fair_slice(super::FAIR_QUANTUM_TICKS);
                 }
@@ -963,6 +978,7 @@ impl Scheduler {
             schedulable_cpus: CpuMask::EMPTY,
             active_domain: None,
             deferred_ready_handoff: None,
+            deferred_blocked_handoff: None,
             terminated: ThreadQueue::new(),
             retirements: RetirementQueue::new(),
         })
@@ -1027,6 +1043,29 @@ impl Scheduler {
         }
         let thread = self.thread(id)?;
         Ok((thread.cpu_index(), thread.affinity()))
+    }
+
+    pub fn stack_statistics(
+        &mut self,
+        id: ThreadId,
+    ) -> Result<Option<crate::kernel::mm::stack::StackStatistics>, Error> {
+        if let Some(cpu) = self.cpu_lock_required_for(id)? {
+            return self.with_cpu_schedule_stored(cpu, |scheduler| scheduler.stack_statistics(id));
+        }
+        if let Some(active) = self.active_domain {
+            if self.thread(id)?.state() != ThreadState::Blocked
+                || self
+                    .switching_from(active.cpu)?
+                    .is_some_and(|switching| switching.thread == id)
+            {
+                return Err(Error::InvalidThreadState);
+            }
+        } else if self.thread(id)?.state() == ThreadState::Migrating
+            || !self.context_is_stopped(id)?
+        {
+            return Err(Error::InvalidThreadState);
+        }
+        self.with_thread(id, Thread::kernel_stack_statistics)
     }
 
     /// Reports whether no CPU owns or may still be saving this context.
@@ -1226,26 +1265,6 @@ impl Scheduler {
         self.registry.take(id)
     }
 
-    pub fn current_vcpu(&mut self, cpu: CpuIndex) -> Result<CurrentVcpu, Error> {
-        let id = self.current_thread(cpu)?;
-        if let Some(owner) = self.cpu_lock_required_for(id)? {
-            return self.with_cpu_schedule_stored(owner, |scheduler| scheduler.current_vcpu(cpu));
-        }
-        let thread = self.thread(id)?;
-        if thread.state() != ThreadState::Running {
-            return Err(Error::InvalidThreadState);
-        }
-        let stack = thread.kernel_stack_bounds().ok_or(Error::Allocation)?;
-        let execution = thread
-            .vcpu_execution_pointer()
-            .ok_or(Error::InvalidThreadState)?;
-        Ok(CurrentVcpu {
-            thread: id,
-            execution,
-            stack,
-        })
-    }
-
     /// Returns the CPU currently executing the exact vCPU Thread.
     ///
     /// Ready, dormant, blocked, and migrating Threads deliberately have no
@@ -1257,8 +1276,8 @@ impl Scheduler {
             return Err(Error::InvalidThreadState);
         }
         if let Some(cpu) = self.cpu_lock_required_for(id)? {
-            // This read-only method is called under TransitionLock by its
-            // public wrapper; acquire the owner CPU and re-enter once.
+            // The registry reader pins residence; the CPU lock supplies
+            // a coherent running-state observation.
             return CPU_SCHEDULERS[cpu].with(|slot| {
                 let local = slot.as_mut().ok_or(Error::CpuNotRegistered)?;
                 let current = local.current;
@@ -1324,33 +1343,6 @@ impl Scheduler {
             ThreadState::Terminated => Ok(VcpuStopTarget::Terminated),
             ThreadState::Blocked | ThreadState::Idle => Err(Error::InvalidThreadState),
         }
-    }
-
-    pub fn current_user(&mut self, cpu: CpuIndex) -> Result<CurrentUser, Error> {
-        let id = self.current_thread(cpu)?;
-        if let Some(owner) = self.cpu_lock_required_for(id)? {
-            return self.with_cpu_schedule_stored(owner, |scheduler| scheduler.current_user(cpu));
-        }
-        let thread = self.thread(id)?;
-        if thread.state() != ThreadState::Running {
-            return Err(Error::InvalidThreadState);
-        }
-        let stack = thread.kernel_stack_bounds().ok_or(Error::Allocation)?;
-        let execution = thread
-            .user_execution_pointer()
-            .ok_or(Error::InvalidThreadState)?;
-        let object = self.registry.with_thread(id, |thread| {
-            thread
-                .user_thread()
-                .cloned()
-                .ok_or(Error::InvalidThreadState)
-        })??;
-        Ok(CurrentUser {
-            thread: id,
-            object,
-            execution,
-            stack,
-        })
     }
 
     pub fn make_ready(&mut self, id: ThreadId) -> Result<ReadyOutcome, Error> {
@@ -1515,7 +1507,9 @@ impl Scheduler {
                 {
                     return Err(Error::QueueCorrupted);
                 }
-                if !self
+                if state == ThreadState::Blocked {
+                    self.move_blocked_thread(id, plan)?;
+                } else if !self
                     .thread_mut(id)?
                     .reassign_stopped_with_affinity(plan.target, plan.affinity)
                 {
@@ -1706,123 +1700,6 @@ impl Scheduler {
         self.prepare_switch(cpu_slot, current, next).map(Some)
     }
 
-    pub fn arm_wait(&mut self, cpu: CpuIndex, mobility: WaitMobility) -> Result<WaitTicket, Error> {
-        let current = self.current_thread(cpu)?;
-        if let Some(owner) = self.cpu_lock_required_for(current)? {
-            return self
-                .with_cpu_schedule_stored(owner, |scheduler| scheduler.arm_wait(cpu, mobility));
-        }
-        let cpu_slot = self.cpu_slot(cpu)?;
-        let current = self.current_thread(cpu_slot)?;
-        let thread = self.thread(current)?;
-        if thread.state() != ThreadState::Running {
-            return Err(Error::CannotBlockIdle);
-        }
-        if mobility == WaitMobility::CpuLocal && thread.pending_migration().is_some() {
-            return Err(Error::MigrationInProgress);
-        }
-        self.thread_mut(current)?
-            .with_wait_record(|wait| wait.arm(current, mobility, cpu))
-            .map_err(Error::from)
-    }
-
-    pub fn finish_unqueued_wait(
-        &mut self,
-        cpu: CpuIndex,
-        ticket: WaitTicket,
-    ) -> Result<Option<WaitOutcome>, Error> {
-        let current = self.current_thread(cpu)?;
-        if let Some(owner) = self.cpu_lock_required_for(current)? {
-            return self.with_cpu_schedule_stored(owner, |scheduler| {
-                scheduler.finish_unqueued_wait(cpu, ticket)
-            });
-        }
-        if current != ticket.thread() {
-            return Err(Error::InvalidWaitRegistration);
-        }
-        self.thread_mut(current)?
-            .with_wait_record(|wait| wait.finish_unqueued(ticket))
-            .map_err(Error::from)
-    }
-
-    pub fn finish_completed_wait(
-        &mut self,
-        cpu: CpuIndex,
-        ticket: WaitTicket,
-    ) -> Result<WaitOutcome, Error> {
-        let current = self.current_thread(cpu)?;
-        if let Some(owner) = self.cpu_lock_required_for(current)? {
-            return self.with_cpu_schedule_stored(owner, |scheduler| {
-                scheduler.finish_completed_wait(cpu, ticket)
-            });
-        }
-        if current != ticket.thread() {
-            return Err(Error::InvalidWaitRegistration);
-        }
-        self.thread_mut(current)?
-            .with_wait_record(|wait| wait.finish_completed(ticket))
-            .map_err(Error::from)
-    }
-
-    pub fn prepare_registered_park(
-        &mut self,
-        cpu: CpuIndex,
-        wait_queue: &WaitQueue,
-        ticket: WaitTicket,
-    ) -> Result<PreparedWait, Error> {
-        let current = self.current_thread(cpu)?;
-        if let Some(owner) = self.cpu_lock_required_for(current)? {
-            return self.with_cpu_schedule_stored(owner, |scheduler| {
-                scheduler.prepare_registered_park(cpu, wait_queue, ticket)
-            });
-        }
-        let cpu_slot = self.cpu_slot(cpu)?;
-        let current = self.current_thread(cpu_slot)?;
-        if current != ticket.thread() {
-            return Err(Error::InvalidWaitRegistration);
-        }
-        if self.thread(current)?.state() != ThreadState::Running {
-            return Err(Error::CannotBlockIdle);
-        }
-        match self
-            .thread(current)?
-            .wait_record()
-            .pending_resolution(ticket)?
-        {
-            PendingResolution::Armed => {}
-            PendingResolution::AlreadyCompleted => {
-                let outcome = self
-                    .thread_mut(current)?
-                    .with_wait_record(|wait| wait.finish_unqueued(ticket))?
-                    .ok_or(Error::InvalidWaitRegistration)?;
-                return Ok(PreparedWait::Completed(outcome));
-            }
-            PendingResolution::Queued { .. } | PendingResolution::Stale => {
-                return Err(Error::InvalidWaitRegistration);
-            }
-        }
-        if self.switching_from(cpu_slot)?.is_some() {
-            return Err(Error::ThreadTransitionInProgress);
-        }
-        self.enqueue_waiter(wait_queue, current, ticket)?;
-        let ready = match self.dequeue_ready(cpu_slot) {
-            Ok(ready) => ready,
-            Err(error) => scheduler_invariant(error),
-        };
-        let next = match ready.or(self.idle_thread(cpu_slot)?) {
-            Some(id) => id,
-            None => return self.rollback_failed_park(wait_queue, current, ticket),
-        };
-        if next == current {
-            return self.rollback_failed_park(wait_queue, current, ticket);
-        }
-        let switch = match self.prepare_switch(cpu_slot, current, next) {
-            Ok(switch) => switch,
-            Err(error) => scheduler_invariant(error),
-        };
-        Ok(PreparedWait::Park { switch, ticket })
-    }
-
     pub fn resolve_wait(
         &mut self,
         ticket: WaitTicket,
@@ -1927,97 +1804,6 @@ impl Scheduler {
                 })
             }
         }
-    }
-
-    pub fn cancel_waiter(
-        &mut self,
-        wait_queue: &WaitQueue,
-        id: ThreadId,
-    ) -> Result<ResolvedWait, Error> {
-        if let Ok(Some(cpu)) = self.cpu_lock_required_for(id) {
-            return self.with_cpu_schedule_stored(cpu, |scheduler| {
-                scheduler.cancel_waiter(wait_queue, id)
-            });
-        }
-        let thread = match self.thread(id) {
-            Ok(thread) => thread,
-            Err(Error::ThreadNotFound) => {
-                return Ok(ResolvedWait {
-                    won: false,
-                    ready: None,
-                });
-            }
-            Err(error) => return Err(error),
-        };
-        let Some(ticket) = thread
-            .wait_record()
-            .queued_ticket(id, wait_queue.identity())
-        else {
-            if thread.queue_links().membership
-                == (QueueMembership::Waiting {
-                    queue: wait_queue.identity(),
-                })
-            {
-                return Err(Error::QueueCorrupted);
-            }
-            return Ok(ResolvedWait {
-                won: false,
-                ready: None,
-            });
-        };
-        self.resolve_wait(ticket, WaitOutcome::Cancelled)
-    }
-
-    pub fn notify_one_with(
-        &mut self,
-        wait_queue: &WaitQueue,
-        before_ready: impl FnOnce(ThreadId),
-    ) -> Result<Option<(ThreadId, ReadyOutcome)>, Error> {
-        // SAFETY: all WaitQueue state is serialized by this scheduler lock.
-        let queue = unsafe { &mut *wait_queue.state_pointer() };
-        let Some(id) = queue.head else {
-            if queue.len == 0 && queue.tail.is_none() {
-                return Ok(None);
-            }
-            return Err(Error::QueueCorrupted);
-        };
-        if let Some(cpu) = self.cpu_lock_required_for(id)? {
-            return self.with_cpu_schedule_stored(cpu, |scheduler| {
-                scheduler.notify_one_with(wait_queue, before_ready)
-            });
-        }
-        let ticket = self
-            .thread(id)?
-            .wait_record()
-            .queued_ticket(id, wait_queue.identity())
-            .ok_or(Error::QueueCorrupted)?;
-        let popped = Self::queue_pop(
-            &mut self.registry,
-            queue,
-            QueueMembership::Waiting {
-                queue: wait_queue.identity(),
-            },
-        );
-        match popped {
-            Ok(Some(popped)) if popped == id => {}
-            Ok(_) => scheduler_invariant(Error::QueueCorrupted),
-            Err(error) => scheduler_invariant(error),
-        }
-        let mut thread = match self.thread_mut(id) {
-            Ok(thread) => thread,
-            Err(error) => scheduler_invariant(error),
-        };
-        let completion =
-            thread.with_wait_record(|wait| wait.complete(ticket, WaitOutcome::Notified));
-        if completion.is_err() {
-            scheduler_invariant(Error::InvalidWaitRegistration);
-        }
-        before_ready(id);
-        let ready = match self.make_ready_from_wait(id) {
-            Ok(ready) => ready,
-            Err(error) => scheduler_invariant(error),
-        };
-        Ok(Some((id, ready)))
     }
 
     pub fn prepare_exit(&mut self, cpu: CpuIndex) -> Result<PreparedContextSwitch, Error> {
@@ -2318,7 +2104,9 @@ impl Scheduler {
         })?;
         let plan = self.thread_mut(switching.thread)?.take_migration_request();
         let state = self.thread(switching.thread)?.state();
-        if !matches!(state, ThreadState::Ready | ThreadState::Idle) {
+        if !matches!(state, ThreadState::Ready | ThreadState::Idle)
+            && (state != ThreadState::Blocked || plan.is_some())
+        {
             let released = self
                 .registry
                 .with_thread_mut(switching.thread, |thread| thread.release_schedule(cpu))?;
@@ -2505,19 +2293,15 @@ impl Scheduler {
                     // `with_cpu_schedule_stored` holds this exact CPU lock.
                     unsafe {
                         thread.with_cpu_schedule(cpu, |schedule| {
-                            ThreadObservation::capture_cpu(thread, cpu, schedule)
+                            ThreadObservation::capture_cpu(thread, schedule)
                         })
                     }
                     .unwrap_or_else(|| crate::hal::cpu::halt())
                 }
-                Some(cpu) => ThreadObservation {
-                    schedule_owner: Some(cpu),
+                Some(_) => ThreadObservation {
                     schedule: None,
                     execution: thread.execution_kind(),
                     context: thread.context_pointer(),
-                    vcpu: thread.vcpu_execution_pointer(),
-                    user: thread.user_execution_pointer(),
-                    stack_bounds: thread.kernel_stack_bounds(),
                 },
             }
         })
@@ -2568,6 +2352,11 @@ impl Scheduler {
             if self.registry.with_thread(id, Thread::schedule_owner_cpu) != Ok(Some(target)) {
                 crate::hal::cpu::halt();
             }
+        }
+        if let Some((id, target)) = self.deferred_blocked_handoff.take()
+            && let Err(error) = self.publish_blocked_handoff(id, target)
+        {
+            scheduler_invariant(error);
         }
         result
     }
@@ -2672,6 +2461,46 @@ impl Scheduler {
         self.prepare_switch(cpu_slot, current, next)
     }
 
+    fn move_blocked_thread(&mut self, id: ThreadId, plan: MigrationRequest) -> Result<(), Error> {
+        if let Some(source) = self.registry.with_thread(id, Thread::schedule_owner_cpu)?
+            && !self
+                .registry
+                .with_thread_mut(id, |thread| thread.release_schedule(source))?
+        {
+            scheduler_invariant(Error::InvalidThreadState);
+        }
+        if !self
+            .thread_mut(id)?
+            .reassign_stopped_with_affinity(plan.target, plan.affinity)
+        {
+            scheduler_invariant(Error::InvalidThreadState);
+        }
+        if self.active_domain.is_some() {
+            if self
+                .deferred_blocked_handoff
+                .replace((id, plan.target))
+                .is_some()
+            {
+                scheduler_invariant(Error::InvalidThreadState);
+            }
+        } else {
+            self.publish_blocked_handoff(id, plan.target)?;
+        }
+        Ok(())
+    }
+
+    fn publish_blocked_handoff(&mut self, id: ThreadId, target: CpuIndex) -> Result<(), Error> {
+        self.with_cpu_domain(target, |scheduler, _local| {
+            if !scheduler
+                .registry
+                .with_thread_mut(id, |thread| thread.claim_schedule(target))?
+            {
+                scheduler_invariant(Error::InvalidThreadState);
+            }
+            Ok(())
+        })
+    }
+
     fn complete_migration(
         &mut self,
         id: ThreadId,
@@ -2686,12 +2515,7 @@ impl Scheduler {
                 ) {
                     return Err(Error::QueueCorrupted);
                 }
-                if !self
-                    .thread_mut(id)?
-                    .reassign_stopped_with_affinity(plan.target, plan.affinity)
-                {
-                    return Err(Error::InvalidThreadState);
-                }
+                self.move_blocked_thread(id, plan)?;
                 Ok(None)
             }
             ThreadState::Migrating => {
@@ -2892,29 +2716,6 @@ impl Scheduler {
         })
     }
 
-    fn enqueue_waiter(
-        &mut self,
-        wait_queue: &WaitQueue,
-        id: ThreadId,
-        ticket: WaitTicket,
-    ) -> Result<(), Error> {
-        let membership = QueueMembership::Waiting {
-            queue: wait_queue.identity(),
-        };
-        // SAFETY: Every caller holds the global scheduler lock exclusively.
-        let queue = unsafe { &mut *wait_queue.state_pointer() };
-        self.thread_mut(id)?
-            .with_wait_record(|wait| wait.queue(ticket, wait_queue.identity()))?;
-        if let Err(error) = Self::queue_push(&mut self.registry, queue, id, membership) {
-            scheduler_invariant(error);
-        }
-        match self.thread_mut(id) {
-            Ok(mut thread) => thread.set_state(ThreadState::Blocked),
-            Err(error) => scheduler_invariant(error),
-        }
-        Ok(())
-    }
-
     fn remove_waiter(&mut self, wait_queue: &WaitQueue, id: ThreadId) -> Result<(), Error> {
         let membership = QueueMembership::Waiting {
             queue: wait_queue.identity(),
@@ -2926,29 +2727,6 @@ impl Scheduler {
             id,
             membership,
         )
-    }
-
-    fn rollback_failed_park(
-        &mut self,
-        wait_queue: &WaitQueue,
-        current: ThreadId,
-        ticket: WaitTicket,
-    ) -> Result<PreparedWait, Error> {
-        if let Err(error) = self.remove_waiter(wait_queue, current) {
-            scheduler_invariant(error);
-        }
-        let mut thread = match self.thread_mut(current) {
-            Ok(thread) => thread,
-            Err(error) => scheduler_invariant(error),
-        };
-        if thread
-            .with_wait_record(|wait| wait.rollback_queued(ticket))
-            .is_err()
-        {
-            scheduler_invariant(Error::InvalidWaitRegistration);
-        }
-        thread.set_state(ThreadState::Running);
-        Err(Error::CurrentThreadMissing)
     }
 
     fn cpu_slot(&self, cpu: CpuIndex) -> Result<CpuIndex, Error> {
@@ -3020,15 +2798,6 @@ impl Scheduler {
         queue::control_push(&mut threads, target, id, membership)
     }
 
-    fn queue_pop(
-        registry: &mut ThreadRegistry,
-        target: &mut ThreadQueue,
-        membership: QueueMembership,
-    ) -> Result<Option<ThreadId>, Error> {
-        let mut threads = queue::ControlQueueAuthority::new(registry.control_authority());
-        queue::control_pop(&mut threads, target, membership)
-    }
-
     fn queue_remove(
         registry: &mut ThreadRegistry,
         target: &mut ThreadQueue,
@@ -3056,8 +2825,8 @@ impl From<WaitRecordError> for Error {
 }
 
 fn scheduler_invariant(_error: Error) -> ! {
-    // Every caller holds the global scheduler lock after a committed queue or
-    // wait-record mutation. Diagnostics could deadlock and returning would
-    // expose inconsistent shared state, so retain the lock and fail closed.
+    // The caller holds CPU/queue locks or exclusive coordination after a
+    // committed mutation. Diagnostics could deadlock and returning would
+    // expose inconsistent shared state, so retain protection and fail closed.
     crate::hal::cpu::halt()
 }

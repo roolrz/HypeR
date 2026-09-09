@@ -788,17 +788,6 @@ pub(super) fn control_push(
     push(threads, queue, id, membership)
 }
 
-pub(super) fn control_pop(
-    threads: &mut ControlQueueAuthority<'_>,
-    queue: &mut ThreadQueue,
-    membership: QueueMembership,
-) -> Result<Option<ThreadId>, Error> {
-    if ready_cpu(membership).is_some() || membership == QueueMembership::None {
-        return Err(Error::InvalidThreadState);
-    }
-    pop(threads, queue, membership)
-}
-
 pub(super) fn control_remove(
     threads: &mut ControlQueueAuthority<'_>,
     queue: &mut ThreadQueue,

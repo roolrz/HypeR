@@ -12,7 +12,7 @@ use super::thread::ThreadId;
 
 /// Terminal reason selected for one wait registration.
 ///
-/// Notification, timeout, and cancellation arbitrate under the scheduler lock;
+/// Notification, timeout, and cancellation arbitrate under the owner CPU lock;
 /// exactly one reason can complete a registration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WaitOutcome {
@@ -87,9 +87,9 @@ enum WaitPhase {
 
 /// Scheduler-owned arbitration record embedded in every Thread.
 ///
-/// Queue links and this record are mutated in the same global scheduler-lock
-/// transaction. The record itself therefore needs neither allocation nor
-/// atomics.
+/// The owner CPU lock serializes this record, while queue-link changes also
+/// hold the affected queue lock (or exclusive coordination). The record
+/// therefore needs neither allocation nor atomics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct WaitRecord {
     generation: u64,
@@ -247,18 +247,6 @@ impl WaitRecord {
         Ok(outcome)
     }
 
-    pub fn rollback_queued(&mut self, ticket: WaitTicket) -> Result<(), WaitRecordError> {
-        self.require_ticket(ticket)?;
-        if !matches!(
-            self.phase,
-            WaitPhase::Queued { generation, .. } if generation == ticket.generation
-        ) {
-            return Err(WaitRecordError::InvalidPhase);
-        }
-        self.phase = WaitPhase::Idle;
-        Ok(())
-    }
-
     pub const fn permits_assignment(&self, cpu: CpuIndex) -> bool {
         match self.phase {
             WaitPhase::Armed { mobility, .. } | WaitPhase::Queued { mobility, .. } => {
@@ -315,12 +303,14 @@ impl ThreadQueue {
 /// an object retained by the blocked thread's stack/owner.
 pub struct WaitQueue {
     state: UnsafeCell<ThreadQueue>,
+    lock: hyper::sync::InterruptSpinLock<(), crate::hal::irq::LocalMask>,
 }
 
 impl WaitQueue {
     pub const fn new() -> Self {
         Self {
             state: UnsafeCell::new(ThreadQueue::new()),
+            lock: hyper::sync::InterruptSpinLock::new(()),
         }
     }
 
@@ -365,9 +355,24 @@ impl WaitQueue {
         core::ptr::from_ref(self).expose_provenance()
     }
 
-    /// Returns the internal pointer accessed only under the scheduler lock.
+    /// Returns the internal pointer accessed only under exclusive coordination.
     pub(super) const fn state_pointer(&self) -> *mut ThreadQueue {
         self.state.get()
+    }
+
+    /// Accesses FIFO topology under shared registry protection. The exclusive
+    /// coordinator excludes all such readers and can access state directly.
+    ///
+    /// # Safety
+    ///
+    /// The caller must retain shared or exclusive registry protection for the
+    /// entire closure, excluding direct coordinator access to this cell.
+    pub(super) unsafe fn with_state<R>(&self, operation: impl FnOnce(&mut ThreadQueue) -> R) -> R {
+        self.lock.with(|()| {
+            // SAFETY: callers hold a registry reader lane, excluding direct
+            // coordinator access; this queue's lock excludes other readers.
+            operation(unsafe { &mut *self.state.get() })
+        })
     }
 }
 
@@ -377,8 +382,8 @@ impl Default for WaitQueue {
     }
 }
 
-// SAFETY: WaitQueue state is accessed only while the global scheduler lock is
-// held. The UnsafeCell exists so embedded queues remain const-constructible.
+// SAFETY: accesses either hold the exclusive coordinator or a registry reader
+// lane plus this queue's lock. These two access modes exclude each other.
 unsafe impl Sync for WaitQueue {}
 
 #[cfg(test)]

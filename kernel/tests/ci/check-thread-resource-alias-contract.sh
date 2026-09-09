@@ -58,9 +58,9 @@ require 'fn user_execution_pointer[\s\S]*NonNull::new\(execution\.get\(\)\)' \
     "$thread" 'user payload pointers must come from the payload cell without an exclusive borrow'
 require 'struct CurrentUser \{[\s\S]*execution: NonNull<crate::kernel::process::UserExecution>' \
     "$scheduler" 'current-user capability must retain only the cell-derived stable pointer'
-require 'pub fn current_vcpu[\s\S]*vcpu_execution_pointer\(\)' \
+require 'pub\(super\) fn local_current_vcpu[\s\S]*vcpu_execution_pointer\(\)' \
     "$state" 'current-vCPU lookup must not derive a long-lived pointer from &mut'
-require 'pub fn current_user[\s\S]*user_execution_pointer\(\)' \
+require 'pub\(super\) fn local_current_user[\s\S]*user_execution_pointer\(\)' \
     "$state" 'current-user lookup must not derive a long-lived pointer from &mut'
 require 'fn prepare_switch[\s\S]*context_pointer\(\)[\s\S]*context_pointer\(\)\.cast_const\(\)' \
     "$state" 'context switch pointers must use the stable cell address'

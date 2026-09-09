@@ -11,7 +11,8 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
 copy_sources() {
     rm -rf "$fixture/src"
-    mkdir -p "$fixture/src/kernel/task/scheduler"
+    mkdir -p "$fixture/src/kernel/task/scheduler/state"
+    cp "$root/src/kernel/task/scheduler/state/waiting.rs" "$fixture/src/kernel/task/scheduler/state/waiting.rs"
     cp "$root/src/kernel/task/thread.rs" "$fixture/src/kernel/task/thread.rs"
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
     cp "$root/src/kernel/task/scheduler/registry.rs" "$fixture/src/kernel/task/scheduler/registry.rs"
@@ -77,3 +78,13 @@ mutate 'top-level CPU access stopped sharing raw provenance with nested access' 
 mutate 'user stop lost its pre-resolution schedule snapshot' \
     src/kernel/task/scheduler/state.rs \
     'let (state, cpu, ticket) =' 'let (state_after_resolution, cpu, ticket) ='
+
+mutate 'wait consumers stopped revalidating the selected queue head' \
+    src/kernel/task/scheduler/state/waiting.rs \
+    'queue.head != Some(id)' 'false'
+mutate 'registry readers returned to a single exclusive lock' \
+    src/kernel/task/scheduler/mod.rs \
+    'InterruptShardedLock<Option<Scheduler>' 'InterruptSpinLock<Option<Scheduler>'
+mutate 'blocked migration stopped transferring CPU residence' \
+    src/kernel/task/scheduler/state.rs \
+    'fn move_blocked_thread' 'fn removed_blocked_migration'

@@ -58,11 +58,11 @@ require 'struct ThreadControlAuthority' "$registry" \
     'global control links must have a dedicated registry authority'
 require 'struct ControlQueueAuthority' "$queue" \
     'waiting and terminated queues must use a dedicated control authority'
-require 'pub\(super\) fn control_push[\s\S]*pub\(super\) fn control_pop[\s\S]*pub\(super\) fn control_remove' \
+require 'pub\(super\) fn control_push[\s\S]*pub\(super\) fn control_remove' \
     "$queue" 'control queues must expose a domain-specific API'
 require 'fn queue_push[\s\S]*ControlQueueAuthority::new\(registry\.control_authority\(\)\)[\s\S]*queue::control_push' \
     "$state" 'waiting and terminated insertion must use registry control authority'
-require 'fn queue_pop[\s\S]*queue::control_pop[\s\S]*fn queue_remove[\s\S]*queue::control_remove' \
+require 'fn queue_remove[\s\S]*queue::control_remove' \
     "$state" 'waiting and terminated removal must remain in the control domain'
 require 'preflight_insert\([\s\S]*commit_insert\(' "$queue" \
     'queue insertion must separate fallible preflight from commit'
@@ -86,8 +86,8 @@ require 'struct SwitchingContext' "$state" \
     'switch-tail context ownership must remain explicit beside schedule residence'
 reject 'stack_statistics: thread\.kernel_stack_statistics\(\)' "$state" \
     'generic Thread observation must not scan possibly live stack memory'
-require 'pub fn thread_stack_statistics[\s\S]*context_is_stopped\(id\)\?[\s\S]*scheduler\.with_thread\(id, Thread::kernel_stack_statistics\)' \
-    "$scheduler" 'stack watermark scans must follow an explicit stopped-context proof'
+require 'pub fn stack_statistics[\s\S]*ThreadState::Blocked[\s\S]*switching_from[\s\S]*context_is_stopped\(id\)\?[\s\S]*self\.with_thread\(id, Thread::kernel_stack_statistics\)' \
+    "$state" 'stack watermark scans must follow an explicit stopped-context proof'
 require 'pub\(crate\) fn crash_snapshot[\s\S]*state::try_cpu_snapshot\(cpu\)' "$scheduler" \
     'crash snapshots must delegate to one non-blocking CPU-domain observation'
 require 'pub\(super\) fn try_cpu_snapshot[\s\S]*CPU_SCHEDULERS\[cpu\][\s\S]*\.try_with[\s\S]*stack_statistics: None' \
