@@ -21,8 +21,11 @@ void *hyper_runtime_tls_get(uintptr_t key);
 void hyper_runtime_tls_set(uintptr_t key, void *value);
 
 /* Atomic u32 address, aligned and live for the call. Spurious wakes allowed.
- * Absolute monotonic deadline; UINT64_MAX means infinite. Wake does not
- * publish memory: the caller must release-store before waking. */
+ * Absolute monotonic deadline; UINT64_MAX means infinite.
+ * Wait returns 0 only on timeout, or 1 on a value mismatch or wake (including
+ * a spurious wake). A return of 1 does not guarantee a changed value: callers
+ * must recheck their predicate. The polling backend returns 1 on mismatch.
+ * Wake does not publish memory: the caller must release-store before waking. */
 int hyper_runtime_wait_u32(const uint32_t *address, uint32_t expected, uint64_t deadline);
 void hyper_runtime_wake_u32(const uint32_t *address, uint32_t count);
 #endif
