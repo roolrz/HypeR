@@ -13,8 +13,9 @@ import time
 
 def main():
     qemu, image, initramfs, logfile = sys.argv[1:]
-    command = [qemu, '-machine', 'virt,virtualization=on,gic-version=3',
-               '-cpu', 'cortex-a72', '-smp', '4', '-m', '512M', '-nographic',
+    command = [qemu, '-machine', 'virt,virtualization=on,gic-version=3,dtb-randomness=on',
+               '-cpu', 'cortex-a72', '-smp', '4', '-m', '512M',
+               '-nodefaults', '-display', 'none', '-serial', 'stdio', '-no-reboot',
                '-monitor', 'none', '-kernel', image, '-initrd', initramfs,
                '-append', 'earlycon=pl011,mmio32,0x09000000']
     with open(logfile, 'wb') as log:
@@ -33,7 +34,13 @@ def main():
                     del pending[:match.end()]
                     return matched
                 if process.poll() is not None:
-                    raise RuntimeError('QEMU exited before ' + repr(pattern))
+                    remaining = process.stdout.read()
+                    log.write(remaining)
+                    log.flush()
+                    pending.extend(remaining)
+                    raise RuntimeError('QEMU exited with status ' + str(process.returncode)
+                                       + ' before ' + repr(pattern) + ':\n'
+                                       + pending[-8192:].decode(errors='replace'))
                 for key, _ in selector.select(0.2):
                     data = os.read(key.fd, 65536)
                     log.write(data)
