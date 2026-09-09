@@ -7,26 +7,11 @@
 //! The runtime adapter must obtain real root-`Directory` and process-construction
 //! capabilities before it can apply a validated launch plan.
 
-#![no_std]
-
-#[cfg(test)]
-#[path = "../../command/directory_path.rs"]
-mod command_directory_path;
 pub mod diagnostics;
 pub mod manifest;
-#[cfg(test)]
-#[path = "../../shell/command.rs"]
-mod shell_command;
-#[cfg(test)]
-#[path = "../../shell/path.rs"]
-mod shell_path;
 pub mod supervision;
-pub mod vm_policy;
-#[cfg(test)]
-#[path = "../../vm/profile.rs"]
-mod vm_profile;
 
-use core::convert::Infallible;
+use std::convert::Infallible;
 
 use manifest::{AuthorityPolicy, LaunchPlan, Manifest, ParseError, ValidationError};
 
@@ -86,94 +71,5 @@ where
 }
 
 #[cfg(test)]
-mod tests {
-    use core::cell::Cell;
-    use core::convert::Infallible;
-
-    use super::manifest::{
-        AuthorityDeclaration, AuthorityPolicy, LaunchPlan, Manifest, StartupPurposeDeclaration,
-    };
-    use super::{BootstrapError, ManifestSource, ServiceGraphLauncher, bootstrap};
-
-    const EMPTY_GRAPH: &str = r#"{"format":"hyper.service-manifest","services":[]}"#;
-    const ONE_SERVICE: &str = r#"{
-        "format":"hyper.service-manifest",
-        "services":[{
-            "name":"session",
-            "image":"/svc/session-manager",
-            "critical":true,
-            "restart":"on-failure",
-            "after":[],
-            "capabilities":[]
-        }]
-    }"#;
-
-    struct Source(&'static str);
-
-    impl ManifestSource for Source {
-        type Error = Infallible;
-
-        fn manifest(&self) -> Result<&str, Self::Error> {
-            Ok(self.0)
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-    struct LaunchStopped;
-
-    struct Policy;
-
-    struct Launcher {
-        launches: Cell<usize>,
-    }
-
-    impl AuthorityPolicy for Policy {
-        fn authority<'policy>(
-            &'policy self,
-            _source: &str,
-        ) -> Option<AuthorityDeclaration<'policy>> {
-            None
-        }
-
-        fn startup_purpose(&self, _image: &str, _name: &str) -> Option<StartupPurposeDeclaration> {
-            None
-        }
-
-        fn right(&self, _name: &str) -> Option<u64> {
-            None
-        }
-    }
-
-    impl ServiceGraphLauncher for Launcher {
-        type Error = LaunchStopped;
-
-        fn launch(
-            &mut self,
-            _manifest: &Manifest<'_>,
-            _plan: &LaunchPlan<'_>,
-        ) -> Result<Infallible, Self::Error> {
-            self.launches.set(self.launches.get() + 1);
-            Err(LaunchStopped)
-        }
-    }
-
-    #[test]
-    fn validation_failure_never_crosses_the_launch_boundary() {
-        let mut launcher = Launcher {
-            launches: Cell::new(0),
-        };
-        let result = bootstrap(&Source(EMPTY_GRAPH), &Policy, &mut launcher);
-        assert!(matches!(result, Err(BootstrapError::Validate(_))));
-        assert_eq!(launcher.launches.get(), 0);
-    }
-
-    #[test]
-    fn a_validated_plan_reaches_the_launch_boundary_once() {
-        let mut launcher = Launcher {
-            launches: Cell::new(0),
-        };
-        let result = bootstrap(&Source(ONE_SERVICE), &Policy, &mut launcher);
-        assert_eq!(result, Err(BootstrapError::Launch(LaunchStopped)));
-        assert_eq!(launcher.launches.get(), 1);
-    }
-}
+#[path = "../tests/bootstrap.rs"]
+mod tests;

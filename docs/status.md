@@ -75,8 +75,8 @@ The current foundation includes:
   domain, plus isolated per-VM runtimes which parse FIT images, own guest VMOs,
   construct Linux firmware data, and supervise installed VMs from EL0;
 - a multi-client VM control plane and `/bin/vmm` lifecycle client, with one
-  exclusive capability-scoped virtual-serial attachment per VM and guest output
-  buffered independently of the physical Console;
+  exclusive runtime-provided console connection per VM, caller-allocated shared
+  output pages, and userspace retention independent of the physical Console;
 - boot-relative, severity-tagged kernel log buffering, lock-independent Thread
   name snapshots for diagnostics, kallsyms, guarded kernel/IRQ/emergency
   stacks, and an optional allocation-free crash console.

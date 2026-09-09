@@ -3,7 +3,7 @@
 
 //! Immutable bootstrap authority and service-contract policy.
 
-use hyper_app::manifest::{
+use hyper_init::manifest::{
     AuthorityDeclaration, AuthorityKey, AuthorityPolicy, StartupPurposeDeclaration,
 };
 use hyper_os::handle::{

@@ -8,6 +8,9 @@
 #[cfg(feature = "std")]
 extern crate std;
 
+#[cfg(feature = "std")]
+pub mod process;
+
 /// Rust's standard heap-backed collections and formatting facilities.
 pub extern crate alloc;
 

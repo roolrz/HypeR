@@ -477,19 +477,9 @@ hyper_call_result_t hyper_virtual_serial_create(void)
     return hyper_native_call6(HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE, 0, 0, 0, 0, 0, 0);
 }
 
-hyper_call_result_t hyper_virtual_serial_read(
-    hyper_native_handle_t virtual_serial,
-    void *bytes,
-    size_t byte_capacity)
+hyper_native_status_t hyper_virtual_serial_register_output(hyper_native_handle_t serial, hyper_native_handle_t buffer)
 {
-    return hyper_native_call6(
-        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ,
-        virtual_serial,
-        (uintptr_t)bytes,
-        byte_capacity,
-        0,
-        0,
-        0);
+    return hyper_native_call6(HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT, serial, buffer, 0, 0, 0, 0).status;
 }
 
 hyper_call_result_t hyper_virtual_serial_write(

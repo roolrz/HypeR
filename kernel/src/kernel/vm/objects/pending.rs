@@ -112,6 +112,9 @@ impl PendingVirtualMachine {
     ) -> Result<(), Error> {
         self.state.with(|state| match state {
             PendingState::Configuring { virtual_serial, .. } if virtual_serial.is_none() => {
+                if !serial.object().claim_assignment() {
+                    return Err(Error::BadState);
+                }
                 *virtual_serial = Some(serial);
                 Ok(())
             }

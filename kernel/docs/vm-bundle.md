@@ -27,8 +27,8 @@ endpoint, opens the selected guest image, creates a per-instance ByteChannel
 control pair, and transfers the image plus the manager-side control endpoint in
 one typed rendezvous. Each transport right survives until its final ownership
 hop: the manager attenuates it from the image and control endpoint, while the
-runtime retains device-assignment authority on a newly created VirtualSerial
-until that capability is consumed into the VM. The retained control endpoint
+runtime creates its own VirtualSerial and registers a caller-allocated output
+VMO before transferring device-assignment authority into the VM. The retained control endpoint
 is the instance's authority-bearing identity; lifecycle requests do not use
 ambient numeric VM identifiers. Neither the manager nor a VM runtime receives
 physical Console authority.
@@ -43,15 +43,15 @@ reviewed policy update, not merely a larger collection in the manager.
 The initial manager deliberately supports one named definition and one active
 instance. It retains a read-only duplicate of the image so a stopped instance
 can be started again with a fresh resource domain, task group, creation lease,
-runtime process, and VirtualSerial. Extending the fleet changes definition and
+runtime process, and console connector. Extending the fleet changes definition and
 instance storage rather than the per-instance construction contract.
 
 For each provisioned VM, the manager creates a child resource domain and task
 group, derives a one-shot VM creation lease, and starts an isolated
 `/svc/vm-runtime` process. The guest image is duplicated into that runtime.
 The runtime receives only its guest image, creation lease, read-and-execute
-runtime libraries, its own process resources, and one assign-only VirtualSerial
-capability.
+runtime libraries, its own process resources, and a CapabilityChannel for receiving
+authorized console clients.
 
 Each runtime:
 
@@ -80,24 +80,40 @@ page because executable-range metadata is not yet part of the VM ABI; sparse
 pages retain the demand-promotion path.
 
 A userspace-created VM has no implicit route to the physical host Console.
-Before sealing, its VMM may explicitly transfer an assign-capable
-VirtualSerial handle into the PendingVirtualMachine. The kernel retains bounded
-guest output independently of client attachment and injects host input through
-the virtual UART. VM retirement disconnects the port without discarding output
-that a client has not yet read. The stream is best-effort: guest execution never
-blocks on a full output buffer, so output beyond the bounded retention window
-may be discarded. A userspace read claims one prefix transactionally, and a
-failed copy does not consume that prefix.
+The runtime creates a VirtualSerial, allocates and maps a 72 KiB VMO, and
+registers those whole pages before assigning the port into the pending VM.
+The kernel pins the VMO backing; it does not allocate a private output buffer
+for userspace to read through syscalls. The shared layout has a producer page,
+a consumer page, and a 64 KiB byte ring. Kernel-owned cursors and cached page
+addresses remain authoritative. Consumer progress cannot regress or acknowledge
+unpublished bytes. A full ring drops new output without waiting or overwriting
+unconsumed bytes. See the generated Native ABI for exact offsets and ordering.
 
-The shell holds only a `WAIT|WRITE` manager-connector endpoint. Every invocation
-of `/bin/vmm` creates private byte and capability channels and transfers their
-manager endpoints through a short rendezvous, so one slow client cannot own the
-shared listener. Lifecycle commands are short control-plane exchanges and may
-run concurrently from different physical sessions. `vmm console` additionally
-requests an attenuated VirtualSerial data-plane handle. The manager admits only
-one console client per VM; disconnecting the private control channel releases
-that attachment while leaving other management clients unaffected. The local
-Ctrl-] menu detaches without changing VM power state.
+`vm-runtime` collects shared output on a 10 ms event-loop deadline, without an
+output-read syscall or per-byte readable notification. It owns a bounded 64 KiB
+retention queue, client forwarding, and slow-client loss policy. Output to a
+full client channel never blocks guest control. Keyboard input travels to the
+runtime through the same client ByteChannel and is injected in bounded batches;
+unaccepted input remains queued in the runtime. Guest UART emulation and input
+injection remain kernel mechanisms.
+
+The shell holds only a `WAIT|WRITE` manager-connector endpoint. Each `/bin/vmm`
+invocation obtains private control and capability channels. For `vmm console`,
+the manager authorizes one client, creates a ByteChannel pair, sends one end to
+the runtime's connector, and transfers the other end to the client. Neither
+console bytes nor VirtualSerial handles are relayed through the manager to the
+client. Closing the private control channel releases attachment policy; the
+runtime observes the data peer closing. Ctrl-] detaches without stopping the VM.
+
+VirtualSerial handles stay in their creating runtime: generic capability
+transfer and ProcessBuilder storage are forbidden. The same-process device
+assignment consumes only the binding handle. Runtime loss therefore closes all
+userspace port handles and future serial output admission. Any already admitted write
+still owns its device binding and registration lease. VM stop and acknowledged
+retirement quiesce vCPU execution before those owners can release registered
+pages. User unmapping, handle close, and runtime address-space teardown therefore
+cannot turn a cached kernel pointer into a write to freed/reused memory. Pinned
+page charges follow the registration lifetime, independently of user mappings.
 
 The manager validates the runtime's monotonic lifecycle records and publishes
 one terminal event on the per-instance endpoint. Loss of either control peer or
@@ -108,6 +124,24 @@ transition. The manager computes a finite absolute deadline from the Native
 monotonic clock, passes it directly to the same multi-object wait, and forces
 the runtime Process when the deadline expires. It does not approximate time
 with polling, scheduler yields, or unrelated inspection authority.
+
+## Serial validation
+
+`make test-native` covers console attachment, output, and detachment.
+`make test-runtime-crash` builds the explicit `test-runtime-crash` fixture and
+boots a separate archive; the production runtime keeps its default features.
+The test first stops the boot-critical initial VM cleanly. The fixture then
+exits without destructors during console forwarding on later instances. Five fresh
+VM/runtime cycles in a 512 MiB machine check teardown and continued allocation.
+Kernel self-tests verify invalid registration, hostile cursor values, full-ring
+behavior, exclusive assignment, last-handle output closure, and release of
+pinned and committed pages only after the final device owner drops. Host tests
+exercise cursor wrap and exhaustion.
+
+Physical AArch64 qualification still needs concurrent guest output/runtime
+consumption under migration, forced runtime termination, and repeated VM
+restart on VHE and nVHE hardware. Check payload ordering and final memory
+accounting under load; QEMU does not establish weak-memory or cache behavior.
 
 ## Guest FIT contract
 

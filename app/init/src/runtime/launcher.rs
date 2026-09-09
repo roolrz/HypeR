@@ -3,7 +3,7 @@
 
 //! Transactional process construction from a validated launch plan.
 
-use hyper_app::manifest::{LaunchPlan, Manifest, Service};
+use hyper_init::manifest::{LaunchPlan, Manifest, Service};
 use hyper_os::fs::FileRights;
 use hyper_os::handle::{OwnedHandle, ProcessObject, Rights, RightsOffer};
 use hyper_os::startup;
@@ -102,7 +102,7 @@ impl ServiceLauncher {
                     Ok(supervisor) => supervisor,
                     Err(error) => {
                         report_service_launch_failure(
-                            &self.authorities.console,
+                            self.authorities.console,
                             service.name(),
                             &error,
                         );

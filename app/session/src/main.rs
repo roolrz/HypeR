@@ -3,16 +3,13 @@
 
 //! Initial foreground-session router for one capability-bound client.
 
-#![no_std]
-#![no_main]
-
-use core::convert::Infallible;
+use std::convert::Infallible;
 
 use hyper_os::handle::{ByteChannelObject, OwnedHandle};
 use hyper_os::startup::Startup;
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
-use hyper_rt::ExitCode;
 use hyper_service::session as session_contract;
+use std::process::ExitCode;
 
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     match run(&mut startup) {
@@ -90,4 +87,9 @@ fn route(
     Err(())
 }
 
-hyper_rt::entry!(application_main);
+fn main() -> ExitCode {
+    match hyper_rt::process::startup() {
+        Ok(startup) => application_main(startup),
+        Err(_) => ExitCode::FAILURE,
+    }
+}

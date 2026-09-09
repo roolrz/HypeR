@@ -60,7 +60,7 @@ ABI revision: `0`.
 | 22 | `pending_virtual_machine` | `rendezvous_only` |
 | 23 | `virtual_machine` | `rendezvous_only` |
 | 24 | `virtual_cpu` | `rendezvous_only` |
-| 25 | `virtual_serial` | `general` |
+| 25 | `virtual_serial` | `forbidden` |
 
 ## Object signals
 
@@ -78,9 +78,6 @@ ABI revision: `0`.
 | `console` | 1 | `writable` |
 | `virtual_machine` | 0 | `terminated` |
 | `virtual_cpu` | 0 | `terminated` |
-| `virtual_serial` | 0 | `readable` |
-| `virtual_serial` | 1 | `writable` |
-| `virtual_serial` | 2 | `disconnected` |
 
 ## Constants
 
@@ -89,6 +86,9 @@ ABI revision: `0`.
 | `page_size` | `4096` |
 | `extensible_record_max_bytes` | `4096` |
 | `virtual_serial_max_transfer_bytes` | `4096` |
+| `virtual_serial_output_capacity` | `65536` |
+| `virtual_serial_output_header_bytes` | `8192` |
+| `virtual_serial_output_bytes` | `73728` |
 | `elf_osabi` | `63` |
 | `elf_abi_version` | `0` |
 | `auxv_startup_handles` | `1213792257` |
@@ -221,8 +221,8 @@ ABI revision: `0`.
 - Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.
 - Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.
 - A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.
-- A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is retained in the VirtualSerial's bounded buffer independently of userspace attachment, and VM retirement disconnects the input route without discarding unread output. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.
-- VirtualSerial syscalls are nonblocking. Read returns busy while a connected port has no claimable output and bad_state after disconnection once retained output is empty. Write returns busy when the connected input queue accepts no byte and bad_state after disconnection. Safe SDK helpers may implement blocking behavior by waiting on the readable, writable, and disconnected signals. Guest output is best-effort: execution never blocks on a full retention buffer, so excess bytes may be discarded. A failed userspace copy does not consume a transactionally claimed output prefix.
+- A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is published to a read-only shared VMO consumed by the owning runtime, and VM retirement disconnects the input route without invalidating existing output mappings. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.
+- VirtualSerial handles cannot cross generic capability transports or ProcessBuilder; the creating runtime owns their complete userspace lifetime. Device assignment is a same-process consume operation. VirtualSerial register_output borrows a caller-allocated writable VMO of exactly 73728 bytes, pins its pages, and registers it once before device assignment. Output offset 0 is an atomic u64 produced count, offset 8 is a saturating dropped-byte count, offset 4096 is an atomic u64 consumer count, and offset 8192 begins 65536 byte slots. Registration initializes header counters; userspace must not access the buffer until registration returns. The single vCPU producer release-publishes bytes; one runtime consumer acquire-loads production, copies bytes, then release-publishes consumption. Kernel addresses, produced count, and accepted consumer progress remain private: shared consumer values must not regress or exceed production. Full queues discard new bytes without blocking or overwriting unconsumed output. Counters never wrap. Unmapping or closing the VMO cannot free registered pages while the port still owns them. No output read syscall or readable notification exists; runtime policy owns periodic collection, retention, and client channels. Write remains nonblocking input injection: busy means the input queue is full, bad_state means disconnected.
 - The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.
 
 ## Syscalls
@@ -307,8 +307,8 @@ element size before any user-memory access.
 | 71 | `virtual_cpu_start` | `virtual_cpu: handle` | — | `virtual_cpu: Borrow, kind=virtual_cpu, rights=0x400` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 72 | `pending_virtual_machine_set_virtual_serial` | `pending_virtual_machine: handle`, `virtual_serial: handle` | — | `pending_virtual_machine: Borrow, kind=pending_virtual_machine, rights=0x20`, `virtual_serial: ConsumeOnCommit, kind=virtual_serial, rights=0x8002` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 73 | `clock_get_monotonic` | — | `nanoseconds: u64` | — | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Abi` |
-| 74 | `virtual_serial_create` | — | `virtual_serial: handle` | `virtual_serial: produce, kind=virtual_serial, fixed=0x803f` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 75 | `virtual_serial_read` | `virtual_serial: handle`, `bytes: user_address`, `byte_capacity: byte_count` | `actual_bytes: byte_count` | `virtual_serial: Borrow, kind=virtual_serial, rights=0x10` | `bytes: Write, len=byte_capacity bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 74 | `virtual_serial_create` | — | `virtual_serial: handle` | `virtual_serial: produce, kind=virtual_serial, fixed=0x802b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 75 | `virtual_serial_register_output` | `virtual_serial: handle`, `buffer: handle` | — | `virtual_serial: Borrow, kind=virtual_serial, rights=0x20`, `buffer: Borrow, kind=vmo, rights=0x70` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 76 | `virtual_serial_write` | `virtual_serial: handle`, `bytes: user_address`, `byte_count: byte_count` | `actual_bytes: byte_count` | `virtual_serial: Borrow, kind=virtual_serial, rights=0x20` | `bytes: Read, len=byte_count bytes, max-bytes=4096; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 
 ## Public records

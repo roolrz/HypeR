@@ -3,7 +3,7 @@
 
 //! Allocation-free init diagnostics.
 
-use hyper_app::diagnostics::write_process_termination;
+use hyper_init::diagnostics::write_process_termination;
 use hyper_os::handle::{ConsoleObject, OwnedHandle, ProcessObject};
 use hyper_service::vm as vm_contract;
 

@@ -570,7 +570,7 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
     ObjectKind {
         value: 25,
         name: "virtual_serial",
-        transfer: TransferClass::General,
+        transfer: TransferClass::Forbidden,
     },
 ];
 
@@ -752,13 +752,8 @@ pub const PENDING_VIRTUAL_MACHINE_RIGHTS: u64 =
 pub const VIRTUAL_MACHINE_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_REQUEST_STOP;
 pub const VIRTUAL_CPU_RIGHTS: u64 = RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_START;
-pub const VIRTUAL_SERIAL_RIGHTS: u64 = RIGHT_DUPLICATE
-    | RIGHT_TRANSFER
-    | RIGHT_WAIT
-    | RIGHT_INSPECT
-    | RIGHT_READ
-    | RIGHT_WRITE
-    | RIGHT_ASSIGN_DEVICE;
+pub const VIRTUAL_SERIAL_RIGHTS: u64 =
+    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_ASSIGN_DEVICE;
 
 pub const CAPABILITY_OPERATIONS: &[HandleOperation] = &[
     HandleOperation {
@@ -836,21 +831,6 @@ pub const SIGNALS: &[Signal] = &[
         bit: 0,
         name: "terminated",
     },
-    Signal {
-        object: "virtual_serial",
-        bit: 0,
-        name: "readable",
-    },
-    Signal {
-        object: "virtual_serial",
-        bit: 1,
-        name: "writable",
-    },
-    Signal {
-        object: "virtual_serial",
-        bit: 2,
-        name: "disconnected",
-    },
 ];
 
 const CONSOLE_MAX_TRANSFER_BYTES: u32 = 4 * 1024;
@@ -872,6 +852,18 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "virtual_serial_max_transfer_bytes",
         value: VIRTUAL_SERIAL_MAX_TRANSFER_BYTES as u64,
+    },
+    AbiConstant {
+        name: "virtual_serial_output_capacity",
+        value: 65536,
+    },
+    AbiConstant {
+        name: "virtual_serial_output_header_bytes",
+        value: 8192,
+    },
+    AbiConstant {
+        name: "virtual_serial_output_bytes",
+        value: 8192 + 65536,
     },
     AbiConstant {
         name: "elf_osabi",
@@ -4217,36 +4209,25 @@ const VIRTUAL_SERIAL_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
     }),
 }];
 
-const VIRTUAL_SERIAL_READ_ARGUMENTS: &[Argument] = &[
+const VIRTUAL_SERIAL_REGISTER_OUTPUT_ARGUMENTS: &[Argument] = &[
     Argument {
         name: "virtual_serial",
         kind: ValueKind::Handle,
         handle: Some(HandleArgument {
             object: ObjectConstraint::Kind("virtual_serial"),
-            required_rights: RIGHT_READ,
+            required_rights: RIGHT_WRITE,
             disposition: HandleDisposition::Borrow,
         }),
         memory: None,
     },
     Argument {
-        name: "bytes",
-        kind: ValueKind::UserAddress,
-        handle: None,
-        memory: Some(UserMemory {
-            direction: MemoryDirection::Write,
-            length: MemoryLength::Bytes {
-                argument: "byte_capacity",
-                maximum_bytes: VIRTUAL_SERIAL_MAX_TRANSFER_BYTES,
-            },
-            record: None,
-            handles: None,
-            validation_order: 0,
+        name: "buffer",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("vmo"),
+            required_rights: RIGHT_READ | RIGHT_WRITE | RIGHT_MAP,
+            disposition: HandleDisposition::Borrow,
         }),
-    },
-    Argument {
-        name: "byte_capacity",
-        kind: ValueKind::ByteCount,
-        handle: None,
         memory: None,
     },
 ];
@@ -5505,10 +5486,10 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 75,
-        name: "virtual_serial_read",
+        name: "virtual_serial_register_output",
         feature: FeatureGate::Core,
-        arguments: VIRTUAL_SERIAL_READ_ARGUMENTS,
-        results: VIRTUAL_SERIAL_IO_RESULTS,
+        arguments: VIRTUAL_SERIAL_REGISTER_OUTPUT_ARGUMENTS,
+        results: &[],
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
@@ -5573,8 +5554,8 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.",
     "Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.",
     "A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.",
-    "A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is retained in the VirtualSerial's bounded buffer independently of userspace attachment, and VM retirement disconnects the input route without discarding unread output. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.",
-    "VirtualSerial syscalls are nonblocking. Read returns busy while a connected port has no claimable output and bad_state after disconnection once retained output is empty. Write returns busy when the connected input queue accepts no byte and bad_state after disconnection. Safe SDK helpers may implement blocking behavior by waiting on the readable, writable, and disconnected signals. Guest output is best-effort: execution never blocks on a full retention buffer, so excess bytes may be discarded. A failed userspace copy does not consume a transactionally claimed output prefix.",
+    "A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is published to a read-only shared VMO consumed by the owning runtime, and VM retirement disconnects the input route without invalidating existing output mappings. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.",
+    "VirtualSerial handles cannot cross generic capability transports or ProcessBuilder; the creating runtime owns their complete userspace lifetime. Device assignment is a same-process consume operation. VirtualSerial register_output borrows a caller-allocated writable VMO of exactly 73728 bytes, pins its pages, and registers it once before device assignment. Output offset 0 is an atomic u64 produced count, offset 8 is a saturating dropped-byte count, offset 4096 is an atomic u64 consumer count, and offset 8192 begins 65536 byte slots. Registration initializes header counters; userspace must not access the buffer until registration returns. The single vCPU producer release-publishes bytes; one runtime consumer acquire-loads production, copies bytes, then release-publishes consumption. Kernel addresses, produced count, and accepted consumer progress remain private: shared consumer values must not regress or exceed production. Full queues discard new bytes without blocking or overwriting unconsumed output. Counters never wrap. Unmapping or closing the VMO cannot free registered pages while the port still owns them. No output read syscall or readable notification exists; runtime policy owns periodic collection, retention, and client channels. Write remains nonblocking input injection: busy means the input queue is full, bad_state means disconnected.",
     "The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.",
 ];
 

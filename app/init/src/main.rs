@@ -3,24 +3,25 @@
 
 //! Initial `HypeR` Native userspace supervisor.
 
-#![no_std]
-#![no_main]
-
 mod runtime;
 
 use hyper_os::startup::Startup;
-use hyper_rt::ExitCode;
+use std::process::ExitCode;
 
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     match runtime::run(&mut startup) {
         Ok(never) => match never {},
         Err(error) => {
-            if let Ok(console) = startup.console() {
-                let _ = console.write_all(error.diagnostic());
-            }
+            use std::io::Write;
+            let _ = std::io::stderr().write_all(error.diagnostic());
             ExitCode::FAILURE
         }
     }
 }
 
-hyper_rt::entry!(application_main);
+fn main() -> ExitCode {
+    match hyper_rt::process::startup() {
+        Ok(startup) => application_main(startup),
+        Err(_) => ExitCode::FAILURE,
+    }
+}

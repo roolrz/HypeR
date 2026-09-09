@@ -3,7 +3,7 @@
 
 //! Initial virtual-machine capability rendezvous.
 
-use hyper_app::manifest::Manifest;
+use hyper_init::manifest::Manifest;
 use hyper_os::capability_channel::{CapabilityChannel, CapabilityDisposition};
 use hyper_os::fs::{Directory, FileRights};
 use hyper_os::handle::{

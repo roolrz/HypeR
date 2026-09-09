@@ -5,7 +5,7 @@
 
 use hyper_os::handle::{
     ByteChannelObject, CapabilityChannelObject, FileObject, Rights,
-    VirtualMachineCreationLeaseObject, VirtualSerialObject,
+    VirtualMachineCreationLeaseObject,
 };
 use hyper_os::startup::StartupPurpose;
 
@@ -17,7 +17,7 @@ pub const IMAGE_NAME: &str = "vm.image";
 pub const RUNTIME_IMAGE_NAME: &str = "vm.runtime-image";
 pub const PROVISIONING_NAME: &str = "vm.provisioning";
 pub const INSTANCE_CONTROL_NAME: &str = "vm.instance-control";
-pub const VIRTUAL_SERIAL_NAME: &str = "vm.virtual-serial";
+pub const CONSOLE_CONNECTION_NAME: &str = "vm.console-connection";
 pub const MANAGER_CONNECTION_NAME: &str = "vm.manager-connection";
 pub const CLIENT_CONTROL_NAME: &str = "vm.client-control";
 pub const CLIENT_CAPABILITIES_NAME: &str = "vm.client-capabilities";
@@ -28,7 +28,8 @@ pub const IMAGE: StartupPurpose<FileObject> = StartupPurpose::new(0x8005_0002);
 pub const RUNTIME_IMAGE: StartupPurpose<FileObject> = StartupPurpose::new(0x8005_0003);
 pub const PROVISIONING: StartupPurpose<CapabilityChannelObject> = StartupPurpose::new(0x8005_0004);
 pub const INSTANCE_CONTROL: StartupPurpose<ByteChannelObject> = StartupPurpose::new(0x8005_0005);
-pub const VIRTUAL_SERIAL: StartupPurpose<VirtualSerialObject> = StartupPurpose::new(0x8005_0006);
+pub const CONSOLE_CONNECTION: StartupPurpose<CapabilityChannelObject> =
+    StartupPurpose::new(0x8005_0006);
 pub const MANAGER_CONNECTION: StartupPurpose<CapabilityChannelObject> =
     StartupPurpose::new(0x8005_0007);
 pub const CLIENT_CONTROL: StartupPurpose<ByteChannelObject> = StartupPurpose::new(0x8005_0008);
@@ -49,8 +50,8 @@ pub const PROVISIONED_INSTANCE_CONTROL_RIGHTS: Rights = Rights::WAIT
     .union(Rights::TRANSFER);
 /// Rights visible to one VM runtime for its instance-control endpoint.
 pub const INSTANCE_CONTROL_RIGHTS: Rights = Rights::WAIT.union(Rights::READ).union(Rights::WRITE);
-pub const RUNTIME_VIRTUAL_SERIAL_RIGHTS: Rights = Rights::ASSIGN_DEVICE.union(Rights::TRANSFER);
-pub const VIRTUAL_SERIAL_SESSION_RIGHTS: Rights = Rights::WAIT
+pub const RUNTIME_CONSOLE_CONNECTION_RIGHTS: Rights = Rights::WAIT.union(Rights::READ);
+pub const CONSOLE_SESSION_RIGHTS: Rights = Rights::WAIT
     .union(Rights::READ)
     .union(Rights::WRITE)
     .union(Rights::TRANSFER);
@@ -97,21 +98,20 @@ pub const RUNTIME_INSTANCE_CONTROL_CONTRACT: StartupContract = StartupContract::
     INSTANCE_CONTROL,
     INSTANCE_CONTROL_RIGHTS,
 );
-pub const RUNTIME_VIRTUAL_SERIAL_CONTRACT: StartupContract = StartupContract::exact(
-    VIRTUAL_SERIAL_NAME,
-    VIRTUAL_SERIAL,
-    RUNTIME_VIRTUAL_SERIAL_RIGHTS,
+pub const RUNTIME_CONSOLE_CONNECTION_CONTRACT: StartupContract = StartupContract::exact(
+    CONSOLE_CONNECTION_NAME,
+    CONSOLE_CONNECTION,
+    RUNTIME_CONSOLE_CONNECTION_RIGHTS,
 );
 
 /// Complete startup vocabulary accepted by one per-VM runtime.
 ///
-/// The virtual-serial binding is mandatory and carries only the authority the
-/// runtime needs to transfer it into the VM object.
+/// The connector receives authorized client byte channels from the manager.
 pub const RUNTIME_STARTUP_CONTRACTS: &[StartupContract] = &[
     RUNTIME_IMAGE_CONTRACT,
     RUNTIME_CREATION_LEASE_CONTRACT,
     RUNTIME_INSTANCE_CONTROL_CONTRACT,
-    RUNTIME_VIRTUAL_SERIAL_CONTRACT,
+    RUNTIME_CONSOLE_CONNECTION_CONTRACT,
 ];
 
 pub const CLIENT_CONTROL_CONTRACT: StartupContract = StartupContract::exact(
@@ -297,6 +297,7 @@ impl ConsoleCapability {
 #[repr(u8)]
 pub enum InstanceCommand {
     Stop = 1,
+    AttachConsole = 2,
 }
 
 impl InstanceCommand {
@@ -310,6 +311,7 @@ impl InstanceCommand {
         let (value, detail) = decode_message(message, KIND_INSTANCE_COMMAND)?;
         match (value, detail) {
             (1, 0) => Some(Self::Stop),
+            (2, 0) => Some(Self::AttachConsole),
             _ => None,
         }
     }
@@ -616,9 +618,9 @@ mod tests {
         FleetCommand, FleetResponse, FleetState, INSTANCE_CONTROL_RIGHTS, InstanceCommand,
         InstanceEvent, InstanceFailure, InstanceStatus, InstanceStopState, InstanceTracker,
         InvalidStatusTransition, ManagerConnectionRequest, PROVISIONED_IMAGE_RIGHTS,
-        PROVISIONED_INSTANCE_CONTROL_RIGHTS, ProvisionRequest, RUNTIME_CREATION_LEASE_CONTRACT,
-        RUNTIME_IMAGE_CONTRACT, RUNTIME_INSTANCE_CONTROL_CONTRACT, RUNTIME_STARTUP_CONTRACTS,
-        RUNTIME_VIRTUAL_SERIAL_CONTRACT, StopAction,
+        PROVISIONED_INSTANCE_CONTROL_RIGHTS, ProvisionRequest, RUNTIME_CONSOLE_CONNECTION_CONTRACT,
+        RUNTIME_CREATION_LEASE_CONTRACT, RUNTIME_IMAGE_CONTRACT, RUNTIME_INSTANCE_CONTROL_CONTRACT,
+        RUNTIME_STARTUP_CONTRACTS, StopAction,
     };
     use hyper_os::handle::Rights;
 
@@ -638,7 +640,7 @@ mod tests {
                 RUNTIME_IMAGE_CONTRACT,
                 RUNTIME_CREATION_LEASE_CONTRACT,
                 RUNTIME_INSTANCE_CONTROL_CONTRACT,
-                RUNTIME_VIRTUAL_SERIAL_CONTRACT,
+                RUNTIME_CONSOLE_CONNECTION_CONTRACT,
             ]
         );
         for (index, contract) in RUNTIME_STARTUP_CONTRACTS.iter().enumerate() {

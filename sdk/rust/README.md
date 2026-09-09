@@ -96,3 +96,9 @@ applications select `HYPER_RUST_STD=0`; std applications using this crate
 enable its `std` feature and use ordinary `main()`. See the
 [Native std guide](../toolchain/rust-std/README.md) for the support matrix,
 build contract, and thread backend extension points.
+
+Native std programs can call `hyper_rt::process::startup()` once to claim their
+non-stream startup capabilities. Standard streams and the bootstrap Console
+remain runtime-owned for std cleanup and TLS destructors. Prefer `std::io` for
+ordinary I/O; `hyper_rt::process::{stdin,stdout,stderr,console}` expose borrowed
+owners when a service needs Native waits, routing, or capability duplication.

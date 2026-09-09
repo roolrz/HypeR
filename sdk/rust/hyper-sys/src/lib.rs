@@ -498,28 +498,30 @@ pub unsafe fn virtual_serial_create() -> CallResult {
     }
 }
 
-/// Reads retained guest output from a virtual serial port.
+/// Registers caller-owned whole pages for virtual serial output.
 ///
 /// # Safety
 ///
-/// `output` must be writable for `capacity` bytes and `serial` must remain live.
+/// Both handles must remain live with WRITE authority (and READ|MAP for the
+/// VMO). Do not access its contents during registration. After success use
+/// the shared-ring atomic protocol until all kernel producers are quiescent.
 #[inline]
-pub unsafe fn virtual_serial_read(
+pub unsafe fn virtual_serial_register_output(
     serial: abi::HyperNativeHandle,
-    output: *mut u8,
-    capacity: usize,
-) -> CallResult {
-    // SAFETY: the caller establishes the pointer and handle contracts.
+    buffer: abi::HyperNativeHandle,
+) -> abi::HyperNativeStatus {
+    // SAFETY: caller retains both handles and suspends buffer access during registration.
     unsafe {
         ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ,
+            abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT,
             serial,
-            output as u64,
-            capacity as u64,
+            buffer,
+            0,
             0,
             0,
             0,
         )
+        .status
     }
 }
 

@@ -16,19 +16,19 @@ use policy::BootstrapPolicy;
 use provision::InitialVmProvisioner;
 use supervisor::SupervisorSet;
 
-use core::convert::Infallible;
+use std::convert::Infallible;
 
-use hyper_app::BootstrapError;
-use hyper_app::manifest::{LaunchPlan, MAX_MANIFEST_BYTES, Manifest};
-use hyper_app::supervision::{self, SupportError};
-use hyper_app::vm_policy::INITIAL_VM_FLEET_LIMITS;
-use hyper_app::{ManifestSource, ServiceGraphLauncher, bootstrap};
+use hyper_init::BootstrapError;
+use hyper_init::manifest::{LaunchPlan, MAX_MANIFEST_BYTES, Manifest};
+use hyper_init::supervision::{self, SupportError};
+use hyper_init::{ManifestSource, ServiceGraphLauncher, bootstrap};
 use hyper_os::capability_channel::CapabilityChannel;
 use hyper_os::channel;
 use hyper_os::fs::{Directory, FileRights};
 use hyper_os::startup::{self, Startup};
 use hyper_os::task::{create_resource_domain, create_task_group};
 use hyper_service::vm as vm_contract;
+use hyper_vm_policy::INITIAL_VM_FLEET_LIMITS;
 
 const MANIFEST_PATH: &str = "/etc/hyper/services.json";
 
@@ -66,52 +66,32 @@ impl Error {
     }
 }
 
-struct LoadedManifest<'buffer> {
-    bytes: &'buffer [u8],
-}
+struct LoadedManifest(String);
 
-impl LoadedManifest<'static> {
-    #[inline(never)]
-    fn load(root_directory: &Directory) -> Result<LoadedManifest<'static>, Error> {
-        // `/init` has exactly one initial thread and enters this bootstrap path
-        // once. Keeping the bounded manifest scratch in BSS avoids nesting a
-        // 64-KiB array beneath the deliberately large, fixed-size parser and
-        // launch-plan frames on the Native stack. `bootstrap` never returns on
-        // success, and every error terminates the process before re-entry.
-        static mut MANIFEST_BUFFER: [u8; MAX_MANIFEST_BYTES] = [0; MAX_MANIFEST_BYTES];
-        // The raw address avoids forming an intermediate reference to a
-        // mutable static.
-        let pointer = (&raw mut MANIFEST_BUFFER).cast::<u8>();
-        // SAFETY: the single-entry ownership argument above guarantees that no
-        // other reference can exist for the returned process lifetime.
-        let buffer: &'static mut [u8] =
-            unsafe { core::slice::from_raw_parts_mut(pointer, MAX_MANIFEST_BYTES) };
+impl LoadedManifest {
+    fn load(root_directory: &Directory) -> Result<Self, Error> {
         let file = root_directory
             .open(MANIFEST_PATH, FileRights::READ)
             .map_err(|_| Error::OperatingSystem)?;
-        let file_size = file.size().map_err(|_| Error::OperatingSystem)?;
-        let length = usize::try_from(file_size)
+        let length = usize::try_from(file.size().map_err(|_| Error::OperatingSystem)?)
             .ok()
             .filter(|length| *length <= MAX_MANIFEST_BYTES)
             .ok_or(Error::Source)?;
-        let target = buffer.get_mut(..length).ok_or(Error::Source)?;
-        file.read_exact_at(0, target)
+        let mut bytes = vec![0; length];
+        file.read_exact_at(0, &mut bytes)
             .map_err(|_| Error::OperatingSystem)?;
-        core::str::from_utf8(target).map_err(|_| Error::Source)?;
-        Ok(Self { bytes: target })
+        String::from_utf8(bytes)
+            .map(Self)
+            .map_err(|_| Error::Source)
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum SourceError {
-    InvalidUtf8,
-}
+type SourceError = std::convert::Infallible;
 
-impl ManifestSource for LoadedManifest<'_> {
+impl ManifestSource for LoadedManifest {
     type Error = SourceError;
-
     fn manifest(&self) -> Result<&str, Self::Error> {
-        core::str::from_utf8(self.bytes).map_err(|_| SourceError::InvalidUtf8)
+        Ok(&self.0)
     }
 }
 
@@ -182,9 +162,7 @@ impl Runtime {
             vm_authority: startup
                 .take(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)
                 .map_err(|_| Error::OperatingSystem)?,
-            console: startup
-                .take(startup::CONSOLE)
-                .map_err(|_| Error::OperatingSystem)?,
+            console: hyper_rt::process::console().map_err(|_| Error::OperatingSystem)?,
             console_input_channel: Some(console_input_channel),
             console_output_channel: Some(console_output_channel),
             session_input_channel: Some(session_input_channel),
@@ -207,7 +185,7 @@ impl Runtime {
                 manager_vm_instance_control_channel: Some(manager_vm_instance_control_channel),
             },
             supervisors: SupervisorSet {
-                processes: core::array::from_fn(|_| None),
+                processes: std::array::from_fn(|_| None),
             },
         })
     }
@@ -276,13 +254,13 @@ impl Runtime {
                 vm_manager_index,
                 initial_vm_image,
                 &self.launcher.authorities.root_directory,
-                &self.launcher.authorities.console,
+                self.launcher.authorities.console,
                 &mut self.supervisors,
             )?;
             self.supervisors.supervise(
                 manifest,
                 &mut self.provisioner.vm_instance_control_channel,
-                &self.launcher.authorities.console,
+                self.launcher.authorities.console,
             )
         })();
         match result {

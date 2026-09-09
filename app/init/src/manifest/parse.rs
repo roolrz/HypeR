@@ -49,7 +49,7 @@ impl ParseError {
     }
 }
 
-/// Parses the complete bounded manifest without allocation.
+/// Parses the complete manifest into bounded heap-backed collections.
 ///
 /// Manifest strings are canonical UTF-8 text and may not contain JSON escape
 /// sequences. This deliberate schema restriction gives names and paths one
@@ -60,11 +60,8 @@ pub fn parse(input: &str) -> Result<Manifest<'_>, ParseError> {
     Ok(manifest)
 }
 
-/// Parses directly into caller-owned bounded storage.
-///
-/// The destination must be empty. It may contain a partial manifest after an
-/// error and should then be discarded. This form avoids keeping another full
-/// manifest-sized return value live on a constrained bootstrap stack.
+/// Parses into an empty destination, preserving the schema's resource limits.
+/// A failed parse may leave partial data, which the caller must discard.
 pub(crate) fn parse_into<'manifest>(
     input: &'manifest str,
     manifest: &mut Manifest<'manifest>,

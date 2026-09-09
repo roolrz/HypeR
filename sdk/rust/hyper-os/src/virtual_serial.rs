@@ -1,10 +1,9 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Safe buffered virtual-serial bindings.
+//! Runtime-allocated shared output and bounded guest input injection.
 
 use crate::handle::{AnyObject, HandleRef, OwnedHandle, Rights, VirtualSerialObject};
-use crate::wait::{ObjectSignals, WaitItem, wait_many};
 use crate::{Error, Result, Status};
 
 const _: () =
@@ -13,15 +12,16 @@ const _: () =
 pub const MAX_TRANSFER_BYTES: usize =
     hyper_abi::HYPER_NATIVE_VIRTUAL_SERIAL_MAX_TRANSFER_BYTES as usize;
 
+/// Whole-page VMO size required by the output registration ABI.
+pub const BUFFER_BYTES: u64 = hyper_abi::HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_BYTES;
+
 const FULL_RIGHTS: Rights = Rights::DUPLICATE
     .union(Rights::TRANSFER)
-    .union(Rights::WAIT)
     .union(Rights::INSPECT)
-    .union(Rights::READ)
     .union(Rights::WRITE)
     .union(Rights::ASSIGN_DEVICE);
 
-/// Creates one unbound buffered virtual serial port.
+/// Creates one unbound port; register output before assigning it to a VM.
 pub fn create() -> Result<OwnedHandle<VirtualSerialObject>> {
     // SAFETY: the safe layer adopts the sole produced handle on success.
     let result = unsafe { hyper_sys::virtual_serial_create() };
@@ -37,65 +37,123 @@ pub fn create() -> Result<OwnedHandle<VirtualSerialObject>> {
         .map_err(|failure| failure.error())
 }
 
-/// Reads retained guest output, waiting while a connected port is empty.
-pub fn read(serial: HandleRef<'_, VirtualSerialObject>, output: &mut [u8]) -> Result<usize> {
-    let capacity = output.len().min(MAX_TRANSFER_BYTES);
-    loop {
-        // SAFETY: the borrowed handle and writable slice remain live for the call.
-        let result = unsafe {
-            hyper_sys::virtual_serial_read(serial.raw().get(), output.as_mut_ptr(), capacity)
-        };
-        match Status::from_raw(result.status) {
-            Status::OK => return checked_count(result.value0, capacity),
-            Status::BUSY => {
-                let waits = [WaitItem::new(
-                    serial,
-                    ObjectSignals::<VirtualSerialObject>::READABLE
-                        .union(ObjectSignals::<VirtualSerialObject>::DISCONNECTED),
-                )];
-                let observed = wait_many(&waits, crate::DEADLINE_INFINITE)?;
-                if ObjectSignals::<VirtualSerialObject>::DISCONNECTED
-                    .is_present_in(observed.observed)
-                    && !ObjectSignals::<VirtualSerialObject>::READABLE
-                        .is_present_in(observed.observed)
-                {
-                    return Err(Error::Status(Status::PEER_CLOSED));
-                }
-            }
-            Status::BAD_STATE => return Err(Error::Status(Status::PEER_CLOSED)),
-            status => return Err(Error::Status(status)),
+/// Registered shared output. Mapping ownership is private so safe callers cannot
+/// unmap storage while a read is active. No syscall is issued by `read`.
+pub struct Output {
+    region: OwnedHandle<crate::handle::VmarObject>,
+    address: usize,
+    cursor: u64,
+}
+
+impl Output {
+    /// Maps caller-allocated whole pages and registers them before VM binding.
+    /// The VMAR reserves an unused range; overlaps are rejected, never replaced.
+    pub fn register(
+        serial: HandleRef<'_, VirtualSerialObject>,
+        root: HandleRef<'_, crate::handle::VmarObject>,
+        address: u64,
+        memory: crate::memory::WritableVmo,
+    ) -> Result<Self> {
+        let size = BUFFER_BYTES;
+        if memory.size() != size
+            || address == 0
+            || !address.is_multiple_of(crate::memory::PAGE_SIZE)
+            || address.checked_add(size).is_none()
+        {
+            return Err(Error::InvalidMemoryRange);
         }
+        let base = usize::try_from(address).map_err(|_| Error::InvalidMemoryRange)?;
+        // SAFETY: root remains borrowed; success reserves an exact unused region.
+        let result = unsafe { hyper_sys::vmar_allocate(root.raw().get(), address, size) };
+        Status::from_raw(result.status).into_result()?;
+        // SAFETY: success transfers a fresh child VMAR owner.
+        let region = unsafe {
+            crate::handle::adopt_produced_handle_excluding::<crate::handle::VmarObject>(
+                result.value0,
+                &[root.raw(), memory.as_handle_ref().raw(), serial.raw()],
+            )?
+        };
+        let mapping = Self {
+            region,
+            address: base,
+            cursor: 0,
+        };
+        // SAFETY: this owner retains both the fresh region and caller's VMO;
+        // the fixed layout fits completely within its page-aligned extent.
+        Status::from_raw(unsafe {
+            hyper_sys::vmar_map(
+                mapping.region.as_handle_ref().raw().get(),
+                memory.as_handle_ref().raw().get(),
+                0,
+                address,
+                size,
+                hyper_abi::HYPER_NATIVE_VMAR_PERMISSION_READ
+                    | hyper_abi::HYPER_NATIVE_VMAR_PERMISSION_WRITE,
+            )
+        })
+        .into_result()?;
+        // SAFETY: no shared references have escaped and no consumer runs yet.
+        // Registration pins the VMO and initializes counters before returning.
+        Status::from_raw(unsafe {
+            hyper_sys::virtual_serial_register_output(
+                serial.raw().get(),
+                memory.as_handle_ref().raw().get(),
+            )
+        })
+        .into_result()?;
+        Ok(mapping)
+    }
+
+    /// Copies a published prefix, then releases its slots to the producer.
+    pub fn read(&mut self, output: &mut [u8]) -> usize {
+        use core::sync::atomic::{AtomicU8, Ordering};
+        let head = self.word(0).load(Ordering::Acquire);
+        let count =
+            head.saturating_sub(self.cursor)
+                .min(output.len() as u64)
+                .min(hyper_abi::HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_CAPACITY) as usize;
+        for (index, byte) in output[..count].iter_mut().enumerate() {
+            let slot = (self.cursor + index as u64)
+                % hyper_abi::HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_CAPACITY;
+            let address = self.address
+                + hyper_abi::HYPER_NATIVE_VIRTUAL_SERIAL_OUTPUT_HEADER_BYTES as usize
+                + slot as usize;
+            // SAFETY: Output exclusively owns the consumer cursor; the kernel
+            // cannot reuse these published slots before our release below.
+            // The bounded offset stays in the registered data mapping. Atomic
+            // byte accesses also tolerate an unsafe caller corrupting the
+            // shared cursor; no ordinary references to shared bytes escape.
+            *byte = unsafe { &*core::ptr::with_exposed_provenance::<AtomicU8>(address) }
+                .load(Ordering::Relaxed);
+        }
+        self.cursor += count as u64;
+        self.word(4096).store(self.cursor, Ordering::Release);
+        count
+    }
+
+    fn word(&self, offset: usize) -> &core::sync::atomic::AtomicU64 {
+        // SAFETY: callers supply fixed, aligned ABI header offsets within the
+        // registered VMO. Mapping lifetime is owned by self; all participants
+        // access these words atomically.
+        unsafe {
+            &*core::ptr::with_exposed_provenance::<core::sync::atomic::AtomicU64>(
+                self.address + offset,
+            )
+        }
+    }
+
+    #[must_use]
+    pub fn lost_bytes(&self) -> u64 {
+        self.word(8).load(core::sync::atomic::Ordering::Relaxed)
     }
 }
 
-/// Writes guest input, waiting while the port's bounded input queue is full.
-pub fn write(serial: HandleRef<'_, VirtualSerialObject>, bytes: &[u8]) -> Result<usize> {
-    let bytes = bytes
-        .get(..bytes.len().min(MAX_TRANSFER_BYTES))
-        .ok_or(Error::InvalidResponse)?;
-    loop {
-        // SAFETY: the borrowed handle and readable slice remain live for the call.
-        let result = unsafe {
-            hyper_sys::virtual_serial_write(serial.raw().get(), bytes.as_ptr(), bytes.len())
-        };
-        match Status::from_raw(result.status) {
-            Status::OK => return checked_count(result.value0, bytes.len()),
-            Status::BUSY => {
-                let waits = [WaitItem::new(
-                    serial,
-                    ObjectSignals::<VirtualSerialObject>::WRITABLE
-                        .union(ObjectSignals::<VirtualSerialObject>::DISCONNECTED),
-                )];
-                let observed = wait_many(&waits, crate::DEADLINE_INFINITE)?;
-                if ObjectSignals::<VirtualSerialObject>::DISCONNECTED
-                    .is_present_in(observed.observed)
-                {
-                    return Err(Error::Status(Status::PEER_CLOSED));
-                }
-            }
-            Status::BAD_STATE => return Err(Error::Status(Status::PEER_CLOSED)),
-            status => return Err(Error::Status(status)),
-        }
+impl Drop for Output {
+    fn drop(&mut self) {
+        // SAFETY: no borrowed mapped data escapes Output, and &mut self
+        // excludes readers. A failed destroy leaves mappings owned by the
+        // process until retirement rather than freeing reachable backing.
+        let _ = unsafe { hyper_sys::vmar_destroy(self.region.as_handle_ref().raw().get()) };
     }
 }
 
@@ -106,4 +164,14 @@ fn checked_count(raw: u64, capacity: usize) -> Result<usize> {
     } else {
         Err(Error::InvalidResponse)
     }
+}
+
+/// Injects one batch without waiting; runtimes must retain the unaccepted suffix.
+pub fn try_write(serial: HandleRef<'_, VirtualSerialObject>, bytes: &[u8]) -> Result<usize> {
+    let capacity = bytes.len().min(MAX_TRANSFER_BYTES);
+    // SAFETY: the borrowed handle and source slice remain live during the call.
+    let result =
+        unsafe { hyper_sys::virtual_serial_write(serial.raw().get(), bytes.as_ptr(), capacity) };
+    Status::from_raw(result.status).into_result()?;
+    checked_count(result.value0, capacity)
 }

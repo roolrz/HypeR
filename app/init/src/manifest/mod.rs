@@ -20,4 +20,5 @@ pub use plan::{
 };
 
 #[cfg(test)]
+#[path = "../../tests/manifest.rs"]
 mod tests;
