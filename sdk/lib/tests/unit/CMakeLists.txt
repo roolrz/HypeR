@@ -78,3 +78,17 @@ target_compile_definitions(hyper-heap-test PRIVATE
 target_include_directories(hyper-heap-test PRIVATE ../../include ${HYPER_ABI_INCLUDE_DIR})
 target_link_libraries(hyper-heap-test PRIVATE Threads::Threads)
 add_test(NAME process-heap COMMAND hyper-heap-test)
+
+add_executable(hyper-thread-test ../../src/thread.c thread.c)
+target_compile_features(hyper-thread-test PRIVATE c_std_17)
+target_compile_definitions(hyper-thread-test PRIVATE HYPER_THREAD_HOST_TEST _POSIX_C_SOURCE=200809L)
+target_compile_options(hyper-thread-test PRIVATE -Wall -Wextra -Werror)
+target_include_directories(hyper-thread-test PRIVATE ../../include ${HYPER_ABI_INCLUDE_DIR})
+target_link_libraries(hyper-thread-test PRIVATE Threads::Threads)
+add_test(NAME thread-runtime COMMAND hyper-thread-test)
+
+add_executable(hyper-stdio-test ../../src/stdio.c ../../src/startup.c stdio.c)
+target_compile_features(hyper-stdio-test PRIVATE c_std_17)
+target_compile_options(hyper-stdio-test PRIVATE -Wall -Wextra -Werror)
+target_include_directories(hyper-stdio-test PRIVATE ../../include ${HYPER_ABI_INCLUDE_DIR})
+add_test(NAME standard-streams COMMAND hyper-stdio-test)

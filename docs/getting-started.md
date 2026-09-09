@@ -15,6 +15,7 @@ Commands in this guide run from the repository root.
   components;
 - Clang/LLVM;
 - GNU Make;
+- Python 3 for the SDK's pinned Rust standard-library source overlay;
 - QEMU for the selected architecture;
 - `curl`, `cpio`, `gzip`, `tar`, and SHA-256 tooling for the Linux guest assets;
 - `dtc` when building the x86-64 QEMU platform description.

@@ -15,5 +15,8 @@ hyper-abi = { path = "../../abi" }
 hyper-os = { path = "../hyper-os" }
 hyper-sys = { path = "../hyper-sys" }
 
+[features]
+std = []
+
 [lints]
 workspace = true

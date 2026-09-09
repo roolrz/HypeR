@@ -150,6 +150,51 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             ;;
         static)
             if grep -Fxq 'HYPER_STATIC_LINK_OK' "$native_output"; then
+                printf '/bin/std-test --name dynamic --read-input\n' >&3
+                command_phase='std_input'
+            fi
+            ;;
+        std_input)
+            if grep -Fxq 'HYPER_STD_INPUT_READY' "$native_output"; then
+                printf 'abcdef\n' >&3
+                command_phase='std_dynamic'
+            fi
+            ;;
+        std_dynamic)
+            if grep -Fxq 'HYPER_STD_OK hello dynamic' "$native_output" &&
+                grep -Fxq 'HYPER_STD_TLS_DROP_OK' "$native_output"; then
+                printf '/bin/std-test-static --name static\n' >&3
+                command_phase='std_static'
+            fi
+            ;;
+        std_static)
+            if grep -Fxq 'HYPER_STD_OK hello static' "$native_output"; then
+                printf '/bin/std-test --help\n' >&3
+                command_phase='std_help'
+            fi
+            ;;
+        std_help)
+            if grep -Fxq 'HypeR standard library acceptance probe' "$native_output" &&
+                grep -q '^Usage: .*std-test' "$native_output"; then
+                if grep -Eq '^(hyper-sh\$ )*sh: command failed$' "$native_output"; then
+                    cat "$log" >&2
+                    echo "std success/help path returned failure" >&2
+                    exit 1
+                fi
+                printf '/bin/std-test --unknown-option\n' >&3
+                command_phase='std_error'
+            fi
+            ;;
+        std_error)
+            if grep -q "unexpected argument '--unknown-option'" "$native_output" &&
+                grep -Eq '^(hyper-sh\$ )*sh: command failed$' "$native_output"; then
+                printf '/bin/std-test --panic\n' >&3
+                command_phase='std_panic'
+            fi
+            ;;
+        std_panic)
+            if grep -q 'HYPER_STD_EXPECTED_PANIC' "$native_output" &&
+                [ "$(grep -Ec '^(hyper-sh\$ )*sh: command failed$' "$native_output")" -eq 2 ]; then
                 printf 'ls\n' >&3
                 command_phase='ls_root'
             fi
@@ -212,6 +257,10 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         grep -Fxq 'KOID       KIND                    HANDLE-STATE HANDLES REFS PURPOSE' "$native_output" &&
         grep -Fxq 'HYPER_DYNAMIC_LINK_OK' "$native_output" &&
         grep -Fxq 'HYPER_STATIC_LINK_OK' "$native_output" &&
+        grep -Fxq 'HYPER_STD_OK hello dynamic' "$native_output" &&
+        grep -Fxq 'HYPER_STD_OK hello static' "$native_output" &&
+        grep -Fxq 'HYPER_STD_TLS_DROP_OK' "$native_output" &&
+        grep -Eq '^(hyper-sh\$ )*HYPER_STD_STDERR_OK$' "$native_output" &&
         grep -Fxq '/bin' "$native_output" &&
         grep -Fxq '/' "$native_output" &&
         grep -Fxq 'HYPER_CD_CHILD_OK' "$native_output" &&

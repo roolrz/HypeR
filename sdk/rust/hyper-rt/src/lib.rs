@@ -5,10 +5,13 @@
 
 #![no_std]
 
+#[cfg(feature = "std")]
+extern crate std;
+
 /// Rust's standard heap-backed collections and formatting facilities.
 pub extern crate alloc;
 
-#[cfg(all(not(test), target_os = "none"))]
+#[cfg(all(not(test), not(feature = "std"), target_os = "none"))]
 #[global_allocator]
 static ALLOCATOR: hyper_sys::allocator::NativeAllocator = hyper_sys::allocator::NativeAllocator;
 
@@ -69,7 +72,7 @@ macro_rules! entry {
     };
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), not(feature = "std")))]
 #[panic_handler]
 fn panic(_information: &core::panic::PanicInfo<'_>) -> ! {
     // SAFETY: a panic aborts the active Native Process without running

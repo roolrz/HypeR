@@ -28,6 +28,8 @@ endif()
 set(HYPER_RUNTIME_SOURCES
     src/arch/aarch64/syscall.S
     src/runtime.c
+    src/thread.c
+    src/stdio.c
     src/heap.c
     src/stdlib.c
     src/dlfcn.c
@@ -42,6 +44,14 @@ add_library(hyper_shared_objects OBJECT ${HYPER_RUNTIME_SOURCES})
 
 add_library(hyper_crt1 OBJECT src/arch/aarch64/crt1.S)
 add_library(hyper_crt OBJECT src/crt.c)
+add_library(hyper_crt_std OBJECT src/crt-std.c)
+add_library(hyper_std STATIC src/std.c)
+set_target_properties(hyper_std PROPERTIES OUTPUT_NAME hyper-std)
+foreach(runtime_target hyper_crt_std hyper_std)
+    target_compile_features(${runtime_target} PRIVATE c_std_17)
+    target_compile_options(${runtime_target} PRIVATE -ffreestanding -fno-builtin -fPIC -Wall -Wextra -Werror)
+    target_include_directories(${runtime_target} PRIVATE include ${HYPER_ABI_INCLUDE_DIR})
+endforeach()
 target_compile_features(hyper_crt PRIVATE c_std_17)
 target_compile_options(hyper_crt PRIVATE -ffreestanding -fno-builtin -fPIE -Wall -Wextra -Werror)
 target_include_directories(hyper_crt PRIVATE
@@ -90,6 +100,8 @@ add_custom_command(
 add_custom_target(hyper_shared ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/libhyper.so)
 
 install(TARGETS hyper ARCHIVE DESTINATION lib)
+install(TARGETS hyper_std ARCHIVE DESTINATION lib)
+install(FILES $<TARGET_OBJECTS:hyper_crt_std> DESTINATION lib RENAME crt-std.o)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/libhyper.so DESTINATION lib)
 install(FILES $<TARGET_OBJECTS:hyper_crt1> DESTINATION lib RENAME crt1.o)
 install(FILES $<TARGET_OBJECTS:hyper_crt> DESTINATION lib RENAME crt.o)

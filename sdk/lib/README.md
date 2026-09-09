@@ -105,3 +105,12 @@ runtime, and compiler-driver integration.
 
 Licensed under the Apache License, Version 2.0. See
 [the project license](../../LICENSE).
+
+## Rust standard library bridge
+
+The SDK also installs `libhyper-std.a` and `crt-std.o` for ordinary Rust
+applications. Shared startup, stream buffering, and key-based thread-local
+storage live in `libhyper`; the std archive carries stateless adapters.
+See the [std runtime contract](../toolchain/rust-std/README.md) and the
+[`hyper/std.h`](include/hyper/std.h) / [`hyper/thread.h`](include/hyper/thread.h)
+interfaces. These are SDK interfaces, not additions to the kernel syscall ABI.
