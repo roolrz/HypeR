@@ -5509,7 +5509,7 @@ pub const SYSCALLS: &[Syscall] = &[
         feature: FeatureGate::Core,
         arguments: VIRTUAL_SERIAL_READ_ARGUMENTS,
         results: VIRTUAL_SERIAL_IO_RESULTS,
-        blocking: BlockingClass::MayBlock,
+        blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
@@ -5523,7 +5523,7 @@ pub const SYSCALLS: &[Syscall] = &[
         feature: FeatureGate::Core,
         arguments: VIRTUAL_SERIAL_WRITE_ARGUMENTS,
         results: VIRTUAL_SERIAL_IO_RESULTS,
-        blocking: BlockingClass::MayBlock,
+        blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
@@ -5574,6 +5574,7 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.",
     "A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.",
     "A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is retained in the VirtualSerial's bounded buffer independently of userspace attachment, and VM retirement disconnects the input route without discarding unread output. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.",
+    "VirtualSerial syscalls are nonblocking. Read returns busy while a connected port has no claimable output and bad_state after disconnection once retained output is empty. Write returns busy when the connected input queue accepts no byte and bad_state after disconnection. Safe SDK helpers may implement blocking behavior by waiting on the readable, writable, and disconnected signals. Guest output is best-effort: execution never blocks on a full retention buffer, so excess bytes may be discarded. A failed userspace copy does not consume a transactionally claimed output prefix.",
     "The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.",
 ];
 

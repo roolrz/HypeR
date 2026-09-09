@@ -28,10 +28,10 @@ control pair, and transfers the image plus the manager-side control endpoint in
 one typed rendezvous. Each transport right survives until its final ownership
 hop: the manager attenuates it from the image and control endpoint, while the
 runtime retains device-assignment authority on a newly created VirtualSerial
-until that capability is consumed into the VM. The retained control endpoint is the
-instance's authority-bearing identity; lifecycle requests do not use ambient
-numeric VM identifiers. Neither the manager nor a VM runtime receives physical
-Console authority.
+until that capability is consumed into the VM. The retained control endpoint
+is the instance's authority-bearing identity; lifecycle requests do not use
+ambient numeric VM identifiers. Neither the manager nor a VM runtime receives
+physical Console authority.
 
 The initial aggregate policy admits one VM and one vCPU, 32,768 guest pages,
 128 MiB of kernel allocation, 12 processes, 24 threads, 512 handles, and 2,048
@@ -79,14 +79,17 @@ data-only. Sealing conservatively publishes and promotes every loader-resident
 page because executable-range metadata is not yet part of the VM ABI; sparse
 pages retain the demand-promotion path.
 
-A userspace-created VM has no implicit route to the physical host console.
+A userspace-created VM has no implicit route to the physical host Console.
 Before sealing, its VMM may explicitly transfer an assign-capable
 VirtualSerial handle into the PendingVirtualMachine. The kernel retains bounded
 guest output independently of client attachment and injects host input through
 the virtual UART. VM retirement disconnects the port without discarding output
-that a client has not yet read.
+that a client has not yet read. The stream is best-effort: guest execution never
+blocks on a full output buffer, so output beyond the bounded retention window
+may be discarded. A userspace read claims one prefix transactionally, and a
+failed copy does not consume that prefix.
 
-The shell holds only a duplicable manager-connector endpoint. Every invocation
+The shell holds only a `WAIT|WRITE` manager-connector endpoint. Every invocation
 of `/bin/vmm` creates private byte and capability channels and transfers their
 manager endpoints through a short rendezvous, so one slow client cannot own the
 shared listener. Lifecycle commands are short control-plane exchanges and may

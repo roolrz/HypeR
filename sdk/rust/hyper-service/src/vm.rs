@@ -105,8 +105,8 @@ pub const RUNTIME_VIRTUAL_SERIAL_CONTRACT: StartupContract = StartupContract::ex
 
 /// Complete startup vocabulary accepted by one per-VM runtime.
 ///
-/// Console output is optional at launch; when present it must still satisfy
-/// the exact contract because the runtime transfers it into the VM object.
+/// The virtual-serial binding is mandatory and carries only the authority the
+/// runtime needs to transfer it into the VM object.
 pub const RUNTIME_STARTUP_CONTRACTS: &[StartupContract] = &[
     RUNTIME_IMAGE_CONTRACT,
     RUNTIME_CREATION_LEASE_CONTRACT,
