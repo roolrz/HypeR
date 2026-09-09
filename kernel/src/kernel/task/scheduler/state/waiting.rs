@@ -23,9 +23,11 @@ impl Scheduler {
     }
 
     pub fn wait_queue_snapshot(&self, wait_queue: &WaitQueue) -> Result<ThreadQueue, Error> {
-        self.with_wait_queue(wait_queue, |queue| match (queue.head, queue.tail, queue.len) {
-            (None, None, 0) | (Some(_), Some(_), 1..) => Ok(*queue),
-            _ => Err(Error::QueueCorrupted),
+        self.with_wait_queue(wait_queue, |queue| {
+            match (queue.head, queue.tail, queue.len) {
+                (None, None, 0) | (Some(_), Some(_), 1..) => Ok(*queue),
+                _ => Err(Error::QueueCorrupted),
+            }
         })
     }
 
