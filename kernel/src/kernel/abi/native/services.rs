@@ -198,11 +198,22 @@ pub(in crate::kernel) trait VmServices: UserMemoryServices {
         pending: HandleValue,
         bootstrap: crate::kernel::vm::objects::VirtualCpuBootstrap,
     ) -> Result<(), crate::kernel::vm::service::Error>;
-    fn set_pending_virtual_machine_console_output(
+    fn set_pending_virtual_machine_virtual_serial(
         &self,
         pending: HandleValue,
         console: HandleValue,
     ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn create_virtual_serial(&self) -> Result<HandleValue, crate::kernel::vm::service::Error>;
+    fn read_virtual_serial(
+        &self,
+        serial: HandleValue,
+        bytes: Option<UserSlice>,
+    ) -> Result<usize, crate::kernel::vm::service::Error>;
+    fn write_virtual_serial(
+        &self,
+        serial: HandleValue,
+        bytes: Option<UserSlice>,
+    ) -> Result<usize, crate::kernel::vm::service::Error>;
     fn seal_pending_virtual_machine(
         &self,
         pending: HandleValue,

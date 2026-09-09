@@ -10,19 +10,20 @@ mod command;
 mod path;
 
 use command::{CommandLine, MAX_LINE_BYTES};
+use hyper_os::capability_channel::{CapabilityChannel, CapabilityDisposition};
 use hyper_os::channel;
 use hyper_os::fs::{Directory, DirectoryRights, File, FileRights};
 use hyper_os::handle::{
-    ByteChannelObject, CpuInspectorObject, MemoryInspectorObject, ObjectInspectorObject,
-    OwnedHandle, ProcessObject, ResourceDomainObject, Rights, RightsOffer, TaskFactoryObject,
-    TaskGroupObject, TaskInspectorObject,
+    ByteChannelObject, CapabilityChannelObject, CpuInspectorObject, MemoryInspectorObject,
+    ObjectInspectorObject, OwnedHandle, ProcessObject, ResourceDomainObject, Rights, RightsOffer,
+    TaskFactoryObject, TaskGroupObject, TaskInspectorObject,
 };
 use hyper_os::startup::{self, Startup};
 use hyper_os::task::{ProcessBuilder, ProcessInfo, ProcessTermination};
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_os::{Error as OsError, Status};
 use hyper_rt::ExitCode;
-use hyper_service::{process, stdio};
+use hyper_service::{process, stdio, vm};
 use path::CanonicalPath;
 
 const INPUT_CHUNK_BYTES: usize = 256;
@@ -68,6 +69,8 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
         .take(startup::MEMORY_INSPECTOR)
         .map_err(Error::from)?;
     let cpu_inspector = startup.take(startup::CPU_INSPECTOR).map_err(Error::from)?;
+    let vm_connection =
+        CapabilityChannel::from_handle(startup.take(vm::MANAGER_CONNECTION).map_err(Error::from)?);
     let mut authorities = CommandAuthorities {
         root_directory,
         current_directory,
@@ -80,6 +83,7 @@ fn run(startup: &mut Startup<'_>) -> Result<ExitCode, Error> {
         object_inspector,
         memory_inspector,
         cpu_inspector,
+        vm_connection,
     };
 
     write(&output, READY_MESSAGE)?;
@@ -352,6 +356,29 @@ fn launch_command(
                 )
                 .map_err(|_| Error::InvalidCommand)?;
         }
+        "vmm" | "/bin/vmm" => {
+            let (client_control, manager_control) = channel::create_pair().map_err(Error::from)?;
+            let (manager_capabilities, client_capabilities) =
+                CapabilityChannel::create().map_err(Error::from)?;
+            connect_vm_manager(
+                &authorities.vm_connection,
+                manager_control,
+                manager_capabilities,
+            )?;
+            add_child_channel(
+                &builder,
+                client_control,
+                vm::CLIENT_CONTROL.as_raw(),
+                vm::CLIENT_CONTROL_CONTRACT.required_rights(),
+            )?;
+            builder
+                .add_handle_move(
+                    client_capabilities.into_handle(),
+                    vm::CLIENT_CAPABILITIES.as_raw(),
+                    RightsOffer::Exact(vm::CLIENT_CAPABILITIES_CONTRACT.required_rights()),
+                )
+                .map_err(|failure| Error::from(failure.error()))?;
+        }
         _ => {}
     }
     add_child_channel(
@@ -377,6 +404,46 @@ fn launch_command(
             error,
         },
     )
+}
+
+fn connect_vm_manager(
+    connector: &CapabilityChannel,
+    control: OwnedHandle<ByteChannelObject>,
+    capabilities: CapabilityChannel,
+) -> Result<(), Error> {
+    let mut control = Some(control);
+    let mut capabilities = Some(capabilities.into_handle());
+    loop {
+        let waits = [WaitItem::new(
+            connector.as_handle_ref(),
+            ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING
+                .union(ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED),
+        )];
+        let observation = wait_many(&waits, hyper_os::DEADLINE_INFINITE).map_err(Error::from)?;
+        if !ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING
+            .is_present_in(observation.observed)
+        {
+            return Err(Error::OperatingSystem);
+        }
+        let control_disposition = CapabilityDisposition::move_handle(
+            &mut control,
+            RightsOffer::Exact(Rights::WAIT.union(Rights::READ).union(Rights::WRITE)),
+        )
+        .map_err(Error::from)?;
+        let capabilities_disposition = CapabilityDisposition::move_handle(
+            &mut capabilities,
+            RightsOffer::Exact(Rights::WAIT.union(Rights::WRITE)),
+        )
+        .map_err(Error::from)?;
+        match connector.try_send(
+            &vm::ManagerConnectionRequest.encode(),
+            &mut [control_disposition, capabilities_disposition],
+        ) {
+            Ok(()) => return Ok(()),
+            Err(OsError::Status(Status::WOULD_BLOCK)) => {}
+            Err(error) => return Err(Error::from(error)),
+        }
+    }
 }
 
 fn add_child_channel(
@@ -523,6 +590,7 @@ struct CommandAuthorities {
     object_inspector: OwnedHandle<ObjectInspectorObject>,
     memory_inspector: OwnedHandle<MemoryInspectorObject>,
     cpu_inspector: OwnedHandle<CpuInspectorObject>,
+    vm_connection: CapabilityChannel,
 }
 
 struct ChildChannels {

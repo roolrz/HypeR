@@ -449,29 +449,100 @@ pub unsafe fn pending_virtual_machine_set_memory(
     }
 }
 
-/// Commits a Console output capability into a pending VM.
+/// Commits a virtual-serial device capability into a pending VM.
 ///
 /// # Safety
 ///
 /// Both handles must remain live for the complete call. The caller must honor
-/// the consume-on-success contract for `console`.
+/// the consume-on-success contract for `serial`.
 #[inline]
-pub unsafe fn pending_virtual_machine_set_console_output(
+pub unsafe fn pending_virtual_machine_set_virtual_serial(
     pending: abi::HyperNativeHandle,
-    console: abi::HyperNativeHandle,
+    serial: abi::HyperNativeHandle,
 ) -> abi::HyperNativeStatus {
     // SAFETY: the caller establishes both handle lifetimes and ownership.
     unsafe {
         ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT,
+            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL,
             pending,
-            console,
+            serial,
             0,
             0,
             0,
             0,
         )
         .status
+    }
+}
+
+/// Creates one unbound buffered virtual serial port.
+///
+/// # Safety
+///
+/// The caller must adopt the returned handle exactly once on success.
+#[inline]
+pub unsafe fn virtual_serial_create() -> CallResult {
+    // SAFETY: result ownership is delegated to the caller.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Reads retained guest output from a virtual serial port.
+///
+/// # Safety
+///
+/// `output` must be writable for `capacity` bytes and `serial` must remain live.
+#[inline]
+pub unsafe fn virtual_serial_read(
+    serial: abi::HyperNativeHandle,
+    output: *mut u8,
+    capacity: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes the pointer and handle contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ,
+            serial,
+            output as u64,
+            capacity as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Writes guest input to a virtual serial port.
+///
+/// # Safety
+///
+/// `bytes` must be readable for `length` bytes and `serial` must remain live.
+#[inline]
+pub unsafe fn virtual_serial_write(
+    serial: abi::HyperNativeHandle,
+    bytes: *const u8,
+    length: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes the pointer and handle contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
+            serial,
+            bytes as u64,
+            length as u64,
+            0,
+            0,
+            0,
+        )
     }
 }
 

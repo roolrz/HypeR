@@ -235,6 +235,7 @@ fn begin_quiesce_control(id: VmId) -> Result<(), Error> {
     // The console route is optional. Its stable device seam is an honest no-op
     // when the selected guest model has no route owner.
     crate::kernel::vm::device::clear_console_route_for_vm(id);
+    machine.disconnect_virtual_serial();
     if let Err(error) = machine.request_all_stops() {
         crate::kernel::crash::fatal(format_args!(
             "HypeR: VM quiesce failed after the registry cut: {error:?}"

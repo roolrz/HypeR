@@ -458,18 +458,53 @@ hyper_native_status_t hyper_pending_virtual_machine_set_memory(
         HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_MEMORY, pending, vmo, 0, 0, 0, 0).status;
 }
 
-hyper_native_status_t hyper_pending_virtual_machine_set_console_output(
+hyper_native_status_t hyper_pending_virtual_machine_set_virtual_serial(
     hyper_native_handle_t pending,
-    hyper_native_handle_t console)
+    hyper_native_handle_t virtual_serial)
 {
     return hyper_native_call6(
-        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT,
+        HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL,
         pending,
-        console,
+        virtual_serial,
         0,
         0,
         0,
         0).status;
+}
+
+hyper_call_result_t hyper_virtual_serial_create(void)
+{
+    return hyper_native_call6(HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE, 0, 0, 0, 0, 0, 0);
+}
+
+hyper_call_result_t hyper_virtual_serial_read(
+    hyper_native_handle_t virtual_serial,
+    void *bytes,
+    size_t byte_capacity)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ,
+        virtual_serial,
+        (uintptr_t)bytes,
+        byte_capacity,
+        0,
+        0,
+        0);
+}
+
+hyper_call_result_t hyper_virtual_serial_write(
+    hyper_native_handle_t virtual_serial,
+    const void *bytes,
+    size_t byte_count)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
+        virtual_serial,
+        (uintptr_t)bytes,
+        byte_count,
+        0,
+        0,
+        0);
 }
 
 hyper_native_status_t hyper_pending_virtual_machine_set_bootstrap(

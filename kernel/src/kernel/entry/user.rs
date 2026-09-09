@@ -296,12 +296,84 @@ impl VmServices for DeferredProcessServices<'_> {
         crate::kernel::vm::service::set_bootstrap(&self.session.process, pending, bootstrap)
     }
 
-    fn set_pending_virtual_machine_console_output(
+    fn set_pending_virtual_machine_virtual_serial(
         &self,
         pending: HandleValue,
-        console: HandleValue,
+        serial: HandleValue,
     ) -> Result<(), crate::kernel::vm::service::Error> {
-        crate::kernel::vm::service::set_console_output(&self.session.process, pending, console)
+        crate::kernel::vm::service::set_virtual_serial(&self.session.process, pending, serial)
+    }
+
+    fn create_virtual_serial(&self) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::create_virtual_serial(&self.session.process)
+    }
+
+    fn read_virtual_serial(
+        &self,
+        value: HandleValue,
+        destination: Option<UserSlice>,
+    ) -> Result<usize, crate::kernel::vm::service::Error> {
+        let serial = self
+            .session
+            .process
+            .resolve_handle::<crate::kernel::vm::virtual_serial::VirtualSerial>(
+                value,
+                Rights::READ,
+            )?;
+        let Some(destination) = destination else {
+            return Ok(0);
+        };
+        let capacity = usize::try_from(destination.length())
+            .map_err(|_| crate::kernel::vm::service::Error::InvalidArgument)?;
+        let claim = serial
+            .object()
+            .claim_output(capacity)
+            .map_err(crate::kernel::vm::objects::Error::from)?;
+        let actual = claim.bytes().len();
+        let actual_bytes =
+            u64::try_from(actual).map_err(|_| crate::kernel::vm::service::Error::Internal)?;
+        let destination = UserSlice::new(destination.base(), actual_bytes)
+            .map_err(|_| crate::kernel::vm::service::Error::Fault)?;
+        let write = self.session.process.reserve_user_write(destination)?;
+        write
+            .copy_from(claim.bytes())
+            .map_err(|_| crate::kernel::vm::service::Error::Fault)?;
+        write.complete();
+        claim.commit();
+        Ok(actual)
+    }
+
+    fn write_virtual_serial(
+        &self,
+        value: HandleValue,
+        source: Option<UserSlice>,
+    ) -> Result<usize, crate::kernel::vm::service::Error> {
+        let serial = self
+            .session
+            .process
+            .resolve_handle::<crate::kernel::vm::virtual_serial::VirtualSerial>(
+                value,
+                Rights::WRITE,
+            )?;
+        let Some(source) = source else {
+            return Ok(0);
+        };
+        let length = usize::try_from(source.length())
+            .map_err(|_| crate::kernel::vm::service::Error::InvalidArgument)?
+            .min(crate::kernel::vm::virtual_serial::TRANSFER_BATCH_BYTES);
+        let length_bytes =
+            u64::try_from(length).map_err(|_| crate::kernel::vm::service::Error::Internal)?;
+        let source = UserSlice::new(source.base(), length_bytes)
+            .map_err(|_| crate::kernel::vm::service::Error::Fault)?;
+        let mut bytes = [0; crate::kernel::vm::virtual_serial::TRANSFER_BATCH_BYTES];
+        self.session
+            .process
+            .copy_from_user(source, &mut bytes[..length])?;
+        serial
+            .object()
+            .write_input(&bytes[..length])
+            .map_err(crate::kernel::vm::objects::Error::from)
+            .map_err(Into::into)
     }
 
     fn seal_pending_virtual_machine(

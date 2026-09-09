@@ -236,6 +236,24 @@ impl AuthorityPolicy for Policy {
                 duplicable: false,
                 creatable: false,
             }),
+            "bootstrap.vm-manager-connection-channel" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
+                provider: None,
+                object_kind: 22,
+                rights: WAIT | READ | TRANSFER,
+                movable: true,
+                duplicable: false,
+                creatable: false,
+            }),
+            "bootstrap.vm-client-connection-channel" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
+                provider: None,
+                object_kind: 22,
+                rights: WAIT | READ | WRITE | DUPLICATE | TRANSFER,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
             _ => None,
         }
     }
@@ -272,10 +290,20 @@ impl AuthorityPolicy for Policy {
             | ("/svc/vm-manager", "process.child-library-directory") => {
                 (315, 5, READ | EXECUTE | DUPLICATE | TRANSFER)
             }
+            ("/bin/sh", "vm.manager-connection") => (
+                hyper_service::vm::MANAGER_CONNECTION.as_raw(),
+                22,
+                WAIT | WRITE,
+            ),
             ("/svc/vm-manager", "vm.runtime-image") => (312, 21, EXECUTE),
             ("/svc/vm-manager", "vm.provisioning") => {
                 (hyper_service::vm::PROVISIONING.as_raw(), 22, WAIT | READ)
             }
+            ("/svc/vm-manager", "vm.manager-connection") => (
+                hyper_service::vm::MANAGER_CONNECTION.as_raw(),
+                22,
+                WAIT | READ,
+            ),
             ("/svc/vm-manager", "process.task-factory") => {
                 (304, 6, CREATE_PROCESS | CREATE_TASK_GROUP)
             }
@@ -348,6 +376,13 @@ fn production_manifest_matches_the_validated_schema() {
     };
     assert_eq!(manifest.service_count(), 5);
     assert_eq!(plan.initial_vm_image(), Some("/vm/alpine.itb"));
+    let shell = manifest
+        .services()
+        .find(|service| service.name() == "shell");
+    assert_eq!(
+        shell.map(|service| service.capabilities().count()),
+        Some(13)
+    );
 }
 
 #[test]

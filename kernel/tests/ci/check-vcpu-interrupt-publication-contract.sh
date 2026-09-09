@@ -25,7 +25,8 @@ trap 'rm -f "$activate" "$receive" "$console_access" "$console_receive" "$schedu
 sed -n '/^[^[:space:]].*unsafe fn activate(/,/^}/p' "$vcpu" >"$activate"
 sed -n '/^pub(super) fn receive_console_input/,/^}/p' "$device" >"$receive"
 sed -n '/^    fn access(/,/^    fn receive(/p' "$device" | sed '$d' >"$console_access"
-sed -n '/^    fn receive(/,/^}/p' "$device" | sed '$d' >"$console_receive"
+sed -n '/^    fn receive(/,/^    fn receive_from_virtual_serial(/p' "$device" |
+    sed '$d' >"$console_receive"
 sed -n '/^    pub fn running_vcpu_cpu(/,/^    pub fn current_user(/p' "$scheduler" | sed '$d' >"$scheduler_query"
 
 line_first() {

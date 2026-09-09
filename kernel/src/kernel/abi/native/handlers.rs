@@ -16,7 +16,8 @@ use hyper::abi::native::{
     HYPER_NATIVE_STATUS_INVALID_ARGUMENT, HYPER_NATIVE_STATUS_NOT_SUPPORTED,
     HYPER_NATIVE_STATUS_TIMED_OUT, HYPER_NATIVE_SYS_BYTE_CHANNEL_READ,
     HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_CONSOLE_READ,
-    HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE,
+    HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ,
+    HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE, HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE,
     HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE, HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES,
     HyperNativeCpuObservation, HyperNativeDirectoryEntry, HyperNativeDirectoryInfo,
     HyperNativeFileInfo, HyperNativeMemoryObservation, HyperNativeObjectInspection,
@@ -58,7 +59,7 @@ use super::wire::{
     parse_byte_channel_io, parse_capability_channel_receive, parse_capability_channel_send,
     parse_console_io, parse_handle, parse_handle_and_rights, parse_handle_inspector_scan,
     parse_inspector_derivation, parse_inspector_scan, parse_single_handle, parse_two_handles,
-    parse_wait_many, prepare_info_request, require_zero,
+    parse_virtual_serial_io, parse_wait_many, prepare_info_request, require_zero,
 };
 
 // Keep each syscall as a distinct machine frame. The routing match must not
@@ -1002,16 +1003,60 @@ pub(super) fn sys_pending_virtual_machine_set_bootstrap(
 }
 
 #[inline(never)]
-pub(super) fn sys_pending_virtual_machine_set_console_output(
+pub(super) fn sys_pending_virtual_machine_set_virtual_serial(
     services: &impl VmServices,
     arguments: &Arguments,
 ) -> DeferredAction {
-    let result = parse_two_handles(arguments).and_then(|[pending, console]| {
+    let result = parse_two_handles(arguments).and_then(|[pending, serial]| {
         services
-            .set_pending_virtual_machine_console_output(pending, console)
+            .set_pending_virtual_machine_virtual_serial(pending, serial)
             .map_err(status_from_vm_service_error)
     });
     DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_virtual_serial_create(
+    services: &impl VmServices,
+    _arguments: &Arguments,
+) -> DeferredAction {
+    DeferredAction::Return(handle_result(
+        services
+            .create_virtual_serial()
+            .map_err(status_from_vm_service_error),
+    ))
+}
+
+#[inline(never)]
+pub(super) fn sys_virtual_serial_read(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_virtual_serial_io(arguments).and_then(|(serial, bytes)| {
+        services
+            .read_virtual_serial(serial, bytes)
+            .map_err(status_from_vm_service_error)
+    });
+    DeferredAction::Return(console_io_result(
+        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_READ,
+        result,
+    ))
+}
+
+#[inline(never)]
+pub(super) fn sys_virtual_serial_write(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_virtual_serial_io(arguments).and_then(|(serial, bytes)| {
+        services
+            .write_virtual_serial(serial, bytes)
+            .map_err(status_from_vm_service_error)
+    });
+    DeferredAction::Return(console_io_result(
+        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
+        result,
+    ))
 }
 
 #[inline(never)]

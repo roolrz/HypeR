@@ -589,12 +589,32 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
 
-        fn set_pending_virtual_machine_console_output(
+        fn set_pending_virtual_machine_virtual_serial(
             &self,
             _: HandleValue,
             _: HandleValue,
         ) -> Result<(), crate::kernel::vm::service::Error> {
             self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+
+        fn create_virtual_serial(&self) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+
+        fn read_virtual_serial(
+            &self,
+            _: HandleValue,
+            _: Option<UserSlice>,
+        ) -> Result<usize, crate::kernel::vm::service::Error> {
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+
+        fn write_virtual_serial(
+            &self,
+            _: HandleValue,
+            _: Option<UserSlice>,
+        ) -> Result<usize, crate::kernel::vm::service::Error> {
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
 

@@ -105,6 +105,13 @@ impl VirtualPl011 {
         self.interrupt_asserted()
     }
 
+    /// Reports whether one byte can enter the currently active receive FIFO.
+    #[must_use]
+    pub fn can_receive(&self) -> bool {
+        self.control & (reg::CR_UARTEN | reg::CR_RXE) == (reg::CR_UARTEN | reg::CR_RXE)
+            && self.receive_length < self.active_fifo_capacity()
+    }
+
     pub fn read(
         &mut self,
         offset: u64,

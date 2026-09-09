@@ -78,6 +78,8 @@ define_bootstrap_authorities! {
     VmAuthority = 21 => "bootstrap.vm-creation-authority",
     VmRuntimeImage = 22 => "bootstrap.vm-runtime-image",
     VmProvisioningChannel = 23 => "bootstrap.vm-provisioning-channel",
+    VmManagerConnectionChannel = 24 => "bootstrap.vm-manager-connection-channel",
+    VmClientConnectionChannel = 25 => "bootstrap.vm-client-connection-channel",
 }
 
 /// Stateless policy used to validate a manifest before touching live handles.
@@ -166,6 +168,23 @@ impl AuthorityPolicy for BootstrapPolicy {
                 duplicable: false,
                 creatable: false,
             },
+            BootstrapAuthority::VmManagerConnectionChannel => AuthorityDeclaration {
+                key: authority.key(),
+                provider: None,
+                object_kind: CapabilityChannelObject::KIND.as_raw(),
+                rights: Rights::WAIT
+                    .union(Rights::READ)
+                    .union(Rights::TRANSFER)
+                    .bits(),
+                movable: true,
+                duplicable: false,
+                creatable: false,
+            },
+            BootstrapAuthority::VmClientConnectionChannel => duplicate_authority(
+                authority,
+                CapabilityChannelObject::KIND.as_raw(),
+                vm_contract::MANAGER_CONNECTION_RIGHTS,
+            ),
         })
     }
 
@@ -175,7 +194,8 @@ impl AuthorityPolicy for BootstrapPolicy {
             CONSOLE_OUTPUT_IMAGE => find_contract(console_contract::OUTPUT_STARTUP_CONTRACTS, name),
             SESSION_IMAGE => find_contract(session_contract::STARTUP_CONTRACTS, name),
             SHELL_IMAGE => find_contract(stdio_contract::STARTUP_CONTRACTS, name)
-                .or_else(|| find_contract(process_contract::SHELL_STARTUP_CONTRACTS, name)),
+                .or_else(|| find_contract(process_contract::SHELL_STARTUP_CONTRACTS, name))
+                .or_else(|| find_contract(vm_contract::CLIENT_STARTUP_CONTRACTS, name)),
             VM_MANAGER_IMAGE => find_contract(vm_contract::MANAGER_STARTUP_CONTRACTS, name)
                 .or_else(|| find_contract(process_contract::VM_MANAGER_STARTUP_CONTRACTS, name)),
             _ => None,

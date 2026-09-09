@@ -84,12 +84,24 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
     sed 's/\r$//' "$log" >"$native_output"
     case "$command_phase" in
         console)
-            # Guest PL011 currently shares the host Console sink. Wait until
-            # the guest's boot-and-timer probe is complete before issuing
-            # line-oriented Native commands, so unrelated guest bytes cannot
-            # split their strict output records.
-            if grep -Fxq 'HypeR session: console ready' "$native_output" &&
-                grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
+            if grep -Fxq 'HypeR session: console ready' "$native_output"; then
+                command_phase='vm_running'
+            fi
+            ;;
+        vm_running)
+            if grep -q 'HypeR: vCPU 0 running as scheduler thread' "$log"; then
+                printf '/bin/vmm console\n' >&3
+                command_phase='guest_console'
+            fi
+            ;;
+        guest_console)
+            if grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
+                printf '\035d' >&3
+                command_phase='guest_detach'
+            fi
+            ;;
+        guest_detach)
+            if grep -Fxq '[vmm] detached' "$native_output"; then
                 printf '/bin/ps\n' >&3
                 command_phase='ps'
             fi

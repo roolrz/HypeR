@@ -9,7 +9,6 @@ use super::execution::{VirtualMachine, VmBinding};
 use super::resources::VmLifecycleResources;
 use super::{Error, REGISTRY, VmId, VmReservation};
 use crate::kernel::accounting::CommittedCharge;
-#[cfg(feature = "kernel-self-test")]
 use crate::kernel::task::thread::ThreadId;
 use crate::kernel::vm::VmInterruptController;
 use crate::kernel::vm::device::VirtualDeviceSet;
@@ -99,6 +98,7 @@ impl VmBuilder {
             dormant,
             machine: self.machine,
             reservation: self.reservation,
+            boot_vcpu: thread,
         })
     }
 }
@@ -111,6 +111,7 @@ pub(crate) struct PreparedVm {
     machine: FallibleArc<VirtualMachine>,
     // Drop last for the same identity-reuse ordering as VmBuilder.
     reservation: VmReservation,
+    boot_vcpu: ThreadId,
 }
 
 impl PreparedVm {
@@ -125,11 +126,13 @@ impl PreparedVm {
         let id = self.reservation.id;
         REGISTRY.with(|registry| registry.validate_install(id, &self.machine))?;
         self.machine.activate_identifier_for_install()?;
+        self.machine.bind_virtual_serial(0, self.boot_vcpu);
         let lifecycle = self.machine.lifecycle();
         let Self {
             dormant,
             machine,
             mut reservation,
+            boot_vcpu: _,
         } = self;
 
         // Preserve PreparedVm's declared rollback drop order through every

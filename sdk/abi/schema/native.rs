@@ -567,6 +567,11 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         name: "virtual_cpu",
         transfer: TransferClass::RendezvousOnly,
     },
+    ObjectKind {
+        value: 25,
+        name: "virtual_serial",
+        transfer: TransferClass::General,
+    },
 ];
 
 pub const RIGHTS: &[Right] = &[
@@ -705,6 +710,7 @@ pub const RIGHT_START: u64 = 1 << 10;
 pub const RIGHT_REQUEST_STOP: u64 = 1 << 11;
 pub const RIGHT_RUN_VCPU: u64 = 1 << 12;
 pub const RIGHT_INJECT_INTERRUPT: u64 = 1 << 13;
+pub const RIGHT_ASSIGN_DEVICE: u64 = 1 << 15;
 pub const RIGHT_REVOKE: u64 = 1 << 18;
 pub const RIGHT_CREATE_PROCESS: u64 = 1 << RIGHT_CREATE_PROCESS_BIT;
 pub const RIGHT_CREATE_THREAD: u64 = 1 << RIGHT_CREATE_THREAD_BIT;
@@ -721,7 +727,7 @@ pub const EVENT_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
 pub const BYTE_CHANNEL_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE;
-pub const CAPABILITY_CHANNEL_RIGHTS: u64 = BYTE_CHANNEL_RIGHTS;
+pub const CAPABILITY_CHANNEL_RIGHTS: u64 = BYTE_CHANNEL_RIGHTS | RIGHT_DUPLICATE;
 pub const DIRECTORY_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_EXECUTE;
 pub const FILE_RIGHTS: u64 = DIRECTORY_RIGHTS;
@@ -746,6 +752,13 @@ pub const PENDING_VIRTUAL_MACHINE_RIGHTS: u64 =
 pub const VIRTUAL_MACHINE_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_REQUEST_STOP;
 pub const VIRTUAL_CPU_RIGHTS: u64 = RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_START;
+pub const VIRTUAL_SERIAL_RIGHTS: u64 = RIGHT_DUPLICATE
+    | RIGHT_TRANSFER
+    | RIGHT_WAIT
+    | RIGHT_INSPECT
+    | RIGHT_READ
+    | RIGHT_WRITE
+    | RIGHT_ASSIGN_DEVICE;
 
 pub const CAPABILITY_OPERATIONS: &[HandleOperation] = &[
     HandleOperation {
@@ -823,9 +836,25 @@ pub const SIGNALS: &[Signal] = &[
         bit: 0,
         name: "terminated",
     },
+    Signal {
+        object: "virtual_serial",
+        bit: 0,
+        name: "readable",
+    },
+    Signal {
+        object: "virtual_serial",
+        bit: 1,
+        name: "writable",
+    },
+    Signal {
+        object: "virtual_serial",
+        bit: 2,
+        name: "disconnected",
+    },
 ];
 
 const CONSOLE_MAX_TRANSFER_BYTES: u32 = 4 * 1024;
+const VIRTUAL_SERIAL_MAX_TRANSFER_BYTES: u32 = 4 * 1024;
 const EXTENSIBLE_RECORD_MAX_BYTES: u32 = 4 * 1024;
 const DIRECTORY_ENTRY_PAGE_CAPACITY: u32 = 4;
 const DIRECTORY_ENTRY_NAME_CAPACITY: u32 = 256;
@@ -839,6 +868,10 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "extensible_record_max_bytes",
         value: EXTENSIBLE_RECORD_MAX_BYTES as u64,
+    },
+    AbiConstant {
+        name: "virtual_serial_max_transfer_bytes",
+        value: VIRTUAL_SERIAL_MAX_TRANSFER_BYTES as u64,
     },
     AbiConstant {
         name: "elf_osabi",
@@ -4152,7 +4185,7 @@ const PENDING_VIRTUAL_MACHINE_SET_MEMORY_ARGUMENTS: &[Argument] = &[
     },
 ];
 
-const PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT_ARGUMENTS: &[Argument] = &[
+const PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL_ARGUMENTS: &[Argument] = &[
     Argument {
         name: "pending_virtual_machine",
         kind: ValueKind::Handle,
@@ -4164,16 +4197,99 @@ const PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT_ARGUMENTS: &[Argument] = &[
         memory: None,
     },
     Argument {
-        name: "console",
+        name: "virtual_serial",
         kind: ValueKind::Handle,
         handle: Some(HandleArgument {
-            object: ObjectConstraint::Kind("console"),
-            required_rights: RIGHT_TRANSFER | RIGHT_WRITE,
+            object: ObjectConstraint::Kind("virtual_serial"),
+            required_rights: RIGHT_TRANSFER | RIGHT_ASSIGN_DEVICE,
             disposition: HandleDisposition::ConsumeOnCommit,
         }),
         memory: None,
     },
 ];
+
+const VIRTUAL_SERIAL_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "virtual_serial",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("virtual_serial"),
+        rights: ProducedRights::Fixed(VIRTUAL_SERIAL_RIGHTS),
+    }),
+}];
+
+const VIRTUAL_SERIAL_READ_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "virtual_serial",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("virtual_serial"),
+            required_rights: RIGHT_READ,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "bytes",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Write,
+            length: MemoryLength::Bytes {
+                argument: "byte_capacity",
+                maximum_bytes: VIRTUAL_SERIAL_MAX_TRANSFER_BYTES,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "byte_capacity",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const VIRTUAL_SERIAL_WRITE_ARGUMENTS: &[Argument] = &[
+    Argument {
+        name: "virtual_serial",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("virtual_serial"),
+            required_rights: RIGHT_WRITE,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    },
+    Argument {
+        name: "bytes",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "byte_count",
+                maximum_bytes: VIRTUAL_SERIAL_MAX_TRANSFER_BYTES,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    Argument {
+        name: "byte_count",
+        kind: ValueKind::ByteCount,
+        handle: None,
+        memory: None,
+    },
+];
+
+const VIRTUAL_SERIAL_IO_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "actual_bytes",
+    kind: ValueKind::ByteCount,
+    handle: None,
+}];
 
 const PENDING_VIRTUAL_MACHINE_SET_BOOTSTRAP_ARGUMENTS: &[Argument] = &[
     Argument {
@@ -5347,9 +5463,9 @@ pub const SYSCALLS: &[Syscall] = &[
     },
     Syscall {
         number: 72,
-        name: "pending_virtual_machine_set_console_output",
+        name: "pending_virtual_machine_set_virtual_serial",
         feature: FeatureGate::Core,
-        arguments: PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT_ARGUMENTS,
+        arguments: PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL_ARGUMENTS,
         results: &[],
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,
@@ -5370,6 +5486,48 @@ pub const SYSCALLS: &[Syscall] = &[
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
         audit: AuditClass::Abi,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 74,
+        name: "virtual_serial_create",
+        feature: FeatureGate::Core,
+        arguments: NO_ARGUMENTS,
+        results: VIRTUAL_SERIAL_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 75,
+        name: "virtual_serial_read",
+        feature: FeatureGate::Core,
+        arguments: VIRTUAL_SERIAL_READ_ARGUMENTS,
+        results: VIRTUAL_SERIAL_IO_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 76,
+        name: "virtual_serial_write",
+        feature: FeatureGate::Core,
+        arguments: VIRTUAL_SERIAL_WRITE_ARGUMENTS,
+        results: VIRTUAL_SERIAL_IO_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
         flags: FlagPolicy::None,
         failure_results: &[],
     },
@@ -5415,7 +5573,7 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.",
     "Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.",
     "A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.",
-    "A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A host-console output route is optional and exists only when a caller transfers a Console handle with write authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Unbound guest console output is discarded. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.",
+    "A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is retained in the VirtualSerial's bounded buffer independently of userspace attachment, and VM retirement disconnects the input route without discarding unread output. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.",
     "The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.",
 ];
 

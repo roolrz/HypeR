@@ -191,7 +191,7 @@ pub fn boot(guest: VmBundle<'_>) -> Result<ThreadId, Error> {
     )?;
     let interrupts = crate::hal::vm::create_prepared_interrupt_controller(interrupt_plan)?;
     let devices = crate::kernel::vm::device::prepare(Some(
-        crate::kernel::vm::device::ConsoleOutputBinding::for_host_test(),
+        crate::kernel::vm::device::VirtualSerialBinding::for_host_test(),
     ))?;
 
     report_guest_layout(&guest, initramfs_range, stage2_root, guest_memory);

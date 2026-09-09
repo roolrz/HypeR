@@ -3,6 +3,8 @@
 
 //! Allocation-free queues and wake ownership for deferred console draining.
 
+use alloc::boxed::Box;
+
 /// Observation of one finite console-drain watermark.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DrainBarrierStatus {
@@ -242,6 +244,22 @@ impl<const CAPACITY: usize> ByteRing<CAPACITY> {
         }
     }
 
+    /// Fallibly allocates and zero-initializes a ring in its final heap slot.
+    ///
+    /// This constructor avoids placing the potentially large backing array on
+    /// a bounded kernel stack. Every field of `ByteRing` is an integer or byte
+    /// array, so the all-zero representation is exactly [`Self::new`].
+    pub fn try_boxed() -> Result<Box<Self>, crate::mm::AllocationError> {
+        let mut allocation = crate::mm::try_box_uninit::<Self>()?;
+        // SAFETY: all-zero is a valid initialized representation for every
+        // field, and the unique `MaybeUninit` allocation is written in full
+        // before it is converted to `Box<Self>`.
+        unsafe {
+            allocation.as_mut_ptr().write_bytes(0, 1);
+            Ok(allocation.assume_init())
+        }
+    }
+
     /// Appends one byte, retaining an overflow count when the FIFO is full.
     pub fn push(&mut self, byte: u8) -> bool {
         if CAPACITY == 0 || self.length == CAPACITY {
@@ -301,6 +319,14 @@ impl<const CAPACITY: usize> ByteRing<CAPACITY> {
 
     pub const fn remaining_capacity(&self) -> usize {
         CAPACITY - self.length
+    }
+
+    /// Discards every retained byte while preserving the allocated storage.
+    pub fn clear(&mut self) {
+        self.head = 0;
+        self.tail = 0;
+        self.length = 0;
+        self.dropped = 0;
     }
 
     pub const fn front(&self) -> Option<u8> {

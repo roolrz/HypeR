@@ -24,9 +24,9 @@ pub use platform::Error;
 pub(crate) use platform::VirtualDeviceSet;
 
 pub(super) fn prepare(
-    console_output: Option<super::ConsoleOutputBinding>,
+    virtual_serial: Option<super::VirtualSerialBinding>,
 ) -> Result<VirtualDeviceSet, Error> {
-    platform::prepare(console_output)
+    platform::prepare(virtual_serial)
 }
 
 pub(super) fn supports_configuration(profile: u32, memory_base: u64, memory_size: u64) -> bool {
@@ -39,6 +39,10 @@ pub(super) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualIn
 
 pub(super) fn clear_console_route_for_vm(vm: super::super::registry::VmId) {
     platform::clear_console_route_for_vm(vm);
+}
+
+pub(super) fn kick_virtual_serial(route: super::super::virtual_serial::Route) {
+    platform::kick_virtual_serial(route);
 }
 
 pub(super) fn receive_console_input(byte: u8) -> super::ConsoleInputDisposition {

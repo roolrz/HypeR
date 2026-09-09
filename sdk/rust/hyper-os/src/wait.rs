@@ -7,7 +7,7 @@ use core::marker::PhantomData;
 
 use crate::handle::{
     ByteChannelObject, CapabilityChannelObject, HandleRef, ObjectType, ProcessObject,
-    VirtualCpuObject,
+    VirtualCpuObject, VirtualSerialObject,
 };
 use crate::{Error, Result, Status};
 
@@ -75,6 +75,15 @@ impl ObjectSignals<ProcessObject> {
 impl ObjectSignals<VirtualCpuObject> {
     pub const TERMINATED: Self =
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED);
+}
+
+impl ObjectSignals<VirtualSerialObject> {
+    pub const READABLE: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE);
+    pub const WRITABLE: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_WRITABLE);
+    pub const DISCONNECTED: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_DISCONNECTED);
 }
 
 /// One ordered borrowed handle and its typed signal mask.

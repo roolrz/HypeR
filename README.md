@@ -277,10 +277,11 @@ Native SDK integration, and runtime acceptance. The AArch64 matrix exercises
 baseline and feature-rich CPU models, multiple host modes and atomic backends,
 address-space geometries, SMP, kernel self-tests, virtual interrupts and timers,
 and Linux guest startup.
-It requires repeated initramfs timer wakeups before exercising guest-console
-RX, so reaching `/init` or delivering only the first timer interrupt cannot
-hide a stalled virtual timer. RISC-V must also reach guest `/init`. x86-64
-currently has a build and image contract only.
+It explicitly attaches `/bin/vmm` to the buffered guest serial port, requires
+repeated initramfs timer wakeups, exercises guest-console RX, and detaches
+through the local Ctrl-] menu. Reaching `/init` or delivering only the first
+timer interrupt therefore cannot hide a stalled virtual timer. RISC-V must also
+reach guest `/init`. x86-64 currently has a build and image contract only.
 
 Stable local equivalents live in `tests/ci/run.sh`:
 

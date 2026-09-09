@@ -148,7 +148,7 @@ fn generated_rust_layouts_are_compiler_checked() {
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_START, 29);
     assert_eq!(generated::HYPER_NATIVE_SYS_PROCESS_BUILDER_ABORT, 30);
     assert_eq!(
-        generated::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_CONSOLE_OUTPUT,
+        generated::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_SET_VIRTUAL_SERIAL,
         72
     );
     assert_eq!(generated::HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC, 73);

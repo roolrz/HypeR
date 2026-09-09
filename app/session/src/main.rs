@@ -14,8 +14,6 @@ use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_rt::ExitCode;
 use hyper_service::session as session_contract;
 
-const INPUT_BYTES: usize = 256;
-
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     match run(&mut startup) {
         Ok(never) => match never {},
@@ -47,7 +45,7 @@ fn run(startup: &mut Startup<'_>) -> Result<Infallible, ()> {
         WaitItem::new(client_error_owner.as_handle_ref(), readable),
         WaitItem::new(console_input_owner.as_handle_ref(), readable),
     ];
-    let mut bytes = [0_u8; INPUT_BYTES];
+    let mut bytes = [0_u8; hyper_os::channel::MAX_MESSAGE_BYTES];
 
     loop {
         let observation = wait_many(&waits, hyper_os::DEADLINE_INFINITE).map_err(|_| ())?;

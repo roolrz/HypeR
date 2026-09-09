@@ -460,6 +460,14 @@ impl VirtualMachine {
         Ok(())
     }
 
+    pub(super) fn bind_virtual_serial(&self, vcpu: u32, thread: ThreadId) {
+        self.devices.bind_virtual_serial(self.id, vcpu, thread);
+    }
+
+    pub(super) fn disconnect_virtual_serial(&self) {
+        self.devices.disconnect_virtual_serial(self.id);
+    }
+
     pub(super) fn is_quiescent(&self) -> bool {
         self.run_admission.is_closed_and_quiescent()
             && self.lifecycle.endpoints().iter().all(|endpoint| {

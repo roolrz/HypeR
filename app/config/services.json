@@ -165,6 +165,12 @@
           "purpose": "process.child-library-directory",
           "operation": "duplicate",
           "rights": ["read", "execute", "duplicate", "transfer"]
+        },
+        {
+          "source": "bootstrap.vm-client-connection-channel",
+          "purpose": "vm.manager-connection",
+          "operation": "duplicate",
+          "rights": ["wait", "write"]
         }
       ]
     },
@@ -184,6 +190,12 @@
         {
           "source": "bootstrap.vm-provisioning-channel",
           "purpose": "vm.provisioning",
+          "operation": "move",
+          "rights": ["wait", "read"]
+        },
+        {
+          "source": "bootstrap.vm-manager-connection-channel",
+          "purpose": "vm.manager-connection",
           "operation": "move",
           "rights": ["wait", "read"]
         },

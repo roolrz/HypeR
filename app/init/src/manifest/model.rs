@@ -5,7 +5,9 @@ pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 pub const MAX_SERVICES: usize = 24;
 pub const MAX_DEPENDENCIES_PER_SERVICE: usize = 12;
 pub const MAX_DEPENDENCY_EDGES: usize = 128;
-pub const MAX_CAPABILITIES_PER_SERVICE: usize = 12;
+// This limit contributes directly to the fixed-size manifest and launch-plan
+// frames retained by init, so grow it only with a reviewed production contract.
+pub const MAX_CAPABILITIES_PER_SERVICE: usize = 13;
 pub const MAX_RIGHTS_PER_CAPABILITY: usize = 12;
 
 pub(super) const MAX_SERVICE_NAME_BYTES: usize = 63;
