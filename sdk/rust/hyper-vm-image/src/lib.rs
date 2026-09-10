@@ -10,6 +10,9 @@
 
 pub mod aarch64_linux;
 pub mod guest_fdt;
+pub mod linux;
+mod placement;
+pub mod riscv64_linux;
 
 const FDT_MAGIC: u32 = 0xd00d_feed;
 const FDT_BEGIN_NODE: u32 = 1;
@@ -27,6 +30,8 @@ const MAX_STRUCTURE_TOKENS: usize = 4096;
 pub const GUEST_IMAGE_COMPATIBLE: &str = "hyper,guest-image-v1";
 /// FIT name of the initial `AArch64` immutable virtual board.
 pub const AARCH64_REFERENCE_PROFILE: &str = "aarch64-reference";
+/// FIT name of the RV64 immutable virtual board.
+pub const RISCV64_REFERENCE_PROFILE: &str = "riscv64-reference";
 /// Maximum accepted command-line bytes, excluding the FIT terminator.
 pub const MAX_BOOT_ARGUMENT_BYTES: usize = 2048;
 

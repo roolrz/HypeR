@@ -207,6 +207,14 @@ pub(in crate::kernel) trait HierarchyServices: UserMemoryServices {
 }
 
 pub(in crate::kernel) trait VmServices: UserMemoryServices {
+    fn virtual_machine_platform_info(
+        &self,
+        lease: HandleValue,
+        profile: u32,
+    ) -> Result<
+        crate::kernel::vm::service::VirtualMachinePlatformInfo,
+        crate::kernel::vm::service::Error,
+    >;
     fn derive_virtual_machine_creation_lease(
         &self,
         authority: HandleValue,

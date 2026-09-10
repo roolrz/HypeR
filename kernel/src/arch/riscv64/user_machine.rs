@@ -33,8 +33,8 @@ pub(crate) type ContractError = Error;
 
 /// Probes one hart before Native execution is published. SMP admission completes
 /// before the first process is built, making the minimum immutable thereafter.
-/// Essential-device discovery already rejects every enabled CPU without F/D/H
-/// (as well as Sstc/Zicbom); the kernel target supplies the RV64IMAC baseline.
+/// Essential-device discovery rejects every enabled CPU without the complete
+/// RV64IMAFDC + Zicsr/Zifencei/H/Sstc/Zicbom contract.
 pub(super) fn discover_local() -> bool {
     let previous: u64;
     let probed: u64;

@@ -36,19 +36,81 @@ fn run() -> Result<(), String> {
     let entry = parse_u64(argument(&arguments, 7)?)?;
     let initramfs = read_file(argument(&arguments, 8)?)?;
     let boot_arguments = argument(&arguments, 9)?;
-    if architecture != "arm64" {
-        return Err(String::from(
-            "only the AArch64 reference platform is currently supported",
-        ));
+    let bytes = build_image(ImageInput {
+        architecture,
+        memory_size,
+        vcpu_count,
+        kernel: &kernel,
+        load,
+        entry,
+        initramfs: &initramfs,
+        boot_arguments,
+    })?;
+    if fs::read(output).ok().as_deref() == Some(bytes.as_slice()) {
+        return Ok(());
     }
+    fs::write(output, bytes).map_err(io_error)
+}
+
+struct ImageInput<'a> {
+    architecture: &'a str,
+    memory_size: u64,
+    vcpu_count: u32,
+    kernel: &'a [u8],
+    load: u64,
+    entry: u64,
+    initramfs: &'a [u8],
+    boot_arguments: &'a str,
+}
+
+fn target(
+    architecture: &str,
+) -> Result<
+    (
+        hyper_vm_image::Architecture,
+        hyper_vm_image::PlatformProfile,
+    ),
+    String,
+> {
+    match architecture {
+        "arm64" => Ok((
+            hyper_vm_image::Architecture::Aarch64,
+            hyper_vm_image::PlatformProfile::Aarch64Reference,
+        )),
+        "riscv" => Ok((
+            hyper_vm_image::Architecture::Riscv64,
+            hyper_vm_image::PlatformProfile::Riscv64Reference,
+        )),
+        _ => Err(String::from(
+            "supported reference architectures are arm64 and riscv",
+        )),
+    }
+}
+
+fn build_image(input: ImageInput<'_>) -> Result<Vec<u8>, String> {
+    let ImageInput {
+        architecture,
+        memory_size,
+        vcpu_count,
+        kernel,
+        load,
+        entry,
+        initramfs,
+        boot_arguments,
+    } = input;
+    let (image_architecture, platform_profile) = target(architecture)?;
     if kernel.is_empty() || initramfs.is_empty() || memory_size == 0 || vcpu_count == 0 {
         return Err(String::from(
             "payload and machine dimensions must be nonzero",
         ));
     }
-    let ramdisk_load =
-        hyper_vm_image::aarch64_linux::plan_initramfs_load(memory_size, initramfs.len() as u64)
-            .map_err(|error| format!("invalid initramfs placement: {error:?}"))?;
+    let ramdisk_load = hyper_vm_image::linux::plan_initramfs_load(
+        image_architecture,
+        platform_profile,
+        memory_size,
+        initramfs.len() as u64,
+    )
+    .map_err(|error| format!("invalid initramfs placement: {error:?}"))?;
 
     let mut fit = Builder::new();
     fit.begin_node("");
@@ -57,7 +119,7 @@ fn run() -> Result<(), String> {
     fit.begin_node("images");
     fit.begin_node("kernel@1");
     fit.property_string("description", "Linux kernel")?;
-    fit.property("data", &kernel)?;
+    fit.property("data", kernel)?;
     fit.property_string("type", "kernel")?;
     fit.property_string("arch", architecture)?;
     fit.property_string("os", "linux")?;
@@ -67,7 +129,7 @@ fn run() -> Result<(), String> {
     fit.end_node();
     fit.begin_node("ramdisk@1");
     fit.property_string("description", "Linux initramfs")?;
-    fit.property("data", &initramfs)?;
+    fit.property("data", initramfs)?;
     fit.property_string("type", "ramdisk")?;
     fit.property_string("arch", architecture)?;
     fit.property_string("os", "linux")?;
@@ -86,7 +148,8 @@ fn run() -> Result<(), String> {
     fit.property_u32("hyper,vcpu-count", vcpu_count)?;
     fit.property_string(
         "hyper,platform-profile",
-        hyper_vm_image::AARCH64_REFERENCE_PROFILE,
+        hyper_vm_image::linux::profile_name(platform_profile)
+            .ok_or("unsupported platform profile")?,
     )?;
     fit.end_node();
     fit.end_node();
@@ -95,6 +158,8 @@ fn run() -> Result<(), String> {
     validate(
         &bytes,
         ValidationExpectations {
+            architecture: image_architecture,
+            platform_profile,
             memory_size,
             vcpu_count,
             kernel_load: load,
@@ -105,13 +170,12 @@ fn run() -> Result<(), String> {
             boot_arguments,
         },
     )?;
-    if fs::read(output).ok().as_deref() == Some(bytes.as_slice()) {
-        return Ok(());
-    }
-    fs::write(output, bytes).map_err(io_error)
+    Ok(bytes)
 }
 
 struct ValidationExpectations<'arguments> {
+    architecture: hyper_vm_image::Architecture,
+    platform_profile: hyper_vm_image::PlatformProfile,
     memory_size: u64,
     vcpu_count: u32,
     kernel_load: u64,
@@ -125,7 +189,7 @@ struct ValidationExpectations<'arguments> {
 fn validate(bytes: &[u8], expected: ValidationExpectations<'_>) -> Result<(), String> {
     let image = hyper_vm_image::parse(&MemorySource(bytes))
         .map_err(|error| format!("generated FIT failed validation: {error:?}"))?;
-    hyper_vm_image::aarch64_linux::validate_reference(&MemorySource(bytes), image)
+    hyper_vm_image::linux::validate_reference(&MemorySource(bytes), image)
         .map_err(|error| format!("generated image violates platform layout: {error:?}"))?;
     let expected_kernel_length = u64::try_from(expected.kernel_length)
         .map_err(|_| String::from("kernel length exceeds u64"))?;
@@ -137,14 +201,15 @@ fn validate(bytes: &[u8], expected: ValidationExpectations<'_>) -> Result<(), St
             && payload.length == expected_initramfs_length
             && payload.compression == hyper_vm_image::Compression::Gzip
     });
-    if image.memory_size != expected.memory_size
+    if image.architecture != expected.architecture
+        || image.memory_size != expected.memory_size
         || image.vcpu_count != expected.vcpu_count
         || image.kernel.load_address != expected.kernel_load
         || image.kernel.entry_address != expected.kernel_entry
         || image.kernel.length != expected_kernel_length
         || !initramfs_matches
         || image.boot_arguments.as_bytes() != expected.boot_arguments.as_bytes()
-        || image.platform_profile != hyper_vm_image::PlatformProfile::Aarch64Reference
+        || image.platform_profile != expected.platform_profile
     {
         return Err(String::from("generated FIT metadata mismatch"));
     }
@@ -311,6 +376,88 @@ impl Builder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_packer_validates_both_reference_platforms() -> Result<(), String> {
+        for (name, architecture, profile, base) in [
+            (
+                "arm64",
+                hyper_vm_image::Architecture::Aarch64,
+                hyper_vm_image::PlatformProfile::Aarch64Reference,
+                0x4000_0000u64,
+            ),
+            (
+                "riscv",
+                hyper_vm_image::Architecture::Riscv64,
+                hyper_vm_image::PlatformProfile::Riscv64Reference,
+                0x8000_0000u64,
+            ),
+        ] {
+            let mut kernel = linux_image();
+            if name == "riscv" {
+                kernel[32..36].copy_from_slice(&2u32.to_le_bytes());
+                kernel[48..56].copy_from_slice(&0x0000_0056_4353_4952u64.to_le_bytes());
+                kernel[56..60].copy_from_slice(&0x0543_5352u32.to_le_bytes());
+            }
+            let bytes = build_image(ImageInput {
+                architecture: name,
+                memory_size: 128 * 1024 * 1024,
+                vcpu_count: 1,
+                kernel: &kernel,
+                load: base + 0x20_0000,
+                entry: base + 0x20_0000,
+                initramfs: &[0; 16],
+                boot_arguments: "console=test",
+            })?;
+            let image = hyper_vm_image::parse(&MemorySource(&bytes))
+                .map_err(|error| format!("{error:?}"))?;
+            assert_eq!(image.architecture, architecture);
+            assert_eq!(image.platform_profile, profile);
+            let plan = hyper_vm_image::linux::validate_reference(&MemorySource(&bytes), image)
+                .map_err(|error| format!("{error:?}"))?;
+            assert_eq!(plan.memory_base(), base);
+            assert_eq!(plan.kernel_entry(), base + 0x20_0000);
+            let mut expected = complete_expectations("console=test", base + 0x07ff_f000);
+            expected.architecture = architecture;
+            expected.platform_profile = profile;
+            expected.kernel_load = base + 0x20_0000;
+            expected.kernel_entry = expected.kernel_load;
+            validate(&bytes, expected)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_packer_rejects_wrong_header_architecture_and_entry() {
+        let kernel = linux_image();
+        assert!(
+            build_image(ImageInput {
+                architecture: "riscv",
+                memory_size: 128 * 1024 * 1024,
+                vcpu_count: 1,
+                kernel: &kernel,
+                load: 0x8020_0000,
+                entry: 0x8020_0000,
+                initramfs: &[0; 16],
+                boot_arguments: "",
+            })
+            .is_err()
+        );
+        assert!(
+            build_image(ImageInput {
+                architecture: "arm64",
+                memory_size: 128 * 1024 * 1024,
+                vcpu_count: 1,
+                kernel: &kernel,
+                load: 0x4020_0000,
+                entry: 0x4020_0004,
+                initramfs: &[0; 16],
+                boot_arguments: "",
+            })
+            .is_err()
+        );
+        assert!(target("x86_64").is_err());
+    }
 
     #[test]
     fn generated_fit_round_trips() -> Result<(), String> {
@@ -588,6 +735,8 @@ mod tests {
         initramfs_load: u64,
     ) -> ValidationExpectations<'_> {
         ValidationExpectations {
+            architecture: hyper_vm_image::Architecture::Aarch64,
+            platform_profile: hyper_vm_image::PlatformProfile::Aarch64Reference,
             memory_size: 128 * 1024 * 1024,
             vcpu_count: 1,
             kernel_load: 0x4020_0000,

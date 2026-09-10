@@ -47,6 +47,7 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO, HYPER_NATIVE_SYS_VIRTUAL_CPU_START,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATE,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_CREATE,
+    HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO, HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REQUEST_STOP,
     HYPER_NATIVE_SYS_VIRTUAL_SERIAL_ACKNOWLEDGE_OUTPUT, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE,
     HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
@@ -84,7 +85,8 @@ use super::handlers::{
     sys_task_inspector_scan_processes, sys_task_inspector_scan_threads, sys_thread_create,
     sys_thread_exit, sys_thread_request_stop, sys_thread_sleep, sys_thread_start, sys_thread_yield,
     sys_virtual_cpu_get_info, sys_virtual_cpu_start, sys_virtual_machine_create,
-    sys_virtual_machine_creation_lease_create, sys_virtual_machine_get_info,
+    sys_virtual_machine_creation_lease_create,
+    sys_virtual_machine_creation_lease_get_platform_info, sys_virtual_machine_get_info,
     sys_virtual_machine_request_stop, sys_virtual_serial_acknowledge_output,
     sys_virtual_serial_create, sys_virtual_serial_register_output, sys_virtual_serial_write,
     sys_vmar_allocate, sys_vmar_destroy, sys_vmar_map, sys_vmar_protect, sys_vmar_unmap,
@@ -325,6 +327,9 @@ pub(in crate::kernel) fn dispatch_deferred(
         }
         HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REQUEST_STOP => {
             sys_virtual_machine_request_stop(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO => {
+            sys_virtual_machine_creation_lease_get_platform_info(services, invocation.arguments())
         }
         HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO => {
             sys_virtual_machine_get_info(services, invocation.arguments())

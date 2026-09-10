@@ -157,6 +157,15 @@ pub const HYPER_NATIVE_SIGNAL_CONSOLE_WRITABLE: u64 = 1_u64 << 1;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED: u64 = 1_u64 << 0;
 
+pub const HYPER_NATIVE_RISCV_ISA_I: u64 = 1;
+pub const HYPER_NATIVE_RISCV_ISA_M: u64 = 2;
+pub const HYPER_NATIVE_RISCV_ISA_A: u64 = 4;
+pub const HYPER_NATIVE_RISCV_ISA_F: u64 = 8;
+pub const HYPER_NATIVE_RISCV_ISA_D: u64 = 16;
+pub const HYPER_NATIVE_RISCV_ISA_C: u64 = 32;
+pub const HYPER_NATIVE_RISCV_ISA_ZICSR: u64 = 64;
+pub const HYPER_NATIVE_RISCV_ISA_ZIFENCEI: u64 = 128;
+pub const HYPER_NATIVE_RISCV_ISA_SSTC: u64 = 256;
 pub const HYPER_NATIVE_PAGE_SIZE: u64 = 4096;
 pub const HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES: u64 = 4096;
 pub const HYPER_NATIVE_VIRTUAL_SERIAL_MAX_TRANSFER_BYTES: u64 = 4096;
@@ -391,6 +400,7 @@ pub const HYPER_NATIVE_SYS_FILE_LOCK: u64 = 109;
 pub const HYPER_NATIVE_SYS_FILE_UNLOCK: u64 = 110;
 pub const HYPER_NATIVE_SYS_CLOCK_GET_REALTIME: u64 = 111;
 pub const HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS: u64 = 112;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO: u64 = 113;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -404,6 +414,27 @@ pub const fn hyper_native_failure_result_mask(
         _ => 0,
     }
 }
+
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE: usize = 24;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeVirtualMachinePlatformInfo {
+    pub architecture: u32,
+    pub platform_profile: u32,
+    pub counter_frequency_hz: u64,
+    pub riscv_isa: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualMachinePlatformInfo>() == 24);
+const _: () = assert!(core::mem::align_of::<HyperNativeVirtualMachinePlatformInfo>() == 8);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachinePlatformInfo, architecture) == 0);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachinePlatformInfo, platform_profile) == 4);
+const _: () = assert!(
+    core::mem::offset_of!(HyperNativeVirtualMachinePlatformInfo, counter_frequency_hz) == 8
+);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachinePlatformInfo, riscv_isa) == 16);
 
 pub const HYPER_NATIVE_FILE_METADATA_MIN_SIZE: usize = 112;
 #[repr(C)]

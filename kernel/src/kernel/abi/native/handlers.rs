@@ -1649,3 +1649,32 @@ pub(super) fn sys_process_get_current_id(
         success([services.current_process_id(), 0])
     })
 }
+
+#[inline(never)]
+pub(super) fn sys_virtual_machine_creation_lease_get_platform_info(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    use hyper::abi::native::{
+        HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE, HyperNativeVirtualMachinePlatformInfo,
+    };
+    let result = (|| {
+        require_zero(&arguments[4..])?;
+        let profile =
+            u32::try_from(arguments[1]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        let request = prepare_info_request(
+            &[arguments[0], arguments[2], arguments[3], 0, 0, 0],
+            HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE,
+            core::mem::size_of::<HyperNativeVirtualMachinePlatformInfo>(),
+        )?;
+        let info = services
+            .virtual_machine_platform_info(request.value, profile)
+            .map_err(status_from_vm_service_error)?;
+        copy_info_record(
+            services,
+            request,
+            &super::wire::encode_virtual_machine_platform_info(info),
+        )
+    })();
+    DeferredAction::Return(info_result(result))
+}

@@ -1137,3 +1137,16 @@ pub(crate) fn access_plic(
 pub(crate) fn stage2_selection_is_current(address_space: &Stage2AddressSpace) -> bool {
     crate::arch::vm::stage2_selection_is_current(address_space)
 }
+
+/// All admitted CPUs satisfy the RV64 I/M/A/F/D/C, Zicsr, Zifencei and Sstc
+/// baseline. This is a mechanism guarantee, not an enumeration of host extras.
+pub(crate) fn riscv_guest_baseline_available() -> bool {
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        crate::arch::vm::riscv_guest_baseline_available()
+    }
+    #[cfg(not(CONFIG_ARCH_RISCV64))]
+    {
+        false
+    }
+}

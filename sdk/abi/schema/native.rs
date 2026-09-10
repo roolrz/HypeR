@@ -919,6 +919,42 @@ const DIRECTORY_ENTRY_RECORD_SIZE: u16 = 24 + DIRECTORY_ENTRY_NAME_CAPACITY as u
 
 pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
+        name: "riscv_isa_i",
+        value: 1,
+    },
+    AbiConstant {
+        name: "riscv_isa_m",
+        value: 2,
+    },
+    AbiConstant {
+        name: "riscv_isa_a",
+        value: 4,
+    },
+    AbiConstant {
+        name: "riscv_isa_f",
+        value: 8,
+    },
+    AbiConstant {
+        name: "riscv_isa_d",
+        value: 16,
+    },
+    AbiConstant {
+        name: "riscv_isa_c",
+        value: 32,
+    },
+    AbiConstant {
+        name: "riscv_isa_zicsr",
+        value: 64,
+    },
+    AbiConstant {
+        name: "riscv_isa_zifencei",
+        value: 128,
+    },
+    AbiConstant {
+        name: "riscv_isa_sstc",
+        value: 256,
+    },
+    AbiConstant {
         name: "page_size",
         value: 4096,
     },
@@ -2206,6 +2242,34 @@ const RESOURCE_LIMITS_FIELDS: &[Field] = &[
 ];
 
 pub const RECORDS: &[Record] = &[
+    Record {
+        name: "virtual_machine_platform_info",
+        fields: &[
+            Field {
+                name: "architecture",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "platform_profile",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "counter_frequency_hz",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "riscv_isa",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+        ],
+        minimum_size: 24,
+        size: 24,
+        alignment: 8,
+    },
     Record {
         name: "file_metadata",
         fields: &[
@@ -7106,6 +7170,48 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::Strict,
         failure_results: &[],
     },
+    Syscall {
+        number: 113,
+        name: "virtual_machine_creation_lease_get_platform_info",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "lease",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine_creation_lease"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("platform_profile", ValueKind::U32),
+            Argument {
+                name: "info",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "info_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("virtual_machine_platform_info"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("info_size", ValueKind::ByteCount),
+        ],
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Object,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -7122,6 +7228,7 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "VM platform inspection borrows an INSPECT creation lease without consuming it. Metadata describes the selected local platform: counter_frequency_hz is the actual guest counter frequency, and riscv_isa is a guaranteed subset across all admitted CPUs, not a complete host ISA listing. Other architectures return a zero RISC-V mask. The guarantee remains valid across local CPU migration; cross-machine migration is not implied.",
     "WaitSets are process-local, non-transferable objects with capacity 1..1024. BIND_WAIT authorizes add/rearm/remove, WAIT authorizes consumption. Add requires source WAIT and reserves one event slot; WaitSet and CapabilityChannel sources are unsupported. Registration IDs are globally non-reused. Bind/rearm observe signal levels and sequence under the source lock; one-shot publication does not allocate. Rearm is busy until successful event consumption. Wait returns one exact 24-byte record (registration ID, signal bits, sequence), using an absolute monotonic deadline. Copyout failure restores the event unless removal or closure cancelled it. Source handle close does not cancel object-lifetime subscriptions; final set handle close detaches registrations and wakes consumers. Future CapabilityChannel subscriptions require ownership-epoch invalidation.",
     "ByteChannel duplicate authority permits shared endpoint ownership; peer_closed is published only when the last active endpoint handle closes. Internal operation pins, including WaitSet subscriptions, do not retain active endpoint authority.",
     "process_get_current_id returns the calling Process KOID for observation only. It creates no handle or operational authority and is not a PID-to-handle lookup.",

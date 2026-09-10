@@ -10,6 +10,7 @@ mod exception;
 mod guest;
 mod interrupt_controller;
 mod interrupts;
+mod isa;
 mod kaslr;
 mod memory;
 mod platform;
@@ -154,7 +155,10 @@ pub fn initialize_cpu_power(
 }
 
 pub fn prepare_primary_cpu_admission() -> bool {
-    user_machine::discover_local() && stage2::discover_local() && vm_vcpu::discover_local_timer()
+    platform::guest_baseline_available()
+        && user_machine::discover_local()
+        && stage2::discover_local()
+        && vm_vcpu::discover_local_timer()
 }
 
 pub fn secondary_cpu_is_compatible() -> bool {
@@ -330,4 +334,10 @@ pub fn commit_interrupt_virtualization(
 
 pub const fn interrupt_virtualization_description() -> Option<(u8, u8, u8, u8)> {
     None
+}
+
+/// The firmware claim is checked for every enabled hart before SMP admission.
+/// Local admission additionally probes Sv39, Sv39x4 and the Sstc control bit.
+pub(crate) fn riscv_guest_baseline_available() -> bool {
+    platform::guest_baseline_available()
 }

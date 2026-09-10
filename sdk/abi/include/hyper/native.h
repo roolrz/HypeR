@@ -169,6 +169,15 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED (UINT64_C(1) << 0)
 
+#define HYPER_NATIVE_RISCV_ISA_I UINT64_C(1)
+#define HYPER_NATIVE_RISCV_ISA_M UINT64_C(2)
+#define HYPER_NATIVE_RISCV_ISA_A UINT64_C(4)
+#define HYPER_NATIVE_RISCV_ISA_F UINT64_C(8)
+#define HYPER_NATIVE_RISCV_ISA_D UINT64_C(16)
+#define HYPER_NATIVE_RISCV_ISA_C UINT64_C(32)
+#define HYPER_NATIVE_RISCV_ISA_ZICSR UINT64_C(64)
+#define HYPER_NATIVE_RISCV_ISA_ZIFENCEI UINT64_C(128)
+#define HYPER_NATIVE_RISCV_ISA_SSTC UINT64_C(256)
 #define HYPER_NATIVE_PAGE_SIZE UINT64_C(4096)
 #define HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES UINT64_C(4096)
 #define HYPER_NATIVE_VIRTUAL_SERIAL_MAX_TRANSFER_BYTES UINT64_C(4096)
@@ -403,6 +412,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_FILE_UNLOCK UINT64_C(110)
 #define HYPER_NATIVE_SYS_CLOCK_GET_REALTIME UINT64_C(111)
 #define HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS UINT64_C(112)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO UINT64_C(113)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -425,6 +435,20 @@ static inline uint64_t hyper_native_failure_result_mask(
     }
     return UINT64_C(0);
 }
+
+#define HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE UINT64_C(24)
+typedef struct hyper_native_virtual_machine_platform_info_t {
+    uint32_t architecture;
+    uint32_t platform_profile;
+    uint64_t counter_frequency_hz;
+    uint64_t riscv_isa;
+} hyper_native_virtual_machine_platform_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_machine_platform_info_t) == 24, "virtual_machine_platform_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_machine_platform_info_t) == 8, "virtual_machine_platform_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_platform_info_t, architecture) == 0, "virtual_machine_platform_info.architecture offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_platform_info_t, platform_profile) == 4, "virtual_machine_platform_info.platform_profile offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_platform_info_t, counter_frequency_hz) == 8, "virtual_machine_platform_info.counter_frequency_hz offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_platform_info_t, riscv_isa) == 16, "virtual_machine_platform_info.riscv_isa offset");
 
 #define HYPER_NATIVE_FILE_METADATA_MIN_SIZE UINT64_C(112)
 typedef struct hyper_native_file_metadata_t {

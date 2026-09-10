@@ -11,7 +11,6 @@ const IMAGE_SIZE: usize = 16;
 const MAGIC: usize = 56;
 const LINUX_IMAGE_MAGIC: u32 = 0x644d_5241;
 const PLACEMENT_ALIGNMENT: u64 = 2 * 1024 * 1024;
-const PAGE_SIZE: u64 = 4096;
 /// Smallest RAM extent accepted by the initial reference platform.
 pub const MINIMUM_REFERENCE_MEMORY_SIZE: u64 = 64 * 1024 * 1024;
 /// Guest-physical start of RAM in the initial reference platform.
@@ -69,24 +68,7 @@ pub enum Error<SourceError> {
     AddressOverflow,
 }
 
-/// One checked half-open guest-physical interval.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AddressRange {
-    start: u64,
-    end: u64,
-}
-
-impl AddressRange {
-    #[must_use]
-    pub const fn start(self) -> u64 {
-        self.start
-    }
-
-    #[must_use]
-    pub const fn end(self) -> u64 {
-        self.end
-    }
-}
+pub use crate::placement::AddressRange;
 
 /// Complete validated placement for the `AArch64` reference Linux platform.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -228,39 +210,27 @@ pub fn validate_reference<Source: ReadAt>(
         .load_address()
         .checked_sub(kernel.text_offset())
         .ok_or(ReferenceLayoutError::AddressOverflow)?;
-    if placement_base < REFERENCE_GUEST_RAM_BASE {
-        return Err(ReferenceLayoutError::InvalidPayload);
-    }
-    let kernel_range = AddressRange {
-        start: kernel.load_address(),
-        end: kernel.occupied_end(),
-    };
-    if !contains(memory_end, kernel_range) {
-        return Err(ReferenceLayoutError::InvalidPayload);
-    }
     let device_tree = AddressRange {
         start: REFERENCE_DTB_ADDRESS,
         end: REFERENCE_DTB_ADDRESS
             .checked_add(REFERENCE_DTB_RESERVED_SIZE)
             .ok_or(ReferenceLayoutError::AddressOverflow)?,
     };
-    if !contains(memory_end, device_tree) {
-        return Err(ReferenceLayoutError::InvalidMemorySize);
-    }
-    if overlaps(device_tree, kernel_range) {
-        return Err(ReferenceLayoutError::OverlappingPayloads);
-    }
-    let initramfs = image
-        .initramfs
-        .map(|payload| {
-            validate_payload_source_range(source, payload)?;
-            payload_range(payload, memory_end)
-        })
-        .transpose()?;
-    if initramfs.is_some_and(|range| overlaps(range, kernel_range) || overlaps(range, device_tree))
-    {
-        return Err(ReferenceLayoutError::OverlappingPayloads);
-    }
+    let initramfs = crate::placement::validate(
+        source,
+        image,
+        AddressRange {
+            start: REFERENCE_GUEST_RAM_BASE,
+            end: memory_end,
+        },
+        AddressRange {
+            start: kernel.load_address(),
+            end: kernel.occupied_end(),
+        },
+        placement_base,
+        device_tree,
+    )
+    .map_err(map_placement_error)?;
     Ok(ReferenceLayout {
         kernel,
         initramfs,
@@ -268,19 +238,16 @@ pub fn validate_reference<Source: ReadAt>(
     })
 }
 
-fn validate_payload_source_range<Source: ReadAt>(
-    source: &Source,
-    payload: Payload,
-) -> Result<(), ReferenceLayoutError<Source::Error>> {
-    let end = payload
-        .file_offset
-        .checked_add(payload.length)
-        .ok_or(ReferenceLayoutError::AddressOverflow)?;
-    let source_length = source.length().map_err(ReferenceLayoutError::Source)?;
-    if end > source_length {
-        return Err(ReferenceLayoutError::PayloadOutOfBounds);
+fn map_placement_error<E>(error: crate::placement::Error<E>) -> ReferenceLayoutError<E> {
+    use crate::placement::Error;
+    match error {
+        Error::Source(error) => ReferenceLayoutError::Source(error),
+        Error::InvalidPayload => ReferenceLayoutError::InvalidPayload,
+        Error::InvalidMemorySize => ReferenceLayoutError::InvalidMemorySize,
+        Error::PayloadOutOfBounds => ReferenceLayoutError::PayloadOutOfBounds,
+        Error::OverlappingPayloads => ReferenceLayoutError::OverlappingPayloads,
+        Error::AddressOverflow => ReferenceLayoutError::AddressOverflow,
     }
-    Ok(())
 }
 
 /// Chooses the canonical top-of-RAM placement used by the development packer.
@@ -288,63 +255,29 @@ fn validate_payload_source_range<Source: ReadAt>(
 /// Final validation remains mandatory because the kernel's occupied extent can
 /// overlap a top-placed initramfs even when both individually fit in RAM.
 pub fn plan_initramfs_load(memory_size: u64, initramfs_length: u64) -> Result<u64, PlacementError> {
-    if initramfs_length == 0 {
-        return Err(PlacementError::InvalidPayload);
-    }
-    let memory_end = reference_memory_end(memory_size).map_err(|error| match error {
-        MemorySizeError::Invalid => PlacementError::InvalidMemorySize,
-        MemorySizeError::AddressOverflow => PlacementError::AddressOverflow,
-    })?;
-    let start = memory_end
-        .checked_sub(initramfs_length)
-        .ok_or(PlacementError::InvalidPayload)?
-        & !(PAGE_SIZE - 1);
-    if start < REFERENCE_GUEST_RAM_BASE {
-        return Err(PlacementError::InvalidPayload);
-    }
-    Ok(start)
+    crate::placement::plan_initramfs::<core::convert::Infallible>(
+        REFERENCE_GUEST_RAM_BASE,
+        memory_size,
+        MINIMUM_REFERENCE_MEMORY_SIZE,
+        initramfs_length,
+    )
+    .map_err(|error| match error {
+        crate::placement::Error::InvalidMemorySize => PlacementError::InvalidMemorySize,
+        crate::placement::Error::AddressOverflow => PlacementError::AddressOverflow,
+        _ => PlacementError::InvalidPayload,
+    })
 }
 
 fn reference_memory_end(memory_size: u64) -> Result<u64, MemorySizeError> {
-    if memory_size < MINIMUM_REFERENCE_MEMORY_SIZE
-        || !memory_size.is_power_of_two()
-        || !memory_size.is_multiple_of(PAGE_SIZE)
-    {
-        return Err(MemorySizeError::Invalid);
-    }
-    REFERENCE_GUEST_RAM_BASE
-        .checked_add(memory_size)
-        .ok_or(MemorySizeError::AddressOverflow)
-}
-
-fn payload_range<SourceError>(
-    payload: Payload,
-    memory_end: u64,
-) -> Result<AddressRange, ReferenceLayoutError<SourceError>> {
-    let end = payload
-        .load_address
-        .checked_add(payload.length)
-        .ok_or(ReferenceLayoutError::AddressOverflow)?;
-    let range = AddressRange {
-        start: payload.load_address,
-        end,
-    };
-    if payload.length == 0
-        || !contains(memory_end, range)
-        || payload.entry_address < range.start
-        || payload.entry_address >= range.end
-    {
-        return Err(ReferenceLayoutError::InvalidPayload);
-    }
-    Ok(range)
-}
-
-const fn contains(memory_end: u64, range: AddressRange) -> bool {
-    range.start >= REFERENCE_GUEST_RAM_BASE && range.end <= memory_end
-}
-
-const fn overlaps(first: AddressRange, second: AddressRange) -> bool {
-    first.start < second.end && second.start < first.end
+    crate::placement::memory_end::<core::convert::Infallible>(
+        REFERENCE_GUEST_RAM_BASE,
+        memory_size,
+        MINIMUM_REFERENCE_MEMORY_SIZE,
+    )
+    .map_err(|error| match error {
+        crate::placement::Error::AddressOverflow => MemorySizeError::AddressOverflow,
+        _ => MemorySizeError::Invalid,
+    })
 }
 
 fn le32(bytes: &[u8], offset: usize) -> Option<u32> {

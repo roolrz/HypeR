@@ -15,6 +15,7 @@ exception=src/arch/riscv64/exception.rs
 context=src/arch/riscv64/context.rs
 guest_rust=src/arch/riscv64/guest.rs
 platform=src/arch/riscv64/platform.rs
+isa=src/arch/riscv64/isa.rs
 arch_module=src/arch/riscv64/mod.rs
 boot=src/kernel/boot/mod.rs
 main=src/main.rs
@@ -163,8 +164,15 @@ rg -q 'fn clear_legacy_software_interrupt\(context: &mut VcpuContext\)' "$guest_
     exit 1
 }
 
-rg -U -q 'if[[:space:]]+!candidate\.supervisor_timer_compare[[:space:]]*\{\n[[:space:]]+return Err\(Error::MissingSstc\);' "$platform" || {
-    echo 'the unconditional VSTIMECMP path requires an explicit Sstc platform contract' >&2
+# The platform collector delegates ISA parsing to the same per-CPU qualifier
+# used by the Native guest metadata guarantee. Keep the complete fail-closed
+# chain, rather than matching the removed boolean-only FDT parser.
+rg -U -q 'candidate[[:space:]]+\.isa[[:space:]]+\.validate\(node\.enabled\)' "$platform" &&
+    rg -F -q 'Missing::Timer => Error::MissingSstc' "$platform" &&
+    rg -U -q 'if bits & SSTC == 0 \{[[:space:]]+return Err\(Missing::Timer\);' "$isa" &&
+    rg -F -q 'b"sstc" => SSTC' "$isa" &&
+    rg -F -q 'platform::guest_baseline_available()' "$arch_module" || {
+    echo 'the unconditional VSTIMECMP path requires every enabled CPU to qualify Sstc' >&2
     exit 1
 }
 rg -U -q 'if[[:space:]]+!enable_supervisor_timer_compare\(\)[[:space:]]*\{\n[[:space:]]+return Err\(Error::SupervisorTimerCompareUnavailable\);' "$vm_vcpu" &&

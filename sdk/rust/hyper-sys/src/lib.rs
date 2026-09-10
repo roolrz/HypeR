@@ -2589,3 +2589,27 @@ pub unsafe fn directory_open_file_with_options(
         )
     }
 }
+
+/// Reads immutable board metadata without consuming the creation lease.
+///
+/// # Safety
+/// `lease` must remain live and `info` writable for the complete call.
+#[inline]
+pub unsafe fn virtual_machine_creation_lease_get_platform_info(
+    lease: abi::HyperNativeHandle,
+    profile: u32,
+    info: *mut abi::HyperNativeVirtualMachinePlatformInfo,
+) -> CallResult {
+    // SAFETY: the caller establishes handle and pointer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO,
+            lease,
+            u64::from(profile),
+            info.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeVirtualMachinePlatformInfo>() as u64,
+            0,
+            0,
+        )
+    }
+}

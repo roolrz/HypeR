@@ -1346,3 +1346,31 @@ pub(super) const fn process_phase(phase: ProcessPhase) -> u32 {
         ProcessPhase::Retired => HYPER_NATIVE_PROCESS_PHASE_RETIRED as u32,
     }
 }
+
+pub(super) fn encode_virtual_machine_platform_info(
+    info: crate::kernel::vm::service::VirtualMachinePlatformInfo,
+) -> [u8; core::mem::size_of::<hyper::abi::native::HyperNativeVirtualMachinePlatformInfo>()] {
+    type Record = hyper::abi::native::HyperNativeVirtualMachinePlatformInfo;
+    let mut bytes = [0; core::mem::size_of::<Record>()];
+    write_u32(
+        &mut bytes,
+        core::mem::offset_of!(Record, architecture),
+        info.architecture,
+    );
+    write_u32(
+        &mut bytes,
+        core::mem::offset_of!(Record, platform_profile),
+        info.platform_profile,
+    );
+    write_u64(
+        &mut bytes,
+        core::mem::offset_of!(Record, counter_frequency_hz),
+        info.counter_frequency_hz,
+    );
+    write_u64(
+        &mut bytes,
+        core::mem::offset_of!(Record, riscv_isa),
+        info.riscv_isa,
+    );
+    bytes
+}

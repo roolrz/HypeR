@@ -1,39 +1,47 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Guest platform profiles implemented by the per-VM runtime.
+//! Conversion between validated image identity and Native platform metadata.
 
+use hyper_os::vm;
+use hyper_vm_image::guest_fdt::GuestHardwareMetadata;
 use hyper_vm_image::{Architecture, PlatformProfile};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SelectedProfile {
-    Aarch64Reference,
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SelectionError {
     Architecture,
     PlatformProfile,
-    VirtualCpuCount,
 }
 
-/// Selects an implemented loader only after the generic image parser has
-/// established a well-formed architecture and platform identity.
-pub const fn select(
-    architecture: Architecture,
-    platform_profile: PlatformProfile,
-    vcpu_count: u32,
-) -> Result<SelectedProfile, SelectionError> {
-    if !matches!(architecture, Architecture::Aarch64) {
-        return Err(SelectionError::Architecture);
+/// Translate an image profile into its Native query identity. Image layout and
+/// CPU-count policy remain in the shared Linux boot-plan validator.
+pub const fn native_profile(
+    profile: PlatformProfile,
+) -> Result<vm::PlatformProfile, SelectionError> {
+    match profile {
+        PlatformProfile::Aarch64Reference => Ok(vm::PlatformProfile::Aarch64Reference),
+        PlatformProfile::Riscv64Reference => Ok(vm::PlatformProfile::Riscv64Reference),
+        PlatformProfile::X86_64Reference => Err(SelectionError::PlatformProfile),
     }
-    if !matches!(platform_profile, PlatformProfile::Aarch64Reference) {
+}
+
+/// Reject a mismatched kernel response before using any of its hardware facts.
+pub fn validate_metadata(
+    architecture: Architecture,
+    profile: PlatformProfile,
+    metadata: vm::VirtualMachinePlatformInfo,
+) -> Result<GuestHardwareMetadata, SelectionError> {
+    if metadata.platform_profile != native_profile(profile)? {
         return Err(SelectionError::PlatformProfile);
     }
-    if vcpu_count != 1 {
-        return Err(SelectionError::VirtualCpuCount);
+    match (architecture, metadata.architecture) {
+        (Architecture::Aarch64, vm::Architecture::Aarch64) => Ok(GuestHardwareMetadata::Aarch64),
+        (Architecture::Riscv64, vm::Architecture::Riscv64) => Ok(GuestHardwareMetadata::Riscv64 {
+            counter_frequency_hz: metadata.counter_frequency_hz,
+            riscv_isa: metadata.riscv_isa,
+        }),
+        _ => Err(SelectionError::Architecture),
     }
-    Ok(SelectedProfile::Aarch64Reference)
 }
 
 #[cfg(test)]

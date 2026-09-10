@@ -1,7 +1,9 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fixed-storage Linux device-tree construction for the reference `AArch64` VM.
+//! Fixed-storage Linux device-tree construction for qualified reference VMs.
+
+mod riscv64;
 
 const FDT_MAGIC: u32 = 0xd00d_feed;
 const FDT_BEGIN_NODE: u32 = 1;
@@ -42,6 +44,85 @@ pub struct Aarch64LinuxBoot<'arguments> {
     pub vcpu_count: u32,
     pub initramfs: Option<(u64, u64)>,
     pub boot_arguments: &'arguments str,
+}
+
+/// Hardware facts obtained from the Native creation lease, never inferred from
+/// the image container or copied from the host's device tree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuestHardwareMetadata {
+    Aarch64,
+    Riscv64 {
+        counter_frequency_hz: u64,
+        riscv_isa: u64,
+    },
+}
+
+impl GuestHardwareMetadata {
+    pub fn validate_for(self, plan: &crate::linux::BootPlan) -> Result<(), Error> {
+        match (self, plan.architecture(), plan.platform_profile()) {
+            (
+                Self::Aarch64,
+                crate::Architecture::Aarch64,
+                crate::PlatformProfile::Aarch64Reference,
+            ) => Ok(()),
+            (
+                Self::Riscv64 {
+                    counter_frequency_hz,
+                    riscv_isa,
+                },
+                crate::Architecture::Riscv64,
+                crate::PlatformProfile::Riscv64Reference,
+            ) if counter_frequency_hz > 0
+                && counter_frequency_hz <= u64::from(u32::MAX)
+                && riscv_isa & riscv64::ISA == riscv64::ISA =>
+            {
+                Ok(())
+            }
+            _ => Err(Error::InvalidInput),
+        }
+    }
+}
+
+/// Encodes the selected, already validated boot plan into caller-owned buffers.
+pub fn build_linux(
+    plan: &crate::linux::BootPlan,
+    boot_arguments: &str,
+    hardware: GuestHardwareMetadata,
+    structure: &mut [u8],
+    strings: &mut [u8],
+    output: &mut [u8],
+) -> Result<usize, Error> {
+    hardware.validate_for(plan)?;
+    if boot_arguments.as_bytes().contains(&0)
+        || boot_arguments.len() > crate::MAX_BOOT_ARGUMENT_BYTES
+    {
+        return Err(Error::InvalidInput);
+    }
+    match hardware {
+        GuestHardwareMetadata::Aarch64 => build_aarch64_linux(
+            Aarch64LinuxBoot {
+                memory_base: plan.memory_base(),
+                memory_size: plan.memory_size(),
+                vcpu_count: plan.vcpu_count(),
+                initramfs: plan.initramfs().map(|range| (range.start(), range.end())),
+                boot_arguments,
+            },
+            structure,
+            strings,
+            output,
+        ),
+        GuestHardwareMetadata::Riscv64 {
+            counter_frequency_hz,
+            ..
+        } => riscv64::build(
+            plan,
+            boot_arguments,
+            counter_frequency_hz as u32,
+            structure,
+            strings,
+            output,
+        ),
+    }
 }
 
 /// Builds a complete Linux-format DTB into caller-owned fixed storage.

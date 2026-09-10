@@ -357,6 +357,59 @@ pub fn wait_vcpu_terminated(vcpu: HandleRef<'_, VirtualCpuObject>, deadline: u64
     }
 }
 
+/// A guaranteed local guest contract, valid across admitted CPU migration.
+/// `riscv_isa` is a minimum subset, not a complete host extension enumeration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VirtualMachinePlatformInfo {
+    pub architecture: Architecture,
+    pub platform_profile: PlatformProfile,
+    pub counter_frequency_hz: u64,
+    pub riscv_isa: u64,
+}
+
+pub fn platform_info(
+    lease: HandleRef<'_, VirtualMachineCreationLeaseObject>,
+    profile: PlatformProfile,
+) -> Result<VirtualMachinePlatformInfo> {
+    let mut record = hyper_abi::HyperNativeVirtualMachinePlatformInfo {
+        architecture: 0,
+        platform_profile: 0,
+        counter_frequency_hz: 0,
+        riscv_isa: 0,
+    };
+    // SAFETY: the lease remains borrowed and the output record writable.
+    let result = unsafe {
+        hyper_sys::virtual_machine_creation_lease_get_platform_info(
+            lease.raw().get(),
+            profile as u32,
+            &mut record,
+        )
+    };
+    let _supported_size = crate::validate_info_result(
+        result,
+        hyper_abi::HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE,
+    )?;
+    let architecture = decode_architecture(record.architecture)?;
+    let platform_profile = decode_platform_profile(record.platform_profile)?;
+    if platform_profile != profile
+        || record.counter_frequency_hz == 0
+        || !matches!(
+            (architecture, platform_profile),
+            (Architecture::Aarch64, PlatformProfile::Aarch64Reference)
+                | (Architecture::Riscv64, PlatformProfile::Riscv64Reference)
+        )
+        || (architecture != Architecture::Riscv64 && record.riscv_isa != 0)
+    {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(VirtualMachinePlatformInfo {
+        architecture,
+        platform_profile,
+        counter_frequency_hz: record.counter_frequency_hz,
+        riscv_isa: record.riscv_isa,
+    })
+}
+
 pub fn machine_info(machine: HandleRef<'_, VirtualMachineObject>) -> Result<VirtualMachineInfo> {
     let mut record = hyper_abi::HyperNativeVirtualMachineInfo {
         phase: 0,
