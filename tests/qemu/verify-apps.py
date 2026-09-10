@@ -48,21 +48,25 @@ def main():
             process.stdin.write(data)
             process.stdin.flush()
 
-        def run(text, expected=None, failed=False):
+        def run(text, expected=None, failed=False, timeout=60):
             send(text.encode() + b'\n')
-            output = await_text(rb'hyper-sh\$ ')
+            output = await_text(rb'hyper-sh\$ ', timeout=timeout)
             if (b'sh: command failed' in output) != failed:
                 raise AssertionError(f'{text}: unexpected exit status: {output!r}')
             if expected is not None and not re.search(expected, output):
                 raise AssertionError(f'{text}: missing {expected!r}: {output!r}')
             return output
 
-        def state(name, wanted):
-            for _ in range(50):
-                output = run(f'vmm status {name}')
+        def state(name, wanted, timeout=60):
+            # Bound elapsed time, not the number of fast status commands.
+            # Guest setup on a loaded CI runner can outlive 50 short polls.
+            deadline = time.monotonic() + timeout
+            output = b''
+            while (remaining := deadline - time.monotonic()) > 0:
+                output = run(f'vmm status {name}', timeout=remaining)
                 if re.search(name.encode() + rb'\s+' + wanted.encode() + rb'\s', output):
                     return
-                time.sleep(0.1)
+                time.sleep(min(0.2, max(0, deadline - time.monotonic())))
             raise AssertionError(f'{name} did not reach {wanted}: {output!r}')
 
         try:
