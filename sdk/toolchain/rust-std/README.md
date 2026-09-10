@@ -39,7 +39,9 @@ input, output, and static/dynamic linking.
 | Mutex, RwLock, Condvar, Once, parking | Upstream atomic/futex algorithms with Native wait/wake bridge |
 | `thread_local!` | Key-based TLS in a per-thread control block; bounded destructor passes |
 | `thread::Builder::spawn` | Native thread creation, join, and detached-stack reclamation |
-| Files, networking, subprocess creation | Upstream unsupported implementations |
+| Files | Read/write/create/append/truncate, seek, metadata, directory iteration/create/remove, copy |
+| Subprocesses | Native ProcessBuilder, arguments/environment, cwd capability, wait/try_wait/kill, piped or inherited byte-channel stdio |
+| Networking | Upstream unsupported implementation |
 | Wall-clock time, environment mutation | Upstream unsupported behavior, including panic where the public API cannot return an error |
 | Cryptographic randomness | Unsupported; no entropy source is claimed |
 | HashMap seeds | Upstream unsupported-target address-based fallback; no strong collision-attack resistance claim |
@@ -110,3 +112,38 @@ against a host syscall substitute. Native tests exercise concurrent thread
 creation, Mutex/Condvar progress, independent TLS, join and detached cleanup.
 Physical AArch64 qualification must still stress weak ordering, migration,
 concurrent mapping retirement and interrupt timing beyond QEMU coverage.
+
+## Files and subprocesses
+
+The shared runtime retains authorized duplicates of startup directory, task
+and stdio capabilities before application code can take its startup handles.
+Applications still need the corresponding authority: filesystem access uses
+root/current-directory capabilities, and spawning additionally requires
+TaskFactory, TaskGroup and ResourceDomain capabilities. A missing authority is
+an error; std does not acquire an ambient root. Relative paths resolve beneath
+the delegated cwd (or root when no cwd is supplied); absolute paths use the
+delegated root. Parent traversal cannot escape either capability boundary.
+
+`File::try_clone` shares the adapter's offset. Native append chooses the end of
+the file atomically for each short write. File handles survive unlink. The
+current filesystem is volatile ramfs; sync/durability, rename, links, canonical
+paths, timestamps, permission mutation and shared file mappings return
+Unsupported. `fs::copy` currently supports ordinary 0666 files only; it rejects
+permission-preserving copies that need missing Native chmod instead of silently
+changing permission bits. Global cwd/environment mutation remains unsupported.
+
+`Command` supports PATH search, arguments, environment overrides, a delegated
+child cwd and Native lifecycle observation. `output` and `wait_with_output`
+drain stdout and stderr concurrently using a bounded WaitSet. Stdio inheritance
+uses explicitly duplicatable ByteChannels; `Stdio::null` drains output on a
+runtime thread and supplies EOF for input. File-backed stdio is unsupported
+because Native ProcessBuilder currently accepts channels for these services.
+`process::id` and child IDs expose observation-only kernel object identities;
+Rust's u32 ID surface cannot represent a KOID above u32::MAX and rejects that
+case rather than aliasing identities. Signals, fork, exec-in-place and Unix
+process groups are not provided.
+
+Native acceptance checks exercise sparse writes, truncation, concurrent append,
+unlink/recreate lifetime, one-shot WaitSet rearm and peer close, more than 64
+persistent sources, and child output larger than channel capacity on both
+streams. Both static and dynamic std applications use the assembled SDK.

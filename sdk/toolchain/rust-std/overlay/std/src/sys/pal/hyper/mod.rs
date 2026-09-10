@@ -33,6 +33,8 @@ pub fn cvt(status: i64) -> crate::io::Result<()> {
         -13 => ErrorKind::WouldBlock,
         -15 => ErrorKind::BrokenPipe,
         -16 => ErrorKind::NotFound,
+        -17 => ErrorKind::AlreadyExists,
+        -18 => ErrorKind::DirectoryNotEmpty,
         _ => ErrorKind::Other,
     };
     // In particular, reporting allocation failure must not allocate again.

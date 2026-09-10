@@ -14,6 +14,7 @@
 mod executable;
 mod instance;
 mod objects;
+mod ramfs;
 mod read;
 mod read_contract;
 mod resolve;
@@ -27,8 +28,9 @@ pub(crate) use objects::{
     Error as VfsError, FileInfo, FileObject,
 };
 pub(crate) use service::{
-    ServiceError as VfsServiceError, directory_info, file_info, open_directory, open_file,
-    read_directory, read_file_at,
+    ServiceError as VfsServiceError, create_directory, create_file, directory_info, file_info,
+    open_directory, open_file, read_directory, read_file_at, remove_entry, resize_file,
+    write_file_at,
 };
 
 use hyper::fs::ramfs::RamFs;

@@ -1881,3 +1881,248 @@ pub unsafe fn thread_sleep(deadline: u64) -> abi::HyperNativeStatus {
     // SAFETY: the caller upholds the raw syscall contract.
     unsafe { ffi_thread_sleep(deadline) }
 }
+
+/// Invokes Native `file_write_at`.
+///
+/// # Safety
+///
+/// Handles must remain live with the operation's required rights. Input
+/// pointers must be readable for their stated lengths.
+pub unsafe fn file_write_at(
+    file: abi::HyperNativeHandle,
+    options: u32,
+    offset: u64,
+    input: *const u8,
+    size: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes the Native handle and buffer contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_FILE_WRITE_AT,
+            file,
+            options as u64,
+            offset,
+            input.addr() as u64,
+            size as u64,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `file_resize`.
+///
+/// # Safety
+///
+/// Handles must remain live with the operation's required rights. Input
+/// pointers must be readable for their stated lengths.
+pub unsafe fn file_resize(file: abi::HyperNativeHandle, size: u64) -> CallResult {
+    // SAFETY: the caller establishes the Native handle and buffer contracts.
+    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_FILE_RESIZE, file, size, 0, 0, 0, 0) }
+}
+
+/// Creates a file and transfers exclusive ownership of the returned handle.
+///
+/// # Safety
+///
+/// Handles must remain live with the operation's required rights. Input
+/// pointers must be readable for their stated lengths.
+pub unsafe fn directory_create_file(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_size: usize,
+    rights: u64,
+    mode: u32,
+) -> CallResult {
+    // SAFETY: the caller establishes the Native handle and buffer contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_CREATE_FILE,
+            directory,
+            path.addr() as u64,
+            path_size as u64,
+            rights,
+            mode as u64,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_create_directory`.
+///
+/// # Safety
+///
+/// Handles must remain live with the operation's required rights. Input
+/// pointers must be readable for their stated lengths.
+pub unsafe fn directory_create_directory(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_size: usize,
+    mode: u32,
+) -> CallResult {
+    // SAFETY: the caller establishes the Native handle and buffer contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_CREATE_DIRECTORY,
+            directory,
+            path.addr() as u64,
+            path_size as u64,
+            mode as u64,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_remove`.
+///
+/// # Safety
+///
+/// Handles must remain live with the operation's required rights. Input
+/// pointers must be readable for their stated lengths.
+pub unsafe fn directory_remove(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_size: usize,
+    options: u32,
+) -> CallResult {
+    // SAFETY: the caller establishes the Native handle and buffer contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_REMOVE,
+            directory,
+            path.addr() as u64,
+            path_size as u64,
+            options as u64,
+            0,
+            0,
+        )
+    }
+}
+
+/// Creates a `WaitSet` and transfers exclusive ownership of the returned handle.
+///
+/// # Safety
+///
+/// Every borrowed handle must remain live with the required rights.
+pub unsafe fn wait_set_create(capacity: usize) -> CallResult {
+    // SAFETY: the caller establishes handle validity and output ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_WAIT_SET_CREATE,
+            capacity as u64,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `wait_set_add`.
+///
+/// # Safety
+///
+/// Every borrowed handle must remain live with the required rights.
+pub unsafe fn wait_set_add(
+    set: abi::HyperNativeHandle,
+    source: abi::HyperNativeHandle,
+    signals: u64,
+) -> CallResult {
+    // SAFETY: the caller establishes handle validity and output ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_WAIT_SET_ADD,
+            set,
+            source,
+            signals,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `wait_set_rearm`.
+///
+/// # Safety
+///
+/// Every borrowed handle must remain live with the required rights.
+pub unsafe fn wait_set_rearm(set: abi::HyperNativeHandle, registration: u64) -> CallResult {
+    // SAFETY: the caller establishes handle validity and output ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_WAIT_SET_REARM,
+            set,
+            registration,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `wait_set_remove`.
+///
+/// # Safety
+///
+/// Every borrowed handle must remain live with the required rights.
+pub unsafe fn wait_set_remove(set: abi::HyperNativeHandle, registration: u64) -> CallResult {
+    // SAFETY: the caller establishes handle validity and output ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_WAIT_SET_REMOVE,
+            set,
+            registration,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `wait_set_wait`.
+///
+/// # Safety
+///
+/// The handle must remain live and output must be writable for `output_size` bytes.
+pub unsafe fn wait_set_wait(
+    set: abi::HyperNativeHandle,
+    deadline: u64,
+    output: *mut u8,
+    output_size: usize,
+) -> CallResult {
+    // SAFETY: the caller pins the handle and provides writable output storage.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_WAIT_SET_WAIT,
+            set,
+            deadline,
+            output as u64,
+            output_size as u64,
+            0,
+            0,
+        )
+    }
+}
+
+/// Returns the calling process's observation-only KOID.
+///
+/// # Safety
+/// The caller must execute in a Native process using the matching SDK.
+pub unsafe fn process_get_current_id() -> CallResult {
+    // SAFETY: this call has no pointers or capability arguments.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}

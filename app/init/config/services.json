@@ -98,43 +98,43 @@
           "source": "bootstrap.shell-input-channel",
           "purpose": "stdio.input",
           "operation": "move",
-          "rights": ["wait", "read"]
+          "rights": ["wait", "read", "duplicate", "transfer"]
         },
         {
           "source": "bootstrap.shell-output-channel",
           "purpose": "stdio.output",
           "operation": "move",
-          "rights": ["wait", "write"]
+          "rights": ["wait", "write", "duplicate", "transfer"]
         },
         {
           "source": "bootstrap.shell-error-channel",
           "purpose": "stdio.error",
           "operation": "move",
-          "rights": ["wait", "write"]
+          "rights": ["wait", "write", "duplicate", "transfer"]
         },
         {
           "source": "bootstrap.root-directory",
           "purpose": "process.root-directory",
           "operation": "duplicate",
-          "rights": ["read", "duplicate", "transfer", "execute"]
+          "rights": ["read", "duplicate", "transfer", "execute", "write", "inspect"]
         },
         {
           "source": "bootstrap.task-factory",
           "purpose": "process.task-factory",
           "operation": "duplicate",
-          "rights": ["create-process"]
+          "rights": ["create-process", "duplicate", "transfer"]
         },
         {
           "source": "bootstrap.task-group",
           "purpose": "process.task-group",
           "operation": "duplicate",
-          "rights": ["attach-process"]
+          "rights": ["attach-process", "duplicate", "transfer"]
         },
         {
           "source": "bootstrap.resource-domain",
           "purpose": "process.resource-domain",
           "operation": "duplicate",
-          "rights": ["sponsor"]
+          "rights": ["sponsor", "duplicate", "transfer"]
         },
         {
           "source": "bootstrap.task-inspector",

@@ -19,6 +19,7 @@ use super::{Rights, signals::SignalSource};
 
 const RETIRED: usize = 1 << (usize::BITS - 1);
 const ACTIVE_LIMIT: usize = RETIRED - 1;
+const WAIT_SET_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_WAIT_SET;
 const EVENT_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_EVENT;
 const BYTE_CHANNEL_OBJECT_KIND: u32 = hyper::abi::native::HYPER_NATIVE_OBJECT_BYTE_CHANNEL;
 const CAPABILITY_CHANNEL_OBJECT_KIND: u32 =
@@ -128,6 +129,7 @@ impl Koid {
 pub(crate) struct ObjectKind(u32);
 
 impl ObjectKind {
+    pub(crate) const WAIT_SET: Self = Self(WAIT_SET_OBJECT_KIND);
     /// Native Event object kind declared by the generated ABI schema.
     pub(crate) const EVENT: Self = Self(EVENT_OBJECT_KIND);
     /// Buffered byte-stream endpoint kind declared by the generated ABI schema.
@@ -211,7 +213,8 @@ impl ObjectKind {
             | PENDING_VIRTUAL_MACHINE_OBJECT_KIND
             | VIRTUAL_MACHINE_OBJECT_KIND
             | VIRTUAL_CPU_OBJECT_KIND
-            | VIRTUAL_SERIAL_OBJECT_KIND => Some(Self(raw)),
+            | VIRTUAL_SERIAL_OBJECT_KIND
+            | WAIT_SET_OBJECT_KIND => Some(Self(raw)),
             _ => None,
         }
     }

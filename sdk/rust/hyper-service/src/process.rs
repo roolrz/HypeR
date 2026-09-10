@@ -34,6 +34,8 @@ pub const SHELL_ROOT_DIRECTORY_CONTRACT: StartupContract = StartupContract::exac
     ROOT_DIRECTORY_NAME,
     startup::ROOT_DIRECTORY,
     Rights::READ
+        .union(Rights::WRITE)
+        .union(Rights::INSPECT)
         .union(Rights::EXECUTE)
         .union(Rights::DUPLICATE)
         .union(Rights::TRANSFER),
@@ -41,17 +43,17 @@ pub const SHELL_ROOT_DIRECTORY_CONTRACT: StartupContract = StartupContract::exac
 pub const SHELL_TASK_FACTORY_CONTRACT: StartupContract = StartupContract::exact(
     TASK_FACTORY_NAME,
     startup::TASK_FACTORY,
-    Rights::CREATE_PROCESS,
+    delegated(Rights::CREATE_PROCESS),
 );
 pub const SHELL_TASK_GROUP_CONTRACT: StartupContract = StartupContract::exact(
     TASK_GROUP_NAME,
     startup::TASK_GROUP,
-    Rights::TASK_GROUP_ATTACH_PROCESS,
+    delegated(Rights::TASK_GROUP_ATTACH_PROCESS),
 );
 pub const SHELL_RESOURCE_DOMAIN_CONTRACT: StartupContract = StartupContract::exact(
     RESOURCE_DOMAIN_NAME,
     startup::RESOURCE_DOMAIN,
-    Rights::RESOURCE_DOMAIN_SPONSOR,
+    delegated(Rights::RESOURCE_DOMAIN_SPONSOR),
 );
 pub const SHELL_TASK_INSPECTOR_CONTRACT: StartupContract = StartupContract::exact(
     TASK_INSPECTOR_NAME,

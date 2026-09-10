@@ -110,7 +110,7 @@ impl AuthorityPolicy for BootstrapPolicy {
             BootstrapAuthority::DynamicLibraryDirectory => duplicate_authority(
                 authority,
                 DirectoryObject::KIND.as_raw(),
-                root_directory_rights(),
+                library_directory_rights(),
             ),
             BootstrapAuthority::TaskFactory => duplicate_authority(
                 authority,
@@ -294,7 +294,8 @@ const fn console_rights() -> Rights {
 }
 
 const fn byte_channel_rights() -> Rights {
-    Rights::TRANSFER
+    Rights::DUPLICATE
+        .union(Rights::TRANSFER)
         .union(Rights::WAIT)
         .union(Rights::INSPECT)
         .union(Rights::READ)
@@ -302,6 +303,10 @@ const fn byte_channel_rights() -> Rights {
 }
 
 const fn root_directory_rights() -> Rights {
+    library_directory_rights().union(Rights::WRITE)
+}
+
+const fn library_directory_rights() -> Rights {
     Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)

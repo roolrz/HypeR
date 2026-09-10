@@ -36,6 +36,9 @@ replace("std/build.rs", 'if target_os == "linux"', 'if target_os == "hyper" || t
 for module in ["pal", "args", "env", "stdio", "thread"]:
     select(module)
 select("alloc", "")
+select("pipe")
+replace("std/src/sys/process/mod.rs", "cfg_select! {", 'cfg_select! {\n    target_os = "hyper" => { mod hyper; use hyper as imp; }')
+replace("std/src/sys/fs/mod.rs", "cfg_select! {", 'cfg_select! {\n    target_os = "hyper" => { mod hyper; use hyper as imp; }')
 replace("std/src/sys/args/mod.rs", '#[cfg(any(', '#[cfg(any(target_os = "hyper",')
 replace("std/src/sys/io/error/mod.rs", '        target_os = "vexos",', '        target_os = "hyper",\n        target_os = "vexos",')
 replace("std/src/sys/exit.rs", 'pub fn exit(code: i32) -> ! {\n    cfg_select! {',

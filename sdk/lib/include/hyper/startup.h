@@ -44,6 +44,11 @@ hyper_native_status_t hyper_runtime_initialize(const uintptr_t *initial_stack);
 /* Immutable process startup view, valid after runtime initialization. */
 const hyper_startup_t *hyper_runtime_startup(void);
 
+/* Borrowed process-lifetime runtime copy, or zero when not delegated with
+ * DUPLICATE. Applications must not close this borrowed handle. */
+hyper_native_handle_t hyper_runtime_capability(uint32_t purpose);
+hyper_native_status_t hyper_runtime_capabilities_initialize(const hyper_startup_t *startup);
+
 int hyper_main(const hyper_startup_t *startup);
 
 #ifdef __cplusplus

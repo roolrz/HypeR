@@ -29,6 +29,7 @@ hyper_call_result_t hyper_native_call6(
     uint64_t argument5);
 
 hyper_call_result_t hyper_abi_query(void);
+hyper_call_result_t hyper_process_get_current_id(void);
 /* Returns absolute nanoseconds from the kernel monotonic clock domain. */
 hyper_call_result_t hyper_clock_get_monotonic(void);
 hyper_native_status_t hyper_handle_close(hyper_native_handle_t handle);
@@ -60,6 +61,7 @@ hyper_call_result_t hyper_byte_channel_read(
     hyper_native_handle_t endpoint,
     void *bytes,
     size_t byte_capacity);
+hyper_call_result_t hyper_byte_channel_create(void);
 hyper_call_result_t hyper_capability_channel_create(void);
 hyper_native_status_t hyper_capability_channel_try_send(
     hyper_native_handle_t endpoint,
@@ -100,6 +102,18 @@ hyper_call_result_t hyper_directory_read(
 hyper_call_result_t hyper_directory_get_info(
     hyper_native_handle_t directory,
     hyper_native_directory_info_t *info);
+hyper_call_result_t hyper_file_write_at(hyper_native_handle_t file, uint32_t options, uint64_t offset, const void *input, size_t size);
+hyper_call_result_t hyper_file_resize(hyper_native_handle_t file, uint64_t size);
+hyper_call_result_t hyper_directory_create_file(hyper_native_handle_t directory, const void *path, size_t path_size, uint64_t rights, uint32_t mode);
+hyper_call_result_t hyper_directory_create_directory(hyper_native_handle_t directory, const void *path, size_t path_size, uint32_t mode);
+hyper_call_result_t hyper_directory_remove(hyper_native_handle_t directory, const void *path, size_t path_size, uint32_t options);
+
+hyper_call_result_t hyper_wait_set_create(size_t capacity);
+hyper_call_result_t hyper_wait_set_add(hyper_native_handle_t set, hyper_native_handle_t source, uint64_t signals);
+hyper_call_result_t hyper_wait_set_rearm(hyper_native_handle_t set, uint64_t registration);
+hyper_call_result_t hyper_wait_set_remove(hyper_native_handle_t set, uint64_t registration);
+hyper_call_result_t hyper_wait_set_wait(hyper_native_handle_t set, uint64_t deadline, void *output, size_t output_size);
+
 hyper_call_result_t hyper_file_read_at(
     hyper_native_handle_t file,
     uint64_t offset,

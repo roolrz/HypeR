@@ -25,6 +25,7 @@ pub(crate) enum Error {
     Inspection(crate::kernel::inspect::Error),
     IncompleteThreadPublication,
     Missing,
+    Scheduler(scheduler::Error),
     MemoryObject(crate::kernel::mm::user_space::MemoryObjectError),
     NotExecutable,
     NotRegularFile,
@@ -53,6 +54,7 @@ impl core::fmt::Debug for Error {
             Self::Image(error) => formatter.debug_tuple("Image").field(error).finish(),
             Self::Inspection(error) => formatter.debug_tuple("Inspection").field(error).finish(),
             Self::IncompleteThreadPublication => formatter.write_str("IncompleteThreadPublication"),
+            Self::Scheduler(error) => formatter.debug_tuple("Scheduler").field(error).finish(),
             Self::Missing => formatter.write_str("Missing"),
             Self::MemoryObject(error) => {
                 formatter.debug_tuple("MemoryObject").field(error).finish()
@@ -96,6 +98,24 @@ impl From<ProcessError> for Error {
 }
 
 pub(crate) fn start() -> Result<Infallible, Error> {
+    // Filesystem backends may sleep. Complete process construction on a normal
+    // scheduler stack after the interrupt-masked machine bootstrap has ended.
+    let worker =
+        scheduler::kthread_create("native-init", start_worker, 0).map_err(Error::Scheduler)?;
+    if !scheduler::thread_ready(worker).map_err(Error::Scheduler)? {
+        return Err(Error::IncompleteThreadPublication);
+    }
+    scheduler::exit_current()
+}
+
+extern "C" fn start_worker(_: usize) {
+    match prepare_and_start() {
+        Ok(never) => match never {},
+        Err(error) => crate::kernel::boot::fail("Native init", error),
+    }
+}
+
+fn prepare_and_start() -> Result<Infallible, Error> {
     let domain = ResourceDomain::try_new_root(ResourceLimits::UNLIMITED)?;
     let group = TaskGroup::try_new(&domain)?;
     let init = bootstrap::prepare(

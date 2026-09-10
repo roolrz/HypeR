@@ -175,3 +175,137 @@ mod tests {
         Ok(())
     }
 }
+
+/// Non-repeating identifier returned by a persistent `WaitSet` registration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct RegistrationId(core::num::NonZeroU64);
+
+impl RegistrationId {
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+}
+
+/// One consumed notification. Rearm its registration to observe another level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Notification {
+    pub registration: RegistrationId,
+    pub signals: u64,
+    /// Source signal-state observation sequence.
+    pub sequence: u64,
+}
+
+/// Persistent, bounded subscriptions to Native object signals.
+///
+/// Registrations retain source object lifetime, independently of source handle
+/// closure. Closing the set unregisters them. Sets cannot subscribe to sets or
+/// be transferred to another process. Ready notifications are one-shot.
+pub struct WaitSet {
+    handle: crate::OwnedHandle<crate::handle::WaitSetObject>,
+}
+
+impl WaitSet {
+    /// Restores operations from an owned process-local `WaitSet` capability.
+    pub const fn from_handle(handle: crate::OwnedHandle<crate::handle::WaitSetObject>) -> Self {
+        Self { handle }
+    }
+
+    /// Borrows the capability for inspection or rights attenuation.
+    pub fn as_handle_ref(&self) -> HandleRef<'_, crate::handle::WaitSetObject> {
+        self.handle.as_handle_ref()
+    }
+
+    pub fn into_handle(self) -> crate::OwnedHandle<crate::handle::WaitSetObject> {
+        self.handle
+    }
+
+    pub fn new(capacity: usize) -> Result<Self> {
+        // SAFETY: creation has no borrowed handles or user pointers.
+        let result = unsafe { hyper_sys::wait_set_create(capacity) };
+        Status::from_raw(result.status).into_result()?;
+        if result.value1 != 0 {
+            return Err(Error::InvalidResponse);
+        }
+        // SAFETY: successful creation publishes one uniquely owned handle.
+        let handle = unsafe { crate::handle::adopt_produced_handle_excluding(result.value0, &[])? };
+        Ok(Self { handle })
+    }
+
+    pub fn add<T: ObjectType>(
+        &self,
+        source: HandleRef<'_, T>,
+        signals: ObjectSignals<T>,
+    ) -> Result<RegistrationId> {
+        // SAFETY: both borrows pin their handles for the call.
+        let result = unsafe {
+            hyper_sys::wait_set_add(
+                self.handle.as_handle_ref().raw().get(),
+                source.raw().get(),
+                signals.bits,
+            )
+        };
+        Status::from_raw(result.status).into_result()?;
+        if result.value1 != 0 {
+            return Err(Error::InvalidResponse);
+        }
+        core::num::NonZeroU64::new(result.value0)
+            .map(RegistrationId)
+            .ok_or(Error::InvalidResponse)
+    }
+
+    /// Rearms a consumed, disarmed registration. A pending event returns BUSY.
+    pub fn rearm(&self, registration: RegistrationId) -> Result<()> {
+        // SAFETY: the owned set remains live throughout this operation.
+        let result = unsafe {
+            hyper_sys::wait_set_rearm(self.handle.as_handle_ref().raw().get(), registration.get())
+        };
+        Status::from_raw(result.status).into_result()
+    }
+
+    /// Cancels a registration and removes its queued notification, if any.
+    pub fn remove(&self, registration: RegistrationId) -> Result<()> {
+        // SAFETY: the owned set remains live throughout this operation.
+        let result = unsafe {
+            hyper_sys::wait_set_remove(self.handle.as_handle_ref().raw().get(), registration.get())
+        };
+        Status::from_raw(result.status).into_result()
+    }
+
+    /// Consumes one event, waiting until an absolute monotonic deadline.
+    pub fn wait(&self, deadline: u64) -> Result<Notification> {
+        let mut record = [0u8; 24];
+        // SAFETY: the owner pins the set and record is writable for the entire call.
+        let result = unsafe {
+            hyper_sys::wait_set_wait(
+                self.handle.as_handle_ref().raw().get(),
+                deadline,
+                record.as_mut_ptr(),
+                record.len(),
+            )
+        };
+        Status::from_raw(result.status).into_result()?;
+        let decode = |start: usize| -> u64 {
+            let mut bytes = [0; 8];
+            bytes.copy_from_slice(&record[start..start + 8]);
+            u64::from_le_bytes(bytes)
+        };
+        let registration = core::num::NonZeroU64::new(decode(0))
+            .map(RegistrationId)
+            .ok_or(Error::InvalidResponse)?;
+        let signals = decode(8);
+        if result.value0 != 0 || result.value1 != 0 || signals == 0 {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(Notification {
+            registration,
+            signals,
+            sequence: decode(16),
+        })
+    }
+}
+
+impl ObjectSignals<crate::handle::WaitSetObject> {
+    pub const READABLE: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_WAIT_SET_READABLE);
+}

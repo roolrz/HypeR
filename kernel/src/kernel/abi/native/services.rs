@@ -69,6 +69,7 @@ pub(in crate::kernel) enum ObjectServiceError {
     Process(ProcessError),
     Event(EventError),
     Wait(ObjectWaitError),
+    WaitSet(crate::kernel::object::WaitSetError),
 }
 
 impl From<ProcessError> for ObjectServiceError {
@@ -114,7 +115,35 @@ pub(in crate::kernel) trait HandleServices {
     ) -> Result<HandleValue, ProcessError>;
 }
 
+impl From<crate::kernel::object::WaitSetError> for ObjectServiceError {
+    fn from(error: crate::kernel::object::WaitSetError) -> Self {
+        Self::WaitSet(error)
+    }
+}
+
 pub(in crate::kernel) trait ObjectServices {
+    fn current_process_id(&self) -> u64;
+    fn wait_set_create(&self, capacity: usize) -> Result<HandleValue, ObjectServiceError>;
+    fn wait_set_add(
+        &self,
+        set: HandleValue,
+        source: HandleValue,
+        signals: u64,
+    ) -> Result<u64, ObjectServiceError>;
+    fn wait_set_rearm(&self, set: HandleValue, registration: u64)
+    -> Result<(), ObjectServiceError>;
+    fn wait_set_remove(
+        &self,
+        set: HandleValue,
+        registration: u64,
+    ) -> Result<(), ObjectServiceError>;
+    fn wait_set_wait(
+        &self,
+        set: HandleValue,
+        deadline: u64,
+        output: UserSlice,
+    ) -> Result<(), ObjectServiceError>;
+
     fn create_event(&self) -> Result<HandleValue, ObjectServiceError>;
     fn signal_event(
         &self,
@@ -342,6 +371,33 @@ pub(in crate::kernel) trait ConsoleServices {
 }
 
 pub(in crate::kernel) trait VfsServices: UserMemoryServices {
+    fn create_file(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        rights: Rights,
+        mode: u32,
+    ) -> Result<HandleValue, VfsServiceError>;
+    fn create_directory(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        mode: u32,
+    ) -> Result<(), VfsServiceError>;
+    fn remove_entry(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        is_directory: bool,
+    ) -> Result<(), VfsServiceError>;
+    fn resize_file(&self, file: HandleValue, length: u64) -> Result<(), VfsServiceError>;
+    fn write_file_at(
+        &self,
+        file: HandleValue,
+        offset: Option<u64>,
+        input: Option<UserSlice>,
+    ) -> Result<(u64, u64), VfsServiceError>;
+
     fn open_file(
         &self,
         root: HandleValue,

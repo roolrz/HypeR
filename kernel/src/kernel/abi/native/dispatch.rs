@@ -10,11 +10,13 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND,
     HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC, HYPER_NATIVE_SYS_CONSOLE_READ,
     HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_CPU_INSPECTOR_READ,
+    HYPER_NATIVE_SYS_DIRECTORY_CREATE_DIRECTORY, HYPER_NATIVE_SYS_DIRECTORY_CREATE_FILE,
     HYPER_NATIVE_SYS_DIRECTORY_GET_INFO, HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY,
     HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE, HYPER_NATIVE_SYS_DIRECTORY_READ,
-    HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
-    HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO, HYPER_NATIVE_SYS_FILE_GET_INFO,
-    HYPER_NATIVE_SYS_FILE_READ_AT, HYPER_NATIVE_SYS_HANDLE_CLOSE,
+    HYPER_NATIVE_SYS_DIRECTORY_REMOVE, HYPER_NATIVE_SYS_EVENT_CREATE,
+    HYPER_NATIVE_SYS_EVENT_SIGNAL, HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO,
+    HYPER_NATIVE_SYS_FILE_GET_INFO, HYPER_NATIVE_SYS_FILE_READ_AT, HYPER_NATIVE_SYS_FILE_RESIZE,
+    HYPER_NATIVE_SYS_FILE_WRITE_AT, HYPER_NATIVE_SYS_HANDLE_CLOSE,
     HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
     HYPER_NATIVE_SYS_HANDLE_REPLACE, HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ,
     HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO, HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS,
@@ -33,9 +35,9 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_PROCESS_BUILDER_CREATE, HYPER_NATIVE_SYS_PROCESS_BUILDER_SEAL,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY, HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_START, HYPER_NATIVE_SYS_PROCESS_EXIT,
-    HYPER_NATIVE_SYS_PROCESS_GET_INFO, HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP,
-    HYPER_NATIVE_SYS_RESOURCE_DOMAIN_CREATE, HYPER_NATIVE_SYS_TASK_GROUP_CREATE,
-    HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_PROCESS,
+    HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID, HYPER_NATIVE_SYS_PROCESS_GET_INFO,
+    HYPER_NATIVE_SYS_PROCESS_REQUEST_STOP, HYPER_NATIVE_SYS_RESOURCE_DOMAIN_CREATE,
+    HYPER_NATIVE_SYS_TASK_GROUP_CREATE, HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_PROCESS,
     HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
     HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_TASK_GROUP,
     HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_PROCESSES, HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_THREADS,
@@ -50,30 +52,33 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE, HYPER_NATIVE_SYS_VMAR_ALLOCATE,
     HYPER_NATIVE_SYS_VMAR_DESTROY, HYPER_NATIVE_SYS_VMAR_MAP, HYPER_NATIVE_SYS_VMAR_PROTECT,
     HYPER_NATIVE_SYS_VMAR_UNMAP, HYPER_NATIVE_SYS_VMO_CREATE, HYPER_NATIVE_SYS_VMO_READ,
-    HYPER_NATIVE_SYS_VMO_WRITE, NativeInvocation, NativeResult,
+    HYPER_NATIVE_SYS_VMO_WRITE, HYPER_NATIVE_SYS_WAIT_SET_ADD, HYPER_NATIVE_SYS_WAIT_SET_CREATE,
+    HYPER_NATIVE_SYS_WAIT_SET_REARM, HYPER_NATIVE_SYS_WAIT_SET_REMOVE,
+    HYPER_NATIVE_SYS_WAIT_SET_WAIT, NativeInvocation, NativeResult,
 };
 
 use super::handlers::{
     sys_abi_query, sys_atomic_wait, sys_atomic_wake, sys_byte_channel_create,
     sys_byte_channel_read, sys_byte_channel_write, sys_capability_channel_create,
     sys_capability_channel_receive, sys_capability_channel_try_send, sys_clock_get_monotonic,
-    sys_console_read, sys_console_write, sys_cpu_inspector_read, sys_directory_get_info,
-    sys_directory_open_directory, sys_directory_open_file, sys_directory_read, sys_event_create,
+    sys_console_read, sys_console_write, sys_cpu_inspector_read, sys_directory_create_directory,
+    sys_directory_create_file, sys_directory_get_info, sys_directory_open_directory,
+    sys_directory_open_file, sys_directory_read, sys_directory_remove, sys_event_create,
     sys_event_signal, sys_file_create_executable_vmo, sys_file_get_info, sys_file_read_at,
-    sys_handle_close, sys_handle_duplicate, sys_handle_get_info, sys_handle_replace,
-    sys_memory_inspector_read, sys_not_supported, sys_object_get_basic_info,
-    sys_object_inspector_derive_process, sys_object_inspector_derive_resource_domain,
-    sys_object_inspector_derive_task_group, sys_object_inspector_scan_handles,
-    sys_object_inspector_scan_objects, sys_object_wait_many, sys_object_wait_one,
-    sys_pending_virtual_machine_abort, sys_pending_virtual_machine_install,
+    sys_file_resize, sys_file_write_at, sys_handle_close, sys_handle_duplicate,
+    sys_handle_get_info, sys_handle_replace, sys_memory_inspector_read, sys_not_supported,
+    sys_object_get_basic_info, sys_object_inspector_derive_process,
+    sys_object_inspector_derive_resource_domain, sys_object_inspector_derive_task_group,
+    sys_object_inspector_scan_handles, sys_object_inspector_scan_objects, sys_object_wait_many,
+    sys_object_wait_one, sys_pending_virtual_machine_abort, sys_pending_virtual_machine_install,
     sys_pending_virtual_machine_seal, sys_pending_virtual_machine_set_bootstrap,
     sys_pending_virtual_machine_set_memory, sys_pending_virtual_machine_set_virtual_serial,
     sys_process_builder_abort, sys_process_builder_add_argument,
     sys_process_builder_add_environment, sys_process_builder_add_handle,
     sys_process_builder_create, sys_process_builder_seal, sys_process_builder_set_affinity,
     sys_process_builder_set_name, sys_process_builder_start, sys_process_exit,
-    sys_process_get_info, sys_process_request_stop, sys_resource_domain_create,
-    sys_task_group_create, sys_task_inspector_derive_process,
+    sys_process_get_current_id, sys_process_get_info, sys_process_request_stop,
+    sys_resource_domain_create, sys_task_group_create, sys_task_inspector_derive_process,
     sys_task_inspector_derive_resource_domain, sys_task_inspector_derive_task_group,
     sys_task_inspector_scan_processes, sys_task_inspector_scan_threads, sys_thread_create,
     sys_thread_exit, sys_thread_request_stop, sys_thread_sleep, sys_thread_start, sys_thread_yield,
@@ -82,7 +87,8 @@ use super::handlers::{
     sys_virtual_machine_request_stop, sys_virtual_serial_create,
     sys_virtual_serial_register_output, sys_virtual_serial_write, sys_vmar_allocate,
     sys_vmar_destroy, sys_vmar_map, sys_vmar_protect, sys_vmar_unmap, sys_vmo_create, sys_vmo_read,
-    sys_vmo_write,
+    sys_vmo_write, sys_wait_set_add, sys_wait_set_create, sys_wait_set_rearm, sys_wait_set_remove,
+    sys_wait_set_wait,
 };
 use super::services::{DeferredAction, DeferredServices, ImmediateServices};
 
@@ -198,6 +204,23 @@ pub(in crate::kernel) fn dispatch_deferred(
             sys_directory_open_directory(services, invocation.arguments())
         }
         HYPER_NATIVE_SYS_DIRECTORY_READ => sys_directory_read(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_FILE_WRITE_AT => sys_file_write_at(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_FILE_RESIZE => sys_file_resize(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_DIRECTORY_CREATE_FILE => {
+            sys_directory_create_file(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_DIRECTORY_CREATE_DIRECTORY => {
+            sys_directory_create_directory(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_DIRECTORY_REMOVE => sys_directory_remove(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_WAIT_SET_CREATE => sys_wait_set_create(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_WAIT_SET_ADD => sys_wait_set_add(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_WAIT_SET_REARM => sys_wait_set_rearm(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_WAIT_SET_REMOVE => sys_wait_set_remove(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_WAIT_SET_WAIT => sys_wait_set_wait(services, invocation.arguments()),
+        HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID => {
+            sys_process_get_current_id(services, invocation.arguments())
+        }
         HYPER_NATIVE_SYS_FILE_READ_AT => sys_file_read_at(services, invocation.arguments()),
         HYPER_NATIVE_SYS_FILE_GET_INFO => sys_file_get_info(services, invocation.arguments()),
         HYPER_NATIVE_SYS_DIRECTORY_GET_INFO => {

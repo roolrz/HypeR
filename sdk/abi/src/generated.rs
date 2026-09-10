@@ -28,6 +28,8 @@ pub const HYPER_NATIVE_STATUS_WOULD_BLOCK: HyperNativeStatus = -13;
 pub const HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL: HyperNativeStatus = -14;
 pub const HYPER_NATIVE_STATUS_PEER_CLOSED: HyperNativeStatus = -15;
 pub const HYPER_NATIVE_STATUS_NOT_FOUND: HyperNativeStatus = -16;
+pub const HYPER_NATIVE_STATUS_ALREADY_EXISTS: HyperNativeStatus = -17;
+pub const HYPER_NATIVE_STATUS_NOT_EMPTY: HyperNativeStatus = -18;
 
 pub const HYPER_NATIVE_OBJECT_NONE: u32 = 0;
 pub const HYPER_NATIVE_OBJECT_EVENT: u32 = 1;
@@ -55,6 +57,7 @@ pub const HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE: u32 = 22;
 pub const HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE: u32 = 23;
 pub const HYPER_NATIVE_OBJECT_VIRTUAL_CPU: u32 = 24;
 pub const HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL: u32 = 25;
+pub const HYPER_NATIVE_OBJECT_WAIT_SET: u32 = 26;
 
 pub const HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN: u32 = 0;
 pub const HYPER_NATIVE_TRANSFER_CLASS_GENERAL: u32 = 1;
@@ -92,10 +95,12 @@ pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {
         HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         HYPER_NATIVE_OBJECT_VIRTUAL_CPU => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
+        HYPER_NATIVE_OBJECT_WAIT_SET => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
         _ => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
     }
 }
 
+pub const HYPER_NATIVE_RIGHT_BIND_WAIT: u64 = 1_u64 << 30;
 pub const HYPER_NATIVE_RIGHT_DUPLICATE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_RIGHT_TRANSFER: u64 = 1_u64 << 1;
 pub const HYPER_NATIVE_RIGHT_WAIT: u64 = 1_u64 << 2;
@@ -127,8 +132,9 @@ pub const HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR: u64 = 1_u64 << 27;
 pub const HYPER_NATIVE_RIGHT_DERIVE: u64 = 1_u64 << 28;
 pub const HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1_u64 << 29;
 
-pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x3fffffff;
+pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x7fffffff;
 
+pub const HYPER_NATIVE_SIGNAL_WAIT_SET_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_EVENT_SIGNALED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_WRITABLE: u64 = 1_u64 << 1;
@@ -335,6 +341,17 @@ pub const HYPER_NATIVE_SYS_THREAD_REQUEST_STOP: u64 = 79;
 pub const HYPER_NATIVE_SYS_ATOMIC_WAIT: u64 = 80;
 pub const HYPER_NATIVE_SYS_ATOMIC_WAKE: u64 = 81;
 pub const HYPER_NATIVE_SYS_THREAD_SLEEP: u64 = 82;
+pub const HYPER_NATIVE_SYS_FILE_WRITE_AT: u64 = 83;
+pub const HYPER_NATIVE_SYS_FILE_RESIZE: u64 = 84;
+pub const HYPER_NATIVE_SYS_DIRECTORY_CREATE_FILE: u64 = 85;
+pub const HYPER_NATIVE_SYS_DIRECTORY_CREATE_DIRECTORY: u64 = 86;
+pub const HYPER_NATIVE_SYS_DIRECTORY_REMOVE: u64 = 87;
+pub const HYPER_NATIVE_SYS_WAIT_SET_CREATE: u64 = 88;
+pub const HYPER_NATIVE_SYS_WAIT_SET_ADD: u64 = 89;
+pub const HYPER_NATIVE_SYS_WAIT_SET_REARM: u64 = 90;
+pub const HYPER_NATIVE_SYS_WAIT_SET_REMOVE: u64 = 91;
+pub const HYPER_NATIVE_SYS_WAIT_SET_WAIT: u64 = 92;
+pub const HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID: u64 = 93;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -348,6 +365,20 @@ pub const fn hyper_native_failure_result_mask(
         _ => 0,
     }
 }
+
+pub const HYPER_NATIVE_WAIT_SET_EVENT_MIN_SIZE: usize = 24;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeWaitSetEvent {
+    pub registration: u64,
+    pub signals: u64,
+    pub sequence: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeWaitSetEvent>() == 24);
+const _: () = assert!(core::mem::align_of::<HyperNativeWaitSetEvent>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeWaitSetEvent, registration) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeWaitSetEvent, signals) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeWaitSetEvent, sequence) == 16);
 
 pub const HYPER_NATIVE_HANDLE_INFO_MIN_SIZE: usize = 16;
 #[repr(C)]

@@ -28,6 +28,7 @@ endif()
 set(HYPER_RUNTIME_SOURCES
     src/arch/aarch64/syscall.S
     src/runtime.c
+    src/capabilities.c
     src/thread.c
     src/thread_spawn.c
     src/stdio.c
@@ -46,7 +47,7 @@ add_library(hyper_shared_objects OBJECT ${HYPER_RUNTIME_SOURCES})
 add_library(hyper_crt1 OBJECT src/arch/aarch64/crt1.S)
 add_library(hyper_crt OBJECT src/crt.c)
 add_library(hyper_crt_std OBJECT src/crt-std.c)
-add_library(hyper_std STATIC src/std.c)
+add_library(hyper_std STATIC src/std.c src/std-fs.c src/std-process.c)
 set_target_properties(hyper_std PROPERTIES OUTPUT_NAME hyper-std)
 foreach(runtime_target hyper_crt_std hyper_std)
     target_compile_features(${runtime_target} PRIVATE c_std_17)
