@@ -15,7 +15,7 @@ options (echo treats option-looking arguments as literal text).
 | `cat` | `cat FILE...`, `cat -n FILE`, `cat -`; streams bytes without UTF-8 conversion, with continuous optional line numbering. No files means stdin. |
 | `ls` | `ls /etc/hyper`, `ls FILE DIRECTORY`, `ls -a`, `ls --sort size -r`; defaults to permission mode, IEC size, and sorted names. `--bytes` gives exact file sizes; `-1` prints names only. Directory sizes are shown as `-`. |
 | `ps` | `ps -T`, `ps -p KOID`, `ps --name vm-runtime`; select a process or filter names, optionally including threads. |
-| `free` | `free`, `free --bytes`; physical totals and ownership, in MiB or exact bytes. |
+| `free` | `free`, `free --bytes`; physical totals, ownership and reclaimable cache pages, in human-readable units or exact bytes. |
 | `top` | `top -d 0.5`, `top -b -n 3`; interactive refresh with q/Ctrl-C to quit, or plain finite batch snapshots. |
 | `handle` | `handle KOID`, `handle --objects --kind process`; inspect process capabilities or filter the object registry by its printed kind. |
 | `echo` | `echo hello world`; prints arguments literally, followed by a newline. |
@@ -116,3 +116,27 @@ connection fails.
 idle-to-input transitions, burst recovery, and returning from top and VM console.
 `QEMU_CPUS` selects the CPU count; `CONSOLE_TYPED_ROUNDS` overrides the default
 40 paced commands. Diagnostics are written to `target/app/aarch64/console.log`.
+
+### Memory cache reporting
+
+`free` retains the physical accounting identity `total = reserved + used + free`.
+Its `cache` column counts complete physical pages recoverable by draining the
+allocator's CPU-local magazines. A page counts only when all its outstanding
+central reservations are cached tokens: a live caller or an in-flight token
+keeps it out of this total. Tokens distributed across CPUs are combined and
+physical pages are counted once. These bytes are already included in `used`.
+
+The census uses bounded preallocated scratch storage, preserves the caches and
+adds no global atomic operation to allocation fast paths. Magazine epochs,
+updated under their existing locks, validate a coherent capture. If concurrent
+mutation prevents validation after bounded retries, `cache` and `reclaimable`
+show `—` rather than claiming a zero or counting a partial observation. Physical
+`free` remains available independently. The snapshot is not a reservation against
+subsequent allocations and does not guarantee contiguous allocation success.
+
+`buffers` represents an independent block-I/O buffer pool, currently zero because
+no such pool exists. Ramfs content is authoritative data, not discardable cache.
+The existing immutable file-page cache is bypassed by ramfs; no current backend
+populates it. Enabling it for a future backend also requires integrating its
+reclaimable storage into memory accounting.
+Default units retain small KiB quantities; `free --bytes` avoids rounding.

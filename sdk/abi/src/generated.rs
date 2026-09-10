@@ -536,7 +536,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, reserved) == 
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, runtime_ticks) == 32);
 const _: () = assert!(core::mem::offset_of!(HyperNativeTaskThread, name) == 40);
 
-pub const HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE: usize = 112;
+pub const HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE: usize = 128;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeMemoryObservation {
@@ -554,8 +554,10 @@ pub struct HyperNativeMemoryObservation {
     pub guest_bytes: u64,
     pub unattributed_bytes: u64,
     pub reclaimable_bytes: u64,
+    pub cache_sample_complete: u64,
+    pub buffered_bytes: u64,
 }
-const _: () = assert!(core::mem::size_of::<HyperNativeMemoryObservation>() == 112);
+const _: () = assert!(core::mem::size_of::<HyperNativeMemoryObservation>() == 128);
 const _: () = assert!(core::mem::align_of::<HyperNativeMemoryObservation>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, captured_at_ns) == 0);
 const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, page_size) == 8);
@@ -573,6 +575,9 @@ const _: () =
     assert!(core::mem::offset_of!(HyperNativeMemoryObservation, unattributed_bytes) == 96);
 const _: () =
     assert!(core::mem::offset_of!(HyperNativeMemoryObservation, reclaimable_bytes) == 104);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeMemoryObservation, cache_sample_complete) == 112);
+const _: () = assert!(core::mem::offset_of!(HyperNativeMemoryObservation, buffered_bytes) == 120);
 
 pub const HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE: usize = 64;
 #[repr(C)]

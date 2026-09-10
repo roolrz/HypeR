@@ -1145,6 +1145,8 @@ pub(super) fn encode_memory_observation(
     field!(guest_bytes);
     field!(unattributed_bytes);
     field!(reclaimable_bytes);
+    field!(cache_sample_complete);
+    field!(buffered_bytes);
     record
 }
 
