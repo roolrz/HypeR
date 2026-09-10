@@ -16,6 +16,7 @@ cpu=$4
 cpus=$5
 memory=$6
 bootargs=$7
+memory_value='[0-9]+(\.[0-9])? (B|KiB|MiB|GiB|TiB|PiB|EiB)'
 timeout_seconds=${QEMU_BOOT_TIMEOUT_SECONDS:-90}
 total_timeout_seconds=${QEMU_NATIVE_TIMEOUT_SECONDS:-300}
 temp=$(mktemp -d -t hyper-native-init.XXXXXX)
@@ -338,8 +339,9 @@ while :; do
             fi
             ;;
         free)
-            if grep -Eq '^Mem:[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB$' "$native_output" &&
-                grep -Eq '^Owners:[[:space:]]+kernel=[0-9]+ MiB heap=[0-9]+ MiB tables=[0-9]+ MiB user=[0-9]+ MiB guest=[0-9]+ MiB other=[0-9]+ MiB$' "$native_output"; then
+            if grep -Eq "^Mem:([[:space:]]+$memory_value){3}[[:space:]]+($memory_value|—)[[:space:]]+$memory_value$" "$native_output" &&
+                grep -Eq "^Reserved: $memory_value  Reclaimable: ($memory_value|—)$" "$native_output" &&
+                grep -Eq "^Owners:[[:space:]]+kernel=$memory_value heap=$memory_value tables=$memory_value user=$memory_value guest=$memory_value other=$memory_value$" "$native_output"; then
                 send_commands 1 '/bin/top\n'
                 command_phase='top'
             fi
@@ -388,7 +390,7 @@ while :; do
         grep -Fxq 'HYPER_CLAP_BUILTIN_OK' "$native_output" &&
         grep -Fxq 'HYPER_CD_CHILD_OK' "$native_output" &&
         grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output" &&
-        grep -Eq '^Mem:[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB' "$native_output" &&
+        grep -Eq "^Mem:([[:space:]]+$memory_value){3}[[:space:]]+($memory_value|—)[[:space:]]+$memory_value$" "$native_output" &&
         grep -Fxq 'Press q or Ctrl-C to quit.' "$native_output" &&
         grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output" &&
         grep -q 'Run /init as init process' "$log" &&

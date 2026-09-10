@@ -291,7 +291,13 @@ pub struct MemoryObservation {
     pub user_bytes: u64,
     pub guest_bytes: u64,
     pub unattributed_bytes: u64,
+    /// Complete physical pages recoverable by draining allocator caches.
+    /// Zero when `cache_sample_complete` is false; this does not mean no cache.
     pub reclaimable_bytes: u64,
+    /// False when concurrent cache activity prevented a coherent page census.
+    pub cache_sample_complete: bool,
+    /// Physical storage owned by an independent block-I/O buffer pool.
+    pub buffered_bytes: u64,
 }
 
 /// One immutable aggregate scheduler CPU-time observation.
@@ -474,6 +480,8 @@ impl MemoryInspector {
             guest_bytes: record.guest_bytes,
             unattributed_bytes: record.unattributed_bytes,
             reclaimable_bytes: record.reclaimable_bytes,
+            cache_sample_complete: record.cache_sample_complete == 1,
+            buffered_bytes: record.buffered_bytes,
         })
     }
 }
@@ -524,7 +532,9 @@ fn validate_memory_observation(record: &hyper_abi::HyperNativeMemoryObservation)
         && record.reserved_bytes.checked_add(record.managed_bytes) == Some(record.total_bytes)
         && record.free_bytes.checked_add(record.used_bytes) == Some(record.managed_bytes)
         && owner_bytes == Some(record.used_bytes)
-        && record.reclaimable_bytes <= record.used_bytes;
+        && record.reclaimable_bytes <= record.used_bytes
+        && record.cache_sample_complete <= 1
+        && (record.cache_sample_complete == 1 || record.reclaimable_bytes == 0);
     if !valid {
         return Err(Error::InvalidResponse);
     }
@@ -742,6 +752,8 @@ const ZERO_MEMORY: hyper_abi::HyperNativeMemoryObservation =
         guest_bytes: 0,
         unattributed_bytes: 0,
         reclaimable_bytes: 0,
+        cache_sample_complete: 0,
+        buffered_bytes: 0,
     };
 
 const ZERO_CPU: hyper_abi::HyperNativeCpuObservation = hyper_abi::HyperNativeCpuObservation {
@@ -969,7 +981,22 @@ mod tests {
             guest_bytes: 5,
             unattributed_bytes: 5,
             reclaimable_bytes: 10,
+            cache_sample_complete: 1,
+            buffered_bytes: 0,
         };
+        assert_eq!(validate_memory_observation(&record), Ok(()));
+
+        record.cache_sample_complete = 2;
+        assert_eq!(
+            validate_memory_observation(&record),
+            Err(crate::Error::InvalidResponse)
+        );
+        record.cache_sample_complete = 0;
+        assert_eq!(
+            validate_memory_observation(&record),
+            Err(crate::Error::InvalidResponse)
+        );
+        record.reclaimable_bytes = 0;
         assert_eq!(validate_memory_observation(&record), Ok(()));
 
         record.used_bytes = 49;

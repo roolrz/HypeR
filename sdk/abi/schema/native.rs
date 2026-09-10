@@ -1627,6 +1627,16 @@ const MEMORY_OBSERVATION_FIELDS: &[Field] = &[
         kind: FieldKind::U64,
         offset: 104,
     },
+    Field {
+        name: "cache_sample_complete",
+        kind: FieldKind::U64,
+        offset: 112,
+    },
+    Field {
+        name: "buffered_bytes",
+        kind: FieldKind::U64,
+        offset: 120,
+    },
 ];
 
 const CPU_OBSERVATION_FIELDS: &[Field] = &[
@@ -2207,8 +2217,8 @@ pub const RECORDS: &[Record] = &[
     Record {
         name: "memory_observation",
         fields: MEMORY_OBSERVATION_FIELDS,
-        minimum_size: 112,
-        size: 112,
+        minimum_size: 128,
+        size: 128,
         alignment: 8,
     },
     Record {

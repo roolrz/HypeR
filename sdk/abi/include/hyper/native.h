@@ -537,7 +537,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, reserved) == 28, "t
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, runtime_ticks) == 32, "task_thread.runtime_ticks offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_task_thread_t, name) == 40, "task_thread.name offset");
 
-#define HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE UINT64_C(112)
+#define HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE UINT64_C(128)
 typedef struct hyper_native_memory_observation_t {
     uint64_t captured_at_ns;
     uint64_t page_size;
@@ -553,8 +553,10 @@ typedef struct hyper_native_memory_observation_t {
     uint64_t guest_bytes;
     uint64_t unattributed_bytes;
     uint64_t reclaimable_bytes;
+    uint64_t cache_sample_complete;
+    uint64_t buffered_bytes;
 } hyper_native_memory_observation_t;
-HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_memory_observation_t) == 112, "memory_observation size");
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_memory_observation_t) == 128, "memory_observation size");
 HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_memory_observation_t) == 8, "memory_observation alignment");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, captured_at_ns) == 0, "memory_observation.captured_at_ns offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, page_size) == 8, "memory_observation.page_size offset");
@@ -570,6 +572,8 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, user_bytes) 
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, guest_bytes) == 88, "memory_observation.guest_bytes offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, unattributed_bytes) == 96, "memory_observation.unattributed_bytes offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, reclaimable_bytes) == 104, "memory_observation.reclaimable_bytes offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, cache_sample_complete) == 112, "memory_observation.cache_sample_complete offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_memory_observation_t, buffered_bytes) == 120, "memory_observation.buffered_bytes offset");
 
 #define HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE UINT64_C(64)
 typedef struct hyper_native_cpu_observation_t {

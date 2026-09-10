@@ -482,6 +482,8 @@ pub(crate) struct MemoryObservation {
     pub(crate) guest_bytes: u64,
     pub(crate) unattributed_bytes: u64,
     pub(crate) reclaimable_bytes: u64,
+    pub(crate) cache_sample_complete: u64,
+    pub(crate) buffered_bytes: u64,
 }
 
 /// Read-only authority over system physical-memory accounting.
@@ -557,9 +559,11 @@ impl MemoryInspector {
             user_bytes,
             guest_bytes,
             unattributed_bytes,
-            // No allocator state currently proves that a complete page can be
-            // reclaimed without affecting a live allocation.
-            reclaimable_bytes: 0,
+            reclaimable_bytes: pages_to_bytes(runtime.cache.reclaimable_pages.unwrap_or(0))?,
+            cache_sample_complete: u64::from(runtime.cache.reclaimable_pages.is_some()),
+            // No independent block-I/O buffer pool exists yet. Ramfs contents
+            // are authoritative data, not discardable read-cache copies.
+            buffered_bytes: 0,
         })
     }
 }

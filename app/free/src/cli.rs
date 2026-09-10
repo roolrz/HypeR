@@ -6,7 +6,7 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[command(about = "Display physical memory usage")]
 pub struct Free {
-    /// Report exact bytes instead of rounded-down MiB values.
+    /// Report exact bytes instead of human-readable units.
     #[arg(short = 'b', long)]
     pub bytes: bool,
 }

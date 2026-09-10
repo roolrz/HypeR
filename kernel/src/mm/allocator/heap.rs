@@ -21,6 +21,7 @@ use crate::mm::{
     BuddyAllocator, BuddyError, BuddyStats, MAX_ORDER, MemoryHandoff, PAGE_SIZE, PhysicalAddress,
 };
 
+mod cache_snapshot;
 mod global;
 mod local_cache;
 mod partial;
@@ -296,6 +297,8 @@ pub struct HeapStats {
 pub struct HeapCacheStats {
     pub enabled_cpus: usize,
     pub cached_objects: usize,
+    /// Complete pages recoverable by draining cached tokens; None on contention.
+    pub reclaimable_pages: Option<usize>,
     pub hits: u64,
     pub misses: u64,
     pub refills: u64,
@@ -836,6 +839,19 @@ impl SlabAllocator {
             allocator_fault(AllocatorFault::InvalidSlabPointer);
         };
         Some(CachedObject::new(pointer, class))
+    }
+
+    // The central heap lock and the borrowed cached token keep this header
+    // resident and immutable throughout the census read.
+    fn cached_page_reservations(&self, object: &CachedObject) -> Option<(u64, usize)> {
+        let page_virtual = (object.pointer.as_ptr() as usize) & !(PAGE_SIZE as usize - 1);
+        let physical = (page_virtual as u64).checked_sub(self.buddy.direct_map_base())?;
+        let page = SlabPageId::new(physical)?;
+        let slab = (SlabHeaderAccess { buddy: &self.buddy }).validated_slab(page)?;
+        if slab.class != object.class() {
+            return None;
+        }
+        Some((physical, usize::from(slab.header.in_use)))
     }
 
     fn release_slab_object(&mut self, object: CachedObject) {
