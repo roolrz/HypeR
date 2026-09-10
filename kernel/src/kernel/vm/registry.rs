@@ -387,10 +387,12 @@ pub(super) fn with_binding<R>(
 }
 
 pub(crate) fn reserve() -> Result<VmReservation, Error> {
+    let identifier_bits = crate::hal::vm::guest_translation_identifier_bits()
+        .map_err(|_| Error::IdentityExhausted)?;
     let id = REGISTRY.with(VmRegistry::reserve)?;
     let hardware_vmid = match crate::kernel::mm::translation_id::reserve::<
         crate::kernel::mm::translation_id::Stage2Vmid,
-    >(8)
+    >(identifier_bits)
     {
         Ok(identifier) => identifier,
         Err(_) => {

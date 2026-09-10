@@ -12,7 +12,112 @@ use core::arch::asm;
 
 use hyper::vm::exit::{GuestMemoryFault, GuestPhysicalAddress, MemoryAccess, MemoryFaultAction};
 
+use super::context::{
+    GuestRunExit, GuestSynchronousTerminal, GuestTerminalCause, GuestTerminalExit, GuestWaitReason,
+};
 use super::{VcpuContext, VmInterruptController};
+use hyper::vm::exit::{MmioAccess, MmioAction, MmioOperation};
+use hyper::vm::riscv64::instruction::{
+    GuestInstruction, Htinst, MmioRegister, classify_htinst, decode_mmio,
+};
+
+pub(crate) enum Dispatch {
+    Resume,
+    Stop(GuestRunExit),
+}
+
+fn terminal(frame: &super::exception::TrapFrame, cause: GuestTerminalCause) -> Dispatch {
+    Dispatch::Stop(GuestRunExit::Terminal(GuestTerminalExit::from_frame(
+        frame, cause,
+    )))
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct Parcel {
+    value: u64,
+    cause: u64,
+    trap_value: u64,
+    guest_address: u64,
+    instruction: u64,
+}
+unsafe extern "C" {
+    fn riscv64_fetch_guest_parcel(
+        address: u64,
+        context: *const (),
+        result: *mut Parcel,
+        hstatus: u64,
+    ) -> u64;
+}
+
+enum Fetch {
+    Instruction(u32),
+    Retry,
+    Failed,
+}
+
+fn fetch_instruction(frame: &super::exception::TrapFrame) -> Fetch {
+    let context = frame.guest_context_address() as *const VcpuContext;
+    if context.is_null() || !context.is_aligned() || frame.sepc & 1 != 0 {
+        return Fetch::Failed;
+    }
+    let mut instruction = 0u32;
+    for parcel_index in 0..2 {
+        let mut parcel = Parcel::default();
+        let Some(address) = frame.sepc.checked_add(parcel_index * 2) else {
+            return Fetch::Failed;
+        };
+        // SAFETY: Trap entry published this pinned owner, captured its banks,
+        // and retained its HGATP lease. Assembly contains faults and restores
+        // every host CSR before returning; no context borrow crosses policy.
+        let failed = unsafe {
+            riscv64_fetch_guest_parcel(address, context.cast(), &mut parcel, frame.hstatus)
+        };
+        if failed != 0 {
+            if let Some(fault) = decode_guest_memory_fault(
+                parcel.cause,
+                parcel.trap_value,
+                parcel.guest_address,
+                parcel.instruction,
+            ) {
+                // HLVX reports load faults, but its explicit access requires
+                // execute permission. Implicit VS page-table walks still use
+                // their separately decoded read/write permission.
+                let fault = if fault.during_guest_page_walk() {
+                    fault
+                } else {
+                    GuestMemoryFault::new(fault.address(), MemoryAccess::Execute, false)
+                };
+                if matches!(
+                    crate::arch::vm::dispatch_memory_fault(fault),
+                    MemoryFaultAction::Retry
+                ) {
+                    return Fetch::Retry;
+                }
+            }
+            return Fetch::Failed;
+        }
+        // HLVX obeys the selected guest data endian mode; instruction parcels
+        // are always little-endian, including when the guest data bank is BE.
+        // SAFETY: The short read occurs only after the probe restored HS state.
+        let user_big_endian = unsafe { (*context).vsstatus & (1 << 6) != 0 };
+        let big_endian = if frame.hstatus & (1 << 8) != 0 {
+            frame.hstatus & (1 << 5) != 0
+        } else {
+            user_big_endian
+        };
+        let value = if big_endian {
+            (parcel.value as u16).swap_bytes()
+        } else {
+            parcel.value as u16
+        };
+        instruction |= u32::from(value) << (parcel_index * 16);
+        if parcel_index == 0 && instruction & 3 != 3 {
+            break;
+        }
+    }
+    Fetch::Instruction(instruction)
+}
 
 const CAUSE_VIRTUAL_SUPERVISOR_ECALL: u64 = 10;
 const CAUSE_INSTRUCTION_GUEST_PAGE_FAULT: u64 = 20;
@@ -39,6 +144,7 @@ pub(crate) enum GuestSyncExit {
     VirtualInstruction(VirtualInstruction),
     SupervisorCall(SupervisorCall),
     Unsupported(UnsupportedGuestExit),
+    IllegalInstruction(IllegalInstruction),
 }
 
 impl GuestSyncExit {
@@ -46,9 +152,19 @@ impl GuestSyncExit {
     pub(crate) const fn legacy_console_byte(self) -> Option<u8> {
         match self {
             Self::SupervisorCall(call) => call.legacy_console_byte(),
-            Self::VirtualInstruction(_) | Self::Unsupported(_) => None,
+            Self::VirtualInstruction(_) | Self::Unsupported(_) | Self::IllegalInstruction(_) => {
+                None
+            }
         }
     }
+}
+
+/// Guest-visible illegal instruction forwarded through the saved VS trap bank.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct IllegalInstruction {
+    program_counter: u64,
+    instruction: u64,
+    supervisor: bool,
 }
 
 /// A virtual instruction which can be completed by the RISC-V backend.
@@ -117,7 +233,6 @@ pub(crate) struct UnsupportedGuestExit {
 pub(crate) enum UnsupportedReason {
     GuestPhysicalAddressUnavailable,
     SynchronousCause,
-    VirtualInstruction,
 }
 
 /// The exhaustive architecture completion returned by VM-exit policy.
@@ -131,6 +246,9 @@ pub(crate) enum GuestSyncAction {
     ProgramTimer {
         deadline: u64,
         result: SupervisorCallResult,
+    },
+    EnterSupervisorTrap {
+        program_counter: u64,
     },
     Stop,
 }
@@ -164,6 +282,7 @@ enum CapturedExit {
 enum Completion {
     VirtualInstruction { destination: usize },
     SupervisorCall(SupervisorCall),
+    IllegalInstruction,
     Unsupported,
 }
 
@@ -172,18 +291,113 @@ enum Completion {
 /// Local interrupts are masked by hardware on trap entry. Capture returns only
 /// copied state, so the raw frame borrow ends before either kernel service may
 /// allocate or take VM locks.
-pub(crate) fn dispatch(frame: &mut super::exception::TrapFrame) -> bool {
+pub(crate) fn dispatch(frame: &mut super::exception::TrapFrame) -> Dispatch {
+    if frame.scause == CAUSE_VIRTUAL_INSTRUCTION
+        && frame.stval == 0
+        && frame.hstatus & (1 << 8) != 0
+    {
+        match fetch_instruction(frame) {
+            Fetch::Instruction(value) => frame.stval = u64::from(value),
+            Fetch::Retry => return Dispatch::Resume,
+            Fetch::Failed => {
+                return terminal(
+                    frame,
+                    GuestTerminalCause::Synchronous(GuestSynchronousTerminal::Undecodable),
+                );
+            }
+        }
+    }
     let captured = capture(frame);
     let action = match &captured {
         CapturedExit::MemoryFault(fault) => {
-            return matches!(
-                crate::arch::vm::dispatch_memory_fault(*fault),
-                MemoryFaultAction::Retry
-            );
+            return match crate::arch::vm::dispatch_memory_fault(*fault) {
+                MemoryFaultAction::Retry => Dispatch::Resume,
+                MemoryFaultAction::ForwardToDevice => dispatch_mmio(frame, *fault),
+                MemoryFaultAction::Stop => terminal(frame, GuestTerminalCause::MemoryFault),
+            };
         }
         CapturedExit::Synchronous { exit, .. } => crate::arch::vm::dispatch_guest_sync(*exit),
     };
-    apply(frame, captured, action)
+    let wfi = matches!(
+        captured,
+        CapturedExit::Synchronous {
+            exit: GuestSyncExit::VirtualInstruction(VirtualInstruction::WaitForInterrupt),
+            ..
+        }
+    );
+    let cause = match &captured {
+        CapturedExit::Synchronous {
+            exit: GuestSyncExit::Unsupported(exit),
+            ..
+        } => GuestSynchronousTerminal::Unsupported(*exit),
+        _ => GuestSynchronousTerminal::Undecodable,
+    };
+    if apply(frame, captured, action) {
+        if wfi {
+            Dispatch::Stop(GuestRunExit::Wait(GuestWaitReason::Interrupt))
+        } else {
+            Dispatch::Resume
+        }
+    } else {
+        terminal(frame, GuestTerminalCause::Synchronous(cause))
+    }
+}
+
+fn dispatch_mmio(frame: &mut super::exception::TrapFrame, fault: GuestMemoryFault) -> Dispatch {
+    if fault.during_guest_page_walk() || fault.access() == MemoryAccess::Execute {
+        return terminal(frame, GuestTerminalCause::MemoryFault);
+    }
+    let instruction = match classify_htinst(frame.htinst) {
+        Htinst::Instruction(value) => value,
+        Htinst::Unavailable => match fetch_instruction(frame) {
+            Fetch::Instruction(value) => GuestInstruction::Fetched(value),
+            Fetch::Retry => return Dispatch::Resume,
+            Fetch::Failed => return terminal(frame, GuestTerminalCause::Mmio),
+        },
+        _ => return terminal(frame, GuestTerminalCause::Mmio),
+    };
+    let Ok(decoded) = decode_mmio(instruction, fault.access()) else {
+        return terminal(frame, GuestTerminalCause::Mmio);
+    };
+    let alignment = decoded.width.bytes() as u64 - 1;
+    if decoded.address_offset != 0
+        || frame.stval & alignment != 0
+        || fault.address().get() & alignment != 0
+    {
+        return terminal(frame, GuestTerminalCause::Mmio);
+    }
+    if let Some(address) = decoded.address {
+        let effective = frame.general[usize::from(address.base)]
+            .wrapping_add_signed(i64::from(address.displacement));
+        if effective != frame.stval {
+            return terminal(frame, GuestTerminalCause::Mmio);
+        }
+    }
+    let operation = match decoded.operation {
+        MmioRegister::Load { .. } => MmioOperation::Read,
+        MmioRegister::Store { rs2 } => MmioOperation::Write(frame.general[usize::from(rs2)]),
+    };
+    let action =
+        crate::arch::vm::dispatch_mmio(MmioAccess::new(fault.address(), decoded.width, operation));
+    match (decoded.operation, action) {
+        (MmioRegister::Load { rd, signed }, MmioAction::CompleteRead(value)) => {
+            let shift = 64 - decoded.width.bytes() * 8;
+            let value = if signed {
+                (((value << shift) as i64) >> shift) as u64
+            } else {
+                (value << shift) >> shift
+            };
+            if rd != 0 {
+                frame.general[usize::from(rd)] = value;
+            }
+        }
+        (MmioRegister::Store { .. }, MmioAction::CompleteWrite) => {}
+        _ => return terminal(frame, GuestTerminalCause::Mmio),
+    }
+    frame.sepc = frame
+        .sepc
+        .wrapping_add(u64::from(decoded.instruction_bytes));
+    Dispatch::Resume
 }
 
 fn capture(frame: &super::exception::TrapFrame) -> CapturedExit {
@@ -201,6 +415,11 @@ fn capture(frame: &super::exception::TrapFrame) -> CapturedExit {
         return unsupported(frame, UnsupportedReason::GuestPhysicalAddressUnavailable);
     }
     if frame.scause == CAUSE_VIRTUAL_INSTRUCTION {
+        if frame.hstatus & (1 << 8) == 0 {
+            // HS-qualified supervisor/hypervisor operations trap here even
+            // from VU. They must not be emulated with supervisor authority.
+            return illegal_instruction(frame);
+        }
         return capture_virtual_instruction(frame);
     }
     if frame.scause == CAUSE_VIRTUAL_SUPERVISOR_ECALL {
@@ -237,11 +456,22 @@ fn capture_virtual_instruction(frame: &super::exception::TrapFrame) -> CapturedE
     }
     let Some((instruction, destination)) = decode_csr_instruction(instruction, &frame.general)
     else {
-        return unsupported(frame, UnsupportedReason::VirtualInstruction);
+        return illegal_instruction(frame);
     };
     CapturedExit::Synchronous {
         exit: GuestSyncExit::VirtualInstruction(VirtualInstruction::Csr(instruction)),
         completion: Completion::VirtualInstruction { destination },
+    }
+}
+
+fn illegal_instruction(frame: &super::exception::TrapFrame) -> CapturedExit {
+    CapturedExit::Synchronous {
+        exit: GuestSyncExit::IllegalInstruction(IllegalInstruction {
+            program_counter: frame.sepc,
+            instruction: frame.stval,
+            supervisor: frame.hstatus & (1 << 8) != 0,
+        }),
+        completion: Completion::IllegalInstruction,
     }
 }
 
@@ -358,6 +588,30 @@ pub(crate) fn handle_guest_sync(
         }
         GuestSyncExit::SupervisorCall(call) => emulate_sbi(context, call),
         GuestSyncExit::Unsupported(_) => GuestSyncAction::Stop,
+        GuestSyncExit::IllegalInstruction(exit) => inject_illegal_instruction(context, exit),
+    }
+}
+
+fn inject_illegal_instruction(
+    context: &mut VcpuContext,
+    exit: IllegalInstruction,
+) -> GuestSyncAction {
+    const SIE: u64 = 1 << 1;
+    const SPIE: u64 = 1 << 5;
+    const SPP: u64 = 1 << 8;
+    let previous = context.vsstatus;
+    context.vsstatus = (previous & !(SIE | SPIE | SPP))
+        | ((previous & SIE) << 4)
+        | if exit.supervisor { SPP } else { 0 };
+    context.vsepc = exit.program_counter;
+    context.vscause = 2;
+    context.vstval = exit.instruction;
+    context.supervisor = 1;
+    // This is a guest virtual PC, never a host pointer. The hardware-captured
+    // WARL VSTVEC supplies the base; synchronous exceptions ignore vectored
+    // mode. An inaccessible base faults inside the guest translation regime.
+    GuestSyncAction::EnterSupervisorTrap {
+        program_counter: context.vstvec & !3,
     }
 }
 
@@ -369,7 +623,7 @@ fn emulate_virtual_instruction(
         return GuestSyncAction::ResumeVirtualInstruction { value: None };
     };
     let old = match instruction.register {
-        VirtualCsr::InterruptEnable => read_vsie(),
+        VirtualCsr::InterruptEnable => context.vsie,
         VirtualCsr::InterruptPending => read_guest_vsip(context),
         VirtualCsr::CounterEnable => context.scounteren,
         VirtualCsr::EnvironmentConfiguration => context.senvcfg,
@@ -382,7 +636,7 @@ fn emulate_virtual_instruction(
     };
     if let Some(value) = new_value {
         match instruction.register {
-            VirtualCsr::InterruptEnable => write_vsie(value),
+            VirtualCsr::InterruptEnable => context.vsie = value & 0x222,
             VirtualCsr::InterruptPending => write_guest_vsip(context, value),
             VirtualCsr::CounterEnable => context.scounteren = sanitize_scounteren(value),
             VirtualCsr::EnvironmentConfiguration => context.senvcfg = sanitize_senvcfg(value),
@@ -391,41 +645,14 @@ fn emulate_virtual_instruction(
     GuestSyncAction::ResumeVirtualInstruction { value: Some(old) }
 }
 
-fn read_vsie() -> u64 {
-    let value: u64;
-    // SAFETY: VSIE is accessible in HS mode while the guest context is active.
-    unsafe { asm!("csrr {value}, vsie", value = out(reg) value, options(nomem, nostack)) };
-    value
-}
-
-fn write_vsie(value: u64) {
-    // SAFETY: VSIE is writable in HS mode while the guest context is active.
-    unsafe { asm!("csrw vsie, {value}", value = in(reg) value, options(nostack)) };
-}
-
 fn read_guest_vsip(context: &VcpuContext) -> u64 {
-    let value: u64;
-    // SAFETY: Guest trap entry quiesced the context-owned HVIP and VSTIMECMP
-    // state before Rust ran. Local interrupts remain masked while this helper
-    // briefly reinstalls it to obtain the architecturally composed VSIP view,
-    // then returns the hart to the quiesced host state.
+    let physical: u64;
+    // SAFETY: TIME is readable in HS on every admitted reference-platform hart.
     unsafe {
-        asm!(
-            "csrw 0x24d, {deadline}",
-            "csrc hvip, {mask}",
-            "csrs hvip, {pending}",
-            "csrr {value}, vsip",
-            "csrw 0x24d, {disabled}",
-            "csrc hvip, {mask}",
-            deadline = in(reg) context.vstimecmp,
-            pending = in(reg) context.hvip & super::registers::HVIP_GUEST_MASK,
-            mask = in(reg) super::registers::HVIP_GUEST_MASK,
-            disabled = in(reg) u64::MAX,
-            value = out(reg) value,
-            options(nomem, nostack)
-        )
-    };
-    value
+        asm!("rdtime {value}", value = out(reg) physical, options(nomem, nostack));
+    }
+    let timer = physical.wrapping_add(context.virtual_count_offset()) >= context.vstimecmp;
+    (context.hvip >> 1) | (u64::from(timer) << 5)
 }
 
 fn write_guest_vsip(context: &mut VcpuContext, value: u64) {
@@ -571,6 +798,17 @@ fn apply(
             advance_program_counter(frame);
             true
         }
+        (
+            Completion::IllegalInstruction,
+            GuestSyncAction::EnterSupervisorTrap { program_counter },
+        ) => {
+            // The saved VS bank already describes the exception. Return into
+            // VS, keeping every interrupted GPR and the faulting VSEPC intact.
+            frame.sepc = program_counter;
+            frame.sstatus |= 1 << 8;
+            frame.hstatus |= (1 << 7) | (1 << 8);
+            true
+        }
         (Completion::Unsupported, GuestSyncAction::Stop) => false,
         _ => false,
     }
@@ -640,19 +878,6 @@ fn set_timer(frame: &super::exception::TrapFrame, deadline: u64) -> bool {
         (*context).vstimecmp = deadline;
         (*context).hvip &= !(HVIP_VSTIP as u64);
     }
-    // SAFETY: These hypervisor CSRs are writable in HS mode while the active
-    // vCPU is exclusively owned on this hart.
-    unsafe {
-        asm!(
-            "csrs henvcfg, {stce}",
-            "csrw 0x24d, {deadline}",
-            "csrc hvip, {mask}",
-            stce = in(reg) 1usize << 63,
-            deadline = in(reg) deadline,
-            mask = in(reg) HVIP_VSTIP,
-            options(nostack)
-        )
-    };
     true
 }
 
@@ -662,12 +887,17 @@ pub enum ValidationError {
     CsrDecoder,
     GuestMemoryFaultDecoder,
     SupervisorCallCompletion,
+    IllegalInstructionTrap,
 }
 
 pub(super) fn validate() -> Result<(), ValidationError> {
     if !super::context::validate_anchor_state_machine() {
         return Err(ValidationError::GuestAnchorState);
     }
+    if !validate_illegal_instruction_traps() {
+        return Err(ValidationError::IllegalInstructionTrap);
+    }
+
     if guest_page_walk_access(0x3000) != Some(MemoryAccess::Read)
         || guest_page_walk_access(0x3020) != Some(MemoryAccess::Write)
         || guest_page_walk_access(0x0000_20c3).is_some()
@@ -767,4 +997,56 @@ pub(super) fn validate() -> Result<(), ValidationError> {
         return Err(ValidationError::SupervisorCallCompletion);
     }
     Ok(())
+}
+
+fn validate_illegal_instruction_traps() -> bool {
+    let mut context = VcpuContext::new(0);
+    let preserved = (2 << 32) | (1 << 18) | (3 << 13);
+    context.vstvec = 0x4001;
+    context.vsstatus = preserved | (1 << 1) | (1 << 8);
+    context.general[5] = 0xfeed;
+    // Even a VS-origin read of HSTATUS is outside this guest's CSR contract;
+    // decode must reject it so capture forwards an illegal instruction.
+    if decode_csr_instruction(0x6000_22f3, &context.general).is_some() {
+        return false;
+    }
+    let instruction = IllegalInstruction {
+        program_counter: 0x1234,
+        instruction: 0x6000_22f3,
+        supervisor: false,
+    };
+    let action = inject_illegal_instruction(&mut context, instruction);
+    if action
+        != (GuestSyncAction::EnterSupervisorTrap {
+            program_counter: 0x4000,
+        })
+        || context.vsepc != 0x1234
+        || context.vscause != 2
+        || context.vstval != 0x6000_22f3
+        || context.vsstatus != preserved | (1 << 5)
+        || context.supervisor != 1
+        || context.general[5] != 0xfeed
+    {
+        return false;
+    }
+    // A VS-origin exception saves SPP=1, and a previously disabled SIE clears
+    // SPIE even when the old SPIE bit was set. Optional STVAL=0 stays valid.
+    context.vsstatus = preserved | (1 << 5);
+    context.vstvec = 0x8000;
+    let action = inject_illegal_instruction(
+        &mut context,
+        IllegalInstruction {
+            program_counter: 0x5678,
+            instruction: 0,
+            supervisor: true,
+        },
+    );
+    action
+        == (GuestSyncAction::EnterSupervisorTrap {
+            program_counter: 0x8000,
+        })
+        && context.vsstatus == preserved | (1 << 8)
+        && context.vsepc == 0x5678
+        && context.vstval == 0
+        && context.vscause == 2
 }

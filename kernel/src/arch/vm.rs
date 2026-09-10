@@ -11,7 +11,7 @@
 use hyper::sync::PublishedOnce;
 use hyper::vm::exit::{GuestMemoryFault, MemoryFaultAction};
 
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 use hyper::vm::exit::{MmioAccess, MmioAction};
 #[cfg(CONFIG_ARCH_X86_64)]
 use hyper::vm::x86::exit::{PendingInterruptAction, PortIoAction, PortIoExit};
@@ -32,24 +32,56 @@ pub(crate) use super::imp::{
 pub(crate) use super::imp::{GuestSyncAction, GuestSyncExit, handle_guest_sync};
 
 #[cfg(CONFIG_ARCH_AARCH64)]
+pub(crate) use super::imp::{GicAccessError, GuestSyncFailure, access_guest_gic};
+
+#[cfg(CONFIG_ARCH_RISCV64)]
+pub(crate) use super::imp::{UnsupportedGuestExit, access_plic, stopped_guest_wfi_state};
+
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(crate) use super::imp::{
-    GicAccessError, GuestAdministrativeStopReason, GuestRunError, GuestRunExit,
-    GuestStage2RetirementRequest, GuestSyncFailure, GuestSynchronousTerminal, GuestTerminalCause,
-    GuestWaitReason, StoppedDeactivationFailure, StoppedGuestRun, access_guest_gic,
-    deactivate_stopped_vcpu_hardware, reconcile_active_interrupts, request_guest_exit,
-    update_guest_device_interrupt, update_saved_guest_device_interrupt,
+    GuestAdministrativeStopReason, GuestRunError, GuestRunExit, GuestStage2RetirementRequest,
+    GuestSynchronousTerminal, GuestTerminalCause, GuestWaitReason, StoppedDeactivationFailure,
+    StoppedGuestRun, deactivate_stopped_vcpu_hardware, reconcile_active_interrupts,
+    request_guest_exit, update_guest_device_interrupt, update_saved_guest_device_interrupt,
 };
 
-#[cfg(CONFIG_ARCH_AARCH64)]
+/// Checks the hart-local selection; an epoch observation alone does not prove
+/// that a stopped-owner detach preserved the selected translation hierarchy.
+pub(crate) fn stage2_selection_is_current(address_space: &Stage2AddressSpace) -> bool {
+    address_space.is_active_local()
+}
+
+pub(crate) fn guest_translation_identifier_bits() -> Result<u8, Stage2Error> {
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        super::imp::guest_translation_identifier_bits()
+    }
+    #[cfg(not(CONFIG_ARCH_RISCV64))]
+    {
+        Ok(8)
+    }
+}
+
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(crate) fn prepare_guest_stage2_retirement(
     address_space: &Stage2AddressSpace,
 ) -> GuestStage2RetirementRequest {
     address_space.retirement_request()
 }
 
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(crate) fn service_guest_stage2_retirement(request: GuestStage2RetirementRequest) {
-    super::imp::retire_guest_stage2_local(request)
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        super::imp::retire_guest_stage2_local(request)
+    }
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        if super::imp::retire_guest_stage2_local(request).is_err() {
+            // Never acknowledge retirement while a hardware owner remains live.
+            super::imp::halt();
+        }
+    }
 }
 
 pub(crate) use super::imp::{
@@ -82,7 +114,7 @@ pub(crate) use super::imp::inject_timer_for_validation;
 #[derive(Clone, Copy)]
 pub(crate) struct ExitServices {
     memory_fault: fn(GuestMemoryFault) -> MemoryFaultAction,
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     mmio: fn(MmioAccess) -> MmioAction,
     #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     guest_sync: fn(GuestSyncExit) -> GuestSyncAction,
@@ -109,10 +141,12 @@ impl ExitServices {
     #[cfg(CONFIG_ARCH_RISCV64)]
     pub(crate) const fn riscv64(
         memory_fault: fn(GuestMemoryFault) -> MemoryFaultAction,
+        mmio: fn(MmioAccess) -> MmioAction,
         guest_sync: fn(GuestSyncExit) -> GuestSyncAction,
     ) -> Self {
         Self {
             memory_fault,
+            mmio,
             guest_sync,
         }
     }
@@ -167,7 +201,7 @@ pub(crate) fn dispatch_memory_fault(fault: GuestMemoryFault) -> MemoryFaultActio
     (exit_services().memory_fault)(fault)
 }
 
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(crate) fn dispatch_mmio(access: MmioAccess) -> MmioAction {
     (exit_services().mmio)(access)
 }

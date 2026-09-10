@@ -41,6 +41,7 @@ pub enum Architecture {
 #[repr(u32)]
 pub enum PlatformProfile {
     Aarch64Reference = hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE as u32,
+    Riscv64Reference = hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE as u32,
 }
 
 impl PlatformProfile {
@@ -50,6 +51,9 @@ impl PlatformProfile {
             Self::Aarch64Reference => {
                 hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GUEST_RAM_BASE
             }
+            Self::Riscv64Reference => {
+                hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE_GUEST_RAM_BASE
+            }
         }
     }
 
@@ -58,6 +62,9 @@ impl PlatformProfile {
         match self {
             Self::Aarch64Reference => {
                 hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DTB_OFFSET
+            }
+            Self::Riscv64Reference => {
+                hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE_DTB_OFFSET
             }
         }
     }
@@ -417,6 +424,9 @@ fn decode_platform_profile(raw: u32) -> Result<PlatformProfile> {
         value if value == PlatformProfile::Aarch64Reference as u32 => {
             Ok(PlatformProfile::Aarch64Reference)
         }
+        value if value == PlatformProfile::Riscv64Reference as u32 => {
+            Ok(PlatformProfile::Riscv64Reference)
+        }
         _ => Err(Error::InvalidResponse),
     }
 }
@@ -514,6 +524,12 @@ mod tests {
                 hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE as u32,
             ),
             Ok(PlatformProfile::Aarch64Reference)
+        );
+        assert_eq!(
+            decode_platform_profile(
+                hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE as u32
+            ),
+            Ok(PlatformProfile::Riscv64Reference)
         );
         assert_eq!(
             decode_platform_profile(u32::MAX),

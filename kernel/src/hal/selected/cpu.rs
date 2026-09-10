@@ -37,6 +37,11 @@ pub(crate) fn secondary_is_compatible() -> bool {
     crate::arch::cpu::secondary_is_compatible()
 }
 
+/// Discovers primary-hart execution capabilities before SMP admission.
+pub(crate) fn prepare_primary_admission() -> bool {
+    crate::arch::cpu::prepare_primary_admission()
+}
+
 #[inline]
 pub(crate) fn current_index() -> Option<CpuIndex> {
     crate::arch::cpu::current_index()

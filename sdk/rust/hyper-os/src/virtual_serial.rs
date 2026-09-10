@@ -44,7 +44,8 @@ pub fn create() -> Result<OwnedHandle<VirtualSerialObject>> {
 /// nonempty batch acknowledges consumption without a syscall data copy.
 pub struct Output {
     serial: OwnedHandle<VirtualSerialObject>,
-    region: OwnedHandle<crate::handle::VmarObject>,
+    region: Option<OwnedHandle<crate::handle::VmarObject>>,
+    mapped: bool,
     address: usize,
     cursor: u64,
 }
@@ -79,9 +80,11 @@ impl Output {
                 &[root.raw(), memory.as_handle_ref().raw(), serial.raw()],
             )?
         };
-        let mapping = Self {
+        let region_raw = region.as_handle_ref().raw().get();
+        let mut mapping = Self {
             serial: output_owner,
-            region,
+            region: Some(region),
+            mapped: false,
             address: base,
             cursor: 0,
         };
@@ -89,7 +92,7 @@ impl Output {
         // the fixed layout fits completely within its page-aligned extent.
         Status::from_raw(unsafe {
             hyper_sys::vmar_map(
-                mapping.region.as_handle_ref().raw().get(),
+                region_raw,
                 memory.as_handle_ref().raw().get(),
                 0,
                 address,
@@ -98,6 +101,7 @@ impl Output {
             )
         })
         .into_result()?;
+        mapping.mapped = true;
         // SAFETY: no shared references have escaped and no consumer runs yet.
         // Registration pins the VMO and initializes counters before returning.
         Status::from_raw(unsafe {
@@ -195,10 +199,31 @@ impl Output {
 
 impl Drop for Output {
     fn drop(&mut self) {
-        // SAFETY: no borrowed mapped data escapes Output, and &mut self
-        // excludes readers. A failed destroy leaves mappings owned by the
-        // process until retirement rather than freeing reachable backing.
-        let _ = unsafe { hyper_sys::vmar_destroy(self.region.as_handle_ref().raw().get()) };
+        let Some(region) = self.region.take() else {
+            return;
+        };
+        let raw = region.as_handle_ref().raw().get();
+        if self.mapped {
+            // SAFETY: Output exclusively owns this exact fixed mapping and no
+            // references to its bytes escape. Kernel unmap joins translation
+            // retirement before releasing backing; registration pins it separately.
+            let status = unsafe { hyper_sys::vmar_unmap(raw, self.address as u64, BUFFER_BYTES) };
+            if Status::from_raw(status).into_result().is_err() {
+                // Leave a failed unmap owned by the process. Closing the region
+                // handle cannot release still-reachable mappings or backing.
+                return;
+            }
+        }
+        // VMAR destruction accepts only an empty region and consumes its handle
+        // on success. Do not let OwnedHandle close that consumed identity again.
+        // SAFETY: this exact private region is empty after successful unmap, or
+        // because register failed before installing any mapping.
+        if Status::from_raw(unsafe { hyper_sys::vmar_destroy(raw) })
+            .into_result()
+            .is_ok()
+        {
+            let _ = region.into_raw();
+        }
     }
 }
 

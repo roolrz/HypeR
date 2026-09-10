@@ -40,7 +40,7 @@ pub(crate) const fn guest_architecture_abi() -> u32 {
 /// process termination fatal. Keep admission closed until every lifecycle
 /// operation is implemented for the selected backend.
 pub(crate) const fn userspace_vm_lifecycle_available() -> bool {
-    cfg!(CONFIG_ARCH_AARCH64)
+    cfg!(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))
 }
 
 const _: () = assert!(
@@ -60,7 +60,7 @@ pub use crate::arch::vm::{InterruptController, InterruptError, VcpuInterruptErro
 
 /// Selected virtualization capability which is unavailable on this target.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(CONFIG_ARCH_AARCH64, allow(dead_code))]
+#[cfg_attr(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64), allow(dead_code))]
 pub enum UnsupportedCapability {
     AdministrativeStop,
     GuestStage2Retirement,
@@ -73,11 +73,11 @@ pub(crate) struct AdministrativeStopCapability {
 
 pub(crate) fn try_administrative_stop()
 -> Result<AdministrativeStopCapability, UnsupportedCapability> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         Ok(AdministrativeStopCapability { _private: () })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         Err(UnsupportedCapability::AdministrativeStop)
     }
@@ -86,9 +86,9 @@ pub(crate) fn try_administrative_stop()
 /// Opaque local stage-2 invalidation request issued to every sticky CPU.
 #[derive(Clone, Copy)]
 pub(crate) struct GuestStage2RetirementRequest {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: crate::arch::vm::GuestStage2RetirementRequest,
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     never: core::convert::Infallible,
 }
 
@@ -103,11 +103,11 @@ pub(crate) struct GuestStage2RetirementCapability {
 
 pub(crate) fn try_guest_stage2_retirement()
 -> Result<GuestStage2RetirementCapability, UnsupportedCapability> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         Ok(GuestStage2RetirementCapability { _private: () })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         Err(UnsupportedCapability::GuestStage2Retirement)
     }
@@ -117,14 +117,14 @@ pub(crate) fn prepare_guest_stage2_retirement(
     capability: &GuestStage2RetirementCapability,
     address_space: &Stage2AddressSpace,
 ) -> GuestStage2RetirementRequest {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         let _ = capability;
         GuestStage2RetirementRequest {
             backend: crate::arch::vm::prepare_guest_stage2_retirement(address_space),
         }
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (capability, address_space);
         // The private capability cannot be obtained on this target.
@@ -133,11 +133,11 @@ pub(crate) fn prepare_guest_stage2_retirement(
 }
 
 pub(crate) fn service_guest_stage2_retirement(request: GuestStage2RetirementRequest) {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         crate::arch::vm::service_guest_stage2_retirement(request.backend)
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         match request.never {}
     }
@@ -277,11 +277,15 @@ pub(crate) fn prepare_native_bootstrap_context(
     stack: u64,
     arguments: [u64; 4],
 ) -> Result<VcpuContext, InitialContextError> {
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    const FIRST_ARGUMENT: usize = 10;
+    #[cfg(not(CONFIG_ARCH_RISCV64))]
+    const FIRST_ARGUMENT: usize = 0;
     let assignments = [
-        InitialRegisterAssignment::new(0, arguments[0]),
-        InitialRegisterAssignment::new(1, arguments[1]),
-        InitialRegisterAssignment::new(2, arguments[2]),
-        InitialRegisterAssignment::new(3, arguments[3]),
+        InitialRegisterAssignment::new(FIRST_ARGUMENT, arguments[0]),
+        InitialRegisterAssignment::new(FIRST_ARGUMENT + 1, arguments[1]),
+        InitialRegisterAssignment::new(FIRST_ARGUMENT + 2, arguments[2]),
+        InitialRegisterAssignment::new(FIRST_ARGUMENT + 3, arguments[3]),
     ];
     let mut context = prepare_initial_context(entry, &assignments)?;
     #[cfg(CONFIG_ARCH_AARCH64)]
@@ -367,9 +371,9 @@ pub(crate) unsafe fn deactivate_hardware(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
 pub(crate) struct VcpuRunExit {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: crate::arch::vm::GuestRunExit,
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     never: core::convert::Infallible,
 }
 
@@ -383,13 +387,16 @@ pub(crate) enum VcpuTerminalReason {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(crate) enum VcpuSynchronousTerminal {
     Undecodable,
+    #[cfg(CONFIG_ARCH_AARCH64)]
     Failed {
         exit: GuestSyncExit,
         failure: VcpuInterruptError,
     },
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    Unsupported(crate::arch::vm::UnsupportedGuestExit),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -397,9 +404,9 @@ pub(crate) enum VcpuSynchronousTerminal {
 pub(crate) enum VcpuTerminalCause {
     MemoryFault,
     Mmio,
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     Synchronous(VcpuSynchronousTerminal),
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     Synchronous,
 }
 
@@ -423,9 +430,9 @@ impl VcpuTerminalExit {
         match self.cause {
             VcpuTerminalCause::MemoryFault => VcpuTerminalReason::MemoryFault,
             VcpuTerminalCause::Mmio => VcpuTerminalReason::Mmio,
-            #[cfg(CONFIG_ARCH_AARCH64)]
+            #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
             VcpuTerminalCause::Synchronous(_) => VcpuTerminalReason::Synchronous,
-            #[cfg(not(CONFIG_ARCH_AARCH64))]
+            #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
             VcpuTerminalCause::Synchronous => VcpuTerminalReason::Synchronous,
         }
     }
@@ -508,7 +515,28 @@ pub(crate) fn stopped_wfi_state(
             timer,
         })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        let stopped = crate::arch::vm::stopped_guest_wfi_state(
+            &state.context,
+            vcpu_id,
+            interrupts,
+            physical_count,
+        )
+        .map_err(StoppedVcpuQueryError::Backend)?;
+        let timer = match stopped.timer {
+            hyper::vm::riscv64::time::TimerWake::Disabled => VcpuTimerWake::None,
+            hyper::vm::riscv64::time::TimerWake::PendingNow => VcpuTimerWake::PendingNow,
+            hyper::vm::riscv64::time::TimerWake::AfterTicks(ticks) => {
+                VcpuTimerWake::Deadline(physical_count.wrapping_add(ticks))
+            }
+        };
+        Ok(VcpuWfiState {
+            interrupt_may_wake: stopped.interrupt_may_wake,
+            timer,
+        })
+    }
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (state, vcpu_id, interrupts, physical_count);
         Err(StoppedVcpuQueryError::Unsupported)
@@ -524,7 +552,7 @@ pub(crate) enum StoppedVcpuQueryError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ActiveInterruptReconcileError {
-    #[cfg_attr(CONFIG_ARCH_AARCH64, allow(dead_code))]
+    #[cfg_attr(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64), allow(dead_code))]
     Unsupported,
     #[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
     Backend(VcpuInterruptError),
@@ -551,7 +579,7 @@ impl core::fmt::Display for VcpuTerminalReason {
 impl VcpuRunExit {
     #[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
     pub(crate) const fn disposition(self) -> VcpuRunDisposition {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             match self.backend {
                 crate::arch::vm::GuestRunExit::Wait(
@@ -568,11 +596,16 @@ impl VcpuRunExit {
                                 crate::arch::vm::GuestSynchronousTerminal::Undecodable => {
                                     VcpuSynchronousTerminal::Undecodable
                                 }
+                                #[cfg(CONFIG_ARCH_AARCH64)]
                                 crate::arch::vm::GuestSynchronousTerminal::Failed {
                                     exit,
                                     failure:
                                         crate::arch::vm::GuestSyncFailure::VirtualInterrupt(failure),
                                 } => VcpuSynchronousTerminal::Failed { exit, failure },
+                                #[cfg(CONFIG_ARCH_RISCV64)]
+                                crate::arch::vm::GuestSynchronousTerminal::Unsupported(exit) => {
+                                    VcpuSynchronousTerminal::Unsupported(exit)
+                                }
                             };
                             VcpuTerminalCause::Synchronous(synchronous)
                         }
@@ -593,7 +626,7 @@ impl VcpuRunExit {
                 }
             }
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             match self.never {}
         }
@@ -608,7 +641,7 @@ pub(crate) enum VcpuRunError {
     State,
 }
 
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 impl From<crate::arch::vm::GuestRunError> for VcpuRunError {
     fn from(error: crate::arch::vm::GuestRunError) -> Self {
         match error {
@@ -626,22 +659,22 @@ impl From<crate::arch::vm::GuestRunError> for VcpuRunError {
 #[must_use = "stopped vCPU hardware must be detached exactly once"]
 #[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
 pub(crate) struct StoppedVcpuRun {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: crate::arch::vm::StoppedGuestRun,
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     never: core::convert::Infallible,
 }
 
 impl StoppedVcpuRun {
     #[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
     pub(crate) fn exit(&self) -> VcpuRunExit {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             VcpuRunExit {
                 backend: self.backend.exit(),
             }
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             match self.never {}
         }
@@ -661,14 +694,14 @@ pub(crate) unsafe fn run(state: *mut VcpuHardwareState) -> Result<StoppedVcpuRun
     }
     // SAFETY: The validated state pointer exclusively owns this pinned field.
     let context = unsafe { core::ptr::addr_of_mut!((*state).context) };
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         // SAFETY: The facade preserves the backend's active, pinned run contract.
         unsafe { VcpuContext::run(context) }
             .map(|backend| StoppedVcpuRun { backend })
             .map_err(Into::into)
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         // SAFETY: The facade preserves the backend's non-returning entry contract.
         unsafe { VcpuContext::enter(context) }
@@ -676,9 +709,9 @@ pub(crate) unsafe fn run(state: *mut VcpuHardwareState) -> Result<StoppedVcpuRun
 }
 
 pub(crate) struct StoppedDetachFailure {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: crate::arch::vm::StoppedDeactivationFailure,
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     never: core::convert::Infallible,
 }
 
@@ -691,18 +724,18 @@ pub(crate) enum StoppedDetachError {
 
 impl StoppedDetachFailure {
     pub(crate) const fn error(&self) -> StoppedDetachError {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             StoppedDetachError::Backend(self.backend.error())
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             match self.never {}
         }
     }
 }
 
-/// Detaches hardware for an `AArch64` stopped run whose lower world is closed.
+/// Detaches hardware for a stopped run whose lower world is closed.
 pub(crate) unsafe fn deactivate_stopped_hardware(
     state: &mut VcpuHardwareState,
     vcpu_id: u32,
@@ -710,7 +743,7 @@ pub(crate) unsafe fn deactivate_stopped_hardware(
     physical_count: u64,
     stopped: StoppedVcpuRun,
 ) -> Result<(), StoppedDetachFailure> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         // SAFETY: The caller preserves the stopped proof, exact context, and mask.
         unsafe {
@@ -724,7 +757,7 @@ pub(crate) unsafe fn deactivate_stopped_hardware(
         }
         .map_err(|backend| StoppedDetachFailure { backend })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (state, vcpu_id, interrupts, physical_count);
         match stopped.never {}
@@ -1005,12 +1038,12 @@ pub(crate) fn reconcile_active_interrupts(
     vcpu_id: u32,
     interrupts: &InterruptController,
 ) -> Result<(), ActiveInterruptReconcileError> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         crate::arch::vm::reconcile_active_interrupts(&mut state.context, vcpu_id, interrupts)
             .map_err(ActiveInterruptReconcileError::Backend)
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (state, vcpu_id, interrupts);
         Err(ActiveInterruptReconcileError::Unsupported)
@@ -1022,11 +1055,11 @@ pub(crate) fn reconcile_active_interrupts(
 /// no qualified targeted guest-exit mechanism; it does not consume the
 /// caller's durable stop request.
 pub(crate) fn request_guest_exit(cpu: hyper::cpu::CpuIndex) -> bool {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         crate::arch::vm::request_guest_exit(cpu)
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = cpu;
         false
@@ -1047,4 +1080,60 @@ pub(crate) fn access_guest_gic(
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn guest_execution_available() -> bool {
     crate::arch::vm::guest_execution_available()
+}
+
+/// Logical identifier width agreed by all admitted CPUs before VM reservation.
+pub(crate) fn guest_translation_identifier_bits() -> Result<u8, Stage2Error> {
+    crate::arch::vm::guest_translation_identifier_bits()
+}
+
+#[cfg(CONFIG_ARCH_RISCV64)]
+pub(crate) fn update_guest_device_interrupt(
+    state: &mut VcpuHardwareState,
+    vcpu_id: u32,
+    interrupts: &InterruptController,
+    interrupt: hyper::vm::interrupt::VirtualInterruptId,
+    asserted: bool,
+) -> Result<(), VcpuInterruptError> {
+    crate::arch::vm::update_guest_device_interrupt(
+        &mut state.context,
+        vcpu_id,
+        interrupts,
+        interrupt,
+        asserted,
+    )
+}
+
+#[cfg(CONFIG_ARCH_RISCV64)]
+pub(crate) fn update_saved_guest_device_interrupt(
+    interrupts: &InterruptController,
+    vcpu_id: u32,
+    interrupt: hyper::vm::interrupt::VirtualInterruptId,
+    asserted: bool,
+) -> Result<(), VcpuInterruptError> {
+    crate::arch::vm::update_saved_guest_device_interrupt(interrupts, vcpu_id, interrupt, asserted)
+}
+
+#[cfg(CONFIG_ARCH_RISCV64)]
+pub(crate) fn access_plic(
+    state: &mut VcpuHardwareState,
+    interrupts: &InterruptController,
+    vcpu_id: u32,
+    offset: u64,
+    size: usize,
+    operation: hyper::vm::exit::MmioOperation,
+) -> Result<Option<u64>, VcpuInterruptError> {
+    crate::arch::vm::access_plic(
+        &mut state.context,
+        interrupts,
+        vcpu_id,
+        offset,
+        size,
+        operation,
+    )
+}
+
+/// A cached mapping epoch may be reused only while its hardware root is selected.
+pub(crate) fn stage2_selection_is_current(address_space: &Stage2AddressSpace) -> bool {
+    crate::arch::vm::stage2_selection_is_current(address_space)
 }

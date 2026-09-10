@@ -182,3 +182,6 @@ rg -q 'control: VmControl' "$construction" &&
     echo 'installed Native VM owners must receive the linear lifecycle control' >&2
     exit 1
 }
+
+require_order "$begin" 'machine.request_all_stops\(\)' 'machine.quiesce_devices\(\)' \
+    'device closure must follow durable administrative stop publication'

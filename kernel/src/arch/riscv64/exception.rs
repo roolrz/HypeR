@@ -334,6 +334,7 @@ pub(crate) struct TrapFrame {
     guest_anchor_return: u64,
     host_cpu_index: u64,
     guest_context: u64,
+    pub(crate) hstatus: u64,
 }
 
 impl TrapFrame {
@@ -396,6 +397,7 @@ const _: () = {
         offset_of!(TrapFrame, guest_context)
             == super::registers::TRAP_FRAME_GUEST_CONTEXT_OFFSET as usize
     );
+    assert!(offset_of!(TrapFrame, hstatus) == super::registers::TRAP_FRAME_HSTATUS_OFFSET as usize);
     assert!(align_of::<TrapFrame>() == 16);
     assert!(size_of::<TrapFrame>() == super::registers::TRAP_FRAME_SIZE as usize);
     assert!(size_of::<TrapAction>() == 16);
@@ -462,8 +464,11 @@ extern "C" fn dispatch_trap(frame: &mut TrapFrame) -> TrapAction {
             }
             _ => fatal_trap(frame),
         }
-    } else if frame.guest_origin != 0 && super::guest::dispatch(frame) {
-        TrapAction::RESUME
+    } else if frame.guest_origin != 0 {
+        match super::guest::dispatch(frame) {
+            super::guest::Dispatch::Resume => TrapAction::RESUME,
+            super::guest::Dispatch::Stop(exit) => stop_guest(frame, exit),
+        }
     } else {
         fatal_trap(frame)
     }
@@ -501,17 +506,36 @@ fn dispatch_irq_action(frame: &mut TrapFrame, action: EntryAction) -> TrapAction
                 TrapAction::postlude(postlude)
             }
         }
-        EntryAction::StopGuest { postlude } => {
-            let Some(postlude) = postlude else {
-                crate::arch::irq::stop_entry(trap_crash_context(frame))
-            };
+        EntryAction::StopGuest { postlude: _ } => {
             if frame.guest_origin == 0 || frame.guest_anchor_return == 0 {
                 crate::arch::irq::stop_entry(trap_crash_context(frame))
             }
-            capture_guest_irq_tail(frame);
-            TrapAction::anchor_irq_tail(postlude)
+            // The IRQ is already acknowledged. Administrative stop returns to
+            // the owning runner; scheduling must not re-enter this guest first.
+            stop_guest(
+                frame,
+                super::context::GuestRunExit::AdministrativeStop(
+                    super::context::GuestAdministrativeStopReason::Requested,
+                ),
+            )
         }
         EntryAction::Stop => crate::arch::irq::stop_entry(trap_crash_context(frame)),
+    }
+}
+
+fn stop_guest(frame: &TrapFrame, exit: super::context::GuestRunExit) -> TrapAction {
+    let context = frame.guest_context as *mut super::VcpuContext;
+    if context.is_null() || !context.is_aligned() {
+        fatal_trap(frame);
+    }
+    // SAFETY: Assembly published this exact live owner, captured its CSR/FP
+    // bank, and masked interrupts. No reference survives policy dispatch.
+    if unsafe { (&mut *context).stop(&frame.general, frame.sepc, exit) }.is_err() {
+        fatal_trap(frame);
+    }
+    TrapAction {
+        kind: super::registers::TRAP_ACTION_ANCHOR_STOPPED,
+        target: 0,
     }
 }
 

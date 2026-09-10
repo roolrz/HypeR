@@ -98,3 +98,6 @@ mutate 'guest stage-2 retirement needs a distinct RPC reason' \
     'KernelRpcReasons::USER_ADDRESS_SPACE'
 mutate 'retirement asm outputs must not overlap live inputs' \
     src/arch/aarch64/stage2.rs 'saved_hcr = out(reg) _' 'saved_hcr = lateout(reg) _'
+
+mutate 'device closure must not precede administrative stop intent' src/kernel/vm/registry/control.rs \
+    'machine.disconnect_virtual_serial();' 'machine.disconnect_virtual_serial(); let _ = machine.quiesce_devices();'

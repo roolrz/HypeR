@@ -131,6 +131,17 @@ ABI revision: `0`.
 | `virtual_platform_aarch64_reference_uart_size` | `4096` |
 | `virtual_platform_aarch64_reference_uart_interrupt` | `33` |
 | `virtual_platform_aarch64_reference_timer_interrupt` | `27` |
+| `virtual_platform_riscv64_reference` | `2` |
+| `virtual_platform_riscv64_reference_guest_ram_base` | `2147483648` |
+| `virtual_platform_riscv64_reference_dtb_offset` | `65536` |
+| `virtual_platform_riscv64_reference_uart_base` | `268435456` |
+| `virtual_platform_riscv64_reference_uart_size` | `4096` |
+| `virtual_platform_riscv64_reference_uart_interrupt` | `10` |
+| `virtual_platform_riscv64_reference_uart_clock_frequency` | `3686400` |
+| `virtual_platform_riscv64_reference_plic_base` | `201326592` |
+| `virtual_platform_riscv64_reference_plic_size` | `4194304` |
+| `virtual_platform_riscv64_reference_plic_num_sources` | `31` |
+| `virtual_platform_riscv64_reference_plic_supervisor_context` | `1` |
 | `virtual_machine_phase_installed` | `1` |
 | `virtual_machine_phase_running` | `2` |
 | `virtual_machine_phase_stopping` | `3` |

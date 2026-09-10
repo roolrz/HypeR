@@ -72,3 +72,18 @@ pub(crate) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualIn
 pub(super) fn kick_virtual_serial(route: Route) {
     selected::kick_virtual_serial(route);
 }
+
+/// Additional allocation charged before virtual-device construction.
+pub(crate) fn dynamic_allocation_bytes() -> usize {
+    selected::dynamic_allocation_bytes()
+}
+
+pub(crate) const fn timer_count() -> u64 {
+    selected::timer_count()
+}
+
+/// Retires device callbacks after registry visibility has been cut.
+/// Called in normal context without holding registry or device locks.
+pub(crate) fn quiesce(devices: &VirtualDeviceSet) -> Result<(), Error> {
+    selected::quiesce(devices)
+}

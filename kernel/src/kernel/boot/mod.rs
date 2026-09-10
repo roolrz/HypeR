@@ -50,6 +50,7 @@ impl core::fmt::Debug for PreparationError {
 
 pub enum RuntimeError {
     Cache(hyper::hal::cache::CacheError),
+    CpuAdmission,
     Console(ConsoleError),
     DtbMapping(u64),
     InitialRamdiskAddress(hyper::platform::PhysicalRange),
@@ -71,6 +72,7 @@ impl core::fmt::Debug for RuntimeError {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Cache(error) => format_error(formatter, "RuntimeError", "cache", Some(error)),
+            Self::CpuAdmission => format_error(formatter, "RuntimeError", "cpu-admission", None),
             Self::Console(error) => format_error(formatter, "RuntimeError", "console", Some(error)),
             Self::DtbMapping(address) => {
                 format_error(formatter, "RuntimeError", "dtb-mapping", Some(address))
@@ -385,6 +387,9 @@ pub(crate) fn enter_runtime() -> Result<Initialization, RuntimeError> {
         }
         None => None,
     };
+    if !crate::hal::cpu::prepare_primary_admission() {
+        return Err(RuntimeError::CpuAdmission);
+    }
     crate::hal::cache::prepare(&essential).map_err(RuntimeError::Cache)?;
     let linear_dtb =
         mm::memory::linear_address(dtb_address).ok_or(RuntimeError::DtbMapping(dtb_address))?;

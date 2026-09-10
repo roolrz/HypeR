@@ -120,6 +120,18 @@ riscv64_enter_guest:
     ld t6, GUEST_HS_ANCHOR_CONTEXT_OFFSET(sp)
     LOAD_FLOATING t6, VCPU_FLOATING_OFFSET, VCPU_FCSR_OFFSET
 
+    # Delegate exceptions handled by a normal supervisor kernel. Guest
+    # supervisor ecalls and guest-page faults remain in HS mode for SBI and
+    # stage-2 emulation. Install delegation BEFORE the VS bank: VSIE bits
+    # are read-only zero until their HIDELEG gates are enabled. In particular,
+    # migration onto a hart which has never run a guest must retain STIE.
+    li t0, HEDELEG_GUEST_VALUE
+    csrw hedeleg, t0
+    li t0, HIDELEG_GUEST_VALUE
+    csrw hideleg, t0
+    li t0, HCOUNTEREN_GUEST_VALUE
+    csrw hcounteren, t0
+
     ld t0, VCPU_VSSTATUS_OFFSET(t6)
     csrw vsstatus, t0
     ld t0, VCPU_VSIE_OFFSET(t6)
@@ -151,16 +163,6 @@ riscv64_enter_guest:
     ld t0, VCPU_VSTIMECMP_OFFSET(t6)
     csrw 0x24d, t0
 
-    # Delegate exceptions handled by a normal supervisor kernel. Guest
-    # supervisor ecalls and guest-page faults remain in HS mode for SBI and
-    # stage-2 emulation.
-    li t0, HEDELEG_GUEST_VALUE
-    csrw hedeleg, t0
-    li t0, HIDELEG_GUEST_VALUE
-    csrw hideleg, t0
-    li t0, HCOUNTEREN_GUEST_VALUE
-    csrw hcounteren, t0
-
     # SPV=1 selects virtualized execution and SPVP=1 enters VS mode.
     csrr t0, hstatus
     # Trap guest WFI so HS retains control of physical idle state. Keep VTSR
@@ -170,10 +172,20 @@ riscv64_enter_guest:
     and t0, t0, t1
     li t1, HSTATUS_GUEST_SET
     or t0, t0, t1
+    li t1, (1 << 8)
+    csrc hstatus, t1
+    not t1, t1
+    and t0, t0, t1
+    ld t1, VCPU_SUPERVISOR_OFFSET(t6)
+    slli t1, t1, 8
+    or t0, t0, t1
     csrw hstatus, t0
     # SPP selects supervisor privilege for the HS sret; SPV above selects the
     # virtualized execution domain.
     li t0, SSTATUS_GUEST_SPP
+    csrc sstatus, t0
+    ld t0, VCPU_SUPERVISOR_OFFSET(t6)
+    slli t0, t0, 8
     csrs sstatus, t0
     ld t0, VCPU_PC_OFFSET(t6)
     csrw sepc, t0
@@ -331,3 +343,103 @@ riscv64_save_guest_floating_point:
     sw t0, VCPU_FCSR_OFFSET(a0)
     ret
 .size riscv64_save_guest_floating_point, . - riscv64_save_guest_floating_point
+
+# Fault-contained instruction parcel fetch. The caller holds the active HGATP
+# lease and masks IRQs. a0=guest VA, a1=context, a2=result, a3=saved hstatus.
+# The guest bank is reinstated only inside this assembly region; no Rust runs
+# before every host CSR has been restored. Result: value/scause/stval/htval/htinst.
+.balign 4
+.global riscv64_fetch_guest_parcel
+.type riscv64_fetch_guest_parcel, @function
+riscv64_fetch_guest_parcel:
+    addi sp, sp, -96
+    sd ra, 0(sp)
+    csrr t0, stvec
+    sd t0, 8(sp)
+    csrr t0, hstatus
+    sd t0, 16(sp)
+    csrr t0, vsatp
+    sd t0, 24(sp)
+    csrr t0, vsstatus
+    sd t0, 32(sp)
+    csrr t0, sstatus
+    sd t0, 40(sp)
+    csrr t0, sepc
+    sd t0, 48(sp)
+    csrr t0, scause
+    sd t0, 56(sp)
+    csrr t0, stval
+    sd t0, 64(sp)
+    csrr t0, htval
+    sd t0, 72(sp)
+    csrr t0, htinst
+    sd t0, 80(sp)
+    sd a2, 88(sp)
+    li t0, ((1 << 7) | (1 << 9))
+    not t0, t0
+    and a3, a3, t0
+    csrw hstatus, a3
+    ld t0, VCPU_VSSTATUS_OFFSET(a1)
+    # Instruction fetch from VS must never gain access to a U page via SUM.
+    li t1, (1 << 18)
+    not t1, t1
+    and t0, t0, t1
+    csrw vsstatus, t0
+    ld t0, VCPU_VSATP_OFFSET(a1)
+    csrw vsatp, t0
+    hfence.vvma zero, zero
+    la t0, .Lparcel_fault
+    csrw stvec, t0
+.Lparcel_load:
+    hlvx.hu t0, (a0)
+    sd t0, 0(a2)
+    li a0, 0
+    j .Lparcel_restore
+.balign 4
+.Lparcel_fault:
+    csrr t0, sepc
+    la t1, .Lparcel_load
+    bne t0, t1, .Lparcel_unexpected
+    ld t1, 88(sp)
+    csrr t0, scause
+    sd t0, 8(t1)
+    csrr t0, stval
+    sd t0, 16(t1)
+    csrr t0, htval
+    sd t0, 24(t1)
+    csrr t0, htinst
+    sd t0, 32(t1)
+    li a0, 1
+    # Stay in HS: no SRET is necessary, since restoration below returns to the
+    # original masked caller and restores its complete interrupted CSR image.
+.Lparcel_restore:
+    ld t0, 8(sp)
+    csrw stvec, t0
+    ld t0, 24(sp)
+    csrw vsatp, t0
+    hfence.vvma zero, zero
+    ld t0, 32(sp)
+    csrw vsstatus, t0
+    ld t0, 16(sp)
+    csrw hstatus, t0
+    ld t0, 48(sp)
+    csrw sepc, t0
+    ld t0, 56(sp)
+    csrw scause, t0
+    ld t0, 64(sp)
+    csrw stval, t0
+    ld t0, 72(sp)
+    csrw htval, t0
+    ld t0, 80(sp)
+    csrw htinst, t0
+    ld t0, 40(sp)
+    csrw sstatus, t0
+    ld ra, 0(sp)
+    addi sp, sp, 96
+    ret
+.Lparcel_unexpected:
+    # A fault outside the single authorized access is a kernel defect.
+    ld t0, 8(sp)
+    csrw stvec, t0
+    jr t0
+.size riscv64_fetch_guest_parcel, . - riscv64_fetch_guest_parcel

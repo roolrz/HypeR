@@ -468,6 +468,10 @@ impl VirtualMachine {
         self.devices.disconnect_virtual_serial(self.id);
     }
 
+    pub(super) fn quiesce_devices(&self) -> Result<(), super::super::device::Error> {
+        super::super::device::quiesce(&self.devices)
+    }
+
     pub(super) fn is_quiescent(&self) -> bool {
         self.run_admission.is_closed_and_quiescent()
             && self.lifecycle.endpoints().iter().all(|endpoint| {
