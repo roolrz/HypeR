@@ -253,11 +253,23 @@ struct HandleChargeLocation {
     entry: usize,
 }
 
-type PreparedTableStorage = (
-    Option<HandleTableStoragePlan>,
-    Option<CommittedCharge>,
-    HandleSidecarPlan<HandleChargeLocation>,
-);
+// Fields drop in declaration order on every retry and early return. Both
+// storage owners must release their backing before the quota owner is dropped.
+struct PreparedTableStorage {
+    slots: Option<HandleTableStoragePlan>,
+    index: HandleSidecarPlan<HandleChargeLocation>,
+    charge: Option<CommittedCharge>,
+}
+
+impl PreparedTableStorage {
+    const fn empty() -> Self {
+        Self {
+            slots: None,
+            index: HandleSidecarPlan::empty(),
+            charge: None,
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 enum HandleAdmission {
@@ -1064,8 +1076,7 @@ impl Process {
                         .with(|table| table.reservation_storage_snapshot_for(N))?,
                 )
             })?;
-            let (mut storage_plan, mut storage_charge, index_plan) =
-                self.prepare_table_storage_plan(snapshot)?;
+            let mut storage = self.prepare_table_storage_plan(snapshot)?;
             let attempt = self.inner.state.with(|state| {
                 require_handle_phase(state.lifecycle.phase())?;
                 let current = self
@@ -1078,14 +1089,14 @@ impl Process {
                 let reservation = self
                     .inner
                     .handles
-                    .with(|table| table.reserve_with_plan(&mut storage_plan))?;
-                install_table_storage_charge(state, snapshot, &mut storage_charge);
-                state.charge_index.install(index_plan);
+                    .with(|table| table.reserve_with_plan(&mut storage.slots))?;
+                install_table_storage_charge(state, snapshot, &mut storage.charge);
+                state.charge_index.install(&mut storage.index);
                 Ok(Some(reservation))
             });
             match attempt {
                 Ok(Some(reservation)) => break reservation,
-                Ok(None) => drop((storage_plan, storage_charge)),
+                Ok(None) => drop(storage),
                 Err(error) => return Err(error),
             }
         };
@@ -1207,8 +1218,7 @@ impl Process {
                         .with(|table| table.reservation_storage_snapshot_for(count))?,
                 )
             })?;
-            let (mut storage_plan, mut storage_charge, index_plan) =
-                self.prepare_table_storage_plan(snapshot)?;
+            let mut storage = self.prepare_table_storage_plan(snapshot)?;
             let attempt = self.inner.state.with(|state| {
                 require_handle_admission(state.lifecycle.phase(), admission)?;
                 let current = self
@@ -1222,16 +1232,16 @@ impl Process {
                     table.reserve_batch_with_plan(
                         count,
                         &mut reservation_storage,
-                        &mut storage_plan,
+                        &mut storage.slots,
                     )
                 })?;
-                install_table_storage_charge(state, snapshot, &mut storage_charge);
-                state.charge_index.install(index_plan);
+                install_table_storage_charge(state, snapshot, &mut storage.charge);
+                state.charge_index.install(&mut storage.index);
                 Ok(Some(reservation))
             });
             match attempt {
                 Ok(Some(reservation)) => break reservation,
-                Ok(None) => drop((storage_plan, storage_charge)),
+                Ok(None) => drop(storage),
                 Err(error) => return Err(error),
             }
         };
@@ -1320,7 +1330,11 @@ impl Process {
         };
         let plan = HandleTableStoragePlan::try_new(snapshot)?;
         let sidecar = HandleSidecar::prepare(snapshot)?;
-        Ok((Some(plan), charge, sidecar))
+        Ok(PreparedTableStorage {
+            slots: Some(plan),
+            index: sidecar,
+            charge,
+        })
     }
 
     pub(crate) fn publish_handles<const N: usize>(
@@ -1380,6 +1394,7 @@ impl Process {
             Ok(values)
         });
         drop(retired_charge_storage.take());
+        self.reclaim_handle_pages();
         match result {
             Ok(values) => Ok(values),
             Err(error) => {
@@ -1460,6 +1475,7 @@ impl Process {
         drop(retired_reservation_storage.take());
         drop(retired_charge_storage.take());
         drop(reservation.scratch_charge.take());
+        self.reclaim_handle_pages();
         match result {
             Ok(()) => {
                 drop(storage_charge.take());
@@ -1500,6 +1516,7 @@ impl Process {
         drop(reservation.handle_charges.take());
         drop(reservation.record.take());
         drop(reservation.scratch_charge.take());
+        self.reclaim_handle_pages();
     }
 
     /// Narrows a prevalidated maximum receive reservation to the matched
@@ -1541,6 +1558,7 @@ impl Process {
             Some(charges) => charges.truncate(count),
             None => process_invariant_violation(),
         }
+        self.reclaim_handle_pages();
         Some(reservation)
     }
 
@@ -1562,6 +1580,7 @@ impl Process {
         self.inner.state.with(|_| {
             self.inner.handles.with(|table| reservation.abort(table));
         });
+        self.reclaim_handle_pages();
     }
 
     fn abort_raw_handle_batch_reservation(&self, reservation: HandleBatchReservation) {
@@ -1570,6 +1589,7 @@ impl Process {
             .state
             .with(|_| self.inner.handles.with(|table| reservation.abort(table)));
         drop(retired);
+        self.reclaim_handle_pages();
     }
 
     pub(crate) fn resolve_handle<T: KernelObject>(
@@ -1969,9 +1989,9 @@ impl Process {
                         .with(|table| table.replace_storage_snapshot(value, rights))?,
                 )
             })?;
-            let (mut storage_plan, mut storage_charge, index_plan) = match snapshot {
+            let mut storage = match snapshot {
                 Some(snapshot) => self.prepare_table_storage_plan(snapshot)?,
-                None => (None, None, HandleSidecarPlan::empty()),
+                None => PreparedTableStorage::empty(),
             };
             let attempt = self.inner.state.with(|state| {
                 require_handle_phase(state.lifecycle.phase())?;
@@ -1985,17 +2005,20 @@ impl Process {
                 let replacement = self
                     .inner
                     .handles
-                    .with(|table| table.replace_with_plan(value, rights, &mut storage_plan))?;
+                    .with(|table| table.replace_with_plan(value, rights, &mut storage.slots))?;
                 if let Some(snapshot) = snapshot {
-                    install_table_storage_charge(state, snapshot, &mut storage_charge);
-                    state.charge_index.install(index_plan);
+                    install_table_storage_charge(state, snapshot, &mut storage.charge);
+                    state.charge_index.install(&mut storage.index);
                 }
                 replace_handle_charge_value(state, value, replacement);
                 Ok(Some(replacement))
             });
             match attempt {
-                Ok(Some(replacement)) => return Ok(replacement),
-                Ok(None) => drop((storage_plan, storage_charge)),
+                Ok(Some(replacement)) => {
+                    self.reclaim_handle_pages();
+                    return Ok(replacement);
+                }
+                Ok(None) => drop(storage),
                 Err(error) => return Err(error),
             }
         }
@@ -2047,7 +2070,36 @@ impl Process {
         closed.complete();
         drop(charge);
         drop(retired_record);
+        self.reclaim_handle_pages();
         Ok(())
+    }
+
+    /// Releases complete empty page pairs after namespace transactions leave
+    /// their locks. Directory/generation metadata remains charged. A bounded
+    /// batch avoids chasing concurrent producers indefinitely; each producer
+    /// also drains the pages made empty by its own bounded operation.
+    #[inline(never)]
+    fn reclaim_handle_pages(&self) {
+        for _ in 0..64 {
+            let detached = self.inner.state.with(|state| {
+                let page = self.inner.handles.with(HandleTable::take_empty_page)?;
+                let sidecar = state.charge_index.detach_empty(page.index());
+                let amount = ResourceAmount::ZERO
+                    .with(ResourceKind::KernelMemoryBytes, page.backing_bytes() as u64);
+                let charge = match state.handle_table_charge.as_mut() {
+                    Some(total) => total.split_off(amount),
+                    None => process_invariant_violation(),
+                };
+                Some((page, sidecar, charge))
+            });
+            let Some((page, sidecar, charge)) = detached else {
+                break;
+            };
+            drop(page);
+            drop(sidecar);
+            // Keep quota conservative until both physical pages are returned.
+            drop(charge);
+        }
     }
 
     fn retire(&self) -> Result<ProcessRetirementStep, ProcessError> {
@@ -2412,7 +2464,8 @@ fn install_table_storage_charge(
         };
         // Every extension was admitted against this Process's domain before
         // storage publication. Coalescing transfers the existing charge; it
-        // neither reserves quota again nor releases it before table retirement.
+        // neither reserves quota again nor releases it. Empty-page reclamation
+        // and final table retirement retain ownership until backing destruction.
         match state.handle_table_charge.as_mut() {
             Some(total) => total.absorb_pre_admitted(charge),
             None => state.handle_table_charge = Some(charge),

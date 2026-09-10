@@ -874,6 +874,26 @@ pub(crate) struct CommittedCharge {
 }
 
 impl CommittedCharge {
+    /// Separates an already admitted subset without changing usage counters.
+    /// The returned owner must outlive the storage whose charge it carries.
+    pub(crate) fn split_off(&mut self, amount: ResourceAmount) -> Self {
+        if amount.overflowed() {
+            accounting_invariant_violation();
+        }
+        let mut remaining = self.amount;
+        for (kind, value) in amount.entries() {
+            let Some(left) = remaining.get(kind).checked_sub(value) else {
+                accounting_invariant_violation();
+            };
+            remaining = remaining.with(kind, left);
+        }
+        self.amount = remaining;
+        Self {
+            domain: self.domain.clone(),
+            amount,
+        }
+    }
+
     pub(crate) fn domain_id(&self) -> ResourceDomainId {
         self.domain.id()
     }
