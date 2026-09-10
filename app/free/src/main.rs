@@ -8,8 +8,10 @@ use hyper_os::inspect::MemoryInspector;
 use hyper_os::startup;
 use std::io::Write;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    hyper_free::cli::Free::parse();
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let args = hyper_free::cli::Free::parse();
+    let unit = if args.bytes { "B" } else { "MiB" };
+    let quantity = |bytes: u64| if args.bytes { bytes } else { mib(bytes) };
     let mut startup = hyper_rt::process::startup()?;
     hyper_os::require_core_abi()?;
     let inspector = MemoryInspector::from_handle(startup.take(startup::MEMORY_INSPECTOR)?);
@@ -21,26 +23,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     writeln!(
         output,
-        "Mem:      {:>6} MiB  {:>6} MiB  {:>6} MiB  {:>6} MiB  {:>6} MiB",
-        mib(observation.total_bytes),
-        mib(observation.used_bytes),
-        mib(observation.free_bytes),
-        mib(observation.reserved_bytes),
-        mib(observation.reclaimable_bytes)
+        "Mem:      {:>6} {unit}  {:>6} {unit}  {:>6} {unit}  {:>6} {unit}  {:>6} {unit}",
+        quantity(observation.total_bytes),
+        quantity(observation.used_bytes),
+        quantity(observation.free_bytes),
+        quantity(observation.reserved_bytes),
+        quantity(observation.reclaimable_bytes)
     )?;
     writeln!(
         output,
-        "Owners:   kernel={} MiB heap={} MiB tables={} MiB user={} MiB guest={} MiB other={} MiB",
-        mib(observation.kernel_bytes),
-        mib(observation.heap_bytes),
-        mib(observation.page_table_bytes),
-        mib(observation.user_bytes),
-        mib(observation.guest_bytes),
-        mib(observation.unattributed_bytes)
+        "Owners:   kernel={} {unit} heap={} {unit} tables={} {unit} user={} {unit} guest={} {unit} other={} {unit}",
+        quantity(observation.kernel_bytes),
+        quantity(observation.heap_bytes),
+        quantity(observation.page_table_bytes),
+        quantity(observation.user_bytes),
+        quantity(observation.guest_bytes),
+        quantity(observation.unattributed_bytes)
     )?;
     Ok(())
 }
 
 const fn mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
+}
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("free: {error}");
+            std::process::ExitCode::FAILURE
+        }
+    }
 }

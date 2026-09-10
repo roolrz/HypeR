@@ -52,6 +52,7 @@ fn path_bytes(path: &Path) -> io::Result<&[u8]> {
 }
 
 impl FileAttr {
+    pub fn mode(&self) -> u32 { self.0.mode }
     pub fn size(&self) -> u64 {
         self.0.size
     }
@@ -407,8 +408,10 @@ pub fn symlink(_: &Path, _: &Path) -> io::Result<()> {
 pub fn link(_: &Path, _: &Path) -> io::Result<()> {
     unsupported()
 }
-pub fn lstat(_: &Path) -> io::Result<FileAttr> {
-    unsupported()
+pub fn lstat(path: &Path) -> io::Result<FileAttr> {
+    // Native VFS currently has no symbolic links, so following and non-following
+    // metadata queries are equivalent. Revisit when Native gains link nodes.
+    stat(path)
 }
 pub fn canonicalize(_: &Path) -> io::Result<PathBuf> {
     unsupported()

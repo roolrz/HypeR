@@ -100,6 +100,9 @@ applications and libraries retain their symbol tables; original application and
 SDK build products retain all debug information. Set `LLVM_STRIP` to override
 the tool path.
 
+See [Native applications](applications.md) for file tools, process monitoring,
+named VM commands, and `/etc/hyper/vms.json` configuration.
+
 ## Configuration
 
 HypeR uses an in-tree, dependency-free Kconfig-like tool. It reads
@@ -118,3 +121,5 @@ developer's `.config`:
 ```sh
 make image ARCH=aarch64 CONFIG_FILE=kernel/configs/qemu_aarch64_defconfig
 ```
+
+See [Incremental builds](incremental-builds.md) for cache behavior and recovery.

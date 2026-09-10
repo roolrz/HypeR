@@ -112,9 +112,10 @@ impl SupervisorSet {
                         .as_ref()
                         .ok_or(LaunchError::InvalidPlan)?
                         .as_byte_channel()
-                        .receive(&mut message);
+                        .try_receive(&mut message);
                     let length = match received {
                         Ok(length) => length,
+                        Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
                         Err(_) => {
                             drop(vm_instance_control.take());
                             report_vm_protocol_failure(console, b"terminal event is unavailable");

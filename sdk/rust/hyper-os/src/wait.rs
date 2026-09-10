@@ -51,6 +51,15 @@ impl<T: ObjectType> ObjectSignals<T> {
     }
 }
 
+impl ObjectSignals<crate::handle::VirtualSerialObject> {
+    pub const READABLE: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE);
+    pub const WRITABLE: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_WRITABLE);
+    pub const PEER_CLOSED: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_PEER_CLOSED);
+}
+
 impl ObjectSignals<ByteChannelObject> {
     pub const READABLE: Self =
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE);
@@ -123,6 +132,9 @@ pub struct WaitObservation {
 
 /// Blocks until one requested level is present, the deadline expires, or the
 /// calling Thread is cancelled.
+/// Readiness is an observation, not a reservation. Multiplexed callers must
+/// use nonblocking operations after waking and retry the full wait set on
+/// `WOULD_BLOCK`; blocking on one observed source can stall all other sources.
 pub fn wait_many(items: &[WaitItem<'_>], deadline: u64) -> Result<WaitObservation> {
     if items.is_empty() || items.len() > MAX_ITEMS {
         return Err(Error::InvalidWaitSet);

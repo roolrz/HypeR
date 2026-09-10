@@ -724,6 +724,13 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         ) -> Result<(), crate::kernel::vm::service::Error> {
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
+        fn acknowledge_virtual_serial_output(
+            &self,
+            _: HandleValue,
+            _: u64,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
         fn write_virtual_serial(
             &self,
             _: HandleValue,

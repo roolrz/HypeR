@@ -94,3 +94,5 @@ pub mod os {
 }
 
 // The fallback when none of the other gates match.''')
+
+replace("std/src/os/mod.rs", "pub mod raw;", 'pub mod raw;\n#[cfg(target_os = "hyper")]\npub mod hyper;')

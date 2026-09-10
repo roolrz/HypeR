@@ -3,6 +3,8 @@
 
 //! Resource-containment policy for the initial Native VM fleet.
 
+pub mod fleet;
+
 use hyper_os::task::ResourceLimits;
 
 /// Limit installed on each disposable VM runtime domain.
@@ -52,35 +54,36 @@ const FLEET_CONTROL_PLANE_HEADROOM: ResourceLimits = ResourceLimits {
 
 /// Aggregate limit installed above the VM manager and all of its descendants.
 ///
-/// The current policy admits one VM and leaves bounded headroom for the manager
+/// The current policy admits two VMs and leaves bounded headroom for the manager
 /// process and its control-plane objects. Per-instance child domains remain
 /// useful for teardown and finer accounting, but this ancestor is the security
 /// boundary which prevents delegated domain creation from charging init's
 /// shared service domain without limit.
 pub const INITIAL_VM_FLEET_LIMITS: ResourceLimits = ResourceLimits {
-    kernel_memory_bytes: INITIAL_VM_LIMITS.kernel_memory_bytes
+    kernel_memory_bytes: 2 * INITIAL_VM_LIMITS.kernel_memory_bytes
         + FLEET_CONTROL_PLANE_HEADROOM.kernel_memory_bytes,
-    processes: INITIAL_VM_LIMITS.processes + FLEET_CONTROL_PLANE_HEADROOM.processes,
-    threads: INITIAL_VM_LIMITS.threads + FLEET_CONTROL_PLANE_HEADROOM.threads,
-    handles: INITIAL_VM_LIMITS.handles + FLEET_CONTROL_PLANE_HEADROOM.handles,
-    kernel_objects: INITIAL_VM_LIMITS.kernel_objects + FLEET_CONTROL_PLANE_HEADROOM.kernel_objects,
-    committed_pages: INITIAL_VM_LIMITS.committed_pages
+    processes: 2 * INITIAL_VM_LIMITS.processes + FLEET_CONTROL_PLANE_HEADROOM.processes,
+    threads: 2 * INITIAL_VM_LIMITS.threads + FLEET_CONTROL_PLANE_HEADROOM.threads,
+    handles: 2 * INITIAL_VM_LIMITS.handles + FLEET_CONTROL_PLANE_HEADROOM.handles,
+    kernel_objects: 2 * INITIAL_VM_LIMITS.kernel_objects
+        + FLEET_CONTROL_PLANE_HEADROOM.kernel_objects,
+    committed_pages: 2 * INITIAL_VM_LIMITS.committed_pages
         + FLEET_CONTROL_PLANE_HEADROOM.committed_pages,
-    pinned_pages: INITIAL_VM_LIMITS.pinned_pages + FLEET_CONTROL_PLANE_HEADROOM.pinned_pages,
-    guest_pages: INITIAL_VM_LIMITS.guest_pages + FLEET_CONTROL_PLANE_HEADROOM.guest_pages,
-    ipc_messages: INITIAL_VM_LIMITS.ipc_messages + FLEET_CONTROL_PLANE_HEADROOM.ipc_messages,
-    ipc_bytes: INITIAL_VM_LIMITS.ipc_bytes + FLEET_CONTROL_PLANE_HEADROOM.ipc_bytes,
-    ipc_handles: INITIAL_VM_LIMITS.ipc_handles + FLEET_CONTROL_PLANE_HEADROOM.ipc_handles,
-    subscriptions: INITIAL_VM_LIMITS.subscriptions + FLEET_CONTROL_PLANE_HEADROOM.subscriptions,
-    timers: INITIAL_VM_LIMITS.timers + FLEET_CONTROL_PLANE_HEADROOM.timers,
-    virtual_machines: INITIAL_VM_LIMITS.virtual_machines
+    pinned_pages: 2 * INITIAL_VM_LIMITS.pinned_pages + FLEET_CONTROL_PLANE_HEADROOM.pinned_pages,
+    guest_pages: 2 * INITIAL_VM_LIMITS.guest_pages + FLEET_CONTROL_PLANE_HEADROOM.guest_pages,
+    ipc_messages: 2 * INITIAL_VM_LIMITS.ipc_messages + FLEET_CONTROL_PLANE_HEADROOM.ipc_messages,
+    ipc_bytes: 2 * INITIAL_VM_LIMITS.ipc_bytes + FLEET_CONTROL_PLANE_HEADROOM.ipc_bytes,
+    ipc_handles: 2 * INITIAL_VM_LIMITS.ipc_handles + FLEET_CONTROL_PLANE_HEADROOM.ipc_handles,
+    subscriptions: 2 * INITIAL_VM_LIMITS.subscriptions + FLEET_CONTROL_PLANE_HEADROOM.subscriptions,
+    timers: 2 * INITIAL_VM_LIMITS.timers + FLEET_CONTROL_PLANE_HEADROOM.timers,
+    virtual_machines: 2 * INITIAL_VM_LIMITS.virtual_machines
         + FLEET_CONTROL_PLANE_HEADROOM.virtual_machines,
-    virtual_cpus: INITIAL_VM_LIMITS.virtual_cpus + FLEET_CONTROL_PLANE_HEADROOM.virtual_cpus,
-    device_leases: INITIAL_VM_LIMITS.device_leases + FLEET_CONTROL_PLANE_HEADROOM.device_leases,
-    dma_mappings: INITIAL_VM_LIMITS.dma_mappings + FLEET_CONTROL_PLANE_HEADROOM.dma_mappings,
-    user_address_spaces: INITIAL_VM_LIMITS.user_address_spaces
+    virtual_cpus: 2 * INITIAL_VM_LIMITS.virtual_cpus + FLEET_CONTROL_PLANE_HEADROOM.virtual_cpus,
+    device_leases: 2 * INITIAL_VM_LIMITS.device_leases + FLEET_CONTROL_PLANE_HEADROOM.device_leases,
+    dma_mappings: 2 * INITIAL_VM_LIMITS.dma_mappings + FLEET_CONTROL_PLANE_HEADROOM.dma_mappings,
+    user_address_spaces: 2 * INITIAL_VM_LIMITS.user_address_spaces
         + FLEET_CONTROL_PLANE_HEADROOM.user_address_spaces,
-    user_mappings: INITIAL_VM_LIMITS.user_mappings + FLEET_CONTROL_PLANE_HEADROOM.user_mappings,
+    user_mappings: 2 * INITIAL_VM_LIMITS.user_mappings + FLEET_CONTROL_PLANE_HEADROOM.user_mappings,
 };
 
 #[cfg(test)]

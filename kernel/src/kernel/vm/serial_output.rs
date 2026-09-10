@@ -5,7 +5,7 @@
 
 use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceDomain, ResourceKind};
 use crate::kernel::mm::user_space::{
-    DomainAccount, KernelPageBackend, MemoryObjectError, VmoObject, WritableMappingLease,
+    DomainAccount, ExclusiveHardwareWriteLease, KernelPageBackend, MemoryObjectError, VmoObject,
 };
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use hyper::abi::native::{
@@ -17,11 +17,11 @@ use hyper::abi::native::{
 const PAGES: usize = (BYTES / hyper::mm::PAGE_SIZE) as usize;
 
 /// A registration pins caller-owned VMO pages independently of mappings and
-/// handles. Its writable lease excludes ordinary kernel copy/snapshot access;
-/// concurrent user writes are untrusted and never supply kernel addresses.
+/// handles. Its exclusive write lease excludes direct VMO access, snapshots,
+/// and writable userspace aliases. Read-only mappings may coexist.
 pub(crate) struct SharedAtomicOutput {
     pages: [usize; PAGES],
-    _lease: WritableMappingLease<KernelPageBackend, DomainAccount>,
+    _lease: ExclusiveHardwareWriteLease<KernelPageBackend, DomainAccount>,
     _pinned: CommittedCharge,
     produced: AtomicU64,
     consumed: AtomicU64,
@@ -42,7 +42,7 @@ impl SharedAtomicOutput {
             .reserve(ResourceAmount::ZERO.with(ResourceKind::PinnedPages, PAGES as u64))?
             .commit();
         let storage = object.writable().ok_or(MemoryObjectError::WrongVariant)?;
-        let lease = storage.try_mapping_write_lease()?;
+        let lease = storage.try_exclusive_hardware_write_lease()?;
         storage
             .populate(0, BYTES)
             .map_err(|failure| MemoryObjectError::Vmo(failure.cause))?;
@@ -62,7 +62,6 @@ impl SharedAtomicOutput {
         };
         output.word(0).store(0, Ordering::Relaxed);
         output.word(8).store(0, Ordering::Relaxed);
-        output.word(4096).store(0, Ordering::Relaxed);
         Ok(output)
     }
 
@@ -70,24 +69,21 @@ impl SharedAtomicOutput {
         let page_size = hyper::mm::PAGE_SIZE as usize;
         let address = self.pages[offset / page_size] + offset % page_size;
         // SAFETY: fixed ABI offsets are aligned and inside pinned pages. The
-        // lease excludes ordinary kernel copies and snapshots. User contents
-        // may change arbitrarily; all kernel accesses use bounded atomics.
+        // exclusive lease excludes other writers and kernel copies/snapshots.
+        // Read-only consumers use matching atomic accesses.
         unsafe { &*core::ptr::with_exposed_provenance::<AtomicU64>(address) }
     }
 
-    /// Called only by the one admitted vCPU of the bound VM, including after
-    /// migration. Multi-vCPU UART production requires a new publication proof.
-    pub(crate) fn publish(&self, byte: u8) {
+    /// Caller holds the port lock across publication and signal mutation.
+    /// Returns true only on the empty-to-nonempty transition.
+    pub(crate) fn publish(&self, byte: u8) -> bool {
         let produced = self.produced.load(Ordering::Relaxed);
         let consumed = self.consumed.load(Ordering::Relaxed);
-        let candidate = self.word(4096).load(Ordering::Acquire);
-        let consumed = super::serial_ring::accept_consumer(produced, consumed, candidate);
-        self.consumed.store(consumed, Ordering::Relaxed);
         let Some(slot) = super::serial_ring::writable_slot(produced, consumed, CAPACITY) else {
             let dropped = self.dropped.load(Ordering::Relaxed).saturating_add(1);
             self.dropped.store(dropped, Ordering::Relaxed);
             self.word(8).store(dropped, Ordering::Relaxed);
-            return;
+            return false;
         };
         let offset = HEADER as usize + slot;
         let page_size = hyper::mm::PAGE_SIZE as usize;
@@ -96,10 +92,23 @@ impl SharedAtomicOutput {
         // pages stay pinned independently of userspace mappings. Atomic bytes keep a
         // malicious premature consumer acknowledgement from creating a Rust
         // data race with a still-reading user. Correct consumers acknowledge
-        // only after reading; Acquire above then permits slot reuse.
+        // only after reading; the acknowledgement syscall and port lock order reuse.
         unsafe { &*core::ptr::with_exposed_provenance::<AtomicU8>(address) }
             .store(byte, Ordering::Relaxed);
         self.word(0).store(produced + 1, Ordering::Release);
         self.produced.store(produced + 1, Ordering::Relaxed);
+        produced == consumed
+    }
+
+    /// Validates a batch acknowledgement under the same port lock as writers.
+    /// A rejected cursor changes neither storage nor readiness.
+    pub(crate) fn acknowledge(&self, candidate: u64) -> Result<bool, ()> {
+        let produced = self.produced.load(Ordering::Relaxed);
+        let consumed = self.consumed.load(Ordering::Relaxed);
+        if super::serial_ring::accept_consumer(produced, consumed, candidate) != candidate {
+            return Err(());
+        }
+        self.consumed.store(candidate, Ordering::Relaxed);
+        Ok(candidate != produced)
     }
 }

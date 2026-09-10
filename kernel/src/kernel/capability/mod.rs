@@ -17,14 +17,14 @@ pub(crate) use super::authority::Rights;
 #[cfg(test)]
 pub(crate) use handle::InTransitHandleBatch;
 pub(crate) use handle::{
-    ClosedHandle, DirectHandleTransfer, HANDLE_TABLE_STORAGE_SEGMENTS, HandleBatchReservation,
-    HandleBatchReservationStorage, HandleError, HandleFlags, HandleInfo, HandleReservation,
-    HandleScanCursor, HandleSidecar, HandleSidecarPlan, HandleSnapshot, HandleSnapshotPage,
-    HandleTable, HandleTableLockOrder, HandleTableStoragePlan, HandleTableStorageSnapshot,
-    HandleTransferClaim, HandleTransferOperation, HandleTransferRequest, HandleTransferRoute,
-    HandleTransferStorage, HandleValue, PreparedHandle, ResolvedObject, ResolvedWaitable,
-    RetiredDirectHandleTransfer, RetiredHandleBatchReservationStorage, RetiredHandleStorage,
-    RetiredHandleTransferStorage, TeardownCursor,
+    ClosedHandle, DirectHandleTransfer, HandleBatchReservation, HandleBatchReservationStorage,
+    HandleError, HandleFlags, HandleInfo, HandleReservation, HandleScanCursor, HandleSidecar,
+    HandleSidecarPlan, HandleSnapshot, HandleSnapshotPage, HandleTable, HandleTableLockOrder,
+    HandleTableStoragePlan, HandleTableStorageSnapshot, HandleTransferClaim,
+    HandleTransferOperation, HandleTransferRequest, HandleTransferRoute, HandleTransferStorage,
+    HandleValue, PreparedHandle, ResolvedObject, ResolvedWaitable, RetiredDirectHandleTransfer,
+    RetiredHandleBatchReservationStorage, RetiredHandleStorage, RetiredHandleTransferStorage,
+    TeardownCursor,
 };
 pub(crate) use transfer::InTransitCapabilities;
 

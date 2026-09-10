@@ -10,27 +10,36 @@ use hyper_os::handle::Rights;
 use hyper_os::inspect::{Koid, ObjectHandleState, ObjectInspector, ScanCursor};
 use hyper_os::startup;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = hyper_handle::cli::Handle::parse();
     let mut startup = hyper_rt::process::startup()?;
     hyper_os::require_core_abi()?;
     let inspector = ObjectInspector::from_handle(startup.take(startup::OBJECT_INSPECTOR)?);
     let mut output = std::io::stdout().lock();
     match args.process {
-        Some(process) => list_handles(&inspector, Koid::from_raw(process.get())?, &mut output),
-        None => list_objects(&inspector, &mut output),
+        Some(process) => list_handles(
+            &inspector,
+            Koid::from_raw(process.get())?,
+            &mut output,
+            args.kind.as_deref(),
+        ),
+        None => list_objects(&inspector, &mut output, args.kind.as_deref()),
     }
 }
 
 fn list_objects(
     inspector: &ObjectInspector,
     output: &mut impl Write,
+    kind: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     output.write_all(b"KOID       KIND                    HANDLE-STATE HANDLES REFS PURPOSE\n")?;
     let mut cursor = Some(ScanCursor::START);
     while let Some(position) = cursor {
         let page = inspector.scan_objects(position)?;
         for object in page.entries() {
+            if kind.is_some_and(|kind| kind != object.object_kind.name()) {
+                continue;
+            }
             let (state, handles) = match object.handles {
                 ObjectHandleState::Unpublished => ("unpublished", 0),
                 ObjectHandleState::Active(count) => ("active", count),
@@ -56,12 +65,16 @@ fn list_handles(
     inspector: &ObjectInspector,
     process: Koid,
     output: &mut impl Write,
+    kind: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     output.write_all(b"HANDLE             OBJECT     KIND                    RIGHTS                           PURPOSE\n")?;
     let mut cursor = Some(ScanCursor::START);
     while let Some(position) = cursor {
         let page = inspector.scan_handles(process, position)?;
         for handle in page.entries() {
+            if kind.is_some_and(|kind| kind != handle.object_kind.name()) {
+                continue;
+            }
             writeln!(
                 output,
                 "0x{:016x} {:<10} {:<23} {:<32} {}",
@@ -83,5 +96,15 @@ impl std::fmt::Display for RightsList {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let names = self.0.names().collect::<Vec<_>>().join("|");
         formatter.pad(if names.is_empty() { "none" } else { &names })
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("handle: {error}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }

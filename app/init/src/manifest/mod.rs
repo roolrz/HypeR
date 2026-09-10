@@ -8,9 +8,9 @@ mod parse;
 mod plan;
 
 pub use model::{
-    CapabilityBinding, CapabilityOperation, InitialVm, MAX_CAPABILITIES_PER_SERVICE,
+    CapabilityBinding, CapabilityOperation, MAX_CAPABILITIES_PER_SERVICE,
     MAX_DEPENDENCIES_PER_SERVICE, MAX_DEPENDENCY_EDGES, MAX_MANIFEST_BYTES,
-    MAX_RIGHTS_PER_CAPABILITY, MAX_SERVICES, Manifest, RestartPolicy, Service,
+    MAX_RIGHTS_PER_CAPABILITY, MAX_SERVICES, Manifest, RestartPolicy, Service, VmConfiguration,
 };
 pub(crate) use parse::parse_into;
 pub use parse::{ParseError, ParseErrorKind, parse};

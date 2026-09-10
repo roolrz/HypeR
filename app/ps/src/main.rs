@@ -9,33 +9,50 @@ use std::io::Write;
 use hyper_os::inspect::{Koid, ProcessObservation, ScanCursor, TaskInspector, ThreadObservation};
 use hyper_os::startup;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args = hyper_ps::cli::Ps::parse();
     let mut startup = hyper_rt::process::startup()?;
     hyper_os::require_core_abi()?;
     let inspector = TaskInspector::from_handle(startup.take(startup::TASK_INSPECTOR)?);
-    list_tasks(&inspector, &mut std::io::stdout().lock(), args.threads)
+    list_tasks(&inspector, &mut std::io::stdout().lock(), &args)
 }
 
 fn list_tasks(
     inspector: &TaskInspector,
     output: &mut impl Write,
-    include_threads: bool,
+    args: &hyper_ps::cli::Ps,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut threads = Vec::new();
+    if args.threads {
+        scan_threads(inspector, |thread| {
+            threads.push(*thread);
+            Ok(())
+        })?;
+    }
     output.write_all(b"TYPE     KOID       OWNER      NAME                 STATE\n")?;
     let mut cursor = Some(ScanCursor::START);
     while let Some(position) = cursor {
         let page = inspector.scan_processes(position)?;
         for process in page.entries() {
+            if args
+                .process
+                .is_some_and(|koid| koid.get() != process.koid.get())
+                || args
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| !process.name.as_str().contains(name))
+            {
+                continue;
+            }
             write_process(output, process)?;
-            if include_threads {
-                write_process_threads(inspector, output, process.koid)?;
+            if args.threads {
+                write_process_threads(&threads, output, process.koid)?;
             }
         }
         cursor = page.next();
     }
-    if include_threads {
-        write_kernel_threads(inspector, output)?;
+    if args.threads && args.process.is_none() && args.name.is_none() {
+        write_kernel_threads(&threads, output)?;
     }
     Ok(())
 }
@@ -61,30 +78,30 @@ fn write_process(
 }
 
 fn write_process_threads(
-    inspector: &TaskInspector,
+    threads: &[ThreadObservation],
     output: &mut impl Write,
     process: Koid,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    scan_threads(inspector, |thread| {
-        if thread.process_koid == Some(process) {
-            write_thread(output, thread)
-        } else {
-            Ok(())
-        }
-    })
+    for thread in threads
+        .iter()
+        .filter(|thread| thread.process_koid == Some(process))
+    {
+        write_thread(output, thread)?;
+    }
+    Ok(())
 }
 
 fn write_kernel_threads(
-    inspector: &TaskInspector,
+    threads: &[ThreadObservation],
     output: &mut impl Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    scan_threads(inspector, |thread| {
-        if thread.process_koid.is_none() {
-            write_thread(output, thread)
-        } else {
-            Ok(())
-        }
-    })
+    for thread in threads
+        .iter()
+        .filter(|thread| thread.process_koid.is_none())
+    {
+        write_thread(output, thread)?;
+    }
+    Ok(())
 }
 
 fn scan_threads(
@@ -126,6 +143,16 @@ impl std::fmt::Display for Owner {
         match self.0 {
             Some(koid) => write!(formatter, "{:<width$}", koid.get()),
             None => write!(formatter, "{:<width$}", "-"),
+        }
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("ps: {error}");
+            std::process::ExitCode::FAILURE
         }
     }
 }

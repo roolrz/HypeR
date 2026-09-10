@@ -7,7 +7,7 @@ use hyper_os::fs::File;
 use hyper_os::handle::{ByteChannelObject, VirtualCpuObject};
 use hyper_os::memory::{MAX_TRANSFER_BYTES, WritableVmo};
 use hyper_os::startup::Startup;
-use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
+use hyper_os::wait::{ObjectSignals, WaitSet};
 use hyper_service::vm as vm_contract;
 use hyper_vm_image::aarch64_linux;
 use hyper_vm_image::guest_fdt::{self, Aarch64LinuxBoot};
@@ -63,7 +63,7 @@ fn run(
     let serial_memory = WritableVmo::create(hyper_os::virtual_serial::BUFFER_BYTES)
         .map_err(Error::OperatingSystem)?;
     let output = hyper_os::virtual_serial::Output::register(
-        virtual_serial.as_handle_ref(),
+        &virtual_serial,
         root.as_handle_ref(),
         0xd000_0000,
         serial_memory,
@@ -201,40 +201,55 @@ fn supervise_guest(
     control: &hyper_os::channel::ByteChannel<'_>,
     console: &mut hyper_vm_runtime::console::Console,
 ) -> Result<(), Error> {
+    let waits = WaitSet::new(4).map_err(Error::OperatingSystem)?;
+    let control_wait = waits
+        .add(
+            control.as_handle_ref(),
+            ObjectSignals::<ByteChannelObject>::READABLE
+                .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
+        )
+        .map_err(Error::OperatingSystem)?;
+    let vcpu_wait = waits
+        .add(
+            vcpu.as_handle_ref(),
+            ObjectSignals::<VirtualCpuObject>::TERMINATED,
+        )
+        .map_err(Error::OperatingSystem)?;
+    let mut control_consumed = false;
     loop {
         console.service().map_err(Error::OperatingSystem)?;
-        let waits = [
-            WaitItem::new(
-                control.as_handle_ref(),
-                ObjectSignals::<ByteChannelObject>::READABLE
-                    .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
-            ),
-            WaitItem::new(
-                vcpu.as_handle_ref(),
-                ObjectSignals::<VirtualCpuObject>::TERMINATED,
-            ),
-        ];
-        let deadline = hyper_os::time::deadline_after(std::time::Duration::from_millis(10))
-            .map_err(Error::OperatingSystem)?
-            .as_raw();
-        let observation = match wait_many(&waits, deadline) {
-            Ok(observation) => observation,
-            Err(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT)) => continue,
-            Err(error) => return Err(Error::OperatingSystem(error)),
-        };
-        if observation.index == 0
-            && ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observation.observed)
+        console
+            .prepare_wait(&waits)
+            .map_err(Error::OperatingSystem)?;
+        if control_consumed {
+            waits.rearm(control_wait).map_err(Error::OperatingSystem)?;
+            control_consumed = false;
+        }
+        let observation = waits
+            .wait(hyper_os::DEADLINE_INFINITE)
+            .map_err(Error::OperatingSystem)?;
+        if observation.registration != control_wait && observation.registration != vcpu_wait {
+            console.observe(observation.registration, observation.signals);
+            continue;
+        }
+        if observation.registration == control_wait {
+            control_consumed = true;
+        }
+        if observation.registration == control_wait
+            && ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observation.signals)
         {
             let mut message = [0u8; vm_contract::MESSAGE_BYTES];
-            let length = control
-                .receive(&mut message)
-                .map_err(Error::OperatingSystem)?;
+            let length = match control.try_receive(&mut message) {
+                Ok(length) => length,
+                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
+                Err(error) => return Err(Error::OperatingSystem(error)),
+            };
             let command = message
                 .get(..length)
                 .and_then(vm_contract::InstanceCommand::decode)
                 .ok_or(Error::InvalidControl)?;
             if command == vm_contract::InstanceCommand::AttachConsole {
-                console.attach().map_err(Error::OperatingSystem)?;
+                console.attach(&waits).map_err(Error::OperatingSystem)?;
                 continue;
             }
             let terminal = stop_and_retire(machine, vcpu)?;
@@ -244,11 +259,11 @@ fn supervise_guest(
             publish_status(control, vm_contract::InstanceStatus::Stopped)?;
             return Ok(());
         }
-        if observation.index == 0 {
+        if observation.registration == control_wait {
             let _terminal = stop_and_retire(machine, vcpu)?;
             return Err(Error::InvalidControl);
         }
-        if observation.index != 1 {
+        if observation.registration != vcpu_wait {
             return Err(Error::InvalidControl);
         }
         let terminal = terminated_vcpu_reason(vcpu)?;

@@ -14,8 +14,6 @@ use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_os::{Error, Status};
 use std::process::ExitCode;
 
-const REFRESH_NS: u64 = 1_000_000_000;
-
 #[derive(Clone, Copy, Default)]
 struct ThreadSample {
     process_koid: u64,
@@ -25,16 +23,28 @@ struct ThreadSample {
 
 type SampleSet = BTreeMap<u64, ThreadSample>;
 
-fn application_main(mut startup: Startup<'_>) -> ExitCode {
-    match run(&mut startup) {
+fn application_main(mut startup: Startup<'_>, args: hyper_top::cli::Top) -> ExitCode {
+    match run(&mut startup, &args) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("top: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
-fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
+fn run(
+    startup: &mut Startup<'_>,
+    args: &hyper_top::cli::Top,
+) -> Result<(), Box<dyn std::error::Error>> {
     hyper_os::require_core_abi()?;
-    let input = hyper_rt::process::stdin()?;
+    let input = if args.batch {
+        None
+    } else {
+        Some(hyper_rt::process::stdin()?)
+    };
+    let refresh = std::time::Duration::from_secs_f64(args.delay);
+    let mut iterations = 0_u32;
     let mut output = std::io::stdout().lock();
     let tasks = TaskInspector::from_handle(startup.take(startup::TASK_INSPECTOR)?);
     let memory = MemoryInspector::from_handle(startup.take(startup::MEMORY_INSPECTOR)?);
@@ -42,14 +52,23 @@ fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let mut previous_cpu = cpu.read()?;
     let mut previous_threads = capture_threads(&tasks)?;
     loop {
-        if wait_or_quit(
-            input,
-            previous_cpu.captured_at_ns.saturating_add(REFRESH_NS),
-        )? {
-            return Ok(());
+        if let Some(input) = input {
+            if wait_or_quit(
+                input,
+                previous_cpu
+                    .captured_at_ns
+                    .saturating_add(refresh.as_nanos() as u64),
+            )? {
+                return Ok(());
+            }
+        } else {
+            std::thread::sleep(refresh);
         }
         let current_cpu = cpu.read()?;
         let current_threads = capture_threads(&tasks)?;
+        if !args.batch {
+            output.write_all(b"\x1b[2J\x1b[H")?;
+        }
         render(
             &mut output,
             &tasks,
@@ -59,6 +78,17 @@ fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
             &previous_threads,
             &current_threads,
         )?;
+        if !args.batch {
+            writeln!(output, "Press q or Ctrl-C to quit.")?;
+            output.flush()?;
+        }
+        iterations = iterations.saturating_add(1);
+        if args
+            .iterations
+            .is_some_and(|limit| iterations >= limit.get())
+        {
+            return Ok(());
+        }
         previous_cpu = current_cpu;
         previous_threads = current_threads;
     }
@@ -67,18 +97,31 @@ fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
 fn wait_or_quit(input: &OwnedHandle<ByteChannelObject>, deadline: u64) -> hyper_os::Result<bool> {
     let waits = [WaitItem::new(
         input.as_handle_ref(),
-        ObjectSignals::<ByteChannelObject>::READABLE,
+        ObjectSignals::<ByteChannelObject>::READABLE
+            .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
     )];
-    match wait_many(&waits, deadline) {
-        Ok(_) => {
-            let mut bytes = [0_u8; 16];
-            let count = input.as_byte_channel().receive(&mut bytes)?;
-            Ok(bytes[..count]
-                .iter()
-                .any(|byte| matches!(byte, b'q' | b'Q')))
+    loop {
+        match wait_many(&waits, deadline) {
+            Ok(observation) => {
+                if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observation.observed)
+                {
+                    return Ok(true);
+                }
+                let mut bytes = [0_u8; hyper_os::channel::MAX_MESSAGE_BYTES];
+                match input.as_byte_channel().try_receive(&mut bytes) {
+                    Ok(count) => {
+                        return Ok(bytes[..count]
+                            .iter()
+                            .any(|byte| matches!(byte, b'q' | b'Q' | 3)));
+                    }
+                    Err(Error::Status(Status::WOULD_BLOCK)) => continue,
+                    Err(Error::Status(Status::PEER_CLOSED)) => return Ok(true),
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(Error::Status(Status::TIMED_OUT)) => return Ok(false),
+            Err(error) => return Err(error),
         }
-        Err(Error::Status(status)) if status == Status::TIMED_OUT => Ok(false),
-        Err(error) => Err(error),
     }
 }
 
@@ -129,7 +172,7 @@ fn render(
         .saturating_add(vcpu);
     write!(
         output,
-        "\x1b[2J\x1b[Htop - {} CPUs  ticks={} Hz\nCPU: user-thread ",
+        "top - {} CPUs  ticks={} Hz\nCPU: user-thread ",
         current_cpu.online_cpus, current_cpu.ticks_per_second
     )
     .and_then(|()| write_percent(output, user_thread, total))
@@ -164,7 +207,6 @@ fn render(
         }
         cursor = page.next();
     }
-    output.write_all(b"Press q to quit.\n")?;
     output.flush()?;
     Ok(())
 }
@@ -197,9 +239,9 @@ const fn mib(bytes: u64) -> u64 {
 }
 
 fn main() -> ExitCode {
-    hyper_top::cli::Top::parse();
+    let args = hyper_top::cli::Top::parse();
     match hyper_rt::process::startup() {
-        Ok(startup) => application_main(startup),
+        Ok(startup) => application_main(startup, args),
         Err(_) => ExitCode::FAILURE,
     }
 }

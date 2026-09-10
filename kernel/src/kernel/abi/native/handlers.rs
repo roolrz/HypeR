@@ -1042,6 +1042,20 @@ pub(super) fn sys_virtual_serial_register_output(
 }
 
 #[inline(never)]
+pub(super) fn sys_virtual_serial_acknowledge_output(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = require_zero(&arguments[2..]).and_then(|()| {
+        let serial = super::wire::parse_handle(arguments[0])?;
+        services
+            .acknowledge_virtual_serial_output(serial, arguments[1])
+            .map_err(status_from_vm_service_error)
+    });
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
 pub(super) fn sys_virtual_serial_write(
     services: &impl VmServices,
     arguments: &Arguments,

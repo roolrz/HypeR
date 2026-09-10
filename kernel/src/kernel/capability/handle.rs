@@ -25,7 +25,6 @@ const SLOT_SEGMENTS: usize = 19;
 const FIRST_SEGMENT_SLOTS: usize = 64;
 const DIAGNOSTIC_PAGE_CAPACITY: usize = 8;
 const DIAGNOSTIC_SLOT_BUDGET: usize = 256;
-pub(crate) const HANDLE_TABLE_STORAGE_SEGMENTS: usize = SLOT_SEGMENTS;
 
 const _: () = {
     assert!(MAX_RESERVATION_SLOTS <= FIRST_SEGMENT_SLOTS);

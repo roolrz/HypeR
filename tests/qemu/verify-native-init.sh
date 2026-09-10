@@ -127,7 +127,7 @@ while :; do
             ;;
         vm_running)
             if grep -q 'HypeR: vCPU 0 running as scheduler thread' "$log"; then
-                send_commands 1 '/bin/vmm console\n'
+                send_commands 1 '/bin/vmm console alpine\n'
                 command_phase='guest_console'
             fi
             ;;
@@ -267,7 +267,7 @@ while :; do
             fi
             ;;
         cli_ls)
-            if grep -Fq 'List a delegated directory' "$native_output"; then
+            if grep -Fq 'List files with permission modes and readable sizes' "$native_output"; then
                 send_commands 1 'free --help\n'
                 command_phase='cli_free'
             fi
@@ -285,7 +285,7 @@ while :; do
             fi
             ;;
         cli_vmm)
-            if grep -Fq 'Manage the default virtual machine' "$native_output"; then
+            if grep -Fq 'Manage named virtual machines' "$native_output"; then
                 send_commands 1 'sh --help\n'
                 command_phase='cli_shell'
             fi
@@ -304,7 +304,7 @@ while :; do
             ;;
         cli_echo)
             if grep -Fq 'HYPER_CLAP_BUILTIN_OK' "$native_output"; then
-                send_commands 1 'ls\n'
+                send_commands 1 'ls -1\n'
                 command_phase='ls_root'
             fi
             ;;
@@ -312,7 +312,7 @@ while :; do
             if grep -Fxq 'bin/' "$native_output" &&
                 grep -Fxq 'etc/' "$native_output" &&
                 grep -Fxq 'lib/' "$native_output"; then
-                send_commands 3 'cd /bin\npwd\nls\n'
+                send_commands 3 'cd /bin\npwd\nls -1\n'
                 command_phase='ls_bin'
             fi
             ;;
@@ -346,13 +346,13 @@ while :; do
             ;;
         top)
             if grep -Eq 'top - [0-9]+ CPUs[[:space:]]+ticks=[0-9]+ Hz' "$native_output" &&
-                grep -Fxq 'Press q to quit.' "$native_output"; then
+                grep -Fxq 'Press q or Ctrl-C to quit.' "$native_output"; then
                 printf 'q' >&3
                 command_phase='top_exit'
             fi
             ;;
         top_exit)
-            if awk '/^Press q to quit[.]$/ { seen = 1; ready = 0; next }
+            if awk '/^Press q or Ctrl-C to quit[.]$/ { seen = 1; ready = 0; next }
                 seen && /^hyper-sh\$ q?$/ { ready = 1 }
                 END { exit !ready }' "$native_output"; then
                 send_commands 1 '/bin/echo HYPER_NATIVE_ECHO_OK\n'
@@ -389,7 +389,7 @@ while :; do
         grep -Fxq 'HYPER_CD_CHILD_OK' "$native_output" &&
         grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output" &&
         grep -Eq '^Mem:[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB' "$native_output" &&
-        grep -Fxq 'Press q to quit.' "$native_output" &&
+        grep -Fxq 'Press q or Ctrl-C to quit.' "$native_output" &&
         grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output" &&
         grep -q 'Run /init as init process' "$log" &&
         grep -q 'HypeR guest: /init reached' "$log" &&

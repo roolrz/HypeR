@@ -238,6 +238,11 @@ pub(in crate::kernel) trait VmServices: UserMemoryServices {
         serial: HandleValue,
         buffer: HandleValue,
     ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn acknowledge_virtual_serial_output(
+        &self,
+        serial: HandleValue,
+        consumed: u64,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
     fn write_virtual_serial(
         &self,
         serial: HandleValue,

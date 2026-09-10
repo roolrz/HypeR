@@ -575,6 +575,13 @@ blocking. Its level-state linearization point and the single winner among
 signal, timeout, and cancellation are explicit. Source-handle close does not
 cancel the wait.
 
+A readiness observation does not reserve data or destination capacity. A later
+I/O operation may return `WOULD_BLOCK`; multiplexed event loops must use
+nonblocking reads/writes and resume the complete wait set in that case. Waiting
+again on only the selected object can strand other ready inputs. Backpressured
+relays must retain bounded pending messages and wait for destination writability
+while continuing to service their other directions.
+
 Asynchronous waiting uses a WaitSet-owned, globally non-reused
 `SubscriptionId`, not an arbitrary user key and not the source handle value.
 Binding requires `WAIT` on the source object and a distinct `BIND_WAIT` right
