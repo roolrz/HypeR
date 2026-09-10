@@ -19,6 +19,8 @@ mod sbi;
 mod smp;
 mod stage2;
 mod timer;
+mod user_entry;
+mod user_machine;
 mod vm_interrupt;
 mod vm_vcpu;
 
@@ -26,6 +28,7 @@ use core::arch::asm;
 
 pub type InterruptVirtualizationError = core::convert::Infallible;
 
+pub use barrier::Riscv64Barrier as ArchitectureBarrier;
 pub use cache::Riscv64Cache as ArchitectureCache;
 pub use context::{
     ThreadContext, VcpuContext, VirtualInterruptError, reset_stack_and_enter, switch_thread_context,
@@ -67,6 +70,27 @@ pub use stage2::{Error as Stage2Error, Stage2AddressSpace};
 pub use timer::{
     Error as TimerError, RiscvTimeCounter as ArchitectureCounter,
     SupervisorTimer as ArchitectureTimer,
+};
+pub(crate) use user_entry::{
+    CompletionFailure as UserCompletionFailure, Error as UserEntryError,
+    ReturnCapability as UserReturnCapability, UserContext, UserExit, run_user,
+};
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use user_entry::{
+    direct_native_call_count_for_test, native_fault_test_programs_for_test,
+    native_register_test_program_for_test,
+};
+pub(crate) use user_machine::{
+    ContractError as UserMachineContractError, Error as UserAddressSpaceError,
+    LocalActivation as UserLocalActivation, LocalIdentity as UserLocalIdentity,
+    LocalOperation as UserLocalOperation, LocalRequest as UserLocalRequest,
+    MappingPage as UserMappingPage, PreparedAddressSpace as PreparedUserAddressSpace,
+    activate_local as activate_user_local, assert_kernel_access, copy_from_exposed,
+    copy_to_exposed, deactivate_local as deactivate_user_local,
+    identifier_bits as user_translation_identifier_bits,
+    local_identity_is_active as user_local_identity_is_active,
+    prepare_host as prepare_host_user_address_space,
+    service_local_request as service_user_local_request, user_address_limit,
 };
 pub use vm_interrupt::{Error as VmInterruptError, VmInterruptController};
 pub use vm_vcpu::Error as VcpuInterruptError;
@@ -116,7 +140,7 @@ pub fn initialize_cpu_power(
 }
 
 pub fn secondary_cpu_is_compatible() -> bool {
-    true
+    user_machine::discover_local()
 }
 pub fn register_secondary_hardware_id(cpu_index: usize, hardware_id: u64) -> bool {
     smp::register_hart(cpu_index, hardware_id)
@@ -130,6 +154,9 @@ pub fn prepare_timekeeping(platform: &EssentialPlatformInfo) -> Result<(), Timer
 pub fn prepare_cache(
     platform: &EssentialPlatformInfo,
 ) -> Result<(), hyper::hal::cache::CacheError> {
+    if !user_machine::discover_local() {
+        halt();
+    }
     cache::initialize(platform.cache_block_size)
 }
 

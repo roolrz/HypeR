@@ -34,7 +34,7 @@ typed startup purposes shared by providers and consumers; each service still
 owns its message payload semantics, and the SDK imposes no generic IPC wire
 envelope.
 
-The initial runtime reuses the C startup parser and AArch64 syscall veneer from
+The initial runtime reuses the C startup parser and selected architecture syscall veneer from
 `sdk/lib`. This preserves one machine entry contract while the Rust API is
 established. Loader/CRT startup reserves a private heap VMAR before application entry, and
 `hyper-rt` installs the `libhyper` process heap as Rust's global allocator.

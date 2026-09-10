@@ -45,6 +45,17 @@ static EMERGENCY_STACKS: [AtomicStackBounds; MAX_CPUS] =
     [const { AtomicStackBounds::new() }; MAX_CPUS];
 static VECTOR_INSTALLED: AtomicU64 = AtomicU64::new(0);
 
+/// Returns this masked hart's unused IRQ stack for a Native U-mode trap.
+pub(super) fn native_irq_stack_top() -> usize {
+    match IRQ_STACKS
+        .get(super::current_cpu_index())
+        .map(AtomicStackBounds::load)
+    {
+        Some(bounds) if bounds.bottom < bounds.top => bounds.top,
+        _ => super::halt(),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C, align(16))]
 pub struct CrashContext {

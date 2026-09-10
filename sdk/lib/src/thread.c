@@ -27,7 +27,7 @@ typedef struct thread_state {
 static _Thread_local thread_state_t *host_thread;
 static thread_state_t *current(void) { return host_thread; }
 static void install(thread_state_t *state) { host_thread = state; }
-#else
+#elif defined(__aarch64__)
 static thread_state_t *current(void)
 {
     thread_state_t *state;
@@ -38,6 +38,19 @@ static void install(thread_state_t *state)
 {
     __asm__ volatile("msr tpidr_el0, %0" : : "r"(state) : "memory");
 }
+#elif defined(__riscv) && __riscv_xlen == 64
+static thread_state_t *current(void)
+{
+    thread_state_t *state;
+    __asm__ volatile("mv %0, tp" : "=r"(state));
+    return state;
+}
+static void install(thread_state_t *state)
+{
+    __asm__ volatile("mv tp, %0" : : "r"(state) : "memory");
+}
+#else
+#error Unsupported Native thread architecture
 #endif
 
 hyper_native_status_t hyper_runtime_thread_attach(void)

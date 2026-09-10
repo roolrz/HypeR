@@ -228,6 +228,26 @@ pub(super) unsafe fn build_final_address_space(
     }
     // SAFETY: The image layout is validated and Builder owns table mutation.
     unsafe { map_kernel(&mut builder, image, kernel_base)? };
+    // Native Sv39 roots share these upper-level entries. Reserve every root
+    // slot in the declared mutable stack arena now; later stack construction
+    // changes only shared descendants, never a copied root entry.
+    let arena_end = KERNEL_STACK_ARENA_BASE
+        .checked_add(hyper::config::MAX_KERNEL_STACKS as u64 * STACK_SLOT_PAGES as u64 * PAGE_SIZE)
+        .ok_or(Error::AddressOverflow)?;
+    let mut address = KERNEL_STACK_ARENA_BASE;
+    while address < arena_end {
+        let slot = index(address, 0);
+        // SAFETY: Boot exclusively owns this directly accessible root.
+        if unsafe { early_read(builder.root, slot)? } == 0 {
+            // SAFETY: The boot allocator transfers one zeroed, retained table.
+            let child = unsafe { builder.allocator.allocate_zeroed_pages(1, 1)? };
+            // SAFETY: The root slot is in range and still unpublished.
+            unsafe { early_write(builder.root, slot, table_pte(child.get()))? };
+        }
+        address = (address | (LEVEL_SIZES[0] - 1))
+            .checked_add(1)
+            .ok_or(Error::AddressOverflow)?;
+    }
     let stack_size = KERNEL_STACK_PAGES as u64 * PAGE_SIZE;
     // SAFETY: `stack` is the fresh allocation above and Builder owns mutation.
     unsafe {

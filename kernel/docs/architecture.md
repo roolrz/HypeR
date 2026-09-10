@@ -280,14 +280,15 @@ preempt, or migrate.
 
 The selected `hal::user` facade owns architecture user-address limits, opaque
 prepared roots, CPU-affine activation/deactivation tokens, and acknowledged
-local replacement and invalidation. On AArch64, synchronous exception entry
+local replacement and invalidation. On AArch64 and RISC-V, synchronous exception entry
 passes an owned invocation to a borrowed Native service scoped to that pinned
 machine run. Explicitly classified Never-blocking calls write their fixed-width
 result into the private frame and return directly; unknown calls, faults,
 preemption, and deferred calls close the active translation and return owned
 state to the ordinary Thread continuation. After a true scheduling point, that
 continuation reacquires its scheduler pin and current execution payload rather
-than retaining a CPU-affine borrow. RISC-V and x86-64 currently reject
+than retaining a CPU-affine borrow. RISC-V uses private Sv39 roots, a dedicated
+U-mode trap vector and full integer/FP state capture. x86-64 currently rejects
 native-user entry as unsupported. Process lifetime, handles, rights, syscall
 numbers, ELF policy, compatibility routing, residency, and resource accounting
 remain in the kernel. The scheduler-owned `UserExecution` strongly retains its
@@ -624,9 +625,10 @@ before assembly restores incoming DAIF, SSTATUS.SIE, or RFLAGS.IF. Passing raw
 context pointers across this boundary avoids retaining Rust references while
 the callback re-enters scheduler ownership.
 
-RISC-V and x86-64 currently retain cooperative scheduling: their exception
-entry does not yet provide the private-stack continuation and complete vCPU
-deactivation contract required for asynchronous IRQ-tail switching. Both can
+RISC-V Native U-mode execution supports asynchronous preemption through its
+owned interrupted-run return. RISC-V host/guest execution and x86-64 retain
+cooperative scheduling: their exception entry does not yet provide the complete
+vCPU deactivation contract required for asynchronous IRQ-tail switching. Both can
 send a targeted wake prompt—an SBI software interrupt on RISC-V and a fixed
 x2APIC IPI on x86-64—while retaining the pending request for a later
 cooperative point. Each architecture must qualify the IRQ-tail boundary

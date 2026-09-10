@@ -23,13 +23,11 @@ pub(super) struct AuthorityInventory {
     pub(super) factory: OwnedHandle<TaskFactoryObject>,
     pub(super) group: OwnedHandle<TaskGroupObject>,
     pub(super) domain: OwnedHandle<ResourceDomainObject>,
-    pub(super) vm_fleet_group: OwnedHandle<TaskGroupObject>,
-    pub(super) vm_fleet_domain: OwnedHandle<ResourceDomainObject>,
+    pub(super) vm: Option<VmAuthorities>,
     pub(super) task_inspector: OwnedHandle<TaskInspectorObject>,
     pub(super) object_inspector: OwnedHandle<ObjectInspectorObject>,
     pub(super) memory_inspector: OwnedHandle<MemoryInspectorObject>,
     pub(super) cpu_inspector: OwnedHandle<CpuInspectorObject>,
-    pub(super) vm_authority: OwnedHandle<VirtualMachineCreationAuthorityObject>,
     pub(super) console: &'static OwnedHandle<ConsoleObject>,
     pub(super) console_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) console_output_channel: Option<OwnedHandle<ByteChannelObject>>,
@@ -41,12 +39,27 @@ pub(super) struct AuthorityInventory {
     pub(super) shell_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) shell_output_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) shell_error_channel: Option<OwnedHandle<ByteChannelObject>>,
+}
+
+/// VM authority and transport are prepared together only for a configured fleet.
+pub(super) struct VmAuthorities {
+    pub(super) group: OwnedHandle<TaskGroupObject>,
+    pub(super) domain: OwnedHandle<ResourceDomainObject>,
+    pub(super) authority: OwnedHandle<VirtualMachineCreationAuthorityObject>,
     pub(super) vm_provisioning_channel: Option<OwnedHandle<CapabilityChannelObject>>,
     pub(super) vm_client_connection_channel: OwnedHandle<CapabilityChannelObject>,
     pub(super) vm_manager_connection_channel: Option<OwnedHandle<CapabilityChannelObject>>,
 }
 
 impl AuthorityInventory {
+    pub(super) fn vm(&self) -> Result<&VmAuthorities, LaunchError> {
+        self.vm.as_ref().ok_or(LaunchError::UnsupportedAuthority)
+    }
+
+    fn vm_mut(&mut self) -> Result<&mut VmAuthorities, LaunchError> {
+        self.vm.as_mut().ok_or(LaunchError::UnsupportedAuthority)
+    }
+
     pub(super) fn offer(
         &mut self,
         grant: CapabilityGrant,
@@ -85,7 +98,7 @@ impl AuthorityInventory {
                 if kind == TaskGroupObject::KIND.as_raw() =>
             {
                 let group = if vm_fleet_scope {
-                    self.vm_fleet_group.as_handle_ref()
+                    self.vm()?.group.as_handle_ref()
                 } else {
                     self.group.as_handle_ref()
                 };
@@ -95,7 +108,7 @@ impl AuthorityInventory {
                 if kind == ResourceDomainObject::KIND.as_raw() =>
             {
                 let domain = if vm_fleet_scope {
-                    self.vm_fleet_domain.as_handle_ref()
+                    self.vm()?.domain.as_handle_ref()
                 } else {
                     self.domain.as_handle_ref()
                 };
@@ -124,7 +137,7 @@ impl AuthorityInventory {
             (BootstrapAuthority::VmAuthority, CapabilityOperation::Duplicate)
                 if kind == VirtualMachineCreationAuthorityObject::KIND.as_raw() =>
             {
-                builder.add_handle_duplicate(self.vm_authority.as_handle_ref(), purpose, offer)
+                builder.add_handle_duplicate(self.vm()?.authority.as_handle_ref(), purpose, offer)
             }
             (authority, CapabilityOperation::Move) if kind == ByteChannelObject::KIND.as_raw() => {
                 return self.move_channel_into_builder(authority, builder, purpose, rights);
@@ -143,7 +156,7 @@ impl AuthorityInventory {
                 if kind == CapabilityChannelObject::KIND.as_raw() =>
             {
                 builder.add_handle_duplicate(
-                    self.vm_client_connection_channel.as_handle_ref(),
+                    self.vm()?.vm_client_connection_channel.as_handle_ref(),
                     purpose,
                     offer,
                 )
@@ -198,6 +211,7 @@ impl AuthorityInventory {
         rights: Rights,
     ) -> Result<(), LaunchError> {
         let channel = self
+            .vm_mut()?
             .vm_provisioning_channel
             .take()
             .ok_or(LaunchError::AuthorityConsumed)?;
@@ -205,7 +219,7 @@ impl AuthorityInventory {
             Ok(()) => Ok(()),
             Err(failure) => {
                 let (_, channel) = failure.into_parts();
-                self.vm_provisioning_channel = Some(channel);
+                self.vm_mut()?.vm_provisioning_channel = Some(channel);
                 Err(LaunchError::OperatingSystem)
             }
         }
@@ -237,6 +251,7 @@ impl AuthorityInventory {
         rights: Rights,
     ) -> Result<(), LaunchError> {
         let channel = self
+            .vm_mut()?
             .vm_manager_connection_channel
             .take()
             .ok_or(LaunchError::AuthorityConsumed)?;
@@ -244,7 +259,7 @@ impl AuthorityInventory {
             Ok(()) => Ok(()),
             Err(failure) => {
                 let (_, channel) = failure.into_parts();
-                self.vm_manager_connection_channel = Some(channel);
+                self.vm_mut()?.vm_manager_connection_channel = Some(channel);
                 Err(LaunchError::OperatingSystem)
             }
         }

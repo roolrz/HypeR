@@ -8,15 +8,15 @@ project(HypeRLoader VERSION 0.0.0 LANGUAGES C ASM)
 if(NOT CMAKE_C_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "HypeR loader requires Clang")
 endif()
-if(NOT HYPER_ARCH STREQUAL "aarch64")
-    message(FATAL_ERROR "HypeR dynamic linking is currently implemented only for AArch64")
+if(NOT HYPER_ARCH MATCHES "^(aarch64|riscv64)$")
+    message(FATAL_ERROR "HypeR dynamic linking is requires a supported Native architecture")
 endif()
 if(NOT EXISTS "${HYPER_SYSROOT}/include/hyper/native.h")
     message(FATAL_ERROR "HYPER_SYSROOT must name a complete HypeR sysroot")
 endif()
 
 add_executable(hyper_loader
-    src/arch/aarch64/start.S
+    src/arch/${HYPER_ARCH}/start.S
     src/rtld.c
 )
 target_compile_features(hyper_loader PRIVATE c_std_17)
@@ -36,12 +36,12 @@ target_link_options(hyper_loader PRIVATE
     -Wl,--export-dynamic-symbol=hyper_dlclose
     -Wl,--export-dynamic-symbol=hyper_dlerror
     -Wl,--build-id=none,--gc-sections,-z,noexecstack,-z,max-page-size=4096
-    -Wl,--hash-style=sysv,-soname,ld-hyper-aarch64.so
-    -Wl,-T,${HYPER_SYSROOT}/lib/hyper/aarch64/hyper-native.ld
+    -Wl,--hash-style=sysv,-soname,ld-hyper-${HYPER_ARCH}.so
+    -Wl,-T,${HYPER_SYSROOT}/lib/hyper/${HYPER_ARCH}/hyper-native.ld
     ${HYPER_SYSROOT}/lib/libhyper.a
 )
 set_target_properties(hyper_loader PROPERTIES
-    OUTPUT_NAME ld-hyper-aarch64.so
+    OUTPUT_NAME ld-hyper-${HYPER_ARCH}.so
     SUFFIX ""
 )
 

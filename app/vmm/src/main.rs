@@ -28,12 +28,12 @@ fn application_main(mut startup: Startup<'_>) -> ExitCode {
 }
 
 fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
+    let args = hyper_vmm::cli::Vmm::parse();
     hyper_os::require_core_abi()?;
     let input = hyper_rt::process::stdin()?;
     let mut output = std::io::stdout().lock();
     let control = startup.take(vm::CLIENT_CONTROL)?;
     let capabilities = CapabilityChannel::from_handle(startup.take(vm::CLIENT_CAPABILITIES)?);
-    let args = hyper_vmm::cli::Vmm::parse();
     let command = args.command.unwrap_or(hyper_vmm::cli::VmCommand::List);
     let save_path = match &command {
         hyper_vmm::cli::VmCommand::Save { path } => Some(path.clone()),

@@ -55,8 +55,9 @@ experiment with; choose an established stack when running VMs is the goal.
 ## What works today?
 
 The AArch64 QEMU system boots Native init, a shell, and VM management services
-that start a Linux guest and expose its console. RISC-V has a Linux guest boot
-acceptance test; x86-64 currently has build and image validation only.
+that start a Linux guest and expose its console. RISC-V runs Native init,
+shell and std applications on QEMU; its userspace VM support is still being
+completed. x86-64 currently has build and image validation only.
 
 The Native ABI is pre-release. Broad hardware support, general-purpose virtual
 I/O, device assignment, and multi-vCPU userspace management remain unfinished.

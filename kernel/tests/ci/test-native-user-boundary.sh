@@ -45,7 +45,7 @@ check
 inject_and_reject 'kernel must reject target-specific selection' \
     src/kernel/mm/user_space/machine.rs '#[cfg(CONFIG_ARCH_AARCH64)] const BAD: usize = 1;'
 inject_and_reject 'kernel must reject VHE mechanism policy' \
-    src/kernel/mm/user_space/machine.rs 'const BAD: &str = "VheHostStage1";'
+    src/kernel/mm/user_space/machine.rs 'const BAD: &str = "HostStage1";'
 inject_and_reject 'kernel entry must reject backend token forgetting' \
     src/kernel/entry/user.rs 'fn bad<T>(completion: T) { core::mem::forget(completion); }'
 inject_and_reject 'process policy must reject discriminant casts' \

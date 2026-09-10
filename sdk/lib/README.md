@@ -16,7 +16,7 @@ Native services, but its contracts do not belong in HypeR Lib.
 
 ## Current scope
 
-- AArch64 Native syscall entry using the published machine convention;
+- AArch64 and RV64 Native syscall entry using the published machine conventions;
 - Native startup-stack parsing, CRT entry, and bootstrap-handle discovery;
 - capability-scoped console and filesystem I/O, object wait, byte and capability
   channels, VMO/VMAR operations, staged Process construction, and core
@@ -26,8 +26,8 @@ Native services, but its contracts do not belong in HypeR Lib.
 - Clang-only cross compilation into `libhyper.a` and `libhyper.so`; and
 - a public-interface-only Native application fixture for product integration.
 
-Native userspace is currently implemented only on AArch64. Additional
-architecture veneers will be added only when the corresponding Kernel entry is
+Native userspace supports AArch64 and RV64GC/LP64D. Additional architecture
+veneers are added only when the corresponding Kernel entry is
 functional.
 
 ## Process heap

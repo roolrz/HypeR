@@ -14,8 +14,8 @@
 
 pub(crate) use super::imp::{
     ActivationContext, ArchitectureAddressTranslation as AddressTranslation,
-    ArchitectureCache as Cache, AtomicCapabilities, MemoryError as Error, PreparedAddressSpace,
-    SecondaryActivationContext, StackMapping,
+    ArchitectureBarrier as Barrier, ArchitectureCache as Cache, AtomicCapabilities,
+    MemoryError as Error, PreparedAddressSpace, SecondaryActivationContext, StackMapping,
 };
 
 pub(crate) use super::imp::{

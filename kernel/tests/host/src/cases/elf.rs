@@ -251,3 +251,66 @@ fn rejects_an_allocation_plan_for_different_image_metadata() {
         Err(Error::InvalidHeader)
     );
 }
+
+#[test]
+fn riscv_native_requires_lp64d_and_accepts_compressed_entry() {
+    let mut bytes = executable_image();
+    write_u16(&mut bytes, 18, 243);
+    for flags in [4, 5] {
+        write_u32(&mut bytes, 48, flags);
+        write_u64(&mut bytes, 24, 0x20_0002);
+        let image = crate::require_ok(Image::parse(&bytes));
+        assert_eq!(image.machine(), Machine::Riscv64);
+        assert_eq!(image.entry(), 0x20_0002);
+    }
+    for flags in [0, 1, 2, 3, 6, 7, 8, 12, 20, u32::MAX] {
+        write_u32(&mut bytes, 48, flags);
+        assert_eq!(Image::parse(&bytes).map(|_| ()), Err(Error::InvalidHeader));
+    }
+    write_u32(&mut bytes, 48, 5);
+    write_u64(&mut bytes, 24, 0x20_0001);
+    assert_eq!(Image::parse(&bytes).map(|_| ()), Err(Error::InvalidEntry));
+}
+
+#[test]
+fn relative_relocations_are_selected_by_elf_machine() {
+    let mut bytes = vec![0u8; 0x3000];
+    initialize_header(&mut bytes, 3, 0, 3);
+    write_u16(&mut bytes, 18, 243);
+    write_u32(&mut bytes, 48, 5);
+    write_program_header(&mut bytes, 0, 1, 5, 0x1000, 0, 4, 0x1000, 0x1000);
+    write_program_header(&mut bytes, 1, 1, 6, 0x2000, 0x2000, 0x300, 0x1000, 0x1000);
+    write_program_header(&mut bytes, 2, 2, 6, 0x2000, 0x2000, 64, 64, 8);
+    for (index, (tag, value)) in [(7i64, 0x2100u64), (8, 24), (9, 24), (0, 0)]
+        .into_iter()
+        .enumerate()
+    {
+        write_i64(&mut bytes, 0x2000 + index * 16, tag);
+        write_u64(&mut bytes, 0x2008 + index * 16, value);
+    }
+    write_u64(&mut bytes, 0x2100, 0x2200);
+    write_u64(&mut bytes, 0x2108, 3);
+    write_i64(&mut bytes, 0x2110, -8);
+    let image = crate::require_ok(Image::parse(&bytes));
+    assert_eq!(
+        image.relocations().collect::<Vec<_>>(),
+        vec![Relocation::Relative {
+            target: 0x2200,
+            addend: -8
+        }]
+    );
+    for relocation in [1027, 2, (1u64 << 32) | 3] {
+        write_u64(&mut bytes, 0x2108, relocation);
+        assert_eq!(
+            Image::parse(&bytes).map(|_| ()),
+            Err(Error::UnsupportedRelocation)
+        );
+    }
+    write_u16(&mut bytes, 18, 183);
+    write_u32(&mut bytes, 48, 0);
+    write_u64(&mut bytes, 0x2108, 3);
+    assert_eq!(
+        Image::parse(&bytes).map(|_| ()),
+        Err(Error::UnsupportedRelocation)
+    );
+}

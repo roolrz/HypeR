@@ -30,23 +30,27 @@ startup.
 
 ## Executable image
 
-The kernel process loader accepts little-endian AArch64 ELF64 images branded
+The kernel process loader accepts little-endian AArch64 and RISC-V ELF64 images branded
 with HypeR ELF OSABI 63, ABI version 0, and either `ET_EXEC` or `ET_DYN` type.
 Every load segment must be readable, use at most 4 KiB alignment, be
 page-congruent with its file offset, remain nonempty in memory, and be free of
 page-level overlap. Writable and executable permissions are mutually
 exclusive, and the entry point must lie in executable segment memory.
+The executable and interpreter must match the running architecture. RISC-V
+images use LP64D, permit compressed instructions, and reject other ELF flags;
+their entry point may be two-byte aligned. AArch64 entry points are four-byte aligned.
 
 Static images reject an interpreter, dynamic dependencies, text relocations,
 nonempty TLS segments, an executable stack, symbol-based relocations, and
 unsupported relocation tables. Static PIE images may use
-`R_AARCH64_RELATIVE` RELA entries and AArch64 RELR entries. Relocation targets
+architecture-matching `R_AARCH64_RELATIVE` or `R_RISCV_RELATIVE` RELA entries,
+and RELR entries. Relocation targets
 must be aligned, unique, and contained in writable declared segment memory;
 relocations can never modify code or a read-only segment.
 The process loader also recognizes an absolute `PT_INTERP` path. It maps the
 trusted interpreter at 256 MiB and transfers the main image's program-header,
 entry, and interpreter-base values through standard auxiliary entries. The
-userspace interpreter performs eager AArch64 symbol relocation, seals
+userspace interpreter performs eager architecture-specific symbol relocation, seals
 `PT_GNU_RELRO`, and resolves dependencies relative to a delegated `/lib`
 Directory capability. A dynamic main image must expose its mapped program
 header table through one consistent `PT_PHDR` entry. Main images remain below

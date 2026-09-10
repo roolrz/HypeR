@@ -37,7 +37,7 @@ require() {
 
 kernel_user_files="$machine $adapter $module $entry $owner"
 reject "$kernel_user_files" \
-    'CONFIG_ARCH_|target_arch|crate::arch::|TranslationKind|VheHostStage1|NvheStage2Only|prepare_vhe|prepare_nvhe|levels_per_leaf' \
+    'CONFIG_ARCH_|target_arch|crate::arch::|TranslationKind|HostStage1|NvheStage2Only|prepare_vhe|prepare_nvhe|levels_per_leaf' \
     'kernel native-user policy must not select an architecture translation mechanism'
 reject "$entry" 'mem::forget\(completion\)|cfg.*ARCH' \
     'fatal completion ownership must be abandoned by HAL, not kernel cfg policy'
@@ -77,7 +77,7 @@ fi
 
 reserve_body=$(sed -n '/pub(crate) fn reserve_identifier/,/^    }/p' "$hal" | tr '\n' ' ')
 printf '%s\n' "$reserve_body" | grep -Eq \
-    'TranslationKind::VheHostStage1.*SelectedIdentifier::HostStage\(reserve_host' &&
+    'TranslationKind::HostStage1.*SelectedIdentifier::HostStage\(reserve_host' &&
     printf '%s\n' "$reserve_body" | grep -Eq \
         'TranslationKind::NvheStage2Only.*SelectedIdentifier::SecondStage\(reserve_stage2' || {
     echo 'machine regime selection must reserve the matching identifier namespace' >&2
@@ -86,7 +86,7 @@ printf '%s\n' "$reserve_body" | grep -Eq \
 
 prepare_body=$(sed -n '/pub(crate) unsafe fn prepare_address_space/,/^    }/p' "$hal" | tr '\n' ' ')
 printf '%s\n' "$prepare_body" | grep -Eq \
-    'SelectedIdentifier::HostStage\(token\).*host_identity\(token\).*prepare_vhe_address_space' &&
+    'SelectedIdentifier::HostStage\(token\).*host_identity\(token\).*prepare_host_address_space' &&
     printf '%s\n' "$prepare_body" | grep -Eq \
         'SelectedIdentifier::SecondStage\(token\).*second_identity\(token\).*prepare_nvhe_address_space' || {
     echo 'one selected identifier variant must choose both identity and hierarchy builder' >&2
