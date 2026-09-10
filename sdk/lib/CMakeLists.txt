@@ -18,15 +18,15 @@ endif()
 set(HYPER_ARCH "aarch64" CACHE STRING "HypeR target architecture")
 set(HYPER_ABI_INCLUDE_DIR "" CACHE PATH "Directory containing hyper/native.h")
 
-if(NOT HYPER_ARCH STREQUAL "aarch64")
-    message(FATAL_ERROR "Native userspace is currently implemented only for AArch64")
+if(NOT HYPER_ARCH MATCHES "^(aarch64|riscv64)$")
+    message(FATAL_ERROR "Native userspace is requires a supported Native architecture")
 endif()
 if(NOT EXISTS "${HYPER_ABI_INCLUDE_DIR}/hyper/native.h")
     message(FATAL_ERROR "HYPER_ABI_INCLUDE_DIR must contain hyper/native.h")
 endif()
 
 set(HYPER_RUNTIME_SOURCES
-    src/arch/aarch64/syscall.S
+    src/arch/${HYPER_ARCH}/syscall.S
     src/runtime.c
     src/capabilities.c
     src/directory.c
@@ -45,7 +45,7 @@ set(HYPER_RUNTIME_SOURCES
 add_library(hyper STATIC ${HYPER_RUNTIME_SOURCES})
 add_library(hyper_shared_objects OBJECT ${HYPER_RUNTIME_SOURCES})
 
-add_library(hyper_crt1 OBJECT src/arch/aarch64/crt1.S)
+add_library(hyper_crt1 OBJECT src/arch/${HYPER_ARCH}/crt1.S)
 add_library(hyper_crt OBJECT src/crt.c)
 add_library(hyper_crt_std OBJECT src/crt-std.c)
 add_library(hyper_std STATIC src/std.c src/std-fs.c src/std-process.c)
@@ -64,7 +64,7 @@ target_include_directories(hyper_crt PRIVATE
 
 target_compile_features(hyper PRIVATE c_std_17)
 target_compile_options(hyper PRIVATE
-    $<$<COMPILE_LANGUAGE:C>:-ffreestanding;-fno-builtin;-fvisibility=hidden;-Wall;-Wextra;-Werror>
+    $<$<COMPILE_LANGUAGE:C>:-ffreestanding;-fno-builtin;-fPIC;-fvisibility=hidden;-Wall;-Wextra;-Werror>
 )
 target_compile_features(hyper_shared_objects PRIVATE c_std_17)
 target_compile_options(hyper_shared_objects PRIVATE

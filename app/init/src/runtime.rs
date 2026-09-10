@@ -10,7 +10,7 @@ mod provision;
 mod report;
 mod supervisor;
 
-use authority::AuthorityInventory;
+use authority::{AuthorityInventory, VmAuthorities};
 use launcher::ServiceLauncher;
 use policy::BootstrapPolicy;
 use provision::InitialVmProvisioner;
@@ -97,7 +97,9 @@ impl ManifestSource for LoadedManifest {
 /// Top-level init state. Subobjects own disjoint authority and lifecycle roles.
 struct Runtime {
     launcher: ServiceLauncher,
-    provisioner: InitialVmProvisioner,
+    provisioner: Option<InitialVmProvisioner>,
+    vm_authority:
+        Option<hyper_os::OwnedHandle<hyper_os::handle::VirtualMachineCreationAuthorityObject>>,
     supervisors: SupervisorSet,
 }
 
@@ -113,12 +115,6 @@ impl Runtime {
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         let (shell_error_channel, session_client_error_channel) =
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
-        let (init_vm_provisioning_channel, vm_provisioning_channel) =
-            CapabilityChannel::create().map_err(|_| Error::OperatingSystem)?;
-        let (vm_client_connection_channel, vm_manager_connection_channel) =
-            CapabilityChannel::create().map_err(|_| Error::OperatingSystem)?;
-        let (vm_instance_control_channel, manager_vm_instance_control_channel) =
-            channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         let factory = startup
             .take(startup::TASK_FACTORY)
             .map_err(|_| Error::OperatingSystem)?;
@@ -128,12 +124,6 @@ impl Runtime {
         let domain = startup
             .take(startup::RESOURCE_DOMAIN)
             .map_err(|_| Error::OperatingSystem)?;
-        let vm_fleet_domain =
-            create_resource_domain(domain.as_handle_ref(), INITIAL_VM_FLEET_LIMITS)
-                .map_err(|_| Error::OperatingSystem)?;
-        let vm_fleet_group =
-            create_task_group(factory.as_handle_ref(), vm_fleet_domain.as_handle_ref())
-                .map_err(|_| Error::OperatingSystem)?;
         let authorities = AuthorityInventory {
             root_directory,
             library_directory: Directory::from_handle(
@@ -144,8 +134,7 @@ impl Runtime {
             factory,
             group,
             domain,
-            vm_fleet_group,
-            vm_fleet_domain,
+            vm: None,
             task_inspector: startup
                 .take(startup::TASK_INSPECTOR)
                 .map_err(|_| Error::OperatingSystem)?,
@@ -158,9 +147,6 @@ impl Runtime {
             cpu_inspector: startup
                 .take(startup::CPU_INSPECTOR)
                 .map_err(|_| Error::OperatingSystem)?,
-            vm_authority: startup
-                .take(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)
-                .map_err(|_| Error::OperatingSystem)?,
             console: hyper_rt::process::console().map_err(|_| Error::OperatingSystem)?,
             console_input_channel: Some(console_input_channel),
             console_output_channel: Some(console_output_channel),
@@ -172,21 +158,50 @@ impl Runtime {
             shell_input_channel: Some(shell_input_channel),
             shell_output_channel: Some(shell_output_channel),
             shell_error_channel: Some(shell_error_channel),
-            vm_provisioning_channel: Some(vm_provisioning_channel.into_handle()),
-            vm_client_connection_channel: vm_client_connection_channel.into_handle(),
-            vm_manager_connection_channel: Some(vm_manager_connection_channel.into_handle()),
         };
         Ok(Self {
             launcher: ServiceLauncher { authorities },
-            provisioner: InitialVmProvisioner {
-                init_vm_provisioning_channel,
-                vm_instance_control_channel: Some(vm_instance_control_channel),
-                manager_vm_instance_control_channel: Some(manager_vm_instance_control_channel),
-            },
+            provisioner: None,
+            vm_authority: startup
+                .take_optional(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)
+                .map_err(|_| Error::OperatingSystem)?,
             supervisors: SupervisorSet {
                 processes: std::array::from_fn(|_| None),
             },
         })
+    }
+
+    fn prepare_vm_fleet(&mut self) -> Result<(), LaunchError> {
+        let authority = self
+            .vm_authority
+            .take()
+            .ok_or(LaunchError::UnsupportedAuthority)?;
+        let authorities = &mut self.launcher.authorities;
+        let domain =
+            create_resource_domain(authorities.domain.as_handle_ref(), INITIAL_VM_FLEET_LIMITS)
+                .map_err(|_| LaunchError::OperatingSystem)?;
+        let group = create_task_group(authorities.factory.as_handle_ref(), domain.as_handle_ref())
+            .map_err(|_| LaunchError::OperatingSystem)?;
+        let (init_vm_provisioning_channel, vm_provisioning_channel) =
+            CapabilityChannel::create().map_err(|_| LaunchError::OperatingSystem)?;
+        let (vm_client_connection_channel, vm_manager_connection_channel) =
+            CapabilityChannel::create().map_err(|_| LaunchError::OperatingSystem)?;
+        let (vm_instance_control_channel, manager_vm_instance_control_channel) =
+            channel::create_pair().map_err(|_| LaunchError::OperatingSystem)?;
+        authorities.vm = Some(VmAuthorities {
+            authority,
+            group,
+            domain,
+            vm_provisioning_channel: Some(vm_provisioning_channel.into_handle()),
+            vm_client_connection_channel: vm_client_connection_channel.into_handle(),
+            vm_manager_connection_channel: Some(vm_manager_connection_channel.into_handle()),
+        });
+        self.provisioner = Some(InitialVmProvisioner {
+            init_vm_provisioning_channel,
+            vm_instance_control_channel: Some(vm_instance_control_channel),
+            manager_vm_instance_control_channel: Some(manager_vm_instance_control_channel),
+        });
+        Ok(())
     }
 
     fn preflight(manifest: &Manifest<'_>) -> Result<(), LaunchError> {
@@ -237,10 +252,17 @@ impl Runtime {
         plan: &LaunchPlan<'_>,
     ) -> Result<Infallible, LaunchError> {
         Self::preflight(manifest)?;
-        let vm_manager_index = plan
-            .unique_service_for_purpose(vm_contract::PROVISIONING.as_raw())
-            .ok_or(LaunchError::InvalidPlan)?;
-        let vm_config_path = plan.vm_config_path().ok_or(LaunchError::InvalidPlan)?;
+        let vm_configuration = match plan.vm_config_path() {
+            Some(path) => {
+                let manager = plan
+                    .unique_service_for_purpose(vm_contract::PROVISIONING.as_raw())
+                    .ok_or(LaunchError::InvalidPlan)?;
+                self.prepare_vm_fleet()?;
+                Some((manager, path))
+            }
+            None => None,
+        };
+        let vm_manager_index = vm_configuration.map(|(manager, _)| manager);
         let result = (|| {
             self.launcher.start_initial_graph(
                 manifest,
@@ -248,19 +270,21 @@ impl Runtime {
                 vm_manager_index,
                 &mut self.supervisors,
             )?;
-            self.provisioner.provision_initial_vm(
-                manifest,
-                vm_manager_index,
-                vm_config_path,
-                &self.launcher.authorities.root_directory,
-                self.launcher.authorities.console,
-                &mut self.supervisors,
-            )?;
-            self.supervisors.supervise(
-                manifest,
-                &mut self.provisioner.vm_instance_control_channel,
-                self.launcher.authorities.console,
-            )
+            let mut vm_control = None;
+            if let Some((manager, path)) = vm_configuration {
+                let provisioner = self.provisioner.as_mut().ok_or(LaunchError::InvalidPlan)?;
+                provisioner.provision_initial_vm(
+                    manifest,
+                    manager,
+                    path,
+                    &self.launcher.authorities.root_directory,
+                    self.launcher.authorities.console,
+                    &mut self.supervisors,
+                )?;
+                vm_control = provisioner.vm_instance_control_channel.take();
+            }
+            self.supervisors
+                .supervise(manifest, &mut vm_control, self.launcher.authorities.console)
         })();
         match result {
             Ok(never) => match never {},

@@ -7,18 +7,22 @@ use crate::kernel::accounting::{ResourceDomain, ResourceDomainObject};
 use crate::kernel::capability::{HandleFlags, PreparedHandle, Rights};
 use crate::kernel::inspect::{CpuInspector, MemoryInspector, ObjectInspector, TaskInspector};
 use crate::kernel::mm::user_space::VmarObject;
-use crate::kernel::object::{ObjectPublication, UserExportableObject};
+use crate::kernel::object::{KernelObject, ObjectPublication, UserExportableObject};
 use crate::kernel::process::{TaskFactory, TaskGroup, TaskGroupObject};
+use crate::kernel::vm::objects::VirtualMachineCreationAuthority;
 
 use super::Error;
 use super::bootstrap::{self, BootProcess};
 
 #[cfg(not(feature = "kernel-self-test"))]
-pub(super) const HANDLE_COUNT: usize = 12;
+const CORE_HANDLE_COUNT: usize = 11;
 #[cfg(feature = "kernel-self-test")]
-pub(super) const HANDLE_COUNT: usize = 11;
+const CORE_HANDLE_COUNT: usize = 10;
 
-const PURPOSES: [u32; HANDLE_COUNT] = [
+const HAS_VM_AUTHORITY: bool = crate::hal::vm::userspace_vm_lifecycle_available();
+pub(super) const HANDLE_COUNT: usize = CORE_HANDLE_COUNT + HAS_VM_AUTHORITY as usize;
+
+const CORE_PURPOSES: [u32; CORE_HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_GROUP),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_FACTORY),
@@ -28,13 +32,25 @@ const PURPOSES: [u32; HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_OBJECT_INSPECTOR),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR),
-    purpose(
-        hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_VIRTUAL_MACHINE_CREATION_AUTHORITY,
-    ),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR),
     #[cfg(not(feature = "kernel-self-test"))]
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE),
 ];
+
+const PURPOSES: [u32; HANDLE_COUNT] = {
+    let mut purposes = [0; HANDLE_COUNT];
+    let mut index = 0;
+    while index < CORE_HANDLE_COUNT {
+        purposes[index] = CORE_PURPOSES[index];
+        index += 1;
+    }
+    if index < HANDLE_COUNT {
+        purposes[index] = purpose(
+            hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_VIRTUAL_MACHINE_CREATION_AUTHORITY,
+        );
+    }
+    purposes
+};
 
 pub(super) fn install(
     init: &BootProcess,
@@ -133,14 +149,18 @@ fn prepare_handles(
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT),
     )?;
-    let vm_authority = prepare_handle(
-        ObjectPublication::try_new(
-            crate::kernel::vm::objects::VirtualMachineCreationAuthority::try_new(domain)
-                .map_err(Error::VirtualMachineObject)?,
-        )
-        .map_err(Error::Object)?,
-        <crate::kernel::vm::objects::VirtualMachineCreationAuthority as crate::kernel::object::KernelObject>::SUPPORTED_RIGHTS,
-    )?;
+    let vm_authority = if HAS_VM_AUTHORITY {
+        Some(prepare_handle(
+            ObjectPublication::try_new(
+                VirtualMachineCreationAuthority::try_new(domain)
+                    .map_err(Error::VirtualMachineObject)?,
+            )
+            .map_err(Error::Object)?,
+            VirtualMachineCreationAuthority::SUPPORTED_RIGHTS,
+        )?)
+    } else {
+        None
+    };
     #[cfg(not(feature = "kernel-self-test"))]
     let console = prepare_handle(
         crate::kernel::device::console::SystemConsole::try_publication(domain)
@@ -168,7 +188,7 @@ fn prepare_handles(
             return Err(Error::Handle(error));
         }
     };
-    Ok([
+    let core = [
         resource,
         task_group,
         task_factory,
@@ -178,11 +198,19 @@ fn prepare_handles(
         object_inspector,
         memory_inspector,
         cpu_inspector,
-        vm_authority,
         root_vmar,
         #[cfg(not(feature = "kernel-self-test"))]
         console,
-    ])
+    ];
+    let mut handles = core.into_iter().chain(vm_authority);
+    Ok(core::array::from_fn(|_| {
+        // HANDLE_COUNT and the optional owner use the same immutable machine
+        // capability. A mismatch is an internal bootstrap contract violation.
+        match handles.next() {
+            Some(handle) => handle,
+            None => crate::hal::cpu::halt(),
+        }
+    }))
 }
 
 fn prepare_handle<T: UserExportableObject>(

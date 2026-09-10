@@ -821,10 +821,11 @@ If stage-2-only execution cannot supply required foreign ABI semantics, that
 route may use a small immutable EL1 stage-1 relay. Kernel policy sees only
 opaque prepared/active user address spaces regardless of backend.
 
-RISC-V and x86-64 must eventually implement the same semantic contracts through
-their native U/S and ring-3 mechanisms; native-user entry currently remains
-unsupported on both. They do not define the common abstraction by erasing
-AArch64's world-regime and translation differences.
+RISC-V implements these Native execution contracts through Sv39 U-mode roots,
+qualified trap returns and acknowledged translation retirement. Its RV64GC
+LP64D applications use `tp` for runtime TLS and preserve full integer/FP state.
+x86-64 ring-3 entry remains unsupported. The shared contracts retain
+AArch64's world-regime and translation distinctions.
 
 ## Implementation plan and acceptance gates
 

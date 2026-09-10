@@ -828,3 +828,28 @@ fn rejects_invalid_and_duplicate_startup_purposes() {
         Err(ValidationErrorKind::UnknownCapabilityPurpose)
     );
 }
+
+#[test]
+fn native_service_manifest_does_not_require_a_vm_fleet() {
+    let parsed = parse(include_str!("../config/services-native.json"));
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    let validated = validate(&manifest, &Policy);
+    assert!(validated.is_ok());
+    let Ok(plan) = validated else {
+        return;
+    };
+    assert_eq!(manifest.service_count(), 4);
+    assert_eq!(plan.vm_config_path(), None);
+    assert_eq!(
+        plan.unique_service_for_purpose(hyper_service::vm::PROVISIONING.as_raw()),
+        None
+    );
+    assert!(manifest.services().all(|service| {
+        service
+            .capabilities()
+            .all(|capability| !capability.source().starts_with("bootstrap.vm-"))
+    }));
+}

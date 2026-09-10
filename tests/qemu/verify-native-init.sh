@@ -16,6 +16,8 @@ cpu=$4
 cpus=$5
 memory=$6
 bootargs=$7
+verify_vm=${HYPER_TEST_VM:-1}
+case "$verify_vm" in 0|1) ;; *) echo "HYPER_TEST_VM must be 0 or 1" >&2; exit 2 ;; esac
 memory_value='[0-9]+(\.[0-9])? (B|KiB|MiB|GiB|TiB|PiB|EiB)'
 timeout_seconds=${QEMU_BOOT_TIMEOUT_SECONDS:-90}
 total_timeout_seconds=${QEMU_NATIVE_TIMEOUT_SECONDS:-300}
@@ -55,7 +57,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 "$qemu" \
-    -machine virt,virtualization=on,gic-version=3,dtb-randomness=on \
+    -machine "${QEMU_MACHINE:-virt,virtualization=on,gic-version=3,dtb-randomness=on}" \
     -cpu "$cpu" \
     -smp "$cpus" \
     -m "$memory" \
@@ -123,7 +125,12 @@ while :; do
             ;;
         first_command)
             if grep -q '^Usage: vmm' "$native_output"; then
-                command_phase='vm_running'
+                if [ "$verify_vm" = 1 ]; then
+                    command_phase='vm_running'
+                else
+                    send_commands 1 '/bin/ps\n'
+                    command_phase='ps'
+                fi
             fi
             ;;
         vm_running)
@@ -384,6 +391,7 @@ while :; do
         grep -Fxq 'HYPER_STD_OK hello dynamic' "$native_output" &&
         grep -Fxq 'HYPER_STD_OK hello static' "$native_output" &&
         [ "$(grep -Fxc 'HYPER_STD_TLS_DROP_OK' "$native_output")" -eq 2 ] &&
+        [ "$(grep -Fxc 'HYPER_STD_FP_THREADS_OK' "$native_output")" -eq 2 ] &&
         [ "$(grep -Ec '^(hyper-sh\$ )*HYPER_STD_STDERR_OK$' "$native_output")" -eq 2 ] &&
         grep -Fxq '/bin' "$native_output" &&
         grep -Fxq '/' "$native_output" &&
@@ -392,12 +400,17 @@ while :; do
         grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output" &&
         grep -Eq "^Mem:([[:space:]]+$memory_value){3}[[:space:]]+($memory_value|—)[[:space:]]+$memory_value$" "$native_output" &&
         grep -Fxq 'Press q or Ctrl-C to quit.' "$native_output" &&
-        grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output" &&
-        grep -q 'Run /init as init process' "$log" &&
-        grep -q 'HypeR guest: /init reached' "$log" &&
-        grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
-        echo "verified Native services and userspace-managed Linux VM startup"
-        exit 0
+        grep -Fxq 'HYPER_NATIVE_ECHO_OK' "$native_output"; then
+        if [ "$verify_vm" = 0 ]; then
+            echo "verified Native services, dynamic/static std, and application startup"
+            exit 0
+        fi
+        if grep -q 'Run /init as init process' "$log" &&
+            grep -q 'HypeR guest: /init reached' "$log" &&
+            grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
+            echo "verified Native services and userspace-managed Linux VM startup"
+            exit 0
+        fi
     fi
     if ! kill -0 "$pid" 2>/dev/null; then
         cat "$log" >&2

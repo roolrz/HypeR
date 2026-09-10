@@ -6,7 +6,7 @@ SPDX-License-Identifier: Apache-2.0
 # Native Rust standard library
 
 The assembled SDK supports ordinary Rust `fn main()` applications on
-`aarch64-unknown-hyper`. `hyper-cargo` builds the matching `std` automatically;
+`aarch64-unknown-hyper` and `riscv64-unknown-hyper`. `hyper-cargo` builds the matching `std` automatically;
 applications do not need a custom entry point, panic handler, or allocator.
 
 ```sh
@@ -14,10 +14,10 @@ target/sdk/aarch64/bin/hyper-cargo generate-lockfile --manifest-path path/to/Car
 target/sdk/aarch64/bin/hyper-cargo build --manifest-path path/to/Cargo.toml --release --locked
 ```
 
-The output is in Cargo's `aarch64-unknown-hyper/release` directory. Use
+The output is in Cargo's `<architecture>-unknown-hyper/release` directory. Use
 `HYPER_LINK_MODE=static` for static PIE. Existing freestanding applications
 using `hyper_rt::entry!` select `HYPER_RUST_STD=0`, which retains the
-`aarch64-unknown-none` target and `core,alloc` build. A std application that
+`aarch64-unknown-none` or `riscv64gc-unknown-none-elf` target and `core,alloc` build. A std application that
 depends on `hyper-rt` must enable its `std` feature to avoid defining a second
 panic handler; it should still use ordinary `main`, not `hyper_rt::entry!`.
 
@@ -80,7 +80,7 @@ upstream licensing terms.
 ## Thread and synchronization runtime
 
 No component assumes that a process has only one thread. A Native thread
-starts with `TPIDR_EL0 == 0`; the shared runtime attaches an allocated thread
+starts with a zero thread pointer (`TPIDR_EL0` on AArch64, `tp` on RV64); the shared runtime attaches an allocated thread
 control block. The kernel already preserves this register across user
 context switches. Rust uses the OS-key TLS implementation, not compiler
 ELF TLS. Native ELF TLS relocations and PT_TLS remain outside this patch.
@@ -185,3 +185,9 @@ file-lock cleanup across thread and process exit. They also exercise one-shot
 WaitSet rearm and peer close, more than 64 persistent sources, and child output
 larger than channel capacity on both streams. Both static and dynamic std
 applications use the assembled SDK.
+
+## Architecture selection
+
+The installed SDK selects the target; see [toolchain architecture selection](../README.md#architecture-selection).
+RV64 uses LP64D and a 16-byte aligned stack. Both architectures share this std
+PAL and key-based TLS implementation; neither currently supports compiler ELF TLS.

@@ -30,7 +30,10 @@ Native SDK integration, and runtime acceptance. The AArch64 matrix exercises
 baseline and feature-rich CPU models, multiple host modes and atomic backends,
 address-space geometries, SMP, kernel self-tests, virtual interrupts and timers,
 and standalone kernel self-tests. Linux guest startup is covered by Native
-userspace integration through the VMM tools.
+userspace integration through the VMM tools. RISC-V Native integration runs the
+same static/dynamic std, process, thread, filesystem and shell contracts on one
+and four harts. Guest portions remain disabled until its VM lifecycle and
+userspace loader are available.
 It explicitly attaches `/bin/vmm` to the buffered guest serial port, requires
 repeated initramfs timer wakeups, exercises guest-console RX, and detaches
 through the local Ctrl-] menu. Reaching `/init` or delivering only the first
@@ -42,6 +45,7 @@ Stable local equivalents live in `tests/ci/run.sh`:
 ```sh
 sh tests/ci/run.sh quality
 sh tests/ci/run.sh native
+sh tests/ci/run.sh riscv64-native
 sh tests/ci/run.sh aarch64-build
 QEMU_CPU=max QEMU_CPUS=4 sh tests/ci/run.sh aarch64-qemu
 sh tests/ci/run.sh riscv64-qemu

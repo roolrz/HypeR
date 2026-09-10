@@ -18,6 +18,7 @@ const MAXIMUM_RELOCATIONS: usize = 1_048_576;
 const ET_EXEC: u16 = 2;
 const ET_DYN: u16 = 3;
 const EM_AARCH64: u16 = 183;
+const EM_RISCV: u16 = 243;
 
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
@@ -47,6 +48,7 @@ const DT_RELR: i64 = 36;
 const DT_RELRENT: i64 = 37;
 
 const R_AARCH64_RELATIVE: u32 = 1027;
+const R_RISCV_RELATIVE: u32 = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -87,6 +89,31 @@ pub enum ImageKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Machine {
     Aarch64,
+    Riscv64,
+}
+
+impl Machine {
+    fn from_header(header: &[u8]) -> Result<Self, Error> {
+        match read_u16(header, 18)? {
+            EM_AARCH64 => Ok(Self::Aarch64),
+            EM_RISCV => Ok(Self::Riscv64),
+            _ => Err(Error::UnsupportedMachine),
+        }
+    }
+
+    const fn relative_relocation(self) -> u32 {
+        match self {
+            Self::Aarch64 => R_AARCH64_RELATIVE,
+            Self::Riscv64 => R_RISCV_RELATIVE,
+        }
+    }
+
+    const fn instruction_alignment(self) -> u64 {
+        match self {
+            Self::Aarch64 => 4,
+            Self::Riscv64 => 2,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -292,12 +319,12 @@ impl<'image> Image<'image> {
             ET_DYN => ImageKind::PositionIndependent,
             _ => return Err(Error::UnsupportedFileType),
         };
-        let machine = match read_u16(header, 18)? {
-            EM_AARCH64 => Machine::Aarch64,
-            _ => return Err(Error::UnsupportedMachine),
-        };
+        let machine = Machine::from_header(header)?;
         validate_fixed_header(header)?;
         let entry = read_u64(header, 24)?;
+        if !entry.is_multiple_of(machine.instruction_alignment()) {
+            return Err(Error::InvalidEntry);
+        }
         let (program_offset, program_count) = program_table(header, bytes)?;
         // A dynamically linked process needs a mapped program-header table for
         // the runtime linker's `AT_PHDR` contract. Static images do not consume
@@ -375,7 +402,7 @@ impl<'image> Image<'image> {
         }
         let relocations = match (dynamic, allocation.dynamic_executable) {
             (Some(dynamic), false) => {
-                parse_dynamic(dynamic, &segments, allocation.relocation_capacity)?
+                parse_dynamic(dynamic, &segments, allocation.relocation_capacity, machine)?
             }
             (Some(dynamic), true) => {
                 validate_dynamic_executable(dynamic)?;
@@ -491,8 +518,16 @@ fn validate_ident(header: &[u8]) -> Result<(), Error> {
 }
 
 fn validate_fixed_header(header: &[u8]) -> Result<(), Error> {
+    let machine = Machine::from_header(header)?;
+    let flags = read_u32(header, 48)?;
+    // Native RV64 uses LP64D, with optional compressed instructions. Reject
+    // soft/single/quad float, embedded-register and unrecognized ABI flags.
+    let valid_flags = match machine {
+        Machine::Aarch64 => flags == 0,
+        Machine::Riscv64 => flags & !0x7 == 0 && flags & 0x6 == 0x4,
+    };
     if read_u32(header, 20)? != 1
-        || read_u32(header, 48)? != 0
+        || !valid_flags
         || usize::from(read_u16(header, 52)?) != ELF_HEADER_SIZE
         || usize::from(read_u16(header, 54)?) != PROGRAM_HEADER_SIZE
     {
@@ -682,13 +717,14 @@ fn parse_dynamic(
     bytes: &[u8],
     segments: &[LoadSegment<'_>],
     relocation_capacity: usize,
+    machine: Machine,
 ) -> Result<Vec<Relocation>, Error> {
     let info = read_dynamic_info(bytes)?;
     let mut relocations = Vec::new();
     relocations
         .try_reserve_exact(relocation_capacity)
         .map_err(|_| Error::Allocation)?;
-    parse_rela(&info, segments, &mut relocations)?;
+    parse_rela(&info, segments, &mut relocations, machine)?;
     parse_relr(&info, segments, &mut relocations)?;
     relocations.sort_unstable_by_key(|relocation| relocation.target());
     if relocations
@@ -781,6 +817,7 @@ fn parse_rela(
     info: &DynamicInfo,
     segments: &[LoadSegment<'_>],
     output: &mut Vec<Relocation>,
+    machine: Machine,
 ) -> Result<(), Error> {
     let present = info.rela.is_some() || info.rela_size.is_some() || info.rela_entry_size.is_some();
     if !present {
@@ -801,7 +838,7 @@ fn parse_rela(
         let info = read_u64(entry, 8)?;
         let symbol = info >> 32;
         let relocation_type = info as u32;
-        if symbol != 0 || relocation_type != R_AARCH64_RELATIVE {
+        if symbol != 0 || relocation_type != machine.relative_relocation() {
             return Err(Error::UnsupportedRelocation);
         }
         validate_relocation_target(segments, target)?;

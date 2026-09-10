@@ -24,7 +24,7 @@ impl ServiceLauncher {
         &mut self,
         service: &Service<'_>,
         service_index: usize,
-        vm_manager_index: usize,
+        vm_manager_index: Option<usize>,
         plan: &LaunchPlan<'_>,
     ) -> Result<OwnedHandle<ProcessObject>, LaunchError> {
         let executable = self
@@ -34,13 +34,13 @@ impl ServiceLauncher {
             .map_err(|_| LaunchError::OperatingSystem)?;
         let builder = ProcessBuilder::create(
             self.authorities.factory.as_handle_ref(),
-            if service_index == vm_manager_index {
-                self.authorities.vm_fleet_group.as_handle_ref()
+            if Some(service_index) == vm_manager_index {
+                self.authorities.vm()?.group.as_handle_ref()
             } else {
                 self.authorities.group.as_handle_ref()
             },
-            if service_index == vm_manager_index {
-                self.authorities.vm_fleet_domain.as_handle_ref()
+            if Some(service_index) == vm_manager_index {
+                self.authorities.vm()?.domain.as_handle_ref()
             } else {
                 self.authorities.domain.as_handle_ref()
             },
@@ -66,7 +66,7 @@ impl ServiceLauncher {
                 .capability_grant(service_index, capability_index)
                 .ok_or(LaunchError::InvalidPlan)?;
             self.authorities
-                .offer(grant, service_index == vm_manager_index, &builder)?;
+                .offer(grant, Some(service_index) == vm_manager_index, &builder)?;
         }
 
         builder.seal().map_err(|_| LaunchError::OperatingSystem)?;
@@ -79,7 +79,7 @@ impl ServiceLauncher {
         &mut self,
         manifest: &Manifest<'_>,
         plan: &LaunchPlan<'_>,
-        vm_manager_index: usize,
+        vm_manager_index: Option<usize>,
         supervisors: &mut SupervisorSet,
     ) -> Result<(), LaunchError> {
         for position in 0..plan.service_count() {

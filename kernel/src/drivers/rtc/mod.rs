@@ -3,6 +3,9 @@
 
 //! Read-only access to firmware-initialized real-time clocks.
 
+mod goldfish;
+pub use goldfish::Goldfish;
+
 use crate::drivers::platform::{MmioMappingError, PermanentMmioMapping};
 use crate::hw::pl031 as reg;
 

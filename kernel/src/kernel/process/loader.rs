@@ -85,11 +85,7 @@ pub(crate) fn load_native(
         .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, scratch_bytes))?
         .commit();
     let executable = Image::parse_process_with_plan(bytes, allocation).map_err(Error::Elf)?;
-    if executable.machine() != Machine::Aarch64
-        || crate::hal::user::host_machine() != crate::hal::user::HostMachine::Aarch64
-    {
-        return Err(Error::UnsupportedMachine);
-    }
+    validate_host_machine(executable.machine())?;
     let load_bias = select_load_bias(&executable)?;
     validate_layout(&executable, load_bias)?;
 
@@ -126,7 +122,12 @@ fn prepare_address_space(
 ) -> Result<ProcessImage, Error> {
     let mut segments = prepare_segments(executable, load_bias, address_space)?;
     let interpreter = match executable.interpreter() {
-        Some(path) => Some(load_interpreter(path, address_space, domain)?),
+        Some(path) => Some(load_interpreter(
+            path,
+            executable.machine(),
+            address_space,
+            domain,
+        )?),
         None => None,
     };
     if let Some(loaded) = &interpreter {
@@ -172,7 +173,7 @@ fn prepare_address_space(
 
     let program_entry = relocated_address(load_bias, executable.entry())?;
     ProcessImage::try_native_with_auxiliary(
-        MachineAbi::Aarch64,
+        machine_abi(executable.machine()),
         UserAddress::new(entry),
         UserAddress::new(initial_stack.stack_pointer()),
         UserAddress::new(0),
@@ -211,6 +212,7 @@ fn validate_dynamic_layout(
 
 fn load_interpreter(
     path: &str,
+    executable_machine: Machine,
     address_space: &NativeAddressSpace,
     domain: &ResourceDomain,
 ) -> Result<LoadedInterpreter, Error> {
@@ -224,7 +226,7 @@ fn load_interpreter(
     }
     let plan = Image::allocation_plan(bytes).map_err(Error::Elf)?;
     let image = Image::parse_with_plan(bytes, plan).map_err(Error::Elf)?;
-    if image.machine() != Machine::Aarch64 || image.kind() != ImageKind::PositionIndependent {
+    if image.machine() != executable_machine || image.kind() != ImageKind::PositionIndependent {
         return Err(Error::UnsupportedMachine);
     }
     let load_bias = INTERPRETER_MAPPING_BASE
@@ -241,6 +243,25 @@ fn load_interpreter(
         mapping_start: relocated_address(load_bias, image.minimum_mapping_address())?,
         mapping_end: relocated_address(load_bias, image.maximum_mapping_address())?,
     })
+}
+
+fn machine_abi(machine: Machine) -> MachineAbi {
+    match machine {
+        Machine::Aarch64 => MachineAbi::Aarch64,
+        Machine::Riscv64 => MachineAbi::Riscv64,
+    }
+}
+
+fn validate_host_machine(machine: Machine) -> Result<(), Error> {
+    use crate::hal::user::HostMachine;
+    if matches!(
+        (machine, crate::hal::user::host_machine()),
+        (Machine::Aarch64, HostMachine::Aarch64) | (Machine::Riscv64, HostMachine::Riscv64)
+    ) {
+        Ok(())
+    } else {
+        Err(Error::UnsupportedMachine)
+    }
 }
 
 fn retire_failed_address_space(address_space: UniqueFallibleArc<NativeAddressSpace>) {

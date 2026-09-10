@@ -2,8 +2,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-OUTPUT_FORMAT(elf64-littleaarch64)
-OUTPUT_ARCH(aarch64)
 ENTRY(_start)
 
 PHDRS
@@ -72,13 +70,13 @@ SECTIONS
 
     .rodata :
     {
-        *(.rodata .rodata.*)
+        *(.rodata .rodata.* .srodata .srodata.*)
     } :rodata
 
     . = ALIGN(CONSTANT(MAXPAGESIZE));
     .data : ALIGN(16)
     {
-        *(.data .data.*)
+        *(.data .data.* .sdata .sdata.*)
     } :data
 
     /* PIC Rust core/alloc may introduce a GOT. Keep relocation targets in
@@ -90,7 +88,7 @@ SECTIONS
 
     .bss (NOLOAD) : ALIGN(16)
     {
-        *(.bss .bss.*)
+        *(.bss .bss.* .sbss .sbss.*)
         *(COMMON)
     } :data
 

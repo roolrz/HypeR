@@ -7,7 +7,7 @@
  *
  * The kernel installs the main image and this interpreter. This file owns all
  * dependency lookup and symbol policy. It intentionally supports only eager
- * AArch64 RELA/RELR relocation and capability-relative library lookup.
+ * Native RELA/RELR relocation and capability-relative library lookup.
  */
 
 #include <hyper/dlfcn.h>
@@ -17,7 +17,7 @@
 
 #define EI_NIDENT 16
 #define ET_DYN 3
-#define EM_AARCH64 183
+#include "arch.h"
 #define PT_LOAD 1
 #define PT_DYNAMIC 2
 #define PT_PHDR 6
@@ -52,10 +52,6 @@
 #define DT_RELRSZ 35
 #define DT_RELRENT 37
 #define DF_TEXTREL UINT64_C(0x4)
-#define R_AARCH64_ABS64 257
-#define R_AARCH64_GLOB_DAT 1025
-#define R_AARCH64_JUMP_SLOT 1026
-#define R_AARCH64_RELATIVE 1027
 #define STB_LOCAL 0
 #define STB_WEAK 2
 #define STV_DEFAULT 0
@@ -699,22 +695,21 @@ static int apply_rela(Object *object, const Elf64_Rela *table, size_t count)
             return 0;
         }
         uintptr_t value = 0;
-        if (kind == R_AARCH64_RELATIVE && symbol == 0) {
+        if (kind == HYPER_RELOC_RELATIVE && symbol == 0) {
             if (!add_signed(object->base, relocation->addend, &value)) {
                 last_error = "relative relocation overflow";
                 return 0;
             }
-        } else if (kind == R_AARCH64_ABS64
-            || kind == R_AARCH64_GLOB_DAT || kind == R_AARCH64_JUMP_SLOT) {
+        } else if (hyper_symbol_relocation(kind)) {
             if (!resolve_symbol(object, symbol, &value)) {
                 return 0;
             }
-            if (!add_signed(value, relocation->addend, &value)) {
+            if (!add_signed(value, hyper_symbol_addend(kind, relocation->addend), &value)) {
                 last_error = "symbol relocation overflow";
                 return 0;
             }
         } else {
-            last_error = "unsupported AArch64 relocation";
+            last_error = "unsupported Native relocation";
             return 0;
         }
         *(uintptr_t *)target_address = value;
@@ -831,9 +826,9 @@ static int validate_header(const Elf64_Ehdr *header)
         && header->ident[7] == HYPER_NATIVE_ELF_OSABI
         && header->ident[8] == HYPER_NATIVE_ELF_ABI_VERSION
         && header->type == ET_DYN
-        && header->machine == EM_AARCH64
+        && header->machine == HYPER_ELF_MACHINE
         && header->version == 1
-        && header->flags == 0
+        && hyper_elf_flags_valid(header->flags)
         && header->ehsize == sizeof(*header)
         && header->phentsize == sizeof(Elf64_Phdr)
         && header->phnum != 0
@@ -1184,7 +1179,7 @@ static int register_interpreter(uintptr_t base)
     for (size_t index = 0; index < header->phnum; ++index) {
         interpreter->owned_phdr[index] = source[index];
     }
-    copy_name(interpreter->name, "ld-hyper-aarch64.so");
+    copy_name(interpreter->name, HYPER_LOADER_NAME);
     interpreter->base = base;
     interpreter->vmar = root_vmar;
     interpreter->phdr = interpreter->owned_phdr;

@@ -15,6 +15,9 @@ use hyper::hal::memory::{AddressTranslation, KernelImageLayout, VirtualMemoryLay
 use hyper::mm::{BootAllocator, PhysicalAddress, VirtualAddress};
 use hyper::platform::PlatformInfo;
 
+/// Selected architectural ordering policy for physical device drivers.
+pub(crate) type Barrier = crate::arch::memory::Barrier;
+
 /// Failure reported by the selected stage-1 implementation.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct Error(crate::arch::memory::Error);

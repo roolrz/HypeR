@@ -25,32 +25,34 @@ pub(crate) enum AddressSpaceError {
     InvalidAddressLimit,
     #[cfg(not(CONFIG_ARCH_AARCH64))]
     Unsupported,
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     Backend(crate::arch::user::UserAddressSpaceError),
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     Contract(crate::arch::user::UserMachineContractError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UserEntryError {
     #[cfg_attr(
-        not(CONFIG_ARCH_AARCH64),
+        not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)),
         allow(dead_code, reason = "secondary Native entry is unsupported")
     )]
     InvalidContext,
     InterruptsEnabled,
     Unsupported,
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     Backend(crate::arch::user::UserEntryError),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
+#[cfg_attr(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)), allow(dead_code))]
 enum TranslationKind {
-    VheHostStage1,
+    HostStage1,
+    #[cfg(CONFIG_ARCH_AARCH64)]
     NvheStage2Only,
 }
 
+#[cfg(CONFIG_ARCH_AARCH64)]
 const USER_TRANSLATION_IDENTIFIER_BITS: u8 = 8;
 
 /// Opaque construction policy for the selected native-user translation regime.
@@ -61,10 +63,18 @@ const USER_TRANSLATION_IDENTIFIER_BITS: u8 = 8;
 pub(crate) struct AddressSpacePlan {
     kind: TranslationKind,
     address_limit: u64,
+    identifier_bits: u8,
 }
 
 enum SelectedIdentifier<HostStage, SecondStage> {
     HostStage(HostStage),
+    #[cfg_attr(
+        not(CONFIG_ARCH_AARCH64),
+        expect(
+            dead_code,
+            reason = "only AArch64 nVHE reserves second-stage identifiers"
+        )
+    )]
     SecondStage(SecondStage),
 }
 
@@ -128,7 +138,7 @@ impl<HostStage, SecondStage> AddressSpaceIdentifier<HostStage, SecondStage> {
             match &self.selected {
                 SelectedIdentifier::HostStage(token) => {
                     let (identifier, generation) = host_identity(token);
-                    prepare_vhe_address_space(identifier, generation, enumerate, allocator)
+                    prepare_host_address_space(identifier, generation, enumerate, allocator)
                 }
                 SelectedIdentifier::SecondStage(token) => {
                     let (identifier, generation) = second_identity(token);
@@ -162,21 +172,30 @@ pub(crate) const fn host_machine() -> HostMachine {
 }
 
 pub(crate) fn address_space_plan() -> Result<AddressSpacePlan, AddressSpaceError> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         let address_limit =
             crate::arch::user::user_address_limit().map_err(AddressSpaceError::Contract)?;
+        #[cfg(CONFIG_ARCH_AARCH64)]
         let kind = if crate::arch::user::user_uses_vhe_translation() {
-            TranslationKind::VheHostStage1
+            TranslationKind::HostStage1
         } else {
             TranslationKind::NvheStage2Only
         };
+        #[cfg(CONFIG_ARCH_RISCV64)]
+        let kind = TranslationKind::HostStage1;
+        #[cfg(CONFIG_ARCH_AARCH64)]
+        let identifier_bits = USER_TRANSLATION_IDENTIFIER_BITS;
+        #[cfg(CONFIG_ARCH_RISCV64)]
+        let identifier_bits = crate::arch::user::user_translation_identifier_bits()
+            .map_err(AddressSpaceError::Contract)?;
         Ok(AddressSpacePlan {
             kind,
             address_limit,
+            identifier_bits,
         })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         Err(AddressSpaceError::Unsupported)
     }
@@ -194,12 +213,15 @@ impl AddressSpacePlan {
         reserve_host: impl FnOnce(u8) -> Result<HostStage, Error>,
         reserve_stage2: impl FnOnce(u8) -> Result<SecondStage, Error>,
     ) -> Result<AddressSpaceIdentifier<HostStage, SecondStage>, Error> {
+        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        let _ = reserve_stage2;
         let selected = match self.kind {
-            TranslationKind::VheHostStage1 => {
-                SelectedIdentifier::HostStage(reserve_host(USER_TRANSLATION_IDENTIFIER_BITS)?)
+            TranslationKind::HostStage1 => {
+                SelectedIdentifier::HostStage(reserve_host(self.identifier_bits)?)
             }
+            #[cfg(CONFIG_ARCH_AARCH64)]
             TranslationKind::NvheStage2Only => {
-                SelectedIdentifier::SecondStage(reserve_stage2(USER_TRANSLATION_IDENTIFIER_BITS)?)
+                SelectedIdentifier::SecondStage(reserve_stage2(self.identifier_bits)?)
             }
         };
         Ok(AddressSpaceIdentifier { selected })
@@ -207,7 +229,7 @@ impl AddressSpacePlan {
 }
 
 #[derive(Clone, Copy)]
-#[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
+#[cfg_attr(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)), allow(dead_code))]
 pub(crate) struct MappingPage {
     pub(crate) address: u64,
     pub(crate) physical: PhysicalAddress,
@@ -218,19 +240,19 @@ pub(crate) struct MappingPage {
 
 /// Opaque, inert hierarchy prepared before kernel mapping publication.
 pub(crate) struct PreparedAddressSpace {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: crate::arch::user::PreparedUserAddressSpace,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct LocalIdentity {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: crate::arch::user::UserLocalIdentity,
 }
 
 #[derive(Clone, Copy)]
 pub(crate) struct LocalRequest {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: crate::arch::user::UserLocalRequest,
 }
 
@@ -244,13 +266,13 @@ pub(crate) struct PreparedKernelAccess<'mask> {
 
 impl PreparedAddressSpace {
     pub(crate) fn local_identity(&self) -> LocalIdentity {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             LocalIdentity {
                 backend: self.backend.local_identity(),
             }
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             LocalIdentity {}
         }
@@ -263,7 +285,7 @@ impl PreparedAddressSpace {
     /// The prepared root and its identifier owner must remain retained until
     /// every target has acknowledged servicing the returned request.
     pub(crate) unsafe fn replace_request(&self) -> LocalRequest {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             LocalRequest {
                 backend: self
@@ -271,7 +293,7 @@ impl PreparedAddressSpace {
                     .local_request(crate::arch::user::UserLocalOperation::Replace),
             }
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             LocalRequest {}
         }
@@ -284,7 +306,7 @@ impl PreparedAddressSpace {
     /// The prepared root and its identifier owner must remain retained until
     /// every target has acknowledged servicing the returned request.
     pub(crate) unsafe fn invalidate_request(&self) -> LocalRequest {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             LocalRequest {
                 backend: self
@@ -292,7 +314,7 @@ impl PreparedAddressSpace {
                     .local_request(crate::arch::user::UserLocalOperation::Invalidate),
             }
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             LocalRequest {}
         }
@@ -301,7 +323,7 @@ impl PreparedAddressSpace {
 
 /// Applies a value-only request retained by the acknowledged RPC mailbox.
 pub(crate) unsafe fn service_local_request(request: LocalRequest) -> bool {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         // SAFETY: The closed kernel RPC keeps the root/ID owner alive until
         // this target acknowledges and closes address-space admission.
@@ -309,7 +331,7 @@ pub(crate) unsafe fn service_local_request(request: LocalRequest) -> bool {
         // target acknowledges completion.
         unsafe { crate::arch::user::service_user_local_request(request.backend) }.is_ok()
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = request;
         false
@@ -320,7 +342,7 @@ pub(crate) unsafe fn service_local_request(request: LocalRequest) -> bool {
 #[must_use = "active native translation must be explicitly left before releasing CPU pinning"]
 pub(crate) struct ActiveAddressSpace<'pin> {
     cpu: CpuIndex,
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: Option<crate::arch::user::UserLocalActivation>,
     _pin: PhantomData<&'pin dyn PinnedExecution>,
     _owner: PhantomData<&'pin dyn hyper::hal::user::UserTranslationOwner>,
@@ -333,19 +355,19 @@ impl ActiveAddressSpace<'_> {
     }
 }
 
-/// Builds a VHE host stage-1 root from a complete immutable mapping snapshot.
+/// Builds a host stage-1 root from a complete immutable mapping snapshot.
 ///
 /// # Safety
 ///
 /// Allocator results must be new, zeroed, linearly mapped blocks of the
 /// requested order and remain retained through acknowledged root retirement.
-unsafe fn prepare_vhe_address_space(
+unsafe fn prepare_host_address_space(
     asid: u16,
     generation: u64,
     mut enumerate: impl FnMut(&mut dyn FnMut(MappingPage)),
     allocator: &mut impl FnMut(usize) -> Option<PhysicalAddress>,
 ) -> Result<PreparedAddressSpace, AddressSpaceError> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         let mut arch_enumerate = |visit: &mut dyn FnMut(crate::arch::user::UserMappingPage)| {
             enumerate(&mut |page| {
@@ -360,7 +382,7 @@ unsafe fn prepare_vhe_address_space(
         };
         // SAFETY: The facade forwards the table ownership contract unchanged.
         let backend = unsafe {
-            crate::arch::user::prepare_vhe_user_address_space(
+            crate::arch::user::prepare_host_user_address_space(
                 asid,
                 generation,
                 &mut arch_enumerate,
@@ -370,7 +392,7 @@ unsafe fn prepare_vhe_address_space(
         .map_err(AddressSpaceError::Backend)?;
         Ok(PreparedAddressSpace { backend })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (asid, generation, &mut enumerate, allocator);
         Err(AddressSpaceError::Unsupported)
@@ -438,7 +460,7 @@ pub(crate) unsafe fn activate_local<'pin>(
     {
         return Err(AddressSpaceError::InvalidCpu);
     }
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         // SAFETY: The caller supplies the admission, pinning, and retention
         // proof required by the architecture-local transition.
@@ -451,7 +473,7 @@ pub(crate) unsafe fn activate_local<'pin>(
             not_send_or_sync: PhantomData,
         })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (root, cpu, kernel_access);
         Err(AddressSpaceError::Unsupported)
@@ -459,11 +481,11 @@ pub(crate) unsafe fn activate_local<'pin>(
 }
 
 pub(crate) fn local_identity_is_active(identity: LocalIdentity) -> bool {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         crate::arch::user::user_local_identity_is_active(identity.backend)
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = identity;
         false
@@ -479,7 +501,7 @@ pub(crate) fn local_identity_is_active(identity: LocalIdentity) -> bool {
 pub(crate) unsafe fn deactivate_local(
     active: ActiveAddressSpace<'_>,
 ) -> Result<(), AddressSpaceError> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         let mut active = active;
         let Some(backend) = active.backend.take() else {
@@ -490,7 +512,7 @@ pub(crate) unsafe fn deactivate_local(
         unsafe { crate::arch::user::deactivate_user_local(backend) };
         Ok(())
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = active;
         Err(AddressSpaceError::Unsupported)
@@ -499,7 +521,7 @@ pub(crate) unsafe fn deactivate_local(
 
 impl Drop for ActiveAddressSpace<'_> {
     fn drop(&mut self) {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         if self.backend.is_some() {
             // Hardware still references a borrowed root. Returning would end
             // the root and pin borrows and permit use-after-free.
@@ -510,15 +532,15 @@ impl Drop for ActiveAddressSpace<'_> {
 
 /// Opaque native-user register owner attached to one kernel `UserThread`.
 pub(crate) struct UserContext {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: crate::arch::user::UserContext,
 }
 
 impl UserContext {
     pub(crate) fn set_entry_argument(&mut self, argument: u64) {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         self.backend.set_entry_argument(argument);
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         let _ = argument;
     }
 }
@@ -529,7 +551,7 @@ pub(crate) fn prepare_context(
     stack: u64,
     tls: u64,
 ) -> Result<UserContext, UserEntryError> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         let address_limit = crate::arch::user::user_address_limit()
             .map_err(crate::arch::user::UserEntryError::from)
@@ -543,7 +565,7 @@ pub(crate) fn prepare_context(
             })?;
         Ok(UserContext { backend })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (entry, stack, tls);
         Err(UserEntryError::Unsupported)
@@ -559,14 +581,14 @@ pub(crate) fn prepare_kernel_access<'mask>(
         return Err(UserEntryError::InterruptsEnabled);
     }
     let cpu = crate::hal::cpu::current_index().ok_or(UserEntryError::Unsupported)?;
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
-        crate::arch::user::assert_kernel_pan()
+        crate::arch::user::assert_kernel_access()
             .map_err(crate::arch::user::UserEntryError::from)
             .map_err(UserEntryError::Backend)?;
         Ok(PreparedKernelAccess { cpu, _mask: mask })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (cpu, mask);
         Err(UserEntryError::Unsupported)
@@ -580,9 +602,9 @@ pub(crate) fn prepare_kernel_access<'mask>(
 /// preceding translation before exposing the exit to policy code.
 #[must_use = "native-user translation must be left before kernel dispatch"]
 pub(crate) struct StoppedUser<'context, 'pin> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     exit: Option<crate::arch::user::UserExit<'context>>,
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     _context: PhantomData<&'context mut UserContext>,
     active: Option<ActiveAddressSpace<'pin>>,
 }
@@ -606,7 +628,7 @@ pub(crate) fn run_user<'context, 'pin>(
         }
         return Err(UserEntryError::InterruptsEnabled);
     }
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         // SAFETY: `active` retains the current-CPU pin, translation root, and
         // owner for this entire call. `context` is exclusively borrowed until
@@ -628,7 +650,7 @@ pub(crate) fn run_user<'context, 'pin>(
             active: Some(active),
         })
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (context, active, binding, kernel_access, service);
         Err(UserEntryError::Unsupported)
@@ -646,7 +668,7 @@ impl<'context, 'pin> StoppedUser<'context, 'pin> {
         let Some(active) = self.active.take() else {
             crate::hal::cpu::halt();
         };
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             let Some(exit) = self.exit.take() else {
                 crate::hal::cpu::halt();
@@ -657,7 +679,7 @@ impl<'context, 'pin> StoppedUser<'context, 'pin> {
             };
             (exit, active, stopped)
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             let _ = active;
             crate::hal::cpu::halt()
@@ -687,7 +709,7 @@ impl Drop for StoppedUser<'_, '_> {
     }
 }
 
-#[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
+#[cfg_attr(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)), allow(dead_code))]
 pub(crate) enum UserExit<'context> {
     NativeCall {
         invocation: NativeInvocation,
@@ -702,7 +724,7 @@ pub(crate) enum UserExit<'context> {
     },
 }
 
-#[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
+#[cfg_attr(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)), allow(dead_code))]
 impl<'context> UserExit<'context> {
     pub(crate) fn binding(&self) -> UserRunBinding {
         match self {
@@ -712,7 +734,7 @@ impl<'context> UserExit<'context> {
         }
     }
 
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     fn from_arch(exit: crate::arch::user::UserExit<'context>) -> Self {
         match exit {
             crate::arch::user::UserExit::NativeCall {
@@ -741,20 +763,20 @@ impl<'context> UserExit<'context> {
 
 #[must_use = "native-user return ownership must be resumed or discarded exactly once"]
 pub(crate) struct ReturnCapability<'context> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     backend: crate::arch::user::UserReturnCapability<'context>,
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     _context: PhantomData<&'context mut UserContext>,
 }
 
-#[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
+#[cfg_attr(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)), allow(dead_code))]
 impl<'context> ReturnCapability<'context> {
     pub(crate) fn binding(&self) -> UserRunBinding {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             self.backend.binding()
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             crate::hal::cpu::halt()
         }
@@ -765,13 +787,13 @@ impl<'context> ReturnCapability<'context> {
         expected: UserRunBinding,
         result: NativeResult,
     ) -> Result<(), CompletionFailure<'context>> {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             self.backend
                 .complete_native(expected, result)
                 .map_err(CompletionFailure::from_arch)
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             let _ = (self, expected, result);
             crate::hal::cpu::halt()
@@ -782,13 +804,13 @@ impl<'context> ReturnCapability<'context> {
         self,
         expected: UserRunBinding,
     ) -> Result<(), CompletionFailure<'context>> {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             self.backend
                 .resume_interrupted(expected)
                 .map_err(CompletionFailure::from_arch)
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             let _ = (self, expected);
             crate::hal::cpu::halt()
@@ -799,13 +821,13 @@ impl<'context> ReturnCapability<'context> {
         self,
         expected: UserRunBinding,
     ) -> Result<(), CompletionFailure<'context>> {
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             self.backend
                 .discard(expected)
                 .map_err(CompletionFailure::from_arch)
         }
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             let _ = (self, expected);
             crate::hal::cpu::halt()
@@ -823,7 +845,7 @@ pub(crate) struct CompletionFailure<'context> {
 pub(crate) enum CompletionStopped {}
 
 impl<'context> CompletionFailure<'context> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     fn from_arch(failure: crate::arch::user::UserCompletionFailure<'context>) -> Self {
         let (error, completion) = failure.into_parts();
         Self {
@@ -841,17 +863,30 @@ impl<'context> CompletionFailure<'context> {
     /// execution; dropping it would trigger a second, less diagnostic halt.
     pub(crate) fn abandon_with(self, stop: impl FnOnce(UserEntryError) -> CompletionStopped) -> ! {
         let Self { error, completion } = self;
-        #[cfg(CONFIG_ARCH_AARCH64)]
+        #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         core::mem::forget(completion);
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         let _ = completion;
         match stop(error) {}
     }
 }
 
-#[cfg(all(CONFIG_ARCH_AARCH64, feature = "kernel-self-test"))]
+#[cfg(all(
+    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64),
+    feature = "kernel-self-test"
+))]
 pub(crate) fn direct_native_call_count_for_test() -> usize {
     crate::arch::user::direct_native_call_count_for_test()
+}
+
+#[cfg(all(CONFIG_ARCH_RISCV64, feature = "kernel-self-test"))]
+pub(crate) fn native_register_test_program_for_test() -> &'static [u8] {
+    crate::arch::user::native_register_test_program_for_test()
+}
+
+#[cfg(all(CONFIG_ARCH_RISCV64, feature = "kernel-self-test"))]
+pub(crate) fn native_fault_test_programs_for_test() -> [&'static [u8]; 2] {
+    crate::arch::user::native_fault_test_programs_for_test()
 }
 
 /// Copies from machine-visible memory using the selected architecture seam.
@@ -865,14 +900,14 @@ pub(crate) unsafe fn copy_from_exposed(
     destination: *mut u8,
     length: usize,
 ) -> Result<(), ExposedCopyError> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         // SAFETY: The caller provides the contract forwarded unchanged to the
-        // selected AArch64 external-memory implementation.
+        // selected external-memory implementation.
         unsafe { crate::arch::user::copy_from_exposed(source, destination, length) };
         Ok(())
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (source, destination, length);
         Err(ExposedCopyError)
@@ -890,13 +925,13 @@ pub(crate) unsafe fn copy_to_exposed(
     destination: *mut u8,
     length: usize,
 ) -> Result<(), ExposedCopyError> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     {
         // SAFETY: The caller provides the forwarded external-memory contract.
         unsafe { crate::arch::user::copy_to_exposed(source, destination, length) };
         Ok(())
     }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (source, destination, length);
         Err(ExposedCopyError)

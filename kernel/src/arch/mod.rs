@@ -31,6 +31,6 @@ pub(crate) mod irq;
 pub(crate) mod memory;
 pub(crate) mod platform;
 pub(crate) mod time;
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "riscv64"))]
 pub(crate) mod user;
 pub(crate) mod vm;

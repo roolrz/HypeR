@@ -16,6 +16,7 @@ than every historical RISC-V board:
 - Zicbom cache-block management with a DT-described CBO block size
 - SBI base, TIME, IPI, RFENCE, HSM, and SRST firmware services
 - QEMU `virt`, OpenSBI, PLIC, ACLINT timers, and NS16550 early console
+- Goldfish RTC for the UTC clock exposed through Native APIs and Rust std
 - four host harts with standalone kernel mechanism tests
 
 HypeR validates every enabled hart for H, F, D, SSTC, and Zicbom and requires a
@@ -29,6 +30,20 @@ small architecture assembly set with RV64GC+H but `-mabi=lp64`, keeping object
 ABIs compatible while isolating H, F, D, and Zicbom instructions. Guest
 floating-point state is initialized deterministically and has an explicit
 save/restore context.
+
+Native applications use RV64GC LP64D through the installed RISC-V SDK, with
+static or dynamic linking and the HypeR Rust std port. A dedicated U-mode trap
+entry retains all integer registers, all 32 floating-point registers, and FCSR.
+The runtime owns `tp`; kernel Rust executes with the restored host `gp`/`tp`.
+Native calls use `ecall`, `a7` for the operation, `a0`–`a5` for arguments,
+and `a0`–`a2` for status and results.
+
+Native roots use the lower Sv39 canonical half for user mappings and share
+supervisor-only kernel mappings in the upper half. ASID capacity is probed on
+every admitted hart; implementations without hardware ASIDs retain software
+identifier generations and flush untagged translations. Root replacement and
+retirement use acknowledged CPU-local requests through the common residency
+owner. Each consuming hart synchronizes its instruction stream before entry.
 
 ## Architecture boundaries
 
@@ -46,11 +61,13 @@ backend can add virtual IMSIC state behind that RISC-V implementation.
 
 ## Runtime validation
 
-CI boots a four-hart HypeR host with a minimal empty ramfs and runs standalone
-kernel self-tests. It does not download or boot Linux. The old kernel-resident
-Linux loader has been removed; guest boot acceptance will return when RISC-V
-Native execution and the userspace VMM are implemented. Guest translation and
-interrupt mechanisms remain available for focused kernel tests.
+CI runs standalone four-hart kernel self-tests and separate one/four-hart
+Native application acceptance. Native acceptance boots init, console/session
+services and shell, and exercises static/dynamic std, threads, filesystem tools
+and console input. The RISC-V service manifest has no VM fleet and init receives
+no VM creation authority. The old kernel-resident Linux loader has been removed;
+Linux acceptance requires the userspace VM lifecycle and platform integration.
+Guest translation and interrupt mechanisms remain available for focused kernel tests.
 
 ## Current limitations
 
@@ -62,8 +79,9 @@ interrupt mechanisms remain available for focused kernel tests.
 - The Native userspace VM platform and Linux boot acceptance are not yet available.
 - Guest WFI currently traps to HS and resumes cooperatively. A scheduler-aware
   blocked-vCPU path is required before guest timeslicing.
-- Stage-1 and active stage-2 invalidation use SBI RFENCE for every other online
-  hart; local `SFENCE.VMA` and `HFENCE.GVMA` are never treated as shootdowns.
+- Shared kernel stage-1 and active guest stage-2 invalidation use SBI RFENCE
+  for other online harts. Native roots use the acknowledged residency protocol
+  described above; a local fence alone is never treated as a shootdown.
 - Cache publication and invalidation use Zicbom CBOs bracketed by full
   memory-and-I/O fences. Firmware must permit HS-mode CBO execution through the
   corresponding environment configuration.
