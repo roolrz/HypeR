@@ -46,6 +46,10 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_STATUS_NOT_FOUND (-INT64_C(16))
 #define HYPER_NATIVE_STATUS_ALREADY_EXISTS (-INT64_C(17))
 #define HYPER_NATIVE_STATUS_NOT_EMPTY (-INT64_C(18))
+#define HYPER_NATIVE_STATUS_NOT_DIRECTORY (-INT64_C(19))
+#define HYPER_NATIVE_STATUS_IS_DIRECTORY (-INT64_C(20))
+#define HYPER_NATIVE_STATUS_SYMLINK_LOOP (-INT64_C(21))
+#define HYPER_NATIVE_STATUS_CROSS_DEVICE (-INT64_C(22))
 
 #define HYPER_NATIVE_OBJECT_NONE UINT32_C(0)
 #define HYPER_NATIVE_OBJECT_EVENT UINT32_C(1)
@@ -143,8 +147,10 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR (UINT64_C(1) << 27)
 #define HYPER_NATIVE_RIGHT_DERIVE (UINT64_C(1) << 28)
 #define HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE (UINT64_C(1) << 29)
+#define HYPER_NATIVE_RIGHT_SET_ATTRIBUTES (UINT64_C(1) << 31)
+#define HYPER_NATIVE_RIGHT_LOCK_FILE (UINT64_C(1) << 32)
 
-#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x7fffffff)
+#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1ffffffff)
 
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_WRITABLE (UINT64_C(1) << 1)
@@ -368,6 +374,24 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_WAIT_SET_WAIT UINT64_C(92)
 #define HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID UINT64_C(93)
 #define HYPER_NATIVE_SYS_VIRTUAL_SERIAL_ACKNOWLEDGE_OUTPUT UINT64_C(94)
+#define HYPER_NATIVE_SYS_DIRECTORY_SCOPE_CREATE UINT64_C(95)
+#define HYPER_NATIVE_SYS_DIRECTORY_GET_METADATA UINT64_C(96)
+#define HYPER_NATIVE_SYS_FILE_GET_METADATA UINT64_C(97)
+#define HYPER_NATIVE_SYS_DIRECTORY_GET_SELF_METADATA UINT64_C(98)
+#define HYPER_NATIVE_SYS_DIRECTORY_SET_METADATA UINT64_C(99)
+#define HYPER_NATIVE_SYS_FILE_SET_METADATA UINT64_C(100)
+#define HYPER_NATIVE_SYS_DIRECTORY_RENAME UINT64_C(101)
+#define HYPER_NATIVE_SYS_DIRECTORY_LINK UINT64_C(102)
+#define HYPER_NATIVE_SYS_DIRECTORY_SYMLINK UINT64_C(103)
+#define HYPER_NATIVE_SYS_DIRECTORY_READ_LINK UINT64_C(104)
+#define HYPER_NATIVE_SYS_DIRECTORY_CANONICALIZE UINT64_C(105)
+#define HYPER_NATIVE_SYS_DIRECTORY_REMOVE_IF UINT64_C(106)
+#define HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY_NOFOLLOW UINT64_C(107)
+#define HYPER_NATIVE_SYS_FILE_SYNC UINT64_C(108)
+#define HYPER_NATIVE_SYS_FILE_LOCK UINT64_C(109)
+#define HYPER_NATIVE_SYS_FILE_UNLOCK UINT64_C(110)
+#define HYPER_NATIVE_SYS_CLOCK_GET_REALTIME UINT64_C(111)
+#define HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS UINT64_C(112)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -390,6 +414,74 @@ static inline uint64_t hyper_native_failure_result_mask(
     }
     return UINT64_C(0);
 }
+
+#define HYPER_NATIVE_FILE_METADATA_MIN_SIZE UINT64_C(112)
+typedef struct hyper_native_file_metadata_t {
+    uint64_t filesystem_id;
+    uint64_t mount_id;
+    uint64_t node_id;
+    uint64_t size;
+    uint32_t mode;
+    uint32_t kind;
+    uint32_t valid_times;
+    uint32_t reserved;
+    int64_t accessed_seconds;
+    uint32_t accessed_nanoseconds;
+    uint32_t accessed_reserved;
+    int64_t modified_seconds;
+    uint32_t modified_nanoseconds;
+    uint32_t modified_reserved;
+    int64_t created_seconds;
+    uint32_t created_nanoseconds;
+    uint32_t created_reserved;
+    int64_t changed_seconds;
+    uint32_t changed_nanoseconds;
+    uint32_t changed_reserved;
+} hyper_native_file_metadata_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_file_metadata_t) == 112, "file_metadata size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_file_metadata_t) == 8, "file_metadata alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, filesystem_id) == 0, "file_metadata.filesystem_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, mount_id) == 8, "file_metadata.mount_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, node_id) == 16, "file_metadata.node_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, size) == 24, "file_metadata.size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, mode) == 32, "file_metadata.mode offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, kind) == 36, "file_metadata.kind offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, valid_times) == 40, "file_metadata.valid_times offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, reserved) == 44, "file_metadata.reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, accessed_seconds) == 48, "file_metadata.accessed_seconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, accessed_nanoseconds) == 56, "file_metadata.accessed_nanoseconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, accessed_reserved) == 60, "file_metadata.accessed_reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, modified_seconds) == 64, "file_metadata.modified_seconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, modified_nanoseconds) == 72, "file_metadata.modified_nanoseconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, modified_reserved) == 76, "file_metadata.modified_reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, created_seconds) == 80, "file_metadata.created_seconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, created_nanoseconds) == 88, "file_metadata.created_nanoseconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, created_reserved) == 92, "file_metadata.created_reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, changed_seconds) == 96, "file_metadata.changed_seconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, changed_nanoseconds) == 104, "file_metadata.changed_nanoseconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_t, changed_reserved) == 108, "file_metadata.changed_reserved offset");
+
+#define HYPER_NATIVE_FILE_METADATA_UPDATE_MIN_SIZE UINT64_C(40)
+typedef struct hyper_native_file_metadata_update_t {
+    uint32_t mask;
+    uint32_t mode;
+    int64_t accessed_seconds;
+    uint32_t accessed_nanoseconds;
+    uint32_t accessed_reserved;
+    int64_t modified_seconds;
+    uint32_t modified_nanoseconds;
+    uint32_t modified_reserved;
+} hyper_native_file_metadata_update_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_file_metadata_update_t) == 40, "file_metadata_update size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_file_metadata_update_t) == 8, "file_metadata_update alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_update_t, mask) == 0, "file_metadata_update.mask offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_update_t, mode) == 4, "file_metadata_update.mode offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_update_t, accessed_seconds) == 8, "file_metadata_update.accessed_seconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_update_t, accessed_nanoseconds) == 16, "file_metadata_update.accessed_nanoseconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_update_t, accessed_reserved) == 20, "file_metadata_update.accessed_reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_update_t, modified_seconds) == 24, "file_metadata_update.modified_seconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_update_t, modified_nanoseconds) == 32, "file_metadata_update.modified_nanoseconds offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_file_metadata_update_t, modified_reserved) == 36, "file_metadata_update.modified_reserved offset");
 
 #define HYPER_NATIVE_WAIT_SET_EVENT_MIN_SIZE UINT64_C(24)
 typedef struct hyper_native_wait_set_event_t {

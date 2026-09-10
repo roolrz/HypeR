@@ -30,6 +30,10 @@ pub const HYPER_NATIVE_STATUS_PEER_CLOSED: HyperNativeStatus = -15;
 pub const HYPER_NATIVE_STATUS_NOT_FOUND: HyperNativeStatus = -16;
 pub const HYPER_NATIVE_STATUS_ALREADY_EXISTS: HyperNativeStatus = -17;
 pub const HYPER_NATIVE_STATUS_NOT_EMPTY: HyperNativeStatus = -18;
+pub const HYPER_NATIVE_STATUS_NOT_DIRECTORY: HyperNativeStatus = -19;
+pub const HYPER_NATIVE_STATUS_IS_DIRECTORY: HyperNativeStatus = -20;
+pub const HYPER_NATIVE_STATUS_SYMLINK_LOOP: HyperNativeStatus = -21;
+pub const HYPER_NATIVE_STATUS_CROSS_DEVICE: HyperNativeStatus = -22;
 
 pub const HYPER_NATIVE_OBJECT_NONE: u32 = 0;
 pub const HYPER_NATIVE_OBJECT_EVENT: u32 = 1;
@@ -131,8 +135,10 @@ pub const HYPER_NATIVE_RIGHT_TASK_GROUP_ATTACH_PROCESS: u64 = 1_u64 << 26;
 pub const HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR: u64 = 1_u64 << 27;
 pub const HYPER_NATIVE_RIGHT_DERIVE: u64 = 1_u64 << 28;
 pub const HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1_u64 << 29;
+pub const HYPER_NATIVE_RIGHT_SET_ATTRIBUTES: u64 = 1_u64 << 31;
+pub const HYPER_NATIVE_RIGHT_LOCK_FILE: u64 = 1_u64 << 32;
 
-pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x7fffffff;
+pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1ffffffff;
 
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_WRITABLE: u64 = 1_u64 << 1;
@@ -356,6 +362,24 @@ pub const HYPER_NATIVE_SYS_WAIT_SET_REMOVE: u64 = 91;
 pub const HYPER_NATIVE_SYS_WAIT_SET_WAIT: u64 = 92;
 pub const HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID: u64 = 93;
 pub const HYPER_NATIVE_SYS_VIRTUAL_SERIAL_ACKNOWLEDGE_OUTPUT: u64 = 94;
+pub const HYPER_NATIVE_SYS_DIRECTORY_SCOPE_CREATE: u64 = 95;
+pub const HYPER_NATIVE_SYS_DIRECTORY_GET_METADATA: u64 = 96;
+pub const HYPER_NATIVE_SYS_FILE_GET_METADATA: u64 = 97;
+pub const HYPER_NATIVE_SYS_DIRECTORY_GET_SELF_METADATA: u64 = 98;
+pub const HYPER_NATIVE_SYS_DIRECTORY_SET_METADATA: u64 = 99;
+pub const HYPER_NATIVE_SYS_FILE_SET_METADATA: u64 = 100;
+pub const HYPER_NATIVE_SYS_DIRECTORY_RENAME: u64 = 101;
+pub const HYPER_NATIVE_SYS_DIRECTORY_LINK: u64 = 102;
+pub const HYPER_NATIVE_SYS_DIRECTORY_SYMLINK: u64 = 103;
+pub const HYPER_NATIVE_SYS_DIRECTORY_READ_LINK: u64 = 104;
+pub const HYPER_NATIVE_SYS_DIRECTORY_CANONICALIZE: u64 = 105;
+pub const HYPER_NATIVE_SYS_DIRECTORY_REMOVE_IF: u64 = 106;
+pub const HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY_NOFOLLOW: u64 = 107;
+pub const HYPER_NATIVE_SYS_FILE_SYNC: u64 = 108;
+pub const HYPER_NATIVE_SYS_FILE_LOCK: u64 = 109;
+pub const HYPER_NATIVE_SYS_FILE_UNLOCK: u64 = 110;
+pub const HYPER_NATIVE_SYS_CLOCK_GET_REALTIME: u64 = 111;
+pub const HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS: u64 = 112;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -369,6 +393,82 @@ pub const fn hyper_native_failure_result_mask(
         _ => 0,
     }
 }
+
+pub const HYPER_NATIVE_FILE_METADATA_MIN_SIZE: usize = 112;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeFileMetadata {
+    pub filesystem_id: u64,
+    pub mount_id: u64,
+    pub node_id: u64,
+    pub size: u64,
+    pub mode: u32,
+    pub kind: u32,
+    pub valid_times: u32,
+    pub reserved: u32,
+    pub accessed_seconds: i64,
+    pub accessed_nanoseconds: u32,
+    pub accessed_reserved: u32,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: u32,
+    pub modified_reserved: u32,
+    pub created_seconds: i64,
+    pub created_nanoseconds: u32,
+    pub created_reserved: u32,
+    pub changed_seconds: i64,
+    pub changed_nanoseconds: u32,
+    pub changed_reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeFileMetadata>() == 112);
+const _: () = assert!(core::mem::align_of::<HyperNativeFileMetadata>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, filesystem_id) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, mount_id) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, node_id) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, size) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, mode) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, kind) == 36);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, valid_times) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, reserved) == 44);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, accessed_seconds) == 48);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, accessed_nanoseconds) == 56);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, accessed_reserved) == 60);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, modified_seconds) == 64);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, modified_nanoseconds) == 72);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, modified_reserved) == 76);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, created_seconds) == 80);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, created_nanoseconds) == 88);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, created_reserved) == 92);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, changed_seconds) == 96);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, changed_nanoseconds) == 104);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadata, changed_reserved) == 108);
+
+pub const HYPER_NATIVE_FILE_METADATA_UPDATE_MIN_SIZE: usize = 40;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeFileMetadataUpdate {
+    pub mask: u32,
+    pub mode: u32,
+    pub accessed_seconds: i64,
+    pub accessed_nanoseconds: u32,
+    pub accessed_reserved: u32,
+    pub modified_seconds: i64,
+    pub modified_nanoseconds: u32,
+    pub modified_reserved: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeFileMetadataUpdate>() == 40);
+const _: () = assert!(core::mem::align_of::<HyperNativeFileMetadataUpdate>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadataUpdate, mask) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadataUpdate, mode) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadataUpdate, accessed_seconds) == 8);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeFileMetadataUpdate, accessed_nanoseconds) == 16);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeFileMetadataUpdate, accessed_reserved) == 20);
+const _: () = assert!(core::mem::offset_of!(HyperNativeFileMetadataUpdate, modified_seconds) == 24);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeFileMetadataUpdate, modified_nanoseconds) == 32);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeFileMetadataUpdate, modified_reserved) == 36);
 
 pub const HYPER_NATIVE_WAIT_SET_EVENT_MIN_SIZE: usize = 24;
 #[repr(C)]

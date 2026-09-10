@@ -284,8 +284,25 @@ hyper_native_status_t hyper_thread_yield(void);
 _Noreturn void hyper_thread_exit(int64_t status);
 _Noreturn void hyper_process_exit(int64_t status);
 
+hyper_call_result_t hyper_directory_scope_create(hyper_native_handle_t root, hyper_native_handle_t start, uint64_t rights);
+hyper_call_result_t hyper_directory_get_metadata(hyper_native_handle_t directory, const void * path, size_t path_length, uint32_t options, hyper_native_file_metadata_t * output, size_t output_size);
+hyper_call_result_t hyper_file_get_metadata(hyper_native_handle_t file, hyper_native_file_metadata_t * output, size_t output_size);
+hyper_call_result_t hyper_directory_get_self_metadata(hyper_native_handle_t directory, hyper_native_file_metadata_t * output, size_t output_size);
+hyper_call_result_t hyper_directory_set_metadata(hyper_native_handle_t directory, const void * path, size_t path_length, uint32_t options, const hyper_native_file_metadata_update_t * input, size_t input_size);
+hyper_call_result_t hyper_file_set_metadata(hyper_native_handle_t file, const hyper_native_file_metadata_update_t * input, size_t input_size);
+hyper_call_result_t hyper_directory_rename(hyper_native_handle_t source, const void * path, size_t path_length, hyper_native_handle_t destination, const void * new_path, size_t new_path_length);
+hyper_call_result_t hyper_directory_link(hyper_native_handle_t source, const void * path, size_t path_length, hyper_native_handle_t destination, const void * new_path, size_t new_path_length);
+hyper_call_result_t hyper_directory_symlink(hyper_native_handle_t directory, const void * path, size_t path_length, const void * target, size_t target_length);
+hyper_call_result_t hyper_directory_read_link(hyper_native_handle_t directory, const void * path, size_t path_length, void * output, size_t capacity);
+hyper_call_result_t hyper_directory_canonicalize(hyper_native_handle_t directory, const void * path, size_t path_length, void * output, size_t capacity);
+hyper_call_result_t hyper_directory_remove_if(hyper_native_handle_t directory, const void * path, size_t path_length, uint32_t options, uint64_t expected_node_id);
+hyper_call_result_t hyper_directory_open_directory_nofollow(hyper_native_handle_t directory, const void * path, size_t path_length, uint64_t rights);
+hyper_call_result_t hyper_file_sync(hyper_native_handle_t file, uint32_t scope);
+hyper_call_result_t hyper_file_lock(hyper_native_handle_t file, uint32_t mode, uint64_t deadline);
+hyper_call_result_t hyper_file_unlock(hyper_native_handle_t file);
+hyper_call_result_t hyper_clock_get_realtime(void);
+hyper_call_result_t hyper_directory_open_file_with_options(hyper_native_handle_t directory, const void * path, size_t path_length, uint64_t rights, uint32_t options, uint32_t mode);
 #ifdef __cplusplus
 }
 #endif
-
 #endif /* HYPER_SYSCALL_H */

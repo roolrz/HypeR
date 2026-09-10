@@ -2151,3 +2151,441 @@ pub unsafe fn process_get_current_id() -> CallResult {
         )
     }
 }
+
+/// Invokes Native `directory_scope_create`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_scope_create(
+    root: abi::HyperNativeHandle,
+    start: abi::HyperNativeHandle,
+    rights: u64,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_SCOPE_CREATE,
+            root,
+            start,
+            rights,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_get_metadata`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_get_metadata(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    options: u32,
+    output: *mut abi::HyperNativeFileMetadata,
+    output_size: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_GET_METADATA,
+            directory,
+            path as u64,
+            path_length as u64,
+            options as u64,
+            output as u64,
+            output_size as u64,
+        )
+    }
+}
+
+/// Invokes Native `file_get_metadata`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn file_get_metadata(
+    file: abi::HyperNativeHandle,
+    output: *mut abi::HyperNativeFileMetadata,
+    output_size: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_FILE_GET_METADATA,
+            file,
+            output as u64,
+            output_size as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_get_self_metadata`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_get_self_metadata(
+    directory: abi::HyperNativeHandle,
+    output: *mut abi::HyperNativeFileMetadata,
+    output_size: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_GET_SELF_METADATA,
+            directory,
+            output as u64,
+            output_size as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_set_metadata`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_set_metadata(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    options: u32,
+    input: *const abi::HyperNativeFileMetadataUpdate,
+    input_size: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_SET_METADATA,
+            directory,
+            path as u64,
+            path_length as u64,
+            options as u64,
+            input as u64,
+            input_size as u64,
+        )
+    }
+}
+
+/// Invokes Native `file_set_metadata`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn file_set_metadata(
+    file: abi::HyperNativeHandle,
+    input: *const abi::HyperNativeFileMetadataUpdate,
+    input_size: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_FILE_SET_METADATA,
+            file,
+            input as u64,
+            input_size as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_rename`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_rename(
+    source: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    destination: abi::HyperNativeHandle,
+    new_path: *const u8,
+    new_path_length: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_RENAME,
+            source,
+            path as u64,
+            path_length as u64,
+            destination,
+            new_path as u64,
+            new_path_length as u64,
+        )
+    }
+}
+
+/// Invokes Native `directory_link`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_link(
+    source: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    destination: abi::HyperNativeHandle,
+    new_path: *const u8,
+    new_path_length: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_LINK,
+            source,
+            path as u64,
+            path_length as u64,
+            destination,
+            new_path as u64,
+            new_path_length as u64,
+        )
+    }
+}
+
+/// Invokes Native `directory_symlink`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_symlink(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    target: *const u8,
+    target_length: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_SYMLINK,
+            directory,
+            path as u64,
+            path_length as u64,
+            target as u64,
+            target_length as u64,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_read_link`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_read_link(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    output: *mut u8,
+    capacity: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_READ_LINK,
+            directory,
+            path as u64,
+            path_length as u64,
+            output as u64,
+            capacity as u64,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_canonicalize`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_canonicalize(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    output: *mut u8,
+    capacity: usize,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_CANONICALIZE,
+            directory,
+            path as u64,
+            path_length as u64,
+            output as u64,
+            capacity as u64,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_remove_if`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_remove_if(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    options: u32,
+    expected_node_id: u64,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_REMOVE_IF,
+            directory,
+            path as u64,
+            path_length as u64,
+            options as u64,
+            expected_node_id,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `directory_open_directory_nofollow`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_open_directory_nofollow(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    rights: u64,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY_NOFOLLOW,
+            directory,
+            path as u64,
+            path_length as u64,
+            rights,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `file_sync`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn file_sync(file: abi::HyperNativeHandle, scope: u32) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_FILE_SYNC,
+            file,
+            scope as u64,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `file_lock`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn file_lock(file: abi::HyperNativeHandle, mode: u32, deadline: u64) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_FILE_LOCK,
+            file,
+            mode as u64,
+            deadline,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Invokes Native `file_unlock`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn file_unlock(file: abi::HyperNativeHandle) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_FILE_UNLOCK, file, 0, 0, 0, 0, 0) }
+}
+
+/// Invokes Native `clock_get_realtime`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn clock_get_realtime() -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_CLOCK_GET_REALTIME, 0, 0, 0, 0, 0, 0) }
+}
+
+/// Invokes Native `directory_open_file_with_options`.
+///
+/// # Safety
+/// Borrowed handles must stay live with required rights. Input pointers must
+/// reference readable initialized records or the specified byte ranges; output
+/// pointers must exclusively reference writable records or byte ranges.
+pub unsafe fn directory_open_file_with_options(
+    directory: abi::HyperNativeHandle,
+    path: *const u8,
+    path_length: usize,
+    rights: u64,
+    options: u32,
+    mode: u32,
+) -> CallResult {
+    // SAFETY: the caller establishes handle lifetime and buffer validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS,
+            directory,
+            path as u64,
+            path_length as u64,
+            rights,
+            options as u64,
+            mode as u64,
+        )
+    }
+}

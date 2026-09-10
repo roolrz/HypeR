@@ -39,6 +39,7 @@ pub struct Entry<'a> {
     name: &'a str,
     data: &'a [u8],
     mode: u32,
+    modified_seconds: u32,
     kind: EntryKind,
 }
 
@@ -53,6 +54,10 @@ impl<'a> Entry<'a> {
 
     pub const fn mode(&self) -> u32 {
         self.mode
+    }
+
+    pub const fn modified_seconds(&self) -> u32 {
+        self.modified_seconds
     }
 
     pub const fn kind(&self) -> EntryKind {
@@ -148,6 +153,7 @@ fn parse_entry(bytes: &[u8], offset: usize) -> Result<Parsed<'_>, Error> {
         _ => return Err(Error::InvalidMagic),
     };
     let mode = parse_hex(field(header, 14)?)?;
+    let modified_seconds = parse_hex(field(header, 46)?)?;
     let file_size =
         usize::try_from(parse_hex(field(header, 54)?)?).map_err(|_| Error::ArithmeticOverflow)?;
     let name_size =
@@ -202,6 +208,7 @@ fn parse_entry(bytes: &[u8], offset: usize) -> Result<Parsed<'_>, Error> {
             name,
             data,
             mode,
+            modified_seconds,
             kind,
         },
         next,

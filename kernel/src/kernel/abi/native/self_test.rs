@@ -95,6 +95,7 @@ pub(crate) enum SelfTestError {
 
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
+    super::fs_handlers::run_wire_self_test().map_err(|_| SelfTestError::RecordEncoding)?;
     use core::cell::Cell;
 
     struct RejectingServices {
@@ -337,6 +338,132 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     }
 
     impl VfsServices for RejectingServices {
+        fn directory_scope_create(
+            &self,
+            _root: HandleValue,
+            _start: HandleValue,
+            _rights: Rights,
+        ) -> Result<HandleValue, VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_get_metadata(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+            _follow: bool,
+        ) -> Result<crate::kernel::vfs::Metadata, VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn file_get_metadata(
+            &self,
+            _file: HandleValue,
+        ) -> Result<crate::kernel::vfs::Metadata, VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_get_self_metadata(
+            &self,
+            _directory: HandleValue,
+        ) -> Result<crate::kernel::vfs::Metadata, VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_set_metadata(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+            _follow: bool,
+            _update: crate::kernel::vfs::MetadataUpdate,
+        ) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn file_set_metadata(
+            &self,
+            _file: HandleValue,
+            _update: crate::kernel::vfs::MetadataUpdate,
+        ) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_rename(
+            &self,
+            _source: HandleValue,
+            _path: UserSlice,
+            _destination: HandleValue,
+            _new_path: UserSlice,
+        ) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_link(
+            &self,
+            _source: HandleValue,
+            _path: UserSlice,
+            _destination: HandleValue,
+            _new_path: UserSlice,
+        ) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_symlink(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+            _target: UserSlice,
+        ) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_read_link(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+        ) -> Result<crate::kernel::vfs::ScratchVec<u8>, VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_canonicalize(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+        ) -> Result<crate::kernel::vfs::ScratchString, VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_remove_if(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+            _is_directory: bool,
+            _expected: u64,
+        ) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_open_directory_nofollow(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+            _rights: Rights,
+        ) -> Result<HandleValue, VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn file_sync(&self, _file: HandleValue, _scope: u64) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn file_lock(
+            &self,
+            _file: HandleValue,
+            _mode: crate::kernel::vfs::locks::LockMode,
+            _deadline: u64,
+        ) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn file_unlock(&self, _file: HandleValue) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+        fn directory_open_file_with_options(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+            _rights: Rights,
+            _options: u64,
+            _mode: u32,
+        ) -> Result<HandleValue, VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+
         fn create_file(
             &self,
             _directory: HandleValue,

@@ -248,6 +248,8 @@ impl Rights {
         Self(hyper_abi::HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR);
     pub const DERIVE: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_DERIVE);
     pub const BIND_WAIT: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_BIND_WAIT);
+    pub const SET_ATTRIBUTES: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_SET_ATTRIBUTES);
+    pub const LOCK_FILE: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_LOCK_FILE);
     pub const CREATE_VIRTUAL_MACHINE: Self =
         Self(hyper_abi::HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE);
 

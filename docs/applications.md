@@ -26,8 +26,9 @@ stdout and stderr into one terminal queue before displaying its next prompt.
 `echo` is an ordinary application, not a second implementation inside the shell.
 
 Native std provides `std::os::hyper::fs::MetadataExt::mode()` for permission and
-special mode bits. File type is queried separately. Native VFS currently has no
-symbolic links, so `metadata` and `symlink_metadata` have equivalent behavior.
+special mode bits. File type is queried separately. `metadata` follows symbolic
+links; `symlink_metadata` inspects the final link itself.
+`std::os::hyper::fs` supplies Native symlink and permission extensions.
 
 ## Named virtual machines
 
@@ -85,8 +86,8 @@ fails afterward, the definitions remain visible with the failed VM state.
 `vmm load FILE` imports a config into the running manager. Existing names are
 rejected; a rejected batch adds no definitions. `vmm create` changes the running
 manager only. `vmm save FILE` writes its current definitions to a **new** config
-file. It refuses to overwrite an existing file because Native VFS does not yet
-provide atomic rename. Failed writes remove the new file. Saved files can be
+file. It refuses to overwrite an existing configuration. Failed writes remove
+the new file. Saved files can be
 inspected with `cat` and later imported with `vmm load`.
 
 The current filesystem is ramfs: all changes, including saved configurations,

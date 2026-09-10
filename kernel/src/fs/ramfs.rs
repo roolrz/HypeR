@@ -50,6 +50,7 @@ pub struct Node<'archive> {
     name: &'archive str,
     data: &'archive [u8],
     attributes: NodeAttributes,
+    modified_seconds: Option<u32>,
 }
 
 impl<'archive> Node<'archive> {
@@ -85,6 +86,10 @@ impl<'archive> Node<'archive> {
 
     pub const fn attributes(self) -> NodeAttributes {
         self.attributes
+    }
+
+    pub const fn modified_seconds(self) -> Option<u32> {
+        self.modified_seconds
     }
 
     pub const fn is_executable(self) -> bool {
@@ -161,6 +166,7 @@ struct Candidate<'archive> {
     mode: u32,
     kind: NodeKind,
     implicit: bool,
+    modified_seconds: Option<u32>,
 }
 
 pub struct RamFs<'archive> {
@@ -185,6 +191,7 @@ impl<'archive> RamFs<'archive> {
                 entry.data(),
                 entry.mode(),
                 map_kind(entry.kind()),
+                entry.modified_seconds(),
             )?;
         }
         build_filesystem(normalize_candidates(candidates)?)
@@ -334,6 +341,7 @@ fn build_filesystem<'archive>(
         name: "",
         data: &[],
         attributes: NodeAttributes::new(NodeKind::Directory, SYNTHETIC_DIRECTORY_MODE, 0),
+        modified_seconds: None,
     });
     for (index, candidate) in candidates.iter().enumerate() {
         let id = node_id_for_index(index.checked_add(1).ok_or(Error::TooManyNodes)?)?;
@@ -354,6 +362,7 @@ fn build_filesystem<'archive>(
             name,
             data: candidate.data,
             attributes: NodeAttributes::new(candidate.kind, candidate.mode, size),
+            modified_seconds: candidate.modified_seconds,
         });
     }
 
@@ -393,6 +402,7 @@ fn insert_archive_entry<'archive>(
     data: &'archive [u8],
     mode: u32,
     kind: NodeKind,
+    modified_seconds: u32,
 ) -> Result<(), Error> {
     for (separator, _) in path.match_indices('/') {
         let prefix = path.get(..separator).ok_or(Error::InvalidPath)?;
@@ -411,6 +421,7 @@ fn insert_archive_entry<'archive>(
             mode,
             kind,
             implicit: false,
+            modified_seconds: Some(modified_seconds),
         },
     )
 }
@@ -423,6 +434,7 @@ impl<'archive> Candidate<'archive> {
             mode: SYNTHETIC_DIRECTORY_MODE,
             kind: NodeKind::Directory,
             implicit: true,
+            modified_seconds: None,
         }
     }
 }

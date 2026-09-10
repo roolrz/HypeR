@@ -7,10 +7,10 @@ use crate::fs::TryLockError;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
 use crate::path::{Path, PathBuf};
 use crate::sync::{Arc, Mutex};
-use crate::sys::AsInner;
 pub use crate::sys::fs::common::{Dir, exists};
 use crate::sys::pal::{cvt, ffi, unsupported};
 use crate::sys::time::SystemTime;
+use crate::vec::Vec;
 
 #[derive(Debug)]
 struct Handle(u64);
@@ -39,7 +39,10 @@ pub struct OpenOptions {
     bits: u32,
 }
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FileTimes;
+pub struct FileTimes {
+    accessed: Option<SystemTime>,
+    modified: Option<SystemTime>,
+}
 #[derive(Debug)]
 pub struct DirBuilder;
 
@@ -52,7 +55,9 @@ fn path_bytes(path: &Path) -> io::Result<&[u8]> {
 }
 
 impl FileAttr {
-    pub fn mode(&self) -> u32 { self.0.mode }
+    pub fn mode(&self) -> u32 {
+        self.0.mode
+    }
     pub fn size(&self) -> u64 {
         self.0.size
     }
@@ -63,16 +68,37 @@ impl FileAttr {
         FileType(self.0.kind)
     }
     pub fn modified(&self) -> io::Result<SystemTime> {
-        unsupported()
+        metadata_time(
+            self.0.valid_times,
+            2,
+            self.0.modified_seconds,
+            self.0.modified_nanoseconds,
+        )
     }
     pub fn accessed(&self) -> io::Result<SystemTime> {
-        unsupported()
+        metadata_time(
+            self.0.valid_times,
+            1,
+            self.0.accessed_seconds,
+            self.0.accessed_nanoseconds,
+        )
     }
     pub fn created(&self) -> io::Result<SystemTime> {
-        unsupported()
+        metadata_time(
+            self.0.valid_times,
+            4,
+            self.0.created_seconds,
+            self.0.created_nanoseconds,
+        )
     }
 }
 impl FilePermissions {
+    pub fn mode(&self) -> u32 {
+        self.0
+    }
+    pub fn from_mode(mode: u32) -> Self {
+        Self(mode)
+    }
     pub fn readonly(&self) -> bool {
         self.0 & 0o222 == 0
     }
@@ -96,8 +122,24 @@ impl FileType {
     }
 }
 impl FileTimes {
-    pub fn set_accessed(&mut self, _: SystemTime) {}
-    pub fn set_modified(&mut self, _: SystemTime) {}
+    pub fn set_accessed(&mut self, time: SystemTime) {
+        self.accessed = Some(time);
+    }
+    pub fn set_modified(&mut self, time: SystemTime) {
+        self.modified = Some(time);
+    }
+    fn update(self) -> ffi::FileUpdate {
+        let mut update = ffi::FileUpdate::default();
+        if let Some(time) = self.accessed {
+            update.mask |= 2;
+            (update.accessed_seconds, update.accessed_nanoseconds) = time.native();
+        }
+        if let Some(time) = self.modified {
+            update.mask |= 4;
+            (update.modified_seconds, update.modified_nanoseconds) = time.native();
+        }
+        update
+    }
 }
 impl OpenOptions {
     pub fn new() -> Self {
@@ -148,28 +190,40 @@ impl File {
     pub fn file_attr(&self) -> io::Result<FileAttr> {
         let mut info = ffi::FileInfo::default();
         cvt(unsafe { ffi::__hyper_std_fs_info(self.0.handle.0, &mut info) })?;
-        Ok(FileAttr(info))
+        FileAttr::checked(info)
     }
     pub fn fsync(&self) -> io::Result<()> {
-        unsupported()
+        cvt(unsafe { ffi::__hyper_std_fs_sync(self.0.handle.0, 1) })
     }
     pub fn datasync(&self) -> io::Result<()> {
-        unsupported()
+        cvt(unsafe { ffi::__hyper_std_fs_sync(self.0.handle.0, 0) })
     }
     pub fn lock(&self) -> io::Result<()> {
-        unsupported()
+        self.acquire_lock(1, u64::MAX)
     }
     pub fn lock_shared(&self) -> io::Result<()> {
-        unsupported()
+        self.acquire_lock(0, u64::MAX)
+    }
+    fn acquire_lock(&self, mode: u32, deadline: u64) -> io::Result<()> {
+        cvt(unsafe { ffi::__hyper_std_fs_lock(self.0.handle.0, mode, deadline) })
     }
     pub fn try_lock(&self) -> Result<(), TryLockError> {
-        Err(TryLockError::Error(io::Error::UNSUPPORTED_PLATFORM))
+        self.try_acquire_lock(1)
     }
     pub fn try_lock_shared(&self) -> Result<(), TryLockError> {
-        self.try_lock()
+        self.try_acquire_lock(0)
+    }
+    fn try_acquire_lock(&self, mode: u32) -> Result<(), TryLockError> {
+        match self.acquire_lock(mode, 0) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                Err(TryLockError::WouldBlock)
+            }
+            Err(error) => Err(TryLockError::Error(error)),
+        }
     }
     pub fn unlock(&self) -> io::Result<()> {
-        unsupported()
+        cvt(unsafe { ffi::__hyper_std_fs_unlock(self.0.handle.0) })
     }
     pub fn truncate(&self, size: u64) -> io::Result<()> {
         cvt(unsafe { ffi::__hyper_std_fs_resize(self.0.handle.0, size) })
@@ -256,16 +310,21 @@ impl File {
     pub fn duplicate(&self) -> io::Result<Self> {
         Ok(self.clone())
     }
-    pub fn set_permissions(&self, _: FilePermissions) -> io::Result<()> {
-        unsupported()
+    pub fn set_permissions(&self, permissions: FilePermissions) -> io::Result<()> {
+        let update = ffi::FileUpdate {
+            mask: 1,
+            mode: permissions.0 & 0o7777,
+            ..Default::default()
+        };
+        cvt(unsafe { ffi::__hyper_std_fs_set_info(self.0.handle.0, &update) })
     }
-    pub fn set_times(&self, _: FileTimes) -> io::Result<()> {
-        unsupported()
+    pub fn set_times(&self, times: FileTimes) -> io::Result<()> {
+        cvt(unsafe { ffi::__hyper_std_fs_set_info(self.0.handle.0, &times.update()) })
     }
 }
 
 pub struct ReadDir {
-    handle: Handle,
+    handle: Arc<Handle>,
     path: Arc<PathBuf>,
     entries: [ffi::DirectoryEntry; 4],
     index: usize,
@@ -317,17 +376,20 @@ impl Iterator for ReadDir {
             _ => return Some(Err(io::ErrorKind::InvalidData.into())),
         };
         Some(Ok(DirEntry {
+            directory: self.handle.clone(),
             parent: self.path.clone(),
             name,
             attributes: FileAttr(ffi::FileInfo {
                 size: entry.size,
                 mode: entry.mode,
                 kind: entry.kind,
+                ..Default::default()
             }),
         }))
     }
 }
 pub struct DirEntry {
+    directory: Arc<Handle>,
     parent: Arc<PathBuf>,
     name: OsString,
     attributes: FileAttr,
@@ -340,7 +402,12 @@ impl DirEntry {
         self.name.clone()
     }
     pub fn metadata(&self) -> io::Result<FileAttr> {
-        Ok(self.attributes.clone())
+        let mut info = ffi::FileInfo::default();
+        let name = self.name.as_encoded_bytes();
+        cvt(unsafe {
+            ffi::__hyper_std_fs_stat_at(self.directory.0, name.as_ptr(), name.len(), 1, &mut info)
+        })?;
+        FileAttr::checked(info)
     }
     pub fn file_type(&self) -> io::Result<FileType> {
         Ok(self.attributes.file_type())
@@ -360,7 +427,7 @@ pub fn readdir(path: &Path) -> io::Result<ReadDir> {
     let mut handle = 0;
     cvt(unsafe { ffi::__hyper_std_fs_directory(bytes.as_ptr(), bytes.len(), &mut handle) })?;
     Ok(ReadDir {
-        handle: Handle(handle),
+        handle: Arc::new(Handle(handle)),
         path: Arc::new(path.to_owned()),
         entries: [ffi::DirectoryEntry::EMPTY; 4],
         index: 0,
@@ -371,8 +438,8 @@ pub fn readdir(path: &Path) -> io::Result<ReadDir> {
 pub fn stat(path: &Path) -> io::Result<FileAttr> {
     let path = path_bytes(path)?;
     let mut info = ffi::FileInfo::default();
-    cvt(unsafe { ffi::__hyper_std_fs_stat(path.as_ptr(), path.len(), &mut info) })?;
-    Ok(FileAttr(info))
+    cvt(unsafe { ffi::__hyper_std_fs_stat(path.as_ptr(), path.len(), 0, &mut info) })?;
+    FileAttr::checked(info)
 }
 pub fn unlink(path: &Path) -> io::Result<()> {
     remove(path, false)
@@ -384,53 +451,314 @@ fn remove(path: &Path, directory: bool) -> io::Result<()> {
     let path = path_bytes(path)?;
     cvt(unsafe { ffi::__hyper_std_fs_remove(path.as_ptr(), path.len(), directory as u32) })
 }
-pub fn rename(_: &Path, _: &Path) -> io::Result<()> {
-    unsupported()
+pub fn rename(from: &Path, to: &Path) -> io::Result<()> {
+    two_paths(from, to, false)
 }
-pub fn set_perm(_: &Path, _: FilePermissions) -> io::Result<()> {
-    unsupported()
+fn two_paths(from: &Path, to: &Path, hardlink: bool) -> io::Result<()> {
+    let from = path_bytes(from)?;
+    let to = path_bytes(to)?;
+    cvt(unsafe {
+        ffi::__hyper_std_fs_rename(
+            from.as_ptr(),
+            from.len(),
+            to.as_ptr(),
+            to.len(),
+            u32::from(hardlink),
+        )
+    })
 }
-pub fn set_times(_: &Path, _: FileTimes) -> io::Result<()> {
-    unsupported()
+pub fn set_perm(path: &Path, permissions: FilePermissions) -> io::Result<()> {
+    let update = ffi::FileUpdate {
+        mask: 1,
+        mode: permissions.0 & 0o7777,
+        ..Default::default()
+    };
+    set_path_info(path, 0, &update)
 }
-pub fn set_times_nofollow(_: &Path, _: FileTimes) -> io::Result<()> {
-    unsupported()
+fn set_path_info(path: &Path, options: u32, update: &ffi::FileUpdate) -> io::Result<()> {
+    let path = path_bytes(path)?;
+    cvt(unsafe { ffi::__hyper_std_fs_set_path_info(path.as_ptr(), path.len(), options, update) })
 }
-pub fn remove_dir_all(_: &Path) -> io::Result<()> {
-    unsupported()
+pub fn set_times(path: &Path, times: FileTimes) -> io::Result<()> {
+    set_path_info(path, 0, &times.update())
 }
-pub fn readlink(_: &Path) -> io::Result<PathBuf> {
-    unsupported()
+pub fn set_times_nofollow(path: &Path, times: FileTimes) -> io::Result<()> {
+    set_path_info(path, 1, &times.update())
 }
-pub fn symlink(_: &Path, _: &Path) -> io::Result<()> {
-    unsupported()
+pub fn readlink(path: &Path) -> io::Result<PathBuf> {
+    path_result(path, false)
 }
-pub fn link(_: &Path, _: &Path) -> io::Result<()> {
-    unsupported()
+pub fn symlink(target: &Path, path: &Path) -> io::Result<()> {
+    let target = path_bytes(target)?;
+    let path = path_bytes(path)?;
+    cvt(unsafe {
+        ffi::__hyper_std_fs_symlink(target.as_ptr(), target.len(), path.as_ptr(), path.len())
+    })
+}
+pub fn link(from: &Path, to: &Path) -> io::Result<()> {
+    two_paths(from, to, true)
 }
 pub fn lstat(path: &Path) -> io::Result<FileAttr> {
-    // Native VFS currently has no symbolic links, so following and non-following
-    // metadata queries are equivalent. Revisit when Native gains link nodes.
-    stat(path)
+    let path = path_bytes(path)?;
+    let mut info = ffi::FileInfo::default();
+    cvt(unsafe { ffi::__hyper_std_fs_stat(path.as_ptr(), path.len(), 1, &mut info) })?;
+    FileAttr::checked(info)
 }
-pub fn canonicalize(_: &Path) -> io::Result<PathBuf> {
-    unsupported()
+pub fn canonicalize(path: &Path) -> io::Result<PathBuf> {
+    path_result(path, true)
+}
+fn path_result(path: &Path, canonical: bool) -> io::Result<PathBuf> {
+    let path = path_bytes(path)?;
+    let mut bytes = vec![0; 4096];
+    let mut actual = 0;
+    cvt(unsafe {
+        ffi::__hyper_std_fs_path(
+            path.as_ptr(),
+            path.len(),
+            u32::from(canonical),
+            bytes.as_mut_ptr(),
+            bytes.len(),
+            &mut actual,
+        )
+    })?;
+    if actual == 0 || actual > bytes.len() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    bytes.truncate(actual);
+    let value = crate::string::String::from_utf8(bytes).map_err(|_| io::ErrorKind::InvalidData)?;
+    if value.as_bytes().contains(&0) || (canonical && !value.starts_with('/')) {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(PathBuf::from(value))
 }
 pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     let mut source = crate::fs::File::open(from)?;
-    // Native has no permission-mutation operation yet. Never claim a copy
-    // succeeded after silently stripping executable or read-only permissions.
-    let permissions = source.metadata()?.permissions();
-    if permissions.as_inner().0 & 0o777 != 0o666 {
-        return unsupported();
+    let metadata = source.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
     }
     let mut target = crate::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .open(to)?;
-    if target.metadata()?.permissions().as_inner().0 & 0o777 != 0o666 {
+    let copied = io::copy(&mut source, &mut target)?;
+    target.set_permissions(metadata.permissions())?;
+    Ok(copied)
+}
+
+fn metadata_time(mask: u32, bit: u32, seconds: i64, nanos: u32) -> io::Result<SystemTime> {
+    if mask & bit == 0 {
         return unsupported();
     }
-    target.set_len(0)?;
-    io::copy(&mut source, &mut target)
+    SystemTime::from_native(seconds, nanos).ok_or_else(|| io::ErrorKind::InvalidData.into())
+}
+impl FileAttr {
+    fn checked(info: ffi::FileInfo) -> io::Result<Self> {
+        if info.filesystem_id == 0
+            || info.mount_id == 0
+            || info.reserved != 0
+            || info.valid_times & !15 != 0
+            || !(1..=4).contains(&info.kind)
+        {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        for (bit, seconds, nanos, reserved) in [
+            (
+                1,
+                info.accessed_seconds,
+                info.accessed_nanoseconds,
+                info.accessed_reserved,
+            ),
+            (
+                2,
+                info.modified_seconds,
+                info.modified_nanoseconds,
+                info.modified_reserved,
+            ),
+            (
+                4,
+                info.created_seconds,
+                info.created_nanoseconds,
+                info.created_reserved,
+            ),
+            (
+                8,
+                info.changed_seconds,
+                info.changed_nanoseconds,
+                info.changed_reserved,
+            ),
+        ] {
+            if reserved != 0
+                || nanos >= 1_000_000_000
+                || (info.valid_times & bit == 0 && (seconds != 0 || nanos != 0))
+            {
+                return Err(io::ErrorKind::InvalidData.into());
+            }
+        }
+        Ok(Self(info))
+    }
+}
+
+// Traversal owns each opened directory. It never resolves a descendant through
+// a pathname that another thread can replace with a symlink. Conditional final
+// removal refuses a name that stopped naming the directory we traversed.
+pub fn remove_dir_all(path: &Path) -> io::Result<()> {
+    let bytes = path_bytes(path)?;
+    let trailing_slash = bytes.last() == Some(&b'/');
+    let end = bytes
+        .iter()
+        .rposition(|byte| *byte != b'/')
+        .map_or(0, |index| index + 1);
+    let trimmed = &bytes[..end];
+    let (parent_path, name) = match trimmed.iter().rposition(|byte| *byte == b'/') {
+        Some(0) => (b"/".as_slice(), &trimmed[1..]),
+        Some(index) => (&trimmed[..index], &trimmed[index + 1..]),
+        None => (b".".as_slice(), trimmed),
+    };
+    // Mutation names cannot denote the traversal root or dot components.
+    // Reject them before descending, so failure cannot leave a partially
+    // emptied root or current directory.
+    if name.is_empty() || name == b"." || name == b".." {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    let mut scope = 0;
+    cvt(unsafe { ffi::__hyper_std_fs_acquire(bytes.as_ptr(), bytes.len(), &mut scope) })?;
+    let scope = Handle(scope);
+    // The parent's final symlink is an intermediate component of the original
+    // path. Resolve it once, then retain this exact directory for final removal.
+    let parent = open_directory_at(&scope, parent_path, false)?;
+    let info = stat_at(&parent, name)?;
+    if trailing_slash && !info.file_type().is_dir() {
+        return Err(io::ErrorKind::NotADirectory.into());
+    }
+    if info.file_type().is_symlink() {
+        return remove_observed(&parent, name, &info);
+    }
+    if !info.file_type().is_dir() {
+        return Err(io::ErrorKind::NotADirectory.into());
+    }
+    let directory = open_directory_at(&parent, name, true)?;
+    let opened = directory_info(&directory)?;
+    if !same_location(&opened, &info) {
+        return Err(io::ErrorKind::ResourceBusy.into());
+    }
+    let mut stack = Vec::new();
+    stack.push(RemovalFrame {
+        directory,
+        parent,
+        name: name.to_vec(),
+        identity: opened,
+        cookie: Some(0),
+    });
+    while let Some(frame) = stack.last_mut() {
+        let Some(cookie) = frame.cookie.take() else {
+            let frame = match stack.pop() {
+                Some(frame) => frame,
+                None => break,
+            };
+            remove_observed(&frame.parent, &frame.name, &frame.identity)?;
+            continue;
+        };
+        let mut entries = [ffi::DirectoryEntry::EMPTY; 4];
+        let mut count = 0;
+        let mut next = 0;
+        cvt(unsafe {
+            ffi::__hyper_std_fs_readdir(
+                frame.directory.0,
+                cookie,
+                entries.as_mut_ptr(),
+                &mut count,
+                &mut next,
+            )
+        })?;
+        if count > 4 || (next != 0 && next <= cookie) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // Process just the first remaining child, then restart enumeration.
+        // This keeps directory handles proportional to depth, not entry count.
+        if count == 0 {
+            continue;
+        }
+        frame.cookie = Some(0);
+        let entry = &entries[0];
+        let length = entry.name_length as usize;
+        if length == 0 || length > 255 {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let name = &entry.name[..length];
+        if name == b"." || name == b".." || name.iter().any(|byte| *byte == b'/' || *byte == 0) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let info = stat_at(&frame.directory, name)?;
+        if !info.file_type().is_dir() {
+            remove_observed(&frame.directory, name, &info)?;
+            continue;
+        }
+        let child = open_directory_at(&frame.directory, name, true)?;
+        let opened = directory_info(&child)?;
+        if !same_location(&opened, &info) {
+            return Err(io::ErrorKind::ResourceBusy.into());
+        }
+        // A parent owner for the child frame is opened as '.', avoiding a
+        // global descriptor registry or a borrow invalidated by stack growth.
+        let parent = open_directory_at(&frame.directory, b".", true)?;
+        stack.push(RemovalFrame {
+            directory: child,
+            parent,
+            name: name.to_vec(),
+            identity: opened,
+            cookie: Some(0),
+        });
+    }
+    Ok(())
+}
+struct RemovalFrame {
+    directory: Handle,
+    parent: Handle,
+    name: Vec<u8>,
+    identity: FileAttr,
+    cookie: Option<u64>,
+}
+fn stat_at(parent: &Handle, name: &[u8]) -> io::Result<FileAttr> {
+    let mut info = ffi::FileInfo::default();
+    cvt(unsafe { ffi::__hyper_std_fs_stat_at(parent.0, name.as_ptr(), name.len(), 1, &mut info) })?;
+    FileAttr::checked(info)
+}
+fn directory_info(directory: &Handle) -> io::Result<FileAttr> {
+    let mut info = ffi::FileInfo::default();
+    cvt(unsafe { ffi::__hyper_std_fs_self_info(directory.0, &mut info) })?;
+    FileAttr::checked(info)
+}
+fn open_directory_at(parent: &Handle, name: &[u8], nofollow: bool) -> io::Result<Handle> {
+    let mut handle = 0;
+    cvt(unsafe {
+        ffi::__hyper_std_fs_open_directory_at(
+            parent.0,
+            name.as_ptr(),
+            name.len(),
+            u32::from(nofollow),
+            &mut handle,
+        )
+    })?;
+    if handle == 0 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    Ok(Handle(handle))
+}
+fn remove_observed(parent: &Handle, name: &[u8], info: &FileAttr) -> io::Result<()> {
+    cvt(unsafe {
+        ffi::__hyper_std_fs_remove_if(
+            parent.0,
+            name.as_ptr(),
+            name.len(),
+            u32::from(info.file_type().is_dir()),
+            info.0.node_id,
+        )
+    })
+}
+
+fn same_location(left: &FileAttr, right: &FileAttr) -> bool {
+    (left.0.filesystem_id, left.0.mount_id, left.0.node_id)
+        == (right.0.filesystem_id, right.0.mount_id, right.0.node_id)
 }

@@ -47,6 +47,12 @@ const hyper_startup_t *hyper_runtime_startup(void);
 /* Borrowed process-lifetime runtime copy, or zero when not delegated with
  * DUPLICATE. Applications must not close this borrowed handle. */
 hyper_native_handle_t hyper_runtime_capability(uint32_t purpose);
+/* Each successful acquisition returns a caller-owned Directory snapshot. */
+hyper_native_status_t hyper_runtime_directory_root(hyper_native_handle_t *output);
+hyper_native_status_t hyper_runtime_directory_acquire(const char *path, size_t size, hyper_native_handle_t *output);
+hyper_native_status_t hyper_runtime_directory_change(const char *path, size_t size);
+hyper_native_status_t hyper_runtime_directory_scope(hyper_native_handle_t start, hyper_native_handle_t *output);
+
 hyper_native_status_t hyper_runtime_capabilities_initialize(const hyper_startup_t *startup);
 
 int hyper_main(const hyper_startup_t *startup);

@@ -35,6 +35,10 @@ pub fn cvt(status: i64) -> crate::io::Result<()> {
         -16 => ErrorKind::NotFound,
         -17 => ErrorKind::AlreadyExists,
         -18 => ErrorKind::DirectoryNotEmpty,
+        -19 => ErrorKind::NotADirectory,
+        -20 => ErrorKind::IsADirectory,
+        -21 => ErrorKind::FilesystemLoop,
+        -22 => ErrorKind::CrossesDevices,
         _ => ErrorKind::Other,
     };
     // In particular, reporting allocation failure must not allocate again.

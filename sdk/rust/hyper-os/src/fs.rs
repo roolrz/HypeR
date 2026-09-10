@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Owned access to a capability-relative filesystem directory.
+//! Owned access to capability-relative filesystem objects.
+
+mod metadata;
+pub use metadata::{
+    FileMetadata, LinkBehavior, LockMode, MetadataUpdate, OpenMode, SyncScope, Timestamp,
+};
 
 use core::num::NonZeroU64;
 
@@ -143,13 +148,17 @@ impl FileRights {
     pub const DUPLICATE: Self = Self(Rights::DUPLICATE);
     pub const TRANSFER: Self = Self(Rights::TRANSFER);
     pub const EXECUTE: Self = Self(Rights::EXECUTE);
+    pub const SET_ATTRIBUTES: Self = Self(Rights::SET_ATTRIBUTES);
+    pub const LOCK_FILE: Self = Self(Rights::LOCK_FILE);
 
     const ALLOWED: Rights = Rights::READ
         .union(Rights::WRITE)
         .union(Rights::INSPECT)
         .union(Rights::DUPLICATE)
         .union(Rights::TRANSFER)
-        .union(Rights::EXECUTE);
+        .union(Rights::EXECUTE)
+        .union(Rights::SET_ATTRIBUTES)
+        .union(Rights::LOCK_FILE);
 
     /// Narrows generic rights to those meaningful for files.
     #[must_use]
@@ -184,13 +193,17 @@ impl DirectoryRights {
     pub const DUPLICATE: Self = Self(Rights::DUPLICATE);
     pub const TRANSFER: Self = Self(Rights::TRANSFER);
     pub const EXECUTE: Self = Self(Rights::EXECUTE);
+    pub const SET_ATTRIBUTES: Self = Self(Rights::SET_ATTRIBUTES);
+    pub const LOCK_FILE: Self = Self(Rights::LOCK_FILE);
 
     const ALLOWED: Rights = Rights::READ
         .union(Rights::WRITE)
         .union(Rights::INSPECT)
         .union(Rights::DUPLICATE)
         .union(Rights::TRANSFER)
-        .union(Rights::EXECUTE);
+        .union(Rights::EXECUTE)
+        .union(Rights::SET_ATTRIBUTES)
+        .union(Rights::LOCK_FILE);
 
     #[must_use]
     pub const fn from_rights(rights: Rights) -> Option<Self> {

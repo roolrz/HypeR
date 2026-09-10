@@ -95,6 +95,8 @@ fn prepare_handles(
     let root_directory = prepare_handle(
         ObjectPublication::try_new(root).map_err(Error::Object)?,
         Rights::WRITE
+            .union(Rights::SET_ATTRIBUTES)
+            .union(Rights::LOCK_FILE)
             .union(Rights::DUPLICATE)
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT)

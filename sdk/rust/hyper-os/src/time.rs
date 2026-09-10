@@ -11,6 +11,33 @@ use core::time::Duration;
 
 use crate::{Error, Result, Status};
 
+/// UTC timestamp with a normalized fractional second, including before 1970.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct Timestamp {
+    seconds: i64,
+    nanoseconds: u32,
+}
+impl Timestamp {
+    #[must_use]
+    pub const fn new(seconds: i64, nanoseconds: u32) -> Option<Self> {
+        if nanoseconds < 1_000_000_000 {
+            Some(Self {
+                seconds,
+                nanoseconds,
+            })
+        } else {
+            None
+        }
+    }
+    #[must_use]
+    pub const fn seconds(self) -> i64 {
+        self.seconds
+    }
+    #[must_use]
+    pub const fn nanoseconds(self) -> u32 {
+        self.nanoseconds
+    }
+}
 /// One absolute observation in the kernel monotonic clock domain.
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -131,4 +158,13 @@ mod tests {
             .ok_or(Error::DeadlineOverflow);
         assert_eq!(result, Err(Error::DeadlineOverflow));
     }
+}
+
+/// Reads UTC time when a platform clock has supplied a valid epoch anchor.
+pub fn realtime_now() -> Result<Timestamp> {
+    // SAFETY: this observation has no borrowed pointers or authority inputs.
+    let result = unsafe { hyper_sys::clock_get_realtime() };
+    Status::from_raw(result.status).into_result()?;
+    let nanos = u32::try_from(result.value1).map_err(|_| Error::InvalidResponse)?;
+    Timestamp::new(result.value0 as i64, nanos).ok_or(Error::InvalidResponse)
 }

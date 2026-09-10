@@ -10,14 +10,18 @@ pub(crate) const FILE_SUPPORTED_RIGHTS: u64 = native::HYPER_NATIVE_RIGHT_DUPLICA
     | native::HYPER_NATIVE_RIGHT_INSPECT
     | native::HYPER_NATIVE_RIGHT_WRITE
     | native::HYPER_NATIVE_RIGHT_READ
-    | native::HYPER_NATIVE_RIGHT_EXECUTE;
+    | native::HYPER_NATIVE_RIGHT_EXECUTE
+    | native::HYPER_NATIVE_RIGHT_SET_ATTRIBUTES
+    | native::HYPER_NATIVE_RIGHT_LOCK_FILE;
 
 pub(crate) const DIRECTORY_SUPPORTED_RIGHTS: u64 = native::HYPER_NATIVE_RIGHT_DUPLICATE
     | native::HYPER_NATIVE_RIGHT_TRANSFER
     | native::HYPER_NATIVE_RIGHT_INSPECT
     | native::HYPER_NATIVE_RIGHT_WRITE
     | native::HYPER_NATIVE_RIGHT_READ
-    | native::HYPER_NATIVE_RIGHT_EXECUTE;
+    | native::HYPER_NATIVE_RIGHT_EXECUTE
+    | native::HYPER_NATIVE_RIGHT_SET_ATTRIBUTES
+    | native::HYPER_NATIVE_RIGHT_LOCK_FILE;
 
 /// Computes the source authority required to create one File capability.
 ///

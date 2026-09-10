@@ -1106,6 +1106,185 @@ impl ConsoleServices for DeferredProcessServices<'_> {
 }
 
 impl VfsServices for DeferredProcessServices<'_> {
+    fn directory_scope_create(
+        &self,
+        root: HandleValue,
+        start: HandleValue,
+        rights: Rights,
+    ) -> Result<HandleValue, VfsServiceError> {
+        crate::kernel::vfs::service::directory_scope_create(
+            &self.session.process,
+            root,
+            start,
+            rights,
+        )
+    }
+    fn directory_get_metadata(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        follow: bool,
+    ) -> Result<crate::kernel::vfs::Metadata, VfsServiceError> {
+        crate::kernel::vfs::service::directory_get_metadata(
+            &self.session.process,
+            directory,
+            path,
+            follow,
+        )
+    }
+    fn file_get_metadata(
+        &self,
+        file: HandleValue,
+    ) -> Result<crate::kernel::vfs::Metadata, VfsServiceError> {
+        crate::kernel::vfs::service::file_get_metadata(&self.session.process, file)
+    }
+    fn directory_get_self_metadata(
+        &self,
+        directory: HandleValue,
+    ) -> Result<crate::kernel::vfs::Metadata, VfsServiceError> {
+        crate::kernel::vfs::service::directory_get_self_metadata(&self.session.process, directory)
+    }
+    fn directory_set_metadata(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        follow: bool,
+        update: crate::kernel::vfs::MetadataUpdate,
+    ) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::service::directory_set_metadata(
+            &self.session.process,
+            directory,
+            path,
+            follow,
+            update,
+        )
+    }
+    fn file_set_metadata(
+        &self,
+        file: HandleValue,
+        update: crate::kernel::vfs::MetadataUpdate,
+    ) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::service::file_set_metadata(&self.session.process, file, update)
+    }
+    fn directory_rename(
+        &self,
+        source: HandleValue,
+        path: UserSlice,
+        destination: HandleValue,
+        new_path: UserSlice,
+    ) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::service::directory_rename(
+            &self.session.process,
+            source,
+            path,
+            destination,
+            new_path,
+        )
+    }
+    fn directory_link(
+        &self,
+        source: HandleValue,
+        path: UserSlice,
+        destination: HandleValue,
+        new_path: UserSlice,
+    ) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::service::directory_link(
+            &self.session.process,
+            source,
+            path,
+            destination,
+            new_path,
+        )
+    }
+    fn directory_symlink(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        target: UserSlice,
+    ) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::service::directory_symlink(
+            &self.session.process,
+            directory,
+            path,
+            target,
+        )
+    }
+    fn directory_read_link(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+    ) -> Result<crate::kernel::vfs::ScratchVec<u8>, VfsServiceError> {
+        crate::kernel::vfs::service::directory_read_link(&self.session.process, directory, path)
+    }
+    fn directory_canonicalize(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+    ) -> Result<crate::kernel::vfs::ScratchString, VfsServiceError> {
+        crate::kernel::vfs::service::directory_canonicalize(&self.session.process, directory, path)
+    }
+    fn directory_remove_if(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        is_directory: bool,
+        expected: u64,
+    ) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::service::directory_remove_if(
+            &self.session.process,
+            directory,
+            path,
+            is_directory,
+            expected,
+        )
+    }
+    fn directory_open_directory_nofollow(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        rights: Rights,
+    ) -> Result<HandleValue, VfsServiceError> {
+        crate::kernel::vfs::service::directory_open_directory_nofollow(
+            &self.session.process,
+            directory,
+            path,
+            rights,
+        )
+    }
+    fn file_sync(&self, file: HandleValue, scope: u64) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::service::file_sync(&self.session.process, file, scope)
+    }
+    fn file_lock(
+        &self,
+        file: HandleValue,
+        mode: crate::kernel::vfs::locks::LockMode,
+        deadline: u64,
+    ) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::service::file_lock(&self.session.process, file, mode, deadline, || {
+            self.session.thread.snapshot().phase == UserThreadPhase::StopRequested
+        })
+    }
+    fn file_unlock(&self, file: HandleValue) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::service::file_unlock(&self.session.process, file)
+    }
+    fn directory_open_file_with_options(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        rights: Rights,
+        options: u64,
+        mode: u32,
+    ) -> Result<HandleValue, VfsServiceError> {
+        crate::kernel::vfs::service::directory_open_file_with_options(
+            &self.session.process,
+            directory,
+            path,
+            rights,
+            options,
+            mode,
+        )
+    }
+
     fn create_file(
         &self,
         directory: HandleValue,

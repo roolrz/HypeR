@@ -69,6 +69,8 @@ const SPONSOR: u64 = 0b0100_0000;
 const DUPLICATE: u64 = 0b1000_0000;
 const TRANSFER: u64 = 0b1_0000_0000;
 const EXECUTE: u64 = 0b10_0000_0000;
+const SET_ATTRIBUTES: u64 = 1 << 31;
+const LOCK_FILE: u64 = 1 << 32;
 const CREATE_TASK_GROUP: u64 = 0b1_0000_0000_0000;
 const CREATE_RESOURCE_DOMAIN: u64 = 0b10_0000_0000_0000;
 const DERIVE: u64 = 0b0100_0000_0000_0000;
@@ -132,7 +134,14 @@ impl AuthorityPolicy for Policy {
                 key: test_authority_key(source),
                 provider: None,
                 object_kind: 5,
-                rights: READ | WRITE | INSPECT | EXECUTE | DUPLICATE | TRANSFER,
+                rights: READ
+                    | WRITE
+                    | INSPECT
+                    | EXECUTE
+                    | DUPLICATE
+                    | TRANSFER
+                    | SET_ATTRIBUTES
+                    | LOCK_FILE,
                 movable: false,
                 duplicable: true,
                 creatable: false,
@@ -280,7 +289,13 @@ impl AuthorityPolicy for Policy {
             ("/bin/sh", "process.root-directory") => (
                 303,
                 5,
-                READ | WRITE | INSPECT | DUPLICATE | TRANSFER | EXECUTE,
+                READ | WRITE
+                    | INSPECT
+                    | DUPLICATE
+                    | TRANSFER
+                    | EXECUTE
+                    | SET_ATTRIBUTES
+                    | LOCK_FILE,
             ),
             ("/bin/sh", "process.task-factory") => (304, 6, CREATE_PROCESS | DUPLICATE | TRANSFER),
             ("/bin/sh", "process.task-group") => (305, 7, ATTACH_PROCESS | DUPLICATE | TRANSFER),
@@ -336,6 +351,8 @@ impl AuthorityPolicy for Policy {
             "duplicate" => Some(DUPLICATE),
             "transfer" => Some(TRANSFER),
             "execute" => Some(EXECUTE),
+            "set-attributes" => Some(SET_ATTRIBUTES),
+            "lock-file" => Some(LOCK_FILE),
             "create-task-group" => Some(CREATE_TASK_GROUP),
             "create-resource-domain" => Some(CREATE_RESOURCE_DOMAIN),
             "derive" => Some(DERIVE),
@@ -680,13 +697,14 @@ fn production_launch_contract_rejects_under_delegated_directory_authority() {
     let production = include_str!("../config/services.json");
     for (under_delegated, service, capability) in [(
         production.replacen(
-            "[\"read\", \"duplicate\", \"transfer\", \"execute\", \"write\", \"inspect\"]",
+            "[\"read\", \"duplicate\", \"transfer\", \"execute\", \"write\", \"inspect\", \"set-attributes\", \"lock-file\"]",
             "[\"read\", \"execute\"]",
             1,
         ),
         3,
         3,
     )] {
+        assert_ne!(under_delegated, production, "rights fixture must change the manifest");
         let parsed = parse(&under_delegated);
         assert!(parsed.is_ok());
         let Ok(manifest) = parsed else {

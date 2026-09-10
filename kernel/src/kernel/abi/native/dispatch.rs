@@ -213,6 +213,66 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_DIRECTORY_CREATE_DIRECTORY => {
             sys_directory_create_directory(services, invocation.arguments())
         }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_SCOPE_CREATE => {
+            super::fs_handlers::sys_directory_scope_create(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_GET_METADATA => {
+            super::fs_handlers::sys_directory_get_metadata(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_FILE_GET_METADATA => {
+            super::fs_handlers::sys_file_get_metadata(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_GET_SELF_METADATA => {
+            super::fs_handlers::sys_directory_get_self_metadata(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_SET_METADATA => {
+            super::fs_handlers::sys_directory_set_metadata(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_FILE_SET_METADATA => {
+            super::fs_handlers::sys_file_set_metadata(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_RENAME => {
+            super::fs_handlers::sys_directory_rename(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_LINK => {
+            super::fs_handlers::sys_directory_link(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_SYMLINK => {
+            super::fs_handlers::sys_directory_symlink(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_READ_LINK => {
+            super::fs_handlers::sys_directory_read_link(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_CANONICALIZE => {
+            super::fs_handlers::sys_directory_canonicalize(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_REMOVE_IF => {
+            super::fs_handlers::sys_directory_remove_if(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY_NOFOLLOW => {
+            super::fs_handlers::sys_directory_open_directory_nofollow(
+                services,
+                invocation.arguments(),
+            )
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_FILE_SYNC => {
+            super::fs_handlers::sys_file_sync(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_FILE_LOCK => {
+            super::fs_handlers::sys_file_lock(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_FILE_UNLOCK => {
+            super::fs_handlers::sys_file_unlock(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS => {
+            super::fs_handlers::sys_directory_open_file_with_options(
+                services,
+                invocation.arguments(),
+            )
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_CLOCK_GET_REALTIME => {
+            super::fs_handlers::sys_clock_get_realtime(invocation.arguments())
+        }
         HYPER_NATIVE_SYS_DIRECTORY_REMOVE => sys_directory_remove(services, invocation.arguments()),
         HYPER_NATIVE_SYS_WAIT_SET_CREATE => sys_wait_set_create(services, invocation.arguments()),
         HYPER_NATIVE_SYS_WAIT_SET_ADD => sys_wait_set_add(services, invocation.arguments()),

@@ -35,6 +35,8 @@ pub const SHELL_ROOT_DIRECTORY_CONTRACT: StartupContract = StartupContract::exac
     startup::ROOT_DIRECTORY,
     Rights::READ
         .union(Rights::WRITE)
+        .union(Rights::SET_ATTRIBUTES)
+        .union(Rights::LOCK_FILE)
         .union(Rights::INSPECT)
         .union(Rights::EXECUTE)
         .union(Rights::DUPLICATE)

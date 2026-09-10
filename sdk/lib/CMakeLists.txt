@@ -29,6 +29,7 @@ set(HYPER_RUNTIME_SOURCES
     src/arch/aarch64/syscall.S
     src/runtime.c
     src/capabilities.c
+    src/directory.c
     src/thread.c
     src/thread_spawn.c
     src/stdio.c

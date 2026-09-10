@@ -13,6 +13,7 @@ use hyper::mm::{AllocationError, FallibleArc};
 use crate::kernel::accounting::ResourceDomain;
 
 use super::ExecutableSnapshot;
+use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
 
 static NEXT_FILESYSTEM_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_MOUNT_ID: AtomicU64 = AtomicU64::new(1);
@@ -43,6 +44,7 @@ pub(crate) enum Error {
     InvalidBackendResult,
     NotDirectory,
     NotRegularFile,
+    IsDirectory,
     NotSymlink,
     RamFs(RamFsError),
     Resource(crate::kernel::accounting::ResourceError),
@@ -51,6 +53,8 @@ pub(crate) enum Error {
     Missing,
     NotEmpty,
     InvalidSize,
+    InvalidInput,
+    Busy,
 }
 
 impl From<AllocationError> for Error {
@@ -63,6 +67,18 @@ impl From<RamFsError> for Error {
     fn from(error: RamFsError) -> Self {
         Self::RamFs(error)
     }
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct EntryName<'a> {
+    pub(super) name: Name<'a>,
+    pub(super) directory_required: bool,
+}
+
+pub(super) struct Creation<'a> {
+    pub(super) kind: hyper::fs::NodeKind,
+    pub(super) mode: u32,
+    pub(super) target: Option<&'a [u8]>,
 }
 
 /// Closed adapter set for filesystems mounted by this kernel revision.
@@ -99,6 +115,10 @@ pub(crate) struct NodeLease(FallibleArc<super::ramfs::Node>);
 impl NodeLease {
     pub(crate) fn get(&self) -> u64 {
         self.0.id()
+    }
+
+    pub(super) fn locks(&self) -> &super::locks::FileLocks {
+        &self.0.locks
     }
 }
 
@@ -210,44 +230,112 @@ impl FilesystemInstance {
         }
     }
 
-    pub(super) fn create(
-        &self,
-        directory: &NodeLease,
-        name: Name<'_>,
-        kind: hyper::fs::NodeKind,
-        mode: u32,
-    ) -> Result<(), Error> {
+    pub(super) fn epoch(&self) -> u64 {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.create(&directory.0, name, kind, mode, |_| Ok(())),
+            Backend::RamFs(fs) => fs.epoch(),
         }
     }
-
-    pub(super) fn create_file<R, E: From<Error>>(
+    pub(super) fn wait_for_namespace(&self) -> Result<(), Error> {
+        match &self.backend {
+            Backend::RamFs(fs) => fs.wait_for_namespace(),
+        }
+    }
+    pub(super) fn ancestry(
+        &self,
+        root: &NodeLease,
+        start: &NodeLease,
+        budget: &ScratchBudget,
+    ) -> Result<ScratchVec<(NodeLease, ScratchString)>, Error> {
+        let entries = match &self.backend {
+            Backend::RamFs(fs) => fs.ancestry(&root.0, &start.0, budget)?,
+        };
+        let mut result = ScratchVec::new(budget.clone());
+        result.try_reserve_exact(entries.len())?;
+        for (node, name) in entries {
+            result.push((NodeLease(node), name))?;
+        }
+        Ok(result)
+    }
+    pub(super) fn metadata(
+        &self,
+        node: &NodeLease,
+    ) -> Result<(NodeAttributes, super::ramfs::NodeMetadata), Error> {
+        node.0.metadata()
+    }
+    pub(super) fn set_metadata(
+        &self,
+        node: &NodeLease,
+        update: super::MetadataUpdate,
+    ) -> Result<(), Error> {
+        node.0.set_metadata(update)
+    }
+    pub(super) fn create_at<R, E: From<Error>>(
         &self,
         directory: &NodeLease,
-        name: Name<'_>,
-        mode: u32,
+        name: EntryName<'_>,
+        creation: Creation<'_>,
+        epoch: u64,
         publish: impl FnOnce(NodeLease) -> Result<R, E>,
     ) -> Result<R, E> {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.create(
-                &directory.0,
-                name,
-                hyper::fs::NodeKind::File,
-                mode,
-                |node| publish(NodeLease(node)),
-            ),
+            Backend::RamFs(fs) => fs.create(&directory.0, name, creation, Some(epoch), |node| {
+                publish(NodeLease(node))
+            }),
         }
     }
-
-    pub(super) fn remove(
+    pub(super) fn open_existing<R, E: From<Error>>(
+        &self,
+        node: &NodeLease,
+        truncate: bool,
+        publish: impl FnOnce(NodeAttributes) -> Result<R, E>,
+    ) -> Result<R, E> {
+        match &self.backend {
+            Backend::RamFs(fs) => fs.open_existing(&node.0, truncate, publish),
+        }
+    }
+    pub(super) fn remove_at(
         &self,
         directory: &NodeLease,
-        name: Name<'_>,
+        name: EntryName<'_>,
         kind: hyper::fs::NodeKind,
+        expected: Option<u64>,
+        epoch: u64,
     ) -> Result<(), Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.remove(&directory.0, name, kind),
+            Backend::RamFs(fs) => fs.remove(&directory.0, name, kind, expected, Some(epoch)),
+        }
+    }
+    pub(super) fn link(
+        &self,
+        node: &NodeLease,
+        directory: &NodeLease,
+        name: EntryName<'_>,
+        epoch: u64,
+    ) -> Result<(), Error> {
+        match &self.backend {
+            Backend::RamFs(fs) => fs.link(&node.0, &directory.0, name, epoch),
+        }
+    }
+    pub(super) fn rename(
+        &self,
+        source: &NodeLease,
+        name: EntryName<'_>,
+        destination: &NodeLease,
+        new_name: EntryName<'_>,
+        epoch: u64,
+    ) -> Result<(), Error> {
+        match &self.backend {
+            Backend::RamFs(fs) => fs.rename(&source.0, name, &destination.0, new_name, epoch),
+        }
+    }
+    pub(super) fn sync(&self, _node: &NodeLease, scope: u64) -> Result<(), Error> {
+        if scope > 1 {
+            return Err(Error::InvalidInput);
+        }
+        // Ramfs operations already complete in memory. This acknowledges that
+        // backend contract, without claiming survival across reboot.
+        match &self.backend {
+            Backend::RamFs(_) => Ok(()),
         }
     }
 }

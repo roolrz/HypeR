@@ -100,6 +100,7 @@ pub struct Field {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FieldKind {
+    I64,
     U32,
     U64,
     Bytes(u16),
@@ -109,7 +110,7 @@ impl FieldKind {
     pub const fn size(self) -> u16 {
         match self {
             Self::U32 => 4,
-            Self::U64 => 8,
+            Self::I64 | Self::U64 => 8,
             Self::Bytes(size) => size,
         }
     }
@@ -117,7 +118,7 @@ impl FieldKind {
     pub const fn alignment(self) -> u8 {
         match self {
             Self::U32 => 4,
-            Self::U64 => 8,
+            Self::I64 | Self::U64 => 8,
             Self::Bytes(_) => 1,
         }
     }
@@ -431,6 +432,22 @@ pub const STATUSES: &[Status] = &[
         value: -18,
         name: "not_empty",
     },
+    Status {
+        value: -19,
+        name: "not_directory",
+    },
+    Status {
+        value: -20,
+        name: "is_directory",
+    },
+    Status {
+        value: -21,
+        name: "symlink_loop",
+    },
+    Status {
+        value: -22,
+        name: "cross_device",
+    },
 ];
 
 const RIGHT_DUPLICATE_BIT: u8 = 0;
@@ -712,6 +729,14 @@ pub const RIGHTS: &[Right] = &[
         bit: RIGHT_CREATE_VIRTUAL_MACHINE_BIT,
         name: "create_virtual_machine",
     },
+    Right {
+        bit: 31,
+        name: "set_attributes",
+    },
+    Right {
+        bit: 32,
+        name: "lock_file",
+    },
 ];
 
 pub const RIGHT_DUPLICATE: u64 = 1 << RIGHT_DUPLICATE_BIT;
@@ -741,14 +766,22 @@ pub const RIGHT_DERIVE: u64 = 1 << RIGHT_DERIVE_BIT;
 pub const RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1 << RIGHT_CREATE_VIRTUAL_MACHINE_BIT;
 
 pub const RIGHT_BIND_WAIT: u64 = 1 << 30;
+pub const RIGHT_SET_ATTRIBUTES: u64 = 1 << 31;
+pub const RIGHT_LOCK_FILE: u64 = 1 << 32;
 
 pub const EVENT_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
 pub const BYTE_CHANNEL_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE;
 pub const CAPABILITY_CHANNEL_RIGHTS: u64 = BYTE_CHANNEL_RIGHTS | RIGHT_DUPLICATE;
-pub const DIRECTORY_RIGHTS: u64 =
-    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE | RIGHT_EXECUTE;
+pub const DIRECTORY_RIGHTS: u64 = RIGHT_DUPLICATE
+    | RIGHT_TRANSFER
+    | RIGHT_INSPECT
+    | RIGHT_READ
+    | RIGHT_WRITE
+    | RIGHT_EXECUTE
+    | RIGHT_SET_ATTRIBUTES
+    | RIGHT_LOCK_FILE;
 pub const FILE_RIGHTS: u64 = DIRECTORY_RIGHTS;
 pub const VMO_WRITABLE_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE | RIGHT_MAP;
@@ -2128,6 +2161,162 @@ const RESOURCE_LIMITS_FIELDS: &[Field] = &[
 ];
 
 pub const RECORDS: &[Record] = &[
+    Record {
+        name: "file_metadata",
+        fields: &[
+            Field {
+                name: "filesystem_id",
+                kind: FieldKind::U64,
+                offset: 0,
+            },
+            Field {
+                name: "mount_id",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "node_id",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "size",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "mode",
+                kind: FieldKind::U32,
+                offset: 32,
+            },
+            Field {
+                name: "kind",
+                kind: FieldKind::U32,
+                offset: 36,
+            },
+            Field {
+                name: "valid_times",
+                kind: FieldKind::U32,
+                offset: 40,
+            },
+            Field {
+                name: "reserved",
+                kind: FieldKind::U32,
+                offset: 44,
+            },
+            Field {
+                name: "accessed_seconds",
+                kind: FieldKind::I64,
+                offset: 48,
+            },
+            Field {
+                name: "accessed_nanoseconds",
+                kind: FieldKind::U32,
+                offset: 56,
+            },
+            Field {
+                name: "accessed_reserved",
+                kind: FieldKind::U32,
+                offset: 60,
+            },
+            Field {
+                name: "modified_seconds",
+                kind: FieldKind::I64,
+                offset: 64,
+            },
+            Field {
+                name: "modified_nanoseconds",
+                kind: FieldKind::U32,
+                offset: 72,
+            },
+            Field {
+                name: "modified_reserved",
+                kind: FieldKind::U32,
+                offset: 76,
+            },
+            Field {
+                name: "created_seconds",
+                kind: FieldKind::I64,
+                offset: 80,
+            },
+            Field {
+                name: "created_nanoseconds",
+                kind: FieldKind::U32,
+                offset: 88,
+            },
+            Field {
+                name: "created_reserved",
+                kind: FieldKind::U32,
+                offset: 92,
+            },
+            Field {
+                name: "changed_seconds",
+                kind: FieldKind::I64,
+                offset: 96,
+            },
+            Field {
+                name: "changed_nanoseconds",
+                kind: FieldKind::U32,
+                offset: 104,
+            },
+            Field {
+                name: "changed_reserved",
+                kind: FieldKind::U32,
+                offset: 108,
+            },
+        ],
+        minimum_size: 112,
+        size: 112,
+        alignment: 8,
+    },
+    Record {
+        name: "file_metadata_update",
+        fields: &[
+            Field {
+                name: "mask",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "mode",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "accessed_seconds",
+                kind: FieldKind::I64,
+                offset: 8,
+            },
+            Field {
+                name: "accessed_nanoseconds",
+                kind: FieldKind::U32,
+                offset: 16,
+            },
+            Field {
+                name: "accessed_reserved",
+                kind: FieldKind::U32,
+                offset: 20,
+            },
+            Field {
+                name: "modified_seconds",
+                kind: FieldKind::I64,
+                offset: 24,
+            },
+            Field {
+                name: "modified_nanoseconds",
+                kind: FieldKind::U32,
+                offset: 32,
+            },
+            Field {
+                name: "modified_reserved",
+                kind: FieldKind::U32,
+                offset: 36,
+            },
+        ],
+        minimum_size: 40,
+        size: 40,
+        alignment: 8,
+    },
     Record {
         name: "wait_set_event",
         minimum_size: 24,
@@ -6030,6 +6219,841 @@ pub const SYSCALLS: &[Syscall] = &[
         ],
         results: &[],
         blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 95,
+        name: "directory_scope_create",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "root",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "start",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("rights", ValueKind::Rights),
+        ],
+        results: &[ResultValue {
+            name: "directory",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("directory"),
+                rights: ProducedRights::ExactRequested {
+                    argument: "rights",
+                    allowed_rights: DIRECTORY_RIGHTS,
+                    authority_source: Some("root"),
+                },
+            }),
+        }],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 96,
+        name: "directory_get_metadata",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            scalar_argument("options", ValueKind::U32),
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "output_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("file_metadata"),
+                    handles: None,
+                    validation_order: 1,
+                }),
+            },
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: &[scalar_result("supported_size", ValueKind::ByteCount)],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 97,
+        name: "file_get_metadata",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "file",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("file"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "output_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("file_metadata"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: &[scalar_result("supported_size", ValueKind::ByteCount)],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 98,
+        name: "directory_get_self_metadata",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "output_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("file_metadata"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: &[scalar_result("supported_size", ValueKind::ByteCount)],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 99,
+        name: "directory_set_metadata",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_SET_ATTRIBUTES,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 1,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            scalar_argument("options", ValueKind::U32),
+            Argument {
+                name: "input",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "input_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("file_metadata_update"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("input_size", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 100,
+        name: "file_set_metadata",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "file",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("file"),
+                    required_rights: RIGHT_SET_ATTRIBUTES,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "input",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "input_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("file_metadata_update"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("input_size", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 101,
+        name: "directory_rename",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "source",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            Argument {
+                name: "destination",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "new_path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "new_path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 1,
+                }),
+            },
+            scalar_argument("new_path_length", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 102,
+        name: "directory_link",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "source",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            Argument {
+                name: "destination",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "new_path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "new_path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 1,
+                }),
+            },
+            scalar_argument("new_path_length", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 103,
+        name: "directory_symlink",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            Argument {
+                name: "target",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "target_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 1,
+                }),
+            },
+            scalar_argument("target_length", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 104,
+        name: "directory_read_link",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "capacity",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 1,
+                }),
+            },
+            scalar_argument("capacity", ValueKind::ByteCount),
+        ],
+        results: &[scalar_result("actual", ValueKind::ByteCount)],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 105,
+        name: "directory_canonicalize",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "capacity",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 1,
+                }),
+            },
+            scalar_argument("capacity", ValueKind::ByteCount),
+        ],
+        results: &[scalar_result("actual", ValueKind::ByteCount)],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 106,
+        name: "directory_remove_if",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            scalar_argument("options", ValueKind::U32),
+            scalar_argument("expected_node_id", ValueKind::U64),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 107,
+        name: "directory_open_directory_nofollow",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            scalar_argument("rights", ValueKind::Rights),
+        ],
+        results: &[ResultValue {
+            name: "directory",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("directory"),
+                rights: ProducedRights::ExactRequested {
+                    argument: "rights",
+                    allowed_rights: DIRECTORY_RIGHTS,
+                    authority_source: Some("directory"),
+                },
+            }),
+        }],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 108,
+        name: "file_sync",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "file",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("file"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("scope", ValueKind::U32),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 109,
+        name: "file_lock",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "file",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("file"),
+                    required_rights: RIGHT_LOCK_FILE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("mode", ValueKind::U32),
+            scalar_argument("deadline", ValueKind::U64),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 110,
+        name: "file_unlock",
+        feature: FeatureGate::Core,
+        arguments: &[Argument {
+            name: "file",
+            kind: ValueKind::Handle,
+            handle: Some(HandleArgument {
+                object: ObjectConstraint::Kind("file"),
+                required_rights: RIGHT_LOCK_FILE,
+                disposition: HandleDisposition::Borrow,
+            }),
+            memory: None,
+        }],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 111,
+        name: "clock_get_realtime",
+        feature: FeatureGate::Core,
+        arguments: &[],
+        results: &[
+            scalar_result("seconds", ValueKind::I64),
+            scalar_result("nanoseconds", ValueKind::U32),
+        ],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 112,
+        name: "directory_open_file_with_options",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+            scalar_argument("rights", ValueKind::Rights),
+            scalar_argument("options", ValueKind::U32),
+            scalar_argument("mode", ValueKind::U32),
+        ],
+        results: &[ResultValue {
+            name: "file",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("file"),
+                rights: ProducedRights::ExactRequested {
+                    argument: "rights",
+                    allowed_rights: FILE_RIGHTS,
+                    authority_source: Some("directory"),
+                },
+            }),
+        }],
+        blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,

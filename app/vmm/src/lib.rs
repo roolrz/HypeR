@@ -3,8 +3,8 @@
 
 pub mod cli;
 
-/// Save to a new file. Native has no rename operation yet, so existing files
-/// are never truncated to emulate replacement. Failed new writes are removed.
+/// Save to a new file without replacing an existing configuration.
+/// Failed new writes are removed.
 pub fn save_config(
     path: &std::path::Path,
     machines: Vec<hyper_vm_policy::fleet::Definition>,

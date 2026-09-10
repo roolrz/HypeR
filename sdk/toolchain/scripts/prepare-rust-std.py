@@ -37,6 +37,7 @@ for module in ["pal", "args", "env", "stdio", "thread"]:
     select(module)
 select("alloc", "")
 select("pipe")
+replace("std/src/sys/paths/mod.rs", "cfg_select! {", 'cfg_select! {\n    target_os = "hyper" => { mod hyper; use hyper as imp; }')
 replace("std/src/sys/process/mod.rs", "cfg_select! {", 'cfg_select! {\n    target_os = "hyper" => { mod hyper; use hyper as imp; }')
 replace("std/src/sys/fs/mod.rs", "cfg_select! {", 'cfg_select! {\n    target_os = "hyper" => { mod hyper; use hyper as imp; }')
 replace("std/src/sys/args/mod.rs", '#[cfg(any(', '#[cfg(any(target_os = "hyper",')
@@ -63,14 +64,6 @@ replace("std/src/sys/thread_local/mod.rs", 'pub(crate) mod key {\n    cfg_select
 replace("std/src/sys/thread_local/os.rs", "        #[inline]\n        fn __rust_std_internal_init_fn()",
         '        #[inline]\n        #[cfg_attr(target_os = "hyper", allow(clippy::missing_const_for_thread_local))]\n        fn __rust_std_internal_init_fn()')
 
-# SystemTime retains upstream's unsupported behavior; only monotonic time is
-# implemented. This preserves all upstream checked arithmetic and ordering.
-time_source = destination / "std/src/sys/time/unsupported.rs"
-time_target = destination / "std/src/sys/time/hyper.rs"
-shutil.copyfile(time_source, time_target)
-replace("std/src/sys/time/hyper.rs",
-    'panic!("time not implemented on this platform")',
-    'Instant(Duration::from_nanos(unsafe { crate::sys::pal::ffi::__hyper_std_clock() }))', count=2)
 replace("std/src/sys/time/mod.rs", "cfg_select! {", '''cfg_select! {
     target_os = "hyper" => {
         #[path = "hyper.rs"]
