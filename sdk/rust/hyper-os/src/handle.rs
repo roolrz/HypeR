@@ -133,7 +133,7 @@ impl ObjectKind {
             hyper_abi::HYPER_NATIVE_OBJECT_MEMORY_INSPECTOR => "memory-inspector",
             hyper_abi::HYPER_NATIVE_OBJECT_CPU_INSPECTOR => "cpu-inspector",
             hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_AUTHORITY => {
-                "virtual-machine-creation-authority"
+                "vm-creation-authority"
             }
             hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE_CREATION_LEASE => {
                 "virtual-machine-creation-lease"
