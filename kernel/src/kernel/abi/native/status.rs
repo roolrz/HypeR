@@ -547,6 +547,20 @@ pub(super) fn status_from_console_service_error(error: ConsoleServiceError) -> H
 
 pub(super) fn status_from_vfs_service_error(error: VfsServiceError) -> HyperNativeStatus {
     match error {
+        VfsServiceError::FileLock(error) => {
+            use crate::kernel::vfs::locks::LockError;
+            match error {
+                LockError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+                LockError::Resource(error) => status_from_resource_error(error),
+                LockError::Wait(error) => status_from_object_wait_error(error),
+                LockError::WrongDomain => HYPER_NATIVE_STATUS_INTERNAL,
+                LockError::Closed => HYPER_NATIVE_STATUS_BAD_STATE,
+                LockError::Busy => HYPER_NATIVE_STATUS_BUSY,
+                LockError::WouldBlock => HYPER_NATIVE_STATUS_WOULD_BLOCK,
+                LockError::TimedOut => hyper::abi::native::HYPER_NATIVE_STATUS_TIMED_OUT,
+                LockError::Cancelled => hyper::abi::native::HYPER_NATIVE_STATUS_CANCELLED,
+            }
+        }
         VfsServiceError::InvalidInput => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         VfsServiceError::Process(error) => status_from_process_error(error),
         VfsServiceError::FileSystem(error) => status_from_vfs_error(error),
@@ -568,7 +582,14 @@ pub(super) const fn status_from_vfs_error(error: VfsError) -> HyperNativeStatus 
         VfsError::NotEmpty => hyper::abi::native::HYPER_NATIVE_STATUS_NOT_EMPTY,
         VfsError::InvalidSize => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         VfsError::Missing => HYPER_NATIVE_STATUS_NOT_FOUND,
-        VfsError::NotDirectory | VfsError::NotRegularFile => HYPER_NATIVE_STATUS_BAD_STATE,
+        VfsError::NotDirectory => hyper::abi::native::HYPER_NATIVE_STATUS_NOT_DIRECTORY,
+        VfsError::NotRegularFile => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        VfsError::IsDirectory => hyper::abi::native::HYPER_NATIVE_STATUS_IS_DIRECTORY,
+        VfsError::SymlinkLoop => hyper::abi::native::HYPER_NATIVE_STATUS_SYMLINK_LOOP,
+        VfsError::NotSymlink | VfsError::InvalidInput => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        VfsError::AccessDenied => HYPER_NATIVE_STATUS_ACCESS_DENIED,
+        VfsError::Busy => HYPER_NATIVE_STATUS_BUSY,
+        VfsError::CrossDevice => hyper::abi::native::HYPER_NATIVE_STATUS_CROSS_DEVICE,
         VfsError::NotExecutable => HYPER_NATIVE_STATUS_ACCESS_DENIED,
         VfsError::Object(error) => status_from_object_creation_error(error),
         VfsError::Resource(error) => status_from_resource_error(error),

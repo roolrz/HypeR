@@ -39,10 +39,12 @@ input, output, and static/dynamic linking.
 | Mutex, RwLock, Condvar, Once, parking | Upstream atomic/futex algorithms with Native wait/wake bridge |
 | `thread_local!` | Key-based TLS in a per-thread control block; bounded destructor passes |
 | `thread::Builder::spawn` | Native thread creation, join, and detached-stack reclamation |
-| Files | Read/write/create/append/truncate, seek, metadata, directory iteration/create/remove, copy |
+| Files | Read/write/create/append/truncate, seek, metadata/times/permissions, rename/copy, hard links, symlink queries, directory traversal and recursive removal, advisory locks and sync |
+| Paths and cwd | Canonicalization, current-directory observation and mutation through rooted Directory scopes |
 | Subprocesses | Native ProcessBuilder, arguments/environment, cwd capability, wait/try_wait/kill, piped or inherited byte-channel stdio |
 | Networking | Upstream unsupported implementation |
-| Wall-clock time, environment mutation | Upstream unsupported behavior, including panic where the public API cannot return an error |
+| Wall-clock time | RTC-anchored UTC when available; absent platform clocks retain unsupported behavior |
+| Environment mutation | Upstream unsupported behavior |
 | Cryptographic randomness | Unsupported; no entropy source is claimed |
 | HashMap seeds | Upstream unsupported-target address-based fallback; no strong collision-attack resistance claim |
 | Terminal detection | Upstream fallback reports false; terminal sizing is unavailable |
@@ -63,8 +65,8 @@ rerunning the Native acceptance suite, not merely changing the version pin.
 
 The platform adapter contains Rust-private type conversions. Its C calls go
 through `libhyper-std.a`, which contains stateless std-specific translation.
-The shared `libhyper` owns startup state, input buffering, the heap, and TLS
-primitives. Thus separately linked shims do not create separate process
+The shared `libhyper` owns startup state, the current directory, input buffering,
+the heap, and TLS primitives. Thus separately linked shims do not create separate process
 registries. The bridge headers and Rust adapter are versioned with the SDK;
 they are not new kernel syscalls or a promise of permanent binary stability.
 
@@ -113,41 +115,73 @@ creation, Mutex/Condvar progress, independent TLS, join and detached cleanup.
 Physical AArch64 qualification must still stress weak ordering, migration,
 concurrent mapping retirement and interrupt timing beyond QEMU coverage.
 
-## Files and subprocesses
+## Filesystem semantics
 
 The shared runtime retains authorized duplicates of startup directory, task
 and stdio capabilities before application code can take its startup handles.
-Applications still need the corresponding authority: filesystem access uses
-root/current-directory capabilities, and spawning additionally requires
-TaskFactory, TaskGroup and ResourceDomain capabilities. A missing authority is
-an error; std does not acquire an ambient root. Relative paths resolve beneath
-the delegated cwd (or root when no cwd is supplied); absolute paths use the
-delegated root. Parent traversal cannot escape either capability boundary.
+The rooted std filesystem namespace requires an explicit startup root grant;
+a cwd grant alone does not implicitly become a process root. Such callers can
+still use confined Native Directory APIs. A supplied root cursor is normalized
+at its current node, and that same process root governs absolute paths, cwd
+derivation and child delegation. Relative paths start at the delegated
+cwd, or root when no cwd is supplied; absolute paths and absolute symlink targets
+start at the delegated root. Parent traversal cannot escape that root.
 
-`File::try_clone` shares the adapter's offset. Native append chooses the end of
-the file atomically for each short write. File handles survive unlink. The
-current filesystem is volatile ramfs; sync/durability, rename, links, canonical
-paths, timestamps, permission mutation and shared file mappings return
-Unsupported. `fs::copy` currently supports ordinary 0666 files only; it rejects
-permission-preserving copies that need missing Native chmod instead of silently
-changing permission bits. Global cwd/environment mutation remains unsupported.
+The cwd owner lives in `libhyper`. `env::set_current_dir` replaces an owned
+Directory scope; concurrent operations retain their own capability snapshots.
+`env::current_dir` and `fs::canonicalize` resolve the current namespace spelling,
+including directory renames, rather than returning a cached lexical path.
+
+`File::try_clone` shares the adapter's offset and Native File owner. Append
+chooses the end atomically for each short write. Open files survive unlink and
+rename replacement. Rename, hard links, symbolic links, permissions, timestamps,
+copy, and recursive directory removal are supported. `fs::copy` also applies the
+source permission bits. `fs::metadata` follows symbolic links, while
+`fs::symlink_metadata` and `DirEntry::metadata` inspect the final link itself.
+`std::os::hyper::fs` provides symbolic-link creation and Native mode extensions.
+
+Mode bits control admission of new read/write/execute capabilities; already
+granted handles keep their authority. Metadata changes and advisory file locks
+require separate `SET_ATTRIBUTES` and `LOCK_FILE` rights. Clones share one lock
+owner, independent opens compete, and final active handle closure releases the
+grant. Contended upgrades preserve the shared grant and return an error;
+callers can unlock before requesting a blocking exclusive lock.
+
+The current filesystem is volatile ramfs. `sync_all` and `sync_data` acknowledge
+completed in-memory changes without promising persistence across restart.
+Recursive deletion uses pinned directory capabilities and conditional removal,
+so replacing an entry with a symlink cannot redirect traversal into its target.
+Concurrent namespace mutation can still make the operation fail partway through.
+
+Timestamps use signed UTC seconds and nanoseconds. Unavailable metadata times
+return `Unsupported` instead of fabricated epoch or uptime values. A missing
+platform wall clock makes the infallible `SystemTime::now` panic; explicit
+metadata times remain usable without an RTC. Shared file mappings, Unix
+credentials, and file descriptors are not provided by these interfaces.
+
+## Subprocesses
+
+Spawning requires TaskFactory, TaskGroup and ResourceDomain capabilities in
+addition to the filesystem authority needed to open the executable. Missing
+authority is an error; std does not acquire ambient capabilities.
 
 `Command` supports PATH search, arguments, environment overrides, a delegated
-child cwd and Native lifecycle observation. `output` and `wait_with_output`
-drain stdout and stderr concurrently using a bounded WaitSet. Stdio inheritance
-uses explicitly duplicatable ByteChannels; `Stdio::null` drains output on a
-runtime thread and supplies EOF for input. File-backed stdio is unsupported
-because Native ProcessBuilder currently accepts channels for these services.
+child cwd and Native lifecycle observation. Its cwd is resolved through
+Directory capabilities before relative executable lookup. Global environment
+mutation remains unsupported. `output` and `wait_with_output` drain stdout and
+stderr concurrently using a bounded WaitSet. Stdio inheritance uses explicitly
+duplicatable ByteChannels; `Stdio::null` drains output on a runtime thread and
+supplies EOF for input. File-backed stdio is unsupported because Native
+ProcessBuilder currently accepts channels for these services.
+
 `process::id` and child IDs expose observation-only kernel object identities;
 Rust's u32 ID surface cannot represent a KOID above u32::MAX and rejects that
 case rather than aliasing identities. Signals, fork, exec-in-place and Unix
 process groups are not provided.
 
-Native acceptance checks exercise sparse writes, truncation, concurrent append,
-unlink/recreate lifetime, one-shot WaitSet rearm and peer close, more than 64
-persistent sources, and child output larger than channel capacity on both
-streams. Both static and dynamic std applications use the assembled SDK.
-
-Native file metadata is available through `std::fs::metadata` and
-`std::fs::symlink_metadata` (Native VFS currently has no symbolic links).
-`std::os::hyper::fs::MetadataExt::mode()` exposes Native permission mode bits.
+Native acceptance checks cover file content and namespace changes, metadata,
+UTC progression, rename-stable cwd, recursive deletion around symlinks, and
+file-lock cleanup across thread and process exit. They also exercise one-shot
+WaitSet rearm and peer close, more than 64 persistent sources, and child output
+larger than channel capacity on both streams. Both static and dynamic std
+applications use the assembled SDK.

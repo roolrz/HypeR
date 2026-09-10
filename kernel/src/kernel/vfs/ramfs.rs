@@ -1,33 +1,34 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Kernel-resident ramfs storage. Directory names and open-node leases have
-//! separate lifetimes; the tree owns only downward edges.
+//! Kernel-resident storage with stable node leases and transactional names.
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use hyper::fs::file_data::{FileData, StorageBudget};
 use hyper::fs::ramfs::RamFs;
-use hyper::fs::{MAX_NAME_BYTES, Name, NodeAttributes, NodeKind};
-use hyper::mm::FallibleArc;
+use hyper::fs::{
+    MAX_NAME_BYTES, MAX_PATH_BYTES, MAX_PATH_COMPONENTS, Name, NodeAttributes, NodeKind,
+};
+use hyper::mm::{FallibleArc, WeakFallibleArc};
+use hyper::sync::SpinLock;
+use hyper::time::Timestamp;
 
+use super::instance::{Creation, EntryName, Error};
+use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
+use super::{ExecutableSnapshot, MetadataUpdate};
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind, ResourceLimits,
 };
-use crate::kernel::sync::Mutex;
-
-use super::ExecutableSnapshot;
-use super::instance::Error;
+use crate::kernel::sync::{Mutex, MutexGuard};
 
 const STORAGE_LIMIT: u64 = 256 * 1024 * 1024;
 
 pub(super) struct Budget(ResourceDomain);
-
 impl StorageBudget for Budget {
     type Charge = CommittedCharge;
     type Error = ResourceError;
-
     fn reserve(&self, bytes: usize) -> Result<CommittedCharge, ResourceError> {
         self.0
             .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, bytes as u64))
@@ -39,16 +40,34 @@ pub(super) struct Ramfs {
     root: FallibleArc<Node>,
     next_id: AtomicU64,
     budget: Budget,
-    /// Serializes structural changes, independently of all file content I/O.
     mutation: Mutex<()>,
+    epoch: AtomicU64,
+}
+
+/// Only directory names retain strong downward edges. Parent hints are weak;
+/// a caller must validate the corresponding forward edge before using one.
+struct Topology {
+    links: u64,
+    parent: Option<WeakFallibleArc<Node>>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct NodeMetadata {
+    pub(super) mode: u32,
+    pub(super) accessed: Option<Timestamp>,
+    pub(super) modified: Option<Timestamp>,
+    pub(super) created: Option<Timestamp>,
+    pub(super) changed: Option<Timestamp>,
 }
 
 pub(super) struct Node {
     id: u64,
-    linked: AtomicBool,
-    attributes: NodeAttributes,
+    kind: NodeKind,
+    topology: SpinLock<Topology>,
+    metadata: SpinLock<NodeMetadata>,
     data: Mutex<FileData<'static, CommittedCharge>>,
     children: Mutex<Children>,
+    pub(super) locks: super::locks::FileLocks,
     _charge: CommittedCharge,
 }
 
@@ -57,19 +76,30 @@ struct Children {
     next_cookie: u64,
     _charge: Option<CommittedCharge>,
 }
-
 struct Entry {
     name: [u8; MAX_NAME_BYTES],
     length: usize,
     cookie: u64,
     node: FallibleArc<Node>,
 }
-
 pub(super) struct EntrySnapshot {
     pub(super) name: [u8; MAX_NAME_BYTES],
     pub(super) length: usize,
     pub(super) attributes: NodeAttributes,
     pub(super) next_cookie: u64,
+}
+
+/// Odd epochs describe an in-progress namespace edit. The sleeping mutation
+/// lock serializes writers; readers validate one even epoch after traversal.
+struct Mutation<'a> {
+    _guard: MutexGuard<'a, ()>,
+    epoch: &'a AtomicU64,
+    committed_epoch: u64,
+}
+impl Drop for Mutation<'_> {
+    fn drop(&mut self) {
+        self.epoch.store(self.committed_epoch, Ordering::Release);
+    }
 }
 
 impl Children {
@@ -80,7 +110,6 @@ impl Children {
             _charge: None,
         }
     }
-
     fn prepare_insert(&mut self, budget: &Budget) -> Result<u64, Error> {
         let cookie = self.next_cookie;
         cookie.checked_add(1).ok_or(Error::IdentifierExhausted)?;
@@ -105,7 +134,6 @@ impl Children {
         }
         Ok(cookie)
     }
-
     fn insert(&mut self, name: Name<'_>, node: FallibleArc<Node>, cookie: u64) {
         let mut bytes = [0; MAX_NAME_BYTES];
         bytes[..name.as_bytes().len()].copy_from_slice(name.as_bytes());
@@ -117,7 +145,6 @@ impl Children {
         });
         self.next_cookie = cookie + 1;
     }
-
     fn index(&self, name: Name<'_>) -> Option<usize> {
         self.entries
             .iter()
@@ -129,26 +156,65 @@ impl Node {
     pub(super) const fn id(&self) -> u64 {
         self.id
     }
-
     pub(super) fn attributes(&self) -> Result<NodeAttributes, Error> {
         let size = self.data.lock().map_err(Error::Lock)?.bytes().len() as u64;
-        Ok(NodeAttributes::new(
-            self.attributes.kind(),
-            self.attributes.mode(),
-            size,
-        ))
+        Ok(self
+            .metadata
+            .with(|metadata| NodeAttributes::new(self.kind, metadata.mode, size)))
     }
-
+    pub(super) fn metadata(&self) -> Result<(NodeAttributes, NodeMetadata), Error> {
+        let data = self.data.lock().map_err(Error::Lock)?;
+        Ok(self.metadata.with(|metadata| {
+            (
+                NodeAttributes::new(self.kind, metadata.mode, data.bytes().len() as u64),
+                *metadata,
+            )
+        }))
+    }
+    pub(super) fn set_metadata(&self, update: MetadataUpdate) -> Result<(), Error> {
+        if update.mode.is_some_and(|mode| mode & !0o777 != 0) {
+            return Err(Error::InvalidInput);
+        }
+        let now = crate::kernel::time::realtime();
+        self.metadata.with(|metadata| {
+            if let Some(mode) = update.mode {
+                metadata.mode = mode;
+            }
+            if let Some(accessed) = update.accessed {
+                metadata.accessed = Some(accessed);
+            }
+            if let Some(modified) = update.modified {
+                metadata.modified = Some(modified);
+            }
+            if update.mode.is_some() || update.accessed.is_some() || update.modified.is_some() {
+                metadata.changed = now;
+            }
+        });
+        Ok(())
+    }
     fn require(&self, kind: NodeKind) -> Result<(), Error> {
-        if self.attributes.kind() == kind {
+        if self.kind == kind {
             Ok(())
         } else {
             Err(match kind {
                 NodeKind::Directory => Error::NotDirectory,
                 NodeKind::Symlink => Error::NotSymlink,
+                _ if self.kind == NodeKind::Directory => Error::IsDirectory,
                 _ => Error::NotRegularFile,
             })
         }
+    }
+    fn linked(&self) -> bool {
+        self.topology.with(|topology| topology.links != 0)
+    }
+    fn modified(&self, now: Option<Timestamp>) {
+        self.metadata.with(|metadata| {
+            metadata.modified = now;
+            metadata.changed = now;
+        });
+    }
+    fn changed(&self, now: Option<Timestamp>) {
+        self.metadata.with(|metadata| metadata.changed = now);
     }
 }
 
@@ -160,8 +226,6 @@ impl Ramfs {
             )
             .map_err(Error::Resource)?,
         );
-        // Build leaves before parents without recursion or locking before the
-        // scheduler exists. Archive node identifiers are canonical path order.
         let count = archive.nodes().len();
         let mut pending: Vec<Children> = Vec::new();
         pending
@@ -184,14 +248,45 @@ impl Ramfs {
             let charge = budget
                 .reserve(FallibleArc::<Node>::allocation_size())
                 .map_err(Error::Resource)?;
+            let mut child_directories = Vec::new();
+            child_directories
+                .try_reserve_exact(children.entries.len())
+                .map_err(|_| Error::Allocation)?;
+            child_directories.extend(
+                children
+                    .entries
+                    .iter()
+                    .filter(|entry| entry.node.kind == NodeKind::Directory)
+                    .map(|entry| entry.node.clone()),
+            );
             let node = FallibleArc::try_new(Node {
                 id: source.id().get(),
-                linked: AtomicBool::new(true),
-                attributes: source.attributes(),
+                kind: source.kind(),
+                topology: SpinLock::new(Topology {
+                    links: 1,
+                    parent: None,
+                }),
+                metadata: SpinLock::new(NodeMetadata {
+                    mode: source.mode() & 0o777,
+                    accessed: None,
+                    modified: source
+                        .modified_seconds()
+                        .and_then(|value| Timestamp::new(i64::from(value), 0)),
+                    created: None,
+                    changed: None,
+                }),
                 data: Mutex::new(FileData::borrowed(source.data())),
                 children: Mutex::new(children),
+                locks: super::locks::FileLocks::new(),
                 _charge: charge,
             })?;
+            // Startup cannot acquire sleeping locks. These retained children
+            // allow parent hints to be completed before publishing the root.
+            for child in child_directories {
+                child
+                    .topology
+                    .with(|topology| topology.parent = Some(node.downgrade()));
+            }
             if source.id().get() == 0 {
                 root = Some(node);
             } else {
@@ -209,13 +304,33 @@ impl Ramfs {
             next_id: AtomicU64::new(count as u64),
             budget,
             mutation: Mutex::new(()),
+            epoch: AtomicU64::new(0),
         })
     }
-
     pub(super) fn root(&self) -> FallibleArc<Node> {
         self.root.clone()
     }
-
+    pub(super) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Acquire)
+    }
+    pub(super) fn wait_for_namespace(&self) -> Result<(), Error> {
+        let _guard = self.mutation.lock().map_err(Error::Lock)?;
+        Ok(())
+    }
+    fn begin(&self, expected: Option<u64>) -> Result<Mutation<'_>, Error> {
+        let guard = self.mutation.lock().map_err(Error::Lock)?;
+        let epoch = self.epoch();
+        if expected.is_some_and(|value| value != epoch) {
+            return Err(Error::Busy);
+        }
+        let next = epoch.checked_add(2).ok_or(Error::IdentifierExhausted)?;
+        self.epoch.store(epoch + 1, Ordering::Release);
+        Ok(Mutation {
+            _guard: guard,
+            epoch: &self.epoch,
+            committed_epoch: next,
+        })
+    }
     pub(super) fn lookup(
         &self,
         directory: &Node,
@@ -227,7 +342,49 @@ impl Ramfs {
             .index(name)
             .map(|index| children.entries[index].node.clone()))
     }
-
+    pub(super) fn ancestry(
+        &self,
+        root: &FallibleArc<Node>,
+        start: &FallibleArc<Node>,
+        budget: &ScratchBudget,
+    ) -> Result<ScratchVec<(FallibleArc<Node>, ScratchString)>, Error> {
+        let mut reverse = ScratchVec::new(budget.clone());
+        reverse.try_reserve_exact(1)?;
+        let mut current = start.clone();
+        let mut path_bytes = 0usize;
+        while current.id != root.id {
+            if reverse.len() == MAX_PATH_COMPONENTS {
+                return Err(Error::InvalidInput);
+            }
+            let parent = current
+                .topology
+                .with(|topology| topology.parent.clone())
+                .and_then(|weak| weak.upgrade())
+                .ok_or(Error::Missing)?;
+            let children = parent.children.lock().map_err(Error::Lock)?;
+            let entry = children
+                .entries
+                .iter()
+                .find(|entry| entry.node.id == current.id)
+                .ok_or(Error::Missing)?;
+            path_bytes = path_bytes
+                .checked_add(entry.length + 1)
+                .filter(|length| *length <= MAX_PATH_BYTES)
+                .ok_or(Error::InvalidInput)?;
+            let mut name = ScratchString::new(budget.clone());
+            name.try_reserve_exact(entry.length)?;
+            name.push_str(
+                core::str::from_utf8(&entry.name[..entry.length])
+                    .map_err(|_| Error::InvalidBackendResult)?,
+            )?;
+            reverse.try_reserve(1)?;
+            reverse.push((current.clone(), name))?;
+            drop(children);
+            current = parent;
+        }
+        reverse.reverse();
+        Ok(reverse)
+    }
     pub(super) fn entry(
         &self,
         directory: &Node,
@@ -253,7 +410,6 @@ impl Ramfs {
             next_cookie: entry.cookie,
         }))
     }
-
     pub(super) fn read(
         &self,
         node: &Node,
@@ -266,9 +422,13 @@ impl Ramfs {
         } else {
             NodeKind::File
         })?;
-        Ok(node.data.lock().map_err(Error::Lock)?.read(offset, output))
+        let count = node.data.lock().map_err(Error::Lock)?.read(offset, output);
+        if count != 0 {
+            node.metadata
+                .with(|metadata| metadata.accessed = crate::kernel::time::realtime());
+        }
+        Ok(count)
     }
-
     pub(super) fn write(
         &self,
         node: &Node,
@@ -281,24 +441,25 @@ impl Ramfs {
         let actual = data
             .write(offset, input, &self.budget)
             .map_err(map_data_error)?;
+        if actual != 0 {
+            node.modified(crate::kernel::time::realtime());
+        }
         Ok((actual, offset + actual as u64))
     }
-
     pub(super) fn resize(&self, node: &Node, length: u64) -> Result<(), Error> {
         node.require(NodeKind::File)?;
-        node.data
-            .lock()
-            .map_err(Error::Lock)?
-            .resize(length, &self.budget)
-            .map_err(map_data_error)
+        let mut data = node.data.lock().map_err(Error::Lock)?;
+        data.resize(length, &self.budget).map_err(map_data_error)?;
+        node.modified(crate::kernel::time::realtime());
+        drop(data);
+        Ok(())
     }
-
     pub(super) fn executable(
         &self,
         node: &Node,
         sponsor: &ResourceDomain,
     ) -> Result<Option<ExecutableSnapshot>, Error> {
-        if node.attributes.kind() != NodeKind::File || !node.attributes.is_executable() {
+        if node.kind != NodeKind::File {
             return Ok(None);
         }
         let data = node.data.lock().map_err(Error::Lock)?;
@@ -319,24 +480,20 @@ impl Ramfs {
         bytes.extend_from_slice(data.bytes());
         Ok(Some(ExecutableSnapshot::owned(bytes, charge)))
     }
-
     pub(super) fn create<R, E: From<Error>>(
         &self,
-        directory: &Node,
-        name: Name<'_>,
-        kind: NodeKind,
-        mode: u32,
+        directory: &FallibleArc<Node>,
+        name: EntryName<'_>,
+        creation: Creation<'_>,
+        epoch: Option<u64>,
         publish: impl FnOnce(FallibleArc<Node>) -> Result<R, E>,
     ) -> Result<R, E> {
+        let Creation { kind, mode, target } = creation;
+        if name.directory_required && kind != NodeKind::Directory {
+            return Err(Error::NotDirectory.into());
+        }
+        let name = name.name;
         directory.require(NodeKind::Directory)?;
-        let _mutation = self.mutation.lock().map_err(Error::Lock)?;
-        let mut children = directory.children.lock().map_err(Error::Lock)?;
-        if !directory.linked.load(Ordering::Relaxed) {
-            return Err(Error::Missing.into());
-        }
-        if children.index(name).is_some() {
-            return Err(Error::AlreadyExists.into());
-        }
         let id = self
             .next_id
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -347,34 +504,92 @@ impl Ramfs {
             .budget
             .reserve(FallibleArc::<Node>::allocation_size())
             .map_err(Error::Resource)?;
+        let now = crate::kernel::time::realtime();
+        let mut data = FileData::borrowed(&[]);
+        if let Some(target) = target {
+            data.write(0, target, &self.budget)
+                .map_err(map_data_error)?;
+        }
         let node = FallibleArc::try_new(Node {
             id,
-            linked: AtomicBool::new(true),
-            attributes: NodeAttributes::new(kind, mode, 0),
-            data: Mutex::new(FileData::borrowed(&[])),
+            kind,
+            topology: SpinLock::new(Topology {
+                links: 1,
+                parent: (kind == NodeKind::Directory).then(|| directory.downgrade()),
+            }),
+            metadata: SpinLock::new(NodeMetadata {
+                mode,
+                accessed: now,
+                modified: now,
+                created: now,
+                changed: now,
+            }),
+            data: Mutex::new(data),
             children: Mutex::new(Children::new()),
+            locks: super::locks::FileLocks::new(),
             _charge: charge,
         })
         .map_err(Error::from)?;
+        let mutation = self.begin(epoch)?;
+        let mut children = directory.children.lock().map_err(Error::Lock)?;
+        if !directory.linked() {
+            return Err(Error::Missing.into());
+        }
+        if children.index(name).is_some() {
+            return Err(Error::AlreadyExists.into());
+        }
         let cookie = children.prepare_insert(&self.budget)?;
-        // Handle publication is the last fallible step. The directory lock
-        // excludes lookups until its already prepared name is committed.
         let result = publish(node.clone())?;
         children.insert(name, node, cookie);
+        directory.modified(now);
+        drop(children);
+        drop(mutation);
+        Ok(result)
+    }
+
+    pub(super) fn open_existing<R, E: From<Error>>(
+        &self,
+        node: &FallibleArc<Node>,
+        truncate: bool,
+        publish: impl FnOnce(NodeAttributes) -> Result<R, E>,
+    ) -> Result<R, E> {
+        node.require(NodeKind::File)?;
+        let mut data = node.data.lock().map_err(Error::Lock)?;
+
+        let attributes = node.metadata.with(|metadata| {
+            NodeAttributes::new(node.kind, metadata.mode, data.bytes().len() as u64)
+        });
+        // A failed handle reservation/publication must leave file contents
+        // untouched. All fallible work precedes this infallible replacement.
+        let result = publish(attributes)?;
+        let old = truncate.then(|| core::mem::replace(&mut *data, FileData::borrowed(&[])));
+        if truncate {
+            node.modified(crate::kernel::time::realtime());
+        }
+        drop(data);
+        drop(old);
         Ok(result)
     }
 
     pub(super) fn remove(
         &self,
         directory: &Node,
-        name: Name<'_>,
+        name: EntryName<'_>,
         kind: NodeKind,
+        expected_node: Option<u64>,
+        epoch: Option<u64>,
     ) -> Result<(), Error> {
         directory.require(NodeKind::Directory)?;
-        let _mutation = self.mutation.lock().map_err(Error::Lock)?;
+        let mutation = self.begin(epoch)?;
         let mut children = directory.children.lock().map_err(Error::Lock)?;
-        let index = children.index(name).ok_or(Error::Missing)?;
+        let index = children.index(name.name).ok_or(Error::Missing)?;
         let node = &children.entries[index].node;
+        if name.directory_required {
+            node.require(NodeKind::Directory)?;
+        }
+        if expected_node.is_some_and(|id| id != node.id) {
+            return Err(Error::Busy);
+        }
         if kind == NodeKind::Directory {
             node.require(NodeKind::Directory)?;
             if !node
@@ -386,16 +601,181 @@ impl Ramfs {
             {
                 return Err(Error::NotEmpty);
             }
-        } else if node.attributes.kind() == NodeKind::Directory {
-            return Err(Error::NotRegularFile);
+        } else if node.kind == NodeKind::Directory {
+            return Err(Error::IsDirectory);
         }
-        node.linked.store(false, Ordering::Relaxed);
         let removed = children.entries.remove(index);
+        unlink_node(&removed.node);
+        let now = crate::kernel::time::realtime();
+        removed.node.changed(now);
+        directory.modified(now);
         drop(children);
-        drop(_mutation);
+        drop(mutation);
         drop(removed);
         Ok(())
     }
+
+    pub(super) fn link(
+        &self,
+        node: &FallibleArc<Node>,
+        directory: &FallibleArc<Node>,
+        name: EntryName<'_>,
+        epoch: u64,
+    ) -> Result<(), Error> {
+        node.require(NodeKind::File)?;
+        if name.directory_required {
+            return Err(Error::NotDirectory);
+        }
+        let name = name.name;
+        directory.require(NodeKind::Directory)?;
+        let mutation = self.begin(Some(epoch))?;
+        if !directory.linked() || !node.linked() {
+            return Err(Error::Missing);
+        }
+        let mut children = directory.children.lock().map_err(Error::Lock)?;
+        if children.index(name).is_some() {
+            return Err(Error::AlreadyExists);
+        }
+        let links = node
+            .topology
+            .with(|topology| topology.links.checked_add(1))
+            .ok_or(Error::IdentifierExhausted)?;
+        let cookie = children.prepare_insert(&self.budget)?;
+        children.insert(name, node.clone(), cookie);
+        node.topology.with(|topology| topology.links = links);
+        let now = crate::kernel::time::realtime();
+        node.changed(now);
+        directory.modified(now);
+        drop(children);
+        drop(mutation);
+        Ok(())
+    }
+
+    pub(super) fn rename(
+        &self,
+        source: &FallibleArc<Node>,
+        name: EntryName<'_>,
+        destination: &FallibleArc<Node>,
+        new_name: EntryName<'_>,
+        epoch: u64,
+    ) -> Result<(), Error> {
+        source.require(NodeKind::Directory)?;
+        destination.require(NodeKind::Directory)?;
+        let mutation = self.begin(Some(epoch))?;
+        if !source.linked() || !destination.linked() {
+            return Err(Error::Missing);
+        }
+        let node = self.lookup(source, name.name)?.ok_or(Error::Missing)?;
+        let replaced = self.lookup(destination, new_name.name)?;
+        if name.directory_required || new_name.directory_required {
+            node.require(NodeKind::Directory)?;
+        }
+        if new_name.directory_required
+            && let Some(other) = &replaced
+        {
+            other.require(NodeKind::Directory)?;
+        }
+        let name = name.name;
+        let new_name = new_name.name;
+        if replaced.as_ref().is_some_and(|other| other.id == node.id) {
+            return Ok(());
+        }
+        if node.kind == NodeKind::Directory && source.id != destination.id {
+            // All mutation paths preserve an acyclic parent forest. Walk to
+            // its actual root: capability-relative path limits do not impose
+            // a global filesystem depth limit. Floyd's check fails closed if
+            // internal corruption violates the forest invariant.
+            let mut ancestor = Some(destination.clone());
+            let mut fast = Some(destination.clone());
+            while let Some(current) = ancestor {
+                if current.id == node.id {
+                    return Err(Error::InvalidInput);
+                }
+                ancestor = parent_hint(&current);
+                fast = fast
+                    .and_then(|node| parent_hint(&node))
+                    .and_then(|node| parent_hint(&node));
+                if let (Some(slow), Some(fast)) = (&ancestor, &fast)
+                    && slow.id == fast.id
+                {
+                    return Err(Error::InvalidBackendResult);
+                }
+            }
+        }
+        if let Some(other) = &replaced {
+            if node.kind == NodeKind::Directory {
+                other.require(NodeKind::Directory)?;
+                if !other
+                    .children
+                    .lock()
+                    .map_err(Error::Lock)?
+                    .entries
+                    .is_empty()
+                {
+                    return Err(Error::NotEmpty);
+                }
+            } else if other.kind == NodeKind::Directory {
+                return Err(Error::IsDirectory);
+            }
+        }
+        let removed = if source.id == destination.id {
+            let mut children = source.children.lock().map_err(Error::Lock)?;
+            let cookie = children.prepare_insert(&self.budget)?;
+            let mut index = children.index(name).ok_or(Error::InvalidBackendResult)?;
+            let replaced_index = children.index(new_name);
+            let removed =
+                replaced_index.map(|replaced_index| children.entries.remove(replaced_index));
+            if replaced_index.is_some_and(|replaced_index| replaced_index < index) {
+                index -= 1;
+            }
+            let moved = children.entries.remove(index);
+            children.insert(new_name, moved.node, cookie);
+            removed
+        } else {
+            let mut from = source.children.lock().map_err(Error::Lock)?;
+            let mut to = destination.children.lock().map_err(Error::Lock)?;
+            let cookie = to.prepare_insert(&self.budget)?;
+            let source_index = from.index(name).ok_or(Error::InvalidBackendResult)?;
+            let removed = to.index(new_name).map(|index| to.entries.remove(index));
+            let moved = from.entries.remove(source_index);
+            to.insert(new_name, moved.node, cookie);
+            if node.kind == NodeKind::Directory {
+                node.topology
+                    .with(|topology| topology.parent = Some(destination.downgrade()));
+            }
+            removed
+        };
+        let now = crate::kernel::time::realtime();
+        if let Some(entry) = &removed {
+            unlink_node(&entry.node);
+            entry.node.changed(now);
+        }
+        node.changed(now);
+        source.modified(now);
+        destination.modified(now);
+        drop(mutation);
+        drop(removed);
+        drop(replaced);
+        Ok(())
+    }
+}
+
+fn parent_hint(node: &Node) -> Option<FallibleArc<Node>> {
+    node.topology
+        .with(|topology| topology.parent.clone())
+        .and_then(|parent| parent.upgrade())
+}
+
+fn unlink_node(node: &Node) {
+    node.topology.with(|topology| {
+        let Some(remaining) = topology.links.checked_sub(1) else {
+            crate::hal::cpu::halt();
+        };
+        topology.links = remaining;
+        if remaining == 0 {
+            topology.parent = None;
+        }
+    });
 }
 
 fn map_data_error(error: hyper::fs::file_data::Error<ResourceError>) -> Error {

@@ -105,6 +105,7 @@ pub(super) fn initialize(
         })
     });
     let services = KernelDriverServices { boot };
+    crate::kernel::time::initialize_realtime(&devices, &services);
     let drivers = manager.probe_devices(&devices, &services);
     reservation.commit(PlatformBusState {
         _devices: devices,

@@ -908,3 +908,57 @@ hyper_call_result_t hyper_wait_set_wait(hyper_native_handle_t set, uint64_t dead
 hyper_call_result_t hyper_process_get_current_id(void) { return hyper_native_call6(HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID, 0, 0, 0, 0, 0, 0); }
 
 hyper_call_result_t hyper_byte_channel_create(void) { return hyper_native_call6(HYPER_NATIVE_SYS_BYTE_CHANNEL_CREATE, 0, 0, 0, 0, 0, 0); }
+
+hyper_call_result_t hyper_directory_scope_create(hyper_native_handle_t root, hyper_native_handle_t start, uint64_t rights)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_SCOPE_CREATE, root, start, rights, 0, 0, 0); }
+
+hyper_call_result_t hyper_directory_get_metadata(hyper_native_handle_t directory, const void * path, size_t path_length, uint32_t options, hyper_native_file_metadata_t * output, size_t output_size)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_GET_METADATA, directory, (uintptr_t)path, path_length, options, (uintptr_t)output, output_size); }
+
+hyper_call_result_t hyper_file_get_metadata(hyper_native_handle_t file, hyper_native_file_metadata_t * output, size_t output_size)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_FILE_GET_METADATA, file, (uintptr_t)output, output_size, 0, 0, 0); }
+
+hyper_call_result_t hyper_directory_get_self_metadata(hyper_native_handle_t directory, hyper_native_file_metadata_t * output, size_t output_size)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_GET_SELF_METADATA, directory, (uintptr_t)output, output_size, 0, 0, 0); }
+
+hyper_call_result_t hyper_directory_set_metadata(hyper_native_handle_t directory, const void * path, size_t path_length, uint32_t options, const hyper_native_file_metadata_update_t * input, size_t input_size)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_SET_METADATA, directory, (uintptr_t)path, path_length, options, (uintptr_t)input, input_size); }
+
+hyper_call_result_t hyper_file_set_metadata(hyper_native_handle_t file, const hyper_native_file_metadata_update_t * input, size_t input_size)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_FILE_SET_METADATA, file, (uintptr_t)input, input_size, 0, 0, 0); }
+
+hyper_call_result_t hyper_directory_rename(hyper_native_handle_t source, const void * path, size_t path_length, hyper_native_handle_t destination, const void * new_path, size_t new_path_length)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_RENAME, source, (uintptr_t)path, path_length, destination, (uintptr_t)new_path, new_path_length); }
+
+hyper_call_result_t hyper_directory_link(hyper_native_handle_t source, const void * path, size_t path_length, hyper_native_handle_t destination, const void * new_path, size_t new_path_length)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_LINK, source, (uintptr_t)path, path_length, destination, (uintptr_t)new_path, new_path_length); }
+
+hyper_call_result_t hyper_directory_symlink(hyper_native_handle_t directory, const void * path, size_t path_length, const void * target, size_t target_length)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_SYMLINK, directory, (uintptr_t)path, path_length, (uintptr_t)target, target_length, 0); }
+
+hyper_call_result_t hyper_directory_read_link(hyper_native_handle_t directory, const void * path, size_t path_length, void * output, size_t capacity)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_READ_LINK, directory, (uintptr_t)path, path_length, (uintptr_t)output, capacity, 0); }
+
+hyper_call_result_t hyper_directory_canonicalize(hyper_native_handle_t directory, const void * path, size_t path_length, void * output, size_t capacity)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_CANONICALIZE, directory, (uintptr_t)path, path_length, (uintptr_t)output, capacity, 0); }
+
+hyper_call_result_t hyper_directory_remove_if(hyper_native_handle_t directory, const void * path, size_t path_length, uint32_t options, uint64_t expected_node_id)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_REMOVE_IF, directory, (uintptr_t)path, path_length, options, expected_node_id, 0); }
+
+hyper_call_result_t hyper_directory_open_directory_nofollow(hyper_native_handle_t directory, const void * path, size_t path_length, uint64_t rights)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY_NOFOLLOW, directory, (uintptr_t)path, path_length, rights, 0, 0); }
+
+hyper_call_result_t hyper_file_sync(hyper_native_handle_t file, uint32_t scope)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_FILE_SYNC, file, scope, 0, 0, 0, 0); }
+
+hyper_call_result_t hyper_file_lock(hyper_native_handle_t file, uint32_t mode, uint64_t deadline)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_FILE_LOCK, file, mode, deadline, 0, 0, 0); }
+
+hyper_call_result_t hyper_file_unlock(hyper_native_handle_t file)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_FILE_UNLOCK, file, 0, 0, 0, 0, 0); }
+
+hyper_call_result_t hyper_clock_get_realtime(void)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_CLOCK_GET_REALTIME, 0, 0, 0, 0, 0, 0); }
+
+hyper_call_result_t hyper_directory_open_file_with_options(hyper_native_handle_t directory, const void * path, size_t path_length, uint64_t rights, uint32_t options, uint32_t mode)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS, directory, (uintptr_t)path, path_length, rights, options, mode); }

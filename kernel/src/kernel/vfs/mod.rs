@@ -13,6 +13,10 @@
 
 mod executable;
 mod instance;
+mod lock_state;
+pub(crate) mod locks;
+#[cfg(feature = "kernel-self-test")]
+pub(crate) mod namespace_test;
 mod objects;
 mod ramfs;
 mod read;
@@ -20,13 +24,17 @@ mod read_contract;
 mod resolve;
 mod resolve_state;
 mod rights_contract;
-mod service;
+mod scratch;
+pub(crate) mod service;
 
 pub(crate) use executable::ExecutableSnapshot;
+#[cfg(feature = "kernel-self-test")]
+pub(crate) use objects::NodeLocationInfo;
 pub(crate) use objects::{
     DirectoryEntrySnapshot, DirectoryInfo, DirectoryObject, DirectoryPage, Error,
-    Error as VfsError, FileInfo, FileObject,
+    Error as VfsError, FileInfo, FileObject, FileOpenOptions, Metadata, MetadataUpdate,
 };
+pub(crate) use scratch::{ScratchBudget, ScratchString, ScratchVec};
 pub(crate) use service::{
     ServiceError as VfsServiceError, create_directory, create_file, directory_info, file_info,
     open_directory, open_file, read_directory, read_file_at, remove_entry, resize_file,
@@ -125,7 +133,7 @@ pub(crate) fn lookup(
 ) -> Result<Option<BootstrapFile>, LookupError> {
     let namespace = SYSTEM_NAMESPACE.get().ok_or(LookupError::NotInitialized)?;
     let root = namespace.root();
-    let location = match resolve::file(namespace, &root, path) {
+    let location = match resolve::file(namespace, &root, path, &ScratchBudget::new(sponsor)) {
         Ok(location) => location,
         Err(Error::Missing) => return Ok(None),
         Err(Error::Backend(error)) => return Err(LookupError::Backend(error)),

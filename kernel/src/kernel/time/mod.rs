@@ -7,8 +7,12 @@
 //! IRQ domain for physical delivery but does not own interrupt-controller
 //! discovery or routing policy.
 
+mod realtime;
 mod tick;
 mod timers;
+
+pub(crate) use realtime::initialize as initialize_realtime;
+pub(crate) use realtime::now as realtime;
 
 pub(crate) use tick::Error as TickError;
 

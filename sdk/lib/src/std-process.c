@@ -22,24 +22,36 @@ static int64_t delegate(uint64_t builder, uint64_t source, uint32_t purpose, uin
 int64_t __hyper_std_process_begin(const char *program, size_t size, const char *cwd, size_t cwd_size, uint64_t *output)
 {
     *output = 0;
-    uint64_t root = hyper_runtime_capability(HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_DIRECTORY);
-    uint64_t working = hyper_runtime_capability(CWD);
-    if (!working) working = root;
+    uint64_t root = 0, working = 0, builder = 0;
+    int64_t status = hyper_runtime_directory_root(&root);
+    if (status) return status;
+    status = hyper_runtime_directory_acquire(".", 1, &working);
+    if (status) goto fail;
+    if (cwd_size) {
+        uint64_t base = cwd[0] == '/' ? root : working;
+        hyper_native_handle_info_t info = {0};
+        status = hyper_handle_get_info(base, &info).status;
+        if (status) goto fail;
+        hyper_call_result_t opened = hyper_directory_open_directory(base, cwd, cwd_size, info.rights);
+        if (opened.status) { status = opened.status; goto fail; }
+        uint64_t scope = 0;
+        status = hyper_runtime_directory_scope(opened.value0, &scope);
+        (void)hyper_handle_close(opened.value0);
+        if (status) goto fail;
+        (void)hyper_handle_close(working);
+        working = scope;
+    }
     uint64_t base = size && program[0] == '/' ? root : working;
-    if (!base) return HYPER_NATIVE_STATUS_ACCESS_DENIED;
     uint64_t factory = hyper_runtime_capability(HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_FACTORY);
     uint64_t group = hyper_runtime_capability(HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_GROUP);
     uint64_t domain = hyper_runtime_capability(HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN);
-    if (!factory || !group || !domain) return HYPER_NATIVE_STATUS_ACCESS_DENIED;
+    if (!base || !factory || !group || !domain) { status = HYPER_NATIVE_STATUS_ACCESS_DENIED; goto fail; }
     hyper_call_result_t file = hyper_directory_open_file(base, program, size, HYPER_NATIVE_RIGHT_EXECUTE);
-    if (file.status != 0) return file.status;
-    hyper_call_result_t created = hyper_process_builder_create(
-        factory, group, domain, file.value0);
+    if (file.status) { status = file.status; goto fail; }
+    hyper_call_result_t created = hyper_process_builder_create(factory, group, domain, file.value0);
     (void)hyper_handle_close(file.value0);
-    if (created.status != 0) return created.status;
-    uint64_t builder = created.value0;
-    uint64_t opened_cwd = 0;
-    /* ProcessBuilder requires a diagnostic name independently of argv[0]. */
+    if (created.status) { status = created.status; goto fail; }
+    builder = created.value0;
     size_t name_start = 0;
     for (size_t i = 0; i < size; ++i) if (program[i] == '/') name_start = i + 1;
     size_t name_size = size - name_start;
@@ -47,25 +59,16 @@ int64_t __hyper_std_process_begin(const char *program, size_t size, const char *
         name_size = HYPER_NATIVE_PROCESS_NAME_MAX_BYTES;
         while (name_size && ((unsigned char)program[name_start + name_size] & 0xc0) == 0x80) --name_size;
     }
-    int64_t status = hyper_process_builder_set_name(builder, program + name_start, name_size);
-    if (status != 0) goto fail;
-    if (cwd_size) {
-        base = cwd[0] == '/' ? root : working;
-        hyper_native_handle_info_t info = {0};
-        status = hyper_handle_get_info(base, &info).status;
-        if (status != 0) goto fail;
-        hyper_call_result_t result = hyper_directory_open_directory(base, cwd, cwd_size, info.rights);
-        if (result.status != 0) { status = result.status; goto fail; }
-        working = opened_cwd = result.value0;
-    }
+    status = hyper_process_builder_set_name(builder, program + name_start, name_size);
+    if (status) goto fail;
     uint64_t library = hyper_runtime_capability(CHILD_LIB);
     if (!library) library = hyper_runtime_capability(HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY);
     if (library) {
         status = delegate(builder, library, HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY, UINT64_MAX);
-        if (status != 0) goto fail;
+        if (status) goto fail;
     }
     status = delegate(builder, working, CWD, UINT64_MAX);
-    if (status != 0) goto fail;
+    if (status) goto fail;
     const uint32_t inherited[] = {
         HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_DIRECTORY,
         HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_TASK_FACTORY,
@@ -73,17 +76,20 @@ int64_t __hyper_std_process_begin(const char *program, size_t size, const char *
         HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN,
     };
     for (size_t i = 0; i < sizeof(inherited) / sizeof(inherited[0]); ++i) {
-        uint64_t source = hyper_runtime_capability(inherited[i]);
+        uint64_t source = inherited[i] == HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_DIRECTORY
+            ? root : hyper_runtime_capability(inherited[i]);
         if (!source) continue;
         status = delegate(builder, source, inherited[i], UINT64_MAX);
-        if (status != 0) goto fail;
+        if (status) goto fail;
     }
-    if (opened_cwd) (void)hyper_handle_close(opened_cwd);
+    (void)hyper_handle_close(working);
+    (void)hyper_handle_close(root);
     *output = builder;
     return 0;
 fail:
-    if (opened_cwd) (void)hyper_handle_close(opened_cwd);
-    (void)hyper_process_builder_abort(builder);
+    if (working) (void)hyper_handle_close(working);
+    (void)hyper_handle_close(root);
+    if (builder) (void)hyper_process_builder_abort(builder);
     return status;
 }
 

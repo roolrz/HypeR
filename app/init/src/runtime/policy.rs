@@ -212,6 +212,8 @@ impl AuthorityPolicy for BootstrapPolicy {
             "read" => Some(Rights::READ.bits()),
             "write" => Some(Rights::WRITE.bits()),
             "execute" => Some(Rights::EXECUTE.bits()),
+            "set-attributes" => Some(Rights::SET_ATTRIBUTES.bits()),
+            "lock-file" => Some(Rights::LOCK_FILE.bits()),
             "create-process" => Some(Rights::CREATE_PROCESS.bits()),
             "create-task-group" => Some(Rights::CREATE_TASK_GROUP.bits()),
             "create-resource-domain" => Some(Rights::CREATE_RESOURCE_DOMAIN.bits()),
@@ -303,7 +305,10 @@ const fn byte_channel_rights() -> Rights {
 }
 
 const fn root_directory_rights() -> Rights {
-    library_directory_rights().union(Rights::WRITE)
+    library_directory_rights()
+        .union(Rights::WRITE)
+        .union(Rights::SET_ATTRIBUTES)
+        .union(Rights::LOCK_FILE)
 }
 
 const fn library_directory_rights() -> Rights {

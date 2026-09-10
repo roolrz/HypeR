@@ -1891,6 +1891,7 @@ fn value_kind_name(kind: ValueKind) -> &'static str {
 
 fn field_kind_name(kind: FieldKind) -> String {
     match kind {
+        FieldKind::I64 => String::from("i64"),
         FieldKind::U32 => String::from("u32"),
         FieldKind::U64 => String::from("u64"),
         FieldKind::Bytes(size) => format!("bytes[{size}]"),
@@ -1907,6 +1908,7 @@ const fn transfer_class_name(class: TransferClass) -> &'static str {
 
 fn rust_field_type(kind: FieldKind) -> String {
     match kind {
+        FieldKind::I64 => String::from("i64"),
         FieldKind::U32 => String::from("u32"),
         FieldKind::U64 => String::from("u64"),
         FieldKind::Bytes(size) => format!("[u8; {size}]"),
@@ -1915,6 +1917,7 @@ fn rust_field_type(kind: FieldKind) -> String {
 
 fn c_scalar_field_type(kind: FieldKind) -> &'static str {
     match kind {
+        FieldKind::I64 => "int64_t",
         FieldKind::U32 => "uint32_t",
         FieldKind::U64 => "uint64_t",
         FieldKind::Bytes(_) => unreachable!("byte arrays require declarator-aware rendering"),
@@ -2003,10 +2006,22 @@ mod tests {
                 .rust
                 .contains("HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1_u64 << 29;")
         );
+        for (name, bit) in [("SET_ATTRIBUTES", 31), ("LOCK_FILE", 32)] {
+            assert!(
+                generated
+                    .rust
+                    .contains(&format!("HYPER_NATIVE_RIGHT_{name}: u64 = 1_u64 << {bit};"))
+            );
+            assert!(
+                generated
+                    .c
+                    .contains(&format!("HYPER_NATIVE_RIGHT_{name} (UINT64_C(1) << {bit})"))
+            );
+        }
         assert!(
             generated
                 .rust
-                .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x7fffffff;")
+                .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1ffffffff;")
         );
         assert!(
             generated
@@ -2021,7 +2036,7 @@ mod tests {
         assert!(
             generated
                 .c
-                .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x7fffffff)")
+                .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1ffffffff)")
         );
     }
 

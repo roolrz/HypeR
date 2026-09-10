@@ -133,11 +133,6 @@ impl Command {
         let mut opened = None;
         let mut error = io::Error::from(io::ErrorKind::NotFound);
         for candidate in candidates {
-            let candidate = if candidate.is_relative() && !cwd.is_empty() {
-                Path::new(cwd).join(candidate)
-            } else {
-                candidate
-            };
             let bytes = valid_text(candidate.as_os_str())?.as_bytes();
             let mut raw = 0;
             match cvt(unsafe {

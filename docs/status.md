@@ -51,7 +51,8 @@ The current foundation includes:
 - Native user-thread creation/start/stop, process-private atomic wait/wake and
   scheduler-backed sleep, with Rust std spawn/join, TLS cleanup and detached
   stack reclamation through the shared runtime;
-- an immutable indexed ramfs, strict AArch64 ELF64 process loader, and
+- a writable kernel ramfs with rooted traversal, links, rename, metadata and
+  advisory locks, optional RTC-backed UTC, a strict AArch64 ELF64 process loader, and
   capability-relative userspace runtime linker for Native `/init` and its
   services, with eager relocation, W^X/RELRO enforcement, guarded stacks, and
   scheduler-owned Process publication;

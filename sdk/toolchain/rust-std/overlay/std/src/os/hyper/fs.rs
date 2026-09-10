@@ -17,5 +17,39 @@ pub trait MetadataExt {
 
 #[stable(feature = "hyper_os", since = "1.97.1")]
 impl MetadataExt for Metadata {
-    fn mode(&self) -> u32 { self.as_inner().mode() }
+    fn mode(&self) -> u32 {
+        self.as_inner().mode()
+    }
+}
+
+/// Creates a Native symbolic link. Relative targets resolve from its parent.
+#[stable(feature = "hyper_os", since = "1.97.1")]
+pub fn symlink<P: AsRef<crate::path::Path>, Q: AsRef<crate::path::Path>>(
+    target: P,
+    link: Q,
+) -> crate::io::Result<()> {
+    crate::sys::fs::symlink(target.as_ref(), link.as_ref())
+}
+/// Native mode-bit construction without assuming Unix credentials.
+#[stable(feature = "hyper_os", since = "1.97.1")]
+pub trait PermissionsExt {
+    #[stable(feature = "hyper_os", since = "1.97.1")]
+    fn mode(&self) -> u32;
+    #[stable(feature = "hyper_os", since = "1.97.1")]
+    fn set_mode(&mut self, mode: u32);
+    #[stable(feature = "hyper_os", since = "1.97.1")]
+    fn from_mode(mode: u32) -> Self;
+}
+#[stable(feature = "hyper_os", since = "1.97.1")]
+impl PermissionsExt for crate::fs::Permissions {
+    fn mode(&self) -> u32 {
+        self.as_inner().mode()
+    }
+    fn set_mode(&mut self, mode: u32) {
+        *self = Self::from_mode(mode);
+    }
+    fn from_mode(mode: u32) -> Self {
+        use crate::sys::FromInner;
+        Self::from_inner(crate::sys::fs::FilePermissions::from_mode(mode))
+    }
 }

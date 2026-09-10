@@ -29,6 +29,11 @@ impl Status {
     pub const NOT_EMPTY: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_NOT_EMPTY);
     pub const NOT_FOUND: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_NOT_FOUND);
 
+    pub const NOT_DIRECTORY: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_NOT_DIRECTORY);
+    pub const IS_DIRECTORY: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_IS_DIRECTORY);
+    pub const SYMLINK_LOOP: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_SYMLINK_LOOP);
+    pub const CROSS_DEVICE: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_CROSS_DEVICE);
+
     #[must_use]
     pub const fn from_raw(raw: hyper_abi::HyperNativeStatus) -> Self {
         Self(raw)

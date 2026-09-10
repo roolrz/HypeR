@@ -47,10 +47,15 @@ A File handle names one opened node and carries only the rights selected when
 it was created. Opening may attenuate authority but never amplify it. `READ`
 is always required on the source Directory for traversal, and every requested
 File right must also be present on that Directory before the result is bounded
-by the node's immutable capability ceiling and mount policy. In this initial
-credential-free root filesystem, mode bits are metadata except that an
-executable File can be created only from a node carrying an execute bit. Native
-reads and writes use explicit offsets; append selects the current end under
+by the node's capability ceiling and mount policy. In the credential-free
+root filesystem, a new read, write, or executable grant requires at least one
+corresponding mode bit (`0444`, `0222`, or `0111`). No user/group identity or
+Unix permission-selection policy is implied. Existing open capabilities retain
+their rights after mode changes. Creation may grant the creator its requested
+rights even when the initial mode is zero. `SET_ATTRIBUTES` and `LOCK_FILE`
+are separate rights from data access.
+
+Native reads and writes use explicit offsets; append selects the current end under
 the same per-file lock that commits the write. Shared offsets, file descriptors, credentials,
 and POSIX path policy belong to a Linux or FreeBSD personality rather than this
 Native API.
@@ -114,7 +119,9 @@ complete fallible storage work.
 
 ## Concurrency and lifecycle
 
-No VFS or file-data-cache operation runs in interrupt or exception context.
+Namespace resolution and file-data backend operations run in scheduled kernel
+context. Short, nonblocking active-handle retirement callbacks may also execute
+from masked Native handle-close entry.
 The conceptual lock order is namespace/mount, node state, cache shard, then
 cache entry, but hot paths acquire a counted owner and release the preceding
 layer before descending. VFS policy and cache spinlocks never span backend execution, userspace copy,
@@ -142,7 +149,7 @@ Growth is zero-filled and charged to a filesystem-owned 256 MiB storage domain,
 including node and directory-entry allocations. Replacement buffers reserve
 before allocation and retain the old charge until replacement succeeds.
 Truncation to zero releases owned capacity. The namespace mutation mutex
-serializes create/remove publication; independent file reads and writes use
+serializes create, remove, link, and rename publication; independent file reads and writes use
 per-node sleeping mutexes. User memory is copied through bounded buffers before
 or after backend execution. One Native write may complete a short prefix;
 append placement and that prefix's write are atomic together.
@@ -161,7 +168,76 @@ its own lease variant and request lifetime/cancellation protocol there; block
 transport stays below the filesystem adapter. No userspace filesystem or block
 protocol is claimed by this implementation.
 
-The current Native mutation surface provides exclusive file creation, file
-write/append/resize, directory creation and removal of files or empty
-directories. Rename, hard links, symlink creation, permission changes, durability
-operations and shared writable mappings remain unimplemented.
+The Native surface includes atomic open/create/create-new/truncate, file
+write/append/resize, directory creation, rename with replacement, regular-file
+hard links, symbolic links, metadata and timestamp updates, and removal of
+files or empty directories. Open/create prepares handle publication before any
+namespace or truncation commit. Failed publication cannot truncate an existing
+file. Hard links share the same canonical node, contents, metadata, and lock
+domain. Directory hard links and cross-filesystem rename/link are rejected.
+Ramfs `file_sync` completes its in-memory operation; it does not promise durable
+storage. Shared writable mappings and persistent writeback remain absent.
+
+## Rooted directory scopes
+
+`directory_scope_create` combines an explicit root location and a reachable
+starting directory. Both handles must authorize every requested right. A scope
+owns its root and current node independently of the input handles. Ordinary
+child Directory handles remain confined to their own subtree; scopes support
+relative paths from a retained cwd while absolute paths and absolute symlinks
+restart at the explicit root.
+
+Resolution reconstructs current ancestry from validated forward edges and
+checks a namespace mutation epoch. A renamed cwd therefore follows the same
+node, while detached contextual locations are rejected. Traversal is iterative,
+with bounded path bytes, depth and symlink expansion. A writer in progress is
+waited for through the namespace mutex; repeated concurrent changes can return
+`Busy`. Canonical paths describe the observed spelling, not a new authority.
+
+Final-component nofollow opens and identity-conditioned removal support safe
+recursive deletion. Each traversal pins its parent Directory and uses a child
+basename, so replacing a name with a symlink cannot redirect deletion outside
+the pinned authority. Concurrent replacement may make deletion fail rather
+than delete a different identity. An already open File remains usable after
+its last name is removed.
+
+Temporary path storage is charged to the process issuing the request, not to
+the creator of its Directory capability. Buffers grow fallibly with actual
+path depth and retained name bytes; there is no maximum-depth allocation or
+maximum-size quota reservation for every open. Growth admits both old and new
+capacity before replacing storage. Each retry releases its own buffers, and
+returned paths retain their charges until userspace copyout finishes.
+
+## Advisory file locks
+
+Each canonical node owns one whole-file advisory lock domain. Separate opens
+have distinct owners; duplicated or transferred handles retain their open
+instance's owner. Locks do not prevent ordinary data I/O by uncooperative
+holders. Shared and exclusive acquisition uses FIFO order, granting a shared
+prefix together without allowing new readers to bypass a waiting writer.
+
+Each owner permits one pending acquisition. A second request returns `Busy`
+until the earlier continuation retires; unlock also cancels a pending request.
+With no pending continuation, repeated acquisition in the same mode is idempotent. Exclusive-to-shared
+conversion is atomic. Shared-to-exclusive conversion succeeds only for a sole
+holder with no predecessor; otherwise it preserves the shared lock and returns
+`WouldBlock` for a try operation or `Busy` for a blocking request. It never
+waits while retaining a shared lock needed by another upgrading owner.
+
+Waits park through the scheduler with monotonic deadlines and cancellation.
+The final active handle releases its owner's grant immediately, even if an
+operation pin keeps the object alive. Last-close callbacks do not allocate,
+block, or call a filesystem backend. Pending records are quota charged before
+publication and bounded to 256 per node, including records awaiting retirement.
+
+## Filesystem time
+
+Metadata carries signed Unix seconds and normalized nanoseconds, with validity
+bits for individual timestamps. The boot archive supplies modification times.
+New mutations use the optional kernel UTC clock; an unavailable timestamp is
+reported as unavailable, never fabricated from uptime. Native callers can set
+access and modification times, including times before the Unix epoch.
+
+The [UTC clock](time.md) is independent of filesystem policy. Filesystems
+choose timestamp resolution and persistence; ramfs retains supplied timestamp
+precision in memory.

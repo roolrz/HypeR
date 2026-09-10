@@ -439,8 +439,11 @@ amplification while allowing init to build a restricted view and then pass an
 memory, peer, task, accounting, and hardware state use typed calls such as
 `vmo_get_info` or `resource_domain_get_usage`; there is no topic selector.
 `file_get_info` and `directory_get_info` follow that typed model. They expose
-immutable attributes and observation-only filesystem, mount, and node
-identities, but no reverse lookup and no alleged canonical pathname.
+live attributes and observation-only filesystem, mount, and node identities.
+The extensible metadata calls also expose timestamp validity and normalized UTC
+values. `directory_canonicalize` separately reports the spelling observed within
+an explicit directory scope; that spelling is neither a reverse-lookup authority
+nor a stable identity.
 
 The shared-reference count and active-handle count are different. Process handles
 and in-transit capabilities are active; wait registrations and internal kernel
@@ -832,7 +835,7 @@ call through deferred unwind and re-entry, yields and resumes, exits a Thread,
 propagates Process exit to a dormant sibling, contains a breakpoint fault, and
 creates, signals, and observes an Event from EL0. It joins each Thread and
 Process and retires each ownership graph. The architecture-neutral dispatchers
-implement syscalls 0 through 93: capability inspection and attenuation,
+implement syscalls 0 through 112: capability inspection and attenuation,
 Thread and Process lifecycle, Event and object wait, byte and rendezvous
 capability channels, Console I/O, root directory access, transactional ProcessBuilder
 construction, Process stop requests, Process lifecycle inspection, and
@@ -841,7 +844,9 @@ storage, transactional user copies, and atomic capability publication. The
 surface also includes VMO/VMAR operations, VM lifecycle/device assignment,
 registered runtime-owned serial output, Native thread create/start/stop,
 process-private atomic wait/wake, deadline sleep, writable ramfs operations,
-persistent WaitSets and observation-only current Process ID. The generated SDK ABI
+persistent WaitSets, observation-only current Process ID, rooted directory scopes,
+metadata and timestamp updates, atomic file open/create, rename and links,
+advisory file locks, and optional RTC-anchored UTC. The generated SDK ABI
 reference is authoritative for numbers and argument contracts.
 `object_wait_one` and the bounded `object_wait_many` use absolute
 monotonic deadlines, generation-qualified signal/timeout/cancellation
