@@ -954,3 +954,14 @@ mod tests {
         Ok(())
     }
 }
+
+/// Returns this process's observation-only kernel object identifier.
+pub fn current_process_id() -> crate::Result<u64> {
+    // SAFETY: hyper-os APIs execute only in a Native process with its SDK.
+    let result = unsafe { hyper_sys::process_get_current_id() };
+    crate::Status::from_raw(result.status).into_result()?;
+    if result.value0 == 0 || result.value1 != 0 {
+        return Err(crate::Error::InvalidResponse);
+    }
+    Ok(result.value0)
+}

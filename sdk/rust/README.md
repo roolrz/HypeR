@@ -109,3 +109,21 @@ asynchronous stop require explicit unsafe lifetime contracts. Applications
 should prefer `std::thread` and `std::sync` for language-level ownership.
 Capability IPC and object waits remain Native APIs: std does not represent
 VM control handles or transferable capability channels.
+
+
+`fs::Directory` provides capability-relative creation/removal; `fs::File`
+provides explicit-offset reads/writes, atomic append and resize. WRITE must be
+present on the originating Directory before writable File authority can be
+opened. Open owners survive unlink; enumeration returns owned metadata with
+opaque, mutation-safe cursors. Prefer `std::fs` when path and stream operations
+are sufficient; keep Native handles for explicit delegation and executable
+provenance.
+
+`wait::WaitSet` owns up to 1024 persistent one-shot subscriptions. `add` returns
+an opaque non-reused registration ID; `wait` returns that ID, observed signals
+and sequence. Consume before `rearm`, and use `remove` to cancel. Registration
+management requires BIND_WAIT, consumption requires WAIT, and sources require
+WAIT. Closing a set removes its subscriptions; source handle closure does not
+cancel the retained object observation. WaitSet and CapabilityChannel sources
+are currently rejected. ByteChannel endpoints can be explicitly duplicated;
+peer close occurs only after the last active endpoint owner closes.

@@ -423,6 +423,14 @@ pub const STATUSES: &[Status] = &[
         value: -16,
         name: "not_found",
     },
+    Status {
+        value: -17,
+        name: "already_exists",
+    },
+    Status {
+        value: -18,
+        name: "not_empty",
+    },
 ];
 
 const RIGHT_DUPLICATE_BIT: u8 = 0;
@@ -572,9 +580,18 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         name: "virtual_serial",
         transfer: TransferClass::Forbidden,
     },
+    ObjectKind {
+        value: 26,
+        name: "wait_set",
+        transfer: TransferClass::Forbidden,
+    },
 ];
 
 pub const RIGHTS: &[Right] = &[
+    Right {
+        bit: 30,
+        name: "bind_wait",
+    },
     Right {
         bit: RIGHT_DUPLICATE_BIT,
         name: "duplicate",
@@ -723,13 +740,15 @@ pub const RIGHT_RESOURCE_DOMAIN_SPONSOR: u64 = 1 << RIGHT_RESOURCE_DOMAIN_SPONSO
 pub const RIGHT_DERIVE: u64 = 1 << RIGHT_DERIVE_BIT;
 pub const RIGHT_CREATE_VIRTUAL_MACHINE: u64 = 1 << RIGHT_CREATE_VIRTUAL_MACHINE_BIT;
 
+pub const RIGHT_BIND_WAIT: u64 = 1 << 30;
+
 pub const EVENT_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_SIGNAL;
 pub const BYTE_CHANNEL_RIGHTS: u64 =
-    RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE;
+    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE;
 pub const CAPABILITY_CHANNEL_RIGHTS: u64 = BYTE_CHANNEL_RIGHTS | RIGHT_DUPLICATE;
 pub const DIRECTORY_RIGHTS: u64 =
-    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_EXECUTE;
+    RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE | RIGHT_EXECUTE;
 pub const FILE_RIGHTS: u64 = DIRECTORY_RIGHTS;
 pub const VMO_WRITABLE_RIGHTS: u64 =
     RIGHT_DUPLICATE | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE | RIGHT_MAP;
@@ -771,6 +790,11 @@ pub const CAPABILITY_OPERATIONS: &[HandleOperation] = &[
 ];
 
 pub const SIGNALS: &[Signal] = &[
+    Signal {
+        object: "wait_set",
+        bit: 0,
+        name: "readable",
+    },
     Signal {
         object: "event",
         bit: 0,
@@ -2075,6 +2099,29 @@ const RESOURCE_LIMITS_FIELDS: &[Field] = &[
 
 pub const RECORDS: &[Record] = &[
     Record {
+        name: "wait_set_event",
+        minimum_size: 24,
+        size: 24,
+        alignment: 8,
+        fields: &[
+            Field {
+                name: "registration",
+                kind: FieldKind::U64,
+                offset: 0,
+            },
+            Field {
+                name: "signals",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "sequence",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+        ],
+    },
+    Record {
         name: "handle_info",
         fields: HANDLE_INFO_FIELDS,
         minimum_size: 16,
@@ -3269,6 +3316,53 @@ const FILE_READ_AT_ARGUMENTS: &[Argument] = &[
         memory: None,
     },
 ];
+const FILE_WRITE_AT_ARGUMENTS: &[Argument] = &[
+    file_argument(RIGHT_WRITE),
+    scalar_argument("options", ValueKind::U32),
+    scalar_argument("offset", ValueKind::U64),
+    Argument {
+        name: "input",
+        kind: ValueKind::UserAddress,
+        handle: None,
+        memory: Some(UserMemory {
+            direction: MemoryDirection::Read,
+            length: MemoryLength::Bytes {
+                argument: "input_size",
+                maximum_bytes: 64 * 1024,
+            },
+            record: None,
+            handles: None,
+            validation_order: 0,
+        }),
+    },
+    scalar_argument("input_size", ValueKind::ByteCount),
+];
+const fn wait_set_argument(rights: u64) -> Argument {
+    Argument {
+        name: "wait_set",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("wait_set"),
+            required_rights: rights,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    }
+}
+
+const fn file_argument(rights: u64) -> Argument {
+    Argument {
+        name: "file",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("file"),
+            required_rights: rights,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    }
+}
+
 const FILE_READ_AT_RESULTS: &[ResultValue] = &[
     ResultValue {
         name: "actual_bytes",
@@ -3961,6 +4055,14 @@ const fn process_builder_argument(
             disposition,
         }),
         memory: None,
+    }
+}
+
+const fn scalar_result(name: &'static str, kind: ValueKind) -> ResultValue {
+    ResultValue {
+        name,
+        kind,
+        handle: None,
     }
 }
 
@@ -4716,7 +4818,7 @@ pub const SYSCALLS: &[Syscall] = &[
         feature: FeatureGate::Core,
         arguments: DIRECTORY_OPEN_FILE_ARGUMENTS,
         results: DIRECTORY_OPEN_FILE_RESULTS,
-        blocking: BlockingClass::Never,
+        blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
@@ -4730,7 +4832,7 @@ pub const SYSCALLS: &[Syscall] = &[
         feature: FeatureGate::Core,
         arguments: FILE_READ_AT_ARGUMENTS,
         results: FILE_READ_AT_RESULTS,
-        blocking: BlockingClass::Never,
+        blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
@@ -5094,7 +5196,7 @@ pub const SYSCALLS: &[Syscall] = &[
         feature: FeatureGate::Core,
         arguments: DIRECTORY_OPEN_FILE_ARGUMENTS,
         results: DIRECTORY_OPEN_DIRECTORY_RESULTS,
-        blocking: BlockingClass::Never,
+        blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
@@ -5122,7 +5224,7 @@ pub const SYSCALLS: &[Syscall] = &[
         feature: FeatureGate::Core,
         arguments: FILE_CREATE_EXECUTABLE_VMO_ARGUMENTS,
         results: FILE_CREATE_EXECUTABLE_VMO_RESULTS,
-        blocking: BlockingClass::Never,
+        blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
@@ -5234,7 +5336,7 @@ pub const SYSCALLS: &[Syscall] = &[
         feature: FeatureGate::Core,
         arguments: DIRECTORY_READ_ARGUMENTS,
         results: DIRECTORY_READ_RESULTS,
-        blocking: BlockingClass::Never,
+        blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
@@ -5276,7 +5378,7 @@ pub const SYSCALLS: &[Syscall] = &[
         feature: FeatureGate::Core,
         arguments: FILE_GET_INFO_ARGUMENTS,
         results: INFO_RECORD_RESULTS,
-        blocking: BlockingClass::Never,
+        blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
@@ -5290,7 +5392,7 @@ pub const SYSCALLS: &[Syscall] = &[
         feature: FeatureGate::Core,
         arguments: DIRECTORY_GET_INFO_ARGUMENTS,
         results: INFO_RECORD_RESULTS,
-        blocking: BlockingClass::Never,
+        blocking: BlockingClass::MayBlock,
         cancellation: CancellationClass::None,
         restart: RestartClass::Never,
         completion: CompletionClass::Returns,
@@ -5638,6 +5740,247 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 83,
+        name: "file_write_at",
+        feature: FeatureGate::Core,
+        arguments: FILE_WRITE_AT_ARGUMENTS,
+        results: &[
+            scalar_result("actual_bytes", ValueKind::ByteCount),
+            scalar_result("end_offset", ValueKind::U64),
+        ],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 84,
+        name: "file_resize",
+        feature: FeatureGate::Core,
+        arguments: &[
+            file_argument(RIGHT_WRITE),
+            scalar_argument("size", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 85,
+        name: "directory_create_file",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            DIRECTORY_OPEN_FILE_ARGUMENTS[1],
+            DIRECTORY_OPEN_FILE_ARGUMENTS[2],
+            DIRECTORY_OPEN_FILE_ARGUMENTS[3],
+            scalar_argument("mode", ValueKind::U32),
+        ],
+        results: DIRECTORY_OPEN_FILE_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 86,
+        name: "directory_create_directory",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            DIRECTORY_OPEN_FILE_ARGUMENTS[1],
+            DIRECTORY_OPEN_FILE_ARGUMENTS[2],
+            scalar_argument("mode", ValueKind::U32),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 87,
+        name: "directory_remove",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_READ | RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            DIRECTORY_OPEN_FILE_ARGUMENTS[1],
+            DIRECTORY_OPEN_FILE_ARGUMENTS[2],
+            scalar_argument("options", ValueKind::U32),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 88,
+        name: "wait_set_create",
+        feature: FeatureGate::Core,
+        arguments: &[scalar_argument("capacity", ValueKind::ElementCount)],
+        results: &[ResultValue {
+            name: "wait_set",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("wait_set"),
+                rights: ProducedRights::Fixed(
+                    RIGHT_DUPLICATE | RIGHT_WAIT | RIGHT_BIND_WAIT | RIGHT_INSPECT,
+                ),
+            }),
+        }],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 89,
+        name: "wait_set_add",
+        feature: FeatureGate::Core,
+        arguments: &[
+            wait_set_argument(RIGHT_BIND_WAIT),
+            OBJECT_WAIT_ONE_ARGUMENTS[0],
+            scalar_argument("signals", ValueKind::U64),
+        ],
+        results: &[scalar_result("registration", ValueKind::U64)],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 90,
+        name: "wait_set_rearm",
+        feature: FeatureGate::Core,
+        arguments: &[
+            wait_set_argument(RIGHT_BIND_WAIT),
+            scalar_argument("registration", ValueKind::U64),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 91,
+        name: "wait_set_remove",
+        feature: FeatureGate::Core,
+        arguments: &[
+            wait_set_argument(RIGHT_BIND_WAIT),
+            scalar_argument("registration", ValueKind::U64),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 92,
+        name: "wait_set_wait",
+        feature: FeatureGate::Core,
+        arguments: &[
+            wait_set_argument(RIGHT_WAIT),
+            scalar_argument("deadline", ValueKind::U64),
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "output_size",
+                        maximum_bytes: 24,
+                    },
+                    record: Some("wait_set_event"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 93,
+        name: "process_get_current_id",
+        feature: FeatureGate::Core,
+        arguments: &[],
+        results: &[scalar_result("koid", ValueKind::U64)],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::Strict,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -5654,6 +5997,10 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "WaitSets are process-local, non-transferable objects with capacity 1..1024. BIND_WAIT authorizes add/rearm/remove, WAIT authorizes consumption. Add requires source WAIT and reserves one event slot; WaitSet and CapabilityChannel sources are unsupported. Registration IDs are globally non-reused. Bind/rearm observe signal levels and sequence under the source lock; one-shot publication does not allocate. Rearm is busy until successful event consumption. Wait returns one exact 24-byte record (registration ID, signal bits, sequence), using an absolute monotonic deadline. Copyout failure restores the event unless removal or closure cancelled it. Source handle close does not cancel object-lifetime subscriptions; final set handle close detaches registrations and wakes consumers. Future CapabilityChannel subscriptions require ownership-epoch invalidation.",
+    "ByteChannel duplicate authority permits shared endpoint ownership; peer_closed is published only when the last active endpoint handle closes. Internal operation pins, including WaitSet subscriptions, do not retain active endpoint authority.",
+    "process_get_current_id returns the calling Process KOID for observation only. It creates no handle or operational authority and is not a PID-to-handle lookup.",
+    "Ramfs storage and all current VFS operations remain kernel-owned. Open File and Directory objects pin their nodes after unlink. Directory WRITE permits namespace mutation; File WRITE permits content mutation. directory_create_file exclusively creates a regular file and publishes its requested handle atomically with the new name. Mode accepts permission bits 0777. directory_remove options 0 removes a non-directory entry without following the final symlink; 1 removes an empty directory. file_write_at options 0 uses offset, 1 atomically appends (offset must be zero); returns actual bytes and end offset. Transfers may complete short. file_resize zero-fills extension. Directory cookies are monotonic, never reused, and enumeration is weakly consistent across mutations. Executable snapshots remain immutable across writes.",
     "Thread creation prepares a dormant thread in the calling Process and returns duplicate, wait, inspect, start and request_stop authority. Entry, 16-byte-aligned stack, TLS and an opaque first argument define its initial context. The caller retains stack/TLS ownership through the thread terminated signal. Start publishes runnable execution; request_stop abandons execution without language destructors. Closing the last handle to a dormant thread cancels it; running threads continue independently of handle ownership. Existing thread_exit terminates only the caller, while process_exit stops every thread.",
     "Atomic wait/wake currently operate on aligned writable u32 words in the calling Process. Wait checks the value and publishes its generation atomically with respect to wake; mismatch returns ok, and spurious wakes are allowed. Wait uses an absolute monotonic nanosecond deadline, with UINT64_MAX meaning infinite; timeout returns timed_out and cancellation returns cancelled. Wake returns the number of registrations actually notified, bounded by count. Wake does not replace the caller's release operation or the waiter's acquire predicate check. Keys include the non-reused mapping identity and virtual address; aliases and other Processes have separate wait domains. Keep the mapping live while waiting: unmap/protect does not move an existing wait to a replacement mapping. Pinned backing survives concurrent unmap until admitted accesses finish; process stop cancels outstanding waits.",
     "Thread sleep accepts an absolute monotonic nanosecond deadline and returns ok when it expires, including an already elapsed deadline. UINT64_MAX sleeps until cancellation. It parks the current thread through scheduler timeout arbitration rather than polling or yielding.",
@@ -5667,7 +6014,7 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Every live TaskGroup handle participates in shared group-lifetime ownership regardless of its attenuated rights. Closing the last TaskGroup handle asynchronously requests stop for every member. Rights control operations available through a handle; they do not change this ownership effect.",
     "Inspector scans require the exact published page capacity for their record type. Cursor zero starts a scan and a returned next_cursor of zero ends it. Pages and complete scans are weakly consistent with concurrent task, object, and handle-table mutation; generation-qualified handle values prevent slot reuse from aliasing an earlier observation.",
     "Memory and CPU inspectors publish immutable point-in-time copies. Their handles grant observation only; they never expose writable accounting storage or allocator and scheduler synchronization to userspace. CPU categories are scheduler-tick observations and a multi-CPU snapshot is weakly consistent across CPUs.",
-    "File and Directory information reports immutable attributes plus filesystem, mount, and node identities for diagnostics and correlation. These identities do not grant authority, cannot be resolved back into handles, and do not define a pathname; directory entries, hard links, renames, mount namespaces, and unlinks make pathnames namespace-dependent observations rather than object identity.",
+    "File and Directory information reports attribute snapshots plus filesystem, mount, and node identities for diagnostics and correlation. These identities do not grant authority, cannot be resolved back into handles, and do not define a pathname; directory entries, hard links, renames, mount namespaces, and unlinks make pathnames namespace-dependent observations rather than object identity.",
     "Object wait-many borrows every input handle for the complete wait, canonicalizes duplicate object identities, and selects the lowest input index whose requested mask intersects the winning object's committed level snapshot. Source-handle close after resolution does not cancel the wait.",
     "Process terminal detail fields are reason-specific: exit reasons encode the signed status as two's-complement in detail0; fault encodes class in detail0 and code in detail1; task-group stop encodes generation in detail0; unused details are zero.",
     "Object transfer classes constrain generic capability transports. General objects may be retained by buffered or rendezvous transports. Rendezvous-only objects may move or duplicate only by a direct source-to-destination commit which never creates an in-transit owner. Forbidden objects cannot cross a userspace handle table boundary.",

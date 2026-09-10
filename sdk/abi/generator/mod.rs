@@ -2006,7 +2006,7 @@ mod tests {
         assert!(
             generated
                 .rust
-                .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x3fffffff;")
+                .contains("HYPER_NATIVE_RIGHTS_MASK: u64 = 0x7fffffff;")
         );
         assert!(
             generated
@@ -2021,7 +2021,7 @@ mod tests {
         assert!(
             generated
                 .c
-                .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x3fffffff)")
+                .contains("HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x7fffffff)")
         );
     }
 
@@ -2054,14 +2054,21 @@ mod tests {
     #[test]
     fn accepts_trailing_fields_after_the_minimum_prefix() {
         let mut records = schema::RECORDS.to_vec();
-        let mut fields = records[0].fields.to_vec();
+        let index = records
+            .iter()
+            .position(|record| record.name == "object_basic_info");
+        assert!(index.is_some());
+        let Some(index) = index else {
+            return;
+        };
+        let mut fields = records[index].fields.to_vec();
         fields.push(schema::Field {
             name: "extension",
             kind: FieldKind::U64,
-            offset: records[0].size,
+            offset: records[index].size,
         });
-        records[0].fields = Box::leak(fields.into_boxed_slice());
-        records[0].size += 8;
+        records[index].fields = Box::leak(fields.into_boxed_slice());
+        records[index].size += 8;
         let candidate = AbiSchema {
             records: Box::leak(records.into_boxed_slice()),
             ..schema::NATIVE_ABI
@@ -2075,7 +2082,9 @@ mod tests {
             let has_info_output = syscall.arguments.iter().any(|argument| {
                 argument.memory.is_some_and(|memory| {
                     memory.direction == MemoryDirection::Write
-                        && memory.record.is_some()
+                        && memory
+                            .record
+                            .is_some_and(|record| record != "wait_set_event")
                         && matches!(memory.length, MemoryLength::Bytes { .. })
                 })
             });
@@ -2692,6 +2701,7 @@ mod tests {
             ("virtual_machine", TransferClass::RendezvousOnly),
             ("virtual_cpu", TransferClass::RendezvousOnly),
             ("virtual_serial", TransferClass::Forbidden),
+            ("wait_set", TransferClass::Forbidden),
         ];
         assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
         for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {

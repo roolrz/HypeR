@@ -92,7 +92,7 @@ pub(crate) fn file_info(
     file: HandleValue,
 ) -> Result<super::FileInfo, ServiceError> {
     let file = process.resolve_handle::<FileObject>(file, Rights::INSPECT)?;
-    Ok(file.object().info())
+    file.object().info().map_err(Into::into)
 }
 
 fn copy_path(process: &Process, path: UserSlice) -> Result<alloc::string::String, ServiceError> {
@@ -125,7 +125,7 @@ pub(crate) fn read_file_at(
     output: Option<UserSlice>,
 ) -> Result<(u64, u64), ServiceError> {
     let file = process.resolve_handle::<FileObject>(file, Rights::READ)?;
-    let file_size = file.object().len();
+    let file_size = file.object().len()?;
     let Some(output) = output else {
         return Ok((0, file_size));
     };
@@ -152,4 +152,105 @@ pub(crate) fn read_file_at(
     write.copy_from(bytes).map_err(ProcessError::UserMemory)?;
     write.complete();
     Ok((actual_u64, file_size))
+}
+
+impl From<super::instance::Error> for ServiceError {
+    fn from(error: super::instance::Error) -> Self {
+        Self::FileSystem(error.into())
+    }
+}
+
+pub(crate) fn create_file(
+    process: &Process,
+    directory: HandleValue,
+    path: UserSlice,
+    rights: Rights,
+    mode: u32,
+) -> Result<HandleValue, ServiceError> {
+    let path = copy_path(process, path)?;
+    if mode & !0o777 != 0 {
+        return Err(ServiceError::InvalidInput);
+    }
+    let required = super::rights_contract::directory_rights_for_file(rights.bits())
+        .and_then(Rights::from_bits)
+        .ok_or(ServiceError::InvalidInput)?
+        .union(Rights::WRITE);
+    let directory = process.resolve_handle::<DirectoryObject>(directory, required)?;
+    directory
+        .object()
+        .create_file(&path, mode, &process.resource_domain(), |file| {
+            process.create_object(file, rights).map_err(Into::into)
+        })
+}
+
+pub(crate) fn create_directory(
+    process: &Process,
+    directory: HandleValue,
+    path: UserSlice,
+    mode: u32,
+) -> Result<(), ServiceError> {
+    let path = copy_path(process, path)?;
+    if mode & !0o777 != 0 {
+        return Err(ServiceError::InvalidInput);
+    }
+    let directory =
+        process.resolve_handle::<DirectoryObject>(directory, Rights::READ.union(Rights::WRITE))?;
+    directory
+        .object()
+        .create(&path, hyper::fs::NodeKind::Directory, mode)
+        .map_err(Into::into)
+}
+
+pub(crate) fn remove_entry(
+    process: &Process,
+    directory: HandleValue,
+    path: UserSlice,
+    is_directory: bool,
+) -> Result<(), ServiceError> {
+    let path = copy_path(process, path)?;
+    let directory =
+        process.resolve_handle::<DirectoryObject>(directory, Rights::READ.union(Rights::WRITE))?;
+    directory
+        .object()
+        .remove(
+            &path,
+            if is_directory {
+                hyper::fs::NodeKind::Directory
+            } else {
+                hyper::fs::NodeKind::File
+            },
+        )
+        .map_err(Into::into)
+}
+
+pub(crate) fn resize_file(
+    process: &Process,
+    file: HandleValue,
+    length: u64,
+) -> Result<(), ServiceError> {
+    let file = process.resolve_handle::<FileObject>(file, Rights::WRITE)?;
+    file.object().resize(length).map_err(Into::into)
+}
+
+pub(crate) fn write_file_at(
+    process: &Process,
+    file: HandleValue,
+    offset: Option<u64>,
+    input: Option<UserSlice>,
+) -> Result<(u64, u64), ServiceError> {
+    let file = process.resolve_handle::<FileObject>(file, Rights::WRITE)?;
+    let Some(input) = input else {
+        return Ok((0, offset.unwrap_or(file.object().len()?)));
+    };
+    let size = usize::try_from(input.length()).map_err(|_| ServiceError::InvalidInput)?;
+    if size > MAX_READ_BYTES {
+        return Err(ServiceError::InvalidInput);
+    }
+    let size = size.min(TRANSFER_BATCH_BYTES);
+    let mut bytes = [0; TRANSFER_BATCH_BYTES];
+    let source =
+        UserSlice::new(input.base(), size as u64).map_err(|_| ServiceError::InvalidInput)?;
+    process.copy_from_user(source, &mut bytes[..size])?;
+    let (actual, end) = file.object().write(offset, &bytes[..size])?;
+    Ok((actual as u64, end))
 }

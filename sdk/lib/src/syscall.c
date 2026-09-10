@@ -878,3 +878,33 @@ hyper_call_result_t hyper_atomic_wake(const uint32_t *address, uint32_t count)
 { return hyper_native_call6(HYPER_NATIVE_SYS_ATOMIC_WAKE, (uintptr_t)address, count, 0, 0, 0, 0); }
 hyper_native_status_t hyper_thread_sleep(uint64_t deadline)
 { return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_SLEEP, deadline, 0, 0, 0, 0, 0).status; }
+
+hyper_call_result_t hyper_file_write_at(hyper_native_handle_t file, uint32_t options, uint64_t offset, const void *input, size_t size)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_FILE_WRITE_AT, file, options, offset, (uintptr_t)input, size, 0); }
+hyper_call_result_t hyper_file_resize(hyper_native_handle_t file, uint64_t size)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_FILE_RESIZE, file, size, 0, 0, 0, 0); }
+hyper_call_result_t hyper_directory_create_file(hyper_native_handle_t directory, const void *path, size_t path_size, uint64_t rights, uint32_t mode)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_CREATE_FILE, directory, (uintptr_t)path, path_size, rights, mode, 0); }
+hyper_call_result_t hyper_directory_create_directory(hyper_native_handle_t directory, const void *path, size_t path_size, uint32_t mode)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_CREATE_DIRECTORY, directory, (uintptr_t)path, path_size, mode, 0, 0); }
+hyper_call_result_t hyper_directory_remove(hyper_native_handle_t directory, const void *path, size_t path_size, uint32_t options)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_REMOVE, directory, (uintptr_t)path, path_size, options, 0, 0); }
+
+hyper_call_result_t hyper_wait_set_create(size_t capacity)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_WAIT_SET_CREATE, capacity, 0, 0, 0, 0, 0); }
+
+hyper_call_result_t hyper_wait_set_add(hyper_native_handle_t set, hyper_native_handle_t source, uint64_t signals)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_WAIT_SET_ADD, set, source, signals, 0, 0, 0); }
+
+hyper_call_result_t hyper_wait_set_rearm(hyper_native_handle_t set, uint64_t registration)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_WAIT_SET_REARM, set, registration, 0, 0, 0, 0); }
+
+hyper_call_result_t hyper_wait_set_remove(hyper_native_handle_t set, uint64_t registration)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_WAIT_SET_REMOVE, set, registration, 0, 0, 0, 0); }
+
+hyper_call_result_t hyper_wait_set_wait(hyper_native_handle_t set, uint64_t deadline, void *output, size_t output_size)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_WAIT_SET_WAIT, set, deadline, (uintptr_t)output, output_size, 0, 0); }
+
+hyper_call_result_t hyper_process_get_current_id(void) { return hyper_native_call6(HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID, 0, 0, 0, 0, 0, 0); }
+
+hyper_call_result_t hyper_byte_channel_create(void) { return hyper_native_call6(HYPER_NATIVE_SYS_BYTE_CHANNEL_CREATE, 0, 0, 0, 0, 0, 0); }

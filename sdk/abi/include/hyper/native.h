@@ -44,6 +44,8 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL (-INT64_C(14))
 #define HYPER_NATIVE_STATUS_PEER_CLOSED (-INT64_C(15))
 #define HYPER_NATIVE_STATUS_NOT_FOUND (-INT64_C(16))
+#define HYPER_NATIVE_STATUS_ALREADY_EXISTS (-INT64_C(17))
+#define HYPER_NATIVE_STATUS_NOT_EMPTY (-INT64_C(18))
 
 #define HYPER_NATIVE_OBJECT_NONE UINT32_C(0)
 #define HYPER_NATIVE_OBJECT_EVENT UINT32_C(1)
@@ -71,6 +73,7 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE UINT32_C(23)
 #define HYPER_NATIVE_OBJECT_VIRTUAL_CPU UINT32_C(24)
 #define HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL UINT32_C(25)
+#define HYPER_NATIVE_OBJECT_WAIT_SET UINT32_C(26)
 
 #define HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN UINT32_C(0)
 #define HYPER_NATIVE_TRANSFER_CLASS_GENERAL UINT32_C(1)
@@ -104,10 +107,12 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
         case HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_VIRTUAL_CPU: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
+        case HYPER_NATIVE_OBJECT_WAIT_SET: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
         default: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
     }
 }
 
+#define HYPER_NATIVE_RIGHT_BIND_WAIT (UINT64_C(1) << 30)
 #define HYPER_NATIVE_RIGHT_DUPLICATE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_RIGHT_TRANSFER (UINT64_C(1) << 1)
 #define HYPER_NATIVE_RIGHT_WAIT (UINT64_C(1) << 2)
@@ -139,8 +144,9 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_RIGHT_DERIVE (UINT64_C(1) << 28)
 #define HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE (UINT64_C(1) << 29)
 
-#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x3fffffff)
+#define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x7fffffff)
 
+#define HYPER_NATIVE_SIGNAL_WAIT_SET_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_EVENT_SIGNALED (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_WRITABLE (UINT64_C(1) << 1)
@@ -347,6 +353,17 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_ATOMIC_WAIT UINT64_C(80)
 #define HYPER_NATIVE_SYS_ATOMIC_WAKE UINT64_C(81)
 #define HYPER_NATIVE_SYS_THREAD_SLEEP UINT64_C(82)
+#define HYPER_NATIVE_SYS_FILE_WRITE_AT UINT64_C(83)
+#define HYPER_NATIVE_SYS_FILE_RESIZE UINT64_C(84)
+#define HYPER_NATIVE_SYS_DIRECTORY_CREATE_FILE UINT64_C(85)
+#define HYPER_NATIVE_SYS_DIRECTORY_CREATE_DIRECTORY UINT64_C(86)
+#define HYPER_NATIVE_SYS_DIRECTORY_REMOVE UINT64_C(87)
+#define HYPER_NATIVE_SYS_WAIT_SET_CREATE UINT64_C(88)
+#define HYPER_NATIVE_SYS_WAIT_SET_ADD UINT64_C(89)
+#define HYPER_NATIVE_SYS_WAIT_SET_REARM UINT64_C(90)
+#define HYPER_NATIVE_SYS_WAIT_SET_REMOVE UINT64_C(91)
+#define HYPER_NATIVE_SYS_WAIT_SET_WAIT UINT64_C(92)
+#define HYPER_NATIVE_SYS_PROCESS_GET_CURRENT_ID UINT64_C(93)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -369,6 +386,18 @@ static inline uint64_t hyper_native_failure_result_mask(
     }
     return UINT64_C(0);
 }
+
+#define HYPER_NATIVE_WAIT_SET_EVENT_MIN_SIZE UINT64_C(24)
+typedef struct hyper_native_wait_set_event_t {
+    uint64_t registration;
+    uint64_t signals;
+    uint64_t sequence;
+} hyper_native_wait_set_event_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_wait_set_event_t) == 24, "wait_set_event size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_wait_set_event_t) == 8, "wait_set_event alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_wait_set_event_t, registration) == 0, "wait_set_event.registration offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_wait_set_event_t, signals) == 8, "wait_set_event.signals offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_wait_set_event_t, sequence) == 16, "wait_set_event.sequence offset");
 
 #define HYPER_NATIVE_HANDLE_INFO_MIN_SIZE UINT64_C(16)
 typedef struct hyper_native_handle_info_t {

@@ -189,7 +189,8 @@ impl private::UserExportable for ByteChannel {}
 
 impl KernelObject for ByteChannel {
     const KIND: ObjectKind = ObjectKind::BYTE_CHANNEL;
-    const SUPPORTED_RIGHTS: Rights = Rights::TRANSFER
+    const SUPPORTED_RIGHTS: Rights = Rights::DUPLICATE
+        .union(Rights::TRANSFER)
         .union(Rights::WAIT)
         .union(Rights::INSPECT)
         .union(Rights::READ)

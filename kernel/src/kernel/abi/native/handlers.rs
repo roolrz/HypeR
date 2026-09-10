@@ -33,6 +33,7 @@ use crate::kernel::mm::user_space::{UserAddress, UserSlice};
 use crate::kernel::object::{SignalWaitManyOutcome, SignalWaitOutcome};
 
 use super::Arguments;
+use super::services::ObjectServiceError;
 use super::services::{
     ConsoleServices, DeferredAction, HandleServices, HierarchyServices, ImmediateServices,
     InspectServices, IpcServices, MemoryServices, ObjectServices, ProcessBuilderServices,
@@ -1409,4 +1410,228 @@ fn wait_status(
         Ok(WaitOutcome::Cancelled) => failure(HYPER_NATIVE_STATUS_CANCELLED),
         Err(status) => failure(status),
     }
+}
+
+#[inline(never)]
+pub(super) fn sys_file_write_at(
+    services: &impl VfsServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[1] > 1
+            || (arguments[1] == 1 && arguments[2] != 0)
+            || arguments[4] > HYPER_NATIVE_FILE_MAX_READ_BYTES
+            || arguments[5] != 0
+        {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        let file = parse_handle(arguments[0])?;
+        let input = optional_user_slice(arguments[3], arguments[4])?;
+        services
+            .write_file_at(file, (arguments[1] == 0).then_some(arguments[2]), input)
+            .map_err(status_from_vfs_service_error)
+    })();
+    DeferredAction::Return(match result {
+        Ok((actual, end)) => success([actual, end]),
+        Err(status) => failure(status),
+    })
+}
+
+#[inline(never)]
+pub(super) fn sys_file_resize(
+    services: &impl VfsServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[2..].iter().any(|value| *value != 0) {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        services
+            .resize_file(parse_handle(arguments[0])?, arguments[1])
+            .map_err(status_from_vfs_service_error)
+    })();
+    DeferredAction::Return(match result {
+        Ok(()) => success([0, 0]),
+        Err(status) => failure(status),
+    })
+}
+
+fn mutation_path(arguments: &Arguments) -> Result<(HandleValue, UserSlice), HyperNativeStatus> {
+    if arguments[2] == 0 || arguments[2] > HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    Ok((
+        parse_handle(arguments[0])?,
+        UserSlice::new(UserAddress::new(arguments[1]), arguments[2])
+            .map_err(status_from_address_error)?,
+    ))
+}
+
+#[inline(never)]
+pub(super) fn sys_directory_create_file(
+    services: &impl VfsServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[5] != 0 || arguments[4] & !0o777 != 0 {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        let (directory, path) = mutation_path(arguments)?;
+        let rights = Rights::from_bits(arguments[3]).ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        services
+            .create_file(directory, path, rights, arguments[4] as u32)
+            .map_err(status_from_vfs_service_error)
+    })();
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_directory_create_directory(
+    services: &impl VfsServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[4] != 0 || arguments[5] != 0 || arguments[3] & !0o777 != 0 {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        let (directory, path) = mutation_path(arguments)?;
+        services
+            .create_directory(directory, path, arguments[3] as u32)
+            .map_err(status_from_vfs_service_error)
+    })();
+    DeferredAction::Return(match result {
+        Ok(()) => success([0, 0]),
+        Err(status) => failure(status),
+    })
+}
+
+#[inline(never)]
+pub(super) fn sys_directory_remove(
+    services: &impl VfsServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[4] != 0 || arguments[5] != 0 || arguments[3] > 1 {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        let (directory, path) = mutation_path(arguments)?;
+        services
+            .remove_entry(directory, path, arguments[3] == 1)
+            .map_err(status_from_vfs_service_error)
+    })();
+    DeferredAction::Return(match result {
+        Ok(()) => success([0, 0]),
+        Err(status) => failure(status),
+    })
+}
+
+#[inline(never)]
+pub(super) fn sys_wait_set_create(
+    services: &impl ObjectServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[1..].iter().any(|value| *value != 0) {
+            return Err(ObjectServiceError::InvalidInput);
+        }
+        services.wait_set_create(
+            usize::try_from(arguments[0]).map_err(|_| ObjectServiceError::InvalidInput)?,
+        )
+    })();
+    DeferredAction::Return(match result {
+        Ok(value) => success([value.get(), 0]),
+        Err(error) => failure(status_from_object_service_error(error)),
+    })
+}
+
+#[inline(never)]
+pub(super) fn sys_wait_set_add(
+    services: &impl ObjectServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[3..].iter().any(|value| *value != 0) {
+            return Err(ObjectServiceError::InvalidInput);
+        }
+        services.wait_set_add(
+            parse_handle(arguments[0]).map_err(|_| ObjectServiceError::InvalidInput)?,
+            parse_handle(arguments[1]).map_err(|_| ObjectServiceError::InvalidInput)?,
+            arguments[2],
+        )
+    })();
+    DeferredAction::Return(match result {
+        Ok(value) => success([value, 0]),
+        Err(error) => failure(status_from_object_service_error(error)),
+    })
+}
+
+#[inline(never)]
+pub(super) fn sys_wait_set_rearm(
+    services: &impl ObjectServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[2..].iter().any(|value| *value != 0) {
+            return Err(ObjectServiceError::InvalidInput);
+        }
+        services.wait_set_rearm(
+            parse_handle(arguments[0]).map_err(|_| ObjectServiceError::InvalidInput)?,
+            arguments[1],
+        )
+    })();
+    DeferredAction::Return(match result {
+        Ok(_) => success([0, 0]),
+        Err(error) => failure(status_from_object_service_error(error)),
+    })
+}
+
+#[inline(never)]
+pub(super) fn sys_wait_set_remove(
+    services: &impl ObjectServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[2..].iter().any(|value| *value != 0) {
+            return Err(ObjectServiceError::InvalidInput);
+        }
+        services.wait_set_remove(
+            parse_handle(arguments[0]).map_err(|_| ObjectServiceError::InvalidInput)?,
+            arguments[1],
+        )
+    })();
+    DeferredAction::Return(match result {
+        Ok(_) => success([0, 0]),
+        Err(error) => failure(status_from_object_service_error(error)),
+    })
+}
+
+#[inline(never)]
+pub(super) fn sys_wait_set_wait(
+    services: &impl ObjectServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        if arguments[3] != 24 || arguments[4] != 0 || arguments[5] != 0 {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        let set = parse_handle(arguments[0])?;
+        let output = UserSlice::new(UserAddress::new(arguments[2]), 24)
+            .map_err(status_from_address_error)?;
+        services
+            .wait_set_wait(set, arguments[1], output)
+            .map_err(status_from_object_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_process_get_current_id(
+    services: &impl ObjectServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    DeferredAction::Return(if arguments.iter().any(|value| *value != 0) {
+        failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+    } else {
+        success([services.current_process_id(), 0])
+    })
 }

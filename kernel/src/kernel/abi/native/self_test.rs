@@ -186,6 +186,47 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     }
 
     impl ObjectServices for RejectingServices {
+        fn current_process_id(&self) -> u64 {
+            1
+        }
+        fn wait_set_create(&self, _capacity: usize) -> Result<HandleValue, ObjectServiceError> {
+            Err(ObjectServiceError::InvalidInput)
+        }
+
+        fn wait_set_add(
+            &self,
+            _set: HandleValue,
+            _source: HandleValue,
+            _signals: u64,
+        ) -> Result<u64, ObjectServiceError> {
+            Err(ObjectServiceError::InvalidInput)
+        }
+
+        fn wait_set_rearm(
+            &self,
+            _set: HandleValue,
+            _registration: u64,
+        ) -> Result<(), ObjectServiceError> {
+            Err(ObjectServiceError::InvalidInput)
+        }
+
+        fn wait_set_remove(
+            &self,
+            _set: HandleValue,
+            _registration: u64,
+        ) -> Result<(), ObjectServiceError> {
+            Err(ObjectServiceError::InvalidInput)
+        }
+
+        fn wait_set_wait(
+            &self,
+            _set: HandleValue,
+            _deadline: u64,
+            _output: UserSlice,
+        ) -> Result<(), ObjectServiceError> {
+            Err(ObjectServiceError::InvalidInput)
+        }
+
         fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation.into())
@@ -296,6 +337,47 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     }
 
     impl VfsServices for RejectingServices {
+        fn create_file(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+            _rights: Rights,
+            _mode: u32,
+        ) -> Result<HandleValue, VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+
+        fn create_directory(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+            _mode: u32,
+        ) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+
+        fn remove_entry(
+            &self,
+            _directory: HandleValue,
+            _path: UserSlice,
+            _is_directory: bool,
+        ) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+
+        fn resize_file(&self, _file: HandleValue, _length: u64) -> Result<(), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+
+        fn write_file_at(
+            &self,
+            _file: HandleValue,
+            _offset: Option<u64>,
+            _input: Option<UserSlice>,
+        ) -> Result<(u64, u64), VfsServiceError> {
+            Err(VfsServiceError::InvalidInput)
+        }
+
         fn open_file(
             &self,
             _: HandleValue,
@@ -1491,6 +1573,8 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         crate::kernel::accounting::ResourceLimits::UNLIMITED,
     )
     .map_err(|_| SelfTestError::RecordEncoding)?;
+    crate::kernel::object::test_delivery_rollback(&inspection_domain)
+        .map_err(|_| SelfTestError::RecordEncoding)?;
     let event = Event::try_new(&inspection_domain).map_err(|_| SelfTestError::RecordEncoding)?;
     let service = PublishableRef::try_new(event).map_err(|_| SelfTestError::RecordEncoding)?;
     let active = service

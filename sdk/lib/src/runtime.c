@@ -30,6 +30,8 @@ hyper_native_status_t hyper_runtime_initialize(const uintptr_t *initial_stack)
     status = hyper_runtime_thread_attach();
     if (status != HYPER_NATIVE_STATUS_OK) return status;
     /* Initial loader/CRT initialization runs before secondary threads exist. */
+    status = hyper_runtime_capabilities_initialize(&startup);
+    if (status != HYPER_NATIVE_STATUS_OK) return status;
     process_startup = startup;
     atomic_store_explicit(&initialized, 1, memory_order_release);
     return HYPER_NATIVE_STATUS_OK;

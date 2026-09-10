@@ -438,6 +438,81 @@ impl SystemInspectServices for DeferredProcessServices<'_> {
 }
 
 impl ObjectServices for DeferredProcessServices<'_> {
+    fn current_process_id(&self) -> u64 {
+        self.session.process.koid().get()
+    }
+    fn wait_set_create(&self, capacity: usize) -> Result<HandleValue, ObjectServiceError> {
+        let set = object::WaitSet::try_new(capacity, &self.session.process.resource_domain())?;
+        Ok(self.session.process.create_object(
+            set,
+            Rights::DUPLICATE
+                .union(Rights::WAIT)
+                .union(Rights::BIND_WAIT)
+                .union(Rights::INSPECT),
+        )?)
+    }
+    fn wait_set_add(
+        &self,
+        set: HandleValue,
+        source: HandleValue,
+        signals: u64,
+    ) -> Result<u64, ObjectServiceError> {
+        let set = self
+            .session
+            .process
+            .resolve_handle::<object::WaitSet>(set, Rights::BIND_WAIT)?;
+        let source = self
+            .session
+            .process
+            .resolve_waitable(source, Rights::WAIT)?;
+        Ok(set
+            .object()
+            .add(source, signals, &self.session.process.resource_domain())?)
+    }
+    fn wait_set_rearm(
+        &self,
+        set: HandleValue,
+        registration: u64,
+    ) -> Result<(), ObjectServiceError> {
+        let set = self
+            .session
+            .process
+            .resolve_handle::<object::WaitSet>(set, Rights::BIND_WAIT)?;
+        Ok(set.object().rearm(registration)?)
+    }
+    fn wait_set_remove(
+        &self,
+        set: HandleValue,
+        registration: u64,
+    ) -> Result<(), ObjectServiceError> {
+        let set = self
+            .session
+            .process
+            .resolve_handle::<object::WaitSet>(set, Rights::BIND_WAIT)?;
+        Ok(set.object().remove(registration)?)
+    }
+    fn wait_set_wait(
+        &self,
+        set: HandleValue,
+        deadline: u64,
+        output: UserSlice,
+    ) -> Result<(), ObjectServiceError> {
+        let set = self
+            .session
+            .process
+            .resolve_handle::<object::WaitSet>(set, Rights::WAIT)?;
+        let delivery =
+            set.object()
+                .wait(deadline, &self.session.process.resource_domain(), || {
+                    self.session.thread.snapshot().phase == UserThreadPhase::StopRequested
+                })?;
+        self.session
+            .process
+            .copy_to_user(output, &delivery.record())?;
+        delivery.complete();
+        Ok(())
+    }
+
     fn create_event(&self) -> Result<HandleValue, ObjectServiceError> {
         let event = Event::try_new(&self.session.process.resource_domain())?;
         Ok(self
@@ -1020,6 +1095,47 @@ impl ConsoleServices for DeferredProcessServices<'_> {
 }
 
 impl VfsServices for DeferredProcessServices<'_> {
+    fn create_file(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        rights: Rights,
+        mode: u32,
+    ) -> Result<HandleValue, VfsServiceError> {
+        crate::kernel::vfs::create_file(&self.session.process, directory, path, rights, mode)
+    }
+
+    fn create_directory(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        mode: u32,
+    ) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::create_directory(&self.session.process, directory, path, mode)
+    }
+
+    fn remove_entry(
+        &self,
+        directory: HandleValue,
+        path: UserSlice,
+        is_directory: bool,
+    ) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::remove_entry(&self.session.process, directory, path, is_directory)
+    }
+
+    fn resize_file(&self, file: HandleValue, length: u64) -> Result<(), VfsServiceError> {
+        crate::kernel::vfs::resize_file(&self.session.process, file, length)
+    }
+
+    fn write_file_at(
+        &self,
+        file: HandleValue,
+        offset: Option<u64>,
+        input: Option<UserSlice>,
+    ) -> Result<(u64, u64), VfsServiceError> {
+        crate::kernel::vfs::write_file_at(&self.session.process, file, offset, input)
+    }
+
     fn open_file(
         &self,
         root: HandleValue,

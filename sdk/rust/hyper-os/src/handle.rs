@@ -45,6 +45,7 @@ impl ObjectType for AnyObject {}
 
 object_types!(
     (EventObject, HYPER_NATIVE_OBJECT_EVENT),
+    (WaitSetObject, HYPER_NATIVE_OBJECT_WAIT_SET),
     (ByteChannelObject, HYPER_NATIVE_OBJECT_BYTE_CHANNEL),
     (ThreadObject, HYPER_NATIVE_OBJECT_THREAD),
     (ProcessObject, HYPER_NATIVE_OBJECT_PROCESS),
@@ -114,6 +115,7 @@ impl ObjectKind {
     pub const fn name(self) -> &'static str {
         match self.0 {
             hyper_abi::HYPER_NATIVE_OBJECT_EVENT => "event",
+            hyper_abi::HYPER_NATIVE_OBJECT_WAIT_SET => "wait-set",
             hyper_abi::HYPER_NATIVE_OBJECT_BYTE_CHANNEL => "byte-channel",
             hyper_abi::HYPER_NATIVE_OBJECT_THREAD => "thread",
             hyper_abi::HYPER_NATIVE_OBJECT_PROCESS => "process",
@@ -245,6 +247,7 @@ impl Rights {
     pub const RESOURCE_DOMAIN_SPONSOR: Self =
         Self(hyper_abi::HYPER_NATIVE_RIGHT_RESOURCE_DOMAIN_SPONSOR);
     pub const DERIVE: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_DERIVE);
+    pub const BIND_WAIT: Self = Self(hyper_abi::HYPER_NATIVE_RIGHT_BIND_WAIT);
     pub const CREATE_VIRTUAL_MACHINE: Self =
         Self(hyper_abi::HYPER_NATIVE_RIGHT_CREATE_VIRTUAL_MACHINE);
 
@@ -312,6 +315,7 @@ const RIGHT_NAMES: &[(Rights, &str)] = &[
     (Rights::TASK_GROUP_ATTACH_PROCESS, "attach-process"),
     (Rights::RESOURCE_DOMAIN_SPONSOR, "sponsor-domain"),
     (Rights::DERIVE, "derive"),
+    (Rights::BIND_WAIT, "bind-wait"),
     (Rights::CREATE_VIRTUAL_MACHINE, "create-virtual-machine"),
 ];
 

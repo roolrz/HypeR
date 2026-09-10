@@ -27,7 +27,7 @@ pub(super) fn cached(
     destination: &mut [u8],
 ) -> Result<usize, Error> {
     let mut completed = 0usize;
-    let file_len = file.len();
+    let file_len = file.len()?;
     while completed < destination.len() {
         let remaining = destination.get_mut(completed..).ok_or(Error::InvalidPath)?;
         let Some(plan) =

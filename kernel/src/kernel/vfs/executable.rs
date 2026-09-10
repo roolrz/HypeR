@@ -12,12 +12,24 @@ use alloc::borrow::Cow;
 /// process construction never depends on a backend-specific lifetime.
 pub(crate) struct ExecutableSnapshot {
     bytes: Cow<'static, [u8]>,
+    _charge: Option<crate::kernel::accounting::CommittedCharge>,
 }
 
 impl ExecutableSnapshot {
     pub(super) const fn borrowed(bytes: &'static [u8]) -> Self {
         Self {
             bytes: Cow::Borrowed(bytes),
+            _charge: None,
+        }
+    }
+
+    pub(super) fn owned(
+        bytes: alloc::vec::Vec<u8>,
+        charge: crate::kernel::accounting::CommittedCharge,
+    ) -> Self {
+        Self {
+            bytes: Cow::Owned(bytes),
+            _charge: Some(charge),
         }
     }
 

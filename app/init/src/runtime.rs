@@ -17,6 +17,7 @@ use provision::InitialVmProvisioner;
 use supervisor::SupervisorSet;
 
 use std::convert::Infallible;
+use std::io::Read;
 
 use hyper_init::BootstrapError;
 use hyper_init::manifest::{LaunchPlan, MAX_MANIFEST_BYTES, Manifest};
@@ -24,7 +25,7 @@ use hyper_init::supervision::{self, SupportError};
 use hyper_init::{ManifestSource, ServiceGraphLauncher, bootstrap};
 use hyper_os::capability_channel::CapabilityChannel;
 use hyper_os::channel;
-use hyper_os::fs::{Directory, FileRights};
+use hyper_os::fs::Directory;
 use hyper_os::startup::{self, Startup};
 use hyper_os::task::{create_resource_domain, create_task_group};
 use hyper_service::vm as vm_contract;
@@ -38,7 +39,7 @@ pub(super) fn run(startup: &mut Startup<'_>) -> Result<Infallible, Error> {
     let root_directory = startup
         .take_root_directory()
         .map_err(|_| Error::OperatingSystem)?;
-    let source = LoadedManifest::load(&root_directory)?;
+    let source = LoadedManifest::load()?;
     let policy = BootstrapPolicy;
     let mut runtime = Runtime::from_startup(startup, root_directory)?;
     match bootstrap(&source, &policy, &mut runtime) {
@@ -69,17 +70,15 @@ impl Error {
 struct LoadedManifest(String);
 
 impl LoadedManifest {
-    fn load(root_directory: &Directory) -> Result<Self, Error> {
-        let file = root_directory
-            .open(MANIFEST_PATH, FileRights::READ)
+    fn load() -> Result<Self, Error> {
+        let file = std::fs::File::open(MANIFEST_PATH).map_err(|_| Error::OperatingSystem)?;
+        let mut bytes = Vec::new();
+        file.take(MAX_MANIFEST_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
             .map_err(|_| Error::OperatingSystem)?;
-        let length = usize::try_from(file.size().map_err(|_| Error::OperatingSystem)?)
-            .ok()
-            .filter(|length| *length <= MAX_MANIFEST_BYTES)
-            .ok_or(Error::Source)?;
-        let mut bytes = vec![0; length];
-        file.read_exact_at(0, &mut bytes)
-            .map_err(|_| Error::OperatingSystem)?;
+        if bytes.len() > MAX_MANIFEST_BYTES {
+            return Err(Error::Source);
+        }
         String::from_utf8(bytes)
             .map(Self)
             .map_err(|_| Error::Source)

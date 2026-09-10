@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Capability objects for namespace traversal and immutable file access.
+//! Capability objects for namespace traversal and file access.
 
 use hyper::fs::{MAX_NAME_BYTES, Name, NodeAttributes, NodeKind};
 use hyper::mm::FallibleArc;
@@ -25,6 +25,9 @@ pub(crate) enum Error {
     InvalidDirectoryCookie,
     InvalidPath,
     Missing,
+    AlreadyExists,
+    NotEmpty,
+    InvalidSize,
     NotDirectory,
     NotExecutable,
     NotRegularFile,
@@ -48,6 +51,12 @@ impl From<super::instance::Error> for Error {
     fn from(error: super::instance::Error) -> Self {
         match error {
             super::instance::Error::InvalidDirectoryCookie => Self::InvalidDirectoryCookie,
+            super::instance::Error::AlreadyExists => Self::AlreadyExists,
+            super::instance::Error::Missing => Self::Missing,
+            super::instance::Error::NotEmpty => Self::NotEmpty,
+            super::instance::Error::InvalidSize => Self::InvalidSize,
+            super::instance::Error::Resource(error) => Self::Resource(error),
+            super::instance::Error::Allocation => Self::Allocation,
             other => Self::Backend(other),
         }
     }
@@ -142,6 +151,56 @@ impl DirectoryObject {
         Self::try_new(self.namespace.clone(), location, sponsor)
     }
 
+    pub(crate) fn create_file<R, E: From<Error> + From<super::instance::Error>>(
+        &self,
+        path: &str,
+        mode: u32,
+        sponsor: &ResourceDomain,
+        publish: impl FnOnce(FileObject) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let (parent, name) = self.parent(path)?;
+        parent
+            .mount()
+            .filesystem()
+            .create_file(parent.node(), name, mode, |node| {
+                let location = Location::new(parent.mount().clone(), node);
+                publish(FileObject::try_new(
+                    location,
+                    self.namespace.cache(),
+                    sponsor,
+                )?)
+            })
+    }
+
+    pub(crate) fn create(&self, path: &str, kind: NodeKind, mode: u32) -> Result<(), Error> {
+        let (parent, name) = self.parent(path)?;
+        parent
+            .mount()
+            .filesystem()
+            .create(parent.node(), name, kind, mode)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn remove(&self, path: &str, kind: NodeKind) -> Result<(), Error> {
+        let (parent, name) = self.parent(path)?;
+        parent
+            .mount()
+            .filesystem()
+            .remove(parent.node(), name, kind)
+            .map_err(Into::into)
+    }
+
+    fn parent<'path>(&self, path: &'path str) -> Result<(Location, Name<'path>), Error> {
+        // The final component is a name, never a followed symlink or dot entry.
+        let (parent, name) = path.rsplit_once('/').unwrap_or((".", path));
+        let name = Name::new(name).map_err(|_| Error::InvalidPath)?;
+        let parent = if parent.is_empty() { "/" } else { parent };
+        Ok((
+            super::resolve::directory(&self.namespace, &self.root, parent)?,
+            name,
+        ))
+    }
+
     pub(crate) fn read_page(&self, cookie: u64) -> Result<DirectoryPage, Error> {
         let mut page = DirectoryPage {
             entries: [None; DIRECTORY_PAGE_CAPACITY],
@@ -153,20 +212,22 @@ impl DirectoryObject {
             let Some(entry) = self.namespace.read_directory_entry(&self.root, cursor)? else {
                 return Ok(page);
             };
-            if Name::new(entry.name).is_err()
+            let entry_name = core::str::from_utf8(&entry.name[..entry.length])
+                .map_err(|_| Error::Backend(super::instance::Error::InvalidBackendResult))?;
+            if Name::new(entry_name).is_err()
                 || entry.next_cookie == 0
                 || entry.next_cookie == cursor
             {
                 return Err(Error::Backend(super::instance::Error::InvalidBackendResult));
             }
             let mut name = [0_u8; MAX_NAME_BYTES];
-            let Some(destination) = name.get_mut(..entry.name.len()) else {
+            let Some(destination) = name.get_mut(..entry_name.len()) else {
                 return Err(Error::Backend(super::instance::Error::InvalidBackendResult));
             };
-            destination.copy_from_slice(entry.name.as_bytes());
+            destination.copy_from_slice(entry_name.as_bytes());
             page.entries[page.len] = Some(DirectoryEntrySnapshot {
                 name,
-                name_length: u32::try_from(entry.name.len())
+                name_length: u32::try_from(entry_name.len())
                     .map_err(|_| Error::Backend(super::instance::Error::InvalidBackendResult))?,
                 attributes: entry.attributes,
             });
@@ -200,7 +261,7 @@ impl DirectoryObject {
             .mount()
             .filesystem()
             .attributes(root.node())
-            .map_err(Error::Backend)?;
+            .map_err(Error::from)?;
         if attributes.kind() != NodeKind::Directory {
             return Err(Error::NotDirectory);
         }
@@ -222,6 +283,7 @@ impl KernelObject for DirectoryObject {
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
         .union(Rights::READ)
+        .union(Rights::WRITE)
         .union(Rights::EXECUTE);
     const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
 }
@@ -244,7 +306,7 @@ impl FileObject {
             .mount()
             .filesystem()
             .attributes(location.node())
-            .map_err(Error::Backend)?;
+            .map_err(Error::from)?;
         if attributes.kind() != NodeKind::File {
             return Err(Error::NotRegularFile);
         }
@@ -256,16 +318,37 @@ impl FileObject {
         })
     }
 
-    pub(crate) fn len(&self) -> u64 {
-        self.attributes.size()
+    pub(crate) fn len(&self) -> Result<u64, Error> {
+        Ok(self
+            .location
+            .mount()
+            .filesystem()
+            .attributes(self.location.node())?
+            .size())
     }
 
-    pub(crate) fn info(&self) -> FileInfo {
-        FileInfo {
+    pub(crate) fn info(&self) -> Result<FileInfo, Error> {
+        Ok(FileInfo {
             location: location_info(&self.location),
-            size: self.attributes.size(),
+            size: self.len()?,
             mode: self.attributes.mode(),
-        }
+        })
+    }
+
+    pub(crate) fn write(&self, offset: Option<u64>, input: &[u8]) -> Result<(usize, u64), Error> {
+        self.location
+            .mount()
+            .filesystem()
+            .write_at(self.location.node(), offset, input)
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn resize(&self, length: u64) -> Result<(), Error> {
+        self.location
+            .mount()
+            .filesystem()
+            .resize(self.location.node(), length)
+            .map_err(Into::into)
     }
 
     pub(crate) fn read(&self, offset: u64, destination: &mut [u8]) -> Result<usize, Error> {
@@ -286,7 +369,7 @@ impl FileObject {
             .mount()
             .filesystem()
             .read_at(self.location.node(), offset, destination)
-            .map_err(Error::Backend)
+            .map_err(Error::from)
     }
 
     pub(super) fn location(&self) -> &Location {
@@ -305,7 +388,7 @@ impl FileObject {
             .mount()
             .filesystem()
             .executable_snapshot(self.location.node(), sponsor)
-            .map_err(Error::Backend)?
+            .map_err(Error::from)?
             .ok_or(Error::NotExecutable)
     }
 }
@@ -319,6 +402,7 @@ impl KernelObject for FileObject {
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
         .union(Rights::READ)
+        .union(Rights::WRITE)
         .union(Rights::EXECUTE);
     const TRANSFER_CLASS: TransferClass = TransferClass::Leaf;
 
@@ -326,7 +410,8 @@ impl KernelObject for FileObject {
         let common = Rights::DUPLICATE
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT)
-            .union(Rights::READ);
+            .union(Rights::READ)
+            .union(Rights::WRITE);
         if self.attributes.is_executable() {
             common.union(Rights::EXECUTE)
         } else {

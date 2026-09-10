@@ -575,7 +575,7 @@ blocking. Its level-state linearization point and the single winner among
 signal, timeout, and cancellation are explicit. Source-handle close does not
 cancel the wait.
 
-Asynchronous waiting uses a WaitSet-owned, generation-qualified
+Asynchronous waiting uses a WaitSet-owned, globally non-reused
 `SubscriptionId`, not an arbitrary user key and not the source handle value.
 Binding requires `WAIT` on the source object and a distinct `BIND_WAIT` right
 on the WaitSet, retains the resolved object, and reserves exactly one
@@ -585,13 +585,19 @@ coalesces its reserved slot without allocation or blocking, and rearm is legal
 only after delivery is consumed. WaitSet size and event slots are bounded.
 `WAIT` authorizes dequeue, not subscription mutation.
 
-Subscriptions are object-lifetime operations by default, so source-handle close
-or transfer does not cancel them. CapabilityChannel endpoints and revocable
-lease subscriptions are explicitly `OwnerEpoch` operations in the schema; successful
-ownership transfer then publishes one `OwnershipLost` terminal event, while
-failed transfer changes nothing. This is distinct from implicit close
-cancellation and prevents an old endpoint owner from retaining a readiness
-side channel.
+Subscriptions are object-lifetime operations, so source-handle close does not
+cancel them. This implementation rejects WaitSet and CapabilityChannel sources.
+CapabilityChannel support requires a future `OwnerEpoch` protocol that publishes
+`OwnershipLost` on successful ownership transfer, preventing the previous owner
+from retaining a readiness side channel. Failed transfer must change nothing.
+
+Sets support 1 through 1024 subscriptions, are process-local and cannot be
+transferred. `wait_set_wait` copies one 24-byte record containing registration
+ID, observed signal bits and observation sequence. Copyout failure restores the
+event unless explicit removal or set closure has cancelled it; rearm remains
+busy until successful consumption. Final active-handle close detaches all
+subscriptions and wakes blocked consumers. Source pins retain lifetime without
+becoming active userspace authority.
 
 Every relevant assert and deassert advances the object's observation sequence,
 even when no subscription is armed. Bind and rearm atomically compare
@@ -803,7 +809,7 @@ call through deferred unwind and re-entry, yields and resumes, exits a Thread,
 propagates Process exit to a dormant sibling, contains a breakpoint fault, and
 creates, signals, and observes an Event from EL0. It joins each Thread and
 Process and retires each ownership graph. The architecture-neutral dispatchers
-implement syscalls 0 through 82: capability inspection and attenuation,
+implement syscalls 0 through 93: capability inspection and attenuation,
 Thread and Process lifecycle, Event and object wait, byte and rendezvous
 capability channels, Console I/O, root directory access, transactional ProcessBuilder
 construction, Process stop requests, Process lifecycle inspection, and
@@ -811,7 +817,8 @@ capability-scoped Process, Thread, object, and handle-graph scans. Channel opera
 storage, transactional user copies, and atomic capability publication. The
 surface also includes VMO/VMAR operations, VM lifecycle/device assignment,
 registered runtime-owned serial output, Native thread create/start/stop,
-process-private atomic wait/wake, and deadline sleep. The generated SDK ABI
+process-private atomic wait/wake, deadline sleep, writable ramfs operations,
+persistent WaitSets and observation-only current Process ID. The generated SDK ABI
 reference is authoritative for numbers and argument contracts.
 `object_wait_one` and the bounded `object_wait_many` use absolute
 monotonic deadlines, generation-qualified signal/timeout/cancellation

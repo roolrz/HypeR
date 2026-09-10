@@ -57,13 +57,13 @@ fn resolve(
                     }
                     Err(error) => return Err(Error::Backend(error)),
                 };
-                let candidate = Location::new(traversal.current().mount().clone(), node);
+                let candidate = Location::new(traversal.current().mount().clone(), node.clone());
                 let attributes = traversal
                     .current()
                     .mount()
                     .filesystem()
-                    .attributes(node)
-                    .map_err(Error::Backend)?;
+                    .attributes(&node)
+                    .map_err(Error::from)?;
                 if attributes.kind() != NodeKind::Symlink {
                     traversal.descend(candidate);
                     continue;
@@ -83,7 +83,7 @@ fn resolve(
         .mount()
         .filesystem()
         .attributes(traversal.current().node())
-        .map_err(Error::Backend)?;
+        .map_err(Error::from)?;
     if attributes.kind() != expected_kind {
         return Err(match expected_kind {
             NodeKind::Directory => Error::NotDirectory,
@@ -107,7 +107,7 @@ fn read_link(location: &Location, size: u64) -> Result<Vec<u8>, Error> {
         .mount()
         .filesystem()
         .read_link(location.node(), &mut target)
-        .map_err(Error::Backend)?;
+        .map_err(Error::from)?;
     if actual != size {
         return Err(Error::Backend(super::instance::Error::InvalidBackendResult));
     }

@@ -2384,6 +2384,9 @@ pub(crate) struct ResolvedWaitable {
 }
 
 impl ResolvedWaitable {
+    pub(crate) fn kind(&self) -> ObjectKind {
+        self.object.kind()
+    }
     pub(crate) fn source(&self) -> SignalSource<'_> {
         match self.object.signal_source() {
             Some(source) => source,

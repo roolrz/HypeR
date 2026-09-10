@@ -123,7 +123,7 @@ impl AuthorityPolicy for Policy {
                 key: test_authority_key(source),
                 provider: None,
                 object_kind: 4,
-                rights: 0b1011,
+                rights: WAIT | READ | WRITE | DUPLICATE | TRANSFER,
                 movable: true,
                 duplicable: false,
                 creatable: false,
@@ -132,7 +132,7 @@ impl AuthorityPolicy for Policy {
                 key: test_authority_key(source),
                 provider: None,
                 object_kind: 5,
-                rights: 0b11_1000_0001,
+                rights: READ | WRITE | INSPECT | EXECUTE | DUPLICATE | TRANSFER,
                 movable: false,
                 duplicable: true,
                 creatable: false,
@@ -159,7 +159,7 @@ impl AuthorityPolicy for Policy {
                 key: test_authority_key(source),
                 provider: None,
                 object_kind: 7,
-                rights: 0b010_0000,
+                rights: ATTACH_PROCESS | DUPLICATE | TRANSFER,
                 movable: false,
                 duplicable: true,
                 creatable: false,
@@ -273,15 +273,17 @@ impl AuthorityPolicy for Policy {
             ("/svc/session", "session.client-input") => (204, 4, WAIT | WRITE),
             ("/svc/session", "session.client-output") => (205, 4, WAIT | READ),
             ("/svc/session", "session.client-error") => (206, 4, WAIT | READ),
-            ("/bin/sh", "stdio.input") => (300, 4, WAIT | READ),
-            ("/bin/sh", "stdio.output") => (301, 4, WAIT | WRITE),
-            ("/bin/sh", "stdio.error") => (302, 4, WAIT | WRITE),
-            ("/bin/sh", "process.root-directory") => {
-                (303, 5, READ | DUPLICATE | TRANSFER | EXECUTE)
-            }
-            ("/bin/sh", "process.task-factory") => (304, 6, CREATE_PROCESS),
-            ("/bin/sh", "process.task-group") => (305, 7, ATTACH_PROCESS),
-            ("/bin/sh", "process.resource-domain") => (306, 8, SPONSOR),
+            ("/bin/sh", "stdio.input") => (300, 4, WAIT | READ | DUPLICATE | TRANSFER),
+            ("/bin/sh", "stdio.output") => (301, 4, WAIT | WRITE | DUPLICATE | TRANSFER),
+            ("/bin/sh", "stdio.error") => (302, 4, WAIT | WRITE | DUPLICATE | TRANSFER),
+            ("/bin/sh", "process.root-directory") => (
+                303,
+                5,
+                READ | WRITE | INSPECT | DUPLICATE | TRANSFER | EXECUTE,
+            ),
+            ("/bin/sh", "process.task-factory") => (304, 6, CREATE_PROCESS | DUPLICATE | TRANSFER),
+            ("/bin/sh", "process.task-group") => (305, 7, ATTACH_PROCESS | DUPLICATE | TRANSFER),
+            ("/bin/sh", "process.resource-domain") => (306, 8, SPONSOR | DUPLICATE | TRANSFER),
             ("/bin/sh", "process.task-inspector") => (307, 16, DUPLICATE | TRANSFER | INSPECT),
             ("/bin/sh", "process.object-inspector") => (308, 17, DUPLICATE | TRANSFER | INSPECT),
             ("/bin/sh", "process.memory-inspector") => (309, 18, DUPLICATE | TRANSFER | INSPECT),
@@ -677,7 +679,7 @@ fn production_launch_contract_rejects_under_delegated_directory_authority() {
     let production = include_str!("../config/services.json");
     for (under_delegated, service, capability) in [(
         production.replacen(
-            "[\"read\", \"duplicate\", \"transfer\", \"execute\"]",
+            "[\"read\", \"duplicate\", \"transfer\", \"execute\", \"write\", \"inspect\"]",
             "[\"read\", \"execute\"]",
             1,
         ),

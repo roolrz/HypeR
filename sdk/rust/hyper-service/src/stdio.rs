@@ -19,17 +19,26 @@ pub const STANDARD_ERROR: StartupPurpose<ByteChannelObject> = StartupPurpose::ne
 pub const STANDARD_INPUT_CONTRACT: StartupContract = StartupContract::exact(
     STANDARD_INPUT_NAME,
     STANDARD_INPUT,
-    Rights::WAIT.union(Rights::READ),
+    Rights::WAIT
+        .union(Rights::READ)
+        .union(Rights::DUPLICATE)
+        .union(Rights::TRANSFER),
 );
 pub const STANDARD_OUTPUT_CONTRACT: StartupContract = StartupContract::exact(
     STANDARD_OUTPUT_NAME,
     STANDARD_OUTPUT,
-    Rights::WAIT.union(Rights::WRITE),
+    Rights::WAIT
+        .union(Rights::WRITE)
+        .union(Rights::DUPLICATE)
+        .union(Rights::TRANSFER),
 );
 pub const STANDARD_ERROR_CONTRACT: StartupContract = StartupContract::exact(
     STANDARD_ERROR_NAME,
     STANDARD_ERROR,
-    Rights::WAIT.union(Rights::WRITE),
+    Rights::WAIT
+        .union(Rights::WRITE)
+        .union(Rights::DUPLICATE)
+        .union(Rights::TRANSFER),
 );
 
 pub const STARTUP_CONTRACTS: &[StartupContract] = &[

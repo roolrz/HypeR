@@ -32,4 +32,36 @@ void __hyper_std_thread_detach(uintptr_t token);
 /* Shared process stream buffering lives in libhyper, not each static shim. */
 int64_t hyper_runtime_stdio_read(void *buffer, size_t capacity, size_t *actual);
 int64_t hyper_runtime_stdio_write(uint32_t stream, const void *buffer, size_t count, size_t *actual);
+
+typedef struct hyper_std_file_info { uint64_t size; uint32_t mode; uint32_t kind; } hyper_std_file_info_t;
+int64_t __hyper_std_fs_open(const char *, size_t, uint32_t, uint64_t *);
+void __hyper_std_fs_close(uint64_t);
+int64_t __hyper_std_fs_read(uint64_t, uint64_t, void *, size_t, size_t *);
+int64_t __hyper_std_fs_write(uint64_t, uint64_t, uint32_t, const void *, size_t, size_t *, uint64_t *);
+int64_t __hyper_std_fs_resize(uint64_t, uint64_t);
+int64_t __hyper_std_fs_info(uint64_t, hyper_std_file_info_t *);
+int64_t __hyper_std_fs_directory(const char *, size_t, uint64_t *);
+int64_t __hyper_std_fs_stat(const char *, size_t, hyper_std_file_info_t *);
+int64_t __hyper_std_fs_readdir(uint64_t, uint64_t, hyper_native_directory_entry_t *, size_t *, uint64_t *);
+int64_t __hyper_std_fs_mkdir(const char *, size_t);
+int64_t __hyper_std_fs_remove(const char *, size_t, uint32_t);
+
+int64_t __hyper_std_process_begin(const char *, size_t, const char *, size_t, uint64_t *);
+int64_t __hyper_std_process_argument(uint64_t, const char *, size_t, uint32_t);
+int64_t __hyper_std_process_pipe(uint64_t, uint32_t, uint64_t *);
+int64_t __hyper_std_process_inherit(uint64_t, uint32_t, uint64_t, uint32_t);
+void __hyper_std_process_abort(uint64_t);
+int64_t __hyper_std_process_start(uint64_t, uint64_t *);
+uint64_t __hyper_std_current_process_id(void);
+int64_t __hyper_std_process_id(uint64_t, uint64_t *);
+int64_t __hyper_std_process_kill(uint64_t);
+int64_t __hyper_std_process_wait(uint64_t, uint32_t, uint32_t *, uint32_t *, int64_t *);
+int64_t __hyper_std_pipe_create(uint64_t *, uint64_t *);
+int64_t __hyper_std_pipe_try_read(uint64_t, void *, size_t, size_t *);
+int64_t __hyper_std_pipe_read(uint64_t, void *, size_t, size_t *);
+int64_t __hyper_std_pipe_write(uint64_t, const void *, size_t, size_t *);
+int64_t __hyper_std_wait_pair(uint64_t, uint64_t, uint64_t *, uint64_t *, uint64_t *);
+int64_t __hyper_std_wait_ready(uint64_t, uint64_t *);
+int64_t __hyper_std_wait_rearm(uint64_t, uint64_t);
+int64_t __hyper_std_wait_remove(uint64_t, uint64_t);
 #endif

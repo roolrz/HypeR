@@ -5,7 +5,7 @@
 
 use alloc::boxed::Box;
 
-use hyper::mm::try_box;
+use hyper::mm::{FallibleArc, try_box};
 use hyper::sync::InterruptSpinLock;
 
 use crate::kernel::accounting::CommittedCharge;
@@ -100,6 +100,9 @@ pub(crate) struct SignalSnapshot {
 }
 
 impl SignalSnapshot {
+    pub(super) const fn sequence(self) -> u64 {
+        self.sequence
+    }
     pub(crate) const fn signals(self) -> SignalMask {
         let Self {
             signals,
@@ -168,11 +171,42 @@ struct SignalWaiter {
     _charge: CommittedCharge,
 }
 
+/// A source-owned persistent observer. Its target holds only a weak queue
+/// reference, so the observer cannot keep its owning `WaitSet` alive.
+pub(super) struct PersistentObserver {
+    registration: FallibleArc<super::wait_set::Registration>,
+    requested: SignalMask,
+    armed: bool,
+    next: Option<Box<PersistentObserver>>,
+}
+
+impl PersistentObserver {
+    pub(super) fn new(
+        registration: FallibleArc<super::wait_set::Registration>,
+        requested: SignalMask,
+    ) -> Self {
+        Self {
+            registration,
+            requested,
+            armed: true,
+            next: None,
+        }
+    }
+
+    fn notify(&mut self, snapshot: SignalSnapshot) {
+        if self.armed && snapshot.signals.intersects(self.requested) {
+            self.armed = false;
+            super::wait_set::Registration::notify(&self.registration, snapshot);
+        }
+    }
+}
+
 struct State {
     level: SignalMask,
     sequence: u64,
     park_queue: WaitQueue,
     registrations: Option<Box<SignalWaiter>>,
+    observers: Option<Box<PersistentObserver>>,
 }
 
 /// Signal state embedded at a stable address in one kernel object.
@@ -193,6 +227,7 @@ impl SignalState {
                 sequence: 0,
                 park_queue: WaitQueue::new(),
                 registrations: None,
+                observers: None,
             }),
         }
     }
@@ -209,6 +244,15 @@ impl SignalState {
                 state.level = next_level;
                 state.sequence = next_sequence;
             }
+            let snapshot = SignalSnapshot {
+                signals: state.level,
+                sequence: state.sequence,
+            };
+            let mut observer = state.observers.as_deref_mut();
+            while let Some(entry) = observer {
+                entry.notify(snapshot);
+                observer = entry.next.as_deref_mut();
+            }
             notify_matching(state).map_err(UpdateError::Scheduler)
         });
         match result {
@@ -216,6 +260,59 @@ impl SignalState {
             Err(UpdateError::SequenceExhausted) => Err(SignalWaitError::SequenceExhausted),
             Err(UpdateError::Scheduler(error)) => signal_scheduler_invariant(error),
         }
+    }
+
+    pub(super) fn subscribe(&self, mut observer: Box<PersistentObserver>) {
+        self.state.with(|state| {
+            observer.notify(SignalSnapshot {
+                signals: state.level,
+                sequence: state.sequence,
+            });
+            observer.next = state.observers.take();
+            state.observers = Some(observer);
+        });
+    }
+
+    pub(super) fn rearm_subscription(&self, id: u64) -> bool {
+        self.state.with(|state| {
+            let snapshot = SignalSnapshot {
+                signals: state.level,
+                sequence: state.sequence,
+            };
+            let mut current = state.observers.as_deref_mut();
+            while let Some(entry) = current {
+                if entry.registration.id() == id {
+                    if entry.registration.pending() || entry.armed {
+                        return false;
+                    }
+                    entry.armed = true;
+                    entry.notify(snapshot);
+                    return true;
+                }
+                current = entry.next.as_deref_mut();
+            }
+            false
+        })
+    }
+
+    pub(super) fn unsubscribe(&self, id: u64) -> Option<Box<PersistentObserver>> {
+        self.state.with(|state| {
+            let mut current = &mut state.observers;
+            loop {
+                if current
+                    .as_ref()
+                    .is_some_and(|entry| entry.registration.id() == id)
+                {
+                    let mut removed = current.take()?;
+                    *current = removed.next.take();
+                    return Some(removed);
+                }
+                match current {
+                    Some(entry) => current = &mut entry.next,
+                    None => return None,
+                }
+            }
+        })
     }
 
     pub(crate) fn observe(&self, requested: SignalMask) -> Option<SignalSnapshot> {

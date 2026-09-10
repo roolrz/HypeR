@@ -138,12 +138,14 @@ pub struct FileRights(Rights);
 impl FileRights {
     pub const NONE: Self = Self(Rights::NONE);
     pub const READ: Self = Self(Rights::READ);
+    pub const WRITE: Self = Self(Rights::WRITE);
     pub const INSPECT: Self = Self(Rights::INSPECT);
     pub const DUPLICATE: Self = Self(Rights::DUPLICATE);
     pub const TRANSFER: Self = Self(Rights::TRANSFER);
     pub const EXECUTE: Self = Self(Rights::EXECUTE);
 
     const ALLOWED: Rights = Rights::READ
+        .union(Rights::WRITE)
         .union(Rights::INSPECT)
         .union(Rights::DUPLICATE)
         .union(Rights::TRANSFER)
@@ -177,12 +179,14 @@ pub struct DirectoryRights(Rights);
 
 impl DirectoryRights {
     pub const READ: Self = Self(Rights::READ);
+    pub const WRITE: Self = Self(Rights::WRITE);
     pub const INSPECT: Self = Self(Rights::INSPECT);
     pub const DUPLICATE: Self = Self(Rights::DUPLICATE);
     pub const TRANSFER: Self = Self(Rights::TRANSFER);
     pub const EXECUTE: Self = Self(Rights::EXECUTE);
 
     const ALLOWED: Rights = Rights::READ
+        .union(Rights::WRITE)
         .union(Rights::INSPECT)
         .union(Rights::DUPLICATE)
         .union(Rights::TRANSFER)
@@ -251,6 +255,67 @@ impl Directory {
             crate::handle::adopt_produced_handle_excluding(result.value0, &[directory.raw()])?
         };
         Ok(File { handle })
+    }
+
+    /// Exclusively creates a regular file and returns its open capability.
+    pub fn create_file(&self, path: &str, rights: FileRights, mode: u32) -> Result<File> {
+        validate_path(path)?;
+        let directory = self.as_handle_ref();
+        // SAFETY: this borrow pins the handle; path bytes are valid throughout.
+        let result = unsafe {
+            hyper_sys::directory_create_file(
+                directory.raw().get(),
+                path.as_ptr(),
+                path.len(),
+                rights.as_rights().bits(),
+                mode,
+            )
+        };
+        Status::from_raw(result.status).into_result()?;
+        // SAFETY: success publishes one unique File handle, excluding its source.
+        let handle = unsafe {
+            crate::handle::adopt_produced_handle_excluding(result.value0, &[directory.raw()])?
+        };
+        Ok(File { handle })
+    }
+
+    /// Creates one directory; its parent must already exist.
+    pub fn create_directory(&self, path: &str, mode: u32) -> Result<()> {
+        validate_path(path)?;
+        // SAFETY: the owned directory and borrowed path stay live.
+        let result = unsafe {
+            hyper_sys::directory_create_directory(
+                self.as_handle_ref().raw().get(),
+                path.as_ptr(),
+                path.len(),
+                mode,
+            )
+        };
+        Status::from_raw(result.status).into_result()
+    }
+
+    /// Removes a non-directory name without following its final symlink.
+    pub fn remove_file(&self, path: &str) -> Result<()> {
+        self.remove(path, false)
+    }
+
+    /// Removes an empty directory. Open handles remain valid after removal.
+    pub fn remove_directory(&self, path: &str) -> Result<()> {
+        self.remove(path, true)
+    }
+
+    fn remove(&self, path: &str, directory: bool) -> Result<()> {
+        validate_path(path)?;
+        // SAFETY: the owned directory and borrowed path stay live.
+        let result = unsafe {
+            hyper_sys::directory_remove(
+                self.as_handle_ref().raw().get(),
+                path.as_ptr(),
+                path.len(),
+                u32::from(directory),
+            )
+        };
+        Status::from_raw(result.status).into_result()
     }
 
     /// Opens a child directory relative to this capability.
@@ -324,6 +389,43 @@ pub struct File {
 }
 
 impl File {
+    /// Writes a bounded range; the returned count may be short.
+    pub fn write_at(&self, offset: u64, input: &[u8]) -> Result<usize> {
+        self.write(Some(offset), input).map(|(count, _)| count)
+    }
+
+    /// Appends one bounded write atomically and reports its end offset.
+    pub fn append(&self, input: &[u8]) -> Result<(usize, u64)> {
+        self.write(None, input)
+    }
+
+    fn write(&self, offset: Option<u64>, input: &[u8]) -> Result<(usize, u64)> {
+        let count = input.len().min(MAX_READ_BYTES);
+        // SAFETY: the owned File and the selected input range remain live.
+        let result = unsafe {
+            hyper_sys::file_write_at(
+                self.as_handle_ref().raw().get(),
+                u32::from(offset.is_none()),
+                offset.unwrap_or(0),
+                input.as_ptr(),
+                count,
+            )
+        };
+        Status::from_raw(result.status).into_result()?;
+        let actual = usize::try_from(result.value0).map_err(|_| Error::InvalidResponse)?;
+        if actual > count || result.value1 < actual as u64 {
+            return Err(Error::InvalidResponse);
+        }
+        Ok((actual, result.value1))
+    }
+
+    /// Changes the file length; extension reads as zero.
+    pub fn resize(&self, size: u64) -> Result<()> {
+        // SAFETY: the owned File pins the Native handle throughout this call.
+        let result = unsafe { hyper_sys::file_resize(self.as_handle_ref().raw().get(), size) };
+        Status::from_raw(result.status).into_result()
+    }
+
     /// Restores file operations from an exclusively owned typed handle.
     ///
     /// This consumes the owner and is therefore safe for a delegated file.
@@ -338,14 +440,14 @@ impl File {
         self.handle.as_handle_ref()
     }
 
-    /// Returns immutable identity and attributes for this File.
+    /// Returns stable identity and a current attribute snapshot for this File.
     ///
     /// The File handle must carry [`Rights::INSPECT`].
     pub fn info(&self) -> Result<FileInfo> {
         decode_file_info(raw_ops::file_info(self.handle.as_handle_ref())?)
     }
 
-    /// Returns the immutable file size reported by the kernel.
+    /// Returns the current file size reported by the kernel.
     pub fn size(&self) -> Result<u64> {
         self.read_at(0, &mut []).map(|outcome| outcome.file_size)
     }
@@ -407,9 +509,6 @@ impl File {
                 .ok_or(Error::OffsetOverflow)?;
             let remaining = output.get_mut(completed..).ok_or(Error::InvalidResponse)?;
             let outcome = self.read_at(chunk_offset, remaining)?;
-            if outcome.file_size != file_size {
-                return Err(Error::InvalidResponse);
-            }
             if outcome.bytes_read == 0 {
                 return Err(Error::UnexpectedEndOfFile {
                     completed,
@@ -857,9 +956,10 @@ mod tests {
     #[test]
     fn rights_narrowing_rejects_non_file_authority() {
         assert!(FileRights::from_rights(Rights::READ.union(Rights::TRANSFER)).is_some());
-        assert!(FileRights::from_rights(Rights::WRITE).is_none());
+        assert!(FileRights::from_rights(Rights::WRITE).is_some());
+        assert!(FileRights::from_rights(Rights::CREATE_PROCESS).is_none());
         assert!(DirectoryRights::from_rights(Rights::READ.union(Rights::EXECUTE)).is_some());
-        assert!(DirectoryRights::from_rights(Rights::WRITE).is_none());
+        assert!(DirectoryRights::from_rights(Rights::WRITE).is_some());
     }
 
     #[test]

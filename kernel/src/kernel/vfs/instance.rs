@@ -6,8 +6,8 @@
 use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use hyper::fs::ramfs::{DirectoryCookie, Error as RamFsError, RamFs};
-use hyper::fs::{Name, NodeAttributes, NodeId, NodeKind};
+use hyper::fs::ramfs::{Error as RamFsError, RamFs};
+use hyper::fs::{Name, NodeAttributes};
 use hyper::mm::{AllocationError, FallibleArc};
 
 use crate::kernel::accounting::ResourceDomain;
@@ -45,6 +45,12 @@ pub(crate) enum Error {
     NotRegularFile,
     NotSymlink,
     RamFs(RamFsError),
+    Resource(crate::kernel::accounting::ResourceError),
+    Lock(crate::kernel::sync::Error),
+    AlreadyExists,
+    Missing,
+    NotEmpty,
+    InvalidSize,
 }
 
 impl From<AllocationError> for Error {
@@ -66,7 +72,7 @@ impl From<RamFsError> for Error {
 /// calls only these narrow methods, so a direct or IPC-backed adapter can be
 /// added without changing namespace or capability objects.
 enum Backend {
-    RamFs(RamFs<'static>),
+    RamFs(super::ramfs::Ramfs),
 }
 
 /// Whether immutable reads benefit from copying backend data into page cache.
@@ -86,18 +92,23 @@ pub(crate) struct FilesystemInstance {
     backend: Backend,
 }
 
-/// One borrowed backend directory entry and its continuation cookie.
-pub(super) struct DirectoryEntry<'entry> {
-    pub(super) name: &'entry str,
-    pub(super) attributes: NodeAttributes,
-    pub(super) next_cookie: u64,
+/// A backend-owned lease, independent of any directory entry lifetime.
+#[derive(Clone)]
+pub(crate) struct NodeLease(FallibleArc<super::ramfs::Node>);
+
+impl NodeLease {
+    pub(crate) fn get(&self) -> u64 {
+        self.0.id()
+    }
 }
+
+pub(super) type DirectoryEntry = super::ramfs::EntrySnapshot;
 
 impl FilesystemInstance {
     pub(crate) fn try_from_ramfs(ramfs: RamFs<'static>) -> Result<FallibleArc<Self>, Error> {
         FallibleArc::try_new(Self {
             id: FilesystemId(allocate_identifier(&NEXT_FILESYSTEM_ID)?),
-            backend: Backend::RamFs(ramfs),
+            backend: Backend::RamFs(super::ramfs::Ramfs::from_archive(ramfs)?),
         })
         .map_err(Error::from)
     }
@@ -119,92 +130,124 @@ impl FilesystemInstance {
         }
     }
 
-    pub(crate) fn root(&self) -> NodeId {
+    pub(crate) fn root(&self) -> NodeLease {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.root().id(),
+            Backend::RamFs(ramfs) => NodeLease(ramfs.root()),
         }
     }
 
-    pub(crate) fn attributes(&self, node: NodeId) -> Result<NodeAttributes, Error> {
-        match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.attributes(node).map_err(map_ramfs_error),
-        }
+    pub(crate) fn attributes(&self, node: &NodeLease) -> Result<NodeAttributes, Error> {
+        node.0.attributes()
     }
 
     pub(crate) fn lookup_child(
         &self,
-        directory: NodeId,
+        directory: &NodeLease,
         name: Name<'_>,
-    ) -> Result<Option<NodeId>, Error> {
+    ) -> Result<Option<NodeLease>, Error> {
         match &self.backend {
             Backend::RamFs(ramfs) => ramfs
-                .lookup_child(directory, name)
-                .map(|node| node.map(|node| node.id()))
-                .map_err(map_ramfs_error),
+                .lookup(&directory.0, name)
+                .map(|node| node.map(NodeLease)),
         }
     }
 
     pub(crate) fn read_at(
         &self,
-        node: NodeId,
+        node: &NodeLease,
         offset: u64,
         destination: &mut [u8],
     ) -> Result<usize, Error> {
-        let actual = match &self.backend {
-            Backend::RamFs(ramfs) => ramfs
-                .read_at(node, offset, destination)
-                .map_err(map_ramfs_error),
-        }?;
-        validate_buffer_result(actual, destination.len())
+        match &self.backend {
+            Backend::RamFs(ramfs) => ramfs.read(&node.0, offset, destination, false),
+        }
     }
 
-    pub(crate) fn read_link(&self, node: NodeId, destination: &mut [u8]) -> Result<usize, Error> {
-        let actual = match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.read_link(node, destination).map_err(map_ramfs_error),
-        }?;
-        validate_buffer_result(actual, destination.len())
+    pub(crate) fn read_link(
+        &self,
+        node: &NodeLease,
+        destination: &mut [u8],
+    ) -> Result<usize, Error> {
+        match &self.backend {
+            Backend::RamFs(ramfs) => ramfs.read(&node.0, 0, destination, true),
+        }
     }
 
     pub(super) fn read_directory_entry(
         &self,
-        node: NodeId,
+        node: &NodeLease,
         cookie: u64,
-    ) -> Result<Option<DirectoryEntry<'_>>, Error> {
+    ) -> Result<Option<DirectoryEntry>, Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => {
-                let mut entries = ramfs
-                    .enumerate(node, DirectoryCookie::new(cookie))
-                    .map_err(map_ramfs_error)?;
-                Ok(entries.next().map(|entry| {
-                    let node = entry.node();
-                    DirectoryEntry {
-                        name: node.name(),
-                        attributes: node.attributes(),
-                        next_cookie: entry.next_cookie().get(),
-                    }
-                }))
-            }
+            Backend::RamFs(ramfs) => ramfs.entry(&node.0, cookie),
         }
     }
 
-    /// Returns immutable executable storage for the bootstrap loader.
-    ///
-    /// This is intentionally narrower than general file I/O. A future mutable
-    /// or remote backend must first create an owned immutable executable
-    /// snapshot so validation and mapping cannot race later file changes. The
-    /// operation is fallible, and any owned snapshot must charge its storage
-    /// to `sponsor` before allocating it. `RamFs` borrows immutable archive bytes
-    /// and therefore needs neither allocation nor an additional charge.
     pub(crate) fn executable_snapshot(
         &self,
-        node: NodeId,
-        _sponsor: &ResourceDomain,
+        node: &NodeLease,
+        sponsor: &ResourceDomain,
     ) -> Result<Option<ExecutableSnapshot>, Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => Ok(ramfs.node(node).and_then(|node| {
-                (node.kind() == NodeKind::File && node.is_executable())
-                    .then(|| ExecutableSnapshot::borrowed(node.data()))
-            })),
+            Backend::RamFs(ramfs) => ramfs.executable(&node.0, sponsor),
+        }
+    }
+
+    pub(super) fn write_at(
+        &self,
+        node: &NodeLease,
+        offset: Option<u64>,
+        input: &[u8],
+    ) -> Result<(usize, u64), Error> {
+        match &self.backend {
+            Backend::RamFs(ramfs) => ramfs.write(&node.0, offset, input),
+        }
+    }
+
+    pub(super) fn resize(&self, node: &NodeLease, length: u64) -> Result<(), Error> {
+        match &self.backend {
+            Backend::RamFs(ramfs) => ramfs.resize(&node.0, length),
+        }
+    }
+
+    pub(super) fn create(
+        &self,
+        directory: &NodeLease,
+        name: Name<'_>,
+        kind: hyper::fs::NodeKind,
+        mode: u32,
+    ) -> Result<(), Error> {
+        match &self.backend {
+            Backend::RamFs(ramfs) => ramfs.create(&directory.0, name, kind, mode, |_| Ok(())),
+        }
+    }
+
+    pub(super) fn create_file<R, E: From<Error>>(
+        &self,
+        directory: &NodeLease,
+        name: Name<'_>,
+        mode: u32,
+        publish: impl FnOnce(NodeLease) -> Result<R, E>,
+    ) -> Result<R, E> {
+        match &self.backend {
+            Backend::RamFs(ramfs) => ramfs.create(
+                &directory.0,
+                name,
+                hyper::fs::NodeKind::File,
+                mode,
+                |node| publish(NodeLease(node)),
+            ),
+        }
+    }
+
+    pub(super) fn remove(
+        &self,
+        directory: &NodeLease,
+        name: Name<'_>,
+        kind: hyper::fs::NodeKind,
+    ) -> Result<(), Error> {
+        match &self.backend {
+            Backend::RamFs(ramfs) => ramfs.remove(&directory.0, name, kind),
         }
     }
 }
@@ -212,7 +255,7 @@ impl FilesystemInstance {
 pub(crate) struct Mount {
     id: MountId,
     filesystem: FallibleArc<FilesystemInstance>,
-    root: NodeId,
+    root: NodeLease,
 }
 
 impl Mount {
@@ -234,46 +277,27 @@ impl Mount {
         &self.filesystem
     }
 
-    pub(crate) const fn root(&self) -> NodeId {
-        self.root
-    }
-}
-
-fn map_ramfs_error(error: RamFsError) -> Error {
-    match error {
-        RamFsError::InvalidDirectoryCookie => Error::InvalidDirectoryCookie,
-        RamFsError::InvalidNode => Error::InvalidBackendResult,
-        RamFsError::NotDirectory => Error::NotDirectory,
-        RamFsError::NotRegularFile => Error::NotRegularFile,
-        RamFsError::NotSymlink => Error::NotSymlink,
-        other => Error::RamFs(other),
-    }
-}
-
-const fn validate_buffer_result(actual: usize, capacity: usize) -> Result<usize, Error> {
-    if actual <= capacity {
-        Ok(actual)
-    } else {
-        Err(Error::InvalidBackendResult)
+    pub(crate) fn root(&self) -> NodeLease {
+        self.root.clone()
     }
 }
 
 #[derive(Clone)]
 pub(crate) struct Location {
     mount: FallibleArc<Mount>,
-    node: NodeId,
+    node: NodeLease,
 }
 
 impl PartialEq for Location {
     fn eq(&self, other: &Self) -> bool {
-        self.mount.id() == other.mount.id() && self.node == other.node
+        self.mount.id() == other.mount.id() && self.node.get() == other.node.get()
     }
 }
 
 impl Eq for Location {}
 
 impl Location {
-    pub(crate) fn new(mount: FallibleArc<Mount>, node: NodeId) -> Self {
+    pub(crate) fn new(mount: FallibleArc<Mount>, node: NodeLease) -> Self {
         Self { mount, node }
     }
 
@@ -281,8 +305,8 @@ impl Location {
         &self.mount
     }
 
-    pub(crate) const fn node(&self) -> NodeId {
-        self.node
+    pub(crate) fn node(&self) -> &NodeLease {
+        &self.node
     }
 }
 
@@ -316,11 +340,11 @@ impl MountNamespace {
         self.cache.clone()
     }
 
-    pub(super) fn read_directory_entry<'entry>(
+    pub(super) fn read_directory_entry(
         &self,
-        directory: &'entry Location,
+        directory: &Location,
         cookie: u64,
-    ) -> Result<Option<DirectoryEntry<'entry>>, Error> {
+    ) -> Result<Option<DirectoryEntry>, Error> {
         directory
             .mount()
             .filesystem()

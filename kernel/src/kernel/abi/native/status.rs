@@ -211,6 +211,24 @@ pub(super) fn status_from_object_service_error(error: ObjectServiceError) -> Hyp
         ObjectServiceError::InvalidInput => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         ObjectServiceError::Process(error) => status_from_process_error(error),
         ObjectServiceError::Event(error) => status_from_event_error(error),
+        ObjectServiceError::WaitSet(error) => match error {
+            crate::kernel::object::WaitSetError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
+            crate::kernel::object::WaitSetError::Unsupported => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
+            crate::kernel::object::WaitSetError::InvalidInput => {
+                HYPER_NATIVE_STATUS_INVALID_ARGUMENT
+            }
+            crate::kernel::object::WaitSetError::Full => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
+            crate::kernel::object::WaitSetError::Missing => HYPER_NATIVE_STATUS_NOT_FOUND,
+            crate::kernel::object::WaitSetError::Busy => HYPER_NATIVE_STATUS_BUSY,
+            crate::kernel::object::WaitSetError::Closed => HYPER_NATIVE_STATUS_CANCELLED,
+            crate::kernel::object::WaitSetError::TimedOut => HYPER_NATIVE_STATUS_TIMED_OUT,
+            crate::kernel::object::WaitSetError::Resource(error) => {
+                status_from_resource_error(error)
+            }
+            crate::kernel::object::WaitSetError::Wait(error) => {
+                status_from_object_wait_error(error)
+            }
+        },
         ObjectServiceError::Wait(error) => status_from_object_wait_error(error),
     }
 }
@@ -546,6 +564,9 @@ pub(super) const fn status_from_vfs_error(error: VfsError) -> HyperNativeStatus 
         VfsError::Cache(_) => HYPER_NATIVE_STATUS_INTERNAL,
         VfsError::InvalidDirectoryCookie => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         VfsError::InvalidPath => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        VfsError::AlreadyExists => hyper::abi::native::HYPER_NATIVE_STATUS_ALREADY_EXISTS,
+        VfsError::NotEmpty => hyper::abi::native::HYPER_NATIVE_STATUS_NOT_EMPTY,
+        VfsError::InvalidSize => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         VfsError::Missing => HYPER_NATIVE_STATUS_NOT_FOUND,
         VfsError::NotDirectory | VfsError::NotRegularFile => HYPER_NATIVE_STATUS_BAD_STATE,
         VfsError::NotExecutable => HYPER_NATIVE_STATUS_ACCESS_DENIED,
