@@ -17,7 +17,11 @@ pub(super) const fn services() -> crate::hal::vm::ExitServices {
     }
     #[cfg(CONFIG_ARCH_RISCV64)]
     {
-        crate::hal::vm::ExitServices::riscv64(super::dispatch_memory_fault, dispatch_guest_sync)
+        crate::hal::vm::ExitServices::riscv64(
+            super::dispatch_memory_fault,
+            dispatch_mmio,
+            dispatch_guest_sync,
+        )
     }
     #[cfg(CONFIG_ARCH_X86_64)]
     {
@@ -29,7 +33,7 @@ pub(super) const fn services() -> crate::hal::vm::ExitServices {
     }
 }
 
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 fn dispatch_mmio(access: hyper::vm::exit::MmioAccess) -> hyper::vm::exit::MmioAction {
     match crate::kernel::vm::active_vcpu::with(|execution| {
         crate::kernel::vm::device::selected::dispatch_mmio(execution, access)

@@ -41,10 +41,10 @@ pub(super) fn kick_virtual_serial(route: super::super::virtual_serial::Route) {
     platform::kick_virtual_serial(route);
 }
 
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(in crate::kernel) use platform::MmioDispatch;
 
-#[cfg(CONFIG_ARCH_AARCH64)]
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
 pub(in crate::kernel) fn dispatch_mmio(
     execution: &mut crate::kernel::vm::vcpu::VcpuExecution,
     access: hyper::vm::exit::MmioAccess,
@@ -76,4 +76,39 @@ pub(in crate::kernel) fn write_console_byte(
     };
     binding.devices().write_console_byte(byte);
     true
+}
+
+/// Heap storage retained by one selected virtual-device set.
+pub(super) fn dynamic_allocation_bytes() -> usize {
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        platform::dynamic_allocation_bytes()
+    }
+    #[cfg(not(CONFIG_ARCH_RISCV64))]
+    {
+        0
+    }
+}
+
+pub(super) const fn timer_count() -> u64 {
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        platform::timer_count()
+    }
+    #[cfg(not(CONFIG_ARCH_RISCV64))]
+    {
+        0
+    }
+}
+
+pub(super) fn quiesce(devices: &VirtualDeviceSet) -> Result<(), Error> {
+    #[cfg(CONFIG_ARCH_RISCV64)]
+    {
+        devices.quiesce()
+    }
+    #[cfg(not(CONFIG_ARCH_RISCV64))]
+    {
+        let _ = devices;
+        Ok(())
+    }
 }

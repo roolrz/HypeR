@@ -234,9 +234,17 @@ fn begin_quiesce_control(id: VmId) -> Result<(), Error> {
     // promotion until their callbacks return.
     // Disconnect the explicitly assigned serial endpoint before stopping vCPUs.
     machine.disconnect_virtual_serial();
+    // Publish every endpoint's durable administrative reason before disabling
+    // devices. A concurrent admitted UART access may observe a closed device;
+    // its terminal exit must see the already-published stop request.
     if let Err(error) = machine.request_all_stops() {
         crate::kernel::crash::fatal(format_args!(
             "HypeR: VM quiesce failed after the registry cut: {error:?}"
+        ));
+    }
+    if let Err(error) = machine.quiesce_devices() {
+        crate::kernel::crash::fatal(format_args!(
+            "HypeR: VM device quiesce failed after the registry cut: {error:?}"
         ));
     }
     Ok(())

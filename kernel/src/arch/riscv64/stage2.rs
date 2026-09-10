@@ -3,7 +3,9 @@
 
 //! Sv39x4 guest-stage translation for the RISC-V hypervisor extension.
 
+use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
+use hyper::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use hyper::mm::{PAGE_SIZE, PhysicalAddress};
 use hyper::vm::translation::{ActiveMappingError, Stage2PagePermissions, publish_active_mapping};
@@ -15,6 +17,88 @@ use hyper::hal::memory::AddressTranslation;
 const LEVEL_SHIFTS: [u64; 3] = [30, 21, 12];
 const LEVEL_SIZES: [u64; 3] = [1 << 30, 1 << 21, PAGE_SIZE];
 const ROOT_ENTRIES: u64 = 2048;
+static VMID_BITS: AtomicU8 = AtomicU8::new(14);
+static DISCOVERED: AtomicBool = AtomicBool::new(false);
+static PROBE_ROOT_PHYSICAL: AtomicU64 = AtomicU64::new(0);
+#[repr(C, align(16384))]
+struct ProbeRoot([u64; 2048]);
+// Permanently retained, immutable invalid entries. This root makes even a
+// speculative walk during VMID probing refer only to owned storage.
+static PROBE_ROOT: ProbeRoot = ProbeRoot([0; 2048]);
+
+/// Captures the linked table's physical address before HS translation starts.
+///
+/// # Safety
+/// Must run in the identity-addressed primary boot phase, before CPU admission.
+pub(super) unsafe fn prepare_discovery() {
+    PROBE_ROOT_PHYSICAL.store(core::ptr::addr_of!(PROBE_ROOT) as u64, Ordering::Release);
+}
+
+/// CPU admission precedes publication of every VM. All admitted harts contribute
+/// to this minimum; no hotplug may lower it after guest roots have been created.
+pub(super) fn discover_local() -> bool {
+    let root = PROBE_ROOT_PHYSICAL.load(Ordering::Acquire);
+    if root == 0 || !root.is_multiple_of(4 * PAGE_SIZE) {
+        return false;
+    }
+    let probe =
+        registers::HGATP_MODE_SV39X4 | registers::HGATP_VMID_MASK | (root >> registers::PAGE_SHIFT);
+    let previous: u64;
+    let probed: u64;
+    // SAFETY: Admission runs in HS mode with interrupts masked and no guest
+    // selected on this hart. The Sv39x4 probe uses an owned empty root (Bare
+    // with a nonzero VMID is unspecified). Both transitions are fenced, and
+    // the previous register is restored exactly.
+    unsafe {
+        asm!(
+            ".option push", ".option arch, +h",
+            "csrr {previous}, hgatp",
+            "csrw hgatp, {mask}",
+            "hfence.gvma zero, zero",
+            "csrr {probed}, hgatp",
+            "csrw hgatp, {previous}",
+            "hfence.gvma zero, zero",
+            ".option pop",
+            previous = out(reg) previous,
+            probed = out(reg) probed,
+            mask = in(reg) probe,
+            options(nostack),
+        );
+    }
+    // Admission must not be invoked while a guest translation is selected.
+    if previous != 0
+        || probed >> 60 != 8
+        || probed & ((1 << 44) - 1) != root >> registers::PAGE_SHIFT
+    {
+        return false;
+    }
+    let bits =
+        ((probed & registers::HGATP_VMID_MASK) >> registers::HGATP_VMID_SHIFT).count_ones() as u8;
+    VMID_BITS.fetch_min(bits, Ordering::AcqRel);
+    DISCOVERED.store(true, Ordering::Release);
+    true
+}
+
+pub(crate) fn identifier_bits() -> Result<u8, Error> {
+    if !DISCOVERED.load(Ordering::Acquire) {
+        return Err(Error::NotInitialized);
+    }
+    let bits = VMID_BITS.load(Ordering::Acquire);
+    Ok(if bits == 0 { 8 } else { bits.min(8) })
+}
+
+fn hardware_identifier(identifier: u16) -> u16 {
+    if VMID_BITS.load(Ordering::Acquire) == 0 {
+        0
+    } else {
+        identifier
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GuestStage2RetirementRequest {
+    hgatp: u64,
+}
 
 const _: () = {
     assert!(
@@ -34,6 +118,8 @@ pub enum Error {
     InvalidAddress,
     InvalidRange,
     InvalidVmid,
+    NotInitialized,
+    ActiveOwner,
 }
 
 pub struct Stage2AddressSpace {
@@ -65,14 +151,17 @@ impl Stage2AddressSpace {
         vmid: u16,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<Self, Error> {
-        if vmid == 0 || u64::from(vmid) >= 1 << 14 {
+        if vmid == 0 || u64::from(vmid) >= 1 << identifier_bits()? {
             return Err(Error::InvalidVmid);
         }
         let root = allocator(4, 4).ok_or(Error::Allocation)?;
         if !root.get().is_multiple_of(4 * PAGE_SIZE) {
             return Err(Error::InvalidAddress);
         }
-        Ok(Self { root, vmid })
+        Ok(Self {
+            root,
+            vmid: hardware_identifier(vmid),
+        })
     }
 
     pub const fn root_address(&self) -> u64 {
@@ -204,10 +293,33 @@ impl Stage2AddressSpace {
         unsafe { self.map_normal(ipa, physical, size, allocator) }
     }
 
-    pub unsafe fn activate(&self) {
-        let value = registers::HGATP_MODE_SV39X4
+    pub(crate) fn retirement_request(&self) -> GuestStage2RetirementRequest {
+        GuestStage2RetirementRequest {
+            hgatp: self.hgatp(),
+        }
+    }
+
+    fn hgatp(&self) -> u64 {
+        registers::HGATP_MODE_SV39X4
             | (u64::from(self.vmid) << registers::HGATP_VMID_SHIFT)
-            | (self.root.get() >> registers::PAGE_SHIFT);
+            | (self.root.get() >> registers::PAGE_SHIFT)
+    }
+
+    /// Tests the current hart's actual selection, independently of a retained
+    /// translation-cache epoch. Detachment may clear HGATP without changing
+    /// that epoch, so residency alone cannot authorize skipping activation.
+    pub(crate) fn is_active_local(&self) -> bool {
+        let current: u64;
+        // SAFETY: The selected RISC-V backend runs in HS mode with H admitted.
+        // This read does not grant ownership or alter the current selection.
+        unsafe {
+            asm!("csrr {current}, hgatp", current = out(reg) current, options(nostack));
+        }
+        current == self.hgatp()
+    }
+
+    pub unsafe fn activate(&self) {
+        let value = self.hgatp();
         // SAFETY: The caller guarantees the hierarchy is complete and activation is serialized.
         unsafe { riscv64_activate_stage2(value) };
     }
@@ -377,7 +489,63 @@ unsafe fn invalidate(ipa: u64, vmid: u16) -> Result<(), Error> {
     // broadcasting an SBI remote fence on every demand fault is unnecessary.
     // SAFETY: The caller guarantees this VMID is active and invalidation is
     // serialized.
-    unsafe { riscv64_invalidate_stage2_page(start >> 2, usize::from(vmid)) };
+    if vmid == 0 {
+        // SAFETY: Untagged implementations share hardware identity zero. The
+        // exclusive owner contract permits a full local guest translation fence.
+        unsafe {
+            asm!(
+                ".option push",
+                ".option arch, +h",
+                "hfence.gvma zero, zero",
+                ".option pop",
+                options(nostack)
+            )
+        };
+    } else {
+        // SAFETY: The validated hardware identifier belongs to this active root.
+        unsafe { riscv64_invalidate_stage2_page(start >> 2, usize::from(vmid)) };
+    }
+    Ok(())
+}
+
+/// Completes the local part of acknowledged retirement. Policy keeps the root
+/// and logical identifier alive until every sticky resident CPU has replied.
+pub(crate) fn retire_local(request: GuestStage2RetirementRequest) -> Result<(), Error> {
+    let root = (request.hgatp & ((1 << 44) - 1)) << registers::PAGE_SHIFT;
+    if super::vm_vcpu::stage2_root_is_active(root) {
+        return Err(Error::ActiveOwner);
+    }
+    let current: u64;
+    // SAFETY: Retirement runs on the addressed CPU with execution serialized.
+    // The explicit owner check excludes a live consumer of the retiring root.
+    unsafe { asm!("csrr {current}, hgatp", current = out(reg) current, options(nostack)) };
+    if current == request.hgatp {
+        // SAFETY: The matching selection is stale, not a live execution lease.
+        // Remove both roots before the final fence so speculative guest walks
+        // cannot repopulate translations into storage released after the ack.
+        unsafe {
+            asm!(
+                ".option push",
+                ".option arch, +h",
+                "csrw vsatp, zero",
+                "hfence.vvma zero, zero",
+                "csrw hgatp, zero",
+                ".option pop",
+                options(nostack)
+            );
+        }
+    }
+    // SAFETY: A full fence covers implementations with zero VMID bits and
+    // preserves any unrelated live HGATP selection and its execution lease.
+    unsafe {
+        asm!(
+            ".option push",
+            ".option arch, +h",
+            "hfence.gvma zero, zero",
+            ".option pop",
+            options(nostack)
+        )
+    };
     Ok(())
 }
 

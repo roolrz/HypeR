@@ -125,6 +125,10 @@ pub fn initialize_cpu_power(
     cpu_power::bind(info)
 }
 
+pub const fn prepare_primary_cpu_admission() -> bool {
+    true
+}
+
 pub fn secondary_cpu_is_compatible() -> bool {
     true
 }

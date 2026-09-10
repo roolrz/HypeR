@@ -22,7 +22,7 @@ use core::hint::spin_loop;
 // VM backends do not consume it yet, but keeping one stable kernel API avoids
 // making the generic primitive follow current backend support.
 #[allow(unused_imports)]
-pub(crate) use timers::{ArmedReservedTimer, ReservedTimer};
+pub(crate) use timers::{ArmedReservedTimer, OwnedArmedReservedTimer, ReservedTimer};
 pub use timers::{
     QueueStats as TimerQueueStats, TimerCallback, TimerEvent, TimerHandle, TimerMode, cancel,
     local_statistics as timer_statistics, schedule_after, schedule_at, schedule_periodic,

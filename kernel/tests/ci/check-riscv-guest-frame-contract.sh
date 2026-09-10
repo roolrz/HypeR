@@ -15,6 +15,9 @@ exception=src/arch/riscv64/exception.rs
 context=src/arch/riscv64/context.rs
 guest_rust=src/arch/riscv64/guest.rs
 platform=src/arch/riscv64/platform.rs
+arch_module=src/arch/riscv64/mod.rs
+boot=src/kernel/boot/mod.rs
+main=src/main.rs
 vm_vcpu=src/arch/riscv64/vm_vcpu.rs
 selected_exception=src/hal/selected/exception.rs
 kernel_irq=src/kernel/entry/irq.rs
@@ -165,7 +168,7 @@ rg -U -q 'if[[:space:]]+!candidate\.supervisor_timer_compare[[:space:]]*\{\n[[:s
     exit 1
 }
 rg -U -q 'if[[:space:]]+!enable_supervisor_timer_compare\(\)[[:space:]]*\{\n[[:space:]]+return Err\(Error::SupervisorTimerCompareUnavailable\);' "$vm_vcpu" &&
-    rg -q 'environment[[:space:]]*&[[:space:]]*HENVCFG_STCE[[:space:]]*!=[[:space:]]*0' \
+    rg -q 'environment[[:space:]]*&[[:space:]]*\(1 << 63\)[[:space:]]*!=[[:space:]]*0' \
         "$vm_vcpu" || {
     echo 'every hart must validate firmware STCE enablement before VSTIMECMP access' >&2
     exit 1
@@ -250,3 +253,127 @@ rg -q 'kernel self-tests completed' "$qemu_verify" || {
     echo 'RISC-V runtime acceptance must require completed kernel self-tests' >&2
     exit 1
 }
+
+# Guest register bank snapshots are authoritative after vector entry. Every
+# register must be captured before Rust, and installed on both return paths.
+for bank in VSSTATUS VSIE VSTVEC VSSCRATCH VSEPC VSCAUSE VSTVAL HVIP VSTIMECMP; do
+    require_order "$trap_body" "sd[[:space:]]+t1,[[:space:]]+VCPU_${bank}_OFFSET\\(a0\\)" \
+        'call[[:space:]]+riscv64_trap_dispatch' \
+        "guest $bank must be captured before Rust policy"
+    rg -q "ld[[:space:]]+t[01],[[:space:]]+VCPU_${bank}_OFFSET\\(t6\\)" "$entry" &&
+        rg -q "ld[[:space:]]+t[12],[[:space:]]+VCPU_${bank}_OFFSET\\(t0\\)" "$trap_body" || {
+        echo "guest $bank must be restored for initial entry and direct trap return" >&2
+        exit 1
+    }
+done
+require_order "$trap_body" 'sd[[:space:]]+t1,[[:space:]]+VCPU_VSIE_OFFSET\(a0\)' \
+    'csrw[[:space:]]+vsie,[[:space:]]+zero' \
+    'VS interrupt delivery must quiesce only after the guest enable snapshot'
+require_order "$trap_body" 'sd[[:space:]]+t1,[[:space:]]+VCPU_HVIP_OFFSET\(a0\)' \
+    'csrc[[:space:]]+hvip,[[:space:]]+t2' \
+    'VSSIP and VSEIP snapshots must precede clearing local virtual delivery'
+
+rg -U -q 'srli t1, t1, 8\n[[:space:]]+andi t1, t1, 1\n[[:space:]]+sd t1, VCPU_SUPERVISOR_OFFSET\(a0\)' "$trap_body" &&
+    rg -q 'ld t0, VCPU_SUPERVISOR_OFFSET\(t6\)' "$entry" &&
+    rg -q 'ld t1, VCPU_SUPERVISOR_OFFSET\(t6\)' "$entry" || {
+    echo 'guest VU/VS privilege must survive a detached IRQ-tail continuation' >&2
+    exit 1
+}
+
+rg -q 'struct StoppedGuestRun' "$context" &&
+    rg -q 'not_send_or_sync: core::marker::PhantomData<alloc::rc::Rc<\(\)>>' "$context" &&
+    rg -q 'impl Drop for StoppedGuestRun' "$context" &&
+    rg -q '!core::ptr::eq\(self.context, context\)' "$context" &&
+    rg -q 'TRAP_ACTION_ANCHOR_STOPPED' "$exception" &&
+    rg -q 'GUEST_ANCHOR_EXIT_STOPPED' "$anchor_exit" || {
+    echo 'terminal and WFI exits require an exact non-transferable stopped-run proof' >&2
+    exit 1
+}
+require_order "$vm_vcpu" 'stopped.validate_for\(context\)' \
+    'unsafe \{ deactivate\(context, vcpu_id, interrupts, physical_count\) \}' \
+    'stopped hardware detach must first validate the exact captured owner'
+require_order "$vm_vcpu" 'unsafe \{ deactivate\(context, vcpu_id, interrupts, physical_count\) \}' \
+    'stopped.consume_for\(context\)' \
+    'the stopped-run proof must remain armed until hardware detach succeeds'
+rg -q '"csrw hgatp, zero"' "$vm_vcpu" &&
+    rg -q '"hfence.gvma zero, zero"' "$vm_vcpu" &&
+    rg -q '"csrw htimedelta, zero"' "$vm_vcpu" || {
+    echo 'guest detach must remove local stage-2 and virtual-time ownership' >&2
+    exit 1
+}
+# PLIC reconciliation owns VSEIP alone; VSSIP must retain guest clear semantics.
+rg -F -q 'context.hvip = (context.hvip & !(1 << 10)) | (u64::from(pending) << 10)' "$vm_vcpu" || {
+    echo 'PLIC reconciliation must preserve unrelated guest pending interrupts' >&2
+    exit 1
+}
+
+# Admission probes firmware delegation on every CPU without leaving probe
+# state installed. Activation separately commits STCE and checks the readback.
+rg -q 'accepted & \(1 << 63\) != 0' "$vm_vcpu" &&
+    rg -F -q '"csrw henvcfg, {original}"' "$vm_vcpu" &&
+    rg -F -q 'vm_vcpu::discover_local_timer()' "$arch_module" &&
+    rg -U -q 'pub fn secondary_cpu_is_compatible\(\) -> bool \{\n[[:space:]]+prepare_primary_cpu_admission\(\)' "$arch_module" &&
+    rg -F -q 'if !crate::hal::cpu::prepare_primary_admission()' "$boot" &&
+    rg -F -q 'if !crate::hal::cpu::secondary_is_compatible()' "$main" || {
+    echo 'primary and secondary admission must probe STCE and restore host HENVCFG' >&2
+    exit 1
+}
+require_order "$vm_vcpu" 'if !enable_supervisor_timer_compare\(\)' \
+    'context.activate_system_registers\(\)' \
+    'activation must validate committed STCE before installing any guest bank'
+
+# Enabling SIE in the legacy preparation hook admits a host-origin interrupt
+# while a vCPU owns hardware but has not published its guest anchor. Only the
+# final SRET may make interrupts deliverable for this returning backend.
+rg -U -q 'pub const fn prepare_interrupts_for_guest_entry\(\)[[:space:]]*\{[[:space:]]*\}' "$arch_module" || {
+    echo 'guest preparation must preserve masked interrupts until anchor publication and SRET' >&2
+    exit 1
+}
+rg -F -q '"csrr {status}, sstatus"' "$context" &&
+    rg -F -q '"csrr {scratch}, sscratch"' "$context" &&
+    rg -U -q 'if status & registers::SSTATUS_SIE != 0 \|\| scratch != 0 \{\n[[:space:]]+return Err\(GuestRunError::State\);' "$context" || {
+    echo 'returning guest runs must reject enabled IRQs or an already published anchor' >&2
+    exit 1
+}
+require_order "$context" 'if status & registers::SSTATUS_SIE != 0 \|\| scratch != 0' \
+    'if unsafe \{ \(&mut \*context\).begin_run\(\) \}' \
+    'the masked, empty-anchor check must precede guest run-state publication'
+
+# VSIE bits are read-only zero while their HIDELEG gates are closed. Restore
+# delegation first on every entry, including migration to a previously unused
+# hart; otherwise restoring STIE/SEIE/SSIE silently loses the saved state.
+require_order "$entry" 'csrw[[:space:]]+hideleg,[[:space:]]+t0' \
+    'csrw[[:space:]]+vsie,[[:space:]]+t0' \
+    'HIDELEG must expose virtual interrupt enable bits before restoring VSIE'
+
+# Cached residency does not prove HGATP remains installed after a stopped
+# detach. Reject Bare/invalid roots before publishing the active hardware owner.
+rg -F -q '"csrr {value}, hgatp"' "$vm_vcpu" &&
+    rg -U -q 'if hgatp >> 60 != 8 \|\| root == 0 \|\| root & 0x3fff != 0 \{\n[[:space:]]+return Err\(Error::Stage2NotSelected\);' "$vm_vcpu" || {
+    echo 'guest activation must reject a missing Sv39x4 hardware selection' >&2
+    exit 1
+}
+require_order "$vm_vcpu" 'if hgatp >> 60 != 8' \
+    'context.activate_system_registers\(\)' \
+    'guest activation must verify HGATP before installing context-owned state'
+require_order "$vm_vcpu" 'if hgatp >> 60 != 8' \
+    'store\(core::ptr::from_mut\(context\).addr\(\)' \
+    'guest activation must verify HGATP before publishing its active owner'
+
+# A VU HS-qualified CSR raises virtual-instruction in HS. With no nested-H
+# guest support it must become a guest illegal trap, never supervisor emulation.
+rg -q 'GuestSyncExit::IllegalInstruction' "$guest_rust" &&
+    rg -q 'Completion::IllegalInstruction' "$guest_rust" &&
+    rg -F -q 'context.vsepc = exit.program_counter;' "$guest_rust" &&
+    rg -F -q 'context.vscause = 2;' "$guest_rust" &&
+    rg -F -q 'context.vstval = exit.instruction;' "$guest_rust" &&
+    rg -F -q 'program_counter: context.vstvec & !3' "$guest_rust" &&
+    rg -F -q 'frame.sstatus |= 1 << 8;' "$guest_rust" &&
+    rg -F -q 'frame.hstatus |= (1 << 7) | (1 << 8);' "$guest_rust" &&
+    rg -F -q 'validate_illegal_instruction_traps()' "$guest_rust" || {
+    echo 'guest illegal instruction forwarding must preserve its trap bank and VS return privilege' >&2
+    exit 1
+}
+require_order "$guest_rust" 'if frame.hstatus & \(1 << 8\) == 0' \
+    'return illegal_instruction\(frame\)' \
+    'VU virtual instructions must be forwarded before privileged emulation'

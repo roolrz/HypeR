@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Register models for the initial x86 legacy PC virtual board.
+
+use crate::vm::device::uart16550::Ns16550;
 const COM1_BASE: u16 = 0x3f8;
 const MASTER_PIC_COMMAND: u16 = 0x20;
 const MASTER_PIC_DATA: u16 = 0x21;
@@ -226,77 +228,5 @@ impl Pit {
     fn write_channel0(&mut self, value: u8) {
         self.channel0[self.channel0_index] = value;
         self.channel0_index ^= 1;
-    }
-}
-
-struct Ns16550 {
-    interrupt_enable: u8,
-    line_control: u8,
-    modem_control: u8,
-    scratch: u8,
-    divisor: [u8; 2],
-    tx_interrupt_pending: bool,
-}
-
-impl Ns16550 {
-    const DLAB: u8 = 1 << 7;
-    const INTERRUPT_TX_EMPTY: u8 = 1 << 1;
-
-    const fn new() -> Self {
-        Self {
-            interrupt_enable: 0,
-            line_control: 0,
-            modem_control: 0,
-            scratch: 0,
-            divisor: [0; 2],
-            tx_interrupt_pending: false,
-        }
-    }
-
-    fn read(&mut self, register: usize) -> u8 {
-        match register {
-            0 if self.line_control & Self::DLAB != 0 => self.divisor[0],
-            0 => 0,
-            1 if self.line_control & Self::DLAB != 0 => self.divisor[1],
-            1 => self.interrupt_enable,
-            2 if self.tx_interrupt_pending => {
-                self.tx_interrupt_pending = false;
-                0x02
-            }
-            2 => 0x01,
-            3 => self.line_control,
-            4 => self.modem_control,
-            5 => 0x60,
-            6 => 0xb0,
-            7 => self.scratch,
-            _ => 0,
-        }
-    }
-
-    fn write(&mut self, register: usize, value: u8) -> Option<u8> {
-        match register {
-            0 if self.line_control & Self::DLAB != 0 => self.divisor[0] = value,
-            0 => {
-                self.tx_interrupt_pending = self.interrupt_enable & Self::INTERRUPT_TX_EMPTY != 0;
-                return Some(value);
-            }
-            1 if self.line_control & Self::DLAB != 0 => self.divisor[1] = value,
-            1 => {
-                let was_enabled = self.interrupt_enable & Self::INTERRUPT_TX_EMPTY != 0;
-                self.interrupt_enable = value & 0x0f;
-                let enabled = self.interrupt_enable & Self::INTERRUPT_TX_EMPTY != 0;
-                self.tx_interrupt_pending = enabled && (!was_enabled || self.tx_interrupt_pending);
-            }
-            2 => {}
-            3 => self.line_control = value,
-            4 => self.modem_control = value & 0x1f,
-            7 => self.scratch = value,
-            _ => {}
-        }
-        None
-    }
-
-    const fn interrupt_asserted(&self) -> bool {
-        self.tx_interrupt_pending && self.interrupt_enable & Self::INTERRUPT_TX_EMPTY != 0
     }
 }

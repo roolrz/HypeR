@@ -99,7 +99,11 @@ pub(in crate::kernel) unsafe fn activate(
             .residency
             .check_admission(cpu.get(), incarnation.translation_epoch())
             .map_err(Error::Residency)?;
-        if !load_stage2_observation(cpu).matches(incarnation, incarnation.translation_epoch()) {
+        // Residency observations remember invalidation epochs, not continued
+        // hardware selection. A backend may clear its root at stopped detach.
+        if !load_stage2_observation(cpu).matches(incarnation, incarnation.translation_epoch())
+            || !crate::hal::vm::stage2_selection_is_current(&address_space.stage2)
+        {
             // SAFETY: The caller owns the stopped vCPU, and the installed
             // address space is pinned in the VM registry for the active guest
             // lifetime. Architecture activation includes any local

@@ -32,8 +32,9 @@ address-space geometries, SMP, kernel self-tests, virtual interrupts and timers,
 and standalone kernel self-tests. Linux guest startup is covered by Native
 userspace integration through the VMM tools. RISC-V Native integration runs the
 same static/dynamic std, process, thread, filesystem and shell contracts on one
-and four harts. Guest portions remain disabled until its VM lifecycle and
-userspace loader are available.
+and four harts. A separate `make test-vm-smoke ARCH=riscv64` init fixture
+validates Native VM lifecycle, timer/serial WFI wakeups and retirement on both
+host sizes; product Linux loading remains separate userspace work.
 It explicitly attaches `/bin/vmm` to the buffered guest serial port, requires
 repeated initramfs timer wakeups, exercises guest-console RX, and detaches
 through the local Ctrl-] menu. Reaching `/init` or delivering only the first

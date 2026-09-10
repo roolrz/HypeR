@@ -165,6 +165,10 @@ pub fn initialize_cpu_power(
 }
 
 /// Checks that a secondary CPU supports the backend selected by the boot CPU.
+pub const fn prepare_primary_cpu_admission() -> bool {
+    true
+}
+
 pub fn secondary_cpu_is_compatible() -> bool {
     address::current_cpu_is_compatible()
         && atomics::current_cpu_supports_selected_backend()

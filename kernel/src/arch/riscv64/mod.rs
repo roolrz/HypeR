@@ -30,6 +30,10 @@ pub type InterruptVirtualizationError = core::convert::Infallible;
 
 pub use barrier::Riscv64Barrier as ArchitectureBarrier;
 pub use cache::Riscv64Cache as ArchitectureCache;
+pub(crate) use context::{
+    GuestAdministrativeStopReason, GuestRunError, GuestRunExit, GuestSynchronousTerminal,
+    GuestTerminalCause, GuestWaitReason, StoppedGuestRun,
+};
 pub use context::{
     ThreadContext, VcpuContext, VirtualInterruptError, reset_stack_and_enter, switch_thread_context,
 };
@@ -40,7 +44,7 @@ pub use exception::{
     validate_local_runtime_vectors, validate_runtime_vectors,
 };
 pub use guest::ValidationError as GuestValidationError;
-pub(crate) use guest::{GuestSyncAction, GuestSyncExit, handle_guest_sync};
+pub(crate) use guest::{GuestSyncAction, GuestSyncExit, UnsupportedGuestExit, handle_guest_sync};
 pub use interrupt_controller::{
     Error as InterruptControllerError,
     Riscv64InterruptController as ArchitectureInterruptController,
@@ -66,7 +70,11 @@ pub use smp::{
     SecondaryBootParameters, current_cpu_index, current_hardware_id, notify_reschedule,
     secondary_entry_physical, send_event,
 };
+pub(crate) use stage2::GuestStage2RetirementRequest;
 pub use stage2::{Error as Stage2Error, Stage2AddressSpace};
+pub(crate) use stage2::{
+    identifier_bits as guest_translation_identifier_bits, retire_local as retire_guest_stage2_local,
+};
 pub use timer::{
     Error as TimerError, RiscvTimeCounter as ArchitectureCounter,
     SupervisorTimer as ArchitectureTimer,
@@ -94,6 +102,12 @@ pub(crate) use user_machine::{
 };
 pub use vm_interrupt::{Error as VmInterruptError, VmInterruptController};
 pub use vm_vcpu::Error as VcpuInterruptError;
+pub(crate) use vm_vcpu::{
+    StoppedDeactivationFailure, access_plic,
+    deactivate_stopped as deactivate_stopped_vcpu_hardware, reconcile_active_interrupts,
+    request_guest_exit, stopped_guest_wfi_state, update_guest_device_interrupt,
+    update_saved_guest_device_interrupt,
+};
 pub(crate) use vm_vcpu::{
     activate as activate_vcpu_hardware, deactivate as deactivate_vcpu_hardware,
     handle_maintenance_interrupt as handle_virtualization_maintenance_interrupt,
@@ -139,8 +153,12 @@ pub fn initialize_cpu_power(
     }
 }
 
+pub fn prepare_primary_cpu_admission() -> bool {
+    user_machine::discover_local() && stage2::discover_local() && vm_vcpu::discover_local_timer()
+}
+
 pub fn secondary_cpu_is_compatible() -> bool {
-    user_machine::discover_local()
+    prepare_primary_cpu_admission()
 }
 pub fn register_secondary_hardware_id(cpu_index: usize, hardware_id: u64) -> bool {
     smp::register_hart(cpu_index, hardware_id)
@@ -154,9 +172,6 @@ pub fn prepare_timekeeping(platform: &EssentialPlatformInfo) -> Result<(), Timer
 pub fn prepare_cache(
     platform: &EssentialPlatformInfo,
 ) -> Result<(), hyper::hal::cache::CacheError> {
-    if !user_machine::discover_local() {
-        halt();
-    }
     cache::initialize(platform.cache_block_size)
 }
 
@@ -182,9 +197,10 @@ pub fn initialize_virtual_devices(
     Ok(())
 }
 
-pub fn prepare_interrupts_for_guest_entry() {
-    enable_local_irq();
-}
+/// The returning guest anchor must be fully published before IRQs become
+/// deliverable. Assembly sets SPIE and SRET enables delivery atomically with
+/// entry into the guest; host execution remains masked throughout preparation.
+pub const fn prepare_interrupts_for_guest_entry() {}
 
 /// Builds the permanent HS address space while translation is disabled.
 ///
@@ -197,6 +213,8 @@ pub unsafe fn prepare_address_space(
     image: hyper::hal::memory::KernelImageLayout,
     kernel_base: u64,
 ) -> Result<PreparedAddressSpace, MemoryError> {
+    // SAFETY: This entry point runs in the identity-addressed boot phase.
+    unsafe { stage2::prepare_discovery() };
     // SAFETY: This function forwards its directly writable allocator contract.
     unsafe { memory::prepare(allocator, platform, image, kernel_base) }
 }

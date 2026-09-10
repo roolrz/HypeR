@@ -87,6 +87,32 @@ impl ReservedTimer {
         result
     }
 
+    /// Own the stable reservation allocation until this exact arm is retired.
+    #[allow(
+        dead_code,
+        reason = "selected device backends may use borrowed reservations only"
+    )]
+    pub(crate) fn arm_owned(
+        reservation: hyper::mm::FallibleArc<Self>,
+        deadline: u64,
+        notify: fn(usize),
+        notify_context: usize,
+    ) -> Result<OwnedArmedReservedTimer, super::Error> {
+        let (handle, generation) = {
+            let mut borrowed = reservation.arm(deadline, notify, notify_context)?;
+            let identity = (borrowed.handle, borrowed.generation);
+            // Transfer the linear obligation, never the callback or queue node.
+            borrowed.armed = false;
+            identity
+        };
+        Ok(OwnedArmedReservedTimer {
+            reservation,
+            handle,
+            generation,
+            armed: true,
+        })
+    }
+
     fn arm_on_pinned_cpu(
         &self,
         cpu: CpuIndex,
@@ -325,6 +351,39 @@ impl ArmedReservedTimer<'_> {
 }
 
 impl Drop for ArmedReservedTimer<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            crate::hal::cpu::halt()
+        }
+    }
+}
+
+/// A movable owner of one exact reserved arm. No borrowed owner address escapes.
+#[allow(
+    dead_code,
+    reason = "selected device backends may use borrowed reservations only"
+)]
+#[must_use = "an armed reserved timer must be retired exactly once"]
+pub(crate) struct OwnedArmedReservedTimer {
+    reservation: hyper::mm::FallibleArc<ReservedTimer>,
+    handle: TimerHandle,
+    generation: u64,
+    armed: bool,
+}
+
+#[allow(
+    dead_code,
+    reason = "selected device backends may use borrowed reservations only"
+)]
+impl OwnedArmedReservedTimer {
+    pub(crate) fn retire(mut self) -> Result<(), super::Error> {
+        self.reservation.retire(self.handle, self.generation)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for OwnedArmedReservedTimer {
     fn drop(&mut self) {
         if self.armed {
             crate::hal::cpu::halt()

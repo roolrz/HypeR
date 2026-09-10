@@ -160,6 +160,13 @@ impl Stage2AddressSpace {
         self.invalidate()
     }
 
+    /// The x86 backend does not yet expose a qualified current-control-block
+    /// selection query. Conservatively republish its EPT/NPT root on entry;
+    /// a cached residency epoch alone is not a hardware binding proof.
+    pub(crate) const fn is_active_local(&self) -> bool {
+        false
+    }
+
     pub unsafe fn activate(&self) {
         self.backend.activate_stage2(self.root.get());
     }

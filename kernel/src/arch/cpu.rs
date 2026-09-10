@@ -37,5 +37,6 @@ pub(crate) fn register_secondary(index: CpuIndex, hardware_id: CpuHardwareId) ->
 
 pub(crate) use super::imp::{
     halt, initialize_cpu_power as initialize_power, mark_current_cpu_online as mark_current_online,
+    prepare_primary_cpu_admission as prepare_primary_admission,
     secondary_cpu_is_compatible as secondary_is_compatible, send_event, wait_for_interrupt_masked,
 };

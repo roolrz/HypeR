@@ -45,15 +45,21 @@ impl VmLifecycleResources {
             .and_then(|bytes| bytes.checked_add(endpoint_slots))
             .and_then(|bytes| bytes.checked_add(endpoint_allocations))
             .and_then(|bytes| bytes.checked_add(timer_bytes))
+            .and_then(|bytes| {
+                bytes.checked_add(crate::kernel::vm::device::dynamic_allocation_bytes())
+            })
             .and_then(|bytes| u64::try_from(bytes).ok())
             .ok_or(Error::Allocation)?;
         let count = u64::from(vcpu_count);
+        let timers = count
+            .checked_add(crate::kernel::vm::device::timer_count())
+            .ok_or(Error::Allocation)?;
         let charge = domain
             .reserve(
                 ResourceAmount::ZERO
                     .with(ResourceKind::KernelMemoryBytes, allocation_bytes)
                     .with(ResourceKind::KernelObjects, 1)
-                    .with(ResourceKind::Timers, count)
+                    .with(ResourceKind::Timers, timers)
                     .with(ResourceKind::VirtualMachines, 1)
                     .with(ResourceKind::VirtualCpus, count),
             )?

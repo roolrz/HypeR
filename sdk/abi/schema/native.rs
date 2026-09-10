@@ -1072,6 +1072,51 @@ pub const CONSTANTS: &[AbiConstant] = &[
         name: "virtual_platform_aarch64_reference_timer_interrupt",
         value: 27,
     },
+    // Immutable RISC-V reference platform shared by kernel and userspace.
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference",
+        value: 2,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_guest_ram_base",
+        value: 2147483648,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_dtb_offset",
+        value: 65536,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_uart_base",
+        value: 268435456,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_uart_size",
+        value: 4096,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_uart_interrupt",
+        value: 10,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_uart_clock_frequency",
+        value: 3686400,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_plic_base",
+        value: 201326592,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_plic_size",
+        value: 4194304,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_plic_num_sources",
+        value: 31,
+    },
+    AbiConstant {
+        name: "virtual_platform_riscv64_reference_plic_supervisor_context",
+        value: 1,
+    },
     AbiConstant {
         name: "virtual_machine_phase_installed",
         value: 1,

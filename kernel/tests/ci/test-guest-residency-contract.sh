@@ -53,6 +53,10 @@ mutate() {
 
 copy_sources
 check
+mutate 'cached residency must not skip selection after guest hardware detach' \
+    src/kernel/vm/memory/residency.rs \
+    '|| !crate::hal::vm::stage2_selection_is_current(\&address_space.stage2)' \
+    '|| false'
 mutate 'retirement must permanently close residency' src/mm/address_space_state.rs \
     'self.phase = ResidencyPhase::Retired' 'self.phase = ResidencyPhase::Open'
 mutate 'cuts must remain bound to the state that minted them' src/mm/address_space_state.rs \

@@ -44,8 +44,10 @@ secondary architectures.
   manifest, restart policy, and per-VM health reporting;
 - add explicit guest-memory grants and virtual-device sessions without sharing
   whole-VM authority with backend services;
-- extend the userspace-owned lifecycle to RISC-V and x86-64 after their stop and
-  stage-2 retirement mechanisms meet the AArch64 contract.
+- integrate RISC-V Linux Image/FDT loading and product VMM configuration on the
+  Native reference platform;
+- extend the userspace-owned lifecycle to x86-64 after its stop and stage-2
+  retirement mechanisms meet the AArch64 contract.
 
 ## 4. Build device-isolation resources
 

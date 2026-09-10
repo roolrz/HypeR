@@ -21,6 +21,7 @@ process=src/kernel/process/owner.rs
 
 activate=$(sed -n '/^pub(crate) unsafe fn activate(/,/^}/p' "$transition")
 leave=$(sed -n '/^pub(in crate::kernel) fn leave(/,/^}/p' "$memory_residency")
+select_stage2=$(sed -n '/^pub(in crate::kernel) unsafe fn activate(/,/^}/p' "$memory_residency")
 release=$(sed -n '/^fn release_execution_or_fail(/,/^}/p' "$transition")
 native_retire=$(sed -n '/^    pub(crate) fn retire(/,/^\/\/\/ Owned guard/p' "$native")
 
@@ -65,6 +66,11 @@ LC_ALL=C rg -q 'self.phase = ResidencyPhase::Retired' "$residency" &&
 LC_ALL=C rg -q 'cpu_affine: PhantomData<\*mut \(\)>' "$memory_residency" &&
     LC_ALL=C rg -q 'impl Drop for GuestResidencyClaim' "$memory_residency" || {
     echo 'guest residency must remain a CPU-affine linear capability' >&2
+    exit 1
+}
+printf '%s\n' "$select_stage2" | LC_ALL=C rg -F -q \
+    '|| !crate::hal::vm::stage2_selection_is_current(&address_space.stage2)' || {
+    echo 'cached residency must also validate the actual local hardware selection' >&2
     exit 1
 }
 printf '%s\n' "$leave" | LC_ALL=C rg -q \

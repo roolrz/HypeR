@@ -38,6 +38,7 @@ riscv64_trap_vector:
     sd t0, TRAP_FRAME_T0_OFFSET(sp)
     csrr t0, sscratch
     sd t0, TRAP_FRAME_SP_OFFSET(sp)
+    csrw sscratch, zero
     li t0, 1
 .Lsave_remaining:
     sd gp, TRAP_FRAME_GP_OFFSET(sp)
@@ -74,6 +75,25 @@ riscv64_trap_vector:
     addi t0, sp, TRAP_FRAME_SIZE
     ld a0, GUEST_HS_ANCHOR_CONTEXT_OFFSET(t0)
     sd a0, TRAP_FRAME_GUEST_CONTEXT_OFFSET(sp)
+    csrr t1, vsstatus
+    sd t1, VCPU_VSSTATUS_OFFSET(a0)
+    csrr t1, vsie
+    sd t1, VCPU_VSIE_OFFSET(a0)
+    csrr t1, vstvec
+    sd t1, VCPU_VSTVEC_OFFSET(a0)
+    csrr t1, vsscratch
+    sd t1, VCPU_VSSCRATCH_OFFSET(a0)
+    csrr t1, vsepc
+    sd t1, VCPU_VSEPC_OFFSET(a0)
+    csrr t1, vscause
+    sd t1, VCPU_VSCAUSE_OFFSET(a0)
+    csrr t1, vstval
+    sd t1, VCPU_VSTVAL_OFFSET(a0)
+    csrw vsie, zero
+    csrr t1, hstatus
+    srli t1, t1, 8
+    andi t1, t1, 1
+    sd t1, VCPU_SUPERVISOR_OFFSET(a0)
     # SCOUNTEREN and SENVCFG have no VS aliases. Capture the guest values
     # before restoring the host copies from the anchor; Rust must never infer
     # them from the host-visible CSRs after this point.
@@ -130,6 +150,11 @@ riscv64_trap_vector:
     sd t0, TRAP_FRAME_STVAL_OFFSET(sp)
     csrr t0, htval
     sd t0, TRAP_FRAME_HTVAL_OFFSET(sp)
+    csrr t0, hstatus
+    sd t0, TRAP_FRAME_HSTATUS_OFFSET(sp)
+    # Host nested traps must not inherit a guest return domain.
+    li t0, ((1 << 7) | (1 << 9))
+    csrc hstatus, t0
     csrr t0, htinst
     sd t0, TRAP_FRAME_HTINST_OFFSET(sp)
     mv a0, sp
@@ -139,6 +164,8 @@ riscv64_trap_vector:
     beq a0, t0, .Lrun_postlude
     li t0, TRAP_ACTION_ANCHOR_IRQ_TAIL
     beq a0, t0, .Lanchor_irq_tail
+    li t0, TRAP_ACTION_ANCHOR_STOPPED
+    beq a0, t0, .Lanchor_stopped
 .Linvalid_trap_action:
     mv t0, a0
     mv t1, a1
@@ -156,6 +183,11 @@ riscv64_trap_vector:
     # The dispatcher captured all guest state and published IRQ_TAIL last.
     # Destroy the sscratch anchor before any host continuation can trap, then
     # restore the complete host callee ABI and return the opaque callback.
+    li t5, GUEST_ANCHOR_EXIT_IRQ_TAIL
+    j .Lanchor_unwind
+.Lanchor_stopped:
+    li t5, GUEST_ANCHOR_EXIT_STOPPED
+.Lanchor_unwind:
     mv t6, a1
     csrw sscratch, zero
     addi sp, sp, TRAP_FRAME_SIZE
@@ -175,7 +207,7 @@ riscv64_trap_vector:
     ld gp, GUEST_HS_ANCHOR_GP_OFFSET(sp)
     ld tp, GUEST_HS_ANCHOR_TP_OFFSET(sp)
     addi sp, sp, GUEST_HS_ANCHOR_SIZE
-    li a0, GUEST_ANCHOR_EXIT_IRQ_TAIL
+    mv a0, t5
     mv a1, t6
     ret
 .Lresume_trap:
@@ -188,6 +220,20 @@ riscv64_trap_vector:
     call riscv64_load_guest_floating_point
     addi t0, sp, TRAP_FRAME_SIZE
     ld t0, GUEST_HS_ANCHOR_CONTEXT_OFFSET(t0)
+    ld t1, VCPU_VSSTATUS_OFFSET(t0)
+    csrw vsstatus, t1
+    ld t1, VCPU_VSIE_OFFSET(t0)
+    csrw vsie, t1
+    ld t1, VCPU_VSTVEC_OFFSET(t0)
+    csrw vstvec, t1
+    ld t1, VCPU_VSSCRATCH_OFFSET(t0)
+    csrw vsscratch, t1
+    ld t1, VCPU_VSEPC_OFFSET(t0)
+    csrw vsepc, t1
+    ld t1, VCPU_VSCAUSE_OFFSET(t0)
+    csrw vscause, t1
+    ld t1, VCPU_VSTVAL_OFFSET(t0)
+    csrw vstval, t1
     ld t1, VCPU_SCOUNTEREN_OFFSET(t0)
     csrw scounteren, t1
     ld t1, VCPU_SENVCFG_OFFSET(t0)
@@ -205,6 +251,8 @@ riscv64_trap_vector:
     ld t1, VCPU_VSTIMECMP_OFFSET(t0)
     csrw 0x24d, t1
 .Lrestore_trap:
+    ld t0, TRAP_FRAME_HSTATUS_OFFSET(sp)
+    csrw hstatus, t0
     ld t0, TRAP_FRAME_SEPC_OFFSET(sp)
     csrw sepc, t0
     ld t0, TRAP_FRAME_SSTATUS_OFFSET(sp)
@@ -252,9 +300,10 @@ riscv64_trap_vector:
     # host-origin returns above retain their exact saved SSTATUS value.
     li t0, (3 << 13)
     csrs sstatus, t0
+    addi t0, sp, TRAP_FRAME_SIZE
+    csrw sscratch, t0
     ld t0, TRAP_FRAME_T0_OFFSET(sp)
-    addi sp, sp, TRAP_FRAME_SIZE
-    csrrw sp, sscratch, sp
+    ld sp, TRAP_FRAME_SP_OFFSET(sp)
     sret
 .size riscv64_trap_vector, . - riscv64_trap_vector
 

@@ -59,15 +59,36 @@ RISC-V does not instantiate the GIC/vGIC model merely to satisfy a shared type.
 HVIP supplies the initial virtual local-interrupt mechanism; a future AIA
 backend can add virtual IMSIC state behind that RISC-V implementation.
 
+## Native reference guest platform
+
+The immutable `Riscv64Reference` ABI profile uses RAM at `0x80000000`, an
+NS16550A UART at `0x10000000` (4 KiB window, IRQ 10, 3.6864 MHz clock), and a
+PLIC at `0x0c000000` (4 MiB window, sources 1–31, supervisor context 1).
+The ABI schema owns these constants for kernel devices and userspace boot data.
+The UART implements receive FIFOs and a reserved one-shot timeout; it has no
+periodic polling worker. Teardown cuts registry visibility, closes device
+producers and joins the exact timer callback before reclaiming its storage.
+
+Guest traps capture VS state and current VS/VU privilege before entering Rust.
+Returning exits carry a linear stopped proof which must detach the matching
+local hardware owner. VMID width is probed on every admitted hart using a
+permanent empty 16 KiB root. Zero-bit implementations use software generations
+with full fences; acknowledged retirement precedes page or identifier reuse.
+
 ## Runtime validation
 
 CI runs standalone four-hart kernel self-tests and separate one/four-hart
 Native application acceptance. Native acceptance boots init, console/session
 services and shell, and exercises static/dynamic std, threads, filesystem tools
-and console input. The RISC-V service manifest has no VM fleet and init receives
-no VM creation authority. The old kernel-resident Linux loader has been removed;
-Linux acceptance requires the userspace VM lifecycle and platform integration.
-Guest translation and interrupt mechanisms remain available for focused kernel tests.
+and console input. The RISC-V service manifest has no VM fleet. Native init
+receives VM creation authority through the same capability bootstrap as AArch64;
+applications cannot mint it. The old kernel-resident Linux loader has been removed.
+
+A separate `make test-vm-smoke ARCH=riscv64` fixture runs as `/init` and uses only
+Native VM handles to construct small guest programs. It covers administrative
+stop, timer and serial WFI wakeups, guest register preservation, privilege
+isolation, owner-process loss and repeated stage-2 retirement on one/four harts.
+Product Linux Image/FDT loading remains a userspace VMM integration task.
 
 ## Current limitations
 
@@ -76,9 +97,11 @@ Guest translation and interrupt mechanisms remain available for focused kernel t
   parsing `interrupts-extended` is required before supporting arbitrary PLIC
   topologies.
 - SSTC is mandatory; the software-injected fallback is not a supported profile.
-- The Native userspace VM platform and Linux boot acceptance are not yet available.
-- Guest WFI currently traps to HS and resumes cooperatively. A scheduler-aware
-  blocked-vCPU path is required before guest timeslicing.
+- The Native reference VM platform supports one guest vCPU. Product Linux boot
+  acceptance is not yet available.
+- Guest WFI traps to HS and blocks the scheduler execution until an enabled
+  pending interrupt or a one-shot host deadline can wake it. Global guest
+  interrupt masking does not suppress WFI wake conditions.
 - Shared kernel stage-1 and active guest stage-2 invalidation use SBI RFENCE
   for other online harts. Native roots use the acknowledged residency protocol
   described above; a local fence alone is never treated as a shootdown.

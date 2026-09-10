@@ -94,6 +94,30 @@ impl Stage2AddressSpace {
         super::GuestStage2RetirementRequest::new(vttbr, address::capabilities().stage2_vtcr_el2())
     }
 
+    /// Tests the local root and translation controls without changing the VHE
+    /// host regime. Retained residency does not imply a still-selected root.
+    pub(crate) fn is_active_local(&self) -> bool {
+        let vttbr: u64;
+        let vtcr: u64;
+        let hcr: u64;
+        // SAFETY: This backend executes at EL2; these register reads have no
+        // side effects and do not enter the lower-EL translation regime.
+        unsafe {
+            asm!(
+                "mrs {vttbr}, VTTBR_EL2",
+                "mrs {vtcr}, VTCR_EL2",
+                "mrs {hcr}, HCR_EL2",
+                vttbr = out(reg) vttbr,
+                vtcr = out(reg) vtcr,
+                hcr = out(reg) hcr,
+                options(nostack, preserves_flags),
+            );
+        }
+        vttbr == ((u64::from(self.vmid) << registers::VTTBR_EL2_VMID_SHIFT) | self.root.get())
+            && vtcr == address::capabilities().stage2_vtcr_el2()
+            && hcr & registers::HCR_EL2_VM != 0
+    }
+
     #[allow(dead_code)]
     /// Maps normal memory using page-table pages supplied by `allocator`.
     ///

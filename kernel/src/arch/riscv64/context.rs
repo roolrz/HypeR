@@ -59,16 +59,154 @@ pub struct VcpuContext {
     pub fcsr: u32,
     _floating_padding: u32,
     run_state: u64,
+    pub supervisor: u64,
+    stopped_exit: Option<GuestRunExit>,
 }
 
 const GUEST_RUN_READY: u64 = 0;
 const GUEST_RUN_RUNNING: u64 = 1;
 const GUEST_RUN_IRQ_TAIL: u64 = 2;
+const GUEST_RUN_STOPPED: u64 = 3;
 
 #[repr(C)]
 struct GuestAnchorExit {
     kind: u64,
     target: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestSynchronousTerminal {
+    Undecodable,
+    Unsupported(super::guest::UnsupportedGuestExit),
+}
+
+/// Typed guest-policy cause for one terminal run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestTerminalCause {
+    MemoryFault,
+    Mmio,
+    Synchronous(GuestSynchronousTerminal),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestWaitReason {
+    Interrupt,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestAdministrativeStopReason {
+    Requested,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GuestTerminalExit {
+    cause: GuestTerminalCause,
+    syndrome: u64,
+    fault_address: u64,
+    program_counter: u64,
+    processor_state: u64,
+    vector: u64,
+}
+
+impl GuestTerminalExit {
+    pub(super) fn from_frame(
+        frame: &super::exception::TrapFrame,
+        cause: GuestTerminalCause,
+    ) -> Self {
+        Self {
+            cause,
+            syndrome: frame.scause,
+            fault_address: frame.stval,
+            program_counter: frame.sepc,
+            processor_state: frame.sstatus,
+            vector: frame.scause,
+        }
+    }
+
+    pub(crate) const fn cause(self) -> GuestTerminalCause {
+        self.cause
+    }
+
+    pub(crate) const fn syndrome(self) -> u64 {
+        self.syndrome
+    }
+
+    pub(crate) const fn fault_address(self) -> u64 {
+        self.fault_address
+    }
+
+    pub(crate) const fn program_counter(self) -> u64 {
+        self.program_counter
+    }
+
+    pub(crate) const fn processor_state(self) -> u64 {
+        self.processor_state
+    }
+
+    pub(crate) const fn vector(self) -> u64 {
+        self.vector
+    }
+}
+
+/// Copied stopped-exit facts which remain valid after local hardware detaches.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuestRunExit {
+    Wait(GuestWaitReason),
+    Terminal(GuestTerminalExit),
+    AdministrativeStop(GuestAdministrativeStopReason),
+}
+
+/// Linear proof that vector entry captured and closed one guest return world.
+#[must_use = "a stopped guest run must be detached exactly once"]
+pub(crate) struct StoppedGuestRun {
+    context: *mut VcpuContext,
+    exit: GuestRunExit,
+    armed: bool,
+    not_send_or_sync: core::marker::PhantomData<alloc::rc::Rc<()>>,
+}
+
+impl StoppedGuestRun {
+    pub(crate) const fn exit(&self) -> GuestRunExit {
+        self.exit
+    }
+
+    pub(super) fn validate_for(&self, context: &VcpuContext) -> Result<(), GuestRunError> {
+        if !self.armed
+            || !core::ptr::eq(self.context, context)
+            || context.run_state != GUEST_RUN_STOPPED
+        {
+            return Err(GuestRunError::Owner);
+        }
+        Ok(())
+    }
+
+    pub(super) fn consume_for(&mut self, context: &mut VcpuContext) -> Result<(), GuestRunError> {
+        if !core::ptr::eq(self.context, context) || context.run_state != GUEST_RUN_STOPPED {
+            return Err(GuestRunError::Owner);
+        }
+        context.run_state = GUEST_RUN_READY;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for StoppedGuestRun {
+    fn drop(&mut self) {
+        if self.armed {
+            let context = crate::arch::exception::capture_crash_context();
+            crate::arch::exception::fatal(
+                context,
+                format_args!("armed RISC-V stopped-guest proof was dropped without detachment"),
+            )
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuestRunError {
+    Owner,
+    Return,
+    State,
 }
 
 impl VcpuContext {
@@ -80,7 +218,7 @@ impl VcpuContext {
         Self {
             general: [0; 32],
             program_counter,
-            vsstatus: VSSTATUS_FS_INITIAL,
+            vsstatus: VSSTATUS_FS_INITIAL | (2 << 32),
             vsie: 0,
             vstvec: 0,
             vsscratch: 0,
@@ -97,6 +235,8 @@ impl VcpuContext {
             fcsr: 0,
             _floating_padding: 0,
             run_state: GUEST_RUN_READY,
+            supervisor: 1,
+            stopped_exit: None,
         }
     }
 
@@ -131,7 +271,7 @@ impl VcpuContext {
     /// This context must be the active vCPU on the current hart, exclusively
     /// owned by the caller, with local interrupts masked.
     pub unsafe fn deactivate_system_registers(&mut self) {
-        self.capture_virtual_supervisor_registers();
+        // Trap entry already captured the complete guest bank before Rust.
     }
     /// Enters the guest represented by `context`.
     ///
@@ -139,26 +279,57 @@ impl VcpuContext {
     ///
     /// `context` must be non-null, aligned, pinned, and exclusively owned by the
     /// active vCPU for the guest-run lifetime. Trap handling may mutate it.
-    pub unsafe fn enter(context: *mut Self) -> ! {
+    pub unsafe fn run(context: *mut Self) -> Result<StoppedGuestRun, GuestRunError> {
+        if context.is_null() || !context.is_aligned() {
+            return Err(GuestRunError::Owner);
+        }
         // Keep only the pinned raw pointer across guest entry and scheduling.
         // The IRQ-tail transition temporarily lends this object to VM
         // deactivation/reactivation, so retaining a Rust reference here would
         // violate exclusive-borrow provenance even though execution is nested.
         loop {
+            let status: u64;
+            let scratch: u64;
+            // SAFETY: These local supervisor CSRs are read-only snapshots.
+            unsafe {
+                core::arch::asm!("csrr {status}, sstatus", "csrr {scratch}, sscratch", status = out(reg) status, scratch = out(reg) scratch, options(nomem, nostack));
+            }
+            if status & registers::SSTATUS_SIE != 0 || scratch != 0 {
+                return Err(GuestRunError::State);
+            }
+            // SAFETY: The validated raw pointer remains pinned; this short
+            // borrow ends before any trap or scheduler callback may run.
+            if !unsafe { super::vm_vcpu::owns(&*context) } {
+                return Err(GuestRunError::Owner);
+            }
             // SAFETY: The run owner has exclusive access before guest entry;
             // this short reference ends before assembly or policy can borrow it.
             if unsafe { (&mut *context).begin_run() }.is_err() {
-                super::halt()
+                return Err(GuestRunError::State);
             }
             // SAFETY: RUNNING publishes the exact context to the assembly
             // anchor. A typed anchor exit destroys that publication before it
             // returns here with local interrupts still masked.
             let exit = unsafe { riscv64_enter_guest(context.cast_const().cast()) };
+            if exit.kind == registers::GUEST_ANCHOR_EXIT_STOPPED {
+                // SAFETY: The destroyed anchor returned this exact pinned owner.
+                let state = unsafe { &mut *context };
+                if state.run_state != GUEST_RUN_STOPPED {
+                    return Err(GuestRunError::State);
+                }
+                let reason = state.stopped_exit.take().ok_or(GuestRunError::Return)?;
+                return Ok(StoppedGuestRun {
+                    context,
+                    exit: reason,
+                    armed: true,
+                    not_send_or_sync: core::marker::PhantomData,
+                });
+            }
             // SAFETY: Typed assembly return restored exclusive access; this
             // short reference ends before invoking the scheduler callback.
             let target = match unsafe { (&mut *context).consume_irq_tail(exit) } {
                 Ok(target) => target,
-                Err(_) => super::halt(),
+                Err(_) => return Err(GuestRunError::Return),
             };
             // SAFETY: Trap dispatch accepts only an opaque callback previously
             // qualified by the selected HAL. The anchor is gone, no raw frame
@@ -186,7 +357,6 @@ impl VcpuContext {
         }
         self.general = *general;
         self.program_counter = program_counter;
-        self.capture_virtual_supervisor_registers();
         // This state is the final publication consumed by `enter`; all guest
         // register copies happen-before it in same-hart program order.
         self.publish_irq_tail()
@@ -219,29 +389,24 @@ impl VcpuContext {
         Ok(exit.target)
     }
 
-    fn capture_virtual_supervisor_registers(&mut self) {
-        // SAFETY: These virtual-supervisor CSRs are accessible in HS mode while
-        // this vCPU owns the current hart. No memory ordering is implied or
-        // required by these same-hart register snapshots.
-        unsafe {
-            core::arch::asm!(
-                "csrr {vsstatus}, vsstatus",
-                "csrr {vsie}, vsie",
-                "csrr {vstvec}, vstvec",
-                "csrr {vsscratch}, vsscratch",
-                "csrr {vsepc}, vsepc",
-                "csrr {vscause}, vscause",
-                "csrr {vstval}, vstval",
-                vsstatus = out(reg) self.vsstatus,
-                vsie = out(reg) self.vsie,
-                vstvec = out(reg) self.vstvec,
-                vsscratch = out(reg) self.vsscratch,
-                vsepc = out(reg) self.vsepc,
-                vscause = out(reg) self.vscause,
-                vstval = out(reg) self.vstval,
-                options(nomem, nostack)
-            );
+    pub(super) fn stop(
+        &mut self,
+        general: &[u64; 32],
+        pc: u64,
+        exit: GuestRunExit,
+    ) -> Result<(), GuestRunError> {
+        if self.run_state != GUEST_RUN_RUNNING {
+            return Err(GuestRunError::State);
         }
+        self.general = *general;
+        self.program_counter = pc;
+        self.stopped_exit = Some(exit);
+        self.run_state = GUEST_RUN_STOPPED;
+        Ok(())
+    }
+
+    pub(super) const fn virtual_count_offset(&self) -> u64 {
+        self.virtual_count_offset
     }
 }
 
@@ -273,12 +438,39 @@ pub(super) fn validate_anchor_state_machine() -> bool {
     {
         return false;
     }
-    context
+    if context
         .consume_irq_tail(GuestAnchorExit {
             kind: registers::GUEST_ANCHOR_EXIT_IRQ_TAIL,
             target: 1,
         })
-        .is_err()
+        .is_ok()
+    {
+        return false;
+    }
+    let exit = GuestRunExit::Wait(GuestWaitReason::Interrupt);
+    if context.stop(&[0; 32], 4, exit).is_ok()
+        || context.begin_run().is_err()
+        || context.stop(&[0; 32], 4, exit).is_err()
+    {
+        return false;
+    }
+    let mut stopped = StoppedGuestRun {
+        context: &mut context,
+        exit,
+        armed: true,
+        not_send_or_sync: core::marker::PhantomData,
+    };
+    let valid = stopped.validate_for(&other).is_err()
+        && stopped.validate_for(&context).is_ok()
+        && context.begin_run().is_err()
+        && stopped.consume_for(&mut other).is_err()
+        && stopped.consume_for(&mut context).is_ok()
+        && stopped.validate_for(&context).is_err()
+        && stopped.consume_for(&mut context).is_err();
+    // This is a locally constructed pure validation witness, not an actual
+    // hardware lease. Avoid turning a failed assertion into a destructor trap.
+    stopped.armed = false;
+    valid && context.begin_run().is_ok()
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -396,5 +588,6 @@ const _: () = {
     assert!(offset_of!(VcpuContext, floating) == registers::VCPU_FLOATING_OFFSET as usize);
     assert!(offset_of!(VcpuContext, fcsr) == registers::VCPU_FCSR_OFFSET as usize);
     assert!(offset_of!(VcpuContext, run_state) == registers::VCPU_RUN_STATE_OFFSET as usize);
+    assert!(offset_of!(VcpuContext, supervisor) == registers::VCPU_SUPERVISOR_OFFSET as usize);
     assert!(size_of::<GuestAnchorExit>() == 16);
 };
