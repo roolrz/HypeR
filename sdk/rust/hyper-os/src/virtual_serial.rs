@@ -19,6 +19,8 @@ const FULL_RIGHTS: Rights = Rights::DUPLICATE
     .union(Rights::TRANSFER)
     .union(Rights::INSPECT)
     .union(Rights::WRITE)
+    .union(Rights::READ)
+    .union(Rights::WAIT)
     .union(Rights::ASSIGN_DEVICE);
 
 /// Creates one unbound port; register output before assigning it to a VM.
@@ -38,8 +40,10 @@ pub fn create() -> Result<OwnedHandle<VirtualSerialObject>> {
 }
 
 /// Registered shared output. Mapping ownership is private so safe callers cannot
-/// unmap storage while a read is active. No syscall is issued by `read`.
+/// unmap storage while a read is active. Output is mapped read-only; each
+/// nonempty batch acknowledges consumption without a syscall data copy.
 pub struct Output {
+    serial: OwnedHandle<VirtualSerialObject>,
     region: OwnedHandle<crate::handle::VmarObject>,
     address: usize,
     cursor: u64,
@@ -49,11 +53,13 @@ impl Output {
     /// Maps caller-allocated whole pages and registers them before VM binding.
     /// The VMAR reserves an unused range; overlaps are rejected, never replaced.
     pub fn register(
-        serial: HandleRef<'_, VirtualSerialObject>,
+        serial: &OwnedHandle<VirtualSerialObject>,
         root: HandleRef<'_, crate::handle::VmarObject>,
         address: u64,
         memory: crate::memory::WritableVmo,
     ) -> Result<Self> {
+        let output_owner = serial.duplicate(Rights::READ.union(Rights::WAIT))?;
+        let serial = serial.as_handle_ref();
         let size = BUFFER_BYTES;
         if memory.size() != size
             || address == 0
@@ -74,6 +80,7 @@ impl Output {
             )?
         };
         let mapping = Self {
+            serial: output_owner,
             region,
             address: base,
             cursor: 0,
@@ -87,8 +94,7 @@ impl Output {
                 0,
                 address,
                 size,
-                hyper_abi::HYPER_NATIVE_VMAR_PERMISSION_READ
-                    | hyper_abi::HYPER_NATIVE_VMAR_PERMISSION_WRITE,
+                hyper_abi::HYPER_NATIVE_VMAR_PERMISSION_READ,
             )
         })
         .into_result()?;
@@ -105,7 +111,8 @@ impl Output {
     }
 
     /// Copies a published prefix, then releases its slots to the producer.
-    pub fn read(&mut self, output: &mut [u8]) -> usize {
+    /// Returns zero immediately when no bytes are currently published.
+    pub fn try_read(&mut self, output: &mut [u8]) -> Result<usize> {
         use core::sync::atomic::{AtomicU8, Ordering};
         let head = self.word(0).load(Ordering::Acquire);
         let count =
@@ -121,14 +128,52 @@ impl Output {
             // SAFETY: Output exclusively owns the consumer cursor; the kernel
             // cannot reuse these published slots before our release below.
             // The bounded offset stays in the registered data mapping. Atomic
-            // byte accesses also tolerate an unsafe caller corrupting the
-            // shared cursor; no ordinary references to shared bytes escape.
+            // byte accesses also tolerate an unsafe caller prematurely
+            // acknowledging slots; no ordinary references to shared bytes escape.
             *byte = unsafe { &*core::ptr::with_exposed_provenance::<AtomicU8>(address) }
                 .load(Ordering::Relaxed);
         }
         self.cursor += count as u64;
-        self.word(4096).store(self.cursor, Ordering::Release);
-        count
+        if count != 0 {
+            // SAFETY: the private handle identifies this registration. All
+            // reads finish before the syscall releases slots to the producer.
+            Status::from_raw(unsafe {
+                hyper_sys::virtual_serial_acknowledge_output(
+                    self.serial.as_handle_ref().raw().get(),
+                    self.cursor,
+                )
+            })
+            .into_result()?;
+        }
+        Ok(count)
+    }
+
+    /// Blocks without polling until a batch or end of stream is available.
+    pub fn read(&mut self, output: &mut [u8]) -> Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let count = self.try_read(output)?;
+            if count != 0 {
+                return Ok(count);
+            }
+            let observed = crate::wait::wait_many(&[self.wait_item()], crate::DEADLINE_INFINITE)?;
+            if crate::wait::ObjectSignals::<VirtualSerialObject>::PEER_CLOSED
+                .is_present_in(observed.observed)
+            {
+                return self.try_read(output);
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn wait_item(&self) -> crate::wait::WaitItem<'_> {
+        crate::wait::WaitItem::new(
+            self.serial.as_handle_ref(),
+            crate::wait::ObjectSignals::<VirtualSerialObject>::READABLE
+                .union(crate::wait::ObjectSignals::<VirtualSerialObject>::PEER_CLOSED),
+        )
     }
 
     fn word(&self, offset: usize) -> &core::sync::atomic::AtomicU64 {

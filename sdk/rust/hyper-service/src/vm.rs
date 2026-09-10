@@ -36,10 +36,12 @@ pub const CLIENT_CONTROL: StartupPurpose<ByteChannelObject> = StartupPurpose::ne
 pub const CLIENT_CAPABILITIES: StartupPurpose<CapabilityChannelObject> =
     StartupPurpose::new(0x8005_0009);
 
-/// Rights retained while the manager forwards the guest image to a runtime.
-pub const PROVISIONED_IMAGE_RIGHTS: Rights = Rights::READ
+/// Rights retained while the manager duplicates a guest image into a runtime.
+pub const MANAGED_IMAGE_RIGHTS: Rights = Rights::READ
     .union(Rights::DUPLICATE)
     .union(Rights::TRANSFER);
+/// The fleet manager only reads its bootstrap configuration; it does not forward it.
+pub const PROVISIONED_CONFIG_RIGHTS: Rights = Rights::READ;
 /// Rights retained across the init-to-manager control-endpoint hop.
 ///
 /// `TRANSFER` is transport authority only. The manager attenuates it away when
@@ -80,6 +82,13 @@ pub const MANAGER_CONNECTION_CONTRACT: StartupContract = StartupContract::exact(
 );
 
 pub const MANAGER_STARTUP_CONTRACTS: &[StartupContract] = &[
+    StartupContract::exact(
+        crate::process::ROOT_DIRECTORY_NAME,
+        hyper_os::startup::ROOT_DIRECTORY,
+        Rights::READ
+            .union(Rights::DUPLICATE)
+            .union(Rights::TRANSFER),
+    ),
     MANAGER_RUNTIME_IMAGE_CONTRACT,
     MANAGER_PROVISIONING_CONTRACT,
     MANAGER_CREATION_AUTHORITY_CONTRACT,
@@ -140,21 +149,19 @@ const KIND_INSTANCE_COMMAND: u8 = 2;
 const KIND_INSTANCE_STATUS: u8 = 3;
 const KIND_INSTANCE_EVENT: u8 = 4;
 const KIND_MANAGER_CONNECTION: u8 = 5;
-const KIND_FLEET_COMMAND: u8 = 6;
-const KIND_FLEET_RESPONSE: u8 = 7;
 const KIND_FLEET_CAPABILITY: u8 = 8;
 
 /// Capability-bearing request accepted by the fleet manager while empty.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisionRequest {
-    LaunchInstance,
+    ConfigureFleet,
 }
 
 impl ProvisionRequest {
     #[must_use]
     pub const fn encode(self) -> [u8; MESSAGE_BYTES] {
         match self {
-            Self::LaunchInstance => encode_message(KIND_PROVISION_REQUEST, 1, 0),
+            Self::ConfigureFleet => encode_message(KIND_PROVISION_REQUEST, 1, 0),
         }
     }
 
@@ -162,7 +169,7 @@ impl ProvisionRequest {
     pub fn decode(message: &[u8]) -> Option<Self> {
         let (value, detail) = decode_message(message, KIND_PROVISION_REQUEST)?;
         match (value, detail) {
-            (1, 0) => Some(Self::LaunchInstance),
+            (1, 0) => Some(Self::ConfigureFleet),
             _ => None,
         }
     }
@@ -170,7 +177,7 @@ impl ProvisionRequest {
     #[must_use]
     pub const fn capability_count(self) -> usize {
         match self {
-            Self::LaunchInstance => 2,
+            Self::ConfigureFleet => 2,
         }
     }
 }
@@ -193,87 +200,6 @@ impl ManagerConnectionRequest {
             Some((1, 0))
         )
         .then_some(Self)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum FleetCommand {
-    List = 1,
-    Status = 2,
-    Start = 3,
-    Stop = 4,
-    Restart = 5,
-    Console = 6,
-}
-
-impl FleetCommand {
-    #[must_use]
-    pub const fn encode(self) -> [u8; MESSAGE_BYTES] {
-        encode_message(KIND_FLEET_COMMAND, self as u8, 0)
-    }
-
-    #[must_use]
-    pub fn decode(message: &[u8]) -> Option<Self> {
-        let (value, detail) = decode_message(message, KIND_FLEET_COMMAND)?;
-        if detail != 0 {
-            return None;
-        }
-        match value {
-            1 => Some(Self::List),
-            2 => Some(Self::Status),
-            3 => Some(Self::Start),
-            4 => Some(Self::Stop),
-            5 => Some(Self::Restart),
-            6 => Some(Self::Console),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[repr(u8)]
-pub enum FleetState {
-    Stopped = 1,
-    Starting = 2,
-    Running = 3,
-    Stopping = 4,
-    Failed = 5,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FleetResponse {
-    State(FleetState),
-    Accepted,
-    Busy,
-    Failed,
-}
-
-impl FleetResponse {
-    #[must_use]
-    pub const fn encode(self) -> [u8; MESSAGE_BYTES] {
-        match self {
-            Self::State(state) => encode_message(KIND_FLEET_RESPONSE, 1, state as u8),
-            Self::Accepted => encode_message(KIND_FLEET_RESPONSE, 2, 0),
-            Self::Busy => encode_message(KIND_FLEET_RESPONSE, 3, 0),
-            Self::Failed => encode_message(KIND_FLEET_RESPONSE, 4, 0),
-        }
-    }
-
-    #[must_use]
-    pub fn decode(message: &[u8]) -> Option<Self> {
-        let (value, detail) = decode_message(message, KIND_FLEET_RESPONSE)?;
-        match (value, detail) {
-            (1, 1) => Some(Self::State(FleetState::Stopped)),
-            (1, 2) => Some(Self::State(FleetState::Starting)),
-            (1, 3) => Some(Self::State(FleetState::Running)),
-            (1, 4) => Some(Self::State(FleetState::Stopping)),
-            (1, 5) => Some(Self::State(FleetState::Failed)),
-            (2, 0) => Some(Self::Accepted),
-            (3, 0) => Some(Self::Busy),
-            (4, 0) => Some(Self::Failed),
-            _ => None,
-        }
     }
 }
 
@@ -615,18 +541,19 @@ fn decode_message(message: &[u8], expected_kind: u8) -> Option<(u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FleetCommand, FleetResponse, FleetState, INSTANCE_CONTROL_RIGHTS, InstanceCommand,
-        InstanceEvent, InstanceFailure, InstanceStatus, InstanceStopState, InstanceTracker,
-        InvalidStatusTransition, ManagerConnectionRequest, PROVISIONED_IMAGE_RIGHTS,
-        PROVISIONED_INSTANCE_CONTROL_RIGHTS, ProvisionRequest, RUNTIME_CONSOLE_CONNECTION_CONTRACT,
-        RUNTIME_CREATION_LEASE_CONTRACT, RUNTIME_IMAGE_CONTRACT, RUNTIME_INSTANCE_CONTROL_CONTRACT,
-        RUNTIME_STARTUP_CONTRACTS, StopAction,
+        INSTANCE_CONTROL_RIGHTS, InstanceCommand, InstanceEvent, InstanceFailure, InstanceStatus,
+        InstanceStopState, InstanceTracker, InvalidStatusTransition, MANAGED_IMAGE_RIGHTS,
+        ManagerConnectionRequest, PROVISIONED_CONFIG_RIGHTS, PROVISIONED_INSTANCE_CONTROL_RIGHTS,
+        ProvisionRequest, RUNTIME_CONSOLE_CONNECTION_CONTRACT, RUNTIME_CREATION_LEASE_CONTRACT,
+        RUNTIME_IMAGE_CONTRACT, RUNTIME_INSTANCE_CONTROL_CONTRACT, RUNTIME_STARTUP_CONTRACTS,
+        StopAction,
     };
     use hyper_os::handle::Rights;
 
     #[test]
     fn provisioned_capabilities_retain_only_required_forwarding_authority() {
-        assert!(PROVISIONED_IMAGE_RIGHTS.contains(Rights::TRANSFER));
+        assert!(MANAGED_IMAGE_RIGHTS.contains(Rights::TRANSFER));
+        assert_eq!(PROVISIONED_CONFIG_RIGHTS, Rights::READ);
         assert!(PROVISIONED_INSTANCE_CONTROL_RIGHTS.contains(Rights::TRANSFER));
         assert!(!INSTANCE_CONTROL_RIGHTS.contains(Rights::TRANSFER));
         assert!(PROVISIONED_INSTANCE_CONTROL_RIGHTS.contains(INSTANCE_CONTROL_RIGHTS));
@@ -655,7 +582,7 @@ mod tests {
     #[test]
     fn wire_values_are_explicit_and_stable() {
         assert_eq!(
-            ProvisionRequest::LaunchInstance.encode(),
+            ProvisionRequest::ConfigureFleet.encode(),
             [b'H', b'V', b'M', 1, 1, 1, 0, 0]
         );
         assert_eq!(
@@ -678,46 +605,22 @@ mod tests {
 
     #[test]
     fn message_kinds_cannot_be_confused() {
-        let command = ProvisionRequest::LaunchInstance.encode();
+        let command = ProvisionRequest::ConfigureFleet.encode();
         assert_eq!(
             ProvisionRequest::decode(&command),
-            Some(ProvisionRequest::LaunchInstance)
+            Some(ProvisionRequest::ConfigureFleet)
         );
         assert_eq!(InstanceCommand::decode(&command), None);
         assert_eq!(InstanceStatus::decode(&command), None);
         assert_eq!(InstanceEvent::decode(&command), None);
-        assert_eq!(FleetCommand::decode(&command), None);
-        assert_eq!(FleetResponse::decode(&command), None);
     }
 
     #[test]
-    fn fleet_protocol_round_trips_every_command_and_state() {
+    fn manager_connection_round_trips() {
         assert_eq!(
             ManagerConnectionRequest::decode(&ManagerConnectionRequest.encode()),
             Some(ManagerConnectionRequest)
         );
-        for command in [
-            FleetCommand::List,
-            FleetCommand::Status,
-            FleetCommand::Start,
-            FleetCommand::Stop,
-            FleetCommand::Restart,
-            FleetCommand::Console,
-        ] {
-            assert_eq!(FleetCommand::decode(&command.encode()), Some(command));
-        }
-        for response in [
-            FleetResponse::State(FleetState::Stopped),
-            FleetResponse::State(FleetState::Starting),
-            FleetResponse::State(FleetState::Running),
-            FleetResponse::State(FleetState::Stopping),
-            FleetResponse::State(FleetState::Failed),
-            FleetResponse::Accepted,
-            FleetResponse::Busy,
-            FleetResponse::Failed,
-        ] {
-            assert_eq!(FleetResponse::decode(&response.encode()), Some(response));
-        }
     }
 
     #[test]
@@ -769,7 +672,7 @@ mod tests {
 
     #[test]
     fn provisioning_flags_determine_the_atomic_capability_shape() {
-        let request = ProvisionRequest::LaunchInstance;
+        let request = ProvisionRequest::ConfigureFleet;
         assert_eq!(ProvisionRequest::decode(&request.encode()), Some(request));
         assert_eq!(request.capability_count(), 2);
     }

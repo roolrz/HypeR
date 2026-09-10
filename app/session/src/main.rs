@@ -5,9 +5,9 @@
 
 use std::convert::Infallible;
 
-use hyper_os::handle::{ByteChannelObject, OwnedHandle};
+use hyper_os::channel::ByteRelay;
 use hyper_os::startup::Startup;
-use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
+use hyper_os::wait::wait_many;
 use hyper_service::session as session_contract;
 use std::process::ExitCode;
 
@@ -35,56 +35,45 @@ fn run(startup: &mut Startup<'_>) -> Result<Infallible, ()> {
     let client_error_owner = startup
         .take(session_contract::CLIENT_ERROR)
         .map_err(|_| ())?;
-    let readable = ObjectSignals::<ByteChannelObject>::READABLE
-        .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED);
-    let waits = [
-        WaitItem::new(client_output_owner.as_handle_ref(), readable),
-        WaitItem::new(client_error_owner.as_handle_ref(), readable),
-        WaitItem::new(console_input_owner.as_handle_ref(), readable),
+    let mut output_buffer = vec![0; hyper_os::channel::MAX_MESSAGE_BYTES];
+    let mut error_buffer = vec![0; hyper_os::channel::MAX_MESSAGE_BYTES];
+    let mut input_buffer = vec![0; hyper_os::channel::MAX_MESSAGE_BYTES];
+    let mut routes = [
+        ByteRelay::new(
+            client_output_owner.as_byte_channel(),
+            console_output_owner.as_byte_channel(),
+            &mut output_buffer,
+        ),
+        ByteRelay::new(
+            client_error_owner.as_byte_channel(),
+            console_output_owner.as_byte_channel(),
+            &mut error_buffer,
+        ),
+        ByteRelay::new(
+            console_input_owner.as_byte_channel(),
+            client_input_owner.as_byte_channel(),
+            &mut input_buffer,
+        ),
     ];
-    let mut bytes = [0_u8; hyper_os::channel::MAX_MESSAGE_BYTES];
-
+    let mut first = 0;
     loop {
+        // Rotate priority so a continuously readable stream cannot starve keys
+        // or stderr. Each direction retains at most one pending message.
+        let order = [
+            first,
+            (first + 1) % routes.len(),
+            (first + 2) % routes.len(),
+        ];
+        let waits = [
+            routes[order[0]].wait_item().ok_or(())?,
+            routes[order[1]].wait_item().ok_or(())?,
+            routes[order[2]].wait_item().ok_or(())?,
+        ];
         let observation = wait_many(&waits, hyper_os::DEADLINE_INFINITE).map_err(|_| ())?;
-        match observation.index {
-            0 => route(
-                &client_output_owner,
-                &console_output_owner,
-                observation.observed,
-                &mut bytes,
-            )?,
-            1 => route(
-                &client_error_owner,
-                &console_output_owner,
-                observation.observed,
-                &mut bytes,
-            )?,
-            2 => route(
-                &console_input_owner,
-                &client_input_owner,
-                observation.observed,
-                &mut bytes,
-            )?,
-            _ => return Err(()),
-        }
+        let index = *order.get(observation.index).ok_or(())?;
+        routes[index].poll().map_err(|_| ())?;
+        first = (index + 1) % routes.len();
     }
-}
-
-fn route(
-    source: &OwnedHandle<ByteChannelObject>,
-    destination: &OwnedHandle<ByteChannelObject>,
-    observed: u64,
-    buffer: &mut [u8],
-) -> Result<(), ()> {
-    if ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed) {
-        let count = source.as_byte_channel().receive(buffer).map_err(|_| ())?;
-        destination
-            .as_byte_channel()
-            .send(buffer.get(..count).ok_or(())?)
-            .map_err(|_| ())?;
-        return Ok(());
-    }
-    Err(())
 }
 
 fn main() -> ExitCode {

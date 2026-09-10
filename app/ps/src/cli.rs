@@ -8,6 +8,12 @@ use clap::Parser;
 pub struct Ps {
     #[arg(short = 'T', long)]
     pub threads: bool,
+    /// Select one process by KOID.
+    #[arg(short = 'p', long)]
+    pub process: Option<std::num::NonZeroU64>,
+    /// Show process names containing this text.
+    #[arg(long)]
+    pub name: Option<String>,
 }
 
 #[cfg(test)]

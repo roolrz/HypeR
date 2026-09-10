@@ -105,6 +105,9 @@ fn run() -> Result<(), String> {
             boot_arguments,
         },
     )?;
+    if fs::read(output).ok().as_deref() == Some(bytes.as_slice()) {
+        return Ok(());
+    }
     fs::write(output, bytes).map_err(io_error)
 }
 

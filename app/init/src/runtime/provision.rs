@@ -33,7 +33,7 @@ impl InitialVmProvisioner {
         &mut self,
         manifest: &Manifest<'_>,
         manager_index: usize,
-        image_path: &str,
+        config_path: &str,
         root_directory: &Directory,
         console: &OwnedHandle<ConsoleObject>,
         supervisors: &mut SupervisorSet,
@@ -43,11 +43,13 @@ impl InitialVmProvisioner {
             .get(manager_index)
             .and_then(Option::as_ref)
             .ok_or(LaunchError::InvalidPlan)?;
-        let requested = FileRights::from_rights(vm_contract::PROVISIONED_IMAGE_RIGHTS)
-            .ok_or(LaunchError::InvalidPlan)?;
-        let mut image = Some(
+        let requested = FileRights::from_rights(
+            vm_contract::PROVISIONED_CONFIG_RIGHTS.union(hyper_os::handle::Rights::TRANSFER),
+        )
+        .ok_or(LaunchError::InvalidPlan)?;
+        let mut config = Some(
             root_directory
-                .open(image_path, requested)
+                .open(config_path, requested)
                 .map_err(|_| LaunchError::OperatingSystem)?
                 .into_handle(),
         );
@@ -91,9 +93,9 @@ impl InitialVmProvisioner {
             {
                 return Err(LaunchError::VmProvisioningClosed);
             }
-            let image_disposition = CapabilityDisposition::move_handle(
-                &mut image,
-                RightsOffer::Exact(vm_contract::PROVISIONED_IMAGE_RIGHTS),
+            let config_disposition = CapabilityDisposition::move_handle(
+                &mut config,
+                RightsOffer::Exact(vm_contract::PROVISIONED_CONFIG_RIGHTS),
             )
             .map_err(|_| LaunchError::OperatingSystem)?;
             let control_disposition = CapabilityDisposition::move_handle(
@@ -102,8 +104,8 @@ impl InitialVmProvisioner {
             )
             .map_err(|_| LaunchError::OperatingSystem)?;
             match self.init_vm_provisioning_channel.try_send(
-                &vm_contract::ProvisionRequest::LaunchInstance.encode(),
-                &mut [image_disposition, control_disposition],
+                &vm_contract::ProvisionRequest::ConfigureFleet.encode(),
+                &mut [config_disposition, control_disposition],
             ) {
                 Ok(()) => return Ok(()),
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}

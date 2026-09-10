@@ -276,6 +276,7 @@ impl AuthorityPolicy for Policy {
             ("/bin/sh", "stdio.input") => (300, 4, WAIT | READ | DUPLICATE | TRANSFER),
             ("/bin/sh", "stdio.output") => (301, 4, WAIT | WRITE | DUPLICATE | TRANSFER),
             ("/bin/sh", "stdio.error") => (302, 4, WAIT | WRITE | DUPLICATE | TRANSFER),
+            ("/svc/vm-manager", "process.root-directory") => (303, 5, READ | DUPLICATE | TRANSFER),
             ("/bin/sh", "process.root-directory") => (
                 303,
                 5,
@@ -377,7 +378,7 @@ fn production_manifest_matches_the_validated_schema() {
         return;
     };
     assert_eq!(manifest.service_count(), 5);
-    assert_eq!(plan.initial_vm_image(), Some("/vm/alpine.itb"));
+    assert_eq!(plan.vm_config_path(), Some("/etc/hyper/vms.json"));
     let shell = manifest
         .services()
         .find(|service| service.name() == "shell");
@@ -388,9 +389,9 @@ fn production_manifest_matches_the_validated_schema() {
 }
 
 #[test]
-fn rejects_a_noncanonical_initial_vm_image() {
+fn rejects_a_noncanonical_vm_config_path() {
     let text =
-        include_str!("../config/services.json").replace("/vm/alpine.itb", "/vm/../alpine.itb");
+        include_str!("../config/services.json").replace("/etc/hyper/vms.json", "/etc/../vms.json");
     let parsed = parse(&text);
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
@@ -398,7 +399,7 @@ fn rejects_a_noncanonical_initial_vm_image() {
     };
     assert_eq!(
         validate(&manifest, &Policy).map_err(|error| error.kind()),
-        Err(ValidationErrorKind::InvalidInitialVmImage)
+        Err(ValidationErrorKind::InvalidVmConfigPath)
     );
 }
 

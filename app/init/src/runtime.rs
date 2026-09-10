@@ -240,7 +240,7 @@ impl Runtime {
         let vm_manager_index = plan
             .unique_service_for_purpose(vm_contract::PROVISIONING.as_raw())
             .ok_or(LaunchError::InvalidPlan)?;
-        let initial_vm_image = plan.initial_vm_image().ok_or(LaunchError::InvalidPlan)?;
+        let vm_config_path = plan.vm_config_path().ok_or(LaunchError::InvalidPlan)?;
         let result = (|| {
             self.launcher.start_initial_graph(
                 manifest,
@@ -251,7 +251,7 @@ impl Runtime {
             self.provisioner.provision_initial_vm(
                 manifest,
                 vm_manager_index,
-                initial_vm_image,
+                vm_config_path,
                 &self.launcher.authorities.root_directory,
                 self.launcher.authorities.console,
                 &mut self.supervisors,

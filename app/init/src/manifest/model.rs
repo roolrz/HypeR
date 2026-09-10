@@ -70,15 +70,15 @@ pub struct Service<'manifest> {
         BoundedList<CapabilityBinding<'manifest>, MAX_CAPABILITIES_PER_SERVICE>,
 }
 
-/// Initial guest selected by immutable bootstrap configuration.
+/// Fleet configuration file selected by immutable bootstrap wiring.
 #[derive(Debug, Eq, PartialEq)]
-pub struct InitialVm<'manifest> {
-    pub(super) image: &'manifest str,
+pub struct VmConfiguration<'manifest> {
+    pub(super) config: &'manifest str,
 }
 
-impl<'manifest> InitialVm<'manifest> {
-    pub const fn image(&self) -> &'manifest str {
-        self.image
+impl<'manifest> VmConfiguration<'manifest> {
+    pub const fn config(&self) -> &'manifest str {
+        self.config
     }
 }
 
@@ -111,14 +111,14 @@ impl Service<'_> {
 /// A parsed manifest which borrows immutable text loaded from the root directory.
 #[derive(Debug, Eq, PartialEq)]
 pub struct Manifest<'manifest> {
-    pub(super) initial_vm: Option<InitialVm<'manifest>>,
+    pub(super) vm_configuration: Option<VmConfiguration<'manifest>>,
     pub(super) services: BoundedList<Service<'manifest>, MAX_SERVICES>,
 }
 
 impl<'manifest> Manifest<'manifest> {
     pub(crate) fn empty() -> Self {
         Self {
-            initial_vm: None,
+            vm_configuration: None,
             services: BoundedList::new(),
         }
     }
@@ -135,13 +135,13 @@ impl<'manifest> Manifest<'manifest> {
         self.services.get(index)
     }
 
-    pub const fn initial_vm(&self) -> Option<&InitialVm<'manifest>> {
-        self.initial_vm.as_ref()
+    pub const fn vm_configuration(&self) -> Option<&VmConfiguration<'manifest>> {
+        self.vm_configuration.as_ref()
     }
 
-    pub const fn initial_vm_image(&self) -> Option<&'manifest str> {
-        match &self.initial_vm {
-            Some(initial_vm) => Some(initial_vm.image),
+    pub const fn vm_config_path(&self) -> Option<&'manifest str> {
+        match &self.vm_configuration {
+            Some(vm_configuration) => Some(vm_configuration.config),
             None => None,
         }
     }

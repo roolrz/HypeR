@@ -147,3 +147,7 @@ Native acceptance checks exercise sparse writes, truncation, concurrent append,
 unlink/recreate lifetime, one-shot WaitSet rearm and peer close, more than 64
 persistent sources, and child output larger than channel capacity on both
 streams. Both static and dynamic std applications use the assembled SDK.
+
+Native file metadata is available through `std::fs::metadata` and
+`std::fs::symlink_metadata` (Native VFS currently has no symbolic links).
+`std::os::hyper::fs::MetadataExt::mode()` exposes Native permission mode bits.

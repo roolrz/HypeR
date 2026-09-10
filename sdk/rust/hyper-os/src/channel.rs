@@ -3,6 +3,8 @@
 
 //! Safe handle-free `ByteChannel` message transport.
 
+pub use crate::relay::ByteRelay;
+
 use crate::handle::{ByteChannelObject, HandleRef, OwnedHandle};
 use crate::{Error, Result, Status};
 

@@ -80,22 +80,39 @@ page because executable-range metadata is not yet part of the VM ABI; sparse
 pages retain the demand-promotion path.
 
 A userspace-created VM has no implicit route to the physical host Console.
-The runtime creates a VirtualSerial, allocates and maps a 72 KiB VMO, and
-registers those whole pages before assigning the port into the pending VM.
-The kernel pins the VMO backing; it does not allocate a private output buffer
-for userspace to read through syscalls. The shared layout has a producer page,
-a consumer page, and a 64 KiB byte ring. Kernel-owned cursors and cached page
-addresses remain authoritative. Consumer progress cannot regress or acknowledge
-unpublished bytes. A full ring drops new output without waiting or overwriting
-unconsumed bytes. See the generated Native ABI for exact offsets and ordering.
+The runtime creates a VirtualSerial, allocates a 68 KiB VMO, maps it read-only,
+and registers those whole pages before assigning the port into the pending VM.
+Registration acquires an exclusive write lease: existing writable aliases reject
+registration; direct VMO access, snapshots, and new writable aliases remain
+excluded until final retirement. The kernel pins the backing but allocates no
+private output queue. One header page contains production and loss counters;
+the remaining 64 KiB holds atomic byte slots. Runtime reads acquire-observe the
+producer and acknowledge absolute consumption through a READ-authorized syscall.
+Invalid backwards or future acknowledgements change neither cursor nor signals.
 
-`vm-runtime` collects shared output on a 10 ms event-loop deadline, without an
-output-read syscall or per-byte readable notification. It owns a bounded 64 KiB
-retention queue, client forwarding, and slow-client loss policy. Output to a
-full client channel never blocks guest control. Keyboard input travels to the
-runtime through the same client ByteChannel and is injected in bounded batches;
-unaccepted input remains queued in the runtime. Guest UART emulation and input
-injection remain kernel mechanisms.
+Output publication, acknowledgement, and closure serialize under one port lock.
+The first byte of an unread batch asserts READABLE; subsequent bytes do not
+notify. Acknowledgement clears it only if all published bytes were consumed.
+Thus output arriving before clearing stays readable and output arriving after
+clearing reasserts readiness. The existing signal wait protocol closes the
+check-to-park race. Full rings drop new bytes and count loss without blocking
+the guest or overwriting unconsumed bytes. See the generated ABI for layout.
+
+`vm-runtime` uses a persistent WaitSet for output, control, vCPU termination,
+and actionable client channel states, with an infinite deadline. It owns a
+bounded 64 KiB retention queue and nonblocking client forwarding. Guest input
+uses bounded partial injection and WRITABLE notification when its queue regains
+space. The runtime subscribes to client READABLE only when it can accept another
+message, and to client WRITABLE only while output is pending. Peer closure drains
+already accepted input. Neither direction requires periodic polling.
+
+The lock order is port, signal state, then scheduler/WaitSet notification.
+Guest-device kicks run after releasing the port lock. Output byte publication
+uses Release and readers use Acquire; consumption completes before the syscall
+releases slots under the port lock. Atomic byte access also tolerates a hostile
+caller prematurely acknowledging slots. Physical AArch64 qualification must
+stress publication/acknowledgement across CPUs, idle wakeups, full queues, and
+runtime termination during output; QEMU alone does not prove weak ordering.
 
 The shell holds only a `WAIT|WRITE` manager-connector endpoint. Each `/bin/vmm`
 invocation obtains private control and capability channels. For `vmm console`,
@@ -108,8 +125,8 @@ runtime observes the data peer closing. Ctrl-] detaches without stopping the VM.
 VirtualSerial handles stay in their creating runtime: generic capability
 transfer and ProcessBuilder storage are forbidden. The same-process device
 assignment consumes only the binding handle. Runtime loss therefore closes all
-userspace port handles and future serial output admission. Any already admitted write
-still owns its device binding and registration lease. VM stop and acknowledged
+userspace port handles and synchronously closes serial output admission under
+the port lock, after any admitted writer completes. VM stop and acknowledged
 retirement quiesce vCPU execution before those owners can release registered
 pages. User unmapping, handle close, and runtime address-space teardown therefore
 cannot turn a cached kernel pointer into a write to freed/reused memory. Pinned

@@ -10,6 +10,9 @@ pub struct Handle {
     #[arg(long)]
     pub objects: bool,
     pub process: Option<std::num::NonZeroU64>,
+    /// Show only this object kind (as printed in KIND).
+    #[arg(long)]
+    pub kind: Option<String>,
 }
 
 #[cfg(test)]

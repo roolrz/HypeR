@@ -3,6 +3,7 @@
 
 //! Fleet policy and supervision for Native virtual-machine runtimes.
 
+use hyper_vm_policy::fleet::{self, Action, Request, Response};
 use std::mem::MaybeUninit;
 use std::time::Duration;
 
@@ -53,11 +54,10 @@ struct FleetManager {
     authority: OwnedHandle<hyper_os::handle::VirtualMachineCreationAuthorityObject>,
     provisioning: CapabilityChannel,
     connections: CapabilityChannel,
-    definition: Option<VmDefinition>,
-    instance: Option<VmInstance>,
+    root: Directory,
+    machines: Vec<Machine>,
+    initial_vm: Option<usize>,
     clients: [Option<Client>; MAX_CLIENTS],
-    restart_pending: bool,
-    failed: bool,
 }
 
 impl FleetManager {
@@ -74,30 +74,47 @@ impl FleetManager {
             connections: CapabilityChannel::from_handle(
                 startup.take(vm_contract::MANAGER_CONNECTION)?,
             ),
-            definition: None,
-            instance: None,
+            root: Directory::from_handle(startup.take(startup::ROOT_DIRECTORY)?),
+            machines: Vec::new(),
+            initial_vm: None,
             clients: std::array::from_fn(|_| None),
-            restart_pending: false,
-            failed: false,
         })
     }
 
     fn run(&mut self) -> hyper_os::Result<()> {
         let provision = self.receive_provision()?;
-        self.definition = Some(VmDefinition {
-            image: provision.image,
-        });
+        let config = File::from_handle(provision.config);
+        let size = config.size()?;
+        if size > fleet::MAX_CONFIG_BYTES {
+            return Err(hyper_os::Error::InvalidResponse);
+        }
+        let mut bytes = vec![0; size as usize];
+        config.read_exact_at(0, &mut bytes)?;
+        let config = fleet::Config::parse(&bytes).map_err(|_| hyper_os::Error::InvalidResponse)?;
         self.clients[0] = Some(Client::initial(provision.control));
-        if self.start_instance().is_err() {
-            self.failed = true;
-            self.publish_initial_event(vm_contract::InstanceEvent::Failed(
-                vm_contract::InstanceFailure::Runtime,
-            ));
+        self.install_definitions(config.machines)
+            .map_err(|_| hyper_os::Error::InvalidResponse)?;
+        self.initial_vm = self
+            .machines
+            .iter()
+            .position(|machine| machine.definition.autostart);
+        let has_boot_vm = self.initial_vm.is_some();
+        for vm in 0..self.machines.len() {
+            if self.machines[vm].definition.autostart && self.start_instance(vm).is_err() {
+                self.machines[vm].failed = true;
+                self.publish_initial_event(
+                    vm,
+                    vm_contract::InstanceEvent::Failed(vm_contract::InstanceFailure::Runtime),
+                );
+            }
+        }
+        if !has_boot_vm {
+            self.publish_boot_event(vm_contract::InstanceEvent::Stopped);
         }
         loop {
             self.accept_client()?;
             self.observe_one_event()?;
-            self.complete_restart_if_ready();
+            self.complete_restarts()?;
         }
     }
 
@@ -105,7 +122,7 @@ impl FleetManager {
         let mut bytes = [MaybeUninit::<u8>::uninit(); vm_contract::MESSAGE_BYTES];
         let mut slots = [
             CapabilityReceiveSlot::new::<hyper_os::handle::FileObject>(
-                vm_contract::PROVISIONED_IMAGE_RIGHTS,
+                vm_contract::PROVISIONED_CONFIG_RIGHTS,
             ),
             CapabilityReceiveSlot::new::<ByteChannelObject>(
                 vm_contract::PROVISIONED_INSTANCE_CONTROL_RIGHTS,
@@ -120,7 +137,7 @@ impl FleetManager {
             return Err(hyper_os::Error::InvalidResponse);
         }
         Ok(Provision {
-            image: slots[0]
+            config: slots[0]
                 .take::<hyper_os::handle::FileObject>()?
                 .ok_or(hyper_os::Error::MissingHandle)?,
             control: slots[1]
@@ -169,22 +186,24 @@ impl FleetManager {
     }
 
     fn observe_one_event(&mut self) -> hyper_os::Result<()> {
-        const WAIT_CAPACITY: usize = MAX_CLIENTS + 2;
+        const WAIT_CAPACITY: usize = MAX_CLIENTS + 2 * fleet::MAX_DEFINITIONS;
         let mut waits = Vec::with_capacity(WAIT_CAPACITY);
         let mut sources = Vec::with_capacity(WAIT_CAPACITY);
-        if let Some(instance) = self.instance.as_ref() {
-            waits.push(WaitItem::new(
-                instance.runtime.as_handle_ref(),
-                ObjectSignals::<ProcessObject>::TERMINATED,
-            ));
-            sources.push(WaitSource::RuntimeProcess);
-            if let Some(control) = instance.runtime_control.as_ref() {
+        for (vm, machine) in self.machines.iter().enumerate() {
+            if let Some(instance) = machine.instance.as_ref() {
                 waits.push(WaitItem::new(
-                    control.as_handle_ref(),
-                    ObjectSignals::<ByteChannelObject>::READABLE
-                        .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
+                    instance.runtime.as_handle_ref(),
+                    ObjectSignals::<ProcessObject>::TERMINATED,
                 ));
-                sources.push(WaitSource::RuntimeControl);
+                sources.push(WaitSource::RuntimeProcess(vm));
+                if let Some(control) = instance.runtime_control.as_ref() {
+                    waits.push(WaitItem::new(
+                        control.as_handle_ref(),
+                        ObjectSignals::<ByteChannelObject>::READABLE
+                            .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
+                    ));
+                    sources.push(WaitSource::RuntimeControl(vm));
+                }
             }
         }
         for (index, client) in self.clients.iter().enumerate() {
@@ -203,38 +222,23 @@ impl FleetManager {
         if waits.is_empty() {
             return Ok(());
         }
-        let deadline = self
-            .instance
-            .as_ref()
-            .and_then(|instance| instance.exit_deadline)
-            .map_or(
-                hyper_os::time::deadline_after(EVENT_POLL_INTERVAL)?.as_raw(),
-                hyper_os::time::FiniteDeadline::as_raw,
-            );
+        let deadline = hyper_os::time::deadline_after(EVENT_POLL_INTERVAL)?.as_raw();
         let observation = match wait_many(&waits, deadline) {
             Ok(observation) => observation,
             Err(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT)) => {
-                let now = hyper_os::time::monotonic_now()?.as_nanoseconds();
-                if let Some(instance) = self.instance.as_mut()
-                    && instance
-                        .exit_deadline
-                        .is_some_and(|deadline| deadline.as_raw() <= now)
-                {
-                    instance.grace_period_expired();
-                }
                 return Ok(());
             }
             Err(error) => return Err(error),
         };
         match sources[observation.index] {
-            WaitSource::RuntimeProcess => self.finish_instance(),
-            WaitSource::RuntimeControl => self.handle_runtime_control(observation.observed),
+            WaitSource::RuntimeProcess(vm) => self.finish_instance(vm),
+            WaitSource::RuntimeControl(vm) => self.handle_runtime_control(vm, observation.observed),
             WaitSource::Client(index) => self.handle_client(index, observation.observed),
         }
     }
 
-    fn handle_runtime_control(&mut self, observed: u64) -> hyper_os::Result<()> {
-        let Some(instance) = self.instance.as_mut() else {
+    fn handle_runtime_control(&mut self, vm: usize, observed: u64) -> hyper_os::Result<()> {
+        let Some(instance) = self.machines[vm].instance.as_mut() else {
             return Ok(());
         };
         if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed) {
@@ -257,13 +261,21 @@ impl FleetManager {
             self.disconnect_client(index);
             return Ok(());
         }
-        let mut bytes = [0u8; vm_contract::MESSAGE_BYTES];
-        let length = self.clients[index]
+        let mut bytes = vec![0u8; fleet::MAX_MESSAGE_BYTES];
+        let received = self.clients[index]
             .as_ref()
             .ok_or(hyper_os::Error::InvalidResponse)?
             .control
             .as_byte_channel()
-            .receive(&mut bytes)?;
+            .try_receive(&mut bytes);
+        let length = match received {
+            Ok(length) => length,
+            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(()),
+            Err(_) => {
+                self.disconnect_client(index);
+                return Ok(());
+            }
+        };
         let message = bytes
             .get(..length)
             .ok_or(hyper_os::Error::InvalidResponse)?;
@@ -274,80 +286,177 @@ impl FleetManager {
             if vm_contract::InstanceCommand::decode(message)
                 == Some(vm_contract::InstanceCommand::Stop)
             {
-                self.request_stop()?;
+                if let Some(vm) = self.initial_vm {
+                    self.request_stop(vm)?;
+                }
             } else {
                 self.disconnect_client(index);
             }
             return Ok(());
         }
-        let Some(command) = vm_contract::FleetCommand::decode(message) else {
-            self.disconnect_client(index);
-            return Ok(());
-        };
-        self.execute_command(index, command)
-    }
-
-    fn execute_command(
-        &mut self,
-        client: usize,
-        command: vm_contract::FleetCommand,
-    ) -> hyper_os::Result<()> {
-        match command {
-            vm_contract::FleetCommand::List | vm_contract::FleetCommand::Status => self.reply(
-                client,
-                vm_contract::FleetResponse::State(self.fleet_state()),
-            ),
-            vm_contract::FleetCommand::Start => {
-                if self.instance.is_some() {
-                    return self.reply(client, vm_contract::FleetResponse::Busy);
-                }
-                let response = if self.start_instance().is_ok() {
-                    vm_contract::FleetResponse::Accepted
-                } else {
-                    self.failed = true;
-                    vm_contract::FleetResponse::Failed
-                };
-                self.reply(client, response)
-            }
-            vm_contract::FleetCommand::Stop => {
-                if self.instance.is_none() {
-                    return self.reply(
-                        client,
-                        vm_contract::FleetResponse::State(vm_contract::FleetState::Stopped),
-                    );
-                }
-                self.request_stop()?;
-                self.reply(client, vm_contract::FleetResponse::Accepted)
-            }
-            vm_contract::FleetCommand::Restart => {
-                if self.instance.is_none() {
-                    let response = if self.start_instance().is_ok() {
-                        vm_contract::FleetResponse::Accepted
-                    } else {
-                        self.failed = true;
-                        vm_contract::FleetResponse::Failed
-                    };
-                    return self.reply(client, response);
-                }
-                self.restart_pending = true;
-                self.request_stop()?;
-                self.reply(client, vm_contract::FleetResponse::Accepted)
-            }
-            vm_contract::FleetCommand::Console => self.attach_console(client),
+        match fleet::request(message) {
+            Ok(command) => match self.execute_command(index, command) {
+                Ok(()) => Ok(()),
+                Err(error) => self.reply_error(index, &format!("operation failed: {error}")),
+            },
+            Err(_) => self.reply_error(index, "invalid fleet request"),
         }
     }
 
-    fn reply(
-        &mut self,
-        client: usize,
-        response: vm_contract::FleetResponse,
-    ) -> hyper_os::Result<()> {
+    fn install_definitions(&mut self, definitions: Vec<fleet::Definition>) -> Result<(), String> {
+        fleet::validate_definitions(&definitions)?;
+        if self.machines.len() + definitions.len() > fleet::MAX_DEFINITIONS {
+            return Err(format!(
+                "at most {} VM definitions are supported",
+                fleet::MAX_DEFINITIONS
+            ));
+        }
+        let mut prepared = Vec::new();
+        for definition in definitions {
+            if self
+                .machines
+                .iter()
+                .any(|machine| machine.definition.name == definition.name)
+            {
+                return Err(format!("VM '{}' already exists", definition.name));
+            }
+            let rights = hyper_os::fs::FileRights::from_rights(vm_contract::MANAGED_IMAGE_RIGHTS)
+                .ok_or("invalid image rights")?;
+            let image = self
+                .root
+                .open(&definition.image, rights)
+                .map_err(|error| format!("cannot open image '{}': {error}", definition.image))?;
+            prepared.push(Machine {
+                definition,
+                image: image.into_handle(),
+                instance: None,
+                restart_pending: false,
+                failed: false,
+            });
+        }
+        // No definition becomes visible until the whole batch is validated.
+        self.machines.extend(prepared);
+        Ok(())
+    }
+
+    fn execute_command(&mut self, client: usize, command: Request) -> hyper_os::Result<()> {
+        let (name, action) = match command {
+            Request::List => {
+                return self.reply(
+                    client,
+                    Response::Entries {
+                        machines: (0..self.machines.len())
+                            .map(|vm| self.summary(vm))
+                            .collect(),
+                    },
+                );
+            }
+            Request::Create { definitions } => {
+                let first = self.machines.len();
+                if let Err(message) = self.install_definitions(definitions) {
+                    return self.reply_error(client, &message);
+                }
+                let mut failures = Vec::new();
+                for vm in first..self.machines.len() {
+                    if self.machines[vm].definition.autostart && self.start_instance(vm).is_err() {
+                        self.machines[vm].failed = true;
+                        failures.push(self.machines[vm].definition.name.clone());
+                    }
+                }
+                if !failures.is_empty() {
+                    return self.reply_error(
+                        client,
+                        &format!(
+                            "definitions created, but failed to start: {}",
+                            failures.join(", ")
+                        ),
+                    );
+                }
+                return self.reply(client, Response::Accepted);
+            }
+            Request::Control { name, action } => (name, action),
+        };
+        let Some(vm) = self
+            .machines
+            .iter()
+            .position(|machine| machine.definition.name == name)
+        else {
+            return self.reply_error(
+                client,
+                &format!("VM '{name}' does not exist; use 'vmm list'"),
+            );
+        };
+        match action {
+            Action::Status => self.reply(
+                client,
+                Response::Entries {
+                    machines: vec![self.summary(vm)],
+                },
+            ),
+            Action::Console => self.attach_console(vm, client),
+            Action::Delete => {
+                if self.machines[vm].instance.is_some() {
+                    return self.reply_error(client, "stop the VM before deleting its definition");
+                }
+                self.machines.remove(vm);
+                if let Some(initial) = self.initial_vm {
+                    self.initial_vm = if initial == vm {
+                        None
+                    } else {
+                        Some(initial - usize::from(initial > vm))
+                    };
+                }
+                self.reply(client, Response::Accepted)
+            }
+            Action::Stop => {
+                self.machines[vm].restart_pending = false;
+                self.request_stop(vm)?;
+                self.reply(client, Response::Accepted)
+            }
+            Action::Start | Action::Restart => {
+                if self.machines[vm].instance.is_some() {
+                    if action == Action::Start {
+                        return self.reply_error(client, "VM is already active");
+                    }
+                    self.machines[vm].restart_pending = true;
+                    self.request_stop(vm)?;
+                } else if let Err(error) = self.start_instance(vm) {
+                    self.machines[vm].failed = true;
+                    return self.reply_error(client, &format!("cannot start VM '{name}': {error}"));
+                }
+                self.reply(client, Response::Accepted)
+            }
+        }
+    }
+
+    fn summary(&self, vm: usize) -> fleet::Summary {
+        let definition = &self.machines[vm].definition;
+        let state = self.fleet_state(vm);
+        fleet::Summary {
+            name: definition.name.clone(),
+            image: definition.image.clone(),
+            autostart: definition.autostart,
+            state,
+        }
+    }
+
+    fn reply_error(&mut self, client: usize, message: &str) -> hyper_os::Result<()> {
+        self.reply(
+            client,
+            Response::Error {
+                message: message.into(),
+            },
+        )
+    }
+
+    fn reply(&mut self, client: usize, response: Response) -> hyper_os::Result<()> {
+        let bytes = fleet::encode(&response).map_err(|_| hyper_os::Error::InvalidResponse)?;
         if self.clients[client]
             .as_ref()
             .ok_or(hyper_os::Error::InvalidResponse)?
             .control
             .as_byte_channel()
-            .try_send(&response.encode())
+            .try_send(&bytes)
             .is_err()
         {
             self.disconnect_client(client);
@@ -355,14 +464,18 @@ impl FleetManager {
         Ok(())
     }
 
-    fn attach_console(&mut self, client: usize) -> hyper_os::Result<()> {
-        let Some(instance) = self.instance.as_ref() else {
-            return self.reply(client, vm_contract::FleetResponse::Busy);
+    fn attach_console(&mut self, vm: usize, client: usize) -> hyper_os::Result<()> {
+        let Some(instance) = self.machines[vm].instance.as_ref() else {
+            return self.reply_error(
+                client,
+                "VM must be running and its console must be unattached",
+            );
         };
-        if instance.console_client.is_some()
-            || self.fleet_state() != vm_contract::FleetState::Running
-        {
-            return self.reply(client, vm_contract::FleetResponse::Busy);
+        if instance.console_client.is_some() || self.fleet_state(vm) != fleet::State::Running {
+            return self.reply_error(
+                client,
+                "VM must be running and its console must be unattached",
+            );
         }
         let (runtime_end, client_end) = channel::create_pair()?;
         instance
@@ -373,13 +486,13 @@ impl FleetManager {
             .try_send(&vm_contract::InstanceCommand::AttachConsole.encode())?;
         let mut runtime_end = Some(runtime_end);
         if send_console_endpoint(&instance.console_connection, &mut runtime_end).is_err() {
-            return self.reply(client, vm_contract::FleetResponse::Failed);
+            return self.reply_error(client, "console connection failed");
         }
         let mut console_channel = Some(client_end);
-        if let Some(instance) = self.instance.as_mut() {
+        if let Some(instance) = self.machines[vm].instance.as_mut() {
             instance.console_client = Some(client);
         }
-        self.reply(client, vm_contract::FleetResponse::Accepted)?;
+        self.reply(client, Response::Accepted)?;
         if self.clients[client].is_none() {
             return Ok(());
         }
@@ -425,28 +538,27 @@ impl FleetManager {
 
     fn disconnect_client(&mut self, index: usize) {
         drop(self.clients[index].take());
-        if let Some(instance) = self.instance.as_mut()
-            && instance.console_client == Some(index)
-        {
-            instance.console_client = None;
+        for machine in &mut self.machines {
+            if let Some(instance) = machine.instance.as_mut()
+                && instance.console_client == Some(index)
+            {
+                instance.console_client = None;
+            }
         }
     }
 
-    fn request_stop(&mut self) -> hyper_os::Result<()> {
-        if let Some(instance) = self.instance.as_mut() {
+    fn request_stop(&mut self, vm: usize) -> hyper_os::Result<()> {
+        if let Some(instance) = self.machines[vm].instance.as_mut() {
             instance.request_cooperative_stop()?;
         }
         Ok(())
     }
 
-    fn start_instance(&mut self) -> hyper_os::Result<()> {
-        if self.instance.is_some() {
+    fn start_instance(&mut self, vm: usize) -> hyper_os::Result<()> {
+        if self.machines[vm].instance.is_some() {
             return Err(hyper_os::Error::InvalidResponse);
         }
-        let definition = self
-            .definition
-            .as_ref()
-            .ok_or(hyper_os::Error::MissingHandle)?;
+        let definition = &self.machines[vm];
         let domain = create_resource_domain(
             self.fleet_domain.as_handle_ref(),
             hyper_vm_policy::INITIAL_VM_LIMITS,
@@ -503,7 +615,7 @@ impl FleetManager {
             .map_err(|failure| failure.error())?;
         builder.seal()?;
         let runtime = builder.start().map_err(|failure| failure.error())?;
-        self.instance = Some(VmInstance {
+        self.machines[vm].instance = Some(VmInstance {
             _resource_domain: domain,
             _task_group: group,
             runtime,
@@ -514,12 +626,12 @@ impl FleetManager {
             stop: vm_contract::InstanceStopState::new(),
             exit_deadline: None,
         });
-        self.failed = false;
+        self.machines[vm].failed = false;
         Ok(())
     }
 
-    fn finish_instance(&mut self) -> hyper_os::Result<()> {
-        let Some(mut instance) = self.instance.take() else {
+    fn finish_instance(&mut self, vm: usize) -> hyper_os::Result<()> {
+        let Some(mut instance) = self.machines[vm].instance.take() else {
             return Ok(());
         };
         instance
@@ -532,13 +644,13 @@ impl FleetManager {
             Some(ProcessTermination::ProcessExited { status: 0 })
         );
         let event = instance.tracker.finish(succeeded);
-        self.failed = matches!(event, vm_contract::InstanceEvent::Failed(_));
-        self.publish_initial_event(event);
+        self.machines[vm].failed = matches!(event, vm_contract::InstanceEvent::Failed(_));
+        self.publish_initial_event(vm, event);
         drop(instance);
         Ok(())
     }
 
-    fn publish_initial_event(&self, event: vm_contract::InstanceEvent) {
+    fn publish_boot_event(&self, event: vm_contract::InstanceEvent) {
         if let Some(client) = self.clients[0].as_ref()
             && client.initial
         {
@@ -546,39 +658,61 @@ impl FleetManager {
         }
     }
 
-    fn complete_restart_if_ready(&mut self) {
-        if self.restart_pending && self.instance.is_none() {
-            self.restart_pending = false;
-            if self.start_instance().is_err() {
-                self.failed = true;
-            }
+    fn publish_initial_event(&mut self, vm: usize, event: vm_contract::InstanceEvent) {
+        if self.initial_vm == Some(vm) {
+            self.initial_vm = None;
+            self.publish_boot_event(event);
         }
     }
 
-    fn fleet_state(&self) -> vm_contract::FleetState {
-        let Some(instance) = self.instance.as_ref() else {
-            return if self.failed {
-                vm_contract::FleetState::Failed
+    fn complete_restarts(&mut self) -> hyper_os::Result<()> {
+        let now = hyper_os::time::monotonic_now()?.as_nanoseconds();
+        for vm in 0..self.machines.len() {
+            if let Some(instance) = self.machines[vm].instance.as_mut()
+                && instance
+                    .exit_deadline
+                    .is_some_and(|deadline| deadline.as_raw() <= now)
+            {
+                instance.grace_period_expired();
+            }
+            if self.machines[vm].restart_pending && self.machines[vm].instance.is_none() {
+                self.machines[vm].restart_pending = false;
+                if self.start_instance(vm).is_err() {
+                    self.machines[vm].failed = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn fleet_state(&self, vm: usize) -> fleet::State {
+        let Some(instance) = self.machines[vm].instance.as_ref() else {
+            return if self.machines[vm].failed {
+                fleet::State::Failed
             } else {
-                vm_contract::FleetState::Stopped
+                fleet::State::Stopped
             };
         };
         if instance.stop != vm_contract::InstanceStopState::new() {
-            vm_contract::FleetState::Stopping
+            fleet::State::Stopping
         } else if instance.tracker.last_status() == Some(vm_contract::InstanceStatus::Running) {
-            vm_contract::FleetState::Running
+            fleet::State::Running
         } else {
-            vm_contract::FleetState::Starting
+            fleet::State::Starting
         }
     }
 }
 
-struct VmDefinition {
+struct Machine {
+    definition: fleet::Definition,
     image: OwnedHandle<hyper_os::handle::FileObject>,
+    instance: Option<VmInstance>,
+    restart_pending: bool,
+    failed: bool,
 }
 
 struct Provision {
-    image: OwnedHandle<hyper_os::handle::FileObject>,
+    config: OwnedHandle<hyper_os::handle::FileObject>,
     control: OwnedHandle<ByteChannelObject>,
 }
 
@@ -608,8 +742,8 @@ impl Client {
 
 #[derive(Clone, Copy)]
 enum WaitSource {
-    RuntimeProcess,
-    RuntimeControl,
+    RuntimeProcess(usize),
+    RuntimeControl(usize),
     Client(usize),
 }
 
@@ -628,12 +762,17 @@ struct VmInstance {
 impl VmInstance {
     fn receive_runtime_status(&mut self) -> hyper_os::Result<()> {
         let mut message = [0u8; vm_contract::MESSAGE_BYTES];
-        let length = self
+        let received = self
             .runtime_control
             .as_ref()
             .ok_or(hyper_os::Error::MissingHandle)?
             .as_byte_channel()
-            .receive(&mut message)?;
+            .try_receive(&mut message);
+        let length = match received {
+            Ok(length) => length,
+            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(()),
+            Err(error) => return Err(error),
+        };
         let status = message
             .get(..length)
             .and_then(vm_contract::InstanceStatus::decode)
@@ -673,10 +812,12 @@ impl VmInstance {
             .as_ref()
             .ok_or(hyper_os::Error::MissingHandle)?
             .as_byte_channel()
-            .send(&vm_contract::InstanceCommand::Stop.encode())
+            .try_send(&vm_contract::InstanceCommand::Stop.encode())
         {
             Ok(()) => self.arm_exit_deadline(),
-            Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => {
+            Err(hyper_os::Error::Status(
+                hyper_os::Status::PEER_CLOSED | hyper_os::Status::WOULD_BLOCK,
+            )) => {
                 self.force_stop();
                 Ok(())
             }

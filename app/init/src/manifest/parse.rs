@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::model::{
-    BoundedList, CapabilityBinding, CapabilityOperation, InitialVm, MAX_BINDING_NAME_BYTES,
+    BoundedList, CapabilityBinding, CapabilityOperation, MAX_BINDING_NAME_BYTES,
     MAX_CAPABILITIES_PER_SERVICE, MAX_DEPENDENCIES_PER_SERVICE, MAX_IMAGE_PATH_BYTES,
     MAX_MANIFEST_BYTES, MAX_PURPOSE_NAME_BYTES, MAX_RIGHT_NAME_BYTES, MAX_RIGHTS_PER_CAPABILITY,
-    MAX_SERVICE_NAME_BYTES, MAX_SERVICES, Manifest, RestartPolicy, Service,
+    MAX_SERVICE_NAME_BYTES, MAX_SERVICES, Manifest, RestartPolicy, Service, VmConfiguration,
 };
 
 const FORMAT: &str = "hyper.service-manifest";
@@ -112,7 +112,7 @@ impl<'manifest> Parser<'manifest> {
         let mut format = None;
         let mut copyright_present = false;
         let mut license_present = false;
-        let mut initial_vm = None;
+        let mut vm_configuration = None;
         let mut services_present = false;
         if self.consume_close(b'}') {
             return Err(self.error(ParseErrorKind::MissingField));
@@ -133,9 +133,11 @@ impl<'manifest> Parser<'manifest> {
                     self.parse_string(MAX_BINDING_NAME_BYTES)?,
                     field_offset,
                 )?,
-                "initial-vm" => {
-                    assign_once(&mut initial_vm, self.parse_initial_vm()?, field_offset)?
-                }
+                "virtual-machines" => assign_once(
+                    &mut vm_configuration,
+                    self.parse_vm_configuration()?,
+                    field_offset,
+                )?,
                 "services" => {
                     if services_present {
                         return Err(self.at(ParseErrorKind::DuplicateField, field_offset));
@@ -158,13 +160,13 @@ impl<'manifest> Parser<'manifest> {
         if !services_present {
             return Err(self.error(ParseErrorKind::MissingField));
         }
-        manifest.initial_vm = initial_vm;
+        manifest.vm_configuration = vm_configuration;
         Ok(())
     }
 
-    fn parse_initial_vm(&mut self) -> Result<InitialVm<'manifest>, ParseError> {
+    fn parse_vm_configuration(&mut self) -> Result<VmConfiguration<'manifest>, ParseError> {
         self.open(b'{')?;
-        let mut image = None;
+        let mut config = None;
         if self.consume_close(b'}') {
             return Err(self.error(ParseErrorKind::MissingField));
         }
@@ -173,8 +175,8 @@ impl<'manifest> Parser<'manifest> {
             let field = self.parse_string(MAX_BINDING_NAME_BYTES)?;
             self.colon()?;
             match field {
-                "image" => assign_once(
-                    &mut image,
+                "config" => assign_once(
+                    &mut config,
                     self.parse_string(MAX_IMAGE_PATH_BYTES)?,
                     field_offset,
                 )?,
@@ -184,8 +186,8 @@ impl<'manifest> Parser<'manifest> {
                 break;
             }
         }
-        Ok(InitialVm {
-            image: image.ok_or_else(|| self.error(ParseErrorKind::MissingField))?,
+        Ok(VmConfiguration {
+            config: config.ok_or_else(|| self.error(ParseErrorKind::MissingField))?,
         })
     }
 

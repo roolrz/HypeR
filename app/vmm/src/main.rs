@@ -11,6 +11,7 @@ use hyper_os::handle::{ByteChannelObject, OwnedHandle};
 use hyper_os::startup::Startup;
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_service::vm;
+use hyper_vm_policy::fleet::{self, Action, Request, Response};
 use std::io::Write;
 use std::process::ExitCode;
 
@@ -19,7 +20,10 @@ const ESCAPE: u8 = 0x1d;
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     match run(&mut startup) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("vmm: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -27,34 +31,65 @@ fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
     hyper_os::require_core_abi()?;
     let input = hyper_rt::process::stdin()?;
     let mut output = std::io::stdout().lock();
-    let mut error = std::io::stderr().lock();
     let control = startup.take(vm::CLIENT_CONTROL)?;
     let capabilities = CapabilityChannel::from_handle(startup.take(vm::CLIENT_CAPABILITIES)?);
     let args = hyper_vmm::cli::Vmm::parse();
-    let command = args.command.map_or(vm::FleetCommand::List, Into::into);
-    control.as_byte_channel().send(&command.encode())?;
-    if command == vm::FleetCommand::Console {
-        let response = receive_response(&control)?;
-        if response != vm::FleetResponse::Accepted {
-            write_response(&mut error, response)?;
-            return Ok(());
+    let command = args.command.unwrap_or(hyper_vmm::cli::VmCommand::List);
+    let save_path = match &command {
+        hyper_vmm::cli::VmCommand::Save { path } => Some(path.clone()),
+        _ => None,
+    };
+    let command = command.request()?;
+    let bytes = fleet::encode(&command).map_err(std::io::Error::other)?;
+    control.as_byte_channel().send(&bytes)?;
+    let response = receive_response(&control)?;
+    if let Response::Error { message } = response {
+        return Err(std::io::Error::other(message).into());
+    }
+    if let Request::Control {
+        name,
+        action: Action::Console,
+    } = &command
+    {
+        if !matches!(response, Response::Accepted) {
+            return Err(std::io::Error::other("invalid console response").into());
         }
         let console_channel = receive_console(&capabilities)?;
-        output.write_all(b"Connected to default. Press Ctrl-] for the control menu.\r\n")?;
+        writeln!(
+            output,
+            "Connected to {name}. Press Ctrl-] for the control menu.\r"
+        )?;
         return console_session(input, &mut output, &console_channel);
     }
-    write_response(&mut output, receive_response(&control)?)
+    if let Some(path) = save_path {
+        let Response::Entries { machines } = response else {
+            return Err(std::io::Error::other("invalid list response").into());
+        };
+        let definitions = machines
+            .into_iter()
+            .map(|machine| fleet::Definition {
+                name: machine.name,
+                image: machine.image,
+                autostart: machine.autostart,
+            })
+            .collect();
+        hyper_vmm::save_config(&path, definitions)?;
+        writeln!(
+            output,
+            "Saved {} (ramfs changes last until reboot).",
+            path.display()
+        )?;
+        return Ok(());
+    }
+    write_response(&mut output, response)
 }
 
 fn receive_response(
     control: &OwnedHandle<ByteChannelObject>,
-) -> hyper_os::Result<vm::FleetResponse> {
-    let mut bytes = [0u8; vm::MESSAGE_BYTES];
+) -> Result<Response, Box<dyn std::error::Error>> {
+    let mut bytes = vec![0; fleet::MAX_MESSAGE_BYTES];
     let length = control.as_byte_channel().receive(&mut bytes)?;
-    bytes
-        .get(..length)
-        .and_then(vm::FleetResponse::decode)
-        .ok_or(hyper_os::Error::InvalidResponse)
+    fleet::response(&bytes[..length]).map_err(|error| std::io::Error::other(error).into())
 }
 
 fn receive_console(
@@ -75,19 +110,36 @@ fn receive_console(
 
 fn write_response(
     output: &mut impl Write,
-    response: vm::FleetResponse,
+    response: Response,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let text: &[u8] = match response {
-        vm::FleetResponse::State(vm::FleetState::Stopped) => b"default\tstopped\n",
-        vm::FleetResponse::State(vm::FleetState::Starting) => b"default\tstarting\n",
-        vm::FleetResponse::State(vm::FleetState::Running) => b"default\trunning\n",
-        vm::FleetResponse::State(vm::FleetState::Stopping) => b"default\tstopping\n",
-        vm::FleetResponse::State(vm::FleetState::Failed) => b"default\tfailed\n",
-        vm::FleetResponse::Accepted => b"accepted\n",
-        vm::FleetResponse::Busy => b"vmm: resource is busy\n",
-        vm::FleetResponse::Failed => b"vmm: operation failed\n",
-    };
-    output.write_all(text).map_err(Into::into)
+    match response {
+        Response::Accepted => writeln!(output, "accepted")?,
+        Response::Error { message } => return Err(std::io::Error::other(message).into()),
+        Response::Entries { mut machines } => {
+            machines.sort_by(|a, b| a.name.cmp(&b.name));
+            writeln!(
+                output,
+                "NAME                              STATE      AUTOSTART  IMAGE"
+            )?;
+            if machines.is_empty() {
+                writeln!(
+                    output,
+                    "(no virtual machines; use 'vmm create NAME --image PATH')"
+                )?;
+            }
+            for machine in machines {
+                writeln!(
+                    output,
+                    "{:<32}  {:<9}  {:<9}  {}",
+                    machine.name,
+                    machine.state,
+                    if machine.autostart { "yes" } else { "no" },
+                    machine.image
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn console_session(
@@ -119,8 +171,9 @@ fn console_session(
         };
         if observation.index == 1 {
             if ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observation.observed) {
-                let count = match console_channel.as_byte_channel().receive(&mut bytes) {
+                let count = match console_channel.as_byte_channel().try_receive(&mut bytes) {
                     Ok(count) => count,
+                    Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
                     Err(error) => return console_error(output, b"read", error),
                 };
                 output.write_all(&bytes[..count])?;
@@ -134,8 +187,9 @@ fn console_session(
         {
             return Ok(());
         }
-        let count = match input.as_byte_channel().receive(&mut bytes) {
+        let count = match input.as_byte_channel().try_receive(&mut bytes) {
             Ok(count) => count,
+            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
             Err(error) => return console_error(output, b"input", error),
         };
         let mut guest_input = Vec::with_capacity(count);

@@ -118,7 +118,7 @@ pub enum ValidationErrorKind {
     TooManyDependencyEdges,
     DependencyCycle,
     ConflictingAuthorityKey,
-    InvalidInitialVmImage,
+    InvalidVmConfigPath,
     InvalidBindingName,
     DuplicateCapabilityPurpose,
     InvalidPurposeName,
@@ -167,7 +167,7 @@ impl ValidationError {
 #[derive(Debug, Eq, PartialEq)]
 pub struct LaunchPlan<'manifest> {
     service_count: usize,
-    initial_vm_image: Option<&'manifest str>,
+    vm_config_path: Option<&'manifest str>,
     order: [usize; MAX_SERVICES],
     grants: [[Option<CapabilityGrant>; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
 }
@@ -177,8 +177,8 @@ impl LaunchPlan<'_> {
         self.service_count
     }
 
-    pub const fn initial_vm_image(&self) -> Option<&str> {
-        self.initial_vm_image
+    pub const fn vm_config_path(&self) -> Option<&str> {
+        self.vm_config_path
     }
 
     pub fn service_index(&self, launch_position: usize) -> Option<usize> {
@@ -231,12 +231,12 @@ pub fn validate<'manifest>(
         return Err(error(ValidationErrorKind::EmptyManifest, None, None));
     }
     validate_service_identities(manifest)?;
-    validate_initial_vm(manifest)?;
+    validate_vm_configuration(manifest)?;
     validate_dependencies(manifest)?;
 
     let mut plan = LaunchPlan {
         service_count: manifest.services.len(),
-        initial_vm_image: manifest.initial_vm_image(),
+        vm_config_path: manifest.vm_config_path(),
         order: [0; MAX_SERVICES],
         grants: [[None; MAX_CAPABILITIES_PER_SERVICE]; MAX_SERVICES],
     };
@@ -279,16 +279,11 @@ fn validate_service_identities(manifest: &Manifest<'_>) -> Result<(), Validation
     Ok(())
 }
 
-fn validate_initial_vm(manifest: &Manifest<'_>) -> Result<(), ValidationError> {
-    if manifest
-        .initial_vm()
-        .is_some_and(|initial_vm| !valid_image_path(initial_vm.image(), MAX_IMAGE_PATH_BYTES))
-    {
-        return Err(error(
-            ValidationErrorKind::InvalidInitialVmImage,
-            None,
-            None,
-        ));
+fn validate_vm_configuration(manifest: &Manifest<'_>) -> Result<(), ValidationError> {
+    if manifest.vm_configuration().is_some_and(|vm_configuration| {
+        !valid_image_path(vm_configuration.config(), MAX_IMAGE_PATH_BYTES)
+    }) {
+        return Err(error(ValidationErrorKind::InvalidVmConfigPath, None, None));
     }
     Ok(())
 }

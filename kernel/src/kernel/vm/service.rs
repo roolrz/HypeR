@@ -66,6 +66,7 @@ const fn classify_object_error(error: ObjectError) -> Error {
             super::virtual_serial::Error::Disconnected => Error::BadState,
             super::virtual_serial::Error::Resource(error) => classify_resource_error(error),
             super::virtual_serial::Error::WouldBlock => Error::Busy,
+            super::virtual_serial::Error::InvalidCursor => Error::InvalidArgument,
         },
     }
 }
@@ -461,6 +462,20 @@ pub(crate) fn register_virtual_serial_output(
     serial
         .object()
         .register_output(buffer.object(), &process.resource_domain())
+        .map_err(ObjectError::from)
+        .map_err(Into::into)
+}
+
+pub(crate) fn acknowledge_virtual_serial_output(
+    process: &Process,
+    value: HandleValue,
+    consumed: u64,
+) -> Result<(), Error> {
+    let serial =
+        process.resolve_handle::<super::virtual_serial::VirtualSerial>(value, Rights::READ)?;
+    serial
+        .object()
+        .acknowledge_output(consumed)
         .map_err(ObjectError::from)
         .map_err(Into::into)
 }

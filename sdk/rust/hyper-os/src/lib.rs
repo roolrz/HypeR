@@ -18,6 +18,7 @@ pub mod fs;
 pub mod handle;
 pub mod inspect;
 pub mod memory;
+mod relay;
 pub mod startup;
 mod status;
 pub mod task;

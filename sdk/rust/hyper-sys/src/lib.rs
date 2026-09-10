@@ -538,6 +538,31 @@ pub unsafe fn virtual_serial_register_output(
     }
 }
 
+/// Acknowledges consumed output and atomically reconciles READABLE.
+///
+/// # Safety
+/// The serial handle must retain READ authority. Complete all reads of the
+/// acknowledged prefix before this call; those slots may immediately be reused.
+#[inline]
+pub unsafe fn virtual_serial_acknowledge_output(
+    serial: abi::HyperNativeHandle,
+    consumed: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller retains the handle and has completed the prefix reads.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_SERIAL_ACKNOWLEDGE_OUTPUT,
+            serial,
+            consumed,
+            0,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
 /// Writes guest input to a virtual serial port.
 ///
 /// # Safety

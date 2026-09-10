@@ -18,6 +18,7 @@ test = false
 bench = false
 
 [dependencies]
+hyper-vm-policy.workspace = true
 hyper-os.workspace = true
 hyper-rt.workspace = true
 hyper-service.workspace = true

@@ -320,6 +320,17 @@ impl VmServices for DeferredProcessServices<'_> {
             buffer,
         )
     }
+    fn acknowledge_virtual_serial_output(
+        &self,
+        serial: HandleValue,
+        consumed: u64,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::acknowledge_virtual_serial_output(
+            &self.session.process,
+            serial,
+            consumed,
+        )
+    }
     fn write_virtual_serial(
         &self,
         value: HandleValue,

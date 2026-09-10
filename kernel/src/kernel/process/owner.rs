@@ -32,13 +32,13 @@ use crate::kernel::accounting::{
     ChargeReservation, CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::capability::{
-    ClosedHandle, DirectHandleTransfer, HANDLE_TABLE_STORAGE_SEGMENTS, HandleBatchReservation,
-    HandleBatchReservationStorage, HandleError, HandleFlags, HandleInfo, HandleReservation,
-    HandleScanCursor, HandleSidecar, HandleSidecarPlan, HandleSnapshotPage, HandleTable,
-    HandleTableStoragePlan, HandleTableStorageSnapshot, HandleTransferClaim, HandleTransferRequest,
-    HandleTransferRoute, HandleTransferStorage, HandleValue, InTransitCapabilities, PreparedHandle,
-    ResolvedObject, ResolvedWaitable, RetiredDirectHandleTransfer,
-    RetiredHandleBatchReservationStorage, RetiredHandleTransferStorage, Rights,
+    ClosedHandle, DirectHandleTransfer, HandleBatchReservation, HandleBatchReservationStorage,
+    HandleError, HandleFlags, HandleInfo, HandleReservation, HandleScanCursor, HandleSidecar,
+    HandleSidecarPlan, HandleSnapshotPage, HandleTable, HandleTableStoragePlan,
+    HandleTableStorageSnapshot, HandleTransferClaim, HandleTransferRequest, HandleTransferRoute,
+    HandleTransferStorage, HandleValue, InTransitCapabilities, PreparedHandle, ResolvedObject,
+    ResolvedWaitable, RetiredDirectHandleTransfer, RetiredHandleBatchReservationStorage,
+    RetiredHandleTransferStorage, Rights,
 };
 use crate::kernel::mm::user_space::{
     MachineError, MemoryObjectError, NativeAddressSpace, UserAddress, UserSlice,
@@ -233,7 +233,8 @@ struct ProcessState {
     threads: Option<FallibleArc<ThreadRecord>>,
     handle_charges: Option<FallibleArc<HandleChargeRecord>>,
     charge_index: HandleSidecar<HandleChargeLocation>,
-    handle_table_charges: [Option<CommittedCharge>; HANDLE_TABLE_STORAGE_SEGMENTS],
+    // Table storage grows monotonically and is released together at retirement.
+    handle_table_charge: Option<CommittedCharge>,
     handles_retired: bool,
 }
 
@@ -479,6 +480,10 @@ impl PreparedProcess {
             Ok(charge) => charge.commit(),
             Err(error) => return Err(create_failure(error.into(), address_space)),
         };
+        let inner_slot = match UniqueFallibleArc::try_new_uninit() {
+            Ok(slot) => slot,
+            Err(_) => return Err(create_failure(ProcessError::Allocation, address_space)),
+        };
         let address_space = address_space.into_shared();
         let id = match allocate_process_id() {
             Ok(id) => id,
@@ -504,7 +509,7 @@ impl PreparedProcess {
                 threads: None,
                 handle_charges: None,
                 charge_index: HandleSidecar::new(),
-                handle_table_charges: [const { None }; HANDLE_TABLE_STORAGE_SEGMENTS],
+                handle_table_charge: None,
                 handles_retired: false,
             }),
             object: PublishedOnce::new(),
@@ -513,20 +518,10 @@ impl PreparedProcess {
             retirement_retry: ProcessLock::new(None),
             _metadata_charge: metadata_charge,
         };
-        let inner = match FallibleArc::try_new_or_return(inner) {
-            Ok(inner) => inner,
-            Err((_, inner)) => {
-                let state = inner.state.into_inner();
-                let address_space = match state.address_space {
-                    Some(address_space) => address_space,
-                    None => crate::hal::cpu::halt(),
-                };
-                return Err(create_failure_from_arc(
-                    ProcessError::Allocation,
-                    address_space,
-                ));
-            }
-        };
+        // Storage was reserved while the address space still had its unique
+        // rollback owner. Initialization cannot fail or return a whole
+        // ProcessInner by value through an allocation-error branch.
+        let inner = inner_slot.write(inner).into_shared();
         let process = Process { inner };
         let registration = match PreparedRegistration::try_new(&process) {
             Ok(registration) => registration,
@@ -2144,7 +2139,7 @@ impl Process {
                     state.process_charge.take(),
                     state.threads.take(),
                     state.handle_charges.take(),
-                    core::mem::take(&mut state.handle_table_charges),
+                    state.handle_table_charge.take(),
                 )
             });
         while let Some(record) = records {
@@ -2415,14 +2410,13 @@ fn install_table_storage_charge(
             Some(charge) => charge,
             None => process_invariant_violation(),
         };
-        let Some(slot) = state
-            .handle_table_charges
-            .iter_mut()
-            .find(|slot| slot.is_none())
-        else {
-            process_invariant_violation();
-        };
-        *slot = Some(charge);
+        // Every extension was admitted against this Process's domain before
+        // storage publication. Coalescing transfers the existing charge; it
+        // neither reserves quota again nor releases it before table retirement.
+        match state.handle_table_charge.as_mut() {
+            Some(total) => total.absorb_pre_admitted(charge),
+            None => state.handle_table_charge = Some(charge),
+        }
     }
 }
 

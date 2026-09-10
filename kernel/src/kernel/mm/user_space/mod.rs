@@ -23,7 +23,7 @@ mod objects;
 mod service;
 mod vmo;
 #[cfg(not(test))]
-pub(crate) use vmo::WritableMappingLease;
+pub(crate) use vmo::{ExclusiveHardwareWriteLease, WritableMappingLease};
 
 pub(crate) use address_space::{
     AddressSpaceError, AddressSpaceId, CommittedMappingChange, MappingChange, MappingSnapshot,

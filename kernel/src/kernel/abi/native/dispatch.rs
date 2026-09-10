@@ -48,13 +48,14 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATE,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_CREATE,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO, HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REQUEST_STOP,
-    HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT,
-    HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE, HYPER_NATIVE_SYS_VMAR_ALLOCATE,
-    HYPER_NATIVE_SYS_VMAR_DESTROY, HYPER_NATIVE_SYS_VMAR_MAP, HYPER_NATIVE_SYS_VMAR_PROTECT,
-    HYPER_NATIVE_SYS_VMAR_UNMAP, HYPER_NATIVE_SYS_VMO_CREATE, HYPER_NATIVE_SYS_VMO_READ,
-    HYPER_NATIVE_SYS_VMO_WRITE, HYPER_NATIVE_SYS_WAIT_SET_ADD, HYPER_NATIVE_SYS_WAIT_SET_CREATE,
-    HYPER_NATIVE_SYS_WAIT_SET_REARM, HYPER_NATIVE_SYS_WAIT_SET_REMOVE,
-    HYPER_NATIVE_SYS_WAIT_SET_WAIT, NativeInvocation, NativeResult,
+    HYPER_NATIVE_SYS_VIRTUAL_SERIAL_ACKNOWLEDGE_OUTPUT, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE,
+    HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
+    HYPER_NATIVE_SYS_VMAR_ALLOCATE, HYPER_NATIVE_SYS_VMAR_DESTROY, HYPER_NATIVE_SYS_VMAR_MAP,
+    HYPER_NATIVE_SYS_VMAR_PROTECT, HYPER_NATIVE_SYS_VMAR_UNMAP, HYPER_NATIVE_SYS_VMO_CREATE,
+    HYPER_NATIVE_SYS_VMO_READ, HYPER_NATIVE_SYS_VMO_WRITE, HYPER_NATIVE_SYS_WAIT_SET_ADD,
+    HYPER_NATIVE_SYS_WAIT_SET_CREATE, HYPER_NATIVE_SYS_WAIT_SET_REARM,
+    HYPER_NATIVE_SYS_WAIT_SET_REMOVE, HYPER_NATIVE_SYS_WAIT_SET_WAIT, NativeInvocation,
+    NativeResult,
 };
 
 use super::handlers::{
@@ -84,11 +85,11 @@ use super::handlers::{
     sys_thread_exit, sys_thread_request_stop, sys_thread_sleep, sys_thread_start, sys_thread_yield,
     sys_virtual_cpu_get_info, sys_virtual_cpu_start, sys_virtual_machine_create,
     sys_virtual_machine_creation_lease_create, sys_virtual_machine_get_info,
-    sys_virtual_machine_request_stop, sys_virtual_serial_create,
-    sys_virtual_serial_register_output, sys_virtual_serial_write, sys_vmar_allocate,
-    sys_vmar_destroy, sys_vmar_map, sys_vmar_protect, sys_vmar_unmap, sys_vmo_create, sys_vmo_read,
-    sys_vmo_write, sys_wait_set_add, sys_wait_set_create, sys_wait_set_rearm, sys_wait_set_remove,
-    sys_wait_set_wait,
+    sys_virtual_machine_request_stop, sys_virtual_serial_acknowledge_output,
+    sys_virtual_serial_create, sys_virtual_serial_register_output, sys_virtual_serial_write,
+    sys_vmar_allocate, sys_vmar_destroy, sys_vmar_map, sys_vmar_protect, sys_vmar_unmap,
+    sys_vmo_create, sys_vmo_read, sys_vmo_write, sys_wait_set_add, sys_wait_set_create,
+    sys_wait_set_rearm, sys_wait_set_remove, sys_wait_set_wait,
 };
 use super::services::{DeferredAction, DeferredServices, ImmediateServices};
 
@@ -246,6 +247,9 @@ pub(in crate::kernel) fn dispatch_deferred(
         }
         HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT => {
             sys_virtual_serial_register_output(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_VIRTUAL_SERIAL_ACKNOWLEDGE_OUTPUT => {
+            sys_virtual_serial_acknowledge_output(services, invocation.arguments())
         }
         HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE => {
             sys_virtual_serial_write(services, invocation.arguments())
