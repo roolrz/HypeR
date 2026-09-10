@@ -603,15 +603,15 @@ InterruptSession uses the same observation mechanism, but
 `interrupt_ack(session, sequence)` is a typed operation. A stale observation
 cannot acknowledge a later interrupt.
 
-Native atomic waits resolve a shared key to memory-object identity plus byte
-offset. A private key additionally contains the address-space and resolved
-mapping generation, or an equivalent private namespace discriminator. Mapping
-removal retains that identity until wait retirement or cancels its waiters, so
-unmap/remap cannot alias an old wait. No raw pointer or VA pair alone persists
-across sleep. A Linux supervisor may reproduce Linux private-futex identity
-separately. The internal design supports requeue and priority inheritance, with
-PI state integrated into scheduler ownership. The initial ABI publishes only
-operations whose semantics are complete.
+Native atomic wait/wake currently use process-private aligned writable u32
+words. The key contains the address-space, non-reused mapping token, and virtual
+byte address. The kernel retains a writable backing lease through each admitted
+wait and performs the value check and wait publication under the same sharded
+condition lock used by wake. Scheduler tickets arbitrate wake, timeout and
+cancellation exactly once. A replaced mapping cannot wake an old wait; callers
+must keep mappings live until their waits finish. Aliases and other Processes
+have separate wait domains. Shared VMO keys, requeue and priority inheritance
+remain separately specified extensions, not implemented contracts.
 
 ## Process, memory, and user-copy safety
 
@@ -803,12 +803,16 @@ call through deferred unwind and re-entry, yields and resumes, exits a Thread,
 propagates Process exit to a dormant sibling, contains a breakpoint fault, and
 creates, signals, and observes an Event from EL0. It joins each Thread and
 Process and retires each ownership graph. The architecture-neutral dispatchers
-implement syscalls 0 through 43: capability inspection and attenuation,
+implement syscalls 0 through 82: capability inspection and attenuation,
 Thread and Process lifecycle, Event and object wait, byte and rendezvous
 capability channels, Console I/O, root directory access, transactional ProcessBuilder
 construction, Process stop requests, Process lifecycle inspection, and
 capability-scoped Process, Thread, object, and handle-graph scans. Channel operations use bounded
-storage, transactional user copies, and atomic capability publication.
+storage, transactional user copies, and atomic capability publication. The
+surface also includes VMO/VMAR operations, VM lifecycle/device assignment,
+registered runtime-owned serial output, Native thread create/start/stop,
+process-private atomic wait/wake, and deadline sleep. The generated SDK ABI
+reference is authoritative for numbers and argument contracts.
 `object_wait_one` and the bounded `object_wait_many` use absolute
 monotonic deadlines, generation-qualified signal/timeout/cancellation
 arbitration, and a Process-stop recheck before completing the machine return.

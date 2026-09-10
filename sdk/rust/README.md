@@ -95,10 +95,17 @@ ordinary `main()`, standard streams, startup arguments, and clap support.
 applications select `HYPER_RUST_STD=0`; std applications using this crate
 enable its `std` feature and use ordinary `main()`. See the
 [Native std guide](../toolchain/rust-std/README.md) for the support matrix,
-build contract, and thread backend extension points.
+build contract, and Native thread and atomic-wait backend.
 
 Native std programs can call `hyper_rt::process::startup()` once to claim their
 non-stream startup capabilities. Standard streams and the bootstrap Console
 remain runtime-owned for std cleanup and TLS destructors. Prefer `std::io` for
 ordinary I/O; `hyper_rt::process::{stdin,stdout,stderr,console}` expose borrowed
 owners when a service needs Native waits, routing, or capability duplication.
+
+Native `thread` bindings expose dormant creation, start, stop, typed termination
+waits, and process-private `AtomicU32` wait/wake. Raw thread construction and
+asynchronous stop require explicit unsafe lifetime contracts. Applications
+should prefer `std::thread` and `std::sync` for language-level ownership.
+Capability IPC and object waits remain Native APIs: std does not represent
+VM control handles or transferable capability channels.

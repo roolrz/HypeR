@@ -119,6 +119,18 @@ const CANCELLED_EVENT_WAIT_PROGRAM: [u8; 52] = [
     0x40, 0x00, 0x20, 0xd4, // failure: brk #2.
 ];
 
+// Mismatch succeeds, elapsed wait times out, misalignment is rejected, then
+// the controller cancels a genuinely published infinite atomic wait.
+const ATOMIC_WAIT_PROGRAM: [u8; 112] = [
+    0xf3, 0x43, 0x00, 0xd1, 0x7f, 0x02, 0x00, 0xb9, 0xe0, 0x03, 0x13, 0xaa, 0x21, 0x00, 0x80, 0xd2,
+    0x02, 0x00, 0x80, 0xd2, 0x03, 0x00, 0x80, 0xd2, 0x04, 0x00, 0x80, 0xd2, 0x05, 0x00, 0x80, 0xd2,
+    0x08, 0x0a, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4, 0x20, 0x02, 0x00, 0xb5, 0xe0, 0x03, 0x13, 0xaa,
+    0x01, 0x00, 0x80, 0xd2, 0x02, 0x00, 0x80, 0xd2, 0x01, 0x00, 0x00, 0xd4, 0x1f, 0x2c, 0x00, 0xb1,
+    0x61, 0x01, 0x00, 0x54, 0x60, 0x06, 0x00, 0x91, 0x01, 0x00, 0x80, 0xd2, 0x02, 0x00, 0x80, 0xd2,
+    0x01, 0x00, 0x00, 0xd4, 0x1f, 0x04, 0x00, 0xb1, 0xa1, 0x00, 0x00, 0x54, 0xe0, 0x03, 0x13, 0xaa,
+    0x01, 0x00, 0x80, 0xd2, 0x02, 0x00, 0x80, 0x92, 0x01, 0x00, 0x00, 0xd4, 0x80, 0x00, 0x20, 0xd4,
+];
+
 #[derive(Clone, Copy)]
 enum SiblingSetup {
     None,
@@ -129,12 +141,14 @@ enum SiblingSetup {
 enum RunControl {
     Join,
     CancelPublishedEventWait,
+    CancelPublishedAtomicWait,
 }
 
 #[derive(Clone, Copy)]
 enum ThreadAuthority {
     None,
     Publish,
+    CloseDormant,
 }
 
 struct ProgramOutcome {
@@ -253,6 +267,32 @@ pub(super) fn run() -> Result<(), Error> {
         return Err(Error::Terminal);
     }
 
+    let outcome = run_program(
+        &domain,
+        &group,
+        &ATOMIC_WAIT_PROGRAM,
+        "selftest/el0-atomic-wait",
+        SiblingSetup::None,
+        RunControl::CancelPublishedAtomicWait,
+        ThreadAuthority::Publish,
+    )?;
+    if outcome.thread != TerminalReason::Requested || outcome.process != TerminalReason::Requested {
+        return Err(Error::Terminal);
+    }
+
+    let closed = run_program(
+        &domain,
+        &group,
+        &THREAD_EXIT_PROGRAM,
+        "selftest/el0-abandoned",
+        SiblingSetup::None,
+        RunControl::Join,
+        ThreadAuthority::CloseDormant,
+    )?;
+    if closed.thread != TerminalReason::Requested {
+        return Err(Error::Terminal);
+    }
+
     group.request_stop().map_err(|_| Error::Group)?;
     group.finish_retirement().map_err(|_| Error::Group)?;
     Ok(())
@@ -331,7 +371,7 @@ fn run_program(
     }
     let thread_waitable: Option<ResolvedWaitable> = match thread_authority {
         ThreadAuthority::None => None,
-        ThreadAuthority::Publish => {
+        ThreadAuthority::Publish | ThreadAuthority::CloseDormant => {
             let rights = Rights::WAIT.union(Rights::INSPECT);
             let handle = process
                 .publish_thread_handle(&thread, rights)
@@ -348,11 +388,16 @@ fn run_program(
             {
                 return Err(Error::Construction);
             }
-            Some(
-                process
-                    .resolve_waitable(handle, Rights::WAIT)
-                    .map_err(|_| Error::Construction)?,
-            )
+            if matches!(thread_authority, ThreadAuthority::CloseDormant) {
+                process.close_handle(handle).map_err(|_| Error::Lifecycle)?;
+                None
+            } else {
+                Some(
+                    process
+                        .resolve_waitable(handle, Rights::WAIT)
+                        .map_err(|_| Error::Construction)?,
+                )
+            }
         }
     };
     let sibling = match sibling_setup {
@@ -363,9 +408,37 @@ fn run_program(
                 .map_err(|_| Error::Construction)?,
         ),
     };
-    thread.ready().map_err(|_| Error::Scheduler)?;
+    if !matches!(thread_authority, ThreadAuthority::CloseDormant) {
+        thread.ready().map_err(|_| Error::Scheduler)?;
+    }
     if matches!(control, RunControl::CancelPublishedEventWait) {
         wait_for_event_registration(&process)?;
+        let report = process.request_stop(TerminalReason::Requested);
+        if !report.newly_requested || !report.dispatch_complete {
+            return Err(Error::Lifecycle);
+        }
+    }
+    if matches!(control, RunControl::CancelPublishedAtomicWait) {
+        let ready = crate::kernel::task::wait_for_test_progress(
+            crate::kernel::task::TEST_PROGRESS_TIMEOUT_NS,
+            || {
+                Ok::<_, Error>(
+                    crate::kernel::process::atomic_wait::waiter_count(
+                        &process,
+                        IMAGE_BASE + PAGE_SIZE * 3 - 16,
+                    )
+                    .is_ok_and(|count| count == 1),
+                )
+            },
+        )?;
+        if !ready {
+            return Err(Error::Lifecycle);
+        }
+        // A repeated start cannot bypass a published atomic wait or enter the
+        // scheduler's invariant-failure path. It must leave cancellation usable.
+        if thread.ready().is_ok() {
+            return Err(Error::Lifecycle);
+        }
         let report = process.request_stop(TerminalReason::Requested);
         if !report.newly_requested || !report.dispatch_complete {
             return Err(Error::Lifecycle);

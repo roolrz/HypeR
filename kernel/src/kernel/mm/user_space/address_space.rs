@@ -894,6 +894,48 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         self.release_user_write(reservation);
     }
 
+    /// Pins one writable atomic word without ordinary byte copies. The mapping
+    /// token never aliases a replacement mapping at the same virtual address.
+    pub(crate) fn pin_atomic_u32(
+        &self,
+        address: UserAddress,
+    ) -> Result<PinnedAtomicWord<Backend, Account>, AddressSpaceError<Backend::Error, Account::Error>>
+    {
+        if !address.get().is_multiple_of(4) {
+            return Err(AddressSpaceError::InvalidRange);
+        }
+        let range = UserSlice::new(address, 4).map_err(|_| AddressSpaceError::InvalidRange)?;
+        let snapshot = self.snapshot();
+        let mapping = snapshot
+            .mappings
+            .records
+            .iter()
+            .find(|mapping| mapping.snapshot.range.contains(range))
+            .ok_or(AddressSpaceError::NotMapped)?;
+        if !mapping.snapshot.permissions.contains(Access::Write) {
+            return Err(AddressSpaceError::WriteDenied);
+        }
+        let MappingObject::Writable(storage) = &mapping.object else {
+            return Err(AddressSpaceError::WriteDenied);
+        };
+        let offset =
+            mapping.snapshot.object_offset + address.get() - mapping.snapshot.range.base().get();
+        let physical = storage.resident_physical_page(offset / PAGE_SIZE * PAGE_SIZE)?;
+        let charge = self
+            .account
+            .try_charge(MemoryCharge {
+                pinned_pages: 1,
+                ..MemoryCharge::default()
+            })
+            .map_err(AddressSpaceError::Account)?;
+        Ok(PinnedAtomicWord {
+            token: mapping.snapshot.token,
+            physical: physical.get() + offset % PAGE_SIZE,
+            _mapping: mapping.clone(),
+            _charge: charge,
+        })
+    }
+
     fn prepare_copy(
         &self,
         range: UserSlice,
@@ -1683,4 +1725,12 @@ fn sort_mappings<Backend: PageBackend, Account: MemoryAccount>(
     mappings: &mut [Mapping<Backend, Account>],
 ) {
     mappings.sort_unstable_by_key(|mapping| mapping.snapshot.range.base());
+}
+
+/// Retains the writable lease and backing independently of mapping replacement.
+pub(crate) struct PinnedAtomicWord<Backend: PageBackend, Account: MemoryAccount> {
+    pub(crate) token: MappingToken,
+    pub(crate) physical: u64,
+    _mapping: Mapping<Backend, Account>,
+    _charge: Account::Charge,
 }

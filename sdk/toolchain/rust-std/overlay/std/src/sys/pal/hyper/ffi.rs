@@ -33,5 +33,5 @@ unsafe extern "C" {
     pub fn hyper_runtime_tls_get(key: usize) -> *mut u8;
     pub fn hyper_runtime_tls_set(key: usize, value: *mut u8);
     pub fn hyper_runtime_wait_u32(address: *const u32, expected: u32, deadline: u64) -> i32;
-    pub fn hyper_runtime_wake_u32(address: *const u32, count: u32);
+    pub fn hyper_runtime_wake_u32(address: *const u32, count: u32) -> u32;
 }

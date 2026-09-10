@@ -90,6 +90,14 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
     case "$command_phase" in
         console)
             if grep -Fxq 'HypeR session: console ready' "$native_output"; then
+                # Empty lines and repeated terminal DEL/BS must not prefix the
+                # first command with an invisible byte.
+                printf '\r\n\r\n\177\177\010vmm --help\r' >&3
+                command_phase='first_command'
+            fi
+            ;;
+        first_command)
+            if grep -q '^Usage: vmm' "$native_output"; then
                 command_phase='vm_running'
             fi
             ;;
@@ -100,7 +108,22 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             fi
             ;;
         guest_console)
-            if grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
+            if grep -q 'HypeR guest: repeated timer wakeups passed' "$log" &&
+                grep -Fq '~ # ' "$log"; then
+                # No Enter yet: a line-buffered relay must not hide guest echo.
+                printf 'echo HYPER_GUEST_CONSOLE_RX' >&3
+                command_phase='guest_echo'
+            fi
+            ;;
+        guest_echo)
+            if grep -Fq 'echo HYPER_GUEST_CONSOLE_RX' "$log"; then
+                printf '\r' >&3
+                command_phase='guest_enter'
+            fi
+            ;;
+        guest_enter)
+            # Check the raw stream: the Linux tty owns CR/LF conversion.
+            if grep -Fxq "$(printf 'HYPER_GUEST_CONSOLE_RX\r')" "$log"; then
                 printf '\035d' >&3
                 command_phase='guest_detach'
             fi
@@ -191,7 +214,10 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             fi
             ;;
         std_error)
-            if grep -q "unexpected argument '--unknown-option'" "$native_output" &&
+            # stdout and stderr use separate channels: the next shell prompt
+            # may arrive between fragments of this stderr diagnostic.
+            if sed 's/hyper-sh\$ //g' "$native_output" |
+                grep -q "unexpected argument '--unknown-option'" &&
                 grep -Eq '^(hyper-sh\$ )*sh: command failed$' "$native_output"; then
                 printf '/bin/std-test --panic\n' >&3
                 command_phase='std_panic'

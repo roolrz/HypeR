@@ -22,7 +22,7 @@ void __hyper_std_sleep(uint64_t nanoseconds);
 /* Successful spawn transfers the entry argument to a newly attached thread.
  * On failure it remains owned by the caller. Join consumes a successful
  * token; detach relinquishes it without stopping the running thread.
- * Backend currently returns NOT_SUPPORTED without invoking entry. */
+ * Stack reclamation follows the Native Thread TERMINATED signal. */
 typedef void (*hyper_std_thread_entry_t)(void *);
 int64_t __hyper_std_thread_spawn(size_t stack_size, hyper_std_thread_entry_t entry,
     void *argument, uintptr_t *token);

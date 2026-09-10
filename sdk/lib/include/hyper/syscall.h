@@ -260,6 +260,12 @@ hyper_call_result_t hyper_object_inspector_derive_task_group(
 hyper_call_result_t hyper_object_inspector_derive_resource_domain(
     hyper_native_handle_t inspector,
     hyper_native_handle_t resource_domain);
+hyper_call_result_t hyper_thread_create(uint64_t entry, uint64_t stack, uint64_t tls, uint64_t argument);
+hyper_native_status_t hyper_thread_start(hyper_native_handle_t thread);
+hyper_native_status_t hyper_thread_request_stop(hyper_native_handle_t thread);
+hyper_native_status_t hyper_atomic_wait(const uint32_t *address, uint32_t expected, uint64_t deadline);
+hyper_call_result_t hyper_atomic_wake(const uint32_t *address, uint32_t count);
+hyper_native_status_t hyper_thread_sleep(uint64_t deadline);
 hyper_native_status_t hyper_thread_yield(void);
 _Noreturn void hyper_thread_exit(int64_t status);
 _Noreturn void hyper_process_exit(int64_t status);

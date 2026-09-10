@@ -33,6 +33,11 @@ pub(crate) enum AddressSpaceError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum UserEntryError {
+    #[cfg_attr(
+        not(CONFIG_ARCH_AARCH64),
+        allow(dead_code, reason = "secondary Native entry is unsupported")
+    )]
+    InvalidContext,
     InterruptsEnabled,
     Unsupported,
     #[cfg(CONFIG_ARCH_AARCH64)]
@@ -509,6 +514,15 @@ pub(crate) struct UserContext {
     backend: crate::arch::user::UserContext,
 }
 
+impl UserContext {
+    pub(crate) fn set_entry_argument(&mut self, argument: u64) {
+        #[cfg(CONFIG_ARCH_AARCH64)]
+        self.backend.set_entry_argument(argument);
+        #[cfg(not(CONFIG_ARCH_AARCH64))]
+        let _ = argument;
+    }
+}
+
 /// Creates a stopped native-user context using the selected machine contract.
 pub(crate) fn prepare_context(
     entry: u64,
@@ -521,7 +535,12 @@ pub(crate) fn prepare_context(
             .map_err(crate::arch::user::UserEntryError::from)
             .map_err(UserEntryError::Backend)?;
         let backend = crate::arch::user::UserContext::try_new(entry, stack, tls, address_limit)
-            .map_err(UserEntryError::Backend)?;
+            .map_err(|error| match error {
+                crate::arch::user::UserEntryError::InvalidInitialContext => {
+                    UserEntryError::InvalidContext
+                }
+                other => UserEntryError::Backend(other),
+            })?;
         Ok(UserContext { backend })
     }
     #[cfg(not(CONFIG_ARCH_AARCH64))]

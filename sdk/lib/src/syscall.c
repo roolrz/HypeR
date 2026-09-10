@@ -865,3 +865,16 @@ _Noreturn void hyper_process_exit(int64_t status)
     (void)hyper_native_call6(HYPER_NATIVE_SYS_PROCESS_EXIT, (uint64_t)status, 0, 0, 0, 0, 0);
     __builtin_trap();
 }
+
+hyper_call_result_t hyper_thread_create(uint64_t entry, uint64_t stack, uint64_t tls, uint64_t argument)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_CREATE, entry, stack, tls, argument, 0, 0); }
+hyper_native_status_t hyper_thread_start(hyper_native_handle_t thread)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_START, thread, 0, 0, 0, 0, 0).status; }
+hyper_native_status_t hyper_thread_request_stop(hyper_native_handle_t thread)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_REQUEST_STOP, thread, 0, 0, 0, 0, 0).status; }
+hyper_native_status_t hyper_atomic_wait(const uint32_t *address, uint32_t expected, uint64_t deadline)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_ATOMIC_WAIT, (uintptr_t)address, expected, deadline, 0, 0, 0).status; }
+hyper_call_result_t hyper_atomic_wake(const uint32_t *address, uint32_t count)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_ATOMIC_WAKE, (uintptr_t)address, count, 0, 0, 0, 0); }
+hyper_native_status_t hyper_thread_sleep(uint64_t deadline)
+{ return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_SLEEP, deadline, 0, 0, 0, 0, 0).status; }

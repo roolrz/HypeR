@@ -1345,6 +1345,33 @@ impl Scheduler {
         }
     }
 
+    /// Validate lifecycle and scheduling state under the same owner CPU lock.
+    /// A user start request must never restart a blocked wait registration.
+    pub fn make_user_ready(&mut self, id: ThreadId) -> Result<ReadyOutcome, Error> {
+        if let Some(cpu) = self.cpu_lock_required_for(id)? {
+            return self.with_cpu_schedule_stored(cpu, |scheduler| scheduler.make_user_ready(id));
+        }
+        if !matches!(
+            self.thread(id)?.state(),
+            ThreadState::Dormant | ThreadState::Ready | ThreadState::Running
+        ) {
+            return Err(Error::InvalidThreadState);
+        }
+        self.with_thread(id, |thread| {
+            thread
+                .user_thread()
+                .ok_or(Error::InvalidThreadState)?
+                .mark_runnable()
+                .map_err(|_| Error::InvalidThreadState)
+        })??;
+        // State cannot change while its scheduler owner is held. An error here
+        // would indicate internal queue corruption after lifecycle publication.
+        match self.make_ready(id) {
+            Ok(outcome) => Ok(outcome),
+            Err(_) => crate::hal::cpu::halt(),
+        }
+    }
+
     pub fn make_ready(&mut self, id: ThreadId) -> Result<ReadyOutcome, Error> {
         if let Some(cpu) = self.cpu_lock_required_for(id)? {
             return self.with_cpu_schedule_stored(cpu, |scheduler| scheduler.make_ready(id));

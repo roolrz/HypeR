@@ -62,6 +62,22 @@ impl KernelObject for UserThreadObject {
         .union(Rights::START)
         .union(Rights::REQUEST_STOP);
 
+    fn on_zero_active_handles(&self, _: &mut crate::kernel::object::ObjectRetirement) {
+        // Closing an unstarted thread must not retain Process membership forever.
+        // Running threads may be detached; their execution remains an owner.
+        let dormant = self
+            .inner
+            .control
+            .with(|control| control.lifecycle.phase() == UserThreadPhase::Dormant);
+        let raw = self.inner.scheduler_id.load(Ordering::Acquire);
+        if dormant && raw != 0 {
+            let _ = crate::kernel::task::scheduler::request_user_thread_stop(
+                ThreadId::from_process_publication(raw),
+                TerminalReason::Requested,
+            );
+        }
+    }
+
     fn signal_source(&self) -> Option<SignalSource<'_>> {
         Some(SignalSource::new(
             &self.inner.signals,
@@ -235,7 +251,14 @@ impl UserThread {
                 crate::kernel::task::scheduler::ready_user_thread(id)
             })
             .map_err(|_| super::owner::ProcessError::Lifecycle(LifecycleError::AdmissionClosed))?
-            .map_err(Into::into)
+            .map_err(|error| match error {
+                crate::kernel::task::scheduler::Error::ThreadNotFound
+                | crate::kernel::task::scheduler::Error::TerminatedThread
+                | crate::kernel::task::scheduler::Error::InvalidThreadState => {
+                    super::owner::ProcessError::Lifecycle(LifecycleError::AdmissionClosed)
+                }
+                other => other.into(),
+            })
     }
 
     pub(in crate::kernel) fn mark_runnable(&self) -> Result<(), LifecycleError> {

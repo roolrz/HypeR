@@ -4,14 +4,15 @@
 //! Native immediate/deferred syscall routing.
 
 use hyper::abi::native::{
-    HYPER_NATIVE_SYS_ABI_QUERY, HYPER_NATIVE_SYS_BYTE_CHANNEL_CREATE,
-    HYPER_NATIVE_SYS_BYTE_CHANNEL_READ, HYPER_NATIVE_SYS_BYTE_CHANNEL_WRITE,
-    HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE,
-    HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND, HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC,
-    HYPER_NATIVE_SYS_CONSOLE_READ, HYPER_NATIVE_SYS_CONSOLE_WRITE,
-    HYPER_NATIVE_SYS_CPU_INSPECTOR_READ, HYPER_NATIVE_SYS_DIRECTORY_GET_INFO,
-    HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY, HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE,
-    HYPER_NATIVE_SYS_DIRECTORY_READ, HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
+    HYPER_NATIVE_SYS_ABI_QUERY, HYPER_NATIVE_SYS_ATOMIC_WAIT, HYPER_NATIVE_SYS_ATOMIC_WAKE,
+    HYPER_NATIVE_SYS_BYTE_CHANNEL_CREATE, HYPER_NATIVE_SYS_BYTE_CHANNEL_READ,
+    HYPER_NATIVE_SYS_BYTE_CHANNEL_WRITE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE,
+    HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND,
+    HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC, HYPER_NATIVE_SYS_CONSOLE_READ,
+    HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_CPU_INSPECTOR_READ,
+    HYPER_NATIVE_SYS_DIRECTORY_GET_INFO, HYPER_NATIVE_SYS_DIRECTORY_OPEN_DIRECTORY,
+    HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE, HYPER_NATIVE_SYS_DIRECTORY_READ,
+    HYPER_NATIVE_SYS_EVENT_CREATE, HYPER_NATIVE_SYS_EVENT_SIGNAL,
     HYPER_NATIVE_SYS_FILE_CREATE_EXECUTABLE_VMO, HYPER_NATIVE_SYS_FILE_GET_INFO,
     HYPER_NATIVE_SYS_FILE_READ_AT, HYPER_NATIVE_SYS_HANDLE_CLOSE,
     HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
@@ -38,7 +39,9 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
     HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_TASK_GROUP,
     HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_PROCESSES, HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_THREADS,
-    HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD,
+    HYPER_NATIVE_SYS_THREAD_CREATE, HYPER_NATIVE_SYS_THREAD_EXIT,
+    HYPER_NATIVE_SYS_THREAD_REQUEST_STOP, HYPER_NATIVE_SYS_THREAD_SLEEP,
+    HYPER_NATIVE_SYS_THREAD_START, HYPER_NATIVE_SYS_THREAD_YIELD,
     HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO, HYPER_NATIVE_SYS_VIRTUAL_CPU_START,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATE,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_CREATE,
@@ -51,17 +54,18 @@ use hyper::abi::native::{
 };
 
 use super::handlers::{
-    sys_abi_query, sys_byte_channel_create, sys_byte_channel_read, sys_byte_channel_write,
-    sys_capability_channel_create, sys_capability_channel_receive, sys_capability_channel_try_send,
-    sys_clock_get_monotonic, sys_console_read, sys_console_write, sys_cpu_inspector_read,
-    sys_directory_get_info, sys_directory_open_directory, sys_directory_open_file,
-    sys_directory_read, sys_event_create, sys_event_signal, sys_file_create_executable_vmo,
-    sys_file_get_info, sys_file_read_at, sys_handle_close, sys_handle_duplicate,
-    sys_handle_get_info, sys_handle_replace, sys_memory_inspector_read, sys_not_supported,
-    sys_object_get_basic_info, sys_object_inspector_derive_process,
-    sys_object_inspector_derive_resource_domain, sys_object_inspector_derive_task_group,
-    sys_object_inspector_scan_handles, sys_object_inspector_scan_objects, sys_object_wait_many,
-    sys_object_wait_one, sys_pending_virtual_machine_abort, sys_pending_virtual_machine_install,
+    sys_abi_query, sys_atomic_wait, sys_atomic_wake, sys_byte_channel_create,
+    sys_byte_channel_read, sys_byte_channel_write, sys_capability_channel_create,
+    sys_capability_channel_receive, sys_capability_channel_try_send, sys_clock_get_monotonic,
+    sys_console_read, sys_console_write, sys_cpu_inspector_read, sys_directory_get_info,
+    sys_directory_open_directory, sys_directory_open_file, sys_directory_read, sys_event_create,
+    sys_event_signal, sys_file_create_executable_vmo, sys_file_get_info, sys_file_read_at,
+    sys_handle_close, sys_handle_duplicate, sys_handle_get_info, sys_handle_replace,
+    sys_memory_inspector_read, sys_not_supported, sys_object_get_basic_info,
+    sys_object_inspector_derive_process, sys_object_inspector_derive_resource_domain,
+    sys_object_inspector_derive_task_group, sys_object_inspector_scan_handles,
+    sys_object_inspector_scan_objects, sys_object_wait_many, sys_object_wait_one,
+    sys_pending_virtual_machine_abort, sys_pending_virtual_machine_install,
     sys_pending_virtual_machine_seal, sys_pending_virtual_machine_set_bootstrap,
     sys_pending_virtual_machine_set_memory, sys_pending_virtual_machine_set_virtual_serial,
     sys_process_builder_abort, sys_process_builder_add_argument,
@@ -71,8 +75,9 @@ use super::handlers::{
     sys_process_get_info, sys_process_request_stop, sys_resource_domain_create,
     sys_task_group_create, sys_task_inspector_derive_process,
     sys_task_inspector_derive_resource_domain, sys_task_inspector_derive_task_group,
-    sys_task_inspector_scan_processes, sys_task_inspector_scan_threads, sys_thread_exit,
-    sys_thread_yield, sys_virtual_cpu_get_info, sys_virtual_cpu_start, sys_virtual_machine_create,
+    sys_task_inspector_scan_processes, sys_task_inspector_scan_threads, sys_thread_create,
+    sys_thread_exit, sys_thread_request_stop, sys_thread_sleep, sys_thread_start, sys_thread_yield,
+    sys_virtual_cpu_get_info, sys_virtual_cpu_start, sys_virtual_machine_create,
     sys_virtual_machine_creation_lease_create, sys_virtual_machine_get_info,
     sys_virtual_machine_request_stop, sys_virtual_serial_create,
     sys_virtual_serial_register_output, sys_virtual_serial_write, sys_vmar_allocate,
@@ -148,6 +153,24 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE => DeferredAction::Return(
             sys_capability_channel_create(services, invocation.arguments()),
         ),
+        HYPER_NATIVE_SYS_THREAD_CREATE => {
+            DeferredAction::Return(sys_thread_create(services, invocation.arguments()))
+        }
+        HYPER_NATIVE_SYS_THREAD_START => {
+            DeferredAction::Return(sys_thread_start(services, invocation.arguments()))
+        }
+        HYPER_NATIVE_SYS_THREAD_REQUEST_STOP => {
+            DeferredAction::Return(sys_thread_request_stop(services, invocation.arguments()))
+        }
+        HYPER_NATIVE_SYS_ATOMIC_WAIT => {
+            DeferredAction::Return(sys_atomic_wait(services, invocation.arguments()))
+        }
+        HYPER_NATIVE_SYS_ATOMIC_WAKE => {
+            DeferredAction::Return(sys_atomic_wake(services, invocation.arguments()))
+        }
+        HYPER_NATIVE_SYS_THREAD_SLEEP => {
+            DeferredAction::Return(sys_thread_sleep(services, invocation.arguments()))
+        }
         HYPER_NATIVE_SYS_THREAD_YIELD => sys_thread_yield(),
         HYPER_NATIVE_SYS_THREAD_EXIT => sys_thread_exit(invocation.arguments()),
         HYPER_NATIVE_SYS_PROCESS_EXIT => sys_process_exit(invocation.arguments()),

@@ -102,6 +102,10 @@ pub(crate) struct UserContext {
 }
 
 impl UserContext {
+    pub(crate) fn set_entry_argument(&mut self, argument: u64) {
+        self.machine.general[0] = argument;
+    }
+
     pub(crate) fn try_new(
         entry: u64,
         stack: u64,

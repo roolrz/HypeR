@@ -4433,6 +4433,44 @@ const VIRTUAL_CPU_START_ARGUMENTS: &[Argument] = &[Argument {
     memory: None,
 }];
 
+const THREAD_CREATE_ARGUMENTS: &[Argument] = &[
+    scalar_argument("entry", ValueKind::U64),
+    scalar_argument("stack", ValueKind::U64),
+    scalar_argument("tls", ValueKind::U64),
+    scalar_argument("argument", ValueKind::U64),
+];
+const THREAD_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
+    name: "thread",
+    kind: ValueKind::Handle,
+    handle: Some(ProducedHandle {
+        object: ProducedObject::Kind("thread"),
+        rights: ProducedRights::Fixed(
+            RIGHT_DUPLICATE | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_START | RIGHT_REQUEST_STOP,
+        ),
+    }),
+}];
+const fn thread_argument(rights: u64) -> Argument {
+    Argument {
+        name: "thread",
+        kind: ValueKind::Handle,
+        handle: Some(HandleArgument {
+            object: ObjectConstraint::Kind("thread"),
+            required_rights: rights,
+            disposition: HandleDisposition::Borrow,
+        }),
+        memory: None,
+    }
+}
+const ATOMIC_WAIT_ARGUMENTS: &[Argument] = &[
+    scalar_argument("address", ValueKind::U64),
+    scalar_argument("expected", ValueKind::U32),
+    scalar_argument("deadline", ValueKind::U64),
+];
+const ATOMIC_WAKE_ARGUMENTS: &[Argument] = &[
+    scalar_argument("address", ValueKind::U64),
+    scalar_argument("count", ValueKind::U32),
+];
+
 pub const SYSCALLS: &[Syscall] = &[
     Syscall {
         number: 0,
@@ -5512,6 +5550,94 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 77,
+        name: "thread_create",
+        feature: FeatureGate::Core,
+        arguments: THREAD_CREATE_ARGUMENTS,
+        results: THREAD_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 78,
+        name: "thread_start",
+        feature: FeatureGate::Core,
+        arguments: &[thread_argument(RIGHT_START)],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 79,
+        name: "thread_request_stop",
+        feature: FeatureGate::Core,
+        arguments: &[thread_argument(RIGHT_REQUEST_STOP)],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 80,
+        name: "atomic_wait",
+        feature: FeatureGate::Core,
+        arguments: ATOMIC_WAIT_ARGUMENTS,
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 81,
+        name: "atomic_wake",
+        feature: FeatureGate::Core,
+        arguments: ATOMIC_WAKE_ARGUMENTS,
+        results: &[ResultValue {
+            name: "woken",
+            kind: ValueKind::U64,
+            handle: None,
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 82,
+        name: "thread_sleep",
+        feature: FeatureGate::Core,
+        arguments: &[scalar_argument("deadline", ValueKind::U64)],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Task,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -5528,6 +5654,9 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "Thread creation prepares a dormant thread in the calling Process and returns duplicate, wait, inspect, start and request_stop authority. Entry, 16-byte-aligned stack, TLS and an opaque first argument define its initial context. The caller retains stack/TLS ownership through the thread terminated signal. Start publishes runnable execution; request_stop abandons execution without language destructors. Closing the last handle to a dormant thread cancels it; running threads continue independently of handle ownership. Existing thread_exit terminates only the caller, while process_exit stops every thread.",
+    "Atomic wait/wake currently operate on aligned writable u32 words in the calling Process. Wait checks the value and publishes its generation atomically with respect to wake; mismatch returns ok, and spurious wakes are allowed. Wait uses an absolute monotonic nanosecond deadline, with UINT64_MAX meaning infinite; timeout returns timed_out and cancellation returns cancelled. Wake returns the number of registrations actually notified, bounded by count. Wake does not replace the caller's release operation or the waiter's acquire predicate check. Keys include the non-reused mapping identity and virtual address; aliases and other Processes have separate wait domains. Keep the mapping live while waiting: unmap/protect does not move an existing wait to a replacement mapping. Pinned backing survives concurrent unmap until admitted accesses finish; process stop cancels outstanding waits.",
+    "Thread sleep accepts an absolute monotonic nanosecond deadline and returns ok when it expires, including an already elapsed deadline. UINT64_MAX sleeps until cancellation. It parks the current thread through scheduler timeout arbitration rather than polling or yielding.",
     "The monotonic clock syscall returns absolute nanoseconds from the kernel's monotonic clock domain. Ambient monotonic observation is intentionally not a capability because reading it conveys no mutable authority; future virtual or adjustable clocks may be represented by handle objects without changing this clock domain.",
     "Extensible input records carry their caller size in the syscall's explicit byte-count argument. The size must be at least the record's published minimum prefix and no greater than extensible_record_max_bytes; missing bytes through the kernel's current record size default to zero, while bytes beyond that size must be zero. Extensible information outputs accept any capacity from the record's minimum prefix through extensible_record_max_bytes, write only the intersection of caller capacity and kernel-supported size, and return the kernel-supported size in value0 on ok. Bytes beyond that intersection remain untouched.",
     "Directory lookup is capability-relative. A leading slash restarts at that Directory's traversal root, and parent components cannot escape it. Every open requires read traversal authority, and every requested File right must already be present on the source Directory before the result is further bounded by the File object's node-specific ceiling.",

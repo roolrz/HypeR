@@ -3,6 +3,7 @@
 
 //! Native Process, `TaskGroup`, and `UserThread` lifecycle ownership.
 
+pub(crate) mod atomic_wait;
 mod builder;
 mod builder_input;
 mod builder_policy;
