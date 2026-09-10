@@ -19,10 +19,9 @@ pub fn futex_wait(futex: &Atomic<u32>, expected: u32, timeout: Option<Duration>)
     unsafe { ffi::hyper_runtime_wait_u32(futex.as_ptr(), expected, deadline) != 0 }
 }
 pub fn futex_wake(futex: &Atomic<u32>) -> bool {
-    unsafe { ffi::hyper_runtime_wake_u32(futex.as_ptr(), 1) };
-    // Polling does not tell us whether a waiter was present. RwLock uses
-    // this result to decide whether readers also need notification.
-    false
+    // RwLock uses the actual notification count to decide whether readers
+    // also need waking when no writer registration won arbitration.
+    unsafe { ffi::hyper_runtime_wake_u32(futex.as_ptr(), 1) != 0 }
 }
 pub fn futex_wake_all(futex: &Atomic<u32>) {
     unsafe { ffi::hyper_runtime_wake_u32(futex.as_ptr(), u32::MAX) };

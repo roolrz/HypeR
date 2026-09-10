@@ -17,6 +17,7 @@ cpus=$5
 memory=$6
 bootargs=$7
 timeout_seconds=${QEMU_BOOT_TIMEOUT_SECONDS:-90}
+total_timeout_seconds=${QEMU_NATIVE_TIMEOUT_SECONDS:-300}
 temp=$(mktemp -d -t hyper-native-init.XXXXXX)
 input=$temp/input
 native_output=$temp/native-output
@@ -67,10 +68,23 @@ trap 'exit 143' TERM
     -kernel "$image" <"$input" >"$log" 2>&1 &
 pid=$!
 
-attempt_limit=$timeout_seconds
-attempt=0
+started=$(date +%s)
+phase_started=$started
 command_phase='console'
-while [ "$attempt" -lt "$attempt_limit" ]; do
+observed_phase=$command_phase
+# A child may print its result before the shell finishes supervising it. Input
+# sent during that interval belongs to the old child, not to the next command.
+prompt_target=1
+send_commands() {
+    prompt_target=$((prompt_target + $1))
+    printf '%b' "$2" >&3
+}
+while :; do
+    now=$(date +%s)
+    if [ "$((now - started))" -ge "$total_timeout_seconds" ] ||
+        [ "$((now - phase_started))" -ge "$timeout_seconds" ]; then
+        break
+    fi
     if grep -Eq 'HypeR: kernel startup.*failed|HypeR crash monitor' "$log" ||
         grep -Eq '(^|[^[:alnum:]_])(PANIC|BUG)([^[:alnum:]_]|$)' "$log" ||
         grep -Eq 'HypeR init: (critical service |initial VM (failed|protocol failed)|VM (manager terminated|provisioning channel closed))' "$log"; then
@@ -87,40 +101,73 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         echo "Native shell reported an unexpected runtime failure" >&2
         exit 1
     fi
+    prompt_ready=true
+    case "$command_phase" in
+        guest_console | guest_echo | guest_enter | std_input | top) ;;
+        *)
+            prompts=$(awk '{ count += gsub(/hyper-sh\$ /, "") }
+                END { print count + 0 }' "$native_output")
+            [ "$prompts" -ge "$prompt_target" ] || prompt_ready=false
+            ;;
+    esac
+    if "$prompt_ready"; then
     case "$command_phase" in
         console)
             if grep -Fxq 'HypeR session: console ready' "$native_output"; then
+                # Empty lines and repeated terminal DEL/BS must not prefix the
+                # first command with an invisible byte.
+                send_commands 3 '\r\n\r\n\177\177\010vmm --help\r'
+                command_phase='first_command'
+            fi
+            ;;
+        first_command)
+            if grep -q '^Usage: vmm' "$native_output"; then
                 command_phase='vm_running'
             fi
             ;;
         vm_running)
             if grep -q 'HypeR: vCPU 0 running as scheduler thread' "$log"; then
-                printf '/bin/vmm console\n' >&3
+                send_commands 1 '/bin/vmm console\n'
                 command_phase='guest_console'
             fi
             ;;
         guest_console)
-            if grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
+            if grep -q 'HypeR guest: repeated timer wakeups passed' "$log" &&
+                grep -Fq '~ # ' "$log"; then
+                # No Enter yet: a line-buffered relay must not hide guest echo.
+                printf 'echo HYPER_GUEST_CONSOLE_RX' >&3
+                command_phase='guest_echo'
+            fi
+            ;;
+        guest_echo)
+            if grep -Fq 'echo HYPER_GUEST_CONSOLE_RX' "$log"; then
+                printf '\r' >&3
+                command_phase='guest_enter'
+            fi
+            ;;
+        guest_enter)
+            # Check the raw stream: the Linux tty owns CR/LF conversion.
+            if grep -Fxq "$(printf 'HYPER_GUEST_CONSOLE_RX\r')" "$log"; then
                 printf '\035d' >&3
                 command_phase='guest_detach'
             fi
             ;;
         guest_detach)
             if grep -Fxq '[vmm] detached' "$native_output"; then
-                printf '/bin/ps\n' >&3
+                send_commands 1 '/bin/ps\n'
                 command_phase='ps'
             fi
             ;;
         ps)
             if grep -Eq '^process  [[:space:]]*[0-9]+[[:space:]]+-[[:space:]]+[^[:space:]]+[[:space:]]+(created|running|stopping|stopped|retiring|retired)' "$native_output"; then
-                printf '/bin/ps --threads\n' >&3
+                send_commands 1 '/bin/ps --threads\n'
                 command_phase='threads'
             fi
             ;;
         threads)
             if grep -Eq '^  thread [[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+user/(resident|retiring)' "$native_output" &&
                 grep -Eq '^  thread [[:space:]]*[0-9]+[[:space:]]+-[[:space:]]+[^[:space:]]+[[:space:]]+(bootstrap|idle|kernel|vcpu)/(resident|retiring)' "$native_output"; then
-                printf '/bin/echo HYPER_NATIVE_PS_OK\n' >&3
+                send_commands 1 '/bin/echo HYPER_NATIVE_PS_OK\n'
                 command_phase='ps_done'
             fi
             ;;
@@ -131,31 +178,31 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
                     echo "could not select a persistent Process observation" >&2
                     exit 1
                 fi
-                printf '/bin/handle %s\n' "$process_koid" >&3
+                send_commands 1 "/bin/handle ${process_koid}\n"
                 command_phase='handles'
             fi
             ;;
         handles)
             if grep -Eq '^0x[0-9a-f]+[[:space:]]+[0-9]+[[:space:]]+[a-z][a-z-]+[[:space:]]+[a-z][a-z|-]+' "$native_output"; then
-                printf '/bin/handle --objects\n' >&3
+                send_commands 1 '/bin/handle --objects\n'
                 command_phase='objects'
             fi
             ;;
         objects)
             if grep -Eq '^[0-9]+[[:space:]]+[a-z][a-z-]+[[:space:]]+(unpublished|active|retired)' "$native_output"; then
-                printf '/bin/dynamic-test\n' >&3
+                send_commands 1 '/bin/dynamic-test\n'
                 command_phase='dynamic'
             fi
             ;;
         dynamic)
             if grep -Fxq 'HYPER_DYNAMIC_LINK_OK' "$native_output"; then
-                printf '/bin/echo-static HYPER_STATIC_LINK_OK\n' >&3
+                send_commands 1 '/bin/echo-static HYPER_STATIC_LINK_OK\n'
                 command_phase='static'
             fi
             ;;
         static)
             if grep -Fxq 'HYPER_STATIC_LINK_OK' "$native_output"; then
-                printf '/bin/std-test --name dynamic --read-input\n' >&3
+                send_commands 1 '/bin/std-test --name dynamic --read-input\n'
                 command_phase='std_input'
             fi
             ;;
@@ -168,13 +215,13 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         std_dynamic)
             if grep -Fxq 'HYPER_STD_OK hello dynamic' "$native_output" &&
                 grep -Fxq 'HYPER_STD_TLS_DROP_OK' "$native_output"; then
-                printf '/bin/std-test-static --name static\n' >&3
+                send_commands 1 '/bin/std-test-static --name static\n'
                 command_phase='std_static'
             fi
             ;;
         std_static)
             if grep -Fxq 'HYPER_STD_OK hello static' "$native_output"; then
-                printf '/bin/std-test --help\n' >&3
+                send_commands 1 '/bin/std-test --help\n'
                 command_phase='std_help'
             fi
             ;;
@@ -186,75 +233,78 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
                     echo "std success/help path returned failure" >&2
                     exit 1
                 fi
-                printf '/bin/std-test --unknown-option\n' >&3
+                send_commands 1 '/bin/std-test --unknown-option\n'
                 command_phase='std_error'
             fi
             ;;
         std_error)
-            if grep -q "unexpected argument '--unknown-option'" "$native_output" &&
+            # stdout and stderr use separate channels: the next shell prompt
+            # may arrive between fragments of this stderr diagnostic.
+            if sed 's/hyper-sh\$ //g' "$native_output" |
+                grep -q "unexpected argument '--unknown-option'" &&
                 grep -Eq '^(hyper-sh\$ )*sh: command failed$' "$native_output"; then
-                printf '/bin/std-test --panic\n' >&3
+                send_commands 1 '/bin/std-test --panic\n'
                 command_phase='std_panic'
             fi
             ;;
         std_panic)
             if grep -q 'HYPER_STD_EXPECTED_PANIC' "$native_output" &&
                 [ "$(grep -Ec '^(hyper-sh\$ )*sh: command failed$' "$native_output")" -eq 2 ]; then
-                printf 'ps --help\n' >&3
+                send_commands 1 'ps --help\n'
                 command_phase='cli_ps'
             fi
             ;;
         cli_ps)
             if grep -Fq 'List Native processes and threads' "$native_output"; then
-                printf 'handle --help\n' >&3
+                send_commands 1 'handle --help\n'
                 command_phase='cli_handle'
             fi
             ;;
         cli_handle)
             if grep -Fq 'Inspect Native kernel objects or a process' "$native_output"; then
-                printf 'ls --help\n' >&3
+                send_commands 1 'ls --help\n'
                 command_phase='cli_ls'
             fi
             ;;
         cli_ls)
             if grep -Fq 'List a delegated directory' "$native_output"; then
-                printf 'free --help\n' >&3
+                send_commands 1 'free --help\n'
                 command_phase='cli_free'
             fi
             ;;
         cli_free)
             if grep -Fq 'Display physical memory usage' "$native_output"; then
-                printf 'top --help\n' >&3
+                send_commands 1 'top --help\n'
                 command_phase='cli_top'
             fi
             ;;
         cli_top)
             if grep -Fq 'Monitor Native CPU, memory and processes' "$native_output"; then
-                printf 'vmm --help\n' >&3
+                send_commands 1 'vmm --help\n'
                 command_phase='cli_vmm'
             fi
             ;;
         cli_vmm)
             if grep -Fq 'Manage the default virtual machine' "$native_output"; then
-                printf 'sh --help\n' >&3
+                send_commands 1 'sh --help\n'
                 command_phase='cli_shell'
             fi
             ;;
         cli_shell)
             if grep -Fq 'Native capability-scoped command shell' "$native_output"; then
-                printf 'cd --help\n' >&3
+                send_commands 1 'cd --help\n'
                 command_phase='cli_builtin'
             fi
             ;;
         cli_builtin)
             if grep -Fq 'Usage: sh cd' "$native_output"; then
-                printf 'echo HYPER_CLAP_BUILTIN_OK\n' >&3
+                send_commands 1 'echo HYPER_CLAP_BUILTIN_OK\n'
                 command_phase='cli_echo'
             fi
             ;;
         cli_echo)
             if grep -Fq 'HYPER_CLAP_BUILTIN_OK' "$native_output"; then
-                printf 'ls\n' >&3
+                send_commands 1 'ls\n'
                 command_phase='ls_root'
             fi
             ;;
@@ -262,7 +312,7 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             if grep -Fxq 'bin/' "$native_output" &&
                 grep -Fxq 'etc/' "$native_output" &&
                 grep -Fxq 'lib/' "$native_output"; then
-                printf 'cd /bin\npwd\nls\n' >&3
+                send_commands 3 'cd /bin\npwd\nls\n'
                 command_phase='ls_bin'
             fi
             ;;
@@ -271,26 +321,26 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
                 grep -Fxq 'ls' "$native_output" &&
                 grep -Fxq 'sh' "$native_output" &&
                 grep -Fxq '/bin' "$native_output"; then
-                printf './echo HYPER_CD_CHILD_OK\n' >&3
+                send_commands 1 './echo HYPER_CD_CHILD_OK\n'
                 command_phase='cd_child'
             fi
             ;;
         cd_child)
             if grep -Fxq 'HYPER_CD_CHILD_OK' "$native_output"; then
-                printf 'cd ..\npwd\nbin/echo HYPER_CD_PARENT_OK\n' >&3
+                send_commands 3 'cd ..\npwd\nbin/echo HYPER_CD_PARENT_OK\n'
                 command_phase='cd_parent'
             fi
             ;;
         cd_parent)
             if grep -Fxq 'HYPER_CD_PARENT_OK' "$native_output"; then
-                printf '/bin/free\n' >&3
+                send_commands 1 '/bin/free\n'
                 command_phase='free'
             fi
             ;;
         free)
             if grep -Eq '^Mem:[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB[[:space:]]+[0-9]+ MiB$' "$native_output" &&
                 grep -Eq '^Owners:[[:space:]]+kernel=[0-9]+ MiB heap=[0-9]+ MiB tables=[0-9]+ MiB user=[0-9]+ MiB guest=[0-9]+ MiB other=[0-9]+ MiB$' "$native_output"; then
-                printf '/bin/top\n' >&3
+                send_commands 1 '/bin/top\n'
                 command_phase='top'
             fi
             ;;
@@ -305,7 +355,7 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
             if awk '/^Press q to quit[.]$/ { seen = 1; ready = 0; next }
                 seen && /^hyper-sh\$ q?$/ { ready = 1 }
                 END { exit !ready }' "$native_output"; then
-                printf '/bin/echo HYPER_NATIVE_ECHO_OK\n' >&3
+                send_commands 1 '/bin/echo HYPER_NATIVE_ECHO_OK\n'
                 command_phase='echo'
             fi
             ;;
@@ -320,6 +370,7 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         echo_done) ;;
 
     esac
+    fi
     if [ "$command_phase" = echo_done ] &&
         grep -q 'HypeR: starting Native init process' "$log" &&
         grep -Fxq 'HypeR session: console ready' "$native_output" &&
@@ -351,10 +402,15 @@ while [ "$attempt" -lt "$attempt_limit" ]; do
         echo "QEMU exited before Native init completed the inspection contract" >&2
         exit 1
     fi
-    attempt=$((attempt + 1))
+    if [ "$command_phase" != "$observed_phase" ]; then
+        now=$(date +%s)
+        echo "Native acceptance: $observed_phase -> $command_phase ($((now - phase_started))s phase, $((now - started))s total)"
+        observed_phase=$command_phase
+        phase_started=$now
+    fi
     sleep 1
 done
 
 cat "$log" >&2
-echo "timed out after ${timeout_seconds}s waiting for Native init inspection" >&2
+echo "Native acceptance timed out in $command_phase ($((now - phase_started))s phase, $((now - started))s total; limits ${timeout_seconds}s/${total_timeout_seconds}s)" >&2
 exit 1

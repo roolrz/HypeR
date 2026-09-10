@@ -6,7 +6,7 @@
 use core::marker::PhantomData;
 
 use crate::handle::{
-    ByteChannelObject, CapabilityChannelObject, HandleRef, ObjectType, ProcessObject,
+    ByteChannelObject, CapabilityChannelObject, HandleRef, ObjectType, ProcessObject, ThreadObject,
     VirtualCpuObject,
 };
 use crate::{Error, Result, Status};
@@ -70,6 +70,11 @@ impl ObjectSignals<CapabilityChannelObject> {
 impl ObjectSignals<ProcessObject> {
     pub const TERMINATED: Self =
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_PROCESS_TERMINATED);
+}
+
+impl ObjectSignals<ThreadObject> {
+    pub const TERMINATED: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_THREAD_TERMINATED);
 }
 
 impl ObjectSignals<VirtualCpuObject> {

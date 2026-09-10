@@ -35,10 +35,10 @@ input, output, and static/dynamic linking.
 | Collections, formatting, `System` allocator | Shared Native process heap |
 | Arguments and environment reads | Immutable startup bytes; iterators own snapshots |
 | stdin/stdout/stderr | Native service byte channels; Console fallback for bootstrap programs |
-| `Instant`, sleep, timed waits | Native monotonic clock; yielding wait fallback |
+| `Instant`, sleep, timed waits | Native monotonic clock and scheduler deadline parking |
 | Mutex, RwLock, Condvar, Once, parking | Upstream atomic/futex algorithms with Native wait/wake bridge |
 | `thread_local!` | Key-based TLS in a per-thread control block; bounded destructor passes |
-| `thread::Builder::spawn` | `io::ErrorKind::Unsupported`; failed creation releases captured values |
+| `thread::Builder::spawn` | Native thread creation, join, and detached-stack reclamation |
 | Files, networking, subprocess creation | Upstream unsupported implementations |
 | Wall-clock time, environment mutation | Upstream unsupported behavior, including panic where the public API cannot return an error |
 | Cryptographic randomness | Unsupported; no entropy source is claimed |
@@ -73,7 +73,7 @@ remain lockfile-controlled. The SDK checks fetch their locked inputs before
 performing offline builds. The standard library source remains under its
 upstream licensing terms.
 
-## Next thread patch
+## Thread and synchronization runtime
 
 No component assumes that a process has only one thread. A Native thread
 starts with `TPIDR_EL0 == 0`; the shared runtime attaches an allocated thread
@@ -89,22 +89,24 @@ callback, and may reinitialize slots for a bounded number of passes. Normal
 return from main detaches the initial thread; process abort/exit need not
 run destructors. Unloading code that owns live TLS destructors is not supported.
 
-The next backend must implement the following contracts behind the existing
-shim signatures:
+The runtime creates a dormant Native Thread, publishes its token, then starts
+it with an owned stack and entry argument. Failure keeps the argument with
+the caller. The child attaches TLS before Rust entry and runs TLS destructors
+before thread_exit. Join observes Native TERMINATED before freeing the stack.
+A single process-lifetime cleanup worker performs the same wait for detached
+threads; its own stack lives until Process retirement. Process exit may
+abandon all remaining language destructors, as before.
 
-1. Spawn failure keeps the entry argument with the caller. Success transfers
-   it to exactly one child, with a suitably aligned owned stack and a join
-   token. The child attaches TLS before invoking Rust's entry callback.
-2. Returning from the callback runs TLS detach/destructors, then exits the
-   thread. Stack reclamation happens only once the thread has stopped using
-   it. Join and detached-thread cleanup must coordinate this ownership.
-3. Address wait atomically checks the expected u32 and registers the waiter.
-   It handles cancellation, spurious wakeups, and absolute monotonic deadlines.
-   Wake follows the caller's release operation. Current waits poll/yield and
-   observe state changes directly; replacing this fallback must not introduce
-   a lost-wakeup gap. It is not an efficient blocking implementation yet.
+The atomic wait bridge uses process-private u32 wait/wake syscalls. Kernel
+mapping identities distinguish virtual-address reuse; pinned backing survives
+unmap while an admitted call finishes. The predicate check and wait publication
+share one sharded condition lock with wake. Existing scheduler generations
+arbitrate notification, timeout and cancellation. Spurious wakeups are allowed;
+upstream Rust locks retain their own acquire/release predicate loops. Shared
+cross-process futexes and requeue are outside the current std contract.
 
-Host tests run simultaneous TLS clients and destructors using pthreads, and
-check wait state changes and deadlines. Native tests cover the initial thread
-and migration through scheduler waits; Native thread creation is explicitly
-not claimed until the syscall patch lands.
+Host tests exercise TLS destructors and upstream synchronization algorithms
+against a host syscall substitute. Native tests exercise concurrent thread
+creation, Mutex/Condvar progress, independent TLS, join and detached cleanup.
+Physical AArch64 qualification must still stress weak ordering, migration,
+concurrent mapping retirement and interrupt timing beyond QEMU coverage.

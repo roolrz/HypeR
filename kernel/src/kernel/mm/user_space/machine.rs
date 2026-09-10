@@ -445,6 +445,14 @@ impl NativeAddressSpace {
         Ok(())
     }
 
+    pub(crate) fn pin_atomic_u32(
+        &self,
+        address: UserAddress,
+    ) -> Result<super::address_space::PinnedAtomicWord<KernelPageBackend, DomainAccount>, Error>
+    {
+        Ok(self.logical.pin_atomic_u32(address)?)
+    }
+
     /// Reserves a stable writable mapping for capability-returning syscalls.
     pub(crate) fn reserve_user_write(
         owner: FallibleArc<Self>,

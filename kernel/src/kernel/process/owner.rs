@@ -849,12 +849,13 @@ impl Process {
             ));
         }
         let prepared = self.prepare_user_thread()?;
-        let context = crate::hal::user::prepare_context(
+        let mut context = crate::hal::user::prepare_context(
             start.entry().get(),
             start.stack().get(),
             start.tls().get(),
         )
         .map_err(ProcessError::UserEntry)?;
+        context.set_entry_argument(start.argument());
         let execution = UserExecution::try_new(prepared.address_space.clone(), context)
             .map_err(|()| ProcessError::Allocation)?;
         let dormant = scheduler::prepare_user_thread(

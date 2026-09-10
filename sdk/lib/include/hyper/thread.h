@@ -7,10 +7,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* SDK-private thread runtime, not a syscall ABI. Each Native thread starts
+/* SDK-private thread runtime, not a syscall ABI. Each SDK-created thread starts
  * with TPIDR_EL0 == 0 and must attach before entering language runtimes.
  * Detach runs key destructors on that thread before releasing its storage.
- * The future thread trampoline must attach -> entry -> detach -> thread_exit.
+ * The runtime trampoline performs attach -> entry -> detach -> thread_exit.
  * Rust uses key TLS; ELF PT_TLS / compiler-native TLS is not supported yet. */
 hyper_native_status_t hyper_runtime_thread_attach(void);
 void hyper_runtime_thread_detach(void);
@@ -24,8 +24,14 @@ void hyper_runtime_tls_set(uintptr_t key, void *value);
  * Absolute monotonic deadline; UINT64_MAX means infinite.
  * Wait returns 0 only on timeout, or 1 on a value mismatch or wake (including
  * a spurious wake). A return of 1 does not guarantee a changed value: callers
- * must recheck their predicate. The polling backend returns 1 on mismatch.
+ * must recheck their predicate. A value mismatch returns 1 without parking.
+ * Wake returns the actual number notified, bounded by count.
  * Wake does not publish memory: the caller must release-store before waking. */
 int hyper_runtime_wait_u32(const uint32_t *address, uint32_t expected, uint64_t deadline);
-void hyper_runtime_wake_u32(const uint32_t *address, uint32_t count);
+uint32_t hyper_runtime_wake_u32(const uint32_t *address, uint32_t count);
+typedef void (*hyper_runtime_thread_entry_t)(void *);
+hyper_native_status_t hyper_runtime_thread_spawn(size_t stack_size, hyper_runtime_thread_entry_t entry,
+    void *argument, uintptr_t *token);
+hyper_native_status_t hyper_runtime_thread_join(uintptr_t token);
+void hyper_runtime_thread_release(uintptr_t token);
 #endif

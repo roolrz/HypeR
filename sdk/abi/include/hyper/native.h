@@ -341,6 +341,12 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_VIRTUAL_SERIAL_CREATE UINT64_C(74)
 #define HYPER_NATIVE_SYS_VIRTUAL_SERIAL_REGISTER_OUTPUT UINT64_C(75)
 #define HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE UINT64_C(76)
+#define HYPER_NATIVE_SYS_THREAD_CREATE UINT64_C(77)
+#define HYPER_NATIVE_SYS_THREAD_START UINT64_C(78)
+#define HYPER_NATIVE_SYS_THREAD_REQUEST_STOP UINT64_C(79)
+#define HYPER_NATIVE_SYS_ATOMIC_WAIT UINT64_C(80)
+#define HYPER_NATIVE_SYS_ATOMIC_WAKE UINT64_C(81)
+#define HYPER_NATIVE_SYS_THREAD_SLEEP UINT64_C(82)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)

@@ -1336,3 +1336,77 @@ pub(super) fn sys_vmar_destroy(
     };
     DeferredAction::Return(status_only(result))
 }
+
+#[inline(never)]
+pub(super) fn sys_thread_create(services: &impl TaskServices, args: &Arguments) -> NativeResult {
+    handle_result(require_zero(&args[4..]).and_then(|()| {
+        services
+            .create_thread(args[0], args[1], args[2], args[3])
+            .map_err(status_from_object_service_error)
+    }))
+}
+#[inline(never)]
+pub(super) fn sys_thread_start(services: &impl TaskServices, args: &Arguments) -> NativeResult {
+    status_only(parse_single_handle(args).and_then(|handle| {
+        services
+            .start_thread(handle)
+            .map_err(status_from_process_error)
+    }))
+}
+#[inline(never)]
+pub(super) fn sys_thread_request_stop(
+    services: &impl TaskServices,
+    args: &Arguments,
+) -> NativeResult {
+    status_only(parse_single_handle(args).and_then(|handle| {
+        services
+            .stop_thread(handle)
+            .map_err(status_from_process_error)
+    }))
+}
+#[inline(never)]
+pub(super) fn sys_atomic_wait(services: &impl TaskServices, args: &Arguments) -> NativeResult {
+    let result = require_zero(&args[3..]).and_then(|()| {
+        let expected = u32::try_from(args[1]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        services
+            .atomic_wait(args[0], expected, args[2])
+            .map_err(status_from_object_service_error)
+    });
+    wait_status(result, false)
+}
+#[inline(never)]
+pub(super) fn sys_atomic_wake(services: &impl TaskServices, args: &Arguments) -> NativeResult {
+    match require_zero(&args[2..]).and_then(|()| {
+        let count = u32::try_from(args[1]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        services
+            .atomic_wake(args[0], count)
+            .map_err(status_from_object_service_error)
+    }) {
+        Ok(count) => success([count, 0]),
+        Err(status) => failure(status),
+    }
+}
+#[inline(never)]
+pub(super) fn sys_thread_sleep(services: &impl TaskServices, args: &Arguments) -> NativeResult {
+    wait_status(
+        require_zero(&args[1..]).and_then(|()| {
+            services
+                .sleep_thread(args[0])
+                .map_err(status_from_object_service_error)
+        }),
+        true,
+    )
+}
+fn wait_status(
+    result: Result<crate::kernel::task::WaitOutcome, HyperNativeStatus>,
+    sleep: bool,
+) -> NativeResult {
+    use crate::kernel::task::WaitOutcome;
+    match result {
+        Ok(WaitOutcome::Notified) => success([0, 0]),
+        Ok(WaitOutcome::TimedOut) if sleep => success([0, 0]),
+        Ok(WaitOutcome::TimedOut) => failure(HYPER_NATIVE_STATUS_TIMED_OUT),
+        Ok(WaitOutcome::Cancelled) => failure(HYPER_NATIVE_STATUS_CANCELLED),
+        Err(status) => failure(status),
+    }
+}

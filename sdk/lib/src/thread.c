@@ -114,22 +114,17 @@ void hyper_runtime_thread_detach(void)
 
 int hyper_runtime_wait_u32(const uint32_t *address, uint32_t expected, uint64_t deadline)
 {
-    /* Correct polling fallback until the Native address-wait syscall exists.
-     * Never sleep after an unchecked load: yield cannot lose a notification. */
-    while (__atomic_load_n(address, __ATOMIC_RELAXED) == expected) {
-        if (deadline != UINT64_MAX) {
-            hyper_call_result_t now = hyper_clock_get_monotonic();
-            if (now.status != HYPER_NATIVE_STATUS_OK) hyper_process_exit(now.status);
-            if (now.value0 >= deadline) return 0;
-        }
-        (void)hyper_thread_yield();
-    }
+    hyper_native_status_t status = hyper_atomic_wait(address, expected, deadline);
+    if (status == HYPER_NATIVE_STATUS_TIMED_OUT) return 0;
+    if (status != HYPER_NATIVE_STATUS_OK && status != HYPER_NATIVE_STATUS_CANCELLED)
+        hyper_process_exit(status);
     return 1;
 }
 
-void hyper_runtime_wake_u32(const uint32_t *address, uint32_t count)
+uint32_t hyper_runtime_wake_u32(const uint32_t *address, uint32_t count)
 {
-    /* Polling waiters observe the caller's atomic state change directly. */
-    (void)address;
-    (void)count;
+    hyper_call_result_t result = hyper_atomic_wake(address, count);
+    if (result.status != HYPER_NATIVE_STATUS_OK) hyper_process_exit(result.status);
+    if (result.value0 > count) hyper_process_exit(HYPER_NATIVE_STATUS_INTERNAL);
+    return (uint32_t)result.value0;
 }

@@ -121,6 +121,19 @@ unsafe extern "C" {
         count: usize,
     ) -> CallResult;
 
+    #[link_name = "hyper_thread_create"]
+    fn ffi_thread_create(entry: u64, stack: u64, tls: u64, argument: u64) -> CallResult;
+    #[link_name = "hyper_thread_start"]
+    fn ffi_thread_start(thread: u64) -> abi::HyperNativeStatus;
+    #[link_name = "hyper_thread_request_stop"]
+    fn ffi_thread_request_stop(thread: u64) -> abi::HyperNativeStatus;
+    #[link_name = "hyper_atomic_wait"]
+    fn ffi_atomic_wait(address: *const u32, expected: u32, deadline: u64)
+    -> abi::HyperNativeStatus;
+    #[link_name = "hyper_atomic_wake"]
+    fn ffi_atomic_wake(address: *const u32, count: u32) -> CallResult;
+    #[link_name = "hyper_thread_sleep"]
+    fn ffi_thread_sleep(deadline: u64) -> abi::HyperNativeStatus;
     #[link_name = "hyper_thread_yield"]
     fn ffi_thread_yield() -> abi::HyperNativeStatus;
 
@@ -1803,4 +1816,68 @@ pub unsafe fn thread_exit(status: i64) -> ! {
 pub unsafe fn process_exit(status: i64) -> ! {
     // SAFETY: the caller authorizes the non-returning Process transition.
     unsafe { ffi_process_exit(status) }
+}
+
+/// Invokes Native `thread_create`.
+///
+/// # Safety
+/// Handles, addresses and thread entry state must satisfy the Native ABI;
+/// referenced memory must remain live through the operation or thread lifetime.
+pub unsafe fn thread_create(entry: u64, stack: u64, tls: u64, argument: u64) -> CallResult {
+    // SAFETY: the caller upholds the raw syscall contract.
+    unsafe { ffi_thread_create(entry, stack, tls, argument) }
+}
+
+/// Invokes Native `thread_start`.
+///
+/// # Safety
+/// Handles, addresses and thread entry state must satisfy the Native ABI;
+/// referenced memory must remain live through the operation or thread lifetime.
+pub unsafe fn thread_start(thread: u64) -> abi::HyperNativeStatus {
+    // SAFETY: the caller upholds the raw syscall contract.
+    unsafe { ffi_thread_start(thread) }
+}
+
+/// Invokes Native `thread_request_stop`.
+///
+/// # Safety
+/// Handles, addresses and thread entry state must satisfy the Native ABI;
+/// referenced memory must remain live through the operation or thread lifetime.
+pub unsafe fn thread_request_stop(thread: u64) -> abi::HyperNativeStatus {
+    // SAFETY: the caller upholds the raw syscall contract.
+    unsafe { ffi_thread_request_stop(thread) }
+}
+
+/// Invokes Native `atomic_wait`.
+///
+/// # Safety
+/// Handles, addresses and thread entry state must satisfy the Native ABI;
+/// referenced memory must remain live through the operation or thread lifetime.
+pub unsafe fn atomic_wait(
+    address: *const u32,
+    expected: u32,
+    deadline: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller upholds the raw syscall contract.
+    unsafe { ffi_atomic_wait(address, expected, deadline) }
+}
+
+/// Invokes Native `atomic_wake`.
+///
+/// # Safety
+/// Handles, addresses and thread entry state must satisfy the Native ABI;
+/// referenced memory must remain live through the operation or thread lifetime.
+pub unsafe fn atomic_wake(address: *const u32, count: u32) -> CallResult {
+    // SAFETY: the caller upholds the raw syscall contract.
+    unsafe { ffi_atomic_wake(address, count) }
+}
+
+/// Invokes Native `thread_sleep`.
+///
+/// # Safety
+/// Handles, addresses and thread entry state must satisfy the Native ABI;
+/// referenced memory must remain live through the operation or thread lifetime.
+pub unsafe fn thread_sleep(deadline: u64) -> abi::HyperNativeStatus {
+    // SAFETY: the caller upholds the raw syscall contract.
+    unsafe { ffi_thread_sleep(deadline) }
 }

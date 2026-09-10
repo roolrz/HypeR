@@ -58,6 +58,7 @@ pub(crate) enum ImageError {
 /// image stack would create overlapping execution state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct UserThreadStart {
+    argument: u64,
     entry: UserAddress,
     stack: UserAddress,
     tls: UserAddress,
@@ -75,7 +76,20 @@ impl UserThreadStart {
         if stack.get() == 0 || stack.get() & 0xf != 0 {
             return Err(ImageError::InvalidStack);
         }
-        Ok(Self { entry, stack, tls })
+        Ok(Self {
+            entry,
+            stack,
+            tls,
+            argument: 0,
+        })
+    }
+
+    pub(crate) const fn with_argument(mut self, argument: u64) -> Self {
+        self.argument = argument;
+        self
+    }
+    pub(crate) const fn argument(self) -> u64 {
+        self.argument
     }
 
     pub(crate) const fn entry(self) -> UserAddress {
@@ -218,6 +232,7 @@ impl ProcessImage {
 
     pub(crate) const fn initial_thread(&self) -> UserThreadStart {
         UserThreadStart {
+            argument: 0,
             entry: self.entry,
             stack: self.stack,
             tls: self.tls,

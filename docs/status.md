@@ -48,6 +48,9 @@ The current foundation includes:
 - strong `ProcessImage`, `Process`, object-backed `UserThread`, and `TaskGroup`
   ownership with accounted construction, explicit publication, start/ready,
   stop/join, and acknowledged retirement;
+- Native user-thread creation/start/stop, process-private atomic wait/wake and
+  scheduler-backed sleep, with Rust std spawn/join, TLS cleanup and detached
+  stack reclamation through the shared runtime;
 - an immutable indexed ramfs, strict AArch64 ELF64 process loader, and
   capability-relative userspace runtime linker for Native `/init` and its
   services, with eager relocation, W^X/RELRO enforcement, guarded stacks, and

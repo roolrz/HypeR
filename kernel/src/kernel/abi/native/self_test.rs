@@ -521,6 +521,39 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     }
 
     impl TaskServices for RejectingServices {
+        fn create_thread(
+            &self,
+            _: u64,
+            _: u64,
+            _: u64,
+            _: u64,
+        ) -> Result<HandleValue, ObjectServiceError> {
+            Err(ObjectServiceError::InvalidInput)
+        }
+        fn start_thread(&self, _: HandleValue) -> Result<(), ProcessError> {
+            Err(ProcessError::Allocation)
+        }
+        fn stop_thread(&self, _: HandleValue) -> Result<(), ProcessError> {
+            Err(ProcessError::Allocation)
+        }
+        fn atomic_wait(
+            &self,
+            _: u64,
+            _: u32,
+            _: u64,
+        ) -> Result<crate::kernel::task::WaitOutcome, ObjectServiceError> {
+            Err(ObjectServiceError::InvalidInput)
+        }
+        fn atomic_wake(&self, _: u64, _: u32) -> Result<u64, ObjectServiceError> {
+            Err(ObjectServiceError::InvalidInput)
+        }
+        fn sleep_thread(
+            &self,
+            _: u64,
+        ) -> Result<crate::kernel::task::WaitOutcome, ObjectServiceError> {
+            Err(ObjectServiceError::InvalidInput)
+        }
+
         fn process_info(&self, _: HandleValue) -> Result<ProcessSnapshot, ProcessError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation)

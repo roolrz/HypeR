@@ -29,15 +29,13 @@ _Noreturn void __hyper_std_exit(int32_t code) { hyper_process_exit(code); }
 void __hyper_std_yield(void) { (void)hyper_thread_yield(); }
 void __hyper_std_sleep(uint64_t nanoseconds)
 {
-    uint64_t start = __hyper_std_clock();
-    while (__hyper_std_clock() - start < nanoseconds) __hyper_std_yield();
+    uint64_t now = __hyper_std_clock();
+    uint64_t deadline = nanoseconds >= UINT64_MAX - now ? UINT64_MAX - 1 : now + nanoseconds;
+    int64_t status = hyper_thread_sleep(deadline);
+    if (status != HYPER_NATIVE_STATUS_OK) hyper_process_exit(status);
 }
 int64_t __hyper_std_thread_spawn(size_t stack_size, hyper_std_thread_entry_t entry,
     void *argument, uintptr_t *token)
-{
-    (void)stack_size; (void)entry; (void)argument; (void)token;
-    return HYPER_NATIVE_STATUS_NOT_SUPPORTED;
-}
-int64_t __hyper_std_thread_join(uintptr_t token)
-{ (void)token; return HYPER_NATIVE_STATUS_NOT_SUPPORTED; }
-void __hyper_std_thread_detach(uintptr_t token) { (void)token; }
+{ return hyper_runtime_thread_spawn(stack_size, entry, argument, token); }
+int64_t __hyper_std_thread_join(uintptr_t token) { return hyper_runtime_thread_join(token); }
+void __hyper_std_thread_detach(uintptr_t token) { hyper_runtime_thread_release(token); }

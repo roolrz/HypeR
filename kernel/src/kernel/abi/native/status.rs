@@ -96,6 +96,9 @@ pub(super) fn status_from_process_error(error: ProcessError) -> HyperNativeStatu
         ProcessError::Resource(error) => status_from_resource_error(error),
         ProcessError::Scheduler(error) => status_from_scheduler_error(error),
         ProcessError::TaskGroup(error) => status_from_task_group_error(error),
+        ProcessError::UserEntry(crate::hal::user::UserEntryError::InvalidContext) => {
+            HYPER_NATIVE_STATUS_INVALID_ARGUMENT
+        }
         ProcessError::UserEntry(_) => HYPER_NATIVE_STATUS_NOT_SUPPORTED,
         ProcessError::UserMemory(error) => status_from_machine_error(error),
     }
@@ -131,6 +134,7 @@ pub(super) const fn status_from_scheduler_error(
         | Error::NoRegisteredCpuInAffinity
         | Error::InvalidCpuIndex
         | Error::CpuNotAllowed => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        Error::InvalidThreadState => HYPER_NATIVE_STATUS_BAD_STATE,
         Error::NotInitialized
         | Error::AlreadyInitialized
         | Error::CurrentThreadMissing
@@ -144,7 +148,6 @@ pub(super) const fn status_from_scheduler_error(
         | Error::CannotSleepWithPreemptionDisabled
         | Error::IrqTailRequiresInterruptsMasked
         | Error::UserRunRequiresInterruptsEnabled
-        | Error::InvalidThreadState
         | Error::IdleThreadAlreadyInstalled
         | Error::InvalidIdleTransition
         | Error::CpuAlreadyRegistered

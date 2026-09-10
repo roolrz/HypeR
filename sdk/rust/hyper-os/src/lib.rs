@@ -21,6 +21,7 @@ pub mod memory;
 pub mod startup;
 mod status;
 pub mod task;
+pub mod thread;
 pub mod time;
 pub mod virtual_serial;
 pub mod vm;

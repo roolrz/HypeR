@@ -110,6 +110,9 @@ fn console_session(
     let mut bytes = [0u8; hyper_os::channel::MAX_MESSAGE_BYTES];
     let mut menu = false;
     loop {
+        // stdout is line-buffered. Publish prompts, key echoes and a trailing
+        // carriage return before waiting for more input from either peer.
+        output.flush()?;
         let observation = match wait_many(&waits, hyper_os::DEADLINE_INFINITE) {
             Ok(observation) => observation,
             Err(error) => return console_error(output, b"wait", error),

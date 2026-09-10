@@ -79,7 +79,7 @@ target_include_directories(hyper-heap-test PRIVATE ../../include ${HYPER_ABI_INC
 target_link_libraries(hyper-heap-test PRIVATE Threads::Threads)
 add_test(NAME process-heap COMMAND hyper-heap-test)
 
-add_executable(hyper-thread-test ../../src/thread.c thread.c)
+add_executable(hyper-thread-test ../../src/thread.c thread.c atomic-wait-host.c)
 target_compile_features(hyper-thread-test PRIVATE c_std_17)
 target_compile_definitions(hyper-thread-test PRIVATE HYPER_THREAD_HOST_TEST _POSIX_C_SOURCE=200809L)
 target_compile_options(hyper-thread-test PRIVATE -Wall -Wextra -Werror)

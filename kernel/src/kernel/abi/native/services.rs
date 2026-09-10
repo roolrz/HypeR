@@ -467,6 +467,26 @@ pub(in crate::kernel) trait ProcessBuilderServices {
 }
 
 pub(in crate::kernel) trait TaskServices: UserMemoryServices {
+    fn create_thread(
+        &self,
+        entry: u64,
+        stack: u64,
+        tls: u64,
+        argument: u64,
+    ) -> Result<HandleValue, ObjectServiceError>;
+    fn start_thread(&self, thread: HandleValue) -> Result<(), ProcessError>;
+    fn stop_thread(&self, thread: HandleValue) -> Result<(), ProcessError>;
+    fn atomic_wait(
+        &self,
+        address: u64,
+        expected: u32,
+        deadline: u64,
+    ) -> Result<crate::kernel::task::WaitOutcome, ObjectServiceError>;
+    fn atomic_wake(&self, address: u64, count: u32) -> Result<u64, ObjectServiceError>;
+    fn sleep_thread(
+        &self,
+        deadline: u64,
+    ) -> Result<crate::kernel::task::WaitOutcome, ObjectServiceError>;
     fn process_info(&self, process: HandleValue) -> Result<ProcessSnapshot, ProcessError>;
     fn request_process_stop(&self, process: HandleValue) -> Result<(), ProcessError>;
 }

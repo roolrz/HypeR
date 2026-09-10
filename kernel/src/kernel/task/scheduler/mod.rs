@@ -938,24 +938,11 @@ pub fn thread_ready(id: ThreadId) -> Result<bool, Error> {
 pub(in crate::kernel) fn ready_user_thread(id: ThreadId) -> Result<bool, Error> {
     let outcome = SCHEDULER.with(|slot| -> Result<state::ReadyOutcome, Error> {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
-        scheduler.with_thread(id, |thread| {
-            if thread.schedule_owner_cpu().is_none()
-                && !matches!(thread.state(), ThreadState::Dormant | ThreadState::Ready)
-            {
-                return Err(Error::InvalidThreadState);
-            }
-            thread
-                .user_thread()
-                .ok_or(Error::InvalidThreadState)?
-                .mark_runnable()
-                .map_err(|_| Error::InvalidThreadState)
-        })??;
-        Ok(match scheduler.make_ready(id) {
-            Ok(outcome) => outcome,
-            Err(_) => crate::hal::cpu::halt(),
-        })
+        scheduler.make_user_ready(id)
     })?;
-    publish_ready_outcome(outcome)?;
+    // Readiness is committed: an ordinary error would let a spawn caller free
+    // the user stack even though the target can already execute on another CPU.
+    publish_committed_ready(outcome);
     Ok(outcome.changed)
 }
 
