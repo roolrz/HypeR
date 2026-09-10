@@ -94,6 +94,12 @@ kernel/target/aarch64-unknown-none/kernel/hyper.img
 `make release` strips debugger-only sections from the canonical ELF without
 recompiling it, then verifies that the resulting raw image is byte-identical.
 
+`make native-initramfs` copies its payloads into a temporary staging directory
+and runs `llvm-strip --strip-debug` on the ELF copies before packaging. Packaged
+applications and libraries retain their symbol tables; original application and
+SDK build products retain all debug information. Set `LLVM_STRIP` to override
+the tool path.
+
 ## Configuration
 
 HypeR uses an in-tree, dependency-free Kconfig-like tool. It reads
