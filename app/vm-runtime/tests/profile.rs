@@ -3,22 +3,81 @@
 
 use super::*;
 
+fn metadata(
+    architecture: vm::Architecture,
+    platform_profile: vm::PlatformProfile,
+) -> vm::VirtualMachinePlatformInfo {
+    vm::VirtualMachinePlatformInfo {
+        architecture,
+        platform_profile,
+        counter_frequency_hz: 24_000_000,
+        riscv_isa: 0x1ff,
+    }
+}
+
 #[test]
-fn selection_distinguishes_implemented_and_unsupported_profiles() {
+fn native_profile_query_preserves_image_identity() {
     assert_eq!(
-        select(Architecture::Aarch64, PlatformProfile::Aarch64Reference, 1),
-        Ok(SelectedProfile::Aarch64Reference)
+        native_profile(PlatformProfile::Aarch64Reference),
+        Ok(vm::PlatformProfile::Aarch64Reference)
     );
     assert_eq!(
-        select(Architecture::Riscv64, PlatformProfile::Riscv64Reference, 1),
-        Err(SelectionError::Architecture)
+        native_profile(PlatformProfile::Riscv64Reference),
+        Ok(vm::PlatformProfile::Riscv64Reference)
     );
     assert_eq!(
-        select(Architecture::Aarch64, PlatformProfile::X86_64Reference, 1),
+        native_profile(PlatformProfile::X86_64Reference),
         Err(SelectionError::PlatformProfile)
     );
-    assert_eq!(
-        select(Architecture::Aarch64, PlatformProfile::Aarch64Reference, 2),
-        Err(SelectionError::VirtualCpuCount)
-    );
+}
+
+#[test]
+fn metadata_does_not_substitute_a_different_platform_or_architecture() {
+    assert!(matches!(
+        validate_metadata(
+            Architecture::Aarch64,
+            PlatformProfile::Aarch64Reference,
+            metadata(
+                vm::Architecture::Aarch64,
+                vm::PlatformProfile::Aarch64Reference
+            )
+        ),
+        Ok(GuestHardwareMetadata::Aarch64)
+    ));
+    assert!(matches!(
+        validate_metadata(
+            Architecture::Riscv64,
+            PlatformProfile::Riscv64Reference,
+            metadata(
+                vm::Architecture::Riscv64,
+                vm::PlatformProfile::Riscv64Reference
+            )
+        ),
+        Ok(GuestHardwareMetadata::Riscv64 {
+            counter_frequency_hz: 24_000_000,
+            riscv_isa: 0x1ff
+        })
+    ));
+    assert!(matches!(
+        validate_metadata(
+            Architecture::Riscv64,
+            PlatformProfile::Riscv64Reference,
+            metadata(
+                vm::Architecture::Aarch64,
+                vm::PlatformProfile::Riscv64Reference
+            )
+        ),
+        Err(SelectionError::Architecture)
+    ));
+    assert!(matches!(
+        validate_metadata(
+            Architecture::Riscv64,
+            PlatformProfile::Riscv64Reference,
+            metadata(
+                vm::Architecture::Riscv64,
+                vm::PlatformProfile::Aarch64Reference
+            )
+        ),
+        Err(SelectionError::PlatformProfile)
+    ));
 }

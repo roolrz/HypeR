@@ -328,6 +328,71 @@ const fn classify_guest_memory_error(error: super::memory::Error) -> Error {
     }
 }
 
+/// Immutable board metadata, separate from per-VM mutable state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VirtualMachinePlatformInfo {
+    pub architecture: u32,
+    pub platform_profile: u32,
+    pub counter_frequency_hz: u64,
+    pub riscv_isa: u64,
+}
+
+pub(crate) fn platform_info(
+    process: &Process,
+    lease: HandleValue,
+    platform_profile: u32,
+) -> Result<VirtualMachinePlatformInfo, Error> {
+    // Resolution only borrows the lease: failed inspection cannot consume the
+    // caller's one-shot creation authority or charge a VM reservation.
+    let _lease = process.resolve_handle::<VirtualMachineCreationLease>(lease, Rights::INSPECT)?;
+    selected_platform_info(platform_profile)
+}
+
+fn selected_platform_info(platform_profile: u32) -> Result<VirtualMachinePlatformInfo, Error> {
+    use hyper::abi::native::*;
+    if !crate::hal::vm::userspace_vm_lifecycle_available() {
+        return Err(Error::NotSupported);
+    }
+    let architecture = crate::hal::vm::guest_architecture_abi();
+    let (expected_profile, riscv_isa) = match u64::from(architecture) {
+        HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_AARCH64 => {
+            (HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE, 0)
+        }
+        HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_RISCV64 => {
+            if !crate::hal::vm::riscv_guest_baseline_available() {
+                return Err(Error::NotSupported);
+            }
+            (
+                HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE,
+                HYPER_NATIVE_RISCV_ISA_I
+                    | HYPER_NATIVE_RISCV_ISA_M
+                    | HYPER_NATIVE_RISCV_ISA_A
+                    | HYPER_NATIVE_RISCV_ISA_F
+                    | HYPER_NATIVE_RISCV_ISA_D
+                    | HYPER_NATIVE_RISCV_ISA_C
+                    | HYPER_NATIVE_RISCV_ISA_ZICSR
+                    | HYPER_NATIVE_RISCV_ISA_ZIFENCEI
+                    | HYPER_NATIVE_RISCV_ISA_SSTC,
+            )
+        }
+        _ => return Err(Error::NotSupported),
+    };
+    if u64::from(platform_profile) != expected_profile {
+        return Err(Error::NotSupported);
+    }
+    let counter_frequency_hz =
+        crate::hal::time::counter_frequency_hz().map_err(|_| Error::Internal)?;
+    if counter_frequency_hz == 0 {
+        return Err(Error::Internal);
+    }
+    Ok(VirtualMachinePlatformInfo {
+        architecture,
+        platform_profile,
+        counter_frequency_hz,
+        riscv_isa,
+    })
+}
+
 pub(crate) fn derive_creation_lease(
     process: &Process,
     authority: HandleValue,

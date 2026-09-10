@@ -795,6 +795,18 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     }
 
     impl VmServices for RejectingServices {
+        fn virtual_machine_platform_info(
+            &self,
+            _: HandleValue,
+            _: u32,
+        ) -> Result<
+            crate::kernel::vm::service::VirtualMachinePlatformInfo,
+            crate::kernel::vm::service::Error,
+        > {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+
         fn derive_virtual_machine_creation_lease(
             &self,
             _: HandleValue,
@@ -1250,6 +1262,30 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     );
     if bad_size.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT {
         return Err(SelfTestError::InvalidRecordSize);
+    }
+    let before_platform_calls = services.calls.get();
+    for arguments in [
+        [1_u64 << 24 | 1, 1, 0x2000, 23, 0, 0],
+        [1_u64 << 24 | 1, u64::MAX, 0x2000, 24, 0, 0],
+        [1_u64 << 24 | 1, 1, 0x2000, 24, 1, 0],
+        [
+            1_u64 << 24 | 1,
+            1,
+            0x2000,
+            HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES + 1,
+            0,
+            0,
+        ],
+    ] {
+        let result = dispatch_deferred(&services, invoke(
+            hyper::abi::native::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO,
+            arguments,
+        ));
+        if result != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+            || services.calls.get() != before_platform_calls
+        {
+            return Err(SelfTestError::InvalidRecordSize);
+        }
     }
     let compatible_info = prepare_info_request(
         &[

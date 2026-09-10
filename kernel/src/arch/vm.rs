@@ -220,3 +220,6 @@ pub(crate) fn dispatch_port_io(exit: PortIoExit) -> PortIoAction {
 pub(crate) fn query_pending_interrupt(timer_pending: bool) -> PendingInterruptAction {
     (exit_services().pending_interrupt)(timer_pending)
 }
+
+#[cfg(CONFIG_ARCH_RISCV64)]
+pub(crate) use super::imp::riscv_guest_baseline_available;

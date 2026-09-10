@@ -19,8 +19,9 @@ than every historical RISC-V board:
 - Goldfish RTC for the UTC clock exposed through Native APIs and Rust std
 - four host harts with standalone kernel mechanism tests
 
-HypeR validates every enabled hart for H, F, D, SSTC, and Zicbom and requires a
-consistent `riscv,cbom-block-size`. Missing mandatory facilities are a
+HypeR validates every enabled hart for the I/M/A/F/D/C, Zicsr and Zifencei
+baseline, H, SSTC and Zicbom, and requires a consistent `riscv,cbom-block-size`.
+Missing mandatory facilities are a
 boot-time platform error; silently selecting a weaker execution model would
 make guest behavior depend on accidental QEMU defaults.
 
@@ -75,20 +76,31 @@ local hardware owner. VMID width is probed on every admitted hart using a
 permanent empty 16 KiB root. Zero-bit implementations use software generations
 with full fences; acknowledged retirement precedes page or identifier reuse.
 
+The Native creation-lease platform query reports the immutable counter frequency
+and guaranteed guest ISA subset. Userspace uses these facts when constructing
+the Linux device tree; it does not copy host ISA extensions or assume QEMU's
+clock rate. The guest contract excludes nested virtualization.
+
+`hyper-vm-image` validates the Linux Image header and the complete memory
+footprint, including BSS, before `vm-runtime` copies payloads into a RAM VMO.
+The SDK builds the CPU, interrupt-controller, UART and boot-data FDT nodes.
+Kernel boot policy does not parse Linux images or create a default VM.
+
 ## Runtime validation
 
 CI runs standalone four-hart kernel self-tests and separate one/four-hart
 Native application acceptance. Native acceptance boots init, console/session
 services and shell, and exercises static/dynamic std, threads, filesystem tools
-and console input. The RISC-V service manifest has no VM fleet. Native init
-receives VM creation authority through the same capability bootstrap as AArch64;
-applications cannot mint it. The old kernel-resident Linux loader has been removed.
+and console input. The same init manifest and VM configuration used on AArch64
+launch `vm-manager` and `vm-runtime` with a RISC-V Linux FIT payload. Native init
+receives VM creation authority through the capability bootstrap; applications
+cannot mint it. The VMM tests cover Linux timer wakeups, paced bidirectional
+console input, named VM isolation and repeated runtime-loss reclamation.
 
 A separate `make test-vm-smoke ARCH=riscv64` fixture runs as `/init` and uses only
 Native VM handles to construct small guest programs. It covers administrative
 stop, timer and serial WFI wakeups, guest register preservation, privilege
 isolation, owner-process loss and repeated stage-2 retirement on one/four harts.
-Product Linux Image/FDT loading remains a userspace VMM integration task.
 
 ## Current limitations
 
@@ -97,8 +109,9 @@ Product Linux Image/FDT loading remains a userspace VMM integration task.
   parsing `interrupts-extended` is required before supporting arbitrary PLIC
   topologies.
 - SSTC is mandatory; the software-injected fallback is not a supported profile.
-- The Native reference VM platform supports one guest vCPU. Product Linux boot
-  acceptance is not yet available.
+- The Native reference VM platform supports one guest vCPU. Guest SBI HSM,
+  RFENCE and reset are not implemented; these are distinct from the SBI
+  firmware services used by the host.
 - Guest WFI traps to HS and blocks the scheduler execution until an enabled
   pending interrupt or a one-shot host deadline can wake it. Global guest
   interrupt masking does not suppress WFI wake conditions.

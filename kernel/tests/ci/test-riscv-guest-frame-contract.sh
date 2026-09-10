@@ -24,6 +24,7 @@ copy_sources() {
     cp "$root/src/kernel/boot/mod.rs" "$fixture/src/kernel/boot/mod.rs"
     cp "$root/src/arch/riscv64/mod.rs" "$fixture/src/arch/riscv64/mod.rs"
     cp "$root/src/arch/riscv64/platform.rs" "$fixture/src/arch/riscv64/platform.rs"
+    cp "$root/src/arch/riscv64/isa.rs" "$fixture/src/arch/riscv64/isa.rs"
     cp "$root/src/arch/riscv64/vm_vcpu.rs" "$fixture/src/arch/riscv64/vm_vcpu.rs"
     cp "$root/src/hal/selected/exception.rs" "$fixture/src/hal/selected/exception.rs"
     cp "$root/src/kernel/entry/irq.rs" "$fixture/src/kernel/entry/irq.rs"
@@ -97,8 +98,14 @@ mutate 'guest timer compare must be captured for migration' src/arch/riscv64/tra
     'sd t1, VCPU_VSTIMECMP_OFFSET(a0)' 'nop'
 mutate 'guest scounteren must not overwrite hcounteren policy' src/arch/riscv64/guest.S \
     'csrw scounteren, t0' 'csrw hcounteren, t0'
-mutate 'RISC-V guest timer state requires Sstc' src/arch/riscv64/platform.rs \
-    'return Err(Error::MissingSstc);' 'return Ok(candidate);'
+mutate 'RISC-V guest timer state requires Sstc' src/arch/riscv64/isa.rs \
+    'return Err(Missing::Timer);' 'return Ok(());'
+mutate 'every enabled CPU must qualify the guest ISA' src/arch/riscv64/platform.rs \
+    'validate(node.enabled)' 'validate(false)'
+mutate 'Sstc must be recognized as an exact extension' src/arch/riscv64/isa.rs \
+    'b"sstc" => SSTC' 'b"sstc" => 0'
+mutate 'admission must require the qualified platform baseline' src/arch/riscv64/mod.rs \
+    'platform::guest_baseline_available()' 'true'
 mutate 'every hart must validate firmware STCE enablement' src/arch/riscv64/vm_vcpu.rs \
     'if !enable_supervisor_timer_compare()' 'if false'
 mutate 'guest anchors must retain their exact context' src/arch/riscv64/guest.S \

@@ -219,7 +219,33 @@ fn lease(
 fn suite(startup: &mut Startup<'_>) -> Result<()> {
     println!("VM-SMOKE: administrative-stop START");
     {
-        let mut guest = Guest::create(startup, lease(startup)?, 0)?;
+        let authority = lease(startup)?;
+        let unsupported = vm::platform_info(
+            authority.as_handle_ref(),
+            vm::PlatformProfile::Aarch64Reference,
+        );
+        if unsupported != Err(hyper_os::Error::Status(hyper_os::Status::NOT_SUPPORTED)) {
+            return Err(format!("unsupported platform query: {unsupported:?}"));
+        }
+        let first = vm::platform_info(
+            authority.as_handle_ref(),
+            vm::PlatformProfile::Riscv64Reference,
+        )
+        .map_err(show)?;
+        let second = vm::platform_info(
+            authority.as_handle_ref(),
+            vm::PlatformProfile::Riscv64Reference,
+        )
+        .map_err(show)?;
+        if first != second
+            || first.architecture != vm::Architecture::Riscv64
+            || first.platform_profile != vm::PlatformProfile::Riscv64Reference
+            || first.counter_frequency_hz == 0
+        {
+            return Err(format!("unstable platform metadata: {first:?}, {second:?}"));
+        }
+        // Inspection, including a rejected profile, must preserve the lease.
+        let mut guest = Guest::create(startup, authority, 0)?;
         guest.marker(b'B')?;
         guest.stop(VirtualCpuTermination::Administrative)?;
         println!("VM-SMOKE: administrative-stop PASS");

@@ -155,6 +155,9 @@ hyper_call_result_t hyper_pending_virtual_machine_install(hyper_native_handle_t 
 hyper_native_status_t hyper_virtual_cpu_start(hyper_native_handle_t virtual_cpu);
 hyper_native_status_t hyper_pending_virtual_machine_abort(hyper_native_handle_t pending);
 hyper_native_status_t hyper_virtual_machine_request_stop(hyper_native_handle_t machine);
+hyper_call_result_t hyper_virtual_machine_creation_lease_get_platform_info(
+    hyper_native_handle_t lease, uint32_t profile,
+    hyper_native_virtual_machine_platform_info_t *info);
 hyper_call_result_t hyper_virtual_machine_get_info(
     hyper_native_handle_t machine,
     hyper_native_virtual_machine_info_t *info);

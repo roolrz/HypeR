@@ -9,16 +9,10 @@ use hyper_os::memory::{MAX_TRANSFER_BYTES, WritableVmo};
 use hyper_os::startup::Startup;
 use hyper_os::wait::{ObjectSignals, WaitSet};
 use hyper_service::vm as vm_contract;
-use hyper_vm_image::aarch64_linux;
-use hyper_vm_image::guest_fdt::{self, Aarch64LinuxBoot};
-use hyper_vm_image::{GuestImage, Payload, ReadAt};
+use hyper_vm_image::guest_fdt::{self, GuestHardwareMetadata};
+use hyper_vm_image::{Payload, ReadAt};
+use hyper_vm_image::{aarch64_linux, linux, riscv64_linux};
 use std::process::ExitCode;
-
-use hyper_vm_runtime::profile::SelectedProfile;
-
-const PLATFORM: hyper_os::vm::PlatformProfile = hyper_os::vm::PlatformProfile::Aarch64Reference;
-const GUEST_RAM_BASE: u64 = PLATFORM.guest_ram_base();
-const GUEST_DTB_ADDRESS: u64 = GUEST_RAM_BASE + PLATFORM.device_tree_offset();
 
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     if hyper_os::require_core_abi().is_err() {
@@ -51,6 +45,23 @@ fn run(
     let lease = startup
         .take(vm_contract::CREATION_LEASE)
         .map_err(Error::OperatingSystem)?;
+    let image = hyper_vm_image::parse(&source).map_err(classify_image_error)?;
+    let plan = linux::validate_reference(&source, image).map_err(classify_reference_error)?;
+    let profile = hyper_vm_runtime::profile::native_profile(plan.platform_profile())
+        .map_err(|_| Error::UnsupportedConfiguration)?;
+    let platform_info = hyper_os::vm::platform_info(lease.as_handle_ref(), profile)
+        .map_err(classify_platform_error)?;
+    let metadata = hyper_vm_runtime::profile::validate_metadata(
+        plan.architecture(),
+        plan.platform_profile(),
+        platform_info,
+    )
+    .map_err(|_| Error::UnsupportedConfiguration)?;
+    metadata
+        .validate_for(&plan)
+        .map_err(|_| Error::UnsupportedConfiguration)?;
+    publish_status(control, vm_contract::InstanceStatus::ImageValidated)?;
+
     let connection = hyper_os::capability_channel::CapabilityChannel::from_handle(
         startup
             .take(vm_contract::CONSOLE_CONNECTION)
@@ -71,36 +82,22 @@ fn run(
     .map_err(Error::OperatingSystem)?;
     let mut console = hyper_vm_runtime::console::Console::new(connection, virtual_serial, output);
     let serial_binding = console.binding().map_err(Error::OperatingSystem)?;
-    let image = hyper_vm_image::parse(&source).map_err(classify_image_error)?;
-    let selected = hyper_vm_runtime::profile::select(
-        image.architecture,
-        image.platform_profile,
-        image.vcpu_count,
-    )
-    .map_err(|_| Error::UnsupportedConfiguration)?;
-    let layout = match selected {
-        SelectedProfile::Aarch64Reference => aarch64_linux::validate_reference(&source, image)
-            .map_err(classify_aarch64_reference_error)?,
-    };
-    publish_status(control, vm_contract::InstanceStatus::ImageValidated)?;
-
-    let memory = WritableVmo::create(image.memory_size).map_err(Error::OperatingSystem)?;
-    copy_payload(&source, &memory, image.kernel)?;
+    let memory = WritableVmo::create(plan.memory_size()).map_err(Error::OperatingSystem)?;
+    copy_payload(&source, &memory, plan.memory_base(), image.kernel)?;
     if let Some(initramfs) = image.initramfs {
-        copy_payload(&source, &memory, initramfs)?;
+        copy_payload(&source, &memory, plan.memory_base(), initramfs)?;
     }
-    let initramfs = layout.initramfs().map(|range| (range.start(), range.end()));
-    build_device_tree(&memory, image, initramfs)?;
+    build_device_tree(&memory, &plan, image.boot_arguments.as_str(), metadata)?;
     publish_status(control, vm_contract::InstanceStatus::MemoryPrepared)?;
 
     let pending = hyper_os::vm::create(
         lease,
         hyper_os::vm::Configuration {
-            guest_physical_base: GUEST_RAM_BASE,
-            memory_size: image.memory_size,
-            vcpu_count: image.vcpu_count,
-            architecture: hyper_os::vm::Architecture::Aarch64,
-            platform_profile: PLATFORM,
+            guest_physical_base: plan.memory_base(),
+            memory_size: plan.memory_size(),
+            vcpu_count: plan.vcpu_count(),
+            architecture: platform_info.architecture,
+            platform_profile: profile,
         },
     )
     .map_err(|failure| Error::OperatingSystem(failure.error()))?;
@@ -109,9 +106,9 @@ fn run(
     hyper_os::vm::set_bootstrap(
         pending.as_handle_ref(),
         hyper_os::vm::VirtualCpuBootstrap {
-            entry: layout.kernel().load_address(),
+            entry: plan.kernel_entry(),
             stack: 0,
-            arguments: [GUEST_DTB_ADDRESS, 0, 0, 0],
+            arguments: plan.bootstrap_arguments(),
         },
     )
     .map_err(Error::OperatingSystem)?;
@@ -164,6 +161,43 @@ fn classify_image_error(error: hyper_vm_image::Error<hyper_os::Error>) -> Error 
     match error {
         hyper_vm_image::Error::Source(error) => Error::OperatingSystem(error),
         hyper_vm_image::Error::UnsupportedImage => Error::UnsupportedConfiguration,
+        _ => Error::InvalidImage,
+    }
+}
+
+fn classify_platform_error(error: hyper_os::Error) -> Error {
+    if error == hyper_os::Error::Status(hyper_os::Status::NOT_SUPPORTED) {
+        Error::UnsupportedConfiguration
+    } else {
+        Error::OperatingSystem(error)
+    }
+}
+
+fn classify_reference_error(error: linux::Error<hyper_os::Error>) -> Error {
+    match error {
+        linux::Error::Aarch64(error) => classify_aarch64_reference_error(error),
+        linux::Error::Riscv64(error) => classify_riscv64_reference_error(error),
+        linux::Error::UnsupportedArchitecture | linux::Error::UnsupportedPlatformProfile => {
+            Error::UnsupportedConfiguration
+        }
+    }
+}
+
+fn classify_riscv64_reference_error(
+    error: riscv64_linux::ReferenceLayoutError<hyper_os::Error>,
+) -> Error {
+    use riscv64_linux::{Error as KernelError, ReferenceLayoutError};
+    match error {
+        ReferenceLayoutError::Source(error)
+        | ReferenceLayoutError::Kernel(KernelError::Source(error)) => Error::OperatingSystem(error),
+        ReferenceLayoutError::UnsupportedArchitecture
+        | ReferenceLayoutError::UnsupportedPlatformProfile
+        | ReferenceLayoutError::UnsupportedVcpuCount
+        | ReferenceLayoutError::Kernel(
+            KernelError::CompressedPayload
+            | KernelError::UnsupportedVersion
+            | KernelError::UnsupportedFlags,
+        ) => Error::UnsupportedConfiguration,
         _ => Error::InvalidImage,
     }
 }
@@ -321,10 +355,15 @@ impl ReadAt for ImageSource {
 }
 
 #[inline(never)]
-fn copy_payload(source: &ImageSource, memory: &WritableVmo, payload: Payload) -> Result<(), Error> {
+fn copy_payload(
+    source: &ImageSource,
+    memory: &WritableVmo,
+    memory_base: u64,
+    payload: Payload,
+) -> Result<(), Error> {
     let destination = payload
         .load_address
-        .checked_sub(GUEST_RAM_BASE)
+        .checked_sub(memory_base)
         .ok_or(Error::InvalidImage)?;
     let mut buffer = [0u8; MAX_TRANSFER_BYTES];
     let mut completed = 0u64;
@@ -356,30 +395,29 @@ fn copy_payload(source: &ImageSource, memory: &WritableVmo, payload: Payload) ->
 #[inline(never)]
 fn build_device_tree(
     memory: &WritableVmo,
-    image: GuestImage,
-    initramfs: Option<(u64, u64)>,
+    plan: &linux::BootPlan,
+    boot_arguments: &str,
+    metadata: GuestHardwareMetadata,
 ) -> Result<(), Error> {
     let mut structure = [0u8; 8192];
     let mut strings = [0u8; 2048];
     let mut output = [0u8; 12 * 1024];
-    let length = guest_fdt::build_aarch64_linux(
-        Aarch64LinuxBoot {
-            memory_base: GUEST_RAM_BASE,
-            memory_size: image.memory_size,
-            vcpu_count: image.vcpu_count,
-            initramfs,
-            boot_arguments: image.boot_arguments.as_str(),
-        },
+    let length = guest_fdt::build_linux(
+        plan,
+        boot_arguments,
+        metadata,
         &mut structure,
         &mut strings,
         &mut output,
     )
     .map_err(|_| Error::InvalidImage)?;
+    let offset = plan
+        .device_tree()
+        .start()
+        .checked_sub(plan.memory_base())
+        .ok_or(Error::InvalidImage)?;
     memory
-        .write_all_at(
-            GUEST_DTB_ADDRESS - GUEST_RAM_BASE,
-            output.get(..length).ok_or(Error::InvalidImage)?,
-        )
+        .write_all_at(offset, output.get(..length).ok_or(Error::InvalidImage)?)
         .map_err(Error::OperatingSystem)
 }
 

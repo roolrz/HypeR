@@ -7,6 +7,15 @@ use hyper::platform::{
     fdt::{NodeId, NodeResources, NodeVisitor, Property},
 };
 
+use super::isa::{Claims, Missing};
+use hyper::sync::atomic::{AtomicBool, Ordering};
+
+static GUEST_BASELINE: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn guest_baseline_available() -> bool {
+    GUEST_BASELINE.load(Ordering::Acquire)
+}
+
 const MAX_DEPTH: usize = 32;
 const MAX_CLAIMS: usize = 8;
 const SUPERVISOR_TIMER_INTERRUPT: u32 = 0;
@@ -47,11 +56,7 @@ struct Candidate {
     plic: bool,
     cpu: bool,
     source_count: Option<u32>,
-    supervisor_timer_compare: bool,
-    hypervisor_extension: bool,
-    single_precision: bool,
-    double_precision: bool,
-    cache_block_management: bool,
+    isa: Claims,
     cache_block_size: Option<u32>,
 }
 
@@ -60,11 +65,7 @@ impl Candidate {
         plic: false,
         cpu: false,
         source_count: None,
-        supervisor_timer_compare: false,
-        hypervisor_extension: false,
-        single_precision: false,
-        double_precision: false,
-        cache_block_management: false,
+        isa: Claims::EMPTY,
         cache_block_size: None,
     };
 }
@@ -105,7 +106,7 @@ impl EssentialDeviceDiscovery {
             // M-mode context followed by an S-mode context for every hart.
             *context = (cpu as u32).saturating_mul(2).saturating_add(1);
         }
-        Ok(EssentialPlatformInfo {
+        let info = EssentialPlatformInfo {
             cpu_power: Some(CpuPowerInfo::Sbi(SbiInfo)),
             interrupt_controller: Some(InterruptControllerInfo::Plic(PlicInfo {
                 registers,
@@ -131,7 +132,9 @@ impl EssentialDeviceDiscovery {
             .map_err(|_| Error::InvalidCacheBlockSize)?,
             claims: [Some(plic_node), None, None, None, None, None, None, None],
             claim_count: 1,
-        })
+        };
+        GUEST_BASELINE.store(true, Ordering::Release);
+        Ok(info)
     }
 }
 
@@ -178,41 +181,8 @@ impl NodeVisitor for EssentialDeviceDiscovery {
                 self.timebase_frequency =
                     Some(property.integer().map_err(|_| Error::InvalidProperty)?)
             }
-            "riscv,isa" => {
-                let value = property.string().map_err(|_| Error::InvalidProperty)?;
-                let base = value
-                    .as_bytes()
-                    .split(|byte| *byte == b'_' || *byte == 0)
-                    .next()
-                    .unwrap_or(&[]);
-                candidate.hypervisor_extension |= base.contains(&b'h');
-                candidate.single_precision |= base.contains(&b'f');
-                candidate.double_precision |= base.contains(&b'd');
-                candidate.supervisor_timer_compare |= value
-                    .as_bytes()
-                    .split(|byte| *byte == b'_' || *byte == 0)
-                    .any(|extension| extension.starts_with(b"sstc"));
-                candidate.cache_block_management |= value
-                    .as_bytes()
-                    .split(|byte| *byte == b'_' || *byte == 0)
-                    .any(|extension| extension.starts_with(b"zicbom"));
-            }
-            "riscv,isa-extensions" => {
-                candidate.supervisor_timer_compare |= property
-                    .contains_string("sstc")
-                    .map_err(|_| Error::InvalidProperty)?;
-                candidate.hypervisor_extension |= property
-                    .contains_string("h")
-                    .map_err(|_| Error::InvalidProperty)?;
-                candidate.single_precision |= property
-                    .contains_string("f")
-                    .map_err(|_| Error::InvalidProperty)?;
-                candidate.double_precision |= property
-                    .contains_string("d")
-                    .map_err(|_| Error::InvalidProperty)?;
-                candidate.cache_block_management |= property
-                    .contains_string("zicbom")
-                    .map_err(|_| Error::InvalidProperty)?;
+            "riscv,isa" | "riscv,isa-base" | "riscv,isa-extensions" => {
+                candidate.isa.property(property.name(), property.bytes());
             }
             "riscv,cbom-block-size" => {
                 candidate.cache_block_size =
@@ -227,22 +197,20 @@ impl NodeVisitor for EssentialDeviceDiscovery {
         let index = self.depth.checked_sub(1).ok_or(Error::InvalidDepth)?;
         let candidate = self.nodes[index];
         self.depth = index;
+        if candidate.cpu {
+            candidate
+                .isa
+                .validate(node.enabled)
+                .map_err(|missing| match missing {
+                    Missing::Baseline => Error::MissingRequiredIsa,
+                    Missing::Timer => Error::MissingSstc,
+                    Missing::Cache => Error::MissingZicbom,
+                })?;
+        }
         if !node.enabled {
             return Ok(());
         }
         if candidate.cpu {
-            if !candidate.supervisor_timer_compare {
-                return Err(Error::MissingSstc);
-            }
-            if !candidate.hypervisor_extension
-                || !candidate.single_precision
-                || !candidate.double_precision
-            {
-                return Err(Error::MissingRequiredIsa);
-            }
-            if !candidate.cache_block_management {
-                return Err(Error::MissingZicbom);
-            }
             let block_size = candidate
                 .cache_block_size
                 .ok_or(Error::InvalidCacheBlockSize)?;

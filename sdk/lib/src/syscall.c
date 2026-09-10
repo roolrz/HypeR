@@ -962,3 +962,12 @@ hyper_call_result_t hyper_clock_get_realtime(void)
 
 hyper_call_result_t hyper_directory_open_file_with_options(hyper_native_handle_t directory, const void * path, size_t path_length, uint64_t rights, uint32_t options, uint32_t mode)
 { return hyper_native_call6(HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS, directory, (uintptr_t)path, path_length, rights, options, mode); }
+
+hyper_call_result_t hyper_virtual_machine_creation_lease_get_platform_info(
+    hyper_native_handle_t lease, uint32_t profile,
+    hyper_native_virtual_machine_platform_info_t *info)
+{
+    return hyper_native_call6(
+        HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO,
+        lease, profile, (uintptr_t)info, sizeof(*info), 0, 0);
+}

@@ -94,6 +94,15 @@ ABI revision: `0`.
 
 | Name | Value |
 | --- | ---: |
+| `riscv_isa_i` | `1` |
+| `riscv_isa_m` | `2` |
+| `riscv_isa_a` | `4` |
+| `riscv_isa_f` | `8` |
+| `riscv_isa_d` | `16` |
+| `riscv_isa_c` | `32` |
+| `riscv_isa_zicsr` | `64` |
+| `riscv_isa_zifencei` | `128` |
+| `riscv_isa_sstc` | `256` |
 | `page_size` | `4096` |
 | `extensible_record_max_bytes` | `4096` |
 | `virtual_serial_max_transfer_bytes` | `4096` |
@@ -217,6 +226,7 @@ ABI revision: `0`.
 
 ## Semantic rules
 
+- VM platform inspection borrows an INSPECT creation lease without consuming it. Metadata describes the selected local platform: counter_frequency_hz is the actual guest counter frequency, and riscv_isa is a guaranteed subset across all admitted CPUs, not a complete host ISA listing. Other architectures return a zero RISC-V mask. The guarantee remains valid across local CPU migration; cross-machine migration is not implied.
 - WaitSets are process-local, non-transferable objects with capacity 1..1024. BIND_WAIT authorizes add/rearm/remove, WAIT authorizes consumption. Add requires source WAIT and reserves one event slot; WaitSet and CapabilityChannel sources are unsupported. Registration IDs are globally non-reused. Bind/rearm observe signal levels and sequence under the source lock; one-shot publication does not allocate. Rearm is busy until successful event consumption. Wait returns one exact 24-byte record (registration ID, signal bits, sequence), using an absolute monotonic deadline. Copyout failure restores the event unless removal or closure cancelled it. Source handle close does not cancel object-lifetime subscriptions; final set handle close detaches registrations and wakes consumers. Future CapabilityChannel subscriptions require ownership-epoch invalidation.
 - ByteChannel duplicate authority permits shared endpoint ownership; peer_closed is published only when the last active endpoint handle closes. Internal operation pins, including WaitSet subscriptions, do not retain active endpoint authority.
 - process_get_current_id returns the calling Process KOID for observation only. It creates no handle or operational authority and is not a PID-to-handle lookup.
@@ -375,11 +385,13 @@ element size before any user-memory access.
 | 110 | `file_unlock` | `file: handle` | — | `file: Borrow, kind=file, rights=0x100000000` | — | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
 | 111 | `clock_get_realtime` | — | `seconds: i64`, `nanoseconds: u32` | — | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
 | 112 | `directory_open_file_with_options` | `directory: handle`, `path: user_address`, `path_length: byte_count`, `rights: rights`, `options: u32`, `mode: u32` | `file: handle` | `directory: Borrow, kind=directory, rights=0x10`, `file: produce, kind=file, exact-from(rights), allowed=0x1800000bb, required-from=directory` | `path: Read, len=path_length bytes, max-bytes=4096; order=0` | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=Strict` | `Capability` |
+| 113 | `virtual_machine_creation_lease_get_platform_info` | `lease: handle`, `platform_profile: u32`, `info: user_address`, `info_size: byte_count` | `supported_size: byte_count` | `lease: Borrow, kind=virtual_machine_creation_lease, rights=0x8` | `info: Write, len=info_size bytes, max-bytes=4096, record=virtual_machine_platform_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
 
 ## Public records
 
 | Name | Minimum prefix | Size | Alignment | Fields |
 | --- | ---: | ---: | ---: | --- |
+| `virtual_machine_platform_info` | 24 | 24 | 8 | `architecture: u32 @ 0`, `platform_profile: u32 @ 4`, `counter_frequency_hz: u64 @ 8`, `riscv_isa: u64 @ 16` |
 | `file_metadata` | 112 | 112 | 8 | `filesystem_id: u64 @ 0`, `mount_id: u64 @ 8`, `node_id: u64 @ 16`, `size: u64 @ 24`, `mode: u32 @ 32`, `kind: u32 @ 36`, `valid_times: u32 @ 40`, `reserved: u32 @ 44`, `accessed_seconds: i64 @ 48`, `accessed_nanoseconds: u32 @ 56`, `accessed_reserved: u32 @ 60`, `modified_seconds: i64 @ 64`, `modified_nanoseconds: u32 @ 72`, `modified_reserved: u32 @ 76`, `created_seconds: i64 @ 80`, `created_nanoseconds: u32 @ 88`, `created_reserved: u32 @ 92`, `changed_seconds: i64 @ 96`, `changed_nanoseconds: u32 @ 104`, `changed_reserved: u32 @ 108` |
 | `file_metadata_update` | 40 | 40 | 8 | `mask: u32 @ 0`, `mode: u32 @ 4`, `accessed_seconds: i64 @ 8`, `accessed_nanoseconds: u32 @ 16`, `accessed_reserved: u32 @ 20`, `modified_seconds: i64 @ 24`, `modified_nanoseconds: u32 @ 32`, `modified_reserved: u32 @ 36` |
 | `wait_set_event` | 24 | 24 | 8 | `registration: u64 @ 0`, `signals: u64 @ 8`, `sequence: u64 @ 16` |

@@ -265,6 +265,17 @@ impl HierarchyServices for DeferredProcessServices<'_> {
 }
 
 impl VmServices for DeferredProcessServices<'_> {
+    fn virtual_machine_platform_info(
+        &self,
+        lease: HandleValue,
+        profile: u32,
+    ) -> Result<
+        crate::kernel::vm::service::VirtualMachinePlatformInfo,
+        crate::kernel::vm::service::Error,
+    > {
+        crate::kernel::vm::service::platform_info(&self.session.process, lease, profile)
+    }
+
     fn derive_virtual_machine_creation_lease(
         &self,
         authority: HandleValue,

@@ -100,7 +100,7 @@ pub const RUNTIME_IMAGE_CONTRACT: StartupContract =
 pub const RUNTIME_CREATION_LEASE_CONTRACT: StartupContract = StartupContract::exact(
     CREATION_LEASE_NAME,
     CREATION_LEASE,
-    Rights::CREATE_VIRTUAL_MACHINE,
+    Rights::CREATE_VIRTUAL_MACHINE.union(Rights::INSPECT),
 );
 pub const RUNTIME_INSTANCE_CONTROL_CONTRACT: StartupContract = StartupContract::exact(
     INSTANCE_CONTROL_NAME,
@@ -577,6 +577,16 @@ mod tests {
                 assert_ne!(contract.purpose(), other.purpose());
             }
         }
+    }
+
+    #[test]
+    fn runtime_lease_can_inspect_platform_then_create_without_forwarding_authority() {
+        let rights = RUNTIME_CREATION_LEASE_CONTRACT.required_rights();
+        assert!(rights.contains(Rights::INSPECT));
+        assert!(rights.contains(Rights::CREATE_VIRTUAL_MACHINE));
+        assert!(!rights.contains(Rights::TRANSFER));
+        assert!(!rights.contains(Rights::DUPLICATE));
+        assert_eq!(rights, RUNTIME_CREATION_LEASE_CONTRACT.allowed_rights());
     }
 
     #[test]
