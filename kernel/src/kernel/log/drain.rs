@@ -214,23 +214,6 @@ fn prompt_local_cpu() {
     }
 }
 
-/// Enqueues one guest Console byte without touching the physical UART.
-#[cfg(feature = "kernel-self-test")]
-pub(super) fn enqueue_console_tx_byte(byte: u8) {
-    if MODE.load(Ordering::Acquire) == EMERGENCY {
-        return;
-    }
-    CONSOLE_TX_QUEUE.with(|queue| {
-        let was_writable = queue.bytes.remaining_capacity() != 0;
-        let _ = queue.bytes.push(byte);
-        let is_writable = queue.bytes.remaining_capacity() != 0;
-        if was_writable != is_writable {
-            crate::kernel::device::console::publish_writable(is_writable);
-        }
-    });
-    request();
-}
-
 /// Enqueues a bounded userspace Console write without interpreting its bytes.
 pub(super) fn try_enqueue_console_tx(bytes: &[u8]) -> usize {
     if MODE.load(Ordering::Acquire) != RUNTIME || bytes.is_empty() {

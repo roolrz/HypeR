@@ -76,8 +76,8 @@ swap_calls 'platform drivers must precede full VM initialization' \
     'crate::kernel::device::platform_device_initialize' 'crate::kernel::vm::initialize'
 mutate 'removing production Native init selection was accepted' \
     src/main.rs 's/crate::kernel::init::start/crate::kernel::init::removed/'
-mutate 'removing the test-only VM selection was accepted' \
-    src/main.rs 's/start_test_default/start_test_removed/'
+mutate 'removing kernel self-test completion was accepted' \
+    src/main.rs 's/kernel self-tests completed/kernel self-tests removed/'
 mutate 'address-space sealing without the stage-1 lock was accepted' \
     src/kernel/mm/mod.rs 's/stack::serialize_stage1_mutation/stack::without_stage1_serialization/'
 mutate 'relaxed FrozenTopology publication was accepted' \

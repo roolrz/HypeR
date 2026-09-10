@@ -266,11 +266,6 @@ impl VmRegistry {
         Ok(lease)
     }
 
-    #[allow(dead_code)]
-    fn is_installed(&self, id: VmId) -> bool {
-        self.installed(id).is_ok()
-    }
-
     fn try_hold_quiescent(&mut self, id: VmId) -> Result<bool, Error> {
         let slot = usize::try_from(id.slot).map_err(|_| Error::StaleIdentity)?;
         let entry = self.slots.get_mut(slot).ok_or(Error::NotInstalled)?;
@@ -389,11 +384,6 @@ pub(super) fn with_binding<R>(
     let lease = REGISTRY.with(|registry| registry.lease(id))?;
     let binding = VmBinding::new(id, lease.machine.clone());
     Ok(operation(&binding))
-}
-
-#[allow(dead_code)]
-pub(super) fn is_installed(id: VmId) -> bool {
-    REGISTRY.with(|registry| registry.is_installed(id))
 }
 
 pub(crate) fn reserve() -> Result<VmReservation, Error> {

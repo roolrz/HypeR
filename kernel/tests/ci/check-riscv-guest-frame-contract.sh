@@ -18,7 +18,6 @@ platform=src/arch/riscv64/platform.rs
 vm_vcpu=src/arch/riscv64/vm_vcpu.rs
 selected_exception=src/hal/selected/exception.rs
 kernel_irq=src/kernel/entry/irq.rs
-kernel_tests=tests/kernel/mod.rs
 qemu_verify=tests/qemu/verify-riscv64.sh
 
 entry=$(mktemp "${TMPDIR:-/tmp}/hyper-riscv-entry.XXXXXX")
@@ -247,8 +246,7 @@ rg -q 'any\(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64\)' "$selected_exception" &&
     exit 1
 }
 
-rg -q 'any\(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64\)' "$kernel_tests" &&
-    rg -q 'RISC-V IRQ-tail Fair vCPU preemption passed' "$qemu_verify" || {
-    echo 'RISC-V runtime acceptance must prove guest-to-host Fair preemption' >&2
+rg -q 'kernel self-tests completed' "$qemu_verify" || {
+    echo 'RISC-V runtime acceptance must require completed kernel self-tests' >&2
     exit 1
 }

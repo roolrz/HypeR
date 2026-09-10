@@ -12,7 +12,7 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 copy_sources() {
     rm -rf "$fixture/src"
     mkdir -p "$fixture/src/kernel/vm/vcpu" "$fixture/src/kernel/vm/device" \
-        "$fixture/src/kernel/vm/linux" "$fixture/src/kernel/vm/registry" \
+        "$fixture/src/kernel/vm/registry" \
         "$fixture/src/kernel/vm/memory" \
         "$fixture/src/kernel/entry" "$fixture/src/kernel/irq" \
         "$fixture/src/hal/selected" "$fixture/src/hal" \
@@ -29,7 +29,6 @@ copy_sources() {
     cp "$root/src/kernel/vm/device/aarch64.rs" "$fixture/src/kernel/vm/device/aarch64.rs"
     cp "$root/src/kernel/vm/vcpu/runner.rs" "$fixture/src/kernel/vm/vcpu/runner.rs"
     cp "$root/src/kernel/vm/vcpu/execution.rs" "$fixture/src/kernel/vm/vcpu/execution.rs"
-    cp "$root/src/kernel/vm/linux/mod.rs" "$fixture/src/kernel/vm/linux/mod.rs"
     cp "$root/src/kernel/entry/irq.rs" "$fixture/src/kernel/entry/irq.rs"
     cp "$root/src/kernel/vm/memory.rs" "$fixture/src/kernel/vm/memory.rs"
     cp "$root/src/kernel/vm/memory/retirement.rs" \
@@ -61,8 +60,8 @@ mutate() {
 
 copy_sources
 check
-mutate 'registry cut must precede console cut' src/kernel/vm/registry/control.rs \
-    'crate::kernel::vm::device::clear_console_route_for_vm(id);' 'let _ = id;'
+mutate 'serial endpoint must disconnect before vCPU stop' src/kernel/vm/registry/control.rs \
+    'machine.disconnect_virtual_serial();' 'let _ = id;'
 mutate 'VM retirement authority must remain linear' src/kernel/vm/registry/construction.rs \
     'pub(in crate::kernel::vm) struct VmControl' \
     '#[derive(Clone)] pub(in crate::kernel::vm) struct VmControl'
@@ -73,8 +72,6 @@ mutate 'raw registry cut must not bypass linear authority' src/kernel/vm/registr
     'fn begin_quiesce_control' 'pub(super) fn begin_quiesce_control'
 mutate 'quiescence must use unique-owner conversion' src/kernel/vm/registry.rs \
     'machine.try_into_unique()' 'Ok(machine)'
-mutate 'console route needs its second Installed validation' src/kernel/vm/device/aarch64.rs \
-    'if super::super::super::registry::is_installed(vm) {' 'if true {'
 mutate 'guest termination must arm persistent reaping' src/kernel/vm/vcpu/runner.rs \
     'ClosureReason::Guest(terminal_reason(' 'ClosureReason::Administrative(terminal_reason('
 mutate 'runner must not accept admission close without durable stop' \

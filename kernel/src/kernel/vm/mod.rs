@@ -9,7 +9,6 @@
 pub(crate) mod active_vcpu;
 mod address_space_state;
 pub(crate) mod device;
-pub(crate) use device::ConsoleInputDisposition;
 mod diagnostics;
 pub(in crate::kernel) use diagnostics::UnhandledMmioReport;
 mod endpoint;
@@ -19,8 +18,6 @@ mod installed;
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use endpoint::{WaitSelfTestError, run_wait_self_test};
 pub(crate) mod lifecycle;
-#[cfg(feature = "kernel-self-test")]
-pub(crate) mod linux;
 pub mod memory;
 pub(crate) mod objects;
 mod reconcile;
@@ -32,9 +29,6 @@ mod timer;
 pub(crate) mod vcpu;
 pub(crate) mod virtual_serial;
 
-#[cfg(feature = "kernel-self-test")]
-use core::convert::Infallible;
-
 use hyper::sync::PublishedOnce;
 
 static ENTRY_READY: PublishedOnce<crate::hal::vm::VmEntryReady> = PublishedOnce::new();
@@ -42,13 +36,7 @@ static ENTRY_READY: PublishedOnce<crate::hal::vm::VmEntryReady> = PublishedOnce:
 pub use crate::hal::vm::{
     InterruptController as VmInterruptController, InterruptError as VmInterruptError,
 };
-#[cfg(feature = "kernel-self-test")]
-pub use hyper::vm::bundle::{Error as VmBundleError, VmBundle};
-#[cfg(feature = "kernel-self-test")]
-pub(crate) use linux::Error as LinuxBootError;
 pub use registry::VmId;
-#[cfg(feature = "kernel-self-test")]
-pub(crate) use vcpu::VcpuInterruptError;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum InitializationError {
@@ -59,34 +47,6 @@ pub(crate) enum InitializationError {
     Registers(crate::hal::vm::RegisterValidationError),
     Timer(timer::Error),
     TimerValidation(timer::ValidationError),
-}
-
-#[cfg(feature = "kernel-self-test")]
-pub(crate) enum StartError {
-    Bundle(VmBundleError),
-    Linux(LinuxBootError),
-}
-
-#[cfg(feature = "kernel-self-test")]
-impl core::fmt::Debug for StartError {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::Bundle(error) => formatter.debug_tuple("Bundle").field(error).finish(),
-            Self::Linux(error) => formatter.debug_tuple("Linux").field(error).finish(),
-        }
-    }
-}
-
-#[cfg(feature = "kernel-self-test")]
-pub(crate) fn select_default(ramdisk: &[u8]) -> Result<VmBundle<'_>, VmBundleError> {
-    hyper::vm::bundle::select_default(ramdisk)
-}
-
-#[cfg(feature = "kernel-self-test")]
-pub(crate) fn boot_linux(
-    guest: VmBundle<'_>,
-) -> Result<crate::kernel::task::thread::ThreadId, LinuxBootError> {
-    linux::boot(guest)
 }
 
 /// Initializes hardware virtualization and guest-visible platform devices.
@@ -167,37 +127,6 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
 
 pub(in crate::kernel) fn entry_ready() -> Option<crate::hal::vm::VmEntryReady> {
     ENTRY_READY.get().copied()
-}
-
-/// Loads the default VM bundle for kernel integration tests and enters it.
-#[cfg(feature = "kernel-self-test")]
-pub(crate) fn start_test_default(ramdisk: &[u8]) -> Result<Infallible, StartError> {
-    let guest = select_default(ramdisk).map_err(StartError::Bundle)?;
-    crate::pr_info!(
-        "HypeR: loaded VM '{}' from boot ramdisk: {} MiB RAM, {} vCPU(s)",
-        guest.name(),
-        guest.memory_size() / (1024 * 1024),
-        guest.vcpu_count()
-    );
-    crate::pr_info!("HypeR: kernel initialization complete; starting Linux guest");
-    let vcpu = match boot_linux(guest) {
-        Ok(vcpu) => vcpu,
-        Err(error) => {
-            crate::pr_err!("HypeR: Linux guest boot failed: {error:?}");
-            return Err(StartError::Linux(error));
-        }
-    };
-    crate::pr_info!("HypeR: Linux boot vCPU scheduled as thread {}", vcpu.get());
-    super::task::scheduler::exit_current()
-}
-
-/// Resolves guest ownership of one host-console input byte.
-///
-/// Only `Unclaimed` permits the physical-console broker to offer the byte to
-/// Native userspace. A failed delivery to an established guest route remains
-/// consumed by that route and cannot cross an isolation boundary.
-pub(crate) fn receive_console_input(byte: u8) -> ConsoleInputDisposition {
-    device::receive_console_input(byte)
 }
 
 mod serial_output;

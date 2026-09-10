@@ -31,14 +31,6 @@ pub(super) enum Stage2InvalidationError {
 }
 
 impl Backend {
-    #[cfg(feature = "kernel-self-test")]
-    pub(super) const fn name(self) -> &'static str {
-        match self {
-            Self::Vmx => "Intel VMX/EPT",
-            Self::Svm => "AMD SVM/NPT",
-        }
-    }
-
     pub(super) const fn stage2_format(self) -> Stage2Format {
         match self {
             Self::Vmx => Stage2Format::Ept,
@@ -95,11 +87,6 @@ pub(super) fn selected() -> Option<Backend> {
         SVM => Some(Backend::Svm),
         _ => None,
     }
-}
-
-#[cfg(feature = "kernel-self-test")]
-pub(super) fn backend_name() -> &'static str {
-    selected().map_or("unselected x86 virtualization", Backend::name)
 }
 
 pub(super) fn observe_host_interrupt(vector: u32) {

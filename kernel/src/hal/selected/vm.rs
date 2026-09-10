@@ -1048,8 +1048,3 @@ pub(crate) fn access_guest_gic(
 pub(crate) fn guest_execution_available() -> bool {
     crate::arch::vm::guest_execution_available()
 }
-
-#[cfg(all(CONFIG_ARCH_X86_64, feature = "kernel-self-test"))]
-pub(crate) fn virtualization_backend_name() -> &'static str {
-    crate::arch::vm::virtualization_backend_name()
-}

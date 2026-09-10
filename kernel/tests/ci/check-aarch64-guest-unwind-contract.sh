@@ -178,8 +178,8 @@ reject "$fixture/memory.rs" 'pr_err!' \
 reject "$fixture/device-mmio.rs" 'pr_err!' \
     'guest device policy must not log before terminal hardware detach'
 require src/kernel/vm/device/aarch64.rs \
-    '(?s)Error::EndpointClosed.*clear_console_route_exact.*ConsoleInputDisposition::from_guest_claim\(true\)' \
-    'closed endpoint console input must clear the exact stale route without crossing into Native input'
+    '(?s)if !matches!\(delivery, Ok\(Ok\(\(\)\)\)\).*disconnect_virtual_serial\(route.vm\)' \
+    'failed virtual serial delivery must disconnect the exact VM endpoint'
 reject src/arch/aarch64/exception.rs \
     'pub(?:\(crate\))?[[:space:]]+(?:struct|fn)[^\n]*ExceptionFrame' \
     'the raw architecture exception frame must not escape its private module'

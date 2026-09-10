@@ -56,24 +56,9 @@ pub(super) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualIn
     hyper::vm::interrupt::VirtualInterruptId::new(5)
 }
 
-pub(super) const fn clear_console_route_for_vm(_expected_vm: super::super::super::registry::VmId) {}
-
 pub(super) fn kick_virtual_serial(route: crate::kernel::vm::virtual_serial::Route) {
     let _ = (route.vcpu, route.thread);
     let _ = super::super::super::registry::with_binding(route.vm, |binding| {
         binding.devices().disconnect_virtual_serial(route.vm);
     });
-}
-
-pub(super) const fn receive_console_input(_byte: u8) -> super::super::ConsoleInputDisposition {
-    super::super::ConsoleInputDisposition::from_guest_claim(false)
-}
-
-#[cfg(feature = "kernel-self-test")]
-pub(super) const fn try_publish_console_route(
-    _vm: super::super::super::registry::VmId,
-    _vcpu: u32,
-    _thread: crate::kernel::task::thread::ThreadId,
-) -> bool {
-    false
 }

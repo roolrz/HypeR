@@ -65,9 +65,6 @@ pub(crate) use super::imp::{
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use super::imp::guest_execution_available;
 
-#[cfg(all(CONFIG_ARCH_X86_64, feature = "kernel-self-test"))]
-pub(crate) use super::imp::virtualization_backend_name;
-
 pub(crate) use super::imp::{
     activate_vcpu_hardware, deactivate_vcpu_hardware,
     virtualization_maintenance_pending as maintenance_interrupt_pending,

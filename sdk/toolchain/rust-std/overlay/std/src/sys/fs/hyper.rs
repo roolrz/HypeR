@@ -7,6 +7,7 @@ use crate::fs::TryLockError;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
 use crate::path::{Path, PathBuf};
 use crate::sync::{Arc, Mutex};
+use crate::sys::AsInner;
 pub use crate::sys::fs::common::{Dir, exists};
 use crate::sys::pal::{cvt, ffi, unsupported};
 use crate::sys::time::SystemTime;
@@ -55,6 +56,9 @@ fn path_bytes(path: &Path) -> io::Result<&[u8]> {
 }
 
 impl FileAttr {
+    pub fn identity(&self) -> (u64, u64) {
+        (self.0.filesystem_id, self.0.node_id)
+    }
     pub fn mode(&self) -> u32 {
         self.0.mode
     }
@@ -540,8 +544,16 @@ pub fn copy(from: &Path, to: &Path) -> io::Result<u64> {
     let mut target = crate::fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .truncate(true)
+        .truncate(false)
         .open(to)?;
+    // Check opened objects before truncation, including hard links and aliases.
+    if metadata.as_inner().identity() == target.metadata()?.as_inner().identity() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "source and destination are the same file",
+        ));
+    }
+    target.set_len(0)?;
     let copied = io::copy(&mut source, &mut target)?;
     target.set_permissions(metadata.permissions())?;
     Ok(copied)

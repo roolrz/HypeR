@@ -13,10 +13,8 @@ construction=src/kernel/vm/registry/construction.rs
 control=src/kernel/vm/registry/control.rs
 execution=src/kernel/vm/registry/execution.rs
 lifecycle=src/kernel/vm/lifecycle.rs
-device=src/kernel/vm/device/aarch64.rs
 runner=src/kernel/vm/vcpu/runner.rs
 irq=src/kernel/entry/irq.rs
-linux=src/kernel/vm/linux/mod.rs
 memory=src/kernel/vm/memory/retirement.rs
 cross_call=src/kernel/irq/cross_call.rs
 hal_vm=src/hal/selected/vm.rs
@@ -58,12 +56,6 @@ require_order() {
     fi
 }
 
-rg -q 'control: VmControl' "$construction" &&
-    rg -q 'static DEFAULT_VM: ControlLock' "$lifecycle" &&
-    rg -q 'retain_default\(control\)' "$linux" || {
-    echo 'installation must mint and boot policy must retain one linear VM control' >&2
-    exit 1
-}
 if rg -U -q 'derive\([^)]*(Clone|Copy)[^)]*\)\][[:space:]]*pub\(in crate::kernel::vm\) struct VmControl' \
     "$construction"; then
     echo 'VM lifecycle authority must not be cloneable' >&2
@@ -91,10 +83,10 @@ if rg -q 'strong_count' "$registry" "$control" "$execution"; then
     echo 'VM retirement must use try_into_unique instead of refcount polling' >&2
     exit 1
 fi
-require_order "$begin" 'registry.begin_quiesce\(id\)' 'clear_console_route_for_vm\(id\)' \
-    'registry visibility must be cut before console producer routing'
-require_order "$begin" 'clear_console_route_for_vm\(id\)' 'machine.request_all_stops\(\)' \
-    'console routing must be cut before endpoint stop publication'
+require_order "$begin" 'registry.begin_quiesce\(id\)' 'machine.disconnect_virtual_serial\(\)' \
+    'registry visibility must be cut before the serial endpoint disconnects'
+require_order "$begin" 'machine.disconnect_virtual_serial\(\)' 'machine.request_all_stops\(\)' \
+    'serial input must disconnect before endpoint stop publication'
 require_order "$stops" '\.request_stop\(' 'self.run_admission.close\(\)' \
     'run admission must close only after durable endpoint stop publication'
 rg -q 'Error::ThreadNotFound' "$stops" &&
@@ -105,15 +97,6 @@ rg -q 'Error::ThreadNotFound' "$stops" &&
 require_order "$promotion" 'machine.is_quiescent\(\)' 'machine.try_into_unique\(\)' \
     'quiescence proof must precede unique-owner conversion'
 
-installed_checks=$(rg -o 'registry::is_installed\(vm\)' "$device" | wc -l | tr -d ' ')
-if [ "$installed_checks" -ne 2 ]; then
-    echo 'console publication must validate Installed on both sides of route publication' >&2
-    exit 1
-fi
-rg -q 'clear_console_route_for_vm' "$device" || {
-    echo 'quiescence must have a standalone exact VM console cut' >&2
-    exit 1
-}
 rg -q 'endpoint: hyper::mm::FallibleArc' "$vcpu_execution" &&
     rg -q '\.publish_reaped\(thread, reason\)' "$vcpu_execution" &&
     ! rg -q 'REGISTRY' "$vcpu_execution" || {
@@ -193,3 +176,9 @@ if rg -q '(saved_hcr|saved_vttbr|saved_vtcr|guest_hcr|restore_vttbr) = lateout' 
     echo 'early-written retirement asm temporaries must not overlap live inputs' >&2
     exit 1
 fi
+
+rg -q 'control: VmControl' "$construction" &&
+    rg -F -q 'publish_installed(self.id, self.control)' "$construction" || {
+    echo 'installed Native VM owners must receive the linear lifecycle control' >&2
+    exit 1
+}

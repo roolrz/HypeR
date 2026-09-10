@@ -50,7 +50,6 @@ require_order() {
 }
 
 producer=$(mktemp "${TMPDIR:-/tmp}/hyper-log-producer.XXXXXX")
-console_tx=$(mktemp "${TMPDIR:-/tmp}/hyper-log-console-tx.XXXXXX")
 prompt=$(mktemp "${TMPDIR:-/tmp}/hyper-log-prompt.XXXXXX")
 rpc=$(mktemp "${TMPDIR:-/tmp}/hyper-log-rpc.XXXXXX")
 riscv_private=$(mktemp "${TMPDIR:-/tmp}/hyper-log-riscv-private.XXXXXX")
@@ -63,9 +62,8 @@ barrier=$(mktemp "${TMPDIR:-/tmp}/hyper-log-barrier.XXXXXX")
 registration=$(mktemp "${TMPDIR:-/tmp}/hyper-log-registration.XXXXXX")
 waiter=$(mktemp "${TMPDIR:-/tmp}/hyper-log-waiter.XXXXXX")
 runtime=$(mktemp "${TMPDIR:-/tmp}/hyper-log-runtime.XXXXXX")
-trap 'rm -f "$producer" "$console_tx" "$prompt" "$rpc" "$riscv_private" "$aarch64_private" "$x86_private" "$x86_vmx_private" "$request" "$retire" "$barrier" "$registration" "$waiter" "$runtime"' EXIT HUP INT TERM
+trap 'rm -f "$producer" "$prompt" "$rpc" "$riscv_private" "$aarch64_private" "$x86_private" "$x86_vmx_private" "$request" "$retire" "$barrier" "$registration" "$waiter" "$runtime"' EXIT HUP INT TERM
 sed -n '/^pub fn log(/,/^}/p' "$log" >"$producer"
-sed -n '/^pub(crate) fn write_test_guest_console_byte(/,/^}/p' "$console" >"$console_tx"
 sed -n '/^pub(crate) fn dispatch(/,/^}/p' "$irq" >"$prompt"
 sed -n '/^pub(crate) fn dispatch_kernel_rpc(/,/^}/p' "$irq" >"$rpc"
 sed -n '/^extern "C" fn dispatch_trap(/,/^fn fatal_trap(/p' "$riscv_irq" >"$riscv_private"
@@ -119,13 +117,6 @@ require 'fn try_write_byte\(&self, byte: u8\) -> bool;' "$hal_console" \
     'the HAL console contract must expose a nonblocking byte operation'
 require 'fn write_byte[\s\S]*while !self\.try_write_byte\(byte\)' "$hal_console" \
     'blocking boot and emergency output must derive from the nonblocking driver primitive'
-require 'drain::enqueue_console_tx_byte\(byte\)' "$console_tx" \
-    'guest Console bytes must enter the bounded TX queue'
-if rg -q 'write_byte|write_bytes|CONSOLE\.with' "$console_tx"; then
-    echo 'guest console producers must not write the physical UART' >&2
-    exit 1
-fi
-
 require_order "$prompt" 'interrupt::dispatch\(interrupt\)' 'log::service_irq_prompt\(\)' \
     'deferred log prompt service must follow interrupt registry dispatch'
 require_order "$rpc" 'irq::cross_call::service\(\)' 'log::service_irq_prompt\(\)' \

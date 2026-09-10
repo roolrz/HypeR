@@ -79,9 +79,6 @@ mutate 'log producers must not synchronously flush the console' \
 mutate 'IRQ prompt service must follow registry dispatch' \
     src/kernel/entry/irq.rs 'crate::kernel::irq::interrupt::dispatch(interrupt);' \
     'crate::kernel::log::service_irq_prompt();'
-mutate 'guest bytes must not bypass the deferred Console TX FIFO' \
-    src/kernel/log/console.rs 'super::drain::enqueue_console_tx_byte(byte);' \
-    'CONSOLE.with(|_| device.write_byte(byte));'
 mutate 'normal drain batches must remain bounded' \
     src/kernel/log/drain.rs 'const LOG_RECORDS_PER_BATCH: usize = 32;' \
     'const LOG_RECORDS_PER_BATCH_REMOVED: usize = 32;'

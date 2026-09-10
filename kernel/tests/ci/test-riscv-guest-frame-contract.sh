@@ -108,5 +108,5 @@ mutate 'RISC-V must retain a qualified IRQ-tail capability' src/hal/selected/exc
     'any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)' 'CONFIG_ARCH_AARCH64'
 mutate 'SSIP must use formal IRQ accounting' src/kernel/entry/irq.rs \
     'dispatch_kernel_rpc_entry(origin: InterruptOrigin)' 'dispatch_kernel_rpc_entry()'
-mutate 'runtime acceptance must require RISC-V guest preemption' tests/qemu/verify-riscv64.sh \
-    'RISC-V IRQ-tail Fair vCPU preemption passed' 'RISC-V IRQ-tail probe unavailable'
+mutate 'runtime acceptance must require completed kernel self-tests' tests/qemu/verify-riscv64.sh \
+    'kernel self-tests completed' 'kernel self-tests unavailable'
