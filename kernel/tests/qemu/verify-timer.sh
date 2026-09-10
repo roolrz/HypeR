@@ -5,19 +5,19 @@
 # Exercises recurring timer delivery on the supported four-core QEMU setup.
 set -eu
 
-if [ "$#" -ne 6 ]; then
-    echo "usage: verify-qemu-timer.sh QEMU IMAGE INITRD CPU MEMORY BOOTARGS" >&2
+if [ "$#" -ne 5 ]; then
+    echo "usage: verify-qemu-timer.sh QEMU IMAGE CPU MEMORY BOOTARGS" >&2
     exit 2
 fi
 
 qemu=$1
 image=$2
-initrd=$3
-cpu=$4
-memory=$5
-bootargs=$6
+cpu=$3
+memory=$4
+bootargs=$5
 log=$(mktemp -t hyper-qemu-timer.XXXXXX)
 pid=
+initrd=$(mktemp -t hyper-qemu-empty.XXXXXX)
 
 cleanup() {
     if [ -n "$pid" ]; then
@@ -26,11 +26,13 @@ cleanup() {
         fi
         wait "$pid" 2>/dev/null || true
     fi
-    rm -f "$log"
+    rm -f "$log" "$initrd"
 }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+sh "$(dirname "$0")/empty-initramfs.sh" "$initrd"
 
 "$qemu" \
     -machine virt,virtualization=on,gic-version=3,dtb-randomness=on \
@@ -65,12 +67,8 @@ while [ "$attempt" -lt 300 ]; do
         grep -q 'HypeR: kernel log ring: 65536 bytes' "$log" &&
         grep -q 'HypeR: CPU power interface version .*: on=true, off=true, suspend=true, reset=true' "$log" &&
         grep -q 'HypeR: platform bus: .* bound, .* unmatched, .* deferred, .* failed' "$log" &&
-        grep -q "HypeR: loaded VM 'alpine' from boot ramdisk: 128 MiB RAM, 1 vCPU(s)" "$log" &&
-        grep -q 'HypeR: kernel initialization complete; starting Linux guest' "$log" &&
-        grep -q 'HypeR: vCPU 0 running as scheduler thread [1-9][0-9]* on guarded stack 0x[0-9a-f][0-9a-f]*-0x[0-9a-f][0-9a-f]*' "$log" &&
-        grep -q 'arch_timer: cp15 timer running at .* (virt).' "$log" &&
-        grep -q 'HypeR guest: Linux userspace is running' "$log"; then
-        echo "verified EL2 host ticks and the Linux virtual timer using model $cpu"
+        grep -q 'HypeR test: kernel self-tests completed' "$log"; then
+        echo "verified EL2 host ticks and kernel self-tests using model $cpu"
         exit 0
     fi
     if ! kill -0 "$pid" 2>/dev/null; then

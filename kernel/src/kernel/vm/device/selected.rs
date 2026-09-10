@@ -37,25 +37,8 @@ pub(super) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualIn
     platform::default_timer_interrupt()
 }
 
-pub(super) fn clear_console_route_for_vm(vm: super::super::registry::VmId) {
-    platform::clear_console_route_for_vm(vm);
-}
-
 pub(super) fn kick_virtual_serial(route: super::super::virtual_serial::Route) {
     platform::kick_virtual_serial(route);
-}
-
-pub(super) fn receive_console_input(byte: u8) -> super::ConsoleInputDisposition {
-    platform::receive_console_input(byte)
-}
-
-#[cfg(feature = "kernel-self-test")]
-pub(super) fn try_publish_console_route(
-    vm: super::super::registry::VmId,
-    vcpu: u32,
-    thread: crate::kernel::task::thread::ThreadId,
-) -> bool {
-    platform::try_publish_console_route(vm, vcpu, thread)
 }
 
 #[cfg(CONFIG_ARCH_AARCH64)]

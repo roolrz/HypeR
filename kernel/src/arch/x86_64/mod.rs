@@ -284,11 +284,6 @@ pub fn guest_execution_available() -> bool {
     virtualization::validate().is_ok()
 }
 
-#[cfg(feature = "kernel-self-test")]
-pub fn virtualization_backend_name() -> &'static str {
-    virtualization::backend_name()
-}
-
 #[unsafe(no_mangle)]
 extern "C" fn x86_64_bootstrap(boot_params: usize, boot_counter_ticks: u64) -> ! {
     super::time::record_boot_counter(boot_counter_ticks);

@@ -206,67 +206,6 @@ impl GuestAddressSpace {
     }
 
     #[cfg(feature = "kernel-self-test")]
-    pub fn publish_instruction(&mut self, ipa: u64, length: usize) -> Result<(), Error> {
-        self.residency
-            .check_inactive(self.translation_epoch)
-            .map_err(Error::Residency)?;
-        self.publish_range(ipa, length, true)?;
-        if length == 0 {
-            return Ok(());
-        }
-        let start = self.validate_access(ipa, length)? / PAGE_SIZE as usize;
-        let end_address = ipa
-            .checked_add(u64::try_from(length).map_err(|_| Error::AddressOverflow)?)
-            .ok_or(Error::AddressOverflow)?;
-        let end = self
-            .validate_access(end_address - 1, 1)?
-            .checked_div(PAGE_SIZE as usize)
-            .and_then(|page| page.checked_add(1))
-            .ok_or(Error::AddressOverflow)?;
-        let mut translation_changed = false;
-        let mut instruction_changed = false;
-        for page_index in start..end {
-            if self.mapped_pages.get(page_index).unwrap_or(false)
-                && !self
-                    .instruction_ready_pages
-                    .get(page_index)
-                    .unwrap_or(false)
-            {
-                self.stage2
-                    .make_normal_page_executable(self.page_ipa(page_index)?)?;
-                translation_changed = true;
-            }
-            if !self
-                .instruction_ready_pages
-                .get(page_index)
-                .unwrap_or(false)
-            {
-                self.instruction_ready_pages.set(page_index, true)?;
-                instruction_changed = true;
-            }
-        }
-        if translation_changed {
-            self.commit_translation_change(None);
-        }
-        if instruction_changed {
-            // Cache maintenance and instruction-byte stores happen-before a
-            // CPU which observes this epoch during a later activation.
-            self.advance_instruction_epoch();
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "kernel-self-test")]
-    pub fn publish_data(&self, ipa: u64, length: usize) -> Result<(), Error> {
-        self.publish_range(ipa, length, false)
-    }
-
-    #[cfg(feature = "kernel-self-test")]
-    pub const fn root_address(&self) -> u64 {
-        self.stage2.root_address()
-    }
-
-    #[cfg(feature = "kernel-self-test")]
     pub fn statistics(&self) -> GuestMemoryStats {
         GuestMemoryStats {
             addressable_pages: self.mapped_pages.len(),
@@ -560,17 +499,6 @@ impl GuestAddressSpace {
         }
     }
 
-    #[cfg(feature = "kernel-self-test")]
-    fn validate_access(&self, ipa: u64, length: usize) -> Result<usize, Error> {
-        let offset = ipa.checked_sub(self.ipa_base).ok_or(Error::InvalidRange)?;
-        let length = u64::try_from(length).map_err(|_| Error::AddressOverflow)?;
-        let end = offset.checked_add(length).ok_or(Error::AddressOverflow)?;
-        if end > self.size {
-            return Err(Error::InvalidRange);
-        }
-        usize::try_from(offset).map_err(|_| Error::AddressOverflow)
-    }
-
     fn prepare_backing_page(&mut self, page_index: usize) -> Result<PhysicalAddress, Error> {
         let offset = (page_index as u64)
             .checked_mul(PAGE_SIZE)
@@ -642,73 +570,6 @@ impl GuestAddressSpace {
                 backing.physical_page(offset).map_err(Into::into)
             }
         }
-    }
-
-    #[cfg(feature = "kernel-self-test")]
-    fn publish_range(&self, ipa: u64, length: usize, instruction: bool) -> Result<(), Error> {
-        self.ensure_healthy()?;
-        self.validate_access(ipa, length)?;
-        if length == 0 {
-            return Ok(());
-        }
-        if !instruction {
-            return self.visit_range_chunks(ipa, length, |address, chunk| {
-                // SAFETY: Loading owns the VM and no vCPU can observe these
-                // pages until the stage-2 hierarchy is installed and active.
-                unsafe { crate::hal::cache::publish_data_range(address, chunk) }
-                    .map_err(Error::from)
-            });
-        }
-
-        let pin =
-            crate::kernel::task::scheduler::preempt_disable().map_err(|_| Error::InvalidCpu)?;
-        let mut walk_error = None;
-        // SAFETY: Loading owns every committed page and excludes guest
-        // execution and modification for the complete, potentially two-pass
-        // transaction. The immutable page set yields identical ranges on each
-        // architecture-requested enumeration.
-        let cache_result = unsafe {
-            crate::hal::cache::publish_instruction_ranges(&pin, |visit| {
-                if walk_error.is_some() {
-                    return;
-                }
-                if let Err(error) = self.visit_range_chunks(ipa, length, |address, chunk| {
-                    visit(address, chunk);
-                    Ok(())
-                }) {
-                    walk_error = Some(error);
-                }
-            })
-        };
-        drop(pin);
-        if let Some(error) = walk_error {
-            return Err(error);
-        }
-        cache_result.map_err(Error::from)
-    }
-
-    #[cfg(feature = "kernel-self-test")]
-    fn visit_range_chunks(
-        &self,
-        ipa: u64,
-        length: usize,
-        mut visit: impl FnMut(usize, usize) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        let mut offset = self.validate_access(ipa, length)?;
-        let mut published = 0;
-        while published < length {
-            let page_index = offset / PAGE_SIZE as usize;
-            let page_offset = offset % PAGE_SIZE as usize;
-            let physical = self.backing_physical_page(page_index)?;
-            let address = linear_address(physical)?
-                .checked_add(page_offset)
-                .ok_or(Error::AddressOverflow)?;
-            let chunk = (PAGE_SIZE as usize - page_offset).min(length - published);
-            visit(address, chunk)?;
-            published += chunk;
-            offset += chunk;
-        }
-        Ok(())
     }
 
     fn page_index(&self, address: u64) -> Option<usize> {
@@ -825,35 +686,6 @@ impl ForeignMemory for GuestAddressSpace {
                 .write_exposed(object_offset, source)
                 .map_err(Into::into),
         }
-    }
-}
-
-#[cfg(feature = "kernel-self-test")]
-impl crate::kernel::vm::linux::abi::PayloadMemory for GuestAddressSpace {
-    type Error = Error;
-
-    fn copy_to(
-        &mut self,
-        address: hyper::vm::exit::GuestPhysicalAddress,
-        bytes: &[u8],
-    ) -> Result<(), Self::Error> {
-        GuestAddressSpace::copy_to(self, address.get(), bytes)
-    }
-
-    fn publish_instruction(
-        &mut self,
-        address: hyper::vm::exit::GuestPhysicalAddress,
-        length: usize,
-    ) -> Result<(), Self::Error> {
-        GuestAddressSpace::publish_instruction(self, address.get(), length)
-    }
-
-    fn publish_data(
-        &self,
-        address: hyper::vm::exit::GuestPhysicalAddress,
-        length: usize,
-    ) -> Result<(), Self::Error> {
-        GuestAddressSpace::publish_data(self, address.get(), length)
     }
 }
 

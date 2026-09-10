@@ -105,10 +105,11 @@ lower range; direct native EL0 remains isolated behind a private stage-2 root.
 The permanent-memory handoff is opaque above `hal::memory`, including the
 single-root or split-root state required by secondary CPUs.
 
-Linux guest architecture identity, IPA layout, image validation/loading, and
-boot-register plans live in `kernel::vm::linux`. Its narrow `selected` module
-is the guest-ABI build selection point; the HAL only realizes the resulting
-register plan and supplies host virtualization mechanisms.
+Linux guest image validation, layout, DTB construction and boot-register plans
+belong to the userspace VM image/runtime stack. The kernel validates Native VM
+authority and platform contracts; the HAL realizes register plans and supplies
+host virtualization mechanisms. Kernel tests use minimal dormant VM fixtures
+without embedding a Linux loader.
 
 Only files below `src/hal/selected` may call the topical `crate::arch`
 facades. Conversely, no selected-HAL file may call `crate::kernel`. The rule
@@ -389,8 +390,9 @@ The concrete startup order is boot-critical CPU power, memory/allocator,
 immutable initramfs publication, debug and scheduler, host IRQ/crash/time,
 one-shot SMP admission, stage-1 address-space sealing, platform drivers,
 complete VM initialization, and Native init publication. Kernel self-test
-images replace only that final workload selection with the repository's Linux
-guest bundle. Sealing takes the same mutation lock as guarded-stack map/unmap
+images run standalone mechanism tests, report completion and retire the
+bootstrap execution. Linux integration boots Native init and uses userspace VMM
+tools; kernel self-tests need only an empty ramfs archive. Sealing takes the same mutation lock as guarded-stack map/unmap
 and retires identity aliases only after every admitted CPU entered permanent
 high mappings.
 

@@ -13,7 +13,7 @@ acceptance boundaries. Planned work is tracked in the [roadmap](roadmap.md).
 | Host architecture | Status | Current acceptance contract |
 | --- | --- | --- |
 | AArch64 | Tier 1 | QEMU `virt`; nVHE and VHE; LL/SC and LSE; SMP; Linux guest reaches `/init` and completes repeated timer wakeups |
-| RISC-V 64-bit | Supported | QEMU `virt`; OpenSBI, H extension, PLIC and SSTC; Linux guest reaches `/init` |
+| RISC-V 64-bit | Supported | QEMU `virt`; OpenSBI, H extension, PLIC and SSTC; kernel startup and mechanism self-tests. Guest boot acceptance is deferred until the Native VMM path is available |
 | x86-64 | Experimental | QEMU `q35`-targeted build and image validation; no public runtime contract yet |
 
 The current foundation includes:
@@ -152,3 +152,9 @@ Read [the architecture guide](../kernel/docs/architecture.md) for the normative
 boundary rules and migration constraints. The planned process, capability,
 syscall, and foreign-ABI boundary is specified separately in the [userspace and
 syscall design](../kernel/docs/syscall-abi.md).
+
+Kernel self-test images contain no Linux guest loader or default VM policy.
+AArch64 Linux integration uses Native `vmm create/start/console` and validates
+guest timer wakeups and console input. RISC-V guest boot coverage is temporarily
+absent; its QEMU gate checks kernel startup and standalone self-tests only.
+The x86-64 build gate does not establish a userspace guest-boot contract.

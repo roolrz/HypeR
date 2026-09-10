@@ -19,33 +19,21 @@ pub(crate) use selected::VirtualDeviceSet;
 ///
 /// Production bindings retain a typed reference derived from an explicitly
 /// supplied `VirtualSerial` handle. The VM-exit path can therefore exchange
-/// bytes without a handle-table lookup or allocation. Kernel self-tests opt
-/// into the physical host sink through a visibly test-only route.
-pub(crate) enum VirtualSerialBinding {
-    VirtualSerial(KernelRef<VirtualSerial, VmDeviceBinding>),
-    #[cfg(feature = "kernel-self-test")]
-    HostTest,
+/// bytes without a handle-table lookup or allocation.
+pub(crate) struct VirtualSerialBinding {
+    serial: KernelRef<VirtualSerial, VmDeviceBinding>,
 }
 
 impl VirtualSerialBinding {
     pub(crate) const fn from_virtual_serial(
         serial: KernelRef<VirtualSerial, VmDeviceBinding>,
     ) -> Self {
-        Self::VirtualSerial(serial)
+        Self { serial }
     }
 
-    #[cfg(feature = "kernel-self-test")]
-    pub(crate) const fn for_host_test() -> Self {
-        Self::HostTest
-    }
-
-    /// Best-effort, allocation-free publication into the bounded host queue.
+    /// Allocation-free publication into the registered userspace output buffer.
     pub(super) fn write_byte(&self, byte: u8) {
-        match self {
-            Self::VirtualSerial(serial) => serial.object().publish_guest_output(byte),
-            #[cfg(feature = "kernel-self-test")]
-            Self::HostTest => crate::kernel::log::console::write_test_guest_console_byte(byte),
-        }
+        self.serial.object().publish_guest_output(byte)
     }
 
     #[allow(
@@ -53,27 +41,15 @@ impl VirtualSerialBinding {
         reason = "selected guest UART backends consume input only when they implement receive injection"
     )]
     pub(super) fn pop_guest_input(&self) -> Option<u8> {
-        match self {
-            Self::VirtualSerial(serial) => serial.object().pop_guest_input(),
-            #[cfg(feature = "kernel-self-test")]
-            Self::HostTest => None,
-        }
+        self.serial.object().pop_guest_input()
     }
 
     pub(super) fn bind(&self, route: Route) {
-        match self {
-            Self::VirtualSerial(serial) => serial.object().bind(route),
-            #[cfg(feature = "kernel-self-test")]
-            Self::HostTest => {}
-        }
+        self.serial.object().bind(route)
     }
 
     pub(super) fn disconnect(&self, vm: super::registry::VmId) {
-        match self {
-            Self::VirtualSerial(serial) => serial.object().disconnect(vm),
-            #[cfg(feature = "kernel-self-test")]
-            Self::HostTest => {}
-        }
+        self.serial.object().disconnect(vm)
     }
 }
 
@@ -93,43 +69,6 @@ pub(crate) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualIn
     selected::default_timer_interrupt()
 }
 
-/// Clears an optional host-console route for this VM.
-pub(super) fn clear_console_route_for_vm(expected_vm: super::registry::VmId) {
-    selected::clear_console_route_for_vm(expected_vm);
-}
-
 pub(super) fn kick_virtual_serial(route: Route) {
     selected::kick_virtual_serial(route);
-}
-
-/// Guest ownership decision for one byte received from the host console.
-#[derive(Clone, Copy)]
-pub(crate) struct ConsoleInputDisposition {
-    claimed_by_guest: bool,
-}
-
-impl ConsoleInputDisposition {
-    const fn from_guest_claim(claimed_by_guest: bool) -> Self {
-        Self { claimed_by_guest }
-    }
-
-    /// Reports whether offering this byte to Native userspace would cross an
-    /// established guest-console ownership boundary.
-    pub(crate) const fn claimed_by_guest(self) -> bool {
-        self.claimed_by_guest
-    }
-}
-
-/// Attempts to deliver one host-console byte to the selected guest platform.
-pub(super) fn receive_console_input(byte: u8) -> ConsoleInputDisposition {
-    selected::receive_console_input(byte)
-}
-
-#[cfg(feature = "kernel-self-test")]
-pub(super) fn try_publish_console_route(
-    vm: super::registry::VmId,
-    vcpu: u32,
-    thread: crate::kernel::task::thread::ThreadId,
-) -> bool {
-    selected::try_publish_console_route(vm, vcpu, thread)
 }

@@ -10,8 +10,6 @@ mod transition;
 
 use super::{active_vcpu, memory, registry, timer};
 
-#[cfg(feature = "kernel-self-test")]
-pub use crate::hal::vm::VcpuInterruptError;
 pub(in crate::kernel) use execution::VcpuExecution;
 #[allow(unused_imports)]
 pub(crate) use lifecycle::{DetachedStopError, complete_detached_stop_if_requested};

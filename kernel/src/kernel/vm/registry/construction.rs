@@ -201,18 +201,6 @@ impl InstalledVm {
     }
 
     #[cfg(feature = "kernel-self-test")]
-    pub(in crate::kernel::vm) fn into_started_boot_parts(self) -> (VmId, ThreadId, VmControl) {
-        let endpoint = match self.lifecycle.endpoint(0) {
-            Ok(endpoint) => endpoint,
-            Err(_) => crate::hal::cpu::halt(),
-        };
-        if endpoint.start().is_err() {
-            crate::hal::cpu::halt();
-        }
-        (self.id, self.boot_vcpu, self.control)
-    }
-
-    #[cfg(feature = "kernel-self-test")]
     pub(crate) const fn boot_vcpu_for_test(&self) -> ThreadId {
         self.boot_vcpu
     }

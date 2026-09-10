@@ -62,13 +62,12 @@ for call in \
     previous=$line
 done
 
-require '#\[cfg\(feature = "kernel-self-test"\)\][[:space:]]*let never = crate::kernel::vm::start_test_default\(' \
-    "$fixture/start-kernel.rs" 'kernel self-test images must select the test-only VM workload'
-require '#\[cfg\(not\(feature = "kernel-self-test"\)\)\][[:space:]]*let never = crate::kernel::init::start\(\)' \
-    "$fixture/start-kernel.rs" 'production images must select Native init'
-require_order "$fixture/start-kernel.rs" 'crate::kernel::vm::initialize' \
-    'crate::kernel::vm::start_test_default' \
-    'VM initialization must precede the test-only guest workload'
+require 'HypeR test: kernel self-tests completed' "$fixture/start-kernel.rs" \
+    'kernel self-tests must report completion without selecting a guest'
+require 'crate::kernel::task::scheduler::exit_current\(\)' "$fixture/start-kernel.rs" \
+    'kernel self-tests must retire the bootstrap execution'
+require 'let never = crate::kernel::init::start\(\)' "$fixture/start-kernel.rs" \
+    'production images must select Native init'
 require_order "$fixture/start-kernel.rs" 'crate::kernel::vm::initialize' \
     'crate::kernel::init::start' \
     'VM initialization must precede Native init publication'

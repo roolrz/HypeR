@@ -16,7 +16,7 @@ than every historical RISC-V board:
 - Zicbom cache-block management with a DT-described CBO block size
 - SBI base, TIME, IPI, RFENCE, HSM, and SRST firmware services
 - QEMU `virt`, OpenSBI, PLIC, ACLINT timers, and NS16550 early console
-- four host harts and one Linux guest vCPU
+- four host harts with standalone kernel mechanism tests
 
 HypeR validates every enabled hart for H, F, D, SSTC, and Zicbom and requires a
 consistent `riscv,cbom-block-size`. Missing mandatory facilities are a
@@ -44,21 +44,13 @@ RISC-V does not instantiate the GIC/vGIC model merely to satisfy a shared type.
 HVIP supplies the initial virtual local-interrupt mechanism; a future AIA
 backend can add virtual IMSIC state behind that RISC-V implementation.
 
-## Linux guest ABI
+## Runtime validation
 
-Linux enters VS mode at `0x80200000` with hart ID zero in `a0` and the guest
-DTB address in `a1`. Guest RAM begins at `0x80000000`; the DTB is placed at
-`0x80010000`. The virtual firmware implements the SBI operations required by
-the current uniprocessor boot, and Linux receives RV64GC, Sv39, and SBI nodes
-in a Linux-format DTB. The smoke-test command line uses `keep_bootcon` because
-the intentionally minimal virtual board has no runtime UART yet; this keeps
-Linux's SBI boot console observable through `/init` without advertising a
-nonexistent `hvc0` device.
-
-The CI smoke test downloads checksum-pinned Alpine artifacts, boots a four-hart
-HypeR host, enters the Linux guest, and requires the kernel to execute `/init`.
-The downloaded GPL kernel and distribution files remain ignored external test
-artifacts and are not part of the Apache-2.0 source tree.
+CI boots a four-hart HypeR host with a minimal empty ramfs and runs standalone
+kernel self-tests. It does not download or boot Linux. The old kernel-resident
+Linux loader has been removed; guest boot acceptance will return when RISC-V
+Native execution and the userspace VMM are implemented. Guest translation and
+interrupt mechanisms remain available for focused kernel tests.
 
 ## Current limitations
 
@@ -67,8 +59,7 @@ artifacts and are not part of the Apache-2.0 source tree.
   parsing `interrupts-extended` is required before supporting arbitrary PLIC
   topologies.
 - SSTC is mandatory; the software-injected fallback is not a supported profile.
-- The Linux guest is uniprocessor and has no virtual PLIC, AIA, UART, virtio,
-  block, or network device.
+- The Native userspace VM platform and Linux boot acceptance are not yet available.
 - Guest WFI currently traps to HS and resumes cooperatively. A scheduler-aware
   blocked-vCPU path is required before guest timeslicing.
 - Stage-1 and active stage-2 invalidation use SBI RFENCE for every other online

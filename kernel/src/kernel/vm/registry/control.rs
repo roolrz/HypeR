@@ -232,9 +232,7 @@ fn begin_quiesce_control(id: VmId) -> Result<(), Error> {
     // Registry visibility was cut before producers and vCPU continuations are
     // stopped. Existing strong leases remain safe and prevent unique-owner
     // promotion until their callbacks return.
-    // The console route is optional. Its stable device seam is an honest no-op
-    // when the selected guest model has no route owner.
-    crate::kernel::vm::device::clear_console_route_for_vm(id);
+    // Disconnect the explicitly assigned serial endpoint before stopping vCPUs.
     machine.disconnect_virtual_serial();
     if let Err(error) = machine.request_all_stops() {
         crate::kernel::crash::fatal(format_args!(

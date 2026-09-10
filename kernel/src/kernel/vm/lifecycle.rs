@@ -9,12 +9,8 @@ use hyper::sync::InterruptSpinLock;
 use super::installed::InstalledMachine;
 use super::registry::{QuiescePoll, QuiescentControl, QuiescingVm, VmControl};
 
-#[cfg(feature = "kernel-self-test")]
-type ControlLock = InterruptSpinLock<Option<VmControl>, crate::hal::irq::LocalMask>;
 type QueueLock = InterruptSpinLock<RetirementQueue, crate::hal::irq::LocalMask>;
 
-#[cfg(feature = "kernel-self-test")]
-static DEFAULT_VM: ControlLock = InterruptSpinLock::new(None);
 static RETIREMENT_QUEUE: QueueLock = InterruptSpinLock::new(RetirementQueue::new());
 
 struct RetirementWork {
@@ -170,17 +166,4 @@ fn reap_one() -> Option<ReapOutcome> {
             Some(ReapOutcome::Deferred)
         }
     }
-}
-
-/// Retains boot policy's sole default-VM lifecycle authority.
-#[cfg(feature = "kernel-self-test")]
-pub(super) fn retain_default(control: VmControl) {
-    DEFAULT_VM.with(|slot| {
-        if slot.is_some() {
-            crate::kernel::crash::fatal(format_args!(
-                "HypeR: default VM lifecycle authority was published twice"
-            ));
-        }
-        *slot = Some(control);
-    });
 }

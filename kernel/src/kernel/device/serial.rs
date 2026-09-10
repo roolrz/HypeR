@@ -207,9 +207,7 @@ fn handle_interrupt(_interrupt: VirtualInterrupt, _context: usize) -> HandlerRes
         if byte.error {
             super::console::record_receive_error();
         } else {
-            if !crate::kernel::vm::receive_console_input(byte.byte).claimed_by_guest() {
-                super::console::receive(byte.byte);
-            }
+            super::console::receive(byte.byte);
         }
     }
     HandlerResult::Handled

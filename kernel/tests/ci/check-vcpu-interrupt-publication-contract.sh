@@ -11,10 +11,8 @@ cd "$root"
 vcpu=src/kernel/vm/vcpu/transition.rs
 device=src/kernel/vm/device/aarch64.rs
 execution=src/kernel/vm/registry/execution.rs
-construction=src/kernel/vm/registry/construction.rs
 scheduler=src/kernel/task/scheduler/state.rs
 irq=src/kernel/entry/irq.rs
-linux=src/kernel/vm/linux/mod.rs
 
 activate=$(mktemp "${TMPDIR:-/tmp}/hyper-vcpu-interrupt-activate.XXXXXX")
 receive=$(mktemp "${TMPDIR:-/tmp}/hyper-vcpu-interrupt-receive.XXXXXX")
@@ -23,10 +21,9 @@ console_receive=$(mktemp "${TMPDIR:-/tmp}/hyper-vcpu-console-receive.XXXXXX")
 scheduler_query=$(mktemp "${TMPDIR:-/tmp}/hyper-vcpu-running-query.XXXXXX")
 trap 'rm -f "$activate" "$receive" "$console_access" "$console_receive" "$scheduler_query"' EXIT HUP INT TERM
 sed -n '/^[^[:space:]].*unsafe fn activate(/,/^}/p' "$vcpu" >"$activate"
-sed -n '/^pub(super) fn receive_console_input/,/^}/p' "$device" >"$receive"
-sed -n '/^    fn access(/,/^    fn receive(/p' "$device" | sed '$d' >"$console_access"
-sed -n '/^    fn receive(/,/^    fn receive_from_virtual_serial(/p' "$device" |
-    sed '$d' >"$console_receive"
+sed -n '/^pub(super) fn kick_virtual_serial/,/^}/p' "$device" >"$receive"
+sed -n '/^    fn access(/,/^    pub(in crate::kernel::vm) fn bind_virtual_serial(/p' "$device" | sed '$d' >"$console_access"
+sed -n '/^    fn receive_from_virtual_serial(/,/^    }/p' "$device" >"$console_receive"
 sed -n '/^    pub fn running_vcpu_cpu(/,/^    pub fn current_user(/p' "$scheduler" | sed '$d' >"$scheduler_query"
 
 line_first() {
@@ -67,7 +64,7 @@ if rg -q 'active_vcpu' "$receive"; then
     echo 'host console input must not depend on a CPU-local active-vCPU borrow' >&2
     exit 1
 fi
-require_order "$receive" '\.receive\(' 'publish_interrupt_reconcile\(' \
+require_order "$receive" '\.receive_from_virtual_serial\(' 'publish_interrupt_reconcile\(' \
     'saved device/controller mutation must complete before durable publication'
 
 for method in "$console_access" "$console_receive"; do
@@ -80,15 +77,6 @@ for method in "$console_access" "$console_receive"; do
     fi
 done
 
-rg -q 'InterruptSpinLock<Option<ConsoleRoute>' "$device" || {
-    echo 'console routing must be generation-replaceable under an IRQ-safe lock' >&2
-    exit 1
-}
-rg -q 'vm: VmId' "$device" &&
-    rg -q 'thread: crate::kernel::task::thread::ThreadId' "$device" || {
-    echo 'console route must retain exact VM generation and Thread identity' >&2
-    exit 1
-}
 rg -q 'update_saved_guest_device_interrupt' "$device" || {
     echo 'console input must update saved interrupt state without active hardware' >&2
     exit 1
@@ -103,19 +91,6 @@ rg -q 'ThreadState::Running =>' "$scheduler_query" &&
     echo 'scheduler location query must classify running and non-running transitions' >&2
     exit 1
 }
-rg -q 'current\.vm == expected_vm && current\.thread == expected_thread' "$device" || {
-    echo 'console teardown must match the exact VM generation and Thread route' >&2
-    exit 1
-}
-rg -U -q 'Error::EndpointClosed[\s\S]*clear_console_route_exact\(route\.vm, route\.thread\);[\s\S]*ConsoleInputDisposition::from_guest_claim\(true\)' "$device" || {
-    echo 'closed vCPU endpoints must retire the exact console route without crossing into Native input' >&2
-    exit 1
-}
-if rg -q 'try_publish_console_route' "$execution" "$construction" ||
-    ! rg -q 'try_publish_console_route' "$linux"; then
-    echo 'host-console selection must remain explicit Linux service policy, not registry policy' >&2
-    exit 1
-fi
 rg -U -q 'Err\(error\) => \{\s*restore_reconcile_if_claimed\(execution, reconcile_claimed\);\s*release_execution_or_fail\(execution, execution_claim\);' "$activate" || {
     echo 'hardware activation failure must restore claimed reconcile work before releasing execution' >&2
     exit 1

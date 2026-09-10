@@ -29,7 +29,8 @@ GitHub Actions separates source quality, architecture builds, image contracts,
 Native SDK integration, and runtime acceptance. The AArch64 matrix exercises
 baseline and feature-rich CPU models, multiple host modes and atomic backends,
 address-space geometries, SMP, kernel self-tests, virtual interrupts and timers,
-and Linux guest startup.
+and standalone kernel self-tests. Linux guest startup is covered by Native
+userspace integration through the VMM tools.
 It explicitly attaches `/bin/vmm` to the buffered guest serial port, requires
 repeated initramfs timer wakeups, exercises guest-console RX, and detaches
 through the local Ctrl-] menu. Reaching `/init` or delivering only the first
@@ -129,3 +130,13 @@ Apache-2.0-licensed source distribution. Linux is GPL-2.0-only and Alpine
 packages carry their own licenses. Anyone redistributing generated guest
 payloads must preserve the relevant upstream notices and source-availability
 obligations. See [kernel/tools/guest/README.md](../kernel/tools/guest/README.md) for details.
+
+## Native std incremental builds
+
+The assembled SDK records a content fingerprint for its Rust standard-library
+sources and Native target descriptions. `hyper-cargo` includes this identity in
+std build flags, so changes to the installed std port invalidate cached
+`build-std` artifacts in both check and release profiles. Unchanged content
+retains the same identity regardless of file timestamps; app-only edits do not
+invalidate std. Native libraries and linker tools retain their separate link
+fingerprint.

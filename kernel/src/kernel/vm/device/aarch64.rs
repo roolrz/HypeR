@@ -13,17 +13,6 @@ use hyper::vm::exit::{MmioAccess, MmioAction, MmioOperation};
 use super::super::super::registry::{VmBinding, VmId};
 
 type ConsoleLock = InterruptSpinLock<VirtualPl011, crate::hal::irq::LocalMask>;
-type ConsoleRouteLock = InterruptSpinLock<Option<ConsoleRoute>, crate::hal::irq::LocalMask>;
-
-#[derive(Clone, Copy)]
-struct ConsoleRoute {
-    vm: VmId,
-    vcpu: u32,
-    thread: crate::kernel::task::thread::ThreadId,
-}
-
-static CONSOLE_ROUTE: ConsoleRouteLock = InterruptSpinLock::new(None);
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidInterrupt,
@@ -102,17 +91,6 @@ impl VirtualDeviceSet {
         if let Some(output) = &self.virtual_serial {
             output.disconnect(vm);
         }
-    }
-
-    fn receive(
-        &self,
-        byte: u8,
-        update: impl FnOnce(GicInterruptId, bool) -> Result<(), Error>,
-    ) -> Result<(), Error> {
-        self.console.with(|console| {
-            let asserted = console.receive(byte);
-            update(self.console_interrupt, asserted)
-        })
     }
 
     fn receive_from_virtual_serial(
@@ -262,95 +240,6 @@ fn publish_terminal_mmio_report(
     }
 }
 
-pub(super) fn receive_console_input(byte: u8) -> super::super::ConsoleInputDisposition {
-    let Some(route) = CONSOLE_ROUTE.with(|route| *route) else {
-        return super::super::ConsoleInputDisposition::from_guest_claim(false);
-    };
-    let delivery = super::super::super::registry::with_binding(route.vm, |binding| {
-        binding
-            .devices()
-            .receive(byte, |interrupt, asserted| {
-                crate::hal::vm::update_saved_guest_device_interrupt(
-                    binding.interrupts(),
-                    route.vcpu,
-                    interrupt,
-                    asserted,
-                )
-                .map_err(|_| Error::InvalidInterrupt)
-            })
-            .map_err(|_| ConsoleDeliveryError::Device)?;
-        // Device and controller locks are released before endpoint publication
-        // can wake a Thread or issue a targeted reschedule notification.
-        binding
-            .publish_interrupt_reconcile(route.vcpu, route.thread)
-            .map_err(ConsoleDeliveryError::Registry)
-    });
-    match delivery {
-        Ok(Ok(())) => {}
-        Ok(Err(ConsoleDeliveryError::Registry(
-            super::super::super::registry::Error::EndpointClosed,
-        ))) => {
-            let _ = clear_console_route_exact(route.vm, route.thread);
-        }
-        Ok(Err(_)) => {}
-        Err(
-            super::super::super::registry::Error::NotInstalled
-            | super::super::super::registry::Error::StaleIdentity,
-        ) => {
-            let _ = clear_console_route_exact(route.vm, route.thread);
-        }
-        Err(_) => {}
-    }
-    // Once a route was observed, failure cannot transfer ownership to Native
-    // userspace: doing so would leak a guest-owned input byte across domains.
-    super::super::ConsoleInputDisposition::from_guest_claim(true)
-}
-
-enum ConsoleDeliveryError {
-    Device,
-    Registry(super::super::super::registry::Error),
-}
-
-/// Selects the first Linux VM as the host-console input recipient.
-#[cfg(feature = "kernel-self-test")]
-pub(super) fn try_publish_console_route(
-    vm: VmId,
-    vcpu: u32,
-    thread: crate::kernel::task::thread::ThreadId,
-) -> bool {
-    if thread == crate::kernel::task::thread::ThreadId::BOOTSTRAP
-        || !super::super::super::registry::is_installed(vm)
-    {
-        return false;
-    }
-    // Never nest registry and route locks. Validation on each side closes the
-    // race with Installed -> Quiescing without reversing lock order.
-    let published = CONSOLE_ROUTE.with(|route| {
-        if route.is_some() {
-            return false;
-        }
-        *route = Some(ConsoleRoute { vm, vcpu, thread });
-        true
-    });
-    if !published {
-        return false;
-    }
-    if super::super::super::registry::is_installed(vm) {
-        true
-    } else {
-        let _ = clear_console_route_exact(vm, thread);
-        false
-    }
-}
-
-pub(super) fn clear_console_route_for_vm(expected_vm: VmId) {
-    CONSOLE_ROUTE.with(|route| {
-        if route.is_some_and(|current| current.vm == expected_vm) {
-            *route = None;
-        }
-    });
-}
-
 pub(super) fn kick_virtual_serial(route: crate::kernel::vm::virtual_serial::Route) {
     let delivery = super::super::super::registry::with_binding(route.vm, |binding| {
         binding
@@ -374,17 +263,4 @@ pub(super) fn kick_virtual_serial(route: crate::kernel::vm::virtual_serial::Rout
             binding.devices().disconnect_virtual_serial(route.vm);
         });
     }
-}
-
-fn clear_console_route_exact(
-    expected_vm: VmId,
-    expected_thread: crate::kernel::task::thread::ThreadId,
-) -> bool {
-    CONSOLE_ROUTE.with(|route| match *route {
-        Some(current) if current.vm == expected_vm && current.thread == expected_thread => {
-            *route = None;
-            true
-        }
-        Some(_) | None => false,
-    })
 }

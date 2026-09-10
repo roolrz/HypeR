@@ -173,12 +173,6 @@ fn emergency_device() -> Option<ConsoleDevice> {
     unsafe { ConsoleDevice::from_emergency_handle(handle, crate::hal::platform::port_io()) }
 }
 
-/// Explicit test-only bridge from the legacy in-kernel guest harness.
-#[cfg(feature = "kernel-self-test")]
-pub(crate) fn write_test_guest_console_byte(byte: u8) {
-    super::drain::enqueue_console_tx_byte(byte);
-}
-
 #[derive(Clone, Copy)]
 pub(super) struct OutputSnapshot {
     pub(super) device: ConsoleDevice,

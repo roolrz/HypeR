@@ -31,7 +31,7 @@ fi
 common_arch_cfg=$(LC_ALL=C rg -n --glob '*.rs' 'CONFIG_ARCH_' \
     src/kernel src/mm src/sync src/time src/log 2>/dev/null || true)
 common_arch_cfg=$(printf '%s\n' "$common_arch_cfg" |
-    sed '\#^src/kernel/entry/vmexit/selected.rs:#d; \#^src/kernel/vm/device/selected.rs:#d; \#^src/kernel/vm/linux/selected.rs:#d; /^$/d')
+    sed '\#^src/kernel/entry/vmexit/selected.rs:#d; \#^src/kernel/vm/device/selected.rs:#d; /^$/d')
 if [ -n "$common_arch_cfg" ]; then
     echo "common kernel policy must use selected HAL interfaces, not CONFIG_ARCH_:" >&2
     printf '%s\n' "$common_arch_cfg" >&2
@@ -53,7 +53,7 @@ fi
 # check semantic avoids silently rebuilding the retired host-HAL guest facade.
 if [ -e src/hal/selected/guest.rs ] ||
     LC_ALL=C rg -q --glob '*.rs' 'crate::hal::guest\b|hal::guest\b' src tests 2>/dev/null; then
-    echo "Linux guest ABI policy must remain in kernel::vm::linux, not the host HAL" >&2
+    echo "Linux guest boot policy belongs to userspace, not the host HAL" >&2
     exit 1
 fi
 

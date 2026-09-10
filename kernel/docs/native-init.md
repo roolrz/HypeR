@@ -163,8 +163,8 @@ rejected during preflight before any child is started.
 ## Validation boundary
 
 Host tests validate archive indexing, path rejection, ELF permissions, layout,
-entry points, and supported relocation decoding. Kernel QEMU tests use the
-test-only Linux guest path. The `test-native` contract separately builds the
+entry points, and supported relocation decoding. Kernel QEMU tests run
+standalone mechanism tests and then retire the bootstrap execution. The `test-native` contract separately builds the
 Native applications through the assembled SDK, constructs the production
 initramfs, and verifies that init loads the manifest, starts the session and
 shell Processes, launches `ps` and `handle` through scoped inspection handles,
