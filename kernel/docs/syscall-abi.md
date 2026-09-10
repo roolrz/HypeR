@@ -346,6 +346,22 @@ supported rights, and required rights, then acquires a typed object reference.
 The lock is released before object code, user copy, allocation, or blocking.
 A concurrent close does not cancel an already resolved operation.
 
+Handle slots and their Process accounting index use independently owned 4 KiB
+pages. A page is reclaimable only when it contains no published handles,
+unpublished reservations, or transfer claims. Close, reservation rollback/trim,
+and committed moves detach empty page pairs under the Process locks and return
+their physical backing outside those locks. Released bytes leave the cumulative
+storage charge only after both pages have been returned. In-transit message
+ownership does not retain a committed move's source page.
+
+Sparse page-directory metadata remains allocated and charged until Process
+retirement. It records the maximum generation used by each page; reconstruction
+starts above that maximum, and an exhausted page identity is never reused.
+Missing-page lookups fail without dereferencing released storage. Live handles
+are never relocated, and partially occupied pages are retained. Reclamation
+does bounded work over empty pages and their own free-list entries, without
+periodic polling or a whole-table scan on close.
+
 ### Typed handle flags
 
 The fixed-width `u32` flag field is an ABI representation, not one global flag

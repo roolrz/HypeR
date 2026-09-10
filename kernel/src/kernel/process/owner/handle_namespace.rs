@@ -128,10 +128,8 @@ impl PreparedHandleConsumption {
 
         drop(retired_transfer_storage.take());
         drop(retired_charge_storage.take());
-        drop(core::mem::take(&mut source.released_charges));
-        drop(core::mem::take(&mut source.retired_records));
         drop(source.entry_charge.take());
-        drop(source.scratch_charge.take());
+        source.release_scratch();
         let source_storage_charge = match source.handle_charge.take() {
             Some(charge) => charge,
             None => process_invariant_violation(),
@@ -143,6 +141,7 @@ impl PreparedHandleConsumption {
         InTransitCapabilities::new(detached_source, source_storage_charge).release();
         drop(destination.handle_charges.take());
         drop(destination.record.take());
+        process.reclaim_handle_pages();
         values
     }
 }
@@ -169,6 +168,15 @@ pub(crate) struct PreparedProcessHandleTransfer {
 }
 
 impl PreparedProcessHandleTransfer {
+    // A drained Vec still owns its allocation. Release all three buffers before
+    // returning their shared scratch quota, on both rollback and commit paths.
+    fn release_scratch(&mut self) {
+        drop(core::mem::take(&mut self.released_charges));
+        drop(core::mem::take(&mut self.retired_records));
+        drop(core::mem::take(&mut self.moved_values));
+        drop(self.scratch_charge.take());
+    }
+
     pub(crate) fn handle_count(&self) -> usize {
         match self.claim.as_ref() {
             Some(claim) => claim.len(),
@@ -191,8 +199,7 @@ impl PreparedProcessHandleTransfer {
         drop(retired);
         drop(self.entry_charge.take());
         drop(self.handle_charge.take());
-        drop(self.scratch_charge.take());
-        drop(core::mem::take(&mut self.moved_values));
+        self.release_scratch();
     }
 
     /// Permanently consumes all source values and returns their active owners.
@@ -238,14 +245,13 @@ impl PreparedProcessHandleTransfer {
             }
         };
         drop(retired_transfer_storage);
-        drop(core::mem::take(&mut self.released_charges));
-        drop(core::mem::take(&mut self.retired_records));
         drop(self.entry_charge.take());
-        drop(self.scratch_charge.take());
+        self.release_scratch();
         let storage_charge = match self.handle_charge.take() {
             Some(charge) => charge,
             None => process_invariant_violation(),
         };
+        self.process.reclaim_handle_pages();
         Ok(InTransitCapabilities::new(handles, storage_charge))
     }
 
@@ -273,14 +279,13 @@ impl PreparedProcessHandleTransfer {
                 .with(|table| claim.commit_with_storage(table))
         });
         drop(retired_transfer_storage);
-        drop(core::mem::take(&mut self.released_charges));
-        drop(core::mem::take(&mut self.retired_records));
         drop(self.entry_charge.take());
-        drop(self.scratch_charge.take());
+        self.release_scratch();
         let storage_charge = match self.handle_charge.take() {
             Some(charge) => charge,
             None => process_invariant_violation(),
         };
+        self.process.reclaim_handle_pages();
         InTransitCapabilities::new(handles, storage_charge)
     }
 }
@@ -406,6 +411,8 @@ impl PreparedDirectProcessHandleTransfer {
         };
         drop(retired);
         finish_direct_process_transfer(&mut self);
+        source_process.reclaim_handle_pages();
+        destination_process.reclaim_handle_pages();
         Ok(())
     }
 }
@@ -574,11 +581,9 @@ fn finish_direct_process_transfer(transfer: &mut PreparedDirectProcessHandleTran
         Some(destination) => destination,
         None => process_invariant_violation(),
     };
-    drop(core::mem::take(&mut source.released_charges));
-    drop(core::mem::take(&mut source.retired_records));
     drop(source.entry_charge.take());
     drop(source.handle_charge.take());
-    drop(source.scratch_charge.take());
+    source.release_scratch();
     drop(destination.handle_charges.take());
     drop(destination.record.take());
     drop(destination.scratch_charge.take());

@@ -21,19 +21,16 @@ const SLOT_MASK: u64 = (1 << SLOT_BITS) - 1;
 const GENERATION_LIMIT: u64 = u64::MAX >> SLOT_BITS;
 const MAX_SLOTS: usize = SLOT_MASK as usize;
 const MAX_RESERVATION_SLOTS: usize = 64;
-const SLOT_SEGMENTS: usize = 19;
-const FIRST_SEGMENT_SLOTS: usize = 64;
 const DIAGNOSTIC_PAGE_CAPACITY: usize = 8;
 const DIAGNOSTIC_SLOT_BUDGET: usize = 256;
 
-const _: () = {
-    assert!(MAX_RESERVATION_SLOTS <= FIRST_SEGMENT_SLOTS);
-    let mut segment = 1;
-    while segment < SLOT_SEGMENTS {
-        assert!(MAX_RESERVATION_SLOTS <= segment_capacity(segment));
-        segment += 1;
-    }
+mod page;
+mod storage;
+pub(crate) use storage::{
+    HandleSidecar, HandleSidecarPlan, HandleTableStoragePlan, HandleTableStorageSnapshot,
+    RetiredHandleStorage,
 };
+use storage::{RetiredHandlePage, SlotStore};
 
 static NEXT_RESERVATION_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -94,7 +91,7 @@ impl HandleValue {
     /// Returns the first value published by a fresh table.
     #[allow(dead_code)]
     pub(crate) fn first_for_test() -> Self {
-        Self::encode(0, 1)
+        Self::encode(storage::SLOTS_PER_PAGE - 1, 1)
     }
 
     fn encode(slot: usize, generation: u64) -> Self {
@@ -346,6 +343,7 @@ enum Slot {
     Vacant {
         generation: u64,
         next_free: Option<usize>,
+        previous_free: Option<usize>,
     },
     Reserved {
         generation: u64,
@@ -370,319 +368,6 @@ pub(crate) struct HandleTable {
     active_transfers: usize,
     lifecycle: TableLifecycle,
     next_teardown_generation: u64,
-}
-
-/// Detached retired table backing, destroyed only after releasing table locks.
-pub(crate) struct RetiredHandleStorage {
-    _segments: [Option<Vec<Slot>>; SLOT_SEGMENTS],
-}
-
-/// Structural state which one lock-free handle-table backing candidate targets.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct HandleTableStorageSnapshot {
-    slot_count: usize,
-    free_slots: usize,
-    additional: usize,
-    segment_mask: u32,
-}
-
-impl HandleTableStorageSnapshot {
-    /// Bytes in complete new segments prepared for this exact snapshot.
-    pub(crate) const fn growth_bytes(self) -> Option<usize> {
-        let mut segment = 0usize;
-        let mut bytes = 0usize;
-        while segment < SLOT_SEGMENTS {
-            if self.segment_mask & (1_u32 << segment) != 0 {
-                let segment_bytes =
-                    match segment_capacity(segment).checked_mul(core::mem::size_of::<Slot>()) {
-                        Some(bytes) => bytes,
-                        None => return None,
-                    };
-                bytes = match bytes.checked_add(segment_bytes) {
-                    Some(bytes) => bytes,
-                    None => return None,
-                };
-            }
-            segment += 1;
-        }
-        Some(bytes)
-    }
-
-    /// Identifies the sole segment this bounded reservation may add.
-    fn growth_segment(self) -> Option<usize> {
-        if self.segment_mask == 0 {
-            return None;
-        }
-        if self.segment_mask.count_ones() != 1 {
-            super::invariant_violation();
-        }
-        Some(self.segment_mask.trailing_zeros() as usize)
-    }
-}
-
-/// Process-owned metadata indexed by the same bounded slot geometry as handles.
-/// Generations are checked by the caller's entry; no allocation occurs in lookup
-/// or publication. Growth is prepared alongside the authoritative table plan.
-pub(crate) struct HandleSidecar<T> {
-    segments: [Option<Vec<Option<T>>>; SLOT_SEGMENTS],
-}
-
-/// Storage for the one sidecar segment an individual reservation may grow.
-///
-/// Every segment holds at least [`MAX_RESERVATION_SLOTS`] entries, and a
-/// reservation cannot request more than that many slots. Since installed
-/// segments are always a contiguous prefix, one reservation can cross at most
-/// one segment boundary. Keeping only that segment here avoids carrying a
-/// table-sized array through the process-start transaction stack.
-pub(crate) struct HandleSidecarPlan<T> {
-    segment: Option<(usize, Vec<Option<T>>)>,
-}
-
-impl<T> HandleSidecarPlan<T> {
-    pub(crate) const fn empty() -> Self {
-        Self { segment: None }
-    }
-}
-
-impl<T> HandleSidecar<T> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            segments: [const { None }; SLOT_SEGMENTS],
-        }
-    }
-
-    pub(crate) fn growth_bytes(snapshot: HandleTableStorageSnapshot) -> Option<usize> {
-        let mut bytes = 0usize;
-        for segment in 0..SLOT_SEGMENTS {
-            if snapshot.segment_mask & (1 << segment) != 0 {
-                bytes = bytes.checked_add(
-                    segment_capacity(segment).checked_mul(core::mem::size_of::<Option<T>>())?,
-                )?;
-            }
-        }
-        Some(bytes)
-    }
-
-    #[inline(never)]
-    pub(crate) fn prepare(
-        snapshot: HandleTableStorageSnapshot,
-    ) -> Result<HandleSidecarPlan<T>, HandleError> {
-        let Some(segment) = snapshot.growth_segment() else {
-            return Ok(HandleSidecarPlan { segment: None });
-        };
-        let count = segment_capacity(segment);
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(count)
-            .map_err(|_| HandleError::Allocation)?;
-        entries.resize_with(count, || None);
-        Ok(HandleSidecarPlan {
-            segment: Some((segment, entries)),
-        })
-    }
-
-    pub(crate) fn install(&mut self, mut plan: HandleSidecarPlan<T>) {
-        let Some((segment, entries)) = plan.segment.take() else {
-            return;
-        };
-        let Some(target) = self.segments.get_mut(segment) else {
-            super::invariant_violation();
-        };
-        if target.is_some() {
-            super::invariant_violation();
-        }
-        *target = Some(entries);
-    }
-
-    pub(crate) fn get(&self, value: HandleValue) -> Option<&T> {
-        let (segment, offset) = segment_location(value.decode().0);
-        self.segments.get(segment)?.as_ref()?.get(offset)?.as_ref()
-    }
-
-    pub(crate) fn replace(&mut self, value: HandleValue, entry: Option<T>) -> Option<T> {
-        let (segment, offset) = segment_location(value.decode().0);
-        let target = self
-            .segments
-            .get_mut(segment)
-            .and_then(Option::as_mut)
-            .and_then(|entries| entries.get_mut(offset));
-        match target {
-            Some(target) => core::mem::replace(target, entry),
-            None => super::invariant_violation(),
-        }
-    }
-}
-
-/// Fully allocated table backing prepared before Process locks are acquired.
-#[must_use = "install or discard the handle-table storage plan"]
-pub(crate) struct HandleTableStoragePlan {
-    snapshot: HandleTableStorageSnapshot,
-    segment: Option<(usize, Vec<Slot>)>,
-}
-
-impl HandleTableStoragePlan {
-    #[inline(never)]
-    pub(crate) fn try_new(snapshot: HandleTableStorageSnapshot) -> Result<Self, HandleError> {
-        let segment = match snapshot.growth_segment() {
-            Some(index) => Some((index, allocate_slot_segment(segment_capacity(index))?)),
-            None => None,
-        };
-        Ok(Self { snapshot, segment })
-    }
-
-    pub(crate) const fn snapshot(&self) -> HandleTableStorageSnapshot {
-        self.snapshot
-    }
-
-    #[cfg(test)]
-    pub(crate) fn force_allocation_failure_for_test() -> Result<(), HandleError> {
-        allocate_slot_segment(usize::MAX).map(drop)
-    }
-}
-
-fn allocate_slot_segment(capacity: usize) -> Result<Vec<Slot>, HandleError> {
-    let mut slots = Vec::new();
-    slots
-        .try_reserve_exact(capacity)
-        .map_err(|_| HandleError::Allocation)?;
-    for _ in 0..capacity {
-        slots.push(Slot::Retired);
-    }
-    Ok(slots)
-}
-
-struct SlotStore {
-    segments: [Option<Vec<Slot>>; SLOT_SEGMENTS],
-    len: usize,
-}
-
-impl SlotStore {
-    const fn new() -> Self {
-        Self {
-            segments: [const { None }; SLOT_SEGMENTS],
-            len: 0,
-        }
-    }
-
-    const fn len(&self) -> usize {
-        self.len
-    }
-
-    fn get(&self, index: usize) -> Option<&Slot> {
-        if index >= self.len {
-            return None;
-        }
-        let (segment, offset) = segment_location(index);
-        self.segments.get(segment)?.as_ref()?.get(offset)
-    }
-
-    fn get_mut(&mut self, index: usize) -> Option<&mut Slot> {
-        if index >= self.len {
-            return None;
-        }
-        let (segment, offset) = segment_location(index);
-        self.segments.get_mut(segment)?.as_mut()?.get_mut(offset)
-    }
-
-    fn replace(&mut self, index: usize, replacement: Slot) -> Slot {
-        match self.get_mut(index) {
-            Some(slot) => core::mem::replace(slot, replacement),
-            None => super::invariant_violation(),
-        }
-    }
-
-    fn iter(&self) -> impl Iterator<Item = &Slot> {
-        self.segments
-            .iter()
-            .filter_map(Option::as_ref)
-            .flat_map(|segment| segment.iter())
-            .take(self.len)
-    }
-
-    fn required_segment_mask(&self, target: usize) -> u32 {
-        let mut mask = 0_u32;
-        for segment in 0..SLOT_SEGMENTS {
-            if segment_base(segment) >= target {
-                break;
-            }
-            if self.segments[segment].is_none() {
-                mask |= 1_u32 << segment;
-            }
-        }
-        mask
-    }
-
-    fn install(&mut self, mut plan: HandleTableStoragePlan) {
-        if plan.snapshot.segment_mask == 0 {
-            if plan.segment.is_some() {
-                super::invariant_violation();
-            }
-            return;
-        }
-        let Some((index, segment)) = plan.segment.take() else {
-            super::invariant_violation();
-        };
-        if plan.snapshot.segment_mask != 1_u32 << index || self.segments[index].is_some() {
-            super::invariant_violation();
-        }
-        self.segments[index] = Some(segment);
-    }
-
-    fn push_vacant(&mut self, generation: u64, next_free: Option<usize>) -> usize {
-        let index = self.len;
-        let slot = match self.get_unpublished_mut(index) {
-            Some(slot) => slot,
-            None => super::invariant_violation(),
-        };
-        if !matches!(slot, Slot::Retired) {
-            super::invariant_violation();
-        }
-        *slot = Slot::Vacant {
-            generation,
-            next_free,
-        };
-        self.len += 1;
-        index
-    }
-
-    fn get_unpublished_mut(&mut self, index: usize) -> Option<&mut Slot> {
-        let (segment, offset) = segment_location(index);
-        self.segments.get_mut(segment)?.as_mut()?.get_mut(offset)
-    }
-
-    fn take_retired(&mut self) -> RetiredHandleStorage {
-        self.len = 0;
-        RetiredHandleStorage {
-            _segments: core::mem::replace(&mut self.segments, [const { None }; SLOT_SEGMENTS]),
-        }
-    }
-}
-
-const fn segment_capacity(segment: usize) -> usize {
-    if segment == 0 {
-        FIRST_SEGMENT_SLOTS
-    } else if segment == SLOT_SEGMENTS - 1 {
-        (1usize << (segment + 5)) - 1
-    } else {
-        1usize << (segment + 5)
-    }
-}
-
-const fn segment_base(segment: usize) -> usize {
-    if segment == 0 {
-        0
-    } else {
-        1usize << (segment + 5)
-    }
-}
-
-fn segment_location(index: usize) -> (usize, usize) {
-    if index < FIRST_SEGMENT_SLOTS {
-        return (0, index);
-    }
-    let highest_bit = (usize::BITS - 1 - index.leading_zeros()) as usize;
-    let segment = highest_bit - 5;
-    (segment, index - (1usize << highest_bit))
 }
 
 #[derive(Clone, Copy)]
@@ -714,9 +399,7 @@ impl HandleTable {
         self.ensure_active()?;
         validate_batch_count(count)?;
         let additional = count.saturating_sub(self.free_slots);
-        if self.slots.len().saturating_add(additional) > MAX_SLOTS {
-            return Err(HandleError::TableFull);
-        }
+        self.slots.snapshot(count, self.free_slots)?;
         Ok(additional)
     }
 
@@ -724,18 +407,9 @@ impl HandleTable {
         &self,
         count: usize,
     ) -> Result<HandleTableStorageSnapshot, HandleError> {
-        let additional = self.reservation_growth_for(count)?;
-        let target = self
-            .slots
-            .len()
-            .checked_add(additional)
-            .ok_or(HandleError::TableFull)?;
-        Ok(HandleTableStorageSnapshot {
-            slot_count: self.slots.len(),
-            free_slots: self.free_slots,
-            additional,
-            segment_mask: self.slots.required_segment_mask(target),
-        })
+        self.ensure_active()?;
+        validate_batch_count(count)?;
+        self.slots.snapshot(count, self.free_slots)
     }
 
     #[cfg(test)]
@@ -777,7 +451,7 @@ impl HandleTable {
             super::invariant_violation();
         }
         let reservation = ReservationId::allocate()?;
-        let plan = match plan.take() {
+        let plan = match plan.as_mut() {
             Some(plan) => plan,
             None => super::invariant_violation(),
         };
@@ -825,7 +499,7 @@ impl HandleTable {
             super::invariant_violation();
         }
         let reservation = ReservationId::allocate()?;
-        let plan = match plan.take() {
+        let plan = match plan.as_mut() {
             Some(plan) => plan,
             None => super::invariant_violation(),
         };
@@ -847,32 +521,51 @@ impl HandleTable {
     }
 
     /// Installs a preallocated replacement and grows only within proven capacity.
-    fn install_storage_plan(&mut self, plan: HandleTableStoragePlan) {
-        let additional = plan.snapshot.additional;
-        self.slots.install(plan);
-        for _ in 0..additional {
-            let index = self.slots.push_vacant(1, self.free_head);
-            self.free_head = Some(index);
-            self.free_slots += 1;
+    fn install_storage_plan(&mut self, plan: &mut HandleTableStoragePlan) {
+        let (pages, count) = self.slots.install(plan);
+        for &page in &pages[..count] {
+            let generation = self.slots.fresh_generation(page);
+            for index in self.slots.page_range(page) {
+                self.publish_vacant_slot(index, generation);
+            }
         }
     }
 
-    fn reserve_free_slot(&mut self, reservation: ReservationId) -> (usize, u64) {
-        let Some(index) = self.free_head else {
-            super::invariant_violation();
+    fn unlink_free_slot(&mut self, index: usize) -> u64 {
+        let (generation, previous, next) = match self.slots.get(index) {
+            Some(Slot::Vacant {
+                generation,
+                previous_free,
+                next_free,
+            }) => (*generation, *previous_free, *next_free),
+            _ => super::invariant_violation(),
         };
+        match previous {
+            Some(previous) => match self.slots.get_mut(previous) {
+                Some(Slot::Vacant { next_free, .. }) => *next_free = next,
+                _ => super::invariant_violation(),
+            },
+            None => self.free_head = next,
+        }
+        if let Some(next) = next {
+            match self.slots.get_mut(next) {
+                Some(Slot::Vacant { previous_free, .. }) => *previous_free = previous,
+                _ => super::invariant_violation(),
+            }
+        }
         if self.free_slots == 0 {
             super::invariant_violation();
         }
-        let (generation, next_free) = match self.slots.get(index) {
-            Some(Slot::Vacant {
-                generation,
-                next_free,
-            }) => (*generation, *next_free),
-            _ => super::invariant_violation(),
-        };
-        self.free_head = next_free;
         self.free_slots -= 1;
+        generation
+    }
+
+    fn reserve_free_slot(&mut self, reservation: ReservationId) -> (usize, u64) {
+        let index = match self.free_head {
+            Some(index) => index,
+            None => super::invariant_violation(),
+        };
+        let generation = self.unlink_free_slot(index);
         self.slots.replace(
             index,
             Slot::Reserved {
@@ -887,15 +580,42 @@ impl HandleTable {
         if generation == 0 || generation > GENERATION_LIMIT {
             super::invariant_violation();
         }
+        if let Some(head) = self.free_head {
+            match self.slots.get_mut(head) {
+                Some(Slot::Vacant { previous_free, .. }) => *previous_free = Some(index),
+                _ => super::invariant_violation(),
+            }
+        }
         self.slots.replace(
             index,
             Slot::Vacant {
                 generation,
                 next_free: self.free_head,
+                previous_free: None,
             },
         );
         self.free_head = Some(index);
         self.free_slots += 1;
+    }
+
+    /// Detaches at most one completely unoccupied page. Every free-list edge
+    /// is removed in page-bounded work; no live, reserved, or transferring slot
+    /// may remain. The Process detaches the matching sidecar under its lock and
+    /// destroys both returned owners after releasing all namespace locks.
+    pub(crate) fn take_empty_page(&mut self) -> Option<RetiredHandlePage> {
+        if !matches!(self.lifecycle, TableLifecycle::Active) {
+            return None;
+        }
+        let page = self.slots.empty_page()?;
+        for index in self.slots.page_range(page) {
+            if matches!(self.slots.get(index), Some(Slot::Vacant { .. })) {
+                self.unlink_free_slot(index);
+            }
+        }
+        Some(RetiredHandlePage {
+            index: page,
+            _page: self.slots.detach_empty(page),
+        })
     }
 
     fn validate_reservation<const N: usize>(&self, token: &HandleReservation<N>) {
@@ -951,14 +671,24 @@ impl HandleTable {
     #[cfg(test)]
     pub(crate) fn free_list_is_consistent_for_test(&self) -> bool {
         let mut current = self.free_head;
+        let mut previous = None;
         let mut linked = 0usize;
         while let Some(index) = current {
             if linked >= self.slots.len() {
                 return false;
             }
-            let Some(Slot::Vacant { next_free, .. }) = self.slots.get(index) else {
+            let Some(Slot::Vacant {
+                previous_free,
+                next_free,
+                ..
+            }) = self.slots.get(index)
+            else {
                 return false;
             };
+            if *previous_free != previous {
+                return false;
+            }
+            previous = Some(index);
             current = *next_free;
             linked += 1;
         }
@@ -1521,7 +1251,7 @@ impl HandleTable {
         // A generation-exhausted slot cannot be reused. Reserve the replacement
         // destination before retiring it so TableFull leaves the source intact.
         let reservation = ReservationId::allocate()?;
-        let plan = match plan.take() {
+        let plan = match plan.as_mut() {
             Some(plan) => plan,
             None => super::invariant_violation(),
         };
@@ -1559,7 +1289,7 @@ impl HandleTable {
         if !matches!(slot, Slot::Occupied { generation: found, .. } if *found == generation) {
             return Err(HandleError::InvalidHandle);
         }
-        let removed = core::mem::replace(slot, Slot::Retired);
+        let removed = self.slots.replace(index, Slot::Retired);
         let Slot::Occupied { handle, .. } = removed else {
             unreachable_handle_value();
         };
@@ -1610,12 +1340,7 @@ impl HandleTable {
         {
             super::invariant_violation();
         }
-        let index = self
-            .slots
-            .iter()
-            .enumerate()
-            .skip(cursor.next_slot)
-            .find_map(|(index, slot)| matches!(slot, Slot::Occupied { .. }).then_some(index))?;
+        let index = self.slots.next_occupied(cursor.next_slot)?;
         cursor.next_slot = index + 1;
         let generation = match self.slots.get(index) {
             Some(Slot::Occupied { generation, .. }) => *generation,
