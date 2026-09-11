@@ -16,6 +16,7 @@ use super::{
 const MAX_PATH_BYTES: usize = hyper::abi::native::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES as usize;
 const MAX_READ_BYTES: usize = hyper::abi::native::HYPER_NATIVE_FILE_MAX_READ_BYTES as usize;
 const TRANSFER_BATCH_BYTES: usize = 1024;
+const READ_BATCH_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum ServiceError {
@@ -126,25 +127,57 @@ pub(crate) fn read_file_at(
     if capacity > MAX_READ_BYTES {
         return Err(ServiceError::InvalidInput);
     }
-    // A file read is allowed to complete short. Bounding the kernel bounce
-    // buffer keeps this untrusted-size syscall allocation-free; SDK
-    // `read_exact_at` performs the required continuation for exact reads.
-    let capacity = capacity.min(TRANSFER_BATCH_BYTES);
-    let mut bytes = [0_u8; TRANSFER_BATCH_BYTES];
-    let actual = file.object().read(offset, &mut bytes[..capacity])?;
-    let actual_u64 = u64::try_from(actual).map_err(|_| ServiceError::InvalidInput)?;
-    if actual == 0 {
+    // Bound work by the observed EOF, but recheck through the backend on each
+    // batch: concurrent truncation may make a later batch short.
+    let capacity = capacity.min(file_size.saturating_sub(offset).min(capacity as u64) as usize);
+    if capacity == 0 {
         return Ok((0, file_size));
     }
-    let destination = UserSlice::new(output.base(), actual_u64)
-        .map_err(|error| ProcessError::UserMemory(error.into()))?;
-    let write: UserWriteReservation = process.reserve_user_write(destination)?;
-    let Some(bytes) = bytes.get(..actual) else {
-        return Err(ServiceError::InvalidInput);
+    // Small reads remain allocation-free apart from user-memory preparation.
+    // Bulk scratch is bounded independently of the ABI request limit and is
+    // charged to the caller, never placed on the kernel stack.
+    let mut small = [0_u8; TRANSFER_BATCH_BYTES];
+    let mut large = ScratchVec::new(ScratchBudget::new(&process.resource_domain()));
+    let bytes = if capacity <= small.len() {
+        &mut small[..capacity]
+    } else {
+        large
+            .resize(capacity.min(READ_BATCH_BYTES), 0)
+            .map_err(VfsError::from)?;
+        &mut large[..]
     };
-    write.copy_from(bytes).map_err(ProcessError::UserMemory)?;
-    write.complete();
-    Ok((actual_u64, file_size))
+    let completed = super::read_contract::read_batches(
+        offset,
+        capacity,
+        bytes.len(),
+        |file_offset, completed, length| -> Result<usize, ServiceError> {
+            let actual = file.object().read(file_offset, &mut bytes[..length])?;
+            if actual == 0 {
+                return Ok(0);
+            }
+            let source = bytes
+                .get(..actual)
+                .filter(|_| actual <= length)
+                .ok_or(ServiceError::InvalidInput)?;
+            let base = output
+                .base()
+                .checked_add(completed as u64)
+                .ok_or(ServiceError::InvalidInput)?;
+            let destination = UserSlice::new(base, actual as u64)
+                .map_err(|error| ProcessError::UserMemory(error.into()))?;
+            // The backend has released its file lock before COW/page preparation.
+            // Pin only this batch; mapping changes elsewhere remain possible.
+            let write: UserWriteReservation = process.reserve_user_write(destination)?;
+            write.copy_from(source).map_err(ProcessError::UserMemory)?;
+            write.complete();
+            Ok(actual)
+        },
+    )
+    .map_err(|error| match error {
+        super::read_contract::BatchError::Transfer(error) => error,
+        super::read_contract::BatchError::Contract(_) => ServiceError::InvalidInput,
+    })?;
+    Ok((completed as u64, file_size))
 }
 
 impl From<super::instance::Error> for ServiceError {

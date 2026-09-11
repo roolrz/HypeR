@@ -178,6 +178,23 @@ domain. Directory hard links and cross-filesystem rename/link are rejected.
 Ramfs `file_sync` completes its in-memory operation; it does not promise durable
 storage. Shared writable mappings and persistent writeback remain absent.
 
+## Native read batching
+
+File transfer requests accept up to 2 MiB; this limit is independent of the
+64 KiB VMO transfer limit. Reads process the request through the existing
+File/backend interface in at most 64 KiB batches. Larger reads use fallible
+scratch storage charged to the calling process; reads up to 1 KiB retain a
+small stack buffer. Only the current batch's user destination is prepared and
+pinned, after the backend has released its locks. Syscalls run in scheduled,
+interruptible kernel context.
+
+Reads stop at the observed EOF, a short backend read, or an error. An error
+before any copy is reported to the caller; after completed batches, the copied
+prefix is returned. Callers must still handle short reads. The operation is
+not an atomic snapshot across concurrent file mutations. Scratch storage is
+released on return and is not a file-data cache. Writes accept the same request
+limit but retain their existing bounded short-write behavior.
+
 ## Rooted directory scopes
 
 `directory_scope_create` combines an explicit root location and a reachable
