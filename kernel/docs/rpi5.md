@@ -13,7 +13,8 @@ interrupt path, not BCM2712 firmware, clocks, or electrical behavior.
 
 The guest interrupt backend currently requires GICv3. GICv2 hosts skip guest
 backend initialization instead of accessing unavailable ICH system registers.
-This does **not** yet enable a Linux I/O VM on Pi 5. That needs a separate GICv2
+VM creation returns `NOT_SUPPORTED` before reserving a pending VM or consuming
+the creation lease. This does **not** yet enable a Linux I/O VM on Pi 5. That needs a separate GICv2
 virtualization backend, tracked in the [near-term roadmap](../../docs/roadmap.md). RP1 UARTs on the 40-pin header are not the console used
 by this configuration.
 

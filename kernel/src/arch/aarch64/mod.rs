@@ -150,8 +150,8 @@ pub(crate) use vsysreg::{
 pub use vsysreg::{ValidationError as GuestValidationError, validate as validate_vsysreg};
 
 #[cfg(feature = "kernel-self-test")]
-pub const fn guest_execution_available() -> bool {
-    true
+pub fn guest_execution_available() -> bool {
+    gic_cpu_interface::guest_interrupts_supported()
 }
 
 pub fn initialize_cpu_power(

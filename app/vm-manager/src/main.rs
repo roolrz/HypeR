@@ -3,6 +3,8 @@
 
 //! Fleet policy and supervision for Native virtual-machine runtimes.
 
+mod listener;
+
 use hyper_vm_policy::fleet::{self, Action, Request, Response};
 use std::io::Read;
 use std::mem::MaybeUninit;
@@ -29,7 +31,6 @@ use std::process::ExitCode;
 
 const RUNTIME_ARGUMENT: &str = "/svc/vm-runtime";
 const MAX_CLIENTS: usize = 8;
-const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const CAPABILITY_REPLY_DEADLINE: Duration = Duration::from_millis(100);
 const INSTANCE_EXIT_GRACE: Duration = Duration::from_secs(2);
 
@@ -55,11 +56,12 @@ struct FleetManager {
     fleet_domain: OwnedHandle<ResourceDomainObject>,
     authority: OwnedHandle<hyper_os::handle::VirtualMachineCreationAuthorityObject>,
     provisioning: CapabilityChannel,
-    connections: CapabilityChannel,
+    connections: listener::Listener,
     root: Directory,
     machines: Vec<Machine>,
     initial_vm: Option<usize>,
     clients: [Option<Client>; MAX_CLIENTS],
+    next_wait: usize,
 }
 
 impl FleetManager {
@@ -73,13 +75,14 @@ impl FleetManager {
             fleet_domain: startup.take(startup::RESOURCE_DOMAIN)?,
             authority: startup.take(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)?,
             provisioning: CapabilityChannel::from_handle(startup.take(vm_contract::PROVISIONING)?),
-            connections: CapabilityChannel::from_handle(
+            connections: listener::Listener::start(CapabilityChannel::from_handle(
                 startup.take(vm_contract::MANAGER_CONNECTION)?,
-            ),
+            ))?,
             root: Directory::from_handle(startup.take(startup::ROOT_DIRECTORY)?),
             machines: Vec::new(),
             initial_vm: None,
             clients: std::array::from_fn(|_| None),
+            next_wait: 0,
         })
     }
 
@@ -118,7 +121,6 @@ impl FleetManager {
             self.publish_boot_event(vm_contract::InstanceEvent::Stopped);
         }
         loop {
-            self.accept_client()?;
             self.observe_one_event()?;
             self.complete_restarts()?;
         }
@@ -152,49 +154,21 @@ impl FleetManager {
         })
     }
 
-    /// Opens one short rendezvous window. Accepted clients immediately leave
-    /// the shared connector and use private control and capability channels.
     fn accept_client(&mut self) -> hyper_os::Result<()> {
-        let deadline = hyper_os::time::deadline_after(EVENT_POLL_INTERVAL)?.as_raw();
-        let mut bytes = [MaybeUninit::<u8>::uninit(); vm_contract::MESSAGE_BYTES];
-        let mut slots = [
-            CapabilityReceiveSlot::new::<ByteChannelObject>(
-                Rights::WAIT.union(Rights::READ).union(Rights::WRITE),
-            ),
-            CapabilityReceiveSlot::new::<CapabilityChannelObject>(
-                Rights::WAIT.union(Rights::WRITE),
-            ),
-        ];
-        let message = match self.connections.receive(deadline, &mut bytes, &mut slots) {
-            Ok(message) => message,
-            Err(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT)) => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        if vm_contract::ManagerConnectionRequest::decode(message.bytes()).is_none()
-            || message.capability_count() != vm_contract::ManagerConnectionRequest::CAPABILITY_COUNT
-        {
-            return Ok(());
+        let connection = self.connections.accept()?;
+        if let Some(index) = self.clients.iter().position(Option::is_none) {
+            self.clients[index] =
+                Some(Client::command(connection.control, connection.capabilities));
         }
-        let Some(index) = self.clients.iter().position(Option::is_none) else {
-            return Ok(());
-        };
-        self.clients[index] = Some(Client::command(
-            slots[0]
-                .take::<ByteChannelObject>()?
-                .ok_or(hyper_os::Error::MissingHandle)?,
-            CapabilityChannel::from_handle(
-                slots[1]
-                    .take::<CapabilityChannelObject>()?
-                    .ok_or(hyper_os::Error::MissingHandle)?,
-            ),
-        ));
         Ok(())
     }
 
     fn observe_one_event(&mut self) -> hyper_os::Result<()> {
-        const WAIT_CAPACITY: usize = MAX_CLIENTS + 2 * fleet::MAX_DEFINITIONS;
+        const WAIT_CAPACITY: usize = 1 + MAX_CLIENTS + 2 * fleet::MAX_DEFINITIONS;
         let mut waits = Vec::with_capacity(WAIT_CAPACITY);
         let mut sources = Vec::with_capacity(WAIT_CAPACITY);
+        waits.push(self.connections.wait_item());
+        sources.push(WaitSource::Connection);
         for (vm, machine) in self.machines.iter().enumerate() {
             if let Some(instance) = machine.instance.as_ref() {
                 waits.push(WaitItem::new(
@@ -223,12 +197,27 @@ impl FleetManager {
             ));
             sources.push(WaitSource::Client(index));
         }
-        // accept_client already waits on the listener each iteration. Once
-        // the last instance/client retires there is no secondary wait set.
-        if waits.is_empty() {
-            return Ok(());
-        }
-        let deadline = hyper_os::time::deadline_after(EVENT_POLL_INTERVAL)?.as_raw();
+        let deadline = match self
+            .machines
+            .iter()
+            .filter_map(|machine| {
+                machine
+                    .instance
+                    .as_ref()
+                    .and_then(|instance| instance.exit_deadline)
+            })
+            .min()
+        {
+            Some(deadline) => {
+                hyper_os::time::deadline_after(deadline.saturating_duration_since(Instant::now()))?
+                    .as_raw()
+            }
+            None => hyper_os::DEADLINE_INFINITE,
+        };
+        // Ready connection traffic must not starve lifecycle/control events.
+        let first = self.next_wait % waits.len();
+        waits.rotate_left(first);
+        sources.rotate_left(first);
         let observation = match wait_many(&waits, deadline) {
             Ok(observation) => observation,
             Err(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT)) => {
@@ -236,7 +225,9 @@ impl FleetManager {
             }
             Err(error) => return Err(error),
         };
+        self.next_wait = (first + observation.index + 1) % sources.len();
         match sources[observation.index] {
+            WaitSource::Connection => self.accept_client(),
             WaitSource::RuntimeProcess(vm) => self.finish_instance(vm),
             WaitSource::RuntimeControl(vm) => self.handle_runtime_control(vm, observation.observed),
             WaitSource::Client(index) => self.handle_client(index, observation.observed),
@@ -764,6 +755,7 @@ impl Client {
 
 #[derive(Clone, Copy)]
 enum WaitSource {
+    Connection,
     RuntimeProcess(usize),
     RuntimeControl(usize),
     Client(usize),

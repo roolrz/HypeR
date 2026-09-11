@@ -14,7 +14,7 @@ use hyper_os::handle::{
 use hyper_os::task::ProcessBuilder;
 
 use super::LaunchError;
-use super::policy::*;
+use hyper_init::bootstrap_policy::*;
 
 /// Live bootstrap capabilities from which service offers are prepared.
 pub(super) struct AuthorityInventory {
