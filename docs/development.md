@@ -11,17 +11,44 @@ SPDX-License-Identifier: Apache-2.0
 
 Open the repository root in VS Code with the `rust-lang.rust-analyzer`
 extension installed. The shared `.vscode/settings.json` explicitly loads all
-nine Cargo project roots, including the SDK workspace, Native applications,
-host tests, and build tools. After updating these settings, run
-**rust-analyzer: Reload Workspace** if the editor has not reloaded them.
+seven Cargo project roots, including the SDK workspace, Native applications,
+and build tools. Run `make sdk ARCH=aarch64` once to prepare the Native target
+and patched std sources, then **Developer: Reload Window** after updating editor
+settings. Continue opening
+the repository root; no separate editor workspace or generated configuration
+is needed.
+
+Reload the VS Code window, not just the language server, if new settings are
+ignored. On some mounted volumes VS Code refuses to watch `.vscode` for file
+changes; restarting rust-analyzer then reuses the cached client configuration.
+The extension's Output log should show the configured `cargo.extraEnv` and
+`check.overrideCommand`, rather than `{}` and `null`.
 
 The editor-only `.vscode/rust-analyzer.toml` supplies local SDK dependency
-patches and the AArch64 kernel configuration to Cargo. It allows analysis
-without first assembling an SDK; production Native builds continue to use
-`hyper-cargo` and the assembled SDK. Other LSP clients can use the same
-`linkedProjects` list and `cargo.configPath` setting, resolved from the
-repository root. When adding an independent Cargo project, add its manifest
-to the list; SDK workspace members are discovered automatically.
+patches and the AArch64 kernel configuration to Cargo. Applications and the std
+smoke program declare their default editor target in workspace-local Cargo
+configuration. The freestanding Rust smoke program selects `aarch64-unknown-none`;
+kernel and host projects retain their host target. The shared std source
+tree contains both HypeR and upstream host implementations; each project selects
+its platform through the actual target cfgs. This resolves `File::into_std()`
+and `std::os::hyper` without pretending that host code targets HypeR.
+
+Build-script discovery and save-time diagnostics both use
+`scripts/rust-analyzer-check.sh`: Native projects use the existing `hyper-cargo`
+driver with repository SDK source patches, while kernel/host projects keep
+ordinary Cargo checks including test targets. Editor artifacts are separate
+from production outputs under `target/rust-analyzer`. All configured paths are
+repository-relative or resolved at invocation time, so relocating the checkout
+does not require regenerating settings. Root Make commands still explicitly
+select their production architecture and do not load the app-local Cargo config.
+
+The editor defaults to AArch64, like the existing kernel editor configuration;
+this does not change RISC-V builds. Rerun `make sdk ARCH=aarch64` and restart
+rust-analyzer after changing std/toolchain sources. Other LSP clients can reuse
+the settings in `.vscode/settings.json`, with the `rust-analyzer.` prefix removed
+and the repository root as their root directory. When adding an independent
+Cargo project, add its manifest to `linkedProjects`; SDK workspace members are
+discovered automatically.
 
 ## Testing and CI
 

@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: 2026 roolrz
+# SPDX-License-Identifier: Apache-2.0
+
+# Default for Cargo discovery from this workspace. hyper-cargo selects the
+# production target explicitly; root Make targets are unaffected by this file.
+[build]
+target = "../target/sdk/aarch64/share/hyper/targets/aarch64-unknown-hyper.json"

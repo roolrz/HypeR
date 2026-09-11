@@ -56,6 +56,18 @@
       "after": ["console-input", "console-output"],
       "capabilities": [
         {
+          "source": "bootstrap.service-output-channel",
+          "purpose": "stdio.output",
+          "operation": "duplicate",
+          "rights": ["wait", "write", "duplicate", "transfer"]
+        },
+        {
+          "source": "bootstrap.service-output-channel",
+          "purpose": "stdio.error",
+          "operation": "duplicate",
+          "rights": ["wait", "write", "duplicate", "transfer"]
+        },
+        {
           "source": "bootstrap.session-input-channel",
           "purpose": "session.console-input",
           "operation": "move",
@@ -179,8 +191,20 @@
       "image": "/svc/vm-manager",
       "critical": true,
       "restart": "never",
-      "after": [],
+      "after": ["console-output"],
       "capabilities": [
+        {
+          "source": "bootstrap.service-output-channel",
+          "purpose": "stdio.output",
+          "operation": "duplicate",
+          "rights": ["wait", "write", "duplicate", "transfer"]
+        },
+        {
+          "source": "bootstrap.service-output-channel",
+          "purpose": "stdio.error",
+          "operation": "duplicate",
+          "rights": ["wait", "write", "duplicate", "transfer"]
+        },
         {
           "source": "bootstrap.root-directory",
           "purpose": "process.root-directory",

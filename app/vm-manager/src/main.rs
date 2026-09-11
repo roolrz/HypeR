@@ -4,8 +4,9 @@
 //! Fleet policy and supervision for Native virtual-machine runtimes.
 
 use hyper_vm_policy::fleet::{self, Action, Request, Response};
+use std::io::Read;
 use std::mem::MaybeUninit;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hyper_os::capability_channel::{
     CapabilityChannel, CapabilityDisposition, CapabilityReceiveSlot,
@@ -22,6 +23,7 @@ use hyper_os::task::{
 };
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_service::process as process_contract;
+use hyper_service::stdio as stdio_contract;
 use hyper_service::vm as vm_contract;
 use std::process::ExitCode;
 
@@ -82,14 +84,18 @@ impl FleetManager {
     }
 
     fn run(&mut self) -> hyper_os::Result<()> {
+        eprintln!("HypeR vm-manager: ready");
         let provision = self.receive_provision()?;
-        let config = File::from_handle(provision.config);
-        let size = config.size()?;
-        if size > fleet::MAX_CONFIG_BYTES {
+        let config = File::from_handle(provision.config).into_std();
+        // Bound allocation even if the file grows after provisioning.
+        let mut bytes = Vec::new();
+        config
+            .take(fleet::MAX_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| hyper_os::Error::InvalidResponse)?;
+        if bytes.len() as u64 > fleet::MAX_CONFIG_BYTES {
             return Err(hyper_os::Error::InvalidResponse);
         }
-        let mut bytes = vec![0; size as usize];
-        config.read_exact_at(0, &mut bytes)?;
         let config = fleet::Config::parse(&bytes).map_err(|_| hyper_os::Error::InvalidResponse)?;
         self.clients[0] = Some(Client::initial(provision.control));
         self.install_definitions(config.machines)
@@ -578,6 +584,22 @@ impl FleetManager {
         )?;
         builder.set_name("vm-runtime")?;
         builder.add_argument(RUNTIME_ARGUMENT)?;
+        for (output, contract) in [
+            (
+                hyper_rt::process::stdout()?,
+                stdio_contract::STANDARD_OUTPUT_CONTRACT,
+            ),
+            (
+                hyper_rt::process::stderr()?,
+                stdio_contract::STANDARD_ERROR_CONTRACT,
+            ),
+        ] {
+            builder.add_handle_duplicate(
+                output.as_handle_ref(),
+                contract.purpose(),
+                RightsOffer::Exact(contract.required_rights()),
+            )?;
+        }
         builder.add_handle_duplicate(
             self.libraries.as_handle_ref(),
             startup::DYNAMIC_LIBRARY_DIRECTORY.as_raw(),
@@ -666,12 +688,12 @@ impl FleetManager {
     }
 
     fn complete_restarts(&mut self) -> hyper_os::Result<()> {
-        let now = hyper_os::time::monotonic_now()?.as_nanoseconds();
+        let now = Instant::now();
         for vm in 0..self.machines.len() {
             if let Some(instance) = self.machines[vm].instance.as_mut()
                 && instance
                     .exit_deadline
-                    .is_some_and(|deadline| deadline.as_raw() <= now)
+                    .is_some_and(|deadline| deadline <= now)
             {
                 instance.grace_period_expired();
             }
@@ -756,7 +778,7 @@ struct VmInstance {
     console_client: Option<usize>,
     tracker: vm_contract::InstanceTracker,
     stop: vm_contract::InstanceStopState,
-    exit_deadline: Option<hyper_os::time::FiniteDeadline>,
+    exit_deadline: Option<Instant>,
 }
 
 impl VmInstance {
@@ -834,7 +856,11 @@ impl VmInstance {
 
     fn arm_exit_deadline(&mut self) -> hyper_os::Result<()> {
         if self.exit_deadline.is_none() {
-            self.exit_deadline = Some(hyper_os::time::deadline_after(INSTANCE_EXIT_GRACE)?);
+            self.exit_deadline = Some(
+                Instant::now()
+                    .checked_add(INSTANCE_EXIT_GRACE)
+                    .ok_or(hyper_os::Error::InvalidResponse)?,
+            );
         }
         Ok(())
     }

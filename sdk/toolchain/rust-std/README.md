@@ -191,3 +191,15 @@ applications use the assembled SDK.
 The installed SDK selects the target; see [toolchain architecture selection](../README.md#architecture-selection).
 RV64 uses LP64D and a 16-byte aligned stack. Both architectures share this std
 PAL and key-based TLS implementation; neither currently supports compiler ELF TLS.
+
+### Native file interoperability
+
+`std::os::hyper::io::FromRawHandle` lets trusted adapters transfer an exclusively
+owned Native File handle into `std::fs::File`. Its unsafe contract requires a
+live, uniquely owned File capability. Applications should use the safe
+`hyper_os::fs::File::into_std()` adapter with the SDK's `std` feature instead.
+The transfer preserves rights, starts the stream offset at zero and disables
+append mode; clones share the std stream offset and close only on last drop.
+`std::os::hyper::fs::FileExt::{read_at,read_exact_at}` perform positioned reads
+without changing that offset. No whole-VM, capability-channel or WaitSet API
+is moved into std by this interoperability boundary.

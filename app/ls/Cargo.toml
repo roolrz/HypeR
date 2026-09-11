@@ -18,9 +18,6 @@ test = false
 bench = false
 
 [dependencies]
-hyper-os.workspace = true
-hyper-rt.workspace = true
-hyper-service.workspace = true
 clap.workspace = true
 
 [lints]

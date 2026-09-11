@@ -151,6 +151,11 @@ impl Runtime {
             console_input_channel: Some(console_input_channel),
             console_output_channel: Some(console_output_channel),
             session_input_channel: Some(session_input_channel),
+            // Share only the writer with services. Output bypasses session so
+            // session's own logging never depends on its relay loop draining it.
+            service_output_channel: session_output_channel
+                .duplicate(hyper_service::stdio::STANDARD_OUTPUT_CONTRACT.allowed_rights())
+                .map_err(|_| Error::OperatingSystem)?,
             session_output_channel: Some(session_output_channel),
             session_client_input_channel: Some(session_client_input_channel),
             session_client_output_channel: Some(session_client_output_channel),

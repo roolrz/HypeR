@@ -80,6 +80,7 @@ define_bootstrap_authorities! {
     VmProvisioningChannel = 23 => "bootstrap.vm-provisioning-channel",
     VmManagerConnectionChannel = 24 => "bootstrap.vm-manager-connection-channel",
     VmClientConnectionChannel = 25 => "bootstrap.vm-client-connection-channel",
+    ServiceOutputChannel = 26 => "bootstrap.service-output-channel",
 }
 
 /// Stateless policy used to validate a manifest before touching live handles.
@@ -102,6 +103,11 @@ impl AuthorityPolicy for BootstrapPolicy {
             | BootstrapAuthority::ShellInputChannel
             | BootstrapAuthority::ShellOutputChannel
             | BootstrapAuthority::ShellErrorChannel => move_authority(authority),
+            BootstrapAuthority::ServiceOutputChannel => duplicate_authority(
+                authority,
+                ByteChannelObject::KIND.as_raw(),
+                stdio_contract::STANDARD_OUTPUT_CONTRACT.allowed_rights(),
+            ),
             BootstrapAuthority::RootDirectory => duplicate_authority(
                 authority,
                 DirectoryObject::KIND.as_raw(),
@@ -192,11 +198,13 @@ impl AuthorityPolicy for BootstrapPolicy {
         let contract = match image {
             CONSOLE_INPUT_IMAGE => find_contract(console_contract::INPUT_STARTUP_CONTRACTS, name),
             CONSOLE_OUTPUT_IMAGE => find_contract(console_contract::OUTPUT_STARTUP_CONTRACTS, name),
-            SESSION_IMAGE => find_contract(session_contract::STARTUP_CONTRACTS, name),
+            SESSION_IMAGE => find_contract(session_contract::STARTUP_CONTRACTS, name)
+                .or_else(|| find_contract(stdio_contract::STARTUP_CONTRACTS, name)),
             SHELL_IMAGE => find_contract(stdio_contract::STARTUP_CONTRACTS, name)
                 .or_else(|| find_contract(process_contract::SHELL_STARTUP_CONTRACTS, name))
                 .or_else(|| find_contract(vm_contract::CLIENT_STARTUP_CONTRACTS, name)),
             VM_MANAGER_IMAGE => find_contract(vm_contract::MANAGER_STARTUP_CONTRACTS, name)
+                .or_else(|| find_contract(stdio_contract::STARTUP_CONTRACTS, name))
                 .or_else(|| find_contract(process_contract::VM_MANAGER_STARTUP_CONTRACTS, name)),
             _ => None,
         }?;
