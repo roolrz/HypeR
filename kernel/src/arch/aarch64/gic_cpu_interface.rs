@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! `AArch64` system-register glue for the reusable `GICv3` driver.
+//! Selected physical GIC interface and architecture-local IPI routing.
 
 use core::arch::asm;
 
@@ -10,6 +10,76 @@ use hyper::drivers::interrupt::gicv3::CpuInterface;
 use hyper::hal::interrupt::InterruptId;
 
 use super::registers;
+
+use super::barrier::Aarch64Barrier;
+use super::interrupt_controller::Error;
+use core::sync::atomic::{AtomicU64, Ordering};
+use hyper::drivers::interrupt::gicv2::GicV2Local;
+use hyper::sync::PublishedOnce;
+
+enum Interface {
+    V2(GicV2Local<Aarch64Barrier>),
+    V3,
+}
+static INTERFACE: PublishedOnce<Interface> = PublishedOnce::new();
+// Indexed by hardware CPU target bit, not by MPIDR Aff0 or logical CPU number.
+static V2_AFFINITIES: [AtomicU64; 8] = [const { AtomicU64::new(u64::MAX) }; 8];
+
+pub(super) fn interface_installed() -> bool {
+    INTERFACE.get().is_some()
+}
+pub(super) fn install_v3() -> Result<(), Error> {
+    INTERFACE
+        .publish(Interface::V3)
+        .map_err(|_| Error::AlreadyInitialized)
+}
+pub(super) fn install_v2(local: GicV2Local<Aarch64Barrier>) -> Result<(), Error> {
+    register_v2_cpu(local)?;
+    INTERFACE
+        .publish(Interface::V2(local))
+        .map_err(|_| Error::AlreadyInitialized)
+}
+pub(super) fn register_v2_cpu(local: GicV2Local<Aarch64Barrier>) -> Result<(), Error> {
+    let mask = local.target()?;
+    let slot = &V2_AFFINITIES[mask.trailing_zeros() as usize];
+    slot.compare_exchange(
+        u64::MAX,
+        u64::from(current_gic_affinity()),
+        Ordering::Release,
+        Ordering::Relaxed,
+    )
+    .map(|_| ())
+    .map_err(|_| Error::AlreadyInitialized)
+}
+pub fn guest_interrupts_supported() -> bool {
+    matches!(INTERFACE.get(), Some(Interface::V3))
+}
+
+fn send_targeted(interrupt: InterruptId, affinity: u32) -> bool {
+    match INTERFACE.get() {
+        Some(Interface::V2(local)) => {
+            let Some(index) = V2_AFFINITIES
+                .iter()
+                .position(|slot| slot.load(Ordering::Acquire) == u64::from(affinity))
+            else {
+                return false;
+            };
+            local.send_sgi(interrupt, 1 << index)
+        }
+        Some(Interface::V3) => {
+            let Some(value) = targeted_sgi_value(interrupt, affinity) else {
+                return false;
+            };
+            // SAFETY: Published GICv3 setup enabled SRE before admitting targets.
+            // Complete durable work publication before sending the doorbell.
+            unsafe {
+                asm!("dsb ishst", "msr ICC_SGI1R_EL1, {value}", value = in(reg) value, options(nostack, preserves_flags));
+            }
+            true
+        }
+        None => false,
+    }
+}
 
 /// `AArch64` implementation of the `GICv3` system-register CPU interface.
 pub struct Aarch64GicCpuInterface;
@@ -140,20 +210,7 @@ pub fn notify_kernel_rpc(cpu: CpuIndex, reasons: u8) -> bool {
     let Some(interrupt) = kernel_rpc_interrupt() else {
         return false;
     };
-    let Some(value) = targeted_sgi_value(interrupt, affinity) else {
-        return false;
-    };
-    // SAFETY: SGI 8 is reserved for this transport, controller setup is
-    // complete, and route publication preceded admission of the target CPU.
-    unsafe {
-        asm!(
-            "dsb ishst",
-            "msr ICC_SGI1R_EL1, {value}",
-            value = in(reg) value,
-            options(nostack, preserves_flags)
-        );
-    }
-    true
+    send_targeted(interrupt, affinity)
 }
 
 /// Prompts one logical CPU to evaluate its pending reschedule state.
@@ -179,30 +236,10 @@ fn notify_with_reschedule_sgi(cpu: CpuIndex) -> bool {
     let Some(affinity) = super::smp::gic_affinity(cpu.get()) else {
         return false;
     };
-    let Some(value) = targeted_sgi_value(
+    send_targeted(
         InterruptId::new(registers::GIC_RESCHEDULE_SGI as u32),
         affinity,
-    ) else {
-        return false;
-    };
-
-    // The caller Release-publishes its durable condition: scheduler pending
-    // for rescheduling, or VM-owned reconcile work for a guest exit. DSB ISHST
-    // completes prior stores before the GIC observes the SGI write, so a target
-    // cannot consume the one-shot interrupt and then observe stale shared
-    // state. ICC_SGI1R_EL1 does not change instruction context, so no post-write
-    // ISB is required.
-    // SAFETY: The GICv3 system-register interface is initialized before the
-    // reschedule interrupt is registered or any secondary becomes schedulable.
-    unsafe {
-        asm!(
-            "dsb ishst",
-            "msr ICC_SGI1R_EL1, {value}",
-            value = in(reg) value,
-            options(nostack, preserves_flags)
-        );
-    }
-    true
+    )
 }
 
 fn targeted_sgi_value(interrupt: InterruptId, affinity: u32) -> Option<u64> {
@@ -242,6 +279,11 @@ pub fn broadcast_crash_stop() -> bool {
 }
 
 fn broadcast_sgi(interrupt: InterruptId) -> bool {
+    match INTERFACE.get() {
+        Some(Interface::V2(local)) => return local.broadcast_sgi(interrupt),
+        Some(Interface::V3) => {}
+        None => return false,
+    }
     if interrupt.get() >= 16 {
         return false;
     }
@@ -261,13 +303,26 @@ fn broadcast_sgi(interrupt: InterruptId) -> bool {
     true
 }
 
-/// Acknowledges the highest-priority physical Group-1 interrupt on this CPU.
+/// Acknowledges the highest-priority physical interrupt on this CPU.
 pub fn acknowledge_interrupt() -> Option<InterruptId> {
+    match INTERFACE.get() {
+        Some(Interface::V2(local)) => return local.acknowledge(),
+        Some(Interface::V3) => {}
+        None => return None,
+    }
     let raw = <Aarch64GicCpuInterface as CpuInterface>::acknowledge();
     (raw < registers::GIC_SPURIOUS_INTERRUPT_MIN as u32).then_some(InterruptId::new(raw))
 }
 
 /// Completes one interrupt returned by [`acknowledge_interrupt`].
 pub fn end_interrupt(interrupt: InterruptId) {
+    match INTERFACE.get() {
+        Some(Interface::V2(local)) => {
+            local.end(interrupt);
+            return;
+        }
+        Some(Interface::V3) => {}
+        None => return,
+    }
     <Aarch64GicCpuInterface as CpuInterface>::end(interrupt.get());
 }

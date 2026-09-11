@@ -7,7 +7,7 @@
  * AArch64 position-independent bootstrap for the Linux kernel boot ABI.
  *
  * This is the only assembly startup path. It establishes deterministic EL2
- * state, a QEMU `virt` bootstrap identity map, and a Rust-compatible stack.
+ * state, a firmware-described bootstrap identity map, and a Rust-compatible stack.
  * All symbol addresses are formed with PC-relative instructions.
  */
 
@@ -84,12 +84,21 @@ aarch64_primary_entry:
     bl      aarch64_boot_apply_relocations
     bl      aarch64_boot_initialize_el2
     bl      aarch64_boot_clear_bss
-    bl      aarch64_boot_build_page_tables
-    bl      aarch64_boot_enable_translation
-
+    // Firmware parsing runs allocation-free before enabling translations.
     adrp    x1, __boot_stack_top
     add     x1, x1, :lo12:__boot_stack_top
     mov     sp, x1
+    mov     x29, xzr
+    bl      aarch64_boot_build_page_tables
+    mov     x0, x20
+    adrp    x1, __boot_l1_table
+    add     x1, x1, :lo12:__boot_l1_table
+    bl      aarch64_prepare_boot_map
+    cbz     x0, .Lunsupported_boot
+    adrp    x0, __boot_l0_table
+    add     x0, x0, :lo12:__boot_l0_table
+    bl      aarch64_boot_enable_translation
+
     mov     x29, xzr
     mov     x30, xzr
     mov     x0, x20
@@ -218,17 +227,6 @@ aarch64_boot_build_page_tables:
     b.ne    .Lclear_table
     orr     x1, x5, #STAGE1_DESC_TABLE_OR_PAGE
     str     x1, [x4]
-    ldr     x1, =BOOT_DEVICE_BLOCK_FLAGS
-    str     x1, [x5]
-    mov     x1, #1
-    ldr     x2, =BOOT_NORMAL_BLOCK_FLAGS
-.Lmap_ram:
-    lsl     x3, x1, #30
-    orr     x3, x3, x2
-    str     x3, [x5, x1, lsl #3]
-    add     x1, x1, #1
-    cmp     x1, #4
-    b.lo    .Lmap_ram
     mov     x0, x4
     ret
 .size aarch64_boot_build_page_tables, . - aarch64_boot_build_page_tables

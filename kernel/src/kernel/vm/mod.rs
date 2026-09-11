@@ -51,6 +51,12 @@ pub(crate) enum InitializationError {
 
 /// Initializes hardware virtualization and guest-visible platform devices.
 pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), InitializationError> {
+    if !crate::hal::vm::platform_supported() {
+        crate::pr_info!(
+            "HypeR: guest VM backend unavailable on this interrupt controller; Native applications remain supported"
+        );
+        return Ok(());
+    }
     let exit_services =
         crate::hal::vm::install_exit_services(crate::kernel::entry::vmexit::services())
             .map_err(InitializationError::EntryServices)?;

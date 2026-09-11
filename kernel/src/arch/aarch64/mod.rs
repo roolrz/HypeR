@@ -371,3 +371,20 @@ pub(crate) fn describe_runtime(mut emit: impl FnMut(core::fmt::Arguments<'_>)) {
         address.stage2_levels(),
     ));
 }
+
+pub use gic_cpu_interface::guest_interrupts_supported;
+
+mod bootstrap_map;
+
+/// # Safety
+/// Runs once with MMU off, after relocation/BSS/stack setup. Firmware supplies
+/// a stable readable DTB; table points to the exclusively owned L1 boot page.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn aarch64_prepare_boot_map(dtb: usize, table: *mut [u64; 512]) -> u64 {
+    // SAFETY: The boot ABI guarantees the complete firmware DTB is readable.
+    let Ok(platform) = (unsafe { hyper::platform::fdt::discover(dtb) }) else {
+        return 0;
+    };
+    // SAFETY: Assembly passes the aligned, exclusive bootstrap L1 page.
+    u64::from(bootstrap_map::populate(unsafe { &mut *table }, &platform))
+}

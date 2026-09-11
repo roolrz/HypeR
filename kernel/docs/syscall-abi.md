@@ -62,10 +62,14 @@ native VMM and services                 Linux / FreeBSD application
                  selected HAL and architecture mechanisms
 ```
 
-Linux used as an I/O backend is a separate, untrusted driver-domain VM. It is
-not the compatibility supervisor and receives no ambient kernel authority. The
-native VMM communicates with it through bounded channels, memory grants, and
-event or backend-session objects; DMA access requires an IOMMU-backed lease.
+Linux used as an I/O backend is a separate VM, not the compatibility supervisor.
+The near-term Pi 5 target uses a trusted Linux VM driving physical network and
+storage devices. Native services communicate through bounded shared-memory
+queues, explicit buffer grants and event/session lifecycles. HypeR-owned RAM is
+excluded from Linux's allocatable memory; this reservation does not provide DMA
+isolation. Device-visible memory cannot be released until DMA is quiescent.
+IOMMU-backed leases are a later prerequisite for untrusted device domains, not
+for this trusted bring-up. See the [current roadmap](../../docs/roadmap.md).
 
 ## Trust and containment
 
@@ -970,11 +974,17 @@ yet a general runtime, vDSO, or secondary-architecture Native entry.
 - evolve the initial EL0 VM manager and per-VM runtime into a validated fleet
   configuration and supervision service without duplicating kernel ownership.
 
-### Phase 5: Linux driver domain
+### Phase 5: Linux I/O VM
 
-- introduce bounded copy-based backend transport first;
-- add MemoryGrant, interrupt, IOMMU, DMA, and DeviceLease revocation; and
-- move to zero-copy only after detach and cache/IOMMU ordering are proven.
+The [current roadmap](../../docs/roadmap.md) makes this the near-term integration
+goal on Pi 5; phase numbering here groups ABI work rather than setting priority.
+
+- support a trusted Linux VM directly driving network and storage devices;
+- add explicit device, interrupt and memory grants with DMA-safe retirement;
+- implement bounded shared request/completion queues with event notification,
+  buffer ownership and cache-ordering rules, allowing zero-copy where valid; and
+- qualify Native I/O and failure handling on Pi 5 before later IOMMU-backed
+  untrusted-domain support.
 
 ### Phase 6: foreign personalities
 

@@ -223,3 +223,15 @@ pub(crate) fn query_pending_interrupt(timer_pending: bool) -> PendingInterruptAc
 
 #[cfg(CONFIG_ARCH_RISCV64)]
 pub(crate) use super::imp::riscv_guest_baseline_available;
+
+/// Whether this platform has an implemented guest interrupt backend.
+pub(crate) fn platform_supported() -> bool {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        super::imp::guest_interrupts_supported()
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        true
+    }
+}

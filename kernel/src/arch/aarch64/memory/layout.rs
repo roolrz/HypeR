@@ -14,7 +14,7 @@ use super::super::address_layout::{AddressLayout, AddressRange};
 
 pub(super) const HOST_LAYOUT: AddressLayout = super::super::address::STAGE1_LAYOUT;
 const _: () = assert!(super::super::address_layout::PAGE_SIZE == hyper::mm::PAGE_SIZE);
-const BOOTSTRAP_ACCESSIBLE_LIMIT: u64 = 0x1_0000_0000;
+const BOOTSTRAP_ACCESSIBLE_LIMIT: u64 = super::super::bootstrap_map::IDENTITY_LIMIT;
 pub(super) type HostLayout = AddressLayout;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

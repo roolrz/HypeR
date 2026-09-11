@@ -150,14 +150,16 @@ impl InterruptStatus {
 #[derive(Clone, Copy)]
 pub struct Pl011 {
     base: usize,
+    has_identification_registers: bool,
 }
 
 impl Pl011 {
     /// Binds a PL011 to a permanent, validated register mapping.
     pub fn from_mapped_mmio(mapping: PermanentMmioMapping) -> Result<Self, MmioMappingError> {
-        let mapping = mapping.validate_window(0x1000, align_of::<u32>())?;
+        let mapping = mapping.validate_window((reg::TDR + 4) as u64, align_of::<u32>())?;
         Ok(Self {
             base: mapping.virtual_start(),
+            has_identification_registers: mapping.resource().size() >= 0x1000,
         })
     }
 
@@ -166,7 +168,11 @@ impl Pl011 {
     /// `base` must identify a mapped PL011 register block for the lifetime of
     /// every copied handle. Register ownership must be coordinated by callers.
     pub(crate) const unsafe fn from_mmio_base(base: usize) -> Self {
-        Self { base }
+        // Early/emergency consoles only access the operational registers.
+        Self {
+            base,
+            has_identification_registers: false,
+        }
     }
 
     pub(crate) const fn mmio_base(self) -> usize {
@@ -331,8 +337,13 @@ impl Pl011 {
         self.read_register(reg::FR) & (reg::FR_CTS | reg::FR_DSR | reg::FR_DCD | reg::FR_RI)
     }
 
-    pub fn peripheral_id(&self) -> [u8; 8] {
-        [
+    /// AXI integrations such as BCM2712 expose only the operational window.
+    /// Never probe `PrimeCell` ID offsets outside the firmware-described resource.
+    pub fn peripheral_id(&self) -> Option<[u8; 8]> {
+        if !self.has_identification_registers {
+            return None;
+        }
+        Some([
             self.read_register(reg::PERIPH_ID0) as u8,
             self.read_register(reg::PERIPH_ID1) as u8,
             self.read_register(reg::PERIPH_ID2) as u8,
@@ -341,7 +352,7 @@ impl Pl011 {
             self.read_register(reg::PCELL_ID1) as u8,
             self.read_register(reg::PCELL_ID2) as u8,
             self.read_register(reg::PCELL_ID3) as u8,
-        ]
+        ])
     }
 
     fn update_control_bit(&self, bit: u32, enabled: bool) {
