@@ -455,7 +455,8 @@ pub(super) const fn status_from_vmo_error(
         }
         crate::kernel::mm::user_space::VmoError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
         crate::kernel::mm::user_space::VmoError::Backend(error) => status_from_page_error(error),
-        crate::kernel::mm::user_space::VmoError::Busy => HYPER_NATIVE_STATUS_BUSY,
+        crate::kernel::mm::user_space::VmoError::Busy
+        | crate::kernel::mm::user_space::VmoError::CowRequired => HYPER_NATIVE_STATUS_BUSY,
         crate::kernel::mm::user_space::VmoError::InvalidRange
         | crate::kernel::mm::user_space::VmoError::SizeOverflow => {
             HYPER_NATIVE_STATUS_INVALID_ARGUMENT
@@ -727,7 +728,7 @@ pub(super) const fn status_from_logical_error(
     match error {
         AddressSpaceError::Account(error) => status_from_resource_error(error),
         AddressSpaceError::Allocation => HYPER_NATIVE_STATUS_NO_MEMORY,
-        AddressSpaceError::Busy => HYPER_NATIVE_STATUS_BUSY,
+        AddressSpaceError::Busy | AddressSpaceError::CowRequired => HYPER_NATIVE_STATUS_BUSY,
         AddressSpaceError::Backend(error) => status_from_page_error(error),
         AddressSpaceError::BackingNotResident
         | AddressSpaceError::EmptyRange

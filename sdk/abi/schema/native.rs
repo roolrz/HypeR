@@ -919,6 +919,14 @@ const DIRECTORY_ENTRY_RECORD_SIZE: u16 = 24 + DIRECTORY_ENTRY_NAME_CAPACITY as u
 
 pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
+        name: "private_mapping_copy_on_write",
+        value: 0,
+    },
+    AbiConstant {
+        name: "private_mapping_eager",
+        value: 1,
+    },
+    AbiConstant {
         name: "riscv_isa_i",
         value: 1,
     },
@@ -2243,6 +2251,49 @@ const RESOURCE_LIMITS_FIELDS: &[Field] = &[
 
 pub const RECORDS: &[Record] = &[
     Record {
+        name: "private_mapping",
+        fields: &[
+            Field {
+                name: "source_offset",
+                kind: FieldKind::U64,
+                offset: 0,
+            },
+            Field {
+                name: "source_length",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "address",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "size",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+            Field {
+                name: "data_offset",
+                kind: FieldKind::U64,
+                offset: 32,
+            },
+            Field {
+                name: "permissions",
+                kind: FieldKind::U32,
+                offset: 40,
+            },
+            Field {
+                name: "mode",
+                kind: FieldKind::U32,
+                offset: 44,
+            },
+        ],
+        minimum_size: 48,
+        size: 48,
+        alignment: 8,
+    },
+    Record {
         name: "virtual_machine_platform_info",
         fields: &[
             Field {
@@ -3463,14 +3514,29 @@ const FILE_CREATE_EXECUTABLE_VMO_ARGUMENTS: &[Argument] = &[Argument {
     }),
     memory: None,
 }];
-const FILE_CREATE_EXECUTABLE_VMO_RESULTS: &[ResultValue] = &[ResultValue {
-    name: "vmo",
-    kind: ValueKind::Handle,
-    handle: Some(ProducedHandle {
-        object: ProducedObject::Kind("vmo"),
-        rights: ProducedRights::Fixed(VMO_EXECUTABLE_RIGHTS),
-    }),
-}];
+const FILE_CREATE_EXECUTABLE_VMO_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "vmo",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("vmo"),
+            rights: ProducedRights::Fixed(VMO_EXECUTABLE_RIGHTS),
+        }),
+    },
+    scalar_result("byte_size", ValueKind::ByteCount),
+];
+
+const SNAPSHOT_VMO_RESULTS: &[ResultValue] = &[
+    ResultValue {
+        name: "vmo",
+        kind: ValueKind::Handle,
+        handle: Some(ProducedHandle {
+            object: ProducedObject::Kind("vmo"),
+            rights: ProducedRights::Fixed(VMO_EXECUTABLE_RIGHTS & !RIGHT_EXECUTE),
+        }),
+    },
+    scalar_result("byte_size", ValueKind::ByteCount),
+];
 
 const VMO_READ_ARGUMENTS: &[Argument] = &[
     Argument {
@@ -7212,6 +7278,67 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 114,
+        name: "vmo_create_snapshot",
+        feature: FeatureGate::Core,
+        arguments: &[vmo_argument(RIGHT_READ)],
+        results: SNAPSHOT_VMO_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 115,
+        name: "file_create_snapshot",
+        feature: FeatureGate::Core,
+        arguments: &[file_argument(RIGHT_READ)],
+        results: SNAPSHOT_VMO_RESULTS,
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 116,
+        name: "vmar_map_private",
+        feature: FeatureGate::Core,
+        arguments: &[
+            vmar_argument(RIGHT_MAP),
+            vmo_argument(RIGHT_READ | RIGHT_MAP),
+            Argument {
+                name: "mapping",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "mapping_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("private_mapping"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("mapping_size", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -7228,6 +7355,7 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "Immutable VMO snapshots grant READ and MAP but never WRITE. vmo_create_snapshot coherently copies its source and reports Busy while writable mappings or hardware writers exist. File snapshots capture one content generation; returned byte_size is its exact file length, while backing is page rounded. Private mappings require source READ|MAP and VMAR MAP: source_offset is page aligned, data_offset is less than one page, source_length bytes starting at source_offset+data_offset initialize destination data_offset; all other destination bytes are zero. Writable private views never permit EXECUTE. Executable private views additionally require an executable source VMO and source EXECUTE rights; sanitized pages are sealed and instruction-published before mapping, with no writable alias. Copy-on-write mode shares immutable full pages until first write; eager mode allocates all private pages before publication. Private writes, including kernel copyout and atomic waits, cannot change the source or another private view. Ordinary writable/shared VMOs and exclusive hardware leases keep their stable backing contract. Snapshot bytes and old page versions remain owned through acknowledged translation retirement.",
     "VM platform inspection borrows an INSPECT creation lease without consuming it. Metadata describes the selected local platform: counter_frequency_hz is the actual guest counter frequency, and riscv_isa is a guaranteed subset across all admitted CPUs, not a complete host ISA listing. Other architectures return a zero RISC-V mask. The guarantee remains valid across local CPU migration; cross-machine migration is not implied.",
     "WaitSets are process-local, non-transferable objects with capacity 1..1024. BIND_WAIT authorizes add/rearm/remove, WAIT authorizes consumption. Add requires source WAIT and reserves one event slot; WaitSet and CapabilityChannel sources are unsupported. Registration IDs are globally non-reused. Bind/rearm observe signal levels and sequence under the source lock; one-shot publication does not allocate. Rearm is busy until successful event consumption. Wait returns one exact 24-byte record (registration ID, signal bits, sequence), using an absolute monotonic deadline. Copyout failure restores the event unless removal or closure cancelled it. Source handle close does not cancel object-lifetime subscriptions; final set handle close detaches registrations and wakes consumers. Future CapabilityChannel subscriptions require ownership-epoch invalidation.",
     "ByteChannel duplicate authority permits shared endpoint ownership; peer_closed is published only when the last active endpoint handle closes. Internal operation pins, including WaitSet subscriptions, do not retain active endpoint authority.",

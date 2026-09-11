@@ -344,3 +344,16 @@ const fn same_regime(left: UserTranslationRegime, right: UserTranslationRegime) 
         )
     )
 }
+
+/// Whether a lower-EL fault can be retried after resolving private write backing.
+/// Cache-maintenance faults and stage-1 table walks are not user stores.
+pub(super) const fn is_user_write_page_fault(syndrome: u64) -> bool {
+    let class = (syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK;
+    let status = syndrome & registers::ESR_ABORT_FSC_MASK;
+    let excluded = registers::ESR_DATA_ABORT_S1PTW | (1 << 8) | (1 << 10);
+    class == registers::ESR_EC_DATA_ABORT_LOWER
+        && syndrome & registers::ESR_DATA_ABORT_WNR != 0
+        && syndrome & excluded == 0
+        && status >= registers::ESR_ABORT_PERMISSION_FAULT_LEVEL0
+        && status <= registers::ESR_ABORT_PERMISSION_FAULT_LEVEL3
+}

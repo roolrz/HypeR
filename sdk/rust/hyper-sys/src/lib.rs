@@ -2613,3 +2613,67 @@ pub unsafe fn virtual_machine_creation_lease_get_platform_info(
         )
     }
 }
+
+/// Creates an immutable snapshot of borrowed VMO bytes.
+///
+/// # Safety
+/// `vmo` must name a live readable VMO; the caller adopts the produced handle.
+pub unsafe fn vmo_create_snapshot(vmo: abi::HyperNativeHandle) -> CallResult {
+    // SAFETY: the caller supplies a live borrowed VMO and adopts the result.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMO_CREATE_SNAPSHOT,
+            vmo,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Captures one immutable file-content generation.
+///
+/// # Safety
+/// `file` must name a live readable file; the caller adopts the produced handle.
+pub unsafe fn file_create_snapshot(file: abi::HyperNativeHandle) -> CallResult {
+    // SAFETY: the caller supplies a live borrowed file and adopts the result.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_FILE_CREATE_SNAPSHOT,
+            file,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Installs a private mapping of immutable snapshot bytes.
+///
+/// # Safety
+/// Handles and the input record must be live for this call. The caller must
+/// own the destination virtual range and uphold Rust aliasing for its mappings.
+pub unsafe fn vmar_map_private(
+    vmar: abi::HyperNativeHandle,
+    snapshot: abi::HyperNativeHandle,
+    mapping: *const abi::HyperNativePrivateMapping,
+    mapping_size: usize,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller supplies live handles, request bytes, and destination ownership.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMAR_MAP_PRIVATE,
+            vmar,
+            snapshot,
+            mapping as usize as u64,
+            mapping_size as u64,
+            0,
+            0,
+        )
+        .status
+    }
+}

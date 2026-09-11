@@ -471,6 +471,14 @@ pub fn current_thread_id() -> Result<ThreadId, Error> {
     state::local_current_thread(cpu)
 }
 
+/// Retains the current user Thread for cancellation checks across scheduling.
+/// Kernel and bootstrap Threads have no user object. No execution pointer or
+/// CPU-affine borrow escapes the local scheduler lock.
+pub(crate) fn current_user_thread() -> Result<Option<crate::kernel::process::UserThread>, Error> {
+    let cpu = current_cpu()?;
+    state::local_current_user_thread(cpu)
+}
+
 /// Returns an owned name snapshot for the identified scheduler Thread.
 pub fn thread_name(id: ThreadId) -> Result<ThreadNameSnapshot, Error> {
     read_scheduler(|scheduler| scheduler.with_thread(id, Thread::name_snapshot))

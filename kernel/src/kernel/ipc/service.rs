@@ -444,8 +444,7 @@ impl CapabilityReceiveTarget {
         slot_output: Option<UserSlice>,
         slot_count: usize,
     ) -> Result<Self, ProcessError> {
-        let byte_output = reserve_output(process, byte_output)?;
-        let slot_output = reserve_output(process, slot_output)?;
+        let [byte_output, slot_output] = process.reserve_user_writes([byte_output, slot_output])?;
         let handles = if slot_count == 0 {
             None
         } else {
@@ -628,16 +627,6 @@ fn slice_length(slice: Option<UserSlice>) -> Result<usize, CapabilityChannelServ
         .unwrap_or(0)
         .try_into()
         .map_err(|_| CapabilityChannelServiceError::InvalidInput)
-}
-
-fn reserve_output(
-    process: &Process,
-    output: Option<UserSlice>,
-) -> Result<Option<UserWriteReservation>, ProcessError> {
-    match output {
-        Some(output) if output.length() != 0 => Ok(Some(process.reserve_user_write(output)?)),
-        Some(_) | None => Ok(None),
-    }
 }
 
 fn channel_error_from_process(error: ProcessError) -> CapabilityChannelError {

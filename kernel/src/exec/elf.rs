@@ -142,6 +142,7 @@ pub struct LoadSegment<'image> {
     mapping_address: u64,
     mapping_size: u64,
     data_offset: u64,
+    file_offset: u64,
     memory_address: u64,
     memory_size: u64,
     data: &'image [u8],
@@ -149,6 +150,10 @@ pub struct LoadSegment<'image> {
 }
 
 impl<'image> LoadSegment<'image> {
+    pub const fn file_offset(self) -> u64 {
+        self.file_offset
+    }
+
     pub const fn mapping_address(self) -> u64 {
         self.mapping_address
     }
@@ -663,6 +668,7 @@ fn parse_load_segment<'image>(
         mapping_address,
         mapping_size,
         data_offset,
+        file_offset,
         memory_address: virtual_address,
         memory_size,
         data,

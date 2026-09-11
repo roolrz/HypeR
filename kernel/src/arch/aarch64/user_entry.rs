@@ -414,7 +414,7 @@ impl<'context> ReturnCapability<'context> {
         Ok(())
     }
 
-    pub(crate) fn resume_interrupted(
+    pub(crate) fn resume_execution(
         mut self,
         expected: UserRunBinding,
     ) -> Result<(), CompletionFailure<'context>> {
@@ -669,6 +669,9 @@ fn current_binding(context: &MachineContext) -> Result<UserRunBinding, Error> {
 }
 
 fn fault_kind(syndrome: u64) -> UserFaultKind {
+    if super::user_contract::is_user_write_page_fault(syndrome) {
+        return UserFaultKind::WritePageFault;
+    }
     let class = (syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK;
     match class {
         registers::ESR_EC_INSTRUCTION_ABORT_LOWER => UserFaultKind::InstructionAbort,

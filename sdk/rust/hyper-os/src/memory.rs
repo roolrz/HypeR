@@ -3,8 +3,13 @@
 
 //! Safe ownership and bounded transfer operations for Native VMOs.
 
-use crate::handle::{AnyObject, HandleRef, OwnedHandle, Rights, VmoObject};
+use crate::handle::{AnyObject, FileObject, HandleRef, OwnedHandle, Rights, VmoObject};
+
+mod private;
 use crate::{Error, Result, Status};
+pub use private::{
+    PrivateMapping, PrivateMappingCloseError, PrivateMappingMode, PrivateMappingOptions,
+};
 
 const WRITABLE_RIGHTS: Rights = Rights::DUPLICATE
     .union(Rights::TRANSFER)
@@ -126,5 +131,86 @@ impl WritableVmo {
         } else {
             Ok(())
         }
+    }
+}
+
+/// Immutable bytes captured from one VMO or file-content generation.
+/// A private mapping may be writable without granting write access to this source.
+pub struct SnapshotVmo {
+    handle: OwnedHandle<VmoObject>,
+    byte_size: u64,
+}
+
+impl SnapshotVmo {
+    pub fn from_vmo(source: HandleRef<'_, VmoObject>) -> Result<Self> {
+        // SAFETY: source is borrowed; successful creation transfers one owner.
+        let result = unsafe { hyper_sys::vmo_create_snapshot(source.raw().get()) };
+        Self::adopt(result, source.raw())
+    }
+
+    pub fn from_file(source: HandleRef<'_, FileObject>) -> Result<Self> {
+        // SAFETY: source is borrowed; the returned size belongs to this snapshot.
+        let result = unsafe { hyper_sys::file_create_snapshot(source.raw().get()) };
+        Self::adopt(result, source.raw())
+    }
+
+    fn adopt(result: hyper_sys::CallResult, source: core::num::NonZeroU64) -> Result<Self> {
+        Status::from_raw(result.status).into_result()?;
+        // SAFETY: success transfers one handle, excluding the still-live input.
+        let owner = unsafe {
+            crate::handle::adopt_produced_handle_excluding::<AnyObject>(result.value0, &[source])?
+        };
+        let expected = Rights::DUPLICATE
+            .union(Rights::TRANSFER)
+            .union(Rights::INSPECT)
+            .union(Rights::READ)
+            .union(Rights::MAP);
+        if owner.info()?.rights != expected {
+            return Err(Error::InvalidResponse);
+        }
+        let handle = owner
+            .downcast::<VmoObject>()
+            .map_err(|failure| failure.error())?;
+        Ok(Self {
+            handle,
+            byte_size: result.value1,
+        })
+    }
+
+    #[must_use]
+    pub const fn byte_size(&self) -> u64 {
+        self.byte_size
+    }
+
+    #[must_use]
+    pub fn as_handle_ref(&self) -> HandleRef<'_, VmoObject> {
+        self.handle.as_handle_ref()
+    }
+
+    pub fn read_exact_at(&self, offset: u64, bytes: &mut [u8]) -> Result<()> {
+        let length = u64::try_from(bytes.len()).map_err(|_| Error::OffsetOverflow)?;
+        if offset.checked_add(length).ok_or(Error::OffsetOverflow)? > self.byte_size {
+            return Err(Error::InvalidMemoryRange);
+        }
+        let mut completed = 0;
+        while completed < bytes.len() {
+            let end = completed
+                .saturating_add(MAX_TRANSFER_BYTES)
+                .min(bytes.len());
+            let chunk = &mut bytes[completed..end];
+            // SAFETY: the destination is uniquely borrowed for the syscall and
+            // the source handle/range remains owned by this immutable snapshot.
+            Status::from_raw(unsafe {
+                hyper_sys::vmo_read(
+                    self.handle.as_handle_ref().raw().get(),
+                    offset + completed as u64,
+                    chunk.as_mut_ptr(),
+                    chunk.len(),
+                )
+            })
+            .into_result()?;
+            completed = end;
+        }
+        Ok(())
     }
 }

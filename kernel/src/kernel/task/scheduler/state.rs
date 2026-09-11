@@ -601,6 +601,23 @@ pub(super) fn local_current_vcpu(cpu: CpuIndex) -> Result<Option<CurrentVcpu>, E
     })
 }
 
+pub(super) fn local_current_user_thread(
+    cpu: CpuIndex,
+) -> Result<Option<crate::kernel::process::UserThread>, Error> {
+    CPU_SCHEDULERS[cpu].with(|slot| {
+        let local = slot.as_mut().ok_or(Error::CpuNotRegistered)?;
+        let id = local.current;
+        local
+            .thread_authority()
+            .with_thread(id, |thread, schedule| {
+                if schedule.state != ThreadState::Running {
+                    return Err(Error::InvalidThreadState);
+                }
+                Ok(thread.user_thread().cloned())
+            })?
+    })
+}
+
 pub(super) fn local_current_user(cpu: CpuIndex) -> Result<CurrentUser, Error> {
     CPU_SCHEDULERS[cpu].with(|slot| {
         let local = slot.as_mut().ok_or(Error::CpuNotRegistered)?;

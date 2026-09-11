@@ -57,6 +57,25 @@ pub(crate) enum Error {
     Vmo(VmoError<KernelPageError, ResourceError>),
 }
 
+impl Error {
+    pub(crate) const fn is_stale_mapping_transaction(&self) -> bool {
+        match self {
+            Self::Logical(error) => error.is_stale_transaction(),
+            Self::Residency(ResidencyError::StaleEpoch) => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) const fn is_mapping_conflict(&self) -> bool {
+        matches!(
+            self,
+            Self::Logical(
+                LogicalError::Busy | LogicalError::StaleTransaction | LogicalError::CowRequired
+            ) | Self::Residency(ResidencyError::Busy | ResidencyError::StaleEpoch)
+        )
+    }
+}
+
 #[must_use = "recover and retry the exact native address-space owner"]
 pub(crate) struct RetirementFailure {
     error: Error,
@@ -259,15 +278,17 @@ pub(crate) struct NativeAddressSpace {
     _owner_charge: CommittedCharge,
 }
 
-/// Unpublished, fully resident storage for one final image mapping.
-///
-/// Loader writes and relocations operate before this owner is consumed. Once
-/// installed, executable data is copied into an immutable instruction-coherent
-/// snapshot, preserving W^X even if another staging reference survives.
+/// Unpublished image storage. Relocations materialize private pages before
+/// publication; untouched pages retain the immutable file generation.
 pub(crate) struct NativeImageSegment {
     range: UserSlice,
     permissions: Permissions,
-    storage: WritableVmo<KernelPageBackend, DomainAccount>,
+    storage: ImageStorage,
+}
+
+enum ImageStorage {
+    Writable(WritableVmo<KernelPageBackend, DomainAccount>),
+    Private(super::vmo::PrivateViewBuilder<KernelPageBackend, DomainAccount>),
 }
 
 impl NativeImageSegment {
@@ -290,7 +311,37 @@ impl NativeImageSegment {
         Ok(Self {
             range,
             permissions,
-            storage,
+            storage: ImageStorage::Writable(storage),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn try_from_snapshot(
+        address_space: &NativeAddressSpace,
+        range: UserSlice,
+        permissions: Permissions,
+        source: super::SnapshotVmo<KernelPageBackend, DomainAccount>,
+        source_offset: u64,
+        source_length: u64,
+        data_offset: u64,
+    ) -> Result<Self, Error> {
+        if !permissions.is_valid() || permissions == Permissions::NONE {
+            return Err(Error::Unsupported);
+        }
+        let view = super::vmo::PrivateViewBuilder::try_new(
+            source,
+            range.length(),
+            source_offset,
+            source_length,
+            data_offset,
+            super::PrivateMappingMode::CopyOnWrite,
+            KernelPageBackend,
+            address_space.account.clone(),
+        )?;
+        Ok(Self {
+            range,
+            permissions,
+            storage: ImageStorage::Private(view),
         })
     }
 
@@ -298,22 +349,26 @@ impl NativeImageSegment {
         self.range
     }
 
-    pub(crate) fn write(&self, offset: u64, source: &[u8]) -> Result<(), Error> {
-        self.storage.write(offset, source).map_err(Error::Vmo)
-    }
-
     pub(crate) fn read_word(&self, address: UserAddress) -> Result<u64, Error> {
         let offset = self.relative_offset(address, size_of::<u64>())?;
         let mut bytes = [0u8; size_of::<u64>()];
-        self.storage.read(offset, &mut bytes).map_err(Error::Vmo)?;
+        match &self.storage {
+            ImageStorage::Writable(storage) => storage.read(offset, &mut bytes),
+            ImageStorage::Private(storage) => storage.read(offset, &mut bytes),
+        }
+        .map_err(Error::Vmo)?;
         Ok(u64::from_le_bytes(bytes))
     }
 
-    pub(crate) fn write_word(&self, address: UserAddress, value: u64) -> Result<(), Error> {
+    pub(crate) fn write_word(&mut self, address: UserAddress, value: u64) -> Result<(), Error> {
         let offset = self.relative_offset(address, size_of::<u64>())?;
-        self.storage
-            .write(offset, &value.to_le_bytes())
-            .map_err(Error::Vmo)
+        match &mut self.storage {
+            ImageStorage::Writable(storage) => storage.write(offset, &value.to_le_bytes())?,
+            ImageStorage::Private(storage) => {
+                storage.write(offset, &value.to_le_bytes())?;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn install(
@@ -322,28 +377,32 @@ impl NativeImageSegment {
         pin: &(impl PinnedExecution + 'static),
     ) -> Result<(), Error> {
         let logical = address_space.logical();
-        let prepared = if self.permissions.contains(Access::Execute) {
-            let executable = self.storage.try_executable_snapshot(
-                &super::ExecutableProvenance::for_native_image_loader(),
-                pin,
-            )?;
-            logical.prepare_map_executable(
+        let prepared = match self.storage {
+            ImageStorage::Writable(storage) => logical.prepare_map_writable(
                 logical.root_vmar(),
                 self.range,
-                executable,
+                storage,
                 0,
                 self.permissions,
                 self.permissions,
-            )?
-        } else {
-            logical.prepare_map_writable(
-                logical.root_vmar(),
-                self.range,
-                self.storage,
-                0,
-                self.permissions,
-                self.permissions,
-            )?
+            )?,
+            ImageStorage::Private(storage) => {
+                let storage = if self.permissions.contains(Access::Execute) {
+                    storage.finish_executable(
+                        &super::ExecutableProvenance::for_native_image_loader(),
+                        pin,
+                    )?
+                } else {
+                    storage.finish()
+                };
+                logical.prepare_map_private_view(
+                    logical.root_vmar(),
+                    self.range,
+                    storage,
+                    self.permissions,
+                    self.permissions,
+                )?
+            }
         };
         address_space.prepare_change(prepared)?.commit()?;
         Ok(())
@@ -429,10 +488,40 @@ impl NativeAddressSpace {
         }
     }
 
+    /// Prepares private backing before any kernel or userspace write can use it.
+    /// The immutable old mapping set keeps shared pages alive through every
+    /// active-root replacement and inactive-resident invalidation acknowledgement.
+    pub(crate) fn resolve_private_write(&self, destination: UserSlice) -> Result<(), Error> {
+        if let Some(prepared) = self.logical.prepare_private_write(destination)? {
+            self.prepare_change(prepared)?.commit()?;
+        }
+        Ok(())
+    }
+
+    /// Resolves only an admitted private mapping, including a stale fault after
+    /// a sibling Thread has already materialized that page. Ordinary protection
+    /// violations must never be converted into an endless instruction retry.
+    pub(crate) fn resolve_write_fault(&self, address: UserAddress) -> Result<bool, Error> {
+        if !self.logical.is_private_write(address) {
+            return Ok(false);
+        }
+        let page = UserAddress::new(address.get() / PAGE_SIZE * PAGE_SIZE);
+        self.resolve_private_write(UserSlice::new(page, PAGE_SIZE)?)?;
+        Ok(true)
+    }
+
     /// Copies kernel-owned bytes through the logical user-address contract.
     pub(crate) fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), Error> {
-        self.logical.copy_to_user(destination, source)?;
-        Ok(())
+        match self.logical.copy_to_user(destination, source) {
+            Ok(()) => Ok(()),
+            Err(LogicalError::CowRequired) => {
+                self.resolve_private_write(destination)?;
+                self.logical
+                    .copy_to_user(destination, source)
+                    .map_err(Error::Logical)
+            }
+            Err(error) => Err(Error::Logical(error)),
+        }
     }
 
     /// Copies bytes from the current logical user-address mappings.
@@ -450,7 +539,14 @@ impl NativeAddressSpace {
         address: UserAddress,
     ) -> Result<super::address_space::PinnedAtomicWord<KernelPageBackend, DomainAccount>, Error>
     {
-        Ok(self.logical.pin_atomic_u32(address)?)
+        match self.logical.pin_atomic_u32(address) {
+            Ok(pin) => Ok(pin),
+            Err(LogicalError::CowRequired) => {
+                self.resolve_private_write(UserSlice::new(address, 4)?)?;
+                self.logical.pin_atomic_u32(address).map_err(Error::Logical)
+            }
+            Err(error) => Err(Error::Logical(error)),
+        }
     }
 
     /// Reserves a stable writable mapping for capability-returning syscalls.
@@ -458,7 +554,14 @@ impl NativeAddressSpace {
         owner: FallibleArc<Self>,
         destination: UserSlice,
     ) -> Result<UserWriteReservation, Error> {
-        let plan = owner.logical.prepare_user_write(destination)?;
+        let plan = match owner.logical.prepare_user_write(destination) {
+            Ok(plan) => plan,
+            Err(LogicalError::CowRequired) => {
+                owner.resolve_private_write(destination)?;
+                owner.logical.prepare_user_write(destination)?
+            }
+            Err(error) => return Err(Error::Logical(error)),
+        };
         Ok(UserWriteReservation {
             owner,
             plan: Some(plan),
@@ -511,7 +614,8 @@ impl NativeAddressSpace {
                             address: snapshot.range.base().get() + offset,
                             physical,
                             readable: snapshot.permissions.contains(Access::Read),
-                            writable: snapshot.permissions.contains(Access::Write),
+                            writable: snapshot.permissions.contains(Access::Write)
+                                && pages.page_is_writable(index),
                             executable: snapshot.permissions.contains(Access::Execute),
                         });
                     }

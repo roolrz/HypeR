@@ -1397,11 +1397,30 @@ impl MemoryServices for DeferredProcessServices<'_> {
 
     fn create_file_executable_vmo(
         &self,
-        file: HandleValue,
-    ) -> Result<HandleValue, crate::kernel::mm::user_space::MemoryServiceError> {
-        crate::kernel::mm::user_space::create_file_executable_vmo(&self.session.process, file)
+        value: HandleValue,
+    ) -> Result<(HandleValue, u64), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::create_file_executable_vmo(&self.session.process, value)
     }
-
+    fn create_file_snapshot(
+        &self,
+        value: HandleValue,
+    ) -> Result<(HandleValue, u64), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::create_file_snapshot(&self.session.process, value)
+    }
+    fn create_vmo_snapshot(
+        &self,
+        value: HandleValue,
+    ) -> Result<(HandleValue, u64), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::create_vmo_snapshot(&self.session.process, value)
+    }
+    fn map_private(
+        &self,
+        vmar: HandleValue,
+        snapshot: HandleValue,
+        request: crate::kernel::mm::user_space::PrivateMappingRequest,
+    ) -> Result<(), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::map_private(&self.session.process, vmar, snapshot, request)
+    }
     fn read_vmo(
         &self,
         vmo: HandleValue,
@@ -1864,7 +1883,7 @@ fn run_session(
                 let result = if stop_requested {
                     completion.discard(binding)
                 } else {
-                    completion.resume_interrupted(binding)
+                    completion.resume_execution(binding)
                 };
                 if let Err(failure) = result {
                     fail_completion(failure);
@@ -1875,12 +1894,42 @@ fn run_session(
                 }
             }
             crate::hal::user::UserExit::Fault { fault, completion } => {
-                session.process.request_stop(fault_reason(fault));
-                if let Err(failure) = completion.discard(binding) {
-                    fail_completion(failure);
+                let resolution = if !stop_requested && fault.kind() == UserFaultKind::WritePageFault
+                {
+                    execution_owner
+                        .address_space()
+                        .resolve_write_fault(UserAddress::new(fault.address()))
+                } else {
+                    Ok(false)
+                };
+                let retry_conflict = resolution
+                    .as_ref()
+                    .is_err_and(|error| error.is_mapping_conflict());
+                let resolved = matches!(resolution, Ok(true));
+                let stopped = session.thread.snapshot().phase == UserThreadPhase::StopRequested;
+                if !stopped && (resolved || retry_conflict) {
+                    // The faulting PC and every register remain unchanged. The
+                    // previous machine run is acknowledged before scheduling;
+                    // admission on the next iteration observes the current root.
+                    if let Err(failure) = completion.resume_execution(binding) {
+                        fail_completion(failure);
+                    }
+                    stopped_run.acknowledge_architecture_exit();
+                    if retry_conflict
+                        && let Err(error) = crate::kernel::task::scheduler::yield_now()
+                    {
+                        fail_run("failed to yield a contended private-page fault", error);
+                    }
+                } else {
+                    if !stopped {
+                        session.process.request_stop(fault_reason(fault));
+                    }
+                    if let Err(failure) = completion.discard(binding) {
+                        fail_completion(failure);
+                    }
+                    stopped_run.acknowledge_architecture_exit();
+                    return;
                 }
-                stopped_run.acknowledge_architecture_exit();
-                return;
             }
         }
         (pin, execution) = reacquire_execution(session);
@@ -1998,7 +2047,7 @@ fn finish_pin(pin: crate::kernel::task::scheduler::UserRunGuard) {
 fn fault_reason(fault: UserFault) -> TerminalReason {
     let class = match fault.kind() {
         UserFaultKind::InstructionAbort => 1,
-        UserFaultKind::DataAbort => 2,
+        UserFaultKind::DataAbort | UserFaultKind::WritePageFault => 2,
         UserFaultKind::Alignment => 3,
         UserFaultKind::IllegalInstruction => 4,
         UserFaultKind::SystemAccess => 5,

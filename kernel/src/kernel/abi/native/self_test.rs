@@ -560,11 +560,33 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         fn create_file_executable_vmo(
             &self,
             _: HandleValue,
-        ) -> Result<HandleValue, MemoryServiceError> {
+        ) -> Result<(HandleValue, u64), MemoryServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(MemoryServiceError::Process(ProcessError::Allocation))
         }
-
+        fn create_file_snapshot(
+            &self,
+            _: HandleValue,
+        ) -> Result<(HandleValue, u64), MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+        fn create_vmo_snapshot(
+            &self,
+            _: HandleValue,
+        ) -> Result<(HandleValue, u64), MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
+        fn map_private(
+            &self,
+            _: HandleValue,
+            _: HandleValue,
+            _: crate::kernel::mm::user_space::PrivateMappingRequest,
+        ) -> Result<(), MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
         fn read_vmo(
             &self,
             _: HandleValue,
@@ -1246,7 +1268,7 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     if bad_rights != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)) {
         return Err(SelfTestError::InvalidRights);
     }
-    let bad_size = dispatch_immediate(
+    let bad_size = dispatch_deferred(
         &services,
         invoke(
             HYPER_NATIVE_SYS_HANDLE_GET_INFO,
@@ -1260,7 +1282,7 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             ],
         ),
     );
-    if bad_size.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT {
+    if bad_size != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)) {
         return Err(SelfTestError::InvalidRecordSize);
     }
     let before_platform_calls = services.calls.get();
@@ -1286,6 +1308,49 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         {
             return Err(SelfTestError::InvalidRecordSize);
         }
+    }
+    let before_private_calls = services.calls.get();
+    for arguments in [
+        [1_u64 << 24 | 1, 1_u64 << 24 | 2, 0x2000, 47, 0, 0],
+        [1_u64 << 24 | 1, 1_u64 << 24 | 2, 0x2000, 48, 1, 0],
+        [1_u64 << 24 | 1, 1_u64 << 24 | 2, 0x2000, 48, 0, 1],
+        [
+            1_u64 << 24 | 1,
+            1_u64 << 24 | 2,
+            0x2000,
+            HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES + 1,
+            0,
+            0,
+        ],
+    ] {
+        let result = dispatch_deferred(
+            &services,
+            invoke(
+                hyper::abi::native::HYPER_NATIVE_SYS_VMAR_MAP_PRIVATE,
+                arguments,
+            ),
+        );
+        if result != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+            || services.calls.get() != before_private_calls
+        {
+            return Err(SelfTestError::InvalidRecordSize);
+        }
+    }
+    // A future private-mapping record may grow only through a zero-filled tail.
+    let private_arguments = [0, 0x5000, 56, 0, 0, 0];
+    if copy_extensible_input_record::<48>(&RecordInput { nonzero_at: None }, &private_arguments, 48)
+        .is_err()
+        || copy_extensible_input_record::<48>(
+            &RecordInput {
+                nonzero_at: Some(0x5000 + 48),
+            },
+            &private_arguments,
+            48,
+        )
+        .err()
+            != Some(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+    {
+        return Err(SelfTestError::InvalidRecordSize);
     }
     let compatible_info = prepare_info_request(
         &[

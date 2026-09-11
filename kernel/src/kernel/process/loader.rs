@@ -63,10 +63,11 @@ pub(crate) struct LoadedProcessImage {
 }
 
 pub(crate) fn load_native(
-    bytes: &[u8],
+    snapshot: &crate::kernel::vfs::ExecutableSnapshot,
     domain: ResourceDomain,
     initial_stack: StartupStackLayout,
 ) -> Result<LoadedProcessImage, Error> {
+    let bytes = snapshot.bytes();
     if bytes.len() > MAXIMUM_IMAGE_BYTES as usize {
         return Err(Error::Address);
     }
@@ -97,6 +98,7 @@ pub(crate) fn load_native(
     let address_space = NativeAddressSpace::try_new(domain.clone(), root)?;
     match prepare_address_space(
         &executable,
+        snapshot,
         load_bias,
         initial_stack,
         &address_space,
@@ -115,12 +117,13 @@ pub(crate) fn load_native(
 
 fn prepare_address_space(
     executable: &Image<'_>,
+    snapshot: &crate::kernel::vfs::ExecutableSnapshot,
     load_bias: u64,
     initial_stack: StartupStackLayout,
     address_space: &NativeAddressSpace,
     domain: &ResourceDomain,
 ) -> Result<ProcessImage, Error> {
-    let mut segments = prepare_segments(executable, load_bias, address_space)?;
+    let mut segments = prepare_segments(executable, snapshot, load_bias, address_space)?;
     let interpreter = match executable.interpreter() {
         Some(path) => Some(load_interpreter(
             path,
@@ -234,7 +237,7 @@ fn load_interpreter(
         .filter(|bias| bias.is_multiple_of(PAGE_SIZE))
         .ok_or(Error::Address)?;
     validate_layout(&image, load_bias)?;
-    let mut segments = prepare_segments(&image, load_bias, address_space)?;
+    let mut segments = prepare_segments(&image, &snapshot, load_bias, address_space)?;
     apply_relocations(&image, load_bias, &mut segments)?;
     Ok(LoadedInterpreter {
         segments,
@@ -308,6 +311,7 @@ fn validate_layout(image: &Image<'_>, load_bias: u64) -> Result<(), Error> {
 
 fn prepare_segments(
     image: &Image<'_>,
+    snapshot: &crate::kernel::vfs::ExecutableSnapshot,
     load_bias: u64,
     address_space: &NativeAddressSpace,
 ) -> Result<Vec<NativeImageSegment>, Error> {
@@ -319,12 +323,15 @@ fn prepare_segments(
         let address = relocated_address(load_bias, segment.mapping_address())?;
         let range = UserSlice::new(UserAddress::new(address), segment.mapping_size())
             .map_err(|_| Error::Address)?;
-        let loaded = NativeImageSegment::try_new(
+        let loaded = NativeImageSegment::try_from_snapshot(
             address_space,
             range,
             map_permissions(segment.permissions()),
+            snapshot.storage().clone(),
+            segment.file_offset() - segment.data_offset(),
+            segment.data().len() as u64,
+            segment.data_offset(),
         )?;
-        loaded.write(segment.data_offset(), segment.data())?;
         prepared.push(loaded);
     }
     Ok(prepared)

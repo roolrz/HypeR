@@ -128,6 +128,8 @@ impl UserRunBinding {
 pub enum UserFaultKind {
     InstructionAbort,
     DataAbort,
+    /// A write translation/permission fault with a valid fault address.
+    WritePageFault,
     Alignment,
     IllegalInstruction,
     SystemAccess,

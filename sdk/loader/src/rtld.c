@@ -66,7 +66,6 @@
 #define MAX_RELOCATIONS 1048576
 #define LIBRARY_BASE UINT64_C(0x20000000)
 #define LIBRARY_LIMIT UINT64_C(0xe0000000)
-#define IO_BYTES 4096
 #define AT_NULL 0
 #define AT_PHDR 3
 #define AT_PHENT 4
@@ -164,7 +163,6 @@ static hyper_native_handle_t library_directory;
 static hyper_native_handle_t root_vmar;
 static hyper_native_handle_t diagnostic_console;
 static const char *last_error;
-static unsigned char io_buffer[IO_BYTES];
 static unsigned char loader_lock;
 
 static size_t string_length(const char *value, size_t maximum);
@@ -302,23 +300,13 @@ static int pointer_aligned(const void *pointer, size_t alignment)
     return ((uintptr_t)pointer & (alignment - 1)) == 0;
 }
 
-static int read_exact(hyper_native_handle_t file, uint64_t offset, void *output, size_t length)
+static int read_exact(hyper_native_handle_t snapshot, uint64_t byte_size,
+    uint64_t offset, void *output, size_t length)
 {
-    unsigned char *bytes = output;
-    size_t complete = 0;
-    while (complete < length) {
-        if ((uint64_t)complete > UINT64_MAX - offset) {
-            return 0;
-        }
-        hyper_call_result_t result = hyper_file_read_at(
-            file, offset + complete, bytes + complete, length - complete);
-        if (result.status != HYPER_NATIVE_STATUS_OK
-            || result.value0 == 0 || result.value0 > length - complete) {
-            return 0;
-        }
-        complete += (size_t)result.value0;
+    if (offset > byte_size || length > byte_size - offset) {
+        return 0;
     }
-    return 1;
+    return hyper_vmo_read(snapshot, offset, output, length) == HYPER_NATIVE_STATUS_OK;
 }
 
 static int parse_dynamic(Object *object)
@@ -835,26 +823,6 @@ static int validate_header(const Elf64_Ehdr *header)
         && header->phnum <= MAX_PROGRAM_HEADERS;
 }
 
-static int copy_file_to_vmo(
-    hyper_native_handle_t file,
-    hyper_native_handle_t vmo,
-    uint64_t file_offset,
-    uint64_t object_offset,
-    uint64_t size)
-{
-    uint64_t complete = 0;
-    while (complete < size) {
-        size_t count = (size_t)((size - complete) < IO_BYTES ? (size - complete) : IO_BYTES);
-        if (!read_exact(file, file_offset + complete, io_buffer, count)
-            || hyper_vmo_write(vmo, object_offset + complete, io_buffer, count)
-                != HYPER_NATIVE_STATUS_OK) {
-            return 0;
-        }
-        complete += count;
-    }
-    return 1;
-}
-
 static void promote_global(Object *object, uint32_t *visited)
 {
     size_t object_index = (size_t)(object - objects);
@@ -909,9 +877,17 @@ static Object *load_object(hyper_native_handle_t directory, const char *name, ui
     }
     hyper_native_handle_t file = opened.value0;
     hyper_native_handle_t file_vmo = 0;
-    hyper_native_handle_t writable_vmo = 0;
+    hyper_call_result_t file_vmo_result = hyper_file_create_executable_vmo(file);
+    if (file_vmo_result.status != HYPER_NATIVE_STATUS_OK) {
+        last_error = "executable VMO creation failed";
+        goto fail;
+    }
+    file_vmo = file_vmo_result.value0;
+    uint64_t file_size = file_vmo_result.value1;
+    (void)hyper_handle_close(file);
+    file = 0;
     Elf64_Ehdr header;
-    if (!read_exact(file, 0, &header, sizeof(header)) || !validate_header(&header)) {
+    if (!read_exact(file_vmo, file_size, 0, &header, sizeof(header)) || !validate_header(&header)) {
         last_error = "invalid shared object header";
         goto fail;
     }
@@ -921,7 +897,7 @@ static Object *load_object(hyper_native_handle_t directory, const char *name, ui
     }
     size_t program_header_bytes = (size_t)header.phnum * sizeof(Elf64_Phdr);
     if (header.phoff > UINT64_MAX - program_header_bytes
-        || !read_exact(file, header.phoff, object->owned_phdr, program_header_bytes)) {
+        || !read_exact(file_vmo, file_size, header.phoff, object->owned_phdr, program_header_bytes)) {
         last_error = "truncated program headers";
         goto fail;
     }
@@ -953,7 +929,8 @@ static Object *load_object(hyper_native_handle_t directory, const char *name, ui
         if ((segment->flags & PF_R) == 0 || (segment->flags & PF_W && segment->flags & PF_X)
             || segment->filesz > segment->memsz
             || segment->vaddr > UINTPTR_MAX - segment->memsz
-            || segment->offset > UINT64_MAX - segment->filesz
+            || segment->offset > file_size
+            || segment->filesz > file_size - segment->offset
             || (segment->align > 1
                 && (segment->align > PAGE_SIZE
                     || (segment->align & (segment->align - 1)) != 0))
@@ -1008,12 +985,6 @@ static Object *load_object(hyper_native_handle_t directory, const char *name, ui
     ++object_count;
     next_library_address = mapped_start + span + PAGE_SIZE;
 
-    hyper_call_result_t file_vmo_result = hyper_file_create_executable_vmo(file);
-    if (file_vmo_result.status != HYPER_NATIVE_STATUS_OK) {
-        last_error = "executable VMO creation failed";
-        goto fail;
-    }
-    file_vmo = file_vmo_result.value0;
     for (size_t index = 0; index < object->phnum; ++index) {
         const Elf64_Phdr *segment = &object->phdr[index];
         if (segment->type != PT_LOAD || segment->memsz == 0) continue;
@@ -1037,28 +1008,17 @@ static Object *load_object(hyper_native_handle_t directory, const char *name, ui
         uint32_t permissions = HYPER_NATIVE_VMAR_PERMISSION_READ;
         if (segment->flags & PF_X) permissions |= HYPER_NATIVE_VMAR_PERMISSION_EXECUTE;
         if (segment->flags & PF_W) permissions |= HYPER_NATIVE_VMAR_PERMISSION_WRITE;
-        hyper_native_handle_t vmo = file_vmo;
-        uint64_t vmo_offset = align_down(segment->offset);
-        if (segment->flags & PF_W) {
-            hyper_call_result_t created = hyper_vmo_create(map_size);
-            if (created.status != HYPER_NATIVE_STATUS_OK) {
-                last_error = "writable VMO creation failed";
-                goto fail;
-            }
-            writable_vmo = created.value0;
-            vmo = writable_vmo;
-            vmo_offset = 0;
-            if (!copy_file_to_vmo(file, vmo, segment->offset, delta, segment->filesz)) {
-                last_error = "writable segment copy failed";
-                goto fail;
-            }
-        }
-        hyper_native_status_t status = hyper_vmar_map(
-            object->vmar, vmo, vmo_offset, address, map_size, permissions);
-        if (writable_vmo != 0) {
-            (void)hyper_handle_close(writable_vmo);
-            writable_vmo = 0;
-        }
+        hyper_native_private_mapping_t mapping = {
+            .source_offset = align_down(segment->offset),
+            .source_length = segment->filesz,
+            .address = address,
+            .size = map_size,
+            .data_offset = delta,
+            .permissions = permissions,
+            .mode = HYPER_NATIVE_PRIVATE_MAPPING_COPY_ON_WRITE,
+        };
+        hyper_native_status_t status = hyper_vmar_map_private(
+            object->vmar, file_vmo, &mapping, sizeof(mapping));
         if (status != HYPER_NATIVE_STATUS_OK) {
             if ((segment->flags & PF_X) != 0) {
                 last_error = "executable shared-object mapping failed";
@@ -1072,8 +1032,6 @@ static Object *load_object(hyper_native_handle_t directory, const char *name, ui
     }
     (void)hyper_handle_close(file_vmo);
     file_vmo = 0;
-    (void)hyper_handle_close(file);
-    file = 0;
     if (!parse_dynamic(object)) {
         return NULL;
     }
@@ -1091,7 +1049,6 @@ static Object *load_object(hyper_native_handle_t directory, const char *name, ui
     return object;
 
 fail:
-    if (writable_vmo != 0) (void)hyper_handle_close(writable_vmo);
     if (file_vmo != 0) (void)hyper_handle_close(file_vmo);
     if (file != 0) (void)hyper_handle_close(file);
     return NULL;

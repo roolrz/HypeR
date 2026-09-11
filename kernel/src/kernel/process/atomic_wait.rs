@@ -61,10 +61,8 @@ pub(crate) fn wait(
     if !address.is_multiple_of(4) {
         return Err(Error::InvalidInput);
     }
-    let space = process.address_space_owner()?;
-    let word = space
-        .pin_atomic_u32(UserAddress::new(address))
-        .map_err(ProcessError::from)?;
+    let word =
+        process.retry_user_memory(|space| space.pin_atomic_u32(UserAddress::new(address)))?;
     let linear =
         crate::kernel::mm::memory::linear_address(word.physical).ok_or(Error::InvalidInput)?;
     // SAFETY: aligned u32 is wholly within a resident writable page. `word`
@@ -140,10 +138,8 @@ pub(crate) fn wake(process: &Process, address: u64, count: u32) -> Result<u64, E
     if !address.is_multiple_of(4) {
         return Err(Error::InvalidInput);
     }
-    let space = process.address_space_owner()?;
-    let word = space
-        .pin_atomic_u32(UserAddress::new(address))
-        .map_err(ProcessError::from)?;
+    let word =
+        process.retry_user_memory(|space| space.pin_atomic_u32(UserAddress::new(address)))?;
     bucket(address).with(|state| {
         let mut woke = 0;
         let mut current = state.waiters.as_deref();
@@ -208,10 +204,8 @@ pub(crate) fn sleep(
 
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn waiter_count(process: &Process, address: u64) -> Result<usize, Error> {
-    let space = process.address_space_owner()?;
-    let word = space
-        .pin_atomic_u32(UserAddress::new(address))
-        .map_err(ProcessError::from)?;
+    let word =
+        process.retry_user_memory(|space| space.pin_atomic_u32(UserAddress::new(address)))?;
     Ok(bucket(address).with(|state| {
         let mut count = 0;
         let mut current = state.waiters.as_deref();

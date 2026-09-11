@@ -165,6 +165,13 @@ hyper_call_result_t hyper_virtual_cpu_get_info(
     hyper_native_handle_t vcpu,
     hyper_native_virtual_cpu_info_t *info);
 hyper_call_result_t hyper_vmo_create(uint64_t size);
+hyper_call_result_t hyper_vmo_create_snapshot(hyper_native_handle_t vmo);
+hyper_call_result_t hyper_file_create_snapshot(hyper_native_handle_t file);
+hyper_native_status_t hyper_vmar_map_private(
+    hyper_native_handle_t vmar,
+    hyper_native_handle_t snapshot,
+    const hyper_native_private_mapping_t *mapping,
+    size_t mapping_size);
 hyper_call_result_t hyper_file_create_executable_vmo(hyper_native_handle_t file);
 hyper_native_status_t hyper_vmo_read(
     hyper_native_handle_t vmo,

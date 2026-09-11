@@ -913,6 +913,13 @@ impl FileObject {
         &self.cache
     }
 
+    pub(crate) fn readable_snapshot(
+        &self,
+        sponsor: &ResourceDomain,
+    ) -> Result<super::ExecutableSnapshot, Error> {
+        self.executable_snapshot(sponsor)
+    }
+
     pub(crate) fn executable_snapshot(
         &self,
         sponsor: &ResourceDomain,

@@ -284,7 +284,7 @@ impl<'context> ReturnCapability<'context> {
         Ok(())
     }
 
-    pub(crate) fn resume_interrupted(
+    pub(crate) fn resume_execution(
         mut self,
         expected: UserRunBinding,
     ) -> Result<(), CompletionFailure<'context>> {
@@ -511,7 +511,8 @@ fn fault_kind(cause: u64) -> UserFaultKind {
     match cause {
         0 | 4 | 6 => UserFaultKind::Alignment,
         1 | 12 => UserFaultKind::InstructionAbort,
-        5 | 7 | 13 | 15 => UserFaultKind::DataAbort,
+        5 | 7 | 13 => UserFaultKind::DataAbort,
+        15 => UserFaultKind::WritePageFault,
         2 => UserFaultKind::IllegalInstruction,
         3 => UserFaultKind::Breakpoint,
         _ => UserFaultKind::OtherSynchronous,
