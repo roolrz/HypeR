@@ -1287,7 +1287,7 @@ pub const CONSTANTS: &[AbiConstant] = &[
     },
     AbiConstant {
         name: "file_max_read_bytes",
-        value: 64 * 1024,
+        value: 2 * 1024 * 1024,
     },
     AbiConstant {
         name: "vmo_max_size_bytes",
@@ -3696,7 +3696,7 @@ const FILE_READ_AT_ARGUMENTS: &[Argument] = &[
             direction: MemoryDirection::Write,
             length: MemoryLength::Bytes {
                 argument: "output_capacity",
-                maximum_bytes: 64 * 1024,
+                maximum_bytes: 2 * 1024 * 1024,
             },
             record: None,
             handles: None,
@@ -3722,7 +3722,7 @@ const FILE_WRITE_AT_ARGUMENTS: &[Argument] = &[
             direction: MemoryDirection::Read,
             length: MemoryLength::Bytes {
                 argument: "input_size",
-                maximum_bytes: 64 * 1024,
+                maximum_bytes: 2 * 1024 * 1024,
             },
             record: None,
             handles: None,

@@ -126,6 +126,8 @@ fn generated_rust_layouts_are_compiler_checked() {
         generated::HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES,
         64 * 1024
     );
+    assert_eq!(generated::HYPER_NATIVE_FILE_MAX_READ_BYTES, 2 * 1024 * 1024);
+    assert_eq!(generated::HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES, 64 * 1024);
     assert_eq!(generated::HYPER_NATIVE_CAPABILITY_CHANNEL_MAX_HANDLES, 16);
     assert_eq!(generated::HYPER_NATIVE_CONSOLE_MAX_TRANSFER_BYTES, 4 * 1024);
     assert_eq!(generated::HYPER_NATIVE_SYS_CONSOLE_READ, 15);
