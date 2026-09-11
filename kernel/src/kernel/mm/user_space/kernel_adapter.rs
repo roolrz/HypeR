@@ -84,11 +84,10 @@ pub(crate) fn fail_exposed_write_after_copy_for_test(countdown: usize) {
 }
 
 pub(crate) fn address_window(
-    exclusive_limit: u64,
+    plan: &crate::hal::user::AddressSpacePlan,
 ) -> Result<UserAddressWindow, crate::hal::user::AddressSpaceError> {
-    // The selected HAL validates both the translation width and reserved host
-    // regions before returning the exclusive user limit.
-    match UserAddressWindow::from_limit(exclusive_limit) {
+    // Consume the selected layout without interpreting architecture identity.
+    match UserAddressWindow::from_limit(plan.address_limit(), plan.application_limit()) {
         Ok(window) => Ok(window),
         Err(_) => Err(crate::hal::user::AddressSpaceError::InvalidAddressLimit),
     }

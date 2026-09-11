@@ -14,22 +14,29 @@ pub use address_space::{
 pub use layout::Aarch64AddressTranslation;
 
 pub(super) fn kernel_region_base() -> u64 {
-    layout::selected().kernel_base
+    layout::HOST_LAYOUT.image().base()
 }
 
-pub(super) fn linear_mapping_base() -> u64 {
-    layout::selected().linear_base
+/// Checks direct-map geometry only; the caller must prove RAM residency and ownership.
+pub(super) fn linear_page_address(physical: hyper::mm::PhysicalAddress) -> Option<usize> {
+    let value = physical.get();
+    if !value.is_multiple_of(hyper::mm::PAGE_SIZE)
+        || value.checked_add(hyper::mm::PAGE_SIZE)? > super::address::physical_address_limit()
+    {
+        return None;
+    }
+    usize::try_from(
+        layout::HOST_LAYOUT
+            .linear()
+            .alias(value, hyper::mm::PAGE_SIZE)?,
+    )
+    .ok()
 }
 
 /// Returns the permanent bootstrap-stack bounds when `stack_pointer` lies in it.
 pub fn bootstrap_stack_bounds(stack_pointer: u64) -> Option<(usize, usize)> {
-    let bottom = usize::try_from(
-        layout::selected()
-            .kernel_stack_base
-            .checked_add(hyper::mm::PAGE_SIZE)?,
-    )
-    .ok()?;
-    let size = page_table::KERNEL_STACK_PAGES.checked_mul(hyper::mm::PAGE_SIZE as usize)?;
-    let top = bottom.checked_add(size)?;
-    (bottom <= stack_pointer as usize && stack_pointer as usize <= top).then_some((bottom, top))
+    let (bottom, top) = layout::HOST_LAYOUT.boot_stack_bounds();
+    let bottom = usize::try_from(bottom).ok()?;
+    let top = usize::try_from(top).ok()?;
+    (bottom as u64 <= stack_pointer && stack_pointer <= top as u64).then_some((bottom, top))
 }

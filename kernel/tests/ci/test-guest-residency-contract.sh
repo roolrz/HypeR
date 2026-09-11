@@ -85,6 +85,12 @@ mutate 'residency retirement must precede identifier reuse' \
     src/kernel/mm/user_space/machine.rs 'state.residency.finish_retirement(cut)' \
     'state.residency.finish_retirement_later(cut)'
 
+mutate 'identifier completion must remain after residency retirement' \
+    src/kernel/mm/user_space/machine.rs 'state.residency.finish_retirement(cut)' \
+    'retiring.complete();\nstate.residency.finish_retirement(cut)'
+mutate 'identifier completion must not disappear' \
+    src/kernel/mm/user_space/machine.rs 'retiring.complete()' 'retiring.skip_retirement()'
+
 copy_sources
 sed '/^pub(in crate::kernel) fn leave(/,/^}/ s/incarnation.translation_epoch()/claim.admitted.translation_epoch()/' \
     "$fixture/src/kernel/vm/memory/residency.rs" >"$fixture/mutated"

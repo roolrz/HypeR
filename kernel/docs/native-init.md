@@ -6,8 +6,9 @@ SPDX-License-Identifier: Apache-2.0
 # Native init contract
 
 The production kernel boot path starts one Native userspace process from the
-firmware-provided initial ramdisk. Linux guest autostart belongs exclusively to
-images built with the `kernel-self-test` Cargo feature.
+firmware-provided initial ramdisk. Linux guest autostart is userspace policy:
+init provisions the VM manager and its isolated VM runtime through Native
+capabilities. Kernel self-test images contain no Linux loader or default VM.
 
 ## Initial ramdisk
 
@@ -57,7 +58,11 @@ header table through one consistent `PT_PHDR` entry. Main images remain below
 the interpreter, and runtime libraries occupy a separate range beginning at
 512 MiB.
 
-The current process layout reserves the user range from 1 MiB through 4 GiB.
+The [Native 64-bit application ABI](syscall-abi.md#native-64-bit-application-address-space-contract)
+uses architecture-specific application and system-managed user regions.
+Current application limits are 128 TiB on AArch64 VA48 and 128 GiB on RISC-V
+Sv39; these are provisional kernel layout policy. The current process
+layout grants only the smaller range from 1 MiB through 4 GiB.
 An `ET_DYN` image is biased so its lowest mapped page begins at 2 MiB. Total
 segment mappings and input image size are each limited to 64 MiB. The initial
 Thread receives a 256 KiB read/write stack below `0xffff0000`, separated from

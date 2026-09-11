@@ -128,7 +128,7 @@ printf '%s\n' "$native_retire" | LC_ALL=C rg -q \
     exit 1
 }
 require_order "$native_retire" 'residency\.finish_retirement\(cut\)' \
-    'complete_identifier_retirement\(retiring\)' \
+    'retiring\.complete\(\)' \
     'residency must become irreversibly retired before identifier reuse'
 if printf '%s\n' "$native_retire" | LC_ALL=C rg -q 'fn retire\(&mut self\)'; then
     echo 'native retirement must not leave a safely reusable moved-out object' >&2

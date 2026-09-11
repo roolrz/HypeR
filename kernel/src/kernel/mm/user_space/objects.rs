@@ -5,6 +5,7 @@
 
 use hyper::mm::FallibleArc;
 
+use super::address_space::ApplicationVmar;
 use super::vmo::ExclusiveHardwareWriteLease;
 use super::{
     DomainAccount, ExecutableAuthority, ExecutableVmo, KernelPageBackend, KernelPageError,
@@ -320,7 +321,7 @@ impl KernelObject for VmoObject {
 /// destroyed child VMAR remains stale even while this object is referenced.
 pub(crate) struct VmarObject {
     address_space: FallibleArc<NativeAddressSpace>,
-    token: Vmar,
+    token: ApplicationVmar,
     _object_charge: CommittedCharge,
 }
 
@@ -333,7 +334,12 @@ impl VmarObject {
         address_space: FallibleArc<NativeAddressSpace>,
         sponsor: &ResourceDomain,
     ) -> Result<Self, MemoryObjectError> {
-        let token = address_space.logical().root_vmar();
+        let token = address_space
+            .logical()
+            .application_vmar(address_space.logical().root_vmar())
+            .ok_or(MemoryObjectError::AddressSpace(
+                super::AddressSpaceError::InvalidRange,
+            ))?;
         Ok(Self {
             address_space,
             token,
@@ -350,8 +356,16 @@ impl VmarObject {
         let token = parent
             .address_space
             .logical()
-            .try_create_vmar(parent.token, range)
+            .try_create_vmar(parent.token.token(), range)
             .map_err(MemoryObjectError::AddressSpace)?;
+        // Child construction proves containment within the checked parent.
+        let token = parent
+            .address_space
+            .logical()
+            .application_vmar(token)
+            .ok_or(MemoryObjectError::AddressSpace(
+                super::AddressSpaceError::InvalidRange,
+            ))?;
         Ok(Self {
             address_space: parent.address_space.clone(),
             token,
@@ -385,11 +399,11 @@ impl VmarObject {
     }
 
     pub(crate) const fn token(&self) -> Vmar {
-        self.token
+        self.token.token()
     }
 
     pub(crate) const fn range(&self) -> UserSlice {
-        self.token.range()
+        self.token.token().range()
     }
 }
 

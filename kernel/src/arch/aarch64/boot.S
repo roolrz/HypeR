@@ -155,22 +155,23 @@ aarch64_boot_apply_relocations:
 /* Establishes deterministic EL2 controls before enabling translation. */
 .type aarch64_boot_initialize_el2, %function
 aarch64_boot_initialize_el2:
-    ldr     x1, =HCR_EL2_BOOT_VALUE
+    // Reject unsupported CPUs before selecting any VHE-only alias or layout.
     mrs     x2, id_aa64mmfr1_el1
     lsr     x2, x2, #ID_AA64MMFR1_VH_SHIFT
     and     x2, x2, #ID_AA64MMFR1_VH_MASK
-    cbz     x2, .Linitialize_el2_hcr
+    cmp     x2, #ID_AA64MMFR1_VH_VHE
+    b.ne    aarch64_unsupported_vhe
     ldr     x1, =HCR_EL2_VHE_HOST_VALUE
-.Linitialize_el2_hcr:
     msr     hcr_el2, x1
-    tst     x1, #HCR_EL2_E2H
-    b.eq    .Linitialize_el2_nvhe_cptr
+    isb
+    // The host alias must be active before CPACR_EL1 selects EL2 controls.
+    mrs     x2, hcr_el2
+    tst     x2, #HCR_EL2_E2H
+    b.eq    aarch64_unsupported_vhe
+    tst     x2, #HCR_EL2_TGE
+    b.eq    aarch64_unsupported_vhe
     ldr     x2, =CPACR_EL1_FPEN_ALL
     msr     cpacr_el1, x2
-    b       .Linitialize_el2_cptr_done
-.Linitialize_el2_nvhe_cptr:
-    msr     cptr_el2, xzr
-.Linitialize_el2_cptr_done:
     msr     hstr_el2, xzr
     msr     mdcr_el2, xzr
     msr     vttbr_el2, xzr
@@ -238,15 +239,8 @@ aarch64_boot_enable_translation:
     dsb     sy
     ldr     x1, =MAIR_EL2_BOOT_VALUE
     msr     mair_el2, x1
-    mrs     x2, hcr_el2
-    tbnz    x2, #34, .Lboot_tcr_vhe
-    ldr     x1, =TCR_EL2_NVHE_BOOT_BASE
-    orr     x1, x1, x23, lsl #TCR_EL2_NVHE_PS_SHIFT
-    b       .Lboot_tcr_ready
-.Lboot_tcr_vhe:
     ldr     x1, =TCR_EL2_VHE_BOOT_BASE
     orr     x1, x1, x23, lsl #TCR_EL2_VHE_IPS_SHIFT
-.Lboot_tcr_ready:
     msr     tcr_el2, x1
     msr     ttbr0_el2, x0
     isb
@@ -264,7 +258,7 @@ aarch64_boot_enable_translation:
  * enters Rust through the high kernel alias. This function never returns.
  *
  * x0 = final TTBR0_EL2 physical address
- * x1 = final TTBR1_EL2 physical address, or TTBR0_EL2 again for nVHE
+ * x1 = final TTBR1_EL2 physical address
  * x2 = virtual load base of the kernel image
  * x3 = virtual top of the final boot stack
  * x4 = selected final TCR_EL2 value
@@ -336,12 +330,8 @@ aarch64_activate_final_address_space:
 
     // Install both roots before enabling the VHE upper walk in TCR_EL2.
     msr     ttbr0_el2, x19
-    cmp     x20, x19
-    b.eq    .Lfinal_roots_ready
-    // The generic system-register spelling keeps the image's Armv8.0 assembly
-    // baseline while this VHE-only access remains behind runtime E2H selection.
+    // The shared bootstrap admitted FEAT_VHE and activated HCR.E2H.
     msr     S3_4_C2_C0_1, x20       // TTBR1_EL2
-.Lfinal_roots_ready:
     msr     tcr_el2, x23
     isb
     tlbi    alle2
@@ -367,6 +357,15 @@ aarch64_activate_final_address_space:
     br      x3
 .size aarch64_activate_final_address_space, . - aarch64_activate_final_address_space
 
+// Deliberately stable two-instruction halt extent for unsupported-hardware
+// diagnostics through an external debugger; no platform UART is assumed.
+.global aarch64_unsupported_vhe
+.type aarch64_unsupported_vhe, %function
+aarch64_unsupported_vhe:
+    wfe
+    b       aarch64_unsupported_vhe
+.size aarch64_unsupported_vhe, . - aarch64_unsupported_vhe
+
 .Lunsupported_boot:
 .Lsecondary_halt:
     wfe
@@ -377,7 +376,7 @@ aarch64_activate_final_address_space:
  *
  * x0 points to a physically addressed SecondaryBootParameters record:
  *   +0  final TTBR0_EL2 root
- *   +8  final TTBR1_EL2 root, or TTBR0_EL2 again for nVHE
+ *   +8  final TTBR1_EL2 root
  *   +16 physical stack top used during the MMU transition
  *   +24 virtual stack top
  *   +32 logical CPU index
@@ -399,15 +398,7 @@ aarch64_secondary_entry:
 
     // Reject an incompatible secondary before enabling its translation regime.
     ldr     x2, [x19, #56]
-    ldr     x6, [x19, #8]
-    ldr     x7, [x19]
-    cmp     x6, x7
-    b.eq    .Lsecondary_nvhe_ps
     ubfx    x3, x2, #TCR_EL2_VHE_IPS_SHIFT, #3
-    b       .Lsecondary_check_pa
-.Lsecondary_nvhe_ps:
-    ubfx    x3, x2, #TCR_EL2_NVHE_PS_SHIFT, #3
-.Lsecondary_check_pa:
     mrs     x4, id_aa64mmfr0_el1
     and     x5, x4, #ID_AA64MMFR0_PARANGE_MASK
     cmp     x5, x3
@@ -424,27 +415,12 @@ aarch64_secondary_entry:
     msr     sctlr_el2, x1
     bl      aarch64_boot_initialize_el2
 
-    // The selected TCR format must match the primary CPU's host mode.
-    mrs     x2, hcr_el2
-    tst     x2, #HCR_EL2_E2H
-    cset    x2, ne
-    ldr     x3, [x19, #8]
-    ldr     x4, [x19]
-    cmp     x3, x4
-    cset    x3, ne
-    cmp     x2, x3
-    b.ne    .Lsecondary_halt
-
     ldr     x1, =MAIR_EL2_BOOT_VALUE
     msr     mair_el2, x1
     ldr     x1, [x19]
     msr     ttbr0_el2, x1
     ldr     x2, [x19, #8]
-    cmp     x2, x1
-    b.eq    .Lsecondary_roots_ready
-    // See the primary transition above.
-    msr     S3_4_C2_C0_1, x2        // TTBR1_EL2
-.Lsecondary_roots_ready:
+    msr     S3_4_C2_C0_1, x2        // TTBR1_EL2, VHE admitted above
     ldr     x1, [x19, #56]
     msr     tcr_el2, x1
     isb

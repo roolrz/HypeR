@@ -83,11 +83,16 @@ impl PreparedAddressSpace {
     ///
     /// # Safety
     ///
-    /// Execution and all live references must already use permanent aliases.
+    /// Every participating CPU must already execute through permanent upper aliases,
+    /// and all live references must use those aliases. No secondary may still
+    /// enter through the transition hierarchy.
     /// The caller must exclusively serialize page-table changes and keep the
     /// hierarchy alive and accessible through the linear map.
-    pub unsafe fn retire_identity_mappings(&self, platform: &PlatformInfo) -> Result<(), Error> {
-        page_table::retire_identity_mappings(self.address_space.transition_root, platform)
+    pub unsafe fn retire_identity_mappings(&self, _platform: &PlatformInfo) -> Result<(), Error> {
+        // The shared HAL accepts platform intervals for architectures that mix
+        // identity and permanent mappings. Here TTBR0 owns only transition
+        // aliases, so retiring its entire root requires no interval walk.
+        page_table::retire_identity_mappings(self.address_space.transition_root)
     }
 
     /// Adds a guarded runtime-stack mapping to this hierarchy.

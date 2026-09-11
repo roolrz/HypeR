@@ -3,41 +3,27 @@
 
 //! Native EL0 machine capability selection for `AArch64`.
 //!
-//! This layer selects VHE host stage-1 or nVHE stage-2-only execution. It does
+//! Native EL0 uses the host stage-1 translation regime. This layer does
 //! not own process mappings, syscall policy, or a runnable entry operation.
 
 use core::arch::asm;
 
 use super::user_contract::UserExecutionCapabilities;
 pub use super::user_contract::UserMachineContractError;
-use super::user_contract::UserTranslationRegime;
 
-/// Reports the native-user machine contract selected by the boot CPU.
-///
-/// nVHE is a supported result with a stage-2-only contract, not an absence of
-/// native-user capability. Eight-bit ASIDs/VMIDs are selected conservatively
-/// until boot capability discovery publishes the optional wider fields.
+/// Reports the native-user host-stage contract. Eight-bit ASIDs are selected
+/// conservatively until discovery publishes optional wider identifier fields.
 pub(super) fn execution_capabilities() -> Result<UserExecutionCapabilities, UserMachineContractError>
 {
     let address = super::address::capabilities();
-    if super::host::is_vhe() {
-        if !supports_pan() {
-            return Err(UserMachineContractError::UnsupportedPrivilegedAccessProtection);
-        }
-        UserExecutionCapabilities::new(
-            UserTranslationRegime::VheHostStage1,
-            address.virtual_address_bits,
-            address.physical_address_bits,
-            8,
-        )
-    } else {
-        UserExecutionCapabilities::new(
-            UserTranslationRegime::NvheStage2Only,
-            address.intermediate_physical_address_bits,
-            address.physical_address_bits,
-            8,
-        )
+    if !supports_pan() {
+        return Err(UserMachineContractError::UnsupportedPrivilegedAccessProtection);
     }
+    UserExecutionCapabilities::new(
+        address.virtual_address_bits,
+        address.physical_address_bits,
+        8,
+    )
 }
 
 fn supports_pan() -> bool {
@@ -57,29 +43,26 @@ fn supports_pan() -> bool {
 
 /// Checks native-user protection features required on every admitted PE.
 pub(crate) fn current_cpu_is_compatible() -> bool {
-    !super::host::is_vhe() || supports_pan()
+    supports_pan()
 }
 
 /// Returns the exclusive virtual-address limit available to native userspace.
 ///
 /// VHE assigns native userspace the complete lower `TTBR0_EL2` range while the
-/// host remains in the upper `TTBR1_EL2` range. nVHE uses its complete private
-/// stage-2 IPA range.
+/// host remains in the upper `TTBR1_EL2` range.
 pub fn user_address_limit() -> Result<u64, UserMachineContractError> {
-    let capabilities = execution_capabilities()?;
-    Ok(capabilities.user_address_limit())
+    execution_capabilities()?;
+    Ok(super::address::STAGE1_VA_LIMIT)
 }
 
-pub(crate) fn uses_vhe_translation() -> bool {
-    super::host::is_vhe()
+/// Returns the selected ARM64 layout's exclusive application mapping limit.
+pub fn application_address_limit() -> u64 {
+    super::address::STAGE1_LAYOUT.application_address_limit()
 }
 
 /// Establishes the privileged-access invariant before a VHE user root is
 /// installed on this CPU.
 pub(crate) fn assert_kernel_pan() -> Result<(), UserMachineContractError> {
-    if !super::host::is_vhe() {
-        return Ok(());
-    }
     if !supports_pan() {
         return Err(UserMachineContractError::UnsupportedPrivilegedAccessProtection);
     }

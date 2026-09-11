@@ -496,11 +496,9 @@ fn index(ipa: u64, level: usize) -> usize {
 }
 
 fn validate_table(table: PhysicalAddress) -> Result<(), Error> {
-    if table.get() & (PAGE_SIZE - 1) != 0 || table.get() >= address::physical_address_limit() {
-        Err(Error::InvalidAddress)
-    } else {
-        Ok(())
-    }
+    memory::linear_page_address(table)
+        .map(|_| ())
+        .ok_or(Error::InvalidAddress)
 }
 
 fn validate_page(ipa: u64, physical: u64) -> Result<(), Error> {
@@ -665,9 +663,7 @@ fn write_entry(table: PhysicalAddress, slot: usize, value: u64) -> Result<(), Er
 }
 
 fn table_pointer(table: PhysicalAddress) -> Result<*mut u64, Error> {
-    memory::linear_mapping_base()
-        .checked_add(table.get())
-        .and_then(|address| usize::try_from(address).ok())
+    memory::linear_page_address(table)
         .map(core::ptr::with_exposed_provenance_mut::<u64>)
         .ok_or(Error::InvalidAddress)
 }

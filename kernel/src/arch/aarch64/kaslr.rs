@@ -3,8 +3,7 @@
 
 //! `AArch64` kernel virtual-address randomization policy.
 
-pub const ALIGNMENT: u64 = 2 * 1024 * 1024;
-pub const WINDOW_SIZE: u64 = 512 * 1024 * 1024 * 1024;
+pub use super::address_layout::{KASLR_ALIGNMENT as ALIGNMENT, KASLR_WINDOW_SIZE as WINDOW_SIZE};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -23,6 +22,9 @@ pub struct Layout {
 pub fn select(seed: Option<u64>, image_size: u64) -> Result<Layout, Error> {
     if image_size == 0 {
         return Err(Error::InvalidImage);
+    }
+    if image_size > WINDOW_SIZE {
+        return Err(Error::ImageTooLarge);
     }
     let offset = match seed {
         Some(seed) => hyper::mm::kaslr::select_offset(seed, image_size, WINDOW_SIZE, ALIGNMENT)

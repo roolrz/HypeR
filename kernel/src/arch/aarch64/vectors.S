@@ -98,8 +98,6 @@ aarch64_runtime_vectors:
     cmp     x1, #EXCEPTION_VECTOR_LOWER_AARCH64_SYNC
     b.lo    .Lhost_regime_active
     ldr     x1, [sp, #EXCEPTION_FRAME_RETURN_HCR_OFFSET]
-    tst     x1, #HCR_EL2_E2H
-    b.eq    .Lhost_regime_active
     orr     x1, x1, #HCR_EL2_TGE
     msr     hcr_el2, x1
     isb
@@ -176,7 +174,7 @@ aarch64_runtime_vectors:
 
     // Restore the exact world captured before VHE entry switched into the host
     // register regime. A lower-EL vector alone cannot distinguish a guest from
-    // native EL0, and nVHE native execution also requires TGE/DC to remain set.
+    // Native EL0: guest return clears TGE, while Native return keeps it set.
     ldr     x1, [sp, #EXCEPTION_FRAME_RETURN_HCR_OFFSET]
     msr     hcr_el2, x1
     isb

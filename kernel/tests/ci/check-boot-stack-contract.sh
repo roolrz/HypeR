@@ -44,6 +44,13 @@ check_final_stack_pages() {
     fi
 }
 
-check_final_stack_pages src/arch/aarch64/memory/page_table.rs KERNEL_STACK_PAGES
+check_final_stack_pages src/arch/aarch64/address_layout.rs BOOT_STACK_PAGES
+arm_stack_exports=$(LC_ALL=C rg --no-line-number \
+    '^[[:space:]]*pub\(super\)[[:space:]]+use[[:space:]]+super::super::address_layout::BOOT_STACK_PAGES[[:space:]]+as[[:space:]]+KERNEL_STACK_PAGES[[:space:]]*;' \
+    src/arch/aarch64/memory/page_table.rs || true)
+if [ "$(printf '%s\n' "$arm_stack_exports" | sed '/^$/d' | wc -l | tr -d ' ')" -ne 1 ]; then
+    echo 'AArch64 boot table construction must use the canonical layout stack size exactly once' >&2
+    exit 1
+fi
 check_final_stack_pages src/arch/riscv64/memory/page_table.rs KERNEL_STACK_PAGES
 check_final_stack_pages src/arch/x86_64/memory.rs STACK_PAGES

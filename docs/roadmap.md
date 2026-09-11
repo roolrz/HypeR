@@ -12,24 +12,22 @@ overlap, but a later stage must not bypass an ownership or isolation prerequisit
 from an earlier one. Every stage keeps AArch64 healthy and preserves buildable
 secondary architectures.
 
-## 1. Establish native EL0 and the capability ABI
+## 1. Mature Native userspace and the capability ABI
 
-- extend the current loader-backed AArch64 VHE split `TTBR0_EL2`/`TTBR1_EL2`
-  and nVHE stage-2-only Native path into a service runtime before publishing a
-  binary ABI, retaining a minimal EL1 relay only as a justified compatibility
-  fallback;
+The AArch64 FEAT_VHE and RISC-V Native paths already run the service graph,
+Rust std applications, and userspace-managed Linux VMs. VMO/VMAR, Event,
+Channel, WaitSet, clock/sleep, and process-private atomic wait/wake are
+implemented pre-release foundations.
+
 - extend the implemented Process, UserThread, ProcessImage, TaskGroup,
   ResourceDomain, and address-space lifecycle with multi-Thread race coverage
   and atomic exec quiescence;
 - expand the checked schema's current Rust values, C header, layouts, metadata,
   and reference into generated dispatch wrappers, architecture stubs, and vDSO
   exports;
-- expose the typed VMO/VMAR capability core through Native syscalls, then
-  extend the implemented Event, Channel, and single-object wait foundation with
-  EventPair, WaitSet, clock/timer, and atomic-wait primitives sufficient for a
-  real service runtime;
-- add temporary pre-release debug output, then extend the implemented blocking
-  cancellation with multi-Thread Process qualification before atomic exec.
+- add EventPair and timer objects, and extend wait composition beyond the
+  current supported object types;
+- qualify ABI stability and broaden Rust std support over Native capabilities.
 
 ## 2. Extend VM lifetime and topology
 
@@ -40,8 +38,8 @@ secondary architectures.
 
 ## 3. Evolve native VMM policy
 
-- replace the initial single-guest manager policy with a validated fleet
-  manifest, restart policy, and per-VM health reporting;
+- extend the implemented named-VM fleet and validated configuration with
+  restart policy and per-VM health reporting;
 - add explicit guest-memory grants and virtual-device sessions without sharing
   whole-VM authority with backend services;
 - extend the userspace-owned lifecycle to x86-64 after its stop and stage-2

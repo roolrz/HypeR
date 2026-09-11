@@ -794,39 +794,6 @@ fn inject_undefined(context: &mut VcpuContext, exit: UndefinedExit) -> GuestSync
 }
 
 unsafe fn load_undefined_exception(syndrome: u64, elr: u64, spsr: u64) -> u64 {
-    if super::host::is_vhe() {
-        // SAFETY: The caller guarantees the active guest owns the live EL12
-        // exception register bank.
-        unsafe { load_undefined_exception_vhe(syndrome, elr, spsr) }
-    } else {
-        // SAFETY: The caller guarantees the active guest owns the live EL1
-        // exception register bank.
-        unsafe { load_undefined_exception_nvhe(syndrome, elr, spsr) }
-    }
-}
-
-unsafe fn load_undefined_exception_nvhe(syndrome: u64, elr: u64, spsr: u64) -> u64 {
-    let vbar: u64;
-    // SAFETY: Guest execution is stopped and the caller guarantees the live
-    // nVHE EL1 exception bank belongs to the active vCPU.
-    unsafe {
-        asm!(
-            "mrs {vbar}, VBAR_EL1",
-            "msr ESR_EL1, {esr}",
-            "msr FAR_EL1, xzr",
-            "msr ELR_EL1, {elr}",
-            "msr SPSR_EL1, {spsr}",
-            vbar = out(reg) vbar,
-            esr = in(reg) syndrome,
-            elr = in(reg) elr,
-            spsr = in(reg) spsr,
-            options(nostack, preserves_flags)
-        );
-    }
-    vbar
-}
-
-unsafe fn load_undefined_exception_vhe(syndrome: u64, elr: u64, spsr: u64) -> u64 {
     let vbar: u64;
     // SAFETY: Guest execution is stopped and the caller guarantees the live
     // EL12 exception bank belongs to the active vCPU.

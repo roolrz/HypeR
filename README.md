@@ -13,7 +13,8 @@ capability-based userspace.**
 
 HypeR owns the scheduler, memory management, hardware virtualization, and host
 service runtime. Native userspace services manage Linux guests through explicit
-capabilities. AArch64 is the primary platform.
+capabilities. AArch64 is the primary platform and requires FEAT_VHE (Virtualization
+Host Extensions).
 
 ## Why run HypeR?
 

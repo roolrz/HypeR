@@ -13,19 +13,9 @@ use super::registers;
 const MINIMUM_ADDRESS_BITS: u8 = 32;
 const MAXIMUM_ADDRESS_BITS: u8 = 48;
 
-/// Translation mechanism selected for native EL0 on this host.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum UserTranslationRegime {
-    /// VHE host EL2&0 stage-1 translation with `E2H=1` and `TGE=1`.
-    VheHostStage1,
-    /// nVHE direct EL0 with stage-1 disabled and per-process stage-2.
-    NvheStage2Only,
-}
-
 /// Immutable machine limits selected during boot.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UserExecutionCapabilities {
-    regime: UserTranslationRegime,
     address_bits: u8,
     physical_address_bits: u8,
     translation_identifier_bits: u8,
@@ -34,7 +24,6 @@ pub struct UserExecutionCapabilities {
 impl UserExecutionCapabilities {
     /// Validates one host-selected native-user translation contract.
     pub(super) const fn new(
-        regime: UserTranslationRegime,
         address_bits: u8,
         physical_address_bits: u8,
         translation_identifier_bits: u8,
@@ -51,30 +40,10 @@ impl UserExecutionCapabilities {
             return Err(UserMachineContractError::UnsupportedIdentifierWidth);
         }
         Ok(Self {
-            regime,
             address_bits,
             physical_address_bits,
             translation_identifier_bits,
         })
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) const fn regime(self) -> UserTranslationRegime {
-        self.regime
-    }
-
-    pub(super) const fn address_bits(self) -> u8 {
-        self.address_bits
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) const fn physical_address_bits(self) -> u8 {
-        self.physical_address_bits
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) const fn translation_identifier_bits(self) -> u8 {
-        self.translation_identifier_bits
     }
 
     /// Returns the exclusive native-user limit of the selected translation regime.
@@ -87,10 +56,9 @@ impl UserExecutionCapabilities {
 ///
 /// The generation prevents a future residency token from silently referring
 /// to a recycled software address-space identity. It is not an architectural
-/// ASID or VMID and is never encoded into a register.
+/// ASID and is never encoded into a register.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct UserTranslationRegisters {
-    regime: UserTranslationRegime,
     root_register: u64,
     generation: u64,
 }
@@ -103,14 +71,10 @@ impl UserTranslationRegisters {
     /// identifier while its residency protocol admits the calling CPU.
     pub(super) const fn new(
         capabilities: UserExecutionCapabilities,
-        regime: UserTranslationRegime,
         root_address: u64,
         translation_identifier: u16,
         generation: u64,
     ) -> Result<Self, UserMachineContractError> {
-        if !same_regime(regime, capabilities.regime) {
-            return Err(UserMachineContractError::TranslationRegimeMismatch);
-        }
         if root_address & (registers::TRANSLATION_GRANULE_4K - 1) != 0 {
             return Err(UserMachineContractError::InvalidRootAlignment);
         }
@@ -128,19 +92,11 @@ impl UserTranslationRegisters {
         if generation == 0 {
             return Err(UserMachineContractError::InvalidGeneration);
         }
-        let identifier_shift = match regime {
-            UserTranslationRegime::VheHostStage1 => registers::TTBR_ASID_SHIFT,
-            UserTranslationRegime::NvheStage2Only => registers::VTTBR_EL2_VMID_SHIFT as u64,
-        };
         Ok(Self {
-            regime,
-            root_register: ((translation_identifier as u64) << identifier_shift) | root_address,
+            root_register: ((translation_identifier as u64) << registers::TTBR_ASID_SHIFT)
+                | root_address,
             generation,
         })
-    }
-
-    pub(super) const fn regime(self) -> UserTranslationRegime {
-        self.regime
     }
 
     pub(super) const fn root_register(self) -> u64 {
@@ -156,10 +112,10 @@ impl UserTranslationRegisters {
 ///
 /// A lower-AArch64 exception vector does not identify this state. Native and
 /// guest execution use the same vector slots but require different `HCR_EL2`
-/// values, especially after nVHE native execution has enabled `DC`.
+/// values; Native execution admits EL0 while guest execution admits EL1.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LowerElReturnRegime {
-    Native(UserTranslationRegime),
+    Native,
     #[cfg_attr(not(test), allow(dead_code))]
     Guest,
 }
@@ -168,35 +124,22 @@ impl LowerElReturnRegime {
     /// Produces the `HCR_EL2` value required before `ERET`.
     ///
     /// Native and guest values are both built from explicit policy rather than
-    /// inherited from the preceding lower-EL context. Only the host's `E2H`
-    /// register regime crosses into guest policy. The selected host mode must
-    /// already match `E2H`.
+    /// inherited from the preceding lower-EL context. Both require the host
+    /// EL2&0 register regime (`E2H=1`), while only Native sets `TGE`.
     pub(super) const fn transition_hcr(
         self,
         current_hcr: u64,
     ) -> Result<u64, UserMachineContractError> {
-        let vhe_host = current_hcr & registers::HCR_EL2_E2H != 0;
-        match self {
-            Self::Native(UserTranslationRegime::VheHostStage1) => {
-                if !vhe_host {
-                    return Err(UserMachineContractError::HostModeMismatch);
-                }
-                Ok(native_hcr_base() | registers::HCR_EL2_E2H | registers::HCR_EL2_TGE)
-            }
-            Self::Native(UserTranslationRegime::NvheStage2Only) => {
-                if vhe_host {
-                    return Err(UserMachineContractError::HostModeMismatch);
-                }
-                Ok(native_hcr_base()
-                    | registers::HCR_EL2_TGE
-                    | registers::HCR_EL2_DC
-                    | registers::HCR_EL2_VM)
-            }
-            Self::Guest => Ok(Self::guest_hcr(current_hcr)),
+        if current_hcr & registers::HCR_EL2_E2H == 0 {
+            return Err(UserMachineContractError::HostModeMismatch);
         }
+        Ok(match self {
+            Self::Native => native_hcr_base() | registers::HCR_EL2_E2H | registers::HCR_EL2_TGE,
+            Self::Guest => Self::guest_hcr(),
+        })
     }
 
-    pub(super) const fn guest_hcr(current_hcr: u64) -> u64 {
+    pub(super) const fn guest_hcr() -> u64 {
         // FB broadcasts guest cache and translation maintenance, while BSU_IS
         // upgrades the completing guest barriers to the same inner-shareable
         // domain. Without the pair, a migratable vCPU can leave stale guest
@@ -204,7 +147,7 @@ impl LowerElReturnRegime {
         // them. SWIO prevents guest set/way invalidation from discarding dirty
         // cache state, and PTW keeps guest table walks subject to stage-2 write
         // permission.
-        // Preserve only the host's VHE mode. TID3 is guest policy: it routes
+        // The host always retains E2H. TID3 is guest policy: it routes
         // the feature-ID register family through the sanitized virtual CPU
         // model. TSC keeps guest SMCs out of EL3, while TACR and TIDCP prevent
         // implementation-defined EL1 controls from exposing host policy; the
@@ -212,7 +155,7 @@ impl LowerElReturnRegime {
         // injects Undefined Instruction for unknown accesses. The remaining
         // native-EL0 discovery, cache-maintenance, and TLB-maintenance traps
         // must not leak through a scheduler transition into Linux EL1.
-        (current_hcr & registers::HCR_EL2_E2H)
+        registers::HCR_EL2_E2H
             | registers::HCR_EL2_VM
             | registers::HCR_EL2_SWIO
             | registers::HCR_EL2_PTW
@@ -260,7 +203,6 @@ pub enum UserMachineContractError {
     InvalidRootAlignment,
     InvalidTranslationIdentifier,
     RootOutsidePhysicalAddressSpace,
-    TranslationRegimeMismatch,
     UnsupportedAddressWidth,
     UnsupportedIdentifierWidth,
     UnsupportedPhysicalAddressWidth,
@@ -290,7 +232,7 @@ impl UserPagePermissions {
         })
     }
 
-    pub(super) const fn vhe_stage1_descriptor(self, physical: u64) -> u64 {
+    pub(super) const fn stage1_descriptor(self, physical: u64) -> u64 {
         if !self.readable {
             return registers::STAGE1_DESC_INVALID;
         }
@@ -310,39 +252,6 @@ impl UserPagePermissions {
         }
         descriptor
     }
-
-    pub(super) const fn nvhe_stage2_descriptor(self, physical: u64) -> u64 {
-        if !self.readable {
-            return registers::STAGE2_DESC_INVALID;
-        }
-        let mut descriptor = (physical & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT)
-            | registers::STAGE2_DESC_TABLE_OR_PAGE
-            | registers::STAGE2_DESC_MEMATTR_NORMAL_WB
-            | registers::STAGE2_DESC_INNER_SHAREABLE
-            | registers::STAGE2_DESC_ACCESS_FLAG
-            | if self.writable {
-                registers::STAGE2_DESC_READ_WRITE
-            } else {
-                registers::STAGE2_DESC_READ_ONLY
-            };
-        if !self.executable {
-            descriptor |= registers::STAGE2_DESC_XN;
-        }
-        descriptor
-    }
-}
-
-const fn same_regime(left: UserTranslationRegime, right: UserTranslationRegime) -> bool {
-    matches!(
-        (left, right),
-        (
-            UserTranslationRegime::VheHostStage1,
-            UserTranslationRegime::VheHostStage1
-        ) | (
-            UserTranslationRegime::NvheStage2Only,
-            UserTranslationRegime::NvheStage2Only
-        )
-    )
 }
 
 /// Whether a lower-EL fault can be retried after resolving private write backing.

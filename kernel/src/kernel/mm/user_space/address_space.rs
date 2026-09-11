@@ -72,6 +72,20 @@ impl Vmar {
     }
 }
 
+/// VMAR authority safe to publish through a Native application handle.
+///
+/// Internal VMARs retain the machine's complete user range. Keeping the
+/// checked token in the handle object prevents root publication or delegation
+/// from granting map, unmap, protect, or destroy authority over system pages.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ApplicationVmar(Vmar);
+
+impl ApplicationVmar {
+    pub(crate) const fn token(self) -> Vmar {
+        self.0
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MappingToken {
     address_space: AddressSpaceId,
@@ -226,6 +240,7 @@ struct AddressSpaceSnapshot<Backend: PageBackend, Account: MemoryAccount> {
 pub(crate) struct UserAddressSpace<Backend: PageBackend, Account: MemoryAccount> {
     id: AddressSpaceId,
     root: Vmar,
+    application_limit: u64,
     backend: Backend,
     account: Account,
     state: AddressSpaceLock<AddressSpaceState<Backend, Account>>,
@@ -285,6 +300,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         Ok(Self {
             id,
             root,
+            application_limit: window.application_limit(),
             backend,
             account,
             state: AddressSpaceLock::new(AddressSpaceState {
@@ -308,6 +324,19 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
 
     pub(crate) const fn root_vmar(&self) -> Vmar {
         self.root
+    }
+
+    /// Only this address-space owner may turn an internal VMAR into authority
+    /// eligible for user publication, using its immutable profile boundary.
+    pub(crate) fn application_vmar(&self, vmar: Vmar) -> Option<ApplicationVmar> {
+        let range = vmar.range();
+        if vmar.address_space != self.id
+            || range.length() == 0
+            || range.end().get() > self.application_limit
+        {
+            return None;
+        }
+        Some(ApplicationVmar(vmar))
     }
 
     pub(crate) fn mapping_epoch(&self) -> u64 {
