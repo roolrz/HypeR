@@ -15,7 +15,7 @@ use core::ptr::{read_volatile, write_bytes, write_volatile};
 #[cfg(CONFIG_CRASH_CONSOLE)]
 use hyper::hal::memory::Stage1Mapping;
 use hyper::mm::{BootAllocator, BootAllocatorError, PAGE_SIZE, PhysicalAddress, VirtualAddress};
-use hyper::platform::{PhysicalRange, PlatformInfo};
+use hyper::platform::PhysicalRange;
 
 use super::super::{address, registers};
 use super::address_space::StackMapping;
@@ -28,9 +28,7 @@ use descriptor::MappingFlags;
 pub(super) use mapping_plan::{FinalAddressSpace, build_final_address_space};
 
 /// CPU0 stack retained through allocation-free firmware rescanning and boot.
-pub(super) const KERNEL_STACK_PAGES: usize = 64;
-const STACK_GUARD_PAGES: usize = 1;
-const STACK_SLOT_PAGES: usize = 1 + 64;
+pub(super) use super::super::address_layout::BOOT_STACK_PAGES as KERNEL_STACK_PAGES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -216,7 +214,7 @@ pub(super) fn runtime_address_is_mapped(
     root: PhysicalAddress,
     address: u64,
 ) -> Result<bool, Error> {
-    if !layout::selected().contains(address) {
+    if !layout::HOST_LAYOUT.upper().contains(address) {
         return Err(Error::InvalidAddress);
     }
     let mut table = root;
@@ -241,7 +239,7 @@ pub(super) fn inspect_runtime_mapping(
     root: PhysicalAddress,
     address: u64,
 ) -> Result<Option<Stage1Mapping>, Error> {
-    if !layout::selected().contains(address) {
+    if !layout::HOST_LAYOUT.upper().contains(address) {
         return Err(Error::InvalidAddress);
     }
     let mut table = root;
@@ -262,36 +260,14 @@ pub(super) fn inspect_runtime_mapping(
 }
 
 fn stack_slot_range(slot: usize, pages: usize) -> Result<(usize, usize, usize), Error> {
-    let occupied_pages = pages
-        .checked_add(STACK_GUARD_PAGES)
-        .ok_or(Error::InvalidRange)?;
-    if pages == 0 || occupied_pages > STACK_SLOT_PAGES {
-        return Err(Error::InvalidRange);
-    }
-    let stride = STACK_SLOT_PAGES as u64 * PAGE_SIZE;
-    let layout = layout::selected();
-    let guard_page = layout
-        .kernel_stack_arena_base
-        .checked_add(
-            u64::try_from(slot)
-                .ok()
-                .and_then(|slot| slot.checked_mul(stride))
-                .ok_or(Error::AddressOverflow)?,
+    let (guard, bottom, top) = layout::HOST_LAYOUT
+        .stack_slot(
+            u64::try_from(slot).map_err(|_| Error::InvalidRange)?,
+            u64::try_from(pages).map_err(|_| Error::InvalidRange)?,
         )
-        .ok_or(Error::AddressOverflow)?;
-    let bottom = guard_page
-        .checked_add(STACK_GUARD_PAGES as u64 * PAGE_SIZE)
-        .ok_or(Error::AddressOverflow)?;
-    let stack_size = u64::try_from(pages)
-        .ok()
-        .and_then(|pages| pages.checked_mul(PAGE_SIZE))
-        .ok_or(Error::AddressOverflow)?;
-    let top = bottom
-        .checked_add(stack_size)
-        .filter(|top| layout.contains(*top))
-        .ok_or(Error::InvalidAddress)?;
+        .ok_or(Error::InvalidRange)?;
     Ok((
-        usize::try_from(guard_page).map_err(|_| Error::InvalidAddress)?,
+        usize::try_from(guard).map_err(|_| Error::InvalidAddress)?,
         usize::try_from(bottom).map_err(|_| Error::InvalidAddress)?,
         usize::try_from(top).map_err(|_| Error::InvalidAddress)?,
     ))
@@ -305,7 +281,9 @@ fn map_runtime_page(
 ) -> Result<(), Error> {
     if !virtual_address.is_multiple_of(PAGE_SIZE)
         || !physical_address.is_multiple_of(PAGE_SIZE)
-        || !layout::selected().contains(virtual_address)
+        || !layout::HOST_LAYOUT
+            .stack_arena()
+            .contains_span(virtual_address, PAGE_SIZE)
         || physical_address >= address::physical_address_limit()
     {
         return Err(Error::InvalidAddress);
@@ -368,7 +346,7 @@ fn zero_runtime_table(table: PhysicalAddress) -> Result<(), Error> {
 }
 
 fn flush_stage1_tlb() {
-    // SAFETY: Runtime stack mappings are globally visible EL2 stage-1 entries.
+    // SAFETY: Host hierarchy mutations affect globally visible EL2 stage-1 entries.
     unsafe {
         asm!(
             "dsb ishst",
@@ -380,66 +358,24 @@ fn flush_stage1_tlb() {
     };
 }
 
-/// Removes low transition aliases after execution, data, devices, and the stack
-/// have moved to their permanent virtual addresses.
-pub(super) fn retire_identity_mappings(
-    root: PhysicalAddress,
-    platform: &PlatformInfo,
-) -> Result<(), Error> {
-    for &range in platform.memory.as_slice() {
-        unmap_identity_range(root, range)?;
-    }
-    for &range in platform.mmio.as_slice() {
-        unmap_identity_range(root, range)?;
+/// Disconnects the dedicated lower transition hierarchy after every CPU has
+/// moved execution, data, devices, and its stack to permanent upper aliases.
+///
+/// Boot allocation owns all table pages for the kernel lifetime. Clearing the
+/// root retires translations, but does not return its detached child tables to
+/// the allocator. The now-empty root remains the idle TTBR0 hierarchy.
+pub(super) fn retire_identity_mappings(root: PhysicalAddress) -> Result<(), Error> {
+    let entries = core::ptr::with_exposed_provenance_mut::<u64>(runtime_table_address(root)?);
+    for index in 0..PAGE_SIZE as usize / core::mem::size_of::<u64>() {
+        // SAFETY: The caller serializes hierarchy changes and all participating
+        // CPUs use upper aliases. Each aligned store invalidates one descriptor
+        // in the exclusively owned, permanently mapped transition root.
+        unsafe { write_volatile(entries.add(index), 0) };
     }
 
-    // SAFETY: Page-table writes above are complete, and this code executes from
-    // the high kernel alias without using low virtual addresses.
-    unsafe {
-        asm!(
-            "dsb ishst",
-            "tlbi alle2is",
-            "dsb ish",
-            "isb",
-            options(nostack, preserves_flags)
-        );
-    }
-    Ok(())
-}
-
-fn unmap_identity_range(root: PhysicalAddress, range: PhysicalRange) -> Result<(), Error> {
-    let mut address = align_down(range.start(), PAGE_SIZE);
-    let end = align_up(range.end(), PAGE_SIZE)?;
-    while address < end {
-        let mut table = root;
-        let mut advanced = false;
-        for (level, &level_size) in registers::STAGE1_LEVEL_SIZES_4K.iter().enumerate() {
-            let index = descriptor::table_index(address, level);
-            let entry = read_runtime_entry(table, index)?;
-            if entry == 0 {
-                address = address
-                    .checked_add(PAGE_SIZE)
-                    .ok_or(Error::AddressOverflow)?;
-                advanced = true;
-                break;
-            }
-            if descriptor::is_leaf(entry, level) {
-                write_runtime_entry(table, index, 0)?;
-                address = address
-                    .checked_add(level_size)
-                    .ok_or(Error::AddressOverflow)?;
-                advanced = true;
-                break;
-            }
-            if !descriptor::is_table(entry) {
-                return Err(Error::Conflict);
-            }
-            table = PhysicalAddress::new(descriptor::output_address(entry));
-        }
-        if !advanced {
-            return Err(Error::Conflict);
-        }
-    }
+    // Complete invalidation on every participating CPU before the disconnected
+    // lower hierarchy is considered retired.
+    flush_stage1_tlb();
     Ok(())
 }
 
@@ -457,22 +393,13 @@ fn write_runtime_entry(table: PhysicalAddress, index: usize, value: u64) -> Resu
 }
 
 fn runtime_table_address(table: PhysicalAddress) -> Result<usize, Error> {
-    if !table.get().is_multiple_of(PAGE_SIZE) || table.get() >= address::physical_address_limit() {
-        return Err(Error::InvalidAddress);
-    }
-    let layout = layout::selected();
-    layout
-        .linear_base
-        .checked_add(table.get())
-        .filter(|address| *address < layout.kernel_base)
-        .and_then(|address| usize::try_from(address).ok())
-        .ok_or(Error::InvalidAddress)
+    super::linear_page_address(table).ok_or(Error::InvalidAddress)
 }
 
 const fn region_contains(region: RootRegion, address: u64) -> bool {
     match region {
-        RootRegion::Lower => address < address::STAGE1_VA_LIMIT,
-        RootRegion::Upper => address >= 0u64.wrapping_sub(address::STAGE1_VA_LIMIT),
+        RootRegion::Lower => layout::HOST_LAYOUT.lower().contains(address),
+        RootRegion::Upper => layout::HOST_LAYOUT.upper().contains(address),
     }
 }
 

@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 mod address;
+mod address_layout;
 mod atomics;
 mod barrier;
 mod cache;
@@ -101,8 +102,8 @@ pub use timer::{
     ArmGenericCounter as ArchitectureCounter, El2PhysicalTimer as ArchitectureTimer,
     Error as TimerError,
 };
-pub use user::{UserMachineContractError, user_address_limit};
-pub(crate) use user::{assert_kernel_pan, uses_vhe_translation as user_uses_vhe_translation};
+pub(crate) use user::assert_kernel_pan;
+pub use user::{UserMachineContractError, application_address_limit, user_address_limit};
 pub(crate) use user::{copy_from_exposed, copy_to_exposed};
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use user_entry::direct_native_call_count_for_test;
@@ -117,7 +118,7 @@ pub(crate) use user_machine::{
     PreparedAddressSpace as PreparedUserAddressSpace, activate_local as activate_user_local,
     deactivate_local as deactivate_user_local,
     local_identity_is_active as user_local_identity_is_active,
-    prepare_nvhe as prepare_nvhe_user_address_space, prepare_vhe as prepare_vhe_user_address_space,
+    prepare_address_space as prepare_host_user_address_space,
     service_local_request as service_user_local_request,
 };
 pub use vgic::Error as VirtualInterruptError;
@@ -358,8 +359,7 @@ pub(crate) fn describe_runtime(mut emit: impl FnMut(core::fmt::Arguments<'_>)) {
         host_execution_mode_name()
     ));
     emit(format_args!(
-        "HypeR: AArch64 execution protection: {}, WXN=on",
-        if host::is_vhe() { "PXN/UXN" } else { "XN" }
+        "HypeR: AArch64 execution protection: PXN/UXN, WXN=on"
     ));
     emit(format_args!(
         "HypeR: AArch64 address space: {}-bit VA/{} levels, {}-bit PA (CPU {}-bit), {}-bit IPA/{} levels",

@@ -21,7 +21,7 @@ use hyper::sync::atomic::AtomicUsize;
 use hyper::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use super::exception::ExceptionFrame;
-use super::user_contract::{LowerElReturnRegime, UserMachineContractError, UserTranslationRegime};
+use super::user_contract::{LowerElReturnRegime, UserMachineContractError};
 use super::{registers, user};
 
 const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
@@ -98,7 +98,6 @@ const _: () = {
 /// Pinned architecture register owner attached to one scheduler `UserThread`.
 pub(crate) struct UserContext {
     machine: MachineContext,
-    regime: UserTranslationRegime,
 }
 
 impl UserContext {
@@ -122,8 +121,7 @@ impl UserContext {
         {
             return Err(Error::InvalidInitialContext);
         }
-        let capabilities = user::execution_capabilities()?;
-        let regime = capabilities.regime();
+        user::execution_capabilities()?;
         Ok(Self {
             machine: MachineContext {
                 general: [0; 31],
@@ -131,7 +129,7 @@ impl UserContext {
                 // Native userspace currently owns normal IRQ delivery only.
                 // Keep debug, SError, and FIQ masked until those classes have
                 // explicit context ownership and contained return paths.
-                processor_state: native_processor_state(regime),
+                processor_state: native_processor_state(),
                 stack_pointer: stack,
                 simd: [[0; 2]; 32],
                 fpcr: 0,
@@ -147,7 +145,6 @@ impl UserContext {
                 fault_address: 0,
                 entry_hcr: 0,
             },
-            regime,
         })
     }
 }
@@ -291,7 +288,7 @@ fn prepare_run(context: &mut UserContext, binding: UserRunBinding) -> Result<(),
         return Err(Error::RunGenerationNotIncreasing);
     }
     let current_hcr = read_hcr_el2();
-    let entry_hcr = LowerElReturnRegime::Native(context.regime).transition_hcr(current_hcr)?;
+    let entry_hcr = LowerElReturnRegime::Native.transition_hcr(current_hcr)?;
     context.machine.thread = binding.thread();
     context.machine.image_generation = binding.image_generation();
     context.machine.run_generation = binding.run_generation();
@@ -300,21 +297,19 @@ fn prepare_run(context: &mut UserContext, binding: UserRunBinding) -> Result<(),
     context.machine.fault_address = 0;
     context.machine.entry_hcr = entry_hcr;
     context.machine.processor_state &= registers::SPSR_NZCV_MASK;
-    context.machine.processor_state |= native_processor_state(context.regime);
+    context.machine.processor_state |= native_processor_state();
     context.machine.state = registers::USER_CONTEXT_STATE_RUNNING;
     Ok(())
 }
 
-const fn native_processor_state(regime: UserTranslationRegime) -> u64 {
-    let base = registers::SPSR_EL0T | registers::SPSR_D | registers::SPSR_A | registers::SPSR_F;
-    match regime {
-        // The VHE root contains both EL0 and privileged mappings. PAN remains
-        // asserted across exception entry (SPAN=1) so ordinary kernel code
-        // cannot accidentally bypass the typed user-copy boundary.
-        UserTranslationRegime::VheHostStage1 => base | registers::SPSR_PAN,
-        // nVHE user memory is stage-2-only and absent from the EL2 host root.
-        UserTranslationRegime::NvheStage2Only => base,
-    }
+const fn native_processor_state() -> u64 {
+    // The EL2&0 root contains EL0 and privileged mappings. PAN protects the
+    // kernel even on exception paths which retain the process translation.
+    registers::SPSR_EL0T
+        | registers::SPSR_D
+        | registers::SPSR_A
+        | registers::SPSR_F
+        | registers::SPSR_PAN
 }
 
 fn stopped_exit(context: &mut UserContext) -> Result<UserExit<'_>, Error> {

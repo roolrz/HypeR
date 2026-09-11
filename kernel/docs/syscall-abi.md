@@ -28,8 +28,8 @@ without moving POSIX policy into architecture code or making Linux the host OS.
   surface, not a security gate.
 - Preserve an efficient userspace implementation of foreign ABIs without
   preventing a future, separately reviewed in-kernel personality.
-- Treat AArch64 nVHE and VHE as Tier-1 execution environments. Native userspace
-  must not silently require VHE.
+- Require FEAT_VHE for AArch64 hosts and reject unsupported CPUs before
+  establishing the host translation regime. An Arm version alone is not admission.
 - Reuse the scheduler's existing wait, timeout, cancellation, affinity, and
   migration contracts.
 
@@ -660,6 +660,54 @@ IrqAuthority, and DmaAuthority, plus a bootstrap Channel. Derived one-shot
 leases bind individual VM construction transactions to a ResourceDomain. There
 is no pseudo self handle or implicit root.
 
+### Native 64-bit application address-space contract
+
+The common Native contract separates application-controlled mappings from
+system-managed user mappings. The machine profile determines the addressable
+user range, and the architecture layout selects the application boundary within
+it. Neither a universal 256 TiB envelope nor an equal split is an ABI promise.
+All limits below are exclusive.
+
+| Current profile | User address limit | Application address limit | System-managed user region |
+| --- | --- | --- | --- |
+| AArch64 VA48 | `0x0001_0000_0000_0000` (256 TiB) | `0x0000_8000_0000_0000` (128 TiB) | Application limit through user limit |
+| RISC-V Sv39 | `0x0000_0040_0000_0000` (256 GiB) | `0x0000_0020_0000_0000` (128 GiB) | Application limit through user limit |
+| Compact AArch64 VA42–VA47 | `2^VA_BITS` | Currently half the selected user range | Application limit through user limit |
+
+These are provisional layout choices. A later profile may expand application
+space or choose an unequal reservation without changing the common ownership
+rule. Applications must use the VMAR range granted to their Process rather
+than hardcoding these table values. There are no architecture-independent ABI
+constants prescribing these numerical limits. x86-64 has no admitted Native
+execution profile and gains none from this policy.
+
+Applications and their allocators/loaders must not select system-reserved
+addresses for images, libraries, heaps, stacks, or explicit VMAR reservations.
+Each architecture supplies both limits through HAL `AddressSpacePlan`. Common
+memory code consumes those limits without matching architecture identities or
+computing a partition. Each address-space owner retains the immutable
+application boundary at construction. The kernel enforces it at capability
+publication: every handle-visible VMAR contains a checked application-only
+token. A root overlapping the reservation cannot be published, and child
+VMARs remain within their parent. The same authority bounds mapping, private
+mapping, unmapping, protection and destruction. Internal kernel VMARs retain
+the full machine-supported range.
+
+System-managed mappings remain user virtual addresses, distinct from the
+kernel's own privileged address range. They can accommodate a future vDSO or
+shared ABI pages; individual permissions and discovery belong to the facility
+which installs them. The reservation does not establish a fixed vDSO address,
+grant application write authority, or allocate physical memory.
+
+The current loader still grants a smaller process range below 4 GiB, as
+specified in the [Native init contract](native-init.md#executable-image).
+Expanding that layout and installing system mappings are separate changes.
+The reservation check remains enforced if a future loader requests a larger
+process range. RISC-V needs no wider translation mode to reserve system pages
+within its existing Sv39 user range.
+
+### Memory mappings and backing ownership
+
 VMO and VMAR provide memory ownership and mapping policy. Executable mappings
 require immutable executable provenance; writable authority cannot be upgraded
 to executable authority. W^X is the default. A mapping operation consumes
@@ -819,10 +867,7 @@ lifecycle operations; handle close merely requests safe cleanup.
 
 ## AArch64 Tier-1 execution
 
-VHE and nVHE require different machine mechanisms behind one `hal::user`
-capability.
-
-On VHE, native EL0 uses the host EL2&0 translation regime with `E2H=1` and
+AArch64 requires FEAT_VHE. Native EL0 uses the host EL2&0 translation regime with `E2H=1` and
 `TGE=1`. The stable permanent kernel hierarchy occupies the configured
 canonical upper range through `TTBR1_EL2`; per-Process roots contain only
 private user mappings in the configured lower range through `TTBR0_EL2`.
@@ -832,42 +877,13 @@ root cannot retire while its context is active. Returning to a vCPU clears the
 host-user regime explicitly. Exception code must never infer the return regime
 merely from a lower-EL vector.
 
-On nVHE, the current AArch64 proof enters EL0 directly with `TGE=1`, `DC=1`,
-stage-1 translation forced off, and a per-process stage-2 root/VMID. SVC,
-faults, and physical interrupts route directly to EL2. User VA equals IPA. QEMU
-exercises this mechanism, while the acceptance contract still requires physical
-qualification of address width, tagged-address behavior, cache defaults, and
-Linux ABI address semantics.
-
-The user stage-2 implementation cannot reuse the VM registry's current
-single-active-vCPU execution claim: Threads in one Process may run concurrently
-on several CPUs. It needs an active-CPU residency set, mapping epoch,
-targeted/global shootdown acknowledgements, and VMID generation and retirement.
-Activation joins the resident set while observing the current epoch. Mutation
-either blocks new admission or requires a late entrant to consume and
-acknowledge the new epoch before EL0 execution. Mapping removal cannot free or
-reuse a page until the snapshot and every late entrant have acknowledged the
-invalidation. Hardware VMID-width rollover requires a system-wide stage-2
-invalidation. Descriptor and TLBI mechanisms may be shared with VM code, but
-residency ownership may not.
-
-Before the syscall ABI is published, the nVHE spike must verify on
-`cortex-a72`, VHE `max`, and physical Armv8 hardware:
-
-- SVC, instruction/data abort, IRQ, and preemption routing;
-- stage-2 read/write/execute permissions and inaccessible kernel/MMIO mappings;
-- `HCR_EL2` cache defaults, shareability, instruction publication, and
-  speculative-transition requirements;
-- VMID allocation shared safely with guest VMIDs, TLB invalidation, SMP
-  migration, and address-space reuse;
-- TLS, FP/SIMD, counter access, cache-maintenance traps, WFI/WFE, debug state,
-  and usable VA/IPA width; and
-- switching among native EL0, supervisor/restricted views, the EL2 kernel, and
-  guest vCPUs without state leakage.
-
-If stage-2-only execution cannot supply required foreign ABI semantics, that
-route may use a small immutable EL1 stage-1 relay. Kernel policy sees only
-opaque prepared/active user address spaces regardless of backend.
+Threads in one Process may execute concurrently on several CPUs. Native roots
+therefore carry an active-CPU residency set, mapping epoch, acknowledged
+shootdown, and ASID generation and retirement. Guest VMID ownership remains
+separate. Mapping removal cannot release physical backing until every relevant
+CPU has acknowledged the old root's retirement. Hardware qualification must
+verify exception routing, SMP migration, cache and TLB maintenance, FP/SIMD,
+TLS, counter access, and transitions between Native EL0, the host, and guests.
 
 RISC-V implements these Native execution contracts through Sv39 U-mode roots,
 qualified trap returns and acknowledged translation retirement. Its RV64GC
@@ -910,7 +926,7 @@ yet a general runtime, vDSO, or secondary-architecture Native entry.
 ### Phase 0: prove the boundary
 
 - land this design, the threat model, and the compiler-checked schema model;
-- spike AArch64 VHE and nVHE entry/address-space mechanisms before freezing ABI
+- qualify AArch64 VHE entry/address-space mechanisms before freezing ABI
   layouts; and
 - specify process stop/exec and user-return ownership against scheduler
   migration.
@@ -969,7 +985,7 @@ yet a general runtime, vDSO, or secondary-architecture Native entry.
   Linux personality state.
 
 Every phase runs the quality gate and all-architecture builds. The current QEMU
-proof covers both AArch64 host regimes, repeated direct `abi_query`, deferred
+proof covers the AArch64 VHE host, repeated direct `abi_query`, deferred
 unknown-call unwind and re-entry, Event handle publication and observation,
 breakpoint-fault containment, Process/Thread join, retirement, and
 architecture-neutral rejection of malformed calls. The remaining user-entry
@@ -986,8 +1002,6 @@ The direction above is settled; these details require implementation proofs
 before they become ABI:
 
 - the exact Native rights bit allocation;
-- the nVHE maximum user address and whether any foreign personality requires
-  the EL1 relay fallback;
 - the exact x86-64 secondary result registers;
 - whether the initial surface includes a dedicated SharedQueue or BackendSession
   for large asynchronous workloads;

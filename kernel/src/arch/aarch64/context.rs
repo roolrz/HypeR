@@ -308,72 +308,6 @@ impl VcpuContext {
     /// The caller must exclusively own this stopped vCPU, and lower-EL guest
     /// execution must remain disabled until the rest of its state is loaded.
     pub unsafe fn activate_system_registers(&self) {
-        if super::host::is_vhe() {
-            // SAFETY: The caller owns this stopped vCPU; the VHE helper writes
-            // only its guest EL12 register bank.
-            unsafe { self.activate_system_registers_vhe() };
-        } else {
-            // SAFETY: The caller owns this stopped vCPU and the nVHE EL1 bank.
-            unsafe { self.activate_system_registers_nvhe() };
-        }
-    }
-
-    unsafe fn activate_system_registers_nvhe(&self) {
-        // SAFETY: The caller owns the inactive guest context. The final ISB
-        // makes all translation and exception state visible before guest entry.
-        unsafe {
-            asm!(
-                "msr TCR_EL1, {tcr}",
-                "msr TTBR0_EL1, {ttbr0}",
-                "msr TTBR1_EL1, {ttbr1}",
-                "msr MAIR_EL1, {mair}",
-                "msr AMAIR_EL1, {amair}",
-                "msr SCTLR_EL1, {sctlr}",
-                "msr VBAR_EL1, {vbar}",
-                "msr CPACR_EL1, {cpacr}",
-                "msr CNTKCTL_EL1, {cntkctl}",
-                "msr AFSR0_EL1, {afsr0}",
-                "msr AFSR1_EL1, {afsr1}",
-                "msr CONTEXTIDR_EL1, {contextidr}",
-                "msr TPIDR_EL0, {tpidr_el0}",
-                "msr TPIDRRO_EL0, {tpidrro_el0}",
-                "msr TPIDR_EL1, {tpidr_el1}",
-                "msr ESR_EL1, {esr}",
-                "msr FAR_EL1, {far}",
-                "msr PAR_EL1, {par}",
-                "msr ELR_EL1, {elr}",
-                "msr SPSR_EL1, {spsr}",
-                "msr SP_EL0, {sp_el0}",
-                "msr SP_EL1, {sp_el1}",
-                "isb",
-                sctlr = in(reg) self.sctlr_el1,
-                tcr = in(reg) self.tcr_el1,
-                ttbr0 = in(reg) self.ttbr0_el1,
-                ttbr1 = in(reg) self.ttbr1_el1,
-                mair = in(reg) self.mair_el1,
-                amair = in(reg) self.amair_el1,
-                vbar = in(reg) self.vbar_el1,
-                cpacr = in(reg) self.cpacr_el1,
-                cntkctl = in(reg) self.cntkctl_el1,
-                afsr0 = in(reg) self.afsr0_el1,
-                afsr1 = in(reg) self.afsr1_el1,
-                contextidr = in(reg) self.contextidr_el1,
-                tpidr_el0 = in(reg) self.tpidr_el0,
-                tpidrro_el0 = in(reg) self.tpidrro_el0,
-                tpidr_el1 = in(reg) self.tpidr_el1,
-                esr = in(reg) self.esr_el1,
-                far = in(reg) self.far_el1,
-                par = in(reg) self.par_el1,
-                elr = in(reg) self.elr_el1,
-                spsr = in(reg) self.spsr_el1,
-                sp_el0 = in(reg) self.stack_pointer_el0,
-                sp_el1 = in(reg) self.stack_pointer_el1,
-                options(nostack, preserves_flags)
-            );
-        }
-    }
-
-    unsafe fn activate_system_registers_vhe(&self) {
         // EL1 register names select the VHE host bank. EL12 aliases are the
         // only safe way to load the guest bank without replacing host state.
         // SAFETY: The caller exclusively owns the inactive guest context; the
@@ -437,74 +371,6 @@ impl VcpuContext {
     /// This context must be the vCPU currently loaded on the calling CPU, and
     /// guest execution must already have stopped with local IRQs masked.
     pub unsafe fn deactivate_system_registers(&mut self) {
-        if super::host::is_vhe() {
-            // SAFETY: The caller guarantees this context owns the live EL12
-            // guest bank and that local IRQs are masked.
-            unsafe { self.deactivate_system_registers_vhe() };
-        } else {
-            // SAFETY: The caller guarantees this context owns the live EL1
-            // guest bank and that local IRQs are masked.
-            unsafe { self.deactivate_system_registers_nvhe() };
-        }
-    }
-
-    unsafe fn deactivate_system_registers_nvhe(&mut self) {
-        // SAFETY: The caller guarantees that the live EL1 bank belongs to this
-        // context and cannot change concurrently.
-        unsafe {
-            asm!(
-                "mrs {sctlr}, SCTLR_EL1",
-                "mrs {tcr}, TCR_EL1",
-                "mrs {ttbr0}, TTBR0_EL1",
-                "mrs {ttbr1}, TTBR1_EL1",
-                "mrs {mair}, MAIR_EL1",
-                "mrs {amair}, AMAIR_EL1",
-                "mrs {vbar}, VBAR_EL1",
-                "mrs {cpacr}, CPACR_EL1",
-                "mrs {cntkctl}, CNTKCTL_EL1",
-                "mrs {afsr0}, AFSR0_EL1",
-                "mrs {afsr1}, AFSR1_EL1",
-                "mrs {contextidr}, CONTEXTIDR_EL1",
-                "mrs {tpidr_el0}, TPIDR_EL0",
-                "mrs {tpidrro_el0}, TPIDRRO_EL0",
-                "mrs {tpidr_el1}, TPIDR_EL1",
-                "mrs {esr}, ESR_EL1",
-                "mrs {far}, FAR_EL1",
-                "mrs {par}, PAR_EL1",
-                "mrs {elr}, ELR_EL1",
-                "mrs {spsr}, SPSR_EL1",
-                "mrs {sp_el0}, SP_EL0",
-                "mrs {sp_el1}, SP_EL1",
-                sctlr = out(reg) self.sctlr_el1,
-                tcr = out(reg) self.tcr_el1,
-                ttbr0 = out(reg) self.ttbr0_el1,
-                ttbr1 = out(reg) self.ttbr1_el1,
-                mair = out(reg) self.mair_el1,
-                amair = out(reg) self.amair_el1,
-                vbar = out(reg) self.vbar_el1,
-                cpacr = out(reg) self.cpacr_el1,
-                cntkctl = out(reg) self.cntkctl_el1,
-                afsr0 = out(reg) self.afsr0_el1,
-                afsr1 = out(reg) self.afsr1_el1,
-                contextidr = out(reg) self.contextidr_el1,
-                tpidr_el0 = out(reg) self.tpidr_el0,
-                tpidrro_el0 = out(reg) self.tpidrro_el0,
-                tpidr_el1 = out(reg) self.tpidr_el1,
-                esr = out(reg) self.esr_el1,
-                far = out(reg) self.far_el1,
-                par = out(reg) self.par_el1,
-                elr = out(reg) self.elr_el1,
-                spsr = out(reg) self.spsr_el1,
-                sp_el0 = out(reg) self.stack_pointer_el0,
-                sp_el1 = out(reg) self.stack_pointer_el1,
-                // Saving architectural ownership is a world-switch boundary;
-                // host memory operations must not move into the guest regime.
-                options(nostack, preserves_flags)
-            );
-        }
-    }
-
-    unsafe fn deactivate_system_registers_vhe(&mut self) {
         // SAFETY: Guest execution is stopped and the caller exclusively owns
         // both this context and the live EL12 bank being sampled.
         unsafe {
@@ -620,7 +486,7 @@ impl VcpuContext {
             return Err(GuestRunError::State);
         }
         context_ref.run_state = GUEST_RUN_RUNNING;
-        let entry_hcr = LowerElReturnRegime::guest_hcr(read_hcr_el2());
+        let entry_hcr = LowerElReturnRegime::guest_hcr();
         // The exclusive reference ends before assembly transfers to the guest.
         // SAFETY: The caller established the complete active guest contract;
         // assembly retains the only live machine-context access until unwind.
@@ -774,19 +640,6 @@ unsafe extern "C" {
         argument: usize,
     ) -> !;
     fn aarch64_run_on_emergency_stack(callback: extern "C" fn(usize) -> !, argument: usize) -> !;
-}
-
-fn read_hcr_el2() -> u64 {
-    let value: u64;
-    // SAFETY: Reading HCR_EL2 is permitted in the kernel's EL2 execution mode.
-    unsafe {
-        asm!(
-            "mrs {value}, HCR_EL2",
-            value = out(reg) value,
-            options(nomem, nostack, preserves_flags)
-        )
-    };
-    value
 }
 
 /// Switches AAPCS64 callee-saved state and kernel stacks.

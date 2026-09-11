@@ -96,14 +96,38 @@ The selected binary HAL exposes eleven enforced capability modules:
   fixed-width events with exhaustive actions; raw frames and backend
   completion state remain architecture-private.
 
-The AArch64 host layout is selected at runtime without changing the image's
-Armv8.0 instruction baseline. VHE uses the configured lower range exclusively
-for native Process roots and the matching canonical upper range for MMIO,
-linear RAM, the randomized kernel image, and guarded kernel stacks. nVHE has no
-EL2 upper range and places the same host regions at equivalent offsets in its
-lower range; direct native EL0 remains isolated behind a private stage-2 root.
-The permanent-memory handoff is opaque above `hal::memory`, including the
-single-root or split-root state required by secondary CPUs.
+AArch64 requires FEAT_VHE, checked before establishing the host translation
+regime. The configured lower range belongs exclusively to Native Process roots;
+the canonical upper range contains MMIO, linear RAM, the randomized kernel image,
+and guarded kernel stacks. The permanent-memory handoff remains opaque above
+`hal::memory` and carries the split-root state required by secondary CPUs.
+Hardware without FEAT_VHE is unsupported. Primary and secondary CPUs validate
+the feature before accessing VHE-specific registers. An unsupported CPU stops
+in the pre-MMU `aarch64_unsupported_vhe` loop, observable through a debugger;
+this early path does not assume a platform UART is available.
+
+The checked [AArch64 address layout](../src/arch/aarch64/address_layout.rs)
+defines permanent host windows for each supported `CONFIG_ARM64_VA_BITS`
+value from 42 through 48. Representative bases are:
+
+| Window | 48-bit VA base | 42-bit VA base |
+| --- | --- | --- |
+| Canonical upper range | `0xffff000000000000` | `0xfffffc0000000000` |
+| MMIO aliases | `0xffff100000000000` | `0xfffffc8000000000` |
+| RAM direct map | `0xffff400000000000` | `0xfffffd0000000000` |
+| Kernel image / KASLR window | `0xffffff0000000000` | `0xffffff0000000000` |
+| Bootstrap stack reservation | `0xffffff8000000000` | `0xffffff8000000000` |
+| Runtime stack arena | `0xffffff8000200000` | `0xffffff8000200000` |
+
+These are reserved virtual windows, not fully populated mappings. MMIO and
+RAM aliases add the physical address to the corresponding base and must remain
+inside that window. Only discovered, admitted ranges are mapped. The kernel
+image occupies a checked, 2 MiB-aligned position within its 512 GiB KASLR
+window. The following 2 MiB reservation holds the bootstrap stack, with an
+unmapped guard page below its 256 KiB payload. Runtime stack slots likewise
+retain a low guard page and admit at most 64 payload pages; checked slot
+arithmetic must reject overflow into another window or beyond the address
+space. The unused upper-range prefix remains unmapped.
 
 Linux guest image validation, layout, DTB construction and boot-register plans
 belong to the userspace VM image/runtime stack. The kernel validates Native VM
@@ -306,24 +330,17 @@ Process and Thread labels are copied into bounded immutable identity snapshots
 before publication. This keeps `ps` output meaningful without retaining loader
 paths, builder storage, scheduler allocations, or authority-bearing references.
 
-AArch64 provides two implementations behind that facade. VHE keeps the
-permanent host mapping in the canonical upper range through `TTBR1_EL2` and
-gives each Process an immutable lower-range `TTBR0_EL2` root. nVHE keeps the EL2
-host in its lower-only translation regime and gives each Process an immutable
-stage-2 root with a separate resident-CPU set, mapping epoch, acknowledged
-shootdown, and shared guest/native VMID allocation and retirement. Both retain
-old roots and tags until every cut target acknowledges; safe abandonment leaks
-published owners rather than risking reuse. A kernel self-test exercises
-repeated direct Native syscall return, register-result validation,
-deferred-call unwind and re-entry, contained fault unwind, join, and retirement
-under both QEMU host regimes. The production AArch64 path mounts the firmware
-initramfs, strictly validates and
-maps `/init`, publishes its Process and initial UserThread, and transfers
-bootstrap execution to the scheduler. Broader runtime ABI coverage, blocking
-and migration qualification, and physical-hardware validation remain
-prerequisites for general native userspace.
-An EL1 relay remains a compatibility fallback only if direct stage-2-only
-execution cannot provide a required ABI semantic.
+AArch64 keeps the permanent host mapping in the canonical upper range through
+`TTBR1_EL2` and gives each Process an immutable lower-range `TTBR0_EL2` root.
+Native ASIDs and guest VMIDs have separate ownership and retirement. Old roots
+and tags remain retained until every cut target acknowledges; safe abandonment
+leaks published owners rather than risking reuse. A kernel self-test exercises
+repeated direct Native syscall return, register-result validation, deferred-call
+unwind and re-entry, contained fault unwind, join, and retirement on VHE QEMU
+CPUs. The production path mounts the firmware initramfs, validates and maps
+`/init`, publishes its Process and initial UserThread, and transfers bootstrap
+execution to the scheduler. Physical-hardware qualification remains necessary
+for guarantees that QEMU cannot establish.
 
 The kernel exposes one Native ABI. Linux and FreeBSD are initially isolated
 EL0 supervisor domains selected transactionally with the process image; foreign
@@ -393,9 +410,15 @@ one-shot SMP admission, stage-1 address-space sealing, platform drivers,
 complete VM initialization, and Native init publication. Kernel self-test
 images run standalone mechanism tests, report completion and retire the
 bootstrap execution. Linux integration boots Native init and uses userspace VMM
-tools; kernel self-tests need only an empty ramfs archive. Sealing takes the same mutation lock as guarded-stack map/unmap
-and retires identity aliases only after every admitted CPU entered permanent
-high mappings.
+tools; kernel self-tests need only an empty ramfs archive. Sealing takes the
+same mutation lock as guarded-stack map/unmap and retires identity aliases only
+after every admitted CPU has entered permanent high mappings. On AArch64, those
+aliases occupy a dedicated lower transition root. Sealing clears every entry
+in that root and completes broadcast TLB invalidation; it does not walk firmware
+RAM or MMIO intervals and never edits the permanent upper root. The page-table
+arena remains owned by the permanent address space; removing aliases does not
+reclaim its backing pages. Native Process roots are installed only after this
+bootstrap transition is complete.
 
 SMP admission publishes a `FrozenTopology` once. `HypeR` has no CPU hotplug:
 late replicated-local transactions snapshot this immutable participant set. A
@@ -532,7 +555,7 @@ dormant, ready, and fully stopped blocked kernel threads synchronously under the
 exclusive coordinator. A running or switch-in-flight thread retains the request
 on its own `Thread`; the source CPU commits a switch and the incoming switch tail
 publishes target membership only after assembly has saved the complete source
-context. vCPU and future user threads do not yet have certified execution-state
+context. vCPU and user threads do not yet have certified execution-state
 migration hooks, while bootstrap and idle threads remain pinned. Automatic load
 selection and balancing are deliberately separate future policy.
 The kernel always builds the SMP-capable scheduler and per-CPU infrastructure;

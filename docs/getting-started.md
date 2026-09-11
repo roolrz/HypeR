@@ -16,7 +16,8 @@ Commands in this guide run from the repository root.
 - Clang/LLVM;
 - GNU Make;
 - Python 3.11+ for SDK source preparation and workspace contract checks;
-- QEMU for the selected architecture;
+- QEMU for the selected architecture; AArch64 uses `-cpu max` by default and
+  requires FEAT_VHE (hardware without it is unsupported);
 - `curl`, `cpio`, `gzip`, `tar`, and SHA-256 tooling for the Linux guest assets;
 - `dtc` when building the x86-64 QEMU platform description.
 
@@ -28,7 +29,7 @@ make defconfig
 make run
 ```
 
-`make run` builds the `no_std` Rust init, direction-attenuated Console workers,
+`make run` builds the Rust std-based init, direction-attenuated Console workers,
 session manager, capability-scoped shell, VM manager, and isolated VM runtime
 only through the assembled SDK under `target/sdk/aarch64`. It also downloads
 the checksum-pinned AArch64 Linux inputs, packages the guest FIT, and places it
@@ -39,17 +40,17 @@ the in-tree AArch64 ELF interpreter. SDK consumers can select a self-contained
 static PIE backed by the matching `libhyper.a` with `HYPER_LINK_MODE=static`.
 Pass `INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.
 
-The separate Kernel self-test guest path remains available as an integration
-test:
+Run the standalone kernel mechanism tests separately:
 
 ```sh
 make test-qemu ARCH=aarch64
 ```
 
-This downloads checksum-pinned Alpine Linux inputs, constructs a versioned VM
-bundle, builds the kernel with `kernel-self-test`, and starts a four-CPU QEMU
-`virt` machine. Guest downloads are cached under the platform temporary
-directory and generated payloads remain under `kernel/target/guest/`.
+This builds the kernel with `kernel-self-test` and starts a four-CPU QEMU
+`virt` machine. Kernel self-tests do not load Linux or create a default VM.
+Use `make test-native` for userspace-managed Linux guest integration. Its guest
+downloads are cached under the platform temporary directory and generated
+payloads remain under `kernel/target/guest/`.
 
 Select another architecture explicitly:
 
@@ -81,7 +82,7 @@ Useful targets:
 | `make test ARCH=<arch>` | Run kernel host, Kconfig, and kallsyms tests |
 | `make test-image ARCH=<arch>` | Verify the ELF, relocation, image, and architecture contract |
 | `make test-qemu ARCH=<arch>` | Run the architecture's QEMU acceptance test where supported |
-| `make verify ARCH=<arch>` | Run the complete local contract for the selected architecture |
+| `make verify ARCH=<arch>` | Run kernel checks, tests, supported QEMU acceptance, and release/image validation |
 | `make verify-all` | Verify the AArch64 kernel, SDK, and Native system together |
 
 The default AArch64 image is written to:

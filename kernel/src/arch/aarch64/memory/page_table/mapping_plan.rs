@@ -41,55 +41,33 @@ pub(in crate::arch::aarch64::memory) unsafe fn build_final_address_space(
     // identity-mapped RAM.
     let stack = unsafe { allocator.allocate_zeroed_pages(KERNEL_STACK_PAGES, 1)? };
     let stack_size = KERNEL_STACK_PAGES as u64 * PAGE_SIZE;
-    let layout = layout::selected();
-    if kernel_base < layout.kernel_base
-        || kernel_base
-            .checked_add(kernel.total_size)
-            .filter(|end| *end <= layout.kernel_stack_base)
-            .is_none()
-    {
+    let layout = layout::HOST_LAYOUT;
+    let image_size = align_up(kernel.total_size, PAGE_SIZE)?;
+    if !layout.image().contains_span(kernel_base, image_size) {
         return Err(Error::InvalidRange);
     }
-    let (transition_root, kernel_root) = match layout.root_region() {
-        RootRegion::Lower => {
-            // SAFETY: The allocator contract applies to the single nVHE root.
-            let mut builder = unsafe { PageTableBuilder::new(allocator, RootRegion::Lower)? };
-            // SAFETY: Platform ranges were validated and the builder remains
-            // writable through the bootstrap identity map.
-            unsafe { map_transition_aliases(&mut builder, platform, kernel)? };
-            // SAFETY: The same builder owns all permanent nVHE aliases.
-            unsafe { map_permanent_aliases(&mut builder, platform, kernel, layout)? };
-            // SAFETY: Image and destination were validated above.
-            unsafe { map_kernel_at(&mut builder, kernel, kernel_base)? };
-            // SAFETY: `stack` is a fresh writable allocation retained by boot.
-            unsafe { map_boot_stack(&mut builder, stack, stack_size, layout)? };
-            (builder.root(), builder.root())
-        }
-        RootRegion::Upper => {
-            let transition_root = {
-                // SAFETY: The allocator contract applies to the VHE lower root.
-                let mut builder = unsafe { PageTableBuilder::new(allocator, RootRegion::Lower)? };
-                // SAFETY: Only transition aliases are installed in this root.
-                unsafe { map_transition_aliases(&mut builder, platform, kernel)? };
-                builder.root()
-            };
-            // SAFETY: The allocator contract also applies to the independent
-            // VHE upper root.
-            let mut builder = unsafe { PageTableBuilder::new(allocator, RootRegion::Upper)? };
-            // SAFETY: Permanent aliases lie wholly in the selected upper range.
-            unsafe { map_permanent_aliases(&mut builder, platform, kernel, layout)? };
-            // SAFETY: Image and destination were validated above.
-            unsafe { map_kernel_at(&mut builder, kernel, kernel_base)? };
-            // SAFETY: `stack` is a fresh writable allocation retained by boot.
-            unsafe { map_boot_stack(&mut builder, stack, stack_size, layout)? };
-            (transition_root, builder.root())
-        }
+    let transition_root = {
+        // SAFETY: The allocator contract applies to the VHE lower root.
+        let mut builder = unsafe { PageTableBuilder::new(allocator, RootRegion::Lower)? };
+        // SAFETY: Only transition aliases are installed in this root.
+        unsafe { map_transition_aliases(&mut builder, platform, kernel)? };
+        builder.root()
     };
+    // SAFETY: The allocator contract also applies to the independent
+    // VHE upper root.
+    let mut builder = unsafe { PageTableBuilder::new(allocator, RootRegion::Upper)? };
+    // SAFETY: Permanent aliases lie wholly in the selected upper range.
+    unsafe { map_permanent_aliases(&mut builder, platform, kernel, layout)? };
+    // SAFETY: Image and destination were validated above.
+    unsafe { map_kernel_at(&mut builder, kernel, kernel_base)? };
+    // SAFETY: `stack` is a fresh writable allocation retained by boot.
+    unsafe { map_boot_stack(&mut builder, stack, stack_size, layout)? };
+    let kernel_root = builder.root();
 
     Ok(FinalAddressSpace {
         transition_root,
         kernel_root,
-        stack_top: VirtualAddress::new(layout.kernel_stack_base + PAGE_SIZE + stack_size),
+        stack_top: VirtualAddress::new(layout.boot_stack_bounds().1),
         kernel_base,
     })
 }
@@ -104,7 +82,7 @@ unsafe fn map_boot_stack(
     // unpublished builder for the complete mapping operation.
     unsafe {
         builder.map_range(
-            VirtualAddress::new(layout.kernel_stack_base + PAGE_SIZE),
+            VirtualAddress::new(layout.boot_stack_bounds().0),
             PhysicalRange::new(stack.get(), stack_size).ok_or(Error::InvalidRange)?,
             MappingFlags::NORMAL_RW,
         )
@@ -138,14 +116,15 @@ unsafe fn map_permanent_aliases(
     layout: HostLayout,
 ) -> Result<(), Error> {
     // SAFETY: The permanent linear alias uses validated RAM and builder ownership.
-    unsafe { map_discovered_ram(builder, platform, kernel, layout.linear_base, false)? };
+    unsafe { map_discovered_ram(builder, platform, kernel, layout.linear().base(), false)? };
     for &range in platform.mmio.as_slice() {
         // SAFETY: The validated range is mapped only through its permanent alias.
         unsafe {
             builder.map_range(
                 VirtualAddress::new(
                     layout
-                        .mmio_base
+                        .mmio()
+                        .base()
                         .checked_add(range.start())
                         .ok_or(Error::AddressOverflow)?,
                 ),
@@ -159,29 +138,20 @@ unsafe fn map_permanent_aliases(
 
 fn validate_platform_addressability(platform: &PlatformInfo) -> Result<(), Error> {
     let physical_limit = address::physical_address_limit();
-    let layout = layout::selected();
-    for range in platform.memory.as_slice() {
-        if range.end() > physical_limit
-            || range.end() > address::STAGE1_VA_LIMIT
-            || layout
-                .linear_base
-                .checked_add(range.end())
-                .filter(|end| *end <= layout.kernel_base)
-                .is_none()
-        {
-            return Err(Error::InvalidAddress);
-        }
-    }
-    for range in platform.mmio.as_slice() {
-        if range.end() > physical_limit
-            || range.end() > address::STAGE1_VA_LIMIT
-            || layout
-                .mmio_base
-                .checked_add(range.end())
-                .filter(|end| *end <= layout.linear_base)
-                .is_none()
-        {
-            return Err(Error::InvalidAddress);
+    let layout = layout::HOST_LAYOUT;
+    for (ranges, alias) in [
+        (platform.memory.as_slice(), layout.linear()),
+        (platform.mmio.as_slice(), layout.mmio()),
+    ] {
+        for range in ranges {
+            let start = align_down(range.start(), PAGE_SIZE);
+            let end = align_up(range.end(), PAGE_SIZE)?;
+            if end > physical_limit
+                || !layout.lower().contains_span(start, end - start)
+                || alias.alias(start, end - start).is_none()
+            {
+                return Err(Error::InvalidAddress);
+            }
         }
     }
     Ok(())

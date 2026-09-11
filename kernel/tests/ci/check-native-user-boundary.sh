@@ -43,22 +43,20 @@ reject "$entry" 'mem::forget\(completion\)|cfg.*ARCH' \
     'fatal completion ownership must be abandoned by HAL, not kernel cfg policy'
 require "$hal" 'struct AddressSpacePlan' \
     'HAL must own an opaque native address-space construction plan'
-require "$hal" 'struct AddressSpaceIdentifier<HostStage, SecondStage>' \
-    'HAL must bind typed identifier ownership to the selected plan'
-require "$hal" 'enum SelectedIdentifier<HostStage, SecondStage>' \
-    'HAL must keep the selected identifier namespace private'
-reject "$hal" 'plan:[[:space:]]*AddressSpacePlan' \
-    'a reserved identifier must have one regime discriminant, not an independent plan copy'
-reject "$hal" 'identifier:[[:space:]]*u16' \
-    'HAL must not erase the selected identifier before hierarchy construction'
-reject "$machine" 'enum[[:space:]]+(ReservedMachineIdentifier|MachineIdentifier)' \
-    'kernel must not reconstruct the private selected identifier variant'
-require "$machine" 'identifier\.try_map\(' \
-    'identifier activation and retirement must preserve the selected variant'
+reject "$hal $kernel_user_files" 'AddressSpaceIdentifier|SelectedIdentifier|Stage2Vmid|NvheStage2Only|prepare_nvhe' \
+    'Native address spaces must not acquire guest VMID or removed regime wrappers'
+require "$machine" 'identifier:[[:space:]]*ManuallyDrop<ActiveIdentifier<HostAsid>>' \
+    'kernel address-space ownership must retain its typed active ASID'
+require "$machine" 'reserve::<HostAsid>\(plan\.asid_bits\(\)\)' \
+    'Native ASID reservation must use the admitted hardware width'
 require "$machine" 'address_space_plan\(\)' \
-    'kernel machine ownership must obtain one selected HAL construction plan'
-require "$machine" 'identifier\.prepare_address_space' \
-    'kernel machine ownership must build through the plan-bound identifier'
+    'kernel machine ownership must obtain selected HAL limits'
+require "$machine" 'crate::hal::user::prepare_host_address_space\(' \
+    'kernel machine ownership must build through the host-stage HAL'
+require "$machine" 'let \(asid, generation\) = identity\(identifier\)' \
+    'Native construction must project its retained identifier and generation'
+reject "$machine" 'enum[[:space:]]+(ReservedMachineIdentifier|MachineIdentifier)' \
+    'kernel must not reconstruct a removed translation-regime discriminant'
 require "$entry" 'failure\.abandon_with\(' \
     'fatal completion abandonment must be structurally diverging'
 reject "$hal" 'pub\(crate\)[[:space:]]+fn[[:space:]]+abandon\(' \
@@ -74,24 +72,6 @@ if [ -z "$plan_line" ] || [ -z "$allocation_line" ] || [ "$plan_line" -ge "$allo
     echo 'unsupported native-user machines must fail before kernel allocation' >&2
     exit 1
 fi
-
-reserve_body=$(sed -n '/pub(crate) fn reserve_identifier/,/^    }/p' "$hal" | tr '\n' ' ')
-printf '%s\n' "$reserve_body" | grep -Eq \
-    'TranslationKind::HostStage1.*SelectedIdentifier::HostStage\(reserve_host' &&
-    printf '%s\n' "$reserve_body" | grep -Eq \
-        'TranslationKind::NvheStage2Only.*SelectedIdentifier::SecondStage\(reserve_stage2' || {
-    echo 'machine regime selection must reserve the matching identifier namespace' >&2
-    exit 1
-}
-
-prepare_body=$(sed -n '/pub(crate) unsafe fn prepare_address_space/,/^    }/p' "$hal" | tr '\n' ' ')
-printf '%s\n' "$prepare_body" | grep -Eq \
-    'SelectedIdentifier::HostStage\(token\).*host_identity\(token\).*prepare_host_address_space' &&
-    printf '%s\n' "$prepare_body" | grep -Eq \
-        'SelectedIdentifier::SecondStage\(token\).*second_identity\(token\).*prepare_nvhe_address_space' || {
-    echo 'one selected identifier variant must choose both identity and hierarchy builder' >&2
-    exit 1
-}
 
 abandon_body=$(sed -n '/pub(crate) fn abandon_with/,/^    }/p' "$hal")
 printf '%s\n' "$abandon_body" | grep -Eq 'core::mem::forget\(completion\)' || {

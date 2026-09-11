@@ -36,23 +36,43 @@ pub(crate) struct UserSlice {
     length: u64,
 }
 
-/// HAL-validated virtual-address authority for one machine regime.
+/// Machine address range and kernel-selected application boundary for one profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct UserAddressWindow {
     range: UserSlice,
+    application_limit: u64,
 }
 
 impl UserAddressWindow {
     /// Constructs a window from selected machine limits inside this subsystem.
-    pub(super) fn from_range(range: UserSlice) -> Result<Self, AddressError> {
-        if range.length() == 0 {
+    pub(super) fn from_range(
+        range: UserSlice,
+        application_limit: u64,
+    ) -> Result<Self, AddressError> {
+        if range.length() == 0
+            || application_limit <= range.base().get()
+            || application_limit > range.end().get()
+        {
             return Err(AddressError::Overflow);
         }
-        Ok(Self { range })
+        Ok(Self {
+            range,
+            application_limit,
+        })
     }
 
-    pub(super) fn from_limit(exclusive_limit: u64) -> Result<Self, AddressError> {
-        Self::from_range(UserSlice::new(UserAddress::new(0), exclusive_limit)?)
+    pub(super) fn from_limit(
+        exclusive_limit: u64,
+        application_limit: u64,
+    ) -> Result<Self, AddressError> {
+        Self::from_range(
+            UserSlice::new(UserAddress::new(0), exclusive_limit)?,
+            application_limit,
+        )
+    }
+
+    pub(crate) const fn application_limit(self) -> u64 {
+        self.application_limit
     }
 
     pub(crate) const fn range(self) -> UserSlice {
@@ -60,8 +80,17 @@ impl UserAddressWindow {
     }
 
     #[cfg(test)]
+    pub(crate) fn with_application_limit_for_test(
+        limit: u64,
+        application_limit: u64,
+    ) -> Result<Self, AddressError> {
+        Self::from_limit(limit, application_limit)
+    }
+
+    #[cfg(test)]
     pub(crate) fn for_test(base: u64, length: u64) -> Result<Self, AddressError> {
-        Self::from_range(UserSlice::new(UserAddress::new(base), length)?)
+        let range = UserSlice::new(UserAddress::new(base), length)?;
+        Self::from_range(range, range.end().get())
     }
 }
 

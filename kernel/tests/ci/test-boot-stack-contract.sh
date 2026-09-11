@@ -24,7 +24,9 @@ write_linkers() {
 }
 
 write_sources() {
-    printf '%s\n' 'pub(super) const KERNEL_STACK_PAGES: usize = 64;' \
+    printf '%s\n' 'pub const BOOT_STACK_PAGES: usize = 64;' \
+        >"$fixture/src/arch/aarch64/address_layout.rs"
+    printf '%s\n' 'pub(super) use super::super::address_layout::BOOT_STACK_PAGES as KERNEL_STACK_PAGES;' \
         >"$fixture/src/arch/aarch64/memory/page_table.rs"
     printf '%s\n' 'const KERNEL_STACK_PAGES: usize = 64;' \
         >"$fixture/src/arch/riscv64/memory/page_table.rs"
@@ -40,6 +42,24 @@ write_linkers
 write_sources
 check
 
+printf '%s\n' '// pub const BOOT_STACK_PAGES: usize = 64;' \
+    'pub const BOOT_STACK_PAGES: usize = 16;' \
+    >"$fixture/src/arch/aarch64/address_layout.rs"
+if check >/dev/null 2>&1; then
+    echo 'AArch64 canonical boot stack must retain the 256 KiB minimum' >&2
+    exit 1
+fi
+
+write_sources
+printf '%s\n' '// pub(super) use super::super::address_layout::BOOT_STACK_PAGES as KERNEL_STACK_PAGES;' \
+    'pub(super) const KERNEL_STACK_PAGES: usize = 64;' \
+    >"$fixture/src/arch/aarch64/memory/page_table.rs"
+if check >/dev/null 2>&1; then
+    echo 'AArch64 must not fork the canonical boot stack definition' >&2
+    exit 1
+fi
+
+write_sources
 printf '%s\n' '// const KERNEL_STACK_PAGES: usize = 64;' \
     'const KERNEL_STACK_PAGES: usize = 16;' \
     >"$fixture/src/arch/riscv64/memory/page_table.rs"

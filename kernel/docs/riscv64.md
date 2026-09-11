@@ -46,6 +46,14 @@ identifier generations and flush untagged translations. Root replacement and
 retirement use acknowledged CPU-local requests through the common residency
 owner. Each consuming hart synchronizes its instruction stream before entry.
 
+The Sv39 user range is 256 GiB. Current kernel layout policy limits
+application-controlled VMARs to `[0, 0x0000_0020_0000_0000)` (128 GiB), reserving
+`[0x0000_0020_0000_0000, 0x0000_0040_0000_0000)` for kernel-managed user mappings
+such as a future vDSO. This reservation is separate from HS kernel mappings.
+The boundary is provisional and may expand application space later; equal
+halves are not an ABI requirement. Actual process grants currently stay below
+4 GiB. See the [Native address-space contract](syscall-abi.md#native-64-bit-application-address-space-contract).
+
 ## Architecture boundaries
 
 Architecture code owns entry state, CSRs, traps, SBI instruction bridges,

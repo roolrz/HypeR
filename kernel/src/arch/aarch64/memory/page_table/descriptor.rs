@@ -11,7 +11,7 @@
 #[cfg(CONFIG_CRASH_CONSOLE)]
 use hyper::hal::memory::{Stage1Mapping, Stage1MemoryType};
 
-use super::super::super::{host, registers};
+use super::super::super::registers;
 
 #[derive(Clone, Copy)]
 pub(super) struct MappingFlags {
@@ -56,16 +56,13 @@ impl MappingFlags {
         if !self.writable {
             bits |= registers::STAGE1_DESC_AP_READ_ONLY;
         }
-        if host::is_vhe() {
-            // Host mappings are never executable from EL0. PXN additionally
-            // blocks privileged fetches for non-executable mappings.
-            bits |= registers::STAGE1_DESC_UXN;
-            if !self.executable {
-                bits |= registers::STAGE1_DESC_PXN;
-            }
-        } else if !self.executable {
-            bits |= registers::STAGE1_DESC_XN;
+        // Host mappings never permit EL0 execution. PXN additionally blocks
+        // privileged instruction fetches from non-executable mappings.
+        bits |= registers::STAGE1_DESC_UXN;
+        if !self.executable {
+            bits |= registers::STAGE1_DESC_PXN;
         }
+
         bits
     }
 }
@@ -146,13 +143,7 @@ pub(super) fn decode_mapping(descriptor: u64, level: usize, address: u64) -> Opt
         size,
         readable: true,
         writable: descriptor & registers::STAGE1_DESC_AP_READ_ONLY == 0,
-        executable: descriptor
-            & if host::is_vhe() {
-                registers::STAGE1_DESC_PXN
-            } else {
-                registers::STAGE1_DESC_XN
-            }
-            == 0,
+        executable: descriptor & registers::STAGE1_DESC_PXN == 0,
         memory_type: if attribute == registers::STAGE1_DESC_ATTR_NORMAL {
             Stage1MemoryType::Normal
         } else if attribute == registers::STAGE1_DESC_ATTR_DEVICE {

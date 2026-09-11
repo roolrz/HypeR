@@ -1,77 +1,40 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Runtime selection and world-switch controls for the EL2 host regime.
-
-use core::arch::asm;
-
-use hyper::sync::atomic::{AtomicU8, Ordering};
+//! Validation of the required VHE EL2 host execution regime.
 
 use super::registers;
-
-const UNINITIALIZED: u8 = 0;
-const NVHE: u8 = 1;
-const VHE: u8 = 2;
-
-static HOST_MODE: AtomicU8 = AtomicU8::new(UNINITIALIZED);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HostMode {
-    NonVhe,
-    Vhe,
-}
+use core::arch::asm;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum InitializationError {
-    ConflictingSelection,
+    VheRequired,
 }
 
 pub(super) fn initialize() -> Result<(), InitializationError> {
-    let mode = current_mode();
-    let encoded = encode(mode);
-    match HOST_MODE.compare_exchange(UNINITIALIZED, encoded, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => Ok(()),
-        Err(selected) if selected == encoded => Ok(()),
-        Err(_) => Err(InitializationError::ConflictingSelection),
+    if current_cpu_is_compatible() {
+        Ok(())
+    } else {
+        Err(InitializationError::VheRequired)
     }
 }
 
 pub(super) fn current_cpu_is_compatible() -> bool {
-    HOST_MODE.load(Ordering::Acquire) == encode(current_mode())
-}
-
-pub(super) fn is_vhe() -> bool {
-    match HOST_MODE.load(Ordering::Acquire) {
-        VHE => true,
-        NVHE => false,
-        _ => super::halt(),
-    }
-}
-
-pub fn mode_name() -> &'static str {
-    if is_vhe() { "VHE" } else { "nVHE" }
-}
-
-fn current_mode() -> HostMode {
+    let features: u64;
     let hcr: u64;
-    // SAFETY: HCR_EL2 is local EL2 state and reading it has no side effects.
+    // SAFETY: These baseline EL2-readable registers have no side effects.
+    // Bootstrap admits VHE before any VHE-only register alias is accessed.
     unsafe {
-        asm!(
-            "mrs {hcr}, HCR_EL2",
-            hcr = out(reg) hcr,
-            options(nomem, nostack, preserves_flags)
-        );
+        asm!("mrs {features}, ID_AA64MMFR1_EL1", "mrs {hcr}, HCR_EL2",
+            features = out(reg) features, hcr = out(reg) hcr,
+            options(nomem, nostack, preserves_flags));
     }
-    if hcr & registers::HCR_EL2_E2H != 0 {
-        HostMode::Vhe
-    } else {
-        HostMode::NonVhe
-    }
+    (features >> registers::ID_AA64MMFR1_VH_SHIFT) & registers::ID_AA64MMFR1_VH_MASK
+        == registers::ID_AA64MMFR1_VH_VHE
+        && hcr & (registers::HCR_EL2_E2H | registers::HCR_EL2_TGE)
+            == registers::HCR_EL2_E2H | registers::HCR_EL2_TGE
 }
 
-const fn encode(mode: HostMode) -> u8 {
-    match mode {
-        HostMode::NonVhe => NVHE,
-        HostMode::Vhe => VHE,
-    }
+pub const fn mode_name() -> &'static str {
+    "VHE"
 }

@@ -3,9 +3,9 @@
 
 //! Kernel ownership of architectural translation-identifier namespaces.
 //!
-//! VHE native address spaces use the ASID namespace. nVHE native address
-//! spaces and guests use the same VMID namespace. Namespace marker types make
-//! feeding an ASID to VTTBR or a VMID to TTBR a type error.
+//! Native address spaces use the ASID namespace; guests use the separate
+//! VMID namespace. Namespace marker types keep their reservation, activation,
+//! and acknowledged-retirement ownership distinct.
 
 use core::marker::PhantomData;
 

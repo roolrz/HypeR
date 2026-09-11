@@ -13,7 +13,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use super::registers;
 
 pub const STAGE1_VA_BITS: u32 = hyper::config::ARM64_VA_BITS as u32;
-pub const STAGE1_VA_LIMIT: u64 = 1_u64 << STAGE1_VA_BITS;
+pub const STAGE1_LAYOUT: super::address_layout::AddressLayout =
+    match super::address_layout::AddressLayout::new(STAGE1_VA_BITS) {
+        Some(layout) => layout,
+        None => panic!("unsupported AArch64 virtual address layout"),
+    };
+pub const STAGE1_VA_LIMIT: u64 = STAGE1_LAYOUT.lower().size();
 pub const CONFIGURED_PA_BITS: u32 = hyper::config::ARM64_PA_BITS as u32;
 pub const STAGE2_IPA_BITS: u32 = hyper::config::ARM64_IPA_BITS as u32;
 pub const STAGE2_IPA_LIMIT: u64 = 1_u64 << STAGE2_IPA_BITS;
@@ -54,12 +59,8 @@ impl Capabilities {
         1_u64 << self.physical_address_bits
     }
 
-    pub fn stage1_tcr_el2(self) -> u64 {
-        if super::host::is_vhe() {
-            registers::tcr_el2_vhe_stage1(self.virtual_address_bits, self.parange)
-        } else {
-            registers::tcr_el2_nvhe_stage1(self.virtual_address_bits, self.parange)
-        }
+    pub const fn stage1_tcr_el2(self) -> u64 {
+        registers::tcr_el2_vhe_stage1(self.virtual_address_bits, self.parange)
     }
 
     pub const fn stage2_vtcr_el2(self) -> u64 {

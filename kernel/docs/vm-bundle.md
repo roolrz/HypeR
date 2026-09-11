@@ -157,7 +157,7 @@ exercise cursor wrap and exhaustion.
 
 Physical AArch64 qualification still needs concurrent guest output/runtime
 consumption under migration, forced runtime termination, and repeated VM
-restart on VHE and nVHE hardware. Check payload ordering and final memory
+restart on FEAT_VHE-capable hardware. Check payload ordering and final memory
 accounting under load; QEMU does not establish weak-memory or cache behavior.
 
 ## Guest FIT contract

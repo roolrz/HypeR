@@ -13,6 +13,9 @@ use hyper::mm::PhysicalAddress;
 use hyper::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 const USER_LIMIT: u64 = 1 << 38;
+// Provisional Sv39 layout: reserve the upper user region for system mappings.
+// This is independent of ARM64 geometry and can change with the RV profile.
+const APPLICATION_LIMIT: u64 = 1 << 37;
 const ASID_SHIFT: u64 = 44;
 const ASID_MASK: u64 = 0xffff << ASID_SHIFT;
 const PPN_MASK: u64 = (1 << 44) - 1;
@@ -72,6 +75,9 @@ pub(crate) fn identifier_bits() -> Result<u8, Error> {
 pub(crate) fn user_address_limit() -> Result<u64, Error> {
     ensure_initialized()?;
     Ok(USER_LIMIT)
+}
+pub(crate) const fn application_address_limit() -> u64 {
+    APPLICATION_LIMIT
 }
 pub(crate) fn assert_kernel_access() -> Result<(), Error> {
     ensure_initialized()?;

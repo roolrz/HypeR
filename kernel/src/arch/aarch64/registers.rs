@@ -286,9 +286,8 @@ define_asm_constants! {
     MAIR_ATTR_NORMAL_WB = 0xff;
     MAIR_EL2_BOOT_VALUE = MAIR_ATTR_DEVICE_NGNRNE | (MAIR_ATTR_NORMAL_WB << 8);
 
-    // TCR_EL2 nVHE and VHE layouts, 4 KiB granules.
+    // TCR_EL2 VHE layout, 4 KiB granules.
     TCR_EL2_T0SZ_MASK = 0x3f;
-    TCR_EL2_NVHE_RES1 = (1 << 31) | (1 << 23);
     TCR_EL2_T0SZ_32 = 32;
     TCR_EL2_T0SZ_48 = 16;
     TCR_EL2_IRGN0_WBWA = 1 << 8;
@@ -297,8 +296,6 @@ define_asm_constants! {
     TCR_EL2_TG0_4K = 0 << 14;
     TCR_EL2_TG0_64K = 1 << 14;
     TCR_EL2_TG0_16K = 2 << 14;
-    TCR_EL2_NVHE_PS_SHIFT = 16;
-    TCR_EL2_NVHE_PS_MASK = 7 << TCR_EL2_NVHE_PS_SHIFT;
     TCR_EL2_VHE_T1SZ_SHIFT = 16;
     TCR_EL2_VHE_EPD1 = 1 << 23;
     TCR_EL2_VHE_IRGN1_WBWA = 1 << 24;
@@ -307,12 +304,6 @@ define_asm_constants! {
     TCR_EL2_VHE_TG1_4K = 2 << 30;
     TCR_EL2_VHE_IPS_SHIFT = 32;
     TCR_EL2_VHE_IPS_MASK = 7 << TCR_EL2_VHE_IPS_SHIFT;
-    TCR_EL2_NVHE_BOOT_BASE = TCR_EL2_NVHE_RES1
-        | TCR_EL2_T0SZ_48
-        | TCR_EL2_IRGN0_WBWA
-        | TCR_EL2_ORGN0_WBWA
-        | TCR_EL2_SH0_INNER
-        | TCR_EL2_TG0_4K;
     TCR_EL2_VHE_BOOT_BASE = TCR_EL2_T0SZ_48
         | (TCR_EL2_T0SZ_48 << TCR_EL2_VHE_T1SZ_SHIFT)
         | TCR_EL2_IRGN0_WBWA
@@ -381,26 +372,18 @@ define_asm_constants! {
     STAGE1_DESC_ACCESS_FLAG = 1 << 10;
     STAGE1_DESC_NOT_GLOBAL = 1 << 11;
     STAGE1_DESC_CONTIGUOUS = 1 << 52;
-    // Bit 53 is PXN only in the two-level EL2&0 (VHE) regime and RES0 in
-    // the single-level EL2 regime. Bit 54 is UXN under VHE and XN otherwise.
+    // Privileged/user execute-never in the required EL2&0 host regime.
     STAGE1_DESC_PXN = 1 << 53;
     STAGE1_DESC_UXN = 1 << 54;
-    STAGE1_DESC_XN = 1 << 54;
     BOOT_DEVICE_BLOCK_FLAGS = STAGE1_DESC_BLOCK
         | STAGE1_DESC_OUTER_SHAREABLE
         | STAGE1_DESC_ACCESS_FLAG
-        | STAGE1_DESC_XN;
+        | STAGE1_DESC_PXN
+        | STAGE1_DESC_UXN;
     BOOT_NORMAL_BLOCK_FLAGS = STAGE1_DESC_BLOCK
         | STAGE1_DESC_ATTR_NORMAL
         | STAGE1_DESC_INNER_SHAREABLE
         | STAGE1_DESC_ACCESS_FLAG;
-}
-
-/// Encodes the final nVHE stage-1 control value for one validated VA/PA policy.
-pub const fn tcr_el2_nvhe_stage1(virtual_address_bits: u8, parange: u8) -> u64 {
-    (TCR_EL2_NVHE_BOOT_BASE & !(TCR_EL2_T0SZ_MASK | TCR_EL2_NVHE_PS_MASK))
-        | (64 - virtual_address_bits as u64)
-        | ((parange as u64) << TCR_EL2_NVHE_PS_SHIFT)
 }
 
 /// Encodes the final VHE lower/upper stage-1 control value.

@@ -23,7 +23,7 @@ pub(crate) struct ExposedCopyError;
 pub(crate) enum AddressSpaceError {
     InvalidCpu,
     InvalidAddressLimit,
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     Unsupported,
     #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     Backend(crate::arch::user::UserAddressSpaceError),
@@ -44,109 +44,24 @@ pub(crate) enum UserEntryError {
     Backend(crate::arch::user::UserEntryError),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)), allow(dead_code))]
-enum TranslationKind {
-    HostStage1,
-    #[cfg(CONFIG_ARCH_AARCH64)]
-    NvheStage2Only,
-}
-
 #[cfg(CONFIG_ARCH_AARCH64)]
 const USER_TRANSLATION_IDENTIFIER_BITS: u8 = 8;
 
 /// Opaque construction policy for the selected native-user translation regime.
 ///
-/// The plan keeps architecture selection, identifier namespace, and hierarchy
-/// sizing below the HAL boundary. Kernel ownership supplies storage and typed
-/// identifier lifetimes without learning which register regime consumes them.
+/// The plan keeps architecture layout limits and ASID width below the HAL boundary.
+/// Kernel ownership supplies storage and typed identifier lifetimes.
 pub(crate) struct AddressSpacePlan {
-    kind: TranslationKind,
     address_limit: u64,
+    application_limit: u64,
     identifier_bits: u8,
 }
 
-enum SelectedIdentifier<HostStage, SecondStage> {
-    HostStage(HostStage),
-    #[cfg_attr(
-        not(CONFIG_ARCH_AARCH64),
-        expect(
-            dead_code,
-            reason = "only AArch64 nVHE reserves second-stage identifiers"
-        )
-    )]
-    SecondStage(SecondStage),
-}
-
-/// Identifier ownership selected by an opaque address-space plan.
-///
-/// The private variant binds the kernel-owned typed identifier to the same
-/// translation regime which will consume its numeric value. Callers cannot
-/// accidentally pair a host-stage identifier with a second-stage plan.
-pub(crate) struct AddressSpaceIdentifier<HostStage, SecondStage> {
-    selected: SelectedIdentifier<HostStage, SecondStage>,
-}
-
-impl<HostStage, SecondStage> AddressSpaceIdentifier<HostStage, SecondStage> {
-    /// Returns a conservative upper bound for pages retained by one hierarchy.
-    pub(crate) fn table_page_capacity(&self, leaf_count: usize) -> Option<usize> {
-        let levels_per_leaf = match &self.selected {
-            SelectedIdentifier::HostStage(_) => 3,
-            SelectedIdentifier::SecondStage(_) => 2,
-        };
-        leaf_count
-            .checked_mul(levels_per_leaf)
-            .and_then(|pages| pages.checked_add(1))
-    }
-
-    pub(crate) fn try_map<NextHost, NextSecond, Error>(
-        self,
-        host_stage: impl FnOnce(HostStage) -> Result<NextHost, Error>,
-        second_stage: impl FnOnce(SecondStage) -> Result<NextSecond, Error>,
-    ) -> Result<AddressSpaceIdentifier<NextHost, NextSecond>, Error> {
-        let selected = match self.selected {
-            SelectedIdentifier::HostStage(identifier) => {
-                SelectedIdentifier::HostStage(host_stage(identifier)?)
-            }
-            SelectedIdentifier::SecondStage(identifier) => {
-                SelectedIdentifier::SecondStage(second_stage(identifier)?)
-            }
-        };
-        Ok(AddressSpaceIdentifier { selected })
-    }
-
-    /// Builds the hierarchy selected when this identifier was reserved.
-    ///
-    /// # Safety
-    ///
-    /// Allocator results must be new, zeroed, linearly mapped blocks of the
-    /// requested order and remain retained through acknowledged retirement.
-    /// Each projection must return the exact value and generation represented
-    /// by its input token; substituting another identifier can violate hardware
-    /// translation isolation.
-    pub(crate) unsafe fn prepare_address_space(
-        &self,
-        host_identity: impl FnOnce(&HostStage) -> (u16, u64),
-        second_identity: impl FnOnce(&SecondStage) -> (u16, u64),
-        enumerate: impl FnMut(&mut dyn FnMut(MappingPage)),
-        allocator: &mut impl FnMut(usize) -> Option<PhysicalAddress>,
-    ) -> Result<PreparedAddressSpace, AddressSpaceError> {
-        // SAFETY: One private variant selects both the identifier namespace and
-        // its builder, while the caller supplies the allocation and exact
-        // token-projection proofs documented above.
-        unsafe {
-            match &self.selected {
-                SelectedIdentifier::HostStage(token) => {
-                    let (identifier, generation) = host_identity(token);
-                    prepare_host_address_space(identifier, generation, enumerate, allocator)
-                }
-                SelectedIdentifier::SecondStage(token) => {
-                    let (identifier, generation) = second_identity(token);
-                    prepare_nvhe_address_space(identifier, generation, enumerate, allocator)
-                }
-            }
-        }
-    }
+/// Conservative page bound for a four-level host hierarchy, including its root.
+pub(crate) fn table_page_capacity(leaf_count: usize) -> Option<usize> {
+    leaf_count
+        .checked_mul(3)
+        .and_then(|pages| pages.checked_add(1))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -176,22 +91,18 @@ pub(crate) fn address_space_plan() -> Result<AddressSpacePlan, AddressSpaceError
     {
         let address_limit =
             crate::arch::user::user_address_limit().map_err(AddressSpaceError::Contract)?;
-        #[cfg(CONFIG_ARCH_AARCH64)]
-        let kind = if crate::arch::user::user_uses_vhe_translation() {
-            TranslationKind::HostStage1
-        } else {
-            TranslationKind::NvheStage2Only
-        };
-        #[cfg(CONFIG_ARCH_RISCV64)]
-        let kind = TranslationKind::HostStage1;
+        let application_limit = crate::arch::user::application_address_limit();
+        if application_limit == 0 || application_limit >= address_limit {
+            return Err(AddressSpaceError::InvalidAddressLimit);
+        }
         #[cfg(CONFIG_ARCH_AARCH64)]
         let identifier_bits = USER_TRANSLATION_IDENTIFIER_BITS;
         #[cfg(CONFIG_ARCH_RISCV64)]
         let identifier_bits = crate::arch::user::user_translation_identifier_bits()
             .map_err(AddressSpaceError::Contract)?;
         Ok(AddressSpacePlan {
-            kind,
             address_limit,
+            application_limit,
             identifier_bits,
         })
     }
@@ -207,24 +118,15 @@ impl AddressSpacePlan {
         self.address_limit
     }
 
-    /// Selects the identifier namespace required by this machine plan.
-    pub(crate) fn reserve_identifier<HostStage, SecondStage, Error>(
-        self,
-        reserve_host: impl FnOnce(u8) -> Result<HostStage, Error>,
-        reserve_stage2: impl FnOnce(u8) -> Result<SecondStage, Error>,
-    ) -> Result<AddressSpaceIdentifier<HostStage, SecondStage>, Error> {
-        #[cfg(not(CONFIG_ARCH_AARCH64))]
-        let _ = reserve_stage2;
-        let selected = match self.kind {
-            TranslationKind::HostStage1 => {
-                SelectedIdentifier::HostStage(reserve_host(self.identifier_bits)?)
-            }
-            #[cfg(CONFIG_ARCH_AARCH64)]
-            TranslationKind::NvheStage2Only => {
-                SelectedIdentifier::SecondStage(reserve_stage2(self.identifier_bits)?)
-            }
-        };
-        Ok(AddressSpaceIdentifier { selected })
+    /// Exclusive limit for application-controlled mappings in this profile.
+    /// Addresses above it remain available only to kernel-managed user mappings.
+    pub(crate) const fn application_limit(&self) -> u64 {
+        self.application_limit
+    }
+
+    /// ASID width admitted by the selected host-stage translation mechanism.
+    pub(crate) const fn asid_bits(&self) -> u8 {
+        self.identifier_bits
     }
 }
 
@@ -361,7 +263,9 @@ impl ActiveAddressSpace<'_> {
 ///
 /// Allocator results must be new, zeroed, linearly mapped blocks of the
 /// requested order and remain retained through acknowledged root retirement.
-unsafe fn prepare_host_address_space(
+/// The ASID must name the caller's retained host-stage identifier; its value
+/// and generation must remain reserved until that same retirement completes.
+pub(crate) unsafe fn prepare_host_address_space(
     asid: u16,
     generation: u64,
     mut enumerate: impl FnMut(&mut dyn FnMut(MappingPage)),
@@ -395,47 +299,6 @@ unsafe fn prepare_host_address_space(
     #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
     {
         let _ = (asid, generation, &mut enumerate, allocator);
-        Err(AddressSpaceError::Unsupported)
-    }
-}
-
-/// Builds an nVHE private stage-2 root. The safety contract matches the VHE
-/// builder, while the caller must supply a VMID from the shared guest/native
-/// namespace.
-unsafe fn prepare_nvhe_address_space(
-    vmid: u16,
-    generation: u64,
-    mut enumerate: impl FnMut(&mut dyn FnMut(MappingPage)),
-    allocator: &mut impl FnMut(usize) -> Option<PhysicalAddress>,
-) -> Result<PreparedAddressSpace, AddressSpaceError> {
-    #[cfg(CONFIG_ARCH_AARCH64)]
-    {
-        let mut arch_enumerate = |visit: &mut dyn FnMut(crate::arch::user::UserMappingPage)| {
-            enumerate(&mut |page| {
-                visit(crate::arch::user::UserMappingPage {
-                    address: page.address,
-                    physical: page.physical,
-                    readable: page.readable,
-                    writable: page.writable,
-                    executable: page.executable,
-                });
-            });
-        };
-        // SAFETY: The facade forwards the same table ownership contract.
-        let backend = unsafe {
-            crate::arch::user::prepare_nvhe_user_address_space(
-                vmid,
-                generation,
-                &mut arch_enumerate,
-                allocator,
-            )
-        }
-        .map_err(AddressSpaceError::Backend)?;
-        Ok(PreparedAddressSpace { backend })
-    }
-    #[cfg(not(CONFIG_ARCH_AARCH64))]
-    {
-        let _ = (vmid, generation, &mut enumerate, allocator);
         Err(AddressSpaceError::Unsupported)
     }
 }

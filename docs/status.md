@@ -12,7 +12,7 @@ acceptance boundaries. Planned work is tracked in the [roadmap](roadmap.md).
 
 | Host architecture | Status | Current acceptance contract |
 | --- | --- | --- |
-| AArch64 | Tier 1 | QEMU `virt`; nVHE and VHE; LL/SC and LSE; SMP; Linux guest reaches `/init` and completes repeated timer wakeups |
+| AArch64 | Tier 1 | QEMU `virt` with FEAT_VHE required; LSE; SMP; Linux guest reaches `/init` and completes repeated timer wakeups |
 | RISC-V 64-bit | Supported | QEMU `virt`; kernel self-tests; UP/SMP Native applications and userspace-managed Linux guests, repeated timer wakeups, interactive console and VM retirement |
 | x86-64 | Experimental | QEMU `q35`-targeted build and image validation; no public runtime contract yet |
 
@@ -52,16 +52,22 @@ The current foundation includes:
   scheduler-backed sleep, with Rust std spawn/join, TLS cleanup and detached
   stack reclamation through the shared runtime;
 - a writable kernel ramfs with rooted traversal, links, rename, metadata and
-  advisory locks, optional RTC-backed UTC, a strict AArch64 ELF64 process loader, and
+  advisory locks, optional RTC-backed UTC, a strict AArch64/RISC-V ELF64 process
+  loader, and
   capability-relative userspace runtime linker for Native `/init` and its
   services, with eager relocation, W^X/RELRO enforcement, guarded stacks, and
   scheduler-owned Process publication;
+- immutable file/VMO snapshots and private mappings with copy-on-write or
+  eager allocation; complete executable source pages can be reused across
+  processes while relocations and other writes remain private. Shared writable
+  VMOs and guest memory retain stable physical backing; this is not live
+  address-space cloning or fork;
 - a manifest-driven Native init which constructs services transactionally and
   delegates monotonically attenuated capabilities;
 - capability-scoped Native `ps` and `handle` tools with immutable task names,
   explicit Process-to-Thread ownership, decoded object purposes and rights,
   and KOIDs that remain diagnostic correlation values rather than authority;
-- an AArch64 VHE/nVHE native-EL0 proof which enters through a scheduler-owned
+- an AArch64 VHE native-EL0 proof which enters through a scheduler-owned
   user Thread, dispatches the initial handle, scheduling, lifecycle, and Event
   syscalls, contains a user fault, and retires the complete Process ownership
   graph;
@@ -77,7 +83,7 @@ The current foundation includes:
   guest memory, virtual interrupts, devices, and the dormant boot vCPU;
 - a capability-scoped Native VM manager contained by a bounded fleet resource
   domain, plus isolated per-VM runtimes which parse FIT images, own guest VMOs,
-  construct Linux firmware data, and supervise installed VMs from EL0;
+  construct Linux firmware data, and supervise installed VMs from userspace;
 - a multi-client VM control plane and `/bin/vmm` lifecycle client, with one
   exclusive runtime-provided console connection per VM, caller-allocated shared
   output pages, and userspace retention independent of the physical Console;
@@ -124,7 +130,7 @@ development.
 HypeR keeps policy above mechanism:
 
 ```text
-native EL0 VMM, services, and future compatibility supervisors
+Native userspace VMM, services, and future compatibility supervisors
     -> schema-defined pre-release syscall and capability boundary
     -> kernel user-entry adapters and services
     -> kernel policy: task, IRQ, time, memory, crash, device
@@ -149,8 +155,8 @@ actions only after policy returns. CI rejects direct architecture-to-kernel
 policy dependencies outside the three non-returning bootstrap transfers.
 
 Read [the architecture guide](../kernel/docs/architecture.md) for the normative
-boundary rules and migration constraints. The planned process, capability,
-syscall, and foreign-ABI boundary is specified separately in the [userspace and
+boundary rules and migration constraints. The implemented Native contracts and
+planned foreign-ABI boundary are specified separately in the [userspace and
 syscall design](../kernel/docs/syscall-abi.md).
 
 Kernel self-test images contain no Linux guest loader or default VM policy.

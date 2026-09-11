@@ -52,17 +52,26 @@ inject_and_reject 'process policy must reject discriminant casts' \
     src/kernel/process/owner.rs 'fn bad(machine: MachineAbi) -> u8 { machine as u8 }'
 inject_and_reject 'kernel must not recreate the identifier selection enum' \
     src/kernel/mm/user_space/machine.rs 'enum ReservedMachineIdentifier { Host, Second }'
-inject_and_reject 'HAL must reject raw identifier construction seams' \
-    src/hal/selected/user.rs 'impl AddressSpacePlan { pub(crate) unsafe fn prepare_address_space(self, identifier: u16) {} }'
+inject_and_reject 'HAL must reject removed translation-regime wrappers' \
+    src/hal/selected/user.rs 'struct AddressSpaceIdentifier<T> { asid: T }'
 inject_and_reject 'completion abandonment must not return normally' \
     src/hal/selected/user.rs 'impl CompletionFailure<'"'"'_> { pub(crate) fn abandon(self) {} }'
 
 copy_sources
-sed 's/SelectedIdentifier::HostStage(reserve_host/SelectedIdentifier::SecondStage(reserve_host/' \
-    "$fixture/src/hal/selected/user.rs" >"$fixture/mutated"
-mv "$fixture/mutated" "$fixture/src/hal/selected/user.rs"
+sed 's/plan.asid_bits()/16/' \
+    "$fixture/src/kernel/mm/user_space/machine.rs" >"$fixture/mutated"
+mv "$fixture/mutated" "$fixture/src/kernel/mm/user_space/machine.rs"
 if check >/dev/null 2>&1; then
-    echo 'VHE selection must not reserve the second-stage namespace' >&2
+    echo 'Native ASID reservation must use the admitted hardware width' >&2
+    exit 1
+fi
+
+copy_sources
+sed 's/identity(identifier)/identity(unrelated_identifier)/' \
+    "$fixture/src/kernel/mm/user_space/machine.rs" >"$fixture/mutated"
+mv "$fixture/mutated" "$fixture/src/kernel/mm/user_space/machine.rs"
+if check >/dev/null 2>&1; then
+    echo 'Native page tables must use the retained ASID owner' >&2
     exit 1
 fi
 

@@ -27,10 +27,10 @@ to the list; SDK workspace members are discovered automatically.
 
 GitHub Actions separates source quality, architecture builds, image contracts,
 Native SDK integration, and runtime acceptance. The AArch64 matrix exercises
-baseline and feature-rich CPU models, multiple host modes and atomic backends,
-address-space geometries, SMP, kernel self-tests, virtual interrupts and timers,
-and standalone kernel self-tests. Linux guest startup is covered by Native
-userspace integration through the VMM tools. RISC-V Native integration runs the
+VHE with different address-space geometries, UP/SMP, kernel self-tests, and
+virtual interrupts and timers. A separate negative boot test verifies that
+CPUs without FEAT_VHE reach the explicit rejection loop. Linux guest startup is
+covered by Native userspace integration through the VMM tools. RISC-V Native integration runs the
 same static/dynamic std, process, thread, filesystem, shell and userspace Linux
 VM contracts on one and four harts. A separate `make test-vm-smoke ARCH=riscv64`
 init fixture validates Native VM lifecycle, timer/serial WFI wakeups and

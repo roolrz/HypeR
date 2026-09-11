@@ -99,38 +99,6 @@ fn physical_count() -> u64 {
 /// The caller must prevent concurrent execution of this vCPU and must enter
 /// the guest only after all of its architectural state has been restored.
 pub unsafe fn activate_virtual_timer(context: &VirtualTimerContext) {
-    if super::host::is_vhe() {
-        // SAFETY: The caller owns the stopped vCPU; the VHE helper accesses
-        // only its guest virtual-timer register bank.
-        unsafe { activate_virtual_timer_vhe(context) };
-    } else {
-        // SAFETY: The caller owns the stopped vCPU and local nVHE timer bank.
-        unsafe { activate_virtual_timer_nvhe(context) };
-    }
-}
-
-unsafe fn activate_virtual_timer_nvhe(context: &VirtualTimerContext) {
-    // Program the offset and comparator before unmasking the timer so stale
-    // state from the previous vCPU cannot assert an interrupt.
-    // SAFETY: The caller exclusively owns the inactive vCPU and local timer;
-    // programming remains masked until the complete saved state is installed.
-    unsafe {
-        asm!(
-            "msr CNTV_CTL_EL0, xzr",
-            "msr CNTVOFF_EL2, {offset}",
-            "msr CNTV_CVAL_EL0, {compare_value}",
-            "isb",
-            "msr CNTV_CTL_EL0, {control}",
-            "isb",
-            offset = in(reg) context.offset(),
-            compare_value = in(reg) context.compare_value(),
-            control = in(reg) context.writable_control(),
-            options(nostack, preserves_flags)
-        );
-    }
-}
-
-unsafe fn activate_virtual_timer_vhe(context: &VirtualTimerContext) {
     // SAFETY: The caller exclusively owns the inactive vCPU and the EL12
     // virtual-timer bank selected by these encodings.
     unsafe {
@@ -156,42 +124,6 @@ unsafe fn activate_virtual_timer_vhe(context: &VirtualTimerContext) {
 /// Local IRQs must be masked, and `context` must identify the vCPU currently
 /// loaded on this processing element.
 pub unsafe fn deactivate_virtual_timer(context: &mut VirtualTimerContext) {
-    if super::host::is_vhe() {
-        // SAFETY: The caller guarantees this is the active local VHE vCPU and
-        // that IRQs prevent concurrent timer handling.
-        unsafe { deactivate_virtual_timer_vhe(context) };
-    } else {
-        // SAFETY: The caller guarantees this is the active local nVHE vCPU and
-        // that IRQs prevent concurrent timer handling.
-        unsafe { deactivate_virtual_timer_nvhe(context) };
-    }
-}
-
-unsafe fn deactivate_virtual_timer_nvhe(context: &mut VirtualTimerContext) {
-    let offset: u64;
-    let compare_value: u64;
-    let control: u64;
-    // SAFETY: Guest execution is stopped, local IRQs are masked, and this
-    // context exclusively owns the live timer bank being sampled and disabled.
-    unsafe {
-        asm!(
-            "mrs {control}, CNTV_CTL_EL0",
-            "mrs {compare_value}, CNTV_CVAL_EL0",
-            "mrs {offset}, CNTVOFF_EL2",
-            "msr CNTV_CTL_EL0, xzr",
-            "isb",
-            "msr CNTVOFF_EL2, xzr",
-            "isb",
-            control = out(reg) control,
-            compare_value = out(reg) compare_value,
-            offset = out(reg) offset,
-            options(nostack, preserves_flags)
-        );
-    }
-    context.restore_hardware_state(offset, compare_value, control);
-}
-
-unsafe fn deactivate_virtual_timer_vhe(context: &mut VirtualTimerContext) {
     let offset: u64;
     let compare_value: u64;
     let control: u64;
@@ -217,29 +149,12 @@ unsafe fn deactivate_virtual_timer_vhe(context: &mut VirtualTimerContext) {
 
 /// Reports the live CNTV interrupt output on the current processing element.
 pub fn virtual_timer_interrupt_asserted() -> bool {
-    let control = if super::host::is_vhe() {
-        read_virtual_timer_control_vhe()
-    } else {
-        read_virtual_timer_control_nvhe()
-    };
+    let control = read_virtual_timer_control();
     control & (registers::CNT_CTL_ENABLE | registers::CNT_CTL_IMASK | CONTROL_STATUS)
         == (registers::CNT_CTL_ENABLE | CONTROL_STATUS)
 }
 
-fn read_virtual_timer_control_nvhe() -> u64 {
-    let control: u64;
-    // SAFETY: CNTV_CTL_EL0 is readable at EL2 and has no side effects.
-    unsafe {
-        asm!(
-            "mrs {control}, CNTV_CTL_EL0",
-            control = out(reg) control,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    control
-}
-
-fn read_virtual_timer_control_vhe() -> u64 {
+fn read_virtual_timer_control() -> u64 {
     let control: u64;
     // SAFETY: The VHE virtual timer control alias is readable at EL2 and has
     // no memory side effects.

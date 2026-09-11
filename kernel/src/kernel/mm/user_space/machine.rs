@@ -23,9 +23,7 @@ use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::mm::page_block::PageBlock;
-use crate::kernel::mm::translation_id::{
-    ActiveIdentifier, HostAsid, IdentifierReservation, RetiringIdentifier, Stage2Vmid,
-};
+use crate::kernel::mm::translation_id::{ActiveIdentifier, HostAsid};
 
 type LogicalAddressSpace = UserAddressSpace<KernelPageBackend, DomainAccount>;
 type LogicalPrepared<'a> = PreparedMappingChange<'a, KernelPageBackend, DomainAccount>;
@@ -130,49 +128,6 @@ impl From<ResourceError> for Error {
     }
 }
 
-type MachineIdentifier = crate::hal::user::AddressSpaceIdentifier<
-    ActiveIdentifier<HostAsid>,
-    ActiveIdentifier<Stage2Vmid>,
->;
-type RetiringMachineIdentifier = crate::hal::user::AddressSpaceIdentifier<
-    RetiringIdentifier<HostAsid>,
-    RetiringIdentifier<Stage2Vmid>,
->;
-type ReservedMachineIdentifier = crate::hal::user::AddressSpaceIdentifier<
-    IdentifierReservation<HostAsid>,
-    IdentifierReservation<Stage2Vmid>,
->;
-
-fn activate_identifier(identifier: ReservedMachineIdentifier) -> Result<MachineIdentifier, Error> {
-    identifier.try_map(
-        |identifier| identifier.activate().map_err(Error::Identifier),
-        |identifier| identifier.activate().map_err(Error::Identifier),
-    )
-}
-
-fn begin_identifier_retirement(
-    identifier: MachineIdentifier,
-) -> Result<RetiringMachineIdentifier, Error> {
-    identifier.try_map(
-        |identifier| identifier.begin_retirement().map_err(Error::Identifier),
-        |identifier| identifier.begin_retirement().map_err(Error::Identifier),
-    )
-}
-
-unsafe fn complete_identifier_retirement(
-    identifier: RetiringMachineIdentifier,
-) -> Result<(), Error> {
-    identifier
-        .try_map(
-            // SAFETY: The caller supplies acknowledged invalidation for the
-            // matching host-stage identifier namespace.
-            |identifier| unsafe { identifier.complete() }.map_err(Error::Identifier),
-            // SAFETY: The same proof covers the shared native/guest VMID.
-            |identifier| unsafe { identifier.complete() }.map_err(Error::Identifier),
-        )
-        .map(|_| ())
-}
-
 struct TablePage {
     // Drop the physical owner before releasing its resource-domain charge.
     _block: PageBlock,
@@ -272,7 +227,7 @@ struct MachineState {
 pub(crate) struct NativeAddressSpace {
     logical: ManuallyDrop<LogicalAddressSpace>,
     account: DomainAccount,
-    identifier: ManuallyDrop<MachineIdentifier>,
+    identifier: ManuallyDrop<ActiveIdentifier<HostAsid>>,
     state: ManuallyDrop<StateLock>,
     root_vmar_object_published: AtomicBool,
     _owner_charge: CommittedCharge,
@@ -437,24 +392,20 @@ impl NativeAddressSpace {
         // identifier, so later allocation failure cannot strand hardware.
         let owner: UniqueFallibleArc<core::mem::MaybeUninit<Self>> =
             UniqueFallibleArc::try_new_uninit().map_err(|_| Error::Allocation)?;
-        let window = super::address_window(plan.address_limit())?;
+        let window = super::address_window(&plan)?;
         let account = DomainAccount::new(domain);
         let logical = UserAddressSpace::try_new(window, range, KernelPageBackend, account.clone())?;
-        let reserved = plan.reserve_identifier(
-            crate::kernel::mm::translation_id::reserve,
-            crate::kernel::mm::translation_id::reserve,
-        )?;
+        let reserved = crate::kernel::mm::translation_id::reserve::<HostAsid>(plan.asid_bits())?;
         let initial_epoch = logical.mapping_epoch();
         let image = build_image(
             &reserved,
-            |identifier| (identifier.value(), identifier.generation()),
             |identifier| (identifier.value(), identifier.generation()),
             initial_epoch,
             0,
             account.clone(),
             |_| {},
         )?;
-        let identifier = activate_identifier(reserved)?;
+        let identifier = reserved.activate()?;
         Ok(owner.write(Self {
             logical: ManuallyDrop::new(logical),
             account,
@@ -602,7 +553,6 @@ impl NativeAddressSpace {
         let image = build_image(
             &self.identifier,
             |identifier| (identifier.value(), identifier.generation()),
-            |identifier| (identifier.value(), identifier.generation()),
             logical.next_epoch(),
             leaf_count,
             self.account.clone(),
@@ -730,7 +680,7 @@ impl NativeAddressSpace {
         // SAFETY: `owner` is consumed, admission is permanently closed, and no
         // ActiveNativeAddressSpace borrow can coexist with this move.
         let identifier = unsafe { ManuallyDrop::take(&mut owner.identifier) };
-        let retiring = match begin_identifier_retirement(identifier) {
+        let retiring = match identifier.begin_retirement() {
             Ok(retiring) => retiring,
             Err(_) => crate::kernel::crash::fatal(format_args!(
                 "HypeR: native translation identifier retirement is inconsistent"
@@ -766,7 +716,7 @@ impl NativeAddressSpace {
         }
         // SAFETY: Residency is now irreversibly retired and every target
         // acknowledged invalidating this exact identifier before reuse.
-        if unsafe { complete_identifier_retirement(retiring) }.is_err() {
+        if unsafe { retiring.complete() }.is_err() {
             crate::kernel::crash::fatal(format_args!(
                 "HypeR: native translation identifier completion is inconsistent"
             ));
@@ -1087,28 +1037,27 @@ fn execute_cut(
     }
 }
 
-fn build_image<HostStage, SecondStage>(
-    identifier: &crate::hal::user::AddressSpaceIdentifier<HostStage, SecondStage>,
-    host_identity: impl FnOnce(&HostStage) -> (u16, u64),
-    second_identity: impl FnOnce(&SecondStage) -> (u16, u64),
+fn build_image<Asid>(
+    identifier: &Asid,
+    identity: impl FnOnce(&Asid) -> (u16, u64),
     epoch: u64,
     leaf_count: usize,
     account: DomainAccount,
     enumerate: impl FnMut(&mut dyn FnMut(crate::hal::user::MappingPage)),
 ) -> Result<FallibleArc<MachineImage>, Error> {
-    let capacity = identifier
-        .table_page_capacity(leaf_count)
-        .ok_or(Error::SizeOverflow)?;
+    let capacity = crate::hal::user::table_page_capacity(leaf_count).ok_or(Error::SizeOverflow)?;
     let mut tables = TablePagePool::try_new(capacity, account.clone())?;
+    let (asid, generation) = identity(identifier);
     let root = {
         let mut allocator = |order| tables.allocate(order);
         // SAFETY: TablePagePool returns uniquely owned zeroed PageTable blocks
         // and is moved intact into the resulting image through acknowledged
-        // retirement.
+        // retirement. Both callers supply their retained HostAsid token: the
+        // initial reservation or this address space's active identifier.
         unsafe {
-            identifier.prepare_address_space(
-                host_identity,
-                second_identity,
+            crate::hal::user::prepare_host_address_space(
+                asid,
+                generation,
                 enumerate,
                 &mut allocator,
             )
