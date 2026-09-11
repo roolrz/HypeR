@@ -3,7 +3,7 @@
 
 //! Immutable bootstrap authority and service-contract policy.
 
-use hyper_init::manifest::{
+use crate::manifest::{
     AuthorityDeclaration, AuthorityKey, AuthorityPolicy, StartupPurposeDeclaration,
 };
 use hyper_os::handle::{
@@ -22,29 +22,29 @@ const CONSOLE_OUTPUT_IMAGE: &str = "/svc/console-output";
 const SESSION_IMAGE: &str = "/svc/session";
 const SHELL_IMAGE: &str = "/bin/sh";
 const VM_MANAGER_IMAGE: &str = "/svc/vm-manager";
-pub(super) const VM_RUNTIME_IMAGE: &str = "/svc/vm-runtime";
+pub const VM_RUNTIME_IMAGE: &str = "/svc/vm-runtime";
 
 macro_rules! define_bootstrap_authorities {
     ($( $variant:ident = $value:literal => $source:literal ),+ $(,)?) => {
         #[repr(u16)]
         #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        pub(super) enum BootstrapAuthority {
+        pub enum BootstrapAuthority {
             $($variant = $value),+
         }
 
         impl BootstrapAuthority {
-            pub(super) const fn key(self) -> AuthorityKey {
+            pub const fn key(self) -> AuthorityKey {
                 AuthorityKey::new(self as u16)
             }
 
-            pub(super) fn from_source(source: &str) -> Option<Self> {
+            pub fn from_source(source: &str) -> Option<Self> {
                 match source {
                     $($source => Some(Self::$variant),)+
                     _ => None,
                 }
             }
 
-            pub(super) const fn from_key(key: AuthorityKey) -> Option<Self> {
+            pub const fn from_key(key: AuthorityKey) -> Option<Self> {
                 match key.as_raw() {
                     $($value => Some(Self::$variant),)+
                     _ => None,
@@ -84,7 +84,7 @@ define_bootstrap_authorities! {
 }
 
 /// Stateless policy used to validate a manifest before touching live handles.
-pub(super) struct BootstrapPolicy;
+pub struct BootstrapPolicy;
 
 impl AuthorityPolicy for BootstrapPolicy {
     fn authority<'policy>(&'policy self, source: &str) -> Option<AuthorityDeclaration<'policy>> {
@@ -206,7 +206,11 @@ impl AuthorityPolicy for BootstrapPolicy {
             VM_MANAGER_IMAGE => find_contract(vm_contract::MANAGER_STARTUP_CONTRACTS, name)
                 .or_else(|| find_contract(stdio_contract::STARTUP_CONTRACTS, name))
                 .or_else(|| find_contract(process_contract::VM_MANAGER_STARTUP_CONTRACTS, name)),
-            _ => None,
+            // Ordinary apps use standard contracts without an executable allowlist.
+            // The manifest must still explicitly request existing authority; this
+            // lookup neither creates handles nor grants service-private roles.
+            _ => find_contract(stdio_contract::APPLICATION_STARTUP_CONTRACTS, name)
+                .or_else(|| find_contract(process_contract::APPLICATION_STARTUP_CONTRACTS, name)),
         }?;
         Some(contract_declaration(contract))
     }
@@ -371,3 +375,7 @@ const fn observation_rights() -> Rights {
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
 }
+
+#[cfg(test)]
+#[path = "../tests/bootstrap_policy.rs"]
+mod tests;

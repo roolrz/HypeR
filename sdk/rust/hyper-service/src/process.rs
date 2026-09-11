@@ -113,3 +113,49 @@ pub const VM_MANAGER_STARTUP_CONTRACTS: &[StartupContract] = &[
     VM_MANAGER_TASK_FACTORY_CONTRACT,
     VM_MANAGER_RESOURCE_DOMAIN_CONTRACT,
 ];
+
+/// Standard application authorities, independently attenuable in the manifest.
+/// Existing shell/manager contracts retain their stronger, role-specific minima.
+pub const APPLICATION_STARTUP_CONTRACTS: &[StartupContract] = &[
+    StartupContract::exact(ROOT_DIRECTORY_NAME, startup::ROOT_DIRECTORY, Rights::READ)
+        .with_optional_rights(SHELL_ROOT_DIRECTORY_CONTRACT.allowed_rights()),
+    StartupContract::exact(
+        TASK_FACTORY_NAME,
+        startup::TASK_FACTORY,
+        Rights::CREATE_PROCESS,
+    )
+    .with_optional_rights(SHELL_TASK_FACTORY_CONTRACT.allowed_rights()),
+    StartupContract::exact(
+        TASK_GROUP_NAME,
+        startup::TASK_GROUP,
+        Rights::TASK_GROUP_ATTACH_PROCESS,
+    )
+    .with_optional_rights(SHELL_TASK_GROUP_CONTRACT.allowed_rights()),
+    StartupContract::exact(
+        RESOURCE_DOMAIN_NAME,
+        startup::RESOURCE_DOMAIN,
+        Rights::RESOURCE_DOMAIN_SPONSOR,
+    )
+    .with_optional_rights(SHELL_RESOURCE_DOMAIN_CONTRACT.allowed_rights()),
+    StartupContract::exact(
+        TASK_INSPECTOR_NAME,
+        startup::TASK_INSPECTOR,
+        Rights::INSPECT,
+    )
+    .with_optional_rights(SHELL_TASK_INSPECTOR_CONTRACT.allowed_rights()),
+    StartupContract::exact(
+        OBJECT_INSPECTOR_NAME,
+        startup::OBJECT_INSPECTOR,
+        Rights::INSPECT,
+    )
+    .with_optional_rights(SHELL_OBJECT_INSPECTOR_CONTRACT.allowed_rights()),
+    StartupContract::exact(
+        MEMORY_INSPECTOR_NAME,
+        startup::MEMORY_INSPECTOR,
+        Rights::INSPECT,
+    )
+    .with_optional_rights(SHELL_MEMORY_INSPECTOR_CONTRACT.allowed_rights()),
+    StartupContract::exact(CPU_INSPECTOR_NAME, startup::CPU_INSPECTOR, Rights::INSPECT)
+        .with_optional_rights(SHELL_CPU_INSPECTOR_CONTRACT.allowed_rights()),
+    CHILD_LIBRARY_DIRECTORY_CONTRACT,
+];

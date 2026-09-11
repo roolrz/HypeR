@@ -136,18 +136,30 @@ new process. Consequently an attached guest console cannot monopolize the
 manager connection or prevent independent lifecycle requests.
 
 Manifest capability purposes are symbolic service-contract names rather than
-raw integers. Init resolves each name in the contract selected by the service
-image, verifies its expected object kind, and rejects duplicate resolved
-purposes before any builder is created. The installed Rust SDK carries these
-typed contracts in `hyper-service`; numeric startup values remain an internal
-wire property at the Process boundary.
+raw integers. Init validates the expected object kind, explicit rights and
+unique resolved purpose before creating a builder. Built-in console, session,
+shell and VM-manager images retain their specialized contracts. Other Native
+apps can use standard stdio and process/inspection contracts without an image
+allowlist; required rights remain mandatory and optional rights are granted only
+when the manifest requests them. A service can therefore receive `WAIT|WRITE`
+stdout and `INSPECT` CPU statistics without authority to delegate either.
+A read-only std filesystem root needs `READ|INSPECT|DUPLICATE`: the runtime
+duplicates directory cursors and opens metadata-capable Files. `WRITE` and
+`TRANSFER` remain optional and should be omitted when unnecessary.
+Private roles such as `vm.provisioning` do not become generic app capabilities.
+The installed Rust SDK carries these typed contracts in `hyper-service`.
 
-The manifest schema's optional `initial-vm.image` field selects an initial
-guest by canonical absolute path; the production init profile currently
-requires it. The validated launch plan carries that path unchanged. Init opens
-it through the root Directory capability and transfers an opaque File
-capability to the unique service that declares the VM provisioning startup
-contract. VM services do not assign guest identity from image paths.
+The optional `virtual-machines.config` manifest field names the fleet config
+file. Init opens it through the root Directory and transfers the File capability
+to the unique service declaring the VM provisioning contract. The configuration
+contains named definitions and autostart policy; a Native-only manifest can omit
+it. Guest image paths are inputs to named VM definitions, not guest identities.
+
+Native apps remain the deployment layer for system policy, including future
+power-management policy services. The kernel owns privileged mechanisms and
+validates their capabilities; policy decisions need not move into the kernel or
+Linux I/O VM. This deployment contract does not claim that Native power-control
+operations are already implemented.
 
 Every dynamically linked service receives the loader's library Directory with
 exactly `READ|EXECUTE`. Services which construct child processes receive a
@@ -182,3 +194,10 @@ external echo command through the complete physical Console path, and attaches
 `/bin/vmm` to the separately buffered guest serial stream. The VM portion must
 observe repeated Linux timer wakeups, deliver guest-console input, and detach
 through the local Ctrl-] menu.
+
+The VM manager uses a std worker Thread for blocking capability rendezvous.
+A bounded ownership handoff and ByteChannel notification feed its main wait set;
+VM lifecycle state remains on the main Thread. Both Threads share the same
+Process and authority table; this is concurrency separation, not isolation. The event loop rotates ready
+sources and waits indefinitely when idle, using a finite deadline only for an
+outstanding runtime exit grace period. It does not periodically poll for clients.

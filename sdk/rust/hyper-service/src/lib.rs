@@ -44,6 +44,14 @@ impl StartupContract {
         }
     }
 
+    /// Allows explicit attenuation between required and optional authority.
+    /// Optional rights are a ceiling, never an implicit startup grant.
+    #[must_use]
+    pub const fn with_optional_rights(mut self, rights: Rights) -> Self {
+        self.allowed_rights = self.allowed_rights.union(rights);
+        self
+    }
+
     #[must_use]
     pub const fn name(self) -> &'static str {
         self.name
@@ -107,6 +115,10 @@ mod tests {
 
     #[test]
     fn composed_service_contracts_are_unambiguous() {
+        assert_unique_contracts(
+            super::stdio::APPLICATION_STARTUP_CONTRACTS,
+            super::process::APPLICATION_STARTUP_CONTRACTS,
+        );
         assert_unique_contracts(super::console::INPUT_STARTUP_CONTRACTS, &[]);
         assert_unique_contracts(super::console::OUTPUT_STARTUP_CONTRACTS, &[]);
         assert_unique_contracts(super::session::STARTUP_CONTRACTS, &[]);

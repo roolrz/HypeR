@@ -46,3 +46,25 @@ pub const STARTUP_CONTRACTS: &[StartupContract] = &[
     STANDARD_OUTPUT_CONTRACT,
     STANDARD_ERROR_CONTRACT,
 ];
+
+/// Ordinary services may keep stdio without authority to delegate it to children.
+pub const APPLICATION_STARTUP_CONTRACTS: &[StartupContract] = &[
+    StartupContract::exact(
+        STANDARD_INPUT_NAME,
+        STANDARD_INPUT,
+        Rights::WAIT.union(Rights::READ),
+    )
+    .with_optional_rights(Rights::DUPLICATE.union(Rights::TRANSFER)),
+    StartupContract::exact(
+        STANDARD_OUTPUT_NAME,
+        STANDARD_OUTPUT,
+        Rights::WAIT.union(Rights::WRITE),
+    )
+    .with_optional_rights(Rights::DUPLICATE.union(Rights::TRANSFER)),
+    StartupContract::exact(
+        STANDARD_ERROR_NAME,
+        STANDARD_ERROR,
+        Rights::WAIT.union(Rights::WRITE),
+    )
+    .with_optional_rights(Rights::DUPLICATE.union(Rights::TRANSFER)),
+];

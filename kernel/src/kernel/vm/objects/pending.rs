@@ -46,6 +46,11 @@ impl PendingVirtualMachine {
         configuration: VirtualMachineConfiguration,
         domain: &ResourceDomain,
     ) -> Result<Self, Error> {
+        // Reject unavailable host backends before reserving VM slots/resources.
+        // The service transaction restores the one-shot creation lease on error.
+        if crate::kernel::vm::entry_ready().is_none() {
+            return Err(Error::UnsupportedArchitecture);
+        }
         validate_configuration(configuration)?;
         let lifecycle_resources =
             VmLifecycleResources::try_reserve(domain, configuration.vcpu_count)?;
@@ -72,17 +77,20 @@ impl PendingVirtualMachine {
         if vmo.size() != self.configuration.memory_size {
             return Err(Error::InvalidConfiguration);
         }
-        let backing = GuestMemoryBacking::try_from_vmo(vmo)?;
-        self.state.with(|state| match state {
+        let mut backing = Some(GuestMemoryBacking::try_from_vmo(vmo)?);
+        let result = self.state.with(|state| match state {
             PendingState::Configuring { memory, .. } if memory.is_none() => {
-                *memory = Some(backing);
+                *memory = backing.take();
                 Ok(())
             }
             PendingState::Configuring { .. }
             | PendingState::Transition
             | PendingState::Sealed(_)
             | PendingState::Failed => Err(Error::BadState),
-        })
+        });
+        // Rejected backing releases its VMO hardware lease outside PendingLock.
+        drop(backing);
+        result
     }
 
     pub(crate) fn set_bootstrap(&self, bootstrap: VirtualCpuBootstrap) -> Result<(), Error> {
@@ -110,19 +118,24 @@ impl PendingVirtualMachine {
         &self,
         serial: KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>,
     ) -> Result<(), Error> {
-        self.state.with(|state| match state {
+        let mut serial = Some(serial);
+        let result = self.state.with(|state| match state {
             PendingState::Configuring { virtual_serial, .. } if virtual_serial.is_none() => {
-                if !serial.object().claim_assignment() {
+                let candidate = serial.as_ref().ok_or(Error::BadState)?;
+                if !candidate.object().claim_assignment() {
                     return Err(Error::BadState);
                 }
-                *virtual_serial = Some(serial);
+                *virtual_serial = serial.take();
                 Ok(())
             }
             PendingState::Configuring { .. }
             | PendingState::Transition
             | PendingState::Sealed(_)
             | PendingState::Failed => Err(Error::BadState),
-        })
+        });
+        // A last rejected reference may release retained pages/accounting.
+        drop(serial);
+        result
     }
 
     /// Realizes every fallible VM resource without making it globally visible.

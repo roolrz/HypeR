@@ -43,6 +43,12 @@ bring-up is part of this milestone, not a follow-up after the backend is done.
   of each exported block range; Linux must not independently mount or modify it.
   Define completion/flush durability and cache invalidation across reconnects.
 
+Native apps and services remain first-class throughout this work, including
+independently deployed power and resource-policy services. The I/O VM supplies
+drivers, not a replacement for the Native application runtime. Keep existing
+app/std functionality and service supervision covered while adding backend
+capabilities; new privileged power operations require explicit Native authority.
+
 ### Ordered milestones and to-do
 
 1. **Bring up the HypeR host on Pi 5.**

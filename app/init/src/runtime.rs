@@ -5,14 +5,13 @@
 
 mod authority;
 mod launcher;
-mod policy;
 mod provision;
 mod report;
 mod supervisor;
 
 use authority::{AuthorityInventory, VmAuthorities};
+use hyper_init::bootstrap_policy::BootstrapPolicy;
 use launcher::ServiceLauncher;
-use policy::BootstrapPolicy;
 use provision::InitialVmProvisioner;
 use supervisor::SupervisorSet;
 

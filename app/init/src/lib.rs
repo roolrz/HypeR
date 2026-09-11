@@ -7,6 +7,7 @@
 //! The runtime adapter must obtain real root-`Directory` and process-construction
 //! capabilities before it can apply a validated launch plan.
 
+pub mod bootstrap_policy;
 pub mod diagnostics;
 pub mod manifest;
 pub mod supervision;
