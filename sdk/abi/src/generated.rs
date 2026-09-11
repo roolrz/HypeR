@@ -157,6 +157,8 @@ pub const HYPER_NATIVE_SIGNAL_CONSOLE_WRITABLE: u64 = 1_u64 << 1;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED: u64 = 1_u64 << 0;
 
+pub const HYPER_NATIVE_PRIVATE_MAPPING_COPY_ON_WRITE: u64 = 0;
+pub const HYPER_NATIVE_PRIVATE_MAPPING_EAGER: u64 = 1;
 pub const HYPER_NATIVE_RISCV_ISA_I: u64 = 1;
 pub const HYPER_NATIVE_RISCV_ISA_M: u64 = 2;
 pub const HYPER_NATIVE_RISCV_ISA_A: u64 = 4;
@@ -401,6 +403,9 @@ pub const HYPER_NATIVE_SYS_FILE_UNLOCK: u64 = 110;
 pub const HYPER_NATIVE_SYS_CLOCK_GET_REALTIME: u64 = 111;
 pub const HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS: u64 = 112;
 pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO: u64 = 113;
+pub const HYPER_NATIVE_SYS_VMO_CREATE_SNAPSHOT: u64 = 114;
+pub const HYPER_NATIVE_SYS_FILE_CREATE_SNAPSHOT: u64 = 115;
+pub const HYPER_NATIVE_SYS_VMAR_MAP_PRIVATE: u64 = 116;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -414,6 +419,28 @@ pub const fn hyper_native_failure_result_mask(
         _ => 0,
     }
 }
+
+pub const HYPER_NATIVE_PRIVATE_MAPPING_MIN_SIZE: usize = 48;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativePrivateMapping {
+    pub source_offset: u64,
+    pub source_length: u64,
+    pub address: u64,
+    pub size: u64,
+    pub data_offset: u64,
+    pub permissions: u32,
+    pub mode: u32,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativePrivateMapping>() == 48);
+const _: () = assert!(core::mem::align_of::<HyperNativePrivateMapping>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, source_offset) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, source_length) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, address) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, size) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, data_offset) == 32);
+const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, permissions) == 40);
+const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, mode) == 44);
 
 pub const HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE: usize = 24;
 #[repr(C)]

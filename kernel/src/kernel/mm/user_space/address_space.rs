@@ -15,7 +15,8 @@ use super::contract::{
     UserSlice,
 };
 use super::vmo::{
-    ExecutableVmo, MappingObject, VmoError, WritableMappingLease, WritableVmo, resident_pages,
+    ExecutableVmo, MappingObject, PrivateMappingMode, PrivateView, SnapshotVmo, VmoError,
+    WritableMappingLease, WritableVmo, resident_pages,
 };
 
 #[cfg(not(test))]
@@ -101,6 +102,7 @@ pub(crate) enum AddressSpaceError<BackendError, AccountError> {
     BackingNotResident,
     Backend(BackendError),
     Busy,
+    CowRequired,
     EmptyRange,
     IdentityExhausted,
     InvalidAddressSpace,
@@ -118,6 +120,12 @@ pub(crate) enum AddressSpaceError<BackendError, AccountError> {
     WritableExecutableBacking,
 }
 
+impl<BackendError, AccountError> AddressSpaceError<BackendError, AccountError> {
+    pub(crate) const fn is_stale_transaction(&self) -> bool {
+        matches!(self, Self::StaleTransaction)
+    }
+}
+
 impl<BackendError, AccountError> From<VmoError<BackendError, AccountError>>
     for AddressSpaceError<BackendError, AccountError>
 {
@@ -127,6 +135,7 @@ impl<BackendError, AccountError> From<VmoError<BackendError, AccountError>>
             VmoError::Allocation => Self::Allocation,
             VmoError::Backend(error) => Self::Backend(error),
             VmoError::Busy => Self::Busy,
+            VmoError::CowRequired => Self::CowRequired,
             VmoError::InvalidRange => Self::InvalidRange,
             VmoError::SizeOverflow => Self::SizeOverflow,
         }
@@ -189,6 +198,12 @@ struct VmarSet<Account: MemoryAccount> {
     _storage_charge: Option<Account::Charge>,
 }
 
+#[derive(Clone, Copy)]
+struct UserWriteRange {
+    id: u64,
+    range: UserSlice,
+}
+
 struct AddressSpaceState<Backend: PageBackend, Account: MemoryAccount> {
     mappings: FallibleArc<MappingSet<Backend, Account>>,
     vmars: FallibleArc<VmarSet<Account>>,
@@ -196,7 +211,9 @@ struct AddressSpaceState<Backend: PageBackend, Account: MemoryAccount> {
     next_vmar_id: u64,
     authority_epoch: u64,
     mapping_epoch: u64,
-    active_user_writes: usize,
+    user_writes: Vec<UserWriteRange>,
+    user_write_charge: Option<Account::Charge>,
+    next_user_write_id: u64,
 }
 
 struct AddressSpaceSnapshot<Backend: PageBackend, Account: MemoryAccount> {
@@ -277,7 +294,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
                 next_vmar_id: 1,
                 authority_epoch: 1,
                 mapping_epoch: 1,
-                active_user_writes: 0,
+                user_writes: Vec::new(),
+                user_write_charge: None,
+                next_user_write_id: 1,
             }),
             _metadata_charge: metadata_charge,
         })
@@ -430,6 +449,206 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         Ok(())
     }
 
+    pub(crate) fn is_private_write(&self, address: UserAddress) -> bool {
+        let snapshot = self.snapshot();
+        snapshot.mappings.records.iter().any(|mapping| {
+            mapping.snapshot.range.base() <= address
+                && address < mapping.snapshot.range.end()
+                && mapping.snapshot.permissions.contains(Access::Write)
+                && mapping.object.private().is_some()
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_map_snapshot(
+        &self,
+        vmar: Vmar,
+        range: UserSlice,
+        source: SnapshotVmo<Backend, Account>,
+        offset: u64,
+        permissions: Permissions,
+        maximum: Permissions,
+    ) -> SpaceResult<Backend, Account, PreparedMappingChange<'_, Backend, Account>> {
+        self.prepare_map(
+            vmar,
+            range,
+            MappingObject::Snapshot(source),
+            offset,
+            permissions,
+            maximum,
+        )
+    }
+
+    pub(super) fn prepare_private_view_builder(
+        &self,
+        source: SnapshotVmo<Backend, Account>,
+        size: u64,
+        source_offset: u64,
+        source_length: u64,
+        data_offset: u64,
+        mode: PrivateMappingMode,
+    ) -> SpaceResult<Backend, Account, super::vmo::PrivateViewBuilder<Backend, Account>> {
+        Ok(super::vmo::PrivateViewBuilder::try_new(
+            source,
+            size,
+            source_offset,
+            source_length,
+            data_offset,
+            mode,
+            self.backend.clone(),
+            self.account.clone(),
+        )?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_map_private(
+        &self,
+        vmar: Vmar,
+        range: UserSlice,
+        source: SnapshotVmo<Backend, Account>,
+        source_offset: u64,
+        source_length: u64,
+        data_offset: u64,
+        permissions: Permissions,
+        maximum: Permissions,
+        mode: PrivateMappingMode,
+    ) -> SpaceResult<Backend, Account, PreparedMappingChange<'_, Backend, Account>> {
+        require_nonempty_aligned(range)?;
+        let view = PrivateView::try_new(
+            source,
+            range.length(),
+            source_offset,
+            source_length,
+            data_offset,
+            mode,
+            self.backend.clone(),
+            self.account.clone(),
+        )?;
+        self.prepare_map_private_view(vmar, range, view, permissions, maximum)
+    }
+
+    pub(super) fn prepare_map_private_view(
+        &self,
+        vmar: Vmar,
+        range: UserSlice,
+        view: FallibleArc<PrivateView<Backend, Account>>,
+        permissions: Permissions,
+        maximum: Permissions,
+    ) -> SpaceResult<Backend, Account, PreparedMappingChange<'_, Backend, Account>> {
+        self.prepare_map(
+            vmar,
+            range,
+            MappingObject::Private(view),
+            0,
+            permissions,
+            maximum,
+        )
+    }
+
+    /// Builds one transactional replacement of all private versions touched by
+    /// a write. Concrete retired page owners remain in the prior mapping set
+    /// until the machine acknowledges its translation epoch's retirement.
+    pub(crate) fn prepare_private_write(
+        &self,
+        range: UserSlice,
+    ) -> SpaceResult<Backend, Account, Option<PreparedMappingChange<'_, Backend, Account>>> {
+        if !self.root.range.contains(range) {
+            return Err(AddressSpaceError::InvalidRange);
+        }
+        if range.length() == 0 {
+            return Ok(None);
+        }
+        let snapshot = self.snapshot();
+        let mut cursor = range.base();
+        let mut needed = false;
+        for mapping in &snapshot.mappings.records {
+            let Some(overlap) = intersection(mapping.snapshot.range, range) else {
+                continue;
+            };
+            if overlap.base() != cursor {
+                return Err(AddressSpaceError::NotMapped);
+            }
+            if !mapping.snapshot.permissions.contains(Access::Write) {
+                return Err(AddressSpaceError::WriteDenied);
+            }
+            let offset = mapping.snapshot.object_offset + overlap.base().get()
+                - mapping.snapshot.range.base().get();
+            if !mapping.object.writable_backing(
+                offset,
+                usize::try_from(overlap.length()).map_err(|_| AddressSpaceError::SizeOverflow)?,
+            )? {
+                needed = true;
+            }
+            cursor = overlap.end();
+        }
+        if cursor != range.end() {
+            return Err(AddressSpaceError::NotMapped);
+        }
+        if !needed {
+            return Ok(None);
+        }
+        let capacity = snapshot.mappings.records.len();
+        let storage_charge = self.try_mapping_set_charge(capacity)?;
+        let mut replacement = Vec::new();
+        replacement
+            .try_reserve_exact(capacity)
+            .map_err(|_| AddressSpaceError::Allocation)?;
+        replacement.extend(snapshot.mappings.records.iter().cloned());
+        // A view may occur in several protect/unmap fragments. Each prepared
+        // version replaces every occurrence so one logical alias cannot retain
+        // different bytes. Mapping tokens deliberately survive COW; futex
+        // identities are virtual mappings, not physical page identities.
+        for index in 0..replacement.len() {
+            let mapping = &replacement[index];
+            let Some(overlap) = intersection(mapping.snapshot.range, range) else {
+                continue;
+            };
+            let Some(view) = mapping.object.private() else {
+                continue;
+            };
+            let offset = mapping.snapshot.object_offset + overlap.base().get()
+                - mapping.snapshot.range.base().get();
+            let first =
+                usize::try_from(offset / PAGE_SIZE).map_err(|_| AddressSpaceError::SizeOverflow)?;
+            let end = offset
+                .checked_add(overlap.length())
+                .and_then(|end| end.checked_add(PAGE_SIZE - 1))
+                .ok_or(AddressSpaceError::SizeOverflow)?
+                / PAGE_SIZE;
+            let count = usize::try_from(end).map_err(|_| AddressSpaceError::SizeOverflow)? - first;
+            if (first..first + count).all(|page| view.is_writable(page)) {
+                continue;
+            }
+            let old = view.clone();
+            let changed = view.materialize(first, count)?;
+            for fragment in &mut replacement {
+                if fragment
+                    .object
+                    .private()
+                    .is_some_and(|view| core::ptr::eq(&**view, &*old))
+                {
+                    fragment.object = MappingObject::Private(changed.clone());
+                }
+            }
+        }
+        let replacement = FallibleArc::try_new(MappingSet {
+            records: replacement,
+            storage_charge,
+        })
+        .map_err(|_| AddressSpaceError::Allocation)?;
+        let epoch = snapshot
+            .mapping_epoch
+            .checked_add(1)
+            .ok_or(AddressSpaceError::SizeOverflow)?;
+        Ok(Some(PreparedMappingChange::new_private_backing(
+            self,
+            snapshot.authority_epoch,
+            snapshot.mapping_epoch,
+            epoch,
+            replacement,
+        )?))
+    }
+
     pub(crate) fn prepare_map_writable(
         &self,
         vmar: Vmar,
@@ -534,7 +753,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             return Err(AddressSpaceError::BackingNotResident);
         }
         let ownership = self.try_mapping_ownership()?;
-        let write_lease = if permissions.contains(Access::Write) {
+        let write_lease = if permissions.contains(Access::Write) && object.private().is_none() {
             Some(object.try_write_lease()?)
         } else {
             None
@@ -572,6 +791,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             snapshot.mapping_epoch,
             next_mapping_epoch,
             replacement,
+            range,
         )
     }
 
@@ -692,6 +912,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
                 &mut next_ownership,
             )?;
         }
+        if permissions.is_none() {
+            prune_private_views(&mut replacement)?;
+        }
         sort_mappings(&mut replacement);
         drop(next_ownership);
         drop(ownerships);
@@ -708,6 +931,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             snapshot.mapping_epoch,
             next_mapping_epoch,
             replacement,
+            range,
         )
     }
 
@@ -792,7 +1016,8 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
 
     /// Pins the current writable mapping set for a later transactional copy.
     ///
-    /// While the returned plan is active, mapping publication returns `Busy`.
+    /// While the returned plan is active, authority changes intersecting its
+    /// exact byte range return `Busy`; unrelated mappings may still change.
     /// This closes the interval between writing future capability values and
     /// publishing those values in a Process handle table: another Thread
     /// cannot redirect the output range to unrelated backing in that window.
@@ -804,19 +1029,48 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         AddressSpaceError<Backend::Error, Account::Error>,
     > {
         let snapshot = self.snapshot();
-        let plan = self.prepare_copy_from_snapshot(destination, Access::Write, &snapshot)?;
-        self.state.with(|state| {
-            if state.mapping_epoch != snapshot.mapping_epoch {
+        let mut plan = self.prepare_copy_from_snapshot(destination, Access::Write, &snapshot)?;
+        plan.pin_private_ranges()?;
+        let (reservation_id, count) = self
+            .state
+            .with(|state| (state.next_user_write_id, state.user_writes.len()));
+        let next_id = reservation_id
+            .checked_add(1)
+            .ok_or(AddressSpaceError::IdentityExhausted)?;
+        let capacity = count
+            .checked_add(1)
+            .ok_or(AddressSpaceError::SizeOverflow)?;
+        let mut charge = self.try_storage_charge::<UserWriteRange>(capacity)?;
+        let mut records = Vec::new();
+        records
+            .try_reserve_exact(capacity)
+            .map_err(|_| AddressSpaceError::Allocation)?;
+        let retired = self.state.with(|state| {
+            if state.mapping_epoch != snapshot.mapping_epoch
+                || state.next_user_write_id != reservation_id
+            {
                 return Err(AddressSpaceError::StaleTransaction);
             }
-            state.active_user_writes = state
-                .active_user_writes
-                .checked_add(1)
-                .ok_or(AddressSpaceError::Busy)?;
-            Ok(())
+            // Other admissions change next_user_write_id. Releases only shrink
+            // the set, so this preallocated capacity covers all current records
+            // plus our new one. Only Copy metadata moves with IRQs masked.
+            records.extend_from_slice(&state.user_writes);
+            records.push(UserWriteRange {
+                id: reservation_id,
+                range: destination,
+            });
+            let old_records =
+                core::mem::replace(&mut state.user_writes, core::mem::take(&mut records));
+            let old_charge = core::mem::replace(&mut state.user_write_charge, charge.take());
+            state.next_user_write_id = next_id;
+            Ok((old_records, old_charge))
         })?;
+        // On stale admission, uninstalled records/charge also remain outside
+        // the state lock. No allocation or destructor runs in the metadata cut.
+        drop(retired);
         Ok(PreparedUserWrite {
             address_space: self.id,
+            reservation_id,
             plan,
             completed: false,
         })
@@ -848,12 +1102,26 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         if reservation.address_space != self.id || reservation.completed {
             address_space_invariant_violation();
         }
-        self.state.with(|state| {
-            let Some(active) = state.active_user_writes.checked_sub(1) else {
+        let retired = self.state.with(|state| {
+            let Some(index) = state
+                .user_writes
+                .iter()
+                .position(|record| record.id == reservation.reservation_id)
+            else {
                 address_space_invariant_violation();
             };
-            state.active_user_writes = active;
+            state.user_writes.swap_remove(index);
+            if state.user_writes.is_empty() {
+                Some((
+                    core::mem::take(&mut state.user_writes),
+                    state.user_write_charge.take(),
+                ))
+            } else {
+                None
+            }
         });
+        // The last release returns all registry storage without allocation.
+        drop(retired);
         reservation.completed = true;
     }
 
@@ -915,12 +1183,14 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         if !mapping.snapshot.permissions.contains(Access::Write) {
             return Err(AddressSpaceError::WriteDenied);
         }
-        let MappingObject::Writable(storage) = &mapping.object else {
-            return Err(AddressSpaceError::WriteDenied);
-        };
         let offset =
             mapping.snapshot.object_offset + address.get() - mapping.snapshot.range.base().get();
-        let physical = storage.resident_physical_page(offset / PAGE_SIZE * PAGE_SIZE)?;
+        if !mapping.object.writable_backing(offset, 4)? {
+            return Err(AddressSpaceError::CowRequired);
+        }
+        let physical = mapping
+            .object
+            .physical_page(offset / PAGE_SIZE * PAGE_SIZE)?;
         let charge = self
             .account
             .try_charge(MemoryCharge {
@@ -931,7 +1201,12 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         Ok(PinnedAtomicWord {
             token: mapping.snapshot.token,
             physical: physical.get() + offset % PAGE_SIZE,
-            _mapping: mapping.clone(),
+            _backing: match mapping.object.pin_private_page(offset)? {
+                Some(page) => PinnedWordBacking::Private { _page: page },
+                None => PinnedWordBacking::Shared {
+                    _mapping: mapping.clone(),
+                },
+            },
             _charge: charge,
         })
     }
@@ -984,8 +1259,22 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
                 .get()
                 .checked_sub(mapping.snapshot.range.base().get())
                 .ok_or(AddressSpaceError::SizeOverflow)?;
+            let object_offset = mapping
+                .snapshot
+                .object_offset
+                .checked_add(delta)
+                .ok_or(AddressSpaceError::SizeOverflow)?;
+            if access == Access::Write
+                && !mapping.object.writable_backing(
+                    object_offset,
+                    usize::try_from(overlap.length())
+                        .map_err(|_| AddressSpaceError::SizeOverflow)?,
+                )?
+            {
+                return Err(AddressSpaceError::CowRequired);
+            }
             segments.push(CopySegment {
-                object: mapping.object.clone(),
+                object: CopyBacking::Mapping(mapping.object.clone()),
                 _write_lease: mapping.write_lease.clone(),
                 object_offset: mapping
                     .snapshot
@@ -1100,6 +1389,16 @@ fn address_space_invariant_violation() -> ! {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MappingChangeKind {
+    Authority {
+        range: UserSlice,
+    },
+    /// Changes only previously read-only private physical backing. Existing
+    /// writable pages, virtual ranges, permissions and mapping tokens survive.
+    PrivateBacking,
+}
+
 #[must_use = "prepared mapping state must be committed or explicitly abandoned"]
 pub(crate) struct PreparedMappingChange<'a, Backend: PageBackend, Account: MemoryAccount> {
     address_space: &'a UserAddressSpace<Backend, Account>,
@@ -1108,6 +1407,7 @@ pub(crate) struct PreparedMappingChange<'a, Backend: PageBackend, Account: Memor
     base_mapping_epoch: u64,
     next_mapping_epoch: u64,
     replacement: FallibleArc<MappingSet<Backend, Account>>,
+    kind: MappingChangeKind,
 }
 
 impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a, Backend, Account> {
@@ -1118,6 +1418,7 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
         base_mapping_epoch: u64,
         next_mapping_epoch: u64,
         replacement: FallibleArc<MappingSet<Backend, Account>>,
+        range: UserSlice,
     ) -> Result<Self, AddressSpaceError<Backend::Error, Account::Error>> {
         Ok(Self {
             address_space,
@@ -1126,6 +1427,29 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
             base_mapping_epoch,
             next_mapping_epoch,
             replacement,
+            kind: MappingChangeKind::Authority { range },
+        })
+    }
+
+    /// Only `prepare_private_write` may use this constructor: it preserves every
+    /// mapping's authority and every already-writable page owner. A reserved
+    /// user output is fully materialized before reservation publication, so no
+    /// page referenced by an active reservation can change in this transaction.
+    fn new_private_backing(
+        address_space: &'a UserAddressSpace<Backend, Account>,
+        authority_epoch: u64,
+        base_mapping_epoch: u64,
+        next_mapping_epoch: u64,
+        replacement: FallibleArc<MappingSet<Backend, Account>>,
+    ) -> Result<Self, AddressSpaceError<Backend::Error, Account::Error>> {
+        Ok(Self {
+            address_space,
+            base_authority_epoch: authority_epoch,
+            next_authority_epoch: authority_epoch,
+            base_mapping_epoch,
+            next_mapping_epoch,
+            replacement,
+            kind: MappingChangeKind::PrivateBacking,
         })
     }
 
@@ -1151,11 +1475,12 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
         PreparedPageSnapshot<Backend, Account>,
         AddressSpaceError<Backend::Error, Account::Error>,
     > {
-        let mapping = self
+        let (mapping_index, mapping) = self
             .replacement
             .records
             .iter()
-            .find(|mapping| mapping.snapshot.token == token)
+            .enumerate()
+            .find(|(_, mapping)| mapping.snapshot.token == token)
             .ok_or(AddressSpaceError::StaleMapping)?;
         let count = usize::try_from(mapping.snapshot.range.length() / PAGE_SIZE)
             .map_err(|_| AddressSpaceError::SizeOverflow)?;
@@ -1170,6 +1495,7 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
         Ok(PreparedPageSnapshot {
             pages,
             _charge: charge,
+            mapping_index,
             _pins: self.replacement.clone(),
         })
     }
@@ -1187,7 +1513,12 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
             {
                 return Err(AddressSpaceError::StaleTransaction);
             }
-            if state.active_user_writes != 0 {
+            if let MappingChangeKind::Authority { range } = self.kind
+                && state
+                    .user_writes
+                    .iter()
+                    .any(|record| record.range.length() != 0 && ranges_overlap(record.range, range))
+            {
                 return Err(AddressSpaceError::Busy);
             }
             // Keep the prepared owner outside the lock so a stale commit never
@@ -1221,10 +1552,28 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
 pub(crate) struct PreparedPageSnapshot<Backend: PageBackend, Account: MemoryAccount> {
     pages: Vec<PhysicalAddress>,
     _charge: Option<Account::Charge>,
+    mapping_index: usize,
     _pins: FallibleArc<MappingSet<Backend, Account>>,
 }
 
 impl<Backend: PageBackend, Account: MemoryAccount> PreparedPageSnapshot<Backend, Account> {
+    pub(crate) fn page_is_writable(&self, index: usize) -> bool {
+        let Some(mapping) = self._pins.records.get(self.mapping_index) else {
+            return false;
+        };
+        let Some(offset) = (index as u64)
+            .checked_mul(PAGE_SIZE)
+            .and_then(|delta| mapping.snapshot.object_offset.checked_add(delta))
+        else {
+            return false;
+        };
+        index < self.pages.len()
+            && mapping
+                .object
+                .writable_backing(offset, PAGE_SIZE as usize)
+                .unwrap_or(false)
+    }
+
     pub(crate) fn pages(&self) -> &[PhysicalAddress] {
         &self.pages
     }
@@ -1262,8 +1611,32 @@ impl<Backend: PageBackend, Account: MemoryAccount> CommittedMappingChange<Backen
     }
 }
 
+enum CopyBacking<B: PageBackend, A: MemoryAccount> {
+    Mapping(MappingObject<B, A>),
+    Private(super::vmo::PinnedPrivateRange<B, A>),
+}
+
+impl<B: PageBackend, A: MemoryAccount> CopyBacking<B, A> {
+    fn read_exposed(
+        &self,
+        offset: u64,
+        bytes: &mut [u8],
+    ) -> Result<(), VmoError<B::Error, A::Error>> {
+        match self {
+            Self::Mapping(object) => object.read_exposed(offset, bytes),
+            Self::Private(pages) => pages.read_exposed(offset, bytes),
+        }
+    }
+    fn write_exposed(&self, offset: u64, bytes: &[u8]) -> Result<(), VmoError<B::Error, A::Error>> {
+        match self {
+            Self::Mapping(object) => object.write_exposed(offset, bytes),
+            Self::Private(pages) => pages.write_exposed(offset, bytes),
+        }
+    }
+}
+
 struct CopySegment<Backend: PageBackend, Account: MemoryAccount> {
-    object: MappingObject<Backend, Account>,
+    object: CopyBacking<Backend, Account>,
     _write_lease: Option<WritableMappingLease<Backend, Account>>,
     object_offset: u64,
     length: u64,
@@ -1275,6 +1648,22 @@ struct CopyPlan<Backend: PageBackend, Account: MemoryAccount> {
 }
 
 impl<Backend: PageBackend, Account: MemoryAccount> CopyPlan<Backend, Account> {
+    fn pin_private_ranges(&mut self) -> SpaceResult<Backend, Account, ()> {
+        for segment in &mut self.segments {
+            let CopyBacking::Mapping(object) = &segment.object else {
+                continue;
+            };
+            let Some(view) = object.private() else {
+                continue;
+            };
+            let length =
+                usize::try_from(segment.length).map_err(|_| AddressSpaceError::SizeOverflow)?;
+            let pages = view.pin_write_range(segment.object_offset, length)?;
+            segment.object = CopyBacking::Private(pages);
+        }
+        Ok(())
+    }
+
     fn copy_from(
         &self,
         source: &[u8],
@@ -1352,6 +1741,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> CopyPlan<Backend, Account> {
 #[must_use = "release the mapping reservation on every exit path"]
 pub(crate) struct PreparedUserWrite<Backend: PageBackend, Account: MemoryAccount> {
     address_space: AddressSpaceId,
+    reservation_id: u64,
     plan: CopyPlan<Backend, Account>,
     completed: bool,
 }
@@ -1595,6 +1985,9 @@ fn validate_mapping_permissions<Backend: PageBackend, Account: MemoryAccount>(
     if !permissions.is_valid() {
         return Err(AddressSpaceError::InvalidPermissions);
     }
+    if matches!(object, MappingObject::Snapshot(_)) && permissions.contains(Access::Write) {
+        return Err(AddressSpaceError::WriteDenied);
+    }
     if object.executable() {
         if permissions.contains(Access::Write) {
             return Err(AddressSpaceError::WritableExecutableBacking);
@@ -1667,7 +2060,9 @@ fn append_fragments<'a, Backend: PageBackend, Account: MemoryAccount>(
             maximum_permissions: original.maximum_permissions,
             object: original.object.clone(),
             ownership,
-            write_lease: if fragment_permissions.contains(Access::Write) {
+            write_lease: if fragment_permissions.contains(Access::Write)
+                && original.object.private().is_none()
+            {
                 match &original.write_lease {
                     Some(lease) => Some(lease.clone()),
                     None => Some(original.object.try_write_lease()?),
@@ -1721,6 +2116,41 @@ fn fragment_total(mapping: UserSlice, cut: UserSlice, retain_middle: bool) -> us
         + usize::from(overlap.end() < mapping.end())
 }
 
+/// Unmapping removes ownership of private pages which no remaining fragment
+/// covers. The prepared version is unpublished; the old version still owns
+/// every removed page until acknowledged hardware retirement.
+fn prune_private_views<B: PageBackend, A: MemoryAccount>(
+    mappings: &mut [Mapping<B, A>],
+) -> SpaceResult<B, A, ()> {
+    for index in 0..mappings.len() {
+        let Some(old) = mappings[index].object.private().cloned() else {
+            continue;
+        };
+        let changed = old.retain_pages(|page| {
+            let offset = page as u64 * PAGE_SIZE;
+            mappings.iter().any(|mapping| {
+                mapping
+                    .object
+                    .private()
+                    .is_some_and(|view| core::ptr::eq(&**view, &*old))
+                    && offset >= mapping.snapshot.object_offset
+                    && offset < mapping.snapshot.object_offset + mapping.snapshot.range.length()
+            })
+        })?;
+        let Some(changed) = changed else { continue };
+        for mapping in mappings.iter_mut() {
+            if mapping
+                .object
+                .private()
+                .is_some_and(|view| core::ptr::eq(&**view, &*old))
+            {
+                mapping.object = MappingObject::Private(changed.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn sort_mappings<Backend: PageBackend, Account: MemoryAccount>(
     mappings: &mut [Mapping<Backend, Account>],
 ) {
@@ -1731,6 +2161,15 @@ fn sort_mappings<Backend: PageBackend, Account: MemoryAccount>(
 pub(crate) struct PinnedAtomicWord<Backend: PageBackend, Account: MemoryAccount> {
     pub(crate) token: MappingToken,
     pub(crate) physical: u64,
-    _mapping: Mapping<Backend, Account>,
+    _backing: PinnedWordBacking<Backend, Account>,
     _charge: Account::Charge,
+}
+
+enum PinnedWordBacking<B: PageBackend, A: MemoryAccount> {
+    Shared {
+        _mapping: Mapping<B, A>,
+    },
+    Private {
+        _page: super::vmo::PinnedPrivatePage<B, A>,
+    },
 }

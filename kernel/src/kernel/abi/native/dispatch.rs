@@ -132,8 +132,6 @@ define_immediate_routes! {
     HYPER_NATIVE_SYS_ABI_QUERY => sys_abi_query,
     HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC => sys_clock_get_monotonic,
     HYPER_NATIVE_SYS_HANDLE_CLOSE => sys_handle_close,
-    HYPER_NATIVE_SYS_HANDLE_GET_INFO => sys_handle_get_info,
-    HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO => sys_object_get_basic_info,
 }
 
 /// Executes one syscall after the machine context has returned to its Thread.
@@ -147,6 +145,21 @@ pub(in crate::kernel) fn dispatch_deferred(
     invocation: NativeInvocation,
 ) -> DeferredAction {
     match invocation.number() {
+        HYPER_NATIVE_SYS_HANDLE_GET_INFO => {
+            DeferredAction::Return(sys_handle_get_info(services, invocation.arguments()))
+        }
+        HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO => {
+            DeferredAction::Return(sys_object_get_basic_info(services, invocation.arguments()))
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_VMO_CREATE_SNAPSHOT => {
+            super::handlers::sys_vmo_create_snapshot(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_FILE_CREATE_SNAPSHOT => {
+            super::handlers::sys_file_create_snapshot(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_VMAR_MAP_PRIVATE => {
+            super::handlers::sys_vmar_map_private(services, invocation.arguments())
+        }
         HYPER_NATIVE_SYS_HANDLE_DUPLICATE => {
             DeferredAction::Return(sys_handle_duplicate(services, invocation.arguments()))
         }

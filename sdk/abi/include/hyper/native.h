@@ -169,6 +169,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED (UINT64_C(1) << 0)
 
+#define HYPER_NATIVE_PRIVATE_MAPPING_COPY_ON_WRITE UINT64_C(0)
+#define HYPER_NATIVE_PRIVATE_MAPPING_EAGER UINT64_C(1)
 #define HYPER_NATIVE_RISCV_ISA_I UINT64_C(1)
 #define HYPER_NATIVE_RISCV_ISA_M UINT64_C(2)
 #define HYPER_NATIVE_RISCV_ISA_A UINT64_C(4)
@@ -413,6 +415,9 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_CLOCK_GET_REALTIME UINT64_C(111)
 #define HYPER_NATIVE_SYS_DIRECTORY_OPEN_FILE_WITH_OPTIONS UINT64_C(112)
 #define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO UINT64_C(113)
+#define HYPER_NATIVE_SYS_VMO_CREATE_SNAPSHOT UINT64_C(114)
+#define HYPER_NATIVE_SYS_FILE_CREATE_SNAPSHOT UINT64_C(115)
+#define HYPER_NATIVE_SYS_VMAR_MAP_PRIVATE UINT64_C(116)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -435,6 +440,26 @@ static inline uint64_t hyper_native_failure_result_mask(
     }
     return UINT64_C(0);
 }
+
+#define HYPER_NATIVE_PRIVATE_MAPPING_MIN_SIZE UINT64_C(48)
+typedef struct hyper_native_private_mapping_t {
+    uint64_t source_offset;
+    uint64_t source_length;
+    uint64_t address;
+    uint64_t size;
+    uint64_t data_offset;
+    uint32_t permissions;
+    uint32_t mode;
+} hyper_native_private_mapping_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_private_mapping_t) == 48, "private_mapping size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_private_mapping_t) == 8, "private_mapping alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, source_offset) == 0, "private_mapping.source_offset offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, source_length) == 8, "private_mapping.source_length offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, address) == 16, "private_mapping.address offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, size) == 24, "private_mapping.size offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, data_offset) == 32, "private_mapping.data_offset offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, permissions) == 40, "private_mapping.permissions offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, mode) == 44, "private_mapping.mode offset");
 
 #define HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE UINT64_C(24)
 typedef struct hyper_native_virtual_machine_platform_info_t {

@@ -1009,7 +1009,7 @@ fn prepare_sealed_process(
     )
     .map_err(ProcessBuilderError::Stack)?;
     let domain = plan.domain.clone();
-    let loaded = load_native(plan.executable.bytes(), domain.clone(), stack_layout)
+    let loaded = load_native(&plan.executable, domain.clone(), stack_layout)
         .map_err(ProcessBuilderError::Image)?;
     let prepared = match PreparedProcess::try_new(
         loaded.image,

@@ -7,10 +7,13 @@ use alloc::vec::Vec;
 use core::mem::size_of;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-use hyper::mm::{AllocationError, FallibleArc, PAGE_SIZE, PhysicalAddress};
+use hyper::mm::{AllocationError, FallibleArc, PAGE_SIZE, PhysicalAddress, WeakFallibleArc};
 use hyper::sync::InterruptSpinLock;
 
 use super::contract::{MemoryAccount, MemoryCharge, PageBackend};
+
+mod private_view;
+pub(super) use private_view::{PinnedPrivateRange, PrivateView, PrivateViewBuilder};
 
 #[cfg(not(test))]
 type UserMemoryLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
@@ -38,6 +41,7 @@ pub(crate) enum VmoError<BackendError, AccountError> {
     Allocation,
     Backend(BackendError),
     Busy,
+    CowRequired,
     InvalidRange,
     SizeOverflow,
 }
@@ -85,6 +89,120 @@ pub(crate) struct WritableVmo<Backend: PageBackend, Account: MemoryAccount> {
 
 pub(crate) struct ExecutableVmo<Backend: PageBackend, Account: MemoryAccount> {
     inner: FallibleArc<VmoInner<Backend, Account>>,
+}
+
+/// Immutable, non-executable contents with independently counted physical owners.
+pub(crate) struct SnapshotVmo<Backend: PageBackend, Account: MemoryAccount> {
+    inner: FallibleArc<VmoInner<Backend, Account>>,
+}
+
+pub(crate) struct WeakSnapshotVmo<Backend: PageBackend, Account: MemoryAccount> {
+    inner: WeakFallibleArc<VmoInner<Backend, Account>>,
+}
+
+impl<B: PageBackend, A: MemoryAccount> Clone for SnapshotVmo<B, A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<B: PageBackend, A: MemoryAccount> Clone for WeakSnapshotVmo<B, A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<B: PageBackend, A: MemoryAccount> WeakSnapshotVmo<B, A> {
+    pub(crate) fn upgrade(&self) -> Option<SnapshotVmo<B, A>> {
+        self.inner.upgrade().map(|inner| SnapshotVmo { inner })
+    }
+}
+
+impl<B: PageBackend, A: MemoryAccount> SnapshotVmo<B, A> {
+    pub(crate) fn try_from_bytes(bytes: &[u8], backend: B, account: A) -> VmoResult<B, A, Self> {
+        let size = u64::try_from(bytes.len()).map_err(|_| VmoError::SizeOverflow)?;
+        let size = size
+            .max(1)
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(VmoError::SizeOverflow)?
+            / PAGE_SIZE
+            * PAGE_SIZE;
+        let writable = WritableVmo::try_new(size, backend, account)?;
+        writable.populate(0, size).map_err(|error| error.cause)?;
+        writable.write(0, bytes)?;
+        // The local writable owner has never escaped or acquired a mapping.
+        Ok(Self {
+            inner: writable.inner,
+        })
+    }
+
+    #[cfg(any(test, feature = "kernel-self-test"))]
+    pub(crate) fn resident_physical_page(&self, offset: u64) -> VmoResult<B, A, PhysicalAddress> {
+        if !offset.is_multiple_of(PAGE_SIZE) {
+            return Err(VmoError::InvalidRange);
+        }
+        let page = page_ref(
+            &self.inner,
+            usize::try_from(offset / PAGE_SIZE).map_err(|_| VmoError::SizeOverflow)?,
+        )?;
+        Ok(page.with(|owned| self.inner.backend.physical_address(&owned.page)))
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        self.inner.size
+    }
+    pub(crate) fn read(&self, offset: u64, bytes: &mut [u8]) -> VmoResult<B, A, ()> {
+        read_owned_inner(&self.inner, offset, bytes)
+    }
+    pub(crate) fn downgrade(&self) -> WeakSnapshotVmo<B, A> {
+        WeakSnapshotVmo {
+            inner: self.inner.downgrade(),
+        }
+    }
+    pub(crate) fn try_executable(
+        &self,
+        _provenance: &ExecutableProvenance,
+        context: &B::InstructionPublicationContext,
+    ) -> VmoResult<B, A, ExecutableVmo<B, A>> {
+        let owner = WritableVmo {
+            inner: self.inner.clone(),
+        };
+        owner.publish_instruction_pages(context)?;
+        Ok(ExecutableVmo {
+            inner: self.inner.clone(),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PrivateMappingMode {
+    CopyOnWrite,
+    Eager,
+}
+
+fn allocate_page<B: PageBackend, A: MemoryAccount>(
+    backend: &B,
+    account: &A,
+) -> VmoResult<B, A, PageRef<B, A>> {
+    let charge = account
+        .try_charge(MemoryCharge {
+            kernel_bytes:
+                FallibleArc::<UserMemoryLock<OwnedPage<B::Page, A::Charge>>>::allocation_size()
+                    as u64,
+            committed_pages: 1,
+            ..MemoryCharge::default()
+        })
+        .map_err(VmoError::Account)?;
+    let page = backend.allocate_zeroed().map_err(VmoError::Backend)?;
+    FallibleArc::try_new(UserMemoryLock::new(OwnedPage {
+        page,
+        _charge: charge,
+    }))
+    .map_err(map_allocation)
 }
 
 struct WritableMappingLeaseInner<Backend: PageBackend, Account: MemoryAccount> {
@@ -484,6 +602,26 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
         Ok(())
     }
 
+    pub(crate) fn try_snapshot(
+        &self,
+        account: Account,
+    ) -> VmoResult<Backend, Account, SnapshotVmo<Backend, Account>> {
+        let _freeze = SnapshotGuard::acquire(&self.inner)?;
+        let snapshot = WritableVmo::try_new(self.size(), self.inner.backend.clone(), account)?;
+        snapshot
+            .populate(0, self.size())
+            .map_err(|error| error.cause)?;
+        let mut bytes = [0u8; PAGE_SIZE as usize];
+        for index in 0..page_count(self.size())? {
+            let offset = index as u64 * PAGE_SIZE;
+            read_owned_inner(&self.inner, offset, &mut bytes)?;
+            snapshot.write_without_writer_guard(offset, &bytes)?;
+        }
+        Ok(SnapshotVmo {
+            inner: snapshot.inner,
+        })
+    }
+
     /// Produces a coherent, fully backed, physically distinct image.
     ///
     /// Snapshot admission excludes new writers and waits for no context: it
@@ -572,6 +710,11 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
 }
 
 impl<Backend: PageBackend, Account: MemoryAccount> ExecutableVmo<Backend, Account> {
+    pub(crate) fn snapshot(&self) -> SnapshotVmo<Backend, Account> {
+        SnapshotVmo {
+            inner: self.inner.clone(),
+        }
+    }
     pub(crate) fn size(&self) -> u64 {
         self.inner.size
     }
@@ -601,7 +744,15 @@ impl<Backend: PageBackend, Account: MemoryAccount> Drop
     }
 }
 
+/// A private atomic-word pin keeps exactly its physical frame alive. It does
+/// not keep removed pages in an older private-view version resident.
+pub(super) struct PinnedPrivatePage<B: PageBackend, A: MemoryAccount> {
+    _owner: PageRef<B, A>,
+}
+
 pub(super) enum MappingObject<Backend: PageBackend, Account: MemoryAccount> {
+    Snapshot(SnapshotVmo<Backend, Account>),
+    Private(FallibleArc<PrivateView<Backend, Account>>),
     Writable(WritableVmo<Backend, Account>),
     Executable(ExecutableVmo<Backend, Account>),
 }
@@ -609,6 +760,8 @@ pub(super) enum MappingObject<Backend: PageBackend, Account: MemoryAccount> {
 impl<Backend: PageBackend, Account: MemoryAccount> Clone for MappingObject<Backend, Account> {
     fn clone(&self) -> Self {
         match self {
+            Self::Snapshot(vmo) => Self::Snapshot(vmo.clone()),
+            Self::Private(view) => Self::Private(view.clone()),
             Self::Writable(vmo) => Self::Writable(vmo.clone()),
             Self::Executable(vmo) => Self::Executable(vmo.clone()),
         }
@@ -616,8 +769,78 @@ impl<Backend: PageBackend, Account: MemoryAccount> Clone for MappingObject<Backe
 }
 
 impl<Backend: PageBackend, Account: MemoryAccount> MappingObject<Backend, Account> {
+    pub(super) fn pin_private_page(
+        &self,
+        offset: u64,
+    ) -> VmoResult<Backend, Account, Option<PinnedPrivatePage<Backend, Account>>> {
+        let Self::Private(view) = self else {
+            return Ok(None);
+        };
+        let index = usize::try_from(offset / PAGE_SIZE).map_err(|_| VmoError::SizeOverflow)?;
+        let page = view
+            .pages
+            .get(index)
+            .and_then(Option::as_ref)
+            .ok_or(VmoError::InvalidRange)?;
+        if !view.is_writable(index) {
+            return Err(VmoError::CowRequired);
+        }
+        Ok(Some(PinnedPrivatePage {
+            _owner: page.owner.clone(),
+        }))
+    }
+
+    pub(super) fn private(&self) -> Option<&FallibleArc<PrivateView<Backend, Account>>> {
+        match self {
+            Self::Private(view) => Some(view),
+            _ => None,
+        }
+    }
+    pub(super) fn writable_backing(
+        &self,
+        offset: u64,
+        length: usize,
+    ) -> VmoResult<Backend, Account, bool> {
+        match self {
+            Self::Writable(_) => Ok(true),
+            Self::Private(view) => view.range_writable(offset, length),
+            _ => Ok(false),
+        }
+    }
+    pub(super) fn physical_page(
+        &self,
+        offset: u64,
+    ) -> VmoResult<Backend, Account, PhysicalAddress> {
+        if !offset.is_multiple_of(PAGE_SIZE) {
+            return Err(VmoError::InvalidRange);
+        }
+        let index = usize::try_from(offset / PAGE_SIZE).map_err(|_| VmoError::SizeOverflow)?;
+        match self {
+            Self::Private(view) => {
+                let page = view
+                    .pages
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .ok_or(VmoError::InvalidRange)?;
+                Ok(page
+                    .owner
+                    .with(|owned| view.backend.physical_address(&owned.page)))
+            }
+            Self::Writable(vmo) => vmo.resident_physical_page(offset),
+            Self::Snapshot(vmo) => {
+                let page = page_ref(&vmo.inner, index)?;
+                Ok(page.with(|owned| vmo.inner.backend.physical_address(&owned.page)))
+            }
+            Self::Executable(vmo) => {
+                let page = page_ref(&vmo.inner, index)?;
+                Ok(page.with(|owned| vmo.inner.backend.physical_address(&owned.page)))
+            }
+        }
+    }
     pub(super) fn size(&self) -> u64 {
         match self {
+            Self::Snapshot(vmo) => vmo.size(),
+            Self::Private(view) => view.size(),
             Self::Writable(vmo) => vmo.size(),
             Self::Executable(vmo) => vmo.size(),
         }
@@ -625,6 +848,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> MappingObject<Backend, Accoun
 
     pub(super) fn executable(&self) -> bool {
         matches!(self, Self::Executable(_))
+            || matches!(self, Self::Private(view) if view.executable)
     }
 
     pub(super) fn try_write_lease(
@@ -632,7 +856,9 @@ impl<Backend: PageBackend, Account: MemoryAccount> MappingObject<Backend, Accoun
     ) -> VmoResult<Backend, Account, WritableMappingLease<Backend, Account>> {
         match self {
             Self::Writable(vmo) => vmo.try_mapping_write_lease(),
-            Self::Executable(_) => Err(VmoError::InvalidRange),
+            Self::Executable(_) | Self::Snapshot(_) | Self::Private(_) => {
+                Err(VmoError::InvalidRange)
+            }
         }
     }
 
@@ -644,6 +870,12 @@ impl<Backend: PageBackend, Account: MemoryAccount> MappingObject<Backend, Accoun
         let length = usize::try_from(length).map_err(|_| VmoError::SizeOverflow)?;
         let (first, count) = covered_pages(offset, length)?;
         let inner = match self {
+            Self::Private(view) => {
+                return Ok(offset
+                    .checked_add(length as u64)
+                    .is_some_and(|end| end <= view.size()));
+            }
+            Self::Snapshot(vmo) => &vmo.inner,
             Self::Writable(vmo) => &vmo.inner,
             Self::Executable(vmo) => &vmo.inner,
         };
@@ -656,6 +888,8 @@ impl<Backend: PageBackend, Account: MemoryAccount> MappingObject<Backend, Accoun
         destination: &mut [u8],
     ) -> Result<(), VmoError<Backend::Error, Account::Error>> {
         match self {
+            Self::Snapshot(vmo) => read_exposed_inner(&vmo.inner, offset, destination),
+            Self::Private(view) => view.read(offset, destination),
             Self::Writable(vmo) => read_exposed_inner(&vmo.inner, offset, destination),
             Self::Executable(vmo) => read_exposed_inner(&vmo.inner, offset, destination),
         }
@@ -667,6 +901,8 @@ impl<Backend: PageBackend, Account: MemoryAccount> MappingObject<Backend, Accoun
         source: &[u8],
     ) -> Result<(), VmoError<Backend::Error, Account::Error>> {
         match self {
+            Self::Private(view) => view.write(offset, source),
+            Self::Snapshot(_) => Err(VmoError::InvalidRange),
             Self::Writable(vmo) => write_exposed_inner(&vmo.inner, offset, source),
             Self::Executable(_) => Err(VmoError::InvalidRange),
         }
@@ -990,23 +1226,15 @@ pub(super) fn resident_pages<Backend: PageBackend, Account: MemoryAccount>(
     offset: u64,
     length: u64,
 ) -> VmoResult<Backend, Account, Vec<PhysicalAddress>> {
-    let inner = match object {
-        MappingObject::Writable(vmo) => &vmo.inner,
-        MappingObject::Executable(vmo) => &vmo.inner,
-    };
     let length_usize = usize::try_from(length).map_err(|_| VmoError::SizeOverflow)?;
-    validate_range(inner.size, offset, length_usize)?;
+    validate_range(object.size(), offset, length_usize)?;
     let (first, count) = covered_pages(offset, length_usize)?;
     let mut result = Vec::new();
     result
         .try_reserve_exact(count)
         .map_err(|_| VmoError::Allocation)?;
-    let end = first.checked_add(count).ok_or(VmoError::SizeOverflow)?;
-    for index in first..end {
-        let page = optional_page_ref(inner, index)?;
-        let page = page.ok_or(VmoError::InvalidRange)?;
-        let physical = page.with(|owned| inner.backend.physical_address(&owned.page));
-        result.push(physical);
+    for index in first..first + count {
+        result.push(object.physical_page(index as u64 * PAGE_SIZE)?);
     }
     Ok(result)
 }

@@ -2024,14 +2024,50 @@ impl Process {
         }
     }
 
+    /// Checks cancellation at a reversible memory-transaction retry boundary.
+    /// The caller has dropped every unpublished transaction and execution pin.
+    pub(crate) fn retry_user_memory_conflict(&self) -> Result<(), ProcessError> {
+        drop(self.address_space_owner()?);
+        let caller =
+            scheduler::current_user_thread()?.filter(|thread| thread.process_id() == self.id());
+        let cancelled = || {
+            caller.as_ref().is_some_and(|thread| {
+                thread.snapshot().phase == super::UserThreadPhase::StopRequested
+            })
+        };
+        if cancelled() {
+            return Err(ProcessError::Lifecycle(LifecycleError::AdmissionClosed));
+        }
+        scheduler::yield_now()?;
+        drop(self.address_space_owner()?);
+        if cancelled() {
+            return Err(ProcessError::Lifecycle(LifecycleError::AdmissionClosed));
+        }
+        Ok(())
+    }
+
+    /// Retries copyout/materialization after releasing its complete prepared
+    /// transaction. Thread and Process stop cancel contention without CPU pins.
+    pub(super) fn retry_user_memory<T>(
+        &self,
+        mut operation: impl FnMut(FallibleArc<NativeAddressSpace>) -> Result<T, MachineError>,
+    ) -> Result<T, ProcessError> {
+        loop {
+            let address_space = self.address_space_owner()?;
+            match operation(address_space) {
+                Ok(value) => return Ok(value),
+                Err(error) if error.is_mapping_conflict() => self.retry_user_memory_conflict()?,
+                Err(error) => return Err(ProcessError::UserMemory(error)),
+            }
+        }
+    }
+
     pub(crate) fn copy_to_user(
         &self,
         destination: UserSlice,
         source: &[u8],
     ) -> Result<(), ProcessError> {
-        let address_space = self.address_space_owner()?;
-        address_space.copy_to_user(destination, source)?;
-        Ok(())
+        self.retry_user_memory(|address_space| address_space.copy_to_user(destination, source))
     }
 
     pub(crate) fn copy_from_user(
@@ -2049,11 +2085,37 @@ impl Process {
         &self,
         destination: UserSlice,
     ) -> Result<UserWriteReservation, ProcessError> {
-        let address_space = self.address_space_owner()?;
-        Ok(NativeAddressSpace::reserve_user_write(
-            address_space,
-            destination,
-        )?)
+        self.retry_user_memory(|address_space| {
+            NativeAddressSpace::reserve_user_write(address_space, destination)
+        })
+    }
+
+    /// Materializes every destination before pinning any output. A competing
+    /// remap may still win; then the whole local reservation batch is dropped
+    /// before retry, so one output cannot prevent another output's COW commit.
+    pub(crate) fn reserve_user_writes<const N: usize>(
+        &self,
+        destinations: [Option<UserSlice>; N],
+    ) -> Result<[Option<UserWriteReservation>; N], ProcessError> {
+        self.retry_user_memory(|address_space| {
+            for destination in destinations
+                .iter()
+                .flatten()
+                .filter(|range| range.length() != 0)
+            {
+                address_space.resolve_private_write(*destination)?;
+            }
+            let mut writes = [const { None }; N];
+            for (slot, destination) in writes.iter_mut().zip(destinations) {
+                if let Some(destination) = destination.filter(|range| range.length() != 0) {
+                    *slot = Some(NativeAddressSpace::reserve_user_write(
+                        address_space.clone(),
+                        destination,
+                    )?);
+                }
+            }
+            Ok(writes)
+        })
     }
 
     pub(crate) fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError> {

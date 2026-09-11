@@ -21,6 +21,9 @@ use super::{ExecutableSnapshot, MetadataUpdate};
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind, ResourceLimits,
 };
+use crate::kernel::mm::user_space::{
+    DomainAccount, KernelPageBackend, KernelPageError, SnapshotVmo, VmoError, WeakSnapshotVmo,
+};
 use crate::kernel::sync::{Mutex, MutexGuard};
 
 const STORAGE_LIMIT: u64 = 256 * 1024 * 1024;
@@ -65,10 +68,25 @@ pub(super) struct Node {
     kind: NodeKind,
     topology: SpinLock<Topology>,
     metadata: SpinLock<NodeMetadata>,
-    data: Mutex<FileData<'static, CommittedCharge>>,
+    data: Mutex<NodeData>,
     children: Mutex<Children>,
     pub(super) locks: super::locks::FileLocks,
     _charge: CommittedCharge,
+}
+
+/// The weak cache belongs to the exact contents protected by this mutex.
+/// Mutations discard the cache; live snapshots keep previous generations alive.
+struct NodeData {
+    contents: FileData<'static, CommittedCharge>,
+    snapshot: Option<WeakSnapshotVmo<KernelPageBackend, DomainAccount>>,
+}
+impl NodeData {
+    const fn new(contents: FileData<'static, CommittedCharge>) -> Self {
+        Self {
+            contents,
+            snapshot: None,
+        }
+    }
 }
 
 struct Children {
@@ -157,7 +175,13 @@ impl Node {
         self.id
     }
     pub(super) fn attributes(&self) -> Result<NodeAttributes, Error> {
-        let size = self.data.lock().map_err(Error::Lock)?.bytes().len() as u64;
+        let size = self
+            .data
+            .lock()
+            .map_err(Error::Lock)?
+            .contents
+            .bytes()
+            .len() as u64;
         Ok(self
             .metadata
             .with(|metadata| NodeAttributes::new(self.kind, metadata.mode, size)))
@@ -166,7 +190,7 @@ impl Node {
         let data = self.data.lock().map_err(Error::Lock)?;
         Ok(self.metadata.with(|metadata| {
             (
-                NodeAttributes::new(self.kind, metadata.mode, data.bytes().len() as u64),
+                NodeAttributes::new(self.kind, metadata.mode, data.contents.bytes().len() as u64),
                 *metadata,
             )
         }))
@@ -222,7 +246,12 @@ impl Ramfs {
     pub(super) fn from_archive(archive: RamFs<'static>) -> Result<Self, Error> {
         let budget = Budget(
             ResourceDomain::try_new_root(
-                ResourceLimits::UNLIMITED.with(ResourceKind::KernelMemoryBytes, STORAGE_LIMIT),
+                ResourceLimits::UNLIMITED
+                    .with(ResourceKind::KernelMemoryBytes, STORAGE_LIMIT)
+                    .with(
+                        ResourceKind::CommittedPages,
+                        STORAGE_LIMIT / hyper::mm::PAGE_SIZE,
+                    ),
             )
             .map_err(Error::Resource)?,
         );
@@ -275,7 +304,7 @@ impl Ramfs {
                     created: None,
                     changed: None,
                 }),
-                data: Mutex::new(FileData::borrowed(source.data())),
+                data: Mutex::new(NodeData::new(FileData::borrowed(source.data()))),
                 children: Mutex::new(children),
                 locks: super::locks::FileLocks::new(),
                 _charge: charge,
@@ -422,7 +451,12 @@ impl Ramfs {
         } else {
             NodeKind::File
         })?;
-        let count = node.data.lock().map_err(Error::Lock)?.read(offset, output);
+        let count = node
+            .data
+            .lock()
+            .map_err(Error::Lock)?
+            .contents
+            .read(offset, output);
         if count != 0 {
             node.metadata
                 .with(|metadata| metadata.accessed = crate::kernel::time::realtime());
@@ -437,11 +471,13 @@ impl Ramfs {
     ) -> Result<(usize, u64), Error> {
         node.require(NodeKind::File)?;
         let mut data = node.data.lock().map_err(Error::Lock)?;
-        let offset = offset.unwrap_or(data.bytes().len() as u64);
+        let offset = offset.unwrap_or(data.contents.bytes().len() as u64);
         let actual = data
+            .contents
             .write(offset, input, &self.budget)
             .map_err(map_data_error)?;
         if actual != 0 {
+            data.snapshot = None;
             node.modified(crate::kernel::time::realtime());
         }
         Ok((actual, offset + actual as u64))
@@ -449,7 +485,10 @@ impl Ramfs {
     pub(super) fn resize(&self, node: &Node, length: u64) -> Result<(), Error> {
         node.require(NodeKind::File)?;
         let mut data = node.data.lock().map_err(Error::Lock)?;
-        data.resize(length, &self.budget).map_err(map_data_error)?;
+        data.contents
+            .resize(length, &self.budget)
+            .map_err(map_data_error)?;
+        data.snapshot = None;
         node.modified(crate::kernel::time::realtime());
         drop(data);
         Ok(())
@@ -462,23 +501,43 @@ impl Ramfs {
         if node.kind != NodeKind::File {
             return Ok(None);
         }
-        let data = node.data.lock().map_err(Error::Lock)?;
-        if let Some(archive) = data.archive() {
-            return Ok(Some(ExecutableSnapshot::borrowed(archive)));
+        let mut data = node.data.lock().map_err(Error::Lock)?;
+        let storage = match data.snapshot.as_ref().and_then(WeakSnapshotVmo::upgrade) {
+            Some(storage) => storage,
+            None => {
+                let storage = SnapshotVmo::try_from_bytes(
+                    data.contents.bytes(),
+                    KernelPageBackend,
+                    DomainAccount::new(self.budget.0.clone()),
+                )
+                .map_err(|error| match error {
+                    VmoError::Account(error) => Error::Resource(error),
+                    VmoError::Allocation | VmoError::Backend(KernelPageError::Allocation(_)) => {
+                        Error::Allocation
+                    }
+                    VmoError::Busy => Error::Busy,
+                    _ => Error::InvalidBackendResult,
+                })?;
+                data.snapshot = Some(storage.downgrade());
+                storage
+            }
+        };
+        if let Some(archive) = data.contents.archive() {
+            return Ok(Some(ExecutableSnapshot::borrowed(archive, storage)));
         }
         let charge = sponsor
-            .reserve(
-                ResourceAmount::ZERO
-                    .with(ResourceKind::KernelMemoryBytes, data.bytes().len() as u64),
-            )
+            .reserve(ResourceAmount::ZERO.with(
+                ResourceKind::KernelMemoryBytes,
+                data.contents.bytes().len() as u64,
+            ))
             .map_err(Error::Resource)?
             .commit();
         let mut bytes = Vec::new();
         bytes
-            .try_reserve_exact(data.bytes().len())
+            .try_reserve_exact(data.contents.bytes().len())
             .map_err(|_| Error::Allocation)?;
-        bytes.extend_from_slice(data.bytes());
-        Ok(Some(ExecutableSnapshot::owned(bytes, charge)))
+        bytes.extend_from_slice(data.contents.bytes());
+        Ok(Some(ExecutableSnapshot::owned(bytes, charge, storage)))
     }
     pub(super) fn create<R, E: From<Error>>(
         &self,
@@ -524,7 +583,7 @@ impl Ramfs {
                 created: now,
                 changed: now,
             }),
-            data: Mutex::new(data),
+            data: Mutex::new(NodeData::new(data)),
             children: Mutex::new(Children::new()),
             locks: super::locks::FileLocks::new(),
             _charge: charge,
@@ -557,12 +616,13 @@ impl Ramfs {
         let mut data = node.data.lock().map_err(Error::Lock)?;
 
         let attributes = node.metadata.with(|metadata| {
-            NodeAttributes::new(node.kind, metadata.mode, data.bytes().len() as u64)
+            NodeAttributes::new(node.kind, metadata.mode, data.contents.bytes().len() as u64)
         });
         // A failed handle reservation/publication must leave file contents
         // untouched. All fallible work precedes this infallible replacement.
         let result = publish(attributes)?;
-        let old = truncate.then(|| core::mem::replace(&mut *data, FileData::borrowed(&[])));
+        let old = truncate
+            .then(|| core::mem::replace(&mut *data, NodeData::new(FileData::borrowed(&[]))));
         if truncate {
             node.modified(crate::kernel::time::realtime());
         }

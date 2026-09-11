@@ -800,14 +800,14 @@ impl<'context> ReturnCapability<'context> {
         }
     }
 
-    pub(crate) fn resume_interrupted(
+    pub(crate) fn resume_execution(
         self,
         expected: UserRunBinding,
     ) -> Result<(), CompletionFailure<'context>> {
         #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             self.backend
-                .resume_interrupted(expected)
+                .resume_execution(expected)
                 .map_err(CompletionFailure::from_arch)
         }
         #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]

@@ -21,7 +21,10 @@ mod machine;
 mod objects;
 #[cfg(not(test))]
 mod service;
+mod transaction;
 mod vmo;
+#[cfg(test)]
+pub(crate) use transaction::retry_stale;
 #[cfg(not(test))]
 pub(crate) use vmo::{ExclusiveHardwareWriteLease, WritableMappingLease};
 
@@ -62,5 +65,11 @@ pub(crate) use service::{
 #[cfg(not(test))]
 pub(crate) use machine::service_local_rpc;
 pub(crate) use vmo::{
-    ExecutableProvenance, ExecutableVmo, VmoError, VmoPopulateError, WritableVmo,
+    ExecutableProvenance, ExecutableVmo, PrivateMappingMode, SnapshotVmo, VmoError,
+    VmoPopulateError, WeakSnapshotVmo, WritableVmo,
+};
+
+#[cfg(not(test))]
+pub(crate) use service::{
+    PrivateMappingRequest, create_file_snapshot, create_vmo_snapshot, map_private,
 };

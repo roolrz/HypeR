@@ -535,7 +535,21 @@ pub(in crate::kernel) trait MemoryServices {
     fn create_file_executable_vmo(
         &self,
         file: HandleValue,
-    ) -> Result<HandleValue, MemoryServiceError>;
+    ) -> Result<(HandleValue, u64), MemoryServiceError>;
+    fn create_file_snapshot(
+        &self,
+        file: HandleValue,
+    ) -> Result<(HandleValue, u64), MemoryServiceError>;
+    fn create_vmo_snapshot(
+        &self,
+        vmo: HandleValue,
+    ) -> Result<(HandleValue, u64), MemoryServiceError>;
+    fn map_private(
+        &self,
+        vmar: HandleValue,
+        snapshot: HandleValue,
+        request: crate::kernel::mm::user_space::PrivateMappingRequest,
+    ) -> Result<(), MemoryServiceError>;
     fn read_vmo(
         &self,
         vmo: HandleValue,

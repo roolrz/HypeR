@@ -42,6 +42,7 @@ pub(crate) fn run() -> Result<(), TestError> {
     let namespace =
         super::instance::MountNamespace::try_new(filesystem, cache).map_err(Error::from)?;
     let root = DirectoryObject::try_root(namespace, &domain)?;
+    snapshot_cache(&root, &domain, &scratch)?;
     root.create("left", NodeKind::Directory, 0o755, &scratch)?;
     root.create("right", NodeKind::Directory, 0o755, &scratch)?;
     let file = root.create_file("left/item", 0o666, &domain, Ok::<FileObject, Error>)?;
@@ -441,4 +442,75 @@ fn deep_directory_rename(
         }
     }
     result.and(cleanup)
+}
+
+fn snapshot_cache(
+    root: &DirectoryObject,
+    domain: &ResourceDomain,
+    scratch: &ScratchBudget,
+) -> Result<(), TestError> {
+    let file = root.create_file("snapshot", 0o666, domain, Ok::<FileObject, Error>)?;
+    file.write(Some(0), b"original")?;
+    root.link("snapshot", root, "snapshot-alias", scratch)?;
+    let alias = root.open_file("snapshot-alias", domain)?;
+    let first = file.readable_snapshot(domain)?;
+    let second = alias.readable_snapshot(domain)?;
+    let physical = |snapshot: &super::ExecutableSnapshot| {
+        snapshot
+            .storage()
+            .resident_physical_page(0)
+            .map_err(|_| TestError::Contract("snapshot physical backing"))
+    };
+    check(
+        physical(&first)? == physical(&second)?,
+        "hardlink snapshots share physical pages",
+    )?;
+    let old_weak = first.storage().downgrade();
+    file.write(Some(0), b"modified")?;
+    let changed = alias.readable_snapshot(domain)?;
+    check(
+        physical(&first)? != physical(&changed)?,
+        "write creates a new physical generation",
+    )?;
+    let mut bytes = [0u8; 8];
+    first
+        .storage()
+        .read(0, &mut bytes)
+        .map_err(|_| TestError::Contract("snapshot read"))?;
+    check(
+        &bytes == b"original",
+        "old snapshot remains immutable after file write",
+    )?;
+    drop(first);
+    drop(second);
+    check(
+        old_weak.upgrade().is_none(),
+        "weak file cache releases last detached generation",
+    )?;
+    file.resize(4)?;
+    let resized = file.readable_snapshot(domain)?;
+    check(
+        physical(&changed)? != physical(&resized)? && resized.bytes() == b"modi",
+        "resize replaces cached generation",
+    )?;
+    let _truncated = root.open_file_with_options(
+        "snapshot-alias",
+        &FileOpenOptions::new(Rights::WRITE, 4, 0o666)?,
+        domain,
+        Ok::<FileObject, Error>,
+    )?;
+    let truncated = file.readable_snapshot(domain)?;
+    check(
+        truncated.bytes().is_empty(),
+        "truncate invalidates cached generation",
+    )?;
+    let weak = truncated.storage().downgrade();
+    drop(truncated);
+    check(
+        weak.upgrade().is_none(),
+        "file cache never strongly pins unused pages",
+    )?;
+    root.remove("snapshot-alias", NodeKind::File, scratch)?;
+    root.remove("snapshot", NodeKind::File, scratch)?;
+    Ok(())
 }

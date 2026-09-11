@@ -8,7 +8,7 @@ use hyper::mm::FallibleArc;
 use super::vmo::ExclusiveHardwareWriteLease;
 use super::{
     DomainAccount, ExecutableAuthority, ExecutableVmo, KernelPageBackend, KernelPageError,
-    NativeAddressSpace, UserSlice, Vmar, VmoError, WritableVmo,
+    NativeAddressSpace, SnapshotVmo, UserSlice, Vmar, VmoError, WritableVmo,
 };
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
@@ -20,6 +20,8 @@ use crate::kernel::object::{
 };
 
 type NativeWritableVmo = WritableVmo<KernelPageBackend, DomainAccount>;
+type NativeSnapshotVmo = SnapshotVmo<KernelPageBackend, DomainAccount>;
+
 type NativeExecutableVmo = ExecutableVmo<KernelPageBackend, DomainAccount>;
 
 /// Stable writable VMO backing shared with a hardware address space.
@@ -128,6 +130,7 @@ impl From<VmoError<KernelPageError, ResourceError>> for MemoryObjectError {
 }
 
 enum VmoStorage {
+    Snapshot(NativeSnapshotVmo),
     Writable(NativeWritableVmo),
     Executable(NativeExecutableVmo),
 }
@@ -163,7 +166,7 @@ impl VmoObject {
         })
     }
 
-    fn from_executable(
+    pub(crate) fn from_executable(
         storage: NativeExecutableVmo,
         sponsor: &ResourceDomain,
     ) -> Result<Self, MemoryObjectError> {
@@ -173,10 +176,40 @@ impl VmoObject {
         })
     }
 
+    pub(crate) fn from_snapshot(
+        storage: NativeSnapshotVmo,
+        sponsor: &ResourceDomain,
+    ) -> Result<Self, MemoryObjectError> {
+        Ok(Self {
+            storage: VmoStorage::Snapshot(storage),
+            _object_charge: reserve_object_charge::<Self>(sponsor)?,
+        })
+    }
+
+    /// Returns immutable bytes without granting executable or shared-write authority.
+    pub(crate) fn snapshot_clone(&self) -> Option<NativeSnapshotVmo> {
+        match &self.storage {
+            VmoStorage::Snapshot(storage) => Some(storage.clone()),
+            VmoStorage::Executable(storage) => Some(storage.snapshot()),
+            VmoStorage::Writable(_) => None,
+        }
+    }
+
+    pub(crate) fn try_snapshot(&self, sponsor: &ResourceDomain) -> Result<Self, MemoryObjectError> {
+        let snapshot = match &self.storage {
+            VmoStorage::Writable(storage) => {
+                storage.try_snapshot(DomainAccount::new(sponsor.clone()))?
+            }
+            VmoStorage::Snapshot(storage) => storage.clone(),
+            VmoStorage::Executable(storage) => storage.snapshot(),
+        };
+        Self::from_snapshot(snapshot, sponsor)
+    }
+
     pub(crate) fn writable(&self) -> Option<&NativeWritableVmo> {
         match &self.storage {
             VmoStorage::Writable(storage) => Some(storage),
-            VmoStorage::Executable(_) => None,
+            VmoStorage::Executable(_) | VmoStorage::Snapshot(_) => None,
         }
     }
 
@@ -186,7 +219,7 @@ impl VmoObject {
 
     pub(crate) fn executable(&self) -> Option<&NativeExecutableVmo> {
         match &self.storage {
-            VmoStorage::Writable(_) => None,
+            VmoStorage::Writable(_) | VmoStorage::Snapshot(_) => None,
             VmoStorage::Executable(storage) => Some(storage),
         }
     }
@@ -198,6 +231,7 @@ impl VmoObject {
     pub(crate) fn size(&self) -> u64 {
         match &self.storage {
             VmoStorage::Writable(storage) => storage.size(),
+            VmoStorage::Snapshot(storage) => storage.size(),
             VmoStorage::Executable(storage) => storage.size(),
         }
     }
@@ -209,6 +243,7 @@ impl VmoObject {
     ) -> Result<(), MemoryObjectError> {
         match &self.storage {
             VmoStorage::Writable(storage) => storage.read(offset, destination)?,
+            VmoStorage::Snapshot(storage) => storage.read(offset, destination)?,
             VmoStorage::Executable(storage) => storage.read(offset, destination)?,
         }
         Ok(())
@@ -272,6 +307,7 @@ impl KernelObject for VmoObject {
             .union(Rights::MAP);
         match &self.storage {
             VmoStorage::Writable(_) => common.union(Rights::WRITE),
+            VmoStorage::Snapshot(_) => common,
             VmoStorage::Executable(_) => common.union(Rights::EXECUTE),
         }
     }

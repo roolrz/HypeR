@@ -49,8 +49,7 @@ pub(super) fn prepare(
         startup_handle_count,
     )
     .map_err(Error::Stack)?;
-    let loaded =
-        load_native(executable.bytes(), domain.clone(), stack_layout).map_err(Error::Image)?;
+    let loaded = load_native(&executable, domain.clone(), stack_layout).map_err(Error::Image)?;
     let prepared = match PreparedProcess::try_new(
         loaded.image,
         group.clone(),

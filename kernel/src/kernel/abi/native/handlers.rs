@@ -1216,7 +1216,10 @@ pub(super) fn sys_file_create_executable_vmo(
                 .map_err(status_from_memory_service_error)
         })
     };
-    DeferredAction::Return(handle_result(result))
+    DeferredAction::Return(match result {
+        Ok((handle, size)) => success([handle.get(), size]),
+        Err(error) => failure(error),
+    })
 }
 
 #[inline(never)]
@@ -1677,4 +1680,71 @@ pub(super) fn sys_virtual_machine_creation_lease_get_platform_info(
         )
     })();
     DeferredAction::Return(info_result(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_vmo_create_snapshot(
+    services: &impl MemoryServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[1..])?;
+        let value = parse_handle(arguments[0])?;
+        services
+            .create_vmo_snapshot(value)
+            .map_err(status_from_memory_service_error)
+    })();
+    DeferredAction::Return(match result {
+        Ok((handle, size)) => success([handle.get(), size]),
+        Err(error) => failure(error),
+    })
+}
+
+#[inline(never)]
+pub(super) fn sys_file_create_snapshot(
+    services: &impl MemoryServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[1..])?;
+        let value = parse_handle(arguments[0])?;
+        services
+            .create_file_snapshot(value)
+            .map_err(status_from_memory_service_error)
+    })();
+    DeferredAction::Return(match result {
+        Ok((handle, size)) => success([handle.get(), size]),
+        Err(error) => failure(error),
+    })
+}
+
+#[inline(never)]
+pub(super) fn sys_vmar_map_private(
+    services: &(impl MemoryServices + super::services::UserMemoryServices),
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[4..])?;
+        let vmar = parse_handle(arguments[0])?;
+        let snapshot = parse_handle(arguments[1])?;
+        let record = super::wire::copy_extensible_input_record::<48>(
+            services,
+            &[0, arguments[2], arguments[3], 0, 0, 0],
+            48,
+        )?;
+        use super::wire::{read_record_u32, read_record_u64};
+        let request = crate::kernel::mm::user_space::PrivateMappingRequest {
+            source_offset: read_record_u64(&record, 0),
+            source_length: read_record_u64(&record, 8),
+            address: read_record_u64(&record, 16),
+            size: read_record_u64(&record, 24),
+            data_offset: read_record_u64(&record, 32),
+            permissions: read_record_u32(&record, 40),
+            mode: read_record_u32(&record, 44),
+        };
+        services
+            .map_private(vmar, snapshot, request)
+            .map_err(status_from_memory_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
 }

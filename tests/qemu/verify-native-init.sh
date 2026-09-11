@@ -392,6 +392,7 @@ while :; do
         grep -Fxq 'HYPER_STD_OK hello static' "$native_output" &&
         [ "$(grep -Fxc 'HYPER_STD_TLS_DROP_OK' "$native_output")" -eq 2 ] &&
         [ "$(grep -Fxc 'HYPER_STD_FP_THREADS_OK' "$native_output")" -eq 2 ] &&
+        [ "$(grep -Fxc 'HYPER_COW_OK' "$native_output")" -eq 2 ] &&
         [ "$(grep -Ec '^(hyper-sh\$ )*HYPER_STD_STDERR_OK$' "$native_output")" -eq 2 ] &&
         grep -Fxq '/bin' "$native_output" &&
         grep -Fxq '/' "$native_output" &&

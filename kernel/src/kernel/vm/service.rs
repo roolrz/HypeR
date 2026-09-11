@@ -225,7 +225,7 @@ const fn classify_vmo_error(
         VmoError::Account(error) => classify_resource_error(error),
         VmoError::Allocation => Error::NoMemory,
         VmoError::Backend(error) => classify_page_error(error),
-        VmoError::Busy => Error::Busy,
+        VmoError::Busy | VmoError::CowRequired => Error::Busy,
         VmoError::InvalidRange | VmoError::SizeOverflow => Error::InvalidArgument,
     }
 }
@@ -241,7 +241,7 @@ const fn classify_address_space_error(
     match error {
         AddressSpaceError::Account(error) => classify_resource_error(error),
         AddressSpaceError::Allocation => Error::NoMemory,
-        AddressSpaceError::Busy => Error::Busy,
+        AddressSpaceError::Busy | AddressSpaceError::CowRequired => Error::Busy,
         AddressSpaceError::Backend(error) => classify_page_error(error),
         AddressSpaceError::IdentityExhausted => Error::ResourceLimit,
         AddressSpaceError::BackingNotResident

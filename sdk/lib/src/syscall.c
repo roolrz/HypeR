@@ -284,6 +284,26 @@ hyper_call_result_t hyper_file_get_info(
         0);
 }
 
+hyper_call_result_t hyper_vmo_create_snapshot(hyper_native_handle_t vmo)
+{
+    return hyper_native_call6(HYPER_NATIVE_SYS_VMO_CREATE_SNAPSHOT, vmo, 0, 0, 0, 0, 0);
+}
+
+hyper_call_result_t hyper_file_create_snapshot(hyper_native_handle_t file)
+{
+    return hyper_native_call6(HYPER_NATIVE_SYS_FILE_CREATE_SNAPSHOT, file, 0, 0, 0, 0, 0);
+}
+
+hyper_native_status_t hyper_vmar_map_private(
+    hyper_native_handle_t vmar,
+    hyper_native_handle_t snapshot,
+    const hyper_native_private_mapping_t *mapping,
+    size_t mapping_size)
+{
+    return hyper_native_call6(HYPER_NATIVE_SYS_VMAR_MAP_PRIVATE,
+        vmar, snapshot, (uintptr_t)mapping, mapping_size, 0, 0).status;
+}
+
 hyper_call_result_t hyper_vmo_create(uint64_t size)
 {
     return hyper_native_call6(HYPER_NATIVE_SYS_VMO_CREATE, size, 0, 0, 0, 0, 0);

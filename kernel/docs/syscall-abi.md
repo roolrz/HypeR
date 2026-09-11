@@ -470,10 +470,12 @@ unpublished object exists; later code cannot manufacture a second KOID for the
 same lifecycle. Kernel subsystems continue to hold classified direct
 references rather than paying for private handle-table lookups.
 
-Writable and executable VMO variants share one ABI kind but publish different
-per-instance rights ceilings. A writable VMO cannot acquire `EXECUTE`; an
-executable VMO is a physically distinct immutable snapshot created through an
-`ExecutableAuthority` and cannot acquire `WRITE`. A root VMAR
+Writable, immutable snapshot and executable VMO variants share one ABI kind but
+publish different per-instance rights ceilings. A writable VMO cannot acquire
+`EXECUTE`. Immutable snapshots grant `READ` and `MAP`; executable provenance is
+derived separately through an `ExecutableAuthority` or executable file grant.
+Neither immutable variant can acquire `WRITE`. Executable views may share the
+same instruction-coherent immutable pages. A root VMAR
 object retains the exact native address-space owner and its generation-checked
 token, and is also published at most once for that address space.
 
@@ -662,6 +664,52 @@ VMO and VMAR provide memory ownership and mapping policy. Executable mappings
 require immutable executable provenance; writable authority cannot be upgraded
 to executable authority. W^X is the default. A mapping operation consumes
 typed user addresses and checked lengths, never Rust pointers.
+
+`vmo_create_snapshot` captures coherent immutable bytes while excluding writable
+mappings and exclusive hardware writers. `file_create_snapshot` captures one
+file-content generation; file snapshot results include the exact byte length
+from that generation. Snapshot backing is page rounded. A file's weak snapshot
+cache permits reuse while mappings retain that generation, and releases all
+source pages after its last owner disappears. Writes and resizing invalidate
+future cache lookup without modifying existing snapshots.
+
+`vmar_map_private` installs an address-space-owned view of immutable bytes. Its
+request names a page-aligned source offset, data offset within the first page,
+data length, destination range, permissions and copy mode. Bytes outside the
+selected data interval are zero, including ELF prefix padding and BSS. Complete
+source pages may be shared; partial boundary pages are sanitized before mapping
+publication. Private write permission derives from readable source bytes and
+destination VMAR authority, and grants no ability to modify the source.
+
+Copy-on-write mode initially maps shared pages read-only and materializes a
+private page on first write. Eager mode prepares all private pages before
+publication. Both modes provide the same isolation. Executable private views
+additionally require an executable source VMO and source EXECUTE rights; their
+sanitized pages are sealed and instruction-published before mapping, with no
+writable alias. Writable private views never permit EXECUTE.
+Ordinary shared writable VMOs and exclusive hardware backing retain
+their stable-page lease contract. This is not a live address-space clone or a
+snapshot of concurrently hardware-written guest memory.
+
+A COW transition prepares replacement page ownership and an immutable machine
+root, then commits through the existing address-space epoch and acknowledged
+cross-CPU replacement protocol. Old mapping versions retain concrete backing
+until translation retirement. Kernel copyout, transactional user-write
+reservations and atomic-word pins materialize private pages before accessing
+them. A source page is never made writable merely because its reference count
+appears to be one. Shared source allocation is charged once; private pages and
+view metadata are charged to the destination address space.
+
+Partial unmap removes unused private pages from the next mapping version;
+retired versions retain them only until translation acknowledgment. Atomic-word
+pins retain their concrete private page rather than the whole private view.
+COW preserves virtual mapping identity and every already-writable page, so it
+can proceed while an unrelated transactional output reservation is parked.
+Only overlapping unmap and protection changes are excluded by those reservations;
+unrelated thread-stack and heap reclamation can proceed. Long-lived private
+output pins retain only their covered pages. VMAR
+services retry unpublished stale-epoch transactions; this does not hide genuine
+reservation conflicts behind an unbounded wait.
 
 The existing `UserAddressSpace: ForeignMemory` direction remains mandatory.
 Syscall code represents user memory as fixed-width `UserAddress` and
