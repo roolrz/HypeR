@@ -1150,3 +1150,8 @@ pub(crate) fn riscv_guest_baseline_available() -> bool {
         false
     }
 }
+
+/// Availability of the selected platform's implemented VM backend.
+pub(crate) fn platform_supported() -> bool {
+    crate::arch::vm::platform_supported()
+}

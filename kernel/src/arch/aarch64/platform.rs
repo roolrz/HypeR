@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use hyper::platform::{
-    CpuPowerInfo, GicV3Info, InterruptControllerInfo, MAX_GIC_REDISTRIBUTOR_REGIONS, PhysicalRange,
-    PlatformInterrupt, PlatformInterruptTrigger, PsciCompatibleVersion, PsciConduit, PsciInfo,
-    PsciInterface, PsciLegacyFunctionIds, RegionList, TimerInfo, TimerKind,
+    CpuPowerInfo, GicV2Info, GicV3Info, InterruptControllerInfo, MAX_GIC_REDISTRIBUTOR_REGIONS,
+    PhysicalRange, PlatformInterrupt, PlatformInterruptTrigger, PsciCompatibleVersion, PsciConduit,
+    PsciInfo, PsciInterface, PsciLegacyFunctionIds, RegionList, TimerInfo, TimerKind,
     fdt::{NodeId, NodeResources, NodeVisitor, Property},
 };
 
@@ -39,6 +39,8 @@ pub enum Error {
 #[derive(Clone, Copy)]
 struct Candidate {
     gic_v3: bool,
+    gic_v2: bool,
+    cpu_offset: u32,
     timer: bool,
     psci_legacy: bool,
     psci_version: Option<PsciCompatibleVersion>,
@@ -54,6 +56,8 @@ struct Candidate {
 impl Candidate {
     const EMPTY: Self = Self {
         gic_v3: false,
+        gic_v2: false,
+        cpu_offset: 0,
         timer: false,
         psci_legacy: false,
         psci_version: None,
@@ -116,6 +120,16 @@ impl EssentialDeviceDiscovery {
         if !node.enabled {
             return Ok(());
         }
+        if candidate.gic_v2 && self.result.interrupt_controller.is_none() {
+            if candidate.cpu_offset != 0 {
+                return Err(Error::InvalidGic);
+            }
+            self.result.interrupt_controller = Some(InterruptControllerInfo::GicV2(GicV2Info {
+                distributor: first_register(&node)?,
+                cpu_interface: *node.registers.get(1).ok_or(Error::InvalidGic)?,
+            }));
+            self.claim(node.id)?;
+        }
         if candidate.gic_v3 && self.result.interrupt_controller.is_none() {
             self.result.interrupt_controller = Some(discover_gic(&node, candidate)?);
             self.claim(node.id)?;
@@ -160,6 +174,12 @@ impl NodeVisitor for EssentialDeviceDiscovery {
             .ok_or(Error::InvalidDepth)?;
         match property.name() {
             "compatible" => {
+                candidate.gic_v2 = property
+                    .contains_string("arm,gic-400")
+                    .map_err(|_| Error::InvalidProperty)?
+                    || property
+                        .contains_string("arm,cortex-a15-gic")
+                        .map_err(|_| Error::InvalidProperty)?;
                 candidate.gic_v3 = property
                     .contains_string("arm,gic-v3")
                     .map_err(|_| Error::InvalidProperty)?;
@@ -217,6 +237,10 @@ impl NodeVisitor for EssentialDeviceDiscovery {
                 .map(|value| {
                     candidate.psci_migrate = Some(value);
                 }),
+            "cpu-offset" => {
+                candidate.cpu_offset = property.u32().map_err(|_| Error::InvalidProperty)?;
+                Ok(())
+            }
             "#redistributor-regions" => {
                 property
                     .u32()

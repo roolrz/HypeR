@@ -432,6 +432,7 @@ pub fn initialize(info: InterruptControllerInfo) -> Result<Capabilities, Error> 
     }
     let maintenance_interrupt = match info {
         InterruptControllerInfo::GicV3(info) => info.maintenance_interrupt,
+        InterruptControllerInfo::GicV2(_) => None,
         InterruptControllerInfo::Plic(_) => None,
         InterruptControllerInfo::X2Apic(_) => None,
     };

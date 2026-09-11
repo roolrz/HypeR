@@ -16,7 +16,8 @@ use super::super::{
 use super::{Error, NodeId, NodeResources, blob::ReservationReader, property::decode_u32};
 
 const MAX_DEPTH: usize = 32;
-const MAX_NODE_REGIONS: usize = 8;
+// BCM2712 HDMI nodes expose nine independent register windows.
+const MAX_NODE_REGIONS: usize = 16;
 const MAX_BUS_RANGES: usize = 8;
 const MAX_RANGE_CELLS: usize = 64;
 const MAX_INTERRUPT_CELLS: usize = 16;

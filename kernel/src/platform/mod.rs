@@ -267,6 +267,7 @@ pub enum PlatformInterruptTrigger {
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug)]
 pub enum InterruptControllerInfo {
+    GicV2(GicV2Info),
     GicV3(GicV3Info),
     Plic(PlicInfo),
     X2Apic(X2ApicInfo),
@@ -282,6 +283,12 @@ pub struct PlicInfo {
     /// Supervisor context index indexed by the firmware hardware-thread ID.
     pub supervisor_contexts: [u32; MAX_PLIC_CONTEXTS],
     pub context_count: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GicV2Info {
+    pub distributor: PhysicalRange,
+    pub cpu_interface: PhysicalRange,
 }
 
 #[derive(Clone, Copy, Debug)]

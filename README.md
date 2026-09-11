@@ -57,12 +57,28 @@ experiment with; choose an established stack when running VMs is the goal.
 
 The AArch64 QEMU system boots Native init, a shell, and VM management services
 that start a Linux guest and expose its console. RISC-V runs Native init,
-shell and std applications on QEMU; its userspace VM support is still being
-completed. x86-64 currently has build and image validation only.
+shell, std applications, and userspace-managed Linux guests on QEMU. x86-64 currently has build and image validation only.
 
 The Native ABI is pre-release. Broad hardware support, general-purpose virtual
 I/O, device assignment, and multi-vCPU userspace management remain unfinished.
 See [implementation status](docs/status.md) and the [roadmap](docs/roadmap.md).
+
+## Near-term roadmap
+
+**Run HypeR on Raspberry Pi 5 with a trimmed, trusted Linux I/O VM as its
+network and block-device backend.** Linux drives the physical devices; HypeR
+Native services use an explicit shared-memory I/O protocol.
+
+- [x] Implement host GICv2 and Pi 5 debug-UART support; validate in QEMU.
+- [ ] Boot the Native shell on Pi 5 and validate SMP, timer and console behavior.
+- [ ] Add GICv2 guest interrupt support and boot the Linux I/O VM on Pi 5.
+- [ ] Assign network/storage devices and implement shared queues, notifications
+  and buffer ownership.
+- [ ] Exercise Native network and storage I/O on Pi 5, including failure handling
+  and performance measurements.
+
+See the [roadmap](docs/roadmap.md) for scope and acceptance criteria, and the
+[Pi 5 boot guide](kernel/docs/rpi5.md) for the recommended firmware setup.
 
 ## Try it
 
