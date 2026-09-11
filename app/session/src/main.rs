@@ -55,6 +55,7 @@ fn run(startup: &mut Startup<'_>) -> Result<Infallible, ()> {
             &mut input_buffer,
         ),
     ];
+    println!("HypeR session: router ready");
     let mut first = 0;
     loop {
         // Rotate priority so a continuously readable stream cannot starve keys

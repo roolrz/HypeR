@@ -9,6 +9,9 @@
 
 #![no_std]
 
+#[cfg(all(feature = "std", target_os = "hyper"))]
+extern crate std;
+
 mod abi;
 pub mod capability_channel;
 pub mod channel;

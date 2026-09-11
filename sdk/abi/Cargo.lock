@@ -5,23 +5,3 @@ version = 4
 [[package]]
 name = "hyper-abi"
 version = "0.0.0"
-
-[[patch.unused]]
-name = "hyper-os"
-version = "0.0.0"
-
-[[patch.unused]]
-name = "hyper-rt"
-version = "0.0.0"
-
-[[patch.unused]]
-name = "hyper-service"
-version = "0.0.0"
-
-[[patch.unused]]
-name = "hyper-sys"
-version = "0.0.0"
-
-[[patch.unused]]
-name = "hyper-vm-image"
-version = "0.0.0"

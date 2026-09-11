@@ -11,5 +11,16 @@
         "sdk/toolchain/tests/std-smoke/Cargo.toml",
         "tools/fit-pack/Cargo.toml"
     ],
-    "rust-analyzer.cargo.configPath": ".vscode/rust-analyzer.toml"
+    "rust-analyzer.cargo.configPath": ".vscode/rust-analyzer.toml",
+    "rust-analyzer.cargo.sysrootSrc": "target/sdk/aarch64/share/hyper/rust-src/library",
+    "rust-analyzer.cargo.extraEnv": {
+        "RUSTC_BOOTSTRAP": "1",
+        "CARGO_UNSTABLE_JSON_TARGET_SPEC": "true"
+    },
+    "rust-analyzer.cargo.buildScripts.overrideCommand": [
+        "sh", "-c", "exec sh \"$(git rev-parse --show-toplevel)/scripts/rust-analyzer-check.sh\""
+    ],
+    "rust-analyzer.check.overrideCommand": [
+        "sh", "-c", "exec sh \"$(git rev-parse --show-toplevel)/scripts/rust-analyzer-check.sh\""
+    ]
 }

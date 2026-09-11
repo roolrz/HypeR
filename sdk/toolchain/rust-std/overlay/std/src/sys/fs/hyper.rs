@@ -176,6 +176,34 @@ impl OpenOptions {
     }
 }
 impl File {
+    pub unsafe fn from_raw_handle(handle: u64) -> Self {
+        Self(Arc::new(Description {
+            handle: Handle(handle),
+            offset: Mutex::new(0),
+            append: false,
+        }))
+    }
+
+    pub fn read_at(&self, output: &mut [u8], offset: u64) -> io::Result<usize> {
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let mut actual = 0;
+        cvt(unsafe {
+            ffi::__hyper_std_fs_read(
+                self.0.handle.0,
+                offset,
+                output.as_mut_ptr(),
+                output.len(),
+                &mut actual,
+            )
+        })?;
+        if actual > output.len() {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        Ok(actual)
+    }
+
     pub fn open(path: &Path, options: &OpenOptions) -> io::Result<Self> {
         let path = path_bytes(path)?;
         let mut handle = 0;

@@ -3,7 +3,6 @@
 
 //! Per-VM image loader and lifetime owner.
 
-use hyper_os::fs::File;
 use hyper_os::handle::{ByteChannelObject, VirtualCpuObject};
 use hyper_os::memory::{MAX_TRANSFER_BYTES, WritableVmo};
 use hyper_os::startup::Startup;
@@ -12,9 +11,15 @@ use hyper_service::vm as vm_contract;
 use hyper_vm_image::guest_fdt::{self, GuestHardwareMetadata};
 use hyper_vm_image::{Payload, ReadAt};
 use hyper_vm_image::{aarch64_linux, linux, riscv64_linux};
+use std::fs::File;
+#[cfg(target_os = "hyper")]
+use std::os::hyper::fs::FileExt;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use std::process::ExitCode;
+use std::time::Instant;
 
-fn application_main(mut startup: Startup<'_>) -> ExitCode {
+fn application_main(mut startup: Startup<'_>, started: Instant) -> ExitCode {
     if hyper_os::require_core_abi().is_err() {
         return ExitCode::FAILURE;
     }
@@ -23,7 +28,8 @@ fn application_main(mut startup: Startup<'_>) -> ExitCode {
         Err(_) => return ExitCode::FAILURE,
     };
     let channel = control.as_byte_channel();
-    match run(&mut startup, &channel) {
+    eprintln!("HypeR vm-runtime: starting");
+    match run(&mut startup, &channel, started) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             let _ = channel.send(&vm_contract::InstanceStatus::Failed(error.failure()).encode());
@@ -36,8 +42,9 @@ fn application_main(mut startup: Startup<'_>) -> ExitCode {
 fn run(
     startup: &mut Startup<'_>,
     control: &hyper_os::channel::ByteChannel<'_>,
+    started: Instant,
 ) -> Result<(), Error> {
-    let source = ImageSource::new(File::from_handle(
+    let source = ImageSource::new(hyper_os::fs::File::from_handle(
         startup
             .take(vm_contract::IMAGE)
             .map_err(Error::OperatingSystem)?,
@@ -119,6 +126,14 @@ fn run(
         .map_err(|failure| Error::OperatingSystem(failure.error()))?;
     publish_status(control, vm_contract::InstanceStatus::Installed)?;
     hyper_os::vm::start_vcpu(vcpu.as_handle_ref()).map_err(Error::OperatingSystem)?;
+    // This ends at the successful start request, not the first guest entry:
+    // scheduling and the EL1/VS transition happen asynchronously in the kernel.
+    let elapsed = started.elapsed();
+    eprintln!(
+        "HypeR vm-runtime: vCPU start submitted in {}.{:03} ms (from main)",
+        elapsed.as_millis(),
+        elapsed.subsec_micros() % 1_000,
+    );
     publish_status(control, vm_contract::InstanceStatus::Running)?;
     supervise_guest(&machine, &vcpu, control, &mut console)
 }
@@ -126,6 +141,7 @@ fn run(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Error {
     OperatingSystem(hyper_os::Error),
+    Io(std::io::ErrorKind),
     InvalidImage,
     UnsupportedConfiguration,
     InvalidControl,
@@ -152,14 +168,14 @@ impl Error {
             Self::Guest(hyper_os::vm::VirtualCpuTermination::Administrative) => {
                 vm_contract::InstanceFailure::UnexpectedAdministrativeStop
             }
-            Self::OperatingSystem(_) => vm_contract::InstanceFailure::Runtime,
+            Self::OperatingSystem(_) | Self::Io(_) => vm_contract::InstanceFailure::Runtime,
         }
     }
 }
 
-fn classify_image_error(error: hyper_vm_image::Error<hyper_os::Error>) -> Error {
+fn classify_image_error(error: hyper_vm_image::Error<std::io::Error>) -> Error {
     match error {
-        hyper_vm_image::Error::Source(error) => Error::OperatingSystem(error),
+        hyper_vm_image::Error::Source(error) => Error::Io(error.kind()),
         hyper_vm_image::Error::UnsupportedImage => Error::UnsupportedConfiguration,
         _ => Error::InvalidImage,
     }
@@ -173,7 +189,7 @@ fn classify_platform_error(error: hyper_os::Error) -> Error {
     }
 }
 
-fn classify_reference_error(error: linux::Error<hyper_os::Error>) -> Error {
+fn classify_reference_error(error: linux::Error<std::io::Error>) -> Error {
     match error {
         linux::Error::Aarch64(error) => classify_aarch64_reference_error(error),
         linux::Error::Riscv64(error) => classify_riscv64_reference_error(error),
@@ -184,12 +200,12 @@ fn classify_reference_error(error: linux::Error<hyper_os::Error>) -> Error {
 }
 
 fn classify_riscv64_reference_error(
-    error: riscv64_linux::ReferenceLayoutError<hyper_os::Error>,
+    error: riscv64_linux::ReferenceLayoutError<std::io::Error>,
 ) -> Error {
     use riscv64_linux::{Error as KernelError, ReferenceLayoutError};
     match error {
         ReferenceLayoutError::Source(error)
-        | ReferenceLayoutError::Kernel(KernelError::Source(error)) => Error::OperatingSystem(error),
+        | ReferenceLayoutError::Kernel(KernelError::Source(error)) => Error::Io(error.kind()),
         ReferenceLayoutError::UnsupportedArchitecture
         | ReferenceLayoutError::UnsupportedPlatformProfile
         | ReferenceLayoutError::UnsupportedVcpuCount
@@ -203,13 +219,13 @@ fn classify_riscv64_reference_error(
 }
 
 fn classify_aarch64_reference_error(
-    error: aarch64_linux::ReferenceLayoutError<hyper_os::Error>,
+    error: aarch64_linux::ReferenceLayoutError<std::io::Error>,
 ) -> Error {
     use aarch64_linux::{Error as KernelError, ReferenceLayoutError};
 
     match error {
         ReferenceLayoutError::Source(error)
-        | ReferenceLayoutError::Kernel(KernelError::Source(error)) => Error::OperatingSystem(error),
+        | ReferenceLayoutError::Kernel(KernelError::Source(error)) => Error::Io(error.kind()),
         ReferenceLayoutError::UnsupportedArchitecture
         | ReferenceLayoutError::UnsupportedPlatformProfile
         | ReferenceLayoutError::UnsupportedVcpuCount
@@ -336,21 +352,26 @@ struct ImageSource {
 }
 
 impl ImageSource {
-    fn new(file: File) -> Result<Self, Error> {
+    fn new(file: hyper_os::fs::File) -> Result<Self, Error> {
+        // Image delegation grants READ, not INSPECT. Query length using that
+        // existing authority before transferring ownership to std for I/O.
         let length = file.size().map_err(Error::OperatingSystem)?;
-        Ok(Self { file, length })
+        Ok(Self {
+            file: file.into_std(),
+            length,
+        })
     }
 }
 
 impl ReadAt for ImageSource {
-    type Error = hyper_os::Error;
+    type Error = std::io::Error;
 
     fn length(&self) -> Result<u64, Self::Error> {
         Ok(self.length)
     }
 
     fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> Result<(), Self::Error> {
-        self.file.read_exact_at(offset, output)
+        self.file.read_exact_at(output, offset)
     }
 }
 
@@ -381,7 +402,7 @@ fn copy_payload(
             .ok_or(Error::InvalidImage)?;
         source
             .read_exact_at(file_offset, chunk)
-            .map_err(Error::OperatingSystem)?;
+            .map_err(|error| Error::Io(error.kind()))?;
         memory
             .write_all_at(guest_offset, chunk)
             .map_err(Error::OperatingSystem)?;
@@ -422,8 +443,9 @@ fn build_device_tree(
 }
 
 fn main() -> ExitCode {
+    let started = Instant::now();
     match hyper_rt::process::startup() {
-        Ok(startup) => application_main(startup),
+        Ok(startup) => application_main(startup, started),
         Err(_) => ExitCode::FAILURE,
     }
 }

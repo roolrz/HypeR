@@ -383,6 +383,7 @@ while :; do
     if [ "$command_phase" = echo_done ] &&
         grep -q 'HypeR: starting Native init process' "$log" &&
         grep -Fxq 'HypeR session: console ready' "$native_output" &&
+        grep -Fxq 'HypeR session: router ready' "$native_output" &&
         grep -Fxq 'TYPE     KOID       OWNER      NAME                 STATE' "$native_output" &&
         grep -Fxq 'HANDLE             OBJECT     KIND                    RIGHTS                           PURPOSE' "$native_output" &&
         grep -Fxq 'KOID       KIND                    HANDLE-STATE HANDLES REFS PURPOSE' "$native_output" &&
@@ -406,7 +407,9 @@ while :; do
             echo "verified Native services, dynamic/static std, and application startup"
             exit 0
         fi
-        if grep -q 'Run /init as init process' "$log" &&
+        if grep -Fq 'HypeR vm-manager: ready' "$native_output" &&
+            grep -Fq 'HypeR vm-runtime: starting' "$native_output" &&
+            grep -q 'Run /init as init process' "$log" &&
             grep -q 'HypeR guest: /init reached' "$log" &&
             grep -q 'HypeR guest: repeated timer wakeups passed' "$log"; then
             echo "verified Native services and userspace-managed Linux VM startup"

@@ -10,6 +10,9 @@ repository.workspace = true
 publish.workspace = true
 description = "Safe operating-system bindings for HypeR Native applications"
 
+[features]
+std = []
+
 [dependencies]
 hyper-abi = { path = "../../abi" }
 hyper-sys = { path = "../hyper-sys" }

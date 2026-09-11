@@ -69,3 +69,35 @@ pub fn set_times<P: AsRef<crate::path::Path>>(
     use crate::sys::AsInnerMut;
     crate::sys::fs::set_times(path.as_ref(), *times.as_inner_mut())
 }
+
+/// File reads which do not change the shared stream position.
+#[stable(feature = "hyper_os", since = "1.97.1")]
+pub trait FileExt {
+    #[stable(feature = "hyper_os", since = "1.97.1")]
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> crate::io::Result<usize>;
+
+    #[stable(feature = "hyper_os", since = "1.97.1")]
+    fn read_exact_at(&self, mut buffer: &mut [u8], mut offset: u64) -> crate::io::Result<()> {
+        while !buffer.is_empty() {
+            match self.read_at(buffer, offset) {
+                Ok(0) => return Err(crate::io::ErrorKind::UnexpectedEof.into()),
+                Ok(count) => {
+                    offset = offset
+                        .checked_add(count as u64)
+                        .ok_or(crate::io::ErrorKind::InvalidInput)?;
+                    buffer = &mut buffer[count..];
+                }
+                Err(error) if error.kind() == crate::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+}
+
+#[stable(feature = "hyper_os", since = "1.97.1")]
+impl FileExt for crate::fs::File {
+    fn read_at(&self, buffer: &mut [u8], offset: u64) -> crate::io::Result<usize> {
+        self.as_inner().read_at(buffer, offset)
+    }
+}

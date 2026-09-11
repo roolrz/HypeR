@@ -7,8 +7,8 @@ use std::fmt::Write;
 use std::string::String;
 
 use super::{
-    AuthorityDeclaration, AuthorityKey, AuthorityPolicy, MAX_MANIFEST_BYTES, MAX_SERVICES,
-    ParseErrorKind, StartupPurposeDeclaration, ValidationErrorKind, parse, validate,
+    AuthorityDeclaration, AuthorityKey, AuthorityPolicy, CapabilityOperation, MAX_MANIFEST_BYTES,
+    MAX_SERVICES, ParseErrorKind, StartupPurposeDeclaration, ValidationErrorKind, parse, validate,
 };
 
 const VALID: &str = r#"
@@ -108,6 +108,15 @@ impl AuthorityPolicy for Policy {
                 provider: None,
                 object_kind: 3,
                 rights: 0b1011,
+                movable: false,
+                duplicable: true,
+                creatable: false,
+            }),
+            "bootstrap.service-output-channel" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
+                provider: None,
+                object_kind: 4,
+                rights: WAIT | WRITE | DUPLICATE | TRANSFER,
                 movable: false,
                 duplicable: true,
                 creatable: false,
@@ -283,8 +292,12 @@ impl AuthorityPolicy for Policy {
             ("/svc/session", "session.client-output") => (205, 4, WAIT | READ),
             ("/svc/session", "session.client-error") => (206, 4, WAIT | READ),
             ("/bin/sh", "stdio.input") => (300, 4, WAIT | READ | DUPLICATE | TRANSFER),
-            ("/bin/sh", "stdio.output") => (301, 4, WAIT | WRITE | DUPLICATE | TRANSFER),
-            ("/bin/sh", "stdio.error") => (302, 4, WAIT | WRITE | DUPLICATE | TRANSFER),
+            ("/bin/sh" | "/svc/session" | "/svc/vm-manager", "stdio.output") => {
+                (301, 4, WAIT | WRITE | DUPLICATE | TRANSFER)
+            }
+            ("/bin/sh" | "/svc/session" | "/svc/vm-manager", "stdio.error") => {
+                (302, 4, WAIT | WRITE | DUPLICATE | TRANSFER)
+            }
             ("/svc/vm-manager", "process.root-directory") => (303, 5, READ | DUPLICATE | TRANSFER),
             ("/bin/sh", "process.root-directory") => (
                 303,
@@ -852,4 +865,54 @@ fn native_service_manifest_does_not_require_a_vm_fleet() {
             .capabilities()
             .all(|capability| !capability.source().starts_with("bootstrap.vm-"))
     }));
+}
+
+#[test]
+fn services_have_output_without_input_or_physical_console_authority() {
+    let parsed = parse(include_str!("../config/services.json"));
+    assert!(parsed.is_ok());
+    let Ok(manifest) = parsed else {
+        return;
+    };
+    assert!(validate(&manifest, &Policy).is_ok());
+    for name in ["session", "vm-manager"] {
+        let service = manifest.services().find(|service| service.name() == name);
+        assert!(service.is_some());
+        let Some(service) = service else {
+            return;
+        };
+        for purpose in ["stdio.output", "stdio.error"] {
+            let output = service
+                .capabilities()
+                .find(|capability| capability.purpose() == purpose);
+            assert!(output.is_some());
+            let Some(output) = output else {
+                return;
+            };
+            assert_eq!(output.source(), "bootstrap.service-output-channel");
+            assert_eq!(output.operation(), CapabilityOperation::Duplicate);
+            assert_eq!(
+                output.rights().collect::<Vec<_>>(),
+                ["wait", "write", "duplicate", "transfer"]
+            );
+        }
+        assert!(
+            !service
+                .capabilities()
+                .any(|capability| capability.purpose() == "stdio.input"
+                    || capability.source() == "bootstrap.console")
+        );
+    }
+    for name in ["console-input", "console-output"] {
+        let service = manifest.services().find(|service| service.name() == name);
+        assert!(service.is_some());
+        let Some(service) = service else {
+            return;
+        };
+        assert!(
+            !service
+                .capabilities()
+                .any(|capability| capability.purpose().starts_with("stdio."))
+        );
+    }
 }

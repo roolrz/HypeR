@@ -127,3 +127,9 @@ WAIT. Closing a set removes its subscriptions; source handle closure does not
 cancel the retained object observation. WaitSet and CapabilityChannel sources
 are currently rejected. ByteChannel endpoints can be explicitly duplicated;
 peer close occurs only after the last active endpoint owner closes.
+
+With the optional `hyper-os/std` feature on HypeR targets,
+`hyper_os::fs::File::into_std()` transfers a Native File capability into
+`std::fs::File` without reopening or duplicating it. The standard file owns
+close, starts at offset zero, and preserves the original rights. Subsequent
+I/O uses std; Native capability acquisition and delegation remain explicit.

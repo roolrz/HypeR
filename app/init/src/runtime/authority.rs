@@ -32,6 +32,7 @@ pub(super) struct AuthorityInventory {
     pub(super) console_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) console_output_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) session_input_channel: Option<OwnedHandle<ByteChannelObject>>,
+    pub(super) service_output_channel: OwnedHandle<ByteChannelObject>,
     pub(super) session_output_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) session_client_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) session_client_output_channel: Option<OwnedHandle<ByteChannelObject>>,
@@ -78,6 +79,15 @@ impl AuthorityInventory {
                 if kind == ConsoleObject::KIND.as_raw() =>
             {
                 builder.add_handle_duplicate(self.console.as_handle_ref(), purpose, offer)
+            }
+            (BootstrapAuthority::ServiceOutputChannel, CapabilityOperation::Duplicate)
+                if kind == ByteChannelObject::KIND.as_raw() =>
+            {
+                builder.add_handle_duplicate(
+                    self.service_output_channel.as_handle_ref(),
+                    purpose,
+                    offer,
+                )
             }
             (BootstrapAuthority::RootDirectory, CapabilityOperation::Duplicate)
                 if kind == DirectoryObject::KIND.as_raw() =>

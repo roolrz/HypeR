@@ -536,6 +536,17 @@ impl File {
         Ok(())
     }
 
+    /// Transfers this capability into a standard file with stream offset zero.
+    /// Rights remain unchanged; no path lookup or handle duplication occurs.
+    #[cfg(all(feature = "std", target_os = "hyper"))]
+    pub fn into_std(self) -> std::fs::File {
+        use std::os::hyper::io::FromRawHandle;
+        let raw = self.into_handle().into_raw().get();
+        // SAFETY: Consuming the typed File transfers its unique, live handle
+        // owner into std. No SDK owner remains to close or transfer it.
+        unsafe { std::fs::File::from_raw_handle(raw) }
+    }
+
     /// Recovers the generic typed owner for delegation or explicit close.
     #[must_use]
     pub fn into_handle(self) -> OwnedHandle<FileObject> {

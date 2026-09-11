@@ -5,3 +5,4 @@
 #![stable(feature = "hyper_os", since = "1.97.1")]
 
 pub mod fs;
+pub mod io;

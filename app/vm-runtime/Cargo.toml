@@ -18,7 +18,7 @@ test = false
 bench = false
 
 [dependencies]
-hyper-os.workspace = true
+hyper-os = { workspace = true, features = ["std"] }
 hyper-rt.workspace = true
 hyper-service.workspace = true
 hyper-vm-image.workspace = true
