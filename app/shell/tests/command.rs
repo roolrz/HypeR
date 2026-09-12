@@ -62,3 +62,57 @@ fn rejects_incomplete_syntax() {
         Err(ParseError::InvalidSyntax)
     ));
 }
+
+#[test]
+fn pipeline_operators_respect_quotes_and_escapes() -> Result<(), ParseError> {
+    let pipeline = super::Pipeline::parse(br#"echo 'a|b' \>x|grep "a|b">out 2>>err"#)?;
+    assert_eq!(pipeline.0.len(), 2);
+    assert_eq!(
+        pipeline.0[0].command.arguments().collect::<Vec<_>>(),
+        ["echo", "a|b", ">x"]
+    );
+    assert_eq!(pipeline.0[1].redirects[0].path, "out");
+    assert_eq!(pipeline.0[1].redirects[1].stream, 2);
+    assert!(pipeline.0[1].redirects[1].append);
+    Ok(())
+}
+#[test]
+fn malformed_pipelines_are_rejected() {
+    for input in [
+        "| cat",
+        "cat |",
+        "cat || cat",
+        "cat >",
+        "cat < | cat",
+        "echo a; echo b",
+        "cat &",
+        "cat 'bad",
+    ] {
+        assert!(super::Pipeline::parse(input.as_bytes()).is_err(), "{input}");
+    }
+}
+#[test]
+fn redirects_preserve_order_and_comments() -> Result<(), ParseError> {
+    let pipeline = super::Pipeline::parse(b"cat<input >one >>two # | ignored")?;
+    assert_eq!(pipeline.0.len(), 1);
+    assert_eq!(
+        pipeline.0[0]
+            .redirects
+            .iter()
+            .map(|r| r.path.as_str())
+            .collect::<Vec<_>>(),
+        ["input", "one", "two"]
+    );
+    Ok(())
+}
+
+#[test]
+fn escaped_whitespace_does_not_start_comment_or_fd_prefix() -> Result<(), ParseError> {
+    let pipeline = super::Pipeline::parse(br"echo \ #literal \ 2>out")?;
+    assert_eq!(
+        pipeline.0[0].command.arguments().collect::<Vec<_>>(),
+        ["echo", " #literal", " 2"]
+    );
+    assert_eq!(pipeline.0[0].redirects[0].stream, 1);
+    Ok(())
+}

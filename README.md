@@ -99,6 +99,7 @@ for configuration, other architectures, and build targets.
 - [Development guide](docs/development.md): editor setup, testing, source layout,
   and contribution requirements.
 - [Architecture](kernel/docs/architecture.md): kernel boundaries and ownership.
+- [Shell and text filtering](docs/shell.md): pipelines, file redirection, and grep.
 - [Native userspace](kernel/docs/native-init.md) and [SDK](sdk/README.md): host
   services and application interfaces.
 - [Issues](https://github.com/roolrz/HypeR/issues): bugs, experiments, and design
