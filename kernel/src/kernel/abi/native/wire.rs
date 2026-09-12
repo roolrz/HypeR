@@ -1372,5 +1372,10 @@ pub(super) fn encode_virtual_machine_platform_info(
         core::mem::offset_of!(Record, riscv_isa),
         info.riscv_isa,
     );
+    write_u64(
+        &mut bytes,
+        core::mem::offset_of!(Record, aarch64_gic_version),
+        info.aarch64_gic_version,
+    );
     bytes
 }

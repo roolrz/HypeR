@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Reusable guest `GICv3` register state and interrupt-model effects.
+//! Shared guest GIC register state and interrupt-model effects.
 
 use crate::vm::arm::gic::{
     GicInterruptId, InterruptGroup, InterruptSnapshot, InterruptTrigger, RuntimeError, VirtualGic,
@@ -27,7 +27,11 @@ impl RegisterState {
 
     pub const fn read(&self, register: ServiceRegister) -> u64 {
         match register {
-            ServiceRegister::DistributorControl => self.distributor_control as u64,
+            ServiceRegister::DistributorControl | ServiceRegister::DistributorControlV2 => {
+                self.distributor_control as u64
+            }
+            ServiceRegister::DistributorTypeV2 => 1,
+            ServiceRegister::PeripheralId2V2 => 0x20,
             ServiceRegister::DistributorType => 1 | (15 << 19),
             // GICD_TYPER2 is optional and explicitly unimplemented.
             ServiceRegister::DistributorType2 => 0,
@@ -42,6 +46,9 @@ impl RegisterState {
     }
 
     pub fn write(&mut self, register: ServiceRegister, value: u64) {
+        if register == ServiceRegister::DistributorControlV2 {
+            self.distributor_control = value as u32 & 1;
+        }
         if register == ServiceRegister::DistributorControl {
             self.distributor_control = value as u32 & DISTRIBUTOR_CONTROL_MASK;
         }
@@ -75,6 +82,16 @@ pub fn read_model_register(
     register: ModelRegister,
 ) -> Result<u64, ModelError> {
     match register.kind {
+        ModelRegisterKind::PrivateEnableV2 { set } => read_bitmap(
+            controller,
+            vcpu,
+            if set {
+                BitmapRegister::SetEnable
+            } else {
+                BitmapRegister::ClearEnable
+            },
+            0,
+        ),
         ModelRegisterKind::Bitmap {
             register,
             first_interrupt,
@@ -82,11 +99,25 @@ pub fn read_model_register(
         ModelRegisterKind::Priority {
             first_interrupt,
             count,
+            ..
         } => read_priority(controller, vcpu, first_interrupt, count),
         ModelRegisterKind::Configuration { first_interrupt } => {
             read_configuration(controller, vcpu, first_interrupt)
         }
-        ModelRegisterKind::Route(_) => Ok(0),
+        ModelRegisterKind::Route(_) | ModelRegisterKind::SoftwareInterrupt => Ok(0),
+        ModelRegisterKind::Targets {
+            first_interrupt,
+            count,
+        } => {
+            let mut value = 0;
+            for byte in 0..count {
+                let id = first_interrupt + u32::from(byte);
+                if snapshot(controller, vcpu, id)?.routed {
+                    value |= 1 << (byte * 8);
+                }
+            }
+            Ok(value)
+        }
     }
 }
 
@@ -97,6 +128,17 @@ pub fn write_model_register(
     value: u64,
 ) -> Result<(), ModelError> {
     match register.kind {
+        ModelRegisterKind::PrivateEnableV2 { set } => write_bitmap(
+            controller,
+            vcpu,
+            if set {
+                BitmapRegister::SetEnable
+            } else {
+                BitmapRegister::ClearEnable
+            },
+            0,
+            value & 0xffff_0000,
+        ),
         ModelRegisterKind::Bitmap {
             register,
             first_interrupt,
@@ -104,9 +146,44 @@ pub fn write_model_register(
         ModelRegisterKind::Priority {
             first_interrupt,
             count,
-        } => write_priority(controller, vcpu, first_interrupt, count, value),
+            mask,
+        } => write_priority(
+            controller,
+            vcpu,
+            first_interrupt,
+            count,
+            value & (u64::from(mask) * 0x0101_0101),
+        ),
         ModelRegisterKind::Configuration { first_interrupt } => {
             write_configuration(controller, vcpu, first_interrupt, value)
+        }
+        ModelRegisterKind::Targets {
+            first_interrupt,
+            count,
+        } => {
+            for byte in 0..count {
+                let _ = snapshot(controller, vcpu, first_interrupt + u32::from(byte))?;
+            }
+            for byte in 0..count {
+                let id = first_interrupt + u32::from(byte);
+                if id >= 32 {
+                    controller.set_routed(
+                        interrupt(id)?,
+                        target_for(id, vcpu),
+                        value & (1 << (byte * 8)) != 0,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        ModelRegisterKind::SoftwareInterrupt => {
+            // The reference board admits one vCPU. Filter 1 excludes self;
+            // filter 0 selects it only when target bit zero is present.
+            let filter = (value >> 24) & 3;
+            if filter == 2 || (filter == 0 && value & (1 << 16) != 0) {
+                controller.inject(interrupt(value as u32 & 15)?, vcpu)?;
+            }
+            Ok(())
         }
         ModelRegisterKind::Route(route) => {
             if value != 0 {

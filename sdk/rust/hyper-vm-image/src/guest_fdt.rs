@@ -42,6 +42,7 @@ pub struct Aarch64LinuxBoot<'arguments> {
     pub memory_base: u64,
     pub memory_size: u64,
     pub vcpu_count: u32,
+    pub gic_version: u32,
     pub initramfs: Option<(u64, u64)>,
     pub boot_arguments: &'arguments str,
 }
@@ -50,7 +51,9 @@ pub struct Aarch64LinuxBoot<'arguments> {
 /// the image container or copied from the host's device tree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GuestHardwareMetadata {
-    Aarch64,
+    Aarch64 {
+        gic_version: u32,
+    },
     Riscv64 {
         counter_frequency_hz: u64,
         riscv_isa: u64,
@@ -61,7 +64,7 @@ impl GuestHardwareMetadata {
     pub fn validate_for(self, plan: &crate::linux::BootPlan) -> Result<(), Error> {
         match (self, plan.architecture(), plan.platform_profile()) {
             (
-                Self::Aarch64,
+                Self::Aarch64 { gic_version: 2 | 3 },
                 crate::Architecture::Aarch64,
                 crate::PlatformProfile::Aarch64Reference,
             ) => Ok(()),
@@ -99,11 +102,12 @@ pub fn build_linux(
         return Err(Error::InvalidInput);
     }
     match hardware {
-        GuestHardwareMetadata::Aarch64 => build_aarch64_linux(
+        GuestHardwareMetadata::Aarch64 { gic_version } => build_aarch64_linux(
             Aarch64LinuxBoot {
                 memory_base: plan.memory_base(),
                 memory_size: plan.memory_size(),
                 vcpu_count: plan.vcpu_count(),
+                gic_version,
                 initramfs: plan.initramfs().map(|range| (range.start(), range.end())),
                 boot_arguments,
             },
@@ -138,6 +142,7 @@ pub fn build_aarch64_linux(
         .ok_or(Error::AddressOverflow)?;
     if boot.memory_size == 0
         || boot.vcpu_count != 1
+        || !matches!(boot.gic_version, 2 | 3)
         || boot.boot_arguments.as_bytes().contains(&0)
         || boot.initramfs.is_some_and(|(start, end)| {
             start < boot.memory_base || start >= end || end > memory_end
@@ -195,7 +200,14 @@ pub fn build_aarch64_linux(
     builder.begin_node("intc@8000000")?;
     builder.property_empty("interrupt-controller")?;
     builder.property_u32("#interrupt-cells", 3)?;
-    builder.property_string("compatible", "arm,gic-v3")?;
+    builder.property_string(
+        "compatible",
+        if boot.gic_version == 2 {
+            "arm,cortex-a15-gic"
+        } else {
+            "arm,gic-v3"
+        },
+    )?;
     builder.property_u32("phandle", GIC_PHANDLE)?;
     builder.property_cells(
         "reg",
@@ -203,11 +215,24 @@ pub fn build_aarch64_linux(
             0,
             GIC_DISTRIBUTOR_BASE as u32,
             0,
-            GIC_DISTRIBUTOR_SIZE as u32,
+            if boot.gic_version == 2 {
+                hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_DISTRIBUTOR_SIZE
+                    as u32
+            } else {
+                GIC_DISTRIBUTOR_SIZE as u32
+            },
             0,
-            GIC_REDISTRIBUTOR_BASE as u32,
+            if boot.gic_version == 2 {
+                hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_BASE as u32
+            } else {
+                GIC_REDISTRIBUTOR_BASE as u32
+            },
             0,
-            GIC_REDISTRIBUTOR_SIZE as u32,
+            if boot.gic_version == 2 {
+                hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_SIZE as u32
+            } else {
+                GIC_REDISTRIBUTOR_SIZE as u32
+            },
         ],
     )?;
     builder.end_node()?;
@@ -480,12 +505,58 @@ mod tests {
     use super::{Aarch64LinuxBoot, FDT_MAGIC, build_aarch64_linux};
 
     #[test]
+    fn emits_gicv2_cpu_window_and_rejects_unknown_revision() -> Result<(), super::Error> {
+        for version in [2, 3, 4] {
+            let mut structure = [0; 8192];
+            let mut strings = [0; 2048];
+            let mut output = [0; 12288];
+            let result = build_aarch64_linux(
+                Aarch64LinuxBoot {
+                    gic_version: version,
+                    memory_base: 0x4000_0000,
+                    memory_size: 0x0800_0000,
+                    vcpu_count: 1,
+                    initramfs: None,
+                    boot_arguments: "console=ttyAMA0",
+                },
+                &mut structure,
+                &mut strings,
+                &mut output,
+            );
+            if version == 4 {
+                assert_eq!(result, Err(super::Error::InvalidInput));
+                continue;
+            }
+            let size = result?;
+            let compatible: &[u8] = if version == 2 {
+                b"arm,cortex-a15-gic\0"
+            } else {
+                b"arm,gic-v3\0"
+            };
+            assert!(
+                output[..size]
+                    .windows(compatible.len())
+                    .any(|bytes| bytes == compatible)
+            );
+            if version == 2 {
+                assert!(
+                    output[..size]
+                        .windows(8)
+                        .any(|bytes| bytes == 0x0801_0000u64.to_be_bytes())
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn builds_a_bounded_single_cpu_linux_tree() -> Result<(), super::Error> {
         let mut structure = [0u8; 8192];
         let mut strings = [0u8; 2048];
         let mut output = [0u8; 12 * 1024];
         let size = build_aarch64_linux(
             Aarch64LinuxBoot {
+                gic_version: 3,
                 memory_base: 0x4000_0000,
                 memory_size: 128 * 1024 * 1024,
                 vcpu_count: 1,

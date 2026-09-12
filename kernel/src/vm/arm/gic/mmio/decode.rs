@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Pure validation and semantic decoding of guest `GICv3` accesses.
+//! Pure validation and semantic decoding of guest `GICv2` and `GICv3` accesses.
 
 use crate::vm::exit::{AccessWidth, GuestPhysicalAddress};
 
@@ -12,6 +12,7 @@ const FRAME_SIZE: u64 = 0x0001_0000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Frame {
     Distributor,
+    DistributorV2,
     RedistributorControl,
     RedistributorSgi,
 }
@@ -41,6 +42,9 @@ impl SingleVcpuRoute {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceRegister {
     DistributorControl,
+    DistributorControlV2,
+    DistributorTypeV2,
+    PeripheralId2V2,
     DistributorType,
     DistributorType2,
     DistributorImplementer,
@@ -67,6 +71,11 @@ pub enum ModelRegisterDescriptor {
         first_interrupt: u32,
     },
     Route(SingleVcpuRoute),
+    Targets {
+        first_interrupt: u32,
+        count: u8,
+    },
+    SoftwareInterrupt,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +89,14 @@ impl ModelRegister {
     /// A descriptor cannot be converted back into the opaque validated token.
     pub const fn descriptor(self) -> ModelRegisterDescriptor {
         match self.kind {
+            ModelRegisterKind::PrivateEnableV2 { set } => ModelRegisterDescriptor::Bitmap {
+                register: if set {
+                    BitmapRegister::SetEnable
+                } else {
+                    BitmapRegister::ClearEnable
+                },
+                first_interrupt: 0,
+            },
             ModelRegisterKind::Bitmap {
                 register,
                 first_interrupt,
@@ -90,6 +107,7 @@ impl ModelRegister {
             ModelRegisterKind::Priority {
                 first_interrupt,
                 count,
+                ..
             } => ModelRegisterDescriptor::Priority {
                 first_interrupt,
                 count,
@@ -98,12 +116,23 @@ impl ModelRegister {
                 ModelRegisterDescriptor::Configuration { first_interrupt }
             }
             ModelRegisterKind::Route(route) => ModelRegisterDescriptor::Route(route),
+            ModelRegisterKind::Targets {
+                first_interrupt,
+                count,
+            } => ModelRegisterDescriptor::Targets {
+                first_interrupt,
+                count,
+            },
+            ModelRegisterKind::SoftwareInterrupt => ModelRegisterDescriptor::SoftwareInterrupt,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ModelRegisterKind {
+    PrivateEnableV2 {
+        set: bool,
+    },
     Bitmap {
         register: BitmapRegister,
         first_interrupt: u32,
@@ -111,11 +140,17 @@ pub(super) enum ModelRegisterKind {
     Priority {
         first_interrupt: u32,
         count: u8,
+        mask: u8,
     },
     Configuration {
         first_interrupt: u32,
     },
     Route(SingleVcpuRoute),
+    Targets {
+        first_interrupt: u32,
+        count: u8,
+    },
+    SoftwareInterrupt,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,7 +166,7 @@ pub enum DecodeError {
     InvalidRegisterAccess,
 }
 
-/// One complete access contained by a single guest `GICv3` frame.
+/// One complete access contained by a single guest GIC frame.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecodedAccess {
     frame: Frame,
@@ -155,7 +190,7 @@ impl DecodedAccess {
 /// byte is owned, overflow, a frame-boundary crossing, or an invalid access to
 /// a modeled register is reported instead of being forwarded to another
 /// device. Reserved space remains a decoded RAZ/WI register.
-pub fn decode_access(
+pub fn decode_v3(
     address: GuestPhysicalAddress,
     width: AccessWidth,
 ) -> Result<Option<DecodedAccess>, DecodeError> {
@@ -199,6 +234,110 @@ pub fn decode_access(
     decode_frame(frame, address - base, width).map(Some)
 }
 
+/// Decodes the `GICv2` distributor. GICV is a hardware stage-2 mapping.
+pub fn decode_v2(
+    address: GuestPhysicalAddress,
+    width: AccessWidth,
+) -> Result<Option<DecodedAccess>, DecodeError> {
+    let address = address.get();
+    let base = u64::from(DISTRIBUTOR_BASE);
+    if !(base..base + 0x1000).contains(&address) {
+        return Ok(None);
+    }
+    if address
+        .checked_add(width.bytes() as u64)
+        .is_none_or(|end| end > base + 0x1000)
+    {
+        return Err(DecodeError::CrossesFrame);
+    }
+    decode_frame(Frame::DistributorV2, address - base, width).map(Some)
+}
+fn decode_distributor_v2(offset: u32, width: AccessWidth) -> Result<DecodedRegister, DecodeError> {
+    for (base, register) in [
+        (0, ServiceRegister::DistributorControlV2),
+        (4, ServiceRegister::DistributorTypeV2),
+        (8, ServiceRegister::DistributorImplementer),
+        (0xfe8, ServiceRegister::PeripheralId2V2),
+    ] {
+        if let Some(result) = fixed(offset, width, base, AccessWidth::Word, register) {
+            return result;
+        }
+    }
+    // No security extensions: Group registers are RAZ/WI, every interrupt is
+    // Group 0. GICV_CTLR bit zero therefore controls guest IRQ delivery.
+    for (base, register) in [
+        (0x100, BitmapRegister::SetEnable),
+        (0x180, BitmapRegister::ClearEnable),
+        (0x200, BitmapRegister::SetPending),
+        (0x280, BitmapRegister::ClearPending),
+        (0x300, BitmapRegister::SetActive),
+        (0x380, BitmapRegister::ClearActive),
+    ] {
+        for word in 0..2 {
+            if let Some(result) = bitmap(offset, width, base + word * 4, word * 32, register) {
+                return result.map(|decoded| {
+                    if word == 0
+                        && matches!(
+                            register,
+                            BitmapRegister::SetEnable | BitmapRegister::ClearEnable
+                        )
+                    {
+                        DecodedRegister::Model(ModelRegister {
+                            kind: ModelRegisterKind::PrivateEnableV2 {
+                                set: register == BitmapRegister::SetEnable,
+                            },
+                        })
+                    } else {
+                        decoded
+                    }
+                });
+            }
+        }
+    }
+    for word in 0..2 {
+        if let Some(result) = priority(offset, width, 0x400 + word * 32, word * 32) {
+            return result.map(|mut decoded| {
+                if let DecodedRegister::Model(ModelRegister {
+                    kind: ModelRegisterKind::Priority { mask, .. },
+                }) = &mut decoded
+                {
+                    *mask = 0xf8;
+                }
+                decoded
+            });
+        }
+        if let Some(result) = configuration(offset, width, 0xc00 + word * 8, word * 32) {
+            return result;
+        }
+    }
+    if (0x800..0x840).contains(&offset) {
+        let count = width.bytes() as u8;
+        if !matches!(width, AccessWidth::Byte | AccessWidth::Word)
+            || !offset.is_multiple_of(u32::from(count))
+            || offset + u32::from(count) > 0x840
+        {
+            return Err(DecodeError::InvalidRegisterAccess);
+        }
+        return Ok(DecodedRegister::Model(ModelRegister {
+            kind: ModelRegisterKind::Targets {
+                first_interrupt: offset - 0x800,
+                count,
+            },
+        }));
+    }
+    if let Some(result) = model_word(
+        offset,
+        width,
+        0xf00,
+        ModelRegister {
+            kind: ModelRegisterKind::SoftwareInterrupt,
+        },
+    ) {
+        return result;
+    }
+    Ok(DecodedRegister::Reserved)
+}
+
 fn decode_frame(
     frame: Frame,
     offset: u64,
@@ -207,6 +346,7 @@ fn decode_frame(
     let offset = u32::try_from(offset).map_err(|_| DecodeError::CrossesFrame)?;
     let register = match frame {
         Frame::Distributor => decode_distributor(offset, width)?,
+        Frame::DistributorV2 => decode_distributor_v2(offset, width)?,
         Frame::RedistributorControl => decode_redistributor_control(offset, width)?,
         Frame::RedistributorSgi => decode_redistributor_sgi(offset, width)?,
     };
@@ -400,6 +540,7 @@ fn priority(
             kind: ModelRegisterKind::Priority {
                 first_interrupt,
                 count: bytes as u8,
+                mask: 0xff,
             },
         }))
     } else {

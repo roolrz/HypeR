@@ -5,6 +5,8 @@
 
 mod controller;
 pub mod lr;
+pub mod lr_v2;
+pub mod mmio;
 mod ready;
 
 pub use controller::{

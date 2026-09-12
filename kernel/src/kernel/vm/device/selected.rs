@@ -8,8 +8,8 @@
 //! typed exit callbacks enter the selected implementation directly.
 
 #[cfg(CONFIG_ARCH_AARCH64)]
-#[path = "gicv3.rs"]
-mod gicv3;
+#[path = "gic.rs"]
+mod gic;
 #[cfg(CONFIG_ARCH_AARCH64)]
 #[path = "aarch64.rs"]
 mod platform;

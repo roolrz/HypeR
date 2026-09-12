@@ -89,7 +89,7 @@ impl Aarch64InterruptController {
     /// controller while local interrupts remain masked.
     pub unsafe fn bind(
         info: InterruptControllerInfo,
-        map: impl FnMut(u64) -> Option<usize>,
+        mut map: impl FnMut(u64) -> Option<usize>,
     ) -> Result<Self, Error> {
         if super::gic_cpu_interface::interface_installed() {
             return Err(Error::AlreadyInitialized);
@@ -97,9 +97,13 @@ impl Aarch64InterruptController {
         match info {
             InterruptControllerInfo::GicV2(info) => {
                 // SAFETY: The caller owns permanent Device mappings with IRQs masked.
-                let mut controller = unsafe { GicV2::bind(info, map, &SGI_COMPLETIONS)? };
+                let mut controller = unsafe { GicV2::bind(info, &mut map, &SGI_COMPLETIONS)? };
                 // SAFETY: No other CPU can access the new controller yet.
                 unsafe { controller.initialize()? };
+                // SAFETY: Binding retains the caller's permanent Device mapping
+                // and masked local-bank ownership contract.
+                unsafe { super::vgic::v2::install(info, &mut map) }
+                    .map_err(|_| Error::Unsupported)?;
                 super::gic_cpu_interface::install_v2(controller.local_controller())?;
                 Ok(Self(ControllerKind::V2(controller)))
             }

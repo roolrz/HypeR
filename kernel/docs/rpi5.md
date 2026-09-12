@@ -11,12 +11,25 @@ four-core Native shell with timer-driven scheduling and interrupt-driven input.
 Physical Pi 5 boot has not yet been validated; QEMU GICv2 tests cover the host
 interrupt path, not BCM2712 firmware, clocks, or electrical behavior.
 
-The guest interrupt backend currently requires GICv3. GICv2 hosts skip guest
-backend initialization instead of accessing unavailable ICH system registers.
-VM creation returns `NOT_SUPPORTED` before reserving a pending VM or consuming
-the creation lease. This does **not** yet enable a Linux I/O VM on Pi 5. That needs a separate GICv2
-virtualization backend, tracked in the [near-term roadmap](../../docs/roadmap.md). RP1 UARTs on the 40-pin header are not the console used
-by this configuration.
+GICv2 guest virtualization is implemented and tested with Linux on QEMU.
+Firmware must describe the GICH and GICV register windows plus the maintenance
+PPI in the GIC node. Hosts without those resources retain Native application
+support and reject VM admission. The current backend requires five priority
+and preemption bits and supports up to 64 list registers.
+
+Each vCPU owns its saved GICH control, VMCR, APR and list-register state. Guest
+stage-2 maps only the banked GICV CPU interface as Device memory; GICC and GICH
+remain host-only. The emulated distributor exposes a single-vCPU, 64-interrupt
+GICv2 without security extensions. The Native platform-info query reports the
+GIC revision so vm-runtime emits matching guest firmware. GICv3 hosts retain
+their existing guest profile.
+
+QEMU covers guest boot, timer/console wakeups and VM retirement, including
+runtime crashes. Physical Pi 5 boot, firmware resource descriptions, interrupt
+ordering and device quiescence still need hardware validation. The Linux I/O
+backend and physical device assignment remain work in the
+[roadmap](../../docs/roadmap.md). RP1 UARTs on the 40-pin header are not the
+console used by this configuration.
 
 ## Recommended boot chain
 
@@ -107,7 +120,10 @@ make test-native-gicv2 QEMU_CPUS=1
 ```
 
 CI runs both configurations, exercising Native services, std programs, shell
-input and application startup. Host tests cover GIC SGI sender preservation,
+input and userspace-managed Linux guest startup. It also runs four-core GICv2
+kernel self-tests, paced guest-console input and vm-runtime crash recovery.
+Host tests cover guest distributor decoding, LR encoding, delivery gates,
+pending-state preservation, GIC SGI sender preservation,
 CPU target masks, UP target-register behavior, spurious IDs, FDT matching,
 nine-window devices, and low-RAM/high-MMIO mapping. The upstream Pi 5 DTB was
 also checked locally for generic and essential-device discovery.

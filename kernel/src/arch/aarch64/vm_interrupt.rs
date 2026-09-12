@@ -1,13 +1,13 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Per-VM `GICv3` interrupt-controller state.
+//! Per-VM Arm GIC interrupt-controller state.
 
 use hyper::sync::InterruptSpinLock;
-use hyper::vm::aarch64::device::gicv3::{
+use hyper::vm::arm::gic::ListEntry;
+use hyper::vm::arm::gic::mmio::{
     DecodedRegister, ModelError, RegisterState, read_model_register, write_model_register,
 };
-use hyper::vm::arm::gic::ListEntry;
 use hyper::vm::arm::gic::{
     BuildError as VgicBuildError, GicInterruptId, InterruptGroup, InterruptSnapshot,
     InterruptTrigger, RuntimeError as VgicError, VirtualGic, VirtualGicBuilder,
@@ -90,7 +90,11 @@ impl VmInterruptController {
                     interrupt,
                     vcpu,
                     TIMER_PRIORITY,
-                    InterruptGroup::Group1,
+                    if super::vgic::v2::guest_physical().is_some() {
+                        InterruptGroup::Group0
+                    } else {
+                        InterruptGroup::Group1
+                    },
                     if id < 16 {
                         InterruptTrigger::Edge
                     } else {
@@ -104,7 +108,11 @@ impl VmInterruptController {
                 GicInterruptId::new(id).ok_or(Error::InvalidInterrupt)?,
                 VirtualCpuId::new(0),
                 TIMER_PRIORITY,
-                InterruptGroup::Group1,
+                if super::vgic::v2::guest_physical().is_some() {
+                    InterruptGroup::Group0
+                } else {
+                    InterruptGroup::Group1
+                },
                 InterruptTrigger::Level,
             )?;
         }
@@ -117,6 +125,18 @@ impl VmInterruptController {
             controller.set_maintenance_on_eoi(timer_interrupt, vcpu, true)?;
             controller.set_enabled(timer_interrupt, vcpu, true)?;
         }
+        if super::vgic::v2::guest_physical().is_some() {
+            controller.set_distributor_enabled(false);
+            for cpu in 0..vcpu_count {
+                for id in 0..16 {
+                    controller.set_enabled(
+                        GicInterruptId::new(id).ok_or(Error::InvalidInterrupt)?,
+                        VirtualCpuId::new(cpu),
+                        true,
+                    )?;
+                }
+            }
+        }
         Ok(Self {
             state: InterruptSpinLock::new(ControllerState {
                 controller,
@@ -125,6 +145,11 @@ impl VmInterruptController {
             timer_interrupt,
             vcpu_count,
         })
+    }
+
+    pub(crate) fn enable_distributor_for_validation(&self) {
+        self.state
+            .with(|state| state.controller.set_distributor_enabled(true));
     }
 
     pub const fn timer_interrupt(&self) -> GicInterruptId {
@@ -170,6 +195,10 @@ impl VmInterruptController {
                 }
                 (DecodedRegister::Service(register), MmioOperation::Write(value)) => {
                     state.registers.write(register, value);
+                    if register == hyper::vm::arm::gic::mmio::ServiceRegister::DistributorControlV2
+                    {
+                        state.controller.set_distributor_enabled(value & 1 != 0);
+                    }
                     None
                 }
                 (DecodedRegister::Model(register), MmioOperation::Read) => Some(

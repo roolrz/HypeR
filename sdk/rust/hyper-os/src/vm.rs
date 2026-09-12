@@ -365,6 +365,7 @@ pub struct VirtualMachinePlatformInfo {
     pub platform_profile: PlatformProfile,
     pub counter_frequency_hz: u64,
     pub riscv_isa: u64,
+    pub aarch64_gic_version: u64,
 }
 
 pub fn platform_info(
@@ -376,6 +377,7 @@ pub fn platform_info(
         platform_profile: 0,
         counter_frequency_hz: 0,
         riscv_isa: 0,
+        aarch64_gic_version: 0,
     };
     // SAFETY: the lease remains borrowed and the output record writable.
     let result = unsafe {
@@ -399,6 +401,10 @@ pub fn platform_info(
                 | (Architecture::Riscv64, PlatformProfile::Riscv64Reference)
         )
         || (architecture != Architecture::Riscv64 && record.riscv_isa != 0)
+        || match architecture {
+            Architecture::Aarch64 => !matches!(record.aarch64_gic_version, 2 | 3),
+            _ => record.aarch64_gic_version != 0,
+        }
     {
         return Err(Error::InvalidResponse);
     }
@@ -407,6 +413,7 @@ pub fn platform_info(
         platform_profile,
         counter_frequency_hz: record.counter_frequency_hz,
         riscv_isa: record.riscv_isa,
+        aarch64_gic_version: record.aarch64_gic_version,
     })
 }
 

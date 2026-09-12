@@ -1101,6 +1101,18 @@ pub const CONSTANTS: &[AbiConstant] = &[
         value: 0x0002_0000,
     },
     AbiConstant {
+        name: "virtual_platform_aarch64_reference_gicv2_distributor_size",
+        value: 0x1000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_gicv2_cpu_base",
+        value: 0x0801_0000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_gicv2_cpu_size",
+        value: 0x2000,
+    },
+    AbiConstant {
         name: "virtual_platform_aarch64_reference_uart_base",
         value: 0x0900_0000,
     },
@@ -2316,9 +2328,14 @@ pub const RECORDS: &[Record] = &[
                 kind: FieldKind::U64,
                 offset: 16,
             },
+            Field {
+                name: "aarch64_gic_version",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
         ],
-        minimum_size: 24,
-        size: 24,
+        minimum_size: 32,
+        size: 32,
         alignment: 8,
     },
     Record {

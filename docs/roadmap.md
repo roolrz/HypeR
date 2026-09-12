@@ -58,7 +58,7 @@ capabilities; new privileged power operations require explicit Native authority.
    - [ ] Validate physical boot, four online CPUs, timer-driven scheduling,
      interrupt-driven serial input and idle wakeup.
 2. **Boot the Linux I/O VM on Pi 5.**
-   - [ ] Implement the GICv2 guest interrupt backend and its lifecycle tests.
+   - [x] Implement the GICv2 guest interrupt backend and its QEMU lifecycle tests.
    - [ ] Build a minimal Linux configuration and reproducible guest artifacts.
    - [ ] Provide board/guest device trees, RAM reservations and VM configuration
      through the existing VMM and vm-runtime path.

@@ -52,7 +52,7 @@ pub(super) fn register_v2_cpu(local: GicV2Local<Aarch64Barrier>) -> Result<(), E
     .map_err(|_| Error::AlreadyInitialized)
 }
 pub fn guest_interrupts_supported() -> bool {
-    matches!(INTERFACE.get(), Some(Interface::V3))
+    matches!(INTERFACE.get(), Some(Interface::V3)) || super::vgic::v2::guest_physical().is_some()
 }
 
 fn send_targeted(interrupt: InterruptId, affinity: u32) -> bool {

@@ -195,7 +195,7 @@ fn rejects_missing_capabilities_bad_clock_and_small_storage() -> Result<(), &'st
         );
     }
     assert_eq!(
-        GuestHardwareMetadata::Aarch64.validate_for(&plan),
+        GuestHardwareMetadata::Aarch64 { gic_version: 3 }.validate_for(&plan),
         Err(guest_fdt::Error::InvalidInput)
     );
     let mut structure = [0; 4096];
@@ -256,7 +256,7 @@ fn shared_arm_plan_preserves_existing_dtb_bytes() -> Result<(), &'static str> {
     let a = guest_fdt::build_linux(
         &plan,
         "test",
-        GuestHardwareMetadata::Aarch64,
+        GuestHardwareMetadata::Aarch64 { gic_version: 3 },
         &mut structure,
         &mut strings,
         &mut first,
@@ -264,6 +264,7 @@ fn shared_arm_plan_preserves_existing_dtb_bytes() -> Result<(), &'static str> {
     .map_err(|_| "shared")?;
     let b = guest_fdt::build_aarch64_linux(
         guest_fdt::Aarch64LinuxBoot {
+            gic_version: 3,
             memory_base: plan.memory_base(),
             memory_size: plan.memory_size(),
             vcpu_count: 1,

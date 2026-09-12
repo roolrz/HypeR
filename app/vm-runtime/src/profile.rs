@@ -11,6 +11,7 @@ use hyper_vm_image::{Architecture, PlatformProfile};
 pub enum SelectionError {
     Architecture,
     PlatformProfile,
+    InterruptController,
 }
 
 /// Translate an image profile into its Native query identity. Image layout and
@@ -35,7 +36,12 @@ pub fn validate_metadata(
         return Err(SelectionError::PlatformProfile);
     }
     match (architecture, metadata.architecture) {
-        (Architecture::Aarch64, vm::Architecture::Aarch64) => Ok(GuestHardwareMetadata::Aarch64),
+        (Architecture::Aarch64, vm::Architecture::Aarch64) => match metadata.aarch64_gic_version {
+            2 | 3 => Ok(GuestHardwareMetadata::Aarch64 {
+                gic_version: metadata.aarch64_gic_version as u32,
+            }),
+            _ => Err(SelectionError::InterruptController),
+        },
         (Architecture::Riscv64, vm::Architecture::Riscv64) => Ok(GuestHardwareMetadata::Riscv64 {
             counter_frequency_hz: metadata.counter_frequency_hz,
             riscv_isa: metadata.riscv_isa,
