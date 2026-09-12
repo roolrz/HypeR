@@ -19,7 +19,7 @@ bring-up is part of this milestone, not a follow-up after the backend is done.
 
 - **Linux is a trusted I/O VM.** It supplies the device-driver ecosystem, while
   HypeR remains the host kernel and owns scheduling, memory, capabilities and VM
-  lifecycle. It is separate from any future foreign-ABI compatibility service.
+  lifecycle.
 - **Physical devices are driven directly by Linux.** Device assignment must
   describe MMIO, interrupts, DMA addressing, firmware dependencies and reset
   ownership. An emulated device backed by a host driver is not this milestone.
@@ -104,5 +104,4 @@ These remain directions rather than prerequisites for the Pi 5 milestone:
 - additional filesystems, cache/writeback policy and storage recovery;
 - scheduler load balancing, power management and CPU hotplug;
 - broader hardware support while preserving existing AArch64/RISC-V acceptance
-  and x86-64 builds;
-- supervised Linux/FreeBSD binary personalities, separate from the I/O VM.
+  and x86-64 builds.

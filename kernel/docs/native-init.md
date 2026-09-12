@@ -10,6 +10,25 @@ firmware-provided initial ramdisk. Linux guest autostart is userspace policy:
 init provisions the VM manager and its isolated VM runtime through Native
 capabilities. Kernel self-test images contain no Linux loader or default VM.
 
+## Rust runtime
+
+Init uses HypeR's Rust `std`, like the other in-tree applications. It uses
+Native SDK bindings for bootstrap handles, capability delegation and service
+construction; these operations are not provided by the Rust standard library.
+Using `std` does not grant additional authority.
+
+Before `main`, the Native runtime initializes the heap, attaches the initial
+thread and initializes runtime capabilities from the kernel-provided startup
+record. This does not require init's child services to be running. Standard
+I/O uses delegated stream handles when present and otherwise falls back to a
+bootstrap Console capability, allowing init to report startup errors before
+the console services exist.
+
+The default application build uses dynamic linking, including for init. Its
+interpreter and runtime libraries must therefore be available in the initial
+ramdisk. Rust `std` support and dynamic linking are separate choices; using
+`std` does not require a shared Rust standard-library image.
+
 ## Initial ramdisk
 
 Firmware must describe one initial ramdisk through the architecture boot

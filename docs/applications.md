@@ -13,6 +13,7 @@ options (echo treats option-looking arguments as literal text).
 | Command | Examples and behavior |
 | --- | --- |
 | `cat` | `cat FILE...`, `cat -n FILE`, `cat -`; streams bytes without UTF-8 conversion, with continuous optional line numbering. No files means stdin. |
+| `grep` | `grep -in PATTERN FILE`, `grep -F TEXT`, `grep -v PATTERN`; filters files or stdin, with counting, filename and quiet modes. |
 | `ls` | `ls /etc/hyper`, `ls FILE DIRECTORY`, `ls -a`, `ls --sort size -r`; defaults to permission mode, IEC size, and sorted names. `--bytes` gives exact file sizes; `-1` prints names only. Directory sizes are shown as `-`. |
 | `ps` | `ps -T`, `ps -p KOID`, `ps --name vm-runtime`; select a process or filter names, optionally including threads. |
 | `free` | `free`, `free --bytes`; physical totals, ownership and reclaimable cache pages, in human-readable units or exact bytes. |
@@ -21,9 +22,13 @@ options (echo treats option-looking arguments as literal text).
 | `echo` | `echo hello world`; prints arguments literally, followed by a newline. |
 
 `cat` and `ls` report an error per failed path, continue with remaining paths,
-and return failure if any path failed. The interactive shell merges command
+and return failure if any path failed. The interactive shell merges unredirected
 stdout and stderr into one terminal queue before displaying its next prompt.
 `echo` is an ordinary application, not a second implementation inside the shell.
+
+The shell supports concurrent pipelines and file redirects, for example
+`cat /etc/hyper/vms.json | grep image > /matches`. See
+[shell and text filtering](shell.md) for syntax, limits and grep options.
 
 Native std provides `std::os::hyper::fs::MetadataExt::mode()` for permission and
 special mode bits. File type is queried separately. `metadata` follows symbolic
