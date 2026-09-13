@@ -434,6 +434,10 @@ impl PreparedChildProcessStart {
         })
     }
 
+    // Publication and rollback run after preparation. Keep their scratch
+    // frames out of the coordinator while it calls deeper preparation paths;
+    // IRQ preemption and the incoming scheduler tail also need stack headroom.
+    #[inline(never)]
     fn commit(mut self) -> CommittedChildProcessStart {
         let build = match self.build.take() {
             Some(build) => build,
@@ -487,6 +491,7 @@ impl PreparedChildProcessStart {
         }
     }
 
+    #[inline(never)]
     fn cancel(mut self) -> SealedProcessBuild {
         let supervisor_object = self.supervisor_object.take();
         drop(supervisor_object);
