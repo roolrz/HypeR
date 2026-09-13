@@ -69,6 +69,55 @@ impl VmBinding {
             .admit_unhandled_mmio(self.id.diagnostic_id(), vcpu, access)
     }
 
+    #[allow(
+        dead_code,
+        reason = "selected guest platforms enter these routes only when their HAL supports assignment or notifications"
+    )]
+    pub(crate) fn route_physical_mmio(
+        &self,
+        access: hyper::vm::exit::MmioAccess,
+    ) -> Option<hyper::vm::exit::MmioAction> {
+        let owner = self.machine.physical.with(|physical| {
+            physical
+                .as_ref()
+                .map(|physical| (physical.object(), physical.offset(access)))
+        });
+        let (object, offset) = owner?;
+        offset.map(|offset| object.object().access_at(offset, access))
+    }
+    #[allow(
+        dead_code,
+        reason = "selected guest platforms enter these routes only when their HAL supports assignment or notifications"
+    )]
+    pub(crate) fn route_io_mmio(
+        &self,
+        access: hyper::vm::exit::MmioAccess,
+    ) -> Option<hyper::vm::exit::MmioAction> {
+        self.machine.io_routes.route(access)
+    }
+    pub(crate) fn preflight_io_route(
+        &self,
+        route: &crate::kernel::vm::io::Route,
+    ) -> Result<(), crate::kernel::vm::io::Error> {
+        if self.machine.physical.with(|physical| {
+            physical
+                .as_ref()
+                .is_some_and(|physical| physical.irq() == route.irq())
+        }) {
+            return Err(crate::kernel::vm::io::Error::Busy);
+        }
+        self.machine.io_routes.can_insert(route)
+    }
+    pub(crate) fn io_range_conflicts(&self, base: u64, length: u64) -> bool {
+        self.machine.io_routes.conflicts(base, length)
+    }
+    pub(crate) fn install_io_route(
+        &self,
+        route: crate::kernel::vm::io::Route,
+    ) -> Result<(), crate::kernel::vm::io::Error> {
+        self.machine.io_routes.insert(route)
+    }
+
     pub(crate) fn interrupts(&self) -> &VmInterruptController {
         &self.machine.interrupts
     }
@@ -377,6 +426,11 @@ pub(super) struct VirtualMachine {
     // but the VM still owns it through the same lifecycle as other targets.
     #[allow(dead_code)]
     devices: VirtualDeviceSet,
+    physical: InterruptSpinLock<
+        Option<crate::kernel::device::assigned::Assignment>,
+        crate::hal::irq::LocalMask,
+    >,
+    io_routes: crate::kernel::vm::io::Routes,
     diagnostics: crate::kernel::vm::diagnostics::VmDiagnostics,
     lifecycle: FallibleArc<crate::kernel::vm::installed::InstalledMachine>,
     _interrupt_controller_charge: Option<CommittedCharge>,
@@ -401,6 +455,8 @@ impl VirtualMachine {
             ),
             interrupts,
             devices,
+            physical: InterruptSpinLock::new(None),
+            io_routes: crate::kernel::vm::io::Routes::new(),
             diagnostics: crate::kernel::vm::diagnostics::VmDiagnostics::new(),
             lifecycle,
             _interrupt_controller_charge: interrupt_controller_charge,
@@ -494,6 +550,43 @@ impl VirtualMachine {
 
     pub(super) fn quiesce_devices(&self) -> Result<(), super::super::device::Error> {
         super::super::device::quiesce(&self.devices)
+    }
+
+    pub(super) fn set_physical(
+        &self,
+        physical: Option<crate::kernel::device::assigned::Assignment>,
+    ) {
+        self.physical.with(|slot| *slot = physical);
+    }
+    pub(super) fn activate_physical(&self) -> Result<(), Error> {
+        let assignment = self
+            .physical
+            .with(|slot| slot.as_ref().map(|assignment| assignment.object()));
+        if let Some(assignment) = assignment {
+            let irq = self
+                .physical
+                .with(|slot| slot.as_ref().map(|assignment| assignment.irq()))
+                .ok_or(Error::StaleIdentity)?;
+            assignment
+                .object()
+                .activate_for(self.id, irq)
+                .map_err(|_| Error::Allocation)?;
+        }
+        Ok(())
+    }
+    pub(super) fn physical_owner(
+        &self,
+    ) -> Option<
+        crate::kernel::object::KernelRef<
+            crate::kernel::device::assigned::PhysicalDevice,
+            crate::kernel::object::VmDeviceBinding,
+        >,
+    > {
+        self.physical
+            .with(|slot| slot.as_ref().map(|assignment| assignment.object()))
+    }
+    pub(super) fn close_io_routes(&self) {
+        self.io_routes.close();
     }
 
     pub(super) fn is_quiescent(&self) -> bool {

@@ -1113,6 +1113,34 @@ pub fn enable_local(interrupt: VirtualInterrupt) -> Result<(), Error> {
     )
 }
 
+/// Re-enables one owned shared line after its device condition was acknowledged.
+/// The live registration prevents removal/reuse while this operation runs.
+/// Call outside device locks: callbacks run under the IRQ registry lock.
+pub(crate) fn enable_registered_shared(registration: &Registration) -> Result<(), Error> {
+    resolve_transition(
+        with_transition_state(|state| {
+            let (domain, index) = state
+                .mapping_position_by_virtual(registration.interrupt)
+                .ok_or(Error::InterruptNotMapped)?;
+            let mapping = &state.domains[domain].mappings[index];
+            if mapping.lifecycle != MappingLifecycle::Active
+                || !mapping
+                    .handlers
+                    .iter()
+                    .any(|handler| handler.id == registration.id)
+            {
+                return Err(Error::MappingBusy.into());
+            }
+            let hardware = mapping.hardware;
+            if state.controller.is_per_cpu(hardware) {
+                return Err(Error::LocalInterruptLifecycleRequiresCrossCall.into());
+            }
+            state.set_hardware_enabled(hardware, true)
+        }),
+        "owned shared IRQ enable",
+    )
+}
+
 /// Disables one already-mapped PPI on the calling CPU.
 pub fn disable_local(interrupt: VirtualInterrupt) -> Result<(), Error> {
     resolve_transition(

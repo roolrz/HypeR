@@ -101,6 +101,32 @@ vCPU migration, automatic load balancing, broad hardware discovery, stable
 management APIs, and a general-purpose virtual I/O stack are still under
 development.
 
+## Linux I/O VM baseline
+
+The [I/O VM integration](io-vm.md) has an AArch64 QEMU cross-VM storage baseline.
+Unmodified upstream Linux 6.18.51 and external modules run in a trusted I/O VM;
+it directly drives a QEMU virtio-scsi disk and exports it through upstream
+vhost-scsi/LIO iblock. A separate Linux guest uses its ordinary virtio-scsi
+block driver. The Native fixture verifies 32 direct write/flush/read rounds,
+host disk bytes, and restoration of Native memory access after both VMs retire.
+Both GICv2 with one host CPU and GICv3 with four host CPUs pass driver
+unbind/rebind followed by repeated I/O, exercising backend endpoint reset and
+a new notification epoch. Each storage guest currently has one vCPU.
+
+The implementation includes capability-gated physical device claims, explicit
+DMA translations, shared guest-memory grants, bounded asynchronous per-vCPU
+configuration MMIO, control mailboxes, and direct kernel kick/call notification
+bindings. Native management services do not forward individual disk requests.
+AArch64 GICv2/GICv3 tests also exercise mailbox interrupts, cross-VM notifications,
+peer exit, stale completion rejection and interrupted MMIO retirement.
+
+Linux build, modules, services, rootfs assembly and source packaging live in
+[HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm). HypeR owns Native deployment,
+DT generation and digest-pinned import. The QEMU deployment currently uses the
+explicit `test-io-vm` fixture; ordinary VMM configuration, Native VFS block
+integration, networking and Pi 5 controller assignment are not implemented by
+this baseline. QEMU does not qualify physical cache, interrupt or DMA behavior.
+
 ## Design priorities
 
 - **Rust at the kernel boundary.** The kernel is `no_std` and `no_main`.

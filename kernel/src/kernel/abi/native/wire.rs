@@ -449,6 +449,15 @@ pub(super) fn parse_object_kind(
         }
         HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => Ok(ObjectKind::PENDING_VIRTUAL_MACHINE),
         HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => Ok(ObjectKind::VIRTUAL_MACHINE),
+        hyper::abi::native::HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY => {
+            Ok(ObjectKind::DEVICE_ASSIGNMENT_AUTHORITY)
+        }
+        hyper::abi::native::HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE => Ok(ObjectKind::PHYSICAL_DEVICE),
+        hyper::abi::native::HYPER_NATIVE_OBJECT_GUEST_MAILBOX => Ok(ObjectKind::GUEST_MAILBOX),
+        hyper::abi::native::HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION => {
+            Ok(ObjectKind::GUEST_NOTIFICATION)
+        }
+        hyper::abi::native::HYPER_NATIVE_OBJECT_GUEST_MEMORY => Ok(ObjectKind::GUEST_MEMORY),
         HYPER_NATIVE_OBJECT_VIRTUAL_CPU => Ok(ObjectKind::VIRTUAL_CPU),
         HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL => Ok(ObjectKind::VIRTUAL_SERIAL),
         _ => Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
@@ -1422,6 +1431,41 @@ pub(super) fn encode_virtual_machine_power_request(
         &mut record,
         core::mem::offset_of!(Record, context),
         request.context,
+    );
+    record
+}
+
+pub(super) fn encode_virtual_cpu_mmio_request(
+    request: hyper::vm::device::mmio::Request,
+) -> [u8; core::mem::size_of::<hyper::abi::native::HyperNativeVirtualCpuMmioRequest>()] {
+    use hyper::abi::native::HyperNativeVirtualCpuMmioRequest as Record;
+    use hyper::vm::exit::MmioOperation;
+    let mut record = [0_u8; core::mem::size_of::<Record>()];
+    let (operation, value) = match request.access.operation() {
+        MmioOperation::Read => (0, 0),
+        MmioOperation::Write(value) => (1, value),
+    };
+    write_u64(&mut record, core::mem::offset_of!(Record, id), request.id);
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(Record, device),
+        request.device,
+    );
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(Record, address),
+        request.access.address().get(),
+    );
+    write_u64(&mut record, core::mem::offset_of!(Record, value), value);
+    write_u32(
+        &mut record,
+        core::mem::offset_of!(Record, operation),
+        operation,
+    );
+    write_u32(
+        &mut record,
+        core::mem::offset_of!(Record, width),
+        request.access.size() as u32,
     );
     record
 }

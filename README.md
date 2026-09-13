@@ -60,22 +60,25 @@ that start a Linux guest and expose its console. RISC-V runs Native init,
 shell, std applications, and userspace-managed Linux guests on QEMU. x86-64 currently has build and image validation only.
 
 The Native ABI is pre-release. Broad hardware support, general-purpose virtual
-I/O, device assignment, and multi-vCPU userspace management remain unfinished.
+I/O, device assignment, and transactional multi-vCPU reconfiguration remain unfinished.
 See [implementation status](docs/status.md) and the [roadmap](docs/roadmap.md).
 
 ## Near-term roadmap
 
 **Run HypeR on Raspberry Pi 5 with a trimmed, trusted Linux I/O VM as its
 network and block-device backend.** Linux drives the physical devices; HypeR
-Native services use an explicit shared-memory I/O protocol.
+Native services remain the host application runtime. Storage uses standard
+virtio-scsi with Linux vhost-scsi/LIO.
 
 - [x] Implement host GICv2 and Pi 5 debug-UART support; validate in QEMU.
 - [ ] Boot the Native shell on Pi 5 and validate SMP, timer and console behavior.
 - [x] Add GICv2 guest interrupts, Arm guest SMP and runtime-managed guest power control.
 - [ ] Validate guest SMP, CPU hotplug, reboot and poweroff on Pi 5.
 - [ ] Boot the Linux I/O VM on physical Pi 5.
-- [ ] Assign network/storage devices and implement shared queues, notifications
-  and buffer ownership.
+- [ ] Publish the complete appliance from [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm)
+  and consume a digest-pinned package; HypeR owns apps and DTS/DTB.
+- [x] Verify cross-VM virtio-scsi/vhost I/O against a real QEMU disk.
+- [ ] Extend device assignment, shared queues and DMA handling to Pi 5 controllers.
 - [ ] Exercise Native network and storage I/O on Pi 5, including failure handling
   and performance measurements.
 

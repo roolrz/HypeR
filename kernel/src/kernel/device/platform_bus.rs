@@ -43,6 +43,7 @@ impl DriverServices for KernelDriverServices<'_> {
 struct PlatformBusState {
     _devices: Vec<PlatformDevice>,
     _manager: PermanentDriverManager,
+    assignable: Vec<super::assigned::Resource>,
 }
 
 enum PlatformBusLifecycle {
@@ -97,6 +98,10 @@ pub(super) fn initialize(
             .register(driver)
             .map_err(Error::DriverRegistration)?;
     }
+    let mut assignable = Vec::new();
+    assignable
+        .try_reserve_exact(devices.len())
+        .map_err(|_| Error::DriverRegistration(ProbeError::Resource))?;
     let console = super::serial::initialize(boot, &devices);
     let reserved_console_base = boot.early_console().map(|console| console.base);
     devices.retain(|device| {
@@ -107,11 +112,43 @@ pub(super) fn initialize(
     let services = KernelDriverServices { boot };
     crate::kernel::time::initialize_realtime(&devices, &services);
     let drivers = manager.probe_devices(&devices, &services);
+    for device in &devices {
+        if manager.binding_driver(device.id()).is_none()
+            && device.is_compatible("virtio,mmio")
+            && let Some(resource) = super::assigned::Resource::discover(
+                device,
+                &services,
+                boot.interrupts().root_domain,
+            )
+        {
+            assignable.push(resource);
+        }
+    }
     reservation.commit(PlatformBusState {
         _devices: devices,
         _manager: manager.retain_permanently(),
+        assignable,
     });
     Ok(InitializationReport { drivers, console })
+}
+
+pub(super) fn claim(index: usize) -> Option<super::assigned::Claim> {
+    PLATFORM_BUS.with(|state| match state {
+        PlatformBusLifecycle::Ready { _state: state } => {
+            state.assignable.get_mut(index)?.claim(index)
+        }
+        _ => None,
+    })
+}
+
+pub(super) fn release(index: usize) {
+    PLATFORM_BUS.with(|state| {
+        if let PlatformBusLifecycle::Ready { _state: state } = state
+            && let Some(resource) = state.assignable.get_mut(index)
+        {
+            resource.release();
+        }
+    });
 }
 
 impl InitializationReservation {

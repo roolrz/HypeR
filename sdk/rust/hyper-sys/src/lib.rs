@@ -2751,3 +2751,357 @@ pub unsafe fn virtual_machine_open_vcpu(
         )
     }
 }
+
+/// Registers one device aperture before a VM starts.
+///
+/// # Safety
+/// The machine handle must remain live throughout the call.
+#[inline]
+pub unsafe fn virtual_machine_register_mmio(
+    machine: abi::HyperNativeHandle,
+    base: u64,
+    length: u64,
+    device: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: The caller retains the handle; all remaining arguments are scalars.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO,
+            machine,
+            base,
+            length,
+            device,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Snapshots a pending MMIO instruction without consuming its continuation.
+///
+/// # Safety
+/// The vCPU handle must remain live and request must be writable for the call.
+#[inline]
+pub unsafe fn virtual_cpu_get_mmio_request(
+    vcpu: abi::HyperNativeHandle,
+    request: *mut abi::HyperNativeVirtualCpuMmioRequest,
+) -> CallResult {
+    // SAFETY: The caller establishes handle and output validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_MMIO_REQUEST,
+            vcpu,
+            request.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeVirtualCpuMmioRequest>() as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Completes an exact pending MMIO instruction, or aborts its VM.
+///
+/// # Safety
+/// The vCPU handle must remain live throughout the call.
+#[inline]
+pub unsafe fn virtual_cpu_complete_mmio(
+    vcpu: abi::HyperNativeHandle,
+    id: u64,
+    operation: u32,
+    value: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: The caller retains the handle; all remaining arguments are scalars.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_COMPLETE_MMIO,
+            vcpu,
+            id,
+            u64::from(operation),
+            value,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Freezes a writable VMO for explicitly shared guest use.
+///
+/// # Safety
+/// The VMO handle remains live; adopt the returned memory handle exactly once.
+#[inline]
+pub unsafe fn guest_memory_create(vmo: abi::HyperNativeHandle) -> CallResult {
+    // SAFETY: The caller retains the sole borrowed handle.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_GUEST_MEMORY_CREATE,
+            vmo,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Adds a page-aligned region to a pending VM's immutable RAM layout.
+///
+/// # Safety
+/// Both handles must remain live for the call.
+#[inline]
+pub unsafe fn pending_virtual_machine_map_memory(
+    pending: abi::HyperNativeHandle,
+    memory: abi::HyperNativeHandle,
+    guest_offset: u64,
+    source_offset: u64,
+    length: u64,
+) -> abi::HyperNativeStatus {
+    // SAFETY: The caller retains both handles; remaining arguments are scalars.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_MAP_MEMORY,
+            pending,
+            memory,
+            guest_offset,
+            source_offset,
+            length,
+            0,
+        )
+        .status
+    }
+}
+
+/// Creates an eagerly allocated physically contiguous writable VMO.
+///
+/// # Safety
+/// Adopt a successfully returned handle exactly once.
+#[inline]
+pub unsafe fn vmo_create_contiguous(size: u64) -> CallResult {
+    // SAFETY: Scalar request; no borrowed memory or input capability.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMO_CREATE_CONTIGUOUS,
+            size,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the Native `device_claim` operation.
+///
+/// # Safety
+/// Retain all input handles and provide valid readable/writable pointer ranges
+/// as specified by the Native ABI for the complete non-retaining call.
+#[inline]
+pub unsafe fn device_claim(authority: u64, index: u32) -> CallResult {
+    // SAFETY: The caller establishes the ABI handle and memory contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DEVICE_CLAIM,
+            authority,
+            u64::from(index),
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the Native `physical_device_info` operation.
+///
+/// # Safety
+/// Retain all input handles and provide valid readable/writable pointer ranges
+/// as specified by the Native ABI for the complete non-retaining call.
+#[inline]
+pub unsafe fn physical_device_info(
+    device: u64,
+    output: *mut abi::HyperNativePhysicalDeviceInfo,
+    size: usize,
+) -> CallResult {
+    // SAFETY: The caller establishes the ABI handle and memory contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PHYSICAL_DEVICE_INFO,
+            device,
+            output as u64,
+            size as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the Native `vmo_get_dma_extent` operation.
+///
+/// # Safety
+/// Retain all input handles and provide valid readable/writable pointer ranges
+/// as specified by the Native ABI for the complete non-retaining call.
+#[inline]
+pub unsafe fn vmo_get_dma_extent(
+    authority: u64,
+    vmo: u64,
+    offset: u64,
+    length: u64,
+    output: *mut abi::HyperNativeDmaExtent,
+    size: usize,
+) -> CallResult {
+    // SAFETY: The caller establishes the ABI handle and memory contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VMO_GET_DMA_EXTENT,
+            authority,
+            vmo,
+            offset,
+            length,
+            output as u64,
+            size as u64,
+        )
+    }
+}
+
+/// Executes the Native `pending_virtual_machine_assign_device` operation.
+///
+/// # Safety
+/// Retain all input handles and provide valid readable/writable pointer ranges
+/// as specified by the Native ABI for the complete non-retaining call.
+#[inline]
+pub unsafe fn pending_virtual_machine_assign_device(
+    pending: u64,
+    device: u64,
+    base: u64,
+    irq: u32,
+) -> CallResult {
+    // SAFETY: The caller establishes the ABI handle and memory contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_ASSIGN_DEVICE,
+            pending,
+            device,
+            base,
+            u64::from(irq),
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the Native `guest_mailbox_create` operation.
+///
+/// # Safety
+/// Retain all input handles and provide valid readable/writable pointer ranges
+/// as specified by the Native ABI for the complete non-retaining call.
+#[inline]
+pub unsafe fn guest_mailbox_create(machine: u64, base: u64, irq: u32) -> CallResult {
+    // SAFETY: The caller establishes the ABI handle and memory contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_GUEST_MAILBOX_CREATE,
+            machine,
+            base,
+            u64::from(irq),
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the Native `guest_mailbox_send` operation.
+///
+/// # Safety
+/// Retain all input handles and provide valid readable/writable pointer ranges
+/// as specified by the Native ABI for the complete non-retaining call.
+#[inline]
+pub unsafe fn guest_mailbox_send(mailbox: u64, bytes: *const u8, length: usize) -> CallResult {
+    // SAFETY: The caller establishes the ABI handle and memory contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_GUEST_MAILBOX_SEND,
+            mailbox,
+            bytes as u64,
+            length as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the Native `guest_mailbox_receive` operation.
+///
+/// # Safety
+/// Retain all input handles and provide valid readable/writable pointer ranges
+/// as specified by the Native ABI for the complete non-retaining call.
+#[inline]
+pub unsafe fn guest_mailbox_receive(mailbox: u64, bytes: *mut u8, capacity: usize) -> CallResult {
+    // SAFETY: The caller establishes the ABI handle and memory contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_GUEST_MAILBOX_RECEIVE,
+            mailbox,
+            bytes as u64,
+            capacity as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the Native `guest_notification_create` operation.
+///
+/// # Safety
+/// Retain all input handles and provide valid readable/writable pointer ranges
+/// as specified by the Native ABI for the complete non-retaining call.
+#[inline]
+pub unsafe fn guest_notification_create(
+    frontend: u64,
+    backend: u64,
+    frontend_base: u64,
+    backend_base: u64,
+    frontend_irq: u32,
+    backend_irq: u32,
+) -> CallResult {
+    // SAFETY: The caller establishes the ABI handle and memory contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CREATE,
+            frontend,
+            backend,
+            frontend_base,
+            backend_base,
+            u64::from(frontend_irq),
+            u64::from(backend_irq),
+        )
+    }
+}
+
+/// Executes the Native `guest_notification_control` operation.
+///
+/// # Safety
+/// Retain all input handles and provide valid readable/writable pointer ranges
+/// as specified by the Native ABI for the complete non-retaining call.
+#[inline]
+pub unsafe fn guest_notification_control(notification: u64, operation: u32) -> CallResult {
+    // SAFETY: The caller establishes the ABI handle and memory contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CONTROL,
+            notification,
+            u64::from(operation),
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}

@@ -60,7 +60,7 @@ mutate() {
 
 copy_sources
 check
-mutate 'serial endpoint must disconnect before vCPU stop' src/kernel/vm/registry/control.rs \
+mutate 'serial endpoint must disconnect after registry cut' src/kernel/vm/registry/control.rs \
     'machine.disconnect_virtual_serial();' 'let _ = id;'
 mutate 'VM retirement authority must remain linear' src/kernel/vm/registry/construction.rs \
     'pub(in crate::kernel::vm) struct VmControl' \
@@ -100,4 +100,13 @@ mutate 'retirement asm outputs must not overlap live inputs' \
     src/arch/aarch64/stage2.rs 'saved_hcr = out(reg) _' 'saved_hcr = lateout(reg) _'
 
 mutate 'device closure must not precede administrative stop intent' src/kernel/vm/registry/control.rs \
-    'machine.disconnect_virtual_serial();' 'machine.disconnect_virtual_serial(); let _ = machine.quiesce_devices();'
+    'let lease = REGISTRY.with' 'let _ = machine.quiesce_devices(); let lease = REGISTRY.with'
+
+mutate 'registry lookup must survive until stop intent is published' src/kernel/vm/registry/control.rs \
+    'let lease = REGISTRY.with' 'let _ = registry.begin_quiesce(id); let lease = REGISTRY.with'
+mutate 'hot MMIO routes must survive until stop intent is published' src/kernel/vm/registry/control.rs \
+    'let lease = REGISTRY.with' 'machine.close_io_routes(); let lease = REGISTRY.with'
+mutate 'post-stop errors must not return reversible installed control' src/kernel/vm/registry/control.rs \
+    'drop(lease);' 'drop(lease); return Err(error);'
+mutate 'post-stop registry cut must not propagate a reversible error' src/kernel/vm/registry/control.rs \
+    'drop(lease);' 'drop(lease); fallible_cut()?;'

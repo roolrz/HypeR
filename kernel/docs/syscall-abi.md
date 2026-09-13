@@ -981,8 +981,12 @@ goal on Pi 5; phase numbering here groups ABI work rather than setting priority.
 
 - support a trusted Linux VM directly driving network and storage devices;
 - add explicit device, interrupt and memory grants with DMA-safe retirement;
-- implement bounded shared request/completion queues with event notification,
-  buffer ownership and cache-ordering rules, allowing zero-copy where valid; and
+- expose the grants and event notifications needed by standard virtio-scsi
+  queues and the Linux vhost-scsi/LIO backend, with explicit buffer ownership,
+  cache ordering and DMA retirement; Linux-local ioctls stay outside the Native
+  ABI, and management services do not forward individual I/O requests;
+- consume the independently published Linux appliance through the
+  [I/O VM package contract](../../docs/io-vm.md), with HypeR-owned apps and DTS/DTB; and
 - qualify Native I/O and failure handling on Pi 5 before later IOMMU-backed
   untrusted-domain support.
 

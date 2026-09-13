@@ -375,7 +375,7 @@ impl GuestMmioCompletion {
         let value = match (self.operation, action) {
             (MmioOperation::Read, MmioAction::CompleteRead(value)) => Some(value),
             (MmioOperation::Write(_), MmioAction::CompleteWrite) => None,
-            (_, MmioAction::Unhandled | MmioAction::Stop)
+            (_, MmioAction::Unhandled | MmioAction::Stop | MmioAction::Deferred)
             | (MmioOperation::Read, MmioAction::CompleteWrite)
             | (MmioOperation::Write(_), MmioAction::CompleteRead(_)) => return false,
         };

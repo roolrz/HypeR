@@ -78,6 +78,11 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_OBJECT_VIRTUAL_CPU UINT32_C(24)
 #define HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL UINT32_C(25)
 #define HYPER_NATIVE_OBJECT_WAIT_SET UINT32_C(26)
+#define HYPER_NATIVE_OBJECT_GUEST_MEMORY UINT32_C(27)
+#define HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY UINT32_C(28)
+#define HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE UINT32_C(29)
+#define HYPER_NATIVE_OBJECT_GUEST_MAILBOX UINT32_C(30)
+#define HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION UINT32_C(31)
 
 #define HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN UINT32_C(0)
 #define HYPER_NATIVE_TRANSFER_CLASS_GENERAL UINT32_C(1)
@@ -112,6 +117,11 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
         case HYPER_NATIVE_OBJECT_VIRTUAL_CPU: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
         case HYPER_NATIVE_OBJECT_WAIT_SET: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
+        case HYPER_NATIVE_OBJECT_GUEST_MEMORY: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY: return HYPER_NATIVE_TRANSFER_CLASS_GENERAL;
+        case HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_GUEST_MAILBOX: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         default: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
     }
 }
@@ -170,7 +180,17 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_POWER_REQUEST (UINT64_C(1) << 1)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_VCPU_TERMINATED (UINT64_C(1) << 2)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_MMIO_REQUEST (UINT64_C(1) << 1)
+#define HYPER_NATIVE_SIGNAL_GUEST_NOTIFICATION_PEER_CLOSED (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_READABLE (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_WRITABLE (UINT64_C(1) << 1)
+#define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED (UINT64_C(1) << 2)
 
+#define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DEVICE_ASSIGNMENT_AUTHORITY UINT64_C(14)
+#define HYPER_NATIVE_GUEST_MAILBOX_MAX_MESSAGE_BYTES UINT64_C(256)
+#define HYPER_NATIVE_GUEST_NOTIFICATION_DISABLE UINT64_C(0)
+#define HYPER_NATIVE_GUEST_NOTIFICATION_ENABLE UINT64_C(1)
+#define HYPER_NATIVE_GUEST_NOTIFICATION_RAISE_CONFIG UINT64_C(2)
 #define HYPER_NATIVE_PRIVATE_MAPPING_COPY_ON_WRITE UINT64_C(0)
 #define HYPER_NATIVE_PRIVATE_MAPPING_EAGER UINT64_C(1)
 #define HYPER_NATIVE_RISCV_ISA_I UINT64_C(1)
@@ -224,6 +244,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_BASE UINT64_C(134283264)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_SIZE UINT64_C(8192)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_BASE UINT64_C(150994944)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_USER_MMIO_BASE UINT64_C(167772160)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_USER_MMIO_SIZE UINT64_C(16777216)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_SIZE UINT64_C(4096)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_INTERRUPT UINT64_C(33)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_TIMER_INTERRUPT UINT64_C(27)
@@ -272,6 +294,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_FILE_MAX_READ_BYTES UINT64_C(2097152)
 #define HYPER_NATIVE_VMO_MAX_SIZE_BYTES UINT64_C(4294967296)
 #define HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES UINT64_C(65536)
+#define HYPER_NATIVE_VMO_MAX_CONTIGUOUS_SIZE_BYTES UINT64_C(67108864)
 #define HYPER_NATIVE_VMAR_PERMISSION_READ UINT64_C(1)
 #define HYPER_NATIVE_VMAR_PERMISSION_WRITE UINT64_C(2)
 #define HYPER_NATIVE_VMAR_PERMISSION_EXECUTE UINT64_C(4)
@@ -431,6 +454,21 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_POWER_REQUEST UINT64_C(117)
 #define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_COMPLETE_POWER_REQUEST UINT64_C(118)
 #define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_OPEN_VCPU UINT64_C(119)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO UINT64_C(120)
+#define HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_MMIO_REQUEST UINT64_C(121)
+#define HYPER_NATIVE_SYS_VIRTUAL_CPU_COMPLETE_MMIO UINT64_C(122)
+#define HYPER_NATIVE_SYS_GUEST_MEMORY_CREATE UINT64_C(123)
+#define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_MAP_MEMORY UINT64_C(124)
+#define HYPER_NATIVE_SYS_VMO_CREATE_CONTIGUOUS UINT64_C(125)
+#define HYPER_NATIVE_SYS_DEVICE_CLAIM UINT64_C(126)
+#define HYPER_NATIVE_SYS_PHYSICAL_DEVICE_INFO UINT64_C(127)
+#define HYPER_NATIVE_SYS_VMO_GET_DMA_EXTENT UINT64_C(128)
+#define HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_ASSIGN_DEVICE UINT64_C(129)
+#define HYPER_NATIVE_SYS_GUEST_MAILBOX_CREATE UINT64_C(130)
+#define HYPER_NATIVE_SYS_GUEST_MAILBOX_SEND UINT64_C(131)
+#define HYPER_NATIVE_SYS_GUEST_MAILBOX_RECEIVE UINT64_C(132)
+#define HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CREATE UINT64_C(133)
+#define HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CONTROL UINT64_C(134)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -453,6 +491,48 @@ static inline uint64_t hyper_native_failure_result_mask(
     }
     return UINT64_C(0);
 }
+
+#define HYPER_NATIVE_PHYSICAL_DEVICE_INFO_MIN_SIZE UINT64_C(16)
+typedef struct hyper_native_physical_device_info_t {
+    uint32_t device_id;
+    uint32_t transport_version;
+    uint64_t mmio_size;
+} hyper_native_physical_device_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_physical_device_info_t) == 16, "physical_device_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_physical_device_info_t) == 8, "physical_device_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_physical_device_info_t, device_id) == 0, "physical_device_info.device_id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_physical_device_info_t, transport_version) == 4, "physical_device_info.transport_version offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_physical_device_info_t, mmio_size) == 8, "physical_device_info.mmio_size offset");
+
+#define HYPER_NATIVE_DMA_EXTENT_MIN_SIZE UINT64_C(16)
+typedef struct hyper_native_dma_extent_t {
+    uint64_t physical_base;
+    uint64_t length;
+} hyper_native_dma_extent_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_dma_extent_t) == 16, "dma_extent size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_dma_extent_t) == 8, "dma_extent alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_dma_extent_t, physical_base) == 0, "dma_extent.physical_base offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_dma_extent_t, length) == 8, "dma_extent.length offset");
+
+#define HYPER_NATIVE_VIRTUAL_CPU_MMIO_REQUEST_MIN_SIZE UINT64_C(48)
+typedef struct hyper_native_virtual_cpu_mmio_request_t {
+    uint64_t id;
+    uint64_t device;
+    uint64_t address;
+    uint64_t value;
+    uint32_t operation;
+    uint32_t width;
+    uint64_t reserved;
+} hyper_native_virtual_cpu_mmio_request_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_cpu_mmio_request_t) == 48, "virtual_cpu_mmio_request size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_cpu_mmio_request_t) == 8, "virtual_cpu_mmio_request alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, id) == 0, "virtual_cpu_mmio_request.id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, device) == 8, "virtual_cpu_mmio_request.device offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, address) == 16, "virtual_cpu_mmio_request.address offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, value) == 24, "virtual_cpu_mmio_request.value offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, operation) == 32, "virtual_cpu_mmio_request.operation offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, width) == 36, "virtual_cpu_mmio_request.width offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_mmio_request_t, reserved) == 40, "virtual_cpu_mmio_request.reserved offset");
 
 #define HYPER_NATIVE_PRIVATE_MAPPING_MIN_SIZE UINT64_C(48)
 typedef struct hyper_native_private_mapping_t {

@@ -219,15 +219,24 @@ struct ExclusiveHardwareWriteLeaseInner<Backend: PageBackend, Account: MemoryAcc
     _charge: Account::Charge,
 }
 
-/// Persistent, exclusive hardware-write ownership of one writable VMO.
+/// Persistent hardware-write ownership excluding Native writers and snapshots.
 ///
 /// Acquisition rejects writable Native mappings, direct kernel access, and
 /// snapshots. While this lease exists, those operations remain closed;
 /// read-only Native mappings may coexist. This is the quiescence proof required
-/// before publishing executable bytes and later exposing the same pages through
-/// a guest translation regime.
+/// before publishing executable bytes and exposing pages through guest translations.
+/// Explicit guest-memory capabilities may clone the same admission; Native
+/// access reopens only after every authorized hardware owner retires.
 pub(crate) struct ExclusiveHardwareWriteLease<Backend: PageBackend, Account: MemoryAccount> {
     inner: FallibleArc<ExclusiveHardwareWriteLeaseInner<Backend, Account>>,
+}
+
+impl<B: PageBackend, A: MemoryAccount> Clone for ExclusiveHardwareWriteLease<B, A> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 /// Opaque authority to publish bytes as native executable provenance.
@@ -286,6 +295,44 @@ impl<Backend: PageBackend, Account: MemoryAccount> Clone
 }
 
 impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account> {
+    /// Imports already-zeroed, already-accounted owned pages before publication.
+    /// This constructor charges VMO/page metadata; the supplied page owners
+    /// retain their physical-allocation charge through the final reference.
+    pub(crate) fn try_from_owned_pages(
+        size: u64,
+        backend: Backend,
+        account: Account,
+        pages: Vec<Backend::Page>,
+    ) -> VmoResult<Backend, Account, Self> {
+        if page_count(size)? != pages.len() {
+            return Err(VmoError::InvalidRange);
+        }
+        let vmo = Self::try_new(size, backend, account)?;
+        for (index, page) in pages.into_iter().enumerate() {
+            let charge = vmo
+                .inner
+                .account
+                .try_charge(MemoryCharge {
+                    kernel_bytes: FallibleArc::<
+                        UserMemoryLock<OwnedPage<Backend::Page, Account::Charge>>,
+                    >::allocation_size() as u64,
+                    ..MemoryCharge::default()
+                })
+                .map_err(VmoError::Account)?;
+            let owner = FallibleArc::try_new(UserMemoryLock::new(OwnedPage {
+                page,
+                _charge: charge,
+            }))
+            .map_err(map_allocation)?;
+            // Local construction owns every slot; no allocation or destructor
+            // runs under the page table lock and the VMO has not escaped.
+            vmo.inner
+                .state
+                .with(|state| state.pages[index] = Some(owner));
+        }
+        Ok(vmo)
+    }
+
     pub(crate) fn try_new(
         size: u64,
         backend: Backend,

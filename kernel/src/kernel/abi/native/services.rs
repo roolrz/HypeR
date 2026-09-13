@@ -206,6 +206,65 @@ pub(in crate::kernel) trait HierarchyServices: UserMemoryServices {
     ) -> Result<HandleValue, crate::kernel::process::hierarchy::Error>;
 }
 
+pub(in crate::kernel) trait DeviceServices: UserMemoryServices {
+    fn claim_device(
+        &self,
+        authority: HandleValue,
+        index: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error>;
+    fn physical_device_info(
+        &self,
+        device: HandleValue,
+    ) -> Result<crate::kernel::device::assigned::Info, crate::kernel::vm::service::Error>;
+    fn vmo_dma_extent(
+        &self,
+        authority: HandleValue,
+        vmo: HandleValue,
+        offset: u64,
+        length: u64,
+    ) -> Result<crate::kernel::device::assigned::DmaExtent, crate::kernel::vm::service::Error>;
+    fn assign_physical_device(
+        &self,
+        pending: HandleValue,
+        device: HandleValue,
+        base: u64,
+        irq: u32,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
+}
+
+pub(in crate::kernel) trait GuestIoServices: UserMemoryServices {
+    fn create_guest_mailbox(
+        &self,
+        machine: HandleValue,
+        base: u64,
+        irq: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error>;
+    fn send_guest_mailbox(
+        &self,
+        mailbox: HandleValue,
+        bytes: &[u8],
+    ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn receive_guest_mailbox(
+        &self,
+        mailbox: HandleValue,
+        copy: &mut dyn FnMut(&[u8]) -> Result<(), crate::kernel::vm::service::Error>,
+    ) -> Result<usize, crate::kernel::vm::service::Error>;
+    fn create_guest_notification(
+        &self,
+        frontend: HandleValue,
+        backend: HandleValue,
+        frontend_base: u64,
+        backend_base: u64,
+        frontend_irq: u32,
+        backend_irq: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error>;
+    fn control_guest_notification(
+        &self,
+        notification: HandleValue,
+        operation: u32,
+    ) -> Result<u32, crate::kernel::vm::service::Error>;
+}
+
 pub(in crate::kernel) trait VmServices: UserMemoryServices {
     fn virtual_machine_platform_info(
         &self,
@@ -271,6 +330,35 @@ pub(in crate::kernel) trait VmServices: UserMemoryServices {
     fn request_virtual_machine_stop(
         &self,
         machine: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn register_mmio(
+        &self,
+        machine: HandleValue,
+        base: u64,
+        length: u64,
+        device: u64,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn pending_mmio(
+        &self,
+        vcpu: HandleValue,
+    ) -> Result<Option<hyper::vm::device::mmio::Request>, crate::kernel::vm::service::Error>;
+    fn complete_mmio(
+        &self,
+        vcpu: HandleValue,
+        id: u64,
+        action: hyper::vm::exit::MmioAction,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn create_guest_memory(
+        &self,
+        vmo: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error>;
+    fn map_guest_memory(
+        &self,
+        pending: HandleValue,
+        memory: HandleValue,
+        guest_offset: u64,
+        source_offset: u64,
+        length: u64,
     ) -> Result<(), crate::kernel::vm::service::Error>;
     fn pending_power_request(
         &self,
@@ -546,6 +634,7 @@ pub(in crate::kernel) trait VfsServices: UserMemoryServices {
 }
 
 pub(in crate::kernel) trait MemoryServices {
+    fn create_contiguous_vmo(&self, size: u64) -> Result<HandleValue, MemoryServiceError>;
     fn create_vmo(&self, size: u64) -> Result<HandleValue, MemoryServiceError>;
     fn create_file_executable_vmo(
         &self,
@@ -695,6 +784,8 @@ pub(in crate::kernel) trait DeferredServices:
     + IpcServices
     + HierarchyServices
     + VmServices
+    + DeviceServices
+    + GuestIoServices
     + SystemInspectServices
     + InspectServices
     + ConsoleServices
@@ -712,6 +803,8 @@ impl<T> DeferredServices for T where
         + IpcServices
         + HierarchyServices
         + VmServices
+        + DeviceServices
+        + GuestIoServices
         + SystemInspectServices
         + InspectServices
         + ConsoleServices

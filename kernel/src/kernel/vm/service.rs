@@ -27,6 +27,7 @@ pub(crate) enum Error {
     BadHandle,
     AccessDenied,
     Busy,
+    WouldBlock,
     BadState,
     ResourceLimit,
     NoMemory,
@@ -723,4 +724,75 @@ pub(crate) fn complete_power_request(
         .owner()
         .complete_power_request(id, accept)
         .map_err(|_| Error::BadState)
+}
+
+/// Registers an immutable device aperture before the VM starts.
+pub(crate) fn register_mmio(
+    process: &Process,
+    machine: HandleValue,
+    base: u64,
+    length: u64,
+    device: u64,
+) -> Result<(), Error> {
+    let machine = process.resolve_handle::<VirtualMachineObject>(machine, Rights::WRITE)?;
+    machine
+        .object()
+        .owner()
+        .register_mmio(base, length, device)
+        .map_err(|_| Error::BadState)
+}
+
+pub(crate) fn pending_mmio(
+    process: &Process,
+    vcpu: HandleValue,
+) -> Result<Option<hyper::vm::device::mmio::Request>, Error> {
+    let vcpu = process.resolve_handle::<VirtualCpuObject>(vcpu, Rights::WRITE)?;
+    vcpu.object().pending_mmio().map_err(Into::into)
+}
+
+pub(crate) fn complete_mmio(
+    process: &Process,
+    vcpu: HandleValue,
+    id: u64,
+    action: hyper::vm::exit::MmioAction,
+) -> Result<(), Error> {
+    let vcpu = process.resolve_handle::<VirtualCpuObject>(vcpu, Rights::WRITE)?;
+    vcpu.object().complete_mmio(id, action).map_err(Into::into)
+}
+
+pub(crate) fn create_guest_memory(
+    process: &Process,
+    vmo: HandleValue,
+) -> Result<HandleValue, Error> {
+    use super::objects::GuestMemoryObject;
+    let vmo = process
+        .resolve_handle::<VmoObject>(vmo, Rights::READ.union(Rights::WRITE).union(Rights::MAP))?;
+    let object = GuestMemoryObject::try_new(vmo.object(), &process.resource_domain())?;
+    let prepared = prepare_handle(object, GuestMemoryObject::SUPPORTED_RIGHTS)?;
+    let reservation = process.reserve_handles::<1>()?;
+    process
+        .publish_handles(reservation, [prepared])
+        .map(|values| values[0])
+        .map_err(|failure| failure.error.into())
+}
+
+pub(crate) fn map_guest_memory(
+    process: &Process,
+    pending: HandleValue,
+    memory: HandleValue,
+    guest_offset: u64,
+    source_offset: u64,
+    length: u64,
+) -> Result<(), Error> {
+    let pending = process.resolve_handle::<PendingVirtualMachine>(pending, Rights::WRITE)?;
+    let memory =
+        process.resolve_handle::<super::objects::GuestMemoryObject>(memory, Rights::MAP)?;
+    let region = super::memory::backing::Region::new(
+        guest_offset,
+        source_offset,
+        length,
+        memory.object().backing(),
+    )
+    .map_err(ObjectError::from)?;
+    pending.object().map_memory(region).map_err(Into::into)
 }

@@ -4,3 +4,7 @@
 pub mod profile;
 
 pub mod console;
+
+pub mod io_backend;
+pub mod io_protocol;
+pub mod virtio_scsi;

@@ -43,6 +43,13 @@ pub(crate) const fn userspace_vm_lifecycle_available() -> bool {
     cfg!(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))
 }
 
+/// Assignment requires decoded synchronous MMIO, saved external-interrupt
+/// injection and acknowledged VM retirement. Other backends have not qualified
+/// that complete combination and must not expose physical device authority.
+pub(crate) const fn supports_guest_device_assignment() -> bool {
+    cfg!(CONFIG_ARCH_AARCH64)
+}
+
 const _: () = assert!(
     hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_X86_64 <= u32::MAX as u64
 );
@@ -472,6 +479,7 @@ pub(crate) enum VcpuAdministrativeStopReason {
 #[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
 pub(crate) enum VcpuWaitReason {
     Interrupt,
+    Mmio,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -582,6 +590,10 @@ impl VcpuRunExit {
         #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             match self.backend {
+                #[cfg(CONFIG_ARCH_AARCH64)]
+                crate::arch::vm::GuestRunExit::Wait(crate::arch::vm::GuestWaitReason::Mmio) => {
+                    VcpuRunDisposition::Wait(VcpuWaitReason::Mmio)
+                }
                 crate::arch::vm::GuestRunExit::Wait(
                     crate::arch::vm::GuestWaitReason::Interrupt,
                 ) => VcpuRunDisposition::Wait(VcpuWaitReason::Interrupt),
@@ -1240,4 +1252,55 @@ pub(crate) fn complete_power_call(
 
 pub(crate) const fn maximum_guest_vcpus() -> u32 {
     crate::arch::vm::maximum_guest_vcpus()
+}
+
+#[derive(Debug)]
+pub(crate) enum MmioContextError {
+    #[cfg_attr(CONFIG_ARCH_AARCH64, allow(dead_code))]
+    Unsupported,
+    #[cfg_attr(not(CONFIG_ARCH_AARCH64), allow(dead_code))]
+    InvalidState,
+}
+
+pub(crate) fn complete_mmio_call(
+    state: &mut VcpuHardwareState,
+    action: hyper::vm::exit::MmioAction,
+) -> Result<(), MmioContextError> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        state
+            .context
+            .complete_mmio(action)
+            .map_err(|_| MmioContextError::InvalidState)
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        let _ = (state, action);
+        Err(MmioContextError::Unsupported)
+    }
+}
+
+/// Sets a validated shared guest device line without touching a live vCPU bank.
+/// Unsupported architectures reject notification-device admission.
+pub(crate) fn update_saved_device_line(
+    interrupts: &InterruptController,
+    interrupt: u32,
+    asserted: bool,
+) -> Result<(), ()> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        let interrupt = hyper::vm::arm::gic::GicInterruptId::new(interrupt).ok_or(())?;
+        update_saved_guest_device_interrupt(interrupts, 0, interrupt, asserted).map_err(|_| ())
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        let _ = (interrupts, interrupt, asserted);
+        Err(())
+    }
+}
+
+/// Selected backend has saved shared-IRQ state and guest MMIO dispatch needed
+/// by VM-owned mailboxes and direct notification bindings.
+pub(crate) const fn supports_io_notifications() -> bool {
+    cfg!(CONFIG_ARCH_AARCH64)
 }

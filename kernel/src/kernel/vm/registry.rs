@@ -41,7 +41,7 @@ pub(super) const MAX_VIRTUAL_MACHINES: usize = 64;
 /// The slot and generation are deliberately private. Callers may retain and
 /// compare an identity, but cannot manufacture one from a hardware VMID or a
 /// registry index.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct VmId {
     slot: u32,
     generation: u32,
@@ -293,6 +293,25 @@ impl VmRegistry {
         }
     }
 
+    fn quiescent_physical(
+        &self,
+        id: VmId,
+    ) -> Result<
+        Option<
+            crate::kernel::object::KernelRef<
+                crate::kernel::device::assigned::PhysicalDevice,
+                crate::kernel::object::VmDeviceBinding,
+            >,
+        >,
+        Error,
+    > {
+        let slot = usize::try_from(id.slot).map_err(|_| Error::StaleIdentity)?;
+        match self.slots.get(slot) {
+            Some(VmSlot::QuiescentHeld { owner }) if owner.id() == id => Ok(owner.physical_owner()),
+            _ => Err(Error::StaleIdentity),
+        }
+    }
+
     fn begin_retirement(&mut self, id: VmId) -> Result<FallibleArc<VirtualMachine>, Error> {
         let slot = usize::try_from(id.slot).map_err(|_| Error::StaleIdentity)?;
         let entry = self.slots.get_mut(slot).ok_or(Error::NotInstalled)?;
@@ -381,9 +400,15 @@ pub(super) fn with_binding<R>(
     id: VmId,
     operation: impl FnOnce(&VmBinding) -> R,
 ) -> Result<R, Error> {
-    let lease = REGISTRY.with(|registry| registry.lease(id))?;
-    let binding = VmBinding::new(id, lease.machine.clone());
+    let binding = acquire_binding(id)?;
     Ok(operation(&binding))
+}
+
+/// Acquires a short operation lease without retaining the registry lock.
+/// Callers must drop it before VM retirement can recover unique ownership.
+pub(super) fn acquire_binding(id: VmId) -> Result<VmBinding, Error> {
+    let lease = REGISTRY.with(|registry| registry.lease(id))?;
+    Ok(VmBinding::new(id, lease.machine))
 }
 
 pub(crate) fn reserve() -> Result<VmReservation, Error> {

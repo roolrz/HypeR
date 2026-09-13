@@ -4,6 +4,8 @@
 //! Handle-visible VM objects and their shared construction errors.
 
 mod authority;
+mod guest_memory;
+pub(crate) use guest_memory::GuestMemoryObject;
 mod installed;
 mod pending;
 

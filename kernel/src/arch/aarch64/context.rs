@@ -96,6 +96,7 @@ pub struct VcpuContext {
     terminal_fault_address: u64,
     terminal_vector: u64,
     terminal_synchronous: Option<GuestSynchronousTerminal>,
+    deferred_mmio: Option<super::vsysreg::GuestMmioCompletion>,
 }
 
 const GUEST_RUN_READY: u64 = 1;
@@ -107,6 +108,7 @@ const TERMINAL_MMIO: u64 = 2;
 const TERMINAL_SYNCHRONOUS: u64 = 3;
 const WAIT_FOR_INTERRUPT: u64 = 4;
 const ADMINISTRATIVE_STOP: u64 = 5;
+const WAIT_FOR_MMIO: u64 = 6;
 
 /// Decoded detail for a synchronous exit which cannot resume.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -129,6 +131,7 @@ pub(crate) enum GuestTerminalCause {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GuestWaitReason {
     Interrupt,
+    Mmio,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -262,6 +265,7 @@ impl VcpuContext {
             terminal_fault_address: 0,
             terminal_vector: 0,
             terminal_synchronous: None,
+            deferred_mmio: None,
         }
     }
 
@@ -482,7 +486,7 @@ impl VcpuContext {
         }
         // SAFETY: The caller provides this pinned, exclusively owned context.
         let context_ref = unsafe { &mut *context };
-        if context_ref.run_state != GUEST_RUN_READY {
+        if context_ref.run_state != GUEST_RUN_READY || context_ref.deferred_mmio.is_some() {
             return Err(GuestRunError::State);
         }
         context_ref.run_state = GUEST_RUN_RUNNING;
@@ -520,6 +524,7 @@ impl VcpuContext {
                 })
             }
             WAIT_FOR_INTERRUPT => GuestRunExit::Wait(GuestWaitReason::Interrupt),
+            WAIT_FOR_MMIO => GuestRunExit::Wait(GuestWaitReason::Mmio),
             ADMINISTRATIVE_STOP => {
                 GuestRunExit::AdministrativeStop(GuestAdministrativeStopReason::Requested)
             }
@@ -586,6 +591,36 @@ impl VcpuContext {
         self.terminal_vector = frame.vector;
         self.terminal_synchronous = None;
         self.run_state = GUEST_RUN_STOPPED;
+        Ok(())
+    }
+
+    pub(super) fn capture_mmio(
+        &mut self,
+        frame: &super::exception::ExceptionFrame,
+        completion: super::vsysreg::GuestMmioCompletion,
+    ) -> Result<(), GuestRunError> {
+        if self.deferred_mmio.is_some() {
+            return Err(GuestRunError::State);
+        }
+        self.capture_wait(frame)?;
+        self.deferred_mmio = Some(completion);
+        self.terminal_kind = WAIT_FOR_MMIO;
+        Ok(())
+    }
+
+    /// Completes the saved instruction only while hardware is detached.
+    pub(crate) fn complete_mmio(
+        &mut self,
+        action: hyper::vm::exit::MmioAction,
+    ) -> Result<(), GuestRunError> {
+        if self.run_state != GUEST_RUN_READY {
+            return Err(GuestRunError::State);
+        }
+        let completion = self.deferred_mmio.ok_or(GuestRunError::State)?;
+        if !completion.apply(&mut self.general, &mut self.program_counter, action) {
+            return Err(GuestRunError::State);
+        }
+        self.deferred_mmio = None;
         Ok(())
     }
 

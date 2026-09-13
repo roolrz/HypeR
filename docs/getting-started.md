@@ -40,6 +40,11 @@ the in-tree AArch64 ELF interpreter. SDK consumers can select a self-contained
 static PIE backed by the matching `libhyper.a` with `HYPER_LINK_MODE=static`.
 Pass `INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.
 
+These Linux/Alpine assets exercise guest boot and VM lifecycle. They are not
+the Linux I/O appliance. That appliance is built in HypeR-io-vm and consumed
+through a separate [digest-pinned package import](io-vm.md#build-and-validation);
+it is not yet part of the default `make run` deployment.
+
 Run the standalone kernel mechanism tests separately:
 
 ```sh

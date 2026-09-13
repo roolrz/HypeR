@@ -117,6 +117,7 @@ Further documentation:
 - [Native SDK contract](../sdk/README.md)
 - [HypeR Native ABI reference](../sdk/abi/docs/native.md)
 - [VM image format and boot ownership](../kernel/docs/vm-bundle.md)
+- [Linux I/O VM ownership and package delivery](io-vm.md)
 - [RISC-V execution profile](../kernel/docs/riscv64.md)
 - [x86-64 execution profile](../kernel/docs/x86_64.md)
 - [Crash console](../kernel/docs/crash-console.md)
@@ -163,6 +164,14 @@ Apache-2.0-licensed source distribution. Linux is GPL-2.0-only and Alpine
 packages carry their own licenses. Anyone redistributing generated guest
 payloads must preserve the relevant upstream notices and source-availability
 obligations. See [kernel/tools/guest/README.md](../kernel/tools/guest/README.md) for details.
+
+The Linux I/O appliance has a separate delivery path: HypeR-io-vm builds and
+publishes the complete kernel/initramfs as a GHCR package, while HypeR imports
+an immutable digest and supplies its own DTS/DTB and launch policy. Its Linux
+sources, configuration, modules, services and rootfs assembly live in that
+repository. Corresponding source materials travel with the published package;
+they are not added to the HypeR boot ramdisk. See the
+[I/O VM contract](io-vm.md) for ownership, import instructions and current limits.
 
 ## Native std incremental builds
 

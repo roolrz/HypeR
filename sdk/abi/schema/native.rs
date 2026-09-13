@@ -602,7 +602,34 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
         name: "wait_set",
         transfer: TransferClass::Forbidden,
     },
+    ObjectKind {
+        value: 27,
+        name: "guest_memory",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 28,
+        name: "device_assignment_authority",
+        transfer: TransferClass::General,
+    },
+    ObjectKind {
+        value: 29,
+        name: "physical_device",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 30,
+        name: "guest_mailbox",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 31,
+        name: "guest_notification",
+        transfer: TransferClass::RendezvousOnly,
+    },
 ];
+
+pub const GUEST_MEMORY_RIGHTS: u64 = RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_MAP | RIGHT_INSPECT;
 
 pub const RIGHTS: &[Right] = &[
     Right {
@@ -803,7 +830,8 @@ pub const PENDING_VIRTUAL_MACHINE_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_START | RIGHT_REQUEST_STOP;
 pub const VIRTUAL_MACHINE_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_REQUEST_STOP;
-pub const VIRTUAL_CPU_RIGHTS: u64 = RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_START;
+pub const VIRTUAL_CPU_RIGHTS: u64 =
+    RIGHT_TRANSFER | RIGHT_WRITE | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_START;
 pub const VIRTUAL_SERIAL_RIGHTS: u64 = RIGHT_DUPLICATE
     | RIGHT_TRANSFER
     | RIGHT_INSPECT
@@ -918,6 +946,31 @@ pub const SIGNALS: &[Signal] = &[
         bit: 0,
         name: "terminated",
     },
+    Signal {
+        object: "virtual_cpu",
+        bit: 1,
+        name: "mmio_request",
+    },
+    Signal {
+        object: "guest_notification",
+        bit: 0,
+        name: "peer_closed",
+    },
+    Signal {
+        object: "guest_mailbox",
+        bit: 0,
+        name: "readable",
+    },
+    Signal {
+        object: "guest_mailbox",
+        bit: 1,
+        name: "writable",
+    },
+    Signal {
+        object: "guest_mailbox",
+        bit: 2,
+        name: "peer_closed",
+    },
 ];
 
 const CONSOLE_MAX_TRANSFER_BYTES: u32 = 4 * 1024;
@@ -928,6 +981,26 @@ const DIRECTORY_ENTRY_NAME_CAPACITY: u32 = 256;
 const DIRECTORY_ENTRY_RECORD_SIZE: u16 = 24 + DIRECTORY_ENTRY_NAME_CAPACITY as u16;
 
 pub const CONSTANTS: &[AbiConstant] = &[
+    AbiConstant {
+        name: "startup_handle_purpose_device_assignment_authority",
+        value: 14,
+    },
+    AbiConstant {
+        name: "guest_mailbox_max_message_bytes",
+        value: 256,
+    },
+    AbiConstant {
+        name: "guest_notification_disable",
+        value: 0,
+    },
+    AbiConstant {
+        name: "guest_notification_enable",
+        value: 1,
+    },
+    AbiConstant {
+        name: "guest_notification_raise_config",
+        value: 2,
+    },
     AbiConstant {
         name: "private_mapping_copy_on_write",
         value: 0,
@@ -1147,6 +1220,14 @@ pub const CONSTANTS: &[AbiConstant] = &[
         value: 0x0900_0000,
     },
     AbiConstant {
+        name: "virtual_platform_aarch64_reference_user_mmio_base",
+        value: 0x0a00_0000,
+    },
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_user_mmio_size",
+        value: 0x0100_0000,
+    },
+    AbiConstant {
         name: "virtual_platform_aarch64_reference_uart_size",
         value: 0x1000,
     },
@@ -1338,6 +1419,10 @@ pub const CONSTANTS: &[AbiConstant] = &[
     AbiConstant {
         name: "vmo_max_transfer_bytes",
         value: 64 * 1024,
+    },
+    AbiConstant {
+        name: "vmo_max_contiguous_size_bytes",
+        value: 64 * 1024 * 1024,
     },
     AbiConstant {
         name: "vmar_permission_read",
@@ -2127,6 +2212,44 @@ const VIRTUAL_CPU_BOOTSTRAP_FIELDS: &[Field] = &[
     },
 ];
 
+const VIRTUAL_CPU_MMIO_REQUEST_FIELDS: &[Field] = &[
+    Field {
+        name: "id",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "device",
+        kind: FieldKind::U64,
+        offset: 8,
+    },
+    Field {
+        name: "address",
+        kind: FieldKind::U64,
+        offset: 16,
+    },
+    Field {
+        name: "value",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "operation",
+        kind: FieldKind::U32,
+        offset: 32,
+    },
+    Field {
+        name: "width",
+        kind: FieldKind::U32,
+        offset: 36,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U64,
+        offset: 40,
+    },
+];
+
 const VIRTUAL_MACHINE_POWER_REQUEST_FIELDS: &[Field] = &[
     Field {
         name: "id",
@@ -2330,6 +2453,54 @@ const RESOURCE_LIMITS_FIELDS: &[Field] = &[
 ];
 
 pub const RECORDS: &[Record] = &[
+    Record {
+        name: "physical_device_info",
+        fields: &[
+            Field {
+                name: "device_id",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "transport_version",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "mmio_size",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+        ],
+        minimum_size: 16,
+        size: 16,
+        alignment: 8,
+    },
+    Record {
+        name: "dma_extent",
+        fields: &[
+            Field {
+                name: "physical_base",
+                kind: FieldKind::U64,
+                offset: 0,
+            },
+            Field {
+                name: "length",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+        ],
+        minimum_size: 16,
+        size: 16,
+        alignment: 8,
+    },
+    Record {
+        name: "virtual_cpu_mmio_request",
+        fields: VIRTUAL_CPU_MMIO_REQUEST_FIELDS,
+        minimum_size: 48,
+        size: 48,
+        alignment: 8,
+    },
     Record {
         name: "private_mapping",
         fields: &[
@@ -7523,6 +7694,533 @@ pub const SYSCALLS: &[Syscall] = &[
                 object: ProducedObject::Kind("virtual_cpu"),
                 rights: ProducedRights::Fixed(VIRTUAL_CPU_RIGHTS),
             }),
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 120,
+        name: "virtual_machine_register_mmio",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "virtual_machine",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("base", ValueKind::U64),
+            scalar_argument("length", ValueKind::U64),
+            scalar_argument("device", ValueKind::U64),
+        ],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 121,
+        name: "virtual_cpu_get_mmio_request",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "virtual_cpu",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_cpu"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "request",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "request_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("virtual_cpu_mmio_request"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("request_size", ValueKind::ByteCount),
+        ],
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 122,
+        name: "virtual_cpu_complete_mmio",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "virtual_cpu",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_cpu"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("request_id", ValueKind::U64),
+            scalar_argument("operation", ValueKind::U32),
+            scalar_argument("value", ValueKind::U64),
+        ],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 123,
+        name: "guest_memory_create",
+        feature: FeatureGate::Core,
+        arguments: &[vmo_argument(RIGHT_READ | RIGHT_WRITE | RIGHT_MAP)],
+        results: &[ResultValue {
+            name: "memory",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("guest_memory"),
+                rights: ProducedRights::Fixed(GUEST_MEMORY_RIGHTS),
+            }),
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 124,
+        name: "pending_virtual_machine_map_memory",
+        feature: FeatureGate::Core,
+        arguments: &[
+            pending_virtual_machine_argument(RIGHT_WRITE, HandleDisposition::Borrow),
+            Argument {
+                name: "memory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("guest_memory"),
+                    required_rights: RIGHT_MAP,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("guest_offset", ValueKind::U64),
+            scalar_argument("source_offset", ValueKind::U64),
+            scalar_argument("length", ValueKind::U64),
+        ],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 125,
+        name: "vmo_create_contiguous",
+        feature: FeatureGate::Core,
+        arguments: VMO_CREATE_ARGUMENTS,
+        results: VMO_CREATE_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 126,
+        name: "device_claim",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "authority",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("device_assignment_authority"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("index", ValueKind::U32),
+        ],
+        results: &[ResultValue {
+            name: "physical_device",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("physical_device"),
+                rights: ProducedRights::Fixed(
+                    RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_INSPECT | RIGHT_WRITE,
+                ),
+            }),
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 127,
+        name: "physical_device_info",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "device",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("physical_device"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "output_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("physical_device_info"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 128,
+        name: "vmo_get_dma_extent",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "authority",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("device_assignment_authority"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "vmo",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("vmo"),
+                    required_rights: RIGHT_READ | RIGHT_MAP,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("offset", ValueKind::U64),
+            scalar_argument("length", ValueKind::U64),
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "output_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("dma_extent"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 129,
+        name: "pending_virtual_machine_assign_device",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "pending",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("pending_virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "device",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("physical_device"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("guest_base", ValueKind::U64),
+            scalar_argument("guest_irq", ValueKind::U32),
+        ],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 130,
+        name: "guest_mailbox_create",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "machine",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("base", ValueKind::U64),
+            scalar_argument("irq", ValueKind::U32),
+        ],
+        results: &[ResultValue {
+            name: "guest_mailbox",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("guest_mailbox"),
+                rights: ProducedRights::Fixed(
+                    RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_READ | RIGHT_WRITE | RIGHT_WAIT,
+                ),
+            }),
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 131,
+        name: "guest_mailbox_send",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "mailbox",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("guest_mailbox"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "bytes",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "length",
+                        maximum_bytes: 256,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("length", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 132,
+        name: "guest_mailbox_receive",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "mailbox",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("guest_mailbox"),
+                    required_rights: RIGHT_READ,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "bytes",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "capacity",
+                        maximum_bytes: 256,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("capacity", ValueKind::ByteCount),
+        ],
+        results: &[ResultValue {
+            name: "bytes",
+            kind: ValueKind::ByteCount,
+            handle: None,
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 133,
+        name: "guest_notification_create",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "frontend",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "backend",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("frontend_base", ValueKind::U64),
+            scalar_argument("backend_base", ValueKind::U64),
+            scalar_argument("frontend_irq", ValueKind::U32),
+            scalar_argument("backend_irq", ValueKind::U32),
+        ],
+        results: &[ResultValue {
+            name: "guest_notification",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("guest_notification"),
+                rights: ProducedRights::Fixed(
+                    RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_WAIT,
+                ),
+            }),
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 134,
+        name: "guest_notification_control",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "notification",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("guest_notification"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("operation", ValueKind::U32),
+        ],
+        results: &[ResultValue {
+            name: "epoch",
+            kind: ValueKind::U32,
+            handle: None,
         }],
         blocking: BlockingClass::Never,
         cancellation: CancellationClass::None,

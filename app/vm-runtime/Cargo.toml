@@ -17,6 +17,12 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "hyper-io-smoke"
+path = "tests/io_vm/main.rs"
+test = false
+bench = false
+
 [dependencies]
 hyper-os = { workspace = true, features = ["std"] }
 hyper-rt.workspace = true

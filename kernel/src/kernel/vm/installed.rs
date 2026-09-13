@@ -72,6 +72,7 @@ pub(crate) struct InstalledMachine {
     state: RuntimeLock,
     vm_signals: SignalState,
     power: InterruptSpinLock<hyper::vm::arm::psci::PowerState, crate::hal::irq::LocalMask>,
+    mmio_regions: InterruptSpinLock<[Option<user_mmio::Region>; 8], crate::hal::irq::LocalMask>,
     endpoints: Vec<FallibleArc<VcpuEndpoint>>,
     resources: VmLifecycleResources,
 }
@@ -106,6 +107,7 @@ impl InstalledMachine {
             power: InterruptSpinLock::new(
                 hyper::vm::arm::psci::PowerState::new(count).ok_or(Error::BadState)?,
             ),
+            mmio_regions: InterruptSpinLock::new([None; 8]),
             endpoints,
             resources,
         })
@@ -327,3 +329,21 @@ const fn encode_terminal_reason(reason: super::endpoint_state::ClosureReason) ->
 
 #[path = "power.rs"]
 mod power;
+#[path = "user_mmio.rs"]
+mod user_mmio;
+
+impl InstalledMachine {
+    /// Serializes immutable device-topology publication with first vCPU start.
+    pub(in crate::kernel::vm) fn with_io_install<R>(
+        &self,
+        operation: impl FnOnce(VmId) -> Result<R, super::io::Error>,
+    ) -> Result<R, super::io::Error> {
+        self.state.with(|state| match state {
+            RuntimeState::Installed { id, .. } => operation(*id),
+            _ => Err(super::io::Error::BadState),
+        })
+    }
+    pub(in crate::kernel::vm) fn io_install_id(&self) -> Result<VmId, super::io::Error> {
+        self.with_io_install(Ok)
+    }
+}

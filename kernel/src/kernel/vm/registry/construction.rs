@@ -130,11 +130,29 @@ impl PreparedVm {
         self.machine.lifecycle()
     }
 
+    pub(crate) fn set_physical(
+        &self,
+        physical: Option<crate::kernel::device::assigned::Assignment>,
+    ) {
+        self.machine.set_physical(physical);
+    }
+
     /// Completes every fallible prerequisite for registry publication.
     pub(crate) fn install(self) -> Result<InstalledVm, Error> {
         let id = self.reservation.id;
         REGISTRY.with(|registry| registry.validate_install(id, &self.machine))?;
-        self.machine.activate_identifier_for_install()?;
+        self.machine.activate_physical()?;
+        if let Err(error) = self.machine.activate_identifier_for_install() {
+            if let Some(physical) = self.machine.physical_owner()
+                && physical.object().quiesce().is_err()
+            {
+                let _retained = core::mem::ManuallyDrop::new(self);
+                crate::kernel::crash::fatal(format_args!(
+                    "physical assignment rollback could not quiesce"
+                ));
+            }
+            return Err(error);
+        }
         self.machine.bind_virtual_serial(0);
         let lifecycle = self.machine.lifecycle();
         let Self {

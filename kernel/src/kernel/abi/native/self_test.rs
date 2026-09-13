@@ -552,6 +552,10 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     }
 
     impl MemoryServices for RejectingServices {
+        fn create_contiguous_vmo(&self, _: u64) -> Result<HandleValue, MemoryServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(MemoryServiceError::Process(ProcessError::Allocation))
+        }
         fn create_vmo(&self, _: u64) -> Result<HandleValue, MemoryServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(MemoryServiceError::Process(ProcessError::Allocation))
@@ -816,6 +820,92 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         }
     }
 
+    impl crate::kernel::abi::native::DeviceServices for RejectingServices {
+        fn claim_device(
+            &self,
+            _: HandleValue,
+            _: u32,
+        ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn physical_device_info(
+            &self,
+            _: HandleValue,
+        ) -> Result<crate::kernel::device::assigned::Info, crate::kernel::vm::service::Error>
+        {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn vmo_dma_extent(
+            &self,
+            _: HandleValue,
+            _: HandleValue,
+            _: u64,
+            _: u64,
+        ) -> Result<crate::kernel::device::assigned::DmaExtent, crate::kernel::vm::service::Error>
+        {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn assign_physical_device(
+            &self,
+            _: HandleValue,
+            _: HandleValue,
+            _: u64,
+            _: u32,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+    }
+    impl crate::kernel::abi::native::GuestIoServices for RejectingServices {
+        fn create_guest_mailbox(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: u32,
+        ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn send_guest_mailbox(
+            &self,
+            _: HandleValue,
+            _: &[u8],
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn receive_guest_mailbox(
+            &self,
+            _: HandleValue,
+            _: &mut dyn FnMut(&[u8]) -> Result<(), crate::kernel::vm::service::Error>,
+        ) -> Result<usize, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn create_guest_notification(
+            &self,
+            _: HandleValue,
+            _: HandleValue,
+            _: u64,
+            _: u64,
+            _: u32,
+            _: u32,
+        ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn control_guest_notification(
+            &self,
+            _: HandleValue,
+            _: u32,
+        ) -> Result<u32, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+    }
     impl VmServices for RejectingServices {
         fn virtual_machine_platform_info(
             &self,
@@ -932,6 +1022,51 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
 
+        fn register_mmio(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: u64,
+            _: u64,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn pending_mmio(
+            &self,
+            _: HandleValue,
+        ) -> Result<Option<hyper::vm::device::mmio::Request>, crate::kernel::vm::service::Error>
+        {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn complete_mmio(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: hyper::vm::exit::MmioAction,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn create_guest_memory(
+            &self,
+            _: HandleValue,
+        ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn map_guest_memory(
+            &self,
+            _: HandleValue,
+            _: HandleValue,
+            _: u64,
+            _: u64,
+            _: u64,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
         fn pending_power_request(
             &self,
             _: HandleValue,

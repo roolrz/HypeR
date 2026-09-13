@@ -8,6 +8,7 @@
 //! and stable VM-facing API explicit without merging those protocols.
 
 mod access;
+pub(super) mod backing;
 mod construction;
 mod residency;
 mod retirement;

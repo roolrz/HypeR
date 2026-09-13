@@ -15,6 +15,7 @@ mod endpoint;
 mod endpoint_state;
 mod endpoint_wait;
 mod installed;
+pub(crate) mod io;
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use endpoint::{WaitSelfTestError, run_wait_self_test};
 pub(crate) mod lifecycle;

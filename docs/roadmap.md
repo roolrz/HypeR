@@ -12,7 +12,8 @@ SPDX-License-Identifier: Apache-2.0
 The near-term milestone is an end-to-end system on **physical Raspberry Pi 5**:
 HypeR runs Native applications and a trimmed Linux I/O VM; Linux drives the
 physical network and storage devices and exports their services to HypeR over
-an explicit native protocol. QEMU remains the regression platform. Hardware
+shared memory and event-driven notifications. Storage uses standard virtio-scsi
+with Linux vhost-scsi/LIO. QEMU remains the regression platform. Hardware
 bring-up is part of this milestone, not a follow-up after the backend is done.
 
 ### Architecture decisions
@@ -23,11 +24,21 @@ bring-up is part of this milestone, not a follow-up after the backend is done.
 - **Physical devices are driven directly by Linux.** Device assignment must
   describe MMIO, interrupts, DMA addressing, firmware dependencies and reset
   ownership. An emulated device backed by a host driver is not this milestone.
-- **Use an explicit shared-memory protocol.** Define bounded request/completion
-  queues, version negotiation, buffer grants and event-driven notification.
+- **Use standard storage queues.** Modern virtio-mmio and virtio-scsi define
+  the guest interface; Linux vhost-scsi/LIO consumes the shared virtqueues.
+  HypeR owns device negotiation, memory grants and event routing. Cross-VM
+  setup must not forward individual requests through management services.
+  Define version negotiation, buffer grants and event-driven notification.
   Design the data path for zero-copy where ownership, alignment and DMA rules
   allow it; measure remaining copies. A copy-first transport is not a required
   architectural stage.
+- **Deliver Linux as an independent appliance.**
+  [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm) owns the upstream LTS
+  source lock, kernel configuration, external `.ko` drivers, Linux-side
+  services, complete initramfs, tests and GHCR publication. Linux stays
+  unmodified upstream. HypeR owns Native apps, DTS/DTB and launch policy;
+  it imports a fixed package digest and does not build or patch the Linux rootfs.
+  Each release carries matching source materials and notices.
 - **Memory ownership is explicit.** A submitted buffer remains owned by the
   in-flight operation until completion or proven device quiescence. Define
   cache visibility, barriers, cancellation and queue generations before reuse.
@@ -61,7 +72,11 @@ capabilities; new privileged power operations require explicit Native authority.
    - [x] Implement the GICv2 guest interrupt backend and its QEMU lifecycle tests.
    - [x] Implement Arm guest SMP (1..8 CPUs) and runtime-mediated PSCI CPU
      on/off, poweroff and reset; add GICv2/GICv3 QEMU acceptance.
-   - [ ] Build a minimal Linux configuration and reproducible guest artifacts.
+   - [ ] Qualify the minimal upstream LTS configuration for Pi 5 in HypeR-io-vm.
+   - [ ] Complete the Linux-side service and initramfs, validate the appliance,
+     and publish its versioned GHCR package with corresponding source materials.
+   - [ ] Pin the first qualified package digest in HypeR and integrate it with
+     Native deployment; package download alone is not VM launch integration.
    - [ ] Provide board/guest device trees, RAM reservations and VM configuration
      through the existing VMM and vm-runtime path.
    - [ ] Validate guest SMP, console, timer/IPI wakeups, CPU off/on, reboot
@@ -73,8 +88,12 @@ capabilities; new privileged power operations require explicit Native authority.
    - [ ] Verify direct network and storage operation inside the I/O VM, with
      HypeR-owned RAM excluded from the guest allocator.
 4. **Expose I/O to Native clients.**
-   - [ ] Specify the shared queue ABI, operations, buffer ownership, errors,
-     backpressure, ordering and event notification.
+   - [x] Validate the AArch64 QEMU cross-VM virtio-scsi/vhost-scsi baseline,
+     including a real disk, DMA translations, reset/rebind and VM retirement.
+   - [ ] Integrate that storage path with ordinary Native service deployment;
+     the current two-VM acceptance fixture is not a Native VFS block backend.
+   - [ ] Define the network frontend/backend contract separately; the storage
+     choice does not by itself complete the network design.
    - [ ] Implement the Linux backend and HypeR Native frontend services/adapters.
    - [ ] Integrate block I/O at the VFS backend boundary and provide the Native
      network APIs needed by the first end-to-end applications.
@@ -95,7 +114,8 @@ measured results can be reproduced. A Linux boot banner or QEMU-only I/O is not
 sufficient. This is a development milestone, not a production-readiness claim.
 
 See [Pi 5 bring-up](../kernel/docs/rpi5.md),
-[implementation status](status.md), and [VFS boundaries](../kernel/docs/vfs.md).
+[implementation status](status.md), [I/O VM delivery and integration](io-vm.md),
+and [VFS boundaries](../kernel/docs/vfs.md).
 
 ## Later work
 

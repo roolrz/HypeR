@@ -26,6 +26,7 @@ const MACHINE_RIGHTS: Rights = Rights::TRANSFER
     .union(Rights::INSPECT)
     .union(Rights::REQUEST_STOP);
 const VCPU_RIGHTS: Rights = Rights::TRANSFER
+    .union(Rights::WRITE)
     .union(Rights::WAIT)
     .union(Rights::INSPECT)
     .union(Rights::START);
@@ -689,4 +690,141 @@ pub fn open_vcpu(
     let result = unsafe { hyper_sys::virtual_machine_open_vcpu(machine.raw().get(), vcpu_id) };
     Status::from_raw(result.status).into_result()?;
     adopt(result.value0, VCPU_RIGHTS, &[machine.raw()])
+}
+
+/// Registers a device identity and page-aligned aperture before first vCPU start.
+pub fn register_mmio(
+    machine: HandleRef<'_, VirtualMachineObject>,
+    base: u64,
+    length: u64,
+    device: NonZeroU64,
+) -> Result<()> {
+    // SAFETY: The borrowed machine capability remains live throughout the call.
+    Status::from_raw(unsafe {
+        hyper_sys::virtual_machine_register_mmio(machine.raw().get(), base, length, device.get())
+    })
+    .into_result()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MmioOperation {
+    Read,
+    Write(u64),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MmioRequest {
+    pub id: NonZeroU64,
+    pub device: NonZeroU64,
+    pub address: u64,
+    /// Access width in bytes: 1, 2, 4 or 8.
+    pub width: u32,
+    pub operation: MmioOperation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MmioCompletion {
+    Read(u64),
+    Write,
+    /// Stops the VM; it cannot safely resume this instruction.
+    Abort,
+}
+
+/// Non-consuming inspection; use `MMIO_REQUEST` with `WaitSet` to wait for work.
+pub fn pending_mmio(vcpu: HandleRef<'_, VirtualCpuObject>) -> Result<Option<MmioRequest>> {
+    let mut record = hyper_abi::HyperNativeVirtualCpuMmioRequest {
+        id: 0,
+        device: 0,
+        address: 0,
+        value: 0,
+        operation: 0,
+        width: 0,
+        reserved: 0,
+    };
+    // SAFETY: The typed handle and initialized output remain live for the call.
+    let result = unsafe { hyper_sys::virtual_cpu_get_mmio_request(vcpu.raw().get(), &mut record) };
+    if Status::from_raw(result.status) == Status::WOULD_BLOCK {
+        return Ok(None);
+    }
+    crate::validate_info_result(
+        result,
+        hyper_abi::HYPER_NATIVE_VIRTUAL_CPU_MMIO_REQUEST_MIN_SIZE,
+    )?;
+    if record.reserved != 0 || !matches!(record.width, 1 | 2 | 4 | 8) {
+        return Err(Error::InvalidResponse);
+    }
+    let operation = match (record.operation, record.value) {
+        (0, 0) => MmioOperation::Read,
+        (1, value) => MmioOperation::Write(value),
+        _ => return Err(Error::InvalidResponse),
+    };
+    Ok(Some(MmioRequest {
+        id: NonZeroU64::new(record.id).ok_or(Error::InvalidResponse)?,
+        device: NonZeroU64::new(record.device).ok_or(Error::InvalidResponse)?,
+        address: record.address,
+        width: record.width,
+        operation,
+    }))
+}
+
+/// Completes one instruction. A stale ID or a mismatched read/write kind fails.
+pub fn complete_mmio(
+    vcpu: HandleRef<'_, VirtualCpuObject>,
+    id: NonZeroU64,
+    completion: MmioCompletion,
+) -> Result<()> {
+    let (operation, value) = match completion {
+        MmioCompletion::Read(value) => (0, value),
+        MmioCompletion::Write => (1, 0),
+        MmioCompletion::Abort => (2, 0),
+    };
+    // SAFETY: The borrowed handle remains live throughout the call.
+    Status::from_raw(unsafe {
+        hyper_sys::virtual_cpu_complete_mmio(vcpu.raw().get(), id.get(), operation, value)
+    })
+    .into_result()
+}
+
+/// Freezes the VMO against Native writes and snapshots while any guest-memory
+/// capability or installed guest mapping retains it. Physical backing remains
+/// stable across sharing and source-handle closure.
+pub fn create_guest_memory(
+    vmo: HandleRef<'_, VmoObject>,
+) -> Result<OwnedHandle<crate::handle::GuestMemoryObject>> {
+    // SAFETY: The borrowed VMO remains live; returned ownership is adopted once.
+    let result = unsafe { hyper_sys::guest_memory_create(vmo.raw().get()) };
+    Status::from_raw(result.status).into_result()?;
+    if result.value1 != 0 {
+        return Err(Error::InvalidResponse);
+    }
+    adopt(
+        result.value0,
+        Rights::TRANSFER
+            .union(Rights::DUPLICATE)
+            .union(Rights::MAP)
+            .union(Rights::INSPECT),
+        &[vmo.raw()],
+    )
+}
+
+/// Adds non-overlapping RAM coverage before seal. Offsets and length must be
+/// page-aligned; sealing requires complete coverage of configured guest RAM.
+pub fn map_guest_memory(
+    pending: HandleRef<'_, PendingVirtualMachineObject>,
+    memory: HandleRef<'_, crate::handle::GuestMemoryObject>,
+    guest_offset: u64,
+    source_offset: u64,
+    length: u64,
+) -> Result<()> {
+    // SAFETY: Both typed handles remain borrowed throughout the call.
+    Status::from_raw(unsafe {
+        hyper_sys::pending_virtual_machine_map_memory(
+            pending.raw().get(),
+            memory.raw().get(),
+            guest_offset,
+            source_offset,
+            length,
+        )
+    })
+    .into_result()
 }

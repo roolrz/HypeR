@@ -11,7 +11,7 @@ use super::reserve;
 use super::{Error, REGISTRY, VmId};
 
 impl VmControl {
-    /// Cuts service lookup before stopping producers and closing run admission.
+    /// Publishes administrative stop before cutting service lookup and devices.
     ///
     /// Unsupported architectures return the exact control without modifying
     /// registry or endpoint state.
@@ -46,7 +46,7 @@ pub(in crate::kernel::vm) enum BeginError {
     Registry(Error),
 }
 
-/// Failed pre-cut transition retaining the exact linear authority.
+/// Failed pre-stop transition retaining the exact linear authority.
 #[allow(dead_code)]
 #[must_use = "retain or retry the exact installed VM lifecycle authority"]
 pub(in crate::kernel::vm) struct BeginFailure {
@@ -123,6 +123,22 @@ impl QuiescentControl {
     /// registry mutation. A precheck failure returns this exact authority;
     /// every later inconsistency is fail-stop with ownership retained.
     pub(in crate::kernel::vm) fn retire(self) -> Result<(), RetirementFailure> {
+        let physical = match REGISTRY.with(|registry| registry.quiescent_physical(self.id)) {
+            Ok(physical) => physical,
+            Err(error) => crate::kernel::crash::fatal(format_args!(
+                "quiescent physical owner lookup failed: {error:?}"
+            )),
+        };
+        if let Some(physical) = physical
+            && physical.object().quiesce().is_err()
+        {
+            // The exact quiescent owner, all imported pages and the device
+            // claim remain retained. A reset timeout never permits reuse.
+            return Err(RetirementFailure {
+                control: self,
+                error: RetirementError::DeviceQuarantined,
+            });
+        }
         let capability = match crate::hal::vm::try_guest_stage2_retirement() {
             Ok(capability) => capability,
             Err(_) => {
@@ -204,6 +220,7 @@ impl QuiescentControl {
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::kernel::vm) enum RetirementError {
+    DeviceQuarantined,
     TopologyUnavailable,
     TransportBusy,
     Unsupported,
@@ -228,20 +245,28 @@ impl RetirementFailure {
 }
 
 fn begin_quiesce_control(id: VmId) -> Result<(), Error> {
-    let machine = REGISTRY.with(|registry| registry.begin_quiesce(id))?;
-    // Registry visibility was cut before producers and vCPU continuations are
-    // stopped. Existing strong leases remain safe and prevent unique-owner
-    // promotion until their callbacks return.
-    // Disconnect the explicitly assigned serial endpoint before stopping vCPUs.
-    machine.disconnect_virtual_serial();
-    // Publish every endpoint's durable administrative reason before disabling
-    // devices. A concurrent admitted UART access may observe a closed device;
-    // its terminal exit must see the already-published stop request.
-    if let Err(error) = machine.request_all_stops() {
+    // Lookup is the only reversible preflight. Retain the complete machine,
+    // then release the registry lock before notifying any scheduler endpoint.
+    let lease = REGISTRY.with(|registry| registry.lease(id))?;
+    if let Err(error) = lease.machine.request_all_stops() {
         crate::kernel::crash::fatal(format_args!(
-            "HypeR: VM quiesce failed after the registry cut: {error:?}"
+            "HypeR: VM stop publication failed after quiescence commitment: {error:?}"
         ));
     }
+    // Every endpoint now carries its durable administrative reason and run
+    // admission is closed. Only now may weak lookup or MMIO routes disappear:
+    // an in-flight access must not misclassify teardown as a guest MMIO fault.
+    // The linear VmControl is the sole authority for this slot transition, so
+    // failure after stop publication cannot masquerade as reversible failure.
+    let machine = match REGISTRY.with(|registry| registry.begin_quiesce(id)) {
+        Ok(machine) => machine,
+        Err(error) => crate::kernel::crash::fatal(format_args!(
+            "HypeR: VM registry cut failed after stop publication: {error:?}"
+        )),
+    };
+    drop(lease);
+    machine.disconnect_virtual_serial();
+    machine.close_io_routes();
     if let Err(error) = machine.quiesce_devices() {
         crate::kernel::crash::fatal(format_args!(
             "HypeR: VM device quiesce failed after the registry cut: {error:?}"

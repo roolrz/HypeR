@@ -359,6 +359,57 @@ pub(in crate::kernel) fn dispatch_deferred(
         HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_INFO => {
             sys_virtual_machine_get_info(services, invocation.arguments())
         }
+        hyper::abi::native::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_REGISTER_MMIO => {
+            super::handlers::sys_virtual_machine_register_mmio(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_MMIO_REQUEST => {
+            super::handlers::sys_virtual_cpu_get_mmio_request(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_VIRTUAL_CPU_COMPLETE_MMIO => {
+            super::handlers::sys_virtual_cpu_complete_mmio(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_GUEST_MEMORY_CREATE => {
+            super::handlers::sys_guest_memory_create(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_MAP_MEMORY => {
+            super::handlers::sys_pending_virtual_machine_map_memory(
+                services,
+                invocation.arguments(),
+            )
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_CLAIM => {
+            super::io_handlers::sys_device_claim(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_PHYSICAL_DEVICE_INFO => {
+            super::io_handlers::sys_physical_device_info(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_VMO_GET_DMA_EXTENT => {
+            super::io_handlers::sys_vmo_get_dma_extent(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_PENDING_VIRTUAL_MACHINE_ASSIGN_DEVICE => {
+            super::io_handlers::sys_pending_virtual_machine_assign_device(
+                services,
+                invocation.arguments(),
+            )
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_GUEST_MAILBOX_CREATE => {
+            super::io_handlers::sys_guest_mailbox_create(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_GUEST_MAILBOX_SEND => {
+            super::io_handlers::sys_guest_mailbox_send(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_GUEST_MAILBOX_RECEIVE => {
+            super::io_handlers::sys_guest_mailbox_receive(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CREATE => {
+            super::io_handlers::sys_guest_notification_create(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CONTROL => {
+            super::io_handlers::sys_guest_notification_control(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_VMO_CREATE_CONTIGUOUS => {
+            super::handlers::sys_vmo_create_contiguous(services, invocation.arguments())
+        }
         HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO => {
             sys_virtual_cpu_get_info(services, invocation.arguments())
         }

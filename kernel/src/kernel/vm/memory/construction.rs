@@ -6,6 +6,7 @@
 use hyper::mm::AddressSpaceResidency;
 use hyper::sync::atomic::AtomicU64;
 
+use super::backing::Layout as SharedGuestMemory;
 #[cfg(feature = "kernel-self-test")]
 use super::storage::try_exact_capacity_vec;
 use super::storage::{
@@ -19,7 +20,6 @@ use crate::hal::vm::Stage2AddressSpace;
 use crate::kernel::accounting::ResourceDomain;
 #[cfg(feature = "kernel-self-test")]
 use crate::kernel::mm::page_block::PageBlock;
-use crate::kernel::mm::user_space::GuestMemoryBacking as SharedGuestMemory;
 use crate::kernel::vm::residency_state::Stage2Incarnation;
 
 impl GuestAddressSpace {
@@ -61,7 +61,7 @@ impl GuestAddressSpace {
         hardware_vmid: Stage2IdentifierReservation,
         ipa_base: u64,
         size: u64,
-        backing: SharedGuestMemory,
+        backing: alloc::boxed::Box<SharedGuestMemory>,
         domain: &ResourceDomain,
     ) -> Result<Self, Error> {
         let page_count = validate_region(ipa_base, size)?;

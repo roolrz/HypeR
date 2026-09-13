@@ -3,6 +3,7 @@
 
 //! Fixed-storage Linux device-tree construction for qualified reference VMs.
 
+pub mod io;
 mod riscv64;
 
 const FDT_MAGIC: u32 = 0xd00d_feed;
@@ -136,6 +137,20 @@ pub fn build_aarch64_linux(
     strings: &mut [u8],
     output: &mut [u8],
 ) -> Result<usize, Error> {
+    build_aarch64_linux_with_io(boot, io::IoDevices::empty(), structure, strings, output)
+}
+
+/// Builds the reference tree plus explicitly admitted storage/control devices.
+/// Physical DMA ranges are supplied by Native device authority, never inferred
+/// from a guest address or copied from host firmware.
+pub fn build_aarch64_linux_with_io(
+    boot: Aarch64LinuxBoot<'_>,
+    devices: io::IoDevices<'_>,
+    structure: &mut [u8],
+    strings: &mut [u8],
+    output: &mut [u8],
+) -> Result<usize, Error> {
+    devices.validate(boot)?;
     let memory_end = boot
         .memory_base
         .checked_add(boot.memory_size)
@@ -277,6 +292,7 @@ pub fn build_aarch64_linux(
     builder.property_string_list("clock-names", &["uartclk", "apb_pclk"])?;
     builder.end_node()?;
 
+    devices.append(&mut builder, boot)?;
     builder.end_node()?;
     builder.finish(output)
 }

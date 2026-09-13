@@ -37,11 +37,16 @@ pub(crate) enum Error {
     TaskGroup(TaskGroupError),
     TaskObject(crate::kernel::process::TaskObjectError),
     VirtualMachineObject(crate::kernel::vm::objects::Error),
+    DeviceAssignment(crate::kernel::device::assigned::Error),
 }
 
 impl core::fmt::Debug for Error {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::DeviceAssignment(error) => formatter
+                .debug_tuple("DeviceAssignment")
+                .field(error)
+                .finish(),
             Self::RootDirectory(error) => {
                 formatter.debug_tuple("RootDirectory").field(error).finish()
             }

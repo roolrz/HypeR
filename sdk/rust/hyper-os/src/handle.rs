@@ -84,6 +84,17 @@ object_types!(
     ),
     (VirtualMachineObject, HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE),
     (VirtualCpuObject, HYPER_NATIVE_OBJECT_VIRTUAL_CPU),
+    (
+        DeviceAssignmentAuthorityObject,
+        HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY
+    ),
+    (PhysicalDeviceObject, HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE),
+    (GuestMailboxObject, HYPER_NATIVE_OBJECT_GUEST_MAILBOX),
+    (
+        GuestNotificationObject,
+        HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION
+    ),
+    (GuestMemoryObject, HYPER_NATIVE_OBJECT_GUEST_MEMORY),
     (VirtualSerialObject, HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL),
 );
 
@@ -142,6 +153,13 @@ impl ObjectKind {
             }
             hyper_abi::HYPER_NATIVE_OBJECT_PENDING_VIRTUAL_MACHINE => "pending-virtual-machine",
             hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_MACHINE => "virtual-machine",
+            hyper_abi::HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY => {
+                "device-assignment-authority"
+            }
+            hyper_abi::HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE => "physical-device",
+            hyper_abi::HYPER_NATIVE_OBJECT_GUEST_MAILBOX => "guest-mailbox",
+            hyper_abi::HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION => "guest-notification",
+            hyper_abi::HYPER_NATIVE_OBJECT_GUEST_MEMORY => "guest-memory",
             hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_CPU => "virtual-cpu",
             hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL => "virtual-serial",
             _ => "unknown",

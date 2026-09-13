@@ -31,6 +31,7 @@ type NativeExecutableVmo = ExecutableVmo<KernelPageBackend, DomainAccount>;
 /// keeps every committed page stable after the source handle closes, while the
 /// exclusive hardware lease prevents direct writers, writable Native mappings,
 /// or snapshot publication from racing hardware writes.
+#[derive(Clone)]
 pub(crate) struct GuestMemoryBacking {
     storage: NativeWritableVmo,
     _mapping: ExclusiveHardwareWriteLease<KernelPageBackend, DomainAccount>,
@@ -148,6 +149,21 @@ pub(crate) struct VmoObject {
 }
 
 impl VmoObject {
+    pub(crate) fn try_new_contiguous(
+        size: u64,
+        sponsor: &ResourceDomain,
+    ) -> Result<Self, MemoryObjectError> {
+        let (pages, transient) = super::kernel_adapter::contiguous_pages(size, sponsor)?;
+        let storage = WritableVmo::try_from_owned_pages(
+            size,
+            KernelPageBackend,
+            DomainAccount::new(sponsor.clone()),
+            pages,
+        )?;
+        drop(transient);
+        Self::from_writable(storage, sponsor)
+    }
+
     pub(crate) fn try_new_writable(
         size: u64,
         sponsor: &ResourceDomain,

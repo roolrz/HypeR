@@ -8,7 +8,7 @@ use core::ptr::{copy_nonoverlapping, with_exposed_provenance_mut};
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use hyper::mm::allocator::heap::PageOwner;
-use hyper::mm::{BuddyError, PAGE_SIZE, PhysicalAddress};
+use hyper::mm::{BuddyError, FallibleArc, PAGE_SIZE, PhysicalAddress};
 
 use super::contract::UserAddressWindow;
 use super::contract::{MemoryAccount, MemoryCharge, PageBackend};
@@ -93,8 +93,94 @@ pub(crate) fn address_window(
     }
 }
 
+/// Ordinary pages retain their existing one-block ownership. Explicit DMA VMOs
+/// share a larger block without teaching the allocator to free its subpages.
+pub(crate) struct KernelUserPage {
+    storage: PageStorage,
+}
+enum PageStorage {
+    Single(PageBlock),
+    Contiguous {
+        physical: PhysicalAddress,
+        _owner: FallibleArc<ContiguousBlock>,
+    },
+}
+struct ContiguousBlock {
+    _block: PageBlock,
+    _charge: CommittedCharge,
+}
+impl KernelUserPage {
+    fn physical(&self) -> PhysicalAddress {
+        match &self.storage {
+            PageStorage::Single(page) => page.physical(),
+            PageStorage::Contiguous { physical, .. } => *physical,
+        }
+    }
+}
+
+pub(super) fn contiguous_pages(
+    size: u64,
+    domain: &ResourceDomain,
+) -> Result<(alloc::vec::Vec<KernelUserPage>, CommittedCharge), super::MemoryObjectError> {
+    use super::MemoryObjectError;
+    if size < PAGE_SIZE
+        || !size.is_power_of_two()
+        || size > hyper::abi::native::HYPER_NATIVE_VMO_MAX_CONTIGUOUS_SIZE_BYTES
+    {
+        return Err(MemoryObjectError::AllocationSize);
+    }
+    let count = usize::try_from(size / PAGE_SIZE).map_err(|_| MemoryObjectError::AllocationSize)?;
+    let charge = domain
+        .reserve(
+            ResourceAmount::ZERO
+                .with(ResourceKind::CommittedPages, count as u64)
+                .with(
+                    ResourceKind::KernelMemoryBytes,
+                    FallibleArc::<ContiguousBlock>::allocation_size() as u64,
+                ),
+        )?
+        .commit();
+    let transient = domain
+        .reserve(ResourceAmount::ZERO.with(
+            ResourceKind::KernelMemoryBytes,
+            (count * core::mem::size_of::<KernelUserPage>()) as u64,
+        ))?
+        .commit();
+    let mut pages = alloc::vec::Vec::new();
+    pages
+        .try_reserve_exact(count)
+        .map_err(|_| MemoryObjectError::AllocationSize)?;
+    let block = PageBlock::allocate_for(count.trailing_zeros() as usize, PageOwner::User).map_err(
+        |error| {
+            MemoryObjectError::Vmo(super::VmoError::Backend(KernelPageError::Allocation(error)))
+        },
+    )?;
+    let base = block.physical().get();
+    base.checked_add(size)
+        .ok_or(MemoryObjectError::AllocationSize)?;
+    let address =
+        crate::kernel::mm::memory::linear_address(base).ok_or(MemoryObjectError::AllocationSize)?;
+    // SAFETY: A newly allocated, exclusive contiguous block is wholly covered
+    // by the permanent RAM map. Zero before any page reference can escape.
+    unsafe { with_exposed_provenance_mut::<u8>(address).write_bytes(0, size as usize) };
+    let owner = FallibleArc::try_new(ContiguousBlock {
+        _block: block,
+        _charge: charge,
+    })
+    .map_err(|_| MemoryObjectError::AllocationSize)?;
+    for index in 0..count {
+        pages.push(KernelUserPage {
+            storage: PageStorage::Contiguous {
+                physical: PhysicalAddress::new(base + index as u64 * PAGE_SIZE),
+                _owner: owner.clone(),
+            },
+        });
+    }
+    Ok((pages, transient))
+}
+
 impl PageBackend for KernelPageBackend {
-    type Page = PageBlock;
+    type Page = KernelUserPage;
     type Error = KernelPageError;
     type InstructionPublicationContext = dyn hyper::cpu::PinnedExecution;
 
@@ -105,7 +191,9 @@ impl PageBackend for KernelPageBackend {
         // SAFETY: `page` uniquely owns exactly one PAGE_SIZE block covered by
         // the permanent writable linear map. No reference to it exists yet.
         unsafe { with_exposed_provenance_mut::<u8>(address).write_bytes(0, PAGE_SIZE as usize) };
-        Ok(page)
+        Ok(KernelUserPage {
+            storage: PageStorage::Single(page),
+        })
     }
 
     fn physical_address(&self, page: &Self::Page) -> PhysicalAddress {
@@ -233,7 +321,7 @@ impl PageBackend for KernelPageBackend {
 }
 
 fn page_address(
-    page: &PageBlock,
+    page: &KernelUserPage,
     offset: usize,
     length: usize,
 ) -> Result<*mut u8, KernelPageError> {

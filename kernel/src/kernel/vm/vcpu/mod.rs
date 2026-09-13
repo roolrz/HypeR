@@ -29,4 +29,5 @@ pub(crate) enum ReconcileObservationError {
     Scheduler(crate::kernel::task::scheduler::Error),
 }
 
+mod mmio;
 mod power;

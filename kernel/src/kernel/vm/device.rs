@@ -64,6 +64,10 @@ pub(crate) fn supports_configuration(profile: u32, memory_base: u64, memory_size
     selected::supports_configuration(profile, memory_base, memory_size)
 }
 
+pub(crate) fn supports_userspace_mmio(profile: u32, base: u64, length: u64) -> bool {
+    selected::supports_userspace_mmio(profile, base, length)
+}
+
 /// Returns the architected timer interrupt used by the selected guest board.
 pub(crate) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualInterruptId {
     selected::default_timer_interrupt()

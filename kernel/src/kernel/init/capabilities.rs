@@ -20,7 +20,9 @@ const CORE_HANDLE_COUNT: usize = 11;
 const CORE_HANDLE_COUNT: usize = 10;
 
 const HAS_VM_AUTHORITY: bool = crate::hal::vm::userspace_vm_lifecycle_available();
-pub(super) const HANDLE_COUNT: usize = CORE_HANDLE_COUNT + HAS_VM_AUTHORITY as usize;
+const HAS_DEVICE_AUTHORITY: bool = crate::kernel::device::assigned::available();
+pub(super) const HANDLE_COUNT: usize =
+    CORE_HANDLE_COUNT + HAS_VM_AUTHORITY as usize + HAS_DEVICE_AUTHORITY as usize;
 
 const CORE_PURPOSES: [u32; CORE_HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_RESOURCE_DOMAIN),
@@ -44,9 +46,15 @@ const PURPOSES: [u32; HANDLE_COUNT] = {
         purposes[index] = CORE_PURPOSES[index];
         index += 1;
     }
-    if index < HANDLE_COUNT {
+    if HAS_VM_AUTHORITY {
         purposes[index] = purpose(
             hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_VIRTUAL_MACHINE_CREATION_AUTHORITY,
+        );
+        index += 1;
+    }
+    if HAS_DEVICE_AUTHORITY {
+        purposes[index] = purpose(
+            hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DEVICE_ASSIGNMENT_AUTHORITY,
         );
     }
     purposes
@@ -172,6 +180,20 @@ fn prepare_handles(
             .union(Rights::READ)
             .union(Rights::WRITE),
     )?;
+    let device_authority = if HAS_DEVICE_AUTHORITY {
+        Some(prepare_handle(
+            ObjectPublication::try_new(
+                crate::kernel::device::assigned::DeviceAssignmentAuthority::try_new(domain)
+                    .map_err(Error::DeviceAssignment)?,
+            )
+            .map_err(Error::Object)?,
+            Rights::DUPLICATE
+                .union(Rights::TRANSFER)
+                .union(Rights::INSPECT),
+        )?)
+    } else {
+        None
+    };
     // Prepare the root VMAR last. Its one-per-address-space publication claim
     // needs explicit rollback, while every earlier handle is self-contained.
     let address_space = init.process.address_space_owner()?;
@@ -202,7 +224,7 @@ fn prepare_handles(
         #[cfg(not(feature = "kernel-self-test"))]
         console,
     ];
-    let mut handles = core.into_iter().chain(vm_authority);
+    let mut handles = core.into_iter().chain(vm_authority).chain(device_authority);
     Ok(core::array::from_fn(|_| {
         // HANDLE_COUNT and the optional owner use the same immutable machine
         // capability. A mismatch is an internal bootstrap contract violation.

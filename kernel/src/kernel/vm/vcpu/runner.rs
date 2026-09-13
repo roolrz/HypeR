@@ -97,6 +97,23 @@ fn run_current() {
             let exit = stopped.exit();
             let detached = super::transition::detach_stopped(&mut *execution, stopped);
             match exit.disposition() {
+                crate::hal::vm::VcpuRunDisposition::Wait(crate::hal::vm::VcpuWaitReason::Mmio) => {
+                    detached.finish();
+                    let Some(binding) = (&*execution).vm_binding() else {
+                        crate::hal::cpu::halt();
+                    };
+                    if binding.lifecycle().publish_mmio(vcpu_id).is_err()
+                        && administrative_stop_reason(execution, current.thread).is_none()
+                    {
+                        crate::kernel::crash::fatal(format_args!(
+                            "invalid detached MMIO publication"
+                        ));
+                    }
+                    if !super::mmio::wait(execution, current.thread) {
+                        return;
+                    }
+                    continue;
+                }
                 crate::hal::vm::VcpuRunDisposition::Wait(
                     crate::hal::vm::VcpuWaitReason::Interrupt,
                 ) => {
