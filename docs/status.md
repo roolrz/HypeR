@@ -75,12 +75,15 @@ The current foundation includes:
   scheduler-owned vCPU continuations;
 - IRQ domains and shared handler registration, host/guest GICv2 and GICv3, PLIC, x2APIC, host
   and virtual architectural timers;
-- PSCI and SBI CPU-power backends;
+- host PSCI and SBI CPU-power backends;
+- AArch64 guest SMP with 1..8 vCPUs on GICv2/GICv3, per-vCPU timer and IPI
+  state, and runtime-mediated PSCI CPU on/off and VM poweroff/reset; guest
+  suspend remains unsupported, and RISC-V guests currently retain one vCPU;
 - a compatibility-matched platform driver framework, PL011 and NS16550 UARTs,
   and reusable virtual-device models;
 - Linux guest FIT images delivered through the Native root initramfs;
 - rollback-safe VM construction with one generational registry publication for
-  guest memory, virtual interrupts, devices, and the dormant boot vCPU;
+  guest memory, virtual interrupts, devices, and all configured dormant vCPUs;
 - a capability-scoped Native VM manager contained by a bounded fleet resource
   domain, plus isolated per-VM runtimes which parse FIT images, own guest VMOs,
   construct Linux firmware data, and supervise installed VMs from userspace;
@@ -92,8 +95,7 @@ The current foundation includes:
   stacks, and an optional allocation-free crash console.
 
 This list describes implemented foundations, not a claim of production
-completeness. In particular, a general-purpose Native runtime, multi-vCPU EL0
-VMM policy, a published capability syscall ABI, device assignment, strong
+completeness. In particular, general-purpose VMM resource policy, device assignment, strong
 guest isolation policy, cross-architecture asynchronous preemption, controlled
 vCPU migration, automatic load balancing, broad hardware discovery, stable
 management APIs, and a general-purpose virtual I/O stack are still under
@@ -169,3 +171,7 @@ The x86-64 build gate does not establish a userspace guest-boot contract.
 Pi 5 host bring-up prerequisites and recommended firmware configuration are
 documented in [Raspberry Pi 5](../kernel/docs/rpi5.md). GICv2 Linux guest boot
 and lifecycle tests run in QEMU; physical Pi 5 boot remains unverified.
+The guest SMP acceptance target covers secondary CPU off/on cycles, concurrent
+work, guest reboot/poweroff and reclamation on both GIC backends, including a
+four-vCPU guest on a single-host-CPU configuration. This checks integration,
+not physical cache, TLB or interrupt ordering.

@@ -59,13 +59,8 @@ impl VirtualDeviceSet {
         }
     }
 
-    pub(in crate::kernel::vm) fn bind_virtual_serial(
-        &self,
-        vm: VmId,
-        vcpu: u32,
-        thread: crate::kernel::task::thread::ThreadId,
-    ) {
-        let route = Route { vm, vcpu, thread };
+    pub(in crate::kernel::vm) fn bind_virtual_serial(&self, vm: VmId, vcpu: u32) {
+        let route = Route { vm, vcpu };
         if self.timeout_context.route.publish(route).is_err() {
             crate::kernel::crash::fatal(format_args!(
                 "HypeR: duplicate UART timer route publication"
@@ -194,8 +189,13 @@ impl VirtualDeviceSet {
         if !timeout_only {
             self.reschedule()?;
         }
+        let thread = binding
+            .endpoint_owner(route.vcpu)
+            .map_err(|_| Error::InvalidInterrupt)?
+            .thread()
+            .ok_or(Error::InvalidInterrupt)?;
         binding
-            .publish_interrupt_reconcile(route.vcpu, route.thread)
+            .publish_interrupt_reconcile(route.vcpu, thread)
             .map_err(|_| Error::InvalidInterrupt)
     }
 }

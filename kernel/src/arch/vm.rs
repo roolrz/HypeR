@@ -246,3 +246,14 @@ pub(crate) fn guest_gic_version() -> u32 {
         0
     }
 }
+
+pub(crate) const fn maximum_guest_vcpus() -> u32 {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        super::imp::maximum_guest_vcpus()
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        1
+    }
+}

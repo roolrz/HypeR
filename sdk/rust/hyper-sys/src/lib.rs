@@ -2677,3 +2677,77 @@ pub unsafe fn vmar_map_private(
         .status
     }
 }
+
+/// Snapshots one pending guest power request without consuming it.
+///
+/// # Safety
+///
+/// `machine` must remain live and `request` writable for the complete call.
+#[inline]
+pub unsafe fn virtual_machine_get_power_request(
+    machine: abi::HyperNativeHandle,
+    request: *mut abi::HyperNativeVirtualMachinePowerRequest,
+) -> CallResult {
+    // SAFETY: The caller establishes handle and output validity.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_POWER_REQUEST,
+            machine,
+            request.addr() as u64,
+            core::mem::size_of::<abi::HyperNativeVirtualMachinePowerRequest>() as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Completes the exact pending power request.
+///
+/// # Safety
+///
+/// `machine` must remain live throughout the call.
+#[inline]
+pub unsafe fn virtual_machine_complete_power_request(
+    machine: abi::HyperNativeHandle,
+    request_id: u64,
+    accept: u32,
+) -> abi::HyperNativeStatus {
+    // SAFETY: The caller retains the handle; scalar arguments borrow no memory.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_COMPLETE_POWER_REQUEST,
+            machine,
+            request_id,
+            u64::from(accept),
+            0,
+            0,
+            0,
+        )
+        .status
+    }
+}
+
+/// Opens one configured vCPU control handle.
+///
+/// # Safety
+///
+/// `machine` must remain live; a successfully returned handle must be adopted once.
+#[inline]
+pub unsafe fn virtual_machine_open_vcpu(
+    machine: abi::HyperNativeHandle,
+    vcpu_id: u32,
+) -> CallResult {
+    // SAFETY: The caller retains the input and owns the returned capability.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_MACHINE_OPEN_VCPU,
+            machine,
+            u64::from(vcpu_id),
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}

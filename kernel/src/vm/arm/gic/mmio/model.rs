@@ -26,11 +26,15 @@ impl RegisterState {
     }
 
     pub const fn read(&self, register: ServiceRegister) -> u64 {
+        self.read_for_cpu(register, 0, 1)
+    }
+
+    pub const fn read_for_cpu(&self, register: ServiceRegister, cpu: u32, count: u32) -> u64 {
         match register {
             ServiceRegister::DistributorControl | ServiceRegister::DistributorControlV2 => {
                 self.distributor_control as u64
             }
-            ServiceRegister::DistributorTypeV2 => 1,
+            ServiceRegister::DistributorTypeV2 => 1 | (((count - 1) as u64) << 5),
             ServiceRegister::PeripheralId2V2 => 0x20,
             ServiceRegister::DistributorType => 1 | (15 << 19),
             // GICD_TYPER2 is optional and explicitly unimplemented.
@@ -40,7 +44,11 @@ impl RegisterState {
             }
             ServiceRegister::DistributorStatus | ServiceRegister::RedistributorStatus => 0,
             ServiceRegister::RedistributorControl | ServiceRegister::RedistributorWake => 0,
-            ServiceRegister::RedistributorType => 1 << 4,
+            ServiceRegister::RedistributorType => {
+                ((cpu as u64) << 32)
+                    | ((cpu as u64) << 8)
+                    | if cpu + 1 == count { 1 << 4 } else { 0 }
+            }
             ServiceRegister::PeripheralId2 => 0x30,
         }
     }
@@ -104,7 +112,23 @@ pub fn read_model_register(
         ModelRegisterKind::Configuration { first_interrupt } => {
             read_configuration(controller, vcpu, first_interrupt)
         }
-        ModelRegisterKind::Route(_) | ModelRegisterKind::SoftwareInterrupt => Ok(0),
+        ModelRegisterKind::Route(route) => {
+            Ok(controller.route_value(interrupt(route.interrupt())?)?)
+        }
+        ModelRegisterKind::SoftwareInterrupt => Ok(0),
+        ModelRegisterKind::SgiPending {
+            first_interrupt,
+            count,
+            ..
+        } => {
+            let mut value = 0;
+            for byte in 0..count {
+                value |= u64::from(
+                    controller.sgi_sources(interrupt(first_interrupt + u32::from(byte))?, vcpu)?,
+                ) << (byte * 8);
+            }
+            Ok(value)
+        }
         ModelRegisterKind::Targets {
             first_interrupt,
             count,
@@ -112,9 +136,12 @@ pub fn read_model_register(
             let mut value = 0;
             for byte in 0..count {
                 let id = first_interrupt + u32::from(byte);
-                if snapshot(controller, vcpu, id)?.routed {
-                    value |= 1 << (byte * 8);
-                }
+                let mask = if id < 32 {
+                    1u8 << vcpu.get()
+                } else {
+                    controller.target_mask(interrupt(id)?)?
+                };
+                value |= u64::from(mask) << (byte * 8);
             }
             Ok(value)
         }
@@ -167,29 +194,52 @@ pub fn write_model_register(
             for byte in 0..count {
                 let id = first_interrupt + u32::from(byte);
                 if id >= 32 {
-                    controller.set_routed(
-                        interrupt(id)?,
-                        target_for(id, vcpu),
-                        value & (1 << (byte * 8)) != 0,
-                    )?;
+                    controller.set_target_mask(interrupt(id)?, (value >> (byte * 8)) as u8)?;
                 }
             }
             Ok(())
         }
         ModelRegisterKind::SoftwareInterrupt => {
-            // The reference board admits one vCPU. Filter 1 excludes self;
-            // filter 0 selects it only when target bit zero is present.
             let filter = (value >> 24) & 3;
-            if filter == 2 || (filter == 0 && value & (1 << 16) != 0) {
-                controller.inject(interrupt(value as u32 & 15)?, vcpu)?;
+            for cpu in 0..controller.vcpu_count() {
+                let selected = match filter {
+                    0 => value & (1 << (16 + cpu)) != 0,
+                    1 => cpu != vcpu.get(),
+                    2 => cpu == vcpu.get(),
+                    _ => false,
+                };
+                if selected {
+                    controller.inject_sgi(
+                        interrupt(value as u32 & 15)?,
+                        VirtualCpuId::new(cpu),
+                        vcpu,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+        ModelRegisterKind::SgiPending {
+            first_interrupt,
+            count,
+            set,
+        } => {
+            for byte in 0..count {
+                let id = interrupt(first_interrupt + u32::from(byte))?;
+                let sources = (value >> (byte * 8)) as u8;
+                if set {
+                    for source in 0..controller.vcpu_count().min(8) {
+                        if sources & (1 << source) != 0 {
+                            controller.inject_sgi(id, vcpu, VirtualCpuId::new(source))?;
+                        }
+                    }
+                } else {
+                    controller.clear_sgi_sources(id, vcpu, sources)?;
+                }
             }
             Ok(())
         }
         ModelRegisterKind::Route(route) => {
-            if value != 0 {
-                return Err(ModelError::UnsupportedRouteValue(value));
-            }
-            controller.route(interrupt(route.interrupt())?, VirtualCpuId::new(0))?;
+            controller.set_route_value(interrupt(route.interrupt())?, value)?;
             Ok(())
         }
     }
@@ -256,7 +306,7 @@ fn write_bitmap(
         }
         let id = lane(first_interrupt, bit)?;
         let interrupt = interrupt(id)?;
-        let target = target_for(id, vcpu);
+        let target = target_for(controller, id, vcpu)?;
         match register {
             BitmapRegister::Group => controller.set_group(
                 interrupt,
@@ -305,7 +355,7 @@ fn write_priority(
         let id = lane(first_interrupt, byte)?;
         controller.set_priority(
             interrupt(id)?,
-            target_for(id, vcpu),
+            target_for(controller, id, vcpu)?,
             (value >> (byte * 8)) as u8,
         )?;
     }
@@ -350,7 +400,7 @@ fn write_configuration(
         } else {
             InterruptTrigger::Level
         };
-        controller.set_trigger(interrupt(id)?, target_for(id, vcpu), trigger)?;
+        controller.set_trigger(interrupt(id)?, target_for(controller, id, vcpu)?, trigger)?;
     }
     Ok(())
 }
@@ -361,7 +411,7 @@ fn snapshot(
     id: u32,
 ) -> Result<InterruptSnapshot, ModelError> {
     controller
-        .snapshot(interrupt(id)?, target_for(id, vcpu))
+        .snapshot(interrupt(id)?, target_for(controller, id, vcpu)?)
         .map_err(Into::into)
 }
 
@@ -375,10 +425,14 @@ fn lane(first_interrupt: u32, offset: u32) -> Result<u32, ModelError> {
         .ok_or(ModelError::InvalidDecodedSpan)
 }
 
-fn target_for(id: u32, private_cpu: VirtualCpuId) -> VirtualCpuId {
+fn target_for(
+    controller: &VirtualGic,
+    id: u32,
+    private_cpu: VirtualCpuId,
+) -> Result<VirtualCpuId, ModelError> {
     if id < 32 {
-        private_cpu
+        Ok(private_cpu)
     } else {
-        VirtualCpuId::new(0)
+        Ok(controller.target(interrupt(id)?)?)
     }
 }

@@ -10,6 +10,11 @@ pub fn encode(entry: Option<ListEntry>) -> u32 {
         return 0;
     };
     entry.interrupt.get()
+        | if entry.interrupt.get() < 16 {
+            u32::from(entry.source & 7) << 10
+        } else {
+            0
+        }
         | (u32::from(entry.priority >> 3) << 23)
         | if entry.group == InterruptGroup::Group1 {
             1 << 30
@@ -38,6 +43,11 @@ pub fn decode(value: u32) -> Result<Option<ListEntry>, DecodeError> {
         return Err(DecodeError::InvalidVirtualInterrupt);
     }
     Ok(Some(ListEntry {
+        source: if value & 0x3ff < 16 {
+            ((value >> 10) & 7) as u8
+        } else {
+            0
+        },
         interrupt: GicInterruptId::new(value & 0x3ff)
             .ok_or(DecodeError::InvalidVirtualInterrupt)?,
         priority: ((value >> 23) as u8 & 31) << 3,

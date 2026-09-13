@@ -134,6 +134,7 @@ pub fn validate_context_switch() -> Result<Capabilities, Error> {
     let mut context = CpuContext::empty();
     let capabilities = initialize_context(&mut context)?;
     let probe = ListEntry {
+        source: 0,
         interrupt: GicInterruptId::new(31).ok_or(Error::InvalidVirtualInterrupt)?,
         priority: 0xa0,
         group: if v2::guest_physical().is_some() {

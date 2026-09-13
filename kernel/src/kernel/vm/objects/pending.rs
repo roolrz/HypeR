@@ -205,17 +205,6 @@ impl PendingVirtualMachine {
         let virtual_serial = virtual_serial
             .map(crate::kernel::vm::device::VirtualSerialBinding::from_virtual_serial);
         let devices = crate::kernel::vm::device::prepare(virtual_serial)?;
-        let mut context = crate::hal::vm::prepare_native_bootstrap_context(
-            bootstrap.entry,
-            bootstrap.stack,
-            bootstrap.arguments,
-        )
-        .map_err(|_| Error::InvalidConfiguration)?;
-        crate::hal::vm::set_virtual_count(
-            &mut context,
-            crate::kernel::time::monotonic_ticks(),
-            crate::kernel::time::monotonic_ticks(),
-        );
         VmBuilder::new(
             reservation,
             lifecycle_resources,
@@ -225,7 +214,7 @@ impl PendingVirtualMachine {
             interrupt_controller_charge,
             devices,
         )?
-        .prepare_boot_vcpu(0, context)
+        .prepare_boot_vcpu(0, bootstrap)
         .map_err(Into::into)
     }
 
@@ -277,7 +266,7 @@ fn validate_configuration(configuration: VirtualMachineConfiguration) -> Result<
     ) {
         return Err(Error::InvalidConfiguration);
     }
-    if configuration.vcpu_count != 1
+    if !(1..=crate::hal::vm::maximum_guest_vcpus()).contains(&configuration.vcpu_count)
         || configuration.memory_size == 0
         || !configuration.memory_size.is_multiple_of(PAGE_SIZE)
         || !configuration.guest_physical_base.is_multiple_of(PAGE_SIZE)

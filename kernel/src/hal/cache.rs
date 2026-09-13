@@ -217,6 +217,26 @@ pub trait CacheMaintenance {
         result
     }
 
+    /// Maintains instruction visibility for memory already owned by a guest.
+    ///
+    /// Unlike host code publication, this permits coherent guest writes while
+    /// maintenance runs. It must never discard dirty data. It does not make
+    /// concurrent instruction modification well-defined: the guest remains
+    /// responsible for its architecture's code-publication and CPU rendezvous
+    /// protocol. The faulting CPU must synchronize before retrying execution.
+    ///
+    /// # Safety
+    ///
+    /// The complete rounded range must be mapped normal coherent memory, owned
+    /// by this guest and retained throughout the call. No host Rust reference
+    /// may alias guest writes. Host writers and DMA are excluded. A stage-2
+    /// execute denial must still exclude instruction fetches from this page
+    /// until maintenance completes; guest data writes may continue.
+    unsafe fn prepare_guest_instruction_range(
+        start: usize,
+        length: usize,
+    ) -> Result<(), CacheError>;
+
     /// Performs the local context synchronization required before executing
     /// instructions published by another CPU.
     fn synchronize_instruction_execution();

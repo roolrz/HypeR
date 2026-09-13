@@ -82,9 +82,5 @@ fn set_timer_level(
     vcpu: VirtualCpuId,
     asserted: bool,
 ) -> Result<(), VgicError> {
-    if asserted {
-        controller.inject(interrupts.timer_interrupt(), vcpu)
-    } else {
-        controller.clear_pending(interrupts.timer_interrupt(), vcpu)
-    }
+    controller.set_line(interrupts.timer_interrupt(), vcpu, asserted)
 }

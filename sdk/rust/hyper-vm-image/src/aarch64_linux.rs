@@ -198,7 +198,9 @@ pub fn validate_reference<Source: ReadAt>(
     if image.platform_profile != PlatformProfile::Aarch64Reference {
         return Err(ReferenceLayoutError::UnsupportedPlatformProfile);
     }
-    if image.vcpu_count != 1 {
+    if !(1..=hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_MAX_VCPUS)
+        .contains(&u64::from(image.vcpu_count))
+    {
         return Err(ReferenceLayoutError::UnsupportedVcpuCount);
     }
     let memory_end = reference_memory_end(image.memory_size).map_err(|error| match error {
@@ -490,6 +492,25 @@ mod tests {
             validate_reference(&source, image),
             Err(ReferenceLayoutError::InvalidPayload)
         ));
+    }
+
+    #[test]
+    fn accepts_bounded_smp_and_preserves_boot_topology() -> Result<(), crate::linux::Error<()>> {
+        let source = Source::image(0x0008_0000, 0x0018_0000);
+        for count in [0, 1, 2, 4, 8, 9] {
+            let mut image = reference_image(Source::payload(0x4008_0000));
+            image.vcpu_count = count;
+            if (1..=8).contains(&count) {
+                let plan = crate::linux::validate_reference(&source, image)?;
+                assert_eq!(plan.vcpu_count(), count);
+            } else {
+                assert!(matches!(
+                    validate_reference(&source, image),
+                    Err(ReferenceLayoutError::UnsupportedVcpuCount)
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn reference_image(kernel: Payload) -> GuestImage {

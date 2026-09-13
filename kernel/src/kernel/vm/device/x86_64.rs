@@ -56,10 +56,9 @@ impl VirtualDeviceSet {
         &self,
         vm: super::super::super::registry::VmId,
         vcpu: u32,
-        thread: crate::kernel::task::thread::ThreadId,
     ) {
         if let Some(output) = &self.virtual_serial {
-            output.bind(crate::kernel::vm::virtual_serial::Route { vm, vcpu, thread });
+            output.bind(crate::kernel::vm::virtual_serial::Route { vm, vcpu });
         }
     }
 
@@ -92,7 +91,7 @@ pub(super) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualIn
 }
 
 pub(super) fn kick_virtual_serial(route: crate::kernel::vm::virtual_serial::Route) {
-    let _ = (route.vcpu, route.thread);
+    let _ = route.vcpu;
     let _ = super::super::super::registry::with_binding(route.vm, |binding| {
         binding.devices().disconnect_virtual_serial(route.vm);
     });

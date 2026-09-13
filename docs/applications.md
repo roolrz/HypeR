@@ -59,8 +59,12 @@ observe `starting`, `running`, `stopping`, `stopped`, or `failed`.
 Each VM owns a separate runtime process, resource domain, task group, lifecycle
 tracker, and console session. The current policy allows eight definitions and
 budgets two active VM instances. Guest memory and vCPU configuration still come
-from the supported FIT image profile (currently 128 MiB and one vCPU); the CLI
-has no misleading memory or CPU overrides.
+from the FIT image: the reference packer defaults to 128 MiB and one vCPU;
+AArch64 supports 1..8 vCPUs and RISC-V currently supports one. The CLI has no
+memory or CPU overrides that would disagree with the image's boot contract.
+For a four-vCPU development image, use `make guest-itb NATIVE_GUEST_VCPUS=4`.
+Guest PSCI poweroff stops the instance cleanly; guest reboot creates a fresh
+instance under the same definition and disconnects the old console session.
 
 ## Configuration
 

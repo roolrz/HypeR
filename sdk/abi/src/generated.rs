@@ -155,6 +155,8 @@ pub const HYPER_NATIVE_SIGNAL_PROCESS_TERMINATED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_CONSOLE_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_CONSOLE_WRITABLE: u64 = 1_u64 << 1;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED: u64 = 1_u64 << 0;
+pub const HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_POWER_REQUEST: u64 = 1_u64 << 1;
+pub const HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_VCPU_TERMINATED: u64 = 1_u64 << 2;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED: u64 = 1_u64 << 0;
 
 pub const HYPER_NATIVE_PRIVATE_MAPPING_COPY_ON_WRITE: u64 = 0;
@@ -194,6 +196,11 @@ pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_VIRTUAL_MACHINE_CREATION_AUTHORITY
 pub const HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_AARCH64: u64 = 1;
 pub const HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_RISCV64: u64 = 2;
 pub const HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_X86_64: u64 = 3;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_MAX_VCPUS: u64 = 8;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_ON: u64 = 1;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_OFF: u64 = 2;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_OFF: u64 = 3;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_RESET: u64 = 4;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE: u64 = 1;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GUEST_RAM_BASE: u64 = 1073741824;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DTB_OFFSET: u64 = 65536;
@@ -409,6 +416,9 @@ pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO: u64
 pub const HYPER_NATIVE_SYS_VMO_CREATE_SNAPSHOT: u64 = 114;
 pub const HYPER_NATIVE_SYS_FILE_CREATE_SNAPSHOT: u64 = 115;
 pub const HYPER_NATIVE_SYS_VMAR_MAP_PRIVATE: u64 = 116;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_POWER_REQUEST: u64 = 117;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_COMPLETE_POWER_REQUEST: u64 = 118;
+pub const HYPER_NATIVE_SYS_VIRTUAL_MACHINE_OPEN_VCPU: u64 = 119;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -952,6 +962,29 @@ const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, argu
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, vcpu_id) == 48);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, flags) == 52);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuBootstrap, reserved) == 56);
+
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_POWER_REQUEST_MIN_SIZE: usize = 40;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeVirtualMachinePowerRequest {
+    pub id: u64,
+    pub vcpu: u32,
+    pub operation: u32,
+    pub target: u32,
+    pub reserved: u32,
+    pub entry: u64,
+    pub context: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualMachinePowerRequest>() == 40);
+const _: () = assert!(core::mem::align_of::<HyperNativeVirtualMachinePowerRequest>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachinePowerRequest, id) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachinePowerRequest, vcpu) == 8);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachinePowerRequest, operation) == 12);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachinePowerRequest, target) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachinePowerRequest, reserved) == 20);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachinePowerRequest, entry) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachinePowerRequest, context) == 32);
 
 pub const HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE: usize = 32;
 #[repr(C)]

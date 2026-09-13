@@ -221,7 +221,8 @@ impl Stage2AddressSpace {
     /// # Safety
     ///
     /// This address space must be active on the current CPU and serialized by
-    /// its single-active-vCPU ownership contract. Instruction bytes must have
+    /// the owning VM address-space lock. Invalidation is broadcast to all CPUs
+    /// in the inner-shareable domain. Instruction bytes must have
     /// completed cache publication before this call.
     pub unsafe fn make_normal_page_executable_active(
         &mut self,
@@ -638,7 +639,7 @@ unsafe fn invalidate_replaced_ipa(ipa: u64) {
 unsafe fn invalidate_broken_ipa(ipa: u64) {
     let operand = ipa >> registers::TLBI_IPAS2E1_IPA_SHIFT;
     // SAFETY: The old descriptor is already invalid, and the caller retains
-    // exclusive ownership of the active guest regime. The first TLBI removes
+    // exclusive mutation of the shared guest hierarchy. The first TLBI removes
     // stage-2 entries; VMALLE1IS also removes combined stage-1/stage-2 entries
     // which may cache the old execute denial.
     unsafe {
@@ -672,7 +673,15 @@ fn read_entry(table: PhysicalAddress, slot: usize) -> Result<u64, Error> {
 
 fn write_entry(table: PhysicalAddress, slot: usize, value: u64) -> Result<(), Error> {
     let pointer = table_pointer(table)?;
-    // SAFETY: Hierarchy construction is serialized before guest execution.
+    // Hardware walkers on another CPU do not take the address-space lock.
+    // Complete child-table initialization and backing-page writes before a
+    // valid descriptor can expose them. The final publication barrier alone
+    // would permit a walker to see this pointer ahead of those earlier stores.
+    // SAFETY: DSB orders the owned normal-memory initialization before this
+    // aligned descriptor store; the hierarchy owner serializes all writers.
+    unsafe { asm!("dsb ishst", options(nostack, preserves_flags)) };
+    // SAFETY: The table allocation is retained and slot is a validated index.
+    // Hardware reads aligned descriptors without taking Rust references.
     unsafe { write_volatile(pointer.add(slot), value) };
     Ok(())
 }

@@ -14,6 +14,8 @@ const PRIVATE_INTERRUPT_COUNT: usize = 32;
 const MAX_GIC_INTERRUPT_ID: u32 = 1_019;
 const SHARED_INTERRUPT_COUNT: usize = MAX_GIC_INTERRUPT_ID as usize + 1 - PRIVATE_INTERRUPT_COUNT;
 const MAX_LIST_REGISTERS: usize = 64;
+// The durable notification bitmap has one bit per admitted vCPU.
+const MAX_VCPUS: u32 = u64::BITS;
 
 /// Guest-visible interrupt identifier in the modeled GIC INTID range.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -73,6 +75,8 @@ impl ListState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ListEntry {
+    /// `GICv2` SGI originating CPU; ignored by the `GICv3` LR encoding.
+    pub source: u8,
     pub interrupt: GicInterruptId,
     pub priority: u8,
     pub group: InterruptGroup,
@@ -136,6 +140,11 @@ impl DirectorySlot {
 struct Interrupt {
     id: GicInterruptId,
     target: VirtualCpuId,
+    route_target: VirtualCpuId,
+    target_mask: u8,
+    route_value: u64,
+    sgi_sources: u8,
+    sgi_source: u8,
     priority: u8,
     group: InterruptGroup,
     trigger: InterruptTrigger,
@@ -146,6 +155,7 @@ struct Interrupt {
     ready_position: Option<usize>,
     listed_position: Option<usize>,
     maintenance_on_eoi: bool,
+    line_asserted: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,7 +209,7 @@ pub struct VirtualGicBuilder {
 
 impl VirtualGicBuilder {
     pub fn new(vcpu_count: u32) -> Result<Self, BuildError> {
-        if vcpu_count == 0 {
+        if vcpu_count == 0 || vcpu_count > MAX_VCPUS {
             return Err(BuildError::InvalidCpu);
         }
         let private_count = usize::try_from(vcpu_count)
@@ -277,6 +287,11 @@ impl VirtualGicBuilder {
         self.entries.push(Interrupt {
             id: interrupt,
             target,
+            route_target: target,
+            target_mask: 1u8.checked_shl(target.get()).unwrap_or(0),
+            route_value: u64::from(target.get()),
+            sgi_sources: 0,
+            sgi_source: 0,
             priority,
             group,
             trigger,
@@ -287,6 +302,7 @@ impl VirtualGicBuilder {
             ready_position: None,
             listed_position: None,
             maintenance_on_eoi: false,
+            line_asserted: false,
         });
         if interrupt.is_private() {
             self.private[directory_offset] = Some(index);
@@ -329,6 +345,7 @@ impl VirtualGicBuilder {
             vcpu_count: self.vcpu_count,
             list_register_count,
             distributor_enabled: true,
+            reconcile_targets: 0,
         })
     }
 
@@ -350,12 +367,210 @@ pub struct VirtualGic {
     vcpu_count: u32,
     list_register_count: usize,
     distributor_enabled: bool,
+    reconcile_targets: u64,
 }
 
 impl VirtualGic {
+    pub const fn vcpu_count(&self) -> u32 {
+        self.vcpu_count
+    }
+
+    /// Coalesced prompts; actual pending/routing state remains in the model.
+    pub fn take_reconcile_targets(&mut self) -> u64 {
+        core::mem::take(&mut self.reconcile_targets)
+    }
+
+    fn changed(&mut self, index: EntryIndex) {
+        let entry = &self.entries[index.0 as usize];
+        self.reconcile_targets |= 1u64.checked_shl(entry.target.get()).unwrap_or(0)
+            | 1u64.checked_shl(entry.route_target.get()).unwrap_or(0);
+    }
+
+    pub fn target(&self, interrupt: GicInterruptId) -> Result<VirtualCpuId, RuntimeError> {
+        Ok(self.entries[self.lookup_shared(interrupt)?.0 as usize].target)
+    }
+
+    pub fn target_mask(&self, interrupt: GicInterruptId) -> Result<u8, RuntimeError> {
+        Ok(self.entries[self.lookup_shared(interrupt)?.0 as usize].target_mask)
+    }
+
+    pub fn route_value(&self, interrupt: GicInterruptId) -> Result<u64, RuntimeError> {
+        Ok(self.entries[self.lookup_shared(interrupt)?.0 as usize].route_value)
+    }
+
+    pub fn set_target_mask(
+        &mut self,
+        interrupt: GicInterruptId,
+        mask: u8,
+    ) -> Result<(), RuntimeError> {
+        let mask = mask & ((1u16 << self.vcpu_count.min(8)) - 1) as u8;
+        let index = self.lookup_shared(interrupt)?;
+        self.entries[index.0 as usize].target_mask = mask;
+        if mask != 0 {
+            self.route(interrupt, VirtualCpuId::new(mask.trailing_zeros()))?;
+        }
+        let target = self.entries[index.0 as usize].target;
+        self.set_routed(interrupt, target, mask != 0)
+    }
+
+    pub fn set_route_value(
+        &mut self,
+        interrupt: GicInterruptId,
+        value: u64,
+    ) -> Result<(), RuntimeError> {
+        let index = self.lookup_shared(interrupt)?;
+        // One flat affinity level. IRM selects one eligible CPU, deterministically CPU 0.
+        let affinity = value & 0x0000_00ff_00ff_ffff;
+        let target = if value & (1 << 31) != 0 {
+            Some(0)
+        } else if affinity < u64::from(self.vcpu_count) {
+            Some(affinity as u32)
+        } else {
+            None
+        };
+        self.entries[index.0 as usize].route_value = value & 0x0000_00ff_80ff_ffff;
+        if let Some(target) = target {
+            self.route(interrupt, VirtualCpuId::new(target))?;
+        }
+        let current = self.entries[index.0 as usize].target;
+        self.set_routed(interrupt, current, target.is_some())
+    }
+
+    /// Retains distinct `GICv2` SGI sources until each source has been acknowledged.
+    pub fn inject_sgi(
+        &mut self,
+        interrupt: GicInterruptId,
+        target: VirtualCpuId,
+        source: VirtualCpuId,
+    ) -> Result<(), RuntimeError> {
+        if interrupt.get() >= 16 || source.get() >= 8 {
+            return Err(RuntimeError::InvalidRoute);
+        }
+        self.validate_cpu(source)?;
+        let index = self.lookup(interrupt, target)?;
+        self.entries[index.0 as usize].sgi_sources |= 1 << source.get();
+        if self.entries[index.0 as usize].list_state.is_none() {
+            self.entries[index.0 as usize].pending_command = PendingCommand::Assert;
+        }
+        self.changed(index);
+        self.reconcile_ready(index)
+    }
+
+    pub fn sgi_sources(
+        &self,
+        interrupt: GicInterruptId,
+        target: VirtualCpuId,
+    ) -> Result<u8, RuntimeError> {
+        let entry = self.entry(interrupt, target)?;
+        Ok(entry.sgi_sources
+            | if entry.list_state.is_some_and(ListState::pending) {
+                1 << entry.sgi_source
+            } else {
+                0
+            })
+    }
+
+    pub fn clear_sgi_sources(
+        &mut self,
+        interrupt: GicInterruptId,
+        target: VirtualCpuId,
+        sources: u8,
+    ) -> Result<(), RuntimeError> {
+        let index = self.lookup(interrupt, target)?;
+        let entry = &mut self.entries[index.0 as usize];
+        entry.sgi_sources &= !sources;
+        if entry.list_state.is_some() && sources & (1 << entry.sgi_source) != 0 {
+            entry.pending_command = PendingCommand::Clear;
+        } else if entry.list_state.is_none() {
+            entry.pending_command = if entry.sgi_sources != 0 {
+                PendingCommand::Assert
+            } else {
+                PendingCommand::None
+            };
+        }
+        self.changed(index);
+        self.reconcile_ready(index)
+    }
+
+    fn settle_unlisted(&mut self, index: EntryIndex) -> Result<(), RuntimeError> {
+        let entry = &self.entries[index.0 as usize];
+        if entry.list_state.is_some() {
+            return Ok(());
+        }
+        if entry.target != entry.route_target {
+            self.validate_ready_position(index)?;
+            let old = entry.target.get() as usize;
+            let (entries, deliveries) = (&mut self.entries, &mut self.deliveries);
+            deliveries[old]
+                .ready
+                .remove(index, &mut EntryStore(entries));
+            entries[index.0 as usize].target = entries[index.0 as usize].route_target;
+            self.changed(index);
+        }
+        let entry = &mut self.entries[index.0 as usize];
+        if entry.sgi_sources != 0
+            || (entry.line_asserted && entry.trigger == InterruptTrigger::Level)
+        {
+            entry.pending_command = PendingCommand::Assert;
+        }
+        Ok(())
+    }
+
+    /// Retires one detached hardware bank before reinitializing its vCPU.
+    /// The caller must guarantee the old bank can never execute again.
+    pub fn reset_vcpu(
+        &mut self,
+        vcpu: VirtualCpuId,
+        group: InterruptGroup,
+        sgi_enabled: bool,
+    ) -> Result<(), RuntimeError> {
+        self.validate_cpu(vcpu)?;
+        let cpu = vcpu.get() as usize;
+        self.validate_listed(cpu)?;
+        while let Some(index) = self.deliveries[cpu].listed.pop() {
+            let entry = &mut self.entries[index.0 as usize];
+            if !entry.id.is_private()
+                && entry.pending_command == PendingCommand::None
+                && entry.list_state.is_some_and(ListState::pending)
+            {
+                entry.pending_command = PendingCommand::Assert;
+            }
+            entry.list_state = None;
+            entry.listed_position = None;
+            self.settle_unlisted(index)?;
+            self.reconcile_ready(index)?;
+        }
+        for id in 0..32 {
+            let Some(slot) = self.private.get(cpu * 32 + id).and_then(|slot| *slot) else {
+                continue;
+            };
+            let index = slot.index();
+            let entry = &mut self.entries[index.0 as usize];
+            entry.enabled = sgi_enabled && id < 16;
+            entry.routed = true;
+            entry.priority = 0x80;
+            entry.group = group;
+            entry.trigger = if id < 16 {
+                InterruptTrigger::Edge
+            } else {
+                InterruptTrigger::Level
+            };
+            entry.pending_command = PendingCommand::None;
+            entry.sgi_sources = 0;
+            entry.sgi_source = 0;
+            entry.line_asserted = false;
+            self.reconcile_ready(index)?;
+        }
+        self.reconcile_targets |= 1u64.checked_shl(vcpu.get()).unwrap_or(0);
+        Ok(())
+    }
+
     /// Gates delivery without changing per-interrupt enable or pending state.
     pub fn set_distributor_enabled(&mut self, enabled: bool) {
         self.distributor_enabled = enabled;
+        self.reconcile_targets |= u64::MAX
+            .checked_shr(64u32.saturating_sub(self.vcpu_count))
+            .unwrap_or(0);
     }
 
     /// Requested heap layout retained by a controller with fixed capacities.
@@ -371,6 +586,7 @@ impl VirtualGic {
         list_register_count: usize,
     ) -> Result<usize, BuildError> {
         if vcpu_count == 0
+            || vcpu_count > MAX_VCPUS
             || private_entries_per_vcpu > PRIVATE_INTERRUPT_COUNT
             || shared_entries > SHARED_INTERRUPT_COUNT
             || list_register_count == 0
@@ -486,6 +702,7 @@ impl VirtualGic {
             self.preflight_ready_insert(index)?;
         }
         self.entries[index.0 as usize].enabled = enabled;
+        self.changed(index);
         self.reconcile_ready(index)?;
         Ok(())
     }
@@ -502,6 +719,7 @@ impl VirtualGic {
             self.preflight_ready_insert(index)?;
         }
         self.entries[index.0 as usize].routed = routed;
+        self.changed(index);
         self.reconcile_ready(index)
     }
 
@@ -514,6 +732,7 @@ impl VirtualGic {
         let index = self.lookup(interrupt, target)?;
         self.validate_ready_position(index)?;
         self.entries[index.0 as usize].priority = priority;
+        self.changed(index);
         let cpu = self.entries[index.0 as usize].target.get() as usize;
         let (entries, deliveries) = (&mut self.entries, &mut self.deliveries);
         deliveries[cpu]
@@ -528,7 +747,9 @@ impl VirtualGic {
         target: VirtualCpuId,
         group: InterruptGroup,
     ) -> Result<(), RuntimeError> {
-        self.entry_mut(interrupt, target)?.group = group;
+        let index = self.lookup(interrupt, target)?;
+        self.entries[index.0 as usize].group = group;
+        self.changed(index);
         Ok(())
     }
 
@@ -538,7 +759,15 @@ impl VirtualGic {
         target: VirtualCpuId,
         trigger: InterruptTrigger,
     ) -> Result<(), RuntimeError> {
-        self.entry_mut(interrupt, target)?.trigger = trigger;
+        let index = self.lookup(interrupt, target)?;
+        let entry = &mut self.entries[index.0 as usize];
+        if entry.trigger == trigger {
+            return Ok(());
+        }
+        entry.trigger = trigger;
+        if trigger == InterruptTrigger::Level && entry.line_asserted {
+            self.inject(interrupt, target)?;
+        }
         Ok(())
     }
 
@@ -562,36 +791,32 @@ impl VirtualGic {
         }
         self.validate_cpu(target)?;
         let index = self.lookup_shared(interrupt)?;
-        let entry = &self.entries[index.0 as usize];
-        if entry.list_state.is_some() {
-            return Err(RuntimeError::Busy);
-        }
-        self.validate_ready_position(index)?;
-        let was_ready = entry.ready_position.is_some();
-        let old_cpu = entry.target.get() as usize;
-        let new_cpu = target.get() as usize;
-        if old_cpu == new_cpu {
+        self.entries[index.0 as usize].route_target = target;
+        self.changed(index);
+        self.settle_unlisted(index)?;
+        self.reconcile_ready(index)?;
+        Ok(())
+    }
+
+    /// Publishes a device level transition; an asserted line is retained across EOI.
+    pub fn set_line(
+        &mut self,
+        interrupt: GicInterruptId,
+        target: VirtualCpuId,
+        asserted: bool,
+    ) -> Result<(), RuntimeError> {
+        let index = self.lookup(interrupt, target)?;
+        if self.entries[index.0 as usize].line_asserted == asserted {
             return Ok(());
         }
-        if was_ready {
-            self.deliveries[new_cpu]
-                .ready
-                .can_insert()
-                .map_err(map_ready_runtime)?;
-            let (entries, deliveries) = (&mut self.entries, &mut self.deliveries);
-            deliveries[old_cpu]
-                .ready
-                .remove(index, &mut EntryStore(entries));
+        self.entries[index.0 as usize].line_asserted = asserted;
+        if asserted {
+            self.inject(interrupt, target)
+        } else if self.entries[index.0 as usize].trigger == InterruptTrigger::Level {
+            self.clear_pending(interrupt, target)
+        } else {
+            Ok(())
         }
-        self.entries[index.0 as usize].target = target;
-        if was_ready {
-            let (entries, deliveries) = (&mut self.entries, &mut self.deliveries);
-            deliveries[new_cpu]
-                .ready
-                .insert(index, &mut EntryStore(entries))
-                .map_err(map_ready_runtime)?;
-        }
-        Ok(())
     }
 
     pub fn inject(
@@ -605,6 +830,7 @@ impl VirtualGic {
         }
         let entry = &mut self.entries[index.0 as usize];
         entry.pending_command = PendingCommand::Assert;
+        self.changed(index);
         self.reconcile_ready(index)?;
         Ok(())
     }
@@ -616,11 +842,19 @@ impl VirtualGic {
     ) -> Result<(), RuntimeError> {
         let index = self.lookup(interrupt, target)?;
         let entry = &mut self.entries[index.0 as usize];
+        if entry.sgi_sources == 0
+            && entry.pending_command != PendingCommand::Assert
+            && !entry.list_state.is_some_and(ListState::pending)
+        {
+            return Ok(());
+        }
+        entry.sgi_sources = 0;
         entry.pending_command = if entry.list_state.is_some() {
             PendingCommand::Clear
         } else {
             PendingCommand::None
         };
+        self.changed(index);
         self.reconcile_ready(index)?;
         Ok(())
     }
@@ -640,7 +874,7 @@ impl VirtualGic {
         Ok(InterruptSnapshot {
             enabled: entry.enabled,
             routed: entry.routed,
-            pending,
+            pending: pending || entry.sgi_sources != 0,
             active: entry.list_state.is_some_and(ListState::active),
             listed: entry.list_state.is_some(),
             priority: entry.priority,
@@ -680,6 +914,9 @@ impl VirtualGic {
             let entry = &mut self.entries[index.0 as usize];
             entry.list_state = None;
             entry.listed_position = None;
+            if !validated.indices.contains(&Some(index)) {
+                self.settle_unlisted(index)?;
+            }
             self.reconcile_ready(index)?;
         }
         for (listed, index) in slots
@@ -689,6 +926,7 @@ impl VirtualGic {
         {
             let entry = &mut self.entries[index.0 as usize];
             entry.list_state = Some(listed.state);
+            entry.sgi_source = listed.source;
             if entry.list_state.is_some() {
                 entry.listed_position = Some(self.deliveries[cpu].listed.len());
                 self.deliveries[cpu]
@@ -724,11 +962,16 @@ impl VirtualGic {
             let entry = &mut self.entries[index.0 as usize];
             let mut state = Some(listed.state);
             state = apply_pending_command(entry, state);
-            state = apply_disabled_policy(entry, state, self.distributor_enabled);
+            state = apply_disabled_policy(
+                entry,
+                state,
+                self.distributor_enabled && entry.target == entry.route_target,
+            );
             let Some(state) = state else {
                 entry.list_state = None;
                 entry.listed_position = None;
                 *slot = None;
+                self.settle_unlisted(index)?;
                 self.reconcile_ready(index)?;
                 continue;
             };
@@ -736,7 +979,8 @@ impl VirtualGic {
             listed.priority = entry.priority;
             listed.group = entry.group;
             listed.state = state;
-            listed.request_eoi_maintenance = entry.maintenance_on_eoi || !entry.id.is_private();
+            listed.request_eoi_maintenance =
+                entry.maintenance_on_eoi || !entry.id.is_private() || entry.id.get() < 16;
             *slot = Some(listed);
             self.reconcile_ready(index)?;
         }
@@ -755,6 +999,12 @@ impl VirtualGic {
             };
             let entry = &mut self.entries[index.0 as usize];
             entry.pending_command = PendingCommand::None;
+            entry.sgi_source = if entry.sgi_sources != 0 {
+                entry.sgi_sources.trailing_zeros() as u8
+            } else {
+                0
+            };
+            entry.sgi_sources &= !(1 << entry.sgi_source);
             let state = ListState::Pending;
             entry.list_state = Some(state);
             entry.listed_position = Some(self.deliveries[cpu].listed.len());
@@ -763,11 +1013,14 @@ impl VirtualGic {
                 .push(index)
                 .map_err(map_ready_runtime)?;
             *slot = Some(ListEntry {
+                source: entry.sgi_source,
                 interrupt: entry.id,
                 priority: entry.priority,
                 group: entry.group,
                 state,
-                request_eoi_maintenance: entry.maintenance_on_eoi || !entry.id.is_private(),
+                request_eoi_maintenance: entry.maintenance_on_eoi
+                    || !entry.id.is_private()
+                    || entry.id.get() < 16,
             });
             filled += 1;
         }
@@ -858,6 +1111,9 @@ impl VirtualGic {
             .enumerate()
             .filter_map(|(position, slot)| slot.as_ref().map(|listed| (position, listed)))
         {
+            if listed.source >= 8 || (listed.interrupt.get() >= 16 && listed.source != 0) {
+                return Err(RuntimeError::ResidencyMismatch);
+            }
             let id = listed.interrupt.get() as usize;
             let word = id / 64;
             let bit = 1u64 << (id % 64);
@@ -948,6 +1204,9 @@ impl VirtualGic {
     }
 
     fn lookup_shared(&self, interrupt: GicInterruptId) -> Result<EntryIndex, RuntimeError> {
+        if interrupt.is_private() {
+            return Err(RuntimeError::InvalidRoute);
+        }
         let slot = self
             .shared
             .get(shared_offset(interrupt))
@@ -1075,10 +1334,16 @@ fn apply_disabled_policy(
     }
     match state {
         Some(ListState::Pending) => {
+            if entry.id.get() < 16 {
+                entry.sgi_sources |= 1 << entry.sgi_source;
+            }
             entry.pending_command = PendingCommand::Assert;
             None
         }
         Some(ListState::PendingActive) => {
+            if entry.id.get() < 16 {
+                entry.sgi_sources |= 1 << entry.sgi_source;
+            }
             entry.pending_command = PendingCommand::Assert;
             Some(ListState::Active)
         }

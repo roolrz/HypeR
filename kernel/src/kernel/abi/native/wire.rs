@@ -1379,3 +1379,49 @@ pub(super) fn encode_virtual_machine_platform_info(
     );
     bytes
 }
+
+pub(super) fn encode_virtual_machine_power_request(
+    request: hyper::vm::arm::psci::Request,
+) -> [u8; core::mem::size_of::<hyper::abi::native::HyperNativeVirtualMachinePowerRequest>()] {
+    use hyper::abi::native::{
+        HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_OFF, HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_ON,
+        HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_OFF,
+        HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_RESET,
+        HyperNativeVirtualMachinePowerRequest as Record,
+    };
+    use hyper::vm::arm::psci::Operation;
+    let mut record = [0_u8; core::mem::size_of::<Record>()];
+    let operation = match request.operation {
+        Operation::CpuOn => HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_ON,
+        Operation::CpuOff => HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_OFF,
+        Operation::SystemOff => HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_OFF,
+        Operation::SystemReset => HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_RESET,
+    };
+    write_u64(&mut record, core::mem::offset_of!(Record, id), request.id);
+    write_u32(
+        &mut record,
+        core::mem::offset_of!(Record, vcpu),
+        request.vcpu,
+    );
+    write_u32(
+        &mut record,
+        core::mem::offset_of!(Record, operation),
+        operation as u32,
+    );
+    write_u32(
+        &mut record,
+        core::mem::offset_of!(Record, target),
+        request.target,
+    );
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(Record, entry),
+        request.entry,
+    );
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(Record, context),
+        request.context,
+    );
+    record
+}

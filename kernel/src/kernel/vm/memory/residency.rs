@@ -84,7 +84,7 @@ impl GuestResidencyLeaveFailure {
 /// # Safety
 ///
 /// The caller must own the stopped vCPU carrying `vm`, retain this VM's
-/// exclusive execution claim, and keep local interrupts masked.
+/// execution claim for this CPU, and keep local interrupts masked.
 pub(in crate::kernel) unsafe fn activate(
     vm: &crate::kernel::vm::registry::VmBinding,
 ) -> Result<GuestResidencyClaim, Error> {
@@ -180,8 +180,8 @@ pub(super) fn publish_current_residency(incarnation: Stage2Incarnation) {
             "HypeR: active stage-2 mapping has no registered CPU owner"
         ));
     };
-    // Active mapping publication already completed the architecture-local
-    // invalidation. Updating this CPU-private observation avoids repeating a
+    // Active mapping publication already completed architecture-required
+    // visibility and invalidation (broadcast for shared AArch64 mappings). Updating this CPU-private observation avoids repeating a
     // whole-context activation at the following IRQ-tail resume.
     store_stage2_observation(
         cpu,

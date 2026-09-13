@@ -32,6 +32,8 @@ pub(crate) enum GuestSyncAction {
     Stop(GuestSyncFailure),
     /// Complete WFI and return through the typed stopped-vCPU boundary.
     Wait,
+    /// HVC already advanced ELR; park until userspace completes its request.
+    FirmwareWait,
 }
 
 /// Typed failure which prevented a decoded synchronous exit from completing.
@@ -48,7 +50,11 @@ pub(crate) enum GuestSyncFailure {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GuestSyncExit {
     SystemRegister(SystemRegisterExit),
-    HypervisorCall { function: u64, argument: u64 },
+    HypervisorCall {
+        function: u64,
+        argument: u64,
+        extra: [u64; 2],
+    },
     SecureMonitorCall,
     Wait(WaitInstruction),
     Undefined(UndefinedExit),
@@ -226,15 +232,24 @@ fn validate_owned_exit_completion() -> bool {
     general[0] = registers::SMCCC_VERSION;
     general[1] = 0xfeed;
     let hvc_syndrome = registers::ESR_EC_HVC64 << registers::ESR_EC_SHIFT;
-    let Some(GuestSyncExit::HypervisorCall { function, argument }) = decode_guest_sync(
+    let Some(GuestSyncExit::HypervisorCall {
+        function,
+        argument,
+        extra,
+    }) = decode_guest_sync(
         hvc_syndrome,
         &general,
         0x8200,
         registers::SPSR_EL1H_AND_DAIF,
-    ) else {
+    )
+    else {
         return false;
     };
-    let hvc_exit = GuestSyncExit::HypervisorCall { function, argument };
+    let hvc_exit = GuestSyncExit::HypervisorCall {
+        function,
+        argument,
+        extra,
+    };
     let mut mismatch_pc = 0x8200;
     let mut mismatch_pstate = registers::SPSR_EL1H_AND_DAIF;
     if apply_guest_sync_action(
@@ -438,11 +453,15 @@ pub(crate) fn apply_guest_sync_action(
             advance(program_counter);
             true
         }
+        GuestSyncAction::FirmwareWait => true,
         GuestSyncAction::Stop(_) => false,
     }
 }
 
 fn guest_sync_action_matches(exit: GuestSyncExit, action: GuestSyncAction) -> bool {
+    if action == GuestSyncAction::FirmwareWait {
+        return matches!(exit, GuestSyncExit::HypervisorCall { .. });
+    }
     if matches!(action, GuestSyncAction::Stop(_)) {
         return true;
     }
@@ -614,6 +633,7 @@ pub(crate) fn decode_guest_sync(
             registers::ESR_EC_HVC64 => GuestSyncExit::HypervisorCall {
                 function: read_general(general, 0),
                 argument: read_general(general, 1),
+                extra: [read_general(general, 2), read_general(general, 3)],
             },
             registers::ESR_EC_SMC64 => GuestSyncExit::SecureMonitorCall,
             registers::ESR_EC_WFX => {
@@ -642,12 +662,12 @@ pub(crate) fn handle_guest_sync(
         GuestSyncExit::SystemRegister(exit) => {
             emulate_system_register(context, vcpu_id, interrupts, exit)
         }
-        GuestSyncExit::HypervisorCall { function, argument } => {
-            emulate_hypercall(function, argument)
-        }
+        GuestSyncExit::HypervisorCall {
+            function, argument, ..
+        } => emulate_hypercall(function, argument),
         GuestSyncExit::SecureMonitorCall => GuestSyncAction::WriteRegister {
             register: 0,
-            value: registers::SMCCC_NOT_SUPPORTED,
+            value: registers::SMCCC_NOT_SUPPORTED as u32 as u64,
             advance: false,
         },
         GuestSyncExit::Wait(WaitInstruction::Event) => GuestSyncAction::Advance,
@@ -665,7 +685,14 @@ fn emulate_hypercall(function: u64, argument: u64) -> GuestSyncAction {
         registers::PSCI_FEATURES => match argument {
             registers::PSCI_VERSION
             | registers::PSCI_FEATURES
-            | registers::PSCI_MIGRATE_INFO_TYPE => 0,
+            | registers::PSCI_MIGRATE_INFO_TYPE
+            | 0x8400_0002
+            | 0x8400_0003
+            | 0xc400_0003
+            | 0x8400_0004
+            | 0xc400_0004
+            | 0x8400_0008
+            | 0x8400_0009 => 0,
             _ => registers::SMCCC_NOT_SUPPORTED,
         },
         _ => registers::SMCCC_NOT_SUPPORTED,
@@ -675,7 +702,7 @@ fn emulate_hypercall(function: u64, argument: u64) -> GuestSyncAction {
     // exception-generating instruction has already been consumed.
     GuestSyncAction::WriteRegister {
         register: 0,
-        value: result,
+        value: result as u32 as u64,
         advance: false,
     }
 }

@@ -64,8 +64,14 @@ if rg -q 'active_vcpu' "$receive"; then
     echo 'host console input must not depend on a CPU-local active-vCPU borrow' >&2
     exit 1
 fi
-require_order "$receive" '\.receive_from_virtual_serial\(' 'publish_interrupt_reconcile\(' \
+require_order "$receive" '\.receive_from_virtual_serial\(' 'publish_changed_interrupts\(' \
     'saved device/controller mutation must complete before durable publication'
+require_order "$execution" 'take_reconcile_targets\(' 'publish_interrupt_reconcile\(' \
+    'changed interrupt targets must be collected before per-vCPU durable publication'
+rg -q 'while targets != 0' "$execution" && rg -q 'targets &= targets - 1' "$execution" || {
+    echo 'interrupt reconciliation must visit every changed vCPU target' >&2
+    exit 1
+}
 
 for method in "$console_access" "$console_receive"; do
     method_updates=$(rg -o 'update\(self\.console_interrupt' "$method" | wc -l | tr -d ' ')

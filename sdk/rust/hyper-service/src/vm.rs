@@ -354,6 +354,8 @@ pub enum InstanceStatus {
     Installed,
     Running,
     Stopped,
+    /// The retired instance requests a fresh VM from its manager.
+    RebootRequested,
     Failed(InstanceFailure),
 }
 
@@ -366,6 +368,7 @@ impl InstanceStatus {
             Self::Installed => encode_message(KIND_INSTANCE_STATUS, 3, 0),
             Self::Running => encode_message(KIND_INSTANCE_STATUS, 4, 0),
             Self::Stopped => encode_message(KIND_INSTANCE_STATUS, 5, 0),
+            Self::RebootRequested => encode_message(KIND_INSTANCE_STATUS, 7, 0),
             Self::Failed(reason) => encode_message(KIND_INSTANCE_STATUS, 6, reason as u8),
         }
     }
@@ -379,6 +382,7 @@ impl InstanceStatus {
             (3, 0) => Some(Self::Installed),
             (4, 0) => Some(Self::Running),
             (5, 0) => Some(Self::Stopped),
+            (7, 0) => Some(Self::RebootRequested),
             (6, reason) => Some(Self::Failed(InstanceFailure::from_wire(reason)?)),
             _ => None,
         }
@@ -398,6 +402,7 @@ impl InstanceStatus {
                 | (Some(Self::Installed), Self::Running)
                 | (Some(Self::Installed), Self::Failed(_))
                 | (Some(Self::Running), Self::Stopped)
+                | (Some(Self::Running), Self::RebootRequested)
                 | (Some(Self::Running), Self::Failed(_))
         )
     }
@@ -405,7 +410,7 @@ impl InstanceStatus {
     #[must_use]
     pub const fn terminal(self) -> Option<InstanceEvent> {
         match self {
-            Self::Stopped => Some(InstanceEvent::Stopped),
+            Self::Stopped | Self::RebootRequested => Some(InstanceEvent::Stopped),
             Self::Failed(reason) => Some(InstanceEvent::Failed(reason)),
             Self::ImageValidated | Self::MemoryPrepared | Self::Installed | Self::Running => None,
         }
@@ -480,7 +485,11 @@ impl InstanceTracker {
         !self.protocol_failed
             && matches!(
                 self.last,
-                Some(InstanceStatus::Stopped | InstanceStatus::Failed(_))
+                Some(
+                    InstanceStatus::Stopped
+                        | InstanceStatus::RebootRequested
+                        | InstanceStatus::Failed(_)
+                )
             )
     }
 
@@ -549,6 +558,33 @@ mod tests {
         StopAction,
     };
     use hyper_os::handle::Rights;
+
+    #[test]
+    fn reboot_is_terminal_only_after_running_and_requires_successful_exit() {
+        let mut tracker = InstanceTracker::new();
+        assert!(!InstanceStatus::RebootRequested.follows(None));
+        assert_eq!(
+            InstanceStatus::decode(&InstanceStatus::RebootRequested.encode()),
+            Some(InstanceStatus::RebootRequested)
+        );
+        for status in [
+            InstanceStatus::ImageValidated,
+            InstanceStatus::MemoryPrepared,
+            InstanceStatus::Installed,
+            InstanceStatus::Running,
+            InstanceStatus::RebootRequested,
+        ] {
+            assert!(tracker.observe(status).is_ok());
+        }
+        assert!(tracker.is_terminal());
+        assert_eq!(tracker.finish(true), InstanceEvent::Stopped);
+        assert_eq!(
+            tracker.finish(false),
+            InstanceEvent::Failed(InstanceFailure::Runtime)
+        );
+        assert!(tracker.observe(InstanceStatus::Running).is_err());
+        assert!(!tracker.is_terminal());
+    }
 
     #[test]
     fn provisioned_capabilities_retain_only_required_forwarding_authority() {

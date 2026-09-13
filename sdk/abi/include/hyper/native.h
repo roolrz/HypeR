@@ -167,6 +167,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SIGNAL_CONSOLE_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_CONSOLE_WRITABLE (UINT64_C(1) << 1)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_POWER_REQUEST (UINT64_C(1) << 1)
+#define HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_VCPU_TERMINATED (UINT64_C(1) << 2)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED (UINT64_C(1) << 0)
 
 #define HYPER_NATIVE_PRIVATE_MAPPING_COPY_ON_WRITE UINT64_C(0)
@@ -206,6 +208,11 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_AARCH64 UINT64_C(1)
 #define HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_RISCV64 UINT64_C(2)
 #define HYPER_NATIVE_VIRTUAL_MACHINE_ARCHITECTURE_X86_64 UINT64_C(3)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_MAX_VCPUS UINT64_C(8)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_ON UINT64_C(1)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_OFF UINT64_C(2)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_OFF UINT64_C(3)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_RESET UINT64_C(4)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE UINT64_C(1)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GUEST_RAM_BASE UINT64_C(1073741824)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DTB_OFFSET UINT64_C(65536)
@@ -421,6 +428,9 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_VMO_CREATE_SNAPSHOT UINT64_C(114)
 #define HYPER_NATIVE_SYS_FILE_CREATE_SNAPSHOT UINT64_C(115)
 #define HYPER_NATIVE_SYS_VMAR_MAP_PRIVATE UINT64_C(116)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_POWER_REQUEST UINT64_C(117)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_COMPLETE_POWER_REQUEST UINT64_C(118)
+#define HYPER_NATIVE_SYS_VIRTUAL_MACHINE_OPEN_VCPU UINT64_C(119)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -899,6 +909,26 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, argument3
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, vcpu_id) == 48, "virtual_cpu_bootstrap.vcpu_id offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, flags) == 52, "virtual_cpu_bootstrap.flags offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_bootstrap_t, reserved) == 56, "virtual_cpu_bootstrap.reserved offset");
+
+#define HYPER_NATIVE_VIRTUAL_MACHINE_POWER_REQUEST_MIN_SIZE UINT64_C(40)
+typedef struct hyper_native_virtual_machine_power_request_t {
+    uint64_t id;
+    uint32_t vcpu;
+    uint32_t operation;
+    uint32_t target;
+    uint32_t reserved;
+    uint64_t entry;
+    uint64_t context;
+} hyper_native_virtual_machine_power_request_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_machine_power_request_t) == 40, "virtual_machine_power_request size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_machine_power_request_t) == 8, "virtual_machine_power_request alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_power_request_t, id) == 0, "virtual_machine_power_request.id offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_power_request_t, vcpu) == 8, "virtual_machine_power_request.vcpu offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_power_request_t, operation) == 12, "virtual_machine_power_request.operation offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_power_request_t, target) == 16, "virtual_machine_power_request.target offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_power_request_t, reserved) == 20, "virtual_machine_power_request.reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_power_request_t, entry) == 24, "virtual_machine_power_request.entry offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_power_request_t, context) == 32, "virtual_machine_power_request.context offset");
 
 #define HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE UINT64_C(32)
 typedef struct hyper_native_virtual_machine_info_t {

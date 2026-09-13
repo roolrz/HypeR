@@ -1224,8 +1224,28 @@ impl Scheduler {
         self.select_cpu(preferred_cpu, affinity).map(|_| ())
     }
 
-    pub fn reserve_vcpu_thread(&mut self, cpu: CpuIndex) -> Result<ThreadReservation, Error> {
-        self.schedulable_cpu_slot(cpu)?;
+    /// Spreads one immutable guest topology over currently admitted host CPUs.
+    /// The boot vCPU retains creator locality; subsequent members wrap through
+    /// schedulable CPUs. Readiness itself does not rebalance dormant Threads,
+    /// so assigning every member to the creator would serialize guest SMP.
+    pub fn reserve_vcpu_thread(
+        &mut self,
+        preferred: CpuIndex,
+        topology_index: u32,
+    ) -> Result<ThreadReservation, Error> {
+        let count = (0..hyper::cpu::MAX_CPUS)
+            .filter_map(CpuIndex::new)
+            .filter(|cpu| self.cpu_is_schedulable(*cpu))
+            .count();
+        if count == 0 {
+            return Err(Error::NoRegisteredCpuInAffinity);
+        }
+        let ordinal = topology_index as usize % count;
+        let cpu = (0..hyper::cpu::MAX_CPUS)
+            .filter_map(|offset| CpuIndex::new((preferred.get() + offset) % hyper::cpu::MAX_CPUS))
+            .filter(|cpu| self.cpu_is_schedulable(*cpu))
+            .nth(ordinal)
+            .ok_or(Error::NoRegisteredCpuInAffinity)?;
         self.reserve_thread_slot(cpu)
     }
 

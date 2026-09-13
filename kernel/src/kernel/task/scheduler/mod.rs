@@ -687,12 +687,14 @@ pub(crate) fn discard_dormant_kernel_thread(id: ThreadId) -> Result<(), Error> {
 
 pub(in crate::kernel) fn vcpu_create(
     name: &str,
+    topology_index: u32,
     execution: ExternalThreadExecution,
     resources: ThreadResourceOwnership,
     entry: KernelThreadEntry,
 ) -> Result<DormantVcpuThread, Error> {
     let cpu = current_cpu()?;
-    let reservation = reserve_thread(|scheduler| scheduler.reserve_vcpu_thread(cpu))?;
+    let reservation =
+        reserve_thread(|scheduler| scheduler.reserve_vcpu_thread(cpu, topology_index))?;
     let id = reservation.id();
     let thread = match prepare_boxed_thread(Thread::vcpu(
         id,

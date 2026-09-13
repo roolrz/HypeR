@@ -195,6 +195,18 @@ QEMU contract requires repeated initramfs timer wakeups after `/init`, proving
 that delivery survives successive list-register lifecycles rather than only
 successful guest entry or the first interrupt.
 
+Arm guest SMP admits 1..8 immutable vCPU identities on both GIC backends.
+Guest CPU on/off is independent of the frozen host topology: PSCI requests
+park or restart preallocated vCPU Threads through runtime-approved power
+transitions. A VM-level WaitSet source reports per-vCPU requests and terminal
+execution without a userspace thread per vCPU. Guest memory execution claims
+are concurrent across host CPUs, while each individual vCPU payload and local
+hardware context remain scheduler-owned. Retirement closes run admission and
+waits for every claim, CPU context, translation residency, and configured Thread
+before releasing backing storage or reusing the VMID. See
+[guest power requests and SMP](vm-bundle.md#guest-power-requests-and-smp) for the
+Native completion protocol and vm-runtime/vm-manager responsibilities.
+
 ## Kernel-object ownership
 
 Kernel objects are the standard identity mechanism for service entities with
@@ -420,7 +432,7 @@ arena remains owned by the permanent address space; removing aliases does not
 reclaim its backing pages. Native Process roots are installed only after this
 bootstrap transition is complete.
 
-SMP admission publishes a `FrozenTopology` once. `HypeR` has no CPU hotplug:
+Host SMP admission publishes a `FrozenTopology` once. Host CPU hotplug is not supported:
 late replicated-local transactions snapshot this immutable participant set. A
 future hotplug implementation must either join the in-flight snapshot or
 replay every live local mapping before publishing a new CPU online.

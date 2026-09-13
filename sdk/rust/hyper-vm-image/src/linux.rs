@@ -17,6 +17,7 @@ enum BootProtocol {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BootPlan {
     protocol: BootProtocol,
+    vcpu_count: u32,
     memory: AddressRange,
     kernel: AddressRange,
     initramfs: Option<AddressRange>,
@@ -39,7 +40,7 @@ impl BootPlan {
     }
     #[must_use]
     pub const fn vcpu_count(&self) -> u32 {
-        1
+        self.vcpu_count
     }
     #[must_use]
     pub const fn memory_base(&self) -> u64 {
@@ -134,6 +135,7 @@ pub fn validate_reference<S: ReadAt>(
         })?;
     Ok(BootPlan {
         protocol,
+        vcpu_count: image.vcpu_count,
         memory: AddressRange { start: base, end },
         kernel,
         initramfs,

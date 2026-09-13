@@ -35,10 +35,10 @@ pub(crate) unsafe fn activate(
                 release_execution_or_fail(execution, execution_claim);
                 return Err(HardwareTransitionError::InvalidExecution);
             };
-            // SAFETY: The exclusive execution claim above proves that no other
-            // CPU can execute this VM while the current CPU selects its
-            // mapping epoch. The stopped vCPU and masked IRQ requirements are
-            // inherited from this function.
+            // SAFETY: The execution claim exclusively owns this physical CPU
+            // for this VM. Shared address-space serialization protects epoch
+            // selection while other vCPUs execute. This vCPU is stopped and
+            // local IRQs are masked as required by the caller.
             let residency = match unsafe { super::memory::activate(binding) } {
                 Ok(residency) => residency,
                 Err(error) => {
@@ -185,6 +185,14 @@ pub(crate) unsafe fn activate(
                 hardware,
             ),
         };
+    }
+    // Refilling can retire a listed SPI and move its pending delivery to a
+    // different vCPU. Publish those prompts before entering guest execution;
+    // waiting until this vCPU next detaches could strand a remote WFI waiter.
+    // SAFETY: Publication succeeded, no callback borrow is live, and local
+    // interrupts remain masked while the pinned owner is borrowed immutably.
+    if let Some(binding) = unsafe { &*execution }.vm_binding() {
+        binding.publish_changed_interrupts();
     }
     Ok(())
 }
@@ -373,6 +381,7 @@ fn release_execution_or_fail(
             "HypeR: VM execution capability release failed: {error:?}"
         ));
     }
+    binding.publish_changed_interrupts();
 }
 
 fn restore_reconcile_if_claimed(execution: &super::VcpuExecution, claimed: bool) {

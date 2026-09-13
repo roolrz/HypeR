@@ -147,6 +147,27 @@ impl VmInterruptController {
         })
     }
 
+    /// Requires the caller to have detached and retired the old hardware bank.
+    pub fn reset_vcpu(&self, vcpu: VirtualCpuId) -> Result<(), VgicError> {
+        let v2 = super::vgic::v2::guest_physical().is_some();
+        self.with(|controller| {
+            controller.reset_vcpu(
+                vcpu,
+                if v2 {
+                    InterruptGroup::Group0
+                } else {
+                    InterruptGroup::Group1
+                },
+                v2,
+            )?;
+            controller.set_enabled(self.timer_interrupt, vcpu, true)
+        })
+    }
+
+    pub fn take_reconcile_targets(&self) -> u64 {
+        self.with(VirtualGic::take_reconcile_targets)
+    }
+
     pub(crate) fn enable_distributor_for_validation(&self) {
         self.state
             .with(|state| state.controller.set_distributor_enabled(true));
@@ -181,7 +202,7 @@ impl VmInterruptController {
         &self,
         vcpu: VirtualCpuId,
         slots: &mut [Option<ListEntry>],
-        register: DecodedRegister,
+        access: hyper::vm::arm::gic::mmio::DecodedAccess,
         operation: MmioOperation,
     ) -> Result<Option<u64>, AccessError> {
         self.state.with(|state| {
@@ -189,10 +210,14 @@ impl VmInterruptController {
                 .controller
                 .synchronize(vcpu, slots)
                 .map_err(AccessError::Controller)?;
+            let register = access.register();
+            let bank = VirtualCpuId::new(access.redistributor().unwrap_or(vcpu.get()));
             let value = match (register, operation) {
-                (DecodedRegister::Service(register), MmioOperation::Read) => {
-                    Some(state.registers.read(register))
-                }
+                (DecodedRegister::Service(register), MmioOperation::Read) => Some(
+                    state
+                        .registers
+                        .read_for_cpu(register, bank.get(), self.vcpu_count),
+                ),
                 (DecodedRegister::Service(register), MmioOperation::Write(value)) => {
                     state.registers.write(register, value);
                     if register == hyper::vm::arm::gic::mmio::ServiceRegister::DistributorControlV2
@@ -202,11 +227,11 @@ impl VmInterruptController {
                     None
                 }
                 (DecodedRegister::Model(register), MmioOperation::Read) => Some(
-                    read_model_register(&state.controller, vcpu, register)
+                    read_model_register(&state.controller, bank, register)
                         .map_err(AccessError::Model)?,
                 ),
                 (DecodedRegister::Model(register), MmioOperation::Write(value)) => {
-                    write_model_register(&mut state.controller, vcpu, register, value)
+                    write_model_register(&mut state.controller, bank, register, value)
                         .map_err(AccessError::Model)?;
                     None
                 }

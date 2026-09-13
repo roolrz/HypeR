@@ -4,3 +4,5 @@
 //! Reusable Arm virtual-machine mechanisms.
 
 pub mod gic;
+
+pub mod psci;

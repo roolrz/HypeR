@@ -28,3 +28,5 @@ pub(crate) enum ReconcileObservationError {
     Registry(registry::Error),
     Scheduler(crate::kernel::task::scheduler::Error),
 }
+
+mod power;

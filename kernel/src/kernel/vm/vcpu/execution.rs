@@ -44,27 +44,55 @@ impl VcpuExecution {
         core::mem::size_of::<VcpuReapPublication>()
     }
 
-    pub(in crate::kernel) fn installed(
+    // Keep architectural register construction in its own measured frame;
+    // callers retain only bootstrap metadata and the final heap owner.
+    #[inline(never)]
+    pub(in crate::kernel) fn try_installed(
         vm: crate::kernel::vm::registry::VmBinding,
         vcpu_id: u32,
-        context: crate::hal::vm::VcpuContext,
+        bootstrap: Option<crate::kernel::vm::objects::VirtualCpuBootstrap>,
         entry_ready: &crate::hal::vm::VmEntryReady,
-    ) -> Result<Self, crate::kernel::task::thread::Error> {
-        let mut hardware = crate::hal::vm::VcpuHardwareState::new(context, entry_ready);
-        crate::hal::vm::initialize_vcpu_interrupts(&mut hardware)?;
+    ) -> Result<alloc::boxed::Box<core::cell::UnsafeCell<Self>>, crate::kernel::task::thread::Error>
+    {
+        // Allocate before constructing architectural state. Neither the VM
+        // preparation loop nor its syscall caller carries a full register bank.
+        let mut storage = hyper::mm::try_box_uninit::<core::cell::UnsafeCell<Self>>()
+            .map_err(|_| crate::kernel::task::thread::Error::Allocation)?;
         let endpoint = vm
             .endpoint_owner(vcpu_id)
             .map_err(|_| crate::kernel::task::thread::Error::InvalidPlacement)?;
-        let reap = hyper::mm::try_box(VcpuReapPublication::new(endpoint, vcpu_id))
+        let reap = hyper::mm::try_box(VcpuReapPublication::new(endpoint, vcpu_id, vm.lifecycle()))
             .map_err(|_| crate::kernel::task::thread::Error::Allocation)?;
-        Ok(Self {
-            vm: VcpuVm::Installed(vm),
-            instruction_context: hyper::vm::translation::GuestInstructionContext::new(),
-            terminal_mmio_report: None,
-            reap: ReapOwnership::Installed(reap),
-            vcpu_id,
-            hardware,
-        })
+        let mut context = match bootstrap {
+            Some(bootstrap) => crate::hal::vm::prepare_native_bootstrap_context(
+                bootstrap.entry,
+                bootstrap.stack,
+                bootstrap.arguments,
+            )
+            .map_err(|_| crate::kernel::task::thread::Error::InvalidPlacement)?,
+            None => crate::hal::vm::VcpuContext::new(0),
+        };
+        crate::hal::vm::set_virtual_count(&mut context, 0, 0);
+        let target = storage.as_mut_ptr().cast::<Self>();
+        // SAFETY: The unique allocation is aligned for UnsafeCell<Self>, whose
+        // representation is transparent. Each field is written exactly once;
+        // no fallible operation occurs until all fields have owners. No full
+        // VcpuExecution temporary is constructed on the kernel Thread stack.
+        unsafe {
+            core::ptr::addr_of_mut!((*target).vm).write(VcpuVm::Installed(vm));
+            core::ptr::addr_of_mut!((*target).instruction_context)
+                .write(hyper::vm::translation::GuestInstructionContext::new());
+            core::ptr::addr_of_mut!((*target).terminal_mmio_report).write(None);
+            core::ptr::addr_of_mut!((*target).reap).write(ReapOwnership::Installed(reap));
+            core::ptr::addr_of_mut!((*target).vcpu_id).write(vcpu_id);
+            core::ptr::addr_of_mut!((*target).hardware)
+                .write(crate::hal::vm::VcpuHardwareState::new(context, entry_ready));
+        }
+        // SAFETY: Every field was initialized above; ownership now guarantees
+        // ordinary cleanup if interrupt initialization fails.
+        let mut execution = unsafe { storage.assume_init() };
+        crate::hal::vm::initialize_vcpu_interrupts(&mut execution.get_mut().hardware)?;
+        Ok(execution)
     }
 
     pub(in crate::kernel) fn vm_binding(&self) -> Option<&crate::kernel::vm::registry::VmBinding> {
@@ -226,6 +254,7 @@ impl crate::kernel::task::thread::ExternalThreadExecutionLifecycle for VcpuExecu
 /// Exact terminal publication extracted only after scheduler detachment.
 #[must_use = "the canonical vCPU terminal transition must be published"]
 pub(in crate::kernel) struct VcpuReapPublication {
+    owner: hyper::mm::FallibleArc<crate::kernel::vm::installed::InstalledMachine>,
     endpoint: hyper::mm::FallibleArc<crate::kernel::vm::endpoint::VcpuEndpoint>,
     vcpu: u32,
     terminal: Option<(ThreadId, crate::kernel::vm::endpoint_state::ClosureReason)>,
@@ -235,8 +264,10 @@ impl VcpuReapPublication {
     const fn new(
         endpoint: hyper::mm::FallibleArc<crate::kernel::vm::endpoint::VcpuEndpoint>,
         vcpu: u32,
+        owner: hyper::mm::FallibleArc<crate::kernel::vm::installed::InstalledMachine>,
     ) -> Self {
         Self {
+            owner,
             endpoint,
             vcpu,
             terminal: None,
@@ -268,7 +299,14 @@ impl VcpuReapPublication {
         };
         self.endpoint
             .publish_reaped(thread, reason)
-            .map_err(|_| crate::kernel::task::thread::ThreadRetirementError::PublicationRejected)
+            .map_err(|_| crate::kernel::task::thread::ThreadRetirementError::PublicationRejected)?;
+        if matches!(
+            reason,
+            crate::kernel::vm::endpoint_state::ClosureReason::Guest(_)
+        ) {
+            self.owner.publish_vcpu_terminal();
+        }
+        Ok(())
     }
 }
 

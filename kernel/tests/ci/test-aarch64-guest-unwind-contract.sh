@@ -150,3 +150,9 @@ mutate 'active address spaces must not reach field destruction' \
     src/kernel/vm/memory.rs 's/destruction_is_safe(state)/true/'
 mutate 'repeated VMID activation must preserve Active ownership' \
     src/kernel/vm/memory/construction.rs 's/activation_may_begin(state)/true/'
+
+mutate 'guest wait selection must reject failed architectural state application' \
+    src/arch/aarch64/exception.rs 's/if !applied {/if false {/'
+mutate 'firmware waits must not advance HVC return PC a second time' \
+    src/arch/aarch64/vsysreg.rs \
+    's/GuestSyncAction::FirmwareWait => true/GuestSyncAction::FirmwareWait => { advance(program_counter); true }/'

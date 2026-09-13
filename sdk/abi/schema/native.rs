@@ -802,7 +802,7 @@ pub const VIRTUAL_MACHINE_CREATION_LEASE_RIGHTS: u64 =
 pub const PENDING_VIRTUAL_MACHINE_RIGHTS: u64 =
     RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_START | RIGHT_REQUEST_STOP;
 pub const VIRTUAL_MACHINE_RIGHTS: u64 =
-    RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_REQUEST_STOP;
+    RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_REQUEST_STOP;
 pub const VIRTUAL_CPU_RIGHTS: u64 = RIGHT_TRANSFER | RIGHT_WAIT | RIGHT_INSPECT | RIGHT_START;
 pub const VIRTUAL_SERIAL_RIGHTS: u64 = RIGHT_DUPLICATE
     | RIGHT_TRANSFER
@@ -902,6 +902,16 @@ pub const SIGNALS: &[Signal] = &[
         object: "virtual_machine",
         bit: 0,
         name: "terminated",
+    },
+    Signal {
+        object: "virtual_machine",
+        bit: 1,
+        name: "power_request",
+    },
+    Signal {
+        object: "virtual_machine",
+        bit: 2,
+        name: "vcpu_terminated",
     },
     Signal {
         object: "virtual_cpu",
@@ -1072,6 +1082,26 @@ pub const CONSTANTS: &[AbiConstant] = &[
     // Immutable guest-visible layout of the first HypeR AArch64 virtual
     // platform. Kernel device construction and userspace boot metadata must
     // consume these values rather than maintain parallel board descriptions.
+    AbiConstant {
+        name: "virtual_platform_aarch64_reference_max_vcpus",
+        value: 8,
+    },
+    AbiConstant {
+        name: "virtual_machine_power_cpu_on",
+        value: 1,
+    },
+    AbiConstant {
+        name: "virtual_machine_power_cpu_off",
+        value: 2,
+    },
+    AbiConstant {
+        name: "virtual_machine_power_system_off",
+        value: 3,
+    },
+    AbiConstant {
+        name: "virtual_machine_power_system_reset",
+        value: 4,
+    },
     AbiConstant {
         name: "virtual_platform_aarch64_reference",
         value: 1,
@@ -2097,6 +2127,44 @@ const VIRTUAL_CPU_BOOTSTRAP_FIELDS: &[Field] = &[
     },
 ];
 
+const VIRTUAL_MACHINE_POWER_REQUEST_FIELDS: &[Field] = &[
+    Field {
+        name: "id",
+        kind: FieldKind::U64,
+        offset: 0,
+    },
+    Field {
+        name: "vcpu",
+        kind: FieldKind::U32,
+        offset: 8,
+    },
+    Field {
+        name: "operation",
+        kind: FieldKind::U32,
+        offset: 12,
+    },
+    Field {
+        name: "target",
+        kind: FieldKind::U32,
+        offset: 16,
+    },
+    Field {
+        name: "reserved",
+        kind: FieldKind::U32,
+        offset: 20,
+    },
+    Field {
+        name: "entry",
+        kind: FieldKind::U64,
+        offset: 24,
+    },
+    Field {
+        name: "context",
+        kind: FieldKind::U64,
+        offset: 32,
+    },
+];
+
 const VIRTUAL_MACHINE_INFO_FIELDS: &[Field] = &[
     Field {
         name: "phase",
@@ -2641,6 +2709,13 @@ pub const RECORDS: &[Record] = &[
         fields: VIRTUAL_CPU_BOOTSTRAP_FIELDS,
         minimum_size: 64,
         size: 64,
+        alignment: 8,
+    },
+    Record {
+        name: "virtual_machine_power_request",
+        fields: VIRTUAL_MACHINE_POWER_REQUEST_FIELDS,
+        minimum_size: 40,
+        size: 40,
         alignment: 8,
     },
     Record {
@@ -7356,6 +7431,107 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 117,
+        name: "virtual_machine_get_power_request",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "virtual_machine",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "request",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "request_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("virtual_machine_power_request"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("request_size", ValueKind::ByteCount),
+        ],
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 118,
+        name: "virtual_machine_complete_power_request",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "virtual_machine",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("request_id", ValueKind::U64),
+            scalar_argument("accept", ValueKind::U32),
+        ],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 119,
+        name: "virtual_machine_open_vcpu",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "virtual_machine",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("vcpu_id", ValueKind::U32),
+        ],
+        results: &[ResultValue {
+            name: "virtual_cpu",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("virtual_cpu"),
+                rights: ProducedRights::Fixed(VIRTUAL_CPU_RIGHTS),
+            }),
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -7372,6 +7548,7 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "VM power control requires WRITE authority. virtual_machine_get_power_request returns a non-consuming snapshot of one pending request, or would_block when none exists. Request IDs identify one completion and stale IDs are rejected. Operations are CPU_ON (1), CPU_OFF (2), SYSTEM_OFF (3), and SYSTEM_RESET (4); accept is strictly 0 or 1. Reserved output is zero. POWER_REQUEST signals pending work, and VCPU_TERMINATED prompts inspection of per-vCPU terminal state. virtual_machine_open_vcpu returns a control handle for an already configured vCPU; it does not change the immutable topology. The runtime owns lifecycle policy; no guest request is forwarded to host firmware. Guest suspend operations remain unsupported.",
     "Immutable VMO snapshots grant READ and MAP but never WRITE. vmo_create_snapshot coherently copies its source and reports Busy while writable mappings or hardware writers exist. File snapshots capture one content generation; returned byte_size is its exact file length, while backing is page rounded. Private mappings require source READ|MAP and VMAR MAP: source_offset is page aligned, data_offset is less than one page, source_length bytes starting at source_offset+data_offset initialize destination data_offset; all other destination bytes are zero. Writable private views never permit EXECUTE. Executable private views additionally require an executable source VMO and source EXECUTE rights; sanitized pages are sealed and instruction-published before mapping, with no writable alias. Copy-on-write mode shares immutable full pages until first write; eager mode allocates all private pages before publication. Private writes, including kernel copyout and atomic waits, cannot change the source or another private view. Ordinary writable/shared VMOs and exclusive hardware leases keep their stable backing contract. Snapshot bytes and old page versions remain owned through acknowledged translation retirement.",
     "VM platform inspection borrows an INSPECT creation lease without consuming it. Metadata describes the selected local platform: counter_frequency_hz is the actual guest counter frequency, and riscv_isa is a guaranteed subset across all admitted CPUs, not a complete host ISA listing. Other architectures return a zero RISC-V mask. The guarantee remains valid across local CPU migration; cross-machine migration is not implied.",
     "WaitSets are process-local, non-transferable objects with capacity 1..1024. BIND_WAIT authorizes add/rearm/remove, WAIT authorizes consumption. Add requires source WAIT and reserves one event slot; WaitSet and CapabilityChannel sources are unsupported. Registration IDs are globally non-reused. Bind/rearm observe signal levels and sequence under the source lock; one-shot publication does not allocate. Rearm is busy until successful event consumption. Wait returns one exact 24-byte record (registration ID, signal bits, sequence), using an absolute monotonic deadline. Copyout failure restores the event unless removal or closure cancelled it. Source handle close does not cancel object-lifetime subscriptions; final set handle close detaches registrations and wakes consumers. Future CapabilityChannel subscriptions require ownership-epoch invalidation.",
@@ -7407,7 +7584,7 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.",
     "Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.",
     "A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.",
-    "A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and future additive VirtualMachine operations may expose their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is published to a read-only shared VMO consumed by the owning runtime, and VM retirement disconnects the input route without invalidating existing output mappings. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. The current implementation accepts one vCPU.",
+    "A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and virtual_machine_open_vcpu exposes their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is published to a read-only shared VMO consumed by the owning runtime, and VM retirement disconnects the input route without invalidating existing output mappings. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. AArch64 reference guests accept 1..8 vCPUs; RISC-V reference guests currently accept one.",
     "VirtualSerial handles are process-local; device assignment consumes a same-process handle. register_output borrows a caller-allocated writable VMO of exactly 69632 bytes and registers it once before assignment. An exclusive write lease rejects existing writable mappings, direct accesses, snapshots, and further writers until port retirement; read-only mappings may coexist. Offset 0 is an atomic u64 produced count, offset 8 a saturating dropped-byte count, and offset 4096 begins 65536 atomic byte slots. Registration initializes counters; callers must not access contents during registration. The producer release-publishes bytes; the runtime acquire-loads production and reads a batch. acknowledge_output requires READ and submits the absolute consumed position after reading. Regressing or future positions return invalid_argument without mutation. Publication, acknowledgement, and closure serialize on the port: READABLE means unacknowledged output, WRITABLE means a connected input route has queue space, and PEER_CLOSED means no future output or input. WAIT authorizes object waits and WaitSet subscriptions. Acknowledgement clears READABLE only when caught up; new output reasserts it, without lost wakeups or periodic polling. Full output discards new bytes without blocking or overwriting unconsumed slots. Counters never wrap. Last active handle closure synchronizes with writers and closes publication; registered pages remain pinned through final VM/object retirement. The SDK maps output read-only and acknowledges batches by syscall without copying payload through the syscall. Write remains nonblocking input injection: busy means the queue is full, bad_state means disconnected. Runtime policy owns retention and client transport.",
     "The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.",
 ];

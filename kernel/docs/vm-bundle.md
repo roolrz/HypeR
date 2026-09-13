@@ -33,18 +33,13 @@ is the instance's authority-bearing identity; lifecycle requests do not use
 ambient numeric VM identifiers. Neither the manager nor a VM runtime receives
 physical Console authority.
 
-The initial aggregate policy admits one VM and one vCPU, 32,768 guest pages,
-128 MiB of kernel allocation, 12 processes, 24 threads, 512 handles, and 2,048
-kernel objects. Every other accounting dimension is likewise the sum of the
-one-instance limit and explicit control-plane headroom. This is an admission
-boundary rather than a usage target; changing fleet cardinality requires a
-reviewed policy update, not merely a larger collection in the manager.
-
-The initial manager deliberately supports one named definition and one active
-instance. It retains a read-only duplicate of the image so a stopped instance
-can be started again with a fresh resource domain, task group, creation lease,
-runtime process, and console connector. Extending the fleet changes definition and
-instance storage rather than the per-instance construction contract.
+The fleet policy admits two active VM instances and eight named definitions.
+Each instance has a bounded child domain, including up to eight vCPUs and
+32,768 guest pages. The fleet ancestor charges both instance budgets plus
+explicit control-plane headroom; see `app/vm-policy/src/lib.rs` for the complete
+limits. These are admission ceilings, not usage targets. A stopped instance can
+be recreated from its retained image with a fresh domain, task group, creation
+lease, runtime process, and console connector.
 
 For each provisioned VM, the manager creates a child resource domain and task
 group, derives a one-shot VM creation lease, and starts an isolated
@@ -205,7 +200,7 @@ leaves; child nodes are rejected. Duplicate selected nodes or properties,
 embedded NUL bytes, overlapping FDT blocks, invalid ranges, unsupported image
 types, and architecture mismatches are rejected before VM construction.
 
-The current AArch64 runtime supports one vCPU, power-of-two page-aligned RAM of
+The AArch64 reference runtime supports one to eight vCPUs, power-of-two page-aligned RAM of
 at least 64 MiB, an uncompressed Linux kernel, and an optional Linux-supported
 compressed initramfs. It validates the raw Linux `Image` magic, entry and
 `text_offset` placement, and nonzero `image_size`; placement reserves that
@@ -223,22 +218,63 @@ limits, not a storage-format promise for other architectures or future VMM
 implementations.
 
 `hyper,vcpu-count` fixes the machine's immutable processor topology before
-construction. `pending_virtual_machine_set_bootstrap` configures only boot vCPU
-0, and installation returns the machine and that boot-vCPU handle; it does not
-represent the complete topology as a variable-length syscall result. Secondary
-processors begin in their architecture-defined powered-off state. AArch64 PSCI
-`CPU_ON` or x86 INIT-SIPI supplies their runtime entry state. Future secondary
-vCPU control handles will therefore be exposed by an additive
-`virtual_machine_open_vcpu(machine, id)` operation over the predeclared topology,
-without changing the existing construction calls. Creating or publishing a
-secondary vCPU must use a generation-qualified installed-machine lease and bind
-its endpoint while holding the `InstalledMachine` runtime lock. The lifecycle
-state check and endpoint publication are one transaction: publication is
-permitted only while the machine is `Installed` or `Running`, and must fail once
-it is `Stopping` or `Stopped`. This prevents retirement from observing an
-unbound endpoint and then racing a late secondary-vCPU publication. The current
-implementation rejects a `vcpu_count` other than one until those architecture
-startup paths and concurrent vCPU execution are implemented.
+construction. AArch64 GICv2 and GICv3 profiles accept 1..8 vCPUs; the RISC-V
+reference profile still accepts one. `pending_virtual_machine_set_bootstrap`
+configures boot vCPU 0. Before installation publishes the VM, all configured
+vCPU endpoints and dormant scheduler Threads are allocated and bound under the
+construction transaction. Rollback owns every unpublished Thread. Installation
+returns the VM and boot-vCPU handles; `virtual_machine_open_vcpu(machine, id)`
+opens another configured endpoint without allocating a CPU or changing topology.
+Only vCPU 0 is initially started through `virtual_cpu_start`.
+
+## Guest power requests and SMP
+
+AArch64 guests use PSCI over HVC. `CPU_ON`, `CPU_OFF`, `AFFINITY_INFO`,
+`SYSTEM_OFF`, and `SYSTEM_RESET` are implemented alongside the PSCI discovery
+calls. CPU and system suspend remain unsupported. Guest power operations never
+invoke the host's PSCI firmware interface.
+
+The kernel validates guest arguments and serializes per-vCPU power transitions.
+`CPU_ON` reserves an existing powered-off CPU and records its entry/context;
+the caller waits for the runtime's decision while other guest CPUs can run.
+Successful acceptance supplies fresh architectural state to the target.
+`CPU_OFF` parks its caller after acceptance, retaining the same Thread and
+endpoint for a later `CPU_ON`. The guest CPU identity remains stable across
+off/on cycles; powering off is not VM retirement. `AFFINITY_INFO` reads the
+kernel's authoritative power state without a userspace round trip.
+
+Requests are associated with their source vCPU and exposed through one VM-level
+wait source. vm-runtime uses a WaitSet alongside console and control events;
+there is no per-vCPU userspace waiting thread or polling timer. The Native API
+adds three nonblocking VM operations, each requiring WRITE authority:
+
+- `virtual_machine_get_power_request`: snapshot one pending request, or
+  `would_block`. Inspection does not consume the request.
+- `virtual_machine_complete_power_request`: accept or reject the exact request
+  ID. Stale or already completed requests cannot complete a newer operation.
+- `virtual_machine_open_vcpu`: return a control handle for a configured CPU.
+
+Waiting on the VM requires WAIT authority. `POWER_REQUEST` indicates pending
+work; `VCPU_TERMINATED` reports terminal CPU execution so the runtime can inspect
+its retained per-vCPU handles, including failures on secondary CPUs. VM stop or
+runtime loss cancels pending operations and retires every configured CPU,
+including CPUs that were never powered on.
+
+For `SYSTEM_OFF` and `SYSTEM_RESET`, the calling CPU stops guest execution while
+vm-runtime coordinates whole-VM stop and waits for retirement. Poweroff reports
+a clean stopped instance. Reset reports `RebootRequested` to vm-manager only
+after retirement; the manager waits for successful runtime exit and creates a
+fresh instance and lease. Administrative stop wins over a concurrent guest
+reset. Reboot disconnects an attached console, which can then attach to the new
+instance by its existing VM name.
+
+Both GIC backends provide per-vCPU private interrupts and timers, SGI/IPI routing,
+and shared SPI routing. GICv3 firmware includes one redistributor frame per CPU;
+GICv2 preserves SGI source identity and its eight-bit target mask. Guest memory
+supports concurrent execution while retaining per-host-CPU hardware residency.
+An individual vCPU remains exclusively scheduled by its owning Thread. Mapping
+changes, executable-code publication, and retirement must account for every CPU
+that can retain the guest translation or instructions.
 
 `tools/fit-pack` creates deterministic development and CI images from an
 external kernel and initramfs. Generated guest artifacts remain ignored by Git.

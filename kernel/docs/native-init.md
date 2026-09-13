@@ -15,7 +15,11 @@ platform metadata. The `aarch64_gic_version` field is 2 or 3 on supported Arm
 hosts and zero on other architectures. vm-runtime uses this value to generate
 the guest interrupt-controller node; host device-tree addresses are never
 copied into guest firmware. Kernel, ABI and SDK consumers must be rebuilt
-together for the extended 32-byte platform-info record.
+together for the extended 32-byte platform-info record. Arm guest topology is
+fixed by FIT metadata (1..8 vCPUs); RISC-V currently supports one. Init does not
+handle guest PSCI: vm-runtime waits on its VM handle for power requests, and
+vm-manager owns creation of a fresh instance after guest reset. See
+[guest power requests and SMP](vm-bundle.md#guest-power-requests-and-smp).
 
 ## Rust runtime
 

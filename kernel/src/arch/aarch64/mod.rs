@@ -397,3 +397,7 @@ pub(crate) fn guest_gic_version() -> u32 {
         3
     }
 }
+
+pub(crate) const fn maximum_guest_vcpus() -> u32 {
+    hyper::vm::arm::psci::MAX_CPUS as u32
+}

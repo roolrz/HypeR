@@ -21,6 +21,7 @@ const PENDING_RIGHTS: Rights = Rights::TRANSFER
     .union(Rights::START)
     .union(Rights::REQUEST_STOP);
 const MACHINE_RIGHTS: Rights = Rights::TRANSFER
+    .union(Rights::WRITE)
     .union(Rights::WAIT)
     .union(Rights::INSPECT)
     .union(Rights::REQUEST_STOP);
@@ -596,4 +597,96 @@ mod tests {
             Err(Error::InvalidResponse)
         );
     }
+}
+
+/// A guest request whose lifecycle policy belongs to the owning VM runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PowerOperation {
+    CpuOn,
+    CpuOff,
+    SystemOff,
+    SystemReset,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PowerRequest {
+    pub id: u64,
+    pub vcpu: u32,
+    pub operation: PowerOperation,
+    pub target: u32,
+    pub entry: u64,
+    pub context: u64,
+}
+
+/// Snapshots pending work. Only completion consumes it; multiple inspections
+/// can observe the same ID, which must be completed at most once.
+pub fn pending_power_request(
+    machine: HandleRef<'_, VirtualMachineObject>,
+) -> Result<Option<PowerRequest>> {
+    let mut record = hyper_abi::HyperNativeVirtualMachinePowerRequest {
+        id: 0,
+        vcpu: 0,
+        operation: 0,
+        target: 0,
+        reserved: 0,
+        entry: 0,
+        context: 0,
+    };
+    // SAFETY: The borrowed handle and writable record remain live for the call.
+    let result =
+        unsafe { hyper_sys::virtual_machine_get_power_request(machine.raw().get(), &mut record) };
+    if Status::from_raw(result.status) == Status::WOULD_BLOCK {
+        return Ok(None);
+    }
+    crate::validate_info_result(
+        result,
+        hyper_abi::HYPER_NATIVE_VIRTUAL_MACHINE_POWER_REQUEST_MIN_SIZE,
+    )?;
+    if record.id == 0 || record.reserved != 0 {
+        return Err(Error::InvalidResponse);
+    }
+    let operation = match u64::from(record.operation) {
+        hyper_abi::HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_ON => PowerOperation::CpuOn,
+        hyper_abi::HYPER_NATIVE_VIRTUAL_MACHINE_POWER_CPU_OFF => PowerOperation::CpuOff,
+        hyper_abi::HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_OFF => PowerOperation::SystemOff,
+        hyper_abi::HYPER_NATIVE_VIRTUAL_MACHINE_POWER_SYSTEM_RESET => PowerOperation::SystemReset,
+        _ => return Err(Error::InvalidResponse),
+    };
+    Ok(Some(PowerRequest {
+        id: record.id,
+        vcpu: record.vcpu,
+        operation,
+        target: record.target,
+        entry: record.entry,
+        context: record.context,
+    }))
+}
+
+/// Accepts or rejects one exact request; cancellation or an earlier completion
+/// makes its ID stale. Acceptance does not imply global VM retirement finished.
+pub fn complete_power_request(
+    machine: HandleRef<'_, VirtualMachineObject>,
+    request_id: u64,
+    accept: bool,
+) -> Result<()> {
+    // SAFETY: The borrowed handle remains live throughout the call.
+    Status::from_raw(unsafe {
+        hyper_sys::virtual_machine_complete_power_request(
+            machine.raw().get(),
+            request_id,
+            u32::from(accept),
+        )
+    })
+    .into_result()
+}
+
+/// Opens control authority for a member of the VM's immutable CPU topology.
+pub fn open_vcpu(
+    machine: HandleRef<'_, VirtualMachineObject>,
+    vcpu_id: u32,
+) -> Result<OwnedHandle<VirtualCpuObject>> {
+    // SAFETY: The input remains borrowed; the result is adopted once below.
+    let result = unsafe { hyper_sys::virtual_machine_open_vcpu(machine.raw().get(), vcpu_id) };
+    Status::from_raw(result.status).into_result()?;
+    adopt(result.value0, VCPU_RIGHTS, &[machine.raw()])
 }

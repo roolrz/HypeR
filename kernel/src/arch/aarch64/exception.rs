@@ -791,11 +791,16 @@ fn dispatch_guest_synchronous(
     if !applied {
         return Err(());
     }
-    Ok(if action == super::GuestSyncAction::Wait {
-        GuestDispatch::Wait
-    } else {
-        GuestDispatch::Resume
-    })
+    Ok(
+        if matches!(
+            action,
+            super::GuestSyncAction::Wait | super::GuestSyncAction::FirmwareWait
+        ) {
+            GuestDispatch::Wait
+        } else {
+            GuestDispatch::Resume
+        },
+    )
 }
 
 fn capture_waiting_guest(frame: &ExceptionFrame, generation: u64) -> Result<(), ()> {

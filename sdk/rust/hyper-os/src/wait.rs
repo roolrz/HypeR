@@ -86,6 +86,15 @@ impl ObjectSignals<ThreadObject> {
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_THREAD_TERMINATED);
 }
 
+impl ObjectSignals<crate::handle::VirtualMachineObject> {
+    pub const TERMINATED: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED);
+    pub const POWER_REQUEST: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_POWER_REQUEST);
+    pub const VCPU_TERMINATED: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_VCPU_TERMINATED);
+}
+
 impl ObjectSignals<VirtualCpuObject> {
     pub const TERMINATED: Self =
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED);

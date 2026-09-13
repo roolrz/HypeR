@@ -378,6 +378,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn production_packer_round_trips_arm_smp_topology() -> Result<(), String> {
+        let kernel = linux_image();
+        for count in [0, 1, 4, 8, 9] {
+            let result = build_image(ImageInput {
+                architecture: "arm64",
+                memory_size: 128 * 1024 * 1024,
+                vcpu_count: count,
+                kernel: &kernel,
+                load: 0x4020_0000,
+                entry: 0x4020_0000,
+                initramfs: &[0; 16],
+                boot_arguments: "console=ttyAMA0",
+            });
+            if count == 0 || count > 8 {
+                assert!(result.is_err());
+                continue;
+            }
+            let bytes = result?;
+            let source = MemorySource(&bytes);
+            let image = hyper_vm_image::parse(&source).map_err(|error| format!("{error:?}"))?;
+            let plan = hyper_vm_image::linux::validate_reference(&source, image)
+                .map_err(|error| format!("{error:?}"))?;
+            assert_eq!(plan.vcpu_count(), count);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn production_packer_validates_both_reference_platforms() -> Result<(), String> {
         for (name, architecture, profile, base) in [
             (

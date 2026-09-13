@@ -115,7 +115,7 @@ printf '%s\n' "$release" | LC_ALL=C rg -q \
     exit 1
 }
 
-LC_ALL=C rg -q 'advance_single_active\(cpu\.get\(\), previous_epoch, self\.translation_epoch\)' \
+LC_ALL=C rg -q 'advance_shared_active\(cpu\.get\(\), previous_epoch, self\.translation_epoch\)' \
     "$memory_access" || {
     echo 'active mapping publication must advance the admitted residency epoch' >&2
     exit 1

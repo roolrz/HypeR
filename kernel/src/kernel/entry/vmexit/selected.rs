@@ -58,8 +58,17 @@ fn dispatch_guest_sync(exit: crate::hal::vm::GuestSyncExit) -> crate::hal::vm::G
             }
             return crate::hal::vm::GuestSyncAction::complete_legacy_console();
         }
+        #[cfg(CONFIG_ARCH_AARCH64)]
+        if let Some(action) = dispatch_power_call(execution, exit) {
+            return action;
+        }
         let (hardware, vcpu_id, interrupts) = execution.interrupt_context();
-        crate::hal::vm::handle_guest_sync(hardware, vcpu_id, interrupts, exit)
+        let action = crate::hal::vm::handle_guest_sync(hardware, vcpu_id, interrupts, exit);
+        #[cfg(CONFIG_ARCH_AARCH64)]
+        if let Some(binding) = execution.vm_binding() {
+            binding.publish_changed_interrupts();
+        }
+        action
     }) {
         Ok(Some(action)) => action,
         Ok(None) => crate::kernel::crash::fatal(format_args!(
@@ -104,4 +113,46 @@ fn query_pending_interrupt(timer_pending: bool) -> hyper::vm::x86::exit::Pending
             PendingInterruptAction::Stop
         }
     }
+}
+
+#[cfg(CONFIG_ARCH_AARCH64)]
+fn dispatch_power_call(
+    execution: &mut crate::kernel::vm::vcpu::VcpuExecution,
+    exit: crate::hal::vm::GuestSyncExit,
+) -> Option<crate::hal::vm::GuestSyncAction> {
+    let crate::hal::vm::GuestSyncExit::HypervisorCall {
+        function,
+        argument,
+        extra,
+    } = exit
+    else {
+        return None;
+    };
+    let binding = execution.vm_binding()?;
+    let owner = binding.lifecycle();
+    let mut arguments = [argument, extra[0], extra[1]];
+    if function & (1 << 30) == 0 {
+        arguments = arguments.map(|value| value as u32 as u64);
+    }
+    let reply = |value: i64| crate::hal::vm::GuestSyncAction::WriteRegister {
+        register: 0,
+        value: hyper::vm::arm::psci::return_register(value),
+        advance: false,
+    };
+    if matches!(function, 0x8400_0004 | 0xc400_0004) {
+        return Some(reply(owner.affinity(arguments[0], arguments[1])));
+    }
+    let operation = match function {
+        0x8400_0002 => hyper::vm::arm::psci::Operation::CpuOff,
+        0x8400_0003 | 0xc400_0003 => hyper::vm::arm::psci::Operation::CpuOn,
+        0x8400_0008 => hyper::vm::arm::psci::Operation::SystemOff,
+        0x8400_0009 => hyper::vm::arm::psci::Operation::SystemReset,
+        _ => return None,
+    };
+    Some(
+        match owner.stage_power(execution.vcpu_id, operation, arguments) {
+            Ok(()) => crate::hal::vm::GuestSyncAction::FirmwareWait,
+            Err(error) => reply(error),
+        },
+    )
 }

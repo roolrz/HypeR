@@ -311,11 +311,12 @@ pub(crate) fn update_guest_device_interrupt(
     let result = interrupts.with(|controller| {
         let vcpu = VirtualCpuId::new(vcpu_id);
         controller.synchronize(vcpu, context.vgic.slots())?;
-        if asserted {
-            controller.inject(interrupt, vcpu)?;
+        let target = if interrupt.get() >= 32 {
+            controller.target(interrupt)?
         } else {
-            controller.clear_pending(interrupt, vcpu)?;
-        }
+            vcpu
+        };
+        controller.set_line(interrupt, target, asserted)?;
         let _ = controller.refill(vcpu, context.vgic.slots_mut())?;
         Ok::<(), hyper::vm::arm::gic::RuntimeError>(())
     });
@@ -340,12 +341,12 @@ pub(crate) fn update_saved_guest_device_interrupt(
 ) -> Result<(), Error> {
     interrupts
         .with(|controller| {
-            let vcpu = VirtualCpuId::new(vcpu_id);
-            if asserted {
-                controller.inject(interrupt, vcpu)
+            let vcpu = if interrupt.get() >= 32 {
+                controller.target(interrupt)?
             } else {
-                controller.clear_pending(interrupt, vcpu)
-            }
+                VirtualCpuId::new(vcpu_id)
+            };
+            controller.set_line(interrupt, vcpu, asserted)
         })
         .map_err(Into::into)
 }
@@ -400,7 +401,7 @@ pub(crate) fn access_guest_gic(
     let result = interrupts.access_saved_bank(
         VirtualCpuId::new(vcpu_id),
         context.vgic.slots_mut(),
-        access.register(),
+        access,
         operation,
     );
     let value = match result {

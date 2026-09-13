@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! `AArch64` `PL011` and `GICv3` guest-platform device service.
+//! `AArch64` `PL011` and virtual GIC guest-platform device service.
 
 use hyper::sync::InterruptSpinLock;
 use hyper::vm::aarch64::device::pl011::{
@@ -76,14 +76,9 @@ impl VirtualDeviceSet {
         }))
     }
 
-    pub(in crate::kernel::vm) fn bind_virtual_serial(
-        &self,
-        vm: VmId,
-        vcpu: u32,
-        thread: crate::kernel::task::thread::ThreadId,
-    ) {
+    pub(in crate::kernel::vm) fn bind_virtual_serial(&self, vm: VmId, vcpu: u32) {
         if let Some(output) = &self.virtual_serial {
-            output.bind(crate::kernel::vm::virtual_serial::Route { vm, vcpu, thread });
+            output.bind(crate::kernel::vm::virtual_serial::Route { vm, vcpu });
         }
     }
 
@@ -184,6 +179,7 @@ pub(super) fn dispatch_mmio(
             },
             Err(_) => Resolution::Action(MmioAction::Stop),
         };
+        binding.publish_changed_interrupts();
         Some((vcpu_id, resolution))
     })() else {
         return MmioDispatch::new(MmioAction::Stop);
@@ -219,7 +215,7 @@ fn handle_gic(
     vcpu_id: u32,
     access: MmioAccess,
 ) -> Result<Option<MmioOutcome>, super::gic::Error> {
-    let Some(decoded) = super::gic::decode(access)? else {
+    let Some(decoded) = super::gic::decode(access, interrupts.vcpu_count())? else {
         return Ok(None);
     };
     let value = super::gic::access(hardware, interrupts, vcpu_id, decoded, access.operation())?;
@@ -254,9 +250,8 @@ pub(super) fn kick_virtual_serial(route: crate::kernel::vm::virtual_serial::Rout
                 .map_err(|_| Error::InvalidInterrupt)
             })
             .map_err(|_| ())?;
-        binding
-            .publish_interrupt_reconcile(route.vcpu, route.thread)
-            .map_err(|_| ())
+        binding.publish_changed_interrupts();
+        Ok::<(), ()>(())
     });
     if !matches!(delivery, Ok(Ok(()))) {
         let _ = super::super::super::registry::with_binding(route.vm, |binding| {

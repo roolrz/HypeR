@@ -19,8 +19,8 @@ and preemption bits and supports up to 64 list registers.
 
 Each vCPU owns its saved GICH control, VMCR, APR and list-register state. Guest
 stage-2 maps only the banked GICV CPU interface as Device memory; GICC and GICH
-remain host-only. The emulated distributor exposes a single-vCPU, 64-interrupt
-GICv2 without security extensions. The Native platform-info query reports the
+remain host-only. The emulated distributor exposes 1..8 vCPUs and 64 interrupt
+IDs using GICv2 without security extensions. The Native platform-info query reports the
 GIC revision so vm-runtime emits matching guest firmware. GICv3 hosts retain
 their existing guest profile.
 
@@ -117,6 +117,7 @@ are embedded in the bootstrap.
 ```sh
 make test-native-gicv2 QEMU_CPUS=4
 make test-native-gicv2 QEMU_CPUS=1
+make test-guest-smp QEMU_MACHINE=virt,virtualization=on,gic-version=2
 ```
 
 CI runs both configurations, exercising Native services, std programs, shell
@@ -131,3 +132,15 @@ also checked locally for generic and essential-device discovery.
 On hardware, record TF-A and HypeR logs, verify four online CPUs and INTID 153
 console registration, then exercise slowly typed shell commands, idle wakeup,
 and repeated `top` entry/exit. QEMU passing is not a substitute for these checks.
+
+After host bring-up, use a four-vCPU guest image and verify all guest CPUs are
+online, then repeatedly offline/online secondary CPUs through Linux sysfs.
+Exercise per-CPU timer wakeups, SGI/IPI traffic, SPI routing, and console input
+under concurrent load. Repeat guest `reboot -f` and `poweroff -f`, verify that
+HypeR itself stays running, and check guest pages return to the stopped baseline.
+Also terminate vm-runtime during a pending power request and with CPUs powered
+off; every configured Thread and translation must retire before page/VMID reuse.
+Record cold/warm boot logs and firmware-provided GICH/GICV/maintenance resources.
+Real hardware must validate cross-core cache publication, TLB invalidation,
+interrupt ordering, and device quiescence; QEMU cannot establish those properties.
+Guest suspend is not supported. See [VM power and SMP](vm-bundle.md#guest-power-requests-and-smp).

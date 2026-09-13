@@ -23,7 +23,8 @@ pub const INITIAL_VM_LIMITS: ResourceLimits = ResourceLimits {
     subscriptions: 128,
     timers: 128,
     virtual_machines: 1,
-    virtual_cpus: 1,
+    // Both Arm GIC backends expose up to eight configured guest CPUs.
+    virtual_cpus: 8,
     device_leases: 8,
     dma_mappings: 64,
     user_address_spaces: 8,
