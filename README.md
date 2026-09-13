@@ -75,7 +75,7 @@ virtio-scsi with Linux vhost-scsi/LIO.
 - [x] Add GICv2 guest interrupts, Arm guest SMP and runtime-managed guest power control.
 - [ ] Validate guest SMP, CPU hotplug, reboot and poweroff on Pi 5.
 - [ ] Boot the Linux I/O VM on physical Pi 5.
-- [ ] Publish the complete appliance from [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm)
+- [x] Publish the complete appliance from [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm)
   and consume a digest-pinned package; HypeR owns apps and DTS/DTB.
 - [x] Verify cross-VM virtio-scsi/vhost I/O against a real QEMU disk.
 - [ ] Extend device assignment, shared queues and DMA handling to Pi 5 controllers.
@@ -95,8 +95,9 @@ make defconfig
 make run
 ```
 
-This builds and boots the AArch64 system in QEMU, downloading checksum-pinned
-Linux guest assets on the first run. See [getting started](docs/getting-started.md)
+This boots the AArch64 system with the HypeR shell and a resident Linux I/O VM
+in QEMU. The first run downloads pinned guest assets and the I/O appliance.
+The storage backend waits idle; it does not run the disk-writing test guest. See [getting started](docs/getting-started.md)
 for configuration, other architectures, and build targets.
 
 ## Explore and contribute

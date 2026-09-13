@@ -4,20 +4,18 @@
 use hyper_os::device;
 use hyper_os::guest_io::{Mailbox, Notification};
 use hyper_os::handle::{
-    GuestMailboxObject, GuestNotificationObject, Rights, VirtualCpuObject, VirtualMachineObject,
+    GuestMailboxObject, GuestNotificationObject, VirtualCpuObject, VirtualMachineObject,
 };
-use hyper_os::memory::WritableVmo;
 use hyper_os::startup::{self, Startup};
 use hyper_os::virtual_serial::{self, Output};
 use hyper_os::vm::{self, PowerOperation};
 use hyper_os::wait::{self, ObjectSignals, WaitItem};
+use hyper_vm_image::guest_fdt;
 use hyper_vm_image::guest_fdt::io::{DmaRange, IoDevices, MmioDevice, SharedMemory};
-use hyper_vm_image::{Payload, ReadAt, guest_fdt, linux};
 use hyper_vm_runtime::io_backend::{Backend, Completion};
-use std::fs::File;
+use hyper_vm_runtime::io_guest::Image;
 use std::io::{self, Write};
 use std::num::NonZeroU64;
-use std::os::hyper::fs::FileExt;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -45,102 +43,6 @@ fn deadline(seconds: u64) -> Result<u64> {
     hyper_os::time::deadline_after(Duration::from_secs(seconds))
         .map(|d| d.as_raw())
         .map_err(show)
-}
-
-struct Image {
-    memory: WritableVmo,
-    plan: linux::BootPlan,
-    arguments: String,
-}
-struct Source {
-    file: File,
-    length: u64,
-}
-impl ReadAt for Source {
-    type Error = io::Error;
-    fn length(&self) -> io::Result<u64> {
-        Ok(self.length)
-    }
-    fn read_exact_at(&self, offset: u64, output: &mut [u8]) -> io::Result<()> {
-        self.file.read_exact_at(output, offset)
-    }
-}
-
-impl Image {
-    fn load(path: &str) -> Result<Self> {
-        let file = File::open(path).map_err(show)?;
-        let length = file.metadata().map_err(show)?.len();
-        let source = Source { file, length };
-        let image = hyper_vm_image::parse(&source).map_err(show)?;
-        let plan = linux::validate_reference(&source, image).map_err(show)?;
-        if plan.memory_base() != RAM_BASE
-            || plan.memory_size() != RAM_BYTES
-            || plan.architecture() != hyper_vm_image::Architecture::Aarch64
-        {
-            return Err("fixture requires 64 MiB AArch64 reference images".into());
-        }
-        println!("IO-VM-SMOKE: validated {path}, allocating guest RAM");
-        let memory = WritableVmo::create_contiguous(RAM_BYTES).map_err(show)?;
-        println!("IO-VM-SMOKE: copying {path} kernel");
-        copy_payload(&source, &memory, image.kernel)?;
-        if let Some(payload) = image.initramfs {
-            copy_payload(&source, &memory, payload)?;
-        }
-        Ok(Self {
-            memory,
-            plan,
-            arguments: image.boot_arguments.as_str().into(),
-        })
-    }
-    fn device_tree(&self, gic_version: u32, devices: IoDevices<'_>) -> Result<()> {
-        let mut structure = vec![0; 12 * 1024];
-        let mut strings = vec![0; 2048];
-        let mut output = vec![0; 16 * 1024];
-        let length = guest_fdt::build_aarch64_linux_with_io(
-            guest_fdt::Aarch64LinuxBoot {
-                memory_base: RAM_BASE,
-                memory_size: RAM_BYTES,
-                vcpu_count: self.plan.vcpu_count(),
-                gic_version,
-                initramfs: self
-                    .plan
-                    .initramfs()
-                    .map(|range| (range.start(), range.end())),
-                boot_arguments: &self.arguments,
-            },
-            devices,
-            &mut structure,
-            &mut strings,
-            &mut output,
-        )
-        .map_err(show)?;
-        self.memory
-            .write_all_at(
-                self.plan.device_tree().start() - RAM_BASE,
-                &output[..length],
-            )
-            .map_err(show)
-    }
-}
-
-fn copy_payload(source: &Source, memory: &WritableVmo, payload: Payload) -> Result<()> {
-    let mut buffer = vec![0; hyper_os::memory::MAX_TRANSFER_BYTES];
-    let offset = payload
-        .load_address
-        .checked_sub(RAM_BASE)
-        .ok_or("payload below RAM")?;
-    let mut copied = 0;
-    while copied < payload.length {
-        let length = (payload.length - copied).min(buffer.len() as u64) as usize;
-        source
-            .read_exact_at(payload.file_offset + copied, &mut buffer[..length])
-            .map_err(show)?;
-        memory
-            .write_all_at(offset + copied, &buffer[..length])
-            .map_err(show)?;
-        copied += length as u64;
-    }
-    Ok(())
 }
 
 struct Guest {
@@ -221,87 +123,12 @@ fn install(
     physical: Option<&hyper_os::OwnedHandle<hyper_os::handle::PhysicalDeviceObject>>,
     serial_address: u64,
 ) -> Result<Guest> {
-    let lease = vm::derive_creation_lease(
-        startup
-            .borrow(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)
-            .map_err(show)?,
-        startup.borrow(startup::RESOURCE_DOMAIN).map_err(show)?,
-    )
-    .map_err(show)?;
-    let pending = vm::create(
-        lease,
-        vm::Configuration {
-            guest_physical_base: RAM_BASE,
-            memory_size: if shared.is_some() {
-                RAM_BYTES * 2
-            } else {
-                RAM_BYTES
-            },
-            vcpu_count: image.plan.vcpu_count(),
-            architecture: vm::Architecture::Aarch64,
-            platform_profile: vm::PlatformProfile::Aarch64Reference,
-        },
-    )
-    .map_err(|error| show(error.error()))?;
-    vm::map_guest_memory(
-        pending.as_handle_ref(),
-        own.as_handle_ref(),
-        0,
-        0,
-        RAM_BYTES,
-    )
-    .map_err(show)?;
-    if let Some(shared) = shared {
-        vm::map_guest_memory(
-            pending.as_handle_ref(),
-            shared.as_handle_ref(),
-            RAM_BYTES,
-            0,
-            RAM_BYTES,
-        )
-        .map_err(show)?;
-    }
-    if let Some(physical) = physical {
-        device::assign(
-            pending.as_handle_ref(),
-            physical.as_handle_ref(),
-            PHYSICAL_MMIO,
-            40,
-        )
-        .map_err(show)?;
-    }
-    let serial = virtual_serial::create().map_err(show)?;
-    let output = Output::register(
-        &serial,
-        startup.borrow(startup::ROOT_VMAR).map_err(show)?,
-        serial_address,
-        WritableVmo::create(virtual_serial::BUFFER_BYTES).map_err(show)?,
-    )
-    .map_err(show)?;
-    let binding = serial
-        .duplicate(Rights::ASSIGN_DEVICE.union(Rights::TRANSFER))
-        .map_err(show)?;
-    vm::set_virtual_serial(pending.as_handle_ref(), binding)
-        .map_err(|error| show(error.error()))?;
-    vm::set_bootstrap(
-        pending.as_handle_ref(),
-        vm::VirtualCpuBootstrap {
-            entry: image.plan.kernel_entry(),
-            stack: 0,
-            arguments: image.plan.bootstrap_arguments(),
-        },
-    )
-    .map_err(show)?;
-    vm::seal(pending.as_handle_ref()).map_err(show)?;
-    let (machine, cpu) = vm::install(pending).map_err(|error| show(error.error()))?;
-    let mut cpus = vec![cpu];
-    for index in 1..image.plan.vcpu_count() {
-        cpus.push(vm::open_vcpu(machine.as_handle_ref(), index).map_err(show)?);
-    }
+    let installed =
+        hyper_vm_runtime::io_guest::install(startup, image, own, shared, physical, serial_address)?;
     Ok(Guest {
-        machine,
-        cpus,
-        output,
+        machine: installed.machine,
+        cpus: installed.cpus,
+        output: installed.output,
         started: false,
         retired: false,
         tail: Vec::new(),

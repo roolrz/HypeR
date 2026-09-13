@@ -30,6 +30,7 @@ case "${1:-}" in
         ;;
     scripts)
         python3 tests/build/incremental.py
+        python3 -B tests/build/io-vm-run.py
         python3 -B tests/build/io-vm-package.py
         python3 -B tests/qemu/test-guest-smp.py
         python3 -B tests/qemu/test-io-vm.py
@@ -90,6 +91,10 @@ case "${1:-}" in
         make -o image -o app-fetch test-io-vm ARCH=aarch64 IO_VM_PACKAGE="$package" \
             IO_VM_TEST=reset QEMU_CPUS=1 \
             QEMU_MACHINE=virt,virtualization=on,gic-version=2
+        make -o image -o app-fetch test-io-standby ARCH=aarch64 IO_VM_PACKAGE="$package" \
+            QEMU_CPUS=4 QEMU_MACHINE=virt,virtualization=on,gic-version=3
+        make -o image -o app test-io-standby ARCH=aarch64 IO_VM_PACKAGE="$package" \
+            QEMU_CPUS=1 QEMU_MACHINE=virt,virtualization=on,gic-version=2
         ;;
     riscv64-native)
         make sdk-check ARCH=riscv64

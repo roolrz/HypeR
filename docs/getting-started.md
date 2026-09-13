@@ -19,6 +19,8 @@ Commands in this guide run from the repository root.
 - QEMU for the selected architecture; AArch64 uses `-cpu max` by default and
   requires FEAT_VHE (hardware without it is unsupported);
 - `curl`, `cpio`, `gzip`, `tar`, and SHA-256 tooling for the Linux guest assets;
+- ORAS 1.3 for the digest-pinned I/O appliance download (`IO_VM_ORAS` can select
+  its executable); verified downloads are cached for offline reuse;
 - `dtc` when building the x86-64 QEMU platform description.
 
 Build the AArch64 kernel, Native SDK, and initramfs, then run the complete
@@ -40,10 +42,23 @@ the in-tree AArch64 ELF interpreter. SDK consumers can select a self-contained
 static PIE backed by the matching `libhyper.a` with `HYPER_LINK_MODE=static`.
 Pass `INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.
 
-These Linux/Alpine assets exercise guest boot and VM lifecycle. They are not
-the Linux I/O appliance. That appliance is built in HypeR-io-vm and consumed
-through a separate [digest-pinned package import](io-vm.md#build-and-validation);
-it is not yet part of the default `make run` deployment.
+The default AArch64 run profile retains the HypeR shell and starts a resident
+Linux I/O VM with its own assigned QEMU virtio-scsi disk. Its Native owner is
+`io-runtime`, visible in `ps`; after Linux and the control handshake are ready
+it prints `HypeR io-runtime: ready; storage backend idle (no client attached)`.
+Both sides then block waiting for work. The ordinary Alpine VM remains
+configured but does not autostart in this profile; `vmm start alpine` still
+starts it independently.
+
+The default disk is `target/app/aarch64/io-disk.img` (64 MiB, created once).
+Existing content is preserved between boots. Select another raw disk with
+`make run IO_VM_DISK=/path/to/disk.img`. Standby does not attach a business VM
+or expose storage through Native VFS, and it never runs the writing acceptance
+fixture. Live client attachment remains separate work. See [I/O VM](io-vm.md).
+
+Use `make run RUN_PROFILE=native` for the previous Native/Alpine profile without
+an I/O appliance or physical disk. Explicit `INITRAMFS=...` also defaults to
+that profile. RISC-V retains its existing Native run profile.
 
 Run the standalone kernel mechanism tests separately:
 

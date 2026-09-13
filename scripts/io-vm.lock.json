@@ -4,9 +4,9 @@
   "version": 1,
   "platforms": {
     "qemu": {
-      "reference": "ghcr.io/roolrz/hyper-io-vm@sha256:de5a07ea8e2195894941f9e60dc0b5dd317b493dc7c4318693e42eeaf294d3a2",
-      "source_revision": "cafc1706ebfb38177dc866d3bcd4611839f20b69",
-      "qualified_run": "https://github.com/roolrz/HypeR-io-vm/actions/runs/34772673771"
+      "reference": "ghcr.io/roolrz/hyper-io-vm@sha256:2d7c31e76ba19418091e9ceb3f154331e5d95eb625048befda28bae33f14be26",
+      "source_revision": "65cef4db74c5c41b52ae471c6dc34f9c30b47fd7",
+      "qualified_run": "https://github.com/roolrz/HypeR-io-vm/actions/runs/34776697110"
     }
   }
 }

@@ -78,6 +78,13 @@ NATIVE_SMP_INITRAMFS := $(APP_OUTPUT)/initramfs-smp.cpio
 IO_VM_REFERENCE ?=
 IO_VM_PLATFORM ?= qemu
 IO_VM_TEST ?= basic
+ifeq ($(origin INITRAMFS),undefined)
+RUN_PROFILE ?= $(if $(filter aarch64,$(ARCH)),io,native)
+else
+RUN_PROFILE ?= native
+endif
+IO_VM_DISK ?= $(APP_OUTPUT)/io-disk.img
+IO_VM_ORAS ?= $(if $(shell command -v oras 2>/dev/null),oras,$(CURDIR)/target/tools/oras-1.3.0/oras)
 IO_VM_PACKAGE ?=
 
 HOST_TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
@@ -125,7 +132,12 @@ NATIVE_RUN_PREREQUISITES :=
 ifneq ($(filter $(ARCH),aarch64 riscv64),)
 ifeq ($(origin INITRAMFS),undefined)
 INITRAMFS := $(NATIVE_INITRAMFS)
+ifeq ($(RUN_PROFILE),io)
+INITRAMFS := $(APP_OUTPUT)/initramfs-io.cpio
+NATIVE_RUN_PREREQUISITES := io-initramfs
+else
 NATIVE_RUN_PREREQUISITES := native-initramfs
+endif
 endif
 else
 INITRAMFS ?=
@@ -385,7 +397,7 @@ native-initramfs: app $(NEWC_PACK) $(NATIVE_GUEST_PREREQUISITES)
 		0755 lib/libhyper.so "$(NATIVE_RUNTIME_LIBRARY)" \
 		0755 lib/libdynamic-probe.so "$(NATIVE_DYNAMIC_PLUGIN)" \
 		0644 etc/hyper/vms.json "$(NATIVE_VM_CONFIG)" \
-		0644 etc/hyper/services.json "$(NATIVE_SERVICE_MANIFEST)"
+		0644 etc/hyper/services.json "$(NATIVE_SERVICE_MANIFEST)" $(NATIVE_EXTRA_ENTRIES)
 
 NATIVE_QEMU_ENV = QEMU_MACHINE="$(QEMU_MACHINE)" QEMU_CPU="$(QEMU_CPU)" \
 	QEMU_CPUS="$(QEMU_CPUS)" QEMU_MEMORY="$(QEMU_MEMORY)" \
@@ -485,8 +497,16 @@ run: $(NATIVE_RUN_PREREQUISITES)
 		echo "INITRAMFS must name a newc archive containing an executable /init" >&2; \
 		exit 2; \
 	}
+ifeq ($(RUN_PROFILE),io)
+	@test "$(ARCH)" = aarch64 || { echo "I/O VM run profile requires aarch64" >&2; exit 2; }
+	$(MAKE) image
+	$(NATIVE_QEMU_ENV) python3 -B scripts/run-io-vm.py \
+		--qemu "$(QEMU)" --image "$(KERNEL_IMAGE)" \
+		--initramfs "$(abspath $(INITRAMFS))" --disk "$(IO_VM_DISK)"
+else
 	$(MAKE) -C "$(KERNEL_DIRECTORY)" run \
 		ARCH="$(ARCH)" INITRAMFS="$(abspath $(INITRAMFS))"
+endif
 
 clean:
 	$(MAKE) -C "$(KERNEL_DIRECTORY)" clean
@@ -503,3 +523,27 @@ test-native-gicv2:
 .PHONY: io-vm-fetch
 io-vm-fetch:
 	python3 -B scripts/fetch-io-vm.py --reference "$(IO_VM_REFERENCE)" --platform "$(IO_VM_PLATFORM)"
+
+# Ordinary shell/services plus a single idle Linux storage backend.
+.PHONY: io-initramfs
+io-initramfs: app fit-pack $(NEWC_PACK)
+	@test "$(ARCH)" = aarch64 || { echo "I/O VM run profile requires aarch64" >&2; exit 2; }
+	@package="$(IO_VM_PACKAGE)"; \
+	if test -z "$$package"; then \
+		package=$$(python3 -B scripts/fetch-io-vm.py --platform qemu \
+			--reference "$(IO_VM_REFERENCE)" --oras "$(IO_VM_ORAS)") || exit $$?; \
+	fi; \
+	python3 -B scripts/io-vm-images.py --package "$$package" \
+		--fit-pack "$(FIT_PACK)" --output "$(APP_OUTPUT)/io-standby.itb"
+	$(MAKE) -o app native-initramfs \
+		NATIVE_INITRAMFS="$(APP_OUTPUT)/initramfs-io.cpio" \
+		NATIVE_SERVICE_MANIFEST="$(CURDIR)/app/init/config/services-io.json" \
+		NATIVE_VM_CONFIG="$(CURDIR)/app/init/config/vms-io.json" \
+		NATIVE_EXTRA_ENTRIES='0755 svc/io-runtime "$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release/hyper-io-runtime" 0644 vm/io.itb "$(APP_OUTPUT)/io-standby.itb"'
+
+.PHONY: test-io-standby
+test-io-standby: image io-initramfs
+	$(NATIVE_QEMU_ENV) python3 -B tests/qemu/verify-io-standby.py \
+		--qemu "$(QEMU)" --image "$(KERNEL_IMAGE)" \
+		--initramfs "$(APP_OUTPUT)/initramfs-io.cpio" \
+		--log "$(APP_OUTPUT)/io-standby-$(QEMU_CPUS).log"

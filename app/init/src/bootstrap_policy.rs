@@ -7,10 +7,10 @@ use crate::manifest::{
     AuthorityDeclaration, AuthorityKey, AuthorityPolicy, StartupPurposeDeclaration,
 };
 use hyper_os::handle::{
-    ByteChannelObject, CapabilityChannelObject, ConsoleObject, CpuInspectorObject, DirectoryObject,
-    FileObject, MemoryInspectorObject, ObjectInspectorObject, ResourceDomainObject, Rights,
-    TaskFactoryObject, TaskGroupObject, TaskInspectorObject, TypedObject,
-    VirtualMachineCreationAuthorityObject,
+    ByteChannelObject, CapabilityChannelObject, ConsoleObject, CpuInspectorObject,
+    DeviceAssignmentAuthorityObject, DirectoryObject, FileObject, MemoryInspectorObject,
+    ObjectInspectorObject, ResourceDomainObject, Rights, TaskFactoryObject, TaskGroupObject,
+    TaskInspectorObject, TypedObject, VirtualMachineCreationAuthorityObject,
 };
 use hyper_service::{
     StartupContract, console as console_contract, process as process_contract,
@@ -22,6 +22,7 @@ const CONSOLE_OUTPUT_IMAGE: &str = "/svc/console-output";
 const SESSION_IMAGE: &str = "/svc/session";
 const SHELL_IMAGE: &str = "/bin/sh";
 const VM_MANAGER_IMAGE: &str = "/svc/vm-manager";
+pub const IO_RUNTIME_IMAGE: &str = "/svc/io-runtime";
 pub const VM_RUNTIME_IMAGE: &str = "/svc/vm-runtime";
 
 macro_rules! define_bootstrap_authorities {
@@ -81,6 +82,7 @@ define_bootstrap_authorities! {
     VmManagerConnectionChannel = 24 => "bootstrap.vm-manager-connection-channel",
     VmClientConnectionChannel = 25 => "bootstrap.vm-client-connection-channel",
     ServiceOutputChannel = 26 => "bootstrap.service-output-channel",
+    DeviceAuthority = 27 => "bootstrap.device-assignment-authority",
 }
 
 /// Stateless policy used to validate a manifest before touching live handles.
@@ -158,6 +160,13 @@ impl AuthorityPolicy for BootstrapPolicy {
                 VirtualMachineCreationAuthorityObject::KIND.as_raw(),
                 vm_authority_rights(),
             ),
+            BootstrapAuthority::DeviceAuthority => duplicate_authority(
+                authority,
+                DeviceAssignmentAuthorityObject::KIND.as_raw(),
+                Rights::INSPECT
+                    .union(Rights::DUPLICATE)
+                    .union(Rights::TRANSFER),
+            ),
             BootstrapAuthority::VmRuntimeImage => {
                 create_authority(authority, FileObject::KIND.as_raw(), Rights::EXECUTE)
             }
@@ -206,6 +215,9 @@ impl AuthorityPolicy for BootstrapPolicy {
             VM_MANAGER_IMAGE => find_contract(vm_contract::MANAGER_STARTUP_CONTRACTS, name)
                 .or_else(|| find_contract(stdio_contract::STARTUP_CONTRACTS, name))
                 .or_else(|| find_contract(process_contract::VM_MANAGER_STARTUP_CONTRACTS, name)),
+            IO_RUNTIME_IMAGE => find_contract(hyper_service::io::STARTUP_CONTRACTS, name)
+                .or_else(|| find_contract(stdio_contract::APPLICATION_STARTUP_CONTRACTS, name))
+                .or_else(|| find_contract(process_contract::APPLICATION_STARTUP_CONTRACTS, name)),
             // Ordinary apps use standard contracts without an executable allowlist.
             // The manifest must still explicitly request existing authority; this
             // lookup neither creates handles nor grants service-private roles.

@@ -49,6 +49,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: io-vm-storage-evidence
-          path: target/app/aarch64/io-vm-reset-*
+          path: |
+            target/app/aarch64/io-vm-reset-*
+            target/app/aarch64/io-standby-*
           if-no-files-found: ignore
           retention-days: 7

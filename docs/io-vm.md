@@ -16,7 +16,36 @@ and upstream vhost-scsi/LIO. A Native test deployment owns both VMs, their DTBs,
 shared memory and control transactions. It verifies disk contents independently
 on the host and checks DMA memory admission after both VMs retire.
 See [implementation status](status.md#linux-io-vm-baseline) for the acceptance
-boundary. Pi 5 device assignment and ordinary VMM deployment remain separate work.
+boundary. Pi 5 device assignment and dynamic client attachment remain separate work.
+
+## Resident startup
+
+`make run` on AArch64 keeps the HypeR shell and starts `/svc/io-runtime` from
+`app/init/config/services-io.json`. Init explicitly delegates the physical-device
+capability only to this service and charges its VM to the bounded VM fleet.
+The service owns the VM, physical device and control mailbox. Guest power-off,
+control failure or runtime exit initiates VM retirement; failed physical reset
+continues to use the kernel's existing quarantine semantics. There is no
+automatic restart of an uncertain device owner.
+
+The appliance boots with `hyper.role=io hyper.mode=standby`: LIO prepares the
+physical disk and the Linux service probes vhost-scsi, answers HELLO, then blocks
+on its control mailbox. No business VM, client RAM, notification binding or
+virtqueue is created. ACTIVATE without a provisioned client is rejected. This
+is an idle storage backend, not yet a Native filesystem mount or a dynamically
+attachable disk service. The separately configured Alpine VM has no connection
+to this backend and is not automatically started by the I/O profile.
+
+The launcher creates `target/app/aarch64/io-disk.img` once and never truncates
+an existing image. `IO_VM_DISK` selects another raw image; `RUN_PROFILE=native`
+selects the previous boot profile. `IO_VM_PACKAGE` can override the downloaded
+package with a complete, locally qualified boot generation. The importer also
+accepts `IO_VM_REFERENCE` for an explicit digest and `IO_VM_ORAS` for ORAS.
+
+`make test-io-standby` verifies backend readiness, slow interactive shell input,
+continued idle operation and an unchanged, preexisting physical disk. The
+`test-io-vm` acceptance remains separate and deliberately writes its own
+unique disposable disk through the full two-VM virtio-scsi path.
 
 ## Repository and package ownership
 
@@ -50,8 +79,8 @@ The complete appliance has passed the QEMU integration tests below. The
 qualified QEMU package is published in GHCR; its immutable reference and source
 revision are pinned in [io-vm.lock.json](../scripts/io-vm.lock.json).
 The import command also accepts `IO_VM_REFERENCE` explicitly. The qualified QEMU
-fixture consumes the imported generation; ordinary service-manifest deployment
-is not yet automatic.
+fixture consumes the imported generation. The ordinary AArch64 `make run`
+profile also imports it to start a resident, idle I/O VM under Native init.
 
 The I/O VM repository owns the pinned upstream LTS version and builds each
 external module against the exact kernel configuration and release. HypeR

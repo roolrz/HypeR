@@ -6,6 +6,7 @@
 #![no_std]
 
 pub mod console;
+pub mod io;
 pub mod process;
 pub mod session;
 pub mod stdio;

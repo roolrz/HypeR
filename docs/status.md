@@ -122,10 +122,12 @@ peer exit, stale completion rejection and interrupted MMIO retirement.
 
 Linux build, modules, services, rootfs assembly and source packaging live in
 [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm). HypeR owns Native deployment,
-DT generation and digest-pinned import. The QEMU deployment currently uses the
-explicit `test-io-vm` fixture; ordinary VMM configuration, Native VFS block
-integration, networking and Pi 5 controller assignment are not implemented by
-this baseline. QEMU does not qualify physical cache, interrupt or DMA behavior.
+DT generation and digest-pinned import. Default AArch64 `make run` keeps the
+Native shell and starts an idle I/O VM under init, with a persistent QEMU disk
+and no client VM or shared queues. `test-io-standby` checks shell responsiveness
+and preservation of disk contents; `test-io-vm` remains the explicit full-path
+writing fixture. Live client attachment, Native VFS block integration,
+networking and Pi 5 controller assignment are not implemented by this baseline. QEMU does not qualify physical cache, interrupt or DMA behavior.
 
 ## Design priorities
 

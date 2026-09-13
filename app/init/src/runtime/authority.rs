@@ -6,9 +6,10 @@
 use hyper_init::manifest::{CapabilityGrant, CapabilityOperation};
 use hyper_os::fs::{Directory, FileRights};
 use hyper_os::handle::{
-    ByteChannelObject, CapabilityChannelObject, ConsoleObject, CpuInspectorObject, DirectoryObject,
-    FileObject, MemoryInspectorObject, ObjectInspectorObject, OwnedHandle, ResourceDomainObject,
-    Rights, RightsOffer, TaskFactoryObject, TaskGroupObject, TaskInspectorObject, TypedObject,
+    ByteChannelObject, CapabilityChannelObject, ConsoleObject, CpuInspectorObject,
+    DeviceAssignmentAuthorityObject, DirectoryObject, FileObject, MemoryInspectorObject,
+    ObjectInspectorObject, OwnedHandle, ResourceDomainObject, Rights, RightsOffer,
+    TaskFactoryObject, TaskGroupObject, TaskInspectorObject, TypedObject,
     VirtualMachineCreationAuthorityObject,
 };
 use hyper_os::task::ProcessBuilder;
@@ -24,6 +25,7 @@ pub(super) struct AuthorityInventory {
     pub(super) group: OwnedHandle<TaskGroupObject>,
     pub(super) domain: OwnedHandle<ResourceDomainObject>,
     pub(super) vm: Option<VmAuthorities>,
+    pub(super) device: Option<OwnedHandle<DeviceAssignmentAuthorityObject>>,
     pub(super) task_inspector: OwnedHandle<TaskInspectorObject>,
     pub(super) object_inspector: OwnedHandle<ObjectInspectorObject>,
     pub(super) memory_inspector: OwnedHandle<MemoryInspectorObject>,
@@ -143,6 +145,18 @@ impl AuthorityInventory {
                 if kind == CpuInspectorObject::KIND.as_raw() =>
             {
                 builder.add_handle_duplicate(self.cpu_inspector.as_handle_ref(), purpose, offer)
+            }
+            (BootstrapAuthority::DeviceAuthority, CapabilityOperation::Duplicate)
+                if kind == DeviceAssignmentAuthorityObject::KIND.as_raw() =>
+            {
+                builder.add_handle_duplicate(
+                    self.device
+                        .as_ref()
+                        .ok_or(LaunchError::UnsupportedAuthority)?
+                        .as_handle_ref(),
+                    purpose,
+                    offer,
+                )
             }
             (BootstrapAuthority::VmAuthority, CapabilityOperation::Duplicate)
                 if kind == VirtualMachineCreationAuthorityObject::KIND.as_raw() =>
