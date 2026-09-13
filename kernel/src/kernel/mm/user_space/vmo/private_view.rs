@@ -180,16 +180,15 @@ impl<B: PageBackend, A: MemoryAccount> PrivateView<B, A> {
                 continue;
             }
             let owner = allocate_page(&self.backend, &self.account)?;
-            let mut bytes = [0u8; PAGE_SIZE as usize];
+            // Only this transaction can reach the new destination. Taking its
+            // lock under the original page lock cannot form a lock cycle, and
+            // a failed copy drops the unpublished page without changing self.
             original.owner.with(|owned| {
-                self.backend
-                    .read_owned(&owned.page, 0, &mut bytes)
-                    .map_err(VmoError::Backend)
-            })?;
-            owner.with(|owned| {
-                self.backend
-                    .write_owned(&mut owned.page, 0, &bytes)
-                    .map_err(VmoError::Backend)
+                owner.with(|destination| {
+                    self.backend
+                        .copy_owned(&owned.page, &mut destination.page)
+                        .map_err(VmoError::Backend)
+                })
             })?;
             pages.push(Some(PrivatePage {
                 owner,

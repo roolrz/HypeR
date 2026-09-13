@@ -195,6 +195,18 @@ impl PageBackend for Backend {
         Ok(())
     }
 
+    fn copy_owned(
+        &self,
+        source: &Self::Page,
+        destination: &mut Self::Page,
+    ) -> Result<(), Self::Error> {
+        // Preserve the model's read/write failure injection for page copies.
+        // Production copies directly between physical pages without scratch.
+        let mut bytes = [0u8; PAGE_SIZE as usize];
+        self.read_owned(source, 0, &mut bytes)?;
+        self.write_owned(destination, 0, &bytes)
+    }
+
     fn read_exposed(
         &self,
         page: &Self::Page,
@@ -1651,6 +1663,26 @@ fn private_materialization_failure_and_stale_commit_leave_backing_intact() {
     assert_eq!(space.mapping_epoch(), epoch);
     assert_eq!(account.0.pages.load(Ordering::Relaxed), baseline);
     backend.0.fail_allocation_at.store(0, Ordering::Relaxed);
+    let baseline_bytes = account.0.bytes.load(Ordering::Relaxed);
+    for (calls, failure) in [
+        (&backend.0.read_calls, &backend.0.fail_read_at),
+        (&backend.0.write_calls, &backend.0.fail_write_at),
+    ] {
+        // Fail the second page copy after the first destination was filled.
+        // Neither destination nor its metadata may survive an aborted view.
+        failure.store(calls.load(Ordering::Relaxed) + 2, Ordering::Relaxed);
+        assert!(matches!(
+            space.prepare_private_write(slice(0x1000, PAGE_SIZE * 2)),
+            Err(AddressSpaceError::Backend(PageError))
+        ));
+        failure.store(0, Ordering::Relaxed);
+        assert_eq!(space.mapping_epoch(), epoch);
+        assert_eq!(account.0.pages.load(Ordering::Relaxed), baseline);
+        assert_eq!(account.0.bytes.load(Ordering::Relaxed), baseline_bytes);
+        let mut bytes = vec![0; PAGE_SIZE as usize * 2];
+        crate::require_ok(space.copy_from_user(slice(0x1000, PAGE_SIZE * 2), &mut bytes));
+        assert!(bytes.iter().all(|byte| *byte == 0x61));
+    }
     let first = crate::require_some(crate::require_ok(
         space.prepare_private_write(slice(0x1000, 1)),
     ));

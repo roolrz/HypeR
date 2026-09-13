@@ -232,6 +232,19 @@ pub(crate) trait PageBackend: Clone {
         source: &[u8],
     ) -> Result<(), Self::Error>;
 
+    /// Copies a complete immutable owned page into a distinct unpublished page.
+    ///
+    /// The caller serializes both owners and excludes machine writers. The
+    /// backend must not block, fault, or retain either page. Hardware backends
+    /// can copy directly between mappings without a bounce buffer. On error
+    /// the destination may be partially written; the caller must discard it
+    /// without publication. The source remains unchanged.
+    fn copy_owned(
+        &self,
+        source: &Self::Page,
+        destination: &mut Self::Page,
+    ) -> Result<(), Self::Error>;
+
     /// Copies from memory that may be concurrently visible to a machine.
     ///
     /// Production implementations use an architecture-audited external-memory
