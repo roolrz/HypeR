@@ -213,6 +213,9 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_SIZE UINT64_C(65536)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_BASE UINT64_C(134873088)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_SIZE UINT64_C(131072)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_DISTRIBUTOR_SIZE UINT64_C(4096)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_BASE UINT64_C(134283264)
+#define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_SIZE UINT64_C(8192)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_BASE UINT64_C(150994944)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_SIZE UINT64_C(4096)
 #define HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_INTERRUPT UINT64_C(33)
@@ -461,19 +464,21 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, data_offset) ==
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, permissions) == 40, "private_mapping.permissions offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_private_mapping_t, mode) == 44, "private_mapping.mode offset");
 
-#define HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE UINT64_C(24)
+#define HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE UINT64_C(32)
 typedef struct hyper_native_virtual_machine_platform_info_t {
     uint32_t architecture;
     uint32_t platform_profile;
     uint64_t counter_frequency_hz;
     uint64_t riscv_isa;
+    uint64_t aarch64_gic_version;
 } hyper_native_virtual_machine_platform_info_t;
-HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_machine_platform_info_t) == 24, "virtual_machine_platform_info size");
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_machine_platform_info_t) == 32, "virtual_machine_platform_info size");
 HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_machine_platform_info_t) == 8, "virtual_machine_platform_info alignment");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_platform_info_t, architecture) == 0, "virtual_machine_platform_info.architecture offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_platform_info_t, platform_profile) == 4, "virtual_machine_platform_info.platform_profile offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_platform_info_t, counter_frequency_hz) == 8, "virtual_machine_platform_info.counter_frequency_hz offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_platform_info_t, riscv_isa) == 16, "virtual_machine_platform_info.riscv_isa offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_platform_info_t, aarch64_gic_version) == 24, "virtual_machine_platform_info.aarch64_gic_version offset");
 
 #define HYPER_NATIVE_FILE_METADATA_MIN_SIZE UINT64_C(112)
 typedef struct hyper_native_file_metadata_t {

@@ -110,7 +110,8 @@ pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), Initi
         binding.maintenance_interrupt(),
     ) {
         crate::pr_info!(
-            "HypeR: vGICv3 active with {} LRs, {} priority bits, {} preemption bits, {} INTID bits, maintenance VIRQ {}",
+            "HypeR: vGICv{} active with {} LRs, {} priority bits, {} preemption bits, {} INTID bits, maintenance VIRQ {}",
+            crate::hal::vm::guest_gic_version(),
             description.list_registers,
             description.priority_bits,
             description.preemption_bits,

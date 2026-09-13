@@ -10,6 +10,13 @@ firmware-provided initial ramdisk. Linux guest autostart is userspace policy:
 init provisions the VM manager and its isolated VM runtime through Native
 capabilities. Kernel self-test images contain no Linux loader or default VM.
 
+The AArch64 reference guest selects GICv2 or GICv3 from the creation lease's
+platform metadata. The `aarch64_gic_version` field is 2 or 3 on supported Arm
+hosts and zero on other architectures. vm-runtime uses this value to generate
+the guest interrupt-controller node; host device-tree addresses are never
+copied into guest firmware. Kernel, ABI and SDK consumers must be rebuilt
+together for the extended 32-byte platform-info record.
+
 ## Rust runtime
 
 Init uses HypeR's Rust `std`, like the other in-tree applications. It uses

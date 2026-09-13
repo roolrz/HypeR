@@ -218,11 +218,11 @@ fn handle_gic(
     interrupts: &super::super::super::VmInterruptController,
     vcpu_id: u32,
     access: MmioAccess,
-) -> Result<Option<MmioOutcome>, super::gicv3::Error> {
-    let Some(decoded) = super::gicv3::decode(access)? else {
+) -> Result<Option<MmioOutcome>, super::gic::Error> {
+    let Some(decoded) = super::gic::decode(access)? else {
         return Ok(None);
     };
-    let value = super::gicv3::access(hardware, interrupts, vcpu_id, decoded, access.operation())?;
+    let value = super::gic::access(hardware, interrupts, vcpu_id, decoded, access.operation())?;
     Ok(Some(MmioOutcome { value }))
 }
 

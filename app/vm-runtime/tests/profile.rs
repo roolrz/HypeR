@@ -8,6 +8,7 @@ fn metadata(
     platform_profile: vm::PlatformProfile,
 ) -> vm::VirtualMachinePlatformInfo {
     vm::VirtualMachinePlatformInfo {
+        aarch64_gic_version: 3,
         architecture,
         platform_profile,
         counter_frequency_hz: 24_000_000,
@@ -42,7 +43,7 @@ fn metadata_does_not_substitute_a_different_platform_or_architecture() {
                 vm::PlatformProfile::Aarch64Reference
             )
         ),
-        Ok(GuestHardwareMetadata::Aarch64)
+        Ok(GuestHardwareMetadata::Aarch64 { gic_version: 3 })
     ));
     assert!(matches!(
         validate_metadata(
@@ -80,4 +81,30 @@ fn metadata_does_not_substitute_a_different_platform_or_architecture() {
         ),
         Err(SelectionError::PlatformProfile)
     ));
+}
+
+#[test]
+fn aarch64_guest_revision_is_taken_from_the_lease() {
+    let mut info = metadata(
+        vm::Architecture::Aarch64,
+        vm::PlatformProfile::Aarch64Reference,
+    );
+    info.aarch64_gic_version = 2;
+    assert_eq!(
+        validate_metadata(
+            Architecture::Aarch64,
+            PlatformProfile::Aarch64Reference,
+            info
+        ),
+        Ok(GuestHardwareMetadata::Aarch64 { gic_version: 2 })
+    );
+    info.aarch64_gic_version = 0;
+    assert_eq!(
+        validate_metadata(
+            Architecture::Aarch64,
+            PlatformProfile::Aarch64Reference,
+            info
+        ),
+        Err(SelectionError::InterruptController)
+    );
 }

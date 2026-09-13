@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-use hyper::vm::aarch64::device::gicv3::{
+use hyper::vm::arm::gic::mmio::{
     BitmapRegister, DISTRIBUTOR_BASE, DISTRIBUTOR_SIZE, DecodeError, DecodedRegister, Frame,
     ModelRegister, ModelRegisterDescriptor, REDISTRIBUTOR_BASE, REDISTRIBUTOR_SIZE, RegisterState,
-    ServiceRegister, decode_access, read_model_register, write_model_register,
+    ServiceRegister, decode_v3, read_model_register, write_model_register,
 };
 use hyper::vm::arm::gic::{
     GicInterruptId, InterruptGroup, InterruptTrigger, VirtualGic, VirtualGicBuilder,
@@ -13,7 +13,7 @@ use hyper::vm::exit::{AccessWidth, GuestPhysicalAddress};
 use hyper::vm::interrupt::VirtualCpuId;
 
 fn decode(address: u64, width: AccessWidth) -> Result<Option<DecodedRegister>, DecodeError> {
-    decode_access(GuestPhysicalAddress::new(address), width)
+    decode_v3(GuestPhysicalAddress::new(address), width)
         .map(|access| access.map(|decoded| decoded.register()))
 }
 
@@ -66,17 +66,17 @@ fn separates_gic_frames_and_rejects_complete_span_crossings() {
     let redistributor = u64::from(REDISTRIBUTOR_BASE);
     let sgi = redistributor + 0x1_0000;
 
-    let decoded = crate::require_some(crate::require_ok(decode_access(
+    let decoded = crate::require_some(crate::require_ok(decode_v3(
         GuestPhysicalAddress::new(distributor),
         AccessWidth::Word,
     )));
     assert_eq!(decoded.frame(), Frame::Distributor);
-    let decoded = crate::require_some(crate::require_ok(decode_access(
+    let decoded = crate::require_some(crate::require_ok(decode_v3(
         GuestPhysicalAddress::new(redistributor),
         AccessWidth::Word,
     )));
     assert_eq!(decoded.frame(), Frame::RedistributorControl);
-    let decoded = crate::require_some(crate::require_ok(decode_access(
+    let decoded = crate::require_some(crate::require_ok(decode_v3(
         GuestPhysicalAddress::new(sgi),
         AccessWidth::Byte,
     )));
@@ -295,7 +295,7 @@ fn single_vcpu_routes_read_zero_and_reject_unsupported_values() {
     );
     assert_eq!(
         write_model_register(&mut controller, VirtualCpuId::new(0), route, 1),
-        Err(hyper::vm::aarch64::device::gicv3::ModelError::UnsupportedRouteValue(1))
+        Err(hyper::vm::arm::gic::mmio::ModelError::UnsupportedRouteValue(1))
     );
     assert_eq!(
         crate::require_ok(controller.snapshot(interrupt(32), VirtualCpuId::new(0)),).target,
@@ -438,7 +438,7 @@ fn malformed_accesses_are_rejected_before_model_mutation() {
         (0x0c09, AccessWidth::Word),
         (0x6101, AccessWidth::DoubleWord),
     ] {
-        let decoded = decode_access(GuestPhysicalAddress::new(distributor + offset), width);
+        let decoded = decode_v3(GuestPhysicalAddress::new(distributor + offset), width);
         assert_eq!(decoded, Err(DecodeError::InvalidRegisterAccess));
         // No DecodedAccess exists, so the production model mutation API cannot
         // be invoked for this malformed transaction.
@@ -492,4 +492,81 @@ fn sparse_model_writes_fail_before_mutating_an_earlier_lane() {
         crate::require_ok(sparse.snapshot(interrupt(32), VirtualCpuId::new(0))).trigger,
         InterruptTrigger::Level
     );
+}
+
+#[test]
+fn gicv2_decodes_private_interrupts_and_rejects_cross_frame_accesses() {
+    use hyper::vm::arm::gic::mmio::decode_v2;
+    let decoded = crate::require_some(crate::require_ok(decode_v2(
+        GuestPhysicalAddress::new(u64::from(DISTRIBUTOR_BASE) + 0x100),
+        AccessWidth::Word,
+    )));
+    let DecodedRegister::Model(model) = decoded.register() else {
+        panic!("not a model register")
+    };
+    assert_eq!(
+        model.descriptor(),
+        ModelRegisterDescriptor::Bitmap {
+            register: BitmapRegister::SetEnable,
+            first_interrupt: 0
+        }
+    );
+    assert_eq!(
+        decode_v2(
+            GuestPhysicalAddress::new(u64::from(DISTRIBUTOR_BASE) + 0xfff),
+            AccessWidth::Word
+        ),
+        Err(DecodeError::CrossesFrame)
+    );
+    assert!(
+        crate::require_ok(decode_v2(
+            GuestPhysicalAddress::new(0x0801_0000),
+            AccessWidth::Word
+        ))
+        .is_none()
+    );
+    let state = RegisterState::new();
+    assert_eq!(state.read(ServiceRegister::DistributorTypeV2), 1);
+    assert_eq!(state.read(ServiceRegister::PeripheralId2V2), 0x20);
+}
+
+#[test]
+fn gicv2_target_mask_and_priority_precision_preserve_pending() {
+    use hyper::vm::arm::gic::mmio::decode_v2;
+    let cpu = VirtualCpuId::new(0);
+    let mut controller = controller();
+    let decode = |offset| {
+        let access = crate::require_some(crate::require_ok(decode_v2(
+            GuestPhysicalAddress::new(u64::from(DISTRIBUTOR_BASE) + offset),
+            AccessWidth::Byte,
+        )));
+        match access.register() {
+            DecodedRegister::Model(register) => register,
+            other => panic!("not a model register: {other:?}"),
+        }
+    };
+    crate::require_ok(write_model_register(
+        &mut controller,
+        cpu,
+        decode(0x420),
+        0xaf,
+    ));
+    assert_eq!(
+        crate::require_ok(read_model_register(&controller, cpu, decode(0x420))),
+        0xa8
+    );
+    crate::require_ok(controller.set_enabled(interrupt(32), cpu, true));
+    crate::require_ok(controller.inject(interrupt(32), cpu));
+    crate::require_ok(write_model_register(&mut controller, cpu, decode(0x820), 0));
+    assert_eq!(
+        crate::require_ok(read_model_register(&controller, cpu, decode(0x820))),
+        0
+    );
+    let mut slots = [None];
+    crate::require_ok(controller.refill(cpu, &mut slots));
+    assert!(slots[0].is_none());
+    assert!(crate::require_ok(controller.snapshot(interrupt(32), cpu)).pending);
+    crate::require_ok(write_model_register(&mut controller, cpu, decode(0x820), 1));
+    crate::require_ok(controller.refill(cpu, &mut slots));
+    assert!(slots[0].is_some());
 }

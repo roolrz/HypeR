@@ -201,6 +201,9 @@ pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_BASE: 
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_DISTRIBUTOR_SIZE: u64 = 65536;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_BASE: u64 = 134873088;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_SIZE: u64 = 131072;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_DISTRIBUTOR_SIZE: u64 = 4096;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_BASE: u64 = 134283264;
+pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_SIZE: u64 = 8192;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_BASE: u64 = 150994944;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_SIZE: u64 = 4096;
 pub const HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_UART_INTERRUPT: u64 = 33;
@@ -442,7 +445,7 @@ const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, data_offs
 const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, permissions) == 40);
 const _: () = assert!(core::mem::offset_of!(HyperNativePrivateMapping, mode) == 44);
 
-pub const HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE: usize = 24;
+pub const HYPER_NATIVE_VIRTUAL_MACHINE_PLATFORM_INFO_MIN_SIZE: usize = 32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HyperNativeVirtualMachinePlatformInfo {
@@ -450,8 +453,9 @@ pub struct HyperNativeVirtualMachinePlatformInfo {
     pub platform_profile: u32,
     pub counter_frequency_hz: u64,
     pub riscv_isa: u64,
+    pub aarch64_gic_version: u64,
 }
-const _: () = assert!(core::mem::size_of::<HyperNativeVirtualMachinePlatformInfo>() == 24);
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualMachinePlatformInfo>() == 32);
 const _: () = assert!(core::mem::align_of::<HyperNativeVirtualMachinePlatformInfo>() == 8);
 const _: () =
     assert!(core::mem::offset_of!(HyperNativeVirtualMachinePlatformInfo, architecture) == 0);
@@ -462,6 +466,9 @@ const _: () = assert!(
 );
 const _: () =
     assert!(core::mem::offset_of!(HyperNativeVirtualMachinePlatformInfo, riscv_isa) == 16);
+const _: () = assert!(
+    core::mem::offset_of!(HyperNativeVirtualMachinePlatformInfo, aarch64_gic_version) == 24
+);
 
 pub const HYPER_NATIVE_FILE_METADATA_MIN_SIZE: usize = 112;
 #[repr(C)]

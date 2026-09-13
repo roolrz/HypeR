@@ -388,3 +388,12 @@ unsafe extern "C" fn aarch64_prepare_boot_map(dtb: usize, table: *mut [u64; 512]
     // SAFETY: Assembly passes the aligned, exclusive bootstrap L1 page.
     u64::from(bootstrap_map::populate(unsafe { &mut *table }, &platform))
 }
+
+/// Guest interrupt-controller revision of the selected reference board.
+pub(crate) fn guest_gic_version() -> u32 {
+    if vgic::v2::guest_physical().is_some() {
+        2
+    } else {
+        3
+    }
+}

@@ -335,6 +335,7 @@ pub(crate) struct VirtualMachinePlatformInfo {
     pub platform_profile: u32,
     pub counter_frequency_hz: u64,
     pub riscv_isa: u64,
+    pub aarch64_gic_version: u64,
 }
 
 pub(crate) fn platform_info(
@@ -350,7 +351,8 @@ pub(crate) fn platform_info(
 
 fn selected_platform_info(platform_profile: u32) -> Result<VirtualMachinePlatformInfo, Error> {
     use hyper::abi::native::*;
-    if !crate::hal::vm::userspace_vm_lifecycle_available() {
+    if !crate::hal::vm::userspace_vm_lifecycle_available() || !crate::hal::vm::platform_supported()
+    {
         return Err(Error::NotSupported);
     }
     let architecture = crate::hal::vm::guest_architecture_abi();
@@ -390,6 +392,7 @@ fn selected_platform_info(platform_profile: u32) -> Result<VirtualMachinePlatfor
         platform_profile,
         counter_frequency_hz,
         riscv_isa,
+        aarch64_gic_version: u64::from(crate::hal::vm::guest_gic_version()),
     })
 }
 

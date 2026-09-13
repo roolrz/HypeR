@@ -1,14 +1,14 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Guest-visible `GICv3` placement, decoding, and reusable register state.
+//! Guest-visible Arm GIC placement, versioned decoding, and register state.
 
 mod decode;
 mod model;
 
 pub use decode::{
     BitmapRegister, DecodeError, DecodedAccess, DecodedRegister, Frame, ModelRegister,
-    ModelRegisterDescriptor, ServiceRegister, SingleVcpuRoute, decode_access,
+    ModelRegisterDescriptor, ServiceRegister, SingleVcpuRoute, decode_v2, decode_v3,
 };
 pub use model::{ModelError, RegisterState, read_model_register, write_model_register};
 

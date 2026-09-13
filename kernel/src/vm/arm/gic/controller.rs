@@ -13,7 +13,7 @@ use super::ready::{BoundedVec, EntryIndex, ReadyEntries, ReadyError, ReadyQueue,
 const PRIVATE_INTERRUPT_COUNT: usize = 32;
 const MAX_GIC_INTERRUPT_ID: u32 = 1_019;
 const SHARED_INTERRUPT_COUNT: usize = MAX_GIC_INTERRUPT_ID as usize + 1 - PRIVATE_INTERRUPT_COUNT;
-const MAX_LIST_REGISTERS: usize = 16;
+const MAX_LIST_REGISTERS: usize = 64;
 
 /// Guest-visible interrupt identifier in the modeled GIC INTID range.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -83,6 +83,7 @@ pub struct ListEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InterruptSnapshot {
     pub enabled: bool,
+    pub routed: bool,
     pub pending: bool,
     pub active: bool,
     pub listed: bool,
@@ -139,6 +140,7 @@ struct Interrupt {
     group: InterruptGroup,
     trigger: InterruptTrigger,
     enabled: bool,
+    routed: bool,
     pending_command: PendingCommand,
     list_state: Option<ListState>,
     ready_position: Option<usize>,
@@ -279,6 +281,7 @@ impl VirtualGicBuilder {
             group,
             trigger,
             enabled: false,
+            routed: true,
             pending_command: PendingCommand::None,
             list_state: None,
             ready_position: None,
@@ -325,6 +328,7 @@ impl VirtualGicBuilder {
             deliveries,
             vcpu_count: self.vcpu_count,
             list_register_count,
+            distributor_enabled: true,
         })
     }
 
@@ -345,9 +349,15 @@ pub struct VirtualGic {
     deliveries: Vec<VcpuDelivery>,
     vcpu_count: u32,
     list_register_count: usize,
+    distributor_enabled: bool,
 }
 
 impl VirtualGic {
+    /// Gates delivery without changing per-interrupt enable or pending state.
+    pub fn set_distributor_enabled(&mut self, enabled: bool) {
+        self.distributor_enabled = enabled;
+    }
+
     /// Requested heap layout retained by a controller with fixed capacities.
     ///
     /// This is a pre-allocation contract. The caller supplies the exact number
@@ -444,6 +454,9 @@ impl VirtualGic {
         self.validate_cpu(vcpu)?;
         let cpu = vcpu.get() as usize;
         self.validate_listed(cpu)?;
+        if !self.distributor_enabled {
+            return Ok(false);
+        }
         // This is intentionally conservative: priority masks, group enables,
         // VMCR, and APR state are not authoritative in the saved software
         // model. Ignoring them can only cause a harmless early wake.
@@ -453,6 +466,7 @@ impl VirtualGic {
         Ok(self.deliveries[cpu].listed.iter().copied().any(|index| {
             let entry = &self.entries[index.0 as usize];
             entry.enabled
+                && entry.routed
                 && match entry.pending_command {
                     PendingCommand::Assert => true,
                     PendingCommand::Clear => false,
@@ -474,6 +488,21 @@ impl VirtualGic {
         self.entries[index.0 as usize].enabled = enabled;
         self.reconcile_ready(index)?;
         Ok(())
+    }
+
+    /// Selects whether an SPI has any destination without changing ISENABLER.
+    pub fn set_routed(
+        &mut self,
+        interrupt: GicInterruptId,
+        target: VirtualCpuId,
+        routed: bool,
+    ) -> Result<(), RuntimeError> {
+        let index = self.lookup(interrupt, target)?;
+        if routed && self.entries[index.0 as usize].pending_command == PendingCommand::Assert {
+            self.preflight_ready_insert(index)?;
+        }
+        self.entries[index.0 as usize].routed = routed;
+        self.reconcile_ready(index)
     }
 
     pub fn set_priority(
@@ -610,6 +639,7 @@ impl VirtualGic {
         };
         Ok(InterruptSnapshot {
             enabled: entry.enabled,
+            routed: entry.routed,
             pending,
             active: entry.list_state.is_some_and(ListState::active),
             listed: entry.list_state.is_some(),
@@ -694,7 +724,7 @@ impl VirtualGic {
             let entry = &mut self.entries[index.0 as usize];
             let mut state = Some(listed.state);
             state = apply_pending_command(entry, state);
-            state = apply_disabled_policy(entry, state);
+            state = apply_disabled_policy(entry, state, self.distributor_enabled);
             let Some(state) = state else {
                 entry.list_state = None;
                 entry.listed_position = None;
@@ -712,6 +742,9 @@ impl VirtualGic {
         }
         self.rebuild_listed(cpu, &validated)?;
         let mut filled = 0;
+        if !self.distributor_enabled {
+            return Ok(filled);
+        }
         for slot in slots.iter_mut().filter(|slot| slot.is_none()) {
             let index = {
                 let (entries, deliveries) = (&mut self.entries, &mut self.deliveries);
@@ -763,6 +796,7 @@ impl VirtualGic {
     fn reconcile_ready(&mut self, index: EntryIndex) -> Result<(), RuntimeError> {
         let entry = &self.entries[index.0 as usize];
         let should = entry.enabled
+            && entry.routed
             && entry.pending_command == PendingCommand::Assert
             && entry.list_state.is_none();
         let present = entry.ready_position.is_some();
@@ -1031,8 +1065,12 @@ fn apply_pending_command(entry: &mut Interrupt, state: Option<ListState>) -> Opt
     }
 }
 
-fn apply_disabled_policy(entry: &mut Interrupt, state: Option<ListState>) -> Option<ListState> {
-    if entry.enabled {
+fn apply_disabled_policy(
+    entry: &mut Interrupt,
+    state: Option<ListState>,
+    distributor_enabled: bool,
+) -> Option<ListState> {
+    if entry.enabled && entry.routed && distributor_enabled {
         return state;
     }
     match state {

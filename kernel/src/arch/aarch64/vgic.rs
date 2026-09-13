@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! `AArch64` `GICv3` virtualization system-register backend.
+//! Selected `AArch64` GIC virtualization backend.
+
+pub(super) mod v2;
+const MAX_LIST_REGISTERS: usize = 64;
 
 use core::arch::asm;
 
@@ -40,7 +43,7 @@ pub struct CpuContext {
     virtual_machine_control: u64,
     active_priorities_group0: [u64; 4],
     active_priorities_group1: [u64; 4],
-    list_registers: [Option<ListEntry>; registers::ICH_MAX_LIST_REGISTERS],
+    list_registers: [Option<ListEntry>; MAX_LIST_REGISTERS],
     list_register_count: u8,
     active_priority_register_count: u8,
 }
@@ -53,7 +56,7 @@ impl CpuContext {
                 | registers::ICH_VMCR_PRIORITY_MASK_ALLOW_ALL,
             active_priorities_group0: [0; 4],
             active_priorities_group1: [0; 4],
-            list_registers: [None; registers::ICH_MAX_LIST_REGISTERS],
+            list_registers: [None; MAX_LIST_REGISTERS],
             list_register_count: 0,
             active_priority_register_count: 0,
         }
@@ -75,6 +78,9 @@ impl Default for CpuContext {
 }
 
 pub fn capabilities() -> Result<Capabilities, Error> {
+    if v2::guest_physical().is_some() {
+        return v2::capabilities();
+    }
     let value: u64;
     // SAFETY: ICH_VTR_EL2 is a read-only capability register available at EL2.
     unsafe {
@@ -115,6 +121,9 @@ pub fn capabilities() -> Result<Capabilities, Error> {
 
 pub fn initialize_context(context: &mut CpuContext) -> Result<Capabilities, Error> {
     let capabilities = capabilities()?;
+    if v2::guest_physical().is_some() {
+        context.virtual_machine_control = 1 | (31 << 27);
+    }
     context.list_register_count = capabilities.list_registers;
     context.active_priority_register_count = active_priority_register_count(capabilities);
     Ok(capabilities)
@@ -127,7 +136,11 @@ pub fn validate_context_switch() -> Result<Capabilities, Error> {
     let probe = ListEntry {
         interrupt: GicInterruptId::new(31).ok_or(Error::InvalidVirtualInterrupt)?,
         priority: 0xa0,
-        group: InterruptGroup::Group1,
+        group: if v2::guest_physical().is_some() {
+            InterruptGroup::Group0
+        } else {
+            InterruptGroup::Group1
+        },
         state: ListState::Pending,
         request_eoi_maintenance: false,
     };
@@ -159,6 +172,9 @@ pub fn validate_context_switch() -> Result<Capabilities, Error> {
 ///
 /// The context must be exclusively owned by the vCPU scheduled on this CPU.
 pub unsafe fn activate(context: &CpuContext) -> Result<(), Error> {
+    if v2::guest_physical().is_some() {
+        return v2::activate(context);
+    }
     let capabilities = capabilities()?;
     let implemented = usize::from(capabilities.list_registers);
     let count = usize::from(context.list_register_count);
@@ -203,6 +219,9 @@ pub unsafe fn activate(context: &CpuContext) -> Result<(), Error> {
 ///
 /// `context` must describe the vCPU currently loaded on this CPU.
 pub unsafe fn deactivate(context: &mut CpuContext) -> Result<(), Error> {
+    if v2::guest_physical().is_some() {
+        return v2::deactivate(context);
+    }
     let capabilities = capabilities()?;
     let implemented = usize::from(capabilities.list_registers);
     let count = usize::from(context.list_register_count);
@@ -242,6 +261,9 @@ pub unsafe fn deactivate(context: &mut CpuContext) -> Result<(), Error> {
 }
 
 pub fn maintenance_state() -> MaintenanceState {
+    if v2::guest_physical().is_some() {
+        return v2::maintenance_state();
+    }
     let status: u64;
     let eoi: u64;
     let empty: u64;
@@ -267,6 +289,9 @@ pub fn maintenance_state() -> MaintenanceState {
 
 /// Disables virtual interrupt delivery on the current CPU.
 pub fn disable() {
+    if v2::guest_physical().is_some() {
+        return v2::disable();
+    }
     // SAFETY: Disabling ICH_HCR_EL2 is always valid at EL2 and is the fail-safe
     // response when maintenance arrives without an active vCPU owner.
     unsafe {

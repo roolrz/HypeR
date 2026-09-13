@@ -235,3 +235,14 @@ pub(crate) fn platform_supported() -> bool {
         true
     }
 }
+
+pub(crate) fn guest_gic_version() -> u32 {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        super::imp::guest_gic_version()
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        0
+    }
+}

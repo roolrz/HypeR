@@ -389,7 +389,7 @@ pub(crate) fn access_guest_gic(
     context: &mut VcpuContext,
     vcpu_id: u32,
     interrupts: &VmInterruptController,
-    access: hyper::vm::aarch64::device::gicv3::DecodedAccess,
+    access: hyper::vm::arm::gic::mmio::DecodedAccess,
     operation: hyper::vm::exit::MmioOperation,
 ) -> Result<Option<u64>, GicAccessError> {
     // SAFETY: Guest synchronous entry masked local IRQs and owns this vCPU.

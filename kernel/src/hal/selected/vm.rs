@@ -861,6 +861,7 @@ pub(crate) fn prepare_timer_validation(
             .ok_or(TimerValidationError::InvalidInterrupt)?;
         let interrupts = InterruptController::new(1, timer, usize::from(prepared.list_registers()))
             .map_err(TimerValidationError::InterruptController)?;
+        interrupts.enable_distributor_for_validation();
         let mut context = VcpuContext::new(0);
         context
             .initialize_virtual_interrupts()
@@ -1071,7 +1072,7 @@ pub(crate) fn access_guest_gic(
     state: &mut VcpuHardwareState,
     vcpu_id: u32,
     interrupts: &InterruptController,
-    access: hyper::vm::aarch64::device::gicv3::DecodedAccess,
+    access: hyper::vm::arm::gic::mmio::DecodedAccess,
     operation: hyper::vm::exit::MmioOperation,
 ) -> Result<Option<u64>, GicAccessError> {
     crate::arch::vm::access_guest_gic(&mut state.context, vcpu_id, interrupts, access, operation)
@@ -1154,4 +1155,8 @@ pub(crate) fn riscv_guest_baseline_available() -> bool {
 /// Availability of the selected platform's implemented VM backend.
 pub(crate) fn platform_supported() -> bool {
     crate::arch::vm::platform_supported()
+}
+
+pub(crate) fn guest_gic_version() -> u32 {
+    crate::arch::vm::guest_gic_version()
 }

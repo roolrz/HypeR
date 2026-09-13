@@ -1,12 +1,12 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! `GICv3` distributor and Redistributor service for the reference VM board.
+//! Selected guest GIC MMIO service for the reference VM board.
 //!
 //! The reusable device model owns register decoding and state semantics. This
 //! service retains only kernel error mapping and selected-controller routing.
 
-use hyper::vm::aarch64::device::gicv3::{DecodeError, DecodedAccess, decode_access};
+use hyper::vm::arm::gic::mmio::{DecodeError, DecodedAccess, decode_v3};
 use hyper::vm::exit::MmioAccess;
 
 use crate::kernel::vm::VmInterruptController;
@@ -24,7 +24,11 @@ impl From<DecodeError> for Error {
 }
 
 pub fn decode(access: MmioAccess) -> Result<Option<DecodedAccess>, Error> {
-    decode_access(access.address(), access.width()).map_err(Into::into)
+    if crate::hal::vm::guest_gic_version() == 2 {
+        hyper::vm::arm::gic::mmio::decode_v2(access.address(), access.width()).map_err(Into::into)
+    } else {
+        decode_v3(access.address(), access.width()).map_err(Into::into)
+    }
 }
 
 pub fn access(

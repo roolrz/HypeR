@@ -59,8 +59,14 @@ impl Stage2AddressSpace {
         let end = ipa.checked_add(size).ok_or(Error::AddressOverflow)?;
         let level1 = covering_regions(ipa, end, registers::STAGE2_LEVEL_SIZES_4K[0])?;
         let level2 = covering_regions(ipa, end, registers::STAGE2_LEVEL_SIZES_4K[1])?;
+        let device_tables = if super::vgic::v2::guest_physical().is_some() {
+            2
+        } else {
+            0
+        };
         1usize
-            .checked_add(level1)
+            .checked_add(device_tables)
+            .and_then(|pages| pages.checked_add(level1))
             .and_then(|pages| pages.checked_add(level2))
             .ok_or(Error::AddressOverflow)
     }
@@ -82,7 +88,16 @@ impl Stage2AddressSpace {
         }
         let root = allocator(1, 1).ok_or(Error::Allocation)?;
         validate_table(root)?;
-        Ok(Self { root, vmid })
+        let mut result = Self { root, vmid };
+        if let Some(physical) = super::vgic::v2::guest_physical() {
+            // SAFETY: Only the guest virtual CPU interface is exposed, never
+            // GICC/GICH. It is banked by CPU and switched with the vCPU context.
+            // The root is unpublished and allocator ownership is unchanged.
+            unsafe {
+                result.map_device(hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_BASE, physical, hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_SIZE, allocator)?;
+            }
+        }
+        Ok(result)
     }
 
     pub const fn root_address(&self) -> u64 {

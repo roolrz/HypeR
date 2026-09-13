@@ -138,6 +138,9 @@ ABI revision: `0`.
 | `virtual_platform_aarch64_reference_gic_distributor_size` | `65536` |
 | `virtual_platform_aarch64_reference_gic_redistributor_base` | `134873088` |
 | `virtual_platform_aarch64_reference_gic_redistributor_size` | `131072` |
+| `virtual_platform_aarch64_reference_gicv2_distributor_size` | `4096` |
+| `virtual_platform_aarch64_reference_gicv2_cpu_base` | `134283264` |
+| `virtual_platform_aarch64_reference_gicv2_cpu_size` | `8192` |
 | `virtual_platform_aarch64_reference_uart_base` | `150994944` |
 | `virtual_platform_aarch64_reference_uart_size` | `4096` |
 | `virtual_platform_aarch64_reference_uart_interrupt` | `33` |
@@ -398,7 +401,7 @@ element size before any user-memory access.
 | Name | Minimum prefix | Size | Alignment | Fields |
 | --- | ---: | ---: | ---: | --- |
 | `private_mapping` | 48 | 48 | 8 | `source_offset: u64 @ 0`, `source_length: u64 @ 8`, `address: u64 @ 16`, `size: u64 @ 24`, `data_offset: u64 @ 32`, `permissions: u32 @ 40`, `mode: u32 @ 44` |
-| `virtual_machine_platform_info` | 24 | 24 | 8 | `architecture: u32 @ 0`, `platform_profile: u32 @ 4`, `counter_frequency_hz: u64 @ 8`, `riscv_isa: u64 @ 16` |
+| `virtual_machine_platform_info` | 32 | 32 | 8 | `architecture: u32 @ 0`, `platform_profile: u32 @ 4`, `counter_frequency_hz: u64 @ 8`, `riscv_isa: u64 @ 16`, `aarch64_gic_version: u64 @ 24` |
 | `file_metadata` | 112 | 112 | 8 | `filesystem_id: u64 @ 0`, `mount_id: u64 @ 8`, `node_id: u64 @ 16`, `size: u64 @ 24`, `mode: u32 @ 32`, `kind: u32 @ 36`, `valid_times: u32 @ 40`, `reserved: u32 @ 44`, `accessed_seconds: i64 @ 48`, `accessed_nanoseconds: u32 @ 56`, `accessed_reserved: u32 @ 60`, `modified_seconds: i64 @ 64`, `modified_nanoseconds: u32 @ 72`, `modified_reserved: u32 @ 76`, `created_seconds: i64 @ 80`, `created_nanoseconds: u32 @ 88`, `created_reserved: u32 @ 92`, `changed_seconds: i64 @ 96`, `changed_nanoseconds: u32 @ 104`, `changed_reserved: u32 @ 108` |
 | `file_metadata_update` | 40 | 40 | 8 | `mask: u32 @ 0`, `mode: u32 @ 4`, `accessed_seconds: i64 @ 8`, `accessed_nanoseconds: u32 @ 16`, `accessed_reserved: u32 @ 20`, `modified_seconds: i64 @ 24`, `modified_nanoseconds: u32 @ 32`, `modified_reserved: u32 @ 36` |
 | `wait_set_event` | 24 | 24 | 8 | `registration: u64 @ 0`, `signals: u64 @ 8`, `sequence: u64 @ 16` |

@@ -289,6 +289,9 @@ pub struct PlicInfo {
 pub struct GicV2Info {
     pub distributor: PhysicalRange,
     pub cpu_interface: PhysicalRange,
+    pub hypervisor_interface: Option<PhysicalRange>,
+    pub virtual_cpu_interface: Option<PhysicalRange>,
+    pub maintenance_interrupt: Option<PlatformInterrupt>,
 }
 
 #[derive(Clone, Copy, Debug)]

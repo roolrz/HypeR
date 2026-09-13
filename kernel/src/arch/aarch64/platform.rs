@@ -127,6 +127,9 @@ impl EssentialDeviceDiscovery {
             self.result.interrupt_controller = Some(InterruptControllerInfo::GicV2(GicV2Info {
                 distributor: first_register(&node)?,
                 cpu_interface: *node.registers.get(1).ok_or(Error::InvalidGic)?,
+                hypervisor_interface: node.registers.get(2).copied(),
+                virtual_cpu_interface: node.registers.get(3).copied(),
+                maintenance_interrupt: discover_maintenance(&node)?,
             }));
             self.claim(node.id)?;
         }
@@ -294,23 +297,30 @@ fn discover_gic(
             .insert(region)
             .map_err(|_| Error::InvalidGic)?;
     }
-    let maintenance_interrupt = if node.interrupt_cells.is_empty() {
-        None
-    } else {
-        let descriptor = node
-            .interrupt_cells
-            .get(..3)
-            .ok_or(Error::InvalidInterrupt)?;
-        Some(PlatformInterrupt {
-            interrupt: decode_gic_interrupt(descriptor)?,
-            trigger: decode_gic_trigger(descriptor[2])?,
-        })
-    };
+    let maintenance_interrupt = discover_maintenance(node)?;
     Ok(InterruptControllerInfo::GicV3(GicV3Info {
         distributor,
         redistributors,
         redistributor_stride: candidate.redistributor_stride,
         maintenance_interrupt,
+    }))
+}
+
+fn discover_maintenance(node: &NodeResources<'_>) -> Result<Option<PlatformInterrupt>, Error> {
+    if node.interrupt_cells.is_empty() {
+        return Ok(None);
+    }
+    let descriptor = node
+        .interrupt_cells
+        .get(..3)
+        .ok_or(Error::InvalidInterrupt)?;
+    let interrupt = decode_gic_interrupt(descriptor)?;
+    if !(16..32).contains(&interrupt) {
+        return Err(Error::InvalidInterrupt);
+    }
+    Ok(Some(PlatformInterrupt {
+        interrupt,
+        trigger: decode_gic_trigger(descriptor[2])?,
     }))
 }
 

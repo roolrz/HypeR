@@ -73,7 +73,7 @@ The current foundation includes:
   graph;
 - safe AArch64 IRQ-tail preemption, including deactivation and resumption of
   scheduler-owned vCPU continuations;
-- IRQ domains and shared handler registration, host GICv2, GICv3/vGIC, PLIC, x2APIC, host
+- IRQ domains and shared handler registration, host/guest GICv2 and GICv3, PLIC, x2APIC, host
   and virtual architectural timers;
 - PSCI and SBI CPU-power backends;
 - a compatibility-matched platform driver framework, PL011 and NS16550 UARTs,
@@ -167,5 +167,5 @@ stop, WFI wakeup, virtual UART/PLIC, privilege isolation and retirement.
 The x86-64 build gate does not establish a userspace guest-boot contract.
 
 Pi 5 host bring-up prerequisites and recommended firmware configuration are
-documented in [Raspberry Pi 5](../kernel/docs/rpi5.md). Physical boot and a
-GICv2 guest interrupt backend remain unverified/unimplemented respectively.
+documented in [Raspberry Pi 5](../kernel/docs/rpi5.md). GICv2 Linux guest boot
+and lifecycle tests run in QEMU; physical Pi 5 boot remains unverified.
