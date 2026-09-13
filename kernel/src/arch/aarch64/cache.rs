@@ -96,50 +96,21 @@ impl CacheMaintenance for Aarch64Cache {
     }
 
     unsafe fn publish_instruction_ranges(
-        mut ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
+        ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
     ) -> Result<(), CacheError> {
-        let contract = selected_contract();
-        let data_line_size = contract_data_line_size(contract);
-        let mut clean_result = Ok(());
-        ranges(&mut |start, length| {
-            if clean_result.is_ok() {
-                // SAFETY: The batch contract keeps every enumerated range
-                // mapped and exclusively owned throughout both phases.
-                clean_result = unsafe { maintain_range(start, length, data_line_size, dc_cvau) };
-            }
-        });
-        // All dirty instruction bytes must reach PoU before any instruction
-        // cache invalidation. One barrier covers the complete batch.
-        Aarch64Barrier::data_synchronization(BarrierDomain::InnerShareable, BarrierAccess::All);
-        clean_result?;
+        // SAFETY: Host publication provides the stronger exclusive ownership
+        // contract required to publish a stable instruction stream.
+        unsafe { maintain_instruction_ranges(ranges) }
+    }
 
-        let invalidate_result = match contract_instruction_policy(contract) {
-            GuestInstructionCachePolicy::Range => {
-                let instruction_line_size = contract_instruction_line_size(contract);
-                let mut result = Ok(());
-                ranges(&mut |start, length| {
-                    if result.is_ok() {
-                        // SAFETY: PIPT indexing makes each stable host VA
-                        // sufficient to select all copies of that line.
-                        result = unsafe {
-                            maintain_range(start, length, instruction_line_size, ic_ivau)
-                        };
-                    }
-                });
-                result
-            }
-            GuestInstructionCachePolicy::WholeInnerShareableDomain => {
-                // SAFETY: Guest execution uses a different VA from the host
-                // linear alias. IALLUIS covers every alias in the execution
-                // domain without dereferencing a virtual address.
-                unsafe { invalidate_instruction_domain() };
-                Ok(())
-            }
-        };
-        // Complete every invalidation issued before returning, including when
-        // validation of a later range detected an address overflow.
-        Aarch64Barrier::data_synchronization(BarrierDomain::InnerShareable, BarrierAccess::All);
-        invalidate_result
+    unsafe fn prepare_guest_instruction_range(
+        start: usize,
+        length: usize,
+    ) -> Result<(), CacheError> {
+        // SAFETY: The guest retains the complete coherent range. This helper
+        // cleans data (never discards it), so sibling guest data writes cannot
+        // lose dirty contents. Guest software owns concurrent code publication.
+        unsafe { maintain_instruction_ranges(|visit| visit(start, length)) }
     }
 
     fn synchronize_instruction_execution() {
@@ -272,4 +243,52 @@ unsafe fn ic_ivau(address: usize) {
     // Invalidate by virtual address to the AArch64 point of unification.
     // SAFETY: The caller guarantees that this cache line is mapped.
     unsafe { asm!("ic ivau, {address}", address = in(reg) address, options(nostack)) };
+}
+
+/// Cleans data and invalidates instruction state without discarding dirty data.
+/// Ranges must be stable, retained coherent mappings; guest writers are allowed.
+unsafe fn maintain_instruction_ranges(
+    mut ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
+) -> Result<(), CacheError> {
+    let contract = selected_contract();
+    let data_line_size = contract_data_line_size(contract);
+    let mut clean_result = Ok(());
+    ranges(&mut |start, length| {
+        if clean_result.is_ok() {
+            // SAFETY: The batch contract keeps every enumerated range
+            // mapped and retained throughout both phases.
+            clean_result = unsafe { maintain_range(start, length, data_line_size, dc_cvau) };
+        }
+    });
+    // All dirty instruction bytes must reach PoU before any instruction
+    // cache invalidation. One barrier covers the complete batch.
+    Aarch64Barrier::data_synchronization(BarrierDomain::InnerShareable, BarrierAccess::All);
+    clean_result?;
+
+    let invalidate_result = match contract_instruction_policy(contract) {
+        GuestInstructionCachePolicy::Range => {
+            let instruction_line_size = contract_instruction_line_size(contract);
+            let mut result = Ok(());
+            ranges(&mut |start, length| {
+                if result.is_ok() {
+                    // SAFETY: PIPT indexing makes each stable host VA
+                    // sufficient to select all copies of that line.
+                    result =
+                        unsafe { maintain_range(start, length, instruction_line_size, ic_ivau) };
+                }
+            });
+            result
+        }
+        GuestInstructionCachePolicy::WholeInnerShareableDomain => {
+            // SAFETY: Guest execution uses a different VA from the host
+            // linear alias. IALLUIS covers every alias in the execution
+            // domain without dereferencing a virtual address.
+            unsafe { invalidate_instruction_domain() };
+            Ok(())
+        }
+    };
+    // Complete every invalidation issued before returning, including when
+    // validation of a later range detected an address overflow.
+    Aarch64Barrier::data_synchronization(BarrierDomain::InnerShareable, BarrierAccess::All);
+    invalidate_result
 }

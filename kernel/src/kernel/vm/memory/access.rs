@@ -296,7 +296,7 @@ impl GuestAddressSpace {
         let active_cpu = if publication.is_active() {
             let cpu = crate::kernel::cpu::current_index().ok_or(Error::InvalidCpu)?;
             self.residency
-                .check_single_active(cpu.get(), self.translation_epoch)
+                .check_active(cpu.get(), self.translation_epoch)
                 .map_err(Error::Residency)?;
             Some(cpu)
         } else {
@@ -361,9 +361,8 @@ impl GuestAddressSpace {
         self.commit_translation_change(active_cpu);
         if let Some(error) = committed_error {
             self.poisoned = true;
-            // The single-active execution lease excludes a concurrent vCPU,
-            // but a failed local invalidation still leaves architectural state
-            // ambiguous. Ownership is retained above before global fail-stop.
+            // A failed publication leaves concurrent hardware state ambiguous.
+            // Retain physical ownership above before global fail-stop.
             crate::kernel::crash::fatal(format_args!(
                 "HypeR: committed stage-2 mapping invalidation failed: {error:?}"
             ));
@@ -383,11 +382,11 @@ impl GuestAddressSpace {
         self.publish_instruction_page_bytes(physical, pin)?;
         let cpu = crate::kernel::cpu::current_index().ok_or(Error::InvalidCpu)?;
         self.residency
-            .check_single_active(cpu.get(), self.translation_epoch)
+            .check_active(cpu.get(), self.translation_epoch)
             .map_err(Error::Residency)?;
         let ipa = self.page_ipa(page_index)?;
         // SAFETY: Fault dispatch proves this exact address space is active on
-        // `cpu`, and the address-space lock plus execution lease serialize the
+        // `cpu`, and the address-space lock serializes the
         // break-before-make/permission update.
         let promotion = unsafe { self.stage2.make_normal_page_executable_active(ipa) };
         match promotion {
@@ -412,15 +411,14 @@ impl GuestAddressSpace {
         pin: &dyn hyper::cpu::PinnedExecution,
     ) -> Result<(), Error> {
         let address = linear_address(physical)?;
-        // SAFETY: The active guest is stopped in its VM-exit callback, the
-        // address-space lock serializes this page, and the typed pin prevents
-        // migration until both architecture-requested maintenance phases end.
-        // The page is complete and aligned, so cache-line rounding stays within
-        // its retained allocation.
+        // SAFETY: This page is still stage-2 execute-denied (or unmapped).
+        // The VM lease excludes host writers and retains the whole aligned
+        // allocation. Sibling vCPUs may write data; the guest-specific helper
+        // cleans without discarding dirty contents and does not claim to
+        // synchronize guest code modifications. Guest software owns that
+        // protocol. The faulting vCPU's ERET supplies local context sync.
         unsafe {
-            crate::hal::cache::publish_instruction_ranges(pin, |visit| {
-                visit(address, PAGE_SIZE as usize)
-            })
+            crate::hal::cache::prepare_guest_instruction_range(pin, address, PAGE_SIZE as usize)
         }?;
         Ok(())
     }
@@ -460,7 +458,7 @@ impl GuestAddressSpace {
         if let Some(cpu) = active_cpu {
             if self
                 .residency
-                .advance_single_active(cpu.get(), previous_epoch, self.translation_epoch)
+                .advance_shared_active(cpu.get(), previous_epoch, self.translation_epoch)
                 .is_err()
             {
                 crate::kernel::crash::fatal(format_args!(

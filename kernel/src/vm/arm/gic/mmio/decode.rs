@@ -29,11 +29,11 @@ pub enum BitmapRegister {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SingleVcpuRoute {
+pub struct InterruptRoute {
     interrupt: u32,
 }
 
-impl SingleVcpuRoute {
+impl InterruptRoute {
     pub const fn interrupt(self) -> u32 {
         self.interrupt
     }
@@ -70,12 +70,17 @@ pub enum ModelRegisterDescriptor {
     Configuration {
         first_interrupt: u32,
     },
-    Route(SingleVcpuRoute),
+    Route(InterruptRoute),
     Targets {
         first_interrupt: u32,
         count: u8,
     },
     SoftwareInterrupt,
+    SgiPending {
+        first_interrupt: u32,
+        count: u8,
+        set: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +129,15 @@ impl ModelRegister {
                 count,
             },
             ModelRegisterKind::SoftwareInterrupt => ModelRegisterDescriptor::SoftwareInterrupt,
+            ModelRegisterKind::SgiPending {
+                first_interrupt,
+                count,
+                set,
+            } => ModelRegisterDescriptor::SgiPending {
+                first_interrupt,
+                count,
+                set,
+            },
         }
     }
 }
@@ -145,12 +159,17 @@ pub(super) enum ModelRegisterKind {
     Configuration {
         first_interrupt: u32,
     },
-    Route(SingleVcpuRoute),
+    Route(InterruptRoute),
     Targets {
         first_interrupt: u32,
         count: u8,
     },
     SoftwareInterrupt,
+    SgiPending {
+        first_interrupt: u32,
+        count: u8,
+        set: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -171,9 +190,13 @@ pub enum DecodeError {
 pub struct DecodedAccess {
     frame: Frame,
     register: DecodedRegister,
+    redistributor: Option<u32>,
 }
 
 impl DecodedAccess {
+    pub const fn redistributor(self) -> Option<u32> {
+        self.redistributor
+    }
     /// Identifies the owning frame for diagnostics and frame-local policy.
     pub const fn frame(self) -> Frame {
         self.frame
@@ -194,6 +217,14 @@ pub fn decode_v3(
     address: GuestPhysicalAddress,
     width: AccessWidth,
 ) -> Result<Option<DecodedAccess>, DecodeError> {
+    decode_v3_cpus(address, width, 1)
+}
+
+pub fn decode_v3_cpus(
+    address: GuestPhysicalAddress,
+    width: AccessWidth,
+    vcpu_count: u32,
+) -> Result<Option<DecodedAccess>, DecodeError> {
     let address = address.get();
     let bytes = width.bytes() as u64;
     let distributor_base = u64::from(DISTRIBUTOR_BASE);
@@ -212,7 +243,7 @@ pub fn decode_v3(
 
     let redistributor_base = u64::from(REDISTRIBUTOR_BASE);
     let redistributor_end = redistributor_base
-        .checked_add(u64::from(REDISTRIBUTOR_SIZE))
+        .checked_add(u64::from(REDISTRIBUTOR_SIZE) * u64::from(vcpu_count))
         .ok_or(DecodeError::CrossesFrame)?;
     if !(redistributor_base..redistributor_end).contains(&address) {
         return Ok(None);
@@ -220,6 +251,9 @@ pub fn decode_v3(
     let end = address
         .checked_add(bytes)
         .ok_or(DecodeError::CrossesFrame)?;
+    let cpu = (address - redistributor_base) / (2 * FRAME_SIZE);
+    let redistributor_base = redistributor_base + cpu * 2 * FRAME_SIZE;
+    let redistributor_end = redistributor_base + 2 * FRAME_SIZE;
     let sgi_base = redistributor_base
         .checked_add(FRAME_SIZE)
         .ok_or(DecodeError::CrossesFrame)?;
@@ -231,7 +265,10 @@ pub fn decode_v3(
     if end > frame_end {
         return Err(DecodeError::CrossesFrame);
     }
-    decode_frame(frame, address - base, width).map(Some)
+    decode_frame(frame, address - base, width).map(|mut decoded| {
+        decoded.redistributor = Some(cpu as u32);
+        Some(decoded)
+    })
 }
 
 /// Decodes the `GICv2` distributor. GICV is a hardware stage-2 mapping.
@@ -325,6 +362,21 @@ fn decode_distributor_v2(offset: u32, width: AccessWidth) -> Result<DecodedRegis
             },
         }));
     }
+    if (0xf10..0xf30).contains(&offset) {
+        let count = width.bytes() as u8;
+        if !matches!(width, AccessWidth::Byte | AccessWidth::Word)
+            || !offset.is_multiple_of(u32::from(count))
+        {
+            return Err(DecodeError::InvalidRegisterAccess);
+        }
+        return Ok(DecodedRegister::Model(ModelRegister {
+            kind: ModelRegisterKind::SgiPending {
+                first_interrupt: (offset - 0xf10) % 16,
+                count,
+                set: offset >= 0xf20,
+            },
+        }));
+    }
     if let Some(result) = model_word(
         offset,
         width,
@@ -350,7 +402,11 @@ fn decode_frame(
         Frame::RedistributorControl => decode_redistributor_control(offset, width)?,
         Frame::RedistributorSgi => decode_redistributor_sgi(offset, width)?,
     };
-    Ok(DecodedAccess { frame, register })
+    Ok(DecodedAccess {
+        frame,
+        register,
+        redistributor: None,
+    })
 }
 
 fn decode_distributor(offset: u32, width: AccessWidth) -> Result<DecodedRegister, DecodeError> {
@@ -589,8 +645,7 @@ fn route(
     let Some(relative) = offset.checked_sub(base) else {
         return Some(Err(DecodeError::InvalidRegisterAccess));
     };
-    // Partial writes require retained 64-bit route state. The current device
-    // contract instead exposes one complete route token targeting vCPU 0.
+    // The reference interface requires aligned complete affinity-route accesses.
     let valid = width == AccessWidth::DoubleWord && relative % 8 == 0;
     let interrupt = first_interrupt.checked_add(relative / 8);
     Some(if valid && interrupt.is_some() {
@@ -598,7 +653,7 @@ fn route(
             return Some(Err(DecodeError::InvalidRegisterAccess));
         };
         Ok(DecodedRegister::Model(ModelRegister {
-            kind: ModelRegisterKind::Route(SingleVcpuRoute { interrupt }),
+            kind: ModelRegisterKind::Route(InterruptRoute { interrupt }),
         }))
     } else {
         Err(DecodeError::InvalidRegisterAccess)

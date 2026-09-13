@@ -68,7 +68,7 @@ require_occurrences 'super::active_vcpu::clear\(' 2 \
 require_order "$fixture/activate.rs" \
     'claim_execution\(' \
     'super::memory::activate\(' \
-    'exclusive VM execution must be claimed before stage-2 activation'
+    'per-CPU VM execution and retirement admission must be claimed before stage-2 activation'
 require_order "$fixture/activate.rs" \
     'super::memory::activate\(' \
     'crate::hal::vm::activate_hardware\(' \

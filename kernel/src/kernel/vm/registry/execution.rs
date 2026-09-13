@@ -6,7 +6,7 @@
 use hyper::cpu::CpuIndex;
 use hyper::mm::FallibleArc;
 use hyper::sync::InterruptSpinLock;
-use hyper::vm::translation::{ExclusiveExecution, ExecutionClaim, ExecutionError};
+use hyper::vm::translation::{ConcurrentExecution, ExecutionClaim, ExecutionError};
 
 use super::{Error, VmId};
 use crate::kernel::accounting::CommittedCharge;
@@ -26,6 +26,30 @@ pub(in crate::kernel) struct VmBinding {
 impl VmBinding {
     pub(super) fn new(id: VmId, machine: FallibleArc<VirtualMachine>) -> Self {
         Self { id, machine }
+    }
+
+    pub(in crate::kernel) fn lifecycle(
+        &self,
+    ) -> FallibleArc<crate::kernel::vm::installed::InstalledMachine> {
+        self.machine.lifecycle()
+    }
+
+    pub(in crate::kernel) fn publish_changed_interrupts(&self) {
+        let mut targets = crate::hal::vm::take_reconcile_targets(self.interrupts());
+        while targets != 0 {
+            let cpu = targets.trailing_zeros();
+            targets &= targets - 1;
+            if let Ok(endpoint) = self.endpoint(cpu)
+                && let Some(thread) = endpoint.thread()
+            {
+                match self.publish_interrupt_reconcile(cpu, thread) {
+                    Ok(()) | Err(Error::EndpointClosed) => {}
+                    Err(error) => crate::kernel::crash::fatal(format_args!(
+                        "guest interrupt notification failed: {error:?}"
+                    )),
+                }
+            }
+        }
     }
 
     pub(crate) const fn id(&self) -> VmId {
@@ -109,6 +133,9 @@ impl VmBinding {
         else {
             return Ok(());
         };
+        // A local sender may have drained a remote producer's controller bit
+        // after its last refill. Synchronous guest return has no IRQ-tail
+        // checkpoint, so local targets also need a hardware prompt.
         if crate::hal::vm::request_guest_exit(cpu) {
             return Ok(());
         }
@@ -216,11 +243,8 @@ impl VmBinding {
         self.machine.address_space.with(operation)
     }
 
-    /// Claims this VM's currently single active execution interval.
-    ///
-    /// The capability is intentionally independent of vCPU identity: current
-    /// construction installs one boot vCPU, and the invariant remains safe if
-    /// additional vCPU objects are added before VM-wide shootdown support.
+    /// Admits concurrent vCPU execution while retaining per-CPU hardware ownership.
+    /// The scheduler exclusively owns each vCPU's execution payload.
     pub(in crate::kernel) fn claim_execution(
         &self,
         cpu: CpuIndex,
@@ -346,7 +370,7 @@ impl VmExecutionReleaseFailure {
 pub(super) struct VirtualMachine {
     id: VmId,
     address_space: AddressSpaceLock,
-    execution: ExclusiveExecution,
+    execution: ConcurrentExecution,
     run_admission: crate::kernel::vm::run_admission::RunAdmission,
     interrupts: VmInterruptController,
     // RISC-V's current selected set is zero-sized and has no exit consumer,
@@ -371,7 +395,7 @@ impl VirtualMachine {
         FallibleArc::try_new(Self {
             id,
             address_space: InterruptSpinLock::new(address_space),
-            execution: ExclusiveExecution::new(id.execution_owner()),
+            execution: ConcurrentExecution::new(id.execution_owner()),
             run_admission: crate::kernel::vm::run_admission::RunAdmission::new(
                 id.execution_owner(),
             ),
@@ -460,8 +484,8 @@ impl VirtualMachine {
         Ok(())
     }
 
-    pub(super) fn bind_virtual_serial(&self, vcpu: u32, thread: ThreadId) {
-        self.devices.bind_virtual_serial(self.id, vcpu, thread);
+    pub(super) fn bind_virtual_serial(&self, vcpu: u32) {
+        self.devices.bind_virtual_serial(self.id, vcpu);
     }
 
     pub(super) fn disconnect_virtual_serial(&self) {

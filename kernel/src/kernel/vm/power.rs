@@ -1,0 +1,143 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
+//! Runtime-mediated power requests, published only after vCPU hardware detach.
+
+use super::{Error, InstalledMachine, RuntimeState};
+use crate::kernel::object::SignalMask;
+use hyper::vm::arm::psci::{Continuation, Operation, Request};
+
+impl InstalledMachine {
+    // Used by guest firmware adapters on platforms with CPU power calls.
+    #[allow(dead_code)]
+    pub(in crate::kernel) fn stage_power(
+        &self,
+        source: u32,
+        operation: Operation,
+        arguments: [u64; 3],
+    ) -> Result<(), i64> {
+        let config = self.configuration;
+        self.power.with(|power| {
+            power.stage(
+                source,
+                operation,
+                arguments,
+                config.guest_physical_base..config.guest_physical_base + config.memory_size,
+            )
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(in crate::kernel) fn affinity(&self, target: u64, level: u64) -> i64 {
+        self.power.with(|power| power.affinity(target, level))
+    }
+
+    pub(in crate::kernel) fn publish_power(&self, source: u32) -> bool {
+        self.power.with(|power| {
+            let changed = power.publish(source).unwrap_or_else(|_| {
+                crate::kernel::crash::fatal(format_args!(
+                    "invalid vCPU power publication source {source}"
+                ))
+            });
+            if changed {
+                self.update_power_signal(power);
+            }
+            changed
+        })
+    }
+
+    pub(in crate::kernel) fn power_continuation(&self, source: u32) -> Continuation {
+        self.power
+            .with(|power| power.continuation(source))
+            .unwrap_or_else(|_| {
+                crate::kernel::crash::fatal(format_args!(
+                    "invalid vCPU power continuation source {source}"
+                ))
+            })
+    }
+
+    pub(in crate::kernel) fn pending_power_request(&self) -> Option<Request> {
+        self.power.with(|power| power.pending())
+    }
+
+    pub(in crate::kernel::vm) fn complete_power_request(
+        &self,
+        id: u64,
+        accept: bool,
+    ) -> Result<(), Error> {
+        // Stop publication and power-on readiness have one lifecycle lock.
+        // All configured endpoint Threads already exist; this commit allocates
+        // nothing and cannot race VM retirement into starting a new Thread.
+        let vm_id = self.state.with(|state| {
+            let vm_id = match state {
+                RuntimeState::Running { id, .. } => *id,
+                _ => return Err(Error::BadState),
+            };
+            let request = self.power.with(|power| {
+                let request = power.request(id).ok_or(Error::BadState)?;
+                if accept && request.operation == Operation::CpuOff {
+                    let vm_id = match state {
+                        RuntimeState::Running { id, .. } => *id,
+                        _ => return Err(Error::BadState),
+                    };
+                    crate::kernel::vm::registry::with_binding(vm_id, |binding| {
+                        crate::hal::vm::reset_vcpu_interrupts(binding.interrupts(), request.vcpu)
+                    })
+                    .map_err(|_| Error::BadState)?
+                    .map_err(|_| Error::BadState)?;
+                }
+                let request = power.complete(id, accept).map_err(|_| Error::BadState)?;
+                self.update_power_signal(power);
+                Ok::<_, Error>(request)
+            })?;
+            if accept && request.operation == Operation::CpuOn {
+                let endpoint = self.endpoint(request.target)?;
+                match endpoint.lifecycle().map_err(|_| Error::BadState)? {
+                    crate::kernel::vm::endpoint_state::Lifecycle::Dormant => {
+                        // Power state and bootstrap are committed above. This
+                        // stable dormant scheduler owner must become runnable.
+                        if endpoint.start().is_err() {
+                            crate::hal::cpu::halt();
+                        }
+                    }
+                    crate::kernel::vm::endpoint_state::Lifecycle::Started => {
+                        endpoint.signal_waiter()
+                    }
+                    _ => crate::hal::cpu::halt(),
+                }
+            }
+            self.endpoint(request.vcpu)?.signal_waiter();
+            Ok(vm_id)
+        })?;
+        // Reset may release an active SPI to another vCPU. Publish its prompt
+        // only after lifecycle/power locks are released. Concurrent retirement
+        // may already have removed the VM; then there is no guest to notify.
+        let _ = crate::kernel::vm::registry::with_binding(vm_id, |binding| {
+            binding.publish_changed_interrupts();
+        });
+        Ok(())
+    }
+
+    fn update_power_signal(&self, power: &hyper::vm::arm::psci::PowerState) {
+        let bit = SignalMask::from_trusted_bits(
+            hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_POWER_REQUEST,
+        );
+        let (clear, set) = if power.pending().is_some() {
+            (SignalMask::EMPTY, bit)
+        } else {
+            (bit, SignalMask::EMPTY)
+        };
+        if self.vm_signals.update(clear, set).is_err() {
+            crate::hal::cpu::halt();
+        }
+    }
+
+    pub(in crate::kernel) fn publish_vcpu_terminal(&self) {
+        let bit = SignalMask::from_trusted_bits(
+            hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_VCPU_TERMINATED,
+        );
+        if self.vm_signals.update(SignalMask::EMPTY, bit).is_err() {
+            crate::hal::cpu::halt();
+        }
+    }
+}

@@ -3,7 +3,7 @@
 
 //! Per-VM image loader and lifetime owner.
 
-use hyper_os::handle::{ByteChannelObject, VirtualCpuObject};
+use hyper_os::handle::{ByteChannelObject, VirtualCpuObject, VirtualMachineObject};
 use hyper_os::memory::{MAX_TRANSFER_BYTES, WritableVmo};
 use hyper_os::startup::Startup;
 use hyper_os::wait::{ObjectSignals, WaitSet};
@@ -124,8 +124,18 @@ fn run(
     hyper_os::vm::seal(pending.as_handle_ref()).map_err(Error::OperatingSystem)?;
     let (machine, vcpu) = hyper_os::vm::install(pending)
         .map_err(|failure| Error::OperatingSystem(failure.error()))?;
+    // Keep inspection capabilities through retirement, including secondary CPU
+    // failures. No registry lookup or allocation is needed on the stop path.
+    let mut vcpus = Vec::with_capacity(plan.vcpu_count() as usize);
+    vcpus.push(vcpu);
+    for index in 1..plan.vcpu_count() {
+        vcpus.push(
+            hyper_os::vm::open_vcpu(machine.as_handle_ref(), index)
+                .map_err(Error::OperatingSystem)?,
+        );
+    }
     publish_status(control, vm_contract::InstanceStatus::Installed)?;
-    hyper_os::vm::start_vcpu(vcpu.as_handle_ref()).map_err(Error::OperatingSystem)?;
+    hyper_os::vm::start_vcpu(vcpus[0].as_handle_ref()).map_err(Error::OperatingSystem)?;
     // This ends at the successful start request, not the first guest entry:
     // scheduling and the EL1/VS transition happen asynchronously in the kernel.
     let elapsed = started.elapsed();
@@ -135,7 +145,7 @@ fn run(
         elapsed.subsec_micros() % 1_000,
     );
     publish_status(control, vm_contract::InstanceStatus::Running)?;
-    supervise_guest(&machine, &vcpu, control, &mut console)
+    supervise_guest(&machine, &vcpus, control, &mut console)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -247,7 +257,7 @@ fn publish_status(
 
 fn supervise_guest(
     machine: &hyper_os::OwnedHandle<hyper_os::handle::VirtualMachineObject>,
-    vcpu: &hyper_os::OwnedHandle<VirtualCpuObject>,
+    vcpus: &[hyper_os::OwnedHandle<VirtualCpuObject>],
     control: &hyper_os::channel::ByteChannel<'_>,
     console: &mut hyper_vm_runtime::console::Console,
 ) -> Result<(), Error> {
@@ -259,10 +269,11 @@ fn supervise_guest(
                 .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
         )
         .map_err(Error::OperatingSystem)?;
-    let vcpu_wait = waits
+    let machine_wait = waits
         .add(
-            vcpu.as_handle_ref(),
-            ObjectSignals::<VirtualCpuObject>::TERMINATED,
+            machine.as_handle_ref(),
+            ObjectSignals::<VirtualMachineObject>::POWER_REQUEST
+                .union(ObjectSignals::<VirtualMachineObject>::VCPU_TERMINATED),
         )
         .map_err(Error::OperatingSystem)?;
     let mut control_consumed = false;
@@ -278,7 +289,7 @@ fn supervise_guest(
         let observation = waits
             .wait(hyper_os::DEADLINE_INFINITE)
             .map_err(Error::OperatingSystem)?;
-        if observation.registration != control_wait && observation.registration != vcpu_wait {
+        if observation.registration != control_wait && observation.registration != machine_wait {
             console.observe(observation.registration, observation.signals);
             continue;
         }
@@ -302,7 +313,7 @@ fn supervise_guest(
                 console.attach(&waits).map_err(Error::OperatingSystem)?;
                 continue;
             }
-            let terminal = stop_and_retire(machine, vcpu)?;
+            let terminal = stop_and_retire(machine, vcpus)?;
             if terminal != hyper_os::vm::VirtualCpuTermination::Administrative {
                 return Err(Error::Guest(terminal));
             }
@@ -310,31 +321,67 @@ fn supervise_guest(
             return Ok(());
         }
         if observation.registration == control_wait {
-            let _terminal = stop_and_retire(machine, vcpu)?;
+            let _terminal = stop_and_retire(machine, vcpus)?;
             return Err(Error::InvalidControl);
         }
-        if observation.registration != vcpu_wait {
+        if observation.registration != machine_wait {
             return Err(Error::InvalidControl);
         }
-        let terminal = terminated_vcpu_reason(vcpu)?;
-        hyper_os::vm::request_stop(machine.as_handle_ref()).map_err(Error::OperatingSystem)?;
-        hyper_os::vm::wait_terminated(machine.as_handle_ref(), hyper_os::DEADLINE_INFINITE)
-            .map_err(Error::OperatingSystem)?;
-        return Err(Error::Guest(terminal));
+        if ObjectSignals::<VirtualMachineObject>::VCPU_TERMINATED.is_present_in(observation.signals)
+        {
+            return Err(Error::Guest(stop_and_retire(machine, vcpus)?));
+        }
+        // A guest may submit another request immediately after completion.
+        // Bound each drain so control/console observations remain serviceable.
+        for _ in 0..vcpus.len() {
+            let Some(request) = hyper_os::vm::pending_power_request(machine.as_handle_ref())
+                .map_err(Error::OperatingSystem)?
+            else {
+                break;
+            };
+            use hyper_os::vm::PowerOperation;
+            match request.operation {
+                PowerOperation::CpuOn | PowerOperation::CpuOff => {
+                    hyper_os::vm::complete_power_request(machine.as_handle_ref(), request.id, true)
+                        .map_err(Error::OperatingSystem)?;
+                }
+                PowerOperation::SystemOff | PowerOperation::SystemReset => {
+                    // Never resume the requesting CPU after a successful system
+                    // power operation. Retire every CPU before reporting terminal
+                    // status; the manager owns authority for a fresh reboot lease.
+                    let terminal = stop_and_retire(machine, vcpus)?;
+                    if terminal != hyper_os::vm::VirtualCpuTermination::Administrative {
+                        return Err(Error::Guest(terminal));
+                    }
+                    let status = if request.operation == PowerOperation::SystemReset {
+                        vm_contract::InstanceStatus::RebootRequested
+                    } else {
+                        vm_contract::InstanceStatus::Stopped
+                    };
+                    publish_status(control, status)?;
+                    return Ok(());
+                }
+            }
+        }
+        waits.rearm(machine_wait).map_err(Error::OperatingSystem)?;
     }
 }
 
 fn stop_and_retire(
-    machine: &hyper_os::OwnedHandle<hyper_os::handle::VirtualMachineObject>,
-    vcpu: &hyper_os::OwnedHandle<VirtualCpuObject>,
+    machine: &hyper_os::OwnedHandle<VirtualMachineObject>,
+    vcpus: &[hyper_os::OwnedHandle<VirtualCpuObject>],
 ) -> Result<hyper_os::vm::VirtualCpuTermination, Error> {
     hyper_os::vm::request_stop(machine.as_handle_ref()).map_err(Error::OperatingSystem)?;
-    hyper_os::vm::wait_vcpu_terminated(vcpu.as_handle_ref(), hyper_os::DEADLINE_INFINITE)
-        .map_err(Error::OperatingSystem)?;
-    let terminal = terminated_vcpu_reason(vcpu)?;
     hyper_os::vm::wait_terminated(machine.as_handle_ref(), hyper_os::DEADLINE_INFINITE)
         .map_err(Error::OperatingSystem)?;
-    Ok(terminal)
+    let mut result = hyper_os::vm::VirtualCpuTermination::Administrative;
+    for cpu in vcpus {
+        let terminal = terminated_vcpu_reason(cpu)?;
+        if terminal != hyper_os::vm::VirtualCpuTermination::Administrative {
+            result = terminal;
+        }
+    }
+    Ok(result)
 }
 
 fn terminated_vcpu_reason(

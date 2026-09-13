@@ -9,7 +9,7 @@
 //! a reversible mapping failure.
 
 use crate::cpu::CpuIndex;
-use crate::sync::atomic::{AtomicUsize, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::vm::exit::MemoryAccess;
 
 const INACTIVE_CPU: usize = usize::MAX;
@@ -215,6 +215,61 @@ impl ExclusiveExecution {
                 Ordering::Release,
                 Ordering::Relaxed,
             )
+            .is_err()
+        {
+            return Err(ExecutionReleaseFailure::new(
+                ExecutionError::NotActiveOwner,
+                claim,
+            ));
+        }
+        claim.armed = false;
+        Ok(())
+    }
+}
+
+/// Concurrent VM execution with one exact owner per physical CPU.
+/// Scheduler ownership independently excludes concurrent execution of a vCPU.
+pub struct ConcurrentExecution {
+    owner: u64,
+    active: [AtomicBool; crate::cpu::MAX_CPUS],
+}
+
+impl ConcurrentExecution {
+    pub const fn new(owner: u64) -> Self {
+        Self {
+            owner,
+            active: [const { AtomicBool::new(false) }; crate::cpu::MAX_CPUS],
+        }
+    }
+
+    pub fn claim(&self, cpu: CpuIndex) -> Result<ExecutionClaim, ExecutionError> {
+        self.active[cpu.get()]
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map_err(|_| ExecutionError::AlreadyActive)?;
+        Ok(ExecutionClaim {
+            owner: self.owner,
+            cpu,
+            armed: true,
+        })
+    }
+
+    pub fn release(
+        &self,
+        mut claim: ExecutionClaim,
+        cpu: CpuIndex,
+    ) -> Result<(), ExecutionReleaseFailure> {
+        let error = if claim.owner != self.owner {
+            Some(ExecutionError::WrongAddressSpace)
+        } else if claim.cpu != cpu {
+            Some(ExecutionError::WrongCpu)
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            return Err(ExecutionReleaseFailure::new(error, claim));
+        }
+        if self.active[cpu.get()]
+            .compare_exchange(true, false, Ordering::Release, Ordering::Relaxed)
             .is_err()
         {
             return Err(ExecutionReleaseFailure::new(

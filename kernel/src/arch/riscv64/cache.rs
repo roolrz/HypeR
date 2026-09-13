@@ -55,32 +55,21 @@ impl CacheMaintenance for Riscv64Cache {
     }
 
     unsafe fn publish_instruction_ranges(
-        mut ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
+        ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
     ) -> Result<(), CacheError> {
-        let block_size = initialized_block_size()?;
-        // CBO.CLEAN operations are ordered as writes. This path publishes only
-        // CPU-written instruction memory, so memory predecessor/successor sets
-        // suffice; MMIO ordering belongs to the generic data/device helpers.
-        // One pair orders the whole batch instead of fencing each guest page.
-        // SAFETY: FENCE has no pointer operands and is valid in HS mode.
-        unsafe { asm!("fence rw, rw", options(nostack)) };
-        let mut result = Ok(());
-        ranges(&mut |start, length| {
-            if result.is_ok() {
-                // SAFETY: The batch contract guarantees every rounded block is
-                // accessible and exclusively owned through this transaction.
-                result = unsafe {
-                    maintain_range_unfenced(start, length, block_size, riscv64_cbo_clean)
-                };
-            }
-        });
-        // Complete any clean already issued even if a later range overflowed.
-        // SAFETY: FENCE has no pointer operands and is valid in HS mode.
-        unsafe { asm!("fence rw, rw", options(nostack)) };
-        result?;
-        // SAFETY: FENCE.I has no pointer operands and is valid in HS mode.
-        unsafe { asm!("fence.i", options(nostack)) };
-        Ok(())
+        // SAFETY: Host publication provides the stronger exclusive ownership
+        // contract required to publish a stable instruction stream.
+        unsafe { maintain_instruction_ranges(ranges) }
+    }
+
+    unsafe fn prepare_guest_instruction_range(
+        start: usize,
+        length: usize,
+    ) -> Result<(), CacheError> {
+        // SAFETY: The guest retains the complete coherent range. This helper
+        // cleans data (never discards it), so sibling guest data writes cannot
+        // lose dirty contents. Guest software owns concurrent code publication.
+        unsafe { maintain_instruction_ranges(|visit| visit(start, length)) }
     }
 
     fn synchronize_instruction_execution() {
@@ -161,4 +150,34 @@ unsafe extern "C" {
     fn riscv64_cbo_clean(address: usize);
     fn riscv64_cbo_flush(address: usize);
     fn riscv64_cbo_inval(address: usize);
+}
+
+/// Cleans data and invalidates instruction state without discarding dirty data.
+/// Ranges must be stable, retained coherent mappings; guest writers are allowed.
+unsafe fn maintain_instruction_ranges(
+    mut ranges: impl FnMut(&mut dyn FnMut(usize, usize)),
+) -> Result<(), CacheError> {
+    let block_size = initialized_block_size()?;
+    // CBO.CLEAN operations are ordered as writes. This path publishes only
+    // CPU-written instruction memory, so memory predecessor/successor sets
+    // suffice; MMIO ordering belongs to the generic data/device helpers.
+    // One pair orders the whole batch instead of fencing each guest page.
+    // SAFETY: FENCE has no pointer operands and is valid in HS mode.
+    unsafe { asm!("fence rw, rw", options(nostack)) };
+    let mut result = Ok(());
+    ranges(&mut |start, length| {
+        if result.is_ok() {
+            // SAFETY: The batch contract guarantees every rounded block is
+            // accessible and retained through this transaction.
+            result =
+                unsafe { maintain_range_unfenced(start, length, block_size, riscv64_cbo_clean) };
+        }
+    });
+    // Complete any clean already issued even if a later range overflowed.
+    // SAFETY: FENCE has no pointer operands and is valid in HS mode.
+    unsafe { asm!("fence rw, rw", options(nostack)) };
+    result?;
+    // SAFETY: FENCE.I has no pointer operands and is valid in HS mode.
+    unsafe { asm!("fence.i", options(nostack)) };
+    Ok(())
 }

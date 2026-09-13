@@ -932,6 +932,31 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
 
+        fn pending_power_request(
+            &self,
+            _: HandleValue,
+        ) -> Result<Option<hyper::vm::arm::psci::Request>, crate::kernel::vm::service::Error>
+        {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn complete_power_request(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: bool,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn open_vcpu(
+            &self,
+            _: HandleValue,
+            _: u32,
+        ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
         fn virtual_machine_info(
             &self,
             _: HandleValue,
@@ -1543,6 +1568,35 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
     {
         return Err(SelfTestError::InvalidRecordSize);
+    }
+    // Malformed power control must not reach capability/lifecycle services.
+    {
+        use hyper::abi::native::{
+            HYPER_NATIVE_SYS_VIRTUAL_MACHINE_COMPLETE_POWER_REQUEST as COMPLETE,
+            HYPER_NATIVE_SYS_VIRTUAL_MACHINE_GET_POWER_REQUEST as GET,
+            HYPER_NATIVE_SYS_VIRTUAL_MACHINE_OPEN_VCPU as OPEN,
+        };
+        let handle = 1_u64 << 24 | 1;
+        let before = services.calls.get();
+        for (number, arguments) in [
+            (GET, [handle, 0x2000, 39, 0, 0, 0]),
+            (GET, [handle, 0x2000, 4097, 0, 0, 0]),
+            (GET, [handle, 0x2000, 40, 1, 0, 0]),
+            (COMPLETE, [handle, 1, 2, 0, 0, 0]),
+            (COMPLETE, [handle, 0, 1, 0, 0, 0]),
+            (COMPLETE, [handle, 1, 1, 0, 0, 1]),
+            (OPEN, [handle, u64::from(u32::MAX) + 1, 0, 0, 0, 0]),
+            (OPEN, [handle, 0, 1, 0, 0, 0]),
+        ] {
+            if dispatch_deferred(&services, invoke(number, arguments))
+                != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+            {
+                return Err(SelfTestError::InvalidRecordSize);
+            }
+        }
+        if services.calls.get() != before {
+            return Err(SelfTestError::InvalidRecordSize);
+        }
     }
     let bad_channel_create = dispatch_deferred(
         &services,

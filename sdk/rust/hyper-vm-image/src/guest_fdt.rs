@@ -141,7 +141,8 @@ pub fn build_aarch64_linux(
         .checked_add(boot.memory_size)
         .ok_or(Error::AddressOverflow)?;
     if boot.memory_size == 0
-        || boot.vcpu_count != 1
+        || !(1..=hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_MAX_VCPUS)
+            .contains(&u64::from(boot.vcpu_count))
         || !matches!(boot.gic_version, 2 | 3)
         || boot.boot_arguments.as_bytes().contains(&0)
         || boot.initramfs.is_some_and(|(start, end)| {
@@ -231,7 +232,7 @@ pub fn build_aarch64_linux(
             if boot.gic_version == 2 {
                 hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_SIZE as u32
             } else {
-                GIC_REDISTRIBUTOR_SIZE as u32
+                GIC_REDISTRIBUTOR_SIZE as u32 * boot.vcpu_count
             },
         ],
     )?;
@@ -240,7 +241,30 @@ pub fn build_aarch64_linux(
     builder.begin_node("timer")?;
     builder.property_string("compatible", "arm,armv8-timer")?;
     builder.property_empty("always-on")?;
-    builder.property_cells("interrupts", &[1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4])?;
+    // GICv2's PPI flags carry the CPU target mask; each guest CPU owns its
+    // banked timer interrupts. GICv3 ignores that legacy mask field.
+    let timer_flags = if boot.gic_version == 2 {
+        4 | (((1u32 << boot.vcpu_count) - 1) << 8)
+    } else {
+        4
+    };
+    builder.property_cells(
+        "interrupts",
+        &[
+            1,
+            13,
+            timer_flags,
+            1,
+            14,
+            timer_flags,
+            1,
+            11,
+            timer_flags,
+            1,
+            10,
+            timer_flags,
+        ],
+    )?;
     builder.end_node()?;
 
     fixed_clock(&mut builder, "clock-uart", UART_CLOCK_PHANDLE)?;
@@ -544,6 +568,44 @@ mod tests {
                         .windows(8)
                         .any(|bytes| bytes == 0x0801_0000u64.to_be_bytes())
                 );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn emits_all_smp_cpu_nodes_and_bounds_topology() -> Result<(), super::Error> {
+        for version in [2, 3] {
+            for count in [0, 1, 4, 8, 9] {
+                let mut structure = [0; 8192];
+                let mut strings = [0; 2048];
+                let mut output = [0; 12288];
+                let result = build_aarch64_linux(
+                    Aarch64LinuxBoot {
+                        gic_version: version,
+                        memory_base: 0x4000_0000,
+                        memory_size: 0x0800_0000,
+                        vcpu_count: count,
+                        initramfs: None,
+                        boot_arguments: "",
+                    },
+                    &mut structure,
+                    &mut strings,
+                    &mut output,
+                );
+                if count == 0 || count > 8 {
+                    assert_eq!(result, Err(super::Error::InvalidInput));
+                    continue;
+                }
+                let size = result?;
+                let bytes = &output[..size];
+                assert_eq!(
+                    bytes.windows(4).filter(|word| *word == b"cpu@").count(),
+                    count as usize
+                );
+                if count == 8 {
+                    assert!(bytes.windows(6).any(|word| word == b"cpu@7\0"));
+                }
             }
         }
         Ok(())

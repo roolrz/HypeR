@@ -71,7 +71,8 @@ Native services use an explicit shared-memory I/O protocol.
 
 - [x] Implement host GICv2 and Pi 5 debug-UART support; validate in QEMU.
 - [ ] Boot the Native shell on Pi 5 and validate SMP, timer and console behavior.
-- [x] Add GICv2 guest interrupt support and validate Linux guests in QEMU.
+- [x] Add GICv2 guest interrupts, Arm guest SMP and runtime-managed guest power control.
+- [ ] Validate guest SMP, CPU hotplug, reboot and poweroff on Pi 5.
 - [ ] Boot the Linux I/O VM on physical Pi 5.
 - [ ] Assign network/storage devices and implement shared queues, notifications
   and buffer ownership.

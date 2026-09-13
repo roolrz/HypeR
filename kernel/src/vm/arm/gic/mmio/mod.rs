@@ -7,8 +7,8 @@ mod decode;
 mod model;
 
 pub use decode::{
-    BitmapRegister, DecodeError, DecodedAccess, DecodedRegister, Frame, ModelRegister,
-    ModelRegisterDescriptor, ServiceRegister, SingleVcpuRoute, decode_v2, decode_v3,
+    BitmapRegister, DecodeError, DecodedAccess, DecodedRegister, Frame, InterruptRoute,
+    ModelRegister, ModelRegisterDescriptor, ServiceRegister, decode_v2, decode_v3, decode_v3_cpus,
 };
 pub use model::{ModelError, RegisterState, read_model_register, write_model_register};
 

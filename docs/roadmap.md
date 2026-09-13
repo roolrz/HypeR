@@ -59,10 +59,13 @@ capabilities; new privileged power operations require explicit Native authority.
      interrupt-driven serial input and idle wakeup.
 2. **Boot the Linux I/O VM on Pi 5.**
    - [x] Implement the GICv2 guest interrupt backend and its QEMU lifecycle tests.
+   - [x] Implement Arm guest SMP (1..8 CPUs) and runtime-mediated PSCI CPU
+     on/off, poweroff and reset; add GICv2/GICv3 QEMU acceptance.
    - [ ] Build a minimal Linux configuration and reproducible guest artifacts.
    - [ ] Provide board/guest device trees, RAM reservations and VM configuration
      through the existing VMM and vm-runtime path.
-   - [ ] Validate guest boot, console, timer wakeups and shutdown on hardware.
+   - [ ] Validate guest SMP, console, timer/IPI wakeups, CPU off/on, reboot
+     and poweroff on hardware, including cross-core cache/TLB retirement.
 3. **Connect physical network and storage devices.**
    - [ ] Inventory the selected controllers' MMIO, IRQ, DMA, clock/reset and
      firmware dependencies; assign each resource one owner.

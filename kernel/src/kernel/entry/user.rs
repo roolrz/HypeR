@@ -403,6 +403,32 @@ impl VmServices for DeferredProcessServices<'_> {
         crate::kernel::vm::service::request_stop(&self.session.process, machine)
     }
 
+    fn pending_power_request(
+        &self,
+        machine: HandleValue,
+    ) -> Result<Option<hyper::vm::arm::psci::Request>, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::pending_power_request(&self.session.process, machine)
+    }
+    fn complete_power_request(
+        &self,
+        machine: HandleValue,
+        request_id: u64,
+        accept: bool,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::complete_power_request(
+            &self.session.process,
+            machine,
+            request_id,
+            accept,
+        )
+    }
+    fn open_vcpu(
+        &self,
+        machine: HandleValue,
+        vcpu: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::open_vcpu(&self.session.process, machine, vcpu)
+    }
     fn virtual_machine_info(
         &self,
         machine: HandleValue,

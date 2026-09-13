@@ -6,18 +6,22 @@
 pub(crate) fn create_thread(
     vm: super::registry::VmBinding,
     vcpu_id: u32,
-    context: crate::hal::vm::VcpuContext,
+    bootstrap: Option<crate::kernel::vm::objects::VirtualCpuBootstrap>,
     resources: crate::kernel::task::thread::ThreadResourceOwnership,
 ) -> Result<crate::kernel::task::scheduler::DormantVcpuThread, crate::kernel::task::scheduler::Error>
 {
     let Some(entry_ready) = crate::kernel::vm::entry_ready() else {
         return Err(crate::kernel::task::scheduler::Error::VmEntryUnavailable);
     };
-    let execution = super::VcpuExecution::installed(vm, vcpu_id, context, &entry_ready)?;
-    let execution = hyper::mm::try_box(core::cell::UnsafeCell::new(execution))
-        .map_err(|_| crate::kernel::task::scheduler::Error::Allocation)?;
+    let execution = super::VcpuExecution::try_installed(vm, vcpu_id, bootstrap, &entry_ready)?;
     let execution = crate::kernel::task::thread::ExternalThreadExecution::from_box(execution);
-    crate::kernel::task::scheduler::vcpu_create("vcpu/0", execution, resources, thread_entry)
+    let name = [
+        "vcpu/0", "vcpu/1", "vcpu/2", "vcpu/3", "vcpu/4", "vcpu/5", "vcpu/6", "vcpu/7",
+    ]
+    .get(vcpu_id as usize)
+    .copied()
+    .unwrap_or("vcpu");
+    crate::kernel::task::scheduler::vcpu_create(name, vcpu_id, execution, resources, thread_entry)
 }
 
 extern "C" fn thread_entry(_argument: usize) {
@@ -52,6 +56,8 @@ fn run_current() {
     let virtual_machine = binding.id();
     let vcpu_id = execution_ref.vcpu_id;
     report_start(current, virtual_machine, vcpu_id);
+    // SAFETY: First scheduling owns the not-yet-active payload exclusively.
+    super::power::first_entry(unsafe { &mut *execution });
 
     loop {
         // Administrative ownership is checked before every activation. A
@@ -99,6 +105,13 @@ fn run_current() {
                             "HypeR: waiting vCPU lost its installed VM binding"
                         ));
                     };
+                    if binding.lifecycle().publish_power(vcpu_id) {
+                        detached.finish();
+                        if !super::power::wait(execution, current.thread) {
+                            return;
+                        }
+                        continue;
+                    }
                     let ticket = match binding.wfi_wait_ticket(vcpu_id) {
                         Ok(ticket) => ticket,
                         Err(error) => crate::kernel::crash::fatal(format_args!(
@@ -231,7 +244,7 @@ fn run_current() {
     }
 }
 
-fn administrative_stop_reason(
+pub(super) fn administrative_stop_reason(
     execution: *mut super::VcpuExecution,
     thread: crate::kernel::task::thread::ThreadId,
 ) -> Option<crate::kernel::vm::endpoint_state::AdministrativeStopReason> {
@@ -251,7 +264,7 @@ fn administrative_stop_reason(
     }
 }
 
-fn finish_inactive_administrative_stop(
+pub(super) fn finish_inactive_administrative_stop(
     execution: *mut super::VcpuExecution,
     thread: crate::kernel::task::thread::ThreadId,
     reason: crate::kernel::vm::endpoint_state::AdministrativeStopReason,
@@ -351,11 +364,12 @@ fn report_start(
     vcpu_id: u32,
 ) {
     crate::pr_info!(
-        "HypeR: vCPU {} running as scheduler thread {} on guarded stack {:#x}-{:#x}; VM {:?}",
+        "HypeR: vCPU {} running as scheduler thread {} on guarded stack {:#x}-{:#x}; host CPU {}; VM {:?}",
         vcpu_id,
         current.thread.get(),
         current.stack.0,
         current.stack.1,
+        crate::kernel::cpu::current_index().map_or(usize::MAX, |cpu| cpu.get()),
         virtual_machine
     );
 }

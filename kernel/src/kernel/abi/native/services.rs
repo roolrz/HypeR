@@ -272,6 +272,21 @@ pub(in crate::kernel) trait VmServices: UserMemoryServices {
         &self,
         machine: HandleValue,
     ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn pending_power_request(
+        &self,
+        machine: HandleValue,
+    ) -> Result<Option<hyper::vm::arm::psci::Request>, crate::kernel::vm::service::Error>;
+    fn complete_power_request(
+        &self,
+        machine: HandleValue,
+        request_id: u64,
+        accept: bool,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
+    fn open_vcpu(
+        &self,
+        machine: HandleValue,
+        vcpu: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error>;
     fn virtual_machine_info(
         &self,
         machine: HandleValue,

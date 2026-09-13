@@ -1160,3 +1160,84 @@ pub(crate) fn platform_supported() -> bool {
 pub(crate) fn guest_gic_version() -> u32 {
     crate::arch::vm::guest_gic_version()
 }
+
+/// Returns the vCPUs whose interrupt models changed since the last drain.
+pub(crate) fn take_reconcile_targets(interrupts: &InterruptController) -> u64 {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        interrupts.take_reconcile_targets()
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        let _ = interrupts;
+        0
+    }
+}
+
+#[derive(Debug)]
+#[allow(dead_code)]
+pub(crate) enum PowerContextError {
+    Unsupported,
+    Interrupt(VirtualInterruptError),
+    Controller(hyper::vm::arm::gic::RuntimeError),
+}
+
+pub(crate) fn reset_vcpu_interrupts(
+    interrupts: &InterruptController,
+    vcpu: u32,
+) -> Result<(), PowerContextError> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        interrupts
+            .reset_vcpu(hyper::vm::interrupt::VirtualCpuId::new(vcpu))
+            .map_err(PowerContextError::Controller)
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        let _ = (interrupts, vcpu);
+        Err(PowerContextError::Unsupported)
+    }
+}
+
+/// Reinitializes a hardware-detached vCPU before its next power-on entry.
+pub(crate) fn reset_power_context(
+    state: &mut VcpuHardwareState,
+    entry: u64,
+    argument: u64,
+) -> Result<(), PowerContextError> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        let mut context = VcpuContext::new(entry);
+        context.general[0] = argument;
+        context
+            .initialize_virtual_interrupts()
+            .map_err(PowerContextError::Interrupt)?;
+        state.context = context;
+        Ok(())
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        let _ = (state, entry, argument);
+        Err(PowerContextError::Unsupported)
+    }
+}
+
+pub(crate) fn complete_power_call(
+    state: &mut VcpuHardwareState,
+    result: i64,
+) -> Result<(), PowerContextError> {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        state.context.general[0] = hyper::vm::arm::psci::return_register(result);
+        Ok(())
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        let _ = (state, result);
+        Err(PowerContextError::Unsupported)
+    }
+}
+
+pub(crate) const fn maximum_guest_vcpus() -> u32 {
+    crate::arch::vm::maximum_guest_vcpus()
+}

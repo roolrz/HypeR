@@ -31,6 +31,10 @@ impl VirtualMachineObject {
         })
     }
 
+    pub(crate) fn owner(&self) -> FallibleArc<InstalledMachine> {
+        self.owner.clone()
+    }
+
     pub(crate) fn request_stop(&self) {
         InstalledMachine::request_stop(&self.owner);
     }
@@ -51,6 +55,7 @@ impl KernelObject for VirtualMachineObject {
     const KIND: ObjectKind = ObjectKind::VIRTUAL_MACHINE;
     const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
     const SUPPORTED_RIGHTS: Rights = Rights::TRANSFER
+        .union(Rights::WRITE)
         .union(Rights::WAIT)
         .union(Rights::INSPECT)
         .union(Rights::REQUEST_STOP);
@@ -59,7 +64,9 @@ impl KernelObject for VirtualMachineObject {
         Some(SignalSource::new(
             self.owner.signal_state(),
             SignalMask::from_trusted_bits(
-                hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED,
+                hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_TERMINATED
+                    | hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_POWER_REQUEST
+                    | hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_VCPU_TERMINATED,
             ),
         ))
     }

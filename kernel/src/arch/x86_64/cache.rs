@@ -73,6 +73,15 @@ impl CacheMaintenance for X86_64Cache {
         Ok(())
     }
 
+    unsafe fn prepare_guest_instruction_range(
+        _start: usize,
+        _length: usize,
+    ) -> Result<(), CacheError> {
+        // Coherent instruction/data caches need no destructive maintenance.
+        super::barrier::X86_64Barrier::instruction_synchronization();
+        Ok(())
+    }
+
     fn synchronize_instruction_execution() {
         super::barrier::X86_64Barrier::instruction_synchronization();
     }

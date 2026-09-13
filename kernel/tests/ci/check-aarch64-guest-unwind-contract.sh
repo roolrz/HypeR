@@ -233,8 +233,11 @@ require src/arch/aarch64/vsysreg.rs \
 require_order "$fixture/capture-wait.rs" 'capture_wait\(' 'close_captured_guest\(' \
     'WFI state must be captured before lower-world publication closes'
 require src/arch/aarch64/exception.rs \
-    '(?s)let applied = super::apply_guest_sync_action\(.*if action == super::GuestSyncAction::Wait.*GuestDispatch::Wait' \
+    '(?s)let applied = super::apply_guest_sync_action\(.*if !applied.*return Err\(\(\)\).*if matches!\(.*action,.*super::GuestSyncAction::Wait \| super::GuestSyncAction::FirmwareWait.*GuestDispatch::Wait' \
     'WFI must complete its PC update before selecting the typed unwind'
+require src/arch/aarch64/vsysreg.rs \
+    '(?s)GuestSyncAction::Wait => \{[[:space:]]*advance\(program_counter\);[[:space:]]*true[[:space:]]*\}[[:space:]]*GuestSyncAction::FirmwareWait => true' \
+    'WFI must advance PC while firmware waits preserve the already advanced HVC return PC'
 require "$fixture/runner.rs" \
     '(?s)VcpuRunDisposition::Wait.*wfi_wait_ticket\(.*wfi_state\(.*detached\.finish\(.*arm_wfi_timer\(.*prepare_wfi_wait\(.*park\.complete\(\).*timer\.retire\(' \
     'WFI must detach before an allocation-free conditional park and retire its timer before reentry'

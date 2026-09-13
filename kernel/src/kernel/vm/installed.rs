@@ -71,6 +71,7 @@ pub(crate) struct InstalledMachine {
     configuration: VirtualMachineConfiguration,
     state: RuntimeLock,
     vm_signals: SignalState,
+    power: InterruptSpinLock<hyper::vm::arm::psci::PowerState, crate::hal::irq::LocalMask>,
     endpoints: Vec<FallibleArc<VcpuEndpoint>>,
     resources: VmLifecycleResources,
 }
@@ -102,6 +103,9 @@ impl InstalledMachine {
             configuration,
             state: RuntimeLock::new(RuntimeState::Uninstalled),
             vm_signals: SignalState::new(),
+            power: InterruptSpinLock::new(
+                hyper::vm::arm::psci::PowerState::new(count).ok_or(Error::BadState)?,
+            ),
             endpoints,
             resources,
         })
@@ -144,7 +148,26 @@ impl InstalledMachine {
     pub(super) fn start_vcpu(&self, id: u32) -> Result<(), Error> {
         self.state.with(|state| match state {
             RuntimeState::Installed { id: vm_id, control } => {
-                self.endpoint(id)?.start().map_err(|_| Error::BadState)?;
+                if id != 0 {
+                    return Err(Error::BadState);
+                }
+                let endpoint = self.endpoint(id)?;
+                if endpoint.lifecycle().map_err(|_| Error::BadState)?
+                    != super::endpoint_state::Lifecycle::Dormant
+                {
+                    return Err(Error::BadState);
+                }
+                self.power
+                    .with(|power| power.boot())
+                    .map_err(|_| Error::BadState)?;
+                // Power-on is committed. The lifecycle lock excludes stop,
+                // and no vCPU can run before this first start. Failure now
+                // proves internal corruption, not a reversible start error.
+                if endpoint.start().is_err() {
+                    crate::kernel::crash::fatal(format_args!(
+                        "HypeR: boot vCPU start failed after power-on commit"
+                    ));
+                }
                 let vm_id = *vm_id;
                 let control = match control.take() {
                     Some(control) => control,
@@ -156,7 +179,7 @@ impl InstalledMachine {
                 };
                 Ok(())
             }
-            RuntimeState::Running { .. } => self.endpoint(id)?.start().map_err(|_| Error::BadState),
+            RuntimeState::Running { .. } => Err(Error::BadState),
             RuntimeState::Uninstalled | RuntimeState::Stopping { .. } | RuntimeState::Stopped => {
                 Err(Error::BadState)
             }
@@ -301,3 +324,6 @@ const fn encode_terminal_reason(reason: super::endpoint_state::ClosureReason) ->
         }
     }
 }
+
+#[path = "power.rs"]
+mod power;

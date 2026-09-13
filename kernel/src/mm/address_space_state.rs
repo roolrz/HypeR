@@ -92,6 +92,36 @@ impl<const CPUS: usize> AddressSpaceResidency<CPUS> {
         Ok(())
     }
 
+    /// Checks the caller's residency without excluding other active CPUs.
+    pub fn check_active(&self, cpu: usize, epoch: u64) -> Result<(), ResidencyError> {
+        self.ensure_open()?;
+        if epoch != self.epoch {
+            return Err(ResidencyError::StaleEpoch);
+        }
+        match self.active.get(cpu) {
+            None => Err(ResidencyError::InvalidCpu),
+            Some(false) => Err(ResidencyError::NotActive),
+            Some(true) => Ok(()),
+        }
+    }
+
+    /// Commits an epoch after architecture-wide mapping publication completes.
+    /// The external lock excludes admissions and mutations; the caller must
+    /// complete required invalidations on every resident CPU before this call.
+    pub fn advance_shared_active(
+        &mut self,
+        cpu: usize,
+        expected: u64,
+        next: u64,
+    ) -> Result<(), ResidencyError> {
+        self.check_active(cpu, expected)?;
+        if next <= expected {
+            return Err(ResidencyError::StaleEpoch);
+        }
+        self.epoch = next;
+        Ok(())
+    }
+
     pub fn check_single_active(&self, cpu: usize, epoch: u64) -> Result<(), ResidencyError> {
         self.ensure_open()?;
         if self.epoch != epoch {

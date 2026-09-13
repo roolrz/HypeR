@@ -70,30 +70,39 @@ impl VmBuilder {
     pub(crate) fn prepare_boot_vcpu(
         self,
         vcpu_id: u32,
-        context: crate::hal::vm::VcpuContext,
+        bootstrap: crate::kernel::vm::objects::VirtualCpuBootstrap,
     ) -> Result<PreparedVm, VcpuPreparationError> {
-        let resources = self
-            .machine
-            .lifecycle()
-            .reserve_vcpu_runtime()
-            .map_err(VcpuPreparationError::Registry)?;
-        let dormant = crate::kernel::vm::vcpu::create_thread(
-            self.vcpu_binding(),
-            vcpu_id,
-            context,
-            resources,
-        )
-        .map_err(VcpuPreparationError::Scheduler)?;
-        // SAFETY: PreparedVm takes ownership of the rollback capability and
-        // cannot expose this identity until registry installation succeeds.
-        let thread = unsafe { dormant.id_for_vm_install() };
-        let endpoint = self
-            .machine
-            .endpoint(vcpu_id)
-            .map_err(VcpuPreparationError::Registry)?;
-        if endpoint.bind_thread(thread).is_err() {
-            crate::hal::cpu::halt()
+        let count = self.machine.lifecycle().configuration().vcpu_count;
+        let mut dormant = alloc::vec::Vec::new();
+        dormant
+            .try_reserve_exact(count as usize)
+            .map_err(|_| VcpuPreparationError::Registry(Error::Allocation))?;
+        let mut boot_vcpu = None;
+        for id in 0..count {
+            let context = (id == vcpu_id).then_some(bootstrap);
+            let resources = self
+                .machine
+                .lifecycle()
+                .reserve_vcpu_runtime()
+                .map_err(VcpuPreparationError::Registry)?;
+            let prepared =
+                crate::kernel::vm::vcpu::create_thread(self.vcpu_binding(), id, context, resources)
+                    .map_err(VcpuPreparationError::Scheduler)?;
+            // SAFETY: The aggregate owns all rollback guards until publication.
+            let thread = unsafe { prepared.id_for_vm_install() };
+            let endpoint = self
+                .machine
+                .endpoint(id)
+                .map_err(VcpuPreparationError::Registry)?;
+            if endpoint.bind_thread(thread).is_err() {
+                crate::hal::cpu::halt();
+            }
+            if id == vcpu_id {
+                boot_vcpu = Some(thread);
+            }
+            dormant.push(prepared);
         }
+        let thread = boot_vcpu.ok_or(VcpuPreparationError::Registry(Error::UnknownVcpu))?;
         Ok(PreparedVm {
             dormant,
             machine: self.machine,
@@ -107,7 +116,7 @@ impl VmBuilder {
 pub(crate) struct PreparedVm {
     // Drop first so an unpublished vCPU releases its strong VM binding before
     // the builder owner and identity are released.
-    dormant: crate::kernel::task::scheduler::DormantVcpuThread,
+    dormant: alloc::vec::Vec<crate::kernel::task::scheduler::DormantVcpuThread>,
     machine: FallibleArc<VirtualMachine>,
     // Drop last for the same identity-reuse ordering as VmBuilder.
     reservation: VmReservation,
@@ -126,13 +135,13 @@ impl PreparedVm {
         let id = self.reservation.id;
         REGISTRY.with(|registry| registry.validate_install(id, &self.machine))?;
         self.machine.activate_identifier_for_install()?;
-        self.machine.bind_virtual_serial(0, self.boot_vcpu);
+        self.machine.bind_virtual_serial(0);
         let lifecycle = self.machine.lifecycle();
         let Self {
             dormant,
             machine,
             mut reservation,
-            boot_vcpu: _,
+            boot_vcpu: _boot_vcpu,
         } = self;
 
         // Preserve PreparedVm's declared rollback drop order through every
@@ -145,9 +154,12 @@ impl PreparedVm {
         REGISTRY.with(|registry| registry.install_prevalidated(id, &mut machine));
         reservation.unpublished = false;
         drop(reservation);
-        // SAFETY: Installation transferred one strong owner into the registry
-        // before exposing the ThreadId retained by the VM and vCPU binding.
-        let _boot_vcpu = unsafe { dormant.commit_after_vm_install() };
+        for thread in dormant {
+            // SAFETY: Installation transferred one strong owner into the registry
+            // before exposing the ThreadId retained by the VM and vCPU binding.
+            let _ = unsafe { thread.commit_after_vm_install() };
+        }
+
         Ok(InstalledVm {
             id,
             #[cfg(feature = "kernel-self-test")]

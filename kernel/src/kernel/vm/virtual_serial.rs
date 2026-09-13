@@ -17,7 +17,6 @@ use crate::kernel::authority::Rights;
 use crate::kernel::object::{
     KernelObject, ObjectKind, TransferClass, object_allocation_size, private,
 };
-use crate::kernel::task::thread::ThreadId;
 
 const INPUT_CAPACITY: usize = 4 * 1024;
 pub(crate) const TRANSFER_BATCH_BYTES: usize = 4 * 1024;
@@ -45,7 +44,6 @@ impl From<ResourceError> for Error {
 pub(crate) struct Route {
     pub(crate) vm: super::registry::VmId,
     pub(crate) vcpu: u32,
-    pub(crate) thread: ThreadId,
 }
 
 struct PortState {

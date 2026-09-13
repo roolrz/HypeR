@@ -72,6 +72,22 @@ pub(crate) unsafe fn publish_instruction_ranges(
     unsafe { crate::arch::memory::Cache::publish_instruction_ranges(ranges) }
 }
 
+/// Prepares an execute-denied guest page without excluding sibling guest writes.
+///
+/// # Safety
+///
+/// The range must satisfy [`CacheMaintenance::prepare_guest_instruction_range`].
+/// `pin` keeps maintenance on the faulting CPU until publication completes.
+pub(crate) unsafe fn prepare_guest_instruction_range(
+    _pin: &dyn hyper::cpu::PinnedExecution,
+    start: usize,
+    length: usize,
+) -> Result<(), CacheError> {
+    // SAFETY: The facade forwards the guest ownership, mapping, and execute
+    // denial contract without claiming that sibling guest writers are stopped.
+    unsafe { crate::arch::memory::Cache::prepare_guest_instruction_range(start, length) }
+}
+
 /// Completes local instruction-stream synchronization after code publication.
 pub(crate) fn synchronize_instruction_execution() {
     crate::arch::memory::Cache::synchronize_instruction_execution();

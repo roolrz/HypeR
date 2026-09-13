@@ -47,6 +47,7 @@ pub fn decode(value: u64) -> Result<Option<ListEntry>, DecodeError> {
     let interrupt = GicInterruptId::new((value & LR_VIRTUAL_ID_MASK) as u32)
         .ok_or(DecodeError::InvalidVirtualInterrupt)?;
     Ok(Some(ListEntry {
+        source: 0,
         interrupt,
         priority: (value >> LR_PRIORITY_SHIFT) as u8,
         group: if value & LR_GROUP1 != 0 {

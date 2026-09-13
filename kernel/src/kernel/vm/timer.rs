@@ -317,11 +317,36 @@ pub(super) fn prepare(
     })
 }
 
-fn handle_interrupt(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
-    match super::active_vcpu::with(|execution| {
+/// Completes controller mutation before scheduler notification. The active
+/// execution borrow and architecture/controller locks all end before draining
+/// cross-vCPU prompts. A concurrently unpublished VM is already retiring all
+/// endpoints, so its registry lookup needs no further delivery work.
+fn update_active_interrupts(
+    update: fn(
+        &mut crate::hal::vm::VcpuHardwareState,
+        u32,
+        &super::VmInterruptController,
+    ) -> Result<bool, crate::hal::vm::VcpuInterruptError>,
+) -> Result<Option<Result<bool, crate::hal::vm::VcpuInterruptError>>, super::active_vcpu::Error> {
+    let observed = super::active_vcpu::with(|execution| {
+        let id = execution.vm_binding().map(super::registry::VmBinding::id);
         let (hardware, vcpu_id, interrupts) = execution.interrupt_context();
-        crate::hal::vm::handle_virtual_timer_interrupt(hardware, vcpu_id, interrupts)
-    }) {
+        (id, update(hardware, vcpu_id, interrupts))
+    })?;
+    let Some((id, result)) = observed else {
+        return Ok(None);
+    };
+    if let Some(id) = id {
+        let _ = super::registry::with_binding(
+            id,
+            super::registry::VmBinding::publish_changed_interrupts,
+        );
+    }
+    Ok(Some(result))
+}
+
+fn handle_interrupt(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
+    match update_active_interrupts(crate::hal::vm::handle_virtual_timer_interrupt) {
         Ok(Some(Ok(true))) => {
             set_local_source_masked(true);
             HandlerResult::HandledAndMaskLocal
@@ -349,10 +374,7 @@ fn handle_maintenance_interrupt(_interrupt: VirtualInterrupt, context: usize) ->
     if !crate::hal::vm::maintenance_interrupt_pending() {
         return HandlerResult::NotHandled;
     }
-    match super::active_vcpu::with(|execution| {
-        let (hardware, vcpu_id, interrupts) = execution.interrupt_context();
-        crate::hal::vm::handle_maintenance_interrupt(hardware, vcpu_id, interrupts)
-    }) {
+    match update_active_interrupts(crate::hal::vm::handle_maintenance_interrupt) {
         Ok(Some(Ok(true))) => {
             let Some(raw) = context
                 .checked_sub(1)
@@ -401,10 +423,7 @@ fn handle_source_recovery(_interrupt: VirtualInterrupt, context: usize) -> Handl
         crate::pr_err!("HypeR: invalid virtual-timer recovery binding");
         return HandlerResult::Handled;
     };
-    let can_unmask = match super::active_vcpu::with(|execution| {
-        let (hardware, vcpu_id, interrupts) = execution.interrupt_context();
-        crate::hal::vm::handle_maintenance_interrupt(hardware, vcpu_id, interrupts)
-    }) {
+    let can_unmask = match update_active_interrupts(crate::hal::vm::handle_maintenance_interrupt) {
         Ok(Some(Ok(can_unmask))) => can_unmask,
         Ok(None) => true,
         Ok(Some(Err(error))) => {

@@ -77,7 +77,7 @@ mutate 'registry release must reject a still-armed residency' \
     src/kernel/vm/registry/execution.rs \
     'if claim.residency.is_some()' 'if false'
 mutate 'active mapping changes must advance residency epoch' src/kernel/vm/memory/access.rs \
-    'advance_single_active(cpu.get(), previous_epoch, self.translation_epoch)' \
+    'advance_shared_active(cpu.get(), previous_epoch, self.translation_epoch)' \
     'ignore_active_epoch_advance(cpu.get(), previous_epoch, self.translation_epoch)'
 mutate 'native retirement must consume unique ownership' \
     src/kernel/mm/user_space/machine.rs 'mut owner: UniqueFallibleArc<Self>' '\&mut self'

@@ -657,8 +657,20 @@ impl FleetManager {
             Some(ProcessTermination::ProcessExited { status: 0 })
         );
         let event = instance.tracker.finish(succeeded);
+        // Guest reset requests become new instances only after the old runtime
+        // exited successfully and its VM completed retirement. An administrative
+        // stop wins over a concurrent guest reboot.
+        let reboot = succeeded
+            && instance.tracker.is_terminal()
+            && instance.tracker.last_status() == Some(vm_contract::InstanceStatus::RebootRequested)
+            && instance.stop == vm_contract::InstanceStopState::new();
+        if reboot {
+            self.machines[vm].restart_pending = true;
+        }
         self.machines[vm].failed = matches!(event, vm_contract::InstanceEvent::Failed(_));
-        self.publish_initial_event(vm, event);
+        if !reboot {
+            self.publish_initial_event(vm, event);
+        }
         drop(instance);
         Ok(())
     }
@@ -692,6 +704,10 @@ impl FleetManager {
                 self.machines[vm].restart_pending = false;
                 if self.start_instance(vm).is_err() {
                     self.machines[vm].failed = true;
+                    self.publish_initial_event(
+                        vm,
+                        vm_contract::InstanceEvent::Failed(vm_contract::InstanceFailure::Runtime),
+                    );
                 }
             }
         }
@@ -706,7 +722,8 @@ impl FleetManager {
                 fleet::State::Stopped
             };
         };
-        if instance.stop != vm_contract::InstanceStopState::new() {
+        if instance.stop != vm_contract::InstanceStopState::new() || instance.tracker.is_terminal()
+        {
             fleet::State::Stopping
         } else if instance.tracker.last_status() == Some(vm_contract::InstanceStatus::Running) {
             fleet::State::Running

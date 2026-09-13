@@ -59,3 +59,8 @@ mutate 'non-running vCPU states must not be guessed prompt targets' \
     src/kernel/task/scheduler/state.rs 'ThreadState::Migrating' 'ThreadState::Running'
 mutate 'VM work must trigger the independent guest IRQ tail' \
     src/kernel/entry/irq.rs 'current_interrupt_reconcile_pending' 'ignore_interrupt_reconcile_pending'
+
+mutate 'console delivery must notify all affected CPU targets' \
+    src/kernel/vm/device/aarch64.rs 'publish_changed_interrupts' 'skip_changed_interrupts'
+mutate 'interrupt target collection must preserve pending CPU notifications' \
+    src/kernel/vm/registry/execution.rs 'take_reconcile_targets' 'discard_reconcile_targets'

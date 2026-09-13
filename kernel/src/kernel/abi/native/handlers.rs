@@ -1748,3 +1748,67 @@ pub(super) fn sys_vmar_map_private(
     })();
     DeferredAction::Return(status_only(result))
 }
+
+#[inline(never)]
+pub(super) fn sys_virtual_machine_get_power_request(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    use hyper::abi::native::{
+        HYPER_NATIVE_STATUS_WOULD_BLOCK, HYPER_NATIVE_VIRTUAL_MACHINE_POWER_REQUEST_MIN_SIZE,
+        HyperNativeVirtualMachinePowerRequest,
+    };
+    let result = prepare_info_request(
+        arguments,
+        HYPER_NATIVE_VIRTUAL_MACHINE_POWER_REQUEST_MIN_SIZE,
+        core::mem::size_of::<HyperNativeVirtualMachinePowerRequest>(),
+    )
+    .and_then(|output| {
+        // Inspection is non-consuming. A failed copyout leaves this exact
+        // request pending; only explicit ID completion advances ownership.
+        let request = services
+            .pending_power_request(output.value)
+            .map_err(status_from_vm_service_error)?
+            .ok_or(HYPER_NATIVE_STATUS_WOULD_BLOCK)?;
+        copy_info_record(
+            services,
+            output,
+            &super::wire::encode_virtual_machine_power_request(request),
+        )
+    });
+    DeferredAction::Return(info_result(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_virtual_machine_complete_power_request(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[3..])?;
+        let machine = parse_handle(arguments[0])?;
+        if arguments[1] == 0 || arguments[2] > 1 {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        services
+            .complete_power_request(machine, arguments[1], arguments[2] == 1)
+            .map_err(status_from_vm_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_virtual_machine_open_vcpu(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[2..])?;
+        let machine = parse_handle(arguments[0])?;
+        let vcpu = u32::try_from(arguments[1]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+        services
+            .open_vcpu(machine, vcpu)
+            .map_err(status_from_vm_service_error)
+    })();
+    DeferredAction::Return(handle_result(result))
+}

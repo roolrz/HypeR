@@ -684,3 +684,43 @@ fn prepare_handle<T: crate::kernel::object::UserExportableObject>(
         .map_err(ProcessError::from)
         .map_err(Into::into)
 }
+
+/// Opens a capability for an already configured vCPU identity. Handle creation
+/// does not allocate or start another scheduler Thread.
+pub(crate) fn open_vcpu(
+    process: &Process,
+    machine: HandleValue,
+    id: u32,
+) -> Result<HandleValue, Error> {
+    let machine = process.resolve_handle::<VirtualMachineObject>(machine, Rights::WRITE)?;
+    let object =
+        VirtualCpuObject::try_new(machine.object().owner(), id, &process.resource_domain())?;
+    let prepared = prepare_handle(object, VirtualCpuObject::SUPPORTED_RIGHTS)?;
+    let reservation = process.reserve_handles::<1>()?;
+    process
+        .publish_handles(reservation, [prepared])
+        .map(|values| values[0])
+        .map_err(|failure| failure.error.into())
+}
+
+pub(crate) fn pending_power_request(
+    process: &Process,
+    machine: HandleValue,
+) -> Result<Option<hyper::vm::arm::psci::Request>, Error> {
+    let machine = process.resolve_handle::<VirtualMachineObject>(machine, Rights::WRITE)?;
+    Ok(machine.object().owner().pending_power_request())
+}
+
+pub(crate) fn complete_power_request(
+    process: &Process,
+    machine: HandleValue,
+    id: u64,
+    accept: bool,
+) -> Result<(), Error> {
+    let machine = process.resolve_handle::<VirtualMachineObject>(machine, Rights::WRITE)?;
+    machine
+        .object()
+        .owner()
+        .complete_power_request(id, accept)
+        .map_err(|_| Error::BadState)
+}

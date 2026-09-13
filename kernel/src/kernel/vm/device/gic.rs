@@ -6,7 +6,7 @@
 //! The reusable device model owns register decoding and state semantics. This
 //! service retains only kernel error mapping and selected-controller routing.
 
-use hyper::vm::arm::gic::mmio::{DecodeError, DecodedAccess, decode_v3};
+use hyper::vm::arm::gic::mmio::{DecodeError, DecodedAccess, decode_v3_cpus};
 use hyper::vm::exit::MmioAccess;
 
 use crate::kernel::vm::VmInterruptController;
@@ -23,11 +23,11 @@ impl From<DecodeError> for Error {
     }
 }
 
-pub fn decode(access: MmioAccess) -> Result<Option<DecodedAccess>, Error> {
+pub fn decode(access: MmioAccess, vcpu_count: u32) -> Result<Option<DecodedAccess>, Error> {
     if crate::hal::vm::guest_gic_version() == 2 {
         hyper::vm::arm::gic::mmio::decode_v2(access.address(), access.width()).map_err(Into::into)
     } else {
-        decode_v3(access.address(), access.width()).map_err(Into::into)
+        decode_v3_cpus(access.address(), access.width(), vcpu_count).map_err(Into::into)
     }
 }
 
