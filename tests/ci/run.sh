@@ -30,6 +30,7 @@ case "${1:-}" in
         ;;
     scripts)
         python3 tests/build/incremental.py
+        python3 -B tests/qemu/test-guest-smp.py
         command -v shellcheck >/dev/null 2>&1 || {
             echo "shellcheck is required for the script-quality suite" >&2
             exit 2

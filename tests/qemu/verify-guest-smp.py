@@ -13,6 +13,28 @@ import sys
 import time
 
 
+HOST_LOG = re.compile(rb'<[0-7]>\[[ \t]*[0-9]+\.[0-9]+\] [^\n]*\n')
+FAILURE_MARKERS = (
+    b'HypeR: fatal', b'kernel panic', b'Kernel panic', b'HypeR KERNEL PANIC',
+    b'HypeR crash monitor', b'kernel startup failed',
+)
+
+
+def append_console_output(pending, data):
+    """Reassemble console text across complete interleaved host log records.
+
+    The caller archives raw bytes first. Keep unfinished records in pending so
+    arbitrary read boundaries do not leak log fragments into prompt matching.
+    Check failures before removing records, and again after joining guest text.
+    """
+    pending.extend(data.replace(b'\r', b''))
+    if any(marker in pending for marker in FAILURE_MARKERS):
+        raise RuntimeError('host or guest kernel failure')
+    pending[:] = HOST_LOG.sub(b'', pending)
+    if any(marker in pending for marker in FAILURE_MARKERS):
+        raise RuntimeError('host or guest kernel failure')
+
+
 def main():
     qemu, image, initramfs, logfile = sys.argv[1:]
     guest_cpus = int(os.environ.get('GUEST_CPUS', '4'))
@@ -50,12 +72,7 @@ def main():
                         raise RuntimeError('QEMU output closed')
                     log.write(data)
                     log.flush()
-                    pending.extend(data.replace(b'\r', b''))
-                    if any(marker in pending for marker in (
-                        b'HypeR: fatal', b'kernel panic', b'Kernel panic', b'HypeR KERNEL PANIC',
-                        b'HypeR crash monitor', b'kernel startup failed',
-                    )):
-                        raise RuntimeError('host or guest kernel failure')
+                    append_console_output(pending, data)
             raise TimeoutError(f'waiting for {pattern!r}')
 
         def send(command):

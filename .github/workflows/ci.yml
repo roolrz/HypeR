@@ -84,6 +84,7 @@ jobs:
             target/app/aarch64/runtime-crash.log
             target/app/aarch64/apps.log
             target/app/aarch64/console.log
+            target/app/aarch64/guest-smp.log
           if-no-files-found: ignore
           retention-days: 7
       - name: Upload the Native SDK
