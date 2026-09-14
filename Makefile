@@ -666,8 +666,8 @@ test-board-broker: app image fit-pack
 		HYPER_RUST_STD=1 HYPER_ARCH="$(NATIVE_ARCH)" HYPER_SYSROOT="$(SDK_OUTPUT)" \
 		HYPER_CLANG="$(CLANG)" HYPER_LD="$(HYPER_LD)" \
 		"$(SDK_OUTPUT)/bin/hyper-cargo" build --manifest-path app/Cargo.toml --release --locked \
-		-p hyper-io-runtime -p hyper-vm-manager \
-		--features hyper-io-runtime/broker-test,hyper-vm-manager/broker-test
+		-p hyper-io-runtime -p hyper-vm-manager -p hyper-vm-runtime \
+		--features hyper-io-runtime/broker-test,hyper-vm-manager/broker-test,hyper-vm-runtime/broker-test
 	mkdir -p "$(BOARD_TEST_OUTPUT)"
 	@package="$(IO_VM_PACKAGE)"; \
 	if test -z "$$package"; then \
@@ -681,6 +681,7 @@ test-board-broker: app image fit-pack
 	$(MAKE) -o image -o app board-image BOARD=qemu IO_VM_PACKAGE="$$package" \
 		APP_CARGO_OUTPUT="$(CURDIR)/target/app-broker-tests/$(NATIVE_ARCH)" \
 		NATIVE_VM_MANAGER="$(CURDIR)/target/app-broker-tests/$(NATIVE_ARCH)/$(NATIVE_RUST_TARGET)/release/hyper-vm-manager" \
+		NATIVE_VM_RUNTIME="$(CURDIR)/target/app-broker-tests/$(NATIVE_ARCH)/$(NATIVE_RUST_TARGET)/release/hyper-vm-runtime" \
 		BOARD_CONFIG="$$fixture/config.json" BOARD_OUTPUT="$$fixture" \
 		BOARD_IMAGE="$$fixture/disk.img" BOARD_ARTIFACTS="--artifact business=$$fixture/business.itb" && \
 	$(NATIVE_QEMU_ENV) python3 -B tests/qemu/verify-board-broker.py run \

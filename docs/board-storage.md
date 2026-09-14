@@ -44,6 +44,10 @@ a separate configuration archive to the Linux initramfs.
 The shell starts independently. An explicit readiness channel gates init's
 loading of `/data/vms.json` until the configuration filesystem is mounted.
 Guest lifecycle management remains in vm-manager and each guest's vm-runtime.
+The manager retains each disk session endpoint until the runtime reports its VM
+installed, then transfers it to the I/O broker through the supervisor wait set.
+Image loading does not consume the bounded disk-handshake deadline or occupy
+the shared broker listener. Pending endpoints retire with their owning instance.
 Disk connection setup uses a capability channel to io-runtime. Only negotiation,
 reset and release commands pass through that service; queue notifications and
 shared-page data transfers do not.

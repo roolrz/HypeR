@@ -2,13 +2,15 @@
 # SPDX-FileCopyrightText: 2026 roolrz
 # SPDX-License-Identifier: Apache-2.0
 """Real supervisor-loop isolation test. Requires broker-test features in both
-hyper-io-runtime and hyper-vm-manager, never enabled by ordinary builds.
+hyper-io-runtime, hyper-vm-manager and hyper-vm-runtime, never enabled by ordinary builds.
 
 Prepare the business ITB with verify-board-business.py prepare first. This fixture
 adds two independent board volumes. Client A's real HELLO reply is withheld until the already
 running B completes RESET/RELEASE and kernel-proven mapping retirement. This
-excludes image-loading speed from the fairness assertion. Manager closes its real
-admission endpoint after spawning both sessions; existing sessions remain usable.
+excludes image-loading speed from the fairness assertion. Each runtime also delays
+readiness by 65 seconds: loading must not consume the 60-second handshake budget.
+Manager closes its real admission endpoint after admitting both sessions;
+existing sessions remain usable.
 """
 import argparse
 import json
@@ -107,7 +109,9 @@ def run(args):
                     raise TimeoutError('board definitions not provisioned')
                 time.sleep(0.1)
             def verify_guest(name):
-                limit = time.monotonic() + 90
+                # Includes the deliberate 65-second pre-admission delay plus
+                # image loading. The actual protocol deadline remains 60 seconds.
+                limit = time.monotonic() + 180
                 while True:
                     status = shell(f'vmm status {name}')
                     if re.search(name.encode() + rb'\s+running\b', status):

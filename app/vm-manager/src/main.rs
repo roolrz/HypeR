@@ -176,11 +176,25 @@ impl FleetManager {
     }
 
     fn observe_one_event(&mut self) -> hyper_os::Result<()> {
-        const WAIT_CAPACITY: usize = 1 + MAX_CLIENTS + 2 * fleet::MAX_DEFINITIONS;
+        const WAIT_CAPACITY: usize = 2 + MAX_CLIENTS + 2 * fleet::MAX_DEFINITIONS;
         let mut waits = Vec::with_capacity(WAIT_CAPACITY);
         let mut sources = Vec::with_capacity(WAIT_CAPACITY);
         waits.push(self.connections.wait_item());
         sources.push(WaitSource::Connection);
+        if self.machines.iter().any(|machine| {
+            machine
+                .instance
+                .as_ref()
+                .is_some_and(VmInstance::wants_disk_admission)
+        }) && let Some(broker) = self.io_broker.as_ref()
+        {
+            waits.push(WaitItem::new(
+                broker.as_handle_ref(),
+                ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING
+                    .union(ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED),
+            ));
+            sources.push(WaitSource::DiskAdmission);
+        }
         for (vm, machine) in self.machines.iter().enumerate() {
             if let Some(instance) = machine.instance.as_ref() {
                 waits.push(WaitItem::new(
@@ -240,10 +254,53 @@ impl FleetManager {
         self.next_wait = (first + observation.index + 1) % sources.len();
         match sources[observation.index] {
             WaitSource::Connection => self.accept_client(),
+            WaitSource::DiskAdmission => self.admit_disk(),
             WaitSource::RuntimeProcess(vm) => self.finish_instance(vm),
             WaitSource::RuntimeControl(vm) => self.handle_runtime_control(vm, observation.observed),
             WaitSource::Client(index) => self.handle_client(index, observation.observed),
         }
+    }
+
+    fn admit_disk(&mut self) -> hyper_os::Result<()> {
+        let Some(instance) = self.machines.iter_mut().find_map(|machine| {
+            machine
+                .instance
+                .as_mut()
+                .filter(|instance| instance.wants_disk_admission())
+        }) else {
+            return Ok(());
+        };
+        let admission = instance
+            .disk_admission
+            .as_mut()
+            .ok_or(hyper_os::Error::InvalidResponse)?;
+        let broker = self
+            .io_broker
+            .as_ref()
+            .ok_or(hyper_os::Error::MissingHandle)?;
+        let disposition = CapabilityDisposition::move_handle(
+            &mut admission.endpoint,
+            RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
+        )?;
+        match broker.try_send(&admission.record, &mut [disposition]) {
+            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(()),
+            // Dropping the local endpoint wakes the runtime's bounded handshake;
+            // one failed admission must not terminate the fleet supervisor.
+            Err(_) | Ok(()) => drop(instance.disk_admission.take()),
+        }
+        #[cfg(feature = "broker-test")]
+        if self
+            .machines
+            .iter()
+            .filter_map(|machine| machine.instance.as_ref())
+            .filter(|instance| instance.disk_admission.is_none())
+            .count()
+            == 2
+        {
+            self.io_broker = None;
+            println!("BROKER-TEST MANAGER-ENDPOINT-CLOSED");
+        }
+        Ok(())
     }
 
     fn handle_runtime_control(&mut self, vm: usize, observed: u64) -> hyper_os::Result<()> {
@@ -569,6 +626,7 @@ impl FleetManager {
     fn request_stop(&mut self, vm: usize) -> hyper_os::Result<()> {
         if let Some(instance) = self.machines[vm].instance.as_mut() {
             instance.request_cooperative_stop()?;
+            drop(instance.disk_admission.take());
         }
         Ok(())
     }
@@ -648,9 +706,8 @@ impl FleetManager {
                 ),
             )
             .map_err(|failure| failure.error())?;
-        if let Some(disk) = &definition.definition.disk {
-            let broker = self
-                .io_broker
+        let disk_admission = if let Some(disk) = &definition.definition.disk {
+            self.io_broker
                 .as_ref()
                 .ok_or(hyper_os::Error::MissingHandle)?;
             let (owner, runtime) = CapabilityChannel::create()?;
@@ -661,20 +718,15 @@ impl FleetManager {
                     RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
                 )
                 .map_err(|failure| failure.error())?;
-            let mut owner = Some(owner.into_handle());
             let record = hyper_service::io::encode_connect(disk.client, &disk.volume)
                 .ok_or(hyper_os::Error::InvalidResponse)?;
-            let disposition = CapabilityDisposition::move_handle(
-                &mut owner,
-                RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
-            )?;
-            hyper_service::io::send_capabilities(
-                broker,
-                &record,
-                &mut [disposition],
-                hyper_os::time::deadline_after(Duration::from_secs(30))?.as_raw(),
-            )?;
-        }
+            Some(DiskAdmission {
+                endpoint: Some(owner.into_handle()),
+                record,
+            })
+        } else {
+            None
+        };
         builder.seal()?;
         let runtime = builder.start().map_err(|failure| failure.error())?;
         self.machines[vm].instance = Some(VmInstance {
@@ -687,19 +739,9 @@ impl FleetManager {
             tracker: vm_contract::InstanceTracker::new(),
             stop: vm_contract::InstanceStopState::new(),
             exit_deadline: None,
+            disk_admission,
         });
         self.machines[vm].failed = false;
-        #[cfg(feature = "broker-test")]
-        if self
-            .machines
-            .iter()
-            .filter(|machine| machine.instance.is_some())
-            .count()
-            == 2
-        {
-            self.io_broker = None;
-            println!("BROKER-TEST MANAGER-ENDPOINT-CLOSED");
-        }
         Ok(())
     }
 
@@ -830,9 +872,15 @@ impl Client {
 #[derive(Clone, Copy)]
 enum WaitSource {
     Connection,
+    DiskAdmission,
     RuntimeProcess(usize),
     RuntimeControl(usize),
     Client(usize),
+}
+
+struct DiskAdmission {
+    endpoint: Option<OwnedHandle<CapabilityChannelObject>>,
+    record: [u8; hyper_service::io::CONNECT_BYTES],
 }
 
 struct VmInstance {
@@ -845,9 +893,17 @@ struct VmInstance {
     tracker: vm_contract::InstanceTracker,
     stop: vm_contract::InstanceStopState,
     exit_deadline: Option<Instant>,
+    disk_admission: Option<DiskAdmission>,
 }
 
 impl VmInstance {
+    fn wants_disk_admission(&self) -> bool {
+        self.disk_admission.is_some()
+            && self.stop == vm_contract::InstanceStopState::new()
+            && self.tracker.last_status() == Some(vm_contract::InstanceStatus::Installed)
+            && !self.tracker.is_terminal()
+    }
+
     fn receive_runtime_status(&mut self) -> hyper_os::Result<()> {
         let mut message = [0u8; vm_contract::MESSAGE_BYTES];
         let received = self

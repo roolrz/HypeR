@@ -33,4 +33,5 @@ hyper-vm-image.workspace = true
 workspace = true
 
 [features]
+broker-test = []
 test-runtime-crash = []

@@ -162,6 +162,15 @@ fn run(
                 .map_err(Error::OperatingSystem)?,
         );
     }
+    // Installation, not image loading, opens the broker admission window.
+    // The manager retains the session endpoint until this status is observed.
+    #[cfg(feature = "broker-test")]
+    if disk_session.is_some() {
+        // Exceed the broker's 60-second handshake budget before publishing
+        // readiness. Ordinary runtime artifacts never include this delay.
+        std::thread::sleep(std::time::Duration::from_secs(65));
+    }
+    publish_status(control, vm_contract::InstanceStatus::Installed)?;
     let (machine, mut disk) = if let Some(session) = disk_session {
         let grant = shared_memory.as_ref().ok_or(Error::InvalidControl)?;
         let (machine, disk) = disk::bind(
@@ -175,7 +184,6 @@ fn run(
     } else {
         (machine, None)
     };
-    publish_status(control, vm_contract::InstanceStatus::Installed)?;
     hyper_os::vm::start_vcpu(vcpus[0].as_handle_ref()).map_err(Error::OperatingSystem)?;
     // This ends at the successful start request, not the first guest entry:
     // scheduling and the EL1/VS transition happen asynchronously in the kernel.
