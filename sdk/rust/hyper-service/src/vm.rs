@@ -270,6 +270,7 @@ pub enum StopAction {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InstanceStopState {
     phase: StopPhase,
+    stop_requested: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -284,11 +285,21 @@ impl InstanceStopState {
     pub const fn new() -> Self {
         Self {
             phase: StopPhase::Running,
+            stop_requested: false,
         }
+    }
+
+    /// Explicit stop policy, distinct from cleanup escalation after a guest
+    /// terminal status. An expired cleanup timer must not cancel a reboot that
+    /// already completed successfully before the manager observed process exit.
+    #[must_use]
+    pub const fn has_stop_request(self) -> bool {
+        self.stop_requested
     }
 
     /// Begins graceful shutdown exactly once.
     pub fn request_cooperative(&mut self) -> StopAction {
+        self.stop_requested = true;
         match self.phase {
             StopPhase::Running => {
                 self.phase = StopPhase::CooperativeRequested;
@@ -298,8 +309,13 @@ impl InstanceStopState {
         }
     }
 
-    /// Escalates owner loss, protocol corruption, or an expired grace period.
+    /// Stops for explicit policy such as owner loss or protocol corruption.
     pub fn request_forced(&mut self) -> StopAction {
+        self.stop_requested = true;
+        self.escalate()
+    }
+
+    fn escalate(&mut self) -> StopAction {
         match self.phase {
             StopPhase::Forced => StopAction::None,
             StopPhase::Running | StopPhase::CooperativeRequested => {
@@ -309,13 +325,13 @@ impl InstanceStopState {
         }
     }
 
-    /// Escalates a cooperative request after its externally supplied grace
-    /// deadline expires.
+    /// Escalates cleanup after its externally supplied grace deadline expires,
+    /// preserving whether an explicit stop was requested.
     ///
     /// The protocol deliberately does not synthesize time. A manager must call
     /// this transition only from a real monotonic-deadline observation.
     pub fn grace_period_expired(&mut self) -> StopAction {
-        self.request_forced()
+        self.escalate()
     }
 }
 
@@ -496,6 +512,16 @@ impl InstanceTracker {
     #[must_use]
     pub const fn last_status(&self) -> Option<InstanceStatus> {
         self.last
+    }
+
+    /// A validated guest reset survives delayed observation of successful exit,
+    /// but never an explicit stop, invalid protocol, or an unsuccessful exit.
+    #[must_use]
+    pub const fn should_restart(self, process_succeeded: bool, stop: InstanceStopState) -> bool {
+        process_succeeded
+            && self.is_terminal()
+            && matches!(self.last, Some(InstanceStatus::RebootRequested))
+            && !stop.has_stop_request()
     }
 
     /// Combines the validated terminal record with process-exit status.
@@ -734,6 +760,66 @@ mod tests {
         let mut owner_lost = InstanceStopState::new();
         assert_eq!(owner_lost.request_forced(), StopAction::ForceProcess);
         assert_eq!(owner_lost.request_cooperative(), StopAction::None);
+    }
+
+    fn reboot_tracker() -> InstanceTracker {
+        let mut tracker = InstanceTracker::new();
+        for status in [
+            InstanceStatus::ImageValidated,
+            InstanceStatus::MemoryPrepared,
+            InstanceStatus::Installed,
+            InstanceStatus::Running,
+            InstanceStatus::RebootRequested,
+        ] {
+            assert_eq!(tracker.observe(status), Ok(()));
+        }
+        tracker
+    }
+
+    #[test]
+    fn delayed_clean_exit_after_cleanup_timeout_still_reboots() {
+        let tracker = reboot_tracker();
+        let mut stop = InstanceStopState::new();
+        assert!(tracker.should_restart(true, stop));
+        // Exit completed first, but the manager observes its elapsed cleanup
+        // deadline before consuming the process-termination notification.
+        assert_eq!(stop.grace_period_expired(), StopAction::ForceProcess);
+        assert_eq!(stop.grace_period_expired(), StopAction::None);
+        assert!(!stop.has_stop_request());
+        assert!(tracker.should_restart(true, stop));
+        // A real timeout kill is still an unsuccessful process exit.
+        assert!(!tracker.should_restart(false, stop));
+    }
+
+    #[test]
+    fn explicit_stop_wins_before_or_after_cleanup_escalation() {
+        let tracker = reboot_tracker();
+        for force in [false, true] {
+            for timeout_first in [false, true] {
+                let mut stop = InstanceStopState::new();
+                if timeout_first {
+                    assert_eq!(stop.grace_period_expired(), StopAction::ForceProcess);
+                }
+                if force {
+                    let _ = stop.request_forced();
+                } else {
+                    let _ = stop.request_cooperative();
+                }
+                let _ = stop.grace_period_expired();
+                assert!(stop.has_stop_request());
+                assert!(!tracker.should_restart(true, stop));
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_timeout_cannot_authorize_invalid_reboot() {
+        let mut stop = InstanceStopState::new();
+        let _ = stop.grace_period_expired();
+        assert!(!InstanceTracker::new().should_restart(true, stop));
+        let mut tracker = reboot_tracker();
+        tracker.reject_protocol();
+        assert!(!tracker.should_restart(true, stop));
     }
 
     #[test]
