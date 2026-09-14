@@ -24,6 +24,7 @@ pub(super) struct VcpuEndpoint {
     reconcile: ReconcilePublication,
     state: super::endpoint_state::EndpointState,
     signals: SignalState,
+    mmio: InterruptSpinLock<hyper::vm::device::mmio::PendingMmio, crate::hal::irq::LocalMask>,
     wait: InterruptSpinLock<WaitState, crate::hal::irq::LocalMask>,
     waiters: crate::kernel::task::WaitQueue,
 }
@@ -75,6 +76,7 @@ impl VcpuEndpoint {
             reconcile: ReconcilePublication::new(),
             state: super::endpoint_state::EndpointState::unbound(),
             signals: SignalState::new(),
+            mmio: InterruptSpinLock::new(hyper::vm::device::mmio::PendingMmio::new()),
             wait: InterruptSpinLock::new(WaitState {
                 publication: super::endpoint_wait::WaitPublication::new(),
             }),
@@ -107,6 +109,71 @@ impl VcpuEndpoint {
 
     pub(super) fn thread(&self) -> Option<ThreadId> {
         self.thread.get().copied()
+    }
+
+    #[allow(
+        dead_code,
+        reason = "selected guest backends opt into deferred userspace MMIO"
+    )]
+    pub(super) fn stage_mmio(
+        &self,
+        device: u64,
+        access: hyper::vm::exit::MmioAccess,
+    ) -> Result<(), hyper::vm::device::mmio::Error> {
+        self.mmio.with(|state| state.stage(device, access))
+    }
+
+    pub(super) fn publish_mmio(&self) -> Result<(), hyper::vm::device::mmio::Error> {
+        self.mmio.with(|state| {
+            state.publish()?;
+            self.update_mmio_signal(true);
+            Ok(())
+        })
+    }
+
+    pub(super) fn pending_mmio(&self) -> Option<hyper::vm::device::mmio::Request> {
+        self.mmio.with(|state| state.pending())
+    }
+
+    pub(super) fn complete_mmio(
+        &self,
+        id: u64,
+        action: hyper::vm::exit::MmioAction,
+    ) -> Result<(), hyper::vm::device::mmio::Error> {
+        self.mmio.with(|state| {
+            state.complete(id, action)?;
+            self.update_mmio_signal(false);
+            Ok(())
+        })?;
+        self.signal_waiter();
+        Ok(())
+    }
+
+    pub(super) fn take_mmio_completion(
+        &self,
+    ) -> Result<Option<hyper::vm::exit::MmioAction>, hyper::vm::device::mmio::Error> {
+        self.mmio.with(|state| state.take_completed())
+    }
+
+    fn cancel_mmio(&self) {
+        self.mmio.with(|state| {
+            state.close();
+            self.update_mmio_signal(false);
+        });
+    }
+
+    fn update_mmio_signal(&self, pending: bool) {
+        let signal = SignalMask::from_trusted_bits(
+            hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_MMIO_REQUEST,
+        );
+        let (clear, set) = if pending {
+            (SignalMask::EMPTY, signal)
+        } else {
+            (signal, SignalMask::EMPTY)
+        };
+        if self.signals.update(clear, set).is_err() {
+            crate::hal::cpu::halt();
+        }
     }
 
     pub(super) fn publish_reconcile(&self) -> Result<(), super::endpoint_state::StateError> {
@@ -282,6 +349,7 @@ impl VcpuEndpoint {
         }
         let outcome = self.state.request_stop(reason)?;
         if outcome == super::endpoint_state::StopRequestOutcome::Published {
+            self.cancel_mmio();
             // Stop and interrupt delivery share the exact endpoint wait ticket.
             // A suspended WFI continuation is made runnable so it can unwind
             // its EndpointPark and ArmedReservedTimer ownership normally.

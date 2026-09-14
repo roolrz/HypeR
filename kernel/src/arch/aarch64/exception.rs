@@ -576,6 +576,12 @@ fn dispatch_synchronous(
                     }
                     VectorAction::unwind(aarch64_unwind_guest as *const () as usize)
                 }
+                Ok(GuestDispatch::Mmio(completion)) => {
+                    if capture_mmio_guest(frame, generation, completion).is_err() {
+                        fatal_exception(frame, entry, exception_class)
+                    }
+                    VectorAction::unwind(aarch64_unwind_guest as *const () as usize)
+                }
                 Ok(GuestDispatch::Terminal(reason)) => {
                     if capture_terminal_guest(frame, generation, reason).is_err() {
                         fatal_exception(frame, entry, exception_class)
@@ -719,6 +725,7 @@ fn fatal_exception(frame: &ExceptionFrame, entry: ExceptionEntry, exception_clas
 enum GuestDispatch {
     Resume,
     Wait,
+    Mmio(super::vsysreg::GuestMmioCompletion),
     Terminal(super::context::GuestTerminalCause),
 }
 
@@ -755,6 +762,7 @@ fn dispatch_guest_synchronous(
         };
         let action = crate::arch::vm::dispatch_mmio(access);
         return match action {
+            hyper::vm::exit::MmioAction::Deferred => Ok(GuestDispatch::Mmio(completion)),
             hyper::vm::exit::MmioAction::Unhandled | hyper::vm::exit::MmioAction::Stop => Ok(
                 GuestDispatch::Terminal(super::context::GuestTerminalCause::Mmio),
             ),
@@ -809,6 +817,20 @@ fn capture_waiting_guest(frame: &ExceptionFrame, generation: u64) -> Result<(), 
     // context which produced this vector, and exceptions remain masked.
     unsafe { context.as_mut() }
         .capture_wait(frame)
+        .map_err(|_| ())?;
+    super::lower_el::close_captured_guest(generation, context).map_err(|_| ())
+}
+
+fn capture_mmio_guest(
+    frame: &ExceptionFrame,
+    generation: u64,
+    completion: super::vsysreg::GuestMmioCompletion,
+) -> Result<(), ()> {
+    let mut context = super::lower_el::guest_context(generation).map_err(|_| ())?;
+    // SAFETY: This exact generation owns the pinned context; the masked vector
+    // has not published it for scheduling or retained any raw-frame borrow.
+    unsafe { context.as_mut() }
+        .capture_mmio(frame, completion)
         .map_err(|_| ())?;
     super::lower_el::close_captured_guest(generation, context).map_err(|_| ())
 }

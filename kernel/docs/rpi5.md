@@ -31,6 +31,12 @@ backend and physical device assignment remain work in the
 [roadmap](../../docs/roadmap.md). RP1 UARTs on the 40-pin header are not the
 console used by this configuration.
 
+The I/O appliance is built and published by the separate HypeR-io-vm repository.
+HypeR will consume its pinned GHCR package and provide the guest DTS/DTB and
+launch configuration. The firmware-provided host DTB used below is not a guest
+device-assignment description. See the [I/O VM contract](../../docs/io-vm.md);
+no complete Pi 5 appliance package is available yet.
+
 ## Recommended boot chain
 
 Use Pi EEPROM firmware followed by upstream TF-A's `PLAT=rpi5` BL31, then load

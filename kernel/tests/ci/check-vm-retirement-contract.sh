@@ -85,8 +85,19 @@ if rg -q 'strong_count' "$registry" "$control" "$execution"; then
 fi
 require_order "$begin" 'registry.begin_quiesce\(id\)' 'machine.disconnect_virtual_serial\(\)' \
     'registry visibility must be cut before the serial endpoint disconnects'
-require_order "$begin" 'machine.disconnect_virtual_serial\(\)' 'machine.request_all_stops\(\)' \
-    'serial input must disconnect before endpoint stop publication'
+require_order "$begin" 'registry.lease\(id\)' 'lease.machine.request_all_stops\(\)' \
+    'retain a machine lease before irreversible stop publication'
+require_order "$begin" 'lease.machine.request_all_stops\(\)' 'registry.begin_quiesce\(id\)' \
+    'all administrative stop reasons must precede loss of registry lookup'
+require_order "$begin" 'registry.begin_quiesce\(id\)' 'drop\(lease\)' \
+    'retain the temporary machine lease through the registry cut'
+require_order "$begin" 'drop\(lease\)' 'machine.close_io_routes\(\)' \
+    'I/O routes must close after stop publication and the registry cut'
+if sed -n '/lease.machine.request_all_stops()/,$p' "$begin" | \
+    rg -q '\)\?|return Err\('; then
+    echo 'post-stop failures cannot return reversible installed control' >&2
+    exit 1
+fi
 require_order "$stops" '\.request_stop\(' 'self.run_admission.close\(\)' \
     'run admission must close only after durable endpoint stop publication'
 rg -q 'Error::ThreadNotFound' "$stops" &&
@@ -183,5 +194,5 @@ rg -q 'control: VmControl' "$construction" &&
     exit 1
 }
 
-require_order "$begin" 'machine.request_all_stops\(\)' 'machine.quiesce_devices\(\)' \
+require_order "$begin" 'lease.machine.request_all_stops\(\)' 'machine.quiesce_devices\(\)' \
     'device closure must follow durable administrative stop publication'

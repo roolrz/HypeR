@@ -116,6 +116,9 @@ pub enum MmioAction {
     CompleteRead(u64),
     /// Complete a write after its side effects committed.
     CompleteWrite,
+    /// Registered userspace device owns this access; detach before publishing
+    /// its request and resume only after exact-generation completion.
+    Deferred,
     /// No installed virtual device owns the address.
     Unhandled,
     /// Device policy failed after the exit was decoded.

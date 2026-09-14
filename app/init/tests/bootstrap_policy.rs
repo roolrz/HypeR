@@ -46,6 +46,7 @@ fn existing_installed_manifests_still_validate_against_real_bootstrap_policy() -
 {
     for text in [
         include_str!("../config/services.json"),
+        include_str!("../config/services-io.json"),
         include_str!("../config/services-native.json"),
     ] {
         let manifest = manifest::parse(text).map_err(|e| format!("{e:?}"))?;
@@ -59,6 +60,7 @@ fn common_contracts_do_not_expose_private_service_roles_or_weaken_required_right
 -> Result<(), String> {
     for purpose in [
         "console.system",
+        "io.device-authority",
         "vm.provisioning",
         "vm.creation-authority",
         "session.client-input",

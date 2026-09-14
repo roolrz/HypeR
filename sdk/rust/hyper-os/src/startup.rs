@@ -85,6 +85,12 @@ pub const DYNAMIC_LIBRARY_DIRECTORY: StartupPurpose<DirectoryObject> = StartupPu
     hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY as u32,
 );
 
+pub const DEVICE_ASSIGNMENT_AUTHORITY: StartupPurpose<
+    crate::handle::DeviceAssignmentAuthorityObject,
+> = StartupPurpose::new(
+    hyper_abi::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DEVICE_ASSIGNMENT_AUTHORITY as u32,
+);
+
 /// Exclusive safe view of the process-startup record owned by the runtime.
 ///
 /// Every handle begins under this value's logical ownership. [`Self::take`]

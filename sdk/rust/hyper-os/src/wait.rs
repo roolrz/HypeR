@@ -69,6 +69,15 @@ impl ObjectSignals<ByteChannelObject> {
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_BYTE_CHANNEL_PEER_CLOSED);
 }
 
+impl ObjectSignals<crate::handle::GuestMailboxObject> {
+    pub const READABLE: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_READABLE);
+    pub const WRITABLE: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_WRITABLE);
+    pub const PEER_CLOSED: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED);
+}
+
 impl ObjectSignals<CapabilityChannelObject> {
     pub const PEER_RECEIVING: Self =
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_CAPABILITY_CHANNEL_PEER_RECEIVING);
@@ -96,6 +105,8 @@ impl ObjectSignals<crate::handle::VirtualMachineObject> {
 }
 
 impl ObjectSignals<VirtualCpuObject> {
+    pub const MMIO_REQUEST: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_MMIO_REQUEST);
     pub const TERMINATED: Self =
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED);
 }
@@ -329,4 +340,10 @@ impl WaitSet {
 impl ObjectSignals<crate::handle::WaitSetObject> {
     pub const READABLE: Self =
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_WAIT_SET_READABLE);
+}
+
+impl ObjectSignals<crate::handle::GuestNotificationObject> {
+    /// The backend or frontend VM retired. Queue processing cannot be resumed.
+    pub const PEER_CLOSED: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_GUEST_NOTIFICATION_PEER_CLOSED);
 }

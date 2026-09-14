@@ -2717,6 +2717,11 @@ mod tests {
             ("virtual_cpu", TransferClass::RendezvousOnly),
             ("virtual_serial", TransferClass::Forbidden),
             ("wait_set", TransferClass::Forbidden),
+            ("guest_memory", TransferClass::RendezvousOnly),
+            ("device_assignment_authority", TransferClass::General),
+            ("physical_device", TransferClass::RendezvousOnly),
+            ("guest_mailbox", TransferClass::RendezvousOnly),
+            ("guest_notification", TransferClass::RendezvousOnly),
         ];
         assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
         for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {

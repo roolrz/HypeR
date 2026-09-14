@@ -918,15 +918,7 @@ impl Process {
                 return Err(error);
             }
         };
-        let start = self.image().initial_thread();
-        let context = crate::hal::user::prepare_context(
-            start.entry().get(),
-            start.stack().get(),
-            start.tls().get(),
-        )
-        .map_err(ProcessError::UserEntry)?;
-        let execution = UserExecution::try_new(prepared.address_space.clone(), context)
-            .map_err(|()| ProcessError::Allocation)?;
+        let execution = self.prepare_initial_user_execution(prepared.address_space.clone())?;
         let dormant = scheduler::prepare_user_thread(
             name,
             prepared.thread.clone(),
@@ -939,6 +931,29 @@ impl Process {
             process_thread: Some(prepared),
             dormant: Some(dormant),
         })
+    }
+
+    // Finish constructing the large architectural register image before
+    // entering scheduler preparation. Keeping this frame separate leaves
+    // room for IRQ entry, preemption and switch-tail retirement on this stack.
+    #[inline(never)]
+    fn prepare_initial_user_execution(
+        &self,
+        address_space: FallibleArc<NativeAddressSpace>,
+    ) -> Result<alloc::boxed::Box<core::cell::UnsafeCell<UserExecution>>, ProcessError> {
+        let start = self.image().initial_thread();
+        // Match the architectural Result directly: mapping its error before
+        // extracting the context creates extra full-register-image temporaries
+        // in the kernel build profile.
+        match crate::hal::user::prepare_context(
+            start.entry().get(),
+            start.stack().get(),
+            start.tls().get(),
+        ) {
+            Ok(context) => UserExecution::try_new(address_space, context)
+                .map_err(|()| ProcessError::Allocation),
+            Err(error) => Err(ProcessError::UserEntry(error)),
+        }
     }
 
     fn abort_pending_thread(&self) {

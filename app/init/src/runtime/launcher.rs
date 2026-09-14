@@ -32,14 +32,16 @@ impl ServiceLauncher {
             .root_directory
             .open(service.image(), FileRights::EXECUTE)
             .map_err(|_| LaunchError::OperatingSystem)?;
+        let vm_fleet_scope = Some(service_index) == vm_manager_index
+            || service.image() == hyper_init::bootstrap_policy::IO_RUNTIME_IMAGE;
         let builder = ProcessBuilder::create(
             self.authorities.factory.as_handle_ref(),
-            if Some(service_index) == vm_manager_index {
+            if vm_fleet_scope {
                 self.authorities.vm()?.group.as_handle_ref()
             } else {
                 self.authorities.group.as_handle_ref()
             },
-            if Some(service_index) == vm_manager_index {
+            if vm_fleet_scope {
                 self.authorities.vm()?.domain.as_handle_ref()
             } else {
                 self.authorities.domain.as_handle_ref()
@@ -65,8 +67,7 @@ impl ServiceLauncher {
             let grant = plan
                 .capability_grant(service_index, capability_index)
                 .ok_or(LaunchError::InvalidPlan)?;
-            self.authorities
-                .offer(grant, Some(service_index) == vm_manager_index, &builder)?;
+            self.authorities.offer(grant, vm_fleet_scope, &builder)?;
         }
 
         builder.seal().map_err(|_| LaunchError::OperatingSystem)?;

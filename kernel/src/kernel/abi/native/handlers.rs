@@ -1812,3 +1812,120 @@ pub(super) fn sys_virtual_machine_open_vcpu(
     })();
     DeferredAction::Return(handle_result(result))
 }
+
+#[inline(never)]
+pub(super) fn sys_virtual_machine_register_mmio(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[4..])?;
+        let machine = parse_handle(arguments[0])?;
+        if arguments[2] == 0
+            || arguments[3] == 0
+            || arguments[1].checked_add(arguments[2]).is_none()
+        {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        services
+            .register_mmio(machine, arguments[1], arguments[2], arguments[3])
+            .map_err(status_from_vm_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_virtual_cpu_get_mmio_request(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    use hyper::abi::native::{
+        HYPER_NATIVE_STATUS_WOULD_BLOCK, HYPER_NATIVE_VIRTUAL_CPU_MMIO_REQUEST_MIN_SIZE,
+        HyperNativeVirtualCpuMmioRequest,
+    };
+    let result = prepare_info_request(
+        arguments,
+        HYPER_NATIVE_VIRTUAL_CPU_MMIO_REQUEST_MIN_SIZE,
+        core::mem::size_of::<HyperNativeVirtualCpuMmioRequest>(),
+    )
+    .and_then(|output| {
+        let request = services
+            .pending_mmio(output.value)
+            .map_err(status_from_vm_service_error)?
+            .ok_or(HYPER_NATIVE_STATUS_WOULD_BLOCK)?;
+        copy_info_record(
+            services,
+            output,
+            &super::wire::encode_virtual_cpu_mmio_request(request),
+        )
+    });
+    DeferredAction::Return(info_result(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_virtual_cpu_complete_mmio(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    use hyper::vm::exit::MmioAction;
+    let result = (|| {
+        require_zero(&arguments[4..])?;
+        let vcpu = parse_handle(arguments[0])?;
+        if arguments[1] == 0 {
+            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+        }
+        let action = match (arguments[2], arguments[3]) {
+            (0, value) => MmioAction::CompleteRead(value),
+            (1, 0) => MmioAction::CompleteWrite,
+            (2, 0) => MmioAction::Stop,
+            _ => return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
+        };
+        services
+            .complete_mmio(vcpu, arguments[1], action)
+            .map_err(status_from_vm_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_guest_memory_create(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_single_handle(arguments).and_then(|vmo| {
+        services
+            .create_guest_memory(vmo)
+            .map_err(status_from_vm_service_error)
+    });
+    DeferredAction::Return(handle_result(result))
+}
+
+#[inline(never)]
+pub(super) fn sys_pending_virtual_machine_map_memory(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(&arguments[5..])?;
+        let pending = parse_handle(arguments[0])?;
+        let memory = parse_handle(arguments[1])?;
+        services
+            .map_guest_memory(pending, memory, arguments[2], arguments[3], arguments[4])
+            .map_err(status_from_vm_service_error)
+    })();
+    DeferredAction::Return(status_only(result))
+}
+#[inline(never)]
+pub(super) fn sys_vmo_create_contiguous(
+    services: &impl MemoryServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = if arguments[1..].iter().any(|value| *value != 0) {
+        Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+    } else {
+        services
+            .create_contiguous_vmo(arguments[0])
+            .map_err(status_from_memory_service_error)
+    };
+    DeferredAction::Return(handle_result(result))
+}

@@ -68,6 +68,11 @@ ABI revision: `0`.
 | 24 | `virtual_cpu` | `rendezvous_only` |
 | 25 | `virtual_serial` | `forbidden` |
 | 26 | `wait_set` | `forbidden` |
+| 27 | `guest_memory` | `rendezvous_only` |
+| 28 | `device_assignment_authority` | `general` |
+| 29 | `physical_device` | `rendezvous_only` |
+| 30 | `guest_mailbox` | `rendezvous_only` |
+| 31 | `guest_notification` | `rendezvous_only` |
 
 ## Object signals
 
@@ -91,11 +96,21 @@ ABI revision: `0`.
 | `virtual_machine` | 1 | `power_request` |
 | `virtual_machine` | 2 | `vcpu_terminated` |
 | `virtual_cpu` | 0 | `terminated` |
+| `virtual_cpu` | 1 | `mmio_request` |
+| `guest_notification` | 0 | `peer_closed` |
+| `guest_mailbox` | 0 | `readable` |
+| `guest_mailbox` | 1 | `writable` |
+| `guest_mailbox` | 2 | `peer_closed` |
 
 ## Constants
 
 | Name | Value |
 | --- | ---: |
+| `startup_handle_purpose_device_assignment_authority` | `14` |
+| `guest_mailbox_max_message_bytes` | `256` |
+| `guest_notification_disable` | `0` |
+| `guest_notification_enable` | `1` |
+| `guest_notification_raise_config` | `2` |
 | `private_mapping_copy_on_write` | `0` |
 | `private_mapping_eager` | `1` |
 | `riscv_isa_i` | `1` |
@@ -149,6 +164,8 @@ ABI revision: `0`.
 | `virtual_platform_aarch64_reference_gicv2_cpu_base` | `134283264` |
 | `virtual_platform_aarch64_reference_gicv2_cpu_size` | `8192` |
 | `virtual_platform_aarch64_reference_uart_base` | `150994944` |
+| `virtual_platform_aarch64_reference_user_mmio_base` | `167772160` |
+| `virtual_platform_aarch64_reference_user_mmio_size` | `16777216` |
 | `virtual_platform_aarch64_reference_uart_size` | `4096` |
 | `virtual_platform_aarch64_reference_uart_interrupt` | `33` |
 | `virtual_platform_aarch64_reference_timer_interrupt` | `27` |
@@ -197,6 +214,7 @@ ABI revision: `0`.
 | `file_max_read_bytes` | `2097152` |
 | `vmo_max_size_bytes` | `4294967296` |
 | `vmo_max_transfer_bytes` | `65536` |
+| `vmo_max_contiguous_size_bytes` | `67108864` |
 | `vmar_permission_read` | `1` |
 | `vmar_permission_write` | `2` |
 | `vmar_permission_execute` | `4` |
@@ -350,7 +368,7 @@ element size before any user-memory access.
 | 61 | `pending_virtual_machine_set_memory` | `pending_virtual_machine: handle`, `vmo: handle` | — | `pending_virtual_machine: Borrow, kind=pending_virtual_machine, rights=0x20`, `vmo: Borrow, kind=vmo, rights=0x70` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 62 | `pending_virtual_machine_set_bootstrap` | `pending_virtual_machine: handle`, `bootstrap: user_address`, `bootstrap_size: byte_count` | — | `pending_virtual_machine: Borrow, kind=pending_virtual_machine, rights=0x20` | `bootstrap: Read, len=bootstrap_size bytes, max-bytes=4096, record=virtual_cpu_bootstrap; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 63 | `pending_virtual_machine_seal` | `pending_virtual_machine: handle` | — | `pending_virtual_machine: Borrow, kind=pending_virtual_machine, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 64 | `pending_virtual_machine_install` | `pending_virtual_machine: handle` | `virtual_machine: handle`, `boot_virtual_cpu: handle` | `pending_virtual_machine: ConsumeOnCommit, kind=pending_virtual_machine, rights=0x400`, `virtual_machine: produce, kind=virtual_machine, fixed=0x82e`, `boot_virtual_cpu: produce, kind=virtual_cpu, fixed=0x40e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 64 | `pending_virtual_machine_install` | `pending_virtual_machine: handle` | `virtual_machine: handle`, `boot_virtual_cpu: handle` | `pending_virtual_machine: ConsumeOnCommit, kind=pending_virtual_machine, rights=0x400`, `virtual_machine: produce, kind=virtual_machine, fixed=0x82e`, `boot_virtual_cpu: produce, kind=virtual_cpu, fixed=0x42e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 65 | `pending_virtual_machine_abort` | `pending_virtual_machine: handle` | — | `pending_virtual_machine: ConsumeOnCommit, kind=pending_virtual_machine, rights=0x800` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 66 | `virtual_machine_request_stop` | `virtual_machine: handle` | — | `virtual_machine: Borrow, kind=virtual_machine, rights=0x800` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 67 | `virtual_machine_get_info` | `virtual_machine: handle`, `info: user_address`, `info_size: byte_count` | `supported_size: byte_count` | `virtual_machine: Borrow, kind=virtual_machine, rights=0x8` | `info: Write, len=info_size bytes, max-bytes=4096, record=virtual_machine_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Object` |
@@ -405,12 +423,30 @@ element size before any user-memory access.
 | 116 | `vmar_map_private` | `vmar: handle`, `vmo: handle`, `mapping: user_address`, `mapping_size: byte_count` | — | `vmar: Borrow, kind=vmar, rights=0x40`, `vmo: Borrow, kind=vmo, rights=0x50` | `mapping: Read, len=mapping_size bytes, max-bytes=4096, record=private_mapping; order=0` | `blocking=MayBlock, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 117 | `virtual_machine_get_power_request` | `virtual_machine: handle`, `request: user_address`, `request_size: byte_count` | `supported_size: byte_count` | `virtual_machine: Borrow, kind=virtual_machine, rights=0x20` | `request: Write, len=request_size bytes, max-bytes=4096, record=virtual_machine_power_request; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 118 | `virtual_machine_complete_power_request` | `virtual_machine: handle`, `request_id: u64`, `accept: u32` | — | `virtual_machine: Borrow, kind=virtual_machine, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
-| 119 | `virtual_machine_open_vcpu` | `virtual_machine: handle`, `vcpu_id: u32` | `virtual_cpu: handle` | `virtual_machine: Borrow, kind=virtual_machine, rights=0x20`, `virtual_cpu: produce, kind=virtual_cpu, fixed=0x40e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 119 | `virtual_machine_open_vcpu` | `virtual_machine: handle`, `vcpu_id: u32` | `virtual_cpu: handle` | `virtual_machine: Borrow, kind=virtual_machine, rights=0x20`, `virtual_cpu: produce, kind=virtual_cpu, fixed=0x42e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 120 | `virtual_machine_register_mmio` | `virtual_machine: handle`, `base: u64`, `length: u64`, `device: u64` | — | `virtual_machine: Borrow, kind=virtual_machine, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 121 | `virtual_cpu_get_mmio_request` | `virtual_cpu: handle`, `request: user_address`, `request_size: byte_count` | `supported_size: byte_count` | `virtual_cpu: Borrow, kind=virtual_cpu, rights=0x20` | `request: Write, len=request_size bytes, max-bytes=4096, record=virtual_cpu_mmio_request; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 122 | `virtual_cpu_complete_mmio` | `virtual_cpu: handle`, `request_id: u64`, `operation: u32`, `value: u64` | — | `virtual_cpu: Borrow, kind=virtual_cpu, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 123 | `guest_memory_create` | `vmo: handle` | `memory: handle` | `vmo: Borrow, kind=vmo, rights=0x70`, `memory: produce, kind=guest_memory, fixed=0x4b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 124 | `pending_virtual_machine_map_memory` | `pending_virtual_machine: handle`, `memory: handle`, `guest_offset: u64`, `source_offset: u64`, `length: u64` | — | `pending_virtual_machine: Borrow, kind=pending_virtual_machine, rights=0x20`, `memory: Borrow, kind=guest_memory, rights=0x40` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 125 | `vmo_create_contiguous` | `size: byte_count` | `vmo: handle` | `vmo: produce, kind=vmo, fixed=0x7b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 126 | `device_claim` | `authority: handle`, `index: u32` | `physical_device: handle` | `authority: Borrow, kind=device_assignment_authority, rights=0x8`, `physical_device: produce, kind=physical_device, fixed=0x2b` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 127 | `physical_device_info` | `device: handle`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `device: Borrow, kind=physical_device, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=4096, record=physical_device_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 128 | `vmo_get_dma_extent` | `authority: handle`, `vmo: handle`, `offset: u64`, `length: u64`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `authority: Borrow, kind=device_assignment_authority, rights=0x8`, `vmo: Borrow, kind=vmo, rights=0x50` | `output: Write, len=output_size bytes, max-bytes=4096, record=dma_extent; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 129 | `pending_virtual_machine_assign_device` | `pending: handle`, `device: handle`, `guest_base: u64`, `guest_irq: u32` | — | `pending: Borrow, kind=pending_virtual_machine, rights=0x20`, `device: Borrow, kind=physical_device, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 130 | `guest_mailbox_create` | `machine: handle`, `base: u64`, `irq: u32` | `guest_mailbox: handle` | `machine: Borrow, kind=virtual_machine, rights=0x20`, `guest_mailbox: produce, kind=guest_mailbox, fixed=0x3e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 131 | `guest_mailbox_send` | `mailbox: handle`, `bytes: user_address`, `length: byte_count` | — | `mailbox: Borrow, kind=guest_mailbox, rights=0x20` | `bytes: Read, len=length bytes, max-bytes=256; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 132 | `guest_mailbox_receive` | `mailbox: handle`, `bytes: user_address`, `capacity: byte_count` | `bytes: byte_count` | `mailbox: Borrow, kind=guest_mailbox, rights=0x10` | `bytes: Write, len=capacity bytes, max-bytes=256; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 133 | `guest_notification_create` | `frontend: handle`, `backend: handle`, `frontend_base: u64`, `backend_base: u64`, `frontend_irq: u32`, `backend_irq: u32` | `guest_notification: handle` | `frontend: Borrow, kind=virtual_machine, rights=0x20`, `backend: Borrow, kind=virtual_machine, rights=0x20`, `guest_notification: produce, kind=guest_notification, fixed=0x2e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 134 | `guest_notification_control` | `notification: handle`, `operation: u32` | `epoch: u32` | `notification: Borrow, kind=guest_notification, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 
 ## Public records
 
 | Name | Minimum prefix | Size | Alignment | Fields |
 | --- | ---: | ---: | ---: | --- |
+| `physical_device_info` | 16 | 16 | 8 | `device_id: u32 @ 0`, `transport_version: u32 @ 4`, `mmio_size: u64 @ 8` |
+| `dma_extent` | 16 | 16 | 8 | `physical_base: u64 @ 0`, `length: u64 @ 8` |
+| `virtual_cpu_mmio_request` | 48 | 48 | 8 | `id: u64 @ 0`, `device: u64 @ 8`, `address: u64 @ 16`, `value: u64 @ 24`, `operation: u32 @ 32`, `width: u32 @ 36`, `reserved: u64 @ 40` |
 | `private_mapping` | 48 | 48 | 8 | `source_offset: u64 @ 0`, `source_length: u64 @ 8`, `address: u64 @ 16`, `size: u64 @ 24`, `data_offset: u64 @ 32`, `permissions: u32 @ 40`, `mode: u32 @ 44` |
 | `virtual_machine_platform_info` | 32 | 32 | 8 | `architecture: u32 @ 0`, `platform_profile: u32 @ 4`, `counter_frequency_hz: u64 @ 8`, `riscv_isa: u64 @ 16`, `aarch64_gic_version: u64 @ 24` |
 | `file_metadata` | 112 | 112 | 8 | `filesystem_id: u64 @ 0`, `mount_id: u64 @ 8`, `node_id: u64 @ 16`, `size: u64 @ 24`, `mode: u32 @ 32`, `kind: u32 @ 36`, `valid_times: u32 @ 40`, `reserved: u32 @ 44`, `accessed_seconds: i64 @ 48`, `accessed_nanoseconds: u32 @ 56`, `accessed_reserved: u32 @ 60`, `modified_seconds: i64 @ 64`, `modified_nanoseconds: u32 @ 72`, `modified_reserved: u32 @ 76`, `created_seconds: i64 @ 80`, `created_nanoseconds: u32 @ 88`, `created_reserved: u32 @ 92`, `changed_seconds: i64 @ 96`, `changed_nanoseconds: u32 @ 104`, `changed_reserved: u32 @ 108` |

@@ -71,6 +71,14 @@ fn retry_mapping_transaction<T>(
     )
 }
 
+pub(crate) fn create_contiguous_vmo(
+    process: &Process,
+    size: u64,
+) -> Result<HandleValue, ServiceError> {
+    let object = VmoObject::try_new_contiguous(size, &process.resource_domain())?;
+    Ok(process.create_object(object, writable_vmo_rights())?)
+}
+
 pub(crate) fn create_vmo(process: &Process, size: u64) -> Result<HandleValue, ServiceError> {
     let size = page_aligned_size(size)?;
     let object = VmoObject::try_new_writable(size, &process.resource_domain())?;

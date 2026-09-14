@@ -10,15 +10,15 @@ use hyper::mm::allocator::heap::PageOwner;
 use hyper::mm::{PAGE_SIZE, PhysicalAddress};
 
 use super::Error;
+use super::backing::Layout as SharedGuestMemory;
 use crate::hal::vm::Stage2AddressSpace;
 use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceDomain, ResourceKind};
 use crate::kernel::mm::page_block::PageBlock;
-use crate::kernel::mm::user_space::GuestMemoryBacking as SharedGuestMemory;
 
 pub(super) enum GuestMemoryBacking {
     #[cfg(feature = "kernel-self-test")]
     KernelOwned(Vec<Option<PageBlock>>),
-    SharedVmo(SharedGuestMemory),
+    SharedVmo(alloc::boxed::Box<SharedGuestMemory>),
 }
 
 /// Frozen membership of the resident pages covered by one batched instruction

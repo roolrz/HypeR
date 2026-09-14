@@ -134,6 +134,9 @@ impl Runtime {
             group,
             domain,
             vm: None,
+            device: startup
+                .take_optional(startup::DEVICE_ASSIGNMENT_AUTHORITY)
+                .map_err(|_| Error::OperatingSystem)?,
             task_inspector: startup
                 .take(startup::TASK_INSPECTOR)
                 .map_err(|_| Error::OperatingSystem)?,

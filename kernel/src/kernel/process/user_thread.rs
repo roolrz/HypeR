@@ -433,6 +433,9 @@ impl UserExecution {
         core::mem::size_of::<Self>()
     }
 
+    // Do not merge register-image allocation scratch into callers which also
+    // retain the Result returned by architectural context preparation.
+    #[inline(never)]
     pub(super) fn try_new(
         address_space: FallibleArc<NativeAddressSpace>,
         context: crate::hal::user::UserContext,

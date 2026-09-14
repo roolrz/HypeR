@@ -58,8 +58,8 @@ pub(crate) use objects::{GuestMemoryBacking, MemoryObjectError, VmarObject, VmoO
 pub(crate) use service::{ServiceError as MemoryServiceError, permissions as abi_permissions};
 #[cfg(not(test))]
 pub(crate) use service::{
-    allocate_vmar, create_file_executable_vmo, create_vmo, destroy as destroy_vmar, map_vmo,
-    protect, read_vmo, unmap, write_vmo,
+    allocate_vmar, create_contiguous_vmo, create_file_executable_vmo, create_vmo,
+    destroy as destroy_vmar, map_vmo, protect, read_vmo, unmap, write_vmo,
 };
 
 #[cfg(not(test))]

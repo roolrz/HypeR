@@ -15,6 +15,7 @@ use crate::kernel::object::{
 };
 use crate::kernel::vm::installed::{InstalledMachine, VirtualMachineConfiguration};
 use crate::kernel::vm::memory::GuestAddressSpace;
+use crate::kernel::vm::memory::backing::{Layout, Region};
 use crate::kernel::vm::registry::{PreparedVm, VmBuilder, VmLifecycleResources, VmReservation};
 
 type PendingLock = InterruptSpinLock<PendingState, crate::hal::irq::LocalMask>;
@@ -23,8 +24,9 @@ enum PendingState {
     Configuring {
         reservation: VmReservation,
         lifecycle_resources: VmLifecycleResources,
-        memory: Option<GuestMemoryBacking>,
+        memory: alloc::boxed::Box<Layout>,
         bootstrap: Option<VirtualCpuBootstrap>,
+        physical: Option<crate::kernel::device::assigned::Assignment>,
         virtual_serial:
             Option<KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>>,
     },
@@ -60,8 +62,9 @@ impl PendingVirtualMachine {
             state: PendingLock::new(PendingState::Configuring {
                 reservation,
                 lifecycle_resources,
-                memory: None,
+                memory: Layout::try_new(configuration.memory_size, domain)?,
                 bootstrap: None,
+                physical: None,
                 virtual_serial: None,
             }),
             domain: domain.clone(),
@@ -77,19 +80,36 @@ impl PendingVirtualMachine {
         if vmo.size() != self.configuration.memory_size {
             return Err(Error::InvalidConfiguration);
         }
-        let mut backing = Some(GuestMemoryBacking::try_from_vmo(vmo)?);
+        let backing = GuestMemoryBacking::try_from_vmo(vmo)?;
+        self.map_memory(Region::new(0, 0, self.configuration.memory_size, backing)?)
+    }
+
+    pub(crate) fn map_memory(&self, region: Region) -> Result<(), Error> {
+        let mut region = Some(region);
         let result = self.state.with(|state| match state {
-            PendingState::Configuring { memory, .. } if memory.is_none() => {
-                *memory = backing.take();
+            PendingState::Configuring { memory, .. } => {
+                memory.insert(&mut region).map_err(Into::into)
+            }
+            _ => Err(Error::BadState),
+        });
+        // Final lease release may free pages; keep it outside PendingLock.
+        drop(region);
+        result
+    }
+
+    pub(crate) fn assign_physical(
+        &self,
+        assignment: crate::kernel::device::assigned::Assignment,
+    ) -> Result<(), Error> {
+        let mut assignment = Some(assignment);
+        let result = self.state.with(|state| match state {
+            PendingState::Configuring { physical, .. } if physical.is_none() => {
+                *physical = assignment.take();
                 Ok(())
             }
-            PendingState::Configuring { .. }
-            | PendingState::Transition
-            | PendingState::Sealed(_)
-            | PendingState::Failed => Err(Error::BadState),
+            _ => Err(Error::BadState),
         });
-        // Rejected backing releases its VMO hardware lease outside PendingLock.
-        drop(backing);
+        drop(assignment);
         result
     }
 
@@ -146,15 +166,17 @@ impl PendingVirtualMachine {
                 PendingState::Configuring {
                     reservation,
                     lifecycle_resources,
-                    memory: Some(memory),
+                    memory,
                     bootstrap: Some(bootstrap),
                     virtual_serial,
-                } => Ok((
+                    physical,
+                } if memory.complete() => Ok((
                     reservation,
                     lifecycle_resources,
                     memory,
                     bootstrap,
                     virtual_serial,
+                    physical,
                 )),
                 other => {
                     *state = other;
@@ -162,7 +184,7 @@ impl PendingVirtualMachine {
                 }
             }
         })?;
-        let result = self.prepare(state.0, state.1, state.2, state.3, state.4);
+        let result = self.prepare(state.0, state.1, state.2, state.3, state.4, state.5);
         self.state.with(|slot| match result {
             Ok(prepared) => {
                 *slot = PendingState::Sealed(Some(prepared));
@@ -175,16 +197,21 @@ impl PendingVirtualMachine {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn prepare(
         &self,
         mut reservation: VmReservation,
         lifecycle_resources: VmLifecycleResources,
-        memory: GuestMemoryBacking,
+        memory: alloc::boxed::Box<Layout>,
         bootstrap: VirtualCpuBootstrap,
         virtual_serial: Option<
             KernelRef<super::super::virtual_serial::VirtualSerial, VmDeviceBinding>,
         >,
+        physical: Option<crate::kernel::device::assigned::Assignment>,
     ) -> Result<PreparedVm, Error> {
+        if physical.is_some() {
+            memory.validate_dma()?;
+        }
         let mut address_space = GuestAddressSpace::from_vmo(
             reservation.take_hardware_vmid()?,
             self.configuration.guest_physical_base,
@@ -205,7 +232,7 @@ impl PendingVirtualMachine {
         let virtual_serial = virtual_serial
             .map(crate::kernel::vm::device::VirtualSerialBinding::from_virtual_serial);
         let devices = crate::kernel::vm::device::prepare(virtual_serial)?;
-        VmBuilder::new(
+        let prepared = VmBuilder::new(
             reservation,
             lifecycle_resources,
             self.configuration,
@@ -215,7 +242,9 @@ impl PendingVirtualMachine {
             devices,
         )?
         .prepare_boot_vcpu(0, bootstrap)
-        .map_err(Into::into)
+        .map_err(Error::from)?;
+        prepared.set_physical(physical);
+        Ok(prepared)
     }
 
     pub(crate) fn take_prepared(&self) -> Result<PreparedVm, Error> {

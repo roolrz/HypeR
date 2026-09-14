@@ -16,7 +16,10 @@ use hyper::abi::native;
 /// handle before retiring its membership edge. VM creation authorities are
 /// admitted so the initial supervisor can delegate construction to a fleet
 /// manager and move a one-shot lease into an isolated VM runtime. Installed
-/// VM and vCPU control objects remain excluded. `VirtualSerial` is created by
+/// VM and vCPU control objects remain excluded. Guest-memory grants may be
+/// delegated to an I/O runtime: they retain backing pages, not a VM lifecycle
+/// edge, and preserve the hardware-write lease until their last mapping retires.
+/// `VirtualSerial` is created by
 /// its owning runtime and is not a startup transport object. Nested
 /// `ProcessBuilder` authority is always forbidden.
 pub(crate) struct BuilderStorable;
@@ -31,6 +34,9 @@ impl BuilderStorable {
             || kind == native::HYPER_NATIVE_OBJECT_TASK_FACTORY
             || kind == native::HYPER_NATIVE_OBJECT_EXECUTABLE_AUTHORITY
             || kind == native::HYPER_NATIVE_OBJECT_VMO
+            || kind == native::HYPER_NATIVE_OBJECT_GUEST_MEMORY
+            || kind == native::HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY
+            || kind == native::HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE
             || kind == native::HYPER_NATIVE_OBJECT_CONSOLE
             || kind == native::HYPER_NATIVE_OBJECT_DIRECTORY
             || kind == native::HYPER_NATIVE_OBJECT_FILE

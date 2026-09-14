@@ -33,6 +33,18 @@ pub(super) fn supports_configuration(profile: u32, memory_base: u64, memory_size
     platform::supports_configuration(profile, memory_base, memory_size)
 }
 
+pub(super) fn supports_userspace_mmio(profile: u32, base: u64, length: u64) -> bool {
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    {
+        platform::supports_userspace_mmio(profile, base, length)
+    }
+    #[cfg(not(CONFIG_ARCH_AARCH64))]
+    {
+        let _ = (profile, base, length);
+        false
+    }
+}
+
 pub(super) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualInterruptId {
     platform::default_timer_interrupt()
 }

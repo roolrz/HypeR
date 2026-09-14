@@ -134,6 +134,22 @@ pub(super) const fn default_timer_interrupt() -> hyper::vm::interrupt::VirtualIn
     )
 }
 
+pub(super) fn supports_userspace_mmio(profile: u32, base: u64, length: u64) -> bool {
+    use hyper::abi::native::{
+        HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE,
+        HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_USER_MMIO_BASE as APERTURE_BASE,
+        HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_USER_MMIO_SIZE as APERTURE_SIZE,
+    };
+    profile == HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE as u32
+        && length != 0
+        && base.is_multiple_of(hyper::mm::PAGE_SIZE)
+        && length.is_multiple_of(hyper::mm::PAGE_SIZE)
+        && base >= APERTURE_BASE
+        && base
+            .checked_add(length)
+            .is_some_and(|end| end <= APERTURE_BASE + APERTURE_SIZE)
+}
+
 #[must_use]
 pub(in crate::kernel) struct MmioDispatch {
     action: MmioAction,
@@ -174,7 +190,14 @@ pub(super) fn dispatch_mmio(
             Ok(Some(outcome)) => resolve_access(access.operation(), outcome),
             Ok(None) => match handle_gic(hardware, interrupts, vcpu_id, access) {
                 Ok(Some(outcome)) => resolve_access(access.operation(), outcome),
-                Ok(None) => Resolution::Unhandled(binding.admit_unhandled_mmio(vcpu_id, access)),
+                Ok(None) => match binding
+                    .route_physical_mmio(access)
+                    .or_else(|| binding.route_io_mmio(access))
+                    .or_else(|| binding.lifecycle().route_mmio(vcpu_id, access))
+                {
+                    Some(action) => Resolution::Action(action),
+                    None => Resolution::Unhandled(binding.admit_unhandled_mmio(vcpu_id, access)),
+                },
                 Err(_) => Resolution::Action(MmioAction::Stop),
             },
             Err(_) => Resolution::Action(MmioAction::Stop),

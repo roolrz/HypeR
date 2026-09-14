@@ -484,6 +484,7 @@ pub(super) fn status_from_vm_service_error(
         crate::kernel::vm::service::Error::BadHandle => HYPER_NATIVE_STATUS_BAD_HANDLE,
         crate::kernel::vm::service::Error::AccessDenied => HYPER_NATIVE_STATUS_ACCESS_DENIED,
         crate::kernel::vm::service::Error::Busy => HYPER_NATIVE_STATUS_BUSY,
+        crate::kernel::vm::service::Error::WouldBlock => HYPER_NATIVE_STATUS_WOULD_BLOCK,
         crate::kernel::vm::service::Error::BadState => HYPER_NATIVE_STATUS_BAD_STATE,
         crate::kernel::vm::service::Error::ResourceLimit => HYPER_NATIVE_STATUS_RESOURCE_LIMIT,
         crate::kernel::vm::service::Error::NoMemory => HYPER_NATIVE_STATUS_NO_MEMORY,

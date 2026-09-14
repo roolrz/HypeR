@@ -28,6 +28,33 @@ pub struct WritableVmo {
 }
 
 impl WritableVmo {
+    /// Eager DMA backing. Size must be a power of two from one page to 64 MiB.
+    /// The entire physical extent remains allocated until all derived page
+    /// owners retire; ordinary applications should use sparse `create`.
+    pub fn create_contiguous(size: u64) -> Result<Self> {
+        if size < PAGE_SIZE
+            || !size.is_power_of_two()
+            || size > hyper_abi::HYPER_NATIVE_VMO_MAX_CONTIGUOUS_SIZE_BYTES
+        {
+            return Err(Error::InvalidMemoryRange);
+        }
+        // SAFETY: successful creation publishes one unique output owner.
+        let result = unsafe { hyper_sys::vmo_create_contiguous(size) };
+        Status::from_raw(result.status).into_result()?;
+        // SAFETY: this no-input creation call transfers its nonzero result.
+        let owner = unsafe {
+            crate::handle::adopt_produced_handle_excluding::<AnyObject>(result.value0, &[])?
+        };
+        let info = owner.info()?;
+        if info.rights != WRITABLE_RIGHTS {
+            return Err(Error::InvalidResponse);
+        }
+        let handle = owner
+            .downcast::<VmoObject>()
+            .map_err(|failure| failure.error())?;
+        Ok(Self { handle, size })
+    }
+
     /// Creates a page-aligned sparse VMO.
     pub fn create(size: u64) -> Result<Self> {
         if size == 0 || !size.is_multiple_of(PAGE_SIZE) {

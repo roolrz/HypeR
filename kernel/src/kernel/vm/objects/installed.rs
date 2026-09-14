@@ -100,6 +100,19 @@ impl VirtualCpuObject {
         self.owner.snapshot_vcpu(self.id)
     }
 
+    pub(crate) fn pending_mmio(&self) -> Result<Option<hyper::vm::device::mmio::Request>, Error> {
+        Ok(self.owner.pending_mmio(self.id)?)
+    }
+
+    pub(crate) fn complete_mmio(
+        &self,
+        id: u64,
+        action: hyper::vm::exit::MmioAction,
+    ) -> Result<(), Error> {
+        self.owner.complete_mmio(self.id, id, action)?;
+        Ok(())
+    }
+
     /// Commits this installed vCPU from dormant to scheduler-runnable.
     pub(crate) fn start(&self) -> Result<(), Error> {
         self.owner.start_vcpu(self.id)?;
@@ -114,6 +127,7 @@ impl KernelObject for VirtualCpuObject {
     const KIND: ObjectKind = ObjectKind::VIRTUAL_CPU;
     const TRANSFER_CLASS: TransferClass = TransferClass::RendezvousOnly;
     const SUPPORTED_RIGHTS: Rights = Rights::TRANSFER
+        .union(Rights::WRITE)
         .union(Rights::WAIT)
         .union(Rights::INSPECT)
         .union(Rights::START);
@@ -126,7 +140,8 @@ impl KernelObject for VirtualCpuObject {
         Some(SignalSource::new(
             signals,
             SignalMask::from_trusted_bits(
-                hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED,
+                hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED
+                    | hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_MMIO_REQUEST,
             ),
         ))
     }

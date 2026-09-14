@@ -403,6 +403,58 @@ impl VmServices for DeferredProcessServices<'_> {
         crate::kernel::vm::service::request_stop(&self.session.process, machine)
     }
 
+    fn register_mmio(
+        &self,
+        machine: HandleValue,
+        base: u64,
+        length: u64,
+        device: u64,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::register_mmio(
+            &self.session.process,
+            machine,
+            base,
+            length,
+            device,
+        )
+    }
+    fn pending_mmio(
+        &self,
+        vcpu: HandleValue,
+    ) -> Result<Option<hyper::vm::device::mmio::Request>, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::pending_mmio(&self.session.process, vcpu)
+    }
+    fn complete_mmio(
+        &self,
+        vcpu: HandleValue,
+        id: u64,
+        action: hyper::vm::exit::MmioAction,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::complete_mmio(&self.session.process, vcpu, id, action)
+    }
+    fn create_guest_memory(
+        &self,
+        vmo: HandleValue,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::create_guest_memory(&self.session.process, vmo)
+    }
+    fn map_guest_memory(
+        &self,
+        pending: HandleValue,
+        memory: HandleValue,
+        guest_offset: u64,
+        source_offset: u64,
+        length: u64,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::service::map_guest_memory(
+            &self.session.process,
+            pending,
+            memory,
+            guest_offset,
+            source_offset,
+            length,
+        )
+    }
     fn pending_power_request(
         &self,
         machine: HandleValue,
@@ -1414,6 +1466,13 @@ impl VfsServices for DeferredProcessServices<'_> {
 }
 
 impl MemoryServices for DeferredProcessServices<'_> {
+    fn create_contiguous_vmo(
+        &self,
+        size: u64,
+    ) -> Result<HandleValue, crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::create_contiguous_vmo(&self.session.process, size)
+    }
+
     fn create_vmo(
         &self,
         size: u64,
@@ -2100,5 +2159,105 @@ fn atomic_wait_error(error: crate::kernel::process::atomic_wait::Error) -> Objec
         Error::Process(error) => ObjectServiceError::Process(error),
         Error::Wait(error) => ObjectServiceError::Wait(error),
         Error::InvalidInput => ObjectServiceError::InvalidInput,
+    }
+}
+
+impl crate::kernel::abi::native::DeviceServices for DeferredProcessServices<'_> {
+    fn claim_device(
+        &self,
+        authority: HandleValue,
+        index: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+        crate::kernel::device::assigned::service::claim(&self.session.process, authority, index)
+    }
+    fn physical_device_info(
+        &self,
+        device: HandleValue,
+    ) -> Result<crate::kernel::device::assigned::Info, crate::kernel::vm::service::Error> {
+        crate::kernel::device::assigned::service::info(&self.session.process, device)
+    }
+    fn vmo_dma_extent(
+        &self,
+        authority: HandleValue,
+        vmo: HandleValue,
+        offset: u64,
+        length: u64,
+    ) -> Result<crate::kernel::device::assigned::DmaExtent, crate::kernel::vm::service::Error> {
+        crate::kernel::device::assigned::service::dma_extent(
+            &self.session.process,
+            authority,
+            vmo,
+            offset,
+            length,
+        )
+    }
+    fn assign_physical_device(
+        &self,
+        pending: HandleValue,
+        device: HandleValue,
+        base: u64,
+        irq: u32,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::device::assigned::service::assign(
+            &self.session.process,
+            pending,
+            device,
+            base,
+            irq,
+        )
+    }
+}
+impl crate::kernel::abi::native::GuestIoServices for DeferredProcessServices<'_> {
+    fn create_guest_mailbox(
+        &self,
+        machine: HandleValue,
+        base: u64,
+        irq: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::io::service::create_mailbox(&self.session.process, machine, base, irq)
+    }
+    fn send_guest_mailbox(
+        &self,
+        mailbox: HandleValue,
+        bytes: &[u8],
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        crate::kernel::vm::io::service::send_mailbox(&self.session.process, mailbox, bytes)
+    }
+    fn receive_guest_mailbox(
+        &self,
+        mailbox: HandleValue,
+        copy: &mut dyn FnMut(&[u8]) -> Result<(), crate::kernel::vm::service::Error>,
+    ) -> Result<usize, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::io::service::receive_mailbox(&self.session.process, mailbox, copy)
+    }
+    fn create_guest_notification(
+        &self,
+        frontend: HandleValue,
+        backend: HandleValue,
+        frontend_base: u64,
+        backend_base: u64,
+        frontend_irq: u32,
+        backend_irq: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::io::service::create_notification(
+            &self.session.process,
+            frontend,
+            backend,
+            frontend_base,
+            backend_base,
+            frontend_irq,
+            backend_irq,
+        )
+    }
+    fn control_guest_notification(
+        &self,
+        notification: HandleValue,
+        operation: u32,
+    ) -> Result<u32, crate::kernel::vm::service::Error> {
+        crate::kernel::vm::io::service::control_notification(
+            &self.session.process,
+            notification,
+            operation,
+        )
     }
 }
