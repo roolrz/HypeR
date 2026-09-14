@@ -60,14 +60,22 @@ impl Listener {
         )
     }
 
-    pub(super) fn accept(&self) -> hyper_os::Result<Connection> {
+    pub(super) fn accept(&self) -> hyper_os::Result<Option<Connection>> {
         let mut byte = [0];
-        if self.notification.as_byte_channel().try_receive(&mut byte)? != 1 || byte != [1] {
+        let length = match self.notification.as_byte_channel().try_receive(&mut byte) {
+            Ok(length) => length,
+            // The wait set observes readiness without reserving a message.
+            // Rejoin the full wait set instead of blocking the supervisor here.
+            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if length != 1 || byte != [1] {
             return Err(hyper_os::Error::InvalidResponse);
         }
         self.connections
             .try_recv()
             .map_err(|_| hyper_os::Error::InvalidResponse)?
+            .map(Some)
     }
 }
 

@@ -121,6 +121,11 @@ def run(args):
                 await_text(rb'HypeR business disk: acceptance complete\n')
                 send(b'\x1dd'); await_text(rb'hyper-sh\$ ')
 
+            # Exercise repeated listener handoffs before guest loading. A stale
+            # READABLE observation must not turn a nonblocking accept into a
+            # fatal supervisor error.
+            for _ in range(600):
+                shell('vmm list')
             shell('vmm start fast')
             verify_guest('fast')
             shell('vmm start slow')

@@ -90,7 +90,7 @@ else
 RUN_PROFILE ?= native
 endif
 IO_VM_DISK ?= $(APP_OUTPUT)/io-disk.img
-IO_VM_ORAS ?= $(if $(shell command -v oras 2>/dev/null),oras,$(CURDIR)/target/tools/oras-1.3.0/oras)
+IO_VM_ORAS ?=
 IO_VM_PACKAGE ?=
 BOARD ?= qemu
 BOARD_CONFIG ?= $(CURDIR)/boards/$(BOARD).json
@@ -600,13 +600,14 @@ board-initramfs: app fit-pack $(NEWC_PACK)
 		--fit-pack "$(FIT_PACK)" --board "$(BOARD_CONFIG)" --output "$(BOARD_OUTPUT)/io.itb"
 	$(MAKE) -o app native-initramfs \
 		NATIVE_INITRAMFS="$(BOARD_OUTPUT)/bootstrap.cpio" \
+		NATIVE_GUEST_PREREQUISITES= NATIVE_GUEST_ENTRY= \
 		NATIVE_SERVICE_MANIFEST="$(BOARD_OUTPUT)/board/services.json" \
 		NATIVE_VM_CONFIG="$(CURDIR)/app/init/config/vms-io.json" \
 		NATIVE_EXTRA_ENTRIES='0755 svc/io-runtime "$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release/hyper-io-runtime" 0644 vm/io.itb "$(BOARD_OUTPUT)/io.itb" 0644 etc/hyper/board.json "$(BOARD_OUTPUT)/board/board.json" 0644 etc/hyper/io-clients.conf "$(BOARD_OUTPUT)/board/io-clients.conf" $(BOARD_EXTRA_ENTRIES)'
 
 # Always create a new image. Refusing existing outputs is intentional: a normal
 # rebuild must never format a disk carrying changes made by HypeR or its guests.
-board-image: image board-initramfs
+board-image: image board-initramfs guest-itb
 	python3 -B scripts/pack-board-image.py --board "$(BOARD_CONFIG)" --output "$(BOARD_IMAGE)" \
 		--default-artifact "hyper=$(KERNEL_IMAGE)" --default-artifact "bootstrap=$(BOARD_OUTPUT)/bootstrap.cpio" \
 		--default-artifact "io-vm=$(BOARD_OUTPUT)/io.itb" --default-artifact "alpine=$(NATIVE_GUEST_ITB)" $(BOARD_ARTIFACTS)

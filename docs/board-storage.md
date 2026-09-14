@@ -73,6 +73,16 @@ make board-run BOARD=qemu
 
 The default imports the digest-pinned appliance. `IO_VM_PACKAGE` optionally
 selects a complete verified local generation.
+When importing an uncached package, the fetcher uses ORAS from `PATH` or
+automatically downloads ORAS 1.3.0 into `target/tools` for macOS/Linux on
+ARM64/x86-64. Downloads require `curl` and are checked against pinned SHA-256
+digests before installation. Set `IO_VM_ORAS` to use a specific executable.
+Verified cached packages need neither ORAS nor network access.
+
+The board bootstrap contains only the I/O VM's ITB. Ordinary guest images such
+as Alpine are stored in the configuration partition and loaded through `/data`;
+they are not duplicated in the bootstrap ramfs. Standalone Native test archives
+still carry their guest fixtures.
 
 `BOARD_CONFIG` selects a custom JSON file, `BOARD_OUTPUT` selects staging, and
 `BOARD_IMAGE` selects the resulting raw image. `board-image` always refuses to

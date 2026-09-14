@@ -40,11 +40,17 @@ fn application_main(mut startup: Startup<'_>) -> ExitCode {
     }
     let mut manager = match FleetManager::from_startup(&mut startup) {
         Ok(manager) => manager,
-        Err(_) => return ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("vm-manager: startup failed: {error}");
+            return ExitCode::FAILURE;
+        }
     };
     match manager.run() {
         Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("vm-manager: supervisor failed: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -159,7 +165,9 @@ impl FleetManager {
     }
 
     fn accept_client(&mut self) -> hyper_os::Result<()> {
-        let connection = self.connections.accept()?;
+        let Some(connection) = self.connections.accept()? else {
+            return Ok(());
+        };
         if let Some(index) = self.clients.iter().position(Option::is_none) {
             self.clients[index] =
                 Some(Client::command(connection.control, connection.capabilities));
