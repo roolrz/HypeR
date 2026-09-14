@@ -18,7 +18,7 @@ pub const STARTUP_CONTRACTS: &[StartupContract] = &[
     ),
 ];
 
-/// Explicit one-shot notification that HypeR's configured data volume is mounted.
+/// Explicit one-shot notification that the configured data volume is mounted.
 pub const READY_NAME: &str = "io.ready";
 pub const READY: startup::StartupPurpose<hyper_os::handle::ByteChannelObject> =
     startup::StartupPurpose::new(0x8006_0001);
