@@ -95,6 +95,8 @@ object_types!(
         HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION
     ),
     (GuestMemoryObject, HYPER_NATIVE_OBJECT_GUEST_MEMORY),
+    (GuestMappingObject, HYPER_NATIVE_OBJECT_GUEST_MAPPING),
+    (NativeBlockObject, HYPER_NATIVE_OBJECT_NATIVE_BLOCK),
     (VirtualSerialObject, HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL),
 );
 
@@ -159,6 +161,8 @@ impl ObjectKind {
             hyper_abi::HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE => "physical-device",
             hyper_abi::HYPER_NATIVE_OBJECT_GUEST_MAILBOX => "guest-mailbox",
             hyper_abi::HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION => "guest-notification",
+            hyper_abi::HYPER_NATIVE_OBJECT_GUEST_MAPPING => "guest-mapping",
+            hyper_abi::HYPER_NATIVE_OBJECT_NATIVE_BLOCK => "native-block",
             hyper_abi::HYPER_NATIVE_OBJECT_GUEST_MEMORY => "guest-memory",
             hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_CPU => "virtual-cpu",
             hyper_abi::HYPER_NATIVE_OBJECT_VIRTUAL_SERIAL => "virtual-serial",

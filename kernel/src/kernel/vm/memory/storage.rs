@@ -11,6 +11,7 @@ use hyper::mm::{PAGE_SIZE, PhysicalAddress};
 
 use super::Error;
 use super::backing::Layout as SharedGuestMemory;
+#[cfg(feature = "kernel-self-test")]
 use crate::hal::vm::Stage2AddressSpace;
 use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceDomain, ResourceKind};
 use crate::kernel::mm::page_block::PageBlock;
@@ -106,6 +107,7 @@ pub(super) struct AdmittedAddressSpaceMetadata {
     pub(super) charge: CommittedCharge,
 }
 pub(super) struct Stage2PagePool {
+    initial_capacity: usize,
     pub(super) pages: Vec<PageBlock>,
     domain: ResourceDomain,
     charge: Option<CommittedCharge>,
@@ -116,11 +118,42 @@ impl Stage2PagePool {
     pub(super) fn with_capacity(capacity: usize, domain: &ResourceDomain) -> Result<Self, Error> {
         let pages = try_exact_capacity_vec(capacity)?;
         Ok(Self {
+            initial_capacity: capacity,
             pages,
             domain: domain.clone(),
             charge: None,
             error: None,
         })
+    }
+
+    pub(super) fn live_capacity_ready(&self, live_capacity: usize) -> Result<bool, Error> {
+        Ok(self.live_capacity_target(live_capacity)? <= self.pages.capacity())
+    }
+    fn live_capacity_target(&self, live_capacity: usize) -> Result<usize, Error> {
+        self.pages
+            .len()
+            .checked_add(self.initial_capacity)
+            .and_then(|value| value.checked_add(live_capacity))
+            .ok_or(Error::MetadataAllocation)
+    }
+
+    pub(super) fn reserve_live(&mut self, live_capacity: usize) -> Result<(), Error> {
+        let target = self.live_capacity_target(live_capacity)?;
+        let additional_capacity = target.saturating_sub(self.pages.capacity());
+        if additional_capacity == 0 {
+            return Ok(());
+        }
+        let bytes = additional_capacity
+            .checked_mul(core::mem::size_of::<PageBlock>())
+            .ok_or(Error::MetadataAllocation)?;
+        let reservation = self
+            .domain
+            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, bytes as u64))?;
+        self.pages
+            .try_reserve_exact(target - self.pages.len())
+            .map_err(|_| Error::MetadataAllocation)?;
+        accumulate_charge(&mut self.charge, reservation.commit());
+        Ok(())
     }
 
     pub(super) fn allocate_zeroed(
@@ -185,6 +218,7 @@ pub(super) fn accumulate_charge(owner: &mut Option<CommittedCharge>, charge: Com
     }
 }
 
+#[cfg(feature = "kernel-self-test")]
 pub(super) fn address_space_metadata_layout(
     ipa_base: u64,
     size: u64,
@@ -192,6 +226,14 @@ pub(super) fn address_space_metadata_layout(
     backing_owner_bytes: usize,
 ) -> Result<AddressSpaceMetadataLayout, Error> {
     let table_capacity = Stage2AddressSpace::required_table_pages(ipa_base, size)?;
+    metadata_for_capacity(page_count, table_capacity, backing_owner_bytes)
+}
+
+pub(super) fn metadata_for_capacity(
+    page_count: usize,
+    table_capacity: usize,
+    backing_owner_bytes: usize,
+) -> Result<AddressSpaceMetadataLayout, Error> {
     let bitmap_bytes = bitmap_storage_bytes(page_count)
         .and_then(|bytes| bytes.checked_mul(2))
         .ok_or(Error::MetadataAllocation)?;

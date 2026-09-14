@@ -11,6 +11,7 @@ use crate::kernel::object::{KernelObject, ObjectKind, TransferClass, private};
 
 pub(crate) struct GuestMemoryObject {
     backing: GuestMemoryBacking,
+    native_initiator: core::sync::atomic::AtomicBool,
     _charge: CommittedCharge,
 }
 
@@ -19,8 +20,19 @@ impl GuestMemoryObject {
         let charge = reserve_object_charge::<Self>(domain)?;
         Ok(Self {
             backing: GuestMemoryBacking::try_from_vmo(vmo)?,
+            native_initiator: core::sync::atomic::AtomicBool::new(false),
             _charge: charge,
         })
+    }
+    pub(crate) fn claim_native_initiator(&self) -> bool {
+        self.native_initiator
+            .compare_exchange(
+                false,
+                true,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
     }
     pub(crate) fn backing(&self) -> GuestMemoryBacking {
         self.backing.clone()

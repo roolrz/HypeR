@@ -136,6 +136,71 @@ impl ProcessStartTransaction for ProcessStartCoordinator {
     }
 }
 
+// Stack encoding and user-page preparation finish before thread/handle
+// admission. Borrow the linear build so these temporary buffers do not remain
+// live on the stack during those later blocking phases.
+#[inline(never)]
+fn write_startup_stack(
+    build: &SealedProcessBuild,
+    batches: &[ProcessHandleBatchReservation],
+    startup_count: usize,
+) -> Result<(), ChildProcessStartError> {
+    let arguments = build.arguments().map_err(ChildProcessStartError::Builder)?;
+    let environment = build
+        .environment()
+        .map_err(ChildProcessStartError::Builder)?;
+    let mut startup_records = alloc::vec::Vec::new();
+    startup_records
+        .try_reserve_exact(startup_count)
+        .map_err(|_| ChildProcessStartError::Process(ProcessError::Allocation))?;
+    let mut values = batches
+        .iter()
+        .flat_map(ProcessHandleBatchReservation::values);
+    for capability in build.startup_capabilities() {
+        let value = match values.next() {
+            Some(value) => *value,
+            None => process_invariant_violation(),
+        };
+        startup_records.push(StartupHandle {
+            purpose: capability.purpose(),
+            handle: value.get(),
+        });
+    }
+    let root_vmar_value = match values.next() {
+        Some(value) => *value,
+        None => process_invariant_violation(),
+    };
+    startup_records.push(StartupHandle {
+        purpose: hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR as u32,
+        handle: root_vmar_value.get(),
+    });
+    if values.next().is_some() {
+        process_invariant_violation();
+    }
+    let stack = build
+        .stack_layout()
+        .encode(
+            build.child().process().image().auxiliary(),
+            &arguments,
+            &environment,
+            &startup_records,
+        )
+        .map_err(ChildProcessStartError::Stack)?;
+    let length = u64::try_from(stack.bytes().len())
+        .map_err(|_| ChildProcessStartError::Stack(hyper::exec::startup::Error::TooLarge))?;
+    let range = UserSlice::new(UserAddress::new(stack.base()), length)
+        .map_err(|_| ChildProcessStartError::Stack(hyper::exec::startup::Error::AddressOverflow))?;
+    let write = build
+        .child()
+        .reserve_initial_stack_write(range)
+        .map_err(ChildProcessStartError::Process)?;
+    write
+        .copy_from(stack.bytes())
+        .map_err(|error| ChildProcessStartError::Process(ProcessError::UserMemory(error)))?;
+    write.complete();
+    Ok(())
+}
+
 impl PreparedChildProcessStart {
     // Keep fallible preparation out of the publication coordinator's frame.
     // This boundary is part of the native syscall stack budget: preparation
@@ -214,100 +279,10 @@ impl PreparedChildProcessStart {
                 build,
             ));
         }
-        let arguments = match build.arguments() {
-            Ok(arguments) => arguments,
-            Err(error) => {
-                abort_child_handle_batches(&child, &mut child_handle_batches);
-                return Err(start_failure(ChildProcessStartError::Builder(error), build));
-            }
-        };
-        let environment = match build.environment() {
-            Ok(environment) => environment,
-            Err(error) => {
-                abort_child_handle_batches(&child, &mut child_handle_batches);
-                return Err(start_failure(ChildProcessStartError::Builder(error), build));
-            }
-        };
-        let mut startup_records = alloc::vec::Vec::new();
-        if startup_records.try_reserve_exact(startup_count).is_err() {
+        if let Err(error) = write_startup_stack(&build, &child_handle_batches, startup_count) {
             abort_child_handle_batches(&child, &mut child_handle_batches);
-            return Err(start_failure(
-                ChildProcessStartError::Process(ProcessError::Allocation),
-                build,
-            ));
+            return Err(start_failure(error, build));
         }
-        let mut values = child_handle_batches
-            .iter()
-            .flat_map(ProcessHandleBatchReservation::values);
-        for capability in build.startup_capabilities() {
-            let value = match values.next() {
-                Some(value) => *value,
-                None => process_invariant_violation(),
-            };
-            startup_records.push(StartupHandle {
-                purpose: capability.purpose(),
-                handle: value.get(),
-            });
-        }
-        let root_vmar_value = match values.next() {
-            Some(value) => *value,
-            None => process_invariant_violation(),
-        };
-        startup_records.push(StartupHandle {
-            purpose: hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR as u32,
-            handle: root_vmar_value.get(),
-        });
-        if values.next().is_some() {
-            process_invariant_violation();
-        }
-        let stack = match build.stack_layout().encode(
-            child.image().auxiliary(),
-            &arguments,
-            &environment,
-            &startup_records,
-        ) {
-            Ok(stack) => stack,
-            Err(error) => {
-                abort_child_handle_batches(&child, &mut child_handle_batches);
-                return Err(start_failure(ChildProcessStartError::Stack(error), build));
-            }
-        };
-        let stack_length = match u64::try_from(stack.bytes().len()) {
-            Ok(length) => length,
-            Err(_) => {
-                abort_child_handle_batches(&child, &mut child_handle_batches);
-                return Err(start_failure(
-                    ChildProcessStartError::Stack(hyper::exec::startup::Error::TooLarge),
-                    build,
-                ));
-            }
-        };
-        let stack_range = match UserSlice::new(UserAddress::new(stack.base()), stack_length) {
-            Ok(range) => range,
-            Err(_) => {
-                abort_child_handle_batches(&child, &mut child_handle_batches);
-                return Err(start_failure(
-                    ChildProcessStartError::Stack(hyper::exec::startup::Error::AddressOverflow),
-                    build,
-                ));
-            }
-        };
-        let stack_write = match build.child().reserve_initial_stack_write(stack_range) {
-            Ok(write) => write,
-            Err(error) => {
-                abort_child_handle_batches(&child, &mut child_handle_batches);
-                return Err(start_failure(ChildProcessStartError::Process(error), build));
-            }
-        };
-        if let Err(error) = stack_write.copy_from(stack.bytes()) {
-            drop(stack_write);
-            abort_child_handle_batches(&child, &mut child_handle_batches);
-            return Err(start_failure(
-                ChildProcessStartError::Process(ProcessError::UserMemory(error)),
-                build,
-            ));
-        }
-        stack_write.complete();
 
         let initial_thread = match build
             .child()

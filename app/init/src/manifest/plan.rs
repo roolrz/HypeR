@@ -659,7 +659,9 @@ fn reject_reused_move_source(
             };
             if earlier.source == current.source
                 && (earlier.operation == CapabilityOperation::Move
-                    || current.operation == CapabilityOperation::Move)
+                    || (current.operation == CapabilityOperation::Move
+                        && !(earlier_service_index == service_index
+                            && earlier.operation == CapabilityOperation::Duplicate)))
             {
                 return Err(error(
                     ValidationErrorKind::MoveSourceReused,

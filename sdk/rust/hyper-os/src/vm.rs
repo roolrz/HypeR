@@ -828,3 +828,70 @@ pub fn map_guest_memory(
     })
     .into_result()
 }
+
+/// Fixed affine DMA alias window. Actual admitted pages remain constrained by
+/// the stable grant and the physical device's immutable DMA translation map.
+pub const IO_MAX_CLIENTS: usize = hyper_abi::HYPER_NATIVE_IO_MAX_CLIENTS as usize;
+pub const DYNAMIC_ALIAS_OFFSET: u64 = hyper_abi::HYPER_NATIVE_GUEST_DYNAMIC_ALIAS_OFFSET;
+pub const DYNAMIC_PHYSICAL_LIMIT: u64 = hyper_abi::HYPER_NATIVE_GUEST_DYNAMIC_PHYSICAL_LIMIT;
+
+pub struct GuestMapping {
+    handle: OwnedHandle<crate::handle::GuestMappingObject>,
+    token: u64,
+}
+impl GuestMapping {
+    pub fn token(&self) -> u64 {
+        self.token
+    }
+    /// Release requires a backend-origin quiescence proof after vhost drain.
+    /// A failed release retains ownership; dropping alone quarantines the grant.
+    /// `Status::WOULD_BLOCK` means the shared all-CPU synchronization transport
+    /// is occupied: retry this same call without resetting or releasing Linux
+    /// state again. `Status::BUSY` means the backend has not supplied its
+    /// quiescence proof; complete backend drain/release before retrying.
+    pub fn release(&self) -> Result<()> {
+        // SAFETY: the mapping capability is borrowed through completion.
+        let result =
+            unsafe { hyper_sys::guest_mapping_release(self.handle.as_handle_ref().raw().get()) };
+        Status::from_raw(result.status).into_result()?;
+        if result.value0 != 0 || result.value1 != 0 {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(())
+    }
+}
+
+/// Populate and retain the entire stable grant as sparse affine DMA aliases in
+/// an installed or running backend. No physical contiguity is required.
+/// Admission is serialized with backend stop; a stopping backend rejects it.
+/// `WOULD_BLOCK` means concurrent metadata growth exhausted the bounded
+/// preparation retries; no mapping was published, so retrying create is safe.
+pub fn map_shared_guest_memory(
+    backend: HandleRef<'_, VirtualMachineObject>,
+    memory: HandleRef<'_, crate::handle::GuestMemoryObject>,
+    frontend_base: u64,
+) -> Result<GuestMapping> {
+    // SAFETY: input capabilities remain borrowed; the kernel retains its own
+    // independent hardware mapping lease.
+    let result = unsafe {
+        hyper_sys::guest_mapping_create(backend.raw().get(), memory.raw().get(), frontend_base)
+    };
+    Status::from_raw(result.status).into_result()?;
+    // SAFETY: successful create returns an independently owned mapping handle.
+    let owner = unsafe {
+        crate::handle::adopt_produced_handle_excluding::<AnyObject>(
+            result.value0,
+            &[backend.raw(), memory.raw()],
+        )?
+    };
+    let rights = Rights::WRITE.union(Rights::TRANSFER).union(Rights::INSPECT);
+    if result.value1 == 0 || owner.info()?.rights != rights {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(GuestMapping {
+        handle: owner
+            .downcast::<crate::handle::GuestMappingObject>()
+            .map_err(|failure| failure.error())?,
+        token: result.value1,
+    })
+}

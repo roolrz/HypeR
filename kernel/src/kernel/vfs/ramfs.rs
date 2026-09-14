@@ -15,7 +15,7 @@ use hyper::mm::{FallibleArc, WeakFallibleArc};
 use hyper::sync::SpinLock;
 use hyper::time::Timestamp;
 
-use super::instance::{Creation, EntryName, Error};
+use super::instance::{Creation, EntryName, EntrySnapshot, Error, NodeMetadata};
 use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
 use super::{ExecutableSnapshot, MetadataUpdate};
 use crate::kernel::accounting::{
@@ -54,17 +54,9 @@ struct Topology {
     parent: Option<WeakFallibleArc<Node>>,
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct NodeMetadata {
-    pub(super) mode: u32,
-    pub(super) accessed: Option<Timestamp>,
-    pub(super) modified: Option<Timestamp>,
-    pub(super) created: Option<Timestamp>,
-    pub(super) changed: Option<Timestamp>,
-}
-
 pub(super) struct Node {
     id: u64,
+    mount_pins: AtomicU64,
     kind: NodeKind,
     topology: SpinLock<Topology>,
     metadata: SpinLock<NodeMetadata>,
@@ -99,12 +91,6 @@ struct Entry {
     length: usize,
     cookie: u64,
     node: FallibleArc<Node>,
-}
-pub(super) struct EntrySnapshot {
-    pub(super) name: [u8; MAX_NAME_BYTES],
-    pub(super) length: usize,
-    pub(super) attributes: NodeAttributes,
-    pub(super) next_cookie: u64,
 }
 
 /// Odd epochs describe an in-progress namespace edit. The sleeping mutation
@@ -167,6 +153,15 @@ impl Children {
         self.entries
             .iter()
             .position(|entry| &entry.name[..entry.length] == name.as_bytes())
+    }
+}
+
+pub(super) struct MountPin(FallibleArc<Node>);
+impl Drop for MountPin {
+    fn drop(&mut self) {
+        if self.0.mount_pins.fetch_sub(1, Ordering::AcqRel) == 0 {
+            crate::kernel::crash::fatal(format_args!("VFS mount pin underflow"));
+        }
     }
 }
 
@@ -289,6 +284,7 @@ impl Ramfs {
                     .map(|entry| entry.node.clone()),
             );
             let node = FallibleArc::try_new(Node {
+                mount_pins: AtomicU64::new(0),
                 id: source.id().get(),
                 kind: source.kind(),
                 topology: SpinLock::new(Topology {
@@ -336,6 +332,20 @@ impl Ramfs {
             epoch: AtomicU64::new(0),
         })
     }
+    pub(super) fn pin_mount(&self, node: &FallibleArc<Node>) -> Result<MountPin, Error> {
+        let _mutation = self.mutation.lock().map_err(Error::Lock)?;
+        node.require(NodeKind::Directory)?;
+        if !node.linked() {
+            return Err(Error::Missing);
+        }
+        node.mount_pins
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .map_err(|_| Error::IdentifierExhausted)?;
+        Ok(MountPin(node.clone()))
+    }
+
     pub(super) fn root(&self) -> FallibleArc<Node> {
         self.root.clone()
     }
@@ -570,6 +580,7 @@ impl Ramfs {
                 .map_err(map_data_error)?;
         }
         let node = FallibleArc::try_new(Node {
+            mount_pins: AtomicU64::new(0),
             id,
             kind,
             topology: SpinLock::new(Topology {
@@ -644,6 +655,9 @@ impl Ramfs {
         let mut children = directory.children.lock().map_err(Error::Lock)?;
         let index = children.index(name.name).ok_or(Error::Missing)?;
         let node = &children.entries[index].node;
+        if node.mount_pins.load(Ordering::Acquire) != 0 {
+            return Err(Error::Busy);
+        }
         if name.directory_required {
             node.require(NodeKind::Directory)?;
         }
@@ -727,6 +741,13 @@ impl Ramfs {
         }
         let node = self.lookup(source, name.name)?.ok_or(Error::Missing)?;
         let replaced = self.lookup(destination, new_name.name)?;
+        if node.mount_pins.load(Ordering::Acquire) != 0
+            || replaced
+                .as_ref()
+                .is_some_and(|other| other.mount_pins.load(Ordering::Acquire) != 0)
+        {
+            return Err(Error::Busy);
+        }
         if name.directory_required || new_name.directory_required {
             node.require(NodeKind::Directory)?;
         }

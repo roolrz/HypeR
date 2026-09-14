@@ -44,6 +44,7 @@ struct PlatformBusState {
     _devices: Vec<PlatformDevice>,
     _manager: PermanentDriverManager,
     assignable: Vec<super::assigned::Resource>,
+    catalogue: hyper::mm::FallibleArc<super::firmware::Catalogue>,
 }
 
 enum PlatformBusLifecycle {
@@ -89,6 +90,14 @@ pub(super) fn initialize(
         Err(fdt::WalkError::Visitor(error)) => return Err(Error::Scan(error)),
     }
     let mut devices = scanner.finish().map_err(Error::Scan)?;
+    let mut dependency_scanner = DeviceScanner::for_dependency_graph(boot.essential().claims());
+    // SAFETY: Same permanently reserved firmware blob as the primary scan.
+    match unsafe { fdt::discover_with(boot.linear_dtb(), &mut dependency_scanner) } {
+        Ok(_) => {}
+        Err(fdt::WalkError::Fdt(error)) => return Err(Error::Fdt(error)),
+        Err(fdt::WalkError::Visitor(error)) => return Err(Error::Scan(error)),
+    }
+    let dependencies = dependency_scanner.finish().map_err(Error::Scan)?;
     // Complete every fallible framework allocation before activating the
     // runtime console. From that publication onward initialization has no
     // recoverable error path which could discard its IRQ ownership.
@@ -100,7 +109,9 @@ pub(super) fn initialize(
     }
     let mut assignable = Vec::new();
     assignable
-        .try_reserve_exact(devices.len())
+        .try_reserve_exact(devices.len().saturating_add(dependencies.len()))
+        .map_err(|_| Error::DriverRegistration(ProbeError::Resource))?;
+    let catalogue = super::firmware::Catalogue::new(dependencies, |node| node.kernel_claimed())
         .map_err(|_| Error::DriverRegistration(ProbeError::Resource))?;
     let console = super::serial::initialize(boot, &devices);
     let reserved_console_base = boot.early_console().map(|console| console.base);
@@ -124,10 +135,28 @@ pub(super) fn initialize(
             assignable.push(resource);
         }
     }
+    catalogue.reserve(|node| {
+        node.kernel_claimed()
+            || manager.binding_driver(node.id()).is_some()
+            || reserved_console_base
+                .is_some_and(|base| node.registers().iter().any(|range| range.start() == base))
+    });
+    for (index, node) in catalogue.nodes.iter().enumerate() {
+        if !catalogue.reserved(index)
+            && let Some(resource) = super::assigned::Resource::discover_userspace(
+                node,
+                &services,
+                boot.interrupts().root_domain,
+            )
+        {
+            assignable.push(resource);
+        }
+    }
     reservation.commit(PlatformBusState {
         _devices: devices,
         _manager: manager.retain_permanently(),
         assignable,
+        catalogue,
     });
     Ok(InitializationReport { drivers, console })
 }
@@ -135,9 +164,67 @@ pub(super) fn initialize(
 pub(super) fn claim(index: usize) -> Option<super::assigned::Claim> {
     PLATFORM_BUS.with(|state| match state {
         PlatformBusLifecycle::Ready { _state: state } => {
+            let resource = state.assignable.get(index)?;
+            if resource.profile() != 1 {
+                return None;
+            }
+            if state
+                .assignable
+                .iter()
+                .enumerate()
+                .any(|(other_index, other)| {
+                    other_index != index && other.claimed() && other.conflicts(resource)
+                })
+            {
+                return None;
+            }
             state.assignable.get_mut(index)?.claim(index)
         }
         _ => None,
+    })
+}
+
+pub(super) fn claim_matching(
+    profile: u32,
+    identity_kind: u32,
+    identity: &str,
+) -> Result<super::assigned::Claim, super::assigned::service::MatchError> {
+    use super::assigned::service::MatchError;
+    PLATFORM_BUS.with(|state| {
+        let PlatformBusLifecycle::Ready { _state: state } = state else {
+            return Err(MatchError::Service(
+                crate::kernel::vm::service::Error::BadState,
+            ));
+        };
+        let index = super::assigned::select_unique(state.assignable.iter().map(|resource| {
+            resource.profile() == profile
+                && state
+                    ._devices
+                    .iter()
+                    .find(|device| device.id() == resource.firmware())
+                    .is_some_and(|device| match u64::from(identity_kind) {
+                        hyper::abi::native::HYPER_NATIVE_DEVICE_IDENTITY_COMPATIBLE => {
+                            device.is_compatible(identity)
+                        }
+                        hyper::abi::native::HYPER_NATIVE_DEVICE_IDENTITY_FDT_PATH => {
+                            device.path() == identity
+                        }
+                        _ => false,
+                    })
+        }))?;
+        if state
+            .assignable
+            .iter()
+            .enumerate()
+            .any(|(other_index, other)| {
+                other_index != index && other.claimed() && other.conflicts(&state.assignable[index])
+            })
+        {
+            return Err(MatchError::Service(crate::kernel::vm::service::Error::Busy));
+        }
+        state.assignable[index]
+            .claim(index)
+            .ok_or(MatchError::Service(crate::kernel::vm::service::Error::Busy))
     })
 }
 
@@ -200,4 +287,52 @@ impl Drop for InitializationReservation {
             crate::hal::cpu::halt()
         }
     }
+}
+
+/// The catalogue is immutable after boot. Clone its owner under the registry
+/// lock, then query/copy/allocate outside that lock.
+pub(super) fn catalogue()
+-> Result<hyper::mm::FallibleArc<super::firmware::Catalogue>, super::assigned::Error> {
+    PLATFORM_BUS.with(|state| match state {
+        PlatformBusLifecycle::Ready { _state: state } => Ok(state.catalogue.clone()),
+        _ => Err(super::assigned::Error::BadState),
+    })
+}
+
+pub(super) fn claim_bundle(
+    entries: &[(u32, u32, u64)],
+    irq_node: u32,
+) -> Result<super::assigned::Claim, super::assigned::Error> {
+    use super::assigned::Error;
+    if entries.is_empty() || entries.len() > 8 {
+        return Err(Error::InvalidArgument);
+    }
+    PLATFORM_BUS.with(|state| {
+        let PlatformBusLifecycle::Ready { _state: state } = state else {
+            return Err(Error::BadState);
+        };
+        let lookup = |node: u32| -> Result<usize, Error> {
+            let id = state
+                .catalogue
+                .nodes
+                .get(node as usize)
+                .ok_or(Error::InvalidArgument)?
+                .id();
+            state
+                .assignable
+                .iter()
+                .position(|resource| resource.profile() == 2 && resource.firmware() == id)
+                .ok_or(Error::Unsupported)
+        };
+        let irq = lookup(irq_node)?;
+        let mut selected = [(0usize, 0u32, 0u64); 8];
+        for (slot, &(node, register, offset)) in selected.iter_mut().zip(entries) {
+            *slot = (lookup(node)?, register, offset);
+        }
+        super::assigned::Resource::claim_bundle(
+            &mut state.assignable,
+            &selected[..entries.len()],
+            irq,
+        )
+    })
 }

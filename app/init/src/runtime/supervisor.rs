@@ -28,6 +28,72 @@ enum SupervisedItem {
 }
 
 impl SupervisorSet {
+    pub(super) fn wait_for_storage(
+        &mut self,
+        manifest: &Manifest<'_>,
+        ready_service: usize,
+        reader: &OwnedHandle<ByteChannelObject>,
+        console: &OwnedHandle<ConsoleObject>,
+    ) -> Result<(), LaunchError> {
+        let deadline = hyper_os::time::deadline_after(std::time::Duration::from_secs(
+            hyper_service::io::READY_TIMEOUT_SECONDS,
+        ))
+        .map_err(|_| LaunchError::OperatingSystem)?
+        .as_raw();
+        loop {
+            let (selected, observed) = {
+                let mut items = Vec::with_capacity(MAX_SERVICES + 1);
+                let mut services = Vec::with_capacity(MAX_SERVICES);
+                for (index, process) in self.processes.iter().enumerate() {
+                    if let Some(process) = process {
+                        items.push(WaitItem::new(
+                            process.as_handle_ref(),
+                            ObjectSignals::<ProcessObject>::TERMINATED,
+                        ));
+                        services.push(index);
+                    }
+                }
+                // Process events precede readiness, so an already observed
+                // critical failure cannot be hidden by a queued READY record.
+                items.push(WaitItem::new(
+                    reader.as_handle_ref(),
+                    ObjectSignals::<ByteChannelObject>::READABLE
+                        .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
+                ));
+                let observation =
+                    wait_many(&items, deadline).map_err(|_| LaunchError::StorageNotReady)?;
+                (
+                    services.get(observation.index).copied(),
+                    observation.observed,
+                )
+            };
+            if let Some(index) = selected {
+                let service = manifest.service(index).ok_or(LaunchError::InvalidPlan)?;
+                let process = self
+                    .processes
+                    .get_mut(index)
+                    .and_then(Option::take)
+                    .ok_or(LaunchError::InvalidPlan)?;
+                report_service_termination(console, service.name(), service.critical(), &process);
+                if service.critical() || index == ready_service {
+                    return Err(LaunchError::CriticalServiceTerminated);
+                }
+                continue;
+            }
+            if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed) {
+                return Err(LaunchError::StorageNotReady);
+            }
+            let mut message = [0; hyper_service::io::READY_MESSAGE.len()];
+            match reader.as_byte_channel().try_receive(&mut message) {
+                Ok(length) if message.get(..length) == Some(hyper_service::io::READY_MESSAGE) => {
+                    return Ok(());
+                }
+                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
+                _ => return Err(LaunchError::StorageNotReady),
+            }
+        }
+    }
+
     pub(super) fn supervise(
         &mut self,
         manifest: &Manifest<'_>,

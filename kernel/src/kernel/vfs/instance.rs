@@ -7,10 +7,11 @@ use core::num::NonZeroU64;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use hyper::fs::ramfs::{Error as RamFsError, RamFs};
-use hyper::fs::{Name, NodeAttributes};
+use hyper::fs::{MAX_NAME_BYTES, Name, NodeAttributes};
 use hyper::mm::{AllocationError, FallibleArc};
+use hyper::time::Timestamp;
 
-use crate::kernel::accounting::ResourceDomain;
+use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceDomain, ResourceKind};
 
 use super::ExecutableSnapshot;
 use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
@@ -55,6 +56,8 @@ pub(crate) enum Error {
     InvalidSize,
     InvalidInput,
     Busy,
+    Unsupported,
+    Fat(hyper::fs::fat::Error),
 }
 
 impl From<AllocationError> for Error {
@@ -89,6 +92,7 @@ pub(super) struct Creation<'a> {
 /// added without changing namespace or capability objects.
 enum Backend {
     RamFs(super::ramfs::Ramfs),
+    Fat(FallibleArc<super::fat::Fatfs<crate::kernel::block::MountedDevice>>),
 }
 
 /// Whether immutable reads benefit from copying backend data into page cache.
@@ -99,38 +103,116 @@ enum Backend {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReadCachePolicy {
     Direct,
-    #[allow(dead_code, reason = "no block-backed filesystem adapter exists yet")]
+    #[allow(
+        dead_code,
+        reason = "mutable file cache requires generation-coherent invalidation before admission"
+    )]
     PageCache,
 }
 
 pub(crate) struct FilesystemInstance {
+    _charge: Option<CommittedCharge>,
     id: FilesystemId,
     backend: Backend,
 }
 
 /// A backend-owned lease, independent of any directory entry lifetime.
 #[derive(Clone)]
-pub(crate) struct NodeLease(FallibleArc<super::ramfs::Node>);
+pub(crate) struct NodeLease(NodeBackend);
 
+#[derive(Clone)]
+enum NodeBackend {
+    RamFs(FallibleArc<super::ramfs::Node>),
+    Fat(FallibleArc<super::fat::Node>),
+}
 impl NodeLease {
-    pub(crate) fn get(&self) -> u64 {
-        self.0.id()
+    fn from_ramfs(node: FallibleArc<super::ramfs::Node>) -> Self {
+        Self(NodeBackend::RamFs(node))
     }
-
+    fn from_fat(node: FallibleArc<super::fat::Node>) -> Self {
+        Self(NodeBackend::Fat(node))
+    }
+    pub(crate) fn get(&self) -> u64 {
+        match &self.0 {
+            NodeBackend::RamFs(node) => node.id(),
+            NodeBackend::Fat(node) => node.id(),
+        }
+    }
     pub(super) fn locks(&self) -> &super::locks::FileLocks {
-        &self.0.locks
+        match &self.0 {
+            NodeBackend::RamFs(node) => &node.locks,
+            NodeBackend::Fat(node) => &node.locks,
+        }
+    }
+    fn ramfs(&self) -> Result<&FallibleArc<super::ramfs::Node>, Error> {
+        match &self.0 {
+            NodeBackend::RamFs(node) => Ok(node),
+            _ => Err(Error::InvalidBackendResult),
+        }
+    }
+    fn fat(&self) -> Result<&FallibleArc<super::fat::Node>, Error> {
+        match &self.0 {
+            NodeBackend::Fat(node) => Ok(node),
+            _ => Err(Error::InvalidBackendResult),
+        }
     }
 }
 
-pub(super) type DirectoryEntry = super::ramfs::EntrySnapshot;
+pub(super) enum MountPin {
+    RamFs { _pin: super::ramfs::MountPin },
+    Fat { _pin: super::fat::MountPin },
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct NodeMetadata {
+    pub(super) mode: u32,
+    pub(super) accessed: Option<Timestamp>,
+    pub(super) modified: Option<Timestamp>,
+    pub(super) created: Option<Timestamp>,
+    pub(super) changed: Option<Timestamp>,
+}
+
+pub(super) struct EntrySnapshot {
+    pub(super) name: [u8; MAX_NAME_BYTES],
+    pub(super) length: usize,
+    pub(super) attributes: NodeAttributes,
+    pub(super) next_cookie: u64,
+}
+
+pub(super) type DirectoryEntry = EntrySnapshot;
 
 impl FilesystemInstance {
     pub(crate) fn try_from_ramfs(ramfs: RamFs<'static>) -> Result<FallibleArc<Self>, Error> {
         FallibleArc::try_new(Self {
+            _charge: None,
             id: FilesystemId(allocate_identifier(&NEXT_FILESYSTEM_ID)?),
             backend: Backend::RamFs(super::ramfs::Ramfs::from_archive(ramfs)?),
         })
         .map_err(Error::from)
+    }
+
+    pub(super) fn try_from_block(
+        device: crate::kernel::block::MountedDevice,
+        sponsor: &ResourceDomain,
+    ) -> Result<FallibleArc<Self>, Error> {
+        let charge = allocation_charge::<Self>(sponsor)?;
+        let filesystem = super::fat::Fatfs::mount(device, sponsor.clone())?;
+        FallibleArc::try_new(Self {
+            _charge: Some(charge),
+            id: FilesystemId(allocate_identifier(&NEXT_FILESYSTEM_ID)?),
+            backend: Backend::Fat(FallibleArc::try_new(filesystem)?),
+        })
+        .map_err(Error::from)
+    }
+    pub(super) fn pin_mount(&self, node: &NodeLease) -> Result<MountPin, Error> {
+        match &self.backend {
+            Backend::RamFs(fs) => fs
+                .pin_mount(node.ramfs()?)
+                .map(|pin| MountPin::RamFs { _pin: pin }),
+            Backend::Fat(fs) => fs
+                .pin_mount(node.fat()?)
+                .map(|pin| MountPin::Fat { _pin: pin }),
+        }
     }
 
     pub(crate) const fn id(&self) -> FilesystemId {
@@ -146,18 +228,22 @@ impl FilesystemInstance {
 
     pub(super) const fn read_cache_policy(&self) -> ReadCachePolicy {
         match &self.backend {
-            Backend::RamFs(_) => ReadCachePolicy::Direct,
+            Backend::RamFs(_) | Backend::Fat(_) => ReadCachePolicy::Direct,
         }
     }
 
     pub(crate) fn root(&self) -> NodeLease {
         match &self.backend {
-            Backend::RamFs(ramfs) => NodeLease(ramfs.root()),
+            Backend::RamFs(ramfs) => NodeLease::from_ramfs(ramfs.root()),
+            Backend::Fat(fs) => NodeLease::from_fat(fs.root()),
         }
     }
 
     pub(crate) fn attributes(&self, node: &NodeLease) -> Result<NodeAttributes, Error> {
-        node.0.attributes()
+        match &self.backend {
+            Backend::RamFs(_) => node.ramfs()?.attributes(),
+            Backend::Fat(fs) => fs.attributes(node.fat()?),
+        }
     }
 
     pub(crate) fn lookup_child(
@@ -166,9 +252,12 @@ impl FilesystemInstance {
         name: Name<'_>,
     ) -> Result<Option<NodeLease>, Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs
-                .lookup(&directory.0, name)
-                .map(|node| node.map(NodeLease)),
+            Backend::RamFs(fs) => fs
+                .lookup(directory.ramfs()?, name)
+                .map(|node| node.map(NodeLease::from_ramfs)),
+            Backend::Fat(fs) => fs
+                .lookup(directory.fat()?, name)
+                .map(|node| node.map(NodeLease::from_fat)),
         }
     }
 
@@ -179,7 +268,8 @@ impl FilesystemInstance {
         destination: &mut [u8],
     ) -> Result<usize, Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.read(&node.0, offset, destination, false),
+            Backend::RamFs(fs) => fs.read(node.ramfs()?, offset, destination, false),
+            Backend::Fat(fs) => fs.read(node.fat()?, offset, destination, false),
         }
     }
 
@@ -189,7 +279,8 @@ impl FilesystemInstance {
         destination: &mut [u8],
     ) -> Result<usize, Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.read(&node.0, 0, destination, true),
+            Backend::RamFs(fs) => fs.read(node.ramfs()?, 0, destination, true),
+            Backend::Fat(fs) => fs.read(node.fat()?, 0, destination, true),
         }
     }
 
@@ -199,7 +290,8 @@ impl FilesystemInstance {
         cookie: u64,
     ) -> Result<Option<DirectoryEntry>, Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.entry(&node.0, cookie),
+            Backend::RamFs(fs) => fs.entry(node.ramfs()?, cookie),
+            Backend::Fat(fs) => fs.entry(node.fat()?, cookie),
         }
     }
 
@@ -209,7 +301,8 @@ impl FilesystemInstance {
         sponsor: &ResourceDomain,
     ) -> Result<Option<ExecutableSnapshot>, Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.executable(&node.0, sponsor),
+            Backend::RamFs(fs) => fs.executable(node.ramfs()?, sponsor),
+            Backend::Fat(fs) => fs.executable(node.fat()?, sponsor),
         }
     }
 
@@ -220,24 +313,28 @@ impl FilesystemInstance {
         input: &[u8],
     ) -> Result<(usize, u64), Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.write(&node.0, offset, input),
+            Backend::RamFs(fs) => fs.write(node.ramfs()?, offset, input),
+            Backend::Fat(fs) => fs.write(node.fat()?, offset, input),
         }
     }
 
     pub(super) fn resize(&self, node: &NodeLease, length: u64) -> Result<(), Error> {
         match &self.backend {
-            Backend::RamFs(ramfs) => ramfs.resize(&node.0, length),
+            Backend::RamFs(fs) => fs.resize(node.ramfs()?, length),
+            Backend::Fat(fs) => fs.resize(node.fat()?, length),
         }
     }
 
     pub(super) fn epoch(&self) -> u64 {
         match &self.backend {
             Backend::RamFs(fs) => fs.epoch(),
+            Backend::Fat(fs) => fs.epoch(),
         }
     }
     pub(super) fn wait_for_namespace(&self) -> Result<(), Error> {
         match &self.backend {
             Backend::RamFs(fs) => fs.wait_for_namespace(),
+            Backend::Fat(fs) => fs.wait_for_namespace(),
         }
     }
     pub(super) fn ancestry(
@@ -246,28 +343,39 @@ impl FilesystemInstance {
         start: &NodeLease,
         budget: &ScratchBudget,
     ) -> Result<ScratchVec<(NodeLease, ScratchString)>, Error> {
-        let entries = match &self.backend {
-            Backend::RamFs(fs) => fs.ancestry(&root.0, &start.0, budget)?,
-        };
         let mut result = ScratchVec::new(budget.clone());
-        result.try_reserve_exact(entries.len())?;
-        for (node, name) in entries {
-            result.push((NodeLease(node), name))?;
+        match &self.backend {
+            Backend::RamFs(fs) => {
+                for (node, name) in fs.ancestry(root.ramfs()?, start.ramfs()?, budget)? {
+                    result.push((NodeLease::from_ramfs(node), name))?;
+                }
+            }
+            Backend::Fat(fs) => {
+                for (node, name) in fs.ancestry(root.fat()?, start.fat()?, budget)? {
+                    result.push((NodeLease::from_fat(node), name))?;
+                }
+            }
         }
         Ok(result)
     }
     pub(super) fn metadata(
         &self,
         node: &NodeLease,
-    ) -> Result<(NodeAttributes, super::ramfs::NodeMetadata), Error> {
-        node.0.metadata()
+    ) -> Result<(NodeAttributes, NodeMetadata), Error> {
+        match &self.backend {
+            Backend::RamFs(_) => node.ramfs()?.metadata(),
+            Backend::Fat(fs) => fs.metadata(node.fat()?),
+        }
     }
     pub(super) fn set_metadata(
         &self,
         node: &NodeLease,
         update: super::MetadataUpdate,
     ) -> Result<(), Error> {
-        node.0.set_metadata(update)
+        match &self.backend {
+            Backend::RamFs(_) => node.ramfs()?.set_metadata(update),
+            Backend::Fat(fs) => fs.set_metadata(node.fat()?, update),
+        }
     }
     pub(super) fn create_at<R, E: From<Error>>(
         &self,
@@ -275,11 +383,21 @@ impl FilesystemInstance {
         name: EntryName<'_>,
         creation: Creation<'_>,
         epoch: u64,
-        publish: impl FnOnce(NodeLease) -> Result<R, E>,
+        publish: impl FnOnce(NodeLease, NodeAttributes) -> Result<R, E>,
     ) -> Result<R, E> {
+        let kind = creation.kind;
         match &self.backend {
-            Backend::RamFs(fs) => fs.create(&directory.0, name, creation, Some(epoch), |node| {
-                publish(NodeLease(node))
+            Backend::RamFs(fs) => {
+                fs.create(directory.ramfs()?, name, creation, Some(epoch), |node| {
+                    let attributes = node.attributes()?;
+                    publish(NodeLease::from_ramfs(node), attributes)
+                })
+            }
+            Backend::Fat(fs) => fs.create(directory.fat()?, name, creation, Some(epoch), |node| {
+                publish(
+                    NodeLease::from_fat(node),
+                    NodeAttributes::new(kind, 0o777, 0),
+                )
             }),
         }
     }
@@ -290,7 +408,8 @@ impl FilesystemInstance {
         publish: impl FnOnce(NodeAttributes) -> Result<R, E>,
     ) -> Result<R, E> {
         match &self.backend {
-            Backend::RamFs(fs) => fs.open_existing(&node.0, truncate, publish),
+            Backend::RamFs(fs) => fs.open_existing(node.ramfs()?, truncate, publish),
+            Backend::Fat(fs) => fs.open_existing(node.fat()?, truncate, publish),
         }
     }
     pub(super) fn remove_at(
@@ -302,7 +421,8 @@ impl FilesystemInstance {
         epoch: u64,
     ) -> Result<(), Error> {
         match &self.backend {
-            Backend::RamFs(fs) => fs.remove(&directory.0, name, kind, expected, Some(epoch)),
+            Backend::RamFs(fs) => fs.remove(directory.ramfs()?, name, kind, expected, Some(epoch)),
+            Backend::Fat(fs) => fs.remove(directory.fat()?, name, kind, expected, Some(epoch)),
         }
     }
     pub(super) fn link(
@@ -313,7 +433,8 @@ impl FilesystemInstance {
         epoch: u64,
     ) -> Result<(), Error> {
         match &self.backend {
-            Backend::RamFs(fs) => fs.link(&node.0, &directory.0, name, epoch),
+            Backend::RamFs(fs) => fs.link(node.ramfs()?, directory.ramfs()?, name, epoch),
+            Backend::Fat(fs) => fs.link(node.fat()?, directory.fat()?, name, epoch),
         }
     }
     pub(super) fn rename(
@@ -325,10 +446,13 @@ impl FilesystemInstance {
         epoch: u64,
     ) -> Result<(), Error> {
         match &self.backend {
-            Backend::RamFs(fs) => fs.rename(&source.0, name, &destination.0, new_name, epoch),
+            Backend::RamFs(fs) => {
+                fs.rename(source.ramfs()?, name, destination.ramfs()?, new_name, epoch)
+            }
+            Backend::Fat(fs) => fs.rename(source.fat()?, name, destination.fat()?, new_name, epoch),
         }
     }
-    pub(super) fn sync(&self, _node: &NodeLease, scope: u64) -> Result<(), Error> {
+    pub(super) fn sync(&self, node: &NodeLease, scope: u64) -> Result<(), Error> {
         if scope > 1 {
             return Err(Error::InvalidInput);
         }
@@ -336,20 +460,30 @@ impl FilesystemInstance {
         // backend contract, without claiming survival across reboot.
         match &self.backend {
             Backend::RamFs(_) => Ok(()),
+            Backend::Fat(fs) => fs.sync(node.fat()?, scope),
         }
     }
 }
 
 pub(crate) struct Mount {
+    _charge: Option<CommittedCharge>,
+    _pin: Option<MountPin>,
     id: MountId,
     filesystem: FallibleArc<FilesystemInstance>,
     root: NodeLease,
 }
 
 impl Mount {
-    fn try_new(filesystem: FallibleArc<FilesystemInstance>) -> Result<FallibleArc<Self>, Error> {
+    pub(super) fn try_new(
+        filesystem: FallibleArc<FilesystemInstance>,
+        pin: Option<MountPin>,
+        sponsor: Option<&ResourceDomain>,
+    ) -> Result<FallibleArc<Self>, Error> {
+        let charge = sponsor.map(allocation_charge::<Self>).transpose()?;
         let root = filesystem.root();
         FallibleArc::try_new(Self {
+            _charge: charge,
+            _pin: pin,
             id: MountId(allocate_identifier(&NEXT_MOUNT_ID)?),
             filesystem,
             root,
@@ -398,13 +532,10 @@ impl Location {
     }
 }
 
-/// Immutable view of the system mount topology.
-///
-/// The first milestone has one root mount. Directory capabilities still carry
-/// this owner so a later immutable mount-table snapshot can be added without
-/// changing their authority or lifetime shape.
+/// Shared namespace owner with atomically published immutable mount snapshots.
 pub(crate) struct MountNamespace {
     root: Location,
+    pub(super) mounts: super::mounts::MountTable,
     cache: FallibleArc<crate::kernel::io_cache::FileDataCache<super::read::FilePage>>,
 }
 
@@ -413,9 +544,14 @@ impl MountNamespace {
         filesystem: FallibleArc<FilesystemInstance>,
         cache: FallibleArc<crate::kernel::io_cache::FileDataCache<super::read::FilePage>>,
     ) -> Result<FallibleArc<Self>, Error> {
-        let mount = Mount::try_new(filesystem)?;
+        let mount = Mount::try_new(filesystem, None, None)?;
         let root = Location::new(mount.clone(), mount.root());
-        FallibleArc::try_new(Self { root, cache }).map_err(Error::from)
+        FallibleArc::try_new(Self {
+            root,
+            cache,
+            mounts: super::mounts::MountTable::new(),
+        })
+        .map_err(Error::from)
     }
 
     pub(crate) fn root(&self) -> Location {
@@ -461,4 +597,14 @@ fn instance_invariant_violation() -> ! {
     loop {
         core::hint::spin_loop();
     }
+}
+
+pub(super) fn allocation_charge<T>(sponsor: &ResourceDomain) -> Result<CommittedCharge, Error> {
+    sponsor
+        .reserve(ResourceAmount::ZERO.with(
+            ResourceKind::KernelMemoryBytes,
+            FallibleArc::<T>::allocation_size() as u64,
+        ))
+        .map(|reservation| reservation.commit())
+        .map_err(Error::Resource)
 }

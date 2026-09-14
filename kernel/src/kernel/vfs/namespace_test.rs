@@ -43,6 +43,7 @@ pub(crate) fn run() -> Result<(), TestError> {
         super::instance::MountNamespace::try_new(filesystem, cache).map_err(Error::from)?;
     let root = DirectoryObject::try_root(namespace, &domain)?;
     snapshot_cache(&root, &domain, &scratch)?;
+    mounted_namespace(&root, &domain, &scratch)?;
     root.create("left", NodeKind::Directory, 0o755, &scratch)?;
     root.create("right", NodeKind::Directory, 0o755, &scratch)?;
     let file = root.create_file("left/item", 0o666, &domain, Ok::<FileObject, Error>)?;
@@ -512,5 +513,89 @@ fn snapshot_cache(
     )?;
     root.remove("snapshot-alias", NodeKind::File, scratch)?;
     root.remove("snapshot", NodeKind::File, scratch)?;
+    Ok(())
+}
+
+fn mounted_namespace(
+    root: &DirectoryObject,
+    domain: &ResourceDomain,
+    scratch: &ScratchBudget,
+) -> Result<(), TestError> {
+    root.create("data", NodeKind::Directory, 0o755, scratch)?;
+    root.create_file("data/covered", 0o644, domain, Ok::<FileObject, Error>)?;
+    let covered = root.open_directory("data", domain)?;
+    let old_cwd = DirectoryObject::scope(root, &covered, domain)?;
+    let archive = RamFs::from_newc(EMPTY_ARCHIVE)
+        .map_err(|error| Error::Backend(super::instance::Error::RamFs(error)))?;
+    let filesystem =
+        super::instance::FilesystemInstance::try_from_ramfs(archive).map_err(Error::from)?;
+    root.mount_filesystem("data", filesystem, domain)?;
+    check(
+        matches!(
+            root.metadata("data/covered", true, scratch),
+            Err(Error::Missing)
+        ),
+        "mount covers, rather than copies, the ramfs directory",
+    )?;
+    check(
+        covered.metadata("covered", true, scratch).is_ok(),
+        "existing directory capability retains the covered mount",
+    )?;
+    root.create_file("data/on-disk", 0o644, domain, Ok::<FileObject, Error>)?;
+    check(
+        old_cwd.metadata("covered", true, scratch).is_ok(),
+        "scoped pre-mount cwd retains covered directory",
+    )?;
+    check(
+        matches!(
+            old_cwd.metadata("on-disk", true, scratch),
+            Err(Error::Missing)
+        ),
+        "old cwd does not silently gain mounted children",
+    )?;
+    check(
+        old_cwd.metadata("../data/on-disk", true, scratch).is_ok(),
+        "old cwd parent then re-entry follows current mount",
+    )?;
+    check(
+        old_cwd.metadata("/data/on-disk", true, scratch).is_ok(),
+        "absolute lookup from scoped cwd follows namespace mount",
+    )?;
+    let data = root.open_directory("data", domain)?;
+    let cwd = DirectoryObject::scope(root, &data, domain)?;
+    check(
+        cwd.canonicalize(".", scratch)? == "/data",
+        "mount ancestry from cwd",
+    )?;
+    check(
+        cwd.canonicalize("..", scratch)? == "/",
+        "parent exits mount",
+    )?;
+    let confined = DirectoryObject::scope(&data, &data, domain)?;
+    check(
+        confined.canonicalize("..", scratch)? == "/",
+        "capability root confines mount parent",
+    )?;
+    check(
+        matches!(
+            root.remove("data", NodeKind::Directory, scratch),
+            Err(Error::Busy)
+        ),
+        "mounted directory cannot be removed",
+    )?;
+    check(
+        matches!(
+            root.rename("data", root, "moved-data", scratch),
+            Err(Error::Busy)
+        ),
+        "mounted directory cannot be renamed",
+    )?;
+    let file = root.open_file("data/on-disk", domain)?;
+    file.write(Some(0), b"mounted")?;
+    let mut buffer = [0; 7];
+    check(
+        file.read(0, &mut buffer)? == 7 && &buffer == b"mounted",
+        "mounted file IO",
+    )?;
     Ok(())
 }

@@ -12,9 +12,11 @@
 //! Kernel-owned VFS namespace, capability objects, and file-data policy.
 
 mod executable;
-mod instance;
+mod fat;
+pub(crate) mod instance;
 mod lock_state;
 pub(crate) mod locks;
+mod mounts;
 #[cfg(feature = "kernel-self-test")]
 pub(crate) mod namespace_test;
 mod objects;

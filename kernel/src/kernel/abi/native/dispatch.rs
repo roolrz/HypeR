@@ -377,6 +377,30 @@ pub(in crate::kernel) fn dispatch_deferred(
                 invocation.arguments(),
             )
         }
+        hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_FIRMWARE_READ => {
+            super::io_handlers::sys_device_firmware_read(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_CLAIM_BUNDLE => {
+            super::io_handlers::sys_device_claim_bundle(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_MMIO => {
+            super::io_handlers::sys_device_mmio(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_IRQ_PENDING => {
+            super::io_handlers::sys_device_irq_pending(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE => {
+            super::io_handlers::sys_device_irq_complete(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_PROFILE_INFO => {
+            super::io_handlers::sys_device_profile_info(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_RESOURCE_INFO => {
+            super::io_handlers::sys_device_resource_info(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_CLAIM_MATCHING => {
+            super::io_handlers::sys_device_claim_matching(services, invocation.arguments())
+        }
         hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_CLAIM => {
             super::io_handlers::sys_device_claim(services, invocation.arguments())
         }
@@ -403,6 +427,21 @@ pub(in crate::kernel) fn dispatch_deferred(
         }
         hyper::abi::native::HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CREATE => {
             super::io_handlers::sys_guest_notification_create(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_GUEST_MAPPING_CREATE => {
+            super::io_handlers::sys_guest_mapping_create(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_GUEST_MAPPING_RELEASE => {
+            super::io_handlers::sys_guest_mapping_release(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_NATIVE_BLOCK_CREATE => {
+            super::io_handlers::sys_native_block_create(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_NATIVE_BLOCK_ACTIVATE => {
+            super::io_handlers::sys_native_block_activate(services, invocation.arguments())
+        }
+        hyper::abi::native::HYPER_NATIVE_SYS_NATIVE_BLOCK_MOUNT => {
+            super::io_handlers::sys_native_block_mount(services, invocation.arguments())
         }
         hyper::abi::native::HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CONTROL => {
             super::io_handlers::sys_guest_notification_control(services, invocation.arguments())

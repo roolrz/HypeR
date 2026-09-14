@@ -60,23 +60,29 @@ const PURPOSES: [u32; HANDLE_COUNT] = {
     purposes
 };
 
+// Keep the fixed bootstrap authority transaction out of the image-loading
+// coordinator's frame; its storage is needed only after that phase completes.
+#[inline(never)]
 pub(super) fn install(
     init: &BootProcess,
     arguments: &[&str],
     group: &TaskGroup,
     domain: &ResourceDomain,
 ) -> Result<(), Error> {
-    bootstrap::install_handles(init, arguments, PURPOSES, || {
-        prepare_handles(init, group, domain)
+    bootstrap::install_handles(init, arguments, PURPOSES, |handles| {
+        prepare_handles(init, group, domain, handles)
     })
 }
 
+// Borrow the single owner table; constructor temporaries end before publication.
+#[inline(never)]
 fn prepare_handles(
     init: &BootProcess,
     group: &TaskGroup,
     domain: &ResourceDomain,
-) -> Result<[PreparedHandle; HANDLE_COUNT], Error> {
-    let resource = prepare_handle(
+    handles: &mut [Option<PreparedHandle>; HANDLE_COUNT],
+) -> Result<(), Error> {
+    handles[0] = Some(prepare_handle(
         ResourceDomainObject::try_publication(domain.clone()).map_err(Error::ResourceObject)?,
         Rights::DUPLICATE
             .union(Rights::TRANSFER)
@@ -85,16 +91,16 @@ fn prepare_handles(
             .union(Rights::SET_LIMITS)
             .union(Rights::REVOKE)
             .union(Rights::RESOURCE_DOMAIN_SPONSOR),
-    )?;
-    let task_group = prepare_handle(
+    )?);
+    handles[1] = Some(prepare_handle(
         TaskGroupObject::try_publication(group.clone()).map_err(Error::TaskObject)?,
         Rights::DUPLICATE
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT)
             .union(Rights::REQUEST_STOP)
             .union(Rights::TASK_GROUP_ATTACH_PROCESS),
-    )?;
-    let task_factory = prepare_handle(
+    )?);
+    handles[2] = Some(prepare_handle(
         ObjectPublication::try_new(TaskFactory::try_new(domain).map_err(Error::TaskObject)?)
             .map_err(Error::Object)?,
         Rights::DUPLICATE
@@ -102,9 +108,9 @@ fn prepare_handles(
             .union(Rights::INSPECT)
             .union(Rights::CREATE_PROCESS)
             .union(Rights::CREATE_TASK_GROUP),
-    )?;
+    )?);
     let root = crate::kernel::vfs::root_directory(domain).map_err(Error::RootDirectory)?;
-    let library_directory = prepare_handle(
+    handles[4] = Some(prepare_handle(
         ObjectPublication::try_new(
             root.open_directory("/lib", domain)
                 .map_err(Error::RootDirectory)?,
@@ -115,8 +121,8 @@ fn prepare_handles(
             .union(Rights::INSPECT)
             .union(Rights::READ)
             .union(Rights::EXECUTE),
-    )?;
-    let root_directory = prepare_handle(
+    )?);
+    handles[3] = Some(prepare_handle(
         ObjectPublication::try_new(root).map_err(Error::Object)?,
         Rights::WRITE
             .union(Rights::SET_ATTRIBUTES)
@@ -126,74 +132,73 @@ fn prepare_handles(
             .union(Rights::INSPECT)
             .union(Rights::READ)
             .union(Rights::EXECUTE),
-    )?;
-    let task_inspector = prepare_handle(
+    )?);
+    handles[5] = Some(prepare_handle(
         ObjectPublication::try_new(TaskInspector::try_system(domain).map_err(Error::Inspection)?)
             .map_err(Error::Object)?,
         Rights::DUPLICATE
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT)
             .union(Rights::DERIVE),
-    )?;
-    let object_inspector = prepare_handle(
+    )?);
+    handles[6] = Some(prepare_handle(
         ObjectPublication::try_new(ObjectInspector::try_system(domain).map_err(Error::Inspection)?)
             .map_err(Error::Object)?,
         Rights::DUPLICATE
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT)
             .union(Rights::DERIVE),
-    )?;
-    let memory_inspector = prepare_handle(
+    )?);
+    handles[7] = Some(prepare_handle(
         ObjectPublication::try_new(MemoryInspector::try_system(domain).map_err(Error::Inspection)?)
             .map_err(Error::Object)?,
         Rights::DUPLICATE
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT),
-    )?;
-    let cpu_inspector = prepare_handle(
+    )?);
+    handles[8] = Some(prepare_handle(
         ObjectPublication::try_new(CpuInspector::try_system(domain).map_err(Error::Inspection)?)
             .map_err(Error::Object)?,
         Rights::DUPLICATE
             .union(Rights::TRANSFER)
             .union(Rights::INSPECT),
-    )?;
-    let vm_authority = if HAS_VM_AUTHORITY {
-        Some(prepare_handle(
+    )?);
+    if HAS_VM_AUTHORITY {
+        *optional_authority_slot(handles, CORE_HANDLE_COUNT) = Some(prepare_handle(
             ObjectPublication::try_new(
                 VirtualMachineCreationAuthority::try_new(domain)
                     .map_err(Error::VirtualMachineObject)?,
             )
             .map_err(Error::Object)?,
             VirtualMachineCreationAuthority::SUPPORTED_RIGHTS,
-        )?)
-    } else {
-        None
-    };
+        )?);
+    }
     #[cfg(not(feature = "kernel-self-test"))]
-    let console = prepare_handle(
-        crate::kernel::device::console::SystemConsole::try_publication(domain)
-            .map_err(Error::ConsoleObject)?,
-        Rights::DUPLICATE
-            .union(Rights::TRANSFER)
-            .union(Rights::WAIT)
-            .union(Rights::INSPECT)
-            .union(Rights::READ)
-            .union(Rights::WRITE),
-    )?;
-    let device_authority = if HAS_DEVICE_AUTHORITY {
-        Some(prepare_handle(
-            ObjectPublication::try_new(
-                crate::kernel::device::assigned::DeviceAssignmentAuthority::try_new(domain)
-                    .map_err(Error::DeviceAssignment)?,
-            )
-            .map_err(Error::Object)?,
+    {
+        handles[10] = Some(prepare_handle(
+            crate::kernel::device::console::SystemConsole::try_publication(domain)
+                .map_err(Error::ConsoleObject)?,
             Rights::DUPLICATE
                 .union(Rights::TRANSFER)
-                .union(Rights::INSPECT),
-        )?)
-    } else {
-        None
-    };
+                .union(Rights::WAIT)
+                .union(Rights::INSPECT)
+                .union(Rights::READ)
+                .union(Rights::WRITE),
+        )?);
+    }
+    if HAS_DEVICE_AUTHORITY {
+        *optional_authority_slot(handles, CORE_HANDLE_COUNT + HAS_VM_AUTHORITY as usize) =
+            Some(prepare_handle(
+                ObjectPublication::try_new(
+                    crate::kernel::device::assigned::DeviceAssignmentAuthority::try_new(domain)
+                        .map_err(Error::DeviceAssignment)?,
+                )
+                .map_err(Error::Object)?,
+                Rights::DUPLICATE
+                    .union(Rights::TRANSFER)
+                    .union(Rights::INSPECT),
+            )?);
+    }
     // Prepare the root VMAR last. Its one-per-address-space publication claim
     // needs explicit rollback, while every earlier handle is self-contained.
     let address_space = init.process.address_space_owner()?;
@@ -210,29 +215,21 @@ fn prepare_handles(
             return Err(Error::Handle(error));
         }
     };
-    let core = [
-        resource,
-        task_group,
-        task_factory,
-        root_directory,
-        library_directory,
-        task_inspector,
-        object_inspector,
-        memory_inspector,
-        cpu_inspector,
-        root_vmar,
-        #[cfg(not(feature = "kernel-self-test"))]
-        console,
-    ];
-    let mut handles = core.into_iter().chain(vm_authority).chain(device_authority);
-    Ok(core::array::from_fn(|_| {
-        // HANDLE_COUNT and the optional owner use the same immutable machine
-        // capability. A mismatch is an internal bootstrap contract violation.
-        match handles.next() {
-            Some(handle) => handle,
-            None => crate::hal::cpu::halt(),
-        }
-    }))
+    handles[9] = Some(root_vmar);
+    Ok(())
+}
+
+fn optional_authority_slot(
+    handles: &mut [Option<PreparedHandle>; HANDLE_COUNT],
+    index: usize,
+) -> &mut Option<PreparedHandle> {
+    // The count and optional capabilities share the same machine constants.
+    // Checked access also handles architectures where an entire branch is
+    // disabled and its hypothetical index equals the end of the core table.
+    match handles.get_mut(index) {
+        Some(slot) => slot,
+        None => crate::hal::cpu::halt(),
+    }
 }
 
 fn prepare_handle<T: UserExportableObject>(

@@ -39,6 +39,9 @@ impl Mailbox {
     pub fn from_handle(handle: OwnedHandle<GuestMailboxObject>) -> Self {
         Self { handle }
     }
+    pub fn into_handle(self) -> OwnedHandle<GuestMailboxObject> {
+        self.handle
+    }
     pub fn as_handle_ref(&self) -> HandleRef<'_, GuestMailboxObject> {
         self.handle.as_handle_ref()
     }
@@ -92,8 +95,19 @@ pub enum Operation {
     Disable = 0,
     Enable = 1,
     RaiseConfigurationInterrupt = 2,
+    /// Permanently withdraw both routes after backend DMA quiescence.
+    Disconnect = hyper_abi::HYPER_NATIVE_GUEST_NOTIFICATION_DISCONNECT as u32,
 }
 impl Notification {
+    pub fn from_handle(handle: OwnedHandle<GuestNotificationObject>) -> Self {
+        Self { handle }
+    }
+    pub fn into_handle(self) -> OwnedHandle<GuestNotificationObject> {
+        self.handle
+    }
+    /// Install the frontend route before its first vCPU start. The backend may
+    /// already be running; both routes remain confined to the platform I/O
+    /// aperture and publication is serialized with either VM stopping.
     pub fn create(
         frontend: HandleRef<'_, VirtualMachineObject>,
         backend: HandleRef<'_, VirtualMachineObject>,
@@ -127,6 +141,11 @@ impl Notification {
     pub fn as_handle_ref(&self) -> HandleRef<'_, GuestNotificationObject> {
         self.handle.as_handle_ref()
     }
+    /// Permanently detach both MMIO routes after backend DMA quiescence.
+    pub fn disconnect(&self) -> Result<()> {
+        self.control(Operation::Disconnect).map(|_| ())
+    }
+
     pub fn control(&self, operation: Operation) -> Result<u32> {
         // SAFETY: The handle is borrowed and the typed operation is ABI-valid.
         let result = unsafe {

@@ -34,6 +34,9 @@ pub const HYPER_NATIVE_STATUS_NOT_DIRECTORY: HyperNativeStatus = -19;
 pub const HYPER_NATIVE_STATUS_IS_DIRECTORY: HyperNativeStatus = -20;
 pub const HYPER_NATIVE_STATUS_SYMLINK_LOOP: HyperNativeStatus = -21;
 pub const HYPER_NATIVE_STATUS_CROSS_DEVICE: HyperNativeStatus = -22;
+pub const HYPER_NATIVE_STATUS_IO_ERROR: HyperNativeStatus = -23;
+pub const HYPER_NATIVE_STATUS_NO_SPACE: HyperNativeStatus = -24;
+pub const HYPER_NATIVE_STATUS_READ_ONLY: HyperNativeStatus = -25;
 
 pub const HYPER_NATIVE_OBJECT_NONE: u32 = 0;
 pub const HYPER_NATIVE_OBJECT_EVENT: u32 = 1;
@@ -67,6 +70,8 @@ pub const HYPER_NATIVE_OBJECT_DEVICE_ASSIGNMENT_AUTHORITY: u32 = 28;
 pub const HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE: u32 = 29;
 pub const HYPER_NATIVE_OBJECT_GUEST_MAILBOX: u32 = 30;
 pub const HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION: u32 = 31;
+pub const HYPER_NATIVE_OBJECT_NATIVE_BLOCK: u32 = 32;
+pub const HYPER_NATIVE_OBJECT_GUEST_MAPPING: u32 = 33;
 
 pub const HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN: u32 = 0;
 pub const HYPER_NATIVE_TRANSFER_CLASS_GENERAL: u32 = 1;
@@ -110,6 +115,8 @@ pub const fn hyper_native_object_transfer_class(object_kind: u32) -> u32 {
         HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         HYPER_NATIVE_OBJECT_GUEST_MAILBOX => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_NATIVE_BLOCK => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
+        HYPER_NATIVE_OBJECT_GUEST_MAPPING => HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY,
         _ => HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN,
     }
 }
@@ -150,6 +157,8 @@ pub const HYPER_NATIVE_RIGHT_LOCK_FILE: u64 = 1_u64 << 32;
 
 pub const HYPER_NATIVE_RIGHTS_MASK: u64 = 0x1ffffffff;
 
+pub const HYPER_NATIVE_SIGNAL_PHYSICAL_DEVICE_READABLE: u64 = 1_u64 << 0;
+pub const HYPER_NATIVE_SIGNAL_NATIVE_BLOCK_PEER_CLOSED: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_WRITABLE: u64 = 1_u64 << 1;
 pub const HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_PEER_CLOSED: u64 = 1_u64 << 2;
@@ -174,6 +183,27 @@ pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_READABLE: u64 = 1_u64 << 0;
 pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_WRITABLE: u64 = 1_u64 << 1;
 pub const HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED: u64 = 1_u64 << 2;
 
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_MAX_BYTES: u64 = 65536;
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_NAME_MAX_BYTES: u64 = 128;
+pub const HYPER_NATIVE_DEVICE_BUNDLE_MAX_ENTRIES: u64 = 8;
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_INFO: u64 = 0;
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PATH: u64 = 1;
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_COMPATIBLE: u64 = 2;
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_REGISTERS: u64 = 3;
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PROPERTY: u64 = 4;
+pub const HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_SCSI: u64 = 1;
+pub const HYPER_NATIVE_DEVICE_PROFILE_USERSPACE: u64 = 2;
+pub const HYPER_NATIVE_DEVICE_IDENTITY_COMPATIBLE: u64 = 1;
+pub const HYPER_NATIVE_DEVICE_IDENTITY_FDT_PATH: u64 = 2;
+pub const HYPER_NATIVE_IO_MAX_CLIENTS: u64 = 9;
+pub const HYPER_NATIVE_GUEST_NOTIFICATION_DISCONNECT: u64 = 3;
+pub const HYPER_NATIVE_GUEST_DYNAMIC_ALIAS_OFFSET: u64 = 68719476736;
+pub const HYPER_NATIVE_GUEST_DYNAMIC_PHYSICAL_LIMIT: u64 = 274877906944;
+pub const HYPER_NATIVE_NATIVE_BLOCK_MEMORY_BYTES: u64 = 131072;
+pub const HYPER_NATIVE_NATIVE_BLOCK_QUEUE_SIZE: u64 = 8;
+pub const HYPER_NATIVE_NATIVE_BLOCK_QUEUE_STRIDE: u64 = 4096;
+pub const HYPER_NATIVE_NATIVE_BLOCK_AVAILABLE_OFFSET: u64 = 256;
+pub const HYPER_NATIVE_NATIVE_BLOCK_USED_OFFSET: u64 = 512;
 pub const HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DEVICE_ASSIGNMENT_AUTHORITY: u64 = 14;
 pub const HYPER_NATIVE_GUEST_MAILBOX_MAX_MESSAGE_BYTES: u64 = 256;
 pub const HYPER_NATIVE_GUEST_NOTIFICATION_DISABLE: u64 = 0;
@@ -457,6 +487,19 @@ pub const HYPER_NATIVE_SYS_GUEST_MAILBOX_SEND: u64 = 131;
 pub const HYPER_NATIVE_SYS_GUEST_MAILBOX_RECEIVE: u64 = 132;
 pub const HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CREATE: u64 = 133;
 pub const HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CONTROL: u64 = 134;
+pub const HYPER_NATIVE_SYS_NATIVE_BLOCK_CREATE: u64 = 135;
+pub const HYPER_NATIVE_SYS_NATIVE_BLOCK_ACTIVATE: u64 = 136;
+pub const HYPER_NATIVE_SYS_NATIVE_BLOCK_MOUNT: u64 = 137;
+pub const HYPER_NATIVE_SYS_GUEST_MAPPING_CREATE: u64 = 138;
+pub const HYPER_NATIVE_SYS_GUEST_MAPPING_RELEASE: u64 = 139;
+pub const HYPER_NATIVE_SYS_DEVICE_CLAIM_MATCHING: u64 = 140;
+pub const HYPER_NATIVE_SYS_DEVICE_PROFILE_INFO: u64 = 141;
+pub const HYPER_NATIVE_SYS_DEVICE_RESOURCE_INFO: u64 = 142;
+pub const HYPER_NATIVE_SYS_DEVICE_FIRMWARE_READ: u64 = 143;
+pub const HYPER_NATIVE_SYS_DEVICE_CLAIM_BUNDLE: u64 = 144;
+pub const HYPER_NATIVE_SYS_DEVICE_MMIO: u64 = 145;
+pub const HYPER_NATIVE_SYS_DEVICE_IRQ_PENDING: u64 = 146;
+pub const HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE: u64 = 147;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -470,6 +513,94 @@ pub const fn hyper_native_failure_result_mask(
         _ => 0,
     }
 }
+
+pub const HYPER_NATIVE_DEVICE_PROFILE_INFO_MIN_SIZE: usize = 32;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeDeviceProfileInfo {
+    pub profile: u32,
+    pub reserved0: u32,
+    pub resource_count: u32,
+    pub reserved1: u32,
+    pub reserved2: u64,
+    pub reserved3: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeDeviceProfileInfo>() == 32);
+const _: () = assert!(core::mem::align_of::<HyperNativeDeviceProfileInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, profile) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, reserved0) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, resource_count) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, reserved1) == 12);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, reserved2) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceProfileInfo, reserved3) == 24);
+
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_QUERY_MIN_SIZE: usize = 24;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeDeviceFirmwareQuery {
+    pub node: u32,
+    pub field: u32,
+    pub name_address: u64,
+    pub name_length: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeDeviceFirmwareQuery>() == 24);
+const _: () = assert!(core::mem::align_of::<HyperNativeDeviceFirmwareQuery>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareQuery, node) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareQuery, field) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareQuery, name_address) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareQuery, name_length) == 16);
+
+pub const HYPER_NATIVE_DEVICE_FIRMWARE_INFO_MIN_SIZE: usize = 32;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeDeviceFirmwareInfo {
+    pub flags: u32,
+    pub register_count: u32,
+    pub irq_number: u32,
+    pub irq_trigger: u32,
+    pub reserved0: u64,
+    pub reserved1: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeDeviceFirmwareInfo>() == 32);
+const _: () = assert!(core::mem::align_of::<HyperNativeDeviceFirmwareInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareInfo, flags) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareInfo, register_count) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareInfo, irq_number) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareInfo, irq_trigger) == 12);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareInfo, reserved0) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceFirmwareInfo, reserved1) == 24);
+
+pub const HYPER_NATIVE_DEVICE_BUNDLE_ENTRY_MIN_SIZE: usize = 16;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeDeviceBundleEntry {
+    pub node: u32,
+    pub resource: u32,
+    pub offset: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeDeviceBundleEntry>() == 16);
+const _: () = assert!(core::mem::align_of::<HyperNativeDeviceBundleEntry>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceBundleEntry, node) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceBundleEntry, resource) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceBundleEntry, offset) == 8);
+
+pub const HYPER_NATIVE_DEVICE_RESOURCE_INFO_MIN_SIZE: usize = 32;
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperNativeDeviceResourceInfo {
+    pub kind: u32,
+    pub reserved: u32,
+    pub offset: u64,
+    pub length: u64,
+    pub reserved2: u64,
+}
+const _: () = assert!(core::mem::size_of::<HyperNativeDeviceResourceInfo>() == 32);
+const _: () = assert!(core::mem::align_of::<HyperNativeDeviceResourceInfo>() == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, kind) == 0);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, reserved) == 4);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, offset) == 8);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, length) == 16);
+const _: () = assert!(core::mem::offset_of!(HyperNativeDeviceResourceInfo, reserved2) == 24);
 
 pub const HYPER_NATIVE_PHYSICAL_DEVICE_INFO_MIN_SIZE: usize = 16;
 #[repr(C)]

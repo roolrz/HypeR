@@ -114,3 +114,23 @@ storage live in `libhyper`; the std archive carries stateless adapters.
 See the [std runtime contract](../toolchain/rust-std/README.md) and the
 [`hyper/std.h`](include/hyper/std.h) / [`hyper/thread.h`](include/hyper/thread.h)
 interfaces. These are SDK interfaces, not additions to the kernel syscall ABI.
+
+Interactive stdin retains `stdio.input` and carries a second, real
+`stdio.terminal-input` capability for the same byte-channel endpoint. Both grant
+INSPECT so the runtime can verify object identity. The shell shares that queue
+with an unredirected foreground process: only a process that reads consumes
+input. Pipelines and file redirections omit the terminal alias and stay binary.
+Default `std::process::Command` inheritance preserves both capabilities.
+
+The console-input service splits command/EOF records and folds CRLF to CR across
+hardware reads. Terminal std reads translate CR to LF and interpret a standalone
+Ctrl-D record as one EOF indication; the endpoint remains open for the next shell
+command. Native channel reads retain Ctrl-D and CR, including `vmm console`.
+This is an interactive terminal path, not a byte-transparent serial tunnel; the
+kernel Console API remains unchanged. This is not a full POSIX canonical tty.
+
+The standard input purpose is unchanged. Older std runtimes can still read that
+capability, but do not implement the terminal alias convention. Consumers that
+validate the old exact rights allowlist must update to permit INSPECT. HypeR ships
+its service manifests, SDK and std runtime together; cross-version terminal EOF
+behavior is not promised.

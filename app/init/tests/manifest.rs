@@ -121,6 +121,15 @@ impl AuthorityPolicy for Policy {
                 duplicable: true,
                 creatable: false,
             }),
+            "bootstrap.shell-input-channel" => Some(AuthorityDeclaration {
+                key: test_authority_key(source),
+                provider: None,
+                object_kind: 4,
+                rights: WAIT | READ | DUPLICATE | TRANSFER | INSPECT,
+                movable: true,
+                duplicable: true,
+                creatable: false,
+            }),
             "bootstrap.console-input-channel"
             | "bootstrap.console-output-channel"
             | "bootstrap.session-input-channel"
@@ -128,7 +137,6 @@ impl AuthorityPolicy for Policy {
             | "bootstrap.session-client-input-channel"
             | "bootstrap.session-client-output-channel"
             | "bootstrap.session-client-error-channel"
-            | "bootstrap.shell-input-channel"
             | "bootstrap.shell-output-channel"
             | "bootstrap.shell-error-channel" => Some(AuthorityDeclaration {
                 key: test_authority_key(source),
@@ -291,7 +299,10 @@ impl AuthorityPolicy for Policy {
             ("/svc/session", "session.client-input") => (204, 4, WAIT | WRITE),
             ("/svc/session", "session.client-output") => (205, 4, WAIT | READ),
             ("/svc/session", "session.client-error") => (206, 4, WAIT | READ),
-            ("/bin/sh", "stdio.input") => (300, 4, WAIT | READ | DUPLICATE | TRANSFER),
+            ("/bin/sh", "stdio.input") => (300, 4, WAIT | READ | DUPLICATE | TRANSFER | INSPECT),
+            ("/bin/sh", "stdio.terminal-input") => {
+                (399, 4, WAIT | READ | DUPLICATE | TRANSFER | INSPECT)
+            }
             ("/bin/sh" | "/svc/session" | "/svc/vm-manager", "stdio.output") => {
                 (301, 4, WAIT | WRITE | DUPLICATE | TRANSFER)
             }
@@ -414,7 +425,7 @@ fn production_manifest_matches_the_validated_schema() {
         .find(|service| service.name() == "shell");
     assert_eq!(
         shell.map(|service| service.capabilities().count()),
-        Some(13)
+        Some(14)
     );
 }
 
@@ -715,7 +726,7 @@ fn production_launch_contract_rejects_under_delegated_directory_authority() {
             1,
         ),
         3,
-        3,
+        4,
     )] {
         assert_ne!(under_delegated, production, "rights fixture must change the manifest");
         let parsed = parse(&under_delegated);

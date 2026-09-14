@@ -84,6 +84,16 @@ pub(crate) fn service_guest_stage2_retirement(request: GuestStage2RetirementRequ
     }
 }
 
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+pub(crate) fn service_guest_stage2_live(request: GuestStage2RetirementRequest) {
+    super::imp::synchronize_guest_stage2_local(request);
+}
+
+#[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+pub(crate) fn publish_guest_stage2_changes() {
+    super::imp::publish_guest_stage2_changes();
+}
+
 pub(crate) use super::imp::{
     commit_interrupt_virtualization as commit_interrupts,
     handle_guest_virtual_timer_interrupt as handle_virtual_timer_interrupt,

@@ -13,6 +13,7 @@
 extern crate std;
 
 mod abi;
+pub mod block;
 pub mod capability_channel;
 pub mod channel;
 pub mod console;

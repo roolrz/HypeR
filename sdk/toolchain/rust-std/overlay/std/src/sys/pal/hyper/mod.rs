@@ -39,6 +39,9 @@ pub fn cvt(status: i64) -> crate::io::Result<()> {
         -20 => ErrorKind::IsADirectory,
         -21 => ErrorKind::FilesystemLoop,
         -22 => ErrorKind::CrossesDevices,
+        -23 => ErrorKind::Other, // Device I/O failure (EIO equivalent).
+        -24 => ErrorKind::StorageFull,
+        -25 => ErrorKind::ReadOnlyFilesystem,
         _ => ErrorKind::Other,
     };
     // In particular, reporting allocation failure must not allocate again.

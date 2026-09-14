@@ -3,6 +3,8 @@
 
 //! Per-VM image loader and lifetime owner.
 
+mod disk;
+
 use hyper_os::handle::{ByteChannelObject, VirtualCpuObject, VirtualMachineObject};
 use hyper_os::memory::{MAX_TRANSFER_BYTES, WritableVmo};
 use hyper_os::startup::Startup;
@@ -32,6 +34,7 @@ fn application_main(mut startup: Startup<'_>, started: Instant) -> ExitCode {
     match run(&mut startup, &channel, started) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            eprintln!("HypeR vm-runtime: failed: {error:?}");
             let _ = channel.send(&vm_contract::InstanceStatus::Failed(error.failure()).encode());
             ExitCode::FAILURE
         }
@@ -44,6 +47,10 @@ fn run(
     control: &hyper_os::channel::ByteChannel<'_>,
     started: Instant,
 ) -> Result<(), Error> {
+    let disk_session = startup
+        .take_optional(hyper_service::io::SESSION)
+        .map_err(Error::OperatingSystem)?
+        .map(hyper_os::capability_channel::CapabilityChannel::from_handle);
     let source = ImageSource::new(hyper_os::fs::File::from_handle(
         startup
             .take(vm_contract::IMAGE)
@@ -94,7 +101,13 @@ fn run(
     if let Some(initramfs) = image.initramfs {
         copy_payload(&source, &memory, plan.memory_base(), initramfs)?;
     }
-    build_device_tree(&memory, &plan, image.boot_arguments.as_str(), metadata)?;
+    build_device_tree(
+        &memory,
+        &plan,
+        image.boot_arguments.as_str(),
+        metadata,
+        disk_session.is_some(),
+    )?;
     publish_status(control, vm_contract::InstanceStatus::MemoryPrepared)?;
 
     let pending = hyper_os::vm::create(
@@ -108,8 +121,23 @@ fn run(
         },
     )
     .map_err(|failure| Error::OperatingSystem(failure.error()))?;
-    hyper_os::vm::set_memory(pending.as_handle_ref(), memory.as_handle_ref())
+    let shared_memory = if disk_session.is_some() {
+        let grant = hyper_os::vm::create_guest_memory(memory.as_handle_ref())
+            .map_err(Error::OperatingSystem)?;
+        hyper_os::vm::map_guest_memory(
+            pending.as_handle_ref(),
+            grant.as_handle_ref(),
+            0,
+            0,
+            plan.memory_size(),
+        )
         .map_err(Error::OperatingSystem)?;
+        Some(grant)
+    } else {
+        hyper_os::vm::set_memory(pending.as_handle_ref(), memory.as_handle_ref())
+            .map_err(Error::OperatingSystem)?;
+        None
+    };
     hyper_os::vm::set_bootstrap(
         pending.as_handle_ref(),
         hyper_os::vm::VirtualCpuBootstrap {
@@ -134,6 +162,19 @@ fn run(
                 .map_err(Error::OperatingSystem)?,
         );
     }
+    let (machine, mut disk) = if let Some(session) = disk_session {
+        let grant = shared_memory.as_ref().ok_or(Error::InvalidControl)?;
+        let (machine, disk) = disk::bind(
+            session,
+            machine,
+            grant,
+            plan.memory_base(),
+            plan.memory_size(),
+        )?;
+        (machine, Some(disk))
+    } else {
+        (machine, None)
+    };
     publish_status(control, vm_contract::InstanceStatus::Installed)?;
     hyper_os::vm::start_vcpu(vcpus[0].as_handle_ref()).map_err(Error::OperatingSystem)?;
     // This ends at the successful start request, not the first guest entry:
@@ -145,7 +186,7 @@ fn run(
         elapsed.subsec_micros() % 1_000,
     );
     publish_status(control, vm_contract::InstanceStatus::Running)?;
-    supervise_guest(&machine, &vcpus, control, &mut console)
+    supervise_guest(&machine, &vcpus, control, &mut console, disk.as_mut())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -260,8 +301,9 @@ fn supervise_guest(
     vcpus: &[hyper_os::OwnedHandle<VirtualCpuObject>],
     control: &hyper_os::channel::ByteChannel<'_>,
     console: &mut hyper_vm_runtime::console::Console,
+    mut disk: Option<&mut disk::Disk>,
 ) -> Result<(), Error> {
-    let waits = WaitSet::new(4).map_err(Error::OperatingSystem)?;
+    let waits = WaitSet::new(6 + vcpus.len()).map_err(Error::OperatingSystem)?;
     let control_wait = waits
         .add(
             control.as_handle_ref(),
@@ -278,6 +320,10 @@ fn supervise_guest(
         .map_err(Error::OperatingSystem)?;
     let mut control_consumed = false;
     loop {
+        if let Some(disk) = disk.as_mut() {
+            disk.service(vcpus)?;
+            disk.prepare_wait(&waits, vcpus)?;
+        }
         console.service().map_err(Error::OperatingSystem)?;
         console
             .prepare_wait(&waits)
@@ -287,8 +333,17 @@ fn supervise_guest(
             control_consumed = false;
         }
         let observation = waits
-            .wait(hyper_os::DEADLINE_INFINITE)
+            .wait(
+                disk.as_ref()
+                    .map_or(hyper_os::DEADLINE_INFINITE, |disk| disk.deadline()),
+            )
             .map_err(Error::OperatingSystem)?;
+        if disk
+            .as_ref()
+            .is_some_and(|disk| disk.owns(observation.registration))
+        {
+            continue;
+        }
         if observation.registration != control_wait && observation.registration != machine_wait {
             console.observe(observation.registration, observation.signals);
             continue;
@@ -466,18 +521,46 @@ fn build_device_tree(
     plan: &linux::BootPlan,
     boot_arguments: &str,
     metadata: GuestHardwareMetadata,
+    disk: bool,
 ) -> Result<(), Error> {
     let mut structure = [0u8; 8192];
     let mut strings = [0u8; 2048];
     let mut output = [0u8; 12 * 1024];
-    let length = guest_fdt::build_linux(
-        plan,
-        boot_arguments,
-        metadata,
-        &mut structure,
-        &mut strings,
-        &mut output,
-    )
+    let length = if disk {
+        let GuestHardwareMetadata::Aarch64 { gic_version } = metadata else {
+            return Err(Error::UnsupportedConfiguration);
+        };
+        guest_fdt::build_aarch64_linux_with_io(
+            guest_fdt::Aarch64LinuxBoot {
+                memory_base: plan.memory_base(),
+                memory_size: plan.memory_size(),
+                vcpu_count: plan.vcpu_count(),
+                gic_version,
+                initramfs: plan.initramfs().map(|range| (range.start(), range.end())),
+                boot_arguments,
+            },
+            guest_fdt::io::IoDevices {
+                virtio: Some(guest_fdt::io::MmioDevice {
+                    base: hyper_service::io::FRONTEND_MMIO,
+                    size: 4096,
+                    irq: hyper_service::io::FRONTEND_IRQ,
+                }),
+                ..guest_fdt::io::IoDevices::empty()
+            },
+            &mut structure,
+            &mut strings,
+            &mut output,
+        )
+    } else {
+        guest_fdt::build_linux(
+            plan,
+            boot_arguments,
+            metadata,
+            &mut structure,
+            &mut strings,
+            &mut output,
+        )
+    }
     .map_err(|_| Error::InvalidImage)?;
     let offset = plan
         .device_tree()

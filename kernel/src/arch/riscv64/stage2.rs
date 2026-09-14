@@ -241,6 +241,41 @@ impl Stage2AddressSpace {
         )
     }
 
+    /// Removes one normal 4 KiB leaf, retaining all intermediate tables.
+    ///
+    /// # Safety
+    /// The caller serializes updates and retains the old backing until every
+    /// possible hart has acknowledged the subsequent live invalidation.
+    pub unsafe fn clear_page(&mut self, ipa: u64) -> Result<bool, Error> {
+        if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= registers::STAGE2_IPA_LIMIT {
+            return Err(Error::InvalidAddress);
+        }
+        let mut table = self.root;
+        for level in 0..2 {
+            // SAFETY: This hierarchy retains its root and every parent table.
+            let entry = unsafe { read_entry(table, index(ipa, level))? };
+            if entry == 0 {
+                return Ok(false);
+            }
+            if entry & registers::PTE_VALID == 0
+                || entry & (registers::PTE_READ | registers::PTE_WRITE | registers::PTE_EXECUTE)
+                    != 0
+            {
+                return Err(Error::Conflict);
+            }
+            table = PhysicalAddress::new(pte_address(entry));
+        }
+        // SAFETY: The preceding walk validated a retained final-level table.
+        let entry = unsafe { read_entry(table, index(ipa, 2))? };
+        if entry == 0 {
+            return Ok(false);
+        }
+        let (pointer, _) = self.normal_page_leaf(ipa)?;
+        // SAFETY: The caller excludes mutation and retains backing through TLBI.
+        unsafe { write_volatile(pointer, 0) };
+        Ok(true)
+    }
+
     /// Grants execute permission to an inactive normal-memory leaf.
     pub fn make_normal_page_executable(&mut self, ipa: u64) -> Result<(), Error> {
         self.install_execute_permission(ipa)
@@ -547,6 +582,27 @@ pub(crate) fn retire_local(request: GuestStage2RetirementRequest) -> Result<(), 
         )
     };
     Ok(())
+}
+
+pub(crate) fn publish_changes() {
+    // SAFETY: Order page-table stores before publishing cross-hart fence work.
+    unsafe { asm!("fence rw, rw", options(nostack)) };
+}
+
+pub(crate) fn synchronize_local(request: GuestStage2RetirementRequest) {
+    let vmid = (request.hgatp & registers::HGATP_VMID_MASK) >> registers::HGATP_VMID_SHIFT;
+    // SAFETY: The request retains its translation identity. HFENCE.GVMA targets
+    // the supplied VMID without changing the current HGATP or VSATP selection.
+    unsafe {
+        asm!(
+            ".option push",
+            ".option arch, +h",
+            "hfence.gvma zero, {vmid}",
+            ".option pop",
+            vmid = in(reg) vmid,
+            options(nostack)
+        );
+    }
 }
 
 unsafe extern "C" {

@@ -566,6 +566,12 @@ fn validate_arguments(
             let (length_argument, expected_length_kind, maximum_bytes, element_size) = match memory
                 .length
             {
+                MemoryLength::FixedBytes { bytes } => {
+                    if bytes == 0 {
+                        return invalid("fixed memory size cannot be zero");
+                    }
+                    ("", ValueKind::ByteCount, bytes, None)
+                }
                 MemoryLength::Bytes {
                     argument: length_name,
                     maximum_bytes,
@@ -608,7 +614,9 @@ fn validate_arguments(
                 .arguments
                 .iter()
                 .find(|candidate| candidate.name == length_argument);
-            if !matches!(length, Some(candidate) if candidate.kind == expected_length_kind) {
+            if !matches!(memory.length, MemoryLength::FixedBytes { .. })
+                && !matches!(length, Some(candidate) if candidate.kind == expected_length_kind)
+            {
                 return invalid(format!(
                     "syscall {} memory argument {} has no matching length argument",
                     syscall.name, argument.name,
@@ -1797,6 +1805,7 @@ fn describe_user_memory(name: &str, memory: schema::UserMemory) -> String {
         .record
         .map_or_else(String::new, |record| format!(", record={record}"));
     let length = match memory.length {
+        MemoryLength::FixedBytes { bytes } => format!("fixed-bytes={bytes}"),
         MemoryLength::Bytes {
             argument,
             maximum_bytes,
@@ -2089,6 +2098,30 @@ mod tests {
             ..schema::NATIVE_ABI
         };
         assert!(validate(&candidate).is_ok());
+    }
+
+    #[test]
+    fn fixed_query_memory_requires_a_nonzero_complete_record() {
+        for bytes in [0, 16, 24] {
+            let mut calls = schema::SYSCALLS.to_vec();
+            let selected = calls
+                .iter_mut()
+                .find(|call| call.name == "device_firmware_read");
+            assert!(selected.is_some());
+            let Some(call) = selected else {
+                return;
+            };
+            let mut arguments = call.arguments.to_vec();
+            if let Some(memory) = &mut arguments[1].memory {
+                memory.length = MemoryLength::FixedBytes { bytes };
+            }
+            call.arguments = Box::leak(arguments.into_boxed_slice());
+            let candidate = AbiSchema {
+                syscalls: Box::leak(calls.into_boxed_slice()),
+                ..schema::NATIVE_ABI
+            };
+            assert_eq!(validate(&candidate).is_ok(), bytes == 24);
+        }
     }
 
     #[test]
@@ -2722,6 +2755,8 @@ mod tests {
             ("physical_device", TransferClass::RendezvousOnly),
             ("guest_mailbox", TransferClass::RendezvousOnly),
             ("guest_notification", TransferClass::RendezvousOnly),
+            ("native_block", TransferClass::RendezvousOnly),
+            ("guest_mapping", TransferClass::RendezvousOnly),
         ];
         assert_eq!(schema::OBJECT_KINDS.len(), expected.len());
         for (kind, expected) in schema::OBJECT_KINDS.iter().zip(expected) {

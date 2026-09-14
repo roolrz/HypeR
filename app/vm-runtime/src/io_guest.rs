@@ -14,6 +14,7 @@ use hyper_vm_image::{Payload, ReadAt, guest_fdt, linux};
 use std::fs::File;
 use std::io;
 use std::os::hyper::fs::FileExt;
+use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, String>;
 pub const RAM_BASE: u64 = 0x4000_0000;
@@ -24,8 +25,8 @@ fn show(error: impl std::fmt::Debug) -> String {
 }
 
 pub struct InstalledGuest {
-    pub machine: hyper_os::OwnedHandle<VirtualMachineObject>,
-    pub cpus: Vec<hyper_os::OwnedHandle<VirtualCpuObject>>,
+    pub machine: Arc<hyper_os::OwnedHandle<VirtualMachineObject>>,
+    pub cpus: Vec<Arc<hyper_os::OwnedHandle<VirtualCpuObject>>>,
     pub output: Output,
 }
 
@@ -136,6 +137,47 @@ pub fn install(
     physical: Option<&hyper_os::OwnedHandle<hyper_os::handle::PhysicalDeviceObject>>,
     serial_address: u64,
 ) -> Result<InstalledGuest> {
+    let mapping = shared.map(|memory| SharedGrant {
+        memory: memory.as_handle_ref(),
+        guest_offset: RAM_BYTES,
+        memory_offset: 0,
+        size: RAM_BYTES,
+    });
+    install_mapped(
+        startup,
+        image,
+        own,
+        mapping.as_slice(),
+        if shared.is_some() {
+            RAM_BYTES * 2
+        } else {
+            RAM_BYTES
+        },
+        physical,
+        serial_address,
+    )
+}
+
+#[derive(Clone, Copy)]
+pub struct SharedGrant<'a> {
+    pub memory: hyper_os::HandleRef<'a, hyper_os::handle::GuestMemoryObject>,
+    pub guest_offset: u64,
+    pub memory_offset: u64,
+    pub size: u64,
+}
+
+pub fn install_mapped(
+    startup: &Startup<'_>,
+    image: &Image,
+    own: &hyper_os::OwnedHandle<hyper_os::handle::GuestMemoryObject>,
+    shared: &[SharedGrant<'_>],
+    address_space_bytes: u64,
+    physical: Option<&hyper_os::OwnedHandle<hyper_os::handle::PhysicalDeviceObject>>,
+    serial_address: u64,
+) -> Result<InstalledGuest> {
+    if address_space_bytes < RAM_BYTES {
+        return Err("I/O VM address space cannot truncate its boot RAM".into());
+    }
     let lease = vm::derive_creation_lease(
         startup
             .borrow(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)
@@ -147,11 +189,7 @@ pub fn install(
         lease,
         vm::Configuration {
             guest_physical_base: RAM_BASE,
-            memory_size: if shared.is_some() {
-                RAM_BYTES * 2
-            } else {
-                RAM_BYTES
-            },
+            memory_size: address_space_bytes,
             vcpu_count: image.plan.vcpu_count(),
             architecture: vm::Architecture::Aarch64,
             platform_profile: vm::PlatformProfile::Aarch64Reference,
@@ -166,13 +204,13 @@ pub fn install(
         RAM_BYTES,
     )
     .map_err(show)?;
-    if let Some(shared) = shared {
+    for shared in shared {
         vm::map_guest_memory(
             pending.as_handle_ref(),
-            shared.as_handle_ref(),
-            RAM_BYTES,
-            0,
-            RAM_BYTES,
+            shared.memory,
+            shared.guest_offset,
+            shared.memory_offset,
+            shared.size,
         )
         .map_err(show)?;
     }
@@ -209,9 +247,12 @@ pub fn install(
     .map_err(show)?;
     vm::seal(pending.as_handle_ref()).map_err(show)?;
     let (machine, cpu) = vm::install(pending).map_err(|error| show(error.error()))?;
-    let mut cpus = vec![cpu];
+    let machine = Arc::new(machine);
+    let mut cpus = vec![Arc::new(cpu)];
     for index in 1..image.plan.vcpu_count() {
-        cpus.push(vm::open_vcpu(machine.as_handle_ref(), index).map_err(show)?);
+        cpus.push(Arc::new(
+            vm::open_vcpu(machine.as_handle_ref(), index).map_err(show)?,
+        ));
     }
     Ok(InstalledGuest {
         machine,

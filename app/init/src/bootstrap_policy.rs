@@ -83,6 +83,9 @@ define_bootstrap_authorities! {
     VmClientConnectionChannel = 25 => "bootstrap.vm-client-connection-channel",
     ServiceOutputChannel = 26 => "bootstrap.service-output-channel",
     DeviceAuthority = 27 => "bootstrap.device-assignment-authority",
+    IoReadyChannel = 28 => "bootstrap.io-ready-channel",
+    IoBrokerServer = 29 => "bootstrap.io-broker-server",
+    IoBrokerClient = 30 => "bootstrap.io-broker-client",
 }
 
 /// Stateless policy used to validate a manifest before touching live handles.
@@ -102,9 +105,15 @@ impl AuthorityPolicy for BootstrapPolicy {
             | BootstrapAuthority::SessionClientInputChannel
             | BootstrapAuthority::SessionClientOutputChannel
             | BootstrapAuthority::SessionClientErrorChannel
-            | BootstrapAuthority::ShellInputChannel
             | BootstrapAuthority::ShellOutputChannel
-            | BootstrapAuthority::ShellErrorChannel => move_authority(authority),
+            | BootstrapAuthority::ShellErrorChannel
+            | BootstrapAuthority::IoReadyChannel => move_authority(authority),
+            BootstrapAuthority::ShellInputChannel => {
+                let mut declaration = move_authority(authority);
+                declaration.duplicable = true;
+                declaration.rights |= Rights::INSPECT.bits();
+                declaration
+            }
             BootstrapAuthority::ServiceOutputChannel => duplicate_authority(
                 authority,
                 ByteChannelObject::KIND.as_raw(),
@@ -170,7 +179,9 @@ impl AuthorityPolicy for BootstrapPolicy {
             BootstrapAuthority::VmRuntimeImage => {
                 create_authority(authority, FileObject::KIND.as_raw(), Rights::EXECUTE)
             }
-            BootstrapAuthority::VmProvisioningChannel => AuthorityDeclaration {
+            BootstrapAuthority::VmProvisioningChannel
+            | BootstrapAuthority::IoBrokerServer
+            | BootstrapAuthority::IoBrokerClient => AuthorityDeclaration {
                 key: authority.key(),
                 provider: None,
                 object_kind: CapabilityChannelObject::KIND.as_raw(),
@@ -386,6 +397,83 @@ const fn observation_rights() -> Rights {
     Rights::DUPLICATE
         .union(Rights::TRANSFER)
         .union(Rights::INSPECT)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IoReadyPlanError {
+    InvalidGrant,
+    MultipleServices,
+}
+
+/// Readiness is bound to the dedicated moved capability, never an image name
+/// or path prefix. Reject substituting another channel with the same purpose.
+pub fn io_ready_service(
+    plan: &crate::manifest::LaunchPlan<'_>,
+) -> Result<Option<usize>, IoReadyPlanError> {
+    let mut selected = None;
+    for service in 0..plan.service_count() {
+        for index in 0..crate::manifest::MAX_CAPABILITIES_PER_SERVICE {
+            let Some(grant) = plan.capability_grant(service, index) else {
+                continue;
+            };
+            let source = grant.authority() == BootstrapAuthority::IoReadyChannel.key();
+            let purpose = grant.purpose() == hyper_service::io::READY.as_raw();
+            if !source && !purpose {
+                continue;
+            }
+            if !source
+                || !purpose
+                || grant.operation() != crate::manifest::CapabilityOperation::Move
+            {
+                return Err(IoReadyPlanError::InvalidGrant);
+            }
+            if selected.replace(service).is_some() {
+                return Err(IoReadyPlanError::MultipleServices);
+            }
+        }
+    }
+    Ok(selected)
+}
+
+/// Both ends must be explicitly offered once; neither service can invent a peer.
+pub fn io_broker_enabled(plan: &crate::manifest::LaunchPlan<'_>) -> Result<bool, IoReadyPlanError> {
+    let mut ends = [None, None];
+    for service in 0..plan.service_count() {
+        for index in 0..crate::manifest::MAX_CAPABILITIES_PER_SERVICE {
+            let Some(grant) = plan.capability_grant(service, index) else {
+                continue;
+            };
+            for (end, (source, purpose)) in [
+                (
+                    BootstrapAuthority::IoBrokerServer,
+                    hyper_service::io::BROKER_SERVER.as_raw(),
+                ),
+                (
+                    BootstrapAuthority::IoBrokerClient,
+                    hyper_service::io::BROKER_CLIENT.as_raw(),
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if grant.authority() != source.key() && grant.purpose() != purpose {
+                    continue;
+                }
+                if grant.authority() != source.key()
+                    || grant.purpose() != purpose
+                    || grant.operation() != crate::manifest::CapabilityOperation::Move
+                    || ends[end].replace(service).is_some()
+                {
+                    return Err(IoReadyPlanError::InvalidGrant);
+                }
+            }
+        }
+    }
+    match ends {
+        [None, None] => Ok(false),
+        [Some(server), Some(client)] if server != client => Ok(true),
+        _ => Err(IoReadyPlanError::InvalidGrant),
+    }
 }
 
 #[cfg(test)]

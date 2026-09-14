@@ -15,6 +15,13 @@ static const hyper_native_startup_handle_t console_handle = {
     HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE, 0, 13,
 };
 static const hyper_startup_t console_startup = {.handle_count = 1, .handles = &console_handle};
+static const hyper_native_startup_handle_t terminal_handles[] = {
+    {0x80030001, 0, 10}, {0x80030004, 0, 14},
+};
+static const hyper_startup_t terminal_startup = {.handle_count = 2, .handles = terminal_handles};
+static int terminal_mode;
+static int mismatched_alias;
+static int packet_mode;
 static int console_mode;
 static int invalid_count;
 static unsigned reads;
@@ -24,7 +31,15 @@ static int missing;
 static int broken;
 
 const hyper_startup_t *hyper_runtime_startup(void)
-{ return missing ? NULL : (console_mode ? &console_startup : &startup); }
+{ return missing ? NULL : (terminal_mode ? &terminal_startup : (console_mode ? &console_startup : &startup)); }
+hyper_native_handle_t hyper_runtime_capability(uint32_t purpose) { (void)purpose; return 0; }
+hyper_call_result_t hyper_object_get_basic_info(hyper_native_handle_t h, hyper_native_object_basic_info_t *info)
+{
+    assert(h == 10 || h == 14);
+    info->koid = h == 14 && mismatched_alias ? 2 : 1;
+    info->object_kind = HYPER_NATIVE_OBJECT_BYTE_CHANNEL;
+    return (hyper_call_result_t){0};
+}
 hyper_native_status_t hyper_thread_yield(void) { return 0; }
 hyper_call_result_t hyper_console_read(hyper_native_handle_t h, void *p, size_t n)
 {
@@ -46,6 +61,10 @@ hyper_call_result_t hyper_byte_channel_read(hyper_native_handle_t h, void *buffe
 {
     assert(h == 10);
     assert(capacity == HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES);
+    if (packet_mode) {
+        ((unsigned char *)buffer)[0] = packet_mode == 2 ? '\r' : (reads++ == 0 ? 4 : 'z');
+        return (hyper_call_result_t){0, 1, 0};
+    }
     switch (reads++) {
         case 0: return (hyper_call_result_t){HYPER_NATIVE_STATUS_WOULD_BLOCK, 0, 0};
         case 1: return (hyper_call_result_t){0, 0, 0}; /* Empty message. */
@@ -93,5 +112,21 @@ int main(void)
     assert(waits == 2);
     invalid_count = 1;
     assert(hyper_runtime_stdio_read(buffer, 3, &actual) == HYPER_NATIVE_STATUS_INTERNAL && actual == 0);
+    console_mode = 0;
+    invalid_count = 0;
+    packet_mode = 1;
+    reads = 0;
+    assert(hyper_runtime_stdio_read(buffer, 3, &actual) == 0 && actual == 1 && buffer[0] == 4);
+    terminal_mode = 1;
+    reads = 0;
+    assert(hyper_runtime_stdio_read(buffer, 3, &actual) == 0 && actual == 0);
+    assert(hyper_runtime_stdio_read(buffer, 3, &actual) == 0 && actual == 1 && buffer[0] == 'z');
+    packet_mode = 2;
+    assert(hyper_runtime_stdio_read(buffer, 3, &actual) == 0 && actual == 1 && buffer[0] == '\n');
+    terminal_mode = 0;
+    assert(hyper_runtime_stdio_read(buffer, 3, &actual) == 0 && actual == 1 && buffer[0] == '\r');
+    terminal_mode = 1;
+    mismatched_alias = 1;
+    assert(hyper_runtime_stdio_read(buffer, 3, &actual) == HYPER_NATIVE_STATUS_INVALID_ARGUMENT && actual == 0);
     return 0;
 }

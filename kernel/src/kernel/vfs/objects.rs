@@ -38,6 +38,7 @@ pub(crate) enum Error {
     InvalidInput,
     AccessDenied,
     Busy,
+    Unsupported,
     CrossDevice,
     Object(ObjectCreationError),
     Resource(ResourceError),
@@ -71,6 +72,7 @@ impl From<super::instance::Error> for Error {
             super::instance::Error::NotSymlink => Self::NotSymlink,
             super::instance::Error::InvalidInput => Self::InvalidInput,
             super::instance::Error::Busy => Self::Busy,
+            super::instance::Error::Unsupported => Self::Unsupported,
             other => Self::Backend(other),
         }
     }
@@ -96,6 +98,14 @@ pub(crate) struct DirectoryPage {
 }
 
 impl DirectoryPage {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            entries: [None; DIRECTORY_PAGE_CAPACITY],
+            len: 0,
+            next_cookie: 0,
+        }
+    }
+
     pub(crate) fn entries(&self) -> impl Iterator<Item = &DirectoryEntrySnapshot> {
         self.entries[..self.len].iter().filter_map(Option::as_ref)
     }
@@ -211,6 +221,40 @@ impl DirectoryObject {
         Self::try_new(namespace, root, sponsor)
     }
 
+    pub(crate) fn mount_block(
+        &self,
+        path: &str,
+        device: crate::kernel::block::MountedDevice,
+        sponsor: &ResourceDomain,
+    ) -> Result<(), Error> {
+        let filesystem = super::instance::FilesystemInstance::try_from_block(device, sponsor)?;
+        self.mount_filesystem(path, filesystem, sponsor)
+    }
+
+    pub(super) fn mount_filesystem(
+        &self,
+        path: &str,
+        filesystem: FallibleArc<super::instance::FilesystemInstance>,
+        sponsor: &ResourceDomain,
+    ) -> Result<(), Error> {
+        let location = super::resolve::typed(
+            &self.namespace,
+            &self.root,
+            &self.current,
+            path,
+            NodeKind::Directory,
+            false,
+            &ScratchBudget::new(sponsor),
+        )?;
+        if location == self.namespace.root() {
+            return Err(Error::Busy);
+        }
+        self.namespace
+            .mounts
+            .attach(location, filesystem, sponsor)?;
+        Ok(())
+    }
+
     pub(crate) fn open_file(
         &self,
         path: &str,
@@ -266,9 +310,8 @@ impl DirectoryObject {
                 target: None,
             },
             epoch,
-            |node| {
+            |node, attributes| {
                 let location = Location::new(parent.mount().clone(), node);
-                let attributes = location.mount().filesystem().attributes(location.node())?;
                 publish(FileObject::try_new_admitted(
                     location,
                     self.namespace.cache(),
@@ -299,7 +342,7 @@ impl DirectoryObject {
                 target: None,
             },
             epoch,
-            |_| Ok(()),
+            |_, _| Ok(()),
         )
     }
     pub(crate) fn remove(
@@ -511,7 +554,7 @@ impl DirectoryObject {
                 target: Some(target.as_bytes()),
             },
             epoch,
-            |_| Ok(()),
+            |_, _| Ok(()),
         )
     }
     pub(crate) fn rename(
@@ -589,12 +632,7 @@ impl DirectoryObject {
         sponsor: &ResourceDomain,
         publish: impl FnOnce(FileObject) -> Result<R, E>,
     ) -> Result<R, E> {
-        let FileOpenOptions {
-            rights,
-            creation,
-            truncate,
-            mode,
-        } = *options;
+        let FileOpenOptions { creation, mode, .. } = *options;
         if creation == FileCreation::CreateNew {
             return self.create_file(path, mode, sponsor, publish);
         }
@@ -604,6 +642,25 @@ impl DirectoryObject {
             creation == FileCreation::Create,
             &ScratchBudget::new(sponsor),
         )?;
+        self.open_resolved_file(&resolved, options, sponsor, publish)
+    }
+
+    // Resolution temporaries do not belong to the backend commit phase. Keep
+    // the admitted path result borrowed while preparation/truncation may block.
+    #[inline(never)]
+    fn open_resolved_file<R, E: From<Error> + From<super::instance::Error>>(
+        &self,
+        resolved: &super::resolve::Resolved,
+        options: &FileOpenOptions,
+        sponsor: &ResourceDomain,
+        publish: impl FnOnce(FileObject) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let FileOpenOptions {
+            rights,
+            truncate,
+            mode,
+            ..
+        } = *options;
         if let Some(location) = &resolved.location {
             location
                 .mount()
@@ -633,12 +690,12 @@ impl DirectoryObject {
                     target: None,
                 },
                 resolved.epoch,
-                |node| {
+                |node, attributes| {
                     publish(FileObject::try_new_admitted(
                         Location::new(parent.mount().clone(), node),
                         self.namespace.cache(),
                         sponsor,
-                        NodeAttributes::new(NodeKind::File, mode, 0),
+                        attributes,
                         true,
                     )?)
                 },
@@ -646,16 +703,15 @@ impl DirectoryObject {
         }
     }
 
-    pub(crate) fn read_page(&self, cookie: u64) -> Result<DirectoryPage, Error> {
-        let mut page = DirectoryPage {
-            entries: [None; DIRECTORY_PAGE_CAPACITY],
-            len: 0,
-            next_cookie: 0,
-        };
+    pub(crate) fn read_page(&self, cookie: u64, page: &mut DirectoryPage) -> Result<(), Error> {
+        // One caller-owned page, including while the backend blocks. Do not
+        // return this large array through nested Result temporaries.
+        page.len = 0;
+        page.next_cookie = 0;
         let mut cursor = cookie;
         while page.len < DIRECTORY_PAGE_CAPACITY {
             let Some(entry) = self.namespace.read_directory_entry(&self.current, cursor)? else {
-                return Ok(page);
+                return Ok(());
             };
             let entry_name = core::str::from_utf8(&entry.name[..entry.length])
                 .map_err(|_| Error::Backend(super::instance::Error::InvalidBackendResult))?;
@@ -687,7 +743,7 @@ impl DirectoryObject {
         {
             page.next_cookie = cursor;
         }
-        Ok(page)
+        Ok(())
     }
 
     pub(crate) fn info(&self) -> Result<DirectoryInfo, Error> {

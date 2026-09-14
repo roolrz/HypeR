@@ -90,8 +90,57 @@ impl Layout {
     }
 
     pub(crate) fn complete(&self) -> bool {
-        // All entries are non-overlapping and contained in [0,size).
-        self.regions.iter().flatten().map(|r| r.length).sum::<u64>() == self.size
+        // Sealing requires actual backing, not coverage of the address-space
+        // envelope. Unadmitted gaps remain unmapped and cannot fault in pages.
+        self.regions.iter().any(Option::is_some)
+    }
+
+    pub(crate) fn overlaps(&self, offset: u64, length: u64) -> bool {
+        self.extents()
+            .any(|(base, size)| offset < base + size && base < offset + length)
+    }
+
+    pub(crate) fn contains(&self, offset: u64) -> bool {
+        self.resolve(offset, 1).is_ok()
+    }
+
+    fn extents(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        self.regions
+            .iter()
+            .flatten()
+            .map(|region| (region.offset, region.length))
+    }
+
+    pub(crate) fn page_count(&self) -> Result<usize, MemoryObjectError> {
+        self.extents().try_fold(0usize, |total, (_, length)| {
+            total
+                .checked_add(
+                    usize::try_from(length / PAGE_SIZE)
+                        .map_err(|_| MemoryObjectError::AllocationSize)?,
+                )
+                .ok_or(MemoryObjectError::AllocationSize)
+        })
+    }
+
+    pub(crate) fn page_index(&self, offset: u64) -> Option<usize> {
+        super::extent_index::index(self.extents(), offset)
+    }
+
+    pub(crate) fn page_offset(&self, index: usize) -> Option<u64> {
+        super::extent_index::offset(self.extents(), index)
+    }
+
+    pub(crate) fn table_capacity(&self, ipa_base: u64) -> Result<usize, super::Error> {
+        self.extents().try_fold(0usize, |total, (offset, length)| {
+            let base = ipa_base
+                .checked_add(offset)
+                .ok_or(super::Error::AddressOverflow)?;
+            total
+                .checked_add(crate::hal::vm::Stage2AddressSpace::required_table_pages(
+                    base, length,
+                )?)
+                .ok_or(super::Error::MetadataAllocation)
+        })
     }
 
     pub(crate) const fn size(&self) -> u64 {

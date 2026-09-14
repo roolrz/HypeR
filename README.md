@@ -56,7 +56,8 @@ experiment with; choose an established stack when running VMs is the goal.
 ## What works today?
 
 The AArch64 QEMU system boots Native init, a shell, and VM management services
-that start a Linux guest and expose its console. RISC-V runs Native init,
+with a resident Linux I/O VM, a persistent `/data` filesystem, and configurable
+Linux guests with console access. RISC-V runs Native init,
 shell, std applications, and userspace-managed Linux guests on QEMU. x86-64 currently has build and image validation only.
 
 The Native ABI is pre-release. Broad hardware support, general-purpose virtual
@@ -78,7 +79,7 @@ virtio-scsi with Linux vhost-scsi/LIO.
 - [x] Publish the complete appliance from [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm)
   and consume a digest-pinned package; HypeR owns apps and DTS/DTB.
 - [x] Verify cross-VM virtio-scsi/vhost I/O against a real QEMU disk.
-- [ ] Extend device assignment, shared queues and DMA handling to Pi 5 controllers.
+- [ ] Validate SDIO1 assignment and DMA on Pi 5; add the network-controller path.
 - [ ] Exercise Native network and storage I/O on Pi 5, including failure handling
   and performance measurements.
 
@@ -96,9 +97,10 @@ make run
 ```
 
 This boots the AArch64 system with the HypeR shell and a resident Linux I/O VM
-in QEMU. The first run downloads pinned guest assets and the I/O appliance.
-The storage backend waits idle; it does not run the disk-writing test guest. See [getting started](docs/getting-started.md)
-for configuration, other architectures, and build targets.
+in QEMU. The first run downloads pinned assets and creates a persistent board
+disk; HypeR mounts its configuration volume at `/data`. The default guest is
+available through `vmm start alpine`. See [board storage](docs/board-storage.md)
+and [getting started](docs/getting-started.md) for configuration and build targets.
 
 ## Explore and contribute
 

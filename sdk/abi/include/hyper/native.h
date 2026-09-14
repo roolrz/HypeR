@@ -50,6 +50,9 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_STATUS_IS_DIRECTORY (-INT64_C(20))
 #define HYPER_NATIVE_STATUS_SYMLINK_LOOP (-INT64_C(21))
 #define HYPER_NATIVE_STATUS_CROSS_DEVICE (-INT64_C(22))
+#define HYPER_NATIVE_STATUS_IO_ERROR (-INT64_C(23))
+#define HYPER_NATIVE_STATUS_NO_SPACE (-INT64_C(24))
+#define HYPER_NATIVE_STATUS_READ_ONLY (-INT64_C(25))
 
 #define HYPER_NATIVE_OBJECT_NONE UINT32_C(0)
 #define HYPER_NATIVE_OBJECT_EVENT UINT32_C(1)
@@ -83,6 +86,8 @@ typedef int64_t hyper_native_status_t;
 #define HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE UINT32_C(29)
 #define HYPER_NATIVE_OBJECT_GUEST_MAILBOX UINT32_C(30)
 #define HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION UINT32_C(31)
+#define HYPER_NATIVE_OBJECT_NATIVE_BLOCK UINT32_C(32)
+#define HYPER_NATIVE_OBJECT_GUEST_MAPPING UINT32_C(33)
 
 #define HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN UINT32_C(0)
 #define HYPER_NATIVE_TRANSFER_CLASS_GENERAL UINT32_C(1)
@@ -122,6 +127,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
         case HYPER_NATIVE_OBJECT_PHYSICAL_DEVICE: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_GUEST_MAILBOX: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         case HYPER_NATIVE_OBJECT_GUEST_NOTIFICATION: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_NATIVE_BLOCK: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
+        case HYPER_NATIVE_OBJECT_GUEST_MAPPING: return HYPER_NATIVE_TRANSFER_CLASS_RENDEZVOUS_ONLY;
         default: return HYPER_NATIVE_TRANSFER_CLASS_FORBIDDEN;
     }
 }
@@ -162,6 +169,8 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 
 #define HYPER_NATIVE_RIGHTS_MASK UINT64_C(0x1ffffffff)
 
+#define HYPER_NATIVE_SIGNAL_PHYSICAL_DEVICE_READABLE (UINT64_C(1) << 0)
+#define HYPER_NATIVE_SIGNAL_NATIVE_BLOCK_PEER_CLOSED (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_READABLE (UINT64_C(1) << 0)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_WRITABLE (UINT64_C(1) << 1)
 #define HYPER_NATIVE_SIGNAL_VIRTUAL_SERIAL_PEER_CLOSED (UINT64_C(1) << 2)
@@ -186,6 +195,27 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_WRITABLE (UINT64_C(1) << 1)
 #define HYPER_NATIVE_SIGNAL_GUEST_MAILBOX_PEER_CLOSED (UINT64_C(1) << 2)
 
+#define HYPER_NATIVE_DEVICE_FIRMWARE_MAX_BYTES UINT64_C(65536)
+#define HYPER_NATIVE_DEVICE_FIRMWARE_NAME_MAX_BYTES UINT64_C(128)
+#define HYPER_NATIVE_DEVICE_BUNDLE_MAX_ENTRIES UINT64_C(8)
+#define HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_INFO UINT64_C(0)
+#define HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PATH UINT64_C(1)
+#define HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_COMPATIBLE UINT64_C(2)
+#define HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_REGISTERS UINT64_C(3)
+#define HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PROPERTY UINT64_C(4)
+#define HYPER_NATIVE_DEVICE_PROFILE_VIRTIO_MMIO_SCSI UINT64_C(1)
+#define HYPER_NATIVE_DEVICE_PROFILE_USERSPACE UINT64_C(2)
+#define HYPER_NATIVE_DEVICE_IDENTITY_COMPATIBLE UINT64_C(1)
+#define HYPER_NATIVE_DEVICE_IDENTITY_FDT_PATH UINT64_C(2)
+#define HYPER_NATIVE_IO_MAX_CLIENTS UINT64_C(9)
+#define HYPER_NATIVE_GUEST_NOTIFICATION_DISCONNECT UINT64_C(3)
+#define HYPER_NATIVE_GUEST_DYNAMIC_ALIAS_OFFSET UINT64_C(68719476736)
+#define HYPER_NATIVE_GUEST_DYNAMIC_PHYSICAL_LIMIT UINT64_C(274877906944)
+#define HYPER_NATIVE_NATIVE_BLOCK_MEMORY_BYTES UINT64_C(131072)
+#define HYPER_NATIVE_NATIVE_BLOCK_QUEUE_SIZE UINT64_C(8)
+#define HYPER_NATIVE_NATIVE_BLOCK_QUEUE_STRIDE UINT64_C(4096)
+#define HYPER_NATIVE_NATIVE_BLOCK_AVAILABLE_OFFSET UINT64_C(256)
+#define HYPER_NATIVE_NATIVE_BLOCK_USED_OFFSET UINT64_C(512)
 #define HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DEVICE_ASSIGNMENT_AUTHORITY UINT64_C(14)
 #define HYPER_NATIVE_GUEST_MAILBOX_MAX_MESSAGE_BYTES UINT64_C(256)
 #define HYPER_NATIVE_GUEST_NOTIFICATION_DISABLE UINT64_C(0)
@@ -469,6 +499,19 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_GUEST_MAILBOX_RECEIVE UINT64_C(132)
 #define HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CREATE UINT64_C(133)
 #define HYPER_NATIVE_SYS_GUEST_NOTIFICATION_CONTROL UINT64_C(134)
+#define HYPER_NATIVE_SYS_NATIVE_BLOCK_CREATE UINT64_C(135)
+#define HYPER_NATIVE_SYS_NATIVE_BLOCK_ACTIVATE UINT64_C(136)
+#define HYPER_NATIVE_SYS_NATIVE_BLOCK_MOUNT UINT64_C(137)
+#define HYPER_NATIVE_SYS_GUEST_MAPPING_CREATE UINT64_C(138)
+#define HYPER_NATIVE_SYS_GUEST_MAPPING_RELEASE UINT64_C(139)
+#define HYPER_NATIVE_SYS_DEVICE_CLAIM_MATCHING UINT64_C(140)
+#define HYPER_NATIVE_SYS_DEVICE_PROFILE_INFO UINT64_C(141)
+#define HYPER_NATIVE_SYS_DEVICE_RESOURCE_INFO UINT64_C(142)
+#define HYPER_NATIVE_SYS_DEVICE_FIRMWARE_READ UINT64_C(143)
+#define HYPER_NATIVE_SYS_DEVICE_CLAIM_BUNDLE UINT64_C(144)
+#define HYPER_NATIVE_SYS_DEVICE_MMIO UINT64_C(145)
+#define HYPER_NATIVE_SYS_DEVICE_IRQ_PENDING UINT64_C(146)
+#define HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE UINT64_C(147)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -491,6 +534,84 @@ static inline uint64_t hyper_native_failure_result_mask(
     }
     return UINT64_C(0);
 }
+
+#define HYPER_NATIVE_DEVICE_PROFILE_INFO_MIN_SIZE UINT64_C(32)
+typedef struct hyper_native_device_profile_info_t {
+    uint32_t profile;
+    uint32_t reserved0;
+    uint32_t resource_count;
+    uint32_t reserved1;
+    uint64_t reserved2;
+    uint64_t reserved3;
+} hyper_native_device_profile_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_device_profile_info_t) == 32, "device_profile_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_device_profile_info_t) == 8, "device_profile_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, profile) == 0, "device_profile_info.profile offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, reserved0) == 4, "device_profile_info.reserved0 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, resource_count) == 8, "device_profile_info.resource_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, reserved1) == 12, "device_profile_info.reserved1 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, reserved2) == 16, "device_profile_info.reserved2 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_profile_info_t, reserved3) == 24, "device_profile_info.reserved3 offset");
+
+#define HYPER_NATIVE_DEVICE_FIRMWARE_QUERY_MIN_SIZE UINT64_C(24)
+typedef struct hyper_native_device_firmware_query_t {
+    uint32_t node;
+    uint32_t field;
+    uint64_t name_address;
+    uint64_t name_length;
+} hyper_native_device_firmware_query_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_device_firmware_query_t) == 24, "device_firmware_query size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_device_firmware_query_t) == 8, "device_firmware_query alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_query_t, node) == 0, "device_firmware_query.node offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_query_t, field) == 4, "device_firmware_query.field offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_query_t, name_address) == 8, "device_firmware_query.name_address offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_query_t, name_length) == 16, "device_firmware_query.name_length offset");
+
+#define HYPER_NATIVE_DEVICE_FIRMWARE_INFO_MIN_SIZE UINT64_C(32)
+typedef struct hyper_native_device_firmware_info_t {
+    uint32_t flags;
+    uint32_t register_count;
+    uint32_t irq_number;
+    uint32_t irq_trigger;
+    uint64_t reserved0;
+    uint64_t reserved1;
+} hyper_native_device_firmware_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_device_firmware_info_t) == 32, "device_firmware_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_device_firmware_info_t) == 8, "device_firmware_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_info_t, flags) == 0, "device_firmware_info.flags offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_info_t, register_count) == 4, "device_firmware_info.register_count offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_info_t, irq_number) == 8, "device_firmware_info.irq_number offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_info_t, irq_trigger) == 12, "device_firmware_info.irq_trigger offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_info_t, reserved0) == 16, "device_firmware_info.reserved0 offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_firmware_info_t, reserved1) == 24, "device_firmware_info.reserved1 offset");
+
+#define HYPER_NATIVE_DEVICE_BUNDLE_ENTRY_MIN_SIZE UINT64_C(16)
+typedef struct hyper_native_device_bundle_entry_t {
+    uint32_t node;
+    uint32_t resource;
+    uint64_t offset;
+} hyper_native_device_bundle_entry_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_device_bundle_entry_t) == 16, "device_bundle_entry size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_device_bundle_entry_t) == 8, "device_bundle_entry alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_bundle_entry_t, node) == 0, "device_bundle_entry.node offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_bundle_entry_t, resource) == 4, "device_bundle_entry.resource offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_bundle_entry_t, offset) == 8, "device_bundle_entry.offset offset");
+
+#define HYPER_NATIVE_DEVICE_RESOURCE_INFO_MIN_SIZE UINT64_C(32)
+typedef struct hyper_native_device_resource_info_t {
+    uint32_t kind;
+    uint32_t reserved;
+    uint64_t offset;
+    uint64_t length;
+    uint64_t reserved2;
+} hyper_native_device_resource_info_t;
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_device_resource_info_t) == 32, "device_resource_info size");
+HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_device_resource_info_t) == 8, "device_resource_info alignment");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, kind) == 0, "device_resource_info.kind offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, reserved) == 4, "device_resource_info.reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, offset) == 8, "device_resource_info.offset offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, length) == 16, "device_resource_info.length offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_device_resource_info_t, reserved2) == 24, "device_resource_info.reserved2 offset");
 
 #define HYPER_NATIVE_PHYSICAL_DEVICE_INFO_MIN_SIZE UINT64_C(16)
 typedef struct hyper_native_physical_device_info_t {

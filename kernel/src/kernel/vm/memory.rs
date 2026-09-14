@@ -8,11 +8,17 @@
 //! and stable VM-facing API explicit without merging those protocols.
 
 mod access;
+pub(super) mod admission;
 pub(super) mod backing;
 mod construction;
+mod extent_index;
+mod grant_state;
+pub(super) mod live;
+pub(crate) mod live_service;
 mod residency;
 mod retirement;
 mod storage;
+mod synchronize;
 
 #[cfg(feature = "kernel-self-test")]
 use hyper::mm::ForeignCopyError;
@@ -27,6 +33,7 @@ use storage::{FixedBitmap, GuestMemoryBacking, Stage2PagePool};
 pub(in crate::kernel) use access::resolve_guest_memory_fault;
 pub(in crate::kernel) use residency::{GuestResidencyClaim, activate, leave};
 pub(in crate::kernel) use retirement::{GuestStage2LocalRequest, service_local_retirement};
+pub(in crate::kernel) use synchronize::{SynchronizationError, prepare_live_synchronization};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Error {
@@ -113,6 +120,7 @@ pub(crate) struct GuestAddressSpace {
     size: u64,
     domain: ResourceDomain,
     backing: GuestMemoryBacking,
+    pub(super) live: live::LiveMappings,
     mapped_pages: FixedBitmap,
     instruction_ready_pages: FixedBitmap,
     committed_pages: usize,

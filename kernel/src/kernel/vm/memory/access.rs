@@ -228,7 +228,7 @@ impl GuestAddressSpace {
     ) -> Result<bool, Error> {
         self.ensure_healthy()?;
         let Some(page_index) = self.page_index(fault.address().get()) else {
-            return Ok(false);
+            return self.resolve_live_fault(fault);
         };
         self.demand_faults = self.demand_faults.saturating_add(1);
         match fault.access() {
@@ -498,9 +498,7 @@ impl GuestAddressSpace {
     }
 
     fn prepare_backing_page(&mut self, page_index: usize) -> Result<PhysicalAddress, Error> {
-        let offset = (page_index as u64)
-            .checked_mul(PAGE_SIZE)
-            .ok_or(Error::AddressOverflow)?;
+        let offset = self.backing_offset(page_index)?;
         match &mut self.backing {
             #[cfg(feature = "kernel-self-test")]
             GuestMemoryBacking::KernelOwned(pages) => {
@@ -538,9 +536,7 @@ impl GuestAddressSpace {
     }
 
     fn backing_page_is_resident(&self, page_index: usize) -> Result<bool, Error> {
-        let offset = (page_index as u64)
-            .checked_mul(PAGE_SIZE)
-            .ok_or(Error::AddressOverflow)?;
+        let offset = self.backing_offset(page_index)?;
         match &self.backing {
             #[cfg(feature = "kernel-self-test")]
             GuestMemoryBacking::KernelOwned(pages) => pages
@@ -554,9 +550,7 @@ impl GuestAddressSpace {
     }
 
     fn backing_physical_page(&self, page_index: usize) -> Result<PhysicalAddress, Error> {
-        let offset = (page_index as u64)
-            .checked_mul(PAGE_SIZE)
-            .ok_or(Error::AddressOverflow)?;
+        let offset = self.backing_offset(page_index)?;
         match &self.backing {
             #[cfg(feature = "kernel-self-test")]
             GuestMemoryBacking::KernelOwned(pages) => pages
@@ -570,20 +564,33 @@ impl GuestAddressSpace {
         }
     }
 
-    fn page_index(&self, address: u64) -> Option<usize> {
+    pub(super) fn page_index(&self, address: u64) -> Option<usize> {
         let offset = address.checked_sub(self.ipa_base)?;
         if offset >= self.size {
             return None;
         }
-        usize::try_from(offset / PAGE_SIZE).ok()
+        match &self.backing {
+            #[cfg(feature = "kernel-self-test")]
+            GuestMemoryBacking::KernelOwned(_) => usize::try_from(offset / PAGE_SIZE).ok(),
+            GuestMemoryBacking::SharedVmo(backing) => backing.page_index(offset),
+        }
+    }
+
+    fn backing_offset(&self, page_index: usize) -> Result<u64, Error> {
+        match &self.backing {
+            #[cfg(feature = "kernel-self-test")]
+            GuestMemoryBacking::KernelOwned(_) => (page_index as u64)
+                .checked_mul(PAGE_SIZE)
+                .ok_or(Error::AddressOverflow),
+            GuestMemoryBacking::SharedVmo(backing) => {
+                backing.page_offset(page_index).ok_or(Error::InvalidRange)
+            }
+        }
     }
 
     fn page_ipa(&self, page_index: usize) -> Result<u64, Error> {
-        let offset = (page_index as u64)
-            .checked_mul(PAGE_SIZE)
-            .ok_or(Error::AddressOverflow)?;
         self.ipa_base
-            .checked_add(offset)
+            .checked_add(self.backing_offset(page_index)?)
             .ok_or(Error::AddressOverflow)
     }
 
@@ -617,13 +624,21 @@ impl ForeignMemory for GuestAddressSpace {
         page_offset: usize,
         destination: &mut [u8],
     ) -> Result<(), Self::Error> {
+        let linear_offset = (page_index as u64)
+            .checked_mul(PAGE_SIZE)
+            .ok_or(Error::AddressOverflow)?;
+        let address = self
+            .ipa_base
+            .checked_add(linear_offset)
+            .ok_or(Error::AddressOverflow)?;
+        let page_index = self.page_index(address).ok_or(Error::InvalidRange)?;
+
         if !self.backing_page_is_resident(page_index)? {
             destination.fill(0);
             return Ok(());
         }
-        let object_offset = (page_index as u64)
-            .checked_mul(PAGE_SIZE)
-            .and_then(|offset| offset.checked_add(page_offset as u64))
+        let object_offset = linear_offset
+            .checked_add(page_offset as u64)
             .ok_or(Error::AddressOverflow)?;
         match &self.backing {
             #[cfg(feature = "kernel-self-test")]
@@ -656,14 +671,22 @@ impl ForeignMemory for GuestAddressSpace {
         page_offset: usize,
         source: &[u8],
     ) -> Result<(), Self::Error> {
+        let linear_offset = (page_index as u64)
+            .checked_mul(PAGE_SIZE)
+            .ok_or(Error::AddressOverflow)?;
+        let address = self
+            .ipa_base
+            .checked_add(linear_offset)
+            .ok_or(Error::AddressOverflow)?;
+        let page_index = self.page_index(address).ok_or(Error::InvalidRange)?;
+
         self.commit_page(
             page_index,
             LeafPublication::Inactive,
             Stage2PagePermissions::ReadWrite,
         )?;
-        let object_offset = (page_index as u64)
-            .checked_mul(PAGE_SIZE)
-            .and_then(|offset| offset.checked_add(page_offset as u64))
+        let object_offset = linear_offset
+            .checked_add(page_offset as u64)
             .ok_or(Error::AddressOverflow)?;
         match &self.backing {
             #[cfg(feature = "kernel-self-test")]

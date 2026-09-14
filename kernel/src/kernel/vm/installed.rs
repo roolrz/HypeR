@@ -346,4 +346,21 @@ impl InstalledMachine {
     pub(in crate::kernel::vm) fn io_install_id(&self) -> Result<VmId, super::io::Error> {
         self.with_io_install(Ok)
     }
+
+    /// Publish only dynamic I/O routes or admitted memory into the platform's
+    /// reserved apertures. Unlike immutable topology installation this permits
+    /// a running backend, while excluding stop/retirement across the commit.
+    /// The callback must be nonblocking and must prepare allocations beforehand.
+    pub(in crate::kernel::vm) fn with_io_update<R>(
+        &self,
+        operation: impl FnOnce(VmId) -> Result<R, super::io::Error>,
+    ) -> Result<R, super::io::Error> {
+        self.state.with(|state| match state {
+            RuntimeState::Installed { id, .. } | RuntimeState::Running { id, .. } => operation(*id),
+            _ => Err(super::io::Error::BadState),
+        })
+    }
+    pub(in crate::kernel::vm) fn io_update_id(&self) -> Result<VmId, super::io::Error> {
+        self.with_io_update(Ok)
+    }
 }

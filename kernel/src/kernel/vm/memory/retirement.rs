@@ -116,18 +116,24 @@ impl GuestStage2Retirement {
         GuestStage2LocalRequest {
             allocation: self.allocation,
             hardware: self.request,
+            live: false,
         }
     }
 }
 
 #[derive(Clone, Copy)]
 pub(in crate::kernel) struct GuestStage2LocalRequest {
-    allocation: Stage2AllocationIdentity,
-    hardware: crate::hal::vm::GuestStage2RetirementRequest,
+    pub(super) allocation: Stage2AllocationIdentity,
+    pub(super) hardware: crate::hal::vm::GuestStage2RetirementRequest,
+    pub(super) live: bool,
 }
 
 pub(in crate::kernel) fn service_local_retirement(request: GuestStage2LocalRequest) {
-    crate::hal::vm::service_guest_stage2_retirement(request.hardware);
+    if request.live {
+        crate::hal::vm::service_guest_stage2_live(request.hardware);
+    } else {
+        crate::hal::vm::service_guest_stage2_retirement(request.hardware);
+    }
     if super::residency::clear_local_observations(request.allocation).is_err() {
         crate::kernel::crash::fatal(format_args!(
             "HypeR: guest retirement could not clear local observations"

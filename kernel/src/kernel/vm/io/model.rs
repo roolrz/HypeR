@@ -173,6 +173,11 @@ impl NotificationState {
         }
     }
     pub(crate) fn control(&mut self, operation: u32) -> Result<u32, Error> {
+        // Closing a peer already establishes Disable's postcondition; policy
+        // must still drain the surviving backend before removing its route.
+        if self.closed && operation == 0 {
+            return Ok(self.epoch);
+        }
         if self.closed && operation != 2 {
             return Err(Error::Closed);
         }

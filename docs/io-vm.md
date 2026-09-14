@@ -8,7 +8,8 @@ virtual hardware, launch policy, and authoritative DTS/DTB. The separate
 [HypeR-io-vm repository](https://github.com/roolrz/HypeR-io-vm) owns everything
 needed to produce the Linux appliance: pinned upstream Linux, configuration,
 external modules, Linux userspace services, initramfs assembly, tests, and
-package publication. This repository does not build Linux or patch its rootfs.
+package publication. This repository does not build Linux or modify appliance binaries. Board
+deployment adds a separate configuration archive to the Linux initramfs.
 
 The AArch64 QEMU baseline runs two Linux VMs: the I/O VM directly drives a
 QEMU virtio-scsi disk, and a business VM reaches it through standard virtio-scsi
@@ -16,29 +17,31 @@ and upstream vhost-scsi/LIO. A Native test deployment owns both VMs, their DTBs,
 shared memory and control transactions. It verifies disk contents independently
 on the host and checks DMA memory admission after both VMs retire.
 See [implementation status](status.md#linux-io-vm-baseline) for the acceptance
-boundary. Pi 5 device assignment and dynamic client attachment remain separate work.
+boundary. Pi 5 device assignment still requires hardware qualification.
+The board deployment path is described in [board storage](board-storage.md).
 
 ## Resident startup
 
-`make run` on AArch64 keeps the HypeR shell and starts `/svc/io-runtime` from
-`app/init/config/services-io.json`. Init explicitly delegates the physical-device
+`make run` on AArch64 uses the QEMU board configuration, keeps the HypeR shell,
+and starts `/svc/io-runtime` from the generated service manifest. Init explicitly delegates the physical-device
 capability only to this service and charges its VM to the bounded VM fleet.
 The service owns the VM, physical device and control mailbox. Guest power-off,
 control failure or runtime exit initiates VM retirement; failed physical reset
 continues to use the kernel's existing quarantine semantics. There is no
 automatic restart of an uncertain device owner.
 
-The appliance boots with `hyper.role=io hyper.mode=standby`: LIO prepares the
-physical disk and the Linux service probes vhost-scsi, answers HELLO, then blocks
-on its control mailbox. No business VM, client RAM, notification binding or
-virtqueue is created. ACTIVATE without a provisioned client is rejected. This
-is an idle storage backend, not yet a Native filesystem mount or a dynamically
-attachable disk service. The separately configured Alpine VM has no connection
-to this backend and is not automatically started by the I/O profile.
+The board profile prepares dm-linear volumes and mounts HypeR's configuration
+volume at `/data` before init provisions the configured business VMs. Business
+VMs are started only when their configuration requests autostart or through
+`vmm start`. `make run RUN_PROFILE=io` retains the explicit standby diagnostic
+profile: it boots a resident backend without mounting Native storage or
+provisioning business clients.
 
-The launcher creates `target/app/aarch64/io-disk.img` once and never truncates
-an existing image. `IO_VM_DISK` selects another raw image; `RUN_PROFILE=native`
-selects the previous boot profile. `IO_VM_PACKAGE` can override the downloaded
+The default board profile creates `target/board/qemu/disk.img` once and validates
+existing images without replacing their persistent contents. `BOARD_IMAGE`
+selects another board disk. The diagnostic `RUN_PROFILE=io` instead creates
+`target/app/aarch64/io-disk.img`; `IO_VM_DISK` overrides that diagnostic disk.
+`RUN_PROFILE=native` selects the previous boot profile. `IO_VM_PACKAGE` can override the downloaded
 package with a complete, locally qualified boot generation. The importer also
 accepts `IO_VM_REFERENCE` for an explicit digest and `IO_VM_ORAS` for ORAS.
 
@@ -75,12 +78,14 @@ Release adoption requires an explicit digest update. An incompatible package for
 architecture/platform, missing artifact, or failed checksum aborts import.
 Download and verification finish before a new generation becomes visible;
 failed updates leave the previously selected generation intact.
-The complete appliance has passed the QEMU integration tests below. The
-qualified QEMU package is published in GHCR; its immutable reference and source
-revision are pinned in [io-vm.lock.json](../scripts/io-vm.lock.json).
+The common AArch64 appliance is published as a prerelease in GHCR. Both QEMU
+and Pi 5 entries in [io-vm.lock.json](../scripts/io-vm.lock.json) pin the same
+immutable reference and source revision. Its supported-platforms metadata
+records compiled driver capabilities; it does not certify Pi hardware operation.
+The QEMU build/test and publication runs are recorded alongside the digest.
 The import command also accepts `IO_VM_REFERENCE` explicitly. The qualified QEMU
 fixture consumes the imported generation. The ordinary AArch64 `make run`
-profile also imports it to start a resident, idle I/O VM under Native init.
+profile also imports it to start the board-managed I/O VM under Native init.
 
 The I/O VM repository owns the pinned upstream LTS version and builds each
 external module against the exact kernel configuration and release. HypeR
@@ -92,6 +97,42 @@ DTBs are generated by HypeR from admitted hardware and mapping facts. A Linux
 package must not supply the authoritative DTB. A host DTB must not be copied
 wholesale into a VM: that would advertise resources the VM does not own.
 `hyper-vm-image` remains the owner of the runtime-generated guest DTB.
+
+## Board-managed clients
+
+`make board-run BOARD=qemu` uses the board-generated client table. Client zero
+is HypeR's configuration volume, mounted by the kernel at `/data`; init waits
+for an explicit readiness record before opening `/data/vms.json`. This is also
+the default AArch64 `make run` profile.
+
+A VM definition may include `"disk": {"client": 1, "volume": "alpine"}`. The
+manager creates a unique capability session for that runtime. The I/O runtime
+checks both fields against `/etc/hyper/io-clients.conf`, generated from the same
+board JSON as the Linux volume table. Duplicate active bindings are refused.
+`vmm create` accepts `--disk-client` and `--disk-volume`; `vmm save` retains them.
+
+The fleet has a finite allowance for eight business VMs plus the resident I/O
+VM and manager overhead. Physical memory admission remains fallible; the quota
+does not reserve backing RAM in advance.
+
+The I/O runtime owns each control mailbox and notification capability. The
+per-VM runtime handles virtio configuration MMIO and exchanges only negotiation
+and notification enable/disable commands over its dedicated channel. Virtqueue
+kicks, completions, and disk data continue through the direct kernel route and
+shared pages. There is no storage-request relay through either Native service.
+
+Normal guest RAM remains noncontiguous. A single guest-memory grant is mapped
+into the frontend and admitted into the I/O VM using an immutable, token-scoped
+extent table. Dynamic aliases use the fixed physical-address translation;
+static I/O RAM and the configuration client's ranges are excluded from that
+translation to avoid ambiguous DMA reverse mappings.
+
+Closing a runtime session revokes its connection: disable new notifications,
+reset and drain vhost, release the Linux mappings, obtain the kernel's
+quiescence proof, then remove the old notification routes. A new binding gets
+a new generation. Any failure to establish quiescence stops the I/O VM and
+retains uncertain DMA storage until actual device retirement. A timeout alone
+never authorizes memory reuse.
 
 ## Storage protocol and control ownership
 
@@ -139,9 +180,9 @@ and guest-visible capabilities.
 
 Direct queue consumption requires Linux to access queue metadata, responses,
 and every guest data buffer referenced by descriptors. The trusted deployment
-may grant an entire business VM's RAM. Future Native HypeR storage clients
-should use an explicitly shared I/O pool; that client integration is not part
-of this baseline. The rest of HypeR memory is not exported.
+may grant an entire business VM's RAM. The Native configuration-volume client
+uses a dedicated 128 KiB shared I/O pool for its queues and bounded data
+transfers. The rest of HypeR memory is not exported.
 
 The same physical pages must remain owned and stable until all backend CPU and
 DMA users have retired. Guest physical, I/O VM physical, Linux virtual, host
@@ -162,11 +203,15 @@ derived page owner retires. This is an explicit alternative to sparse VMOs,
 not implicit DMA authority: device assignment, DMA address translation, and
 quiescence still require their own ownership and validation.
 
-The I/O VM's imported region appears as both a Linux memory node and a
-reserved-memory node, without `no-map` or `reusable`. Linux creates `struct page`
-metadata, but its allocator cannot claim those pages. The external module maps
-them into the vhost owner; the vhost memory table translates original business
-GPAs to that mapping. The physical device bus has explicit `dma-ranges` tuples
+Static imports, including the configuration client's pool and the legacy test
+fixture, appear as Linux memory and reserved-memory nodes without `no-map` or
+`reusable`. Linux creates `struct page` metadata but cannot allocate those pages.
+Dynamic business clients instead advertise an aperture, without declaring it
+as RAM. After token admission, the external module registers device-page
+metadata and maps only the authorized scatter extents into a contiguous
+userspace view. The vhost memory table translates frontend GPAs into that view.
+Release drains vhost and drops Linux mappings and page references before the
+module reports quiescence. The physical device bus has explicit `dma-ranges` tuples
 (HypeR HPA, I/O VM GPA, length), covering both ordinary and imported RAM.
 
 The QEMU test exercises imported-page I/O with nonidentity DMA translation and
@@ -195,8 +240,9 @@ credentials belong to the local registry configuration, never to the repository.
 Only the runtime payload is fetched. The OCI manifest also identifies the
 matching configuration and corresponding-source archive for redistribution.
 To qualify another generation, pass
-`IO_VM_REFERENCE=ghcr.io/OWNER/PACKAGE@sha256:DIGEST` explicitly. Pi 5 has no
-default package until its separate hardware qualification is complete.
+`IO_VM_REFERENCE=ghcr.io/OWNER/PACKAGE@sha256:DIGEST` explicitly.
+`make io-vm-fetch IO_VM_PLATFORM=rpi5` verifies the same common package against
+its Pi capability metadata. The lock explicitly records `hardware_qualified: false`.
 
 Linux build instructions and the vhost-scsi reserved-page acceptance test live
 in [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm). They run in that
@@ -227,8 +273,10 @@ configurations on pull requests and main pushes using the pinned package.
 Manual dispatch can override the public immutable reference. Its local
 equivalent is `sh tests/ci/run.sh io-vm`; set `IO_VM_REFERENCE` to qualify
 another generation explicitly.
-The pinned package has passed both the complete CI artifact tests and import
-from GHCR. Updating its lock entry requires qualifying the exact new build.
+The pinned package has passed its appliance build/tests, publication verification
+and import from GHCR. The board-managed Native FAT and business-client tests
+are additional HypeR acceptance paths, documented in [board storage](board-storage.md).
+Updating the lock requires qualifying the exact new build.
 
 Physical virtio discovery accepts the trigger declared by firmware, including
 QEMU's edge-triggered SPIs. Active physical edge sources remain enabled;
@@ -256,3 +304,14 @@ still need dedicated qualification. Pi 5 must additionally validate DMA address
 translation, cache maintenance, interrupt ordering, device reset, and measured
 image sizes. Failed physical quiescence quarantines the owner and its pages;
 this baseline does not provide automatic recovery of quarantined devices.
+
+### Native mapping release retries
+
+`guest_mapping_release` reports `WOULD_BLOCK` when another operation owns the
+all-CPU translation synchronization transport. No mapping state has changed;
+retry the same release without repeating Linux RESET/RELEASE. `BUSY` instead
+means that the backend has not yet supplied the mapping's quiescence proof.
+Other failures are not treated as proof or silently retried. The I/O broker
+bounds transport retries to five seconds, sleeps between attempts, and keeps
+processing backend console and power notifications. A failed retirement keeps
+its mapping ownership and enters the backend shutdown/quarantine path.

@@ -56,6 +56,7 @@ struct FleetManager {
     fleet_domain: OwnedHandle<ResourceDomainObject>,
     authority: OwnedHandle<hyper_os::handle::VirtualMachineCreationAuthorityObject>,
     provisioning: CapabilityChannel,
+    io_broker: Option<CapabilityChannel>,
     connections: listener::Listener,
     root: Directory,
     machines: Vec<Machine>,
@@ -75,6 +76,9 @@ impl FleetManager {
             fleet_domain: startup.take(startup::RESOURCE_DOMAIN)?,
             authority: startup.take(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)?,
             provisioning: CapabilityChannel::from_handle(startup.take(vm_contract::PROVISIONING)?),
+            io_broker: startup
+                .take_optional(hyper_service::io::BROKER_CLIENT)?
+                .map(CapabilityChannel::from_handle),
             connections: listener::Listener::start(CapabilityChannel::from_handle(
                 startup.take(vm_contract::MANAGER_CONNECTION)?,
             ))?,
@@ -317,6 +321,15 @@ impl FleetManager {
             {
                 return Err(format!("VM '{}' already exists", definition.name));
             }
+            if let Some(disk) = &definition.disk
+                && self
+                    .machines
+                    .iter()
+                    .filter_map(|machine| machine.definition.disk.as_ref())
+                    .any(|other| other.client == disk.client || other.volume == disk.volume)
+            {
+                return Err(format!("disk volume '{}' is already assigned", disk.volume));
+            }
             let rights = hyper_os::fs::FileRights::from_rights(vm_contract::MANAGED_IMAGE_RIGHTS)
                 .ok_or("invalid image rights")?;
             let image = self
@@ -433,6 +446,7 @@ impl FleetManager {
             name: definition.name.clone(),
             image: definition.image.clone(),
             autostart: definition.autostart,
+            disk: definition.disk.clone(),
             state,
         }
     }
@@ -626,6 +640,33 @@ impl FleetManager {
                 ),
             )
             .map_err(|failure| failure.error())?;
+        if let Some(disk) = &definition.definition.disk {
+            let broker = self
+                .io_broker
+                .as_ref()
+                .ok_or(hyper_os::Error::MissingHandle)?;
+            let (owner, runtime) = CapabilityChannel::create()?;
+            builder
+                .add_handle_move(
+                    runtime.into_handle(),
+                    hyper_service::io::SESSION.as_raw(),
+                    RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
+                )
+                .map_err(|failure| failure.error())?;
+            let mut owner = Some(owner.into_handle());
+            let record = hyper_service::io::encode_connect(disk.client, &disk.volume)
+                .ok_or(hyper_os::Error::InvalidResponse)?;
+            let disposition = CapabilityDisposition::move_handle(
+                &mut owner,
+                RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
+            )?;
+            hyper_service::io::send_capabilities(
+                broker,
+                &record,
+                &mut [disposition],
+                hyper_os::time::deadline_after(Duration::from_secs(30))?.as_raw(),
+            )?;
+        }
         builder.seal()?;
         let runtime = builder.start().map_err(|failure| failure.error())?;
         self.machines[vm].instance = Some(VmInstance {
@@ -640,6 +681,17 @@ impl FleetManager {
             exit_deadline: None,
         });
         self.machines[vm].failed = false;
+        #[cfg(feature = "broker-test")]
+        if self
+            .machines
+            .iter()
+            .filter(|machine| machine.instance.is_some())
+            .count()
+            == 2
+        {
+            self.io_broker = None;
+            println!("BROKER-TEST MANAGER-ENDPOINT-CLOSED");
+        }
         Ok(())
     }
 

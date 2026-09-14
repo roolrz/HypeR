@@ -68,6 +68,25 @@ class ImportTests(unittest.TestCase):
         self.assertEqual({p.name for p in result.iterdir()},
                          {"Image", "initramfs.cpio.gz", "oci-manifest.json"})
 
+    def test_same_common_digest_imports_for_both_boards(self):
+        self.manifest['annotations']['org.hyper.supported-platforms'] = '["qemu","rpi5"]'
+        self.pin()
+        with patch.object(FETCH.subprocess, 'run', side_effect=self.registry):
+            qemu = self.fetch()
+            pi = FETCH.fetch(self.reference, 'rpi5', self.output)
+        self.assertEqual(pi, qemu)
+        self.assertEqual(len(self.calls), 3)
+
+    def test_malformed_common_capabilities_are_rejected(self):
+        for capabilities in ('[]', '["rpi5"]', '["qemu","qemu"]',
+                             '["qemu","unknown"]', '"qemu"', '{}', 'null'):
+            with self.subTest(capabilities=capabilities):
+                self.manifest['annotations']['org.hyper.supported-platforms'] = capabilities
+                self.pin()
+                with patch.object(FETCH.subprocess, 'run', side_effect=self.registry):
+                    with self.assertRaises(ValueError):
+                        self.fetch()
+
     def test_tags_rejected_without_registry_access(self):
         with patch.object(FETCH.subprocess, "run") as run:
             with self.assertRaises(ValueError):

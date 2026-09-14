@@ -97,6 +97,10 @@ pub use smp::{
 };
 pub(crate) use stage2::retire_local as retire_guest_stage2_local;
 pub use stage2::{Error as Stage2Error, Stage2AddressSpace};
+pub(crate) use stage2::{
+    publish_changes as publish_guest_stage2_changes,
+    synchronize_local as synchronize_guest_stage2_local,
+};
 pub(crate) use stage2_retirement::Request as GuestStage2RetirementRequest;
 pub use timer::{
     ArmGenericCounter as ArchitectureCounter, El2PhysicalTimer as ArchitectureTimer,

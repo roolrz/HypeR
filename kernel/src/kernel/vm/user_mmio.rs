@@ -21,12 +21,7 @@ impl InstalledMachine {
         length: u64,
         device: u64,
     ) -> Result<(), Error> {
-        if !crate::kernel::vm::device::supports_userspace_mmio(
-            self.configuration.platform_profile,
-            base,
-            length,
-        ) || device == 0
-        {
+        if device == 0 || length == 0 {
             return Err(Error::BadState);
         }
         let end = base.checked_add(length).ok_or(Error::BadState)?;
@@ -38,11 +33,17 @@ impl InstalledMachine {
                 RuntimeState::Installed { id, .. } => *id,
                 _ => return Err(Error::BadState),
             };
-            if crate::kernel::vm::registry::with_binding(id, |binding| {
-                binding.io_range_conflicts(base, length)
-            })
-            .unwrap_or(true)
-            {
+            // Keep the generation-qualified lease through route publication.
+            // The lifecycle lock serializes this with other route installation
+            // and first start; a physical window is never an ambient aperture.
+            let binding =
+                crate::kernel::vm::registry::acquire_binding(id).map_err(|_| Error::BadState)?;
+            let permitted = crate::kernel::vm::device::supports_userspace_mmio(
+                self.configuration.platform_profile,
+                base,
+                length,
+            ) || binding.owns_userspace_assignment_aperture(base, length);
+            if !permitted || binding.io_range_conflicts(base, length) {
                 return Err(Error::BadState);
             }
             self.mmio_regions.with(|regions| {

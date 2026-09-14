@@ -108,9 +108,15 @@
       "capabilities": [
         {
           "source": "bootstrap.shell-input-channel",
+          "purpose": "stdio.terminal-input",
+          "operation": "duplicate",
+          "rights": ["wait", "read", "duplicate", "transfer", "inspect"]
+        },
+        {
+          "source": "bootstrap.shell-input-channel",
           "purpose": "stdio.input",
           "operation": "move",
-          "rights": ["wait", "read", "duplicate", "transfer"]
+          "rights": ["wait", "read", "duplicate", "transfer", "inspect"]
         },
         {
           "source": "bootstrap.shell-output-channel",

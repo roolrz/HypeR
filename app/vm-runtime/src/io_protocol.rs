@@ -22,6 +22,13 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Command {
     Hello,
+    Prepare {
+        alias: u64,
+        guest_base: u64,
+        length: u64,
+        mapping_token: u64,
+    },
+    Release,
     Device(BackendOperation),
 }
 
@@ -29,6 +36,8 @@ impl Command {
     const fn opcode(self) -> u16 {
         match self {
             Self::Hello => 1,
+            Self::Prepare { .. } => 5,
+            Self::Release => 6,
             Self::Device(BackendOperation::Activate { .. }) => 2,
             Self::Device(BackendOperation::Reset) => 3,
             Self::Device(BackendOperation::StopQueue { .. }) => 4,
@@ -45,12 +54,67 @@ pub struct Request {
 }
 
 impl Request {
+    /// Canonical decoding for the Native broker: callers still restrict which
+    /// operations a runtime may request on its already-authorized binding.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let command = match u16_at(bytes, 6)? {
+            1 => Command::Hello,
+            3 => Command::Device(BackendOperation::Reset),
+            4 => Command::Device(BackendOperation::StopQueue {
+                queue: u32_at(bytes, 40)?,
+            }),
+            5 => Command::Prepare {
+                alias: u64_at(bytes, 40)?,
+                guest_base: u64_at(bytes, 48)?,
+                length: u64_at(bytes, 56)?,
+                mapping_token: u64_at(bytes, 64)?,
+            },
+            6 => Command::Release,
+            2 => {
+                let mut queues = [crate::virtio_scsi::Queue {
+                    size: 0,
+                    descriptor: 0,
+                    available: 0,
+                    used: 0,
+                    ready: false,
+                }; QUEUES];
+                for (index, queue) in queues.iter_mut().enumerate() {
+                    let offset = 48 + index * 32;
+                    *queue = crate::virtio_scsi::Queue {
+                        size: u32_at(bytes, offset)?,
+                        descriptor: u64_at(bytes, offset + 8)?,
+                        available: u64_at(bytes, offset + 16)?,
+                        used: u64_at(bytes, offset + 24)?,
+                        ready: true,
+                    };
+                }
+                Command::Device(BackendOperation::Activate {
+                    features: u64_at(bytes, 40)?,
+                    queues,
+                })
+            }
+            _ => return Err(Error::InvalidRecord),
+        };
+        let request = Self {
+            binding: u64_at(bytes, 16)?,
+            epoch: u32::try_from(u64_at(bytes, 24)?).map_err(|_| Error::InvalidRecord)?,
+            transaction: u64_at(bytes, 32)?,
+            command,
+        };
+        let mut canonical = [0; MAX_RECORD];
+        let length = request.encode(&mut canonical)?;
+        if canonical.get(..length) != Some(bytes) {
+            return Err(Error::InvalidRecord);
+        }
+        Ok(request)
+    }
     pub fn encode(self, output: &mut [u8; MAX_RECORD]) -> Result<usize, Error> {
         if self.binding == 0 || self.epoch == 0 || self.transaction == 0 {
             return Err(Error::InvalidIdentity);
         }
         let length = match self.command {
-            Command::Hello | Command::Device(BackendOperation::Reset) => HEADER,
+            Command::Hello | Command::Release | Command::Device(BackendOperation::Reset) => HEADER,
+            Command::Prepare { .. } => 72,
             Command::Device(BackendOperation::Activate { .. }) => 144,
             Command::Device(BackendOperation::StopQueue { .. }) => 48,
         };
@@ -63,6 +127,26 @@ impl Request {
         output[24..32].copy_from_slice(&u64::from(self.epoch).to_le_bytes());
         output[32..40].copy_from_slice(&self.transaction.to_le_bytes());
         match self.command {
+            Command::Prepare {
+                alias,
+                guest_base,
+                length,
+                mapping_token,
+            } => {
+                if length == 0
+                    || !alias.is_multiple_of(4096)
+                    || !guest_base.is_multiple_of(4096)
+                    || !length.is_multiple_of(4096)
+                    || alias.checked_add(length).is_none()
+                    || guest_base.checked_add(length).is_none()
+                {
+                    return Err(Error::InvalidRecord);
+                }
+                output[40..48].copy_from_slice(&alias.to_le_bytes());
+                output[48..56].copy_from_slice(&guest_base.to_le_bytes());
+                output[56..64].copy_from_slice(&length.to_le_bytes());
+                output[64..72].copy_from_slice(&mapping_token.to_le_bytes());
+            }
             Command::Device(BackendOperation::Activate { features, queues }) => {
                 output[40..48].copy_from_slice(&features.to_le_bytes());
                 for (queue, chunk) in queues.iter().zip(output[48..144].chunks_exact_mut(32)) {

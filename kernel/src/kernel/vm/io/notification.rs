@@ -11,20 +11,33 @@ use crate::kernel::object::{
     KernelObject, ObjectKind, ObjectRetirement, SignalMask, SignalSource, SignalState,
     TransferClass, private,
 };
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+static NEXT_ROUTE: AtomicU64 = AtomicU64::new(1);
+fn new_route_id() -> Result<u64, Error> {
+    NEXT_ROUTE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .map_err(|_| Error::ResourceLimit)
+}
 use hyper::mm::FallibleArc;
 use hyper::sync::InterruptSpinLock;
 use hyper::vm::exit::{MmioAccess, MmioAction, MmioOperation};
 
 pub(crate) struct Shared {
-    front: VmId,
+    pub(super) route_id: u64,
+    front: Option<VmId>,
     back: VmId,
     pub(super) front_base: u64,
     pub(super) back_base: u64,
     pub(super) front_irq: u32,
     pub(super) back_irq: u32,
     state: InterruptSpinLock<model::NotificationState, crate::hal::irq::LocalMask>,
+    admission:
+        InterruptSpinLock<super::super::memory::admission::Reply, crate::hal::irq::LocalMask>,
     installed: AtomicBool,
+    detached: AtomicBool,
     signals: SignalState,
     _charge: CommittedCharge,
 }
@@ -32,10 +45,15 @@ impl Shared {
     fn mutate<R>(&self, operation: impl FnOnce(&mut model::NotificationState) -> R) -> R {
         // Either peer can leave the registry independently. Keep the surviving
         // MMIO endpoint operational and let Native policy report device failure.
-        let front = super::super::registry::acquire_binding(self.front).ok();
+        let front = self
+            .front
+            .and_then(|id| super::super::registry::acquire_binding(id).ok());
         let back = super::super::registry::acquire_binding(self.back).ok();
         let value = self.state.with(|state| {
-            if front.is_none() || back.is_none() {
+            if self.detached.load(Ordering::Acquire) {
+                return operation(state);
+            }
+            if (self.front.is_some() && front.is_none()) || back.is_none() {
                 state.close();
             }
             let value = operation(state);
@@ -45,11 +63,19 @@ impl Shared {
             if let Some(back) = &back {
                 super::set_line(back, self.back_irq, state.back_irq());
             }
-            if state.closed
-                && self
-                    .signals
-                    .update(SignalMask::EMPTY, SignalMask::from_trusted_bits(1))
-                    .is_err()
+            let signals = u64::from(state.closed)
+                | if self.front.is_none() {
+                    u64::from(state.status) << 1
+                } else {
+                    0
+                };
+            if self
+                .signals
+                .update(
+                    SignalMask::from_trusted_bits(7),
+                    SignalMask::from_trusted_bits(signals),
+                )
+                .is_err()
             {
                 crate::hal::cpu::halt();
             }
@@ -93,6 +119,35 @@ impl Shared {
     }
     pub(super) fn back_mmio(&self, access: MmioAccess) -> MmioAction {
         let offset = access.address().get() - self.back_base;
+        if (0x20..=0x70).contains(&offset) {
+            if access.size() != 8 {
+                return MmioAction::Stop;
+            }
+            return self.admission.with(|reply| {
+                if self.detached.load(Ordering::Acquire) {
+                    return MmioAction::Stop;
+                }
+                match (offset, access.operation()) {
+                    (0x20, MmioOperation::Write(token)) => {
+                        reply.quiesce(self.back, self.route_id, token);
+                        MmioAction::CompleteWrite
+                    }
+                    (0x28, MmioOperation::Write(token)) => {
+                        reply.admit(self.back, self.route_id, token);
+                        MmioAction::CompleteWrite
+                    }
+                    (0x50, MmioOperation::Write(index)) => {
+                        reply.select(self.back, self.route_id, index);
+                        MmioAction::CompleteWrite
+                    }
+                    (offset, MmioOperation::Read) => reply
+                        .read(offset)
+                        .map_or(MmioAction::Stop, MmioAction::CompleteRead),
+                    _ => MmioAction::Stop,
+                }
+            });
+        }
+
         self.mutate(|state| match (offset, access.size(), access.operation()) {
             (0x00, 4, MmioOperation::Read) => MmioAction::CompleteRead(0x4859_4e42),
             (0x04, 4, MmioOperation::Read) => MmioAction::CompleteRead(1),
@@ -129,20 +184,23 @@ impl Notification {
             return Err(Error::InvalidArgument);
         }
         let front = front.io_install_id()?;
-        let back = back.io_install_id()?;
+        let back = back.io_update_id()?;
         if front == back {
             return Err(Error::InvalidArgument);
         }
         let charge = super::charge::<Self, Shared>(domain)?;
         let shared = FallibleArc::try_new(Shared {
-            front,
+            route_id: new_route_id()?,
+            front: Some(front),
             back,
             front_base,
             back_base,
             front_irq,
             back_irq,
             state: InterruptSpinLock::new(model::NotificationState::new()),
+            admission: InterruptSpinLock::new(super::super::memory::admission::Reply::new()),
             installed: AtomicBool::new(false),
+            detached: AtomicBool::new(false),
             signals: SignalState::new(),
             _charge: charge,
         })
@@ -159,7 +217,7 @@ impl Notification {
             let back_route = Route::NotificationBack(self.shared.clone());
             front.validate_io_route(&front_route)?;
             back.validate_io_route(&back_route)?;
-            super::with_irq_binding(self.shared.front, |front_binding| {
+            super::with_irq_binding(self.shared.front.ok_or(Error::BadState)?, |front_binding| {
                 super::with_irq_binding(self.shared.back, |back_binding| {
                     front_binding.preflight_io_route(&front_route)?;
                     back_binding.preflight_io_route(&back_route)?;
@@ -177,12 +235,12 @@ impl Notification {
                 })?
             })?
         };
-        if self.shared.front < self.shared.back {
+        if self.shared.front.ok_or(Error::BadState)? < self.shared.back {
             front.with_io_install(|id| {
-                if id != self.shared.front {
+                if Some(id) != self.shared.front {
                     return Err(Error::BadState);
                 }
-                back.with_io_install(|id| {
+                back.with_io_update(|id| {
                     if id != self.shared.back {
                         return Err(Error::BadState);
                     }
@@ -190,12 +248,12 @@ impl Notification {
                 })
             })
         } else {
-            back.with_io_install(|id| {
+            back.with_io_update(|id| {
                 if id != self.shared.back {
                     return Err(Error::BadState);
                 }
                 front.with_io_install(|id| {
-                    if id != self.shared.front {
+                    if Some(id) != self.shared.front {
                         return Err(Error::BadState);
                     }
                     commit()
@@ -203,7 +261,150 @@ impl Notification {
             })
         }
     }
+    /// A Native client uses the same backend register contract, with durable
+    /// scheduler signals replacing the frontend guest interrupt line.
+    pub(crate) fn prepare_native(
+        back: &FallibleArc<InstalledMachine>,
+        back_base: u64,
+        back_irq: u32,
+        domain: &ResourceDomain,
+    ) -> Result<Self, Error> {
+        if !super::valid_location(back_base, back_irq) {
+            return Err(Error::InvalidArgument);
+        }
+        let shared = FallibleArc::try_new(Shared {
+            route_id: new_route_id()?,
+            front: None,
+            back: back.io_install_id()?,
+            front_base: 0,
+            back_base,
+            front_irq: 0,
+            back_irq,
+            state: InterruptSpinLock::new(model::NotificationState::new()),
+            admission: InterruptSpinLock::new(super::super::memory::admission::Reply::new()),
+            installed: AtomicBool::new(false),
+            detached: AtomicBool::new(false),
+            signals: SignalState::new(),
+            _charge: super::charge::<Self, Shared>(domain)?,
+        })
+        .map_err(|_| Error::NoMemory)?;
+        Ok(Self { shared })
+    }
+
+    pub(crate) fn install_native(&self, back: &FallibleArc<InstalledMachine>) -> Result<(), Error> {
+        if self.shared.front.is_some() {
+            return Err(Error::BadState);
+        }
+        back.with_io_install(|id| {
+            if id != self.shared.back {
+                return Err(Error::BadState);
+            }
+            let route = Route::NotificationBack(self.shared.clone());
+            back.validate_io_route(&route)?;
+            super::with_irq_binding(id, |binding| {
+                binding.preflight_io_route(&route)?;
+                binding.install_io_route(route)?;
+                self.shared.installed.store(true, Ordering::Release);
+                Ok(())
+            })?
+        })
+    }
+
+    pub(crate) fn kick_native(&self, queue: u32) -> Result<(), Error> {
+        self.shared.mutate(|state| {
+            if state.closed || !state.enabled {
+                return Err(Error::BadState);
+            }
+            state.kick(u64::from(queue));
+            Ok(())
+        })
+    }
+
+    pub(crate) fn acknowledge_native(&self) {
+        self.shared.mutate(|state| state.ack(1));
+    }
+
+    pub(crate) fn native_signal_source(&self) -> SignalSource<'_> {
+        SignalSource::new(&self.shared.signals, SignalMask::from_trusted_bits(7))
+    }
+
+    pub(crate) fn closed_signal_source(&self) -> SignalSource<'_> {
+        SignalSource::new(&self.shared.signals, SignalMask::from_trusted_bits(1))
+    }
+
+    pub(crate) fn close_native(&self) {
+        self.shared.close();
+    }
+
+    fn disconnect(&self) -> Result<u32, Error> {
+        let front = self
+            .shared
+            .front
+            .and_then(|id| super::super::registry::acquire_binding(id).ok());
+        let back = super::super::registry::acquire_binding(self.shared.back).ok();
+        // Admission is serialized with permanent withdrawal. Once detached,
+        // even an already cloned old route can never affect a new binding.
+        let detached = self.shared.admission.with(|_| {
+            if self.shared.detached.load(Ordering::Acquire) {
+                return Err(Error::BadState);
+            }
+            if back.as_ref().is_some_and(|binding| {
+                binding.with_address_space(|space| {
+                    space
+                        .live
+                        .slots
+                        .iter()
+                        .flatten()
+                        .any(|record| record.state.owns(self.shared.route_id))
+                })
+            }) {
+                return Err(Error::Busy);
+            }
+            self.shared.state.with(|state| {
+                state.close();
+                if self
+                    .shared
+                    .signals
+                    .update(
+                        SignalMask::from_trusted_bits(7),
+                        SignalMask::from_trusted_bits(1),
+                    )
+                    .is_err()
+                {
+                    crate::hal::cpu::halt();
+                }
+                if let Some(front) = &front {
+                    super::set_line(front, self.shared.front_irq, false);
+                }
+                if let Some(back) = &back {
+                    super::set_line(back, self.shared.back_irq, false);
+                }
+                self.shared.detached.store(true, Ordering::Release);
+                let removed_front = front
+                    .as_ref()
+                    .and_then(|binding| binding.remove_io_notification(self.shared.route_id));
+                let removed_back = back
+                    .as_ref()
+                    .and_then(|binding| binding.remove_io_notification(self.shared.route_id));
+                Ok((state.epoch, removed_front, removed_back))
+            })
+        })?;
+        if let Some(front) = front {
+            front.publish_changed_interrupts();
+        }
+        if let Some(back) = back {
+            back.publish_changed_interrupts();
+        }
+        let (epoch, front_route, back_route) = detached;
+        drop(front_route);
+        drop(back_route);
+        Ok(epoch)
+    }
+
     pub(crate) fn control(&self, operation: u32) -> Result<u32, Error> {
+        if operation == hyper::abi::native::HYPER_NATIVE_GUEST_NOTIFICATION_DISCONNECT as u32 {
+            return self.disconnect();
+        }
         self.shared
             .mutate(|state| state.control(operation))
             .map_err(Into::into)

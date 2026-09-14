@@ -71,6 +71,22 @@ enum Work {
     FinishDirectory(PathBuf, fs::Permissions),
 }
 
+fn permissions(path: &Path, permissions: fs::Permissions) -> io::Result<()> {
+    match fs::set_permissions(path, permissions) {
+        // A data copy is useful on filesystems such as FAT which cannot
+        // represent Unix permission bits. Other failures remain errors.
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => Ok(()),
+        result => result,
+    }
+}
+
+fn copy_regular(source: &Path, target: &Path, mode: fs::Permissions) -> io::Result<()> {
+    let mut source = fs::File::open(source)?;
+    let mut destination = fs::File::create(target)?;
+    io::copy(&mut source, &mut destination)?;
+    permissions(target, mode)
+}
+
 pub fn copy(source: &Path, target: &Path, recursive: bool) -> io::Result<()> {
     // Keep directory depth off the application stack. Apply new directory
     // permissions after copying their children, so restrictive modes work too.
@@ -79,7 +95,7 @@ pub fn copy(source: &Path, target: &Path, recursive: bool) -> io::Result<()> {
         let (source, target) = match work {
             Work::Copy(source, target) => (source, target),
             Work::FinishDirectory(path, permissions) => {
-                fs::set_permissions(path, permissions)?;
+                self::permissions(&path, permissions)?;
                 continue;
             }
         };
@@ -118,7 +134,7 @@ pub fn copy(source: &Path, target: &Path, recursive: bool) -> io::Result<()> {
                 pending.push(Work::Copy(entry.path(), target.join(entry.file_name())));
             }
         } else if metadata.is_file() {
-            fs::copy(&source, &target)?;
+            copy_regular(&source, &target, metadata.permissions())?;
         } else {
             return Err(io::Error::other("unsupported source file type"));
         }

@@ -93,6 +93,7 @@ pub const MANAGER_STARTUP_CONTRACTS: &[StartupContract] = &[
     MANAGER_PROVISIONING_CONTRACT,
     MANAGER_CREATION_AUTHORITY_CONTRACT,
     MANAGER_CONNECTION_CONTRACT,
+    crate::io::BROKER_CLIENT_CONTRACT,
 ];
 
 pub const RUNTIME_IMAGE_CONTRACT: StartupContract =
@@ -121,6 +122,7 @@ pub const RUNTIME_STARTUP_CONTRACTS: &[StartupContract] = &[
     RUNTIME_CREATION_LEASE_CONTRACT,
     RUNTIME_INSTANCE_CONTROL_CONTRACT,
     RUNTIME_CONSOLE_CONNECTION_CONTRACT,
+    crate::io::SESSION_CONTRACT,
 ];
 
 pub const CLIENT_CONTROL_CONTRACT: StartupContract = StartupContract::exact(
@@ -630,6 +632,7 @@ mod tests {
                 RUNTIME_CREATION_LEASE_CONTRACT,
                 RUNTIME_INSTANCE_CONTROL_CONTRACT,
                 RUNTIME_CONSOLE_CONNECTION_CONTRACT,
+                crate::io::SESSION_CONTRACT,
             ]
         );
         for (index, contract) in RUNTIME_STARTUP_CONTRACTS.iter().enumerate() {

@@ -258,12 +258,14 @@ impl TaskInspector {
     pub(crate) fn scan_processes(
         &self,
         cursor: u64,
-    ) -> Result<Page<ProcessSnapshot, PROCESS_PAGE_CAPACITY>, Error> {
+        output: &mut Page<ProcessSnapshot, PROCESS_PAGE_CAPACITY>,
+    ) -> Result<(), Error> {
         if !self.visibility.contains(TaskVisibility::PROCESS_BASIC) {
             return Err(Error::AccessDenied);
         }
         let source = crate::kernel::process::scan(ProcessScanCursor::from_token(cursor));
-        let mut output = Page::empty();
+        output.len = 0;
+        output.next = 0;
         for process in source.entries() {
             let snapshot = process.snapshot();
             if self.scope.permits(snapshot) {
@@ -271,7 +273,7 @@ impl TaskInspector {
             }
         }
         output.next = source.next().map_or(0, ProcessScanCursor::token);
-        Ok(output)
+        Ok(())
     }
 
     /// Fills caller-owned storage without moving a full snapshot page through
@@ -411,7 +413,8 @@ impl ObjectInspector {
     pub(crate) fn scan_objects(
         &self,
         cursor: u64,
-    ) -> Result<Page<ObjectSnapshot, OBJECT_PAGE_CAPACITY>, Error> {
+        output: &mut Page<ObjectSnapshot, OBJECT_PAGE_CAPACITY>,
+    ) -> Result<(), Error> {
         if self.scope != Scope::System
             || !self.visibility.contains(ObjectVisibility::KERNEL_OBJECTS)
         {
@@ -420,14 +423,15 @@ impl ObjectInspector {
         let source = crate::kernel::object::scan(
             crate::kernel::object::ObjectScanCursor::from_token(cursor),
         );
-        let mut output = Page::empty();
+        output.len = 0;
+        output.next = 0;
         for object in source.entries() {
             output.push(*object);
         }
         output.next = source
             .next()
             .map_or(0, crate::kernel::object::ObjectScanCursor::token);
-        Ok(output)
+        Ok(())
     }
 
     pub(crate) fn scan_process_handles(

@@ -105,6 +105,48 @@ fn plans_a_static_executable_without_weakening_permissions() {
 }
 
 #[test]
+fn derived_segment_extents_preserve_checked_rounding_boundaries() {
+    for (address, memory_size, expected_base, expected_size) in [
+        (0x124, 0x1000, 0, 0x2000),
+        (0x124, 0xedc, 0, 0x1000),
+        (0, u64::MAX - 0xfff, 0, u64::MAX - 0xfff),
+        (u64::MAX - 0x1fff, 0x1000, u64::MAX - 0x1fff, 0x1000),
+    ] {
+        let mut bytes = executable_image();
+        write_u64(&mut bytes, 24, address);
+        write_program_header(
+            &mut bytes,
+            0,
+            1,
+            5,
+            0x1000 + (address & 0xfff),
+            address,
+            4,
+            memory_size,
+            0x1000,
+        );
+        let image = crate::require_ok(Image::parse(&bytes));
+        let segment = crate::require_some(image.segments().next());
+        assert_eq!(segment.mapping_address(), expected_base);
+        assert_eq!(segment.mapping_size(), expected_size);
+        assert_eq!(segment.data_offset(), address & 0xfff);
+        assert_eq!(
+            image.maximum_mapping_address(),
+            expected_base + expected_size
+        );
+    }
+    for (address, memory_size) in [(0, u64::MAX), (u64::MAX - 0xfff, 0xfff)] {
+        let mut bytes = executable_image();
+        write_u64(&mut bytes, 24, address);
+        write_program_header(&mut bytes, 0, 1, 5, 0x1000, address, 4, memory_size, 0x1000);
+        assert_eq!(
+            Image::parse(&bytes).map(|_| ()),
+            Err(Error::ArithmeticOverflow)
+        );
+    }
+}
+
+#[test]
 fn rejects_writable_code_and_non_executable_entry_points() {
     let mut writable_code = executable_image();
     write_u32(&mut writable_code, ELF_HEADER_SIZE + 4, 7);

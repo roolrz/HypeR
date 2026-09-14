@@ -32,6 +32,9 @@ impl Status {
     pub const NOT_DIRECTORY: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_NOT_DIRECTORY);
     pub const IS_DIRECTORY: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_IS_DIRECTORY);
     pub const SYMLINK_LOOP: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_SYMLINK_LOOP);
+    pub const IO_ERROR: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_IO_ERROR);
+    pub const NO_SPACE: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_NO_SPACE);
+    pub const READ_ONLY: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_READ_ONLY);
     pub const CROSS_DEVICE: Self = Self(hyper_abi::HYPER_NATIVE_STATUS_CROSS_DEVICE);
 
     #[must_use]

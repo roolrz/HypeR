@@ -11,19 +11,38 @@
  * whole messages, whereas Read consumes arbitrary prefixes: retain the rest
  * in one process-wide buffer, including across separately linked std shims. */
 #define STDIO_INPUT UINT32_C(0x80030001)
+#define TERMINAL_INPUT UINT32_C(0x80030004)
 static atomic_flag input_lock = ATOMIC_FLAG_INIT;
 static unsigned char pending[HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES];
 static size_t pending_start;
 static size_t pending_end;
 
-static hyper_native_handle_t stream_handle(uint32_t stream, int *console)
+static hyper_native_handle_t stream_handle(uint32_t stream, int *console, int *terminal)
 {
     hyper_native_handle_t handle = 0;
     const hyper_startup_t *startup = hyper_runtime_startup();
     *console = 0;
+    *terminal = 0;
     if (startup == NULL) return 0;
-    if (hyper_startup_find_handle(startup, STDIO_INPUT + stream, &handle) == HYPER_NATIVE_STATUS_OK)
+    if (hyper_startup_find_handle(startup, STDIO_INPUT + stream, &handle) == HYPER_NATIVE_STATUS_OK) {
+        if (stream == 0) {
+            hyper_native_handle_t alias = hyper_runtime_capability(TERMINAL_INPUT);
+            if (!alias) (void)hyper_startup_find_handle(startup, TERMINAL_INPUT, &alias);
+            if (alias) {
+                hyper_native_object_basic_info_t input_info = {0}, alias_info = {0};
+                if (hyper_object_get_basic_info(handle, &input_info).status != HYPER_NATIVE_STATUS_OK ||
+                    hyper_object_get_basic_info(alias, &alias_info).status != HYPER_NATIVE_STATUS_OK ||
+                    !input_info.koid || input_info.koid != alias_info.koid ||
+                    input_info.object_kind != HYPER_NATIVE_OBJECT_BYTE_CHANNEL ||
+                    alias_info.object_kind != input_info.object_kind) {
+                    *terminal = -1;
+                    return 0;
+                }
+                *terminal = 1;
+            }
+        }
         return handle;
+    }
     /* Bootstrap programs may be given a Console instead of service streams. */
     *console = 1;
     if (hyper_startup_find_handle(startup, HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE, &handle) == HYPER_NATIVE_STATUS_OK)
@@ -36,9 +55,9 @@ int64_t hyper_runtime_stdio_write(uint32_t stream, const void *buffer, size_t co
     *actual = 0;
     if (stream != 1 && stream != 2) return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
     if (count == 0) return HYPER_NATIVE_STATUS_OK;
-    int console;
-    hyper_native_handle_t handle = stream_handle(stream, &console);
-    if (!handle) return HYPER_NATIVE_STATUS_NOT_FOUND;
+    int console, terminal;
+    hyper_native_handle_t handle = stream_handle(stream, &console, &terminal);
+    if (!handle) return terminal < 0 ? HYPER_NATIVE_STATUS_INVALID_ARGUMENT : HYPER_NATIVE_STATUS_NOT_FOUND;
     size_t limit = console ? HYPER_NATIVE_CONSOLE_MAX_TRANSFER_BYTES : HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES;
     if (count > limit) count = limit;
     for (;;) {
@@ -69,9 +88,9 @@ int64_t hyper_runtime_stdio_write(uint32_t stream, const void *buffer, size_t co
 static int64_t read_locked(void *buffer, size_t capacity, size_t *actual)
 {
     if (capacity == 0) return HYPER_NATIVE_STATUS_OK;
-    int console;
-    hyper_native_handle_t handle = stream_handle(0, &console);
-    if (!handle) return HYPER_NATIVE_STATUS_NOT_FOUND;
+    int console, terminal;
+    hyper_native_handle_t handle = stream_handle(0, &console, &terminal);
+    if (!handle) return terminal < 0 ? HYPER_NATIVE_STATUS_INVALID_ARGUMENT : HYPER_NATIVE_STATUS_NOT_FOUND;
     for (;;) {
         if (pending_start != pending_end) {
             size_t count = pending_end - pending_start;
@@ -89,6 +108,14 @@ static int64_t read_locked(void *buffer, size_t capacity, size_t *actual)
         if ((result.status == HYPER_NATIVE_STATUS_OK ||
              (console && result.status == HYPER_NATIVE_STATUS_WOULD_BLOCK)) && result.value0 != 0) {
             if (result.value0 > limit) return HYPER_NATIVE_STATUS_INTERNAL;
+            // Only explicit terminal input interprets a standalone Ctrl-D.
+            // Consume this EOF record, never close the shared shell endpoint.
+            if (terminal && result.value0 == 1 && pending[0] == 4)
+                return HYPER_NATIVE_STATUS_OK;
+            if (terminal) {
+                for (size_t i = 0; i < result.value0; ++i)
+                    if (pending[i] == '\r') pending[i] = '\n';
+            }
             pending_start = 0;
             pending_end = result.value0;
             continue;

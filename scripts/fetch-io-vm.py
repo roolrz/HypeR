@@ -57,8 +57,16 @@ def validate_manifest(path, digest, platform):
             or manifest.get("artifactType") != ARTIFACT_TYPE):
         raise ValueError("unsupported I/O VM package format")
     annotations = manifest.get("annotations", {})
+    legacy = annotations.get("org.hyper.platform")
+    supported = [legacy]
+    if "org.hyper.supported-platforms" in annotations:
+        supported = json.loads(annotations["org.hyper.supported-platforms"])
+        if (not isinstance(supported, list) or not supported
+                or any(value not in ("qemu", "rpi5") for value in supported)
+                or len(set(supported)) != len(supported) or legacy not in supported):
+            raise ValueError("invalid I/O VM supported-platforms metadata")
     if (annotations.get("org.hyper.architecture") != "aarch64"
-            or annotations.get("org.hyper.platform") != platform):
+            or platform not in supported):
         raise ValueError("I/O VM architecture/platform mismatch")
     layers = {}
     for entry in manifest["layers"]:

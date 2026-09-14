@@ -110,7 +110,10 @@ impl Route {
 }
 
 pub(crate) struct Routes {
-    entries: InterruptSpinLock<[Option<Route>; 8], crate::hal::irq::LocalMask>,
+    entries: InterruptSpinLock<
+        [Option<Route>; hyper::abi::native::HYPER_NATIVE_IO_MAX_CLIENTS as usize * 2],
+        crate::hal::irq::LocalMask,
+    >,
 }
 impl Routes {
     pub(crate) fn new() -> Self {
@@ -150,6 +153,20 @@ impl Routes {
             Ok(())
         })
     }
+    pub(crate) fn remove_notification(&self, route_id: u64) -> Option<Route> {
+        self.entries.with(|entries| {
+            entries
+                .iter_mut()
+                .find(|entry| match entry {
+                    Some(Route::NotificationFront(shared) | Route::NotificationBack(shared)) => {
+                        shared.route_id == route_id
+                    }
+                    _ => false,
+                })
+                .and_then(Option::take)
+        })
+    }
+
     pub(crate) fn conflicts(&self, base: u64, length: u64) -> bool {
         self.entries.with(|entries| {
             entries.iter().flatten().any(|route| {
