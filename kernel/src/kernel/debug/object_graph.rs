@@ -58,10 +58,10 @@ pub(super) fn report() {
     if crate::kernel::task::is_ready() {
         let mut thread_cursor = Some(ThreadObjectScanCursor::start());
         while let Some(cursor) = thread_cursor {
-            let page = match crate::kernel::task::scheduler::scan_thread_objects(cursor) {
-                Ok(page) => page,
-                Err(_) => break,
-            };
+            let mut page = crate::kernel::task::ThreadObjectSnapshotPage::empty();
+            if crate::kernel::task::scheduler::scan_thread_objects(cursor, &mut page).is_err() {
+                break;
+            }
             for thread in page.entries() {
                 pr_debug!(
                     "HypeR thread-object: thread={} koid={} role={:?} registry={:?}",

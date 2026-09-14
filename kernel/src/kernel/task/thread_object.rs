@@ -94,6 +94,14 @@ pub(crate) struct ThreadObjectSnapshotPage {
 }
 
 impl ThreadObjectSnapshotPage {
+    pub(crate) const fn empty() -> Self {
+        Self {
+            entries: [None; THREAD_OBJECT_PAGE_CAPACITY],
+            len: 0,
+            next: None,
+        }
+    }
+
     pub(crate) fn entries(&self) -> impl Iterator<Item = &ThreadObjectObservation> {
         self.entries[..self.len].iter().filter_map(Option::as_ref)
     }

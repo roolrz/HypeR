@@ -25,7 +25,7 @@ use hyper::abi::native::{
 };
 
 use crate::kernel::capability::{HandleValue, Rights};
-use crate::kernel::inspect::OBJECT_PAGE_CAPACITY;
+use crate::kernel::inspect::{OBJECT_PAGE_CAPACITY, Page};
 use crate::kernel::ipc::{
     ByteChannelReadOutcome, CapabilityChannelError, CapabilityReceiveOutcome,
 };
@@ -616,8 +616,9 @@ pub(super) fn sys_task_inspector_scan_threads(
         core::mem::size_of::<HyperNativeTaskThread>(),
     )
     .and_then(|(inspector, cursor, destination)| {
-        let page = services
-            .scan_threads(inspector, cursor)
+        let mut page = Page::empty();
+        services
+            .scan_threads(inspector, cursor, &mut page)
             .map_err(status_from_inspection_error)?;
         copy_encoded_page(services, destination, &page, encode_task_thread)
     });

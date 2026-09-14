@@ -683,17 +683,17 @@ impl ThreadRegistry {
     pub fn scan_objects(
         &self,
         cursor: crate::kernel::task::ThreadObjectScanCursor,
-    ) -> crate::kernel::task::ThreadObjectSnapshotPage {
+        output: &mut crate::kernel::task::ThreadObjectSnapshotPage,
+    ) {
         use crate::kernel::task::{
             ThreadObjectObservation, ThreadObjectRegistryPhase, ThreadObjectScanCursor,
-            ThreadObjectSnapshotPage,
         };
 
-        let mut entries = [None; crate::kernel::task::thread_object::THREAD_OBJECT_PAGE_CAPACITY];
-        let mut len = 0usize;
+        output.len = 0;
+        output.next = None;
         let mut index = cursor.next_slot;
         let table = self.table.access().table();
-        while index < self.high_water && len < entries.len() {
+        while index < self.high_water && output.len < output.entries.len() {
             let observation = match table.slot(index) {
                 Some(ThreadSlot::Occupied(thread)) => Some(ThreadObjectObservation {
                     thread: thread.id(),
@@ -718,13 +718,13 @@ impl ThreadRegistry {
                 Some(ThreadSlot::Vacant | ThreadSlot::Reserved(_)) | None => None,
             };
             if let Some(observation) = observation {
-                entries[len] = Some(observation);
-                len += 1;
+                output.entries[output.len] = Some(observation);
+                output.len += 1;
             }
             index += 1;
         }
-        let next = (index < self.high_water).then_some(ThreadObjectScanCursor { next_slot: index });
-        ThreadObjectSnapshotPage { entries, len, next }
+        output.next =
+            (index < self.high_water).then_some(ThreadObjectScanCursor { next_slot: index });
     }
 
     pub fn for_each_thread(&self, mut operation: impl for<'thread> FnMut(&'thread Thread)) {

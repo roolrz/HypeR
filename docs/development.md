@@ -110,6 +110,7 @@ exact coverage and supported runtime expectations.
 
 Further documentation:
 
+- [Kernel stack budgets and workload checks](../kernel/docs/stack-budgets.md)
 - [Architecture boundaries](../kernel/docs/architecture.md)
 - [Native init contract](../kernel/docs/native-init.md)
 - [Userspace and syscall architecture](../kernel/docs/syscall-abi.md)

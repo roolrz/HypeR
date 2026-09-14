@@ -1161,10 +1161,8 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             &self,
             _: HandleValue,
             _: u64,
-        ) -> Result<
-            Page<TaskThreadSnapshot, { crate::kernel::inspect::THREAD_PAGE_CAPACITY }>,
-            crate::kernel::inspect::Error,
-        > {
+            _: &mut Page<TaskThreadSnapshot, { crate::kernel::inspect::THREAD_PAGE_CAPACITY }>,
+        ) -> Result<(), crate::kernel::inspect::Error> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(crate::kernel::inspect::Error::AccessDenied)
         }

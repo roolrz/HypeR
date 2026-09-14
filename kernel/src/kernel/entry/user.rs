@@ -129,6 +129,28 @@ impl ChargedBuilderInput {
 }
 
 impl DeferredProcessServices<'_> {
+    // Keep the full batch buffer off the interactive input call path. Both
+    // variants copy once before publishing any input and kick the guest once.
+    // A full 4 KiB write still needs its complete scratch buffer: shortening
+    // that batch would change partial-write behavior and increase syscall cost.
+    #[inline(never)]
+    fn copy_virtual_serial_input<const CAPACITY: usize>(
+        &self,
+        serial: &crate::kernel::vm::virtual_serial::VirtualSerial,
+        source: UserSlice,
+        length: usize,
+    ) -> Result<usize, crate::kernel::vm::service::Error> {
+        let mut bytes = [0; CAPACITY];
+        let bytes = bytes
+            .get_mut(..length)
+            .ok_or(crate::kernel::vm::service::Error::InvalidArgument)?;
+        self.session.process.copy_from_user(source, bytes)?;
+        serial
+            .write_input(bytes)
+            .map_err(crate::kernel::vm::objects::Error::from)
+            .map_err(Into::into)
+    }
+
     fn copy_builder_input(
         &self,
         input: Option<UserSlice>,
@@ -364,15 +386,13 @@ impl VmServices for DeferredProcessServices<'_> {
             u64::try_from(length).map_err(|_| crate::kernel::vm::service::Error::Internal)?;
         let source = UserSlice::new(source.base(), length_bytes)
             .map_err(|_| crate::kernel::vm::service::Error::Fault)?;
-        let mut bytes = [0; crate::kernel::vm::virtual_serial::TRANSFER_BATCH_BYTES];
-        self.session
-            .process
-            .copy_from_user(source, &mut bytes[..length])?;
-        serial
-            .object()
-            .write_input(&bytes[..length])
-            .map_err(crate::kernel::vm::objects::Error::from)
-            .map_err(Into::into)
+        if length <= 128 {
+            self.copy_virtual_serial_input::<128>(serial.object(), source, length)
+        } else {
+            self.copy_virtual_serial_input::<
+                { crate::kernel::vm::virtual_serial::TRANSFER_BATCH_BYTES },
+            >(serial.object(), source, length)
+        }
     }
 
     fn seal_pending_virtual_machine(
@@ -860,19 +880,17 @@ impl InspectServices for DeferredProcessServices<'_> {
         &self,
         inspector: HandleValue,
         cursor: u64,
-    ) -> Result<
-        crate::kernel::inspect::Page<
+        output: &mut crate::kernel::inspect::Page<
             crate::kernel::inspect::TaskThreadSnapshot,
             { crate::kernel::inspect::THREAD_PAGE_CAPACITY },
         >,
-        crate::kernel::inspect::Error,
-    > {
+    ) -> Result<(), crate::kernel::inspect::Error> {
         let inspector = self
             .session
             .process
             .resolve_handle::<TaskInspector>(inspector, Rights::INSPECT)
             .map_err(crate::kernel::inspect::Error::Process)?;
-        inspector.object().scan_threads(cursor)
+        inspector.object().scan_threads(cursor, output)
     }
 
     fn scan_objects(

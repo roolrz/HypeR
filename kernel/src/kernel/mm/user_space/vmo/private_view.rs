@@ -94,17 +94,27 @@ impl<B: PageBackend, A: MemoryAccount> PrivateView<B, A> {
                 let first = start.max(data_offset);
                 let last = (start + PAGE_SIZE).min(end);
                 if first < last {
-                    let mut bytes = [0u8; PAGE_SIZE as usize];
-                    let length = (last - first) as usize;
-                    source.read(source_offset + first, &mut bytes[..length])?;
-                    page.with(|owned| {
-                        backend
-                            .write_owned(
-                                &mut owned.page,
-                                (first - start) as usize,
-                                &bytes[..length],
-                            )
-                            .map_err(VmoError::Backend)
+                    let source_page = page_ref(
+                        &source.inner,
+                        usize::try_from((source_offset + first) / PAGE_SIZE)
+                            .map_err(|_| VmoError::SizeOverflow)?,
+                    )?;
+                    // The immutable source and newly allocated destination are
+                    // distinct. The destination has never escaped, so nesting
+                    // its lock cannot create a lock cycle. Zeroed bytes outside
+                    // this exact range remain undisclosed boundary/BSS padding.
+                    source_page.with(|owned| {
+                        page.with(|destination| {
+                            backend
+                                .copy_owned(
+                                    &owned.page,
+                                    (first - start) as usize,
+                                    &mut destination.page,
+                                    (first - start) as usize,
+                                    (last - first) as usize,
+                                )
+                                .map_err(VmoError::Backend)
+                        })
                     })?;
                 }
                 page
@@ -186,7 +196,7 @@ impl<B: PageBackend, A: MemoryAccount> PrivateView<B, A> {
             original.owner.with(|owned| {
                 owner.with(|destination| {
                     self.backend
-                        .copy_owned(&owned.page, &mut destination.page)
+                        .copy_owned(&owned.page, 0, &mut destination.page, 0, PAGE_SIZE as usize)
                         .map_err(VmoError::Backend)
                 })
             })?;

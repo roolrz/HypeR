@@ -658,12 +658,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
         snapshot
             .populate(0, self.size())
             .map_err(|error| error.cause)?;
-        let mut bytes = [0u8; PAGE_SIZE as usize];
-        for index in 0..page_count(self.size())? {
-            let offset = index as u64 * PAGE_SIZE;
-            read_owned_inner(&self.inner, offset, &mut bytes)?;
-            snapshot.write_without_writer_guard(offset, &bytes)?;
-        }
+        self.copy_frozen_pages_to(&snapshot)?;
         Ok(SnapshotVmo {
             inner: snapshot.inner,
         })
@@ -689,17 +684,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
         snapshot
             .prepare_pages(0, page_count)
             .map_err(|failure| failure.cause)?;
-        let mut buffer = [0u8; PAGE_SIZE as usize];
-        for index in 0..page_count {
-            let offset = (index as u64)
-                .checked_mul(PAGE_SIZE)
-                .ok_or(VmoError::SizeOverflow)?;
-            let length = usize::try_from((self.inner.size - offset).min(PAGE_SIZE))
-                .map_err(|_| VmoError::SizeOverflow)?;
-            read_owned_inner(&self.inner, offset, &mut buffer[..length])?;
-            snapshot.write_without_writer_guard(offset, &buffer[..length])?;
-            buffer.fill(0);
-        }
+        self.copy_frozen_pages_to(&snapshot)?;
         drop(freeze);
         snapshot.publish_instruction_pages(publication_context)?;
         Ok(ExecutableVmo {
@@ -707,28 +692,28 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
         })
     }
 
-    fn write_without_writer_guard(
-        &self,
-        offset: u64,
-        source: &[u8],
-    ) -> Result<(), VmoError<Backend::Error, Account::Error>> {
-        visit_chunks(
-            offset,
-            source.len(),
-            |index, page_offset, source_offset, length| {
-                let page = page_ref(&self.inner, index)?;
-                page.with(|owned| {
+    /// Caller holds the source snapshot guard and exclusively owns a fully
+    /// populated, zeroed destination which has never been published. VMO
+    /// construction requires a page-aligned size, so every copy is a full page.
+    fn copy_frozen_pages_to(&self, destination: &Self) -> VmoResult<Backend, Account, ()> {
+        for index in 0..page_count(self.size())? {
+            let Some(source) = optional_page_ref(&self.inner, index)? else {
+                // Sparse source bytes are zero; the destination already is.
+                continue;
+            };
+            let target = page_ref(&destination.inner, index)?;
+            // Only this transaction can reach target. Its lock under source
+            // cannot form a cycle. Failure discards every unpublished target.
+            source.with(|owned| {
+                target.with(|target| {
                     self.inner
                         .backend
-                        .write_owned(
-                            &mut owned.page,
-                            page_offset,
-                            &source[source_offset..source_offset + length],
-                        )
+                        .copy_owned(&owned.page, 0, &mut target.page, 0, PAGE_SIZE as usize)
                         .map_err(VmoError::Backend)
                 })
-            },
-        )
+            })?;
+        }
+        Ok(())
     }
 
     fn publish_instruction_pages(

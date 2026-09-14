@@ -960,8 +960,9 @@ impl Scheduler {
     pub fn scan_thread_objects(
         &self,
         cursor: crate::kernel::task::ThreadObjectScanCursor,
-    ) -> crate::kernel::task::ThreadObjectSnapshotPage {
-        self.registry.scan_objects(cursor)
+        output: &mut crate::kernel::task::ThreadObjectSnapshotPage,
+    ) {
+        self.registry.scan_objects(cursor, output)
     }
 
     /// Routes schedule access without recursively reacquiring an active CPU lock.
