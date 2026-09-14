@@ -88,6 +88,8 @@ reject 'stack_statistics: thread\.kernel_stack_statistics\(\)' "$state" \
     'generic Thread observation must not scan possibly live stack memory'
 require 'pub fn stack_statistics[\s\S]*ThreadState::Blocked[\s\S]*switching_from[\s\S]*context_is_stopped\(id\)\?[\s\S]*self\.with_thread\(id, Thread::kernel_stack_statistics\)' \
     "$state" 'stack watermark scans must follow an explicit stopped-context proof'
+require 'pub fn cpu_stack_statistics\([^}]*CPU_STACKS\.with\(\|stacks\| \{[^}]*cpu != crate::kernel::cpu::current_index\(\)' \
+    src/kernel/mm/stack.rs 'local IRQ-stack scans must check CPU identity while LocalMask prevents migration'
 require 'pub\(crate\) fn crash_snapshot[\s\S]*state::try_cpu_snapshot\(cpu\)' "$scheduler" \
     'crash snapshots must delegate to one non-blocking CPU-domain observation'
 require 'pub\(super\) fn try_cpu_snapshot[\s\S]*CPU_SCHEDULERS\[cpu\][\s\S]*\.try_with[\s\S]*stack_statistics: None' \

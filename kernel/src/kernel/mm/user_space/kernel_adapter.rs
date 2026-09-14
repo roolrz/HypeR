@@ -235,19 +235,22 @@ impl PageBackend for KernelPageBackend {
     fn copy_owned(
         &self,
         source: &Self::Page,
+        source_offset: usize,
         destination: &mut Self::Page,
+        destination_offset: usize,
+        length: usize,
     ) -> Result<(), Self::Error> {
-        let source = page_address(source, 0, PAGE_SIZE as usize)?;
-        let destination = page_address(destination, 0, PAGE_SIZE as usize)?;
-        if source == destination {
+        let source_address = page_address(source, source_offset, length)?;
+        let destination_address = page_address(destination, destination_offset, length)?;
+        if source.physical() == destination.physical() {
             return Err(KernelPageError::Range);
         }
         // SAFETY: KernelUserPage owns page-aligned storage; page_address
-        // validates both complete pages in the permanent linear map. Distinct
-        // bases cannot overlap. The caller holds both page locks and excludes
+        // validates both ranges in the permanent linear map. Distinct physical
+        // pages cannot overlap. The caller holds both page locks and excludes
         // source machine writers. The destination is unpublished and exclusively
-        // borrowed.
-        unsafe { copy_nonoverlapping(source.cast_const(), destination, PAGE_SIZE as usize) };
+        // borrowed. Neither pointer escapes this non-faulting copy.
+        unsafe { copy_nonoverlapping(source_address.cast_const(), destination_address, length) };
         Ok(())
     }
 

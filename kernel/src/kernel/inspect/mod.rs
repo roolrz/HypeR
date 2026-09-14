@@ -157,7 +157,7 @@ pub(crate) struct Page<T: Copy, const N: usize> {
 }
 
 impl<T: Copy, const N: usize> Page<T, N> {
-    fn empty() -> Self {
+    pub(crate) const fn empty() -> Self {
         Self {
             entries: [None; N],
             len: 0,
@@ -274,18 +274,24 @@ impl TaskInspector {
         Ok(output)
     }
 
+    /// Fills caller-owned storage without moving a full snapshot page through
+    /// the scheduler and ABI adapters. Only a successful result is publishable.
     pub(crate) fn scan_threads(
         &self,
         cursor: u64,
-    ) -> Result<Page<TaskThreadSnapshot, THREAD_PAGE_CAPACITY>, Error> {
+        output: &mut Page<TaskThreadSnapshot, THREAD_PAGE_CAPACITY>,
+    ) -> Result<(), Error> {
         if !self.visibility.contains(TaskVisibility::THREAD_BASIC) {
             return Err(Error::AccessDenied);
         }
         let token = usize::try_from(cursor).map_err(|_| Error::NotFound)?;
-        let source = crate::kernel::task::scheduler::scan_thread_objects(
+        let mut source = crate::kernel::task::ThreadObjectSnapshotPage::empty();
+        crate::kernel::task::scheduler::scan_thread_objects(
             ThreadObjectScanCursor::from_token(token),
+            &mut source,
         )?;
-        let mut output = Page::empty();
+        output.len = 0;
+        output.next = 0;
         for thread in source.entries() {
             let (process, permitted) = match thread.object.process {
                 Some(id) => {
@@ -314,7 +320,7 @@ impl TaskInspector {
             Some(next) => u64::try_from(next.token()).map_err(|_| Error::Allocation)?,
             None => 0,
         };
-        Ok(output)
+        Ok(())
     }
 }
 

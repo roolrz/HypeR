@@ -254,10 +254,12 @@ pub(crate) fn prepare_cpu(cpu: CpuIndex) -> Result<(), Error> {
 
 pub fn cpu_stack_statistics(cpu: usize) -> Option<(StackStatistics, StackStatistics)> {
     let cpu = CpuIndex::new(cpu)?;
-    if cpu != crate::kernel::cpu::current_index()? {
-        return None;
-    }
     CPU_STACKS.with(|stacks| {
+        // Check after LocalMask pins this execution to its CPU. Checking before
+        // the lock would allow migration followed by a remote live-stack scan.
+        if cpu != crate::kernel::cpu::current_index()? {
+            return None;
+        }
         let stacks = &stacks[cpu];
         Some((
             stacks.irq.as_ref()?.statistics(),

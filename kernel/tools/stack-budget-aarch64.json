@@ -1,0 +1,128 @@
+{
+  "SPDX-FileCopyrightText": "2026 roolrz",
+  "SPDX-License-Identifier": "Apache-2.0",
+  "architecture": "aarch64",
+  "default_budget": 4096,
+  "rules": [
+    {
+      "pattern": "hyper::platform::fdt::walker::discover_from_bytes_with::<hyper::platform::fdt::walker::IgnoreNodes>(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 59392,
+      "reason": "Boot-only bounded FDT collector scratch.",
+      "required": false
+    },
+    {
+      "pattern": "<hyper::platform::fdt::resources::ResourceCollector>::new(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 55040,
+      "reason": "Boot-only bounded FDT resource collector construction.",
+      "required": false
+    },
+    {
+      "pattern": "<hyper::sync::lock::interrupt::InterruptSpinLock<core::option::Option<hyper::kernel::task::scheduler::state::CpuScheduler>,\\ hyper::arch::aarch64::interrupts::LocalInterruptMask>>::with::<bool,\\ <hyper::kernel::task::scheduler::state::Scheduler>::publish_secondary::\\{closure\\#3\\}>(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 20736,
+      "reason": "Secondary CPU preparation by boot CPU registration; bounded CpuScheduler construction.",
+      "required": false
+    },
+    {
+      "pattern": "<hyper::kernel::entry::user::DeferredProcessServices>::copy_virtual_serial_input::<4096>(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 4352,
+      "reason": "Explicit 4096-byte serial batch preserves atomic copy/partial-write behavior; interactive input uses small specialization.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::start_kernel::\\{closure\\#0\\}(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 9216,
+      "reason": "Boot-only startup closure on 256 KiB bootstrap stack.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::cpu::initialize(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 4864,
+      "reason": "Boot-only CPU discovery/setup.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::boot::try_prepare_boot_environment(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 71680,
+      "reason": "Boot-only environment/FDT scratch on 256 KiB bootstrap stack.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::init::prepare_and_start(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 5376,
+      "reason": "Known one-shot native-init worker frame on an ordinary kernel stack, not the bootstrap stack; requires runtime watermark evidence and separate call-chain headroom review.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::task::initialize(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 60672,
+      "reason": "Boot-only scheduler construction on 256 KiB bootstrap stack.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::device::platform_device_initialize(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 59904,
+      "reason": "Boot-only device/FDT discovery on bootstrap stack.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::vm::timer::validate_hardware(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 4864,
+      "reason": "Boot-only VM timer interrupt validation from VM initialization.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::crash::coordination::enter_on_emergency_stack(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 5632,
+      "reason": "Crash report construction after explicit emergency-stack transfer.",
+      "required": false
+    },
+    {
+      "pattern": "aarch64_prepare_boot_map(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 4864,
+      "reason": "Pre-runtime boot translation-map preparation.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::abi::native::handlers::sys_task_inspector_scan_threads::<hyper::kernel::entry::user::DeferredProcessServices>(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 3328,
+      "reason": "In-place inspector result avoids repeated snapshot page copies.",
+      "required": true
+    },
+    {
+      "pattern": "hyper::kernel::task::scheduler::scan_thread_objects(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 768,
+      "reason": "Caller-owned inspector output page.",
+      "required": true
+    },
+    {
+      "pattern": "<hyper::kernel::process::owner::PreparedProcess>::try_new(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 1024,
+      "reason": "Prepared process avoids large by-value copies.",
+      "required": true
+    },
+    {
+      "pattern": "<hyper::kernel::process::owner::Process>::finish_retirement(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 1536,
+      "reason": "Retirement avoids full handle storage in frame.",
+      "required": true
+    },
+    {
+      "pattern": "hyper::kernel::abi::native::handlers::sys_vmo_create_snapshot::<hyper::kernel::entry::user::DeferredProcessServices>(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 768,
+      "reason": "Snapshot syscall avoids page-sized scratch.",
+      "required": true
+    },
+    {
+      "pattern": "hyper::kernel::abi::native::handlers::sys_vmar_map_private::<hyper::kernel::entry::user::DeferredProcessServices>(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 768,
+      "reason": "Private mapping keeps bounded state.",
+      "required": true
+    },
+    {
+      "pattern": "<hyper::kernel::mm::user_space::vmo::private_view::PrivateView<hyper::kernel::mm::user_space::kernel_adapter::KernelPageBackend,\\ hyper::kernel::mm::user_space::kernel_adapter::DomainAccount>>::try_new(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 1024,
+      "reason": "Private-view page copying uses mapped storage rather than stack scratch.",
+      "required": true
+    }
+  ]
+}

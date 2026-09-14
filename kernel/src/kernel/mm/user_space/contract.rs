@@ -232,9 +232,11 @@ pub(crate) trait PageBackend: Clone {
         source: &[u8],
     ) -> Result<(), Self::Error>;
 
-    /// Copies a complete immutable owned page into a distinct unpublished page.
+    /// Copies an immutable owned page range into a distinct unpublished page.
     ///
-    /// The caller serializes both owners and excludes machine writers. The
+    /// The caller serializes both owners and excludes machine writers. Both
+    /// checked offset-plus-length ranges must fit their respective pages; an
+    /// empty range is valid, but the owners must still be distinct. The
     /// backend must not block, fault, or retain either page. Hardware backends
     /// can copy directly between mappings without a bounce buffer. On error
     /// the destination may be partially written; the caller must discard it
@@ -242,7 +244,10 @@ pub(crate) trait PageBackend: Clone {
     fn copy_owned(
         &self,
         source: &Self::Page,
+        source_offset: usize,
         destination: &mut Self::Page,
+        destination_offset: usize,
+        length: usize,
     ) -> Result<(), Self::Error>;
 
     /// Copies from memory that may be concurrently visible to a machine.

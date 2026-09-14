@@ -413,17 +413,16 @@ pub(in crate::kernel) trait InspectServices: UserMemoryServices {
         Page<ProcessSnapshot, { crate::kernel::inspect::PROCESS_PAGE_CAPACITY }>,
         crate::kernel::inspect::Error,
     >;
+    /// Fills caller-owned snapshot storage. Contents are publishable only on success.
     fn scan_threads(
         &self,
         inspector: HandleValue,
         cursor: u64,
-    ) -> Result<
-        Page<
+        output: &mut Page<
             crate::kernel::inspect::TaskThreadSnapshot,
             { crate::kernel::inspect::THREAD_PAGE_CAPACITY },
         >,
-        crate::kernel::inspect::Error,
-    >;
+    ) -> Result<(), crate::kernel::inspect::Error>;
     fn scan_objects(
         &self,
         inspector: HandleValue,

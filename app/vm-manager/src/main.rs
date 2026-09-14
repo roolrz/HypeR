@@ -660,10 +660,7 @@ impl FleetManager {
         // Guest reset requests become new instances only after the old runtime
         // exited successfully and its VM completed retirement. An administrative
         // stop wins over a concurrent guest reboot.
-        let reboot = succeeded
-            && instance.tracker.is_terminal()
-            && instance.tracker.last_status() == Some(vm_contract::InstanceStatus::RebootRequested)
-            && instance.stop == vm_contract::InstanceStopState::new();
+        let reboot = instance.tracker.should_restart(succeeded, instance.stop);
         if reboot {
             self.machines[vm].restart_pending = true;
         }

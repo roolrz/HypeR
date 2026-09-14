@@ -615,7 +615,6 @@ impl ProcessBuilder {
                 return result;
             }
         };
-        let mut prepared = Some(prepared);
         let authorized = self.state.with(|state| {
             require_busy_state(state);
             if self.abort_requested.load(Ordering::Acquire) {
@@ -626,18 +625,10 @@ impl ProcessBuilder {
             true
         });
         if !authorized {
-            transaction
-                .cancel_start(match prepared.take() {
-                    Some(prepared) => prepared,
-                    None => builder_invariant_violation(),
-                })
-                .abort();
+            transaction.cancel_start(prepared).abort();
             return Err(ProcessBuilderError::Aborted);
         }
-        let committed = transaction.commit_start(match prepared.take() {
-            Some(prepared) => prepared,
-            None => builder_invariant_violation(),
-        });
+        let committed = transaction.commit_start(prepared);
         self.state.with(|state| {
             require_commit_authorized_state(state);
             *state = Some(BuilderState::Started);

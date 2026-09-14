@@ -12,6 +12,8 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 copy_sources() {
     rm -rf "$fixture/src"
     mkdir -p "$fixture/src/kernel/task/scheduler"
+    mkdir -p "$fixture/src/kernel/mm"
+    cp "$root/src/kernel/mm/stack.rs" "$fixture/src/kernel/mm/stack.rs"
     cp "$root/src/kernel/task/thread.rs" "$fixture/src/kernel/task/thread.rs"
     cp "$root/src/kernel/task/scheduler/registry.rs" "$fixture/src/kernel/task/scheduler/registry.rs"
     cp "$root/src/kernel/task/scheduler/queue.rs" "$fixture/src/kernel/task/scheduler/queue.rs"
@@ -63,3 +65,26 @@ mutate 'waiting insertion bypassed the control queue API' \
     src/kernel/task/scheduler/state.rs 'queue::control_push' 'queue::push'
 mutate 'crash observation changed from a try-lock to a blocking CPU lock' \
     src/kernel/task/scheduler/state.rs '.try_with(|slot|' '.with(|slot|'
+
+copy_sources
+python3 - "$fixture/src/kernel/mm/stack.rs" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+source = path.read_text()
+check = '''        if cpu != crate::kernel::cpu::current_index()? {
+            return None;
+        }
+'''
+assert source.count(check) == 1
+source = source.replace(check, '', 1)
+start = source.index('pub fn cpu_stack_statistics(')
+lock = source.index('    CPU_STACKS.with(|stacks| {', start)
+source = source[:lock] + check + source[lock:]
+path.write_text(source)
+PY
+if check >/dev/null 2>&1; then
+    echo 'IRQ-stack CPU identity check moved outside its migration mask' >&2
+    exit 1
+fi

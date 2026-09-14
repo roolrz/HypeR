@@ -7,6 +7,8 @@
 mod cpu_time;
 mod queue;
 mod registry;
+#[cfg(feature = "kernel-stack-audit")]
+mod stack_audit;
 mod state;
 
 #[cfg(not(test))]
@@ -495,8 +497,12 @@ pub(crate) fn thread_object_snapshot(
 /// Captures one pointer-free page of scheduler-to-object relationships.
 pub(crate) fn scan_thread_objects(
     cursor: crate::kernel::task::ThreadObjectScanCursor,
-) -> Result<crate::kernel::task::ThreadObjectSnapshotPage, Error> {
-    read_scheduler(|scheduler| Ok(scheduler.scan_thread_objects(cursor)))
+    output: &mut crate::kernel::task::ThreadObjectSnapshotPage,
+) -> Result<(), Error> {
+    read_scheduler(|scheduler| {
+        scheduler.scan_thread_objects(cursor, output);
+        Ok(())
+    })
 }
 
 pub fn statistics() -> Result<Statistics, Error> {
@@ -1639,6 +1645,8 @@ pub(crate) fn reap_one_thread(
         return Ok(None);
     };
 
+    #[cfg(feature = "kernel-stack-audit")]
+    stack_audit::record_retired(&thread);
     retire_detached_thread(thread);
     let more = SCHEDULER.with(|slot| {
         let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
