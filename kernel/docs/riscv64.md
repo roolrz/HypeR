@@ -102,7 +102,7 @@ services and shell, and exercises static/dynamic std, threads, filesystem tools
 and console input. The same init manifest and VM configuration used on AArch64
 launch `vm-manager` and `vm-runtime` with a RISC-V Linux FIT payload. Native init
 receives VM creation authority through the capability bootstrap; applications
-cannot mint it. The VMM tests cover Linux timer wakeups, paced bidirectional
+cannot mint it. The VMM tests cover Linux userspace startup, paced bidirectional
 console input, named VM isolation and repeated runtime-loss reclamation.
 
 A separate `make test-vm-smoke ARCH=riscv64` fixture runs as `/init` and uses only

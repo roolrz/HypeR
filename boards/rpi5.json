@@ -21,7 +21,8 @@
       "name": "alpine",
       "image": "vm/alpine.itb",
       "autostart": false,
-      "disk-mib": 2048
+      "disk-mib": 2048,
+      "disk-image": "alpine-rootfs"
     }
   ],
   "io-device": {

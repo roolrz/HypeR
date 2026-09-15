@@ -190,10 +190,7 @@ reconciliation unmasks it only after the virtual interrupt can no longer be
 lost. Because a guest can retire that list register before its timer write has
 deasserted the physical level, the existing host tick supplies a bounded
 recheck for a source retained masked across that edge. The ordinary tick path
-pays only one CPU-local relaxed load while no recovery is pending. The AArch64
-QEMU contract requires repeated initramfs timer wakeups after `/init`, proving
-that delivery survives successive list-register lifecycles rather than only
-successful guest entry or the first interrupt.
+pays only one CPU-local relaxed load while no recovery is pending.
 
 Arm guest SMP admits 1..8 immutable vCPU identities on both GIC backends.
 Guest CPU on/off is independent of the frozen host topology: PSCI requests

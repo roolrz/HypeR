@@ -222,7 +222,7 @@ shell Processes, launches `ps` and `handle` through scoped inspection handles,
 executes a constructor-bearing shared-object fixture through `dlopen`, runs an
 external echo command through the complete physical Console path, and attaches
 `/bin/vmm` to the separately buffered guest serial stream. The VM portion must
-observe repeated Linux timer wakeups, deliver guest-console input, and detach
+observe Linux userspace startup, deliver guest-console input, and detach
 through the local Ctrl-] menu.
 
 The VM manager uses a std worker Thread for blocking capability rendezvous.
