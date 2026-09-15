@@ -86,6 +86,9 @@ pub(crate) struct ProcessLifecycle {
     phase: ProcessPhase,
     pending_threads: usize,
     active_threads: usize,
+    // An admitted creation can outlive the last active Thread. Preserve its
+    // exit status until that creation either publishes or rolls back.
+    last_thread_exit: Option<i64>,
     terminal: Option<TerminalReason>,
 }
 
@@ -95,6 +98,7 @@ impl ProcessLifecycle {
             phase: ProcessPhase::Prepared,
             pending_threads: 0,
             active_threads: 0,
+            last_thread_exit: None,
             terminal: None,
         }
     }
@@ -187,6 +191,7 @@ impl ProcessLifecycle {
             .ok_or(LifecycleError::CounterOverflow)?;
         self.pending_threads = pending;
         self.active_threads = active;
+        self.last_thread_exit = None;
         Ok(())
     }
 
@@ -214,15 +219,10 @@ impl ProcessLifecycle {
             .active_threads
             .checked_sub(1)
             .ok_or(LifecycleError::InvalidMembership)?;
-        if self.active_threads == 0 && self.pending_threads == 0 {
-            if self.terminal.is_none() {
-                self.terminal = Some(TerminalReason::LastThreadExited { status });
-            }
-            if matches!(self.phase, ProcessPhase::Created | ProcessPhase::Running) {
-                self.phase = ProcessPhase::Stopping;
-            }
-            self.finish_stop_if_quiescent();
+        if self.active_threads == 0 {
+            self.last_thread_exit = Some(status);
         }
+        self.finish_stop_if_quiescent();
         Ok(())
     }
 
@@ -250,10 +250,20 @@ impl ProcessLifecycle {
     }
 
     fn finish_stop_if_quiescent(&mut self) {
-        if self.phase == ProcessPhase::Stopping
-            && self.pending_threads == 0
-            && self.active_threads == 0
+        if self.pending_threads != 0 || self.active_threads != 0 {
+            return;
+        }
+        // Failed initial construction must not terminate an otherwise unused
+        // Process. Natural exit requires a previously detached active Thread.
+        if matches!(self.phase, ProcessPhase::Created | ProcessPhase::Running)
+            && let Some(status) = self.last_thread_exit
         {
+            if self.terminal.is_none() {
+                self.terminal = Some(TerminalReason::LastThreadExited { status });
+            }
+            self.phase = ProcessPhase::Stopping;
+        }
+        if self.phase == ProcessPhase::Stopping {
             self.phase = ProcessPhase::Stopped;
         }
     }

@@ -15,7 +15,9 @@ mod resources;
 pub(super) use construction::VmControl;
 pub(crate) use construction::{PreparedVm, VcpuPreparationError, VmBuilder};
 #[cfg(feature = "kernel-self-test")]
-pub(crate) use control::{DormantVcpuQuiesceError, verify_dormant_vcpu_quiesce};
+pub(crate) use control::{
+    DormantVcpuQuiesceError, verify_dormant_vcpu_quiesce, verify_observed_vm_quiesce,
+};
 pub(super) use control::{QuiescePoll, QuiescentControl, QuiescingVm};
 pub(in crate::kernel) use execution::VmBinding;
 pub(crate) use execution::{VmExecutionClaim, VmExecutionError};
