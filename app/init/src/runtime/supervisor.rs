@@ -12,7 +12,7 @@ use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_service::vm as vm_contract;
 
 use super::LaunchError;
-use super::report::{report_service_termination, report_vm_event, report_vm_protocol_failure};
+use super::report::{report_boot_event, report_service_termination, report_vm_protocol_failure};
 
 const _: () = assert!(MAX_SERVICES < hyper_os::wait::MAX_ITEMS);
 
@@ -190,17 +190,15 @@ impl SupervisorSet {
                     };
                     let Some(event) = message
                         .get(..length)
-                        .and_then(vm_contract::InstanceEvent::decode)
+                        .and_then(vm_contract::BootEvent::decode)
                     else {
                         drop(vm_instance_control.take());
                         report_vm_protocol_failure(console, b"terminal event is malformed");
                         return Err(LaunchError::VmInstanceProtocol);
                     };
-                    report_vm_event(console, event);
+                    report_boot_event(console, event);
                     drop(vm_instance_control.take());
-                    if supervision::instance_termination_action(event)
-                        == TerminationAction::FailSystem
-                    {
+                    if supervision::boot_event_action(event) == TerminationAction::FailSystem {
                         return Err(LaunchError::VmInstanceFailed);
                     }
                 }

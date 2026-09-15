@@ -49,16 +49,19 @@ pub(super) fn report_service_termination(
     let _ = console.write_all(b"\n");
 }
 
-pub(super) fn report_vm_event(
+pub(super) fn report_boot_event(
     output: &OwnedHandle<ConsoleObject>,
-    event: vm_contract::InstanceEvent,
+    event: vm_contract::BootEvent,
 ) {
     let console = output.as_emergency_console();
     match event {
-        vm_contract::InstanceEvent::Stopped => {
+        vm_contract::BootEvent::NoAutostart => {
+            let _ = console.write_all(b"HypeR init: VM configuration loaded; no autostart VMs\n");
+        }
+        vm_contract::BootEvent::InstanceTerminated(vm_contract::InstanceEvent::Stopped) => {
             let _ = console.write_all(b"HypeR init: initial VM stopped cleanly\n");
         }
-        vm_contract::InstanceEvent::Failed(reason) => {
+        vm_contract::BootEvent::InstanceTerminated(vm_contract::InstanceEvent::Failed(reason)) => {
             let _ = console.write_all(b"HypeR init: initial VM failed: ");
             let _ = console.write_all(vm_failure_reason(reason));
             let _ = console.write_all(b"\n");
