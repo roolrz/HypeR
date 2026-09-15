@@ -119,7 +119,7 @@ impl From<super::installed::Error> for Error {
     }
 }
 
-fn reserve_object_charge<T: KernelObject>(
+pub(super) fn reserve_object_charge<T: KernelObject>(
     domain: &ResourceDomain,
 ) -> Result<CommittedCharge, Error> {
     let bytes = object_allocation_size::<T>()

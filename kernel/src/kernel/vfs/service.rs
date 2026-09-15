@@ -4,8 +4,9 @@
 //! Process-facing VFS operations and user-memory validation.
 
 use crate::kernel::authority::Rights;
-use crate::kernel::capability::HandleValue;
+use crate::kernel::capability::{HandleFlags, HandleValue, PreparedHandle};
 use crate::kernel::mm::user_space::{UserSlice, UserWriteReservation};
+use crate::kernel::object::ObjectPublication;
 use crate::kernel::process::{Process, ProcessError};
 
 use super::{
@@ -20,6 +21,7 @@ const READ_BATCH_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum ServiceError {
+    Block(crate::kernel::vm::service::Error),
     FileLock(super::locks::LockError),
     FileSystem(VfsError),
     InvalidInput,
@@ -77,9 +79,13 @@ pub(crate) fn read_directory(
     process: &Process,
     directory: HandleValue,
     cookie: u64,
-) -> Result<DirectoryPage, ServiceError> {
+    page: &mut DirectoryPage,
+) -> Result<(), ServiceError> {
     let directory = process.resolve_handle::<DirectoryObject>(directory, Rights::READ)?;
-    directory.object().read_page(cookie).map_err(Into::into)
+    directory
+        .object()
+        .read_page(cookie, page)
+        .map_err(Into::into)
 }
 
 pub(crate) fn directory_info(
@@ -202,11 +208,11 @@ pub(crate) fn create_file(
         .ok_or(ServiceError::InvalidInput)?
         .union(Rights::WRITE);
     let directory = process.resolve_handle::<DirectoryObject>(directory, required)?;
-    directory
-        .object()
-        .create_file(&path, mode, &process.resource_domain(), |file| {
-            process.create_object(file, rights).map_err(Into::into)
-        })
+    prepare_file_handle(process, rights, |prepare| {
+        directory
+            .object()
+            .create_file(&path, mode, &process.resource_domain(), prepare)
+    })
 }
 
 pub(crate) fn create_directory(
@@ -534,11 +540,60 @@ pub(crate) fn directory_open_file_with_options(
     }
     let directory = process.resolve_handle::<DirectoryObject>(directory, required)?;
     let options = super::FileOpenOptions::new(rights, options, mode)?;
+    prepare_file_handle(process, rights, |prepare| {
+        directory.object().open_file_with_options(
+            &path,
+            &options,
+            &process.resource_domain(),
+            prepare,
+        )
+    })
+}
+
+/// Reserve table storage and allocate the object before a backend commits I/O.
+/// The closure receives preparation, not publication: a disk failure drops an
+/// unreachable object, never a handle installed in the requesting process.
+fn prepare_file_handle(
+    process: &Process,
+    rights: Rights,
+    operation: impl FnOnce(
+        &mut dyn FnMut(FileObject) -> Result<PreparedHandle, ServiceError>,
+    ) -> Result<PreparedHandle, ServiceError>,
+) -> Result<HandleValue, ServiceError> {
+    let reservation = process.reserve_handles::<1>()?;
+    let result = operation(&mut |file| {
+        let object = ObjectPublication::try_new(file).map_err(ProcessError::from)?;
+        PreparedHandle::try_from_new_object(object, rights, HandleFlags::NONE)
+            .map_err(ProcessError::from)
+            .map_err(Into::into)
+    });
+    match result {
+        Ok(prepared) => process
+            .publish_handles(reservation, [prepared])
+            .map(|handles| handles[0])
+            .map_err(|failure| ServiceError::Process(failure.error)),
+        Err(error) => {
+            process.abort_handles(reservation);
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn mount_block(
+    process: &Process,
+    block: HandleValue,
+    directory: HandleValue,
+    path: UserSlice,
+) -> Result<(), ServiceError> {
+    let path = copy_path(process, path)?;
+    let directory = process.resolve_handle::<DirectoryObject>(
+        directory,
+        Rights::READ.union(Rights::WRITE).union(Rights::EXECUTE),
+    )?;
+    let device =
+        crate::kernel::block::service::claim_mount(process, block).map_err(ServiceError::Block)?;
     directory
         .object()
-        .open_file_with_options(&path, &options, &process.resource_domain(), |file| {
-            process
-                .create_object(file, rights)
-                .map_err(ServiceError::Process)
-        })
+        .mount_block(&path, device, &process.resource_domain())?;
+    Ok(())
 }

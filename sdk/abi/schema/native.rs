@@ -254,6 +254,9 @@ pub struct UserMemory {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryLength {
+    FixedBytes {
+        bytes: u32,
+    },
     Bytes {
         argument: &'static str,
         maximum_bytes: u32,
@@ -448,6 +451,18 @@ pub const STATUSES: &[Status] = &[
         value: -22,
         name: "cross_device",
     },
+    Status {
+        value: -23,
+        name: "io_error",
+    },
+    Status {
+        value: -24,
+        name: "no_space",
+    },
+    Status {
+        value: -25,
+        name: "read_only",
+    },
 ];
 
 const RIGHT_DUPLICATE_BIT: u8 = 0;
@@ -625,6 +640,16 @@ pub const OBJECT_KINDS: &[ObjectKind] = &[
     ObjectKind {
         value: 31,
         name: "guest_notification",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 32,
+        name: "native_block",
+        transfer: TransferClass::RendezvousOnly,
+    },
+    ObjectKind {
+        value: 33,
+        name: "guest_mapping",
         transfer: TransferClass::RendezvousOnly,
     },
 ];
@@ -857,6 +882,16 @@ pub const CAPABILITY_OPERATIONS: &[HandleOperation] = &[
 
 pub const SIGNALS: &[Signal] = &[
     Signal {
+        object: "physical_device",
+        bit: 0,
+        name: "readable",
+    },
+    Signal {
+        object: "native_block",
+        bit: 0,
+        name: "peer_closed",
+    },
+    Signal {
         object: "virtual_serial",
         bit: 0,
         name: "readable",
@@ -981,6 +1016,90 @@ const DIRECTORY_ENTRY_NAME_CAPACITY: u32 = 256;
 const DIRECTORY_ENTRY_RECORD_SIZE: u16 = 24 + DIRECTORY_ENTRY_NAME_CAPACITY as u16;
 
 pub const CONSTANTS: &[AbiConstant] = &[
+    AbiConstant {
+        name: "device_firmware_max_bytes",
+        value: 65536,
+    },
+    AbiConstant {
+        name: "device_firmware_name_max_bytes",
+        value: 128,
+    },
+    AbiConstant {
+        name: "device_bundle_max_entries",
+        value: 8,
+    },
+    AbiConstant {
+        name: "device_firmware_field_info",
+        value: 0,
+    },
+    AbiConstant {
+        name: "device_firmware_field_path",
+        value: 1,
+    },
+    AbiConstant {
+        name: "device_firmware_field_compatible",
+        value: 2,
+    },
+    AbiConstant {
+        name: "device_firmware_field_registers",
+        value: 3,
+    },
+    AbiConstant {
+        name: "device_firmware_field_property",
+        value: 4,
+    },
+    AbiConstant {
+        name: "device_profile_virtio_mmio_scsi",
+        value: 1,
+    },
+    AbiConstant {
+        name: "device_profile_userspace",
+        value: 2,
+    },
+    AbiConstant {
+        name: "device_identity_compatible",
+        value: 1,
+    },
+    AbiConstant {
+        name: "device_identity_fdt_path",
+        value: 2,
+    },
+    AbiConstant {
+        name: "io_max_clients",
+        value: 9,
+    },
+    AbiConstant {
+        name: "guest_notification_disconnect",
+        value: 3,
+    },
+    AbiConstant {
+        name: "guest_dynamic_alias_offset",
+        value: 64 << 30,
+    },
+    AbiConstant {
+        name: "guest_dynamic_physical_limit",
+        value: 256 << 30,
+    },
+    AbiConstant {
+        name: "native_block_memory_bytes",
+        value: 131072,
+    },
+    AbiConstant {
+        name: "native_block_queue_size",
+        value: 8,
+    },
+    AbiConstant {
+        name: "native_block_queue_stride",
+        value: 4096,
+    },
+    AbiConstant {
+        name: "native_block_available_offset",
+        value: 256,
+    },
+    AbiConstant {
+        name: "native_block_used_offset",
+        value: 512,
+    },
     AbiConstant {
         name: "startup_handle_purpose_device_assignment_authority",
         value: 14,
@@ -2453,6 +2572,166 @@ const RESOURCE_LIMITS_FIELDS: &[Field] = &[
 ];
 
 pub const RECORDS: &[Record] = &[
+    Record {
+        name: "device_profile_info",
+        fields: &[
+            Field {
+                name: "profile",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "reserved0",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "resource_count",
+                kind: FieldKind::U32,
+                offset: 8,
+            },
+            Field {
+                name: "reserved1",
+                kind: FieldKind::U32,
+                offset: 12,
+            },
+            Field {
+                name: "reserved2",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "reserved3",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+        ],
+        minimum_size: 32,
+        size: 32,
+        alignment: 8,
+    },
+    Record {
+        name: "device_firmware_query",
+        fields: &[
+            Field {
+                name: "node",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "field",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "name_address",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "name_length",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+        ],
+        minimum_size: 24,
+        size: 24,
+        alignment: 8,
+    },
+    Record {
+        name: "device_firmware_info",
+        fields: &[
+            Field {
+                name: "flags",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "register_count",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "irq_number",
+                kind: FieldKind::U32,
+                offset: 8,
+            },
+            Field {
+                name: "irq_trigger",
+                kind: FieldKind::U32,
+                offset: 12,
+            },
+            Field {
+                name: "reserved0",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "reserved1",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+        ],
+        minimum_size: 32,
+        size: 32,
+        alignment: 8,
+    },
+    Record {
+        name: "device_bundle_entry",
+        fields: &[
+            Field {
+                name: "node",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "resource",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "offset",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+        ],
+        minimum_size: 16,
+        size: 16,
+        alignment: 8,
+    },
+    Record {
+        name: "device_resource_info",
+        fields: &[
+            Field {
+                name: "kind",
+                kind: FieldKind::U32,
+                offset: 0,
+            },
+            Field {
+                name: "reserved",
+                kind: FieldKind::U32,
+                offset: 4,
+            },
+            Field {
+                name: "offset",
+                kind: FieldKind::U64,
+                offset: 8,
+            },
+            Field {
+                name: "length",
+                kind: FieldKind::U64,
+                offset: 16,
+            },
+            Field {
+                name: "reserved2",
+                kind: FieldKind::U64,
+                offset: 24,
+            },
+        ],
+        minimum_size: 32,
+        size: 32,
+        alignment: 8,
+    },
     Record {
         name: "physical_device_info",
         fields: &[
@@ -8230,6 +8509,538 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 135,
+        name: "native_block_create",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "memory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("guest_memory"),
+                    required_rights: RIGHT_MAP,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "backend",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("guest_base", ValueKind::U64),
+            scalar_argument("notification_base", ValueKind::U64),
+            scalar_argument("notification_irq", ValueKind::U32),
+        ],
+        results: &[ResultValue {
+            name: "block",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("native_block"),
+                rights: ProducedRights::Fixed(
+                    RIGHT_WRITE | RIGHT_MAP | RIGHT_TRANSFER | RIGHT_INSPECT | RIGHT_WAIT,
+                ),
+            }),
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 136,
+        name: "native_block_activate",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "block",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("native_block"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("readonly", ValueKind::U32),
+        ],
+        results: &[ResultValue {
+            name: "sectors",
+            kind: ValueKind::U64,
+            handle: None,
+        }],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 137,
+        name: "native_block_mount",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "block",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("native_block"),
+                    required_rights: RIGHT_MAP,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "directory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("directory"),
+                    required_rights: RIGHT_WRITE | RIGHT_EXECUTE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "path",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "path_length",
+                        maximum_bytes: 4096,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("path_length", ValueKind::ByteCount),
+        ],
+        results: &[],
+        blocking: BlockingClass::MayBlock,
+        cancellation: CancellationClass::Explicit,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 138,
+        name: "guest_mapping_create",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "backend",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_machine"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "memory",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("guest_memory"),
+                    required_rights: RIGHT_MAP,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("frontend_base", ValueKind::U64),
+        ],
+        results: &[
+            ResultValue {
+                name: "mapping",
+                kind: ValueKind::Handle,
+                handle: Some(ProducedHandle {
+                    object: ProducedObject::Kind("guest_mapping"),
+                    rights: ProducedRights::Fixed(RIGHT_WRITE | RIGHT_TRANSFER | RIGHT_INSPECT),
+                }),
+            },
+            ResultValue {
+                name: "token",
+                kind: ValueKind::U64,
+                handle: None,
+            },
+        ],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 139,
+        name: "guest_mapping_release",
+        feature: FeatureGate::Core,
+        arguments: &[Argument {
+            name: "mapping",
+            kind: ValueKind::Handle,
+            handle: Some(HandleArgument {
+                object: ObjectConstraint::Kind("guest_mapping"),
+                required_rights: RIGHT_WRITE,
+                disposition: HandleDisposition::Borrow,
+            }),
+            memory: None,
+        }],
+        results: &[],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 140,
+        name: "device_claim_matching",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "authority",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("device_assignment_authority"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("profile", ValueKind::U32),
+            scalar_argument("identity_kind", ValueKind::U32),
+            Argument {
+                name: "identity",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Bytes {
+                        argument: "length",
+                        maximum_bytes: 512,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("length", ValueKind::ByteCount),
+        ],
+        results: &[ResultValue {
+            name: "physical_device",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("physical_device"),
+                rights: ProducedRights::Fixed(
+                    RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_INSPECT | RIGHT_WRITE,
+                ),
+            }),
+        }],
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 141,
+        name: "device_profile_info",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "device",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("physical_device"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "output_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("device_profile_info"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 142,
+        name: "device_resource_info",
+        feature: FeatureGate::Core,
+        arguments: &[
+            Argument {
+                name: "device",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("physical_device"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("index", ValueKind::U32),
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "output_size",
+                        maximum_bytes: EXTENSIBLE_RECORD_MAX_BYTES,
+                    },
+                    record: Some("device_resource_info"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("output_size", ValueKind::ByteCount),
+        ],
+        results: INFO_RECORD_RESULTS,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 143,
+        name: "device_firmware_read",
+        arguments: &[
+            Argument {
+                name: "authority",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("device_assignment_authority"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "query",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::FixedBytes { bytes: 24 },
+                    record: Some("device_firmware_query"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            Argument {
+                name: "output",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Write,
+                    length: MemoryLength::Bytes {
+                        argument: "capacity",
+                        maximum_bytes: 65536,
+                    },
+                    record: None,
+                    handles: None,
+                    validation_order: 1,
+                }),
+            },
+            scalar_argument("capacity", ValueKind::ByteCount),
+        ],
+        results: &[ResultValue {
+            name: "value",
+            kind: ValueKind::U64,
+            handle: None,
+        }],
+        feature: FeatureGate::Core,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 144,
+        name: "device_claim_bundle",
+        arguments: &[
+            Argument {
+                name: "authority",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("device_assignment_authority"),
+                    required_rights: RIGHT_INSPECT,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            Argument {
+                name: "entries",
+                kind: ValueKind::UserAddress,
+                handle: None,
+                memory: Some(UserMemory {
+                    direction: MemoryDirection::Read,
+                    length: MemoryLength::Elements {
+                        argument: "count",
+                        maximum_elements: 8,
+                        element_size: 16,
+                    },
+                    record: Some("device_bundle_entry"),
+                    handles: None,
+                    validation_order: 0,
+                }),
+            },
+            scalar_argument("count", ValueKind::ElementCount),
+            scalar_argument("irq_node", ValueKind::U32),
+        ],
+        results: &[ResultValue {
+            name: "physical_device",
+            kind: ValueKind::Handle,
+            handle: Some(ProducedHandle {
+                object: ProducedObject::Kind("physical_device"),
+                rights: ProducedRights::Fixed(
+                    RIGHT_TRANSFER | RIGHT_DUPLICATE | RIGHT_INSPECT | RIGHT_WRITE | RIGHT_WAIT,
+                ),
+            }),
+        }],
+        feature: FeatureGate::Core,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 145,
+        name: "device_mmio",
+        arguments: &[
+            Argument {
+                name: "device",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("physical_device"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("offset", ValueKind::U64),
+            scalar_argument("width", ValueKind::U32),
+            scalar_argument("operation", ValueKind::U32),
+            scalar_argument("value", ValueKind::U64),
+        ],
+        results: &[ResultValue {
+            name: "value",
+            kind: ValueKind::U64,
+            handle: None,
+        }],
+        feature: FeatureGate::Core,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 146,
+        name: "device_irq_pending",
+        arguments: &[Argument {
+            name: "device",
+            kind: ValueKind::Handle,
+            handle: Some(HandleArgument {
+                object: ObjectConstraint::Kind("physical_device"),
+                required_rights: RIGHT_WAIT,
+                disposition: HandleDisposition::Borrow,
+            }),
+            memory: None,
+        }],
+        results: &[ResultValue {
+            name: "value",
+            kind: ValueKind::U64,
+            handle: None,
+        }],
+        feature: FeatureGate::Core,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
+    Syscall {
+        number: 147,
+        name: "device_irq_complete",
+        arguments: &[
+            Argument {
+                name: "device",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("physical_device"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            scalar_argument("sequence", ValueKind::U64),
+            scalar_argument("asserted", ValueKind::U32),
+        ],
+        results: &[],
+        feature: FeatureGate::Core,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -8246,6 +9057,8 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "Guest mapping creation borrows backend VirtualMachine WRITE and GuestMemory MAP, populates the full stable grant, and returns an owned mapping handle plus a backend-VM-local non-reused token. The backend IPA envelope must contain all sparse aliases: alias = 64 GiB + host physical address, with host addresses below 256 GiB. Unadmitted envelope holes have no RAM or page bitmap entries. The kernel constructs immutable frontend-ordered, coalesced physical extents; neither Native policy nor Linux may replace their addresses. Backend notification write64 0x28 admits one token exactly once to that unique notification route; read64 0x30/0x38/0x40/0x48 return frontend base, total bytes, status, extent count. Write64 0x50 selects an extent index; read64 0x58/0x60/0x68/0x70 return alias, frontend-relative offset, byte length, and query status. Rejection clears the old reply. Extents cover the entire frontend range without holes or overlapping physical pages. After draining vhost and releasing all page pins, only that backend route may write64 the token at 0x20 to certify quiescence. Mapping release accepts never-admitted or quiescent tokens, withdraws lookup, clears leaves, waits for every CPU translation acknowledgement, then releases backing. Closing a mapping handle alone quarantines its pages until backend VM retirement. Notification control operation 3 permanently disconnects both routes, only when no admitted mapping remains; a disconnected route never affects an address or IRQ reused by a subsequent connection.",
+    "Native block creation dedicates one fully resident 131072-byte guest-memory grant permanently to one kernel virtio-scsi initiator; repeated creation from that grant fails. The backend VM must retain the matching mapping until execution and physical DMA are quiescent. Three standard split queues have size 8, descriptor offsets n*4096, available offsets n*4096+256, and used offsets n*4096+512, relative to guest_base. Userspace negotiates VERSION_1 with the backend before activation. Activation enables notifications and issues READ CAPACITY(16), accepting only 512-byte sectors; capacity is never supplied by userspace. MAP on the block is exclusive filesystem mount authority; directory WRITE|EXECUTE is additionally required. Mounting retains an independent block owner after its setup handle closes. Reads, writes and flushes use the shared request queue and blocking kernel notifications, not per-request userspace RPC. Unretired request failures permanently disconnect the initiator and never recycle its buffer. PEER_CLOSED reports disconnection. The physical pages remain retained by backend mappings until VM/DMA retirement; notification closure alone never proves DMA quiescence.",
     "VM power control requires WRITE authority. virtual_machine_get_power_request returns a non-consuming snapshot of one pending request, or would_block when none exists. Request IDs identify one completion and stale IDs are rejected. Operations are CPU_ON (1), CPU_OFF (2), SYSTEM_OFF (3), and SYSTEM_RESET (4); accept is strictly 0 or 1. Reserved output is zero. POWER_REQUEST signals pending work, and VCPU_TERMINATED prompts inspection of per-vCPU terminal state. virtual_machine_open_vcpu returns a control handle for an already configured vCPU; it does not change the immutable topology. The runtime owns lifecycle policy; no guest request is forwarded to host firmware. Guest suspend operations remain unsupported.",
     "Immutable VMO snapshots grant READ and MAP but never WRITE. vmo_create_snapshot coherently copies its source and reports Busy while writable mappings or hardware writers exist. File snapshots capture one content generation; returned byte_size is its exact file length, while backing is page rounded. Private mappings require source READ|MAP and VMAR MAP: source_offset is page aligned, data_offset is less than one page, source_length bytes starting at source_offset+data_offset initialize destination data_offset; all other destination bytes are zero. Writable private views never permit EXECUTE. Executable private views additionally require an executable source VMO and source EXECUTE rights; sanitized pages are sealed and instruction-published before mapping, with no writable alias. Copy-on-write mode shares immutable full pages until first write; eager mode allocates all private pages before publication. Private writes, including kernel copyout and atomic waits, cannot change the source or another private view. Ordinary writable/shared VMOs and exclusive hardware leases keep their stable backing contract. Snapshot bytes and old page versions remain owned through acknowledged translation retirement.",
     "VM platform inspection borrows an INSPECT creation lease without consuming it. Metadata describes the selected local platform: counter_frequency_hz is the actual guest counter frequency, and riscv_isa is a guaranteed subset across all admitted CPUs, not a complete host ISA listing. Other architectures return a zero RISC-V mask. The guarantee remains valid across local CPU migration; cross-machine migration is not implied.",
@@ -8282,7 +9095,7 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.",
     "Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.",
     "A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.",
-    "A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and virtual_machine_open_vcpu exposes their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is published to a read-only shared VMO consumed by the owning runtime, and VM retirement disconnects the input route without invalidating existing output mappings. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. AArch64 reference guests accept 1..8 vCPUs; RISC-V reference guests currently accept one.",
+    "A PendingVirtualMachine is mutable until seal. It must own at least one explicitly backed, non-overlapping writable region inside the configured IPA envelope and one bootstrap record for boot vCPU 0. Bootstrap entry and stack must lie in admitted backing; sparse envelope gaps remain unbacked and never become anonymous RAM. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and virtual_machine_open_vcpu exposes their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is published to a read-only shared VMO consumed by the owning runtime, and VM retirement disconnects the input route without invalidating existing output mappings. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. AArch64 reference guests accept 1..8 vCPUs; RISC-V reference guests currently accept one.",
     "VirtualSerial handles are process-local; device assignment consumes a same-process handle. register_output borrows a caller-allocated writable VMO of exactly 69632 bytes and registers it once before assignment. An exclusive write lease rejects existing writable mappings, direct accesses, snapshots, and further writers until port retirement; read-only mappings may coexist. Offset 0 is an atomic u64 produced count, offset 8 a saturating dropped-byte count, and offset 4096 begins 65536 atomic byte slots. Registration initializes counters; callers must not access contents during registration. The producer release-publishes bytes; the runtime acquire-loads production and reads a batch. acknowledge_output requires READ and submits the absolute consumed position after reading. Regressing or future positions return invalid_argument without mutation. Publication, acknowledgement, and closure serialize on the port: READABLE means unacknowledged output, WRITABLE means a connected input route has queue space, and PEER_CLOSED means no future output or input. WAIT authorizes object waits and WaitSet subscriptions. Acknowledgement clears READABLE only when caught up; new output reasserts it, without lost wakeups or periodic polling. Full output discards new bytes without blocking or overwriting unconsumed slots. Counters never wrap. Last active handle closure synchronizes with writers and closes publication; registered pages remain pinned through final VM/object retirement. The SDK maps output read-only and acknowledges batches by syscall without copying payload through the syscall. Write remains nonblocking input injection: busy means the queue is full, bad_state means disconnected. Runtime policy owns retention and client transport.",
     "The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.",
 ];

@@ -12,6 +12,7 @@ pub(crate) mod abi;
 pub(crate) mod accounting;
 #[allow(dead_code)]
 pub(crate) mod authority;
+pub(crate) mod block;
 pub(crate) mod boot;
 #[allow(dead_code, unused_imports)]
 pub(crate) mod capability;

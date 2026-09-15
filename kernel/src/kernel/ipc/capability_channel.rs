@@ -837,8 +837,8 @@ pub(crate) struct PendingCapabilityReceive {
 }
 
 impl PendingCapabilityReceive {
-    pub(crate) fn contract(&self) -> CapabilityReceiveContract {
-        self.registration.contract
+    pub(crate) fn contract(&self) -> &CapabilityReceiveContract {
+        &self.registration.contract
     }
 
     /// Cancels only if no sender has already won the match arbitration.
@@ -903,8 +903,8 @@ pub(crate) struct CapabilityReceiveClaim {
 }
 
 impl CapabilityReceiveClaim {
-    pub(crate) fn contract(&self) -> CapabilityReceiveContract {
-        self.registration().contract
+    pub(crate) fn contract(&self) -> &CapabilityReceiveContract {
+        &self.registration().contract
     }
 
     pub(crate) const fn capacity_result(&self) -> Result<(), CapabilityChannelError> {

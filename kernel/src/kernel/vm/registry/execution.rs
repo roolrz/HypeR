@@ -108,6 +108,13 @@ impl VmBinding {
         }
         self.machine.io_routes.can_insert(route)
     }
+    pub(crate) fn owns_userspace_assignment_aperture(&self, base: u64, length: u64) -> bool {
+        self.machine.physical.with(|physical| {
+            physical
+                .as_ref()
+                .is_some_and(|assignment| assignment.owns_userspace_aperture(base, length))
+        })
+    }
     pub(crate) fn io_range_conflicts(&self, base: u64, length: u64) -> bool {
         self.machine.io_routes.conflicts(base, length)
     }
@@ -116,6 +123,13 @@ impl VmBinding {
         route: crate::kernel::vm::io::Route,
     ) -> Result<(), crate::kernel::vm::io::Error> {
         self.machine.io_routes.insert(route)
+    }
+
+    pub(crate) fn remove_io_notification(
+        &self,
+        route_id: u64,
+    ) -> Option<crate::kernel::vm::io::Route> {
+        self.machine.io_routes.remove_notification(route_id)
     }
 
     pub(crate) fn interrupts(&self) -> &VmInterruptController {

@@ -597,8 +597,9 @@ pub(super) fn sys_task_inspector_scan_processes(
         core::mem::size_of::<HyperNativeTaskProcess>(),
     )
     .and_then(|(inspector, cursor, destination)| {
-        let page = services
-            .scan_processes(inspector, cursor)
+        let mut page = Page::empty();
+        services
+            .scan_processes(inspector, cursor, &mut page)
             .map_err(status_from_inspection_error)?;
         copy_encoded_page(services, destination, &page, encode_task_process)
     });
@@ -636,8 +637,9 @@ pub(super) fn sys_object_inspector_scan_objects(
         core::mem::size_of::<HyperNativeObjectInspection>(),
     )
     .and_then(|(inspector, cursor, destination)| {
-        let page = services
-            .scan_objects(inspector, cursor)
+        let mut page = Page::empty();
+        services
+            .scan_objects(inspector, cursor, &mut page)
             .map_err(status_from_inspection_error)?;
         copy_encoded_page(services, destination, &page, encode_object_inspection)
     });
@@ -863,8 +865,9 @@ pub(super) fn sys_directory_read(
     arguments: &Arguments,
 ) -> DeferredAction {
     let result = parse_directory_read(arguments).and_then(|(directory, cookie, destination)| {
-        let page = services
-            .read_directory(directory, cookie)
+        let mut page = crate::kernel::vfs::DirectoryPage::empty();
+        services
+            .read_directory(directory, cookie, &mut page)
             .map_err(status_from_vfs_service_error)?;
         copy_directory_page(services, destination, &page)
     });

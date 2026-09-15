@@ -150,6 +150,21 @@ pub(crate) fn service_guest_stage2_retirement(request: GuestStage2RetirementRequ
     }
 }
 
+/// Invalidate a retained, still-live identity without clearing its selection.
+pub(crate) fn service_guest_stage2_live(request: GuestStage2RetirementRequest) {
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+    crate::arch::vm::service_guest_stage2_live(request.backend);
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
+    match request.never {}
+}
+
+pub(crate) fn publish_guest_stage2_changes(_capability: &GuestStage2RetirementCapability) {
+    #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
+    crate::arch::vm::publish_guest_stage2_changes();
+    #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
+    crate::hal::cpu::halt();
+}
+
 /// Selected per-vCPU machine state retained by one scheduler execution.
 pub struct VcpuHardwareState {
     context: VcpuContext,

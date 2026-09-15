@@ -74,7 +74,9 @@ pub use smp::{
 pub(crate) use stage2::GuestStage2RetirementRequest;
 pub use stage2::{Error as Stage2Error, Stage2AddressSpace};
 pub(crate) use stage2::{
-    identifier_bits as guest_translation_identifier_bits, retire_local as retire_guest_stage2_local,
+    identifier_bits as guest_translation_identifier_bits,
+    publish_changes as publish_guest_stage2_changes, retire_local as retire_guest_stage2_local,
+    synchronize_local as synchronize_guest_stage2_local,
 };
 pub use timer::{
     Error as TimerError, RiscvTimeCounter as ArchitectureCounter,

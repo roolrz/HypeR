@@ -165,6 +165,9 @@ impl Runtime {
             shell_input_channel: Some(shell_input_channel),
             shell_output_channel: Some(shell_output_channel),
             shell_error_channel: Some(shell_error_channel),
+            io_ready_channel: None,
+            io_broker_server: None,
+            io_broker_client: None,
         };
         Ok(Self {
             launcher: ServiceLauncher { authorities },
@@ -259,6 +262,24 @@ impl Runtime {
         plan: &LaunchPlan<'_>,
     ) -> Result<Infallible, LaunchError> {
         Self::preflight(manifest)?;
+        if hyper_init::bootstrap_policy::io_broker_enabled(plan)
+            .map_err(|_| LaunchError::InvalidPlan)?
+        {
+            let (server, client) =
+                CapabilityChannel::create().map_err(|_| LaunchError::OperatingSystem)?;
+            self.launcher.authorities.io_broker_server = Some(server.into_handle());
+            self.launcher.authorities.io_broker_client = Some(client.into_handle());
+        }
+        let ready_service = hyper_init::bootstrap_policy::io_ready_service(plan)
+            .map_err(|_| LaunchError::InvalidPlan)?;
+        let ready_reader = if ready_service.is_some() {
+            let (writer, reader) =
+                channel::create_pair().map_err(|_| LaunchError::OperatingSystem)?;
+            self.launcher.authorities.io_ready_channel = Some(writer);
+            Some(reader)
+        } else {
+            None
+        };
         let vm_configuration = match plan.vm_config_path() {
             Some(path) => {
                 let manager = plan
@@ -277,6 +298,15 @@ impl Runtime {
                 vm_manager_index,
                 &mut self.supervisors,
             )?;
+            if let (Some(reader), Some(service)) = (ready_reader.as_ref(), ready_service) {
+                self.supervisors.wait_for_storage(
+                    manifest,
+                    service,
+                    reader,
+                    self.launcher.authorities.console,
+                )?;
+            }
+            drop(ready_reader);
             let mut vm_control = None;
             if let Some((manager, path)) = vm_configuration {
                 let provisioner = self.provisioner.as_mut().ok_or(LaunchError::InvalidPlan)?;
@@ -323,6 +353,7 @@ pub(super) enum LaunchError {
     VmInstanceProtocol,
     VmManagerTerminated,
     VmProvisioningClosed,
+    StorageNotReady,
 }
 
 impl LaunchError {
@@ -342,6 +373,7 @@ impl LaunchError {
             Self::VmInstanceProtocol => b"HypeR init: initial VM protocol failed\n",
             Self::VmManagerTerminated => b"HypeR init: VM manager terminated before provisioning\n",
             Self::VmProvisioningClosed => b"HypeR init: VM provisioning channel closed\n",
+            Self::StorageNotReady => b"HypeR init: storage readiness failed or timed out\n",
         }
     }
 
@@ -359,6 +391,7 @@ impl LaunchError {
             Self::VmInstanceProtocol => b"initial VM protocol failed",
             Self::VmManagerTerminated => b"VM manager terminated",
             Self::VmProvisioningClosed => b"VM provisioning channel closed",
+            Self::StorageNotReady => b"storage not ready",
         }
     }
 }

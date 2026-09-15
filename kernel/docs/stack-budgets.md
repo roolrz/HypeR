@@ -19,7 +19,9 @@ so the existing shell policy supplies thread inspection authority. The normal
 application output and production initramfs are preserved. The workload checks
 thread scan pagination, snapshot isolation, boundary/eager/COW mappings, and
 dynamic child startup/exit, then stops the Linux guest to observe vCPU retirement.
-The console attachment also exercises interactive guest input.
+The console attachment also exercises interactive guest input. For diagnosis,
+`verify-stack.py --stage inspect|memory|process` isolates a workload stage so
+its terminated thread can be measured independently.
 
 The target builds with `kernel-stack-audit` and `STACK_METADATA=1`. The latter
 scopes `RUSTC_BOOTSTRAP=1` and `-Zemit-stack-sizes` to diagnostic kernel builds
@@ -30,11 +32,11 @@ uninstrumented image. Its JSON report includes every reported symbol, its frame
 size, its ceiling, and the reason for each reviewed exception.
 
 The AArch64 policy uses a 4096-byte local-frame ceiling with tighter limits for
-selected runtime paths. Boot, emergency, initial process construction and
-full-batch serial exceptions are named individually. Initial process construction
-still has a large frame on a normal 16 KiB `native-init` worker stack; being
-one-shot does not make it safe automatically. Its nested calls and measured
-reserve remain relevant. These are regression limits, not recommended frame sizes.
+selected runtime paths. Boot, emergency and full-batch serial exceptions are
+named individually. Initial process construction runs on a normal 16 KiB
+`native-init` worker stack; its loading, authority preparation and publication
+phases must not retain each other's temporary storage. These are regression
+limits, not recommended frame sizes.
 Changing the compiler or inlining layout requires reviewing the resulting
 frames and their callers, not simply raising limits until a build passes.
 
@@ -56,8 +58,10 @@ Watermarks can miss reserved but untouched stack space. Still-running services,
 the reaper's own stack and IRQ stacks on unsampled CPUs are not covered. QEMU
 workload coverage is evidence, not a proof against every stack overflow.
 The harness requires retired kernel/user/vCPU and local IRQ observations, intact canaries
-and at least 2048 bytes of measured reserve. `STACK_MINIMUM_REMAINING` can set a
-stricter local threshold. Guard pages catch out-of-range access, but exception
+and at least 2048 bytes of measured reserve. It also rejects a measured maximum
+above 12 KiB, independently of the allocated stack size. The optimization target
+is 8 KiB; run with `STACK_MAXIMUM_USED=8192` to check that stricter target.
+`STACK_MINIMUM_REMAINING` can set a stricter reserve threshold. Guard pages catch out-of-range access, but exception
 entry itself still requires space; recovery from arbitrary exhaustion is not
 guaranteed.
 
@@ -77,6 +81,16 @@ mappings directly, eliminating page-sized bounce buffers and a second copy.
 Interactive serial writes use a 128-byte specialization; full 4096-byte writes
 retain their complete buffer, one usercopy and one publication, preserving
 failure and partial-write behavior without allocating per input event.
+
+FAT directory parsing fills a caller-owned entry and borrows its long-name
+buffer. A mounted volume owns one persistent sector-cache allocation in place
+of its former outer volume allocation, reducing mount return-value copies
+without adding allocations or I/O. ELF segments retain their validated ELF
+fields and derive page extents, reducing sorting scratch without replacing the
+sorting algorithm. Process rollback extracts the address-space owner from its
+existing unique allocation instead of moving the complete process state onto
+the stack. Bootstrap and child startup release encoding scratch before later
+thread and capability publication phases.
 
 `make test-stack ARCH=riscv64` runs the same workload and watermark checks.
 The static frame policy currently covers AArch64 only; a policy must be measured

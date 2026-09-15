@@ -11,6 +11,12 @@
       "required": false
     },
     {
+      "pattern": "hyper::platform::fdt::walker::discover_with::<hyper::drivers::platform::DeviceScanner>(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 59904,
+      "reason": "Boot-only bounded FDT/device dependency discovery, invoked solely by platform_bus::initialize on the 256 KiB bootstrap stack.",
+      "required": false
+    },
+    {
       "pattern": "<hyper::platform::fdt::resources::ResourceCollector>::new(?: \\(\\.llvm\\.\\d+\\))?",
       "budget": 55040,
       "reason": "Boot-only bounded FDT resource collector construction.",
@@ -48,8 +54,8 @@
     },
     {
       "pattern": "hyper::kernel::init::prepare_and_start(?: \\(\\.llvm\\.\\d+\\))?",
-      "budget": 5376,
-      "reason": "Known one-shot native-init worker frame on an ordinary kernel stack, not the bootstrap stack; requires runtime watermark evidence and separate call-chain headroom review.",
+      "budget": 1024,
+      "reason": "Bootstrap coordinator retains only phase owners; image loading and capability preparation have separate lifetimes.",
       "required": false
     },
     {
@@ -123,6 +129,84 @@
       "budget": 1024,
       "reason": "Private-view page copying uses mapped storage rather than stack scratch.",
       "required": true
+    },
+    {
+      "pattern": "<hyper::fs::fat::FatVolume<hyper::kernel::block::MountedDevice>>::stat_into",
+      "budget": 128,
+      "reason": "FAT lookup shares the 16 KiB syscall stack with blocking block I/O; caller-owned metadata and separate traversal frames preserve call-chain headroom.",
+      "required": true
+    },
+    {
+      "pattern": "<hyper::fs::fat::FatVolume<hyper::kernel::block::MountedDevice>>::find_entry",
+      "budget": 1536,
+      "reason": "FAT lookup shares the 16 KiB syscall stack with blocking block I/O; caller-owned metadata and separate traversal frames preserve call-chain headroom.",
+      "required": true
+    },
+    {
+      "pattern": "<hyper::kernel::vfs::fat::Fatfs<hyper::kernel::block::MountedDevice>>::attributes",
+      "budget": 1792,
+      "reason": "FAT lookup shares the 16 KiB syscall stack with blocking block I/O; caller-owned metadata and separate traversal frames preserve call-chain headroom.",
+      "required": true
+    },
+    {
+      "pattern": "<hyper::kernel::vfs::fat::Fatfs<hyper::kernel::block::MountedDevice>>::lookup",
+      "budget": 1920,
+      "reason": "FAT lookup shares the 16 KiB syscall stack with blocking block I/O; caller-owned metadata and separate traversal frames preserve call-chain headroom.",
+      "required": true
+    },
+    {
+      "pattern": "hyper::kernel::vfs::resolve::resolve",
+      "budget": 3072,
+      "reason": "FAT lookup shares the 16 KiB syscall stack with blocking block I/O; caller-owned metadata and separate traversal frames preserve call-chain headroom.",
+      "required": true
+    },
+    {
+      "pattern": "<hyper::fs::fat::FatVolume<hyper::kernel::block::MountedDevice>>::scan_entry",
+      "budget": 512,
+      "reason": "Borrowed visitor owns the LFN scratch; scanning retains only caller-owned metadata.",
+      "required": true
+    },
+    {
+      "pattern": "<fatfs::dir::Dir<hyper::fs::fat::Disk<hyper::kernel::block::MountedDevice>,\\ hyper::fs::fat_time::Clock,\\ fatfs::fs::LossyOemCpConverter>>::find_entry(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 512,
+      "reason": "Compact located entries keep long-filename buffers out of blocking mutation callers.",
+      "required": true
+    },
+    {
+      "pattern": "<hyper::fs::fat::FatVolume<hyper::kernel::block::MountedDevice>>::create(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 1024,
+      "reason": "Compact located entries keep long-filename buffers out of blocking mutation callers.",
+      "required": true
+    },
+    {
+      "pattern": "<hyper::fs::fat::FatVolume<hyper::kernel::block::MountedDevice>>::rename(?: \\(\\.llvm\\.\\d+\\))?",
+      "budget": 1280,
+      "reason": "Compact located entries keep long-filename buffers out of blocking mutation callers.",
+      "required": true
+    },
+    {
+      "pattern": "hyper::kernel::init::capabilities::install",
+      "budget": 2304,
+      "reason": "Bootstrap retains slot owners only; publication and construction scratch must not accumulate.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::init::capabilities::prepare_handles",
+      "budget": 2048,
+      "reason": "Caller-owned bootstrap slots avoid intermediate aggregate owners.",
+      "required": false
+    },
+    {
+      "pattern": "hyper::kernel::init::bootstrap::finish_handles::<[0-9]+>",
+      "budget": 3072,
+      "reason": "Only the final bootstrap phase retains publication arrays and failure owners.",
+      "required": false
+    },
+    {
+      "pattern": "<hyper::kernel::process::owner::start::PreparedChildProcessStart>::prepare",
+      "budget": 2560,
+      "reason": "Child stack encoding completes before thread and handle admission.",
+      "required": false
     }
   ]
 }

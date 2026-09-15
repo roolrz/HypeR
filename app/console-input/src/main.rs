@@ -29,12 +29,14 @@ fn run(startup: &mut Startup<'_>) -> Result<Infallible, ()> {
     let console = console_owner.as_console();
     let channel = channel_owner.as_byte_channel();
     let mut input = [0_u8; INPUT_BYTES];
+    let mut newlines = hyper_console_input::Newlines::default();
 
     loop {
         let count = console.read_blocking(&mut input).map_err(|_| ())?;
-        channel
-            .send(input.get(..count).ok_or(())?)
-            .map_err(|_| ())?;
+        let count = newlines.normalize(input.get_mut(..count).ok_or(())?);
+        for packet in hyper_console_input::Packets::new(&input[..count]) {
+            channel.send(packet).map_err(|_| ())?;
+        }
     }
 }
 

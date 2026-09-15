@@ -139,9 +139,6 @@ impl SegmentPermissions {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LoadSegment<'image> {
-    mapping_address: u64,
-    mapping_size: u64,
-    data_offset: u64,
     file_offset: u64,
     memory_address: u64,
     memory_size: u64,
@@ -155,15 +152,16 @@ impl<'image> LoadSegment<'image> {
     }
 
     pub const fn mapping_address(self) -> u64 {
-        self.mapping_address
+        align_down(self.memory_address)
     }
 
     pub const fn mapping_size(self) -> u64 {
-        self.mapping_size
+        // parse_load_segment validates both additions before constructing Self.
+        align_down(self.data_offset() + self.memory_size + (PAGE_SIZE - 1))
     }
 
     pub const fn data_offset(self) -> u64 {
-        self.data_offset
+        self.memory_address & (PAGE_SIZE - 1)
     }
 
     pub const fn memory_address(self) -> u64 {
@@ -395,7 +393,7 @@ impl<'image> Image<'image> {
         if segments.is_empty() {
             return Err(Error::InvalidLoadSegment);
         }
-        segments.sort_unstable_by_key(|segment| segment.mapping_address);
+        segments.sort_unstable_by_key(|segment| segment.mapping_address());
         validate_segment_layout(&segments, entry)?;
         if allocation.dynamic_executable
             && (kind != ImageKind::PositionIndependent
@@ -470,13 +468,17 @@ impl<'image> Image<'image> {
     }
 
     pub fn minimum_mapping_address(&self) -> u64 {
-        self.segments[0].mapping_address
+        self.segments[0].mapping_address()
     }
 
     pub fn maximum_mapping_address(&self) -> u64 {
         self.segments
             .last()
-            .and_then(|segment| segment.mapping_address.checked_add(segment.mapping_size))
+            .and_then(|segment| {
+                segment
+                    .mapping_address()
+                    .checked_add(segment.mapping_size())
+            })
             .unwrap_or(u64::MAX)
     }
 }
@@ -659,15 +661,14 @@ fn parse_load_segment<'image>(
     let data = bytes.get(file_start..file_end).ok_or(Error::Truncated)?;
     let mapping_address = align_down(virtual_address);
     let data_offset = virtual_address - mapping_address;
-    let mapping_size = align_up(
+    // Validate the derived page extent once; keep only the ELF facts in each
+    // segment so sorting and loader transactions do not move redundant state.
+    align_up(
         data_offset
             .checked_add(memory_size)
             .ok_or(Error::ArithmeticOverflow)?,
     )?;
     Ok(Some(LoadSegment {
-        mapping_address,
-        mapping_size,
-        data_offset,
         file_offset,
         memory_address: virtual_address,
         memory_size,
@@ -683,12 +684,12 @@ fn parse_load_segment<'image>(
 fn validate_segment_layout(segments: &[LoadSegment<'_>], entry: u64) -> Result<(), Error> {
     let mut previous_end = 0u64;
     for segment in segments {
-        if segment.mapping_address < previous_end {
+        if segment.mapping_address() < previous_end {
             return Err(Error::OverlappingLoadSegments);
         }
         previous_end = segment
-            .mapping_address
-            .checked_add(segment.mapping_size)
+            .mapping_address()
+            .checked_add(segment.mapping_size())
             .ok_or(Error::ArithmeticOverflow)?;
     }
     if !segments

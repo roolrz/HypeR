@@ -6,7 +6,8 @@ use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceDomain,
 use crate::kernel::authority::Rights;
 use crate::kernel::irq::interrupt::{self, HandlerResult, Registration, VirtualInterrupt};
 use crate::kernel::object::{
-    KernelObject, KernelRef, ObjectKind, TransferClass, VmDeviceBinding, private,
+    KernelObject, KernelRef, ObjectKind, SignalMask, SignalSource, SignalState, TransferClass,
+    VmDeviceBinding, private,
 };
 use crate::kernel::vm::registry::VmId;
 use hyper::sync::InterruptSpinLock;
@@ -52,6 +53,7 @@ struct Route {
     vm: VmId,
     irq: u32,
     negotiation: super::model::Negotiation,
+    interrupt: super::model::LevelInterrupt,
 }
 enum State {
     Claimed,
@@ -65,6 +67,7 @@ pub(crate) struct PhysicalDevice {
     claim: Claim,
     state: Lock<State>,
     registration: Lock<Option<Registration>>,
+    readable: SignalState,
     _charge: CommittedCharge,
 }
 impl PhysicalDevice {
@@ -78,15 +81,204 @@ impl PhysicalDevice {
             claim,
             state: Lock::new(State::Claimed),
             registration: Lock::new(None),
+            readable: SignalState::new(),
             _charge: charge,
         })
     }
+    pub(crate) fn claim_matching(
+        profile: u32,
+        identity_kind: u32,
+        identity: &str,
+        domain: &ResourceDomain,
+    ) -> Result<Self, super::service::MatchError> {
+        let charge = charge::<Self>(domain).map_err(super::service::classify)?;
+        let claim = super::super::platform_bus::claim_matching(profile, identity_kind, identity)?;
+        Ok(Self {
+            claim,
+            state: Lock::new(State::Claimed),
+            registration: Lock::new(None),
+            readable: SignalState::new(),
+            _charge: charge,
+        })
+    }
+    pub(crate) fn claim_bundle(
+        entries: &[(u32, u32, u64)],
+        irq_node: u32,
+        domain: &ResourceDomain,
+    ) -> Result<Self, Error> {
+        if !crate::hal::vm::supports_guest_device_assignment() {
+            return Err(Error::Unsupported);
+        }
+        let charge = charge::<Self>(domain)?;
+        let claim = super::super::platform_bus::claim_bundle(entries, irq_node)?;
+        Ok(Self {
+            claim,
+            state: Lock::new(State::Claimed),
+            registration: Lock::new(None),
+            readable: SignalState::new(),
+            _charge: charge,
+        })
+    }
+    fn set_readable(&self, ready: bool) {
+        if self
+            .readable
+            .update(
+                SignalMask::from_trusted_bits(1),
+                SignalMask::from_trusted_bits(u64::from(ready)),
+            )
+            .is_err()
+        {
+            crate::kernel::crash::fatal(format_args!("physical IRQ signal sequence exhausted"));
+        }
+    }
+    pub(crate) fn mmio(
+        &self,
+        offset: u64,
+        width: u32,
+        write: bool,
+        value: u64,
+    ) -> Result<u64, Error> {
+        let offset = usize::try_from(offset).map_err(|_| Error::InvalidArgument)?;
+        let width = width as usize;
+        if !matches!(self.claim.hardware.profile, super::Profile::Userspace) {
+            return Err(Error::Unsupported);
+        }
+        if !matches!(width, 1 | 2 | 4)
+            || !offset.is_multiple_of(width)
+            || (write && value > (u64::MAX >> (64 - width * 8)))
+            || (!write && value != 0)
+        {
+            return Err(Error::InvalidArgument);
+        }
+        // Even a device read may have side effects. Access begins only after
+        // the installed VM owns all DMA backing; CPU access and retirement are
+        // serialized here. Userspace selects register semantics, never extents.
+        let route = self.state.with(|state| match state {
+            State::Active(route) => Ok(*route),
+            _ => Err(Error::BadState),
+        })?;
+        // Activation prepares the IRQ before registry publication. An active
+        // object alone is not yet permission to touch hardware: reject access
+        // until the fully installed VM and its retained backing are visible.
+        crate::kernel::vm::io::with_irq_binding(route.vm, |_| {
+            self.state.with(|state| {
+                if !matches!(state, State::Active(_)) {
+                    return Err(Error::BadState);
+                }
+                if write {
+                    self.claim
+                        .hardware
+                        .write_access(offset, width, value)
+                        .then_some(0)
+                        .ok_or(Error::InvalidArgument)
+                } else {
+                    self.claim
+                        .hardware
+                        .read_access(offset, width)
+                        .ok_or(Error::InvalidArgument)
+                }
+            })
+        })
+        .map_err(|_| Error::BadState)?
+    }
+    pub(crate) fn irq_pending(&self) -> Result<u64, Error> {
+        if !matches!(self.claim.hardware.profile, super::Profile::Userspace) {
+            return Err(Error::Unsupported);
+        }
+        self.state.with(|state| match state {
+            State::Active(route) => Ok(route.interrupt.pending()),
+            _ => Err(Error::BadState),
+        })
+    }
+    pub(crate) fn irq_complete(&self, sequence: u64, asserted: bool) -> Result<(), Error> {
+        if !matches!(self.claim.hardware.profile, super::Profile::Userspace) {
+            return Err(Error::Unsupported);
+        }
+        let route = self.state.with(|state| match state {
+            State::Active(route) => Ok(*route),
+            _ => Err(Error::BadState),
+        })?;
+        crate::kernel::vm::io::with_irq_binding(route.vm, |binding| {
+            let result = self.state.with(|state| {
+                let State::Active(current) = state else {
+                    return Err(Error::BadState);
+                };
+                if current.interrupt.pending() != sequence {
+                    return Err(Error::Busy);
+                }
+                crate::kernel::vm::io::set_line(binding, route.irq, asserted);
+                current
+                    .interrupt
+                    .complete(sequence, asserted)
+                    .map_err(|_| Error::Busy)?;
+                // Acknowledging observation is distinct from hardware rearm.
+                // A still-asserted level keeps its token but is no longer a
+                // continuously-ready userspace event.
+                self.set_readable(current.interrupt.readable());
+                Ok(())
+            });
+            binding.publish_changed_interrupts();
+            result
+        })
+        .map_err(|_| Error::BadState)??;
+        if !asserted {
+            self.registration.with(|registration| {
+                let registration = registration.as_ref().ok_or(Error::BadState)?;
+                // IRQ dispatch applies its mask before releasing the registry
+                // lock. Rearm takes that same lock, then rechecks the token:
+                // neither a late mask nor a newer pending IRQ can be lost.
+                interrupt::enable_registered_shared_if(registration, || {
+                    self.state
+                        .with(|state| matches!(state, State::Active(route) if route.interrupt.can_rearm()))
+                })
+                .map_err(|_| Error::Interrupt)
+            })?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn info(&self) -> super::service::Info {
         super::service::Info {
-            device_id: 8,
-            transport_version: 2,
+            device_id: if matches!(self.claim.hardware.profile, super::Profile::Virtio) {
+                8
+            } else {
+                0
+            },
+            transport_version: if matches!(self.claim.hardware.profile, super::Profile::Virtio) {
+                2
+            } else {
+                0
+            },
             mmio_size: self.claim.hardware.mapping.resource().size(),
         }
+    }
+    pub(crate) fn profile_info(&self) -> [u8; 32] {
+        let count = 1 + self.claim.hardware.extra.iter().flatten().count() as u32;
+        let mut output = [0; 32];
+        output[0..4].copy_from_slice(&self.claim.hardware.profile.id().to_le_bytes());
+        output[8..12].copy_from_slice(&count.to_le_bytes());
+        output
+    }
+    pub(crate) fn resource_info(&self, index: u32) -> Result<[u8; 32], Error> {
+        let window = if index == 0 {
+            super::Window {
+                mapping: self.claim.hardware.mapping,
+                offset: 0,
+            }
+        } else {
+            self.claim
+                .hardware
+                .extra
+                .get(index as usize - 1)
+                .copied()
+                .flatten()
+                .ok_or(Error::InvalidArgument)?
+        };
+        let mut output = [0; 32];
+        output[0..4].copy_from_slice(&(index + 1).to_le_bytes());
+        output[8..16].copy_from_slice(&(window.offset as u64).to_le_bytes());
+        output[16..24].copy_from_slice(&window.mapping.resource().size().to_le_bytes());
+        Ok(output)
     }
     fn attach(&self) -> Result<(), Error> {
         self.state.with(|state| match state {
@@ -102,6 +294,7 @@ impl PhysicalDevice {
             vm,
             irq,
             negotiation: super::model::Negotiation::new(),
+            interrupt: super::model::LevelInterrupt::new(),
         };
         self.state.with(|state| {
             if matches!(state, State::Attached) {
@@ -153,6 +346,10 @@ impl PhysicalDevice {
             // All owning VM vCPUs have detached before this entry. A modern
             // virtio reset acknowledges only once the device has stopped DMA.
             // Never free backing merely because a poll budget elapsed.
+            if matches!(self.claim.hardware.profile, super::Profile::Userspace) {
+                *state = State::Quarantined;
+                return Err(Error::Quarantined);
+            }
             self.claim.hardware.write(0x70, 0);
             for _ in 0..1024 {
                 if self.claim.hardware.read(0x70) == 0 {
@@ -181,11 +378,23 @@ impl PhysicalDevice {
         }
         Ok(())
     }
+    fn irq_write(&self, offset: usize) -> bool {
+        match self.claim.hardware.profile {
+            super::Profile::Virtio => offset == 0x64 || offset == 0x70,
+            super::Profile::Userspace => false,
+        }
+    }
     pub(crate) fn access_at(&self, offset: usize, access: MmioAccess) -> MmioAction {
         if !matches!(access.size(), 1 | 2 | 4)
-            || (offset < 0x100 && access.size() != 4)
+            || (matches!(self.claim.hardware.profile, super::Profile::Virtio)
+                && offset < 0x100
+                && access.size() != 4)
             || !offset.is_multiple_of(access.size())
-            || offset + access.size() > self.claim.hardware.mapping.resource().size() as usize
+            || self
+                .claim
+                .hardware
+                .register(offset, access.size())
+                .is_none()
         {
             return MmioAction::Stop;
         }
@@ -202,21 +411,30 @@ impl PhysicalDevice {
                     return MmioAction::Stop;
                 };
                 match access.operation() {
-                    MmioOperation::Read => MmioAction::CompleteRead(
-                        self.claim.hardware.read_access(offset, access.size()),
-                    ),
+                    MmioOperation::Read => self
+                        .claim
+                        .hardware
+                        .read_access(offset, access.size())
+                        .map(MmioAction::CompleteRead)
+                        .unwrap_or(MmioAction::Stop),
                     MmioOperation::Write(value) => {
-                        if !active.negotiation.write(offset, value as u32) {
+                        if matches!(self.claim.hardware.profile, super::Profile::Virtio)
+                            && !active.negotiation.write(offset, value as u32)
+                        {
                             return MmioAction::Stop;
                         }
-                        self.claim
+                        if !self
+                            .claim
                             .hardware
-                            .write_access(offset, access.size(), value);
-                        if offset == 0x64 || offset == 0x70 {
+                            .write_access(offset, access.size(), value)
+                        {
+                            return MmioAction::Stop;
+                        }
+                        if self.irq_write(offset) {
                             crate::kernel::vm::io::set_line(
                                 binding,
                                 route.irq,
-                                self.claim.hardware.read(0x60) != 0,
+                                self.claim.hardware.line_asserted(),
                             );
                         }
                         MmioAction::CompleteWrite
@@ -228,7 +446,7 @@ impl PhysicalDevice {
         })
         .unwrap_or(MmioAction::Stop);
         if matches!(access.operation(), MmioOperation::Write(_))
-            && (offset == 0x64 || offset == 0x70)
+            && self.irq_write(offset)
             && matches!(
                 self.claim.hardware.trigger,
                 hyper::hal::interrupt::InterruptTrigger::Level
@@ -251,6 +469,19 @@ fn interrupt_handler(_: VirtualInterrupt, context: usize) -> HandlerResult {
     // SAFETY: Assignment owns a stable KernelRef until synchronized unregister;
     // the callback never takes registration or mutates the IRQ registry.
     let object = unsafe { &*core::ptr::with_exposed_provenance::<PhysicalDevice>(context) };
+    if matches!(object.claim.hardware.profile, super::Profile::Userspace) {
+        object.state.with(|state| {
+            if let State::Active(route) = state {
+                if route.interrupt.deliver().is_err() {
+                    crate::kernel::crash::fatal(format_args!("physical IRQ token exhausted"));
+                }
+                object.set_readable(route.interrupt.readable());
+            }
+        });
+        // The IRQ registry lock spans this callback and the hardware mask.
+        // The only rearm API acquires that lock after validating registration.
+        return HandlerResult::HandledAndMaskLocal;
+    }
     let route = object.state.with(|state| match state {
         State::Active(route) => Some(*route),
         _ => None,
@@ -259,7 +490,7 @@ fn interrupt_handler(_: VirtualInterrupt, context: usize) -> HandlerResult {
         crate::kernel::vm::io::with_irq_binding(route.vm, |binding| {
             let mask = object.state.with(|state| {
                 let active = matches!(state, State::Active(_));
-                let status = object.claim.hardware.read(0x60);
+                let status = u32::from(object.claim.hardware.line_asserted());
                 if active {
                     crate::kernel::vm::io::set_line(binding, route.irq, status != 0);
                 }
@@ -281,7 +512,7 @@ fn interrupt_handler(_: VirtualInterrupt, context: usize) -> HandlerResult {
             object.state.with(|state| {
                 super::model::mask_interrupt(
                     matches!(state, State::Active(_)),
-                    object.claim.hardware.read(0x60),
+                    u32::from(object.claim.hardware.line_asserted()),
                     object.claim.hardware.trigger,
                 )
             })
@@ -304,7 +535,14 @@ impl KernelObject for PhysicalDevice {
     const SUPPORTED_RIGHTS: Rights = Rights::TRANSFER
         .union(Rights::DUPLICATE)
         .union(Rights::INSPECT)
-        .union(Rights::WRITE);
+        .union(Rights::WRITE)
+        .union(Rights::WAIT);
+    fn signal_source(&self) -> Option<SignalSource<'_>> {
+        Some(SignalSource::new(
+            &self.readable,
+            SignalMask::from_trusted_bits(1),
+        ))
+    }
 }
 
 pub(crate) struct Assignment {
@@ -321,10 +559,7 @@ impl Assignment {
         if !crate::hal::vm::supports_guest_device_assignment() {
             return Err(Error::Unsupported);
         }
-        if !base.is_multiple_of(4096)
-            || !(0x0b00_0000..0x0c00_0000).contains(&base)
-            || !(40..64).contains(&irq)
-        {
+        if !super::model::assignment_aperture(base) || !(40..64).contains(&irq) {
             return Err(Error::InvalidArgument);
         }
         object.object().attach()?;
@@ -336,9 +571,28 @@ impl Assignment {
     pub(crate) const fn irq(&self) -> u32 {
         self.irq
     }
+    /// Only the exact aperture owned by this userspace assignment can be
+    /// delegated to an installed Native MMIO handler.
+    pub(crate) fn owns_userspace_aperture(&self, base: u64, length: u64) -> bool {
+        super::model::owns_userspace_aperture(
+            matches!(
+                self.object.object().claim.hardware.profile,
+                super::Profile::Userspace
+            ),
+            self.base,
+            base,
+            length,
+        )
+    }
     pub(crate) fn offset(&self, access: MmioAccess) -> Option<usize> {
+        if matches!(
+            self.object.object().claim.hardware.profile,
+            super::Profile::Userspace
+        ) {
+            return None;
+        }
         let offset = access.address().get().checked_sub(self.base)?;
-        if offset >= 4096 {
+        if offset >= 65536 {
             return None;
         }
         Some(offset as usize)

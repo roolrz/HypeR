@@ -27,15 +27,25 @@ their existing guest profile.
 QEMU covers guest boot, timer/console wakeups and VM retirement, including
 runtime crashes. Physical Pi 5 boot, firmware resource descriptions, interrupt
 ordering and device quiescence still need hardware validation. The Linux I/O
-backend and physical device assignment remain work in the
-[roadmap](../../docs/roadmap.md). RP1 UARTs on the 40-pin header are not the
+backend has a board-configured deployment path; its Pi 5 hardware qualification
+remains in the [roadmap](../../docs/roadmap.md). RP1 UARTs on the 40-pin header are not the
 console used by this configuration.
 
 The I/O appliance is built and published by the separate HypeR-io-vm repository.
-HypeR will consume its pinned GHCR package and provide the guest DTS/DTB and
+HypeR consumes its pinned GHCR package and provides the guest DTS/DTB and
 launch configuration. The firmware-provided host DTB used below is not a guest
-device-assignment description. See the [I/O VM contract](../../docs/io-vm.md);
-no complete Pi 5 appliance package is available yet.
+device-assignment description. The common AArch64 package includes the upstream
+Pi storage drivers, but has not been qualified on physical Pi 5 hardware. See
+the [I/O VM contract](../../docs/io-vm.md) and
+[board storage deployment](../../docs/board-storage.md).
+
+The Native I/O runtime validates the C0/D0 SDIO1 dependency graph and runs a
+separate userspace MMIO/IRQ worker. The kernel supplies immutable firmware
+facts, atomic exclusive resource claims, bounded register access and IRQ
+notification/completion; it contains no SDHCI register or pinmux policy.
+Retiring an I/O VM cannot yet prove SD DMA has stopped, so the device and all
+own/imported DMA backing remain quarantined until host reboot. QEMU's generic
+device test does not establish physical SD reset, cache or DMA correctness.
 
 ## Recommended boot chain
 

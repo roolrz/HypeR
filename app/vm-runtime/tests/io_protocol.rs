@@ -23,6 +23,7 @@ fn reply(request: Request, status: u32) -> Result<Vec<u8>, Error> {
     };
     record[8..12].copy_from_slice(&length.to_le_bytes());
     record[12..16].copy_from_slice(&1u32.to_le_bytes());
+    record[40..48].fill(0);
     record[40..44].copy_from_slice(&status.to_le_bytes());
     Ok(record[..length as usize].to_vec())
 }
@@ -96,5 +97,83 @@ fn hello_rejects_incompatible_queue_contract() -> Result<(), Error> {
         Reply::decode(&bytes, request),
         Err(Error::UnsupportedBackend)
     );
+    Ok(())
+}
+
+#[test]
+fn prepare_carries_exact_mapping_identity_and_release_is_header_only() -> Result<(), Error> {
+    let request = Request {
+        command: Command::Prepare {
+            alias: 0x4400_0000,
+            guest_base: 0x5000_0000,
+            length: 0x20000,
+            mapping_token: 123,
+        },
+        ..reset()
+    };
+    let mut bytes = [0xff; MAX_RECORD];
+    assert_eq!(request.encode(&mut bytes)?, 72);
+    assert_eq!(u16_at(&bytes, 6)?, 5);
+    assert_eq!(u64_at(&bytes, 40)?, 0x4400_0000);
+    assert_eq!(u64_at(&bytes, 48)?, 0x5000_0000);
+    assert_eq!(u64_at(&bytes, 56)?, 0x20000);
+    assert_eq!(u64_at(&bytes, 64)?, 123);
+    assert_eq!(
+        Reply::decode(&reply(request, 0)?, request)?.status,
+        Status::Success
+    );
+    let release = Request {
+        command: Command::Release,
+        ..reset()
+    };
+    assert_eq!(release.encode(&mut bytes)?, 40);
+    assert_eq!(u16_at(&bytes, 6)?, 6);
+    for command in [
+        Command::Prepare {
+            alias: 1,
+            guest_base: 0,
+            length: 4096,
+            mapping_token: 0,
+        },
+        Command::Prepare {
+            alias: 0,
+            guest_base: 0,
+            length: 0,
+            mapping_token: 0,
+        },
+        Command::Prepare {
+            alias: u64::MAX - 4095,
+            guest_base: 0,
+            length: 4096,
+            mapping_token: 0,
+        },
+    ] {
+        assert_eq!(
+            Request { command, ..reset() }.encode(&mut bytes),
+            Err(Error::InvalidRecord)
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn broker_decodes_only_canonical_requests() -> Result<(), Error> {
+    let request = Request {
+        binding: 9,
+        epoch: 2,
+        transaction: 7,
+        command: Command::Prepare {
+            alias: 0,
+            guest_base: 0x4000_0000,
+            length: 128 * 1024 * 1024,
+            mapping_token: 42,
+        },
+    };
+    let mut bytes = [0; MAX_RECORD];
+    let length = request.encode(&mut bytes)?;
+    assert_eq!(Request::decode(&bytes[..length]), Ok(request));
+    bytes[12] = 1;
+    assert!(Request::decode(&bytes[..length]).is_err());
+    assert!(Request::decode(&bytes[..20]).is_err());
     Ok(())
 }

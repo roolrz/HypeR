@@ -9,6 +9,7 @@
 pub(crate) mod assigned;
 pub(crate) mod console;
 pub mod cpu_power;
+mod firmware;
 mod platform_bus;
 mod serial;
 

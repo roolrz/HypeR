@@ -140,3 +140,7 @@ pub(in crate::kernel) fn entry_ready() -> Option<crate::hal::vm::VmEntryReady> {
 mod serial_output;
 
 mod serial_ring;
+
+pub(crate) use memory::live_service::{
+    create as create_guest_mapping, release as release_guest_mapping,
+};

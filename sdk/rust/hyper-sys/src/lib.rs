@@ -2915,6 +2915,77 @@ pub unsafe fn device_claim(authority: u64, index: u32) -> CallResult {
     }
 }
 
+/// Claims exactly one device matching an explicit firmware identity and profile.
+///
+/// # Safety
+/// The identity pointer must remain readable for `length` bytes during this call.
+pub unsafe fn device_claim_matching(
+    authority: u64,
+    profile: u32,
+    identity_kind: u32,
+    identity: *const u8,
+    length: usize,
+) -> CallResult {
+    // SAFETY: Caller retains the authority and readable identity bytes.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DEVICE_CLAIM_MATCHING,
+            authority,
+            u64::from(profile),
+            u64::from(identity_kind),
+            identity as u64,
+            length as u64,
+            0,
+        )
+    }
+}
+
+/// Queries the immutable validated assignment profile.
+///
+/// # Safety
+/// Output must be writable for `size` bytes and the handle must stay live.
+pub unsafe fn device_profile_info(
+    device: u64,
+    output: *mut abi::HyperNativeDeviceProfileInfo,
+    size: usize,
+) -> CallResult {
+    // SAFETY: Caller establishes the handle and output buffer contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DEVICE_PROFILE_INFO,
+            device,
+            output as u64,
+            size as u64,
+            0,
+            0,
+            0,
+        )
+    }
+}
+/// Queries one named, guest-relative register window.
+///
+/// # Safety
+/// Output must be writable for `size` bytes and the handle must stay live.
+pub unsafe fn device_resource_info(
+    device: u64,
+    index: u32,
+    output: *mut abi::HyperNativeDeviceResourceInfo,
+    size: usize,
+) -> CallResult {
+    // SAFETY: Caller establishes the handle and output buffer contracts.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DEVICE_RESOURCE_INFO,
+            device,
+            u64::from(index),
+            output as u64,
+            size as u64,
+            0,
+            0,
+        )
+    }
+}
+
 /// Executes the Native `physical_device_info` operation.
 ///
 /// # Safety
@@ -3099,6 +3170,223 @@ pub unsafe fn guest_notification_control(notification: u64, operation: u32) -> C
             notification,
             u64::from(operation),
             0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Creates a Native virtio-scsi initiator over a dedicated shared memory grant.
+///
+/// # Safety
+/// Input handles must remain valid throughout this call.
+#[inline]
+pub unsafe fn native_block_create(
+    memory: u64,
+    backend: u64,
+    guest_base: u64,
+    notification_base: u64,
+    notification_irq: u32,
+) -> CallResult {
+    // SAFETY: The caller retains the input capabilities.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_NATIVE_BLOCK_CREATE,
+            memory,
+            backend,
+            guest_base,
+            notification_base,
+            u64::from(notification_irq),
+            0,
+        )
+    }
+}
+
+/// Activates a negotiated initiator and discovers its SCSI capacity.
+///
+/// # Safety
+/// The block handle must remain valid throughout this blocking call.
+#[inline]
+pub unsafe fn native_block_activate(block: u64, readonly: bool) -> CallResult {
+    // SAFETY: The caller retains the input capability.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_NATIVE_BLOCK_ACTIVATE,
+            block,
+            u64::from(readonly),
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Mounts a Native block volume at a directory-relative path.
+///
+/// # Safety
+/// Both handles and the readable path must remain valid throughout the call.
+#[inline]
+pub unsafe fn native_block_mount(
+    block: u64,
+    directory: u64,
+    path: *const u8,
+    length: usize,
+) -> CallResult {
+    // SAFETY: The caller supplies valid capabilities and a borrowed path range.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_NATIVE_BLOCK_MOUNT,
+            block,
+            directory,
+            path as u64,
+            length as u64,
+            0,
+            0,
+        )
+    }
+}
+
+/// Creates a retained sparse DMA mapping in an installed backend VM.
+/// # Safety
+/// Input handles must remain valid throughout the call.
+pub unsafe fn guest_mapping_create(backend: u64, memory: u64, frontend: u64) -> CallResult {
+    // SAFETY: caller retains the borrowed input capabilities.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_GUEST_MAPPING_CREATE,
+            backend,
+            memory,
+            frontend,
+            0,
+            0,
+            0,
+        )
+    }
+}
+/// Releases a mapping after backend-certified DMA quiescence.
+/// # Safety
+/// The mapping handle must remain valid throughout the call.
+pub unsafe fn guest_mapping_release(mapping: u64) -> CallResult {
+    // SAFETY: caller retains the borrowed mapping capability.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_GUEST_MAPPING_RELEASE,
+            mapping,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the corresponding Native physical-device operation.
+///
+/// # Safety
+/// Handles and pointer ranges must satisfy the Native ABI for the full call.
+pub unsafe fn device_firmware_read(
+    authority: u64,
+    query: *const abi::HyperNativeDeviceFirmwareQuery,
+    output: *mut u8,
+    capacity: usize,
+) -> CallResult {
+    // SAFETY: the caller provides valid handles and complete memory ranges.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DEVICE_FIRMWARE_READ,
+            authority,
+            query as u64,
+            output as u64,
+            capacity as u64,
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the corresponding Native physical-device operation.
+///
+/// # Safety
+/// Handles and pointer ranges must satisfy the Native ABI for the full call.
+pub unsafe fn device_claim_bundle(
+    authority: u64,
+    entries: *const abi::HyperNativeDeviceBundleEntry,
+    count: usize,
+    irq_node: u32,
+) -> CallResult {
+    // SAFETY: the caller provides valid handles and complete memory ranges.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DEVICE_CLAIM_BUNDLE,
+            authority,
+            entries as u64,
+            count as u64,
+            u64::from(irq_node),
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the corresponding Native physical-device operation.
+///
+/// # Safety
+/// Handles and pointer ranges must satisfy the Native ABI for the full call.
+pub unsafe fn device_mmio(
+    device: u64,
+    offset: u64,
+    width: u32,
+    operation: u32,
+    value: u64,
+) -> CallResult {
+    // SAFETY: the caller provides valid handles and complete memory ranges.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DEVICE_MMIO,
+            device,
+            offset,
+            u64::from(width),
+            u64::from(operation),
+            value,
+            0,
+        )
+    }
+}
+
+/// Executes the corresponding Native physical-device operation.
+///
+/// # Safety
+/// Handles and pointer ranges must satisfy the Native ABI for the full call.
+pub unsafe fn device_irq_pending(device: u64) -> CallResult {
+    // SAFETY: the caller provides valid handles and complete memory ranges.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DEVICE_IRQ_PENDING,
+            device,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
+    }
+}
+
+/// Executes the corresponding Native physical-device operation.
+///
+/// # Safety
+/// Handles and pointer ranges must satisfy the Native ABI for the full call.
+pub unsafe fn device_irq_complete(device: u64, sequence: u64, asserted: bool) -> CallResult {
+    // SAFETY: the caller provides valid handles and complete memory ranges.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE,
+            device,
+            sequence,
+            u64::from(asserted),
             0,
             0,
             0,

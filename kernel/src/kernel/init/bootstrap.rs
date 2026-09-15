@@ -7,10 +7,11 @@ use hyper::exec::startup::{Layout as StackLayout, StartupHandle};
 use hyper::fs::NodeKind;
 
 use crate::kernel::accounting::ResourceDomain;
-use crate::kernel::capability::PreparedHandle;
+use crate::kernel::capability::{HandleValue, PreparedHandle};
 use crate::kernel::mm::user_space::{UserAddress, UserSlice};
 use crate::kernel::process::{
-    PreparedProcess, Process, ProcessError, ProcessObject, TaskGroup, UserThread, load_native,
+    PreparedProcess, Process, ProcessError, ProcessHandleReservation, ProcessObject, TaskGroup,
+    UserThread, load_native,
 };
 use crate::kernel::task::scheduler::CpuMask;
 
@@ -24,6 +25,9 @@ pub(super) struct BootProcess {
     pub(super) stack_layout: StackLayout,
 }
 
+// Image loading and authority installation are consecutive boot phases. Their
+// temporary owners must not accumulate on the same scheduled kernel stack.
+#[inline(never)]
 pub(super) fn prepare(
     path: &'static str,
     arguments: &'static [&'static str],
@@ -88,66 +92,79 @@ pub(super) fn install_handles<const N: usize>(
     boot: &BootProcess,
     arguments: &[&str],
     purposes: [u32; N],
-    prepare: impl FnOnce() -> Result<[PreparedHandle; N], Error>,
+    prepare: impl FnOnce(&mut [Option<PreparedHandle>; N]) -> Result<(), Error>,
 ) -> Result<(), Error> {
     let reservation = boot.process.reserve_handles::<N>()?;
     let values = reservation.values();
-    let startup_handles: [StartupHandle; N] = core::array::from_fn(|index| StartupHandle {
-        purpose: purposes[index],
-        handle: values[index].get(),
-    });
-    let stack = match boot.stack_layout.encode(
-        boot.process.image().auxiliary(),
-        arguments,
-        ENVIRONMENT,
-        &startup_handles,
-    ) {
-        Ok(stack) => stack,
-        Err(error) => {
-            boot.process.abort_handles(reservation);
-            return Err(Error::Stack(error));
-        }
-    };
-    let stack_length = match u64::try_from(stack.bytes().len()) {
-        Ok(length) => length,
-        Err(_) => {
-            boot.process.abort_handles(reservation);
-            return Err(Error::Stack(hyper::exec::startup::Error::TooLarge));
-        }
-    };
-    let stack_range = match UserSlice::new(UserAddress::new(stack.base()), stack_length) {
-        Ok(range) => range,
-        Err(_) => {
-            boot.process.abort_handles(reservation);
-            return Err(Error::Stack(hyper::exec::startup::Error::AddressOverflow));
-        }
-    };
-    let output = match boot.process.reserve_user_write(stack_range) {
-        Ok(output) => output,
-        Err(error) => {
-            boot.process.abort_handles(reservation);
-            return Err(Error::Process(error));
-        }
-    };
-    if let Err(error) = output.copy_from(stack.bytes()) {
-        drop(output);
+    if let Err(error) = write_startup(boot, arguments, &purposes, &values) {
         boot.process.abort_handles(reservation);
-        return Err(Error::Process(ProcessError::UserMemory(error)));
+        return Err(error);
     }
-    output.complete();
 
-    let prepared = match prepare() {
-        Ok(handles) => handles,
-        Err(error) => {
-            boot.process.abort_handles(reservation);
-            return Err(error);
-        }
-    };
+    // One owner table is filled in place. Partial preparation is automatically
+    // retired on failure; no handle is visible before the batch publication.
+    let mut slots = [const { None }; N];
+    if let Err(error) = prepare(&mut slots) {
+        drop(slots);
+        boot.process.abort_handles(reservation);
+        return Err(error);
+    }
+    finish_handles(boot, reservation, &values, &mut slots)
+}
+
+// Authority construction can enter VFS. Keep the publication array and its
+// failure-owned handles off that call chain; only this final phase consumes
+// the complete slot table and the linear reservation.
+#[inline(never)]
+fn finish_handles<const N: usize>(
+    boot: &BootProcess,
+    reservation: ProcessHandleReservation<N>,
+    values: &[HandleValue; N],
+    slots: &mut [Option<PreparedHandle>; N],
+) -> Result<(), Error> {
+    let prepared = core::array::from_fn(|index| match slots[index].take() {
+        Some(handle) => handle,
+        None => crate::hal::cpu::halt(),
+    });
     match boot.process.publish_handles(reservation, prepared) {
-        Ok(published) if published == values => Ok(()),
+        Ok(published) if &published == values => Ok(()),
         Ok(_) => crate::kernel::crash::fatal(format_args!(
             "HypeR: startup handle publication changed reserved values"
         )),
         Err(failure) => Err(Error::Process(failure.error)),
     }
+}
+
+// No capability constructors or publication run while the encoded stack and
+// COW write reservation exist. Only the reserved handle values cross phases.
+#[inline(never)]
+fn write_startup<const N: usize>(
+    boot: &BootProcess,
+    arguments: &[&str],
+    purposes: &[u32; N],
+    values: &[HandleValue; N],
+) -> Result<(), Error> {
+    let startup_handles = core::array::from_fn::<_, N, _>(|index| StartupHandle {
+        purpose: purposes[index],
+        handle: values[index].get(),
+    });
+    let stack = boot
+        .stack_layout
+        .encode(
+            boot.process.image().auxiliary(),
+            arguments,
+            ENVIRONMENT,
+            &startup_handles,
+        )
+        .map_err(Error::Stack)?;
+    let stack_length = u64::try_from(stack.bytes().len())
+        .map_err(|_| Error::Stack(hyper::exec::startup::Error::TooLarge))?;
+    let stack_range = UserSlice::new(UserAddress::new(stack.base()), stack_length)
+        .map_err(|_| Error::Stack(hyper::exec::startup::Error::AddressOverflow))?;
+    let output = boot.process.reserve_user_write(stack_range)?;
+    output
+        .copy_from(stack.bytes())
+        .map_err(|error| Error::Process(ProcessError::UserMemory(error)))?;
+    output.complete();
+    Ok(())
 }

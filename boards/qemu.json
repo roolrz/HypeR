@@ -1,0 +1,30 @@
+{
+  "SPDX-FileCopyrightText": "2026 roolrz",
+  "SPDX-License-Identifier": "Apache-2.0",
+  "format": "hyper.board.v1",
+  "board": "qemu",
+  "architecture": "aarch64",
+  "boot": "qemu-direct",
+  "disk": {
+    "uuid": "09f8feba-c8e5-46df-bb97-ceba1c4f334b",
+    "config-mib": 1024
+  },
+  "files": {
+    "hyper.img": "hyper",
+    "bootstrap.cpio": "bootstrap",
+    "vm/io.itb": "io-vm",
+    "vm/alpine.itb": "alpine"
+  },
+  "virtual-machines": [
+    {
+      "name": "alpine",
+      "image": "vm/alpine.itb",
+      "autostart": false,
+      "disk-mib": 2048
+    }
+  ],
+  "io-device": {
+    "profile": "virtio-mmio-scsi",
+    "compatible": "virtio,mmio"
+  }
+}

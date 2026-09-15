@@ -7,12 +7,12 @@ use hyper::mm::AddressSpaceResidency;
 use hyper::sync::atomic::AtomicU64;
 
 use super::backing::Layout as SharedGuestMemory;
-#[cfg(feature = "kernel-self-test")]
-use super::storage::try_exact_capacity_vec;
 use super::storage::{
-    AdmittedAddressSpaceMetadata, FixedBitmap, GuestMemoryBacking, Stage2PagePool,
-    address_space_metadata_layout, admit_metadata, validate_region,
+    AdmittedAddressSpaceMetadata, GuestMemoryBacking, Stage2PagePool, admit_metadata,
+    validate_region,
 };
+#[cfg(feature = "kernel-self-test")]
+use super::storage::{address_space_metadata_layout, try_exact_capacity_vec};
 use super::{
     ActiveStage2Identifier, Error, GuestAddressSpace, Stage2Identifier, Stage2IdentifierReservation,
 };
@@ -64,13 +64,15 @@ impl GuestAddressSpace {
         backing: alloc::boxed::Box<SharedGuestMemory>,
         domain: &ResourceDomain,
     ) -> Result<Self, Error> {
-        let page_count = validate_region(ipa_base, size)?;
+        validate_region(ipa_base, size)?;
         if backing.size() != size {
             return Err(Error::InvalidRange);
         }
-        // SharedVmo owns and accounts its page slots independently. Charge
-        // only metadata allocated by this guest address space.
-        let metadata = address_space_metadata_layout(ipa_base, size, page_count, 0)?;
+        let page_count = backing.page_count()?;
+        let table_capacity = backing.table_capacity(ipa_base)?;
+        // Both bitmaps and table-owner storage scale with admitted extents,
+        // never with the distance between a high RAM region and low DMA aliases.
+        let metadata = super::storage::metadata_for_capacity(page_count, table_capacity, 0)?;
         let metadata = admit_metadata(domain, metadata)?;
         Self::with_backing(
             hardware_vmid,
@@ -95,8 +97,8 @@ impl GuestAddressSpace {
             table_capacity,
             charge: metadata_charge,
         } = metadata;
-        let mapped_pages = FixedBitmap::try_new(page_count)?;
-        let instruction_ready_pages = FixedBitmap::try_new(page_count)?;
+        let mapped_pages = super::FixedBitmap::try_new(page_count)?;
+        let instruction_ready_pages = super::FixedBitmap::try_new(page_count)?;
 
         let mut table_pages = Stage2PagePool::with_capacity(table_capacity, domain)?;
         let identifier = hardware_vmid.value();
@@ -120,6 +122,7 @@ impl GuestAddressSpace {
             size,
             domain: domain.clone(),
             backing,
+            live: super::live::LiveMappings::new(),
             mapped_pages,
             instruction_ready_pages,
             committed_pages: 0,

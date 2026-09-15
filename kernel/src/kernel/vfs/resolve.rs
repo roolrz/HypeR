@@ -3,7 +3,7 @@
 
 //! Bounded, capability-confined traversal validated against namespace epochs.
 
-use super::instance::{Location, MountNamespace};
+use super::instance::{Location, Mount, MountNamespace};
 use super::objects::Error;
 use super::resolve_state::{NameDescriptor, PendingComponent, PendingPath, StateError, Traversal};
 use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
@@ -76,8 +76,35 @@ pub(super) fn typed(
     Ok(location.clone())
 }
 
+struct Epochs {
+    entries: ScratchVec<(FallibleArc<Mount>, u64)>,
+}
+impl Epochs {
+    fn observe(&mut self, mount: &FallibleArc<Mount>) -> Result<u64, super::instance::Error> {
+        if let Some((_, epoch)) = self
+            .entries
+            .iter()
+            .find(|(seen, _)| seen.id() == mount.id())
+        {
+            return Ok(*epoch);
+        }
+        let epoch = mount.filesystem().epoch();
+        if epoch & 1 != 0 {
+            mount.filesystem().wait_for_namespace()?;
+            return Err(super::instance::Error::Busy);
+        }
+        self.entries.push((mount.clone(), epoch))?;
+        Ok(epoch)
+    }
+    fn unchanged(&self) -> bool {
+        self.entries
+            .iter()
+            .all(|(mount, epoch)| mount.filesystem().epoch() == *epoch)
+    }
+}
+
 pub(super) fn resolve(
-    _namespace: &FallibleArc<MountNamespace>,
+    namespace: &FallibleArc<MountNamespace>,
     root: &Location,
     start: &Location,
     value: &str,
@@ -85,38 +112,45 @@ pub(super) fn resolve(
     missing: bool,
     budget: &ScratchBudget,
 ) -> Result<Resolved, Error> {
-    if root.mount().id() != start.mount().id() {
-        return Err(Error::CrossDevice);
-    }
     let normalized = normalize(value, budget)?;
-    let filesystem = root.mount().filesystem();
     for _ in 0..8 {
-        let epoch = filesystem.epoch();
-        if epoch & 1 != 0 {
-            filesystem.wait_for_namespace()?;
-            continue;
-        }
-        let result = walk(root, start, &normalized, follow, missing, epoch, budget);
-        // No writer may have committed any ancestry change between the first
-        // edge and the last edge. Leases keep all inspected nodes alive.
-        // Every topology read acquires the same children/topology lock used
-        // by its writer. Observing an edited edge therefore also observes the
-        // odd epoch published before that edit, even on weakly ordered CPUs.
-        if filesystem.epoch() == epoch {
+        let view = namespace.mounts.snapshot();
+        let mut epochs = Epochs {
+            entries: ScratchVec::new(budget.clone()),
+        };
+        let result = walk(
+            &view,
+            root,
+            start,
+            &normalized,
+            WalkOptions { follow, missing },
+            &mut epochs,
+            budget,
+        );
+        // Validate both the mount snapshot and every filesystem whose edges
+        // contributed to traversal, including ancestry reconstructed across '..'.
+        if epochs.unchanged() && namespace.mounts.is_current(&view) {
+            if matches!(result, Err(Error::Busy)) {
+                continue;
+            }
             return result;
         }
-        filesystem.wait_for_namespace()?;
     }
     Err(Error::Busy)
 }
 
+struct WalkOptions {
+    follow: bool,
+    missing: bool,
+}
+
 fn walk(
+    view: &super::mounts::View,
     root: &Location,
     start: &Location,
     value: &NormalizedPath,
-    follow: bool,
-    missing: bool,
-    epoch: u64,
+    options: WalkOptions,
+    epochs: &mut Epochs,
     budget: &ScratchBudget,
 ) -> Result<Resolved, Error> {
     let path = Path::new(&value.text).map_err(|_| Error::InvalidPath)?;
@@ -133,14 +167,12 @@ fn walk(
     )
     .map_err(map_state_error)?;
     if !path.is_absolute() {
-        for (node, name) in root
-            .mount()
-            .filesystem()
-            .ancestry(root.node(), start.node(), budget)?
-        {
+        for (location, name) in view.ancestry(root, start, budget, |mount| {
+            epochs.observe(mount).map(|_| ())
+        })? {
             traversal
                 .descend(Step {
-                    location: Location::new(root.mount().clone(), node),
+                    location,
                     name: Some(
                         pending
                             .retain_name(Name::new(&name).map_err(|_| Error::InvalidPath)?)
@@ -154,6 +186,7 @@ fn walk(
     let mut final_name = ScratchString::new(budget.clone());
     while let Some(component) = pending.pop() {
         let current = &traversal.current().location;
+        let epoch = epochs.observe(current.mount())?;
         if current
             .mount()
             .filesystem()
@@ -168,7 +201,6 @@ fn walk(
             PendingComponent::Parent => traversal.parent(),
             PendingComponent::Name(descriptor) => {
                 let name = pending.name(descriptor).ok_or(Error::InvalidPath)?;
-                let owned_name = copy_string(name.as_str(), budget)?;
                 parent = current.clone();
                 final_name = copy_string(name.as_str(), budget)?;
                 let node = current
@@ -176,32 +208,32 @@ fn walk(
                     .filesystem()
                     .lookup_child(current.node(), name)?;
                 let Some(node) = node else {
-                    if missing && pending.is_empty() {
+                    if options.missing && pending.is_empty() {
                         return Ok(Resolved {
                             location: None,
                             parent,
-                            name: owned_name,
+                            name: final_name,
                             canonical: ScratchString::new(budget.clone()),
                             epoch,
                         });
                     }
                     return Err(Error::Missing);
                 };
-                let candidate = Location::new(current.mount().clone(), node);
+                let candidate = view.enter(Location::new(current.mount().clone(), node));
+                epochs.observe(candidate.mount())?;
                 let attributes = candidate
                     .mount()
                     .filesystem()
                     .attributes(candidate.node())?;
-                if attributes.kind() == NodeKind::Symlink && (follow || !pending.is_empty()) {
-                    let target = read_link(&candidate, attributes.size(), budget)?;
-                    let target = core::str::from_utf8(&target).map_err(|_| Error::InvalidPath)?;
-                    let target = normalize(target, budget)?;
-                    if pending
-                        .expand_symlink(&target.text, target.directory_required)
-                        .map_err(map_state_error)?
-                    {
-                        traversal.restart();
-                    }
+                if attributes.kind() == NodeKind::Symlink && (options.follow || !pending.is_empty())
+                {
+                    follow_link(
+                        &mut pending,
+                        &mut traversal,
+                        &candidate,
+                        attributes.size(),
+                        budget,
+                    )?;
                 } else {
                     traversal
                         .descend(Step {
@@ -236,6 +268,7 @@ fn walk(
     if canonical.is_empty() {
         canonical.push('/')?;
     }
+    let epoch = epochs.observe(traversal.current().location.mount())?;
     Ok(Resolved {
         location: Some(traversal.current().location.clone()),
         parent,
@@ -243,6 +276,27 @@ fn walk(
         canonical,
         epoch,
     })
+}
+
+// Symlink-only buffers stay off ordinary component lookup stacks.
+#[inline(never)]
+fn follow_link(
+    pending: &mut PendingPath<ScratchBudget>,
+    traversal: &mut Traversal<Step, ScratchBudget>,
+    candidate: &Location,
+    size: u64,
+    budget: &ScratchBudget,
+) -> Result<(), Error> {
+    let target = read_link(candidate, size, budget)?;
+    let target = core::str::from_utf8(&target).map_err(|_| Error::InvalidPath)?;
+    let target = normalize(target, budget)?;
+    if pending
+        .expand_symlink(&target.text, target.directory_required)
+        .map_err(map_state_error)?
+    {
+        traversal.restart();
+    }
+    Ok(())
 }
 
 /// Repeated separators carry no name. A terminal separator is retained as a

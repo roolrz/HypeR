@@ -207,6 +207,54 @@ pub(in crate::kernel) trait HierarchyServices: UserMemoryServices {
 }
 
 pub(in crate::kernel) trait DeviceServices: UserMemoryServices {
+    fn device_firmware_read(
+        &self,
+        authority: HandleValue,
+        node: u32,
+        field: u32,
+        name: &str,
+    ) -> Result<alloc::vec::Vec<u8>, crate::kernel::device::assigned::service::MatchError>;
+    fn device_claim_bundle(
+        &self,
+        authority: HandleValue,
+        entries: &[(u32, u32, u64)],
+        irq_node: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error>;
+    fn device_mmio(
+        &self,
+        device: HandleValue,
+        offset: u64,
+        width: u32,
+        write: bool,
+        value: u64,
+    ) -> Result<u64, crate::kernel::vm::service::Error>;
+    fn device_irq_pending(
+        &self,
+        device: HandleValue,
+    ) -> Result<u64, crate::kernel::vm::service::Error>;
+    fn device_irq_complete(
+        &self,
+        device: HandleValue,
+        sequence: u64,
+        asserted: bool,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
+
+    fn device_profile_info(
+        &self,
+        device: HandleValue,
+    ) -> Result<[u8; 32], crate::kernel::vm::service::Error>;
+    fn device_resource_info(
+        &self,
+        device: HandleValue,
+        index: u32,
+    ) -> Result<[u8; 32], crate::kernel::vm::service::Error>;
+    fn claim_device_matching(
+        &self,
+        authority: HandleValue,
+        profile: u32,
+        identity_kind: u32,
+        identity: &str,
+    ) -> Result<HandleValue, crate::kernel::device::assigned::service::MatchError>;
     fn claim_device(
         &self,
         authority: HandleValue,
@@ -233,6 +281,48 @@ pub(in crate::kernel) trait DeviceServices: UserMemoryServices {
 }
 
 pub(in crate::kernel) trait GuestIoServices: UserMemoryServices {
+    fn create_guest_mapping(
+        &self,
+        _backend: HandleValue,
+        _memory: HandleValue,
+        _frontend: u64,
+    ) -> Result<(HandleValue, u64), crate::kernel::vm::service::Error> {
+        Err(crate::kernel::vm::service::Error::NotSupported)
+    }
+    fn release_guest_mapping(
+        &self,
+        _mapping: HandleValue,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        Err(crate::kernel::vm::service::Error::NotSupported)
+    }
+    fn create_native_block(
+        &self,
+        _memory: HandleValue,
+        _backend: HandleValue,
+        _guest_base: u64,
+        _notification_base: u64,
+        _notification_irq: u32,
+    ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+        Err(crate::kernel::vm::service::Error::NotSupported)
+    }
+    fn activate_native_block(
+        &self,
+        _block: HandleValue,
+        _readonly: bool,
+    ) -> Result<u64, crate::kernel::block::service::ActivationError> {
+        Err(crate::kernel::block::service::ActivationError::Device(
+            hyper::fs::block::Error::Unsupported,
+        ))
+    }
+    fn mount_native_block(
+        &self,
+        _block: HandleValue,
+        _directory: HandleValue,
+        _path: UserSlice,
+    ) -> Result<(), crate::kernel::vfs::VfsServiceError> {
+        Err(crate::kernel::vfs::VfsServiceError::InvalidInput)
+    }
+
     fn create_guest_mailbox(
         &self,
         machine: HandleValue,
@@ -409,10 +499,8 @@ pub(in crate::kernel) trait InspectServices: UserMemoryServices {
         &self,
         inspector: HandleValue,
         cursor: u64,
-    ) -> Result<
-        Page<ProcessSnapshot, { crate::kernel::inspect::PROCESS_PAGE_CAPACITY }>,
-        crate::kernel::inspect::Error,
-    >;
+        output: &mut Page<ProcessSnapshot, { crate::kernel::inspect::PROCESS_PAGE_CAPACITY }>,
+    ) -> Result<(), crate::kernel::inspect::Error>;
     /// Fills caller-owned snapshot storage. Contents are publishable only on success.
     fn scan_threads(
         &self,
@@ -427,10 +515,8 @@ pub(in crate::kernel) trait InspectServices: UserMemoryServices {
         &self,
         inspector: HandleValue,
         cursor: u64,
-    ) -> Result<
-        Page<crate::kernel::object::ObjectSnapshot, OBJECT_PAGE_CAPACITY>,
-        crate::kernel::inspect::Error,
-    >;
+        output: &mut Page<crate::kernel::object::ObjectSnapshot, OBJECT_PAGE_CAPACITY>,
+    ) -> Result<(), crate::kernel::inspect::Error>;
     fn scan_process_handles(
         &self,
         inspector: HandleValue,
@@ -621,7 +707,8 @@ pub(in crate::kernel) trait VfsServices: UserMemoryServices {
         &self,
         directory: HandleValue,
         cookie: u64,
-    ) -> Result<DirectoryPage, VfsServiceError>;
+        page: &mut DirectoryPage,
+    ) -> Result<(), VfsServiceError>;
     fn read_file_at(
         &self,
         file: HandleValue,

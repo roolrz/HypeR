@@ -31,6 +31,8 @@ fn boot() -> Aarch64LinuxBoot<'static> {
 }
 fn devices() -> IoDevices<'static> {
     IoDevices {
+        clients: &[],
+        sdhci: None,
         virtio: Some(MmioDevice {
             base: 0x0b00_0000,
             size: 0x200,
@@ -184,6 +186,7 @@ fn physical_tree_maps_host_dma_addresses_and_retains_imported_struct_pages()
 #[test]
 fn frontend_tree_uses_standard_virtio_without_physical_dma_authority() -> Result<(), &'static str> {
     let devices = IoDevices {
+        clients: &[],
         virtio: Some(MmioDevice {
             base: 0x0a00_0000,
             size: 4096,
@@ -241,4 +244,359 @@ fn reserved_alias_cannot_overlap_linux_allocatable_ram() {
         guest_base: 0x4000_0000,
     });
     assert_eq!(build(invalid), Err(Error::InvalidInput));
+}
+
+fn client(id: u32, memory: u64, dynamic: bool) -> super::IoClient {
+    super::IoClient {
+        id,
+        shared_memory: SharedMemory {
+            base: memory,
+            size: 64 * MIB,
+            guest_base: 0x4000_0000,
+        },
+        mailbox: MmioDevice {
+            base: 0x0a00_0000 + u64::from(id) * 8192,
+            size: 4096,
+            irq: 41 + id * 2,
+        },
+        notification: MmioDevice {
+            base: 0x0a00_1000 + u64::from(id) * 8192,
+            size: 4096,
+            irq: 42 + id * 2,
+        },
+        dynamic,
+    }
+}
+
+#[test]
+fn clients_have_distinct_phandles_and_context_ids() -> Result<(), &'static str> {
+    let clients = [client(0, 0x4400_0000, false), client(3, 0x4800_0000, false)];
+    let tree = build(IoDevices {
+        clients: &clients,
+        ..IoDevices::empty()
+    })
+    .map_err(|_| "build")?;
+    let values = properties(&tree)?;
+    assert_eq!(
+        values
+            .get("/hyper-guest-memory@0/memory-region")
+            .ok_or("first phandle")?,
+        &4u32.to_be_bytes()
+    );
+    assert_eq!(
+        values
+            .get("/hyper-guest-memory@3/memory-region")
+            .ok_or("second phandle")?,
+        &7u32.to_be_bytes()
+    );
+    assert_eq!(
+        values
+            .get("/guest-mailbox@a006000/hyper,client-id")
+            .ok_or("mailbox id")?,
+        &3u32.to_be_bytes()
+    );
+    assert_eq!(
+        values
+            .get("/guest-notification@a007000/hyper,client-id")
+            .ok_or("notification id")?,
+        &3u32.to_be_bytes()
+    );
+    Ok(())
+}
+
+#[test]
+fn dynamic_windows_do_not_claim_ram_or_preallocated_pages() -> Result<(), &'static str> {
+    let clients = [
+        client(0, super::DYNAMIC_ALIAS_OFFSET + 0x8000_0000, true),
+        client(1, super::DYNAMIC_ALIAS_OFFSET + 0x8000_0000, true),
+    ];
+    let dma = [
+        DMA[0],
+        DmaRange {
+            dma_base: 0x8000_0000,
+            cpu_base: super::DYNAMIC_ALIAS_OFFSET + 0x8000_0000,
+            size: 64 * MIB,
+        },
+    ];
+    let devices = IoDevices {
+        clients: &clients,
+        virtio: devices().virtio,
+        dma_ranges: &dma,
+        ..IoDevices::empty()
+    };
+    let values = properties(&build(devices).map_err(|_| "build")?)?;
+    assert!(values.contains_key("/hyper-guest-memory-0@1080000000/hyper,dynamic-memory"));
+    assert!(values.contains_key("/hyper-guest-memory-1@1080000000/hyper,dynamic-memory"));
+    assert!(!values.contains_key("/memory@1080000000/reg"));
+    assert!(!values.contains_key("/reserved-memory/#address-cells"));
+    assert!(!values.contains_key("/hyper-guest-memory-0@1080000000/memory-region"));
+    let mut linux_names = std::collections::BTreeSet::new();
+    for id in [0u32, 1] {
+        let node = std::format!("/hyper-guest-memory-{id}@1080000000");
+        assert_eq!(
+            values.get(&(node.clone() + "/hyper,client-id")),
+            Some(&id.to_be_bytes().to_vec())
+        );
+        assert_eq!(
+            values.get(&(node.clone() + "/compatible")),
+            Some(&b"hyper,guest-memory-v1\0".to_vec())
+        );
+        let reg = values.get(&(node.clone() + "/reg")).ok_or("dynamic reg")?;
+        let base = u64::from_be_bytes(reg[..8].try_into().map_err(|_| "base")?);
+        let basename = node
+            .trim_start_matches('/')
+            .split('@')
+            .next()
+            .ok_or("basename")?;
+        // of_device_make_bus_id combines translated address and basename;
+        // distinct unit addresses alone would still collide in Linux sysfs.
+        assert!(linux_names.insert(std::format!("{base:x}.{basename}")));
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_ambiguous_or_fabricated_dynamic_dma_translation() {
+    let clients = [client(0, super::DYNAMIC_ALIAS_OFFSET + 0x8000_0000, true)];
+    let mut dma = [
+        DMA[0],
+        DmaRange {
+            dma_base: 0x9000_0000,
+            cpu_base: super::DYNAMIC_ALIAS_OFFSET + 0x8000_0000,
+            size: 64 * MIB,
+        },
+    ];
+    let check = |ranges: &[DmaRange]| {
+        build(IoDevices {
+            clients: &clients,
+            virtio: devices().virtio,
+            dma_ranges: ranges,
+            ..IoDevices::empty()
+        })
+    };
+    assert_eq!(check(&dma), Err(Error::InvalidInput));
+    dma[1].dma_base = dma[1].cpu_base - super::DYNAMIC_ALIAS_OFFSET;
+    dma[0].dma_base = dma[1].dma_base;
+    assert_eq!(check(&dma), Err(Error::InvalidInput));
+    assert_eq!(check(&dma[1..]), Err(Error::InvalidInput));
+}
+
+#[test]
+fn rejects_duplicate_client_or_cross_context_irq_and_static_alias() {
+    let mut clients = [client(0, 0x4400_0000, false), client(1, 0x4800_0000, false)];
+    clients[1].notification.irq = clients[0].mailbox.irq;
+    assert_eq!(
+        build(IoDevices {
+            clients: &clients,
+            ..IoDevices::empty()
+        }),
+        Err(Error::InvalidInput)
+    );
+    clients[1] = client(0, 0x4800_0000, false);
+    assert_eq!(
+        build(IoDevices {
+            clients: &clients,
+            ..IoDevices::empty()
+        }),
+        Err(Error::InvalidInput)
+    );
+    clients[1] = client(1, 0x4400_0000, false);
+    assert_eq!(
+        build(IoDevices {
+            clients: &clients,
+            ..IoDevices::empty()
+        }),
+        Err(Error::InvalidInput)
+    );
+    assert_eq!(
+        build(IoDevices {
+            clients: &clients[..1],
+            mailbox: Some(clients[0].mailbox),
+            ..IoDevices::empty()
+        }),
+        Err(Error::InvalidInput)
+    );
+}
+
+#[test]
+fn all_native_client_slots_fit_the_device_table() {
+    let clients: Vec<_> = (0..hyper_abi::HYPER_NATIVE_IO_MAX_CLIENTS as u32)
+        .map(|id| client(id, super::DYNAMIC_ALIAS_OFFSET + 0x8000_0000, true))
+        .collect();
+    assert!(
+        build(IoDevices {
+            clients: &clients,
+            ..IoDevices::empty()
+        })
+        .is_ok()
+    );
+}
+
+fn sdhci(revision: super::SdhciRevision) -> super::SdhciDevice {
+    use super::{MmioWindow, SdhciDevice, SdhciRevision};
+    let c0 = revision == SdhciRevision::C0;
+    SdhciDevice {
+        host: MmioDevice {
+            base: 0x0b00_0000,
+            size: 0x260,
+            irq: 40,
+        },
+        config: MmioWindow {
+            base: 0x0b00_0400,
+            size: 0x200,
+        },
+        main_pinctrl: MmioWindow {
+            base: 0x0b00_1100,
+            size: if c0 { 0x30 } else { 0x20 },
+        },
+        aon_pinctrl: MmioWindow {
+            base: 0x0b00_2700,
+            size: if c0 { 0x20 } else { 0x1c },
+        },
+        aon_gpio: MmioWindow {
+            base: 0x0b00_3c00,
+            size: 0x40,
+        },
+        revision,
+        clock_hz: 200_000_000,
+        gpio_widths: [if c0 { 17 } else { 15 }, 6],
+    }
+}
+
+#[test]
+fn sdhci_preserves_admitted_windows_and_upstream_dependency_cells() -> Result<(), &'static str> {
+    for revision in [super::SdhciRevision::C0, super::SdhciRevision::D0] {
+        let sd = sdhci(revision);
+        let tree = build(IoDevices {
+            virtio: None,
+            sdhci: Some(sd),
+            ..devices()
+        })
+        .map_err(|_| "SD tree")?;
+        let props = properties(&tree)?;
+        let get = |key| {
+            props
+                .get(key)
+                .map(Vec::as_slice)
+                .ok_or("missing SD property")
+        };
+        assert!(!props.keys().any(|key| key.ends_with("/dma-coherent")));
+        assert_eq!(
+            get("/io-bus/mmc@b000000/reg")?,
+            [sd.host.base, sd.host.size, sd.config.base, sd.config.size]
+                .into_iter()
+                .flat_map(u64::to_be_bytes)
+                .collect::<Vec<_>>()
+        );
+        for (path, window) in [
+            ("/io-bus/pinctrl@b001100/reg", sd.main_pinctrl),
+            ("/io-bus/pinctrl@b002700/reg", sd.aon_pinctrl),
+            ("/io-bus/gpio@b003c00/reg", sd.aon_gpio),
+        ] {
+            assert_eq!(
+                get(path)?,
+                [window.base.to_be_bytes(), window.size.to_be_bytes()].concat()
+            );
+        }
+        assert_eq!(get("/io-bus/#address-cells")?, 2u32.to_be_bytes());
+        assert_eq!(get("/io-bus/#size-cells")?, 2u32.to_be_bytes());
+        assert_eq!(get("/io-bus/sd-clock/#clock-cells")?, 0u32.to_be_bytes());
+        assert_eq!(
+            get("/io-bus/mmc@b000000/clocks")?,
+            get("/io-bus/sd-clock/phandle")?
+        );
+        assert_eq!(
+            get("/io-bus/sd-clock/clock-frequency")?,
+            200_000_000u32.to_be_bytes()
+        );
+        assert_eq!(
+            get("/io-bus/mmc@b000000/interrupts")?,
+            [0u32, 8, 4]
+                .into_iter()
+                .flat_map(u32::to_be_bytes)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            get("/io-bus/mmc@b000000/pinctrl-0")?,
+            [
+                get("/io-bus/pinctrl@b001100/emmc-sd-default-state/phandle")?,
+                get("/io-bus/pinctrl@b002700/emmc-aon-cd-default-state/phandle")?
+            ]
+            .concat()
+        );
+        assert_eq!(
+            get("/io-bus/mmc@b000000/vqmmc-supply")?,
+            get("/io-bus/sd-io-voltage/phandle")?
+        );
+        assert_eq!(
+            get("/io-bus/mmc@b000000/vmmc-supply")?,
+            get("/io-bus/sd-card-power/phandle")?
+        );
+        assert_eq!(get("/io-bus/gpio@b003c00/#gpio-cells")?, 2u32.to_be_bytes());
+        for (path, pin, flags) in [
+            ("/io-bus/sd-io-voltage/gpios", 3u32, 0u32),
+            ("/io-bus/sd-card-power/gpios", 4, 0),
+            ("/io-bus/mmc@b000000/cd-gpios", 5, 1),
+        ] {
+            assert_eq!(
+                get(path)?,
+                [
+                    get("/io-bus/gpio@b003c00/phandle")?,
+                    &pin.to_be_bytes(),
+                    &flags.to_be_bytes()
+                ]
+                .concat()
+            );
+        }
+        assert!(!props.contains_key("/io-bus/gpio@b003c00/interrupts"));
+        assert!(!props.contains_key("/io-bus/gpio@b003c00/interrupt-controller"));
+        assert_eq!(
+            get("/io-bus/sd-io-voltage/states")?,
+            [1_800_000u32, 1, 3_300_000, 0]
+                .into_iter()
+                .flat_map(u32::to_be_bytes)
+                .collect::<Vec<_>>()
+        );
+        let revision = if revision == super::SdhciRevision::C0 {
+            b"brcm,bcm2712c0-pinctrl\0"
+        } else {
+            b"brcm,bcm2712d0-pinctrl\0"
+        };
+        assert_eq!(get("/io-bus/pinctrl@b001100/compatible")?, revision);
+    }
+    Ok(())
+}
+
+#[test]
+fn sdhci_rejects_missing_dma_overlap_and_inconsistent_silicon_facts() {
+    let device = sdhci(super::SdhciRevision::C0);
+    let mut io = IoDevices {
+        sdhci: Some(device),
+        ..devices()
+    };
+    assert_eq!(build(io), Err(Error::InvalidInput)); // two physical devices
+    io.virtio = None;
+    io.dma_ranges = &[];
+    assert_eq!(build(io), Err(Error::InvalidInput));
+    io.dma_ranges = &DMA;
+    for broken in [
+        super::SdhciDevice {
+            config: super::MmioWindow {
+                base: device.host.base,
+                ..device.config
+            },
+            ..device
+        },
+        super::SdhciDevice {
+            gpio_widths: [15, 6],
+            ..device
+        },
+        super::SdhciDevice {
+            clock_hz: 0,
+            ..device
+        },
+    ] {
+        io.sdhci = Some(broken);
+        assert_eq!(build(io), Err(Error::InvalidInput));
+    }
 }

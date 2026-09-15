@@ -347,3 +347,10 @@ impl ObjectSignals<crate::handle::GuestNotificationObject> {
     pub const PEER_CLOSED: Self =
         Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_GUEST_NOTIFICATION_PEER_CLOSED);
 }
+
+impl ObjectSignals<crate::handle::PhysicalDeviceObject> {
+    /// A newly delivered masked physical IRQ awaits userspace notification handling.
+    /// Completing with asserted=true consumes readiness while retaining its sequence.
+    pub const READABLE: Self =
+        Self::from_trusted_bits(hyper_abi::HYPER_NATIVE_SIGNAL_PHYSICAL_DEVICE_READABLE);
+}

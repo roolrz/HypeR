@@ -170,14 +170,27 @@ impl PendingVirtualMachine {
                     bootstrap: Some(bootstrap),
                     virtual_serial,
                     physical,
-                } if memory.complete() => Ok((
-                    reservation,
-                    lifecycle_resources,
-                    memory,
-                    bootstrap,
-                    virtual_serial,
-                    physical,
-                )),
+                } if memory.complete()
+                    && bootstrap
+                        .entry
+                        .checked_sub(self.configuration.guest_physical_base)
+                        .is_some_and(|offset| memory.contains(offset))
+                    && (bootstrap.stack == 0
+                        || bootstrap
+                            .stack
+                            .checked_sub(self.configuration.guest_physical_base)
+                            .and_then(|offset| offset.checked_sub(1))
+                            .is_some_and(|offset| memory.contains(offset))) =>
+                {
+                    Ok((
+                        reservation,
+                        lifecycle_resources,
+                        memory,
+                        bootstrap,
+                        virtual_serial,
+                        physical,
+                    ))
+                }
                 other => {
                     *state = other;
                     Err(Error::BadState)

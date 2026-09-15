@@ -525,7 +525,12 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(VfsServiceError::Process(ProcessError::Allocation))
         }
 
-        fn read_directory(&self, _: HandleValue, _: u64) -> Result<DirectoryPage, VfsServiceError> {
+        fn read_directory(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: &mut DirectoryPage,
+        ) -> Result<(), VfsServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(VfsServiceError::Process(ProcessError::Allocation))
         }
@@ -821,6 +826,93 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
     }
 
     impl crate::kernel::abi::native::DeviceServices for RejectingServices {
+        fn device_firmware_read(
+            &self,
+            _: HandleValue,
+            _: u32,
+            _: u32,
+            _: &str,
+        ) -> Result<alloc::vec::Vec<u8>, crate::kernel::device::assigned::service::MatchError>
+        {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(
+                crate::kernel::device::assigned::service::MatchError::Service(
+                    crate::kernel::vm::service::Error::NotSupported,
+                ),
+            )
+        }
+        fn device_claim_bundle(
+            &self,
+            _: HandleValue,
+            _: &[(u32, u32, u64)],
+            _: u32,
+        ) -> Result<HandleValue, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn device_mmio(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: u32,
+            _: bool,
+            _: u64,
+        ) -> Result<u64, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn device_irq_pending(
+            &self,
+            _: HandleValue,
+        ) -> Result<u64, crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+        fn device_irq_complete(
+            &self,
+            _: HandleValue,
+            _: u64,
+            _: bool,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+
+        fn device_profile_info(
+            &self,
+            device: HandleValue,
+        ) -> Result<[u8; 32], crate::kernel::vm::service::Error> {
+            {
+                let _ = device;
+                Err(crate::kernel::vm::service::Error::NotSupported)
+            }
+        }
+        fn device_resource_info(
+            &self,
+            device: HandleValue,
+            index: u32,
+        ) -> Result<[u8; 32], crate::kernel::vm::service::Error> {
+            {
+                let _ = (device, index);
+                Err(crate::kernel::vm::service::Error::NotSupported)
+            }
+        }
+        fn claim_device_matching(
+            &self,
+            authority: HandleValue,
+            profile: u32,
+            identity_kind: u32,
+            identity: &str,
+        ) -> Result<HandleValue, crate::kernel::device::assigned::service::MatchError> {
+            {
+                let _ = (authority, profile, identity_kind, identity);
+                Err(
+                    crate::kernel::device::assigned::service::MatchError::Service(
+                        crate::kernel::vm::service::Error::NotSupported,
+                    ),
+                )
+            }
+        }
         fn claim_device(
             &self,
             _: HandleValue,
@@ -1149,10 +1241,8 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             &self,
             _: HandleValue,
             _: u64,
-        ) -> Result<
-            Page<ProcessSnapshot, { crate::kernel::inspect::PROCESS_PAGE_CAPACITY }>,
-            crate::kernel::inspect::Error,
-        > {
+            _: &mut Page<ProcessSnapshot, { crate::kernel::inspect::PROCESS_PAGE_CAPACITY }>,
+        ) -> Result<(), crate::kernel::inspect::Error> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(crate::kernel::inspect::Error::AccessDenied)
         }
@@ -1171,10 +1261,8 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             &self,
             _: HandleValue,
             _: u64,
-        ) -> Result<
-            Page<crate::kernel::object::ObjectSnapshot, OBJECT_PAGE_CAPACITY>,
-            crate::kernel::inspect::Error,
-        > {
+            _: &mut Page<crate::kernel::object::ObjectSnapshot, OBJECT_PAGE_CAPACITY>,
+        ) -> Result<(), crate::kernel::inspect::Error> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(crate::kernel::inspect::Error::AccessDenied)
         }
@@ -1441,6 +1529,72 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         ),
     );
     if bad_size != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)) {
+        return Err(SelfTestError::InvalidRecordSize);
+    }
+    // Reject malformed generic-device requests before touching userspace or
+    // invoking an authority/device operation. Sequence zero is deliberately
+    // valid for an idle IRQ line resample, unlike malformed boolean values.
+    let before_device_calls = services.calls.get();
+    for (number, arguments) in [
+        (
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_FIRMWARE_READ,
+            [1_u64 << 24 | 1, 0x2000, 0, 65537, 0, 0],
+        ),
+        (
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_FIRMWARE_READ,
+            [1_u64 << 24 | 1, 0x2000, 0, 0, 1, 0],
+        ),
+        (
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_CLAIM_BUNDLE,
+            [1_u64 << 24 | 1, 0x2000, 0, 0, 0, 0],
+        ),
+        (
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_CLAIM_BUNDLE,
+            [1_u64 << 24 | 1, 0x2000, 9, 0, 0, 0],
+        ),
+        (
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_MMIO,
+            [1_u64 << 24 | 1, 0, 8, 0, 0, 0],
+        ),
+        (
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_MMIO,
+            [1_u64 << 24 | 1, 0, 4, 2, 0, 0],
+        ),
+        (
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_MMIO,
+            [1_u64 << 24 | 1, 0, 4, 0, 1, 0],
+        ),
+        (
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_IRQ_PENDING,
+            [1_u64 << 24 | 1, 1, 0, 0, 0, 0],
+        ),
+        (
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE,
+            [1_u64 << 24 | 1, 0, 2, 0, 0, 0],
+        ),
+    ] {
+        if dispatch_deferred(&services, invoke(number, arguments))
+            != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+            || services.calls.get() != before_device_calls
+        {
+            return Err(SelfTestError::InvalidRecordSize);
+        }
+    }
+    // The valid idle-line resample intentionally reaches the service. Keep its
+    // counter separate so the final zero-call assertion still covers every
+    // malformed request above and below without resetting accumulated evidence.
+    let idle_irq_services = RejectingServices {
+        calls: Cell::new(0),
+    };
+    if dispatch_deferred(
+        &idle_irq_services,
+        invoke(
+            hyper::abi::native::HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE,
+            [1_u64 << 24 | 1, 0, 0, 0, 0, 0],
+        ),
+    ) != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED))
+        || idle_irq_services.calls.get() != 1
+    {
         return Err(SelfTestError::InvalidRecordSize);
     }
     let before_platform_calls = services.calls.get();

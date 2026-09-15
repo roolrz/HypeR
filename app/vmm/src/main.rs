@@ -71,14 +71,11 @@ fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
                 name: machine.name,
                 image: machine.image,
                 autostart: machine.autostart,
+                disk: machine.disk,
             })
             .collect();
         hyper_vmm::save_config(&path, definitions)?;
-        writeln!(
-            output,
-            "Saved {} (ramfs changes last until reboot).",
-            path.display()
-        )?;
+        writeln!(output, "Saved {}.", path.display())?;
         return Ok(());
     }
     write_response(&mut output, response)

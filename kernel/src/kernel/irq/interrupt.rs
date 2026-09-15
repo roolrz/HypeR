@@ -1117,6 +1117,15 @@ pub fn enable_local(interrupt: VirtualInterrupt) -> Result<(), Error> {
 /// The live registration prevents removal/reuse while this operation runs.
 /// Call outside device locks: callbacks run under the IRQ registry lock.
 pub(crate) fn enable_registered_shared(registration: &Registration) -> Result<(), Error> {
+    enable_registered_shared_if(registration, || true)
+}
+
+/// The condition executes under the IRQ registry lock, after any callback's
+/// mask was applied, and must not call IRQ registry APIs or block.
+pub(crate) fn enable_registered_shared_if(
+    registration: &Registration,
+    ready: impl FnOnce() -> bool,
+) -> Result<(), Error> {
     resolve_transition(
         with_transition_state(|state| {
             let (domain, index) = state
@@ -1134,6 +1143,9 @@ pub(crate) fn enable_registered_shared(registration: &Registration) -> Result<()
             let hardware = mapping.hardware;
             if state.controller.is_per_cpu(hardware) {
                 return Err(Error::LocalInterruptLifecycleRequiresCrossCall.into());
+            }
+            if !ready() {
+                return Ok(());
             }
             state.set_hardware_enabled(hardware, true)
         }),

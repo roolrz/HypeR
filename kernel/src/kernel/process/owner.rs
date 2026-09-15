@@ -679,15 +679,7 @@ impl PreparedProcess {
         };
         drop(self.group.take());
         drop(self.registration.take());
-        let inner = match process.inner.try_unwrap() {
-            Ok(inner) => inner,
-            Err(_) => process_invariant_violation(),
-        };
-        let state = inner.state.into_inner();
-        let address = match state.address_space {
-            Some(address) => address,
-            None => process_invariant_violation(),
-        };
+        let address = recover_unpublished_address_space(process);
         match address.try_into_unique() {
             Ok(address) => address,
             Err(_) => process_invariant_violation(),
@@ -2742,12 +2734,16 @@ fn create_failure_from_arc(
 }
 
 fn recover_unpublished_address_space(process: Process) -> FallibleArc<NativeAddressSpace> {
-    let inner = match process.inner.try_unwrap() {
+    // Keep the large ProcessInner in its existing allocation. Unique ownership
+    // proves no lifecycle operation can race the extraction; destruction runs
+    // after releasing the state lock and never moves the whole state to stack.
+    let inner = match process.inner.try_into_unique() {
         Ok(inner) => inner,
         Err(_) => process_invariant_violation(),
     };
-    let state = inner.state.into_inner();
-    match state.address_space {
+    let address_space = inner.state.with(|state| state.address_space.take());
+    drop(inner);
+    match address_space {
         Some(address_space) => address_space,
         None => process_invariant_violation(),
     }

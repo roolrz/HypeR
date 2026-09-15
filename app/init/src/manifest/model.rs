@@ -6,7 +6,7 @@ pub const MAX_SERVICES: usize = 24;
 pub const MAX_DEPENDENCIES_PER_SERVICE: usize = 12;
 pub const MAX_DEPENDENCY_EDGES: usize = 128;
 // Schema limits bound bootstrap resource use independently of heap storage.
-pub const MAX_CAPABILITIES_PER_SERVICE: usize = 13;
+pub const MAX_CAPABILITIES_PER_SERVICE: usize = 14;
 pub const MAX_RIGHTS_PER_CAPABILITY: usize = 12;
 
 pub(super) const MAX_SERVICE_NAME_BYTES: usize = 63;

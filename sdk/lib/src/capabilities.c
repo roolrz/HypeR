@@ -16,6 +16,7 @@ static const uint32_t purposes[] = {
     HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_DYNAMIC_LIBRARY_DIRECTORY,
     UINT32_C(0x80040002), /* child library directory */
     UINT32_C(0x80030001), UINT32_C(0x80030002), UINT32_C(0x80030003),
+    UINT32_C(0x80030004), /* terminal stdin; preserve provenance on inheritance */
 };
 static hyper_native_handle_t retained[sizeof(purposes) / sizeof(purposes[0])];
 

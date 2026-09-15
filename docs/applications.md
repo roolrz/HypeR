@@ -114,15 +114,28 @@ repeated runtime-crash cleanup tests.
 
 ## Interactive transport
 
-Session routing and shell child supervision use nonblocking byte-channel
-relays. Each direction retains at most one message and rotates I/O priority;
-input, stdout, and stderr continue independently under backpressure. A readiness
-notification is an observation, so handlers retry the complete wait set when a
-subsequent nonblocking read finds no message. The shell drains child output
-before presenting the next prompt and stops a supervised child if its terminal
-connection fails.
+Session routing and shell output supervision use nonblocking byte-channel
+relays. Each direction retains at most one message and rotates I/O priority.
+A readiness notification is an observation, so handlers retry the complete wait
+set when a subsequent nonblocking read finds no message. An unredirected
+foreground child shares the terminal input endpoint with the shell; only an
+actual read consumes input. This preserves typed-ahead commands when the child
+does not read stdin. File redirections and pipelines use separate binary streams.
+The shell drains child output before its next prompt and stops a supervised child
+if its terminal connection fails.
 
-`make test-console ARCH=aarch64` checks randomized, individually echoed keystrokes,
+Terminal stdin carries both `stdio.input` and a same-object
+`stdio.terminal-input` capability. The runtime verifies their identity. The
+console-input service splits command/EOF records and folds CRLF to CR across
+hardware reads; std terminal input translates CR to LF and consumes standalone
+Ctrl-D as EOF without closing the shared endpoint. Native channel readers such
+as `vmm console` still receive CR and Ctrl-D. This interactive path is not a
+binary serial tunnel or a full POSIX tty. Ordinary pipes and files preserve all
+bytes. Default std child-process inheritance preserves terminal provenance.
+See [the runtime contract](../sdk/lib/README.md) for compatibility details.
+
+`make test-console ARCH=aarch64` checks typeahead bursts, terminal EOF and CRLF,
+std child inheritance and binary pipes, randomized individually echoed keystrokes,
 idle-to-input transitions, burst recovery, and returning from top and VM console.
 `QEMU_CPUS` selects the CPU count; `CONSOLE_TYPED_ROUNDS` overrides the default
 40 paced commands. Diagnostics are written to `target/app/aarch64/console.log`.

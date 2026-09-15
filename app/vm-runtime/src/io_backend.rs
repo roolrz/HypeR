@@ -33,13 +33,169 @@ pub struct Completion {
 
 struct Pending {
     request: Request,
-    sent: bool,
+    phase: Phase,
     guest: Option<(Transaction, Completion)>,
 }
 
-pub struct Backend {
-    mailbox: Mailbox,
-    notification: Notification,
+#[derive(Clone, Copy)]
+enum Phase {
+    Disable { started: bool },
+    Request { sent: bool },
+    Notify { operation: Operation, started: bool },
+}
+
+/// Low-frequency backend configuration transport; queue notifications bypass it.
+pub trait ControlTransport {
+    fn send(&self, record: &[u8]) -> hyper_os::Result<()>;
+    fn receive(&self, record: &mut [u8]) -> hyper_os::Result<usize>;
+}
+impl ControlTransport for Mailbox {
+    fn send(&self, record: &[u8]) -> hyper_os::Result<()> {
+        Mailbox::send(self, record)
+    }
+    fn receive(&self, record: &mut [u8]) -> hyper_os::Result<usize> {
+        Mailbox::receive(self, record)
+    }
+}
+impl ControlTransport for hyper_os::OwnedHandle<hyper_os::handle::ByteChannelObject> {
+    fn send(&self, record: &[u8]) -> hyper_os::Result<()> {
+        self.as_byte_channel().try_send(record)
+    }
+    fn receive(&self, record: &mut [u8]) -> hyper_os::Result<usize> {
+        self.as_byte_channel().try_receive(record)
+    }
+}
+
+/// Starts/polls one notification transaction without waiting for its peer.
+/// `None` preserves the transaction; callers must not start a second one.
+pub trait NotificationControl {
+    fn start(&mut self, operation: Operation) -> hyper_os::Result<Option<u32>>;
+    fn poll(&mut self) -> hyper_os::Result<Option<u32>>;
+    fn wants_write(&self) -> bool {
+        false
+    }
+    /// A lost remote lane cannot safely start another transaction. Local
+    /// notification capabilities can still raise a diagnostic interrupt.
+    fn disconnected(&mut self) -> hyper_os::Result<()> {
+        Ok(())
+    }
+}
+impl NotificationControl for Notification {
+    fn disconnected(&mut self) -> hyper_os::Result<()> {
+        Notification::control(self, Operation::RaiseConfigurationInterrupt).map(|_| ())
+    }
+    fn start(&mut self, operation: Operation) -> hyper_os::Result<Option<u32>> {
+        Notification::control(self, operation).map(Some)
+    }
+    fn poll(&mut self) -> hyper_os::Result<Option<u32>> {
+        Err(hyper_os::Error::InvalidResponse)
+    }
+}
+
+/// Broker notification adapter sharing the protocol lane, never a wait thread.
+pub struct RemoteNotification<T> {
+    channel: T,
+    pending: Option<([u8; 16], bool)>,
+}
+impl<T> RemoteNotification<T> {
+    pub fn new(channel: T) -> Self {
+        Self {
+            channel,
+            pending: None,
+        }
+    }
+}
+impl<T: ControlTransport> NotificationControl for RemoteNotification<T> {
+    fn start(&mut self, operation: Operation) -> hyper_os::Result<Option<u32>> {
+        if self.pending.is_some() {
+            return Err(hyper_os::Error::InvalidResponse);
+        }
+        let mut request = [0; 16];
+        request[..8].copy_from_slice(b"HIONOT01");
+        request[8..12].copy_from_slice(&(operation as u32).to_le_bytes());
+        self.pending = Some((request, false));
+        self.poll()
+    }
+    fn wants_write(&self) -> bool {
+        self.pending.as_ref().is_some_and(|(_, sent)| !sent)
+    }
+    fn poll(&mut self) -> hyper_os::Result<Option<u32>> {
+        let (request, sent) = self
+            .pending
+            .as_mut()
+            .ok_or(hyper_os::Error::InvalidResponse)?;
+        if !*sent {
+            match self.channel.send(request) {
+                Ok(()) => *sent = true,
+                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        let mut reply = [0; 16];
+        match self.channel.receive(&mut reply) {
+            Ok(16) if &reply[..8] == b"HIONOTR1" && reply[12..] == [0; 4] => {
+                let epoch = u32::from_le_bytes(
+                    reply[8..12]
+                        .try_into()
+                        .map_err(|_| hyper_os::Error::InvalidResponse)?,
+                );
+                if epoch == 0 {
+                    return Err(hyper_os::Error::InvalidResponse);
+                }
+                self.pending = None;
+                Ok(Some(epoch))
+            }
+            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => Ok(None),
+            Err(error) => Err(error),
+            _ => Err(hyper_os::Error::InvalidResponse),
+        }
+    }
+}
+
+impl ControlTransport
+    for std::sync::Arc<hyper_os::OwnedHandle<hyper_os::handle::ByteChannelObject>>
+{
+    fn send(&self, record: &[u8]) -> hyper_os::Result<()> {
+        self.as_byte_channel().try_send(record)
+    }
+    fn receive(&self, record: &mut [u8]) -> hyper_os::Result<usize> {
+        self.as_byte_channel().try_receive(record)
+    }
+}
+
+/// Budget for a whole Disable/protocol/Enable operation, not each wakeup.
+#[derive(Default)]
+pub struct OperationDeadline(Option<u64>);
+impl OperationDeadline {
+    /// Observe completion first: already completed work wins at the boundary.
+    pub fn observe(&mut self, pending: bool, now: u64) -> Result<(), Error> {
+        if !pending {
+            self.0 = None;
+            return Ok(());
+        }
+        let limit = match self.0 {
+            Some(limit) => limit,
+            None => {
+                let limit = now.checked_add(60_000_000_000).ok_or(Error::InvalidState)?;
+                self.0 = Some(limit);
+                limit
+            }
+        };
+        if now >= limit {
+            return Err(Error::Native(hyper_os::Error::Status(
+                hyper_os::Status::TIMED_OUT,
+            )));
+        }
+        Ok(())
+    }
+    pub fn raw(&self) -> u64 {
+        self.0.unwrap_or(hyper_os::DEADLINE_INFINITE)
+    }
+}
+
+pub struct Backend<T = Mailbox, N = Notification> {
+    mailbox: T,
+    notification: N,
     device: Option<Device>,
     memory_base: u64,
     memory_size: u64,
@@ -51,17 +207,14 @@ pub struct Backend {
     terminal: bool,
 }
 
-impl Backend {
+impl<T: ControlTransport, N: NotificationControl> Backend<T, N> {
     pub fn new(
-        mailbox: Mailbox,
-        notification: Notification,
+        mailbox: T,
+        notification: N,
         memory: (u64, u64),
         mmio_base: u64,
         device_id: NonZeroU64,
     ) -> Result<Self, Error> {
-        let epoch = notification
-            .control(Operation::Disable)
-            .map_err(Error::Native)?;
         Ok(Self {
             mailbox,
             notification,
@@ -76,11 +229,11 @@ impl Backend {
             pending: Some(Pending {
                 request: Request {
                     binding: device_id.get(),
-                    epoch,
+                    epoch: 0, // Filled only after the Disable reply.
                     transaction: 1,
                     command: Command::Hello,
                 },
-                sent: false,
+                phase: Phase::Disable { started: false },
                 guest: None,
             }),
         })
@@ -96,16 +249,14 @@ impl Backend {
         if let Some(device) = self.device.as_mut() {
             device.backend_lost();
         }
-        self.notification
-            .control(Operation::RaiseConfigurationInterrupt)
-            .map_err(Error::Native)?;
+        self.notification.disconnected().map_err(Error::Native)?;
         Ok(())
     }
 
-    pub fn mailbox(&self) -> &Mailbox {
+    pub fn mailbox(&self) -> &T {
         &self.mailbox
     }
-    pub fn notification(&self) -> &Notification {
+    pub fn notification(&self) -> &N {
         &self.notification
     }
     pub fn ready(&self) -> bool {
@@ -117,80 +268,148 @@ impl Backend {
         self.pending.is_some() && !self.terminal
     }
     pub fn wants_write(&self) -> bool {
-        !self.terminal && self.pending.as_ref().is_some_and(|pending| !pending.sent)
+        !self.terminal
+            && self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| match pending.phase {
+                    Phase::Request { sent } => !sent,
+                    Phase::Disable { started } | Phase::Notify { started, .. } => {
+                        !started || self.notification.wants_write()
+                    }
+                })
     }
 
-    /// Run after mailbox readiness, and after enqueuing a guest operation.
-    /// `WOULD_BLOCK` leaves state intact for the next readiness observation.
+    /// Advance a bounded number of immediate phases. Every transport operation
+    /// is a try operation: delayed notifications never block console/power.
     pub fn progress(&mut self) -> Result<Option<Completion>, Error> {
         if self.terminal {
             return Err(Error::Disconnected);
         }
-        let Some(pending) = self.pending.as_mut() else {
-            return Ok(None);
-        };
-        if !pending.sent {
-            let mut record = [0; io_protocol::MAX_RECORD];
-            let length = pending
-                .request
-                .encode(&mut record)
-                .map_err(Error::Protocol)?;
-            match self.mailbox.send(&record[..length]) {
-                Ok(()) => pending.sent = true,
-                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(None),
-                Err(error) => return Err(Error::Native(error)),
+        // Disable -> request -> post-notification: at most three transitions.
+        for _ in 0..3 {
+            let Some(pending) = self.pending.as_mut() else {
+                return Ok(None);
+            };
+            match pending.phase {
+                Phase::Disable { started } | Phase::Notify { started, .. } => {
+                    let operation = match pending.phase {
+                        Phase::Disable { .. } => Operation::Disable,
+                        Phase::Notify { operation, .. } => operation,
+                        Phase::Request { .. } => return Err(Error::InvalidState),
+                    };
+                    let epoch = if started {
+                        self.notification.poll()
+                    } else {
+                        pending.phase = match pending.phase {
+                            Phase::Disable { .. } => Phase::Disable { started: true },
+                            _ => Phase::Notify {
+                                operation,
+                                started: true,
+                            },
+                        };
+                        self.notification.start(operation)
+                    }
+                    .map_err(Error::Native)?;
+                    let Some(epoch) = epoch else {
+                        return Ok(None);
+                    };
+                    if matches!(pending.phase, Phase::Disable { .. }) {
+                        pending.request.epoch = epoch;
+                        pending.phase = Phase::Request { sent: false };
+                        continue;
+                    }
+                    if epoch != pending.request.epoch {
+                        return Err(Error::InvalidState);
+                    }
+                    let completion = pending.guest.map(|(_, completion)| completion);
+                    self.pending = None;
+                    return Ok(completion);
+                }
+                Phase::Request { sent } => {
+                    if !sent {
+                        let mut record = [0; io_protocol::MAX_RECORD];
+                        let length = pending
+                            .request
+                            .encode(&mut record)
+                            .map_err(Error::Protocol)?;
+                        match self.mailbox.send(&record[..length]) {
+                            Ok(()) => pending.phase = Phase::Request { sent: true },
+                            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {
+                                return Ok(None);
+                            }
+                            Err(error) => return Err(Error::Native(error)),
+                        }
+                    }
+                    let mut record = [0; io_protocol::MAX_RECORD];
+                    let length = match self.mailbox.receive(&mut record) {
+                        Ok(length) => length,
+                        Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {
+                            return Ok(None);
+                        }
+                        Err(error) => return Err(Error::Native(error)),
+                    };
+                    let reply = Reply::decode(&record[..length], pending.request)
+                        .map_err(Error::Protocol)?;
+                    if let Some((transaction, completion)) = pending.guest {
+                        let success = match reply.status {
+                            Status::Success => true,
+                            Status::BackendFailure
+                                if matches!(
+                                    transaction.operation,
+                                    BackendOperation::Activate { .. }
+                                ) =>
+                            {
+                                false
+                            }
+                            status => return Err(Error::BackendRejected(status)),
+                        };
+                        self.device
+                            .as_mut()
+                            .ok_or(Error::InvalidState)?
+                            .complete(transaction.id, success)
+                            .map_err(Error::Device)?;
+                        let operation =
+                            if matches!(transaction.operation, BackendOperation::Activate { .. })
+                                && success
+                            {
+                                Some(Operation::Enable)
+                            } else if matches!(
+                                transaction.operation,
+                                BackendOperation::StopQueue { .. }
+                            ) || !success
+                            {
+                                Some(Operation::RaiseConfigurationInterrupt)
+                            } else {
+                                None
+                            };
+                        if let Some(operation) = operation {
+                            pending.phase = Phase::Notify {
+                                operation,
+                                started: false,
+                            };
+                            continue;
+                        }
+                        self.pending = None;
+                        return Ok(Some(completion));
+                    }
+                    if reply.status != Status::Success {
+                        return Err(Error::BackendRejected(reply.status));
+                    }
+                    self.device = Some(
+                        Device::new(
+                            reply.features.ok_or(Error::InvalidState)?,
+                            self.memory_base,
+                            self.memory_size,
+                        )
+                        .map_err(Error::Device)?,
+                    );
+                    self.pending = None;
+                    return Ok(None);
+                }
             }
         }
-        let mut record = [0; io_protocol::MAX_RECORD];
-        let length = match self.mailbox.receive(&mut record) {
-            Ok(length) => length,
-            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(None),
-            Err(error) => return Err(Error::Native(error)),
-        };
-        let reply = Reply::decode(&record[..length], pending.request).map_err(Error::Protocol)?;
-        let completion = if let Some((transaction, completion)) = pending.guest {
-            let success = match reply.status {
-                Status::Success => true,
-                Status::BackendFailure
-                    if matches!(transaction.operation, BackendOperation::Activate { .. }) =>
-                {
-                    false
-                }
-                status => return Err(Error::BackendRejected(status)),
-            };
-            let device = self.device.as_mut().ok_or(Error::InvalidState)?;
-            device
-                .complete(transaction.id, success)
-                .map_err(Error::Device)?;
-            if matches!(transaction.operation, BackendOperation::Activate { .. }) && success {
-                let epoch = self
-                    .notification
-                    .control(Operation::Enable)
-                    .map_err(Error::Native)?;
-                if epoch != pending.request.epoch {
-                    return Err(Error::InvalidState);
-                }
-            } else if matches!(transaction.operation, BackendOperation::StopQueue { .. })
-                || !success
-            {
-                self.notification
-                    .control(Operation::RaiseConfigurationInterrupt)
-                    .map_err(Error::Native)?;
-            }
-            Some(completion)
-        } else {
-            self.device = Some(
-                Device::new(
-                    reply.features.ok_or(Error::InvalidState)?,
-                    self.memory_base,
-                    self.memory_size,
-                )
-                .map_err(Error::Device)?,
-            );
-            None
-        };
-        self.pending = None;
-        Ok(completion)
+        Ok(None)
     }
 
     /// `None` means the instruction is deliberately parked. Other vCPUs may
@@ -230,18 +449,14 @@ impl Backend {
                         .next_transaction
                         .checked_add(1)
                         .ok_or(Error::SequenceExhausted)?;
-                    let epoch = self
-                        .notification
-                        .control(Operation::Disable)
-                        .map_err(Error::Native)?;
                     self.pending = Some(Pending {
                         request: Request {
                             binding: self.binding,
-                            epoch,
+                            epoch: 0,
                             transaction: self.next_transaction,
                             command: Command::Device(transaction.operation),
                         },
-                        sent: false,
+                        phase: Phase::Disable { started: false },
                         guest: Some((transaction, completion)),
                     });
                     self.next_transaction = next;
@@ -252,3 +467,7 @@ impl Backend {
         Ok(Some(completion))
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/io_backend.rs"]
+mod tests;

@@ -18,10 +18,7 @@ fn render(terminal: Option<ProcessTermination>) -> String {
         },
         |fragment| bytes.extend_from_slice(fragment),
     );
-    match String::from_utf8(bytes) {
-        Ok(text) => text,
-        Err(_) => String::new(),
-    }
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
 #[test]

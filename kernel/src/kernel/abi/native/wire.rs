@@ -684,6 +684,9 @@ pub(super) fn copy_encoded_page<T: Copy, const N: usize, const R: usize>(
     Ok((page.len(), page.next()))
 }
 
+// Encoding/copyout follows backend completion. Keep its record scratch out of
+// the syscall frame while directory lookup may block deep in a filesystem.
+#[inline(never)]
 pub(super) fn copy_directory_page(
     services: &impl UserMemoryServices,
     destination: UserSlice,

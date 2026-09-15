@@ -16,7 +16,32 @@ pub struct Definition {
     pub image: String,
     #[serde(default)]
     pub autostart: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<Disk>,
 }
+/// One exclusive volume authorized by the board's I/O client table.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Disk {
+    pub client: u32,
+    pub volume: String,
+}
+impl Disk {
+    pub fn validate(&self) -> Result<(), String> {
+        if !(1..=127).contains(&self.client)
+            || self.volume.is_empty()
+            || self.volume.len() > 32
+            || !self
+                .volume
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
+        {
+            return Err("disk requires a client index from 1 to 127 and a volume name of 1 to 32 letters, digits, '-' or '_'".into());
+        }
+        Ok(())
+    }
+}
+
 impl Definition {
     pub fn validate(&self) -> Result<(), String> {
         if self.name.is_empty()
@@ -35,6 +60,9 @@ impl Definition {
             || self.image.split('/').any(|part| part == "..")
         {
             return Err("VM image must be an absolute path without parent components or control characters (at most 512 bytes)".into());
+        }
+        if let Some(disk) = &self.disk {
+            disk.validate()?;
         }
         Ok(())
     }
@@ -86,6 +114,14 @@ pub fn validate_definitions(definitions: &[Definition]) -> Result<(), String> {
     }
     for (index, definition) in definitions.iter().enumerate() {
         definition.validate()?;
+        if let Some(disk) = &definition.disk
+            && definitions[..index]
+                .iter()
+                .filter_map(|other| other.disk.as_ref())
+                .any(|other| other.client == disk.client || other.volume == disk.volume)
+        {
+            return Err(format!("duplicate exclusive disk volume '{}'", disk.volume));
+        }
         if definitions[..index]
             .iter()
             .any(|other| other.name == definition.name)
@@ -148,6 +184,8 @@ pub struct Summary {
     pub state: State,
     pub image: String,
     pub autostart: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<Disk>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

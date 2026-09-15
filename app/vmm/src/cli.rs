@@ -38,6 +38,11 @@ pub enum VmCommand {
         image: String,
         #[arg(long)]
         start: bool,
+        /// Board-authorized exclusive disk volume.
+        #[arg(long, requires = "disk_client")]
+        disk_volume: Option<String>,
+        #[arg(long, requires = "disk_volume", value_parser = clap::value_parser!(u32).range(1..=127))]
+        disk_client: Option<u32>,
     },
     /// Remove a stopped definition (does not delete its image or edit the config file).
     Delete { name: String },
@@ -48,11 +53,20 @@ impl VmCommand {
     pub fn request(self) -> Result<Request, Box<dyn std::error::Error>> {
         let (name, action) = match self {
             Self::List | Self::Save { .. } => return Ok(Request::List),
-            Self::Create { name, image, start } => {
+            Self::Create {
+                name,
+                image,
+                start,
+                disk_volume,
+                disk_client,
+            } => {
                 let definition = Definition {
                     name,
                     image,
                     autostart: start,
+                    disk: disk_volume
+                        .zip(disk_client)
+                        .map(|(volume, client)| hyper_vm_policy::fleet::Disk { client, volume }),
                 };
                 definition.validate().map_err(std::io::Error::other)?;
                 return Ok(Request::Create {

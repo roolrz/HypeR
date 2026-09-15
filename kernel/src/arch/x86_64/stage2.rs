@@ -250,6 +250,38 @@ impl Stage2AddressSpace {
         Ok(())
     }
 
+    /// Removes one 4 KiB leaf without releasing table storage.
+    ///
+    /// # Safety
+    /// The caller serializes mutation and retains the old backing until all
+    /// possible CPU consumers have invalidated the affected translation.
+    pub unsafe fn clear_page(&mut self, ipa: u64) -> Result<bool, Error> {
+        if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= GUEST_LIMIT {
+            return Err(Error::InvalidAddress);
+        }
+        let mut table = self.root;
+        for level in 0..3 {
+            // SAFETY: Root and every validated child remain retained.
+            let entry = unsafe { read_entry(table, index(ipa, level))? };
+            if entry == 0 {
+                return Ok(false);
+            }
+            if entry & self.present_flags() == 0 || entry & (1 << 7) != 0 {
+                return Err(Error::Conflict);
+            }
+            table = PhysicalAddress::new(entry & EPT_ADDRESS_MASK);
+        }
+        // SAFETY: The preceding walk validated the retained final-level table.
+        let entry = unsafe { read_entry(table, index(ipa, 3))? };
+        if entry == 0 {
+            return Ok(false);
+        }
+        let (pointer, _) = self.normal_page_leaf(ipa)?;
+        // SAFETY: The caller retains the old backing until invalidation completes.
+        unsafe { write_volatile(pointer, 0) };
+        Ok(true)
+    }
+
     fn normal_page_leaf(&self, ipa: u64) -> Result<(*mut u64, u64), Error> {
         if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= GUEST_LIMIT {
             return Err(Error::InvalidAddress);

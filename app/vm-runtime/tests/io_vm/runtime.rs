@@ -17,6 +17,7 @@ use hyper_vm_runtime::io_guest::Image;
 use std::io::{self, Write};
 use std::num::NonZeroU64;
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 type Result<T> = std::result::Result<T, String>;
@@ -46,8 +47,8 @@ fn deadline(seconds: u64) -> Result<u64> {
 }
 
 struct Guest {
-    machine: hyper_os::OwnedHandle<VirtualMachineObject>,
-    cpus: Vec<hyper_os::OwnedHandle<VirtualCpuObject>>,
+    machine: Arc<hyper_os::OwnedHandle<VirtualMachineObject>>,
+    cpus: Vec<Arc<hyper_os::OwnedHandle<VirtualCpuObject>>>,
     output: Output,
     started: bool,
     retired: bool,
@@ -295,6 +296,8 @@ fn suite(startup: &Startup<'_>) -> Result<()> {
     io.device_tree(
         gic_version,
         IoDevices {
+            clients: &[],
+            sdhci: None,
             virtio: Some(MmioDevice {
                 base: PHYSICAL_MMIO,
                 size: physical_info.mmio_size,
@@ -313,6 +316,7 @@ fn suite(startup: &Startup<'_>) -> Result<()> {
     front.device_tree(
         gic_version,
         IoDevices {
+            clients: &[],
             virtio: Some(device_node(FRONT_MMIO, 40)),
             ..IoDevices::empty()
         },

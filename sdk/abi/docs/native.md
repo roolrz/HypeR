@@ -36,6 +36,9 @@ ABI revision: `0`.
 | -20 | `is_directory` |
 | -21 | `symlink_loop` |
 | -22 | `cross_device` |
+| -23 | `io_error` |
+| -24 | `no_space` |
+| -25 | `read_only` |
 
 ## Object kinds
 
@@ -73,11 +76,15 @@ ABI revision: `0`.
 | 29 | `physical_device` | `rendezvous_only` |
 | 30 | `guest_mailbox` | `rendezvous_only` |
 | 31 | `guest_notification` | `rendezvous_only` |
+| 32 | `native_block` | `rendezvous_only` |
+| 33 | `guest_mapping` | `rendezvous_only` |
 
 ## Object signals
 
 | Object | Bit | Name |
 | --- | ---: | --- |
+| `physical_device` | 0 | `readable` |
+| `native_block` | 0 | `peer_closed` |
 | `virtual_serial` | 0 | `readable` |
 | `virtual_serial` | 1 | `writable` |
 | `virtual_serial` | 2 | `peer_closed` |
@@ -106,6 +113,27 @@ ABI revision: `0`.
 
 | Name | Value |
 | --- | ---: |
+| `device_firmware_max_bytes` | `65536` |
+| `device_firmware_name_max_bytes` | `128` |
+| `device_bundle_max_entries` | `8` |
+| `device_firmware_field_info` | `0` |
+| `device_firmware_field_path` | `1` |
+| `device_firmware_field_compatible` | `2` |
+| `device_firmware_field_registers` | `3` |
+| `device_firmware_field_property` | `4` |
+| `device_profile_virtio_mmio_scsi` | `1` |
+| `device_profile_userspace` | `2` |
+| `device_identity_compatible` | `1` |
+| `device_identity_fdt_path` | `2` |
+| `io_max_clients` | `9` |
+| `guest_notification_disconnect` | `3` |
+| `guest_dynamic_alias_offset` | `68719476736` |
+| `guest_dynamic_physical_limit` | `274877906944` |
+| `native_block_memory_bytes` | `131072` |
+| `native_block_queue_size` | `8` |
+| `native_block_queue_stride` | `4096` |
+| `native_block_available_offset` | `256` |
+| `native_block_used_offset` | `512` |
 | `startup_handle_purpose_device_assignment_authority` | `14` |
 | `guest_mailbox_max_message_bytes` | `256` |
 | `guest_notification_disable` | `0` |
@@ -256,6 +284,8 @@ ABI revision: `0`.
 
 ## Semantic rules
 
+- Guest mapping creation borrows backend VirtualMachine WRITE and GuestMemory MAP, populates the full stable grant, and returns an owned mapping handle plus a backend-VM-local non-reused token. The backend IPA envelope must contain all sparse aliases: alias = 64 GiB + host physical address, with host addresses below 256 GiB. Unadmitted envelope holes have no RAM or page bitmap entries. The kernel constructs immutable frontend-ordered, coalesced physical extents; neither Native policy nor Linux may replace their addresses. Backend notification write64 0x28 admits one token exactly once to that unique notification route; read64 0x30/0x38/0x40/0x48 return frontend base, total bytes, status, extent count. Write64 0x50 selects an extent index; read64 0x58/0x60/0x68/0x70 return alias, frontend-relative offset, byte length, and query status. Rejection clears the old reply. Extents cover the entire frontend range without holes or overlapping physical pages. After draining vhost and releasing all page pins, only that backend route may write64 the token at 0x20 to certify quiescence. Mapping release accepts never-admitted or quiescent tokens, withdraws lookup, clears leaves, waits for every CPU translation acknowledgement, then releases backing. Closing a mapping handle alone quarantines its pages until backend VM retirement. Notification control operation 3 permanently disconnects both routes, only when no admitted mapping remains; a disconnected route never affects an address or IRQ reused by a subsequent connection.
+- Native block creation dedicates one fully resident 131072-byte guest-memory grant permanently to one kernel virtio-scsi initiator; repeated creation from that grant fails. The backend VM must retain the matching mapping until execution and physical DMA are quiescent. Three standard split queues have size 8, descriptor offsets n*4096, available offsets n*4096+256, and used offsets n*4096+512, relative to guest_base. Userspace negotiates VERSION_1 with the backend before activation. Activation enables notifications and issues READ CAPACITY(16), accepting only 512-byte sectors; capacity is never supplied by userspace. MAP on the block is exclusive filesystem mount authority; directory WRITE|EXECUTE is additionally required. Mounting retains an independent block owner after its setup handle closes. Reads, writes and flushes use the shared request queue and blocking kernel notifications, not per-request userspace RPC. Unretired request failures permanently disconnect the initiator and never recycle its buffer. PEER_CLOSED reports disconnection. The physical pages remain retained by backend mappings until VM/DMA retirement; notification closure alone never proves DMA quiescence.
 - VM power control requires WRITE authority. virtual_machine_get_power_request returns a non-consuming snapshot of one pending request, or would_block when none exists. Request IDs identify one completion and stale IDs are rejected. Operations are CPU_ON (1), CPU_OFF (2), SYSTEM_OFF (3), and SYSTEM_RESET (4); accept is strictly 0 or 1. Reserved output is zero. POWER_REQUEST signals pending work, and VCPU_TERMINATED prompts inspection of per-vCPU terminal state. virtual_machine_open_vcpu returns a control handle for an already configured vCPU; it does not change the immutable topology. The runtime owns lifecycle policy; no guest request is forwarded to host firmware. Guest suspend operations remain unsupported.
 - Immutable VMO snapshots grant READ and MAP but never WRITE. vmo_create_snapshot coherently copies its source and reports Busy while writable mappings or hardware writers exist. File snapshots capture one content generation; returned byte_size is its exact file length, while backing is page rounded. Private mappings require source READ|MAP and VMAR MAP: source_offset is page aligned, data_offset is less than one page, source_length bytes starting at source_offset+data_offset initialize destination data_offset; all other destination bytes are zero. Writable private views never permit EXECUTE. Executable private views additionally require an executable source VMO and source EXECUTE rights; sanitized pages are sealed and instruction-published before mapping, with no writable alias. Copy-on-write mode shares immutable full pages until first write; eager mode allocates all private pages before publication. Private writes, including kernel copyout and atomic waits, cannot change the source or another private view. Ordinary writable/shared VMOs and exclusive hardware leases keep their stable backing contract. Snapshot bytes and old page versions remain owned through acknowledged translation retirement.
 - VM platform inspection borrows an INSPECT creation lease without consuming it. Metadata describes the selected local platform: counter_frequency_hz is the actual guest counter frequency, and riscv_isa is a guaranteed subset across all admitted CPUs, not a complete host ISA listing. Other architectures return a zero RISC-V mask. The guarantee remains valid across local CPU migration; cross-machine migration is not implied.
@@ -292,7 +322,7 @@ ABI revision: `0`.
 - Process-builder set_name and set_affinity replace their prior values; add_argument and add_environment append in order. Process-builder affinity is a nonempty little-endian array of u64 CPU-mask words. Bits above process_affinity_max_cpus and bits which cannot designate an allowed CPU are rejected.
 - Process-builder add_handle requires a nonzero purpose unique within the builder, an expected nonzero exact object kind, and either exact granted rights or capability_disposition_same_rights. Move consumes the source only when the mutator returns ok; duplicate retains it and additionally requires duplicate. Failure preserves both builder and source.
 - A VirtualMachineCreationAuthority may derive one resource-domain-bound VirtualMachineCreationLease. The lease is single-use and is consumed only when VirtualMachine creation publishes a PendingVirtualMachine handle successfully.
-- A PendingVirtualMachine is mutable until seal. It must own exactly one writable VMO whose size equals the configured guest RAM and one bootstrap record for boot vCPU 0. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and virtual_machine_open_vcpu exposes their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is published to a read-only shared VMO consumed by the owning runtime, and VM retirement disconnects the input route without invalidating existing output mappings. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. AArch64 reference guests accept 1..8 vCPUs; RISC-V reference guests currently accept one.
+- A PendingVirtualMachine is mutable until seal. It must own at least one explicitly backed, non-overlapping writable region inside the configured IPA envelope and one bootstrap record for boot vCPU 0. Bootstrap entry and stack must lie in admitted backing; sparse envelope gaps remain unbacked and never become anonymous RAM. The configured vcpu_count fixes immutable topology; architecture power-on protocols supply secondary-vCPU runtime entry state, and virtual_machine_open_vcpu exposes their control handles. A guest serial route is optional and exists only when a caller transfers a VirtualSerial handle with assign-device authority before seal. Successful binding consumes the supplied handle and commits a VM-owned reference until VM retirement; a rejected binding leaves the handle unchanged. Guest output is published to a read-only shared VMO consumed by the owning runtime, and VM retirement disconnects the input route without invalidating existing output mappings. Seal is irreversible; install consumes the pending handle only on ok and publishes the installed VirtualMachine and dormant boot VirtualCpu handles together. VirtualCpu start is a separate operation after handle publication. The started VirtualCpu phase means that start committed successfully; it is not an observation that the scheduler currently considers the vCPU runnable or executing. AArch64 reference guests accept 1..8 vCPUs; RISC-V reference guests currently accept one.
 - VirtualSerial handles are process-local; device assignment consumes a same-process handle. register_output borrows a caller-allocated writable VMO of exactly 69632 bytes and registers it once before assignment. An exclusive write lease rejects existing writable mappings, direct accesses, snapshots, and further writers until port retirement; read-only mappings may coexist. Offset 0 is an atomic u64 produced count, offset 8 a saturating dropped-byte count, and offset 4096 begins 65536 atomic byte slots. Registration initializes counters; callers must not access contents during registration. The producer release-publishes bytes; the runtime acquire-loads production and reads a batch. acknowledge_output requires READ and submits the absolute consumed position after reading. Regressing or future positions return invalid_argument without mutation. Publication, acknowledgement, and closure serialize on the port: READABLE means unacknowledged output, WRITABLE means a connected input route has queue space, and PEER_CLOSED means no future output or input. WAIT authorizes object waits and WaitSet subscriptions. Acknowledgement clears READABLE only when caught up; new output reasserts it, without lost wakeups or periodic polling. Full output discards new bytes without blocking or overwriting unconsumed slots. Counters never wrap. Last active handle closure synchronizes with writers and closes publication; registered pages remain pinned through final VM/object retirement. The SDK maps output read-only and acknowledges batches by syscall without copying payload through the syscall. Write remains nonblocking input injection: busy means the queue is full, bad_state means disconnected. Runtime policy owns retention and client transport.
 - The creating process retains its guest VMO handle, but attaching it to a PendingVirtualMachine acquires exclusive hardware-write ownership and rejects any active Native writable mapping or direct VMO operation. Direct VMO access, snapshots, and writable Native mappings remain closed until VM retirement removes and invalidates every stage-2 mapping and releases the independent backing reference; read-only Native mappings may coexist.
 
@@ -439,11 +469,29 @@ element size before any user-memory access.
 | 132 | `guest_mailbox_receive` | `mailbox: handle`, `bytes: user_address`, `capacity: byte_count` | `bytes: byte_count` | `mailbox: Borrow, kind=guest_mailbox, rights=0x10` | `bytes: Write, len=capacity bytes, max-bytes=256; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 133 | `guest_notification_create` | `frontend: handle`, `backend: handle`, `frontend_base: u64`, `backend_base: u64`, `frontend_irq: u32`, `backend_irq: u32` | `guest_notification: handle` | `frontend: Borrow, kind=virtual_machine, rights=0x20`, `backend: Borrow, kind=virtual_machine, rights=0x20`, `guest_notification: produce, kind=guest_notification, fixed=0x2e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 | 134 | `guest_notification_control` | `notification: handle`, `operation: u32` | `epoch: u32` | `notification: Borrow, kind=guest_notification, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 135 | `native_block_create` | `memory: handle`, `backend: handle`, `guest_base: u64`, `notification_base: u64`, `notification_irq: u32` | `block: handle` | `memory: Borrow, kind=guest_memory, rights=0x40`, `backend: Borrow, kind=virtual_machine, rights=0x20`, `block: produce, kind=native_block, fixed=0x6e` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 136 | `native_block_activate` | `block: handle`, `readonly: u32` | `sectors: u64` | `block: Borrow, kind=native_block, rights=0x20` | — | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 137 | `native_block_mount` | `block: handle`, `directory: handle`, `path: user_address`, `path_length: byte_count` | — | `block: Borrow, kind=native_block, rights=0x40`, `directory: Borrow, kind=directory, rights=0xa0` | `path: Read, len=path_length bytes, max-bytes=4096; order=0` | `blocking=MayBlock, cancellation=Explicit, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 138 | `guest_mapping_create` | `backend: handle`, `memory: handle`, `frontend_base: u64` | `mapping: handle`, `token: u64` | `backend: Borrow, kind=virtual_machine, rights=0x20`, `memory: Borrow, kind=guest_memory, rights=0x40`, `mapping: produce, kind=guest_mapping, fixed=0x2a` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 139 | `guest_mapping_release` | `mapping: handle` | — | `mapping: Borrow, kind=guest_mapping, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 140 | `device_claim_matching` | `authority: handle`, `profile: u32`, `identity_kind: u32`, `identity: user_address`, `length: byte_count` | `physical_device: handle` | `authority: Borrow, kind=device_assignment_authority, rights=0x8`, `physical_device: produce, kind=physical_device, fixed=0x2b` | `identity: Read, len=length bytes, max-bytes=512; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 141 | `device_profile_info` | `device: handle`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `device: Borrow, kind=physical_device, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=4096, record=device_profile_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 142 | `device_resource_info` | `device: handle`, `index: u32`, `output: user_address`, `output_size: byte_count` | `supported_size: byte_count` | `device: Borrow, kind=physical_device, rights=0x8` | `output: Write, len=output_size bytes, max-bytes=4096, record=device_resource_info; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 143 | `device_firmware_read` | `authority: handle`, `query: user_address`, `output: user_address`, `capacity: byte_count` | `value: u64` | `authority: Borrow, kind=device_assignment_authority, rights=0x8` | `query: Read, fixed-bytes=24, record=device_firmware_query; order=0`, `output: Write, len=capacity bytes, max-bytes=65536; order=1` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 144 | `device_claim_bundle` | `authority: handle`, `entries: user_address`, `count: element_count`, `irq_node: u32` | `physical_device: handle` | `authority: Borrow, kind=device_assignment_authority, rights=0x8`, `physical_device: produce, kind=physical_device, fixed=0x2f` | `entries: Read, len=count elements, max-elements=8, element-size=16, record=device_bundle_entry; order=0` | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 145 | `device_mmio` | `device: handle`, `offset: u64`, `width: u32`, `operation: u32`, `value: u64` | `value: u64` | `device: Borrow, kind=physical_device, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 146 | `device_irq_pending` | `device: handle` | `value: u64` | `device: Borrow, kind=physical_device, rights=0x4` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
+| 147 | `device_irq_complete` | `device: handle`, `sequence: u64`, `asserted: u32` | — | `device: Borrow, kind=physical_device, rights=0x20` | — | `blocking=Never, cancellation=None, restart=Never, completion=Returns, flags=None` | `Capability` |
 
 ## Public records
 
 | Name | Minimum prefix | Size | Alignment | Fields |
 | --- | ---: | ---: | ---: | --- |
+| `device_profile_info` | 32 | 32 | 8 | `profile: u32 @ 0`, `reserved0: u32 @ 4`, `resource_count: u32 @ 8`, `reserved1: u32 @ 12`, `reserved2: u64 @ 16`, `reserved3: u64 @ 24` |
+| `device_firmware_query` | 24 | 24 | 8 | `node: u32 @ 0`, `field: u32 @ 4`, `name_address: u64 @ 8`, `name_length: u64 @ 16` |
+| `device_firmware_info` | 32 | 32 | 8 | `flags: u32 @ 0`, `register_count: u32 @ 4`, `irq_number: u32 @ 8`, `irq_trigger: u32 @ 12`, `reserved0: u64 @ 16`, `reserved1: u64 @ 24` |
+| `device_bundle_entry` | 16 | 16 | 8 | `node: u32 @ 0`, `resource: u32 @ 4`, `offset: u64 @ 8` |
+| `device_resource_info` | 32 | 32 | 8 | `kind: u32 @ 0`, `reserved: u32 @ 4`, `offset: u64 @ 8`, `length: u64 @ 16`, `reserved2: u64 @ 24` |
 | `physical_device_info` | 16 | 16 | 8 | `device_id: u32 @ 0`, `transport_version: u32 @ 4`, `mmio_size: u64 @ 8` |
 | `dma_extent` | 16 | 16 | 8 | `physical_base: u64 @ 0`, `length: u64 @ 8` |
 | `virtual_cpu_mmio_request` | 48 | 48 | 8 | `id: u64 @ 0`, `device: u64 @ 8`, `address: u64 @ 16`, `value: u64 @ 24`, `operation: u32 @ 32`, `width: u32 @ 36`, `reserved: u64 @ 40` |

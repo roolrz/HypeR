@@ -201,6 +201,38 @@ impl Stage2AddressSpace {
         )
     }
 
+    /// Removes one normal 4 KiB leaf without reclaiming its page tables.
+    ///
+    /// # Safety
+    /// The caller serializes updates and retains the old backing until every
+    /// possible CPU consumer has acknowledged a subsequent live invalidation.
+    pub unsafe fn clear_page(&mut self, ipa: u64) -> Result<bool, Error> {
+        if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= address::STAGE2_IPA_LIMIT {
+            return Err(Error::InvalidAddress);
+        }
+        let mut table = self.root;
+        for level in 0..2 {
+            let entry = read_entry(table, index(ipa, level))?;
+            if entry == 0 {
+                return Ok(false);
+            }
+            if entry & registers::TRANSLATION_DESC_TYPE_MASK != registers::STAGE2_DESC_TABLE_OR_PAGE
+            {
+                return Err(Error::Conflict);
+            }
+            table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
+        }
+        let entry = read_entry(table, index(ipa, 2))?;
+        if entry == 0 {
+            return Ok(false);
+        }
+        let (pointer, _) = self.normal_page_leaf(ipa)?;
+        // SAFETY: The validated leaf is exclusively mutated and the caller
+        // retains every hardware-visible owner through the later flush.
+        unsafe { write_volatile(pointer, 0) };
+        Ok(true)
+    }
+
     /// Grants execute permission to an existing inactive normal-memory page.
     ///
     /// Instruction bytes must already have been published to the instruction
@@ -456,12 +488,26 @@ const fn normal_memory_attributes(permissions: Stage2PagePermissions) -> u64 {
 /// The request is opaque outside the architecture. Its publisher retains the
 /// exact root and VMID until every targeted CPU acknowledges this operation.
 pub(crate) fn retire_local(request: super::GuestStage2RetirementRequest) {
+    invalidate_local(request, true);
+}
+
+pub(crate) fn synchronize_local(request: super::GuestStage2RetirementRequest) {
+    invalidate_local(request, false);
+}
+
+pub(crate) fn publish_changes() {
+    // SAFETY: Publish descriptor stores before dispatching remote TLBI work.
+    unsafe { asm!("dsb ishst", options(nostack)) };
+}
+
+fn invalidate_local(request: super::GuestStage2RetirementRequest, retiring: bool) {
     let retiring_vttbr = request.retiring_vttbr();
     let guest_vtcr = request.guest_vtcr();
-    // SAFETY: The caller has stopped every execution of the retiring VM and
-    // retains its root and VMID. This register-only interval selects that
-    // exact guest regime, performs a local combined stage-1/stage-2
-    // invalidation, and restores unrelated local state before returning.
+    // SAFETY: The caller retains the exact root and VMID and executes with
+    // local guest execution stopped. This register-only interval selects that
+    // regime and performs a local combined stage-1/stage-2 invalidation. Live
+    // synchronization restores all prior state; final retirement additionally
+    // parks a matching old selection after globally stopping that VM.
     unsafe {
         asm!(
             "mrs {saved_hcr}, HCR_EL2",
@@ -479,6 +525,8 @@ pub(crate) fn retire_local(request: super::GuestStage2RetirementRequest) {
             "isb",
             "cmp {saved_vttbr}, {retiring_vttbr}",
             "csel {restore_vttbr}, xzr, {saved_vttbr}, eq",
+            "cmp {retiring}, #0",
+            "csel {restore_vttbr}, {saved_vttbr}, {restore_vttbr}, eq",
             "msr VTTBR_EL2, {restore_vttbr}",
             "msr VTCR_EL2, {saved_vtcr}",
             "msr HCR_EL2, {saved_hcr}",
@@ -490,6 +538,7 @@ pub(crate) fn retire_local(request: super::GuestStage2RetirementRequest) {
             restore_vttbr = out(reg) _,
             guest_vtcr = in(reg) guest_vtcr,
             retiring_vttbr = in(reg) retiring_vttbr,
+            retiring = in(reg) u64::from(retiring),
             vm = in(reg) registers::HCR_EL2_VM,
             tge = in(reg) registers::HCR_EL2_TGE,
             options(nostack)

@@ -155,7 +155,9 @@ impl DeviceProperty {
 /// Resources discovered for one unclaimed, enabled platform device.
 #[derive(Debug)]
 pub struct PlatformDevice {
+    kernel_claimed: bool,
     id: NodeId,
+    path: String,
     name: String,
     compatibles: Vec<String>,
     registers: Vec<MmioResource>,
@@ -164,9 +166,17 @@ pub struct PlatformDevice {
 }
 
 impl PlatformDevice {
+    pub const fn kernel_claimed(&self) -> bool {
+        self.kernel_claimed
+    }
     /// Returns the device tree node identifier.
     pub const fn id(&self) -> NodeId {
         self.id
+    }
+
+    /// Returns the canonical full firmware node path.
+    pub fn path(&self) -> &str {
+        &self.path
     }
 
     /// Returns the device tree node name.
@@ -240,6 +250,7 @@ struct DeviceBuilder {
 /// only for enabled, compatible, unclaimed devices. Its peak allocation is
 /// therefore proportional to nesting depth plus the retained device data.
 pub struct DeviceScanner<'a> {
+    dependencies: bool,
     claims: &'a [Option<NodeId>],
     stack: Vec<DeviceBuilder>,
     devices: Vec<PlatformDevice>,
@@ -249,6 +260,18 @@ impl<'a> DeviceScanner<'a> {
     /// Creates a scanner that excludes the supplied claimed node identifiers.
     pub const fn new(claims: &'a [Option<NodeId>]) -> Self {
         Self {
+            claims,
+            dependencies: false,
+            stack: Vec::new(),
+            devices: Vec::new(),
+        }
+    }
+
+    /// Captures a temporary firmware dependency graph, including nodes already
+    /// owned by boot drivers. Such nodes remain marked and cannot be assigned.
+    pub const fn for_dependency_graph(claims: &'a [Option<NodeId>]) -> Self {
+        Self {
+            dependencies: true,
             claims,
             stack: Vec::new(),
             devices: Vec::new(),
@@ -319,8 +342,7 @@ impl<'a> DeviceScanner<'a> {
     fn complete_node(&mut self, node: NodeResources<'_>) -> Result<(), ScanError> {
         let builder = self.stack.pop().ok_or(ScanError::MalformedTree)?;
         if !node.enabled
-            || builder.compatibles.is_empty()
-            || self.is_claimed(node.id)
+            || (!self.dependencies && (builder.compatibles.is_empty() || self.is_claimed(node.id)))
             || self.stack.is_empty()
         {
             return Ok(());
@@ -336,8 +358,27 @@ impl<'a> DeviceScanner<'a> {
         // before publishing the completed node. Keeping the tuple constructor
         // private makes DeviceScanner the normal capability minting point.
         registers.extend(node.registers.iter().copied().map(MmioResource));
+        let mut path = String::new();
+        let length = self
+            .stack
+            .iter()
+            .map(|parent| parent.name.len() + 1)
+            .sum::<usize>()
+            + builder.name.len();
+        path.try_reserve_exact(length)
+            .map_err(|_| ScanError::Allocation)?;
+        for parent in &self.stack {
+            if !parent.name.is_empty() {
+                path.push('/');
+                path.push_str(&parent.name);
+            }
+        }
+        path.push('/');
+        path.push_str(&builder.name);
         self.devices.push(PlatformDevice {
+            kernel_claimed: self.is_claimed(node.id),
             id: builder.id,
+            path,
             name: builder.name,
             compatibles: builder.compatibles,
             registers,

@@ -42,6 +42,9 @@ pub(super) struct AuthorityInventory {
     pub(super) shell_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) shell_output_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) shell_error_channel: Option<OwnedHandle<ByteChannelObject>>,
+    pub(super) io_broker_server: Option<OwnedHandle<CapabilityChannelObject>>,
+    pub(super) io_broker_client: Option<OwnedHandle<CapabilityChannelObject>>,
+    pub(super) io_ready_channel: Option<OwnedHandle<ByteChannelObject>>,
 }
 
 /// VM authority and transport are prepared together only for a configured fleet.
@@ -81,6 +84,18 @@ impl AuthorityInventory {
                 if kind == ConsoleObject::KIND.as_raw() =>
             {
                 builder.add_handle_duplicate(self.console.as_handle_ref(), purpose, offer)
+            }
+            (BootstrapAuthority::ShellInputChannel, CapabilityOperation::Duplicate)
+                if kind == ByteChannelObject::KIND.as_raw() =>
+            {
+                builder.add_handle_duplicate(
+                    self.shell_input_channel
+                        .as_ref()
+                        .ok_or(LaunchError::AuthorityConsumed)?
+                        .as_handle_ref(),
+                    purpose,
+                    offer,
+                )
             }
             (BootstrapAuthority::ServiceOutputChannel, CapabilityOperation::Duplicate)
                 if kind == ByteChannelObject::KIND.as_raw() =>
@@ -166,6 +181,24 @@ impl AuthorityInventory {
             (authority, CapabilityOperation::Move) if kind == ByteChannelObject::KIND.as_raw() => {
                 return self.move_channel_into_builder(authority, builder, purpose, rights);
             }
+            (
+                BootstrapAuthority::IoBrokerServer | BootstrapAuthority::IoBrokerClient,
+                CapabilityOperation::Move,
+            ) if kind == CapabilityChannelObject::KIND.as_raw() => {
+                let slot = if authority == BootstrapAuthority::IoBrokerServer {
+                    &mut self.io_broker_server
+                } else {
+                    &mut self.io_broker_client
+                };
+                let handle = slot.take().ok_or(LaunchError::UnsupportedAuthority)?;
+                return builder
+                    .add_handle_move(handle, purpose, offer)
+                    .map_err(|failure| {
+                        let (_, handle) = failure.into_parts();
+                        *slot = Some(handle);
+                        LaunchError::OperatingSystem
+                    });
+            }
             (BootstrapAuthority::VmProvisioningChannel, CapabilityOperation::Move)
                 if kind == CapabilityChannelObject::KIND.as_raw() =>
             {
@@ -215,6 +248,7 @@ impl AuthorityInventory {
             BootstrapAuthority::ShellInputChannel => &mut self.shell_input_channel,
             BootstrapAuthority::ShellOutputChannel => &mut self.shell_output_channel,
             BootstrapAuthority::ShellErrorChannel => &mut self.shell_error_channel,
+            BootstrapAuthority::IoReadyChannel => &mut self.io_ready_channel,
             _ => return Err(LaunchError::UnsupportedAuthority),
         };
         let channel = slot.take().ok_or(LaunchError::AuthorityConsumed)?;
