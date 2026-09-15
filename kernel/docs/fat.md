@@ -45,10 +45,24 @@ metadata. Device errors may have committed part of an operation.
 
 ## Synchronization and lifetime
 
-Sector writes are write-through. A one-sector read cache avoids repeated I/O
-for adjacent small metadata fields. Ordinary writes do not claim stable-storage
-durability. `sync` explicitly commits upstream FSInfo and directory metadata,
+Sector writes are write-through. Four 4 KiB read-through windows batch nearby
+metadata fields and keep directory and FAT lookups from displacing each other
+on every read. Their fixed heap storage is charged to the mount sponsor; bulk
+file data bypasses these windows. Completed writes update overlapping windows;
+failed writes invalidate them and poison the volume. Ordinary writes do not
+claim stable-storage durability. `sync` explicitly commits upstream FSInfo and directory metadata,
 issues the block device's durable flush, and retains the mounted metadata view.
+
+File reads retain bounded allocation maps for four paths, with at most 128
+coalesced disk extents per path. Once mapped, reads locate the requested offset
+directly and combine adjacent data sectors instead of reopening and walking the
+FAT chain for every transfer. These maps contain metadata, not file contents;
+their fixed storage is charged to the mount sponsor. Highly fragmented files
+fall back to ordinary FAT reads without allocating an unbounded extent table.
+All potentially mutating operations invalidate the maps before touching media,
+including operations that subsequently fail. The volume mutex serializes map
+construction, use and invalidation. An initial map build traverses the file's
+chain; this cost is amortized across subsequent reads until mutation or eviction.
 An exclusive filesystem borrow ensures all temporary file editors have been
 dropped before synchronization. It does not reparse the boot sector or repeat
 the admission scan. A failed synchronization closes the mounted view.
