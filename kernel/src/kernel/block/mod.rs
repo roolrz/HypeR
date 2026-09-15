@@ -4,6 +4,7 @@
 //! Native block initiators. Userspace negotiates a backend once; filesystem
 //! requests use shared virtio-scsi queues and scheduler notifications directly.
 
+mod request;
 pub(crate) mod service;
 mod wire;
 
@@ -15,7 +16,7 @@ use crate::kernel::object::{
     SignalWaitOutcome, TransferClass, private, wait_one,
 };
 use crate::kernel::vm::io::Notification;
-use core::sync::atomic::{AtomicU16, Ordering, fence};
+use core::sync::atomic::{AtomicU16, Ordering};
 use hyper::fs::block::{BlockDevice, Error, SECTOR_SIZE};
 use hyper::mm::FallibleArc;
 use hyper::sync::InterruptSpinLock;
@@ -24,7 +25,7 @@ struct State {
     busy: bool,
     failed: bool,
     sectors: u64,
-    index: u16,
+    indices: [u16; wire::REQUEST_QUEUES],
     tag: u64,
     readonly: bool,
     mounted: bool,
@@ -172,20 +173,6 @@ impl Device {
     }
 }
 
-struct RequestFlight<'a> {
-    device: &'a Device,
-    retired: bool,
-}
-impl Drop for RequestFlight<'_> {
-    fn drop(&mut self) {
-        // Every error after available publication poisons the entire queue.
-        // Never reuse its data buffer while an unacknowledged backend can DMA.
-        if !self.retired {
-            self.device.fail();
-        }
-    }
-}
-
 struct Session<'a> {
     device: &'a Device,
 }
@@ -195,145 +182,6 @@ impl Drop for Session<'_> {
             state.busy = false;
             self.device.update_available(state);
         });
-    }
-}
-impl Session<'_> {
-    fn command(
-        &self,
-        cdb: &[u8; 16],
-        input: Option<&[u8]>,
-        mut output: Option<&mut [u8]>,
-    ) -> Result<(), Error> {
-        let d = self.device;
-        let length = input.map_or_else(|| output.as_ref().map_or(0, |b| b.len()), |b| b.len());
-        if length > wire::DATA_BYTES || (input.is_some() && output.is_some()) {
-            return Err(Error::InvalidRange);
-        }
-        let (index, tag) = d.state.with(|state| {
-            if state.failed {
-                return Err(Error::Disconnected);
-            }
-            state.tag = state.tag.checked_add(1).ok_or(Error::Exhausted)?;
-            Ok((state.index, state.tag))
-        })?;
-        d.write(wire::REQUEST, &wire::request(tag, cdb))?;
-        let mut empty_response = [0; wire::RESPONSE_BYTES];
-        empty_response[11] = 0xff; // An unwritten response must never look successful.
-        d.write(wire::RESPONSE, &empty_response)?;
-        if let Some(bytes) = input {
-            d.write(wire::DATA, bytes)?;
-        }
-        // Descriptor order follows virtio: all device-readable buffers precede
-        // device-writable buffers. Only descriptor zero is published as a head.
-        let response_id = if input.is_some() { 2 } else { 1 };
-        d.write(
-            wire::REQUEST_QUEUE,
-            &wire::descriptor(d.guest_base + wire::REQUEST, 51, 1, 1),
-        )?;
-        if input.is_some() {
-            d.write(
-                wire::REQUEST_QUEUE + 16,
-                &wire::descriptor(d.guest_base + wire::DATA, length as u32, 1, 2),
-            )?;
-        }
-        d.write(
-            wire::REQUEST_QUEUE + response_id * 16,
-            &wire::descriptor(
-                d.guest_base + wire::RESPONSE,
-                wire::RESPONSE_BYTES as u32,
-                if output.is_some() { 3 } else { 2 },
-                2,
-            ),
-        )?;
-        if output.is_some() {
-            d.write(
-                wire::REQUEST_QUEUE + 32,
-                &wire::descriptor(d.guest_base + wire::DATA, length as u32, 2, 0),
-            )?;
-        }
-        let slot = u64::from(index % wire::QUEUE_SIZE);
-        d.write(wire::AVAILABLE + 4 + slot * 2, &0u16.to_le_bytes())?;
-        // Coherent CPU-to-CPU virtqueue publication. Linux owns physical DMA
-        // mapping/synchronization; this fence orders its CPU view of the ring.
-        fence(Ordering::Release);
-        let mut flight = RequestFlight {
-            device: d,
-            retired: false,
-        };
-        d.index_word(wire::AVAILABLE + 2)?
-            .store(index.wrapping_add(1).to_le(), Ordering::Release);
-        fence(Ordering::SeqCst);
-        if d.notification.kick_native(2).is_err() {
-            d.fail();
-            return Err(Error::Disconnected);
-        }
-        let deadline = crate::kernel::time::monotonic_nanoseconds()
-            .map_err(|_| Error::Io)?
-            .checked_add(30_000_000_000)
-            .ok_or(Error::Io)?;
-        loop {
-            let complete = d.u16(wire::USED + 2)? != index;
-            let now = crate::kernel::time::monotonic_nanoseconds().map_err(|_| Error::Io)?;
-            match wire::command_pending(complete, now, deadline) {
-                Ok(false) => break,
-                Ok(true) => {}
-                Err(()) => return Err(Error::Disconnected),
-            }
-            // Clear the prompt, then recheck the durable used index before
-            // registering a waiter. A concurrent completion cannot be lost.
-            d.notification.acknowledge_native();
-            fence(Ordering::SeqCst);
-            if d.u16(wire::USED + 2)? != index {
-                break;
-            }
-            let result = wait_one(
-                d.notification.native_signal_source(),
-                &d.domain,
-                7,
-                deadline,
-                || false,
-            );
-            match result {
-                Ok(SignalWaitOutcome::Observed(value)) if value.signals().bits() & 5 == 0 => {}
-                _ => {
-                    d.fail();
-                    return Err(Error::Disconnected);
-                }
-            }
-        }
-        fence(Ordering::Acquire);
-        if d.u16(wire::USED + 2)? != index.wrapping_add(1) {
-            d.fail();
-            return Err(Error::Corrupt);
-        }
-        let mut used = [0; 8];
-        d.read(wire::USED + 4 + slot * 8, &mut used)?;
-        let id = u32::from_le_bytes(used[..4].try_into().map_err(|_| Error::Corrupt)?);
-        let written =
-            u32::from_le_bytes(used[4..].try_into().map_err(|_| Error::Corrupt)?) as usize;
-        let mut response = [0; wire::RESPONSE_BYTES];
-        d.read(wire::RESPONSE, &mut response)?;
-        let result = wire::validate_completion(
-            index,
-            d.u16(wire::USED + 2)?,
-            id,
-            written,
-            &response,
-            length,
-            output.is_some(),
-        );
-        if result == Err(wire::CompletionError::Corrupt) {
-            return Err(Error::Corrupt);
-        }
-        d.state.with(|state| state.index = index.wrapping_add(1));
-        flight.retired = true;
-        if result == Err(wire::CompletionError::Scsi) {
-            return Err(Error::Io);
-        }
-        if let Some(bytes) = output.as_mut() {
-            d.read(wire::DATA, bytes)?;
-        }
-        Ok(())
     }
 }
 
@@ -390,14 +238,13 @@ impl BlockDevice for MountedDevice {
     fn read_sectors(&mut self, first: u64, output: &mut [u8]) -> Result<(), Error> {
         let session = self.device.acquire(true)?;
         check_range(first, output.len(), self.sector_count())?;
-        let mut sector = first;
-        for bytes in output.chunks_mut(wire::DATA_BYTES) {
-            session.command(
-                &wire::transfer_cdb(false, sector, (bytes.len() / SECTOR_SIZE) as u32),
-                None,
-                Some(bytes),
-            )?;
-            sector += (bytes.len() / SECTOR_SIZE) as u64;
+        for (batch, bytes) in output
+            .chunks_mut(wire::DATA_BYTES * wire::REQUEST_QUEUES)
+            .enumerate()
+        {
+            let sector =
+                first + (batch * wire::DATA_BYTES * wire::REQUEST_QUEUES / SECTOR_SIZE) as u64;
+            session.read_batch(sector, bytes)?;
         }
         Ok(())
     }

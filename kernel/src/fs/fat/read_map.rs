@@ -1,10 +1,10 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded allocation maps, not a data cache. The volume owner serializes reads
-//! and invalidates all maps before mutation, including partially failed writes.
+//! Bounded allocation maps and small-read windows. The volume owner serializes
+//! reads and invalidates both before mutation, including partially failed writes.
 
-use super::{BlockDevice, BlockError, DeviceSlot, Disk, Error, SECTOR_SIZE};
+use super::{BlockDevice, BlockError, DeviceSlot, Disk, Error, SECTOR_SIZE, sector_cache};
 use alloc::{boxed::Box, string::String, vec::Vec};
 use fatfs::{Seek, SeekFrom};
 
@@ -24,7 +24,7 @@ pub(super) struct Map {
     size: u64,
     complete: bool,
     valid: bool,
-    sector: Box<[u8; SECTOR_SIZE]>,
+    cache: Box<sector_cache::Cache>,
 }
 
 pub(super) struct Cache {
@@ -38,7 +38,7 @@ impl Cache {
             * (core::mem::size_of::<Option<Map>>()
                 + PATH_BYTES
                 + EXTENTS * core::mem::size_of::<Extent>()
-                + SECTOR_SIZE)
+                + sector_cache::Cache::allocation_bytes())
     }
 
     pub(super) fn new() -> Result<Self, Error> {
@@ -59,7 +59,7 @@ impl Cache {
                 size: 0,
                 complete: false,
                 valid: false,
-                sector: crate::mm::try_box([0; SECTOR_SIZE]).map_err(|_| Error::Allocation)?,
+                cache: sector_cache::Cache::new()?,
             }));
         }
         Ok(Self { maps, next: 0 })
@@ -114,6 +114,7 @@ impl Map {
         self.valid = false;
         self.complete = false;
         self.extents.clear();
+        self.cache.invalidate();
         self.path.clear();
         self.path.push_str(path);
         let mut file = fs.root_dir().open_file(path).map_err(Error::from)?;
@@ -194,12 +195,9 @@ impl Map {
                     })?;
                     length
                 } else {
-                    device.access(|d| {
-                        d.read_sectors(physical / SECTOR_SIZE as u64, self.sector.as_mut())
-                    })?;
+                    let sector = self.cache.sector(device, physical / SECTOR_SIZE as u64)?;
                     let length = (end - done).min(SECTOR_SIZE - within);
-                    output[done..done + length]
-                        .copy_from_slice(&self.sector[within..within + length]);
+                    output[done..done + length].copy_from_slice(&sector[within..within + length]);
                     length
                 };
                 done += n;

@@ -108,6 +108,30 @@ impl BlockDevice for Disk {
     }
 }
 #[test]
+fn fat_tiny_file_reads_reuse_windows_and_refresh_after_writes() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("fit", false));
+    require_ok(fs.write_at("fit", 0, &vec![0x42; 16 * 1024]));
+    let mut byte = [0];
+    for offset in [0, 511, 512, 4095, 8192] {
+        assert_eq!(require_ok(fs.read_at("fit", offset, &mut byte)), 1);
+        assert_eq!(byte, [0x42]);
+    }
+    let reads = require_ok(disk.0.lock()).reads;
+    for _ in 0..32 {
+        for offset in [0, 511, 512, 4095, 8192] {
+            assert_eq!(require_ok(fs.read_at("fit", offset, &mut byte)), 1);
+            assert_eq!(byte, [0x42]);
+        }
+    }
+    assert_eq!(require_ok(disk.0.lock()).reads, reads);
+    require_ok(fs.write_at("fit", 511, &[0x17]));
+    assert_eq!(require_ok(fs.read_at("fit", 511, &mut byte)), 1);
+    assert_eq!(byte, [0x17]);
+}
+
+#[test]
 fn fat_failed_write_cannot_serve_cached_metadata_or_data() {
     let disk = Disk::fresh();
     let mut fs = require_ok(FatVolume::mount(disk.clone()));

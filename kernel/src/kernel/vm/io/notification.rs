@@ -310,12 +310,19 @@ impl Notification {
         })
     }
 
-    pub(crate) fn kick_native(&self, queue: u32) -> Result<(), Error> {
+    pub(crate) fn kick_native_mask(&self, queues: u32) -> Result<(), Error> {
+        if queues == 0 || queues & !((1 << model::QUEUE_COUNT) - 1) != 0 {
+            return Err(Error::BadState);
+        }
         self.shared.mutate(|state| {
             if state.closed || !state.enabled {
                 return Err(Error::BadState);
             }
-            state.kick(u64::from(queue));
+            for queue in 0..model::QUEUE_COUNT {
+                if queues & (1 << queue) != 0 {
+                    state.kick(queue);
+                }
+            }
             Ok(())
         })
     }

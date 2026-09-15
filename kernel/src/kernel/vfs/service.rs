@@ -17,7 +17,7 @@ use super::{
 const MAX_PATH_BYTES: usize = hyper::abi::native::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES as usize;
 const MAX_READ_BYTES: usize = hyper::abi::native::HYPER_NATIVE_FILE_MAX_READ_BYTES as usize;
 const TRANSFER_BATCH_BYTES: usize = 1024;
-const READ_BATCH_BYTES: usize = 64 * 1024;
+const READ_BATCH_BYTES: usize = 512 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum ServiceError {

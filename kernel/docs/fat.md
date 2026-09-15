@@ -56,10 +56,12 @@ issues the block device's durable flush, and retains the mounted metadata view.
 File reads retain bounded allocation maps for four paths, with at most 128
 coalesced disk extents per path. Once mapped, reads locate the requested offset
 directly and combine adjacent data sectors instead of reopening and walking the
-FAT chain for every transfer. These maps contain metadata, not file contents;
-their fixed storage is charged to the mount sponsor. Highly fragmented files
+FAT chain for every transfer. Each map also owns four 4 KiB read-through windows
+for partial-sector file reads, avoiding repeated device requests while parsing
+image headers. Aligned bulk reads bypass these windows. All of this fixed
+storage is charged to the mount sponsor. Highly fragmented files
 fall back to ordinary FAT reads without allocating an unbounded extent table.
-All potentially mutating operations invalidate the maps before touching media,
+All potentially mutating operations invalidate maps and their windows before touching media,
 including operations that subsequently fail. The volume mutex serializes map
 construction, use and invalidation. An initial map build traverses the file's
 chain; this cost is amortized across subsequent reads until mutation or eviction.

@@ -181,8 +181,26 @@ and guest-visible capabilities.
 Direct queue consumption requires Linux to access queue metadata, responses,
 and every guest data buffer referenced by descriptors. The trusted deployment
 may grant an entire business VM's RAM. The Native configuration-volume client
-uses a dedicated 128 KiB shared I/O pool for its queues and bounded data
-transfers. The rest of HypeR memory is not exported.
+uses a dedicated 1 MiB shared I/O pool. Bridge protocol version 2 carries six
+split queues: control, event, and four request queues. The Native client submits
+up to four 128 KiB reads before issuing one combined notification. Each request
+queue owns its descriptor chain and data buffer until completion. Writes and
+flushes remain ordered by the device session. Unretired requests poison the
+session on failure; their memory lease remains retained until backend quiescence.
+The rest of HypeR memory is not exported.
+
+Business guests may enable one through four request queues; unused optional
+queues have canonical zero entries in activation records. Version 1 peers are
+rejected, so the main repository must pin the matching I/O VM package. Image
+loading pipelines two 512 KiB userspace buffers between a scoped reader and the
+guest-memory writer. Read-ahead stays inside the selected payload and the reader
+is joined on success or failure. There is no idle polling or unbounded data cache.
+
+The optional `hyper-vm-runtime/startup-profile` Cargo feature reports image
+validation, payload read/write, memory preparation, and installation timings.
+Read and write durations overlap in the pipeline; their sum is not wall time.
+The existing startup total ends at vCPU start submission, before guest entry.
+Ordinary builds omit the detailed phase measurements.
 
 The same physical pages must remain owned and stable until all backend CPU and
 DMA users have retired. Guest physical, I/O VM physical, Linux virtual, host
