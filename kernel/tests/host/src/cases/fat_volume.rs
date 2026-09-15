@@ -15,6 +15,7 @@ struct State {
     flushes: usize,
     fail_flush: bool,
     fail_reads: bool,
+    fail_writes: bool,
     readonly: bool,
 }
 #[derive(Clone)]
@@ -90,6 +91,10 @@ impl BlockDevice for Disk {
             copy.copy_from_slice(sector);
             state.sectors.insert(first + i as u64, copy);
         }
+        // Model a device that reports failure after touching the media.
+        if state.fail_writes {
+            return Err(BlockError::Io);
+        }
         Ok(())
     }
     fn flush(&mut self) -> Result<(), BlockError> {
@@ -102,6 +107,134 @@ impl BlockDevice for Disk {
         }
     }
 }
+#[test]
+fn fat_failed_write_cannot_serve_cached_metadata_or_data() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("file", false));
+    require_ok(fs.write_at("file", 0, b"contents"));
+    let mut output = [0; 8];
+    require_ok(fs.read_at("file", 0, &mut output));
+    require_ok(fs.stat("file"));
+    require_ok(disk.0.lock()).fail_writes = true;
+    assert!(matches!(
+        fs.resize("file", 1),
+        Err(Error::Block(BlockError::Io))
+    ));
+    let reads = require_ok(disk.0.lock()).reads;
+    assert!(matches!(fs.stat("file"), Err(Error::Block(BlockError::Io))));
+    assert!(matches!(
+        fs.read_at("file", 0, &mut output),
+        Err(Error::Block(BlockError::Io))
+    ));
+    assert_eq!(require_ok(disk.0.lock()).reads, reads);
+}
+
+#[test]
+fn fat_metadata_windows_batch_cold_chain_and_retain_directory_sectors() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("images", true));
+    require_ok(fs.create("images/guest.itb", false));
+    let contents = vec![0x5a; 256 * 1024];
+    require_ok(fs.write_at("images/guest.itb", 0, &contents));
+    require_ok(fs.sync());
+    drop(fs);
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    let before = require_ok(disk.0.lock()).reads;
+    let mut output = vec![0; 64 * 1024];
+    require_ok(fs.stat("images/guest.itb"));
+    require_ok(fs.read_at("images/guest.itb", 0, &mut output));
+    assert_eq!(output, contents[..output.len()]);
+    let cold = require_ok(disk.0.lock()).reads - before;
+    assert!(cold <= 8, "cold metadata scan took {cold} requests");
+    let before = require_ok(disk.0.lock()).reads;
+    for _ in 0..16 {
+        assert_eq!(
+            require_ok(fs.stat("images/guest.itb")).size,
+            contents.len() as u64
+        );
+        require_ok(fs.read_at("images/guest.itb", 64 * 1024, &mut output));
+    }
+    assert_eq!(
+        require_ok(disk.0.lock()).reads - before,
+        16,
+        "warm directory lookup must not add I/O to each data request"
+    );
+    require_ok(fs.resize("images/guest.itb", 123));
+    assert_eq!(require_ok(fs.stat("images/guest.itb")).size, 123);
+    require_ok(fs.sync());
+    drop(fs);
+    let mut fs = require_ok(FatVolume::mount(disk));
+    assert_eq!(require_ok(fs.stat("images/guest.itb")).size, 123);
+}
+
+#[test]
+fn fat_read_maps_coalesce_data_and_invalidate_on_mutation() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("image", false));
+    let contents: Vec<u8> = (0..256 * 1024).map(|index| (index % 251) as u8).collect();
+    assert_eq!(
+        require_ok(fs.write_at("image", 0, &contents)),
+        contents.len()
+    );
+    let mut byte = [0];
+    require_ok(fs.read_at("image", 0, &mut byte));
+    let before = require_ok(disk.0.lock()).reads;
+    let mut output = vec![0; 64 * 1024];
+    assert_eq!(
+        require_ok(fs.read_at("image", 128 * 1024, &mut output)),
+        output.len()
+    );
+    assert_eq!(output, contents[128 * 1024..192 * 1024]);
+    assert_eq!(
+        require_ok(disk.0.lock()).reads - before,
+        1,
+        "one contiguous data transfer, no FAT walk"
+    );
+    let mut unaligned = [0; 1031];
+    require_ok(fs.read_at("image", 511, &mut unaligned));
+    assert_eq!(unaligned, contents[511..1542]);
+    require_ok(fs.resize("image", 0));
+    require_ok(fs.create("reuse", false));
+    require_ok(fs.write_at("reuse", 0, &[0xaa; 4096]));
+    assert_eq!(require_ok(fs.read_at("image", 0, &mut byte)), 0);
+    require_ok(fs.write_at("image", 0, b"new"));
+    let mut new = [0; 3];
+    require_ok(fs.read_at("image", 0, &mut new));
+    assert_eq!(&new, b"new");
+    require_ok(fs.rename("image", "renamed"));
+    assert!(matches!(
+        fs.read_at("image", 0, &mut byte),
+        Err(Error::Missing)
+    ));
+    require_ok(fs.read_at("renamed", 0, &mut new));
+    assert_eq!(&new, b"new");
+    require_ok(fs.remove("renamed"));
+    require_ok(fs.create("renamed", false));
+    assert_eq!(require_ok(fs.read_at("renamed", 0, &mut byte)), 0);
+}
+
+#[test]
+fn fat_fragmented_reads_remain_correct_beyond_mapping_cache_limit() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk));
+    require_ok(fs.create("a", false));
+    require_ok(fs.create("b", false));
+    for index in 0..140u64 {
+        require_ok(fs.write_at("a", index * 512, &[index as u8; 512]));
+        require_ok(fs.write_at("b", index * 512, &[0xee; 512]));
+    }
+    let mut data = vec![0; 140 * 512];
+    for _ in 0..2 {
+        assert_eq!(require_ok(fs.read_at("a", 0, &mut data)), data.len());
+        for (index, sector) in data.chunks_exact(512).enumerate() {
+            assert!(sector.iter().all(|byte| *byte == index as u8));
+        }
+    }
+}
+
 #[test]
 fn fat_file_timestamps_use_utc_and_survive_remount() {
     use hyper::time::Timestamp;
@@ -546,6 +679,9 @@ fn fat_iterator_preserves_names_end_and_io_errors() {
     assert_eq!(names, ["SHORT.TXT".to_owned(), unicode]);
     assert!(require_ok(fs.entry("", 3)).is_none());
     require_ok(fs.sync());
+    drop(fs);
+    // Force an actual directory cache miss before injecting the I/O error.
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
     require_ok(disk.0.lock()).fail_reads = true;
     assert!(matches!(fs.entry("", 0), Err(Error::Block(BlockError::Io))));
     let reads = require_ok(disk.0.lock()).reads;

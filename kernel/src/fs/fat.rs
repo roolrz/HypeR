@@ -16,6 +16,9 @@ use alloc::boxed::Box;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use fatfs::{Read, Seek, SeekFrom, Write};
 
+mod read_map;
+mod sector_cache;
+
 // Gap filling and extension only read these bytes. Keep one immutable sector
 // instead of retaining a zeroed stack buffer across blocking filesystem I/O.
 static ZERO_SECTOR: [u8; SECTOR_SIZE] = [0; SECTOR_SIZE];
@@ -131,7 +134,7 @@ impl<D: BlockDevice> DeviceSlot<D> {
 struct Disk<D> {
     owner: FallibleArc<DeviceSlot<D>>,
     offset: u64,
-    cached: Option<u64>,
+    cache: Box<sector_cache::Cache>,
     sector: Box<[u8; SECTOR_SIZE]>,
 }
 impl<D> fatfs::IoBase for Disk<D> {
@@ -153,13 +156,9 @@ impl<D: BlockDevice> Read for Disk<D> {
                 .access(|d| d.read_sectors(first, &mut output[..n]))?;
             n
         } else {
-            if self.cached != Some(first) {
-                self.owner
-                    .access(|d| d.read_sectors(first, self.sector.as_mut()))?;
-                self.cached = Some(first);
-            }
+            let sector = self.cache.sector(&self.owner, first)?;
             let n = count.min(SECTOR_SIZE - within);
-            output[..n].copy_from_slice(&self.sector[within..within + n]);
+            output[..n].copy_from_slice(&sector[within..within + n]);
             n
         };
         self.offset += n as u64;
@@ -178,19 +177,25 @@ impl<D: BlockDevice> Write for Disk<D> {
         let first = self.offset / SECTOR_SIZE as u64;
         let n = if within == 0 && count >= SECTOR_SIZE {
             let n = count / SECTOR_SIZE * SECTOR_SIZE;
-            self.cached = None;
-            self.owner.access(|d| d.write_sectors(first, &input[..n]))?;
+            if let Err(error) = self.owner.access(|d| d.write_sectors(first, &input[..n])) {
+                self.cache.invalidate();
+                return Err(error);
+            }
+            self.cache.written(first, &input[..n]);
             n
         } else {
-            if self.cached != Some(first) {
-                self.owner
-                    .access(|d| d.read_sectors(first, self.sector.as_mut()))?;
-                self.cached = Some(first);
-            }
+            self.sector
+                .copy_from_slice(self.cache.sector(&self.owner, first)?);
             let n = count.min(SECTOR_SIZE - within);
             self.sector[within..within + n].copy_from_slice(&input[..n]);
-            self.owner
-                .access(|d| d.write_sectors(first, self.sector.as_ref()))?;
+            if let Err(error) = self
+                .owner
+                .access(|d| d.write_sectors(first, self.sector.as_ref()))
+            {
+                self.cache.invalidate();
+                return Err(error);
+            }
+            self.cache.written(first, self.sector.as_ref());
             n
         };
         self.offset += n as u64;
@@ -254,6 +259,7 @@ pub struct FatVolume<D: BlockDevice> {
     fs: Option<fatfs::FileSystem<Disk<D>, super::fat_time::Clock>>,
     device: FallibleArc<DeviceSlot<D>>,
     budget: u64,
+    read_maps: read_map::Cache,
 }
 impl<D: BlockDevice> FatVolume<D> {
     /// Upper bound for temporary admission allocations with this geometry.
@@ -266,7 +272,10 @@ impl<D: BlockDevice> FatVolume<D> {
             .ok_or(Error::InvalidInput)
     }
     pub const fn allocation_bytes() -> usize {
-        FallibleArc::<DeviceSlot<D>>::allocation_size() + SECTOR_SIZE
+        FallibleArc::<DeviceSlot<D>>::allocation_size()
+            + SECTOR_SIZE
+            + read_map::Cache::allocation_bytes()
+            + sector_cache::Cache::allocation_bytes()
     }
     pub fn mount(device: D) -> Result<Self, Error> {
         Self::mount_with_clock(device, || None)
@@ -281,9 +290,8 @@ impl<D: BlockDevice> FatVolume<D> {
         if sectors == 0 || sectors > u64::MAX / SECTOR_SIZE as u64 {
             return Err(Error::InvalidInput);
         }
-        // One persistent cache allocation replaces the VFS wrapper's former
-        // boxed volume. Its buffer also serves boot validation, so no sector
-        // array is retained in the mount call chain while device I/O blocks.
+        // Reuse the partial-sector write buffer for boot validation, keeping
+        // sector arrays out of the mount call chain while device I/O blocks.
         let mut sector = crate::mm::try_box([0; SECTOR_SIZE]).map_err(|_| Error::Allocation)?;
         device
             .read_sectors(0, sector.as_mut())
@@ -303,7 +311,7 @@ impl<D: BlockDevice> FatVolume<D> {
             Disk {
                 owner: owner.clone(),
                 offset: 0,
-                cached: None,
+                cache: sector_cache::Cache::new()?,
                 sector,
             },
             fatfs::FsOptions::new().strict(true).time_provider(clock),
@@ -317,12 +325,13 @@ impl<D: BlockDevice> FatVolume<D> {
             fs: Some(fs),
             device: owner,
             budget,
+            read_maps: read_map::Cache::new()?,
         })
     }
     pub fn is_read_only(&self) -> bool {
         self.device.readonly
     }
-    fn writable(&self) -> Result<(), Error> {
+    fn writable(&mut self) -> Result<(), Error> {
         if let Some(error) = self.device.failure() {
             return Err(Error::Block(error));
         }
@@ -332,6 +341,9 @@ impl<D: BlockDevice> FatVolume<D> {
         if self.is_read_only() {
             return Err(Error::Block(BlockError::ReadOnly));
         }
+        // Invalidate before attempting a mutation: failed writes may still have
+        // changed allocation chains or directory entries.
+        self.read_maps.invalidate();
         Ok(())
     }
     fn run<R>(
@@ -495,6 +507,30 @@ impl<D: BlockDevice> FatVolume<D> {
         if offset > u32::MAX as u64 {
             return Ok(0);
         }
+        if output.is_empty() {
+            return Ok(0);
+        }
+        let index = self.read_maps.select(path);
+        let mut map = self.read_maps.take(index)?;
+        let device = self.device.clone();
+        let result = self.run(|fs| {
+            if !map.matches(path) {
+                map.prepare(fs, path, device.sectors)?;
+            }
+            if map.complete() {
+                map.read(&device, offset, output)
+                    .map_err(Error::Block)
+                    .map(Some)
+            } else {
+                Ok(None)
+            }
+        });
+        self.read_maps.put(index, map);
+        if let Some(actual) = result? {
+            return Ok(actual);
+        }
+        // Highly fragmented files exceed the bounded mapping cache and retain
+        // the ordinary FAT traversal path without unbounded metadata allocation.
         self.run(|fs| {
             let mut file = fs.root_dir().open_file(path).map_err(Error::from)?;
             let position = file.seek(SeekFrom::Start(offset)).map_err(Error::from)?;
