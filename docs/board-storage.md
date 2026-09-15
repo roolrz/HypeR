@@ -76,6 +76,8 @@ DMA has stopped.
 Interactive `make run` / `make board-run` uses QEMU's multiplexed serial console.
 Press `Ctrl+A`, then `X` to exit QEMU, or `Ctrl+A`, then `C` to switch to the
 QEMU monitor. `Ctrl+C` is passed to the guest.
+Piped input, including automated tests, uses a dedicated serial backend without
+monitor multiplexing.
 
 The image builder needs `mkfs.fat` from dosfstools and `mcopy` from mtools,
 in addition to the normal build prerequisites. It searches `PATH` first,
