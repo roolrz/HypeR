@@ -5,12 +5,10 @@ SPDX-License-Identifier: Apache-2.0
 
 # Userspace and syscall architecture
 
-This document describes the Native userspace boundary and records earlier
-compatibility design exploration. Native capability, process and IPC invariants
-remain applicable. Foreign ABI routing, restricted/supervisor execution,
-`SupervisionSession`, `TargetAddressSpace`, and Linux/FreeBSD application support
-are uncommitted design notes, not requirements on new Native code or promised
-implementation phases. Their prescriptive wording below is historical.
+This document describes the Native userspace boundary, ownership contracts,
+and syscall execution model. Current signatures and numbers are defined by the
+compiler-checked schema in `sdk/abi`; exploratory interfaces below are labelled
+as planned. Linux/FreeBSD application compatibility is outside this contract.
 
 The current integration goal is Native applications plus a trusted Linux I/O VM
 on Pi 5; see the [roadmap](../../docs/roadmap.md). HypeR is pre-release, so syscall
@@ -19,7 +17,7 @@ numbers and binary layouts do not yet carry a release compatibility guarantee.
 ## Design goals
 
 - Keep the EL2 kernel small enough to audit while exposing enough mechanism for
-  a real VMM, loader, service manager, and compatibility supervisor.
+  a real VMM, loader, and service manager.
 - Make authority explicit and monotonically decreasing. Integer identifiers,
   object identity, and diagnostic access are never authority.
 - Make every capability creation, transfer, publication, and revocation an
@@ -28,8 +26,6 @@ numbers and binary layouts do not yet carry a release compatibility guarantee.
   stable, fixed-width machine ABI.
 - Support direct native syscalls. A vDSO is an optimization and compatibility
   surface, not a security gate.
-- Preserve an efficient userspace implementation of foreign ABIs without
-  preventing a future, separately reviewed in-kernel personality.
 - Require FEAT_VHE for AArch64 hosts and reject unsupported CPUs before
   establishing the host translation regime. An Arm version alone is not admission.
 - Reuse the scheduler's existing wait, timeout, cancellation, affinity, and
@@ -41,30 +37,21 @@ document from its first syscall.
 
 ## System model
 
-The kernel exposes one Native ABI. A native VMM and native services use it
-directly. A foreign application initially runs through an EL0 compatibility
-supervisor which consumes the same architecture-neutral kernel services.
+The kernel exposes one Native ABI. Native applications, the VMM, and system
+services consume it directly or through the SDK and Rust standard library.
 
 ```text
-native VMM and services                 Linux / FreeBSD application
-          |                                      |
-          | Native ABI                  restricted execution exit
-          v                                      v
-  +-----------------+                 +-------------------------+
-  | native adapter  |                 | EL0 compatibility       |
-  | and capability  |<----------------| supervisor              |
-  | validation      |   Native ABI    | fd, signal, VFS, errno |
-  +--------+--------+                 +------------+------------+
-           |                                           |
-           +-------------------+-----------------------+
-                               v
-          process, memory, IPC, wait, task, and VM kernel services
-                               |
-                               v
-                 selected HAL and architecture mechanisms
+Native applications, VMM and system services
+                      |
+              Native syscall adapter
+              capability validation
+                      |
+    Process, memory, IPC, wait, task and VM services
+                      |
+       selected HAL and architecture mechanisms
 ```
 
-Linux used as an I/O backend is a separate VM, not the compatibility supervisor.
+Linux runs as an I/O backend VM.
 The near-term Pi 5 target uses a trusted Linux VM driving physical network and
 storage devices. Native services communicate through bounded shared-memory
 queues, explicit buffer grants and event/session lifecycles. HypeR-owned RAM is
@@ -83,15 +70,14 @@ The design assumes that any EL0 caller can:
 - mutate or unmap user memory during validation;
 - exhaust handles, messages, pages, timers, wait registrations, and kernel
   metadata;
-- forge object identifiers, stale handle values, ABI metadata, and supervisor
-  state; and
-- compromise its own compatibility supervisor.
+- forge object identifiers, stale handle values, and ABI metadata.
 
 The kernel, selected HAL, architecture implementation, and boot trust chain are
-inside the trusted computing base. A compromised compatibility supervisor may
-compromise its compatibility domain, but must not acquire another domain's
-handles, mappings, accounting budget, or device leases. A compromised Linux
-driver VM remains confined by stage-2 translation and the IOMMU.
+inside the trusted computing base. Native callers remain confined to their
+explicit capabilities, mappings and accounting budgets. The current Linux I/O
+VM is also trusted: stage-2 restricts CPU accesses, but reserved host memory is
+not DMA isolation. An untrusted driver domain requires separately qualified
+IOMMU-backed ownership and retirement.
 
 Speculative state, extended registers, debug state, TLS, and address-space
 identifiers are part of the execution boundary. The initial implementation
@@ -107,7 +93,7 @@ The intended production layout is:
 sdk/abi/                    compiler-checked schema and public interfaces
 
 src/kernel/entry/user.rs    one upward user-entry adapter
-src/kernel/abi/             ABI values, native dispatch, supervised seam
+src/kernel/abi/             ABI values and Native dispatch
 src/kernel/process/         process image, handle table, user threads
 src/kernel/capability/      object header, rights, handles, transactions
 src/kernel/ipc/             channels, events, wait sets, backend sessions
@@ -122,7 +108,7 @@ dispatch policy but no architecture register offsets. `kernel::capability`
 does not depend on Channel or VM policy. IPC composes capability transactions;
 object-specific behavior remains in its owning subsystem. HAL knows address-
 space activation and user entry mechanisms but never Process, syscall numbers,
-rights, ELF metadata, or compatibility policy.
+rights, or ELF metadata.
 
 The earlier `UserExecution { AddressSpaceId, UserContext }` placeholder was
 removed because it could not pin mappings or authorize activation. A runnable
@@ -132,54 +118,29 @@ authority.
 
 ## Process image and execution route
 
-Each installed process image has immutable execution identity:
+Each installed `ProcessImage` owns immutable machine ABI, ABI family, execution
+route, initial entry/stack/TLS values, and auxiliary startup values. Its address
+space is owned separately by `Process`; mutable registers belong to the Thread.
+The Native ABI revision is validated at construction and remains zero during
+pre-release development, rather than being stored redundantly in the image.
 
-```text
-ProcessImage
-  machine ABI        AArch64, RV64, x86-64, future AArch32
-  ABI family         HypeR Native, Linux, FreeBSD
-  ABI revision       opaque family-specific revision
-  execution route    NativeKernel or Supervised(session)
-  execution address-space set
-  initial register state
-  vDSO and shared-page selection
-```
+The implemented loader creates Native images. Before preparing user execution,
+`Process::create_user_thread_with_start` checks that the machine matches the
+host and that the family/route are `Native`/`NativeKernel`. The common entry
+adapter also rejects a non-Native route. Loader metadata and ELF branding are
+untrusted inputs, never sources of authority.
 
-The current pre-release subset stores machine ABI, ABI family, revision,
-execution route, and the initial entry, stack, and TLS values. Its address space
-is owned separately by `Process`. Multi-view address-space sets, vDSO and shared
-page selection, loader metadata, and `PreparedExec` publication remain target
-contracts rather than implemented fields.
+`AbiFamily::Linux`, `AbiFamily::FreeBsd`, `ExecutionRoute::Supervised`, and
+`SupervisionSessionId` remain internal reserved vocabulary. The session ID is a
+diagnostic key, not a capability. These names do not imply a working foreign
+loader, supervisor execution mode, or a public supervision API. Removing or
+implementing them requires a separate code review; Native callers do not need
+to maintain hypothetical compatibility state.
 
-The route is selected by a trusted loader from ELF class, machine, endianness,
-ABI notes, interpreter, launch manifest, and policy. ELF branding is an
-untrusted classification hint; it never grants authority. Unknown or ambiguous
-images are rejected rather than assigned a default personality.
-
-The route is immutable for one installed image. Initial in-place `exec` support
-is limited to the same ABI family, route, and supervision session. Cross-family
-or Native/Supervised replacement creates a new Process and transfers only
-explicitly designated capabilities; it does not guess how to convert handles,
-fds, principals, or restart state.
-
-Exec uses a `PreparedExec` transaction. The kernel prepares mappings, initial
-stack, auxiliary vector, TLS, register state, vDSO, and return context. A
-supervised route additionally seals an opaque supervisor shadow containing its
-close-on-exec fd, signal, and personality state. The transaction then parks and
-generation-pins every sibling behind a reversible quiesce barrier; it does not
-terminate them. After all fallible work is complete, one infallible commit
-swaps the ProcessImage, supervision shadow generation, and current Thread
-context, invalidates old resume tokens, and only then retires siblings and old
-state. Abort unparks siblings against the unchanged old image. Complete
-Thread/Process stop, join, cancellation, and quiescence are prerequisites, not
-features to improvise inside exec.
-
-`NativeKernel` and `Supervised` are the initial sealed routes. The internal
-shape reserves a future, separately audited `KernelCompat` route if profiling
-shows that an entire foreign personality belongs in the kernel. HypeR will not
-route individual foreign syscalls partly through userspace and partly through
-the kernel: that would split errno, restart, signal, and ordering semantics
-across two owners.
+The route stays fixed for the installed image. Process construction and
+publication use the existing builder transaction. In-place image replacement,
+`PreparedExec`, multiple execution views, and vDSO selection are not implemented
+contracts; adding them requires explicit ownership and failure-path review.
 
 ## Entry and completion contract
 
@@ -206,35 +167,27 @@ contract. The borrowed service exists only for one pinned machine run and is
 withdrawn and destroyed before that run releases its CPU pin. A blocking call
 must select unwind before producing side effects.
 
+The immediate service interface exposes only handle close; ABI revision and
+monotonic clock queries need no Process service. User-memory copies and handle
+inspection, duplication, and replacement are available only to deferred
+handlers. In particular, a user copy may resolve COW and must not become
+reachable through an immediate handler's service bound. The immediate entry
+adapter does not implement these deferred service traits.
+
 The unwind return capability is linear and bound to the exact stopped
 `UserContext` plus its Thread, ProcessImage generation, and run generation.
 Machine-active CPU pinning and translation ownership end before deferred policy
 dispatch; a separate stopped-run token keeps that logical generation occupied
 until completion. This makes a stopped continuation migratable without
 exporting or retaining the raw exception frame. Dropping an armed return owner
-enters a lock-, allocation-, and diagnostic-free fail-stop. Exit, termination,
-and successful exec consume it explicitly. Architecture result encoding is
+enters a lock-, allocation-, and diagnostic-free fail-stop. Exit and termination consume it explicitly. Architecture result encoding is
 proven infallible before a deferred syscall may publish new capabilities; an
 impossible post-publication encoding failure retains the capabilities and
 enters fail-stop rather than attempting rollback.
 
-For a foreign restricted Thread, entry produces a `RestrictedExit` reason and
-switches that Thread into its supervisor view. The private frame is never
-exported. Each exit creates an exclusive, generation-bound
-`RestrictedResumeToken` and a fixed-width, read-only, architecture-specific GPR
-snapshot in pinned supervisor-only memory. The reason payload includes the
-syscall PC convention or fault address and syndrome. FP/SIMD, scalable-vector,
-debug, pointer-authentication, memory-tagging, and future register sets use
-separate typed, feature-tagged records tied to the same stopped generation.
-Resume copies the proposed record once into owned kernel memory, validates that
-snapshot without rereading user memory, and consumes the token in one
-publication step. A stale, duplicated, remapped, or concurrently completed
-token cannot resume execution.
-
-Architecture entry does not interpret syscall numbers, handles, errno, POSIX
-signals, or process policy. Kernel services return typed internal errors; the
-Native adapter maps them to `NativeStatus`, while foreign policy maps them to
-Linux or FreeBSD results.
+Architecture entry does not interpret syscall numbers, handles, or process
+policy. Kernel services return typed internal errors; the Native adapter maps
+them to `NativeStatus`.
 
 ## Native machine ABI
 
@@ -261,12 +214,11 @@ rejected; a field is flexible only when its schema says so.
 
 The direct trap ABI is implemented first. A future vDSO will provide recommended
 C-compatible wrappers and optimized time or shared-page operations, but the
-kernel will never check that a syscall instruction originated there. Each ABI
-family owns its own vDSO and opaque shared-page protocol.
+kernel will never check that a syscall instruction originated there. Each
+facility defines its own shared-page layout and discovery contract.
 
 Native blocking calls use absolute monotonic deadlines and an explicit infinite
 sentinel. They report cancellation rather than silently rewinding the PC.
-Linux and FreeBSD restart rules remain foreign-personality policy.
 
 ## Declarative ABI schema
 
@@ -342,9 +294,7 @@ interpretation.
 
 `HandleValue` is a nonzero, process-local, opaque `u64` containing a slot and a
 large generation. Security does not depend on secrecy. Slot reuse never makes
-a practical stale handle valid; a slot is retired before generation wrap. A
-future 32-bit personality receives its own descriptor namespace and does not
-weaken the Native table.
+a practical stale handle valid; a slot is retired before generation wrap. The Native table does not depend on a narrower descriptor namespace.
 
 A handle entry contains a user-authority reference, rights, and handle flags.
 Lookup under the process handle-table lock validates generation, object type,
@@ -635,9 +585,9 @@ becoming active userspace authority.
 
 Every relevant assert and deassert advances the object's observation sequence,
 even when no subscription is armed. Bind and rearm atomically compare
-`{typed_level_state, sequence}` with event publication. This lets a Linux
-`epoll` supervisor detect ready/not-ready/ready transitions between one-shot
-deliveries without making native waits edge-triggered.
+`{typed_level_state, sequence}` with event publication. This lets Native
+consumers detect ready/not-ready/ready transitions between one-shot deliveries
+without making object waits edge-triggered.
 
 InterruptSession uses the same observation mechanism, but
 `interrupt_ack(session, sequence)` is a typed operation. A stale observation
@@ -784,68 +734,6 @@ ancestors. Process, TaskGroup, and ResourceDomain metadata is charged to the
 parent domain. The kernel retains a separate emergency budget which untrusted
 domains cannot consume.
 
-## Foreign binary compatibility (historical, non-normative)
-
-Foreign entry is not dispatched by substituting a Native syscall number or by
-nested Native dispatch. A compatibility supervisor implements the operation by
-making ordinary Native calls against explicit capabilities. It owns Linux or
-FreeBSD fd tables, file descriptions, credentials, namespaces, VFS policy,
-signals, thread-group rules, errno mapping, restart state, `epoll` or `kqueue`,
-ABI-specific auxiliary vectors, and vDSO behavior. Those structures never
-alias Native handles or object signals.
-
-One HypeR kernel Thread represents one foreign Thread and alternates between:
-
-- a restricted view containing the foreign application mappings and no Native
-  syscall authority; and
-- a supervisor view containing supervisor code/state and explicitly granted
-  windows into the foreign address space.
-
-These are distinct prepared address spaces and principals, not two conventions
-inside one mutually accessible mapping. The mode sidecar is kernel-owned and
-absent from the restricted view. Native calls resolve only against the linked
-supervisor process's handle table; restricted code has neither Native dispatch
-nor a Native vDSO mapping. The foreign fd table is separate from both. A native
-call from supervisor mode is valid; the same trap from restricted mode is a
-foreign exit. A kick prompts restricted exit or cancels the supervisor's
-explicitly interruptible Native wait, but does not itself implement POSIX
-signal policy.
-
-Every entry snapshots one immutable `ExecutionPrincipal` containing the active
-handle table, prepared address space, ResourceDomain, task/audit identity, and
-permitted current-task semantics. A Native Thread uses its Process principal.
-Supervisor mode uses the pinned supervisor image's handle table and address
-space, but remains a Thread in the compatibility session's TaskGroup and
-charges CPU time and default resource use to that session's ResourceDomain.
-Audit records carry both identities. Implicit `thread_exit`, `process_exit`,
-private-current-address-space atomic wait, and other ambiguous current-task
-operations are forbidden in borrowed supervisor mode; the supervisor uses
-explicit Thread, Process, target-address-space, or supervision-session handles.
-
-`SupervisionSession` is a revocable typed lease, not an ordinary shared
-reference. It pins exact supervisor ProcessImage/address-space generations,
-the restricted image set, protected state, TaskGroup, ResourceDomain, and its
-lifecycle generation. Supervisor exec must first revoke or migrate its
-sessions. Revocation rejects new entry, latches kicks, cancels interruptible
-waits, waits for every active Thread to acknowledge exit, invalidates resume
-tokens, and only then releases roots and state. Supervisor exit, unhandled
-supervisor fault, or lost authority terminates the compatibility domain rather
-than retaining stale supervisor state.
-
-The session exposes a rights-limited `TargetAddressSpace` capability. Its typed
-copy, atomic-access, map, unmap, protect, COW-clone, and fault-completion
-operations are independent of the supervisor's VMAR and validate the target
-mapping generation. Optional mapped windows are explicit bounded grants, not
-the authority source. This lets the supervisor service foreign pointers,
-faults, `mmap`, `clone`, signal frames, and exec without exposing supervisor
-pages or publishing incomplete restricted mappings.
-
-The historical proposal started with a small `TestCompat` personality first,
-then Linux, then FreeBSD. `TestCompat` must use different syscall numbers,
-error encoding, restart behavior, initial stack, and vDSO selection to prove
-that Native assumptions have not leaked into the route. Linux validation later
-uses differential tests which run identical binaries on Linux and HypeR.
-
 ## Target Native object and syscall surface
 
 The planned Native surface is intentionally broad enough for a real EL0 VMM and
@@ -862,7 +750,7 @@ assigned only through schema review.
 | IPC | Channel create/read/write; Event and EventPair create/signal; Counter create/read/add |
 | Wait | wait-one/wait-many; WaitSet create/bind/rearm/cancel/wait |
 | Time and atomic wait | Timer create/set/cancel, sleep-until, atomic wait/wake/requeue |
-| Exceptions and supervision | exception endpoint/token, typed register sets, resume; SupervisionSession, TargetAddressSpace, restricted enter/resume/kick/revoke |
+| Exceptions | exception endpoint/token, typed register sets, resume |
 | Virtualization | VM create/map/unmap/protect; vCPU create/run/kick/inject; typed architecture state operations |
 | Driver-domain resources | MemoryGrant, DeviceLease, DmaMapping, InterruptSession, and later BackendSession/SharedQueue |
 
@@ -897,127 +785,41 @@ LP64D applications use `tp` for runtime TLS and preserve full integer/FP state.
 x86-64 ring-3 entry remains unsupported. The shared contracts retain
 AArch64's world-regime and translation distinctions.
 
-## Implementation plan and acceptance gates
+## Implementation and acceptance
 
-The current checkpoint implements much of the Phase 1 capability mechanics and
-a narrow AArch64 Phase 2 proof. The proof maps raw instruction sequences,
-executes 64 direct `abi_query` calls in one machine run, exercises an unknown
-call through deferred unwind and re-entry, yields and resumes, exits a Thread,
-propagates Process exit to a dormant sibling, contains a breakpoint fault, and
-creates, signals, and observes an Event from EL0. It joins each Thread and
-Process and retires each ownership graph. The architecture-neutral dispatchers
-implement syscalls 0 through 112: capability inspection and attenuation,
-Thread and Process lifecycle, Event and object wait, byte and rendezvous
-capability channels, Console I/O, root directory access, transactional ProcessBuilder
-construction, Process stop requests, Process lifecycle inspection, and
-capability-scoped Process, Thread, object, and handle-graph scans. Channel operations use bounded
-storage, transactional user copies, and atomic capability publication. The
-surface also includes VMO/VMAR operations, VM lifecycle/device assignment,
-registered runtime-owned serial output, Native thread create/start/stop,
-process-private atomic wait/wake, deadline sleep, writable ramfs operations,
-persistent WaitSets, observation-only current Process ID, rooted directory scopes,
-metadata and timestamp updates, atomic file open/create, rename and links,
-advisory file locks, and optional RTC-anchored UTC. The generated SDK ABI
-reference is authoritative for numbers and argument contracts.
-`object_wait_one` and the bounded `object_wait_many` use absolute
-monotonic deadlines, generation-qualified signal/timeout/cancellation
-arbitration, and a Process-stop recheck before completing the machine return.
-Multi-wait canonicalizes duplicate object references under one scheduler wait
-generation and returns the lowest matching input index. The checkpoint includes
-an AArch64 static PIE loader, a minimal init supervisor, isolated Console and
-foreground-session services, a capability-scoped command shell, and Native
-`ps` and `handle` inspection tools. It is not
-yet a general runtime, vDSO, or secondary-architecture Native entry.
+Native applications and userspace-managed VMs run on AArch64 and RISC-V.
+The implemented surface includes capability inspection/transfer, Process and
+Thread lifecycle, IPC and WaitSets, VMO/VMAR mappings and COW, filesystem
+operations, clocks, atomic waits, and VM/device management. The generated
+[schema reference](../../sdk/abi/docs/native.md) is authoritative for syscall
+numbers and argument contracts. The [Native init contract](native-init.md)
+describes executable loading and service bootstrap; the
+[current status](../../docs/status.md) records support and remaining limits.
 
-### Phase 0: prove the boundary
+Verification follows the affected boundary:
 
-- land this design, the threat model, and the compiler-checked schema model;
-- qualify AArch64 VHE entry/address-space mechanisms before freezing ABI
-  layouts; and
-- specify process stop/exec and user-return ownership against scheduler
-  migration.
+- Host tests exercise portable ownership, lifecycle, handle and ABI mechanisms.
+- Kernel self-tests exercise direct calls, deferred unwind and re-entry,
+  user faults, thread/process exit and resource retirement.
+- Native QEMU acceptance exercises the assembled SDK, std and apps through
+  userspace init, services and the command shell.
+- Guest and I/O VM acceptance exercises userspace VM management, console and
+  backing-disk operations; runtime-crash tests cover retirement and restart.
 
-### Phase 1: capability core
-
-- implement object header, KOIDs, active-handle accounting, generational handle
-  tables, rights/type resolution, slot reservations, transactions, revocable
-  sponsorship, iterative teardown, and quotas;
-- establish an audited fallible shared-owner constructor, then use only safe
-  reference cloning and `Any` downcasts in the object core; and
-- host-test stale handles, wrong type/rights, attenuation, close races,
-  generation retirement, allocation failure, and quota rollback.
-
-### Phase 2: first native process
-
-- extend the implemented Process/UserThread ownership, cooperative stop/join,
-  fault containment, retirement, and AArch64 entry with blocking cancellation,
-  multi-Thread races, and migration qualification;
-- replace the raw instruction proof with an embedded static PIE EL0 program
-  running through direct syscalls, without requiring a vDSO; and
-- support temporary unstable debug output without calling the result ABI
-  stable.
-
-### Phase 3: usable Native runtime
-
-- expose VMO/VMAR lifecycle operations through capabilities and implement
-  Channel/Event/EventPair, WaitSet, clock/timer/sleep, and atomic waits;
-- start an EL0 init process with multiple processes and Threads; and
-- add generated Rust/C bindings and ABI conformance tests.
-
-### Phase 4: EL0 VMM
-
-- extend the implemented creation authority, one-shot lease, pending VM,
-  installed VM/vCPU, shared guest-VMO, and acknowledged retirement objects to
-  multi-vCPU execution. Creation-time `vcpu_count` fixes topology and bootstrap
-  state applies only to vCPU 0; architecture power-on protocols supply secondary
-  entry state, and an additive VM operation exposes their control handles;
-- add interrupt injection and bounded guest-memory grants for isolated device
-  backend processes; and
-- evolve the initial EL0 VM manager and per-VM runtime into a validated fleet
-  configuration and supervision service without duplicating kernel ownership.
-
-### Phase 5: Linux I/O VM
-
-The [current roadmap](../../docs/roadmap.md) makes this the near-term integration
-goal on Pi 5; phase numbering here groups ABI work rather than setting priority.
-
-- support a trusted Linux VM directly driving network and storage devices;
-- add explicit device, interrupt and memory grants with DMA-safe retirement;
-- expose the grants and event notifications needed by standard virtio-scsi
-  queues and the Linux vhost-scsi/LIO backend, with explicit buffer ownership,
-  cache ordering and DMA retirement; Linux-local ioctls stay outside the Native
-  ABI, and management services do not forward individual I/O requests;
-- consume the independently published Linux appliance through the
-  [I/O VM package contract](../../docs/io-vm.md), with HypeR-owned apps and DTS/DTB; and
-- qualify Native I/O and failure handling on Pi 5 before later IOMMU-backed
-  untrusted-domain support.
-
-### Historical proposal: foreign personalities (not scheduled)
-
-- implement a supervised `TestCompat` route, restricted/supervisor execution,
-  session revocation, target-address-space operations, and atomic exec;
-- implement Linux with differential syscall, signal, futex, and ELF tests; and
-- implement FreeBSD as a separate ABI family, reusing kernel mechanisms but not
-  Linux personality state.
-
-Every phase runs the quality gate and all-architecture builds. The current QEMU
-proof covers the AArch64 VHE host, repeated direct `abi_query`, deferred
-unknown-call unwind and re-entry, Event handle publication and observation,
-breakpoint-fault containment, Process/Thread join, retirement, and
-architecture-neutral rejection of malformed calls. The remaining user-entry
-acceptance target adds invalid-pointer operations, cross-Process isolation,
-same-Process multi-Thread migration, IRQ-tail user preemption, TLS/SIMD
-preservation, and broader stop-versus-entry races. The existing Linux guest boot
-remains a regression contract. Cache, TLB, IOMMU, interrupt, and speculation
-properties which QEMU cannot prove require physical AArch64 validation before
-the corresponding feature is declared stable.
+The near-term integration target remains a trusted Linux I/O VM on Pi 5,
+consumed through the [I/O VM package contract](../../docs/io-vm.md). Native
+services provide management and explicit memory/device authority; standard
+virtio-scsi queues and Linux vhost-scsi/LIO carry storage requests. Linux-local
+ioctls do not become Native syscalls. Physical cache/TLB, interrupts and DMA
+retirement still require hardware qualification; QEMU cannot establish those
+properties. Future work is tracked in the [roadmap](../../docs/roadmap.md), not
+as additional mandatory phases of the Native ABI.
 
 ## Open implementation questions
 
-The direction above is settled; these details require implementation proofs
-before they become ABI:
+The following extensions remain outside the implemented ABI until their
+contracts and validation are reviewed:
 
-- the exact Native rights bit allocation;
 - the exact x86-64 secondary result registers;
 - whether the initial surface includes a dedicated SharedQueue or BackendSession
   for large asynchronous workloads;

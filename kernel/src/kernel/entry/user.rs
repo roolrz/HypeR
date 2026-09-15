@@ -13,10 +13,10 @@ use hyper::hal::user::{
 use hyper::sync::InterruptMaskGuard;
 
 use crate::kernel::abi::native::{
-    self, ConsoleServiceError, ConsoleServices, HandleServices, HierarchyServices, InspectServices,
-    IpcServices, MemoryServices, ObjectServiceError, ObjectServices, ProcessBuilderServiceError,
-    ProcessBuilderServices, SystemInspectServices, TaskServices, UserMemoryServices, VfsServices,
-    VmServices,
+    self, ConsoleServiceError, ConsoleServices, HandleServices, HierarchyServices,
+    ImmediateServices, InspectServices, IpcServices, MemoryServices, ObjectServiceError,
+    ObjectServices, ProcessBuilderServiceError, ProcessBuilderServices, SystemInspectServices,
+    TaskServices, UserMemoryServices, VfsServices, VmServices,
 };
 use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomainObject, ResourceKind,
@@ -51,46 +51,9 @@ struct ProcessServices<'process> {
     process: &'process Process,
 }
 
-impl UserMemoryServices for ProcessServices<'_> {
-    fn copy_to_user(&self, destination: UserSlice, source: &[u8]) -> Result<(), ProcessError> {
-        self.process.copy_to_user(destination, source)
-    }
-
-    fn copy_from_user(
-        &self,
-        source: UserSlice,
-        destination: &mut [u8],
-    ) -> Result<(), ProcessError> {
-        self.process.copy_from_user(source, destination)
-    }
-}
-
-impl HandleServices for ProcessServices<'_> {
+impl ImmediateServices for ProcessServices<'_> {
     fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError> {
         self.process.close_handle(value)
-    }
-
-    fn handle_info(
-        &self,
-        value: HandleValue,
-        required_rights: Rights,
-    ) -> Result<HandleInfo, ProcessError> {
-        self.process.handle_info(value, required_rights)
-    }
-
-    fn duplicate_handle(
-        &self,
-        value: HandleValue,
-        rights: Rights,
-    ) -> Result<HandleValue, ProcessError> {
-        self.process.duplicate_handle(value, rights)
-    }
-    fn replace_handle(
-        &self,
-        value: HandleValue,
-        rights: Rights,
-    ) -> Result<HandleValue, ProcessError> {
-        self.process.replace_handle(value, rights)
     }
 }
 
@@ -235,11 +198,13 @@ impl DeferredProcessServices<'_> {
     }
 }
 
-impl HandleServices for DeferredProcessServices<'_> {
+impl ImmediateServices for DeferredProcessServices<'_> {
     fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError> {
         self.session.process.close_handle(value)
     }
+}
 
+impl HandleServices for DeferredProcessServices<'_> {
     fn handle_info(
         &self,
         value: HandleValue,

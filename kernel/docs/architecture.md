@@ -364,8 +364,8 @@ I/O VM described by the project roadmap. Foreign application personalities are
 not a delivery commitment and must not impose new requirements on Native paths.
 
 Native object, capability, IPC and ABI contracts are described in the
-[userspace and syscall architecture](syscall-abi.md). Its foreign-personality
-material is historical design exploration, not a prerequisite for Native work.
+[userspace and syscall architecture](syscall-abi.md). Reserved image-routing
+names do not establish support for foreign application execution.
 
 ## Construction and publication
 
@@ -427,7 +427,10 @@ images run standalone mechanism tests, report completion and retire the
 bootstrap execution. Linux integration boots Native init and uses userspace VMM
 tools; kernel self-tests need only an empty ramfs archive. Sealing takes the
 same mutation lock as guarded-stack map/unmap and retires identity aliases only
-after every admitted CPU has entered permanent high mappings. On AArch64, those
+after every admitted CPU has entered permanent high mappings. Its entry rejects
+missing `FrozenTopology` before acquiring the mutation lock or changing mappings,
+so callers cannot retire trampoline aliases before CPU admission completes.
+On AArch64, those
 aliases occupy a dedicated lower transition root. Sealing clears every entry
 in that root and completes broadcast TLB invalidation; it does not walk firmware
 RAM or MMIO intervals and never edits the permanent upper root. The page-table

@@ -96,8 +96,7 @@ pub(in crate::kernel) trait UserMemoryServices {
     -> Result<(), ProcessError>;
 }
 
-pub(in crate::kernel) trait HandleServices {
-    fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError>;
+pub(in crate::kernel) trait HandleServices: ImmediateServices {
     fn handle_info(
         &self,
         value: HandleValue,
@@ -856,12 +855,13 @@ pub(in crate::kernel) trait TaskServices: UserMemoryServices {
     fn request_process_stop(&self, process: HandleValue) -> Result<(), ProcessError>;
 }
 
-pub(in crate::kernel) trait ImmediateServices:
-    UserMemoryServices + HandleServices
-{
+/// Services audited for the masked machine-entry path.
+///
+/// Deliberately excludes user copies (which may resolve COW) and handle-table
+/// growth. Adding a deferred service must not expand this interface implicitly.
+pub(in crate::kernel) trait ImmediateServices {
+    fn close_handle(&self, value: HandleValue) -> Result<(), ProcessError>;
 }
-
-impl<T: UserMemoryServices + HandleServices> ImmediateServices for T {}
 
 pub(in crate::kernel) trait DeferredServices:
     UserMemoryServices

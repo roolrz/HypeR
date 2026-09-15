@@ -80,6 +80,8 @@ mutate 'removing kernel self-test completion was accepted' \
     src/main.rs 's/kernel self-tests completed/kernel self-tests removed/'
 mutate 'address-space sealing without the stage-1 lock was accepted' \
     src/kernel/mm/mod.rs 's/stack::serialize_stage1_mutation/stack::without_stage1_serialization/'
+mutate 'removing sealing topology validation was accepted' \
+    src/kernel/mm/mod.rs '/frozen_topology().ok_or(FinalizationError::CpuTopologyUnavailable)/d'
 mutate 'relaxed FrozenTopology publication was accepted' \
     src/kernel/cpu/smp.rs 's/next_cpu_index, Ordering::Release/next_cpu_index, Ordering::Relaxed/'
 mutate 'removing the FrozenTopology capability was accepted' \
