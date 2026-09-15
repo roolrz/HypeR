@@ -21,6 +21,8 @@ use hyper_vm_runtime::io_guest::{InstalledGuest, RAM_BASE, RAM_BYTES, SharedGran
 use hyper_vm_runtime::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
 use hyper_vm_runtime::virtio_scsi::{BackendOperation, QUEUES, Queue, VERSION_1};
 
+const _: () = assert!(QUEUES == block::QUEUE_COUNT);
+
 const SHARED_BASE: u64 = RAM_BASE + RAM_BYTES;
 const NOTIFICATION_MMIO: u64 = 0x0a02_0000;
 

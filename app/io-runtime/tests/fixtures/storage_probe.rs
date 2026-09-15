@@ -27,11 +27,16 @@ fn verify(path: &str) -> io::Result<()> {
     if file.metadata()?.len() != (LENGTH + GAP + 1) as u64 {
         return Err(io::Error::other("incorrect persisted file length"));
     }
-    let mut buffer = vec![0; 64 * 1024];
+    // Cross all four request queues, including unaligned heads and tails.
+    let mut buffer = vec![0; 512 * 1024];
     println!("BOARD-STORAGE: reading {path}");
     let mut offset = 0;
     while offset < LENGTH {
-        let count = buffer.len().min(LENGTH - offset);
+        let count = if offset == 0 {
+            13
+        } else {
+            buffer.len().min(LENGTH - offset)
+        };
         file.read_exact(&mut buffer[..count])?;
         if buffer[..count]
             .iter()

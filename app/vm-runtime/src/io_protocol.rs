@@ -7,7 +7,7 @@
 use crate::virtio_scsi::{BackendOperation, QUEUE_MAX, QUEUES, VERSION_1};
 
 const MAGIC: u32 = 0x314f_4948;
-const VERSION: u16 = 1;
+const VERSION: u16 = 2;
 const HEADER: usize = 40;
 pub const MAX_RECORD: usize = 256;
 
@@ -85,7 +85,7 @@ impl Request {
                         descriptor: u64_at(bytes, offset + 8)?,
                         available: u64_at(bytes, offset + 16)?,
                         used: u64_at(bytes, offset + 24)?,
-                        ready: true,
+                        ready: u32_at(bytes, offset)? != 0,
                     };
                 }
                 Command::Device(BackendOperation::Activate {
@@ -115,7 +115,7 @@ impl Request {
         let length = match self.command {
             Command::Hello | Command::Release | Command::Device(BackendOperation::Reset) => HEADER,
             Command::Prepare { .. } => 72,
-            Command::Device(BackendOperation::Activate { .. }) => 144,
+            Command::Device(BackendOperation::Activate { .. }) => 48 + QUEUES * 32,
             Command::Device(BackendOperation::StopQueue { .. }) => 48,
         };
         output.fill(0);
@@ -149,7 +149,13 @@ impl Request {
             }
             Command::Device(BackendOperation::Activate { features, queues }) => {
                 output[40..48].copy_from_slice(&features.to_le_bytes());
-                for (queue, chunk) in queues.iter().zip(output[48..144].chunks_exact_mut(32)) {
+                for (queue, chunk) in queues
+                    .iter()
+                    .zip(output[48..48 + QUEUES * 32].chunks_exact_mut(32))
+                {
+                    if !queue.ready {
+                        continue;
+                    }
                     chunk[0..4].copy_from_slice(&queue.size.to_le_bytes());
                     chunk[8..16].copy_from_slice(&queue.descriptor.to_le_bytes());
                     chunk[16..24].copy_from_slice(&queue.available.to_le_bytes());

@@ -110,22 +110,22 @@ impl Image {
 }
 
 fn copy_payload(source: &Source, memory: &WritableVmo, payload: Payload) -> Result<()> {
-    let mut buffer = vec![0; hyper_os::memory::MAX_TRANSFER_BYTES];
     let offset = payload
         .load_address
         .checked_sub(RAM_BASE)
         .ok_or("payload below RAM")?;
-    let mut copied = 0;
-    while copied < payload.length {
-        let length = (payload.length - copied).min(buffer.len() as u64) as usize;
-        source
-            .read_exact_at(payload.file_offset + copied, &mut buffer[..length])
-            .map_err(show)?;
-        memory
-            .write_all_at(offset + copied, &buffer[..length])
-            .map_err(show)?;
-        copied += length as u64;
-    }
+    crate::image_io::copy(
+        payload.file_offset,
+        payload.length,
+        |offset, bytes| source.read_exact_at(offset, bytes),
+        |relative, bytes| {
+            let destination = offset
+                .checked_add(relative)
+                .ok_or("payload offset overflow")?;
+            memory.write_all_at(destination, bytes).map_err(show)
+        },
+    )
+    .map_err(show)?;
     Ok(())
 }
 

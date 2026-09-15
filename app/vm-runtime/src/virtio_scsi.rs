@@ -9,7 +9,8 @@
 //! until the backend confirms the corresponding operation.
 
 pub const VERSION_1: u64 = 1 << 32;
-pub const QUEUES: usize = 3;
+pub const REQUEST_QUEUES: usize = 4;
+pub const QUEUES: usize = 2 + REQUEST_QUEUES;
 pub const QUEUE_MAX: u32 = 128;
 const ACKNOWLEDGE: u32 = 1;
 const DRIVER: u32 = 2;
@@ -363,6 +364,9 @@ impl Device {
         let mut regions = [(0u64, 0u64); QUEUES * 3];
         for (index, queue) in self.queues.iter().copied().enumerate() {
             if !queue.ready {
+                if index >= 3 {
+                    continue;
+                }
                 return Err(Error::InvalidQueue);
             }
             self.validate_queue(queue)?;
@@ -383,7 +387,10 @@ impl Device {
 
     fn read_config(&self, offset: u64, width: u8) -> Result<u64, Error> {
         let mut bytes = [0u8; 36];
-        for (index, value) in [1u32, 126, 256, 64, 16, 96, 32].into_iter().enumerate() {
+        for (index, value) in [REQUEST_QUEUES as u32, 126, 1024, 64, 16, 96, 32]
+            .into_iter()
+            .enumerate()
+        {
             bytes[index * 4..index * 4 + 4].copy_from_slice(&value.to_le_bytes());
         }
         bytes[30..32].copy_from_slice(&255u16.to_le_bytes());

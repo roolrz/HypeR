@@ -68,9 +68,9 @@ fn activation_wire_has_fixed_linux_layout() -> Result<(), Error> {
         ..reset()
     };
     let mut bytes = [0xff; MAX_RECORD];
-    assert_eq!(request.encode(&mut bytes)?, 144);
+    assert_eq!(request.encode(&mut bytes)?, 48 + QUEUES * 32);
     assert_eq!(u64_at(&bytes, 40)?, VERSION_1);
-    for offset in [48, 80, 112] {
+    for offset in (48..48 + QUEUES * 32).step_by(32) {
         assert_eq!(u32_at(&bytes, offset)?, 128);
         assert_eq!(u32_at(&bytes, offset + 4)?, 0);
         assert_eq!(u64_at(&bytes, offset + 8)?, 0x4010_0000);
@@ -78,6 +78,34 @@ fn activation_wire_has_fixed_linux_layout() -> Result<(), Error> {
         assert_eq!(u64_at(&bytes, offset + 24)?, 0x4010_2000);
     }
     assert_eq!(&bytes[12..16], &[0; 4]);
+    Ok(())
+}
+
+#[test]
+fn optional_queues_are_canonical_and_old_bridge_versions_are_rejected() -> Result<(), Error> {
+    let queues = core::array::from_fn(|index| Queue {
+        size: 8,
+        descriptor: 0x4010_0000 + index as u64 * 4096,
+        available: 0x4010_0100 + index as u64 * 4096,
+        used: 0x4010_0200 + index as u64 * 4096,
+        ready: index < 3,
+    });
+    let request = Request {
+        command: Command::Device(BackendOperation::Activate {
+            features: VERSION_1,
+            queues,
+        }),
+        ..reset()
+    };
+    let mut bytes = [0; MAX_RECORD];
+    let length = request.encode(&mut bytes)?;
+    assert!(bytes[48 + 3 * 32..length].iter().all(|byte| *byte == 0));
+    assert!(Request::decode(&bytes[..length]).is_ok());
+    bytes[48 + 3 * 32 + 8] = 1;
+    assert_eq!(Request::decode(&bytes[..length]), Err(Error::InvalidRecord));
+    bytes[48 + 3 * 32 + 8] = 0;
+    bytes[4..6].copy_from_slice(&1u16.to_le_bytes());
+    assert_eq!(Request::decode(&bytes[..length]), Err(Error::InvalidRecord));
     Ok(())
 }
 

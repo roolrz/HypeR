@@ -162,6 +162,8 @@ pub(crate) struct NotificationState {
     pub(crate) kicks: u32,
     pub(crate) status: u32,
 }
+pub(crate) const QUEUE_COUNT: u64 = hyper::abi::native::HYPER_NATIVE_NATIVE_BLOCK_QUEUE_COUNT;
+
 impl NotificationState {
     pub(crate) const fn new() -> Self {
         Self {
@@ -197,7 +199,7 @@ impl NotificationState {
         Ok(self.epoch)
     }
     pub(crate) fn kick(&mut self, queue: u64) {
-        if self.enabled && !self.closed && queue < 3 {
+        if self.enabled && !self.closed && queue < QUEUE_COUNT {
             self.kicks |= 1 << queue;
         }
     }

@@ -5,15 +5,19 @@
 
 #![cfg_attr(test, allow(dead_code))]
 
-pub(crate) const MEMORY_BYTES: u64 = 128 * 1024;
-pub(crate) const QUEUE_SIZE: u16 = 8;
+use hyper::abi::native as abi;
+
+pub(crate) const MEMORY_BYTES: u64 = abi::HYPER_NATIVE_NATIVE_BLOCK_MEMORY_BYTES;
+pub(crate) const QUEUE_SIZE: u16 = abi::HYPER_NATIVE_NATIVE_BLOCK_QUEUE_SIZE as u16;
+pub(crate) const REQUEST_QUEUES: usize = abi::HYPER_NATIVE_NATIVE_BLOCK_QUEUE_COUNT as usize - 2;
+pub(crate) const QUEUE_STRIDE: u64 = abi::HYPER_NATIVE_NATIVE_BLOCK_QUEUE_STRIDE;
 pub(crate) const REQUEST_QUEUE: u64 = 8192;
 pub(crate) const AVAILABLE: u64 = REQUEST_QUEUE + 256;
 pub(crate) const USED: u64 = REQUEST_QUEUE + 512;
-pub(crate) const REQUEST: u64 = 12288;
+pub(crate) const REQUEST: u64 = 24576;
 pub(crate) const RESPONSE: u64 = REQUEST + 128;
-pub(crate) const DATA: u64 = 16384;
-pub(crate) const DATA_BYTES: usize = MEMORY_BYTES as usize - DATA as usize;
+pub(crate) const DATA: u64 = 32768;
+pub(crate) const DATA_BYTES: usize = 128 * 1024;
 pub(crate) const RESPONSE_BYTES: usize = 108;
 
 pub(crate) fn request(tag: u64, cdb: &[u8; 16]) -> [u8; 51] {
@@ -68,7 +72,8 @@ mod tests {
     }
     #[test]
     fn queue_extents_and_data_are_disjoint() {
-        for base in [0, 4096, REQUEST_QUEUE] {
+        for queue in 0..REQUEST_QUEUES + 2 {
+            let base = queue as u64 * QUEUE_STRIDE;
             assert!(base + u64::from(QUEUE_SIZE) * 16 <= base + 256);
             assert!(base + 256 + 6 + u64::from(QUEUE_SIZE) * 2 <= base + 512);
             assert!(base + 512 + 6 + u64::from(QUEUE_SIZE) * 8 <= base + 4096);
@@ -76,7 +81,8 @@ mod tests {
         const {
             assert!(REQUEST + 51 <= RESPONSE);
             assert!(RESPONSE + RESPONSE_BYTES as u64 <= DATA);
-            assert!(DATA + DATA_BYTES as u64 == MEMORY_BYTES);
+            assert!(REQUEST + REQUEST_QUEUES as u64 * 256 <= DATA);
+            assert!(DATA + (DATA_BYTES * REQUEST_QUEUES) as u64 <= MEMORY_BYTES);
         }
     }
 }

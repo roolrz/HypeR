@@ -6,7 +6,7 @@
 mod disk;
 
 use hyper_os::handle::{ByteChannelObject, VirtualCpuObject, VirtualMachineObject};
-use hyper_os::memory::{MAX_TRANSFER_BYTES, WritableVmo};
+use hyper_os::memory::WritableVmo;
 use hyper_os::startup::Startup;
 use hyper_os::wait::{ObjectSignals, WaitSet};
 use hyper_service::vm as vm_contract;
@@ -74,6 +74,11 @@ fn run(
     metadata
         .validate_for(&plan)
         .map_err(|_| Error::UnsupportedConfiguration)?;
+    #[cfg(feature = "startup-profile")]
+    eprintln!(
+        "HypeR startup profile: image validated at {} us",
+        started.elapsed().as_micros()
+    );
     publish_status(control, vm_contract::InstanceStatus::ImageValidated)?;
 
     let connection = hyper_os::capability_channel::CapabilityChannel::from_handle(
@@ -97,6 +102,11 @@ fn run(
     let mut console = hyper_vm_runtime::console::Console::new(connection, virtual_serial, output);
     let serial_binding = console.binding().map_err(Error::OperatingSystem)?;
     let memory = WritableVmo::create(plan.memory_size()).map_err(Error::OperatingSystem)?;
+    #[cfg(feature = "startup-profile")]
+    eprintln!(
+        "HypeR startup profile: RAM allocated at {} us",
+        started.elapsed().as_micros()
+    );
     copy_payload(&source, &memory, plan.memory_base(), image.kernel)?;
     if let Some(initramfs) = image.initramfs {
         copy_payload(&source, &memory, plan.memory_base(), initramfs)?;
@@ -108,6 +118,11 @@ fn run(
         metadata,
         disk_session.is_some(),
     )?;
+    #[cfg(feature = "startup-profile")]
+    eprintln!(
+        "HypeR startup profile: memory prepared at {} us",
+        started.elapsed().as_micros()
+    );
     publish_status(control, vm_contract::InstanceStatus::MemoryPrepared)?;
 
     let pending = hyper_os::vm::create(
@@ -170,6 +185,11 @@ fn run(
         // readiness. Ordinary runtime artifacts never include this delay.
         std::thread::sleep(std::time::Duration::from_secs(65));
     }
+    #[cfg(feature = "startup-profile")]
+    eprintln!(
+        "HypeR startup profile: installed at {} us",
+        started.elapsed().as_micros()
+    );
     publish_status(control, vm_contract::InstanceStatus::Installed)?;
     let (machine, mut disk) = if let Some(session) = disk_session {
         let grant = shared_memory.as_ref().ok_or(Error::InvalidControl)?;
@@ -496,30 +516,34 @@ fn copy_payload(
         .load_address
         .checked_sub(memory_base)
         .ok_or(Error::InvalidImage)?;
-    let mut buffer = [0u8; MAX_TRANSFER_BYTES];
-    let mut completed = 0u64;
-    while completed < payload.length {
-        let remaining = payload.length - completed;
-        let length = usize::try_from(remaining.min(MAX_TRANSFER_BYTES as u64))
-            .map_err(|_| Error::InvalidImage)?;
-        let chunk = buffer.get_mut(..length).ok_or(Error::InvalidImage)?;
-        let file_offset = payload
-            .file_offset
-            .checked_add(completed)
-            .ok_or(Error::InvalidImage)?;
-        let guest_offset = destination
-            .checked_add(completed)
-            .ok_or(Error::InvalidImage)?;
-        source
-            .read_exact_at(file_offset, chunk)
-            .map_err(|error| Error::Io(error.kind()))?;
-        memory
-            .write_all_at(guest_offset, chunk)
-            .map_err(Error::OperatingSystem)?;
-        completed = completed
-            .checked_add(length as u64)
-            .ok_or(Error::InvalidImage)?;
-    }
+    let statistics = hyper_vm_runtime::image_io::copy(
+        payload.file_offset,
+        payload.length,
+        |offset, bytes| source.read_exact_at(offset, bytes),
+        |offset, bytes| {
+            let offset = destination.checked_add(offset).ok_or(Error::InvalidImage)?;
+            memory
+                .write_all_at(offset, bytes)
+                .map_err(Error::OperatingSystem)
+        },
+    )
+    .map_err(|error| match error {
+        hyper_vm_runtime::image_io::Error::Read(error)
+        | hyper_vm_runtime::image_io::Error::Thread(error) => Error::Io(error.kind()),
+        hyper_vm_runtime::image_io::Error::Write(error) => error,
+        hyper_vm_runtime::image_io::Error::Allocation => Error::Io(std::io::ErrorKind::OutOfMemory),
+        hyper_vm_runtime::image_io::Error::InvalidRange => Error::InvalidImage,
+        hyper_vm_runtime::image_io::Error::WorkerStopped => Error::Io(std::io::ErrorKind::Other),
+    })?;
+    #[cfg(feature = "startup-profile")]
+    eprintln!(
+        "HypeR startup profile: payload {} bytes read={} us write={} us",
+        payload.length,
+        statistics.read.as_micros(),
+        statistics.write.as_micros()
+    );
+    #[cfg(not(feature = "startup-profile"))]
+    let _ = statistics;
     Ok(())
 }
 

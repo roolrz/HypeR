@@ -16,7 +16,7 @@ fn negotiate(device: &mut Device) -> TestResult {
     Ok(())
 }
 fn queues(device: &mut Device, alias: bool) -> TestResult {
-    for index in 0..3u64 {
+    for index in 0..QUEUES as u64 {
         let base = 0x4000_0000 + if alias { 0 } else { index * 0x10000 };
         device.write(0x30, 4, index)?;
         device.write(0x38, 4, 128)?;
@@ -158,7 +158,7 @@ fn queue_stop_waits_for_inflight_io_and_linux_cleanup_after_reset_is_allowed() -
     let stop = device.write(0x44, 4, 0)?.ok_or(Error::InvalidQueue)?;
     assert!(matches!(
         stop.operation,
-        BackendOperation::StopQueue { queue: 2 }
+        BackendOperation::StopQueue { queue } if queue == (QUEUES - 1) as u32
     ));
     assert_eq!(device.read(0x44, 4), Ok(1));
     assert_eq!(
@@ -172,7 +172,7 @@ fn queue_stop_waits_for_inflight_io_and_linux_cleanup_after_reset_is_allowed() -
     let reset = begin(&mut device, 0)?;
     device.complete(reset.id, true)?;
     // Linux resets the device, then writes QueueReady=0 for each old queue.
-    for index in 0..3 {
+    for index in 0..QUEUES as u64 {
         device.write(0x30, 4, index)?;
         assert_eq!(device.write(0x44, 4, 0), Ok(None));
         assert_eq!(device.read(0x44, 4), Ok(0));
@@ -199,5 +199,27 @@ fn backend_loss_preserves_pending_reset_and_owned_queue_state() -> TestResult {
     assert_eq!(device.pending.map(|value| value.transaction), Some(reset));
     device.backend_lost();
     assert_eq!(device.read(0x70, 4), Ok(15 | 64));
+    Ok(())
+}
+
+#[test]
+fn driver_can_use_one_request_queue_or_all_four() -> TestResult {
+    let mut device = device()?;
+    assert_eq!(device.read(0x100, 4), Ok(REQUEST_QUEUES as u64));
+    negotiate(&mut device)?;
+    queues(&mut device, false)?;
+    for index in 3..QUEUES as u64 {
+        device.write(0x30, 4, index)?;
+        device.write(0x44, 4, 0)?;
+    }
+    let activation = begin(&mut device, 15)?;
+    match activation.operation {
+        BackendOperation::Activate { queues, .. } => {
+            assert!(queues[..3].iter().all(|queue| queue.ready));
+            assert!(queues[3..].iter().all(|queue| !queue.ready));
+        }
+        _ => panic!("activation required"),
+    }
+    device.complete(activation.id, true)?;
     Ok(())
 }

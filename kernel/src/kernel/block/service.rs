@@ -57,7 +57,7 @@ pub(crate) fn create(
             busy: false,
             failed: false,
             sectors: 0,
-            index: 0,
+            indices: [0; wire::REQUEST_QUEUES],
             tag: 0,
             readonly: false,
             mounted: false,
