@@ -353,3 +353,36 @@ pub(crate) fn verify_dormant_vcpu_quiesce(
         crate::kernel::task::sleep_ms(1)?;
     }
 }
+
+/// Exercises the production queue while retaining the handle-visible VM owner.
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn verify_observed_vm_quiesce(
+    installed: InstalledVm,
+) -> Result<
+    hyper::mm::FallibleArc<crate::kernel::vm::installed::InstalledMachine>,
+    DormantVcpuQuiesceError,
+> {
+    let old = installed.id_for_test();
+    let owner = installed.publish_handle_lifecycle();
+    crate::kernel::vm::installed::InstalledMachine::request_stop(&owner);
+    crate::kernel::vm::installed::InstalledMachine::request_stop(&owner);
+    let deadline =
+        crate::kernel::time::deadline_after(crate::kernel::task::TEST_PROGRESS_TIMEOUT_NS)?;
+    while owner.snapshot().phase
+        != hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPED as u32
+    {
+        if hyper::hal::timer::deadline_reached(crate::kernel::time::monotonic_ticks(), deadline) {
+            return Err(DormantVcpuQuiesceError::Timeout);
+        }
+        crate::kernel::task::sleep_ms(1)?;
+    }
+    let replacement = reserve()?;
+    let new = replacement.id();
+    if old.slot != new.slot || old.generation == new.generation {
+        return Err(DormantVcpuQuiesceError::Registry(Error::InvalidReservation));
+    }
+    // Stopping a tombstone again cannot enqueue authority for its replacement.
+    crate::kernel::vm::installed::InstalledMachine::request_stop(&owner);
+    drop(replacement);
+    Ok(owner)
+}

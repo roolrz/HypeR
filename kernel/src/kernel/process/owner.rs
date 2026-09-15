@@ -887,6 +887,16 @@ impl Process {
         Ok(thread)
     }
 
+    /// Holds the real creation rollback owner across a controlled test interleaving.
+    #[cfg(feature = "kernel-self-test")]
+    #[allow(
+        dead_code,
+        reason = "Used by Native lifecycle integration tests where user execution is available"
+    )]
+    pub(crate) fn prepare_thread_rollback_for_test(&self) -> Result<impl Drop + '_, ProcessError> {
+        self.prepare_user_thread()
+    }
+
     fn prepare_user_thread(&self) -> Result<PreparedUserThread, ProcessError> {
         self.inner
             .state

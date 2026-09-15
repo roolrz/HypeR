@@ -219,6 +219,11 @@ pub(crate) struct InstalledVm {
 
 impl InstalledVm {
     #[cfg(feature = "kernel-self-test")]
+    pub(super) const fn id_for_test(&self) -> VmId {
+        self.id
+    }
+
+    #[cfg(feature = "kernel-self-test")]
     pub(in crate::kernel::vm) fn into_boot_parts(self) -> (VmId, ThreadId, VmControl) {
         (self.id, self.boot_vcpu, self.control)
     }

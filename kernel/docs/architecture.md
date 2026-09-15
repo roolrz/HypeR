@@ -240,6 +240,14 @@ context, and architecture execution payload are explicitly detached and
 retired by the scheduler. A userspace handle can therefore retain a terminated
 user Thread tombstone without retaining its execution resources.
 
+Natural Process exit waits for both active Threads and admitted creations to
+resolve. If the last active Thread exits while a creation is pending, its exit
+status remains provisional: a successful publication replaces it with a new
+active Thread, while final rollback completes natural termination. A Process
+which has never had an active Thread does not synthesize an exit merely because
+creation failed. Explicit stop reasons remain latched independently and take
+precedence over a provisional natural exit.
+
 A Process reaching Stopped transfers a counted owner to the kernel reaper.
 The reaper closes its handles, waits for outstanding address-space references,
 and completes acknowledged address-space retirement before breaking TaskGroup
