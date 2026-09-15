@@ -52,6 +52,45 @@ discovered automatically.
 
 ## Testing and CI
 
+Use these repository-root commands for short feedback loops:
+
+| Change | First check |
+| --- | --- |
+| App parser, state machine, or policy library | `make app-test APP_TEST_ARGS='test_name'` |
+| Native ABI and SDK source behavior | `make sdk-test` |
+| Installed SDK consumption by apps | `make app-sdk-test ARCH=aarch64` |
+| Portable kernel mechanisms | `make -C kernel test ARCH=aarch64` |
+| App deployment and packaging | `sh tests/ci/run.sh scripts` |
+| Kernel or app runtime behavior | The relevant QEMU target below |
+
+`app-test` uses SDK source patches within the existing app workspace, an explicit
+host target, and ordinary Cargo. It does not assemble an SDK or require patched
+std; the first invocation can download missing Cargo dependencies. `APP_TEST_PACKAGE=hyper-init` selects a single package;
+`APP_TEST_ARGS=supervision` filters its test names.
+Run it from the repository root so Native editor-target defaults are not loaded.
+`app-sdk-test` separately tests the assembled SDK contract. Production app
+manifests and builds continue to consume installed SDK sources.
+
+`make app` builds and installs ordinary system applications, including the I/O
+runtime. `make app-fixtures` additionally builds static/dynamic linking probes
+and Rust std smoke programs. Specialized VM smoke binaries remain owned by their
+acceptance targets.
+
+[app/deployment.json](../app/deployment.json) is the shared installation and
+initramfs payload manifest. A binary entry defines its Cargo binary, staged
+filename, archive destination, mode, and image membership. Cargo workspace
+membership remains a build concern; service manifests still own startup and
+capabilities, and board JSON still owns storage and device deployment.
+
+`NATIVE_IMAGE_PROFILE=development` is the default and preserves the existing
+apps and test programs. `NATIVE_IMAGE_PROFILE=system` includes all ordinary apps
+and runtime libraries without acceptance probes; it also avoids building those
+probes. The I/O service is included by the existing I/O/board boot profiles.
+Changing image membership does not delete applications or their capabilities.
+Packaging still copies ELF files before stripping only debug information and
+preserves unchanged output timestamps. Use a separate `NATIVE_INITRAMFS` or
+`BOARD_OUTPUT` when comparing profiles; existing disks are never reformatted.
+
 GitHub Actions separates source quality, architecture builds, image contracts,
 Native SDK integration, and runtime acceptance. The AArch64 matrix exercises
 VHE with different address-space geometries, UP/SMP, kernel self-tests, and
