@@ -50,6 +50,9 @@ class BoardTests(unittest.TestCase):
             with patch.object(
                 packer.shutil, "which",
                 side_effect=lambda name: str(brew) if name == "brew" else None,
+            ), patch.object(
+                packer.Path, "is_file", autospec=True,
+                side_effect=lambda path: path == executable,
             ), patch.object(packer.subprocess, "run") as run:
                 run.return_value.stdout = f"{tmp}\n"
 
@@ -63,6 +66,17 @@ class BoardTests(unittest.TestCase):
                     [str(brew), "--prefix", "dosfstools"],
                 )
 
+    def test_image_tool_prefers_linux_sbin_to_brew(self):
+        executable = Path('/usr/sbin/mkfs.fat')
+        with patch.object(packer.shutil, 'which',
+                          side_effect=lambda name: '/tools/brew' if name == 'brew' else None), \
+                patch.object(packer.Path, 'is_file', autospec=True,
+                             side_effect=lambda path: path == executable), \
+                patch.object(packer.os, 'access', return_value=True), \
+                patch.object(packer.subprocess, 'run') as run:
+            self.assertEqual(packer.image_tool('mkfs.fat', 'mkfs.fat', 'dosfstools'),
+                             str(executable))
+            run.assert_not_called()
 
     def test_missing_explicit_tool_does_not_fall_back(self):
         with patch.object(packer.shutil, 'which', return_value=None), \
