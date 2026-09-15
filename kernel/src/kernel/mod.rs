@@ -8,13 +8,10 @@
 // capability, memory, and lifecycle contracts cannot decay behind AArch64-only
 // runtime coverage.
 pub(crate) mod abi;
-#[allow(dead_code, unused_imports)]
 pub(crate) mod accounting;
-#[allow(dead_code)]
 pub(crate) mod authority;
 pub(crate) mod block;
 pub(crate) mod boot;
-#[allow(dead_code, unused_imports)]
 pub(crate) mod capability;
 pub mod cpu;
 pub mod crash;
@@ -24,15 +21,12 @@ pub(crate) mod entry;
 #[cfg(not(feature = "kernel-self-test"))]
 pub(crate) mod init;
 pub(crate) mod inspect;
-#[allow(dead_code)]
 pub(crate) mod io_cache;
-#[allow(dead_code, unused_imports)]
 pub(crate) mod ipc;
 pub mod irq;
 pub mod log;
 pub mod mm;
 pub(crate) mod object;
-#[allow(dead_code, unused_imports)]
 pub(crate) mod process;
 pub(crate) mod reaper;
 pub mod sync;

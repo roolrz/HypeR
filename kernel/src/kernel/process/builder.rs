@@ -42,15 +42,6 @@ const _: () = assert!(hyper::cpu::MAX_CPUS <= ABI_AFFINITY_WORDS * u64::BITS as 
 const _: () = assert!(MAX_STARTUP_HANDLES > 0);
 const MAX_USER_STARTUP_HANDLES: usize = MAX_STARTUP_HANDLES - 1;
 
-/// Externally observable lifecycle of a one-shot process builder.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProcessBuilderPhase {
-    Open,
-    Sealed,
-    Started,
-    Aborted,
-}
-
 /// Failure before the atomic child-publication commit.
 #[derive(Debug)]
 pub(crate) enum ProcessBuilderError<E> {
@@ -104,10 +95,6 @@ impl StartupCapability {
             expected_kind,
             operation,
         }
-    }
-
-    pub(crate) const fn purpose(self) -> u32 {
-        self.purpose
     }
 
     const fn transfer_request(
@@ -235,30 +222,22 @@ struct BuilderPlan {
 /// the builder state lock instead of relying on an ambient source Process.
 pub(super) struct StoredStartupCapability {
     purpose: u32,
-    info: HandleInfo,
     authority: Option<InTransitCapabilities>,
 }
 
 impl StoredStartupCapability {
-    fn new(purpose: u32, info: HandleInfo, authority: InTransitCapabilities) -> Self {
+    fn new(purpose: u32, authority: InTransitCapabilities) -> Self {
         if authority.len() != 1 {
             builder_invariant_violation();
         }
         Self {
             purpose,
-            info,
             authority: Some(authority),
         }
     }
 
     pub(super) const fn purpose(&self) -> u32 {
         self.purpose
-    }
-
-    /// Immutable target metadata retained for transaction validation and
-    /// future authority-free `ProcessBuilder` diagnostics.
-    pub(super) const fn info(&self) -> HandleInfo {
-        self.info
     }
 
     /// Consumes the staged entry at the child-publication commit.
@@ -464,18 +443,6 @@ impl ProcessBuilder {
         ObjectPublication::try_new(builder).map_err(ProcessBuilderError::Object)
     }
 
-    pub(crate) fn phase(&self) -> Result<ProcessBuilderPhase, ProcessBuilderError<()>> {
-        self.state.with(|state| match state.as_ref() {
-            Some(BuilderState::Open(_)) => Ok(ProcessBuilderPhase::Open),
-            Some(BuilderState::Sealed(_)) => Ok(ProcessBuilderPhase::Sealed),
-            Some(BuilderState::Busy) => Err(ProcessBuilderError::Busy),
-            Some(BuilderState::CommitAuthorized) => Err(ProcessBuilderError::Busy),
-            Some(BuilderState::Started) => Ok(ProcessBuilderPhase::Started),
-            Some(BuilderState::Aborted) => Ok(ProcessBuilderPhase::Aborted),
-            None => builder_invariant_violation(),
-        })
-    }
-
     pub(crate) fn add_startup_capability(
         &self,
         source: &Process,
@@ -510,14 +477,8 @@ impl ProcessBuilder {
         // Capacity was reserved before the source transaction. From this point
         // onward insertion cannot fail, so successful MOVE ownership is never
         // reported to userspace as a recoverable failure.
-        plan.startup.push(StoredStartupCapability::new(
-            capability.purpose,
-            HandleInfo {
-                rights: requested_rights,
-                ..info
-            },
-            authority,
-        ));
+        plan.startup
+            .push(StoredStartupCapability::new(capability.purpose, authority));
         self.finish_committed_add(plan)
     }
 

@@ -13,7 +13,6 @@ use super::lifecycle::{LifecycleError, TerminalReason, UserThreadLifecycle, User
 use super::owner::{Process, ProcessThreadMembership};
 use crate::kernel::accounting::CommittedCharge;
 use crate::kernel::authority::Rights;
-use crate::kernel::capability::{HandleError, HandleFlags, PreparedHandle};
 use crate::kernel::mm::user_space::NativeAddressSpace;
 use crate::kernel::object::{
     KernelObject, KernelRef, KernelService, ObjectCreationError, ObjectKind, ObjectPublication,
@@ -174,15 +173,6 @@ impl UserThread {
         }
     }
 
-    /// Prepares the first userspace handle without exposing the erased payload
-    /// type outside Process ownership.
-    pub(crate) fn prepare_public_handle(
-        &self,
-        rights: Rights,
-    ) -> Result<PreparedHandle, HandleError> {
-        PreparedHandle::try_from_new_object(self.publication(), rights, HandleFlags::NONE)
-    }
-
     pub(super) fn from_operation_pin(object: KernelRef<UserThreadObject, OperationPin>) -> Self {
         Self {
             object: UserThreadOwner::Operation(object),
@@ -317,6 +307,11 @@ impl UserThread {
         })
     }
 
+    #[cfg(feature = "kernel-self-test")]
+    #[allow(
+        dead_code,
+        reason = "Join helpers are consumed by architecture-specific Native self-tests"
+    )]
     pub(crate) fn join(&self) -> Result<TerminalReason, crate::kernel::sync::Error> {
         self.inner().joined.wait()?;
         match self.snapshot().terminal {
@@ -325,6 +320,11 @@ impl UserThread {
         }
     }
 
+    #[cfg(feature = "kernel-self-test")]
+    #[allow(
+        dead_code,
+        reason = "Join helpers are consumed by architecture-specific Native self-tests"
+    )]
     pub(crate) fn try_join(&self) -> Option<TerminalReason> {
         if !self.inner().joined.try_wait() {
             return None;
@@ -522,13 +522,6 @@ pub(crate) struct PreparedUserRun {
 }
 
 impl PreparedUserRun {
-    pub(crate) fn pin(&self) -> &crate::kernel::task::scheduler::UserRunGuard {
-        match self.pin.as_ref() {
-            Some(pin) => pin,
-            None => crate::hal::cpu::halt(),
-        }
-    }
-
     /// Publishes one CPU-affine run only after HAL preparation succeeds.
     pub(crate) fn commit(
         mut self,
@@ -606,10 +599,6 @@ pub(crate) struct ActiveUserRun {
 }
 
 impl ActiveUserRun {
-    pub(crate) const fn generation(&self) -> u64 {
-        self.identity.generation
-    }
-
     pub(crate) fn binding(&self) -> hyper::hal::user::UserRunBinding {
         match hyper::hal::user::UserRunBinding::new(
             self.thread.scheduler_id().map_or(0, ThreadId::get),
@@ -678,20 +667,6 @@ pub(crate) struct StoppedUserRun {
 }
 
 impl StoppedUserRun {
-    pub(crate) fn binding(&self) -> hyper::hal::user::UserRunBinding {
-        match hyper::hal::user::UserRunBinding::new(
-            match self.thread.scheduler_id() {
-                Some(id) => id.get(),
-                None => 0,
-            },
-            self.identity.image_generation,
-            self.identity.generation,
-        ) {
-            Some(binding) => binding,
-            None => crate::hal::cpu::halt(),
-        }
-    }
-
     /// Acknowledges that the architecture return capability was consumed.
     pub(crate) fn acknowledge_architecture_exit(mut self) {
         self.thread.inner().control.with(|control| {

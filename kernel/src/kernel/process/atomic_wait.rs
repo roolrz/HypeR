@@ -203,6 +203,13 @@ pub(crate) fn sleep(
 }
 
 #[cfg(feature = "kernel-self-test")]
+#[cfg_attr(
+    feature = "kernel-self-test",
+    allow(
+        dead_code,
+        reason = "Used by the AArch64 Native self-tests; other HAL self-tests exercise different entry paths"
+    )
+)]
 pub(crate) fn waiter_count(process: &Process, address: u64) -> Result<usize, Error> {
     let word =
         process.retry_user_memory(|space| space.pin_atomic_u32(UserAddress::new(address)))?;

@@ -11,9 +11,7 @@ use core::num::NonZeroU64;
 
 use hyper::mm::FallibleArc;
 
-use crate::kernel::accounting::{
-    CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
-};
+use crate::kernel::accounting::{ResourceAmount, ResourceDomain, ResourceError, ResourceKind};
 use crate::kernel::authority::Rights;
 use crate::kernel::object::{
     KernelObject, ObjectKind, ObjectRetirement, SignalMask, SignalSource, TransferClass,
@@ -210,7 +208,8 @@ impl KernelObject for ByteChannel {
 }
 
 /// Reserved target capacity and sequence for one infallible write commit.
-#[must_use = "publish or abort the Channel write reservation"]
+// Allocation and user copies must finish before reserving queue capacity.
+#[must_use = "publish the Channel write reservation"]
 pub(crate) struct ByteWriteReservation {
     pair: FallibleArc<Pair>,
     target: Side,
@@ -240,11 +239,6 @@ impl ByteWriteReservation {
         self.pair
             .publish_write(self.target, self.sequence, self.info, message);
     }
-
-    pub(crate) fn abort(mut self) {
-        self.armed = false;
-        self.pair.abort_write(self.target, self.info);
-    }
 }
 
 impl Drop for ByteWriteReservation {
@@ -270,10 +264,6 @@ impl ByteReceiveClaim {
             side,
             message: Some(message),
         }
-    }
-
-    pub(crate) fn info(&self) -> ByteMessageInfo {
-        self.message().info()
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
@@ -322,21 +312,6 @@ impl ReceivedByteMessage {
     fn new(message: Box<Message>) -> Self {
         Self {
             message: Some(message),
-        }
-    }
-
-    pub(crate) fn info(&self) -> ByteMessageInfo {
-        self.message().info()
-    }
-
-    pub(crate) fn bytes(&self) -> &[u8] {
-        self.message().bytes()
-    }
-
-    fn message(&self) -> &Message {
-        match self.message.as_deref() {
-            Some(message) => message,
-            None => channel_invariant("released Channel message accessed"),
         }
     }
 

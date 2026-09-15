@@ -42,20 +42,13 @@ impl ProcessStartCoordinator {
 
 /// Published child identity returned after deferred builder authority retires.
 pub(crate) struct StartedChildProcess {
-    process: Process,
-    initial_thread: UserThread,
+    // Keep service ownership alive until the caller consumes the start result.
+    _process: Process,
+    _initial_thread: UserThread,
     supervisor_handle: HandleValue,
 }
 
 impl StartedChildProcess {
-    pub(crate) const fn process(&self) -> &Process {
-        &self.process
-    }
-
-    pub(crate) const fn initial_thread(&self) -> &UserThread {
-        &self.initial_thread
-    }
-
     pub(crate) const fn supervisor_handle(&self) -> HandleValue {
         self.supervisor_handle
     }
@@ -125,8 +118,8 @@ impl ProcessStartTransaction for ProcessStartCoordinator {
             None => process_invariant_violation(),
         }
         StartedChildProcess {
-            process: committed.child.clone(),
-            initial_thread: committed.initial_thread.clone(),
+            _process: committed.child.clone(),
+            _initial_thread: committed.initial_thread.clone(),
             supervisor_handle: committed.supervisor_handle,
         }
     }

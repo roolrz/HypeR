@@ -14,8 +14,6 @@
 //! Per-mount accounting may be added with writable mounts; it is deliberately
 //! absent from this immutable foundation.
 
-#![cfg_attr(test, allow(dead_code))]
-
 use alloc::vec::Vec;
 use core::num::NonZeroU64;
 
@@ -32,6 +30,7 @@ mod state;
 /// Active readers may briefly retain an evicted shared page after the cache
 /// releases it. The bound applies to cache-owned resident entries, while the
 /// internal API keeps reader ownership short-lived and non-exportable.
+#[cfg(not(test))]
 pub(crate) const SYSTEM_PAGE_CAPACITY: usize = 256;
 
 #[cfg(not(test))]
@@ -47,10 +46,6 @@ impl FilesystemGeneration {
     pub(crate) const fn new(value: NonZeroU64) -> Self {
         Self(value)
     }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
-    }
 }
 
 /// Stable identity of one node within a filesystem generation.
@@ -60,10 +55,6 @@ pub(crate) struct NodeIdentity(NonZeroU64);
 impl NodeIdentity {
     pub(crate) const fn new(value: NonZeroU64) -> Self {
         Self(value)
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
     }
 }
 
@@ -75,10 +66,6 @@ pub(crate) struct FilePageIndex(u64);
 impl FilePageIndex {
     pub(crate) const fn new(value: u64) -> Self {
         Self(value)
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0
     }
 }
 
@@ -102,18 +89,6 @@ impl CacheKey {
             page,
         }
     }
-
-    pub(crate) const fn filesystem(self) -> FilesystemGeneration {
-        self.filesystem
-    }
-
-    pub(crate) const fn node(self) -> NodeIdentity {
-        self.node
-    }
-
-    pub(crate) const fn page(self) -> FilePageIndex {
-        self.page
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,6 +98,10 @@ pub(crate) enum CacheError {
     SequenceExhausted,
     StaleLoad,
     /// A cache consumer detected an impossible published payload.
+    #[cfg_attr(
+        test,
+        expect(dead_code, reason = "Constructed by production filesystem validation")
+    )]
     Invariant,
 }
 
@@ -168,6 +147,7 @@ pub(crate) enum CacheAccess<'cache, Page> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(test)]
 pub(crate) struct CacheSnapshot {
     pub(crate) capacity: usize,
     pub(crate) clean: usize,
@@ -190,6 +170,7 @@ pub(crate) struct FileDataCache<Page> {
 }
 
 impl<Page> FileDataCache<Page> {
+    #[cfg(not(test))]
     pub(crate) fn try_new_system() -> Result<Self, CacheError> {
         Self::try_new_with_capacity(SYSTEM_PAGE_CAPACITY)
     }
@@ -260,6 +241,7 @@ impl<Page> FileDataCache<Page> {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> CacheSnapshot {
         let snapshot = self.state.with(|cache| cache.model.snapshot());
         CacheSnapshot {
@@ -343,6 +325,7 @@ impl<Page> LoadReservation<'_, Page> {
     }
 
     /// Explicitly abandons a failed backend fill.
+    #[cfg(test)]
     pub(crate) fn abort(mut self) -> Result<(), CacheError> {
         let result = self
             .cache
@@ -378,6 +361,13 @@ impl<Page> Drop for LoadReservation<'_, Page> {
 #[derive(Debug)]
 pub(crate) struct PublishError<Page> {
     cause: CacheError,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Owns rejected fill memory until the publication error is dropped"
+        )
+    )]
     page: Page,
 }
 
@@ -386,6 +376,7 @@ impl<Page> PublishError<Page> {
         self.cause
     }
 
+    #[cfg(test)]
     pub(crate) fn into_page(self) -> Page {
         self.page
     }

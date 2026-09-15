@@ -20,9 +20,9 @@ use crate::kernel::accounting::{
 };
 use crate::kernel::authority::Rights;
 use crate::kernel::object::{
-    KernelObject, ObjectKind, ObjectRetirement, ObjectWaitError, PreparedTimedWait, SignalMask,
-    SignalSource, SignalState, TimedWaitPreparation, TransferClass, object_allocation_size,
-    prepare_timed_wait, private,
+    KernelObject, ObjectKind, ObjectRetirement, ObjectWaitError, SignalMask, SignalSource,
+    SignalState, TimedWaitPreparation, TransferClass, object_allocation_size, prepare_timed_wait,
+    private,
 };
 use crate::kernel::sync::Completion;
 use crate::kernel::task::{WaitOutcome, WaitQueue};
@@ -147,10 +147,6 @@ impl CapabilityReceiveContract {
             slots: owned,
             slot_count: slots.len(),
         })
-    }
-
-    pub(crate) const fn byte_capacity(self) -> usize {
-        self.byte_capacity
     }
 
     pub(crate) fn slots(&self) -> &[CapabilitySlotContract] {
@@ -430,6 +426,7 @@ impl CapabilityPair {
         }
     }
 
+    #[cfg(feature = "kernel-self-test")]
     fn register(
         &self,
         side: Side,
@@ -519,6 +516,7 @@ impl CapabilityPair {
         })
     }
 
+    #[cfg(feature = "kernel-self-test")]
     fn cancel(&self, side: Side, registration: &ReceiveRegistration) -> bool {
         self.cancel_with_error(side, registration, CapabilityChannelError::Cancelled)
     }
@@ -681,6 +679,8 @@ impl PreparedCapabilityReceive {
         })
     }
 
+    /// Registers without parking for deterministic rendezvous contract tests.
+    #[cfg(feature = "kernel-self-test")]
     pub(crate) fn publish(mut self) -> Result<PendingCapabilityReceive, CapabilityChannelError> {
         let node = match self.node.take() {
             Some(node) => node,
@@ -837,11 +837,8 @@ pub(crate) struct PendingCapabilityReceive {
 }
 
 impl PendingCapabilityReceive {
-    pub(crate) fn contract(&self) -> &CapabilityReceiveContract {
-        &self.registration.contract
-    }
-
     /// Cancels only if no sender has already won the match arbitration.
+    #[cfg(feature = "kernel-self-test")]
     pub(crate) fn cancel(&self) -> bool {
         self.pair.cancel(self.side, &self.registration)
     }

@@ -9,14 +9,10 @@ mod channel;
 mod service;
 
 pub(crate) use capability_channel::{
-    CapabilityChannel, CapabilityChannelError, CapabilityDeliveryInfo, CapabilityReceiveClaim,
-    CapabilityReceiveContract, CapabilityReceiveOutcome, CapabilitySlotContract,
-    PendingCapabilityReceive, PreparedCapabilityReceive,
+    CapabilityChannel, CapabilityChannelError, CapabilityDeliveryInfo, CapabilityReceiveContract,
+    CapabilityReceiveOutcome, CapabilitySlotContract,
 };
-pub(crate) use channel::{
-    ByteChannel, ByteChannelError, ByteMessageInfo, ByteReceiveClaim, ByteWriteReservation,
-    PreparedByteMessage, ReceivedByteMessage,
-};
+pub(crate) use channel::{ByteChannel, ByteChannelError, PreparedByteMessage};
 pub(crate) use service::{
     ByteChannelReadOutcome, ByteChannelServiceError, CapabilityChannelServiceError,
     byte_channel_create, byte_channel_read, byte_channel_write, capability_channel_create,

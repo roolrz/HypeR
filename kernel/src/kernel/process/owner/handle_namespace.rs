@@ -7,6 +7,10 @@ use super::*;
 
 pub(crate) struct HandlePublishFailure<const N: usize> {
     pub(crate) error: ProcessError,
+    #[expect(
+        dead_code,
+        reason = "Failure retains ownership of unpublished handles until the caller releases it"
+    )]
     pub(crate) handles: [PreparedHandle; N],
 }
 
@@ -427,6 +431,10 @@ impl Drop for PreparedDirectProcessHandleTransfer {
 
 #[must_use = "inspect the error and roll back the retained direct transfer"]
 pub(crate) struct DirectProcessHandleTransferCommitFailure {
+    #[expect(
+        dead_code,
+        reason = "Retains the commit failure cause alongside its rollback owner"
+    )]
     pub(crate) error: ProcessError,
     pub(crate) transfer: PreparedDirectProcessHandleTransfer,
 }
@@ -636,11 +644,19 @@ impl<const N: usize> ProcessHandleReservation<N> {
     }
 
     #[cfg(feature = "kernel-self-test")]
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        allow(
+            dead_code,
+            reason = "Used by the AArch64 Native self-tests; other HAL self-tests exercise different entry paths"
+        )
+    )]
     pub(crate) fn belongs_to(&self, process: &Process) -> bool {
         self.owner == process.id()
     }
 
     /// Future generation-tagged values which resolve only after publication.
+    #[cfg(not(feature = "kernel-self-test"))]
     pub(crate) fn values(&self) -> [HandleValue; N] {
         match self.reservation.as_ref() {
             Some(reservation) => reservation.values(),
@@ -657,6 +673,13 @@ impl ProcessHandleBatchReservation {
     }
 
     #[cfg(feature = "kernel-self-test")]
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        allow(
+            dead_code,
+            reason = "Used by the AArch64 Native self-tests; other HAL self-tests exercise different entry paths"
+        )
+    )]
     pub(crate) fn belongs_to(&self, process: &Process) -> bool {
         self.owner == process.id()
     }
@@ -680,12 +703,6 @@ impl Drop for ProcessHandleBatchReservation {
             process_invariant_violation();
         }
     }
-}
-
-#[must_use = "recover the in-transit handles from the failed publication"]
-pub(crate) struct HandleBatchPublishFailure {
-    pub(crate) error: ProcessError,
-    pub(crate) handles: InTransitCapabilities,
 }
 
 impl<const N: usize> Drop for ProcessHandleReservation<N> {

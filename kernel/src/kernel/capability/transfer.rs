@@ -63,16 +63,6 @@ impl InTransitCapabilities {
         let (handles, charge) = self.into_parts();
         (handles.into_prepared_handles(), charge)
     }
-
-    pub(crate) fn from_prepared_handles(
-        handles: Vec<PreparedHandle>,
-        storage_charge: CommittedCharge,
-    ) -> Self {
-        Self::new(
-            InTransitHandleBatch::from_prepared_handles(handles),
-            storage_charge,
-        )
-    }
 }
 
 impl Drop for InTransitCapabilities {
