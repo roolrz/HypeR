@@ -162,8 +162,7 @@ pub(crate) struct NotificationState {
     pub(crate) kicks: u32,
     pub(crate) status: u32,
 }
-pub(crate) const QUEUE_COUNT: u64 =
-    hyper::abi::native::HYPER_NATIVE_NATIVE_BLOCK_QUEUE_COUNT as u64;
+pub(crate) const QUEUE_COUNT: u64 = hyper::abi::native::HYPER_NATIVE_NATIVE_BLOCK_QUEUE_COUNT;
 
 impl NotificationState {
     pub(crate) const fn new() -> Self {
