@@ -128,7 +128,7 @@ impl FleetManager {
             }
         }
         if !has_boot_vm {
-            self.publish_boot_event(vm_contract::InstanceEvent::Stopped);
+            self.publish_boot_event(vm_contract::BootEvent::NoAutostart);
         }
         loop {
             self.observe_one_event()?;
@@ -774,7 +774,7 @@ impl FleetManager {
         Ok(())
     }
 
-    fn publish_boot_event(&self, event: vm_contract::InstanceEvent) {
+    fn publish_boot_event(&self, event: vm_contract::BootEvent) {
         if let Some(client) = self.clients[0].as_ref()
             && client.initial
         {
@@ -785,7 +785,7 @@ impl FleetManager {
     fn publish_initial_event(&mut self, vm: usize, event: vm_contract::InstanceEvent) {
         if self.initial_vm == Some(vm) {
             self.initial_vm = None;
-            self.publish_boot_event(event);
+            self.publish_boot_event(vm_contract::BootEvent::InstanceTerminated(event));
         }
     }
 

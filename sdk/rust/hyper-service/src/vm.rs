@@ -462,6 +462,33 @@ impl InstanceEvent {
     }
 }
 
+/// Completion of init's boot-time fleet supervision. No-autostart is not an
+/// instance termination; existing terminal event encodings remain unchanged.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BootEvent {
+    NoAutostart,
+    InstanceTerminated(InstanceEvent),
+}
+
+impl BootEvent {
+    #[must_use]
+    pub const fn encode(self) -> [u8; MESSAGE_BYTES] {
+        match self {
+            Self::NoAutostart => encode_message(KIND_INSTANCE_EVENT, 3, 0),
+            Self::InstanceTerminated(event) => event.encode(),
+        }
+    }
+
+    #[must_use]
+    pub fn decode(message: &[u8]) -> Option<Self> {
+        if decode_message(message, KIND_INSTANCE_EVENT)? == (3, 0) {
+            Some(Self::NoAutostart)
+        } else {
+            InstanceEvent::decode(message).map(Self::InstanceTerminated)
+        }
+    }
+}
+
 /// Pure reducer used by the manager to validate one runtime status stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct InstanceTracker {
@@ -578,14 +605,34 @@ fn decode_message(message: &[u8], expected_kind: u8) -> Option<(u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        INSTANCE_CONTROL_RIGHTS, InstanceCommand, InstanceEvent, InstanceFailure, InstanceStatus,
-        InstanceStopState, InstanceTracker, InvalidStatusTransition, MANAGED_IMAGE_RIGHTS,
-        ManagerConnectionRequest, PROVISIONED_CONFIG_RIGHTS, PROVISIONED_INSTANCE_CONTROL_RIGHTS,
-        ProvisionRequest, RUNTIME_CONSOLE_CONNECTION_CONTRACT, RUNTIME_CREATION_LEASE_CONTRACT,
-        RUNTIME_IMAGE_CONTRACT, RUNTIME_INSTANCE_CONTROL_CONTRACT, RUNTIME_STARTUP_CONTRACTS,
-        StopAction,
+        BootEvent, INSTANCE_CONTROL_RIGHTS, InstanceCommand, InstanceEvent, InstanceFailure,
+        InstanceStatus, InstanceStopState, InstanceTracker, InvalidStatusTransition,
+        MANAGED_IMAGE_RIGHTS, ManagerConnectionRequest, PROVISIONED_CONFIG_RIGHTS,
+        PROVISIONED_INSTANCE_CONTROL_RIGHTS, ProvisionRequest, RUNTIME_CONSOLE_CONNECTION_CONTRACT,
+        RUNTIME_CREATION_LEASE_CONTRACT, RUNTIME_IMAGE_CONTRACT, RUNTIME_INSTANCE_CONTROL_CONTRACT,
+        RUNTIME_STARTUP_CONTRACTS, StopAction,
     };
     use hyper_os::handle::Rights;
+
+    #[test]
+    fn boot_without_autostart_is_not_an_instance_termination() {
+        let message = BootEvent::NoAutostart.encode();
+        assert_eq!(BootEvent::decode(&message), Some(BootEvent::NoAutostart));
+        assert_eq!(InstanceEvent::decode(&message), None);
+        assert_eq!(InstanceStatus::decode(&message), None);
+        for event in [
+            InstanceEvent::Stopped,
+            InstanceEvent::Failed(InstanceFailure::Runtime),
+        ] {
+            assert_eq!(
+                BootEvent::decode(&event.encode()),
+                Some(BootEvent::InstanceTerminated(event))
+            );
+        }
+        let mut malformed = message;
+        malformed[7] = 1;
+        assert_eq!(BootEvent::decode(&malformed), None);
+    }
 
     #[test]
     fn reboot_is_terminal_only_after_running_and_requires_successful_exit() {

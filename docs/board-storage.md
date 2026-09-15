@@ -15,6 +15,13 @@ a different kernel or app ABI.
 The image builder creates an outer GPT with a 1 GiB FAT32 configuration volume
 and one opaque partition per configured VM. The configuration volume contains
 the boot payloads, `board.json`, `vms.json`, `volumes.json`, and guest ITBs.
+The I/O VM image lives only at `/vm/io.itb` inside `bootstrap.cpio`; no separate
+`/data/vm/io.itb` is packaged. Business guest images remain on the configuration
+volume.
+QEMU loads `bootstrap.cpio` directly from the host with `-initrd`, so its
+configuration volume omits this archive. Pi 5 firmware loads the archive from
+the FAT boot/configuration partition; that required boot file remains visible
+as `/data/bootstrap.cpio` after HypeR mounts the partition.
 VM partitions contain whole virtual disks: their first byte is the guest's
 sector zero, so a guest GPT is contained within that VM's volume.
 
@@ -43,6 +50,9 @@ a separate configuration archive to the Linux initramfs.
 
 The shell starts independently. An explicit readiness channel gates init's
 loading of `/data/vms.json` until the configuration filesystem is mounted.
+If no VM is configured for autostart, vm-manager reports `NoAutostart` to init;
+this completes boot supervision without claiming that a VM stopped. The I/O VM
+continues running under io-runtime independently.
 Guest lifecycle management remains in vm-manager and each guest's vm-runtime.
 The manager retains each disk session endpoint until the runtime reports its VM
 installed, then transfers it to the I/O broker through the supervisor wait set.
@@ -62,6 +72,10 @@ before releasing the old storage. A timeout or process exit is not proof that
 DMA has stopped.
 
 ## Build and run
+
+Interactive `make run` / `make board-run` uses QEMU's multiplexed serial console.
+Press `Ctrl+A`, then `X` to exit QEMU, or `Ctrl+A`, then `C` to switch to the
+QEMU monitor. `Ctrl+C` is passed to the guest.
 
 The image builder needs `mkfs.fat` from dosfstools and `mcopy` from mtools,
 in addition to the normal build prerequisites. It searches `PATH` first,

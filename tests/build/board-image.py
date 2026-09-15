@@ -35,33 +35,33 @@ class BoardTests(unittest.TestCase):
                              '/tools/mkfs.fat')
             run.assert_not_called()
 
-def test_image_tool_discovers_brew_sbin(self):
-    with tempfile.TemporaryDirectory() as tmp:
-        brew = Path(tmp) / "brew"
-        sbin = Path(tmp) / "sbin"
-        executable = sbin / "mkfs.fat"
+    def test_image_tool_discovers_brew_sbin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            brew = Path(tmp) / "brew"
+            sbin = Path(tmp) / "sbin"
+            executable = sbin / "mkfs.fat"
 
-        sbin.mkdir()
-        brew.touch()
-        executable.touch()
+            sbin.mkdir()
+            brew.touch()
+            executable.touch()
 
-        executable.chmod(0o755)
+            executable.chmod(0o755)
 
-        with patch.object(
-            packer.shutil, "which",
-            side_effect=lambda name: str(brew) if name == "brew" else None,
-        ), patch.object(packer.subprocess, "run") as run:
-            run.return_value.stdout = f"{tmp}\n"
+            with patch.object(
+                packer.shutil, "which",
+                side_effect=lambda name: str(brew) if name == "brew" else None,
+            ), patch.object(packer.subprocess, "run") as run:
+                run.return_value.stdout = f"{tmp}\n"
 
-            self.assertEqual(
-                packer.image_tool("mkfs.fat", "mkfs.fat", "dosfstools"),
-                str(executable),
-            )
+                self.assertEqual(
+                    packer.image_tool("mkfs.fat", "mkfs.fat", "dosfstools"),
+                    str(executable),
+                )
 
-            self.assertEqual(
-                run.call_args.args[0],
-                [str(brew), "--prefix", "dosfstools"],
-            )
+                self.assertEqual(
+                    run.call_args.args[0],
+                    [str(brew), "--prefix", "dosfstools"],
+                )
 
 
     def test_missing_explicit_tool_does_not_fall_back(self):
@@ -75,7 +75,7 @@ def test_image_tool_discovers_brew_sbin(self):
         source = copy.deepcopy(self.source)
         source['files']['vm/alpine.itb'] = 'custom'
         board = Board.parse(source)
-        defaults = ['hyper=kernel', 'bootstrap=initramfs', 'io-vm=io', 'alpine=unused']
+        defaults = ['hyper=kernel', 'bootstrap=initramfs', 'alpine=unused']
         actual = packer.artifact_inputs(board, defaults, ['custom=my-guest', 'hyper=my-kernel'])
         self.assertNotIn('alpine', actual)
         self.assertEqual(actual['custom'], Path('my-guest'))
@@ -93,6 +93,28 @@ def test_image_tool_discovers_brew_sbin(self):
             self.assertEqual(board.vms()['virtual-machines'][0]['image'], '/data/vm/alpine.itb')
             self.assertEqual(board.partitions[1].start, board.partitions[0].end + 1)
             self.assertNotEqual(board.partitions[0].identifier, board.partitions[1].identifier)
+
+    def test_configuration_payload_does_not_duplicate_io_vm(self):
+        for profile in ('qemu', 'rpi5'):
+            board = Board.load(ROOT / f'boards/{profile}.json')
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                artifacts = {}
+                for key in board.source['files'].values():
+                    artifacts[key] = root / key
+                    artifacts[key].write_bytes(key.encode())
+                payload = root / 'payload'
+                payload.mkdir()
+                packer.prepare_payload(board, artifacts, payload)
+                self.assertFalse((payload / 'vm/io.itb').exists())
+                self.assertEqual((payload / 'bootstrap.cpio').is_file(), profile == 'rpi5')
+                self.assertTrue((payload / 'vm/alpine.itb').is_file())
+
+    def test_rpi5_firmware_requires_bootstrap_archive(self):
+        source = json.loads((ROOT / 'boards/rpi5.json').read_text())
+        del source['files']['bootstrap.cpio']
+        with self.assertRaisesRegex(ValueError, 'missing boot profile payloads'):
+            Board.parse(source)
 
     def test_assignment_selector_is_explicit_and_unambiguous(self):
         for selector in ({'profile': 'virtio-mmio-scsi'},
@@ -156,7 +178,7 @@ def test_image_tool_discovers_brew_sbin(self):
             case = copy.deepcopy(self.source)
             case['disk']['config-mib'] = size
             cases.append(case)
-        for path in ('../escape', '/absolute', 'vm/../bad', 'VM/IO.ITB',
+        for path in ('../escape', '/absolute', 'vm/../bad', 'VM/ALPINE.ITB',
                      'vm', 'volumes.json', 'config.txt', 'x\\y', 'x/./y'):
             case = copy.deepcopy(self.source)
             case['files'][path] = 'artifact'

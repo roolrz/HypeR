@@ -11,8 +11,6 @@
   },
   "files": {
     "hyper.img": "hyper",
-    "bootstrap.cpio": "bootstrap",
-    "vm/io.itb": "io-vm",
     "vm/alpine.itb": "alpine"
   },
   "virtual-machines": [

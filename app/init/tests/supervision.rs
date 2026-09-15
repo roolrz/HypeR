@@ -3,11 +3,10 @@
 
 extern crate std;
 
-use hyper_service::vm::{InstanceEvent, InstanceFailure};
+use hyper_service::vm::{BootEvent, InstanceEvent, InstanceFailure};
 
 use super::{
-    SupportError, TerminationAction, instance_termination_action, service_termination_action,
-    validate,
+    SupportError, TerminationAction, boot_event_action, service_termination_action, validate,
 };
 use crate::manifest::parse;
 
@@ -68,11 +67,21 @@ fn termination_policy_keeps_noncritical_services_and_clean_vms_nonfatal() {
         TerminationAction::FailSystem
     );
     assert_eq!(
-        instance_termination_action(InstanceEvent::Stopped),
+        boot_event_action(BootEvent::InstanceTerminated(InstanceEvent::Stopped)),
         TerminationAction::Continue
     );
     assert_eq!(
-        instance_termination_action(InstanceEvent::Failed(InstanceFailure::Runtime)),
+        boot_event_action(BootEvent::InstanceTerminated(InstanceEvent::Failed(
+            InstanceFailure::Runtime
+        ))),
         TerminationAction::FailSystem
+    );
+}
+
+#[test]
+fn no_autostart_completes_boot_supervision_without_failing_init() {
+    assert_eq!(
+        boot_event_action(BootEvent::NoAutostart),
+        TerminationAction::Continue
     );
 }

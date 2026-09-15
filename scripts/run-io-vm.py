@@ -56,7 +56,7 @@ def main():
     command = [args.qemu, '-machine', os.environ.get('QEMU_MACHINE', 'virt,virtualization=on,gic-version=3'),
                '-cpu', os.environ.get('QEMU_CPU', 'max'), '-smp', os.environ.get('QEMU_CPUS', '4'),
                '-m', os.environ.get('QEMU_MEMORY', '512M'), '-nodefaults', '-display', 'none',
-               '-serial', 'stdio', '-monitor', 'none', '-nic', 'none', '-no-reboot',
+               '-serial', 'mon:stdio', '-nic', 'none', '-no-reboot',
                '-kernel', str(args.image), '-initrd', str(args.initramfs),
                '-append', os.environ.get('QEMU_BOOTARGS', 'earlycon=pl011,mmio32,0x09000000'),
                '-global', 'virtio-mmio.force-legacy=false',

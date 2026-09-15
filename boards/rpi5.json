@@ -14,7 +14,6 @@
     "bootstrap.cpio": "bootstrap",
     "bl31.bin": "tfa",
     "bcm2712-rpi-5-b.dtb": "host-dtb",
-    "vm/io.itb": "io-vm",
     "vm/alpine.itb": "alpine"
   },
   "virtual-machines": [
