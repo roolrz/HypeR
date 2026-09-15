@@ -21,12 +21,6 @@ static NEXT_TASK_GROUP_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TaskGroupId(u64);
 
-impl TaskGroupId {
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GroupPhase {
     Active,
@@ -72,6 +66,20 @@ pub(crate) enum TaskGroupError {
     CounterOverflow,
     GenerationExhausted,
     Inactive,
+    #[cfg_attr(
+        not(feature = "kernel-self-test"),
+        expect(
+            dead_code,
+            reason = "Explicit group retirement is exercised by kernel self-tests"
+        )
+    )]
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        allow(
+            dead_code,
+            reason = "Native lifecycle self-tests require a HAL with user execution support"
+        )
+    )]
     MembersRemain,
     Resource(ResourceError),
 }
@@ -236,6 +244,14 @@ impl TaskGroup {
         })
     }
 
+    #[cfg(feature = "kernel-self-test")]
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        allow(
+            dead_code,
+            reason = "Native lifecycle self-tests require a HAL with user execution support"
+        )
+    )]
     pub(crate) fn finish_retirement(&self) -> Result<(), TaskGroupError> {
         let mut current = self.inner.state.with(|state| {
             if state.phase == GroupPhase::Retired {

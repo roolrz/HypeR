@@ -354,15 +354,13 @@ CPUs. The production path mounts the firmware initramfs, validates and maps
 execution to the scheduler. Physical-hardware qualification remains necessary
 for guarantees that QEMU cannot establish.
 
-The kernel exposes one Native ABI. Linux and FreeBSD are initially isolated
-EL0 supervisor domains selected transactionally with the process image; foreign
-syscalls are not translated into Native syscall calls. The route may later add
-one separately audited whole-personality kernel engine, but may not split one
-personality syscall-by-syscall across two semantic owners.
+The kernel exposes one Native ABI. Linux currently participates as the trusted
+I/O VM described by the project roadmap. Foreign application personalities are
+not a delivery commitment and must not impose new requirements on Native paths.
 
-The complete object, capability, IPC, ABI, supervised-execution, AArch64 proof,
-and implementation contracts are normative in the [userspace and syscall
-architecture](syscall-abi.md).
+Native object, capability, IPC and ABI contracts are described in the
+[userspace and syscall architecture](syscall-abi.md). Its foreign-personality
+material is historical design exploration, not a prerequisite for Native work.
 
 ## Construction and publication
 

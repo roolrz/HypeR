@@ -7,8 +7,7 @@ mod handle_namespace;
 mod start;
 
 pub(crate) use handle_namespace::{
-    DirectProcessHandleTransferCommitFailure, HandleBatchPublishFailure, HandlePublishFailure,
-    HandleTransferCommitFailure, PreparedDirectProcessHandleTransfer, PreparedHandleConsumption,
+    HandlePublishFailure, PreparedDirectProcessHandleTransfer, PreparedHandleConsumption,
     PreparedProcessHandleTransfer, ProcessHandleBatchReservation, ProcessHandleReservation,
 };
 pub(crate) use start::{ChildProcessStartError, ProcessStartCoordinator, StartedChildProcess};
@@ -37,8 +36,7 @@ use crate::kernel::capability::{
     HandleSidecarPlan, HandleSnapshotPage, HandleTable, HandleTableStoragePlan,
     HandleTableStorageSnapshot, HandleTransferClaim, HandleTransferRequest, HandleTransferRoute,
     HandleTransferStorage, HandleValue, InTransitCapabilities, PreparedHandle, ResolvedObject,
-    ResolvedWaitable, RetiredDirectHandleTransfer, RetiredHandleBatchReservationStorage,
-    RetiredHandleTransferStorage, Rights,
+    ResolvedWaitable, RetiredDirectHandleTransfer, RetiredHandleBatchReservationStorage, Rights,
 };
 use crate::kernel::mm::user_space::{
     MachineError, MemoryObjectError, NativeAddressSpace, UserAddress, UserSlice,
@@ -309,7 +307,10 @@ pub(crate) enum ProcessError {
     Allocation,
     Handle(HandleError),
     Object(ObjectCreationError),
-    Lifecycle(LifecycleError),
+    Lifecycle(
+        #[expect(dead_code, reason = "Retains the cause for derived Debug diagnostics")]
+        LifecycleError,
+    ),
     UserMemory(MachineError),
     Resource(ResourceError),
     Scheduler(scheduler::Error),
@@ -368,13 +369,6 @@ pub(crate) struct ProcessCreateFailure {
 }
 
 impl ProcessCreateFailure {
-    pub(crate) fn error(&self) -> &ProcessError {
-        match self.error.as_ref() {
-            Some(error) => error,
-            None => process_invariant_violation(),
-        }
-    }
-
     /// Recovers both the error and the still-linear machine owner.
     pub(crate) fn into_parts(mut self) -> (ProcessError, UniqueFallibleArc<NativeAddressSpace>) {
         let error = match self.error.take() {
@@ -729,13 +723,6 @@ impl Process {
         }
     }
 
-    pub(super) fn object_publication(&self) -> ObjectPublication<ProcessObject> {
-        match self.inner.object.get() {
-            Some(object) => object.publication(),
-            None => process_invariant_violation(),
-        }
-    }
-
     /// Retains the native address-space owner while Process handle admission
     /// remains open.
     ///
@@ -773,6 +760,13 @@ impl Process {
         })
     }
 
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        allow(
+            dead_code,
+            reason = "Native lifecycle self-tests require a HAL with user execution support"
+        )
+    )]
     pub(crate) fn start(&self) -> Result<(), ProcessError> {
         self.inner.state.with(|state| state.lifecycle.start())?;
         Ok(())
@@ -807,6 +801,11 @@ impl Process {
             });
     }
 
+    #[cfg(feature = "kernel-self-test")]
+    #[allow(
+        dead_code,
+        reason = "Join helpers are consumed by architecture-specific Native self-tests"
+    )]
     pub(crate) fn join(&self) -> Result<TerminalReason, crate::kernel::sync::Error> {
         self.inner.stopped.wait()?;
         match self.snapshot().terminal {
@@ -815,6 +814,11 @@ impl Process {
         }
     }
 
+    #[cfg(feature = "kernel-self-test")]
+    #[allow(
+        dead_code,
+        reason = "Join helpers are consumed by architecture-specific Native self-tests"
+    )]
     pub(crate) fn try_join(&self) -> Option<TerminalReason> {
         if !self.inner.stopped.try_wait() {
             return None;
@@ -825,6 +829,13 @@ impl Process {
         }
     }
 
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        allow(
+            dead_code,
+            reason = "Used by the AArch64 Native self-tests; other HAL self-tests exercise different entry paths"
+        )
+    )]
     pub(crate) fn create_initial_user_thread(
         &self,
         name: &str,
@@ -1413,97 +1424,6 @@ impl Process {
                         Some(handles) => handles,
                         None => process_invariant_violation(),
                     },
-                })
-            }
-        }
-    }
-
-    // Boxing the error would add a fallible allocation precisely on rollback;
-    // the large variant is the linear owner required to preserve authority.
-    #[allow(clippy::result_large_err)]
-    pub(crate) fn publish_handle_batch(
-        &self,
-        mut reservation: ProcessHandleBatchReservation,
-        handles: InTransitCapabilities,
-    ) -> Result<(), HandleBatchPublishFailure> {
-        reservation.require_owner(self);
-        let (handles, storage_charge) = handles.into_prepared_handles();
-        let mut handles = Some(handles);
-        let mut storage_charge = Some(storage_charge);
-        let mut retired_reservation_storage = None;
-        let mut retired_charge_storage = None;
-        let result = self.inner.state.with(|state| {
-            if require_handle_phase(state.lifecycle.phase()).is_err() {
-                let token = match reservation.reservation.take() {
-                    Some(token) => token,
-                    None => process_invariant_violation(),
-                };
-                retired_reservation_storage =
-                    Some(self.inner.handles.with(|table| token.abort(table)));
-                return Err(ProcessError::Lifecycle(LifecycleError::AdmissionClosed));
-            }
-            let token = match reservation.reservation.take() {
-                Some(token) => token,
-                None => process_invariant_violation(),
-            };
-            let prepared = match handles.take() {
-                Some(handles) => handles,
-                None => process_invariant_violation(),
-            };
-            retired_reservation_storage = Some(
-                self.inner
-                    .handles
-                    .with(|table| token.publish(table, prepared)),
-            );
-            let mut charges = match reservation.handle_charges.take() {
-                Some(charges) => charges,
-                None => process_invariant_violation(),
-            };
-            let record = match reservation.record.take() {
-                Some(record) => record,
-                None => process_invariant_violation(),
-            };
-            record.state.with(|record_state| {
-                if record_state.entries.len() != charges.len() {
-                    process_invariant_violation();
-                }
-                for entry in record_state.entries.iter_mut().rev() {
-                    let charge = match charges.pop() {
-                        Some(charge) => charge,
-                        None => process_invariant_violation(),
-                    };
-                    entry.charge = Some(charge.commit());
-                }
-            });
-            install_handle_charge_record(state, record);
-            retired_charge_storage = Some(charges);
-            Ok(())
-        });
-        drop(retired_reservation_storage.take());
-        drop(retired_charge_storage.take());
-        drop(reservation.scratch_charge.take());
-        self.reclaim_handle_pages();
-        match result {
-            Ok(()) => {
-                drop(storage_charge.take());
-                Ok(())
-            }
-            Err(error) => {
-                drop(reservation.handle_charges.take());
-                drop(reservation.record.take());
-                let prepared = match handles.take() {
-                    Some(handles) => handles,
-                    None => process_invariant_violation(),
-                };
-                Err(HandleBatchPublishFailure {
-                    error,
-                    handles: InTransitCapabilities::from_prepared_handles(
-                        prepared,
-                        match storage_charge.take() {
-                            Some(charge) => charge,
-                            None => process_invariant_violation(),
-                        },
-                    ),
                 })
             }
         }

@@ -5,14 +5,16 @@ SPDX-License-Identifier: Apache-2.0
 
 # Userspace and syscall architecture
 
-This document defines the target boundary between the HypeR kernel and
-untrusted userspace. It is normative for new userspace, capability, process,
-IPC, and compatibility work. HypeR is pre-release, so no syscall number or
-binary layout described here carries a compatibility guarantee yet.
+This document describes the Native userspace boundary and records earlier
+compatibility design exploration. Native capability, process and IPC invariants
+remain applicable. Foreign ABI routing, restricted/supervisor execution,
+`SupervisionSession`, `TargetAddressSpace`, and Linux/FreeBSD application support
+are uncommitted design notes, not requirements on new Native code or promised
+implementation phases. Their prescriptive wording below is historical.
 
-The immediate goal is a native EL0 environment capable of hosting HypeR's VMM.
-The same boundary must later support Linux and FreeBSD application binaries
-without moving POSIX policy into architecture code or making Linux the host OS.
+The current integration goal is Native applications plus a trusted Linux I/O VM
+on Pi 5; see the [roadmap](../../docs/roadmap.md). HypeR is pre-release, so syscall
+numbers and binary layouts do not yet carry a release compatibility guarantee.
 
 ## Design goals
 
@@ -782,7 +784,7 @@ ancestors. Process, TaskGroup, and ResourceDomain metadata is charged to the
 parent domain. The kernel retains a separate emergency budget which untrusted
 domains cannot consume.
 
-## Foreign binary compatibility
+## Foreign binary compatibility (historical, non-normative)
 
 Foreign entry is not dispatched by substituting a Native syscall number or by
 nested Native dispatch. A compatibility supervisor implements the operation by
@@ -838,7 +840,7 @@ the authority source. This lets the supervisor service foreign pointers,
 faults, `mmap`, `clone`, signal frames, and exec without exposing supervisor
 pages or publishing incomplete restricted mappings.
 
-Compatibility implementation order is a small `TestCompat` personality first,
+The historical proposal started with a small `TestCompat` personality first,
 then Linux, then FreeBSD. `TestCompat` must use different syscall numbers,
 error encoding, restart behavior, initial stack, and vDSO selection to prove
 that Native assumptions have not leaked into the route. Linux validation later
@@ -990,7 +992,7 @@ goal on Pi 5; phase numbering here groups ABI work rather than setting priority.
 - qualify Native I/O and failure handling on Pi 5 before later IOMMU-backed
   untrusted-domain support.
 
-### Phase 6: foreign personalities
+### Historical proposal: foreign personalities (not scheduled)
 
 - implement a supervised `TestCompat` route, restricted/supervisor execution,
   session revocation, target-address-space operations, and atomic exec;

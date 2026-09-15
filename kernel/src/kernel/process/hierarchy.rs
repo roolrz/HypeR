@@ -12,6 +12,10 @@ use super::{Process, ProcessError, TaskFactory, TaskGroupObject, TaskObjectError
 
 #[derive(Debug)]
 pub(crate) enum Error {
+    #[allow(
+        dead_code,
+        reason = "Fallback status depends on selected HAL Native execution support"
+    )]
     NotSupported,
     Process(ProcessError),
     ResourceDomain(ResourceDomainObjectError),

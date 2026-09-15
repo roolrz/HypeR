@@ -12,5 +12,5 @@ pub(crate) use object::{ResourceDomainObject, ResourceDomainObjectError};
 
 pub(crate) use resource_domain::{
     ChargeReservation, CommittedCharge, ResourceAmount, ResourceDomain, ResourceDomainId,
-    ResourceError, ResourceKind, ResourceLimits, ResourceUsage, RetirementSnapshot,
+    ResourceError, ResourceKind, ResourceLimits,
 };

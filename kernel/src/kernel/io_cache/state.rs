@@ -38,6 +38,7 @@ pub(super) enum Access {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(test)]
 pub(super) struct Snapshot {
     pub(super) capacity: usize,
     pub(super) clean: usize,
@@ -183,6 +184,7 @@ impl State {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn snapshot(&self) -> Snapshot {
         let mut clean = 0;
         let mut loading = 0;

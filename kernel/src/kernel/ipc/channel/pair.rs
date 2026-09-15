@@ -179,16 +179,6 @@ impl Pair {
         release_messages(detached);
     }
 
-    pub(super) fn abort_write(&self, target: Side, expected: ByteMessageInfo) {
-        let detached = self.state.with(|state| {
-            let endpoint = &mut state.endpoints[target.index()];
-            release_reservation(endpoint, expected);
-            finalize_close(endpoint)
-        });
-        self.reconcile_all();
-        release_messages(detached);
-    }
-
     pub(super) fn peek(&self, side: Side) -> Result<ByteMessageInfo, ByteChannelError> {
         self.state.with(|state| {
             let endpoint = &state.endpoints[side.index()];

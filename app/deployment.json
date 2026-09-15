@@ -1,0 +1,314 @@
+{
+  "SPDX-FileCopyrightText": "2026 roolrz",
+  "SPDX-License-Identifier": "Apache-2.0",
+  "version": 1,
+  "entries": [
+    {
+      "binary": "hyper-init",
+      "staged": "init",
+      "destination": "init",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-session-service",
+      "staged": "session-service",
+      "destination": "svc/session",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-console-input",
+      "staged": "console-input",
+      "destination": "svc/console-input",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-console-output",
+      "staged": "console-output",
+      "destination": "svc/console-output",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-shell",
+      "staged": "sh",
+      "destination": "bin/sh",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-cat",
+      "staged": "cat",
+      "destination": "bin/cat",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-grep",
+      "staged": "grep",
+      "destination": "bin/grep",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-mv",
+      "staged": "mv",
+      "destination": "bin/mv",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-ln",
+      "staged": "ln",
+      "destination": "bin/ln",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-rm",
+      "staged": "rm",
+      "destination": "bin/rm",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-chmod",
+      "staged": "chmod",
+      "destination": "bin/chmod",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-cp",
+      "staged": "cp",
+      "destination": "bin/cp",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-mkdir",
+      "staged": "mkdir",
+      "destination": "bin/mkdir",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-rmdir",
+      "staged": "rmdir",
+      "destination": "bin/rmdir",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-touch",
+      "staged": "touch",
+      "destination": "bin/touch",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-echo",
+      "staged": "echo",
+      "destination": "bin/echo",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-ps",
+      "staged": "ps",
+      "destination": "bin/ps",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-handle",
+      "staged": "handle",
+      "destination": "bin/handle",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-ls",
+      "staged": "ls",
+      "destination": "bin/ls",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-free",
+      "staged": "free",
+      "destination": "bin/free",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-top",
+      "staged": "top",
+      "destination": "bin/top",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-vm-manager",
+      "staged": "vm-manager",
+      "destination": "svc/vm-manager",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-vm-runtime",
+      "staged": "vm-runtime",
+      "destination": "svc/vm-runtime",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-vmm",
+      "staged": "vmm",
+      "destination": "bin/vmm",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "binary": "hyper-io-runtime",
+      "staged": "io-runtime",
+      "destination": "svc/io-runtime",
+      "mode": "0755",
+      "profiles": [
+        "io"
+      ]
+    },
+    {
+      "source": "{apps}/echo-static",
+      "destination": "bin/echo-static",
+      "mode": "0755",
+      "profiles": [
+        "development"
+      ]
+    },
+    {
+      "source": "{apps}/dynamic-test",
+      "destination": "bin/dynamic-test",
+      "mode": "0755",
+      "profiles": [
+        "development"
+      ]
+    },
+    {
+      "source": "{std}/std-dynamic",
+      "destination": "bin/std-test",
+      "mode": "0755",
+      "profiles": [
+        "development"
+      ]
+    },
+    {
+      "source": "{std}/std-static",
+      "destination": "bin/std-test-static",
+      "mode": "0755",
+      "profiles": [
+        "development"
+      ]
+    },
+    {
+      "source": "{apps}/libdynamic-probe.so",
+      "destination": "lib/libdynamic-probe.so",
+      "mode": "0755",
+      "profiles": [
+        "development"
+      ]
+    },
+    {
+      "source": "{sdk}/lib/ld-hyper-{arch}.so",
+      "destination": "lib/ld-hyper-{arch}.so",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    },
+    {
+      "source": "{sdk}/lib/libhyper.so",
+      "destination": "lib/libhyper.so",
+      "mode": "0755",
+      "profiles": [
+        "system",
+        "development"
+      ]
+    }
+  ]
+}

@@ -93,7 +93,8 @@ impl PreparedByteMessage {
         })
     }
 
-    /// Test and kernel-internal convenience for copying an existing byte slice.
+    /// Copies an existing byte slice for bare-metal channel contract tests.
+    #[cfg(feature = "kernel-self-test")]
     pub(crate) fn try_copy_from(
         domain: &ResourceDomain,
         bytes: &[u8],

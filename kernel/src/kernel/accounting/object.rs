@@ -85,14 +85,6 @@ impl ResourceDomainObject {
     ) -> Result<ObjectPublication<Self>, ResourceDomainObjectError> {
         Self::try_publication(self.domain.try_new_child(limits)?)
     }
-
-    pub(crate) fn set_limits(
-        &self,
-        limits: ResourceLimits,
-    ) -> Result<(), ResourceDomainObjectError> {
-        self.domain.set_local_limits(limits)?;
-        Ok(())
-    }
 }
 
 impl private::Sealed for ResourceDomainObject {}

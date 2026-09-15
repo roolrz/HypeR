@@ -32,10 +32,22 @@ pub(crate) enum Error {
     Address,
     Allocation,
     Elf(hyper::exec::elf::Error),
-    Image(ImageError),
+    Image(
+        #[expect(
+            dead_code,
+            reason = "Retains image failure details for Debug diagnostics"
+        )]
+        ImageError,
+    ),
     Machine(MachineError),
     Resource(ResourceError),
-    Scheduler(crate::kernel::task::scheduler::Error),
+    Scheduler(
+        #[expect(
+            dead_code,
+            reason = "Retains scheduler failure details for Debug diagnostics"
+        )]
+        crate::kernel::task::scheduler::Error,
+    ),
     UnsupportedMachine,
 }
 

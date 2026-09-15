@@ -11,13 +11,22 @@ use crate::kernel::mm::user_space::UserAddress;
 pub(crate) enum MachineAbi {
     Aarch64,
     Riscv64,
+    #[expect(dead_code, reason = "x86 Native image loading is not implemented")]
     X86_64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AbiFamily {
     Native,
+    #[expect(
+        dead_code,
+        reason = "Reserved image-routing vocabulary; foreign loaders are not implemented"
+    )]
     Linux,
+    #[expect(
+        dead_code,
+        reason = "Reserved image-routing vocabulary; foreign loaders are not implemented"
+    )]
     FreeBsd,
 }
 
@@ -25,6 +34,10 @@ pub(crate) enum AbiFamily {
 pub(crate) enum ExecutionRoute {
     NativeKernel,
     /// The session is a stable diagnostic key, not authority.
+    #[expect(
+        dead_code,
+        reason = "Reserved image-routing vocabulary; foreign loaders are not implemented"
+    )]
     Supervised {
         session: SupervisionSessionId,
     },
@@ -32,16 +45,6 @@ pub(crate) enum ExecutionRoute {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SupervisionSessionId(NonZeroU64);
-
-impl SupervisionSessionId {
-    pub(crate) const fn new(value: NonZeroU64) -> Self {
-        Self(value)
-    }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0.get()
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ImageError {
@@ -113,7 +116,6 @@ impl UserThreadStart {
 pub(crate) struct ProcessImage {
     machine: MachineAbi,
     family: AbiFamily,
-    revision: u64,
     route: ExecutionRoute,
     entry: UserAddress,
     stack: UserAddress,
@@ -122,6 +124,14 @@ pub(crate) struct ProcessImage {
 }
 
 impl ProcessImage {
+    #[cfg(feature = "kernel-self-test")]
+    #[cfg_attr(
+        feature = "kernel-self-test",
+        allow(
+            dead_code,
+            reason = "Native lifecycle self-tests require a HAL with user execution support"
+        )
+    )]
     pub(crate) fn try_native(
         machine: MachineAbi,
         entry: UserAddress,
@@ -189,7 +199,6 @@ impl ProcessImage {
         Ok(Self {
             machine,
             family,
-            revision,
             route,
             entry,
             stack,
@@ -206,24 +215,8 @@ impl ProcessImage {
         self.family
     }
 
-    pub(crate) const fn revision(&self) -> u64 {
-        self.revision
-    }
-
     pub(crate) const fn route(&self) -> ExecutionRoute {
         self.route
-    }
-
-    pub(crate) const fn entry(&self) -> UserAddress {
-        self.entry
-    }
-
-    pub(crate) const fn stack(&self) -> UserAddress {
-        self.stack
-    }
-
-    pub(crate) const fn tls(&self) -> UserAddress {
-        self.tls
     }
 
     pub(crate) const fn auxiliary(&self) -> hyper::exec::startup::AuxiliaryValues {

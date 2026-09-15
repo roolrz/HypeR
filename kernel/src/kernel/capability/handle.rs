@@ -216,6 +216,13 @@ pub(crate) enum HandleTransferOperation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HandleTransferRoute {
     /// The transport may retain capability owners after the sender returns.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Keeps the rejection rule for transports that retain capability owners; exercised by host tests"
+        )
+    )]
     Buffered,
     /// The source and destination namespaces commit directly while paired.
     Rendezvous,
@@ -395,6 +402,7 @@ impl HandleTable {
         self.reservation_growth_for(N)
     }
 
+    #[cfg(test)]
     pub(crate) fn reservation_growth_for(&self, count: usize) -> Result<usize, HandleError> {
         self.ensure_active()?;
         validate_batch_count(count)?;
@@ -1579,10 +1587,12 @@ impl HandleTableLockOrder {
 /// A fully prepared direct source-to-destination capability commit.
 ///
 /// Source claims and destination slots remain unpublished until the caller
-/// holds the Process locks selected by `lock_order`. Both completion paths are
-/// allocation-free. Returned storage must be dropped only after those locks
-/// are released because rollback may release duplicate authority.
-#[must_use = "commit or roll back the direct handle transfer"]
+/// holds the Process locks selected by `lock_order`. Production constructs this
+/// owner only at the final, allocation-free commit point; earlier failures are
+/// rolled back by the Process preparation owners. Host tests can also roll back
+/// paired tables here. Returned storage must be dropped after releasing locks.
+#[cfg_attr(not(test), must_use = "commit the direct handle transfer")]
+#[cfg_attr(test, must_use = "commit or roll back the direct handle transfer")]
 pub(crate) struct DirectHandleTransfer {
     source: Option<HandleTransferClaim>,
     destination: Option<HandleBatchReservation>,
@@ -1616,10 +1626,12 @@ impl DirectHandleTransfer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn lock_order(&self) -> HandleTableLockOrder {
         self.lock_order
     }
 
+    #[cfg(test)]
     pub(crate) fn destination_values(&self) -> &[HandleValue] {
         match self.destination.as_ref() {
             Some(destination) => destination.values(),
@@ -1652,6 +1664,7 @@ impl DirectHandleTransfer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn rollback_between(
         mut self,
         source_table: &mut HandleTable,
@@ -1661,21 +1674,6 @@ impl DirectHandleTransfer {
             super::invariant_violation();
         }
         self.rollback_locked(source_table, destination_table)
-    }
-
-    pub(crate) fn rollback_within(
-        mut self,
-        table: &mut HandleTable,
-    ) -> RetiredDirectHandleTransfer {
-        if self.lock_order != HandleTableLockOrder::SameTable {
-            super::invariant_violation();
-        }
-        let source_storage = table.rollback_transfer(self.take_source());
-        let destination_storage = self.take_destination().abort(table);
-        RetiredDirectHandleTransfer {
-            _source: source_storage,
-            _destination: destination_storage,
-        }
     }
 
     fn commit_locked(
@@ -1694,6 +1692,7 @@ impl DirectHandleTransfer {
         }
     }
 
+    #[cfg(test)]
     fn rollback_locked(
         &mut self,
         source_table: &mut HandleTable,
@@ -1737,6 +1736,7 @@ pub(crate) struct InTransitHandleBatch {
 }
 
 impl InTransitHandleBatch {
+    #[cfg(test)]
     pub(crate) fn from_prepared_handles(handles: Vec<PreparedHandle>) -> Self {
         if handles.is_empty() {
             super::invariant_violation();
@@ -1760,6 +1760,7 @@ impl InTransitHandleBatch {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn release(self) {
         let mut retirement = ObjectRetirement::new();
         self.release_into(&mut retirement);
@@ -2118,6 +2119,7 @@ impl ResolvedWaitable {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn koid(&self) -> Koid {
         self.object.koid()
     }

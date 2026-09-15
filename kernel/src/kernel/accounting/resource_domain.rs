@@ -73,10 +73,6 @@ impl ResourceDomainId {
             }
         }
     }
-
-    pub(crate) const fn get(self) -> u64 {
-        self.0
-    }
 }
 
 /// Independently limited resource dimensions.
@@ -245,6 +241,7 @@ impl Iterator for ResourceAmountEntries<'_> {
 struct ResourceVector([u64; RESOURCE_KIND_COUNT]);
 
 impl ResourceVector {
+    #[cfg_attr(not(test), cfg(feature = "kernel-self-test"))]
     const ZERO: Self = Self([0; RESOURCE_KIND_COUNT]);
 
     const fn get(self, kind: ResourceKind) -> u64 {
@@ -281,11 +278,13 @@ impl Default for ResourceLimits {
 /// pending/committed split conservatively stale, so that split is diagnostic;
 /// admission and local-limit changes use `total` under the control lock.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(not(test), cfg(feature = "kernel-self-test"))]
 pub(crate) struct ResourceUsage {
     total: ResourceVector,
     pending: ResourceVector,
 }
 
+#[cfg_attr(not(test), cfg(feature = "kernel-self-test"))]
 impl ResourceUsage {
     pub(crate) fn committed(self, kind: ResourceKind) -> u64 {
         match self.total.get(kind).checked_sub(self.pending.get(kind)) {
@@ -294,6 +293,7 @@ impl ResourceUsage {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn pending(self, kind: ResourceKind) -> u64 {
         self.pending.get(kind)
     }
@@ -322,24 +322,57 @@ pub(crate) enum ResourceError {
         domain: ResourceDomainId,
         resource: ResourceKind,
     },
+    #[cfg_attr(
+        not(test),
+        cfg_attr(
+            not(feature = "kernel-self-test"),
+            expect(
+                dead_code,
+                reason = "Limit updates currently have only contract-test consumers"
+            )
+        )
+    )]
     LimitBelowUsage {
         domain: ResourceDomainId,
         resource: ResourceKind,
         limit: u64,
         used: u64,
     },
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Resource-domain administrative retirement is host-tested but not wired into production policy"
+        )
+    )]
     OutstandingUsage,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Resource-domain administrative retirement is host-tested but not wired into production policy"
+        )
+    )]
     ActiveChildren,
     ChildCountExhausted,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Resource-domain administrative retirement is host-tested but not wired into production policy"
+        )
+    )]
     RetirementNotStarted,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(test)]
 pub(crate) struct RetirementSnapshot {
     pub(crate) usage: ResourceUsage,
     pub(crate) active_children: usize,
 }
 
+#[cfg(test)]
 impl RetirementSnapshot {
     pub(crate) fn is_quiescent(self) -> bool {
         self.active_children == 0
@@ -358,7 +391,21 @@ impl From<AllocationError> for ResourceError {
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum DomainLifecycle {
     Active,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Resource-domain administrative retirement is host-tested but not wired into production policy"
+        )
+    )]
     Retiring,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Resource-domain administrative retirement is host-tested but not wired into production policy"
+        )
+    )]
     Retired,
 }
 
@@ -370,7 +417,8 @@ struct DomainControl {
 struct DomainInner {
     id: ResourceDomainId,
     parent: Option<ResourceDomain>,
-    metadata_charge: Option<CommittedCharge>,
+    // Owns the metadata quota until this domain is dropped.
+    _metadata_charge: Option<CommittedCharge>,
     depth: usize,
     control: DomainLock<DomainControl>,
     active_children: AtomicUsize,
@@ -428,7 +476,7 @@ impl ResourceDomain {
         let inner = DomainInner {
             id: ResourceDomainId::allocate()?,
             parent: None,
-            metadata_charge: None,
+            _metadata_charge: None,
             depth: 0,
             control: DomainLock::new(DomainControl {
                 limits,
@@ -477,7 +525,7 @@ impl ResourceDomain {
         let inner = DomainInner {
             id,
             parent: Some(self.clone()),
-            metadata_charge: Some(metadata_charge),
+            _metadata_charge: Some(metadata_charge),
             depth,
             control: DomainLock::new(DomainControl {
                 limits,
@@ -508,6 +556,7 @@ impl ResourceDomain {
         self.inner.id
     }
 
+    #[cfg(test)]
     pub(crate) fn parent_id(&self) -> Option<ResourceDomainId> {
         self.inner.parent.as_ref().map(Self::id)
     }
@@ -535,6 +584,7 @@ impl ResourceDomain {
         })
     }
 
+    #[cfg_attr(not(test), cfg(feature = "kernel-self-test"))]
     pub(crate) fn usage(&self) -> ResourceUsage {
         self.inner.control.with(|_| ResourceUsage {
             total: load_total_counters(&self.inner.total),
@@ -542,6 +592,7 @@ impl ResourceDomain {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn local_limits(&self) -> ResourceLimits {
         self.inner.control.with(|control| control.limits)
     }
@@ -569,6 +620,7 @@ impl ResourceDomain {
     /// Child ceilings may exceed an ancestor ceiling: the effective limit is
     /// the minimum remaining capacity along the path. This permits a parent
     /// policy to tighten or relax without rewriting every descendant.
+    #[cfg_attr(not(test), cfg(feature = "kernel-self-test"))]
     pub(crate) fn set_local_limits(&self, limits: ResourceLimits) -> Result<(), ResourceError> {
         self.inner.control.with(|control| {
             if control.lifecycle != DomainLifecycle::Active {
@@ -595,6 +647,13 @@ impl ResourceDomain {
     ///
     /// Descendant reservations visit this node and therefore observe the same
     /// cutoff. Reservations admitted before the cutoff remain committable.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Resource-domain administrative retirement is host-tested but not wired into production policy"
+        )
+    )]
     pub(crate) fn begin_retirement(&self) -> Result<(), ResourceError> {
         self.inner.control.with(|control| match control.lifecycle {
             DomainLifecycle::Active => {
@@ -606,6 +665,7 @@ impl ResourceDomain {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn retirement_snapshot(&self) -> Result<RetirementSnapshot, ResourceError> {
         self.inner.control.with(|control| {
             if control.lifecycle == DomainLifecycle::Active {
@@ -622,6 +682,13 @@ impl ResourceDomain {
     }
 
     /// Publishes terminal retirement only after sponsored ownership drains.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Resource-domain administrative retirement is host-tested but not wired into production policy"
+        )
+    )]
     pub(crate) fn finish_retirement(&self) -> Result<(), ResourceError> {
         self.inner.control.with(|control| {
             match control.lifecycle {
@@ -760,6 +827,7 @@ impl<'domain> DomainPath<'domain> {
     }
 }
 
+#[cfg_attr(not(test), cfg(feature = "kernel-self-test"))]
 fn load_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT]) -> ResourceVector {
     let mut amount = ResourceVector::ZERO;
     for kind in ResourceKind::ALL {
@@ -768,6 +836,7 @@ fn load_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT]) -> ResourceVector 
     amount
 }
 
+#[cfg_attr(not(test), cfg(feature = "kernel-self-test"))]
 fn load_total_counters(counters: &[AtomicU64; RESOURCE_KIND_COUNT]) -> ResourceVector {
     let mut amount = ResourceVector::ZERO;
     for kind in ResourceKind::ALL {
@@ -815,6 +884,7 @@ pub(crate) struct ChargeReservation {
 }
 
 impl ChargeReservation {
+    #[cfg(test)]
     pub(crate) fn domain_id(&self) -> ResourceDomainId {
         match self.domain.as_ref() {
             Some(domain) => domain.id(),
@@ -822,6 +892,7 @@ impl ChargeReservation {
         }
     }
 
+    #[cfg(test)]
     pub(crate) const fn amount(&self) -> ResourceAmount {
         self.amount
     }
@@ -844,6 +915,7 @@ impl ChargeReservation {
     }
 
     /// Explicitly restores pending quota before returning.
+    #[cfg(test)]
     pub(crate) fn abort(mut self) {
         let domain = match self.domain.as_ref() {
             Some(domain) => domain,
@@ -894,10 +966,12 @@ impl CommittedCharge {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn domain_id(&self) -> ResourceDomainId {
         self.domain.id()
     }
 
+    #[cfg(test)]
     pub(crate) const fn amount(&self) -> ResourceAmount {
         self.amount
     }
@@ -909,6 +983,7 @@ impl CommittedCharge {
     /// exactly once. This permits resources which grow incrementally, such as
     /// sparse machine address spaces, to retain one bounded accounting owner
     /// rather than allocating one owner per page.
+    #[cfg(test)]
     pub(crate) fn try_extend(&mut self, additional: ResourceAmount) -> Result<(), ResourceError> {
         if additional.overflowed() {
             return Err(ResourceError::TooManyChargeDimensions);
