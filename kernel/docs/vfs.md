@@ -56,9 +56,8 @@ rights even when the initial mode is zero. `SET_ATTRIBUTES` and `LOCK_FILE`
 are separate rights from data access.
 
 Native reads and writes use explicit offsets; append selects the current end under
-the same per-file lock that commits the write. Shared offsets, file descriptors, credentials,
-and POSIX path policy belong to a Linux or FreeBSD personality rather than this
-Native API.
+the same per-file lock that commits the write. SDK file objects may maintain their own offsets. Unix file-descriptor tables,
+credentials and POSIX path semantics are not implied by this Native API.
 
 The namespace strongly owns mounted filesystems. Directory and File objects
 hold the namespace view and the resolved mount/node location needed to keep an

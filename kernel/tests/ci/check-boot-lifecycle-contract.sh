@@ -76,8 +76,13 @@ if LC_ALL=C rg -q 'crate::kernel::vm::start_default\(' "$fixture/start-kernel.rs
     exit 1
 fi
 
-require 'pub\(crate\) fn seal_address_space\(\)[^{]*\{[[:space:]]*stack::serialize_stage1_mutation\(\|\| \{' \
+require 'pub\(crate\) fn seal_address_space\(\)[^{]*\{[^}]*stack::serialize_stage1_mutation\(\|\| \{' \
     src/kernel/mm/mod.rs 'address-space sealing must share the runtime stage-1 mutation lock'
+require 'frozen_topology\(\)\.ok_or\(FinalizationError::CpuTopologyUnavailable\)\?;' \
+    src/kernel/mm/mod.rs 'address-space sealing must reject missing frozen topology'
+require_order src/kernel/mm/mod.rs 'frozen_topology\(\)\.ok_or\(FinalizationError::CpuTopologyUnavailable' \
+    'stack::serialize_stage1_mutation' \
+    'topology validation must precede identity-mapping mutation'
 require 'PARTICIPATING_CPU_COUNT[[:space:]]*\.compare_exchange\([[:space:]]*0,[[:space:]]*next_cpu_index,[[:space:]]*Ordering::Release' \
     src/kernel/cpu/smp.rs 'SMP must release-publish its immutable participating CPU count'
 require 'pub\(crate\) fn frozen_topology\(\) -> Option<FrozenTopology>' \

@@ -129,7 +129,7 @@ pub(super) fn sys_handle_replace(
 
 #[inline(never)]
 pub(super) fn sys_handle_get_info(
-    services: &impl ImmediateServices,
+    services: &(impl HandleServices + super::services::UserMemoryServices),
     arguments: &Arguments,
 ) -> NativeResult {
     let result = prepare_info_request(
@@ -150,7 +150,7 @@ pub(super) fn sys_handle_get_info(
 
 #[inline(never)]
 pub(super) fn sys_object_get_basic_info(
-    services: &impl ImmediateServices,
+    services: &(impl HandleServices + super::services::UserMemoryServices),
     arguments: &Arguments,
 ) -> NativeResult {
     let result = prepare_info_request(

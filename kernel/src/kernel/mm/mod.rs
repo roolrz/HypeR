@@ -33,6 +33,7 @@ pub(crate) enum InitializationError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FinalizationError {
+    CpuTopologyUnavailable,
     IdentityMappings(memory::Error),
     MemoryProtection,
 }
@@ -92,6 +93,9 @@ pub(crate) fn activate_local_allocator_caches() -> Result<(), InitializationErro
 
 /// Removes bootstrap-only mappings and reports the permanent memory layout.
 pub(crate) fn seal_address_space() -> Result<(), FinalizationError> {
+    // CPU admission publishes this only after every participant has left its
+    // physical trampoline. Reject early callers before any mapping mutation.
+    super::cpu::frozen_topology().ok_or(FinalizationError::CpuTopologyUnavailable)?;
     stack::serialize_stage1_mutation(|| {
         super::boot::with_boot_state(|state| {
             // SAFETY: SMP initialization moved the frozen participating set to
