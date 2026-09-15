@@ -89,7 +89,15 @@ probes. The I/O service is included by the existing I/O/board boot profiles.
 Changing image membership does not delete applications or their capabilities.
 Packaging still copies ELF files before stripping only debug information and
 preserves unchanged output timestamps. Use a separate `NATIVE_INITRAMFS` or
-`BOARD_OUTPUT` when comparing profiles; existing disks are never reformatted.
+`BOARD_OUTPUT` when comparing profiles.
+
+On AArch64, plain `make` (or `make all`) rebuilds the board disk with current
+guest artifacts and resets all data in that disk. Packing completes in a
+temporary file before atomically replacing `BOARD_IMAGE`; a failed build keeps
+the previous disk intact. `make board-rebuild` explicitly requests the same
+behavior. `make run` reuses an existing disk and creates one only if missing.
+`make board-image` still refuses an existing output. On other architectures,
+plain `make` continues to build the kernel image.
 
 GitHub Actions separates source quality, architecture builds, image contracts,
 Native SDK integration, and runtime acceptance. The AArch64 matrix exercises
@@ -101,10 +109,8 @@ same static/dynamic std, process, thread, filesystem, shell and userspace Linux
 VM contracts on one and four harts. A separate `make test-vm-smoke ARCH=riscv64`
 init fixture validates Native VM lifecycle, timer/serial WFI wakeups and
 retirement independently of Linux loading.
-Linux acceptance explicitly attaches `/bin/vmm` to the buffered guest serial port, requires
-repeated initramfs timer wakeups, exercises guest-console RX, and detaches
-through the local Ctrl-] menu. Reaching `/init` or delivering only the first
-timer interrupt therefore cannot hide a stalled virtual timer. Both Native
+Linux acceptance explicitly attaches `/bin/vmm` to the buffered guest serial port, exercises guest-console RX, and detaches
+through the local Ctrl-] menu. Both Native
 integration suites also verify named VM isolation and repeated runtime crashes
 with guest-memory reclamation. x86-64 has a build and image contract only.
 

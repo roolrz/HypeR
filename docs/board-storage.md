@@ -91,6 +91,14 @@ make board-image BOARD=qemu
 make board-run BOARD=qemu
 ```
 
+Plain AArch64 `make` also creates the complete board image and atomically
+replaces an existing disk, resetting its data; `make run` preserves the disk.
+The Alpine volume is initialized from the pinned base rootfs as an ext4 disk.
+Alpine boots it through I/O VM virtio-scsi; `apk` and BusyBox tools are included.
+Rootfs generation additionally requires e2fsprogs and squashfs-tools (Homebrew:
+`brew install e2fsprogs squashfs`). Run `make test-alpine-rootfs` for a disposable
+root-disk boot and persistence test.
+
 The default imports the digest-pinned appliance. `IO_VM_PACKAGE` optionally
 selects a complete verified local generation.
 When importing an uncached package, the fetcher uses ORAS from `PATH` or
@@ -110,14 +118,15 @@ overwrite an existing image. To create another generation, choose a new output
 name; rebuilding applications must not silently erase persistent disk contents.
 AArch64 `make run` selects this QEMU deployment profile. On first use,
 `board-run` creates the configured image only if its output does not exist;
-the image publisher still refuses replacement. Existing images must pass GPT
+`board-image` refuses replacement unless the default build explicitly requests it. Existing images must pass GPT
 validation against the selected configuration. QEMU uses the freshly built kernel/bootstrap
 while persistent files and VM images remain those stored on the disk.
 
-An optional VM `disk-image` names an explicit `--artifact NAME=PATH` input. It
-must exactly match the declared volume size, preserving any guest backup GPT.
-Without this input, the newly created VM disk is blank. Additional deployment
-inputs can be passed through `BOARD_ARTIFACTS`.
+An optional VM `disk-image` names a disk artifact. The default board profiles
+select `alpine-rootfs`, generated from the pinned Alpine rootfs and sized to the
+volume. Custom inputs use `BOARD_ARTIFACTS="--artifact NAME=PATH"` and must
+exactly match the declared volume size, preserving any guest backup GPT.
+Without `disk-image`, the newly created VM disk is blank.
 
 `make test-board-storage IO_VM_PACKAGE=/path/to/verified/appliance` creates an
 isolated disk under `target/board-tests/` and boots it twice. Its test-only
