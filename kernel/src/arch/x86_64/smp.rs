@@ -112,14 +112,14 @@ pub fn mark_current_cpu_online() {
 pub(super) fn for_each_online_remote_cpu(current: CpuIndex, mut visit: impl FnMut(CpuIndex, u32)) {
     for index in 0..MAX_CPUS {
         let Some(cpu) = CpuIndex::new(index) else {
-            super::halt()
+            hyper::debug::invariant_failure("x86_64/smp::for_each_online_remote_cpu invariant")
         };
         if cpu == current || !ONLINE[index].load(Ordering::Acquire) {
             continue;
         }
         let hardware_id = APIC_IDS[index].load(Ordering::Acquire);
         let Ok(apic_id) = u32::try_from(hardware_id) else {
-            super::halt()
+            hyper::debug::invariant_failure("x86_64/smp::for_each_online_remote_cpu invariant")
         };
         visit(cpu, apic_id);
     }

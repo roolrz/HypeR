@@ -185,7 +185,7 @@ impl Registration {
 
     fn disarm(&mut self) {
         if !self.armed {
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure("irq::interrupt::disarm invariant")
         }
         self.armed = false;
     }
@@ -205,9 +205,9 @@ impl Drop for Registration {
     fn drop(&mut self) {
         if self.armed {
             // Destruction can run under an arbitrary lock and interrupt-mask
-            // state. Do not attempt implicit unregistration or diagnostics;
-            // either could deadlock while the live callback loses its owner.
-            crate::hal::cpu::halt()
+            // state. Do not release callbacks or use ordinary logs; the panic handler
+            // reports without unwinding the live callback owner.
+            hyper::debug::invariant_failure("irq::interrupt::drop invariant")
         }
     }
 }

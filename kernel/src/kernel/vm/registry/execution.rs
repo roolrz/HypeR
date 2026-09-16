@@ -345,7 +345,7 @@ impl VmBinding {
         if claim.residency.is_some() {
             // Architecture detach must consume guest residency before the
             // execution/admission capability can cross this release boundary.
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure("vm::registry::execution::release_execution invariant")
         }
         let VmExecutionClaim {
             execution,
@@ -409,7 +409,7 @@ impl VmExecutionClaim {
         residency: crate::kernel::vm::memory::GuestResidencyClaim,
     ) {
         if self.residency.replace(residency).is_some() {
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure("vm::registry::execution::restore_residency invariant")
         }
     }
 }

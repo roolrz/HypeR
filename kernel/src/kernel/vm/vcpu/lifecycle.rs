@@ -4,7 +4,6 @@
 //! Administrative lifecycle completion for inactive vCPU continuations.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(dead_code)]
 pub(crate) enum DetachedStopError {
     InvalidExecution,
     MissingBinding,
@@ -24,7 +23,6 @@ pub(crate) enum DetachedStopError {
 /// `current` must be the scheduler's newly reobserved exact current vCPU. Its
 /// active-vCPU publication and architecture hardware must be detached, its VM
 /// execution claim released, and local interrupts must remain masked.
-#[allow(dead_code)]
 pub(crate) unsafe fn complete_detached_stop_if_requested(
     current: crate::kernel::task::scheduler::CurrentVcpu,
 ) -> Result<bool, DetachedStopError> {

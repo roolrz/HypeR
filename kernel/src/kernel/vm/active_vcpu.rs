@@ -124,8 +124,9 @@ pub unsafe fn set_raw(
     compiler_fence(Ordering::Release);
     if let Err(error) = ACTIVE[cpu].publish(execution) {
         // SAFETY: publication failed and the same local masked CPU still owns the slot.
-        let owner =
-            unsafe { OWNERSHIP[cpu].take(execution) }.unwrap_or_else(|| crate::hal::cpu::halt());
+        let owner = unsafe { OWNERSHIP[cpu].take(execution) }.unwrap_or_else(|| {
+            hyper::debug::invariant_failure("vm::active_vcpu::set_raw invariant")
+        });
         return Err(PublicationFailure::new(
             match error {
                 AtomicBorrowError::Active => Error::CpuAlreadyActive,
@@ -161,7 +162,8 @@ pub fn clear(
     compiler_fence(Ordering::Acquire);
     let pointer = NonNull::from(&mut *execution);
     // SAFETY: unpublication succeeded on this same IRQ-masked CPU.
-    let owner = unsafe { OWNERSHIP[cpu].take(pointer) }.unwrap_or_else(|| crate::hal::cpu::halt());
+    let owner = unsafe { OWNERSHIP[cpu].take(pointer) }
+        .unwrap_or_else(|| hyper::debug::invariant_failure("vm::active_vcpu::clear invariant"));
     Ok(owner.claim)
 }
 
@@ -189,7 +191,7 @@ impl Drop for PublicationFailure {
         if self.claim.is_some() {
             // Dropping a failed publication would abandon exclusive VM and
             // CPU-residency ownership without architecture teardown.
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure("vm::active_vcpu::drop invariant")
         }
     }
 }
@@ -290,9 +292,9 @@ fn fail_borrow_completion(error: Error) -> ! {
     // Continuing could expose a second mutable reference to the pinned vCPU.
     // Halt without unwinding so both the Borrowed state and its preemption pin
     // remain retained. This path may inherit arbitrary callback lock state, so
-    // it must not allocate, log, or enter coordinated crash machinery.
+    // only the allocation-free, ordinary-lock-free panic path is safe.
     let _ = error;
-    crate::hal::cpu::halt()
+    hyper::debug::invariant_failure("vm::active_vcpu::fail_borrow_completion invariant")
 }
 
 fn ensure_interrupts_masked() -> Result<(), Error> {

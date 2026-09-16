@@ -840,10 +840,7 @@ fn rollback_or_fail_stop(mut instance: Box<dyn DriverInstance>) {
 }
 
 fn ownership_violation() -> ! {
-    // This architecture-neutral crate cannot enter kernel crash policy. The
-    // loop is reserved for impossible linear-ownership violations and must not
-    // acquire locks, allocate, or discard the live owner on its stack.
-    loop {
-        core::hint::spin_loop();
-    }
+    // The binary panic handler owns crash policy. Keep the live owner on
+    // this stack: no ordinary locks, allocation, or unwinding is permitted.
+    crate::debug::invariant_failure("platform device ownership invariant")
 }

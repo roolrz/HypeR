@@ -218,7 +218,7 @@ require src/kernel/vm/endpoint_state.rs \
     '(?s)STOP_REQUESTED.*HARDWARE_DETACHED.*REAPED.*publish_hardware_detached.*publish_reaped' \
     'administrative endpoint lifecycle must retain explicit one-way phases'
 require src/kernel/vm/memory.rs \
-    '(?s)impl Drop for GuestAddressSpace.*destruction_is_safe\(state\).*crate::hal::cpu::halt\(\)' \
+    '(?s)impl Drop for GuestAddressSpace.*destruction_is_safe\(state\).*hyper::debug::invariant_failure\(' \
     'active guest address-space destruction must fail-stop before owned fields are dropped'
 require_order "$fixture/vmid-activate.rs" 'activation_may_begin\(state\)' \
     'mem::replace' \

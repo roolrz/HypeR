@@ -52,14 +52,14 @@ pub(super) fn current_cpu_is_compatible() -> bool {
 pub(super) fn frozen() -> GuestCpuModel {
     match load_frozen() {
         Some(model) => model,
-        None => super::halt(),
+        None => hyper::debug::invariant_failure("aarch64/guest_cpu_model::frozen invariant"),
     }
 }
 
 /// Returns the frozen processor identity without loading the remaining model.
 pub(super) fn processor_identity() -> u64 {
     if STATE.load(Ordering::Acquire) != READY {
-        super::halt()
+        hyper::debug::invariant_failure("aarch64/guest_cpu_model::processor_identity invariant")
     }
     VALUES[0].load(Ordering::Relaxed)
 }

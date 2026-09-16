@@ -361,7 +361,7 @@ impl ThreadReservation {
 
     pub fn disarm(&mut self) {
         if !self.armed {
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure("task::scheduler::registry::disarm invariant")
         }
         self.armed = false;
     }
@@ -370,7 +370,7 @@ impl ThreadReservation {
 impl Drop for ThreadReservation {
     fn drop(&mut self) {
         if self.armed {
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure("task::scheduler::registry::drop invariant")
         }
     }
 }
@@ -817,6 +817,6 @@ impl ThreadRegistry {
 
 fn registry_invariant() -> ! {
     // Registry corruption is observed while the scheduler lock is held. Do
-    // not enter diagnostics which could reacquire scheduler-adjacent locks.
-    crate::hal::cpu::halt()
+    // not use ordinary diagnostics that reacquire scheduler-adjacent locks.
+    hyper::debug::invariant_failure("task::scheduler::registry::registry_invariant invariant")
 }

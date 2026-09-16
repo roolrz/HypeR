@@ -204,7 +204,8 @@ impl<Charge> Clone for VmarRecord<Charge> {
 
 struct MappingSet<Backend: PageBackend, Account: MemoryAccount> {
     records: Vec<Mapping<Backend, Account>>,
-    storage_charge: Option<Account::Charge>,
+    // Retains metadata quota until the complete mapping set is dropped.
+    _storage_charge: Option<Account::Charge>,
 }
 
 struct VmarSet<Account: MemoryAccount> {
@@ -277,7 +278,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             .map_err(AddressSpaceError::Account)?;
         let mappings = FallibleArc::try_new(MappingSet {
             records: Vec::new(),
-            storage_charge: Some(mapping_set_charge),
+            _storage_charge: Some(mapping_set_charge),
         })
         .map_err(|_| AddressSpaceError::Allocation)?;
         let vmar_set_charge = account
@@ -662,7 +663,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         }
         let replacement = FallibleArc::try_new(MappingSet {
             records: replacement,
-            storage_charge,
+            _storage_charge: storage_charge,
         })
         .map_err(|_| AddressSpaceError::Allocation)?;
         let epoch = snapshot
@@ -810,7 +811,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         sort_mappings(&mut replacement);
         let replacement = FallibleArc::try_new(MappingSet {
             records: replacement,
-            storage_charge,
+            _storage_charge: storage_charge,
         })
         .map_err(|_| AddressSpaceError::Allocation)?;
         PreparedMappingChange::new(
@@ -950,7 +951,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         drop(ownership_storage_charge);
         let replacement = FallibleArc::try_new(MappingSet {
             records: replacement,
-            storage_charge,
+            _storage_charge: storage_charge,
         })
         .map_err(|_| AddressSpaceError::Allocation)?;
         PreparedMappingChange::new(
@@ -964,6 +965,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn mapping_snapshot(
         &self,
         token: MappingToken,
@@ -1413,9 +1415,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
 
 #[cold]
 fn address_space_invariant_violation() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    hyper::debug::invariant_failure("user address space invariant")
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -1568,6 +1568,10 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
     }
 
     #[cfg(any(test, feature = "kernel-self-test"))]
+    #[allow(
+        dead_code,
+        reason = "shared test helper; hardware coverage is architecture-dependent"
+    )]
     pub(crate) fn commit_for_test(
         self,
     ) -> Result<
@@ -1634,6 +1638,10 @@ impl<Backend: PageBackend, Account: MemoryAccount> CommittedMappingChange<Backen
     }
 
     #[cfg(any(test, feature = "kernel-self-test"))]
+    #[allow(
+        dead_code,
+        reason = "shared test helper; hardware coverage is architecture-dependent"
+    )]
     pub(crate) unsafe fn complete_retirement_for_test(mut self) {
         // SAFETY: Test callers model the required acknowledged quiescence.
         unsafe { ManuallyDrop::drop(&mut self.retired) };

@@ -49,7 +49,7 @@ pub(crate) unsafe fn activate(
             // The residency capability becomes part of the exact composite VM
             // execution claim before any later fallible activation step.
             if let Err(_residency) = claim.attach_residency(residency) {
-                crate::hal::cpu::halt()
+                hyper::debug::invariant_failure("vm::vcpu::transition::activate invariant")
             }
         }
         // Clear publication before acquiring the controller lock. A producer
@@ -389,13 +389,17 @@ fn restore_reconcile_if_claimed(execution: &super::VcpuExecution, claimed: bool)
         return;
     }
     let Some(binding) = execution.vm_binding() else {
-        crate::hal::cpu::halt()
+        hyper::debug::invariant_failure(
+            "vm::vcpu::transition::restore_reconcile_if_claimed invariant",
+        )
     };
     if binding
         .restore_interrupt_reconcile(execution.vcpu_id)
         .is_err()
     {
-        crate::hal::cpu::halt()
+        hyper::debug::invariant_failure(
+            "vm::vcpu::transition::restore_reconcile_if_claimed invariant",
+        )
     }
 }
 
@@ -463,7 +467,6 @@ pub(crate) enum HardwareTransitionError {
     Registry(super::registry::Error),
 }
 
-#[allow(dead_code)]
 pub(crate) fn current_interrupt_reconcile_pending() -> Result<bool, super::ReconcileObservationError>
 {
     match super::active_vcpu::with(|execution| {
@@ -479,7 +482,6 @@ pub(crate) fn current_interrupt_reconcile_pending() -> Result<bool, super::Recon
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn current_administrative_stop_requested()
 -> Result<bool, super::ReconcileObservationError> {
     let current = crate::kernel::task::scheduler::current_vcpu_if_present()

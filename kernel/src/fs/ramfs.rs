@@ -558,7 +558,5 @@ const fn map_kind(kind: cpio::EntryKind) -> NodeKind {
 
 #[cold]
 fn ramfs_invariant_violation() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    crate::debug::invariant_failure("ramfs ownership invariant")
 }

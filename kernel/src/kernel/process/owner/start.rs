@@ -505,6 +505,9 @@ impl Drop for PreparedChildProcessStart {
     }
 }
 
+// Resource-domain reservation has its own temporary accounting path. Keep it
+// off the coordinator frame used later for thread and handle preparation.
+#[inline(never)]
 fn reserve_start_scratch(
     child: &Process,
     startup_count: usize,
@@ -549,6 +552,8 @@ fn reserve_start_scratch(
         .commit())
 }
 
+#[cold]
+#[inline(never)]
 fn start_failure(
     error: ChildProcessStartError,
     build: SealedProcessBuild,
@@ -556,6 +561,9 @@ fn start_failure(
     StartPreparationFailure { error, build }
 }
 
+// Batch rollback is a separate phase; its release/accounting scratch must
+// not enlarge the successful preparation frame.
+#[inline(never)]
 fn abort_child_handle_batches(
     child: &Process,
     batches: &mut alloc::vec::Vec<ProcessHandleBatchReservation>,

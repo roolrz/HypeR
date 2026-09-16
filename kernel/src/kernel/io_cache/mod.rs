@@ -384,7 +384,5 @@ impl<Page> PublishError<Page> {
 
 #[cold]
 fn cache_invariant_violation() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    hyper::debug::invariant_failure("I/O cache ownership invariant")
 }

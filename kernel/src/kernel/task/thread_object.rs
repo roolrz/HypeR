@@ -202,5 +202,7 @@ impl ThreadObject {
 
 #[cold]
 fn thread_object_invariant_violation() -> ! {
-    crate::hal::cpu::halt()
+    hyper::debug::invariant_failure(
+        "task::thread_object::thread_object_invariant_violation invariant",
+    )
 }

@@ -110,7 +110,7 @@ impl ResourceRetirement {
             })
             .is_err()
         {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure("task::scheduler::mod::begin invariant");
         }
         Self { _private: () }
     }
@@ -124,7 +124,7 @@ impl Drop for ResourceRetirement {
             })
             .is_err()
         {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure("task::scheduler::mod::drop invariant");
         }
     }
 }
@@ -164,7 +164,9 @@ impl DormantUserThread {
                 .arm_dormant_user(self.thread, ownership)
         });
         if result.is_err() {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(
+                "task::scheduler::mod::commit_before_process_publication invariant",
+            );
         }
         self.rollback = false;
     }
@@ -181,7 +183,7 @@ impl Drop for DormantUserThread {
                 .take_dormant_user(self.thread)
         }) {
             Ok(thread) => thread,
-            Err(_) => crate::hal::cpu::halt(),
+            Err(_) => hyper::debug::invariant_failure("task::scheduler::mod::drop invariant"),
         };
         drop(thread);
     }
@@ -226,9 +228,9 @@ impl Drop for DormantVcpuThread {
                 // allocation referenced by this scheduler-owned Thread. This
                 // is a soundness boundary, so a violated rollback invariant is
                 // fatal in release builds as well as debug builds. Drop can
-                // run under arbitrary locks, so diagnostics are unsafe here.
+                // run under arbitrary locks, so use only crash-safe diagnostics.
                 let _ = error;
-                crate::hal::cpu::halt()
+                hyper::debug::invariant_failure("task::scheduler::mod::drop invariant")
             }
         };
         // Drop the stack, architecture context, and raw VM binding only after
@@ -399,9 +401,9 @@ impl Drop for WaitRegistration {
     fn drop(&mut self) {
         if self.active {
             // This linear owner can be abandoned from arbitrary lock/IRQ
-            // context. Do not enter diagnostics while scheduler state still
-            // retains the registered wait.
-            crate::hal::cpu::halt()
+            // context. Report through the panic handler while retaining the
+            // registered wait; do not attempt ordinary cleanup or logging.
+            hyper::debug::invariant_failure("task::scheduler::mod::drop invariant")
         }
     }
 }
@@ -793,7 +795,9 @@ fn publish_thread(mut reservation: ThreadReservation, thread: Box<Thread>) -> Re
                 Ok(()) => Ok(()),
                 Err((error, thread)) => match scheduler.abandon_reservation(&reservation) {
                     Ok(()) => Err((error, thread)),
-                    Err(_) => crate::hal::cpu::halt(),
+                    Err(_) => hyper::debug::invariant_failure(
+                        "task::scheduler::mod::publish_thread invariant",
+                    ),
                 },
             };
             (result, true)
@@ -822,7 +826,9 @@ fn publish_secondary(
                 Ok(stack) => Ok(stack),
                 Err((error, thread)) => match scheduler.abandon_reservation(&reservation) {
                     Ok(()) => Err((error, thread)),
-                    Err(_) => crate::hal::cpu::halt(),
+                    Err(_) => hyper::debug::invariant_failure(
+                        "task::scheduler::mod::publish_secondary invariant",
+                    ),
                 },
             };
             (result, true)

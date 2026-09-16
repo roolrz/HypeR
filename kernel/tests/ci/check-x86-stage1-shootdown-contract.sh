@@ -103,7 +103,7 @@ rpc=src/kernel/irq/cross_call.rs
 controller=src/arch/x86_64/interrupt_controller.rs
 publication=src/sync/publication.rs
 
-require 'if previous == u64::MAX \{[^}]*super::halt\(\)' "$tlb" \
+require 'if previous == u64::MAX \{[^}]*hyper::debug::invariant_failure\(' "$tlb" \
     'TLB generations must fail closed before wrapping to zero'
 require_order "$tlb" 'REQUESTED_GENERATION\.store' 'flush_local\(\);' \
     'the TLB request must be published before the initiating CPU flushes'

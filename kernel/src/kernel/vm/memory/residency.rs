@@ -58,7 +58,7 @@ impl Drop for GuestResidencyClaim {
         if self.armed {
             // No safe destructor can prove architecture hardware is detached
             // or repair residency history after abandoning this capability.
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure("vm::memory::residency::drop invariant")
         }
     }
 }

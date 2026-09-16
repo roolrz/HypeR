@@ -489,5 +489,5 @@ fn allocate_group_id() -> Result<TaskGroupId, TaskGroupError> {
 
 #[cold]
 fn group_invariant_violation() -> ! {
-    crate::hal::cpu::halt()
+    hyper::debug::invariant_failure("process::task_group::group_invariant_violation invariant")
 }

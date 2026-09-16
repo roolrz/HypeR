@@ -158,7 +158,7 @@ static LOCAL: [LocalOwner; hyper::config::MAX_CPUS as usize] =
 fn local() -> &'static LocalOwner {
     match LOCAL.get(super::current_cpu_index()) {
         Some(local) => local,
-        None => super::halt(),
+        None => hyper::debug::invariant_failure("riscv64/user_machine::local invariant"),
     }
 }
 impl PreparedAddressSpace {
@@ -320,7 +320,7 @@ fn install(root: &PreparedAddressSpace) {
 /// the complete CPU-local token lifetime. Native activations cannot nest.
 pub(crate) unsafe fn activate_local(root: &PreparedAddressSpace) -> LocalActivation {
     if local().root.load(Ordering::Acquire) != 0 {
-        super::halt();
+        hyper::debug::invariant_failure("riscv64/user_machine::activate_local invariant");
     }
     let previous_root = read_satp();
     install(root);
@@ -336,7 +336,7 @@ pub(crate) unsafe fn activate_local(root: &PreparedAddressSpace) -> LocalActivat
 pub(crate) unsafe fn deactivate_local(activation: LocalActivation) {
     let owner = local();
     if owner.root.load(Ordering::Acquire) == 0 {
-        super::halt();
+        hyper::debug::invariant_failure("riscv64/user_machine::deactivate_local invariant");
     }
     let identifier = owner.identifier.load(Ordering::Relaxed) as u16;
     // Switch first so old user roots cannot start new walks after the fence.
