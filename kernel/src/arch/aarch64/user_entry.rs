@@ -696,15 +696,5 @@ fn read_hcr_el2() -> u64 {
 }
 
 pub(super) fn fail_stop() -> ! {
-    loop {
-        // SAFETY: Returning could expose a duplicated completion or an active
-        // raw context. Masking and waiting is the lock-free local fail-stop.
-        unsafe {
-            asm!(
-                "msr daifset, #0xf",
-                "wfe",
-                options(nomem, nostack, preserves_flags)
-            )
-        };
-    }
+    hyper::debug::invariant_failure(format_args!("aarch64 Native entry ownership invariant"))
 }

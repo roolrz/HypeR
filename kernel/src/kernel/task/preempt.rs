@@ -280,7 +280,7 @@ impl Drop for PreemptionGuard {
         if self.release_inner().is_err() {
             // Guard destruction may occur under arbitrary locks. Logging can
             // deadlock before preserving the non-preemptible fail-stop state.
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!("task::preempt::drop invariant"))
         }
     }
 }
@@ -336,8 +336,8 @@ impl Drop for IrqGuard {
     fn drop(&mut self) {
         if self.complete_inner().is_err() {
             // IRQ-exit accounting is still live and Drop may hold unrelated
-            // locks, so this invariant path must remain diagnostics-free.
-            crate::hal::cpu::halt()
+            // locks, so report only through the lock-free panic boundary.
+            hyper::debug::invariant_failure(format_args!("task::preempt::drop invariant"))
         }
     }
 }

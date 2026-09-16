@@ -785,7 +785,9 @@ impl Process {
                     if state.lifecycle.start().is_err()
                         || scheduler::ready_user_thread(thread).is_err()
                     {
-                        crate::hal::cpu::halt();
+                        hyper::debug::invariant_failure(format_args!(
+                            "process::owner::commit_initial_execution invariant"
+                        ));
                     }
                 }
                 // A pending TaskGroup stop can reach retirement on another CPU
@@ -2681,5 +2683,7 @@ fn recover_unpublished_address_space(process: Process) -> FallibleArc<NativeAddr
 
 #[cold]
 fn process_invariant_violation() -> ! {
-    crate::hal::cpu::halt()
+    hyper::debug::invariant_failure(format_args!(
+        "process::owner::process_invariant_violation invariant"
+    ))
 }

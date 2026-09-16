@@ -19,11 +19,13 @@ pub(super) unsafe fn wait(
         // SAFETY: The scheduler exclusively owns this pinned, detached payload.
         let current = unsafe { &mut *execution };
         let Some(binding) = current.vm_binding() else {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!("vm::vcpu::mmio::wait invariant"));
         };
         let ticket = binding
             .wfi_wait_ticket(current.vcpu_id)
-            .unwrap_or_else(|_| crate::hal::cpu::halt());
+            .unwrap_or_else(|_| {
+                hyper::debug::invariant_failure(format_args!("vm::vcpu::mmio::wait invariant"))
+            });
         let lifecycle = binding.lifecycle();
         match lifecycle.take_mmio_completion(current.vcpu_id) {
             Ok(Some(hyper::vm::exit::MmioAction::Stop)) => {

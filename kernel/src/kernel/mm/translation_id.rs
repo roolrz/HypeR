@@ -97,7 +97,7 @@ impl<Namespace: IdentifierNamespace> Drop for IdentifierReservation<Namespace> {
             return;
         };
         if Namespace::with_pool(|pool| pool.cancel(token)).is_err() {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!("mm::translation_id::drop invariant"));
         }
     }
 }

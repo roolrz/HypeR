@@ -712,3 +712,20 @@ file and exact contract path, rejecting any new, substituted, or increased
 dependency. Architecture code also may not conceal logging or policy calls
 behind macros, aliases, or indirect imports. This lexical enforcement is
 reinforced by facade privacy and review of every upward entry contract.
+
+### Unrecoverable invariant failures
+
+An internal invariant that has already failed must report through the fatal
+crash path, never through an unannotated permanent spin loop. Reusable
+mechanisms use `hyper::debug::invariant_failure`; the binary panic handler
+provides the kernel policy. The kernel uses `panic=abort`, so live execution
+claims and other ownership guards are not unwound or released after corruption.
+The failure path must not allocate or use ordinary logging or kernel locks.
+Once crash handling is ready, it captures the reason, coordinates CPU stopping,
+and emits bounded emergency diagnostics. Before safe console initialization,
+it retains a debugger-visible record when CPU identity is available; serial
+output cannot be guaranteed before its hardware prerequisites exist.
+
+This requirement does not prohibit busy waits, CAS retries, scheduler idle
+loops, or the final CPU halt after crash handling. Those have different
+progress or terminal-state contracts.

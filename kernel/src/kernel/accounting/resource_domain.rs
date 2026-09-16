@@ -1047,7 +1047,5 @@ impl Drop for CommittedCharge {
 
 #[cold]
 fn accounting_invariant_violation() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    hyper::debug::invariant_failure(format_args!("resource domain accounting invariant"))
 }

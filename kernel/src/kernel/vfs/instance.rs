@@ -594,9 +594,7 @@ fn allocate_identifier(source: &AtomicU64) -> Result<u64, Error> {
 
 #[cold]
 fn instance_invariant_violation() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    hyper::debug::invariant_failure(format_args!("VFS instance invariant"))
 }
 
 pub(super) fn allocation_charge<T>(sponsor: &ResourceDomain) -> Result<CommittedCharge, Error> {

@@ -31,7 +31,7 @@ pub(super) fn flush_all_online() {
     if previous == u64::MAX {
         // Generation zero is the unacknowledged initial state and cannot be
         // reused without making a stale acknowledgement appear current.
-        super::halt()
+        hyper::debug::invariant_failure(format_args!("x86_64/tlb::flush_all_online invariant"))
     }
     let generation = previous + 1;
 
@@ -52,7 +52,7 @@ pub(super) fn flush_all_online() {
             // The compile-time vector checks and validated APIC route make this
             // unreachable. Continuing would permit use-after-unmap through a
             // stale translation, so fail closed if the invariant is violated.
-            super::halt()
+            hyper::debug::invariant_failure(format_args!("x86_64/tlb::flush_all_online invariant"))
         }
     });
 
@@ -105,7 +105,7 @@ pub(super) fn service_pending() {
 
 fn current_cpu_or_halt() -> CpuIndex {
     let Some(cpu) = CpuIndex::new(super::smp::current_cpu_index()) else {
-        super::halt()
+        hyper::debug::invariant_failure(format_args!("x86_64/tlb::current_cpu_or_halt invariant"))
     };
     cpu
 }

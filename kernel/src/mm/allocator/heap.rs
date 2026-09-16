@@ -11,7 +11,6 @@
 
 use core::alloc::Layout;
 use core::fmt;
-use core::hint::spin_loop;
 use core::ptr::{NonNull, null_mut};
 
 use crate::sync::PublishedOnce;
@@ -215,17 +214,20 @@ fn allocator_fault(fault: AllocatorFault) -> ! {
         Err(first) => first,
     };
     let Some(first) = AllocatorInvariant::from_code(first_code) else {
-        loop {
-            spin_loop();
-        }
+        crate::debug::invariant_failure(format_args!(
+            "invalid allocator fault record: current {}, first {first_code}",
+            current.code()
+        ))
     };
     let report = AllocatorInvariantReport::new(current, first);
     if let Some(handler) = ALLOCATOR_INVARIANT_HANDLER.get() {
         handler(report)
     }
-    loop {
-        spin_loop();
-    }
+    crate::debug::invariant_failure(format_args!(
+        "allocator failure before handler installation: current {:?}, first {:?}",
+        report.current(),
+        report.first()
+    ))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

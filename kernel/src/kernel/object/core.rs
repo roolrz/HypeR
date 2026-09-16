@@ -1360,7 +1360,5 @@ pub(crate) enum ActiveHandleError {
 
 #[cold]
 fn object_invariant_violation() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    hyper::debug::invariant_failure(format_args!("object lifecycle invariant"))
 }

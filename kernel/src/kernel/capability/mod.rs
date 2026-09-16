@@ -29,11 +29,10 @@ pub(crate) use transfer::InTransitCapabilities;
 
 /// Stops after a private capability invariant is violated.
 ///
-/// This leaf path must remain allocation-, lock-, and diagnostic-free so it is
-/// safe from handle-table, transfer, and teardown contexts.
+/// This leaf path must remain allocation- and ordinary-lock-free so it is
+/// safe from handle-table, transfer, and teardown contexts. Diagnostics use
+/// the binary panic handler, never the ordinary log path.
 #[cold]
 fn invariant_violation() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    hyper::debug::invariant_failure(format_args!("capability ownership invariant"))
 }

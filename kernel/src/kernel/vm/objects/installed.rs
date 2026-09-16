@@ -135,7 +135,9 @@ impl KernelObject for VirtualCpuObject {
     fn signal_source(&self) -> Option<SignalSource<'_>> {
         let signals = match self.owner.vcpu_signal_state(self.id) {
             Ok(signals) => signals,
-            Err(_) => crate::hal::cpu::halt(),
+            Err(_) => hyper::debug::invariant_failure(format_args!(
+                "vm::objects::installed::signal_source invariant"
+            )),
         };
         Some(SignalSource::new(
             signals,

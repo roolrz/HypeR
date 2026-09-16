@@ -52,7 +52,9 @@ pub(super) fn native_irq_stack_top() -> usize {
         .map(AtomicStackBounds::load)
     {
         Some(bounds) if bounds.bottom < bounds.top => bounds.top,
-        _ => super::halt(),
+        _ => hyper::debug::invariant_failure(format_args!(
+            "riscv64/exception::native_irq_stack_top invariant"
+        )),
     }
 }
 

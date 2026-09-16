@@ -77,7 +77,9 @@ impl Shared {
                 )
                 .is_err()
             {
-                crate::hal::cpu::halt();
+                hyper::debug::invariant_failure(format_args!(
+                    "vm::io::notification::mutate invariant"
+                ));
             }
             value
         });
@@ -378,7 +380,9 @@ impl Notification {
                     )
                     .is_err()
                 {
-                    crate::hal::cpu::halt();
+                    hyper::debug::invariant_failure(format_args!(
+                        "vm::io::notification::disconnect invariant"
+                    ));
                 }
                 if let Some(front) = &front {
                     super::set_line(front, self.shared.front_irq, false);

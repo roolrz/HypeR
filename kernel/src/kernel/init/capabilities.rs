@@ -228,7 +228,9 @@ fn optional_authority_slot(
     // disabled and its hypothetical index equals the end of the core table.
     match handles.get_mut(index) {
         Some(slot) => slot,
-        None => crate::hal::cpu::halt(),
+        None => hyper::debug::invariant_failure(format_args!(
+            "init::capabilities::optional_authority_slot invariant"
+        )),
     }
 }
 

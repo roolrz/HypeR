@@ -45,7 +45,7 @@ fi
 drop_body=$(sed -n '/^impl Drop for Registration {$/,/^}$/p' "$source_file")
 if [ -z "$drop_body" ] ||
     ! printf '%s\n' "$drop_body" | LC_ALL=C rg -q 'if self\.armed' ||
-    ! printf '%s\n' "$drop_body" | LC_ALL=C rg -q 'crate::hal::cpu::halt\(\)' ||
+    ! printf '%s\n' "$drop_body" | LC_ALL=C rg -q 'hyper::debug::invariant_failure\(' ||
     printf '%s\n' "$drop_body" | LC_ALL=C rg -q \
         'unregister|with_state|INTERRUPTS|controller|disable|remove_prepared|pr_|print|log::|crash::'; then
     echo "armed Registration Drop must fail-stop without locks or hardware operations" >&2
@@ -59,7 +59,7 @@ LC_ALL=C rg -q -U \
 }
 
 LC_ALL=C rg -q -U \
-    'fn disarm\(&mut self\)\s*\{\s*if !self\.armed\s*\{\s*crate::hal::cpu::halt\(\)[[:space:]]*\}[[:space:]]*self\.armed\s*=\s*false;' \
+    'fn disarm\(&mut self\)\s*\{\s*if !self\.armed\s*\{\s*hyper::debug::invariant_failure\([\s\S]*?\}[[:space:]]*self\.armed\s*=\s*false;' \
     "$source_file" || {
     echo "Registration must have one checked disarm transition" >&2
     exit 1

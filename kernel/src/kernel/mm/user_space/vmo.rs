@@ -1373,7 +1373,5 @@ const MAPPING_ACCESS_MASK: usize = EXCLUSIVE_HARDWARE_BIT - MAPPING_UNIT;
 
 #[cold]
 fn vmo_invariant_violation() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    hyper::debug::invariant_failure(format_args!("VMO access ownership invariant"))
 }

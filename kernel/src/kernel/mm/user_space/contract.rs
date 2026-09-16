@@ -284,7 +284,5 @@ pub(crate) trait PageBackend: Clone {
 
 #[cold]
 fn address_invariant_violation() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    hyper::debug::invariant_failure(format_args!("user address ownership invariant"))
 }

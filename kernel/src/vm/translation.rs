@@ -295,10 +295,8 @@ impl Drop for ExecutionClaim {
     fn drop(&mut self) {
         if self.armed {
             // Losing the only release capability would make later execution
-            // ownership unknowable. Fail closed without locks or diagnostics.
-            loop {
-                core::hint::spin_loop();
-            }
+            // ownership unknowable. Report through the binary panic handler without releasing ownership.
+            crate::debug::invariant_failure(format_args!("armed VM execution claim dropped"))
         }
     }
 }

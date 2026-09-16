@@ -329,7 +329,7 @@ impl Drop for ReservedTimer {
             .state
             .with(|state| matches!(state, ReservationState::Idle { node: Some(_), .. }));
         if !idle {
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!("time::timers::drop invariant"))
         }
     }
 }
@@ -353,7 +353,7 @@ impl ArmedReservedTimer<'_> {
 impl Drop for ArmedReservedTimer<'_> {
     fn drop(&mut self) {
         if self.armed {
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!("time::timers::drop invariant"))
         }
     }
 }
@@ -386,7 +386,7 @@ impl OwnedArmedReservedTimer {
 impl Drop for OwnedArmedReservedTimer {
     fn drop(&mut self) {
         if self.armed {
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!("time::timers::drop invariant"))
         }
     }
 }

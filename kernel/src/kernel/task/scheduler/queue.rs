@@ -1000,5 +1000,7 @@ impl ReadyQueueAccess for LocalReadyQueueAuthority<'_> {
 }
 
 fn queue_invariant() -> ! {
-    crate::hal::cpu::halt()
+    hyper::debug::invariant_failure(format_args!(
+        "task::scheduler::queue::queue_invariant invariant"
+    ))
 }

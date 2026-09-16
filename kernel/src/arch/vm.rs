@@ -79,7 +79,9 @@ pub(crate) fn service_guest_stage2_retirement(request: GuestStage2RetirementRequ
     {
         if super::imp::retire_guest_stage2_local(request).is_err() {
             // Never acknowledge retirement while a hardware owner remains live.
-            super::imp::halt();
+            hyper::debug::invariant_failure(format_args!(
+                "vm::service_guest_stage2_retirement invariant"
+            ));
         }
     }
 }
@@ -202,7 +204,7 @@ pub(crate) fn install_exit_services(
 
 fn exit_services() -> ExitServices {
     let Some(services) = EXIT_SERVICES.get().copied() else {
-        super::imp::halt()
+        hyper::debug::invariant_failure(format_args!("vm::exit_services invariant"))
     };
     services
 }

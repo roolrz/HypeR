@@ -100,7 +100,9 @@ fn run_current() {
                 crate::hal::vm::VcpuRunDisposition::Wait(crate::hal::vm::VcpuWaitReason::Mmio) => {
                     detached.finish();
                     let Some(binding) = (&*execution).vm_binding() else {
-                        crate::hal::cpu::halt();
+                        hyper::debug::invariant_failure(format_args!(
+                            "vm::vcpu::runner::run_current invariant"
+                        ));
                     };
                     if binding.lifecycle().publish_mmio(vcpu_id).is_err()
                         && administrative_stop_reason(execution, current.thread).is_none()

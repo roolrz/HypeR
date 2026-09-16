@@ -850,7 +850,7 @@ fn parent_hint(node: &Node) -> Option<FallibleArc<Node>> {
 fn unlink_node(node: &Node) {
     node.topology.with(|topology| {
         let Some(remaining) = topology.links.checked_sub(1) else {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!("vfs::ramfs::unlink_node invariant"));
         };
         topology.links = remaining;
         if remaining == 0 {

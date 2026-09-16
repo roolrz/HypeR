@@ -207,9 +207,9 @@ impl Drop for KernelStack {
         });
         if result.is_err() {
             // Destruction may occur under arbitrary allocator or scheduler
-            // locks. Diagnostics could deadlock while a partially unmapped
+            // locks. Ordinary diagnostics could deadlock while a partially unmapped
             // stack owner is being released.
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!("mm::stack::drop invariant"))
         }
     }
 }

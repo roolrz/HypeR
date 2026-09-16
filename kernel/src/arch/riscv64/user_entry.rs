@@ -519,10 +519,7 @@ fn fault_kind(cause: u64) -> UserFaultKind {
     }
 }
 fn fail_stop() -> ! {
-    loop {
-        // SAFETY: A broken run owner cannot return safely; stop this masked hart.
-        unsafe { asm!("csrci sstatus, 2", "wfi", options(nomem, nostack)) };
-    }
+    hyper::debug::invariant_failure(format_args!("riscv64 Native entry ownership invariant"))
 }
 const _: () = {
     assert!(offset_of!(NativeFrame, general) == 0);

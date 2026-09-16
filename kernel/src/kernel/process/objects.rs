@@ -82,7 +82,9 @@ impl ProcessObject {
         }
         match self.final_snapshot.get() {
             Some(snapshot) => *snapshot,
-            None => crate::hal::cpu::halt(),
+            None => hyper::debug::invariant_failure(format_args!(
+                "process::objects::snapshot invariant"
+            )),
         }
     }
 
@@ -98,13 +100,17 @@ impl ProcessObject {
             .update(SignalMask::EMPTY, Process::TERMINATED)
             .is_err()
         {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!(
+                "process::objects::publish_stopped invariant"
+            ));
         }
     }
 
     pub(super) fn publish_final_snapshot(&self, snapshot: ProcessSnapshot) {
         if self.final_snapshot.publish(snapshot).is_err() {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!(
+                "process::objects::publish_final_snapshot invariant"
+            ));
         }
     }
 

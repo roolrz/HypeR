@@ -93,7 +93,7 @@ pub(crate) fn request() {
         // IRQ prompting is enabled only after bootstrap CPU identity and the
         // interrupt route exist. A plain event would wake a WFI but would not
         // consume the durable prompt or wake the scheduler Thread.
-        None => crate::hal::cpu::halt(),
+        None => hyper::debug::invariant_failure(format_args!("reaper::request invariant")),
     }
 }
 
@@ -109,7 +109,7 @@ pub(crate) fn enable_irq_prompts() {
             .compare_exchange(false, true, Ordering::Release, Ordering::Relaxed)
             .is_err()
     {
-        crate::hal::cpu::halt();
+        hyper::debug::invariant_failure(format_args!("reaper::enable_irq_prompts invariant"));
     }
     if WORK.consume_prompt()
         && WORK.claim_notification()

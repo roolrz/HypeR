@@ -368,7 +368,9 @@ pub(crate) unsafe fn deactivate_local(
     {
         let mut active = active;
         let Some(backend) = active.backend.take() else {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!(
+                "selected HAL user::deactivate_local invariant"
+            ));
         };
         // SAFETY: The caller proves this is the PE which installed the
         // consumed non-Send translation token.
@@ -388,7 +390,7 @@ impl Drop for ActiveAddressSpace<'_> {
         if self.backend.is_some() {
             // Hardware still references a borrowed root. Returning would end
             // the root and pin borrows and permit use-after-free.
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!("selected HAL user::drop invariant"));
         }
     }
 }
@@ -487,7 +489,7 @@ pub(crate) fn run_user<'context, 'pin>(
     if kernel_access.cpu != active.cpu || crate::hal::irq::local_enabled() {
         // SAFETY: `active` still owns the current-CPU pin and translation.
         if unsafe { deactivate_local(active) }.is_err() {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!("selected HAL user::run_user invariant"));
         }
         return Err(UserEntryError::InterruptsEnabled);
     }
@@ -503,7 +505,9 @@ pub(crate) fn run_user<'context, 'pin>(
                     // SAFETY: The consumed token proves the current CPU remains
                     // pinned to the activation which this path is abandoning.
                     if unsafe { deactivate_local(active) }.is_err() {
-                        crate::hal::cpu::halt();
+                        hyper::debug::invariant_failure(format_args!(
+                            "selected HAL user::run_user invariant"
+                        ));
                     }
                     return Err(UserEntryError::Backend(error));
                 }
@@ -529,12 +533,14 @@ impl<'context, 'pin> StoppedUser<'context, 'pin> {
         StoppedPublication,
     ) {
         let Some(active) = self.active.take() else {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!("selected HAL user::release invariant"));
         };
         #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
         {
             let Some(exit) = self.exit.take() else {
-                crate::hal::cpu::halt();
+                hyper::debug::invariant_failure(format_args!(
+                    "selected HAL user::release invariant"
+                ));
             };
             let exit = UserExit::from_arch(exit);
             let stopped = StoppedPublication {
@@ -545,7 +551,7 @@ impl<'context, 'pin> StoppedUser<'context, 'pin> {
         #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             let _ = active;
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!("selected HAL user::release invariant"))
         }
     }
 }
@@ -567,7 +573,7 @@ impl Drop for StoppedUser<'_, '_> {
         if self.active.is_some() {
             // Leaking a borrowed hardware root would permit both migration and
             // hierarchy retirement while the CPU still names it.
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!("selected HAL user::drop invariant"));
         }
     }
 }
@@ -641,7 +647,7 @@ impl<'context> ReturnCapability<'context> {
         }
         #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!("selected HAL user::binding invariant"))
         }
     }
 
@@ -659,7 +665,9 @@ impl<'context> ReturnCapability<'context> {
         #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             let _ = (self, expected, result);
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!(
+                "selected HAL user::complete_native invariant"
+            ))
         }
     }
 
@@ -676,7 +684,9 @@ impl<'context> ReturnCapability<'context> {
         #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             let _ = (self, expected);
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!(
+                "selected HAL user::resume_execution invariant"
+            ))
         }
     }
 
@@ -693,7 +703,7 @@ impl<'context> ReturnCapability<'context> {
         #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
         {
             let _ = (self, expected);
-            crate::hal::cpu::halt()
+            hyper::debug::invariant_failure(format_args!("selected HAL user::discard invariant"))
         }
     }
 }

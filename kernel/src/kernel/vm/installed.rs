@@ -137,7 +137,9 @@ impl InstalledMachine {
     pub(super) fn publish_installed(&self, id: VmId, control: VmControl) {
         self.state.with(|state| {
             if !matches!(state, RuntimeState::Uninstalled) {
-                crate::hal::cpu::halt();
+                hyper::debug::invariant_failure(format_args!(
+                    "vm::installed::publish_installed invariant"
+                ));
             }
             *state = RuntimeState::Installed {
                 id,
@@ -173,7 +175,9 @@ impl InstalledMachine {
                 let vm_id = *vm_id;
                 let control = match control.take() {
                     Some(control) => control,
-                    None => crate::hal::cpu::halt(),
+                    None => hyper::debug::invariant_failure(format_args!(
+                        "vm::installed::start_vcpu invariant"
+                    )),
                 };
                 *state = RuntimeState::Running {
                     id: vm_id,
@@ -193,7 +197,9 @@ impl InstalledMachine {
             RuntimeState::Installed { id, control } | RuntimeState::Running { id, control } => {
                 let control = match control.take() {
                     Some(control) => control,
-                    None => crate::hal::cpu::halt(),
+                    None => hyper::debug::invariant_failure(format_args!(
+                        "vm::installed::take_stop_control invariant"
+                    )),
                 };
                 *state = RuntimeState::Stopping { id: *id };
                 Some(control)
@@ -214,7 +220,9 @@ impl InstalledMachine {
         self.state.with(|state| {
             let old = core::mem::replace(state, RuntimeState::Uninstalled);
             let RuntimeState::Stopping { id } = old else {
-                crate::hal::cpu::halt()
+                hyper::debug::invariant_failure(format_args!(
+                    "vm::installed::publish_stopped invariant"
+                ))
             };
             let _ = id;
             *state = RuntimeState::Stopped;
@@ -227,7 +235,9 @@ impl InstalledMachine {
             .update(SignalMask::EMPTY, terminated)
             .is_err()
         {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!(
+                "vm::installed::publish_stopped invariant"
+            ));
         }
     }
 
@@ -279,7 +289,9 @@ impl InstalledMachine {
     pub(crate) fn snapshot_vcpu(&self, id: u32) -> VirtualCpuSnapshot {
         match self.vcpu_snapshot(id) {
             Ok(snapshot) => snapshot,
-            Err(_) => crate::hal::cpu::halt(),
+            Err(_) => hyper::debug::invariant_failure(format_args!(
+                "vm::installed::snapshot_vcpu invariant"
+            )),
         }
     }
 

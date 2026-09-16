@@ -35,7 +35,9 @@ impl Shared {
             )
             .is_err()
         {
-            crate::hal::cpu::halt();
+            hyper::debug::invariant_failure(format_args!(
+                "vm::io::mailbox::native_signal invariant"
+            ));
         }
     }
     fn mutate<R>(&self, operation: impl FnOnce(&mut model::MailboxState) -> R) -> Result<R, Error> {

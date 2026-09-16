@@ -119,7 +119,5 @@ impl Drop for RunAdmissionClaim {
 
 #[cold]
 fn fail_stop_invalid_claim() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
+    hyper::debug::invariant_failure(format_args!("invalid or abandoned VM run admission claim"))
 }

@@ -124,7 +124,9 @@ fn finish_handles<const N: usize>(
 ) -> Result<(), Error> {
     let prepared = core::array::from_fn(|index| match slots[index].take() {
         Some(handle) => handle,
-        None => crate::hal::cpu::halt(),
+        None => hyper::debug::invariant_failure(format_args!(
+            "init::bootstrap::finish_handles invariant"
+        )),
     });
     match boot.process.publish_handles(reservation, prepared) {
         Ok(published) if &published == values => Ok(()),
