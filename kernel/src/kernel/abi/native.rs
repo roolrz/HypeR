@@ -10,9 +10,10 @@ mod services;
 
 pub(in crate::kernel) use services::{
     ConsoleServiceError, ConsoleServices, DeferredAction, DeviceServices, GuestIoServices,
-    HandleServices, HierarchyServices, InspectServices, IpcServices, MemoryServices,
-    ObjectServiceError, ObjectServices, ProcessBuilderServiceError, ProcessBuilderServices,
-    SystemInspectServices, TaskServices, UserMemoryServices, VfsServices, VmServices,
+    HandleServices, HierarchyServices, ImmediateServices, InspectServices, IpcServices,
+    MemoryServices, ObjectServiceError, ObjectServices, ProcessBuilderServiceError,
+    ProcessBuilderServices, SystemInspectServices, TaskServices, UserMemoryServices, VfsServices,
+    VmServices,
 };
 
 mod dispatch;

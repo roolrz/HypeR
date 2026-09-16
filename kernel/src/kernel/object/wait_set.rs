@@ -381,10 +381,14 @@ impl WaitSet {
             control.closed = true;
             core::mem::take(&mut control.subscriptions)
         });
-        self.queue.state.with(|state| {
+        let ready = self.queue.state.with(|state| {
             state.closed = true;
             self.queue.update(true);
+            // Closing excludes both notify and Delivery rollback. Detach once
+            // rather than searching the ready queue for every subscription.
+            core::mem::take(&mut state.ready)
         });
+        drop(ready);
         for entry in entries {
             entry.registration.active.store(false, Ordering::Relaxed);
             let observer = entry
@@ -392,7 +396,6 @@ impl WaitSet {
                 .source()
                 .state()
                 .unsubscribe(entry.registration.id);
-            self.queue.remove(entry.registration.id);
             drop(observer);
             drop(entry);
         }
@@ -475,6 +478,41 @@ pub(crate) fn test_delivery_rollback(domain: &ResourceDomain) -> Result<(), Wait
     set.queue.remove(1);
     drop(third); // Explicit cancellation wins over restoration.
     if set.queue.state.with(|state| !state.ready.is_empty()) {
+        return Err(WaitSetError::InvalidInput);
+    }
+    // Close with one delivery in flight and another notification still queued.
+    // Keep registrations active to model a notifier already admitted by a source.
+    let closing = WaitSet::try_new(2, domain)?;
+    let make_registration = |id| -> Result<_, WaitSetError> {
+        let charge = domain
+            .reserve(ResourceAmount::ZERO.with(
+                ResourceKind::KernelMemoryBytes,
+                FallibleArc::<Registration>::allocation_size() as u64,
+            ))
+            .map_err(WaitSetError::Resource)?
+            .commit();
+        FallibleArc::try_new(Registration {
+            id,
+            queue: closing.queue.downgrade(),
+            active: AtomicBool::new(true),
+            pending: AtomicBool::new(false),
+            _charge: charge,
+        })
+        .map_err(|_| WaitSetError::Allocation)
+    };
+    let first = make_registration(2)?;
+    let second = make_registration(3)?;
+    let snapshot = source.observe(mask).ok_or(WaitSetError::InvalidInput)?;
+    Registration::notify(&first, snapshot);
+    let delivery = closing.wait(0, domain, || false)?;
+    Registration::notify(&second, snapshot);
+    closing.close();
+    drop(delivery); // Failed copyout after close must not restore the event.
+    Registration::notify(&first, snapshot); // Late notification must be ignored.
+    closing.close(); // Final destruction may close the same queue again.
+    if closing.queue.state.with(|state| !state.ready.is_empty())
+        || !matches!(closing.wait(0, domain, || false), Err(WaitSetError::Closed))
+    {
         return Err(WaitSetError::InvalidInput);
     }
     Ok(())

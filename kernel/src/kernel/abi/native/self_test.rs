@@ -165,12 +165,14 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         }
     }
 
-    impl HandleServices for RejectingServices {
+    impl super::services::ImmediateServices for RejectingServices {
         fn close_handle(&self, _: HandleValue) -> Result<(), ProcessError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation)
         }
+    }
 
+    impl HandleServices for RejectingServices {
         fn handle_info(&self, _: HandleValue, _: Rights) -> Result<HandleInfo, ProcessError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(ProcessError::Allocation)

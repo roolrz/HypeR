@@ -185,9 +185,8 @@ actions only after policy returns. CI rejects direct architecture-to-kernel
 policy dependencies outside the three non-returning bootstrap transfers.
 
 Read [the architecture guide](../kernel/docs/architecture.md) for the normative
-boundary rules and migration constraints. The implemented Native contracts and
-planned foreign-ABI boundary are specified separately in the [userspace and
-syscall design](../kernel/docs/syscall-abi.md).
+boundary rules and migration constraints. The Native contracts are specified in the
+[userspace and syscall design](../kernel/docs/syscall-abi.md).
 
 Kernel self-test images contain no Linux guest loader or default VM policy.
 AArch64 and RISC-V Linux integration uses Native `vmm create/start/console` and

@@ -1171,7 +1171,7 @@ impl ObjectRetirement {
         }
     }
 
-    pub(crate) fn enqueue(&mut self, object: ErasedKernelRef<Retirement>) {
+    fn enqueue(&mut self, object: ErasedKernelRef<Retirement>) {
         if let Some(tail) = self.tail.as_ref() {
             tail.link_retirement_successor(object.clone());
             self.tail = Some(object);
@@ -1184,9 +1184,11 @@ impl ObjectRetirement {
         }
     }
 
-    pub(crate) fn drain(&mut self) {
+    /// Consumes the outer worklist owner. A callback only borrows the worklist
+    /// to append releases and cannot recursively drain it through that borrow.
+    pub(crate) fn drain(mut self) {
         while let Some(object) = self.pop() {
-            object.complete_zero_active_transition(self);
+            object.complete_zero_active_transition(&mut self);
         }
     }
 
