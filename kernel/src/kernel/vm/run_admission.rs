@@ -53,14 +53,12 @@ impl RunAdmission {
     }
 
     /// Permanently closes admission and returns the claims active at its
-    /// linearization point. This is only a future teardown primitive.
-    #[allow(dead_code)]
+    /// linearization point. VM quiescence closes this before withdrawing routes.
     pub(super) fn close(&self) -> usize {
         self.state.fetch_or(CLOSED, Ordering::AcqRel) & COUNT_MASK
     }
 
     /// Reports quiescence after close and acquires every prior claim release.
-    #[allow(dead_code)]
     pub(super) fn is_closed_and_quiescent(&self) -> bool {
         self.state.load(Ordering::Acquire) == CLOSED
     }

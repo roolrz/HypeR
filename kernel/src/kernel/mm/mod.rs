@@ -11,14 +11,9 @@ pub mod memory;
 pub mod page_block;
 pub mod stack;
 pub(crate) mod translation_id;
-#[allow(dead_code)]
-mod user_access;
-#[allow(dead_code, unused_imports)]
 pub(crate) mod user_space;
 
 pub use memory::PreparedMemory;
-#[allow(unused_imports)]
-pub(crate) use user_access::{UserCopyError, copy_from_user, copy_to_user};
 
 static READY: AtomicBool = AtomicBool::new(false);
 

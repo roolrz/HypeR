@@ -463,7 +463,6 @@ pub(crate) enum HardwareTransitionError {
     Registry(super::registry::Error),
 }
 
-#[allow(dead_code)]
 pub(crate) fn current_interrupt_reconcile_pending() -> Result<bool, super::ReconcileObservationError>
 {
     match super::active_vcpu::with(|execution| {
@@ -479,7 +478,6 @@ pub(crate) fn current_interrupt_reconcile_pending() -> Result<bool, super::Recon
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn current_administrative_stop_requested()
 -> Result<bool, super::ReconcileObservationError> {
     let current = crate::kernel::task::scheduler::current_vcpu_if_present()

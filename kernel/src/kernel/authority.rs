@@ -55,6 +55,10 @@ impl Rights {
     pub(crate) const CREATE_RESOURCE_DOMAIN: Self =
         Self(native::HYPER_NATIVE_RIGHT_CREATE_RESOURCE_DOMAIN);
     pub(crate) const SET_LIMITS: Self = Self(native::HYPER_NATIVE_RIGHT_SET_LIMITS);
+    #[allow(
+        dead_code,
+        reason = "reserved executable authority is only constructed by self-tests"
+    )]
     pub(crate) const CREATE_EXECUTABLE: Self = Self(native::HYPER_NATIVE_RIGHT_CREATE_EXECUTABLE);
     /// Permits attaching a newly constructed Process to this `TaskGroup`.
     pub(crate) const TASK_GROUP_ATTACH_PROCESS: Self =

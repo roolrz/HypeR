@@ -15,7 +15,6 @@ impl VmControl {
     ///
     /// Unsupported architectures return the exact control without modifying
     /// registry or endpoint state.
-    #[allow(dead_code)]
     pub(in crate::kernel::vm) fn begin(self) -> Result<QuiescingVm, BeginFailure> {
         let capability = match crate::hal::vm::try_administrative_stop() {
             Ok(capability) => capability,
@@ -39,7 +38,6 @@ impl VmControl {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::kernel::vm) enum BeginError {
     Unsupported,
@@ -47,26 +45,27 @@ pub(in crate::kernel::vm) enum BeginError {
 }
 
 /// Failed pre-stop transition retaining the exact linear authority.
-#[allow(dead_code)]
 #[must_use = "retain or retry the exact installed VM lifecycle authority"]
 pub(in crate::kernel::vm) struct BeginFailure {
     control: VmControl,
     error: BeginError,
 }
 
-#[allow(dead_code)]
 impl BeginFailure {
     pub(in crate::kernel::vm) const fn error(&self) -> BeginError {
         self.error
     }
 
+    #[expect(
+        dead_code,
+        reason = "pre-stop failure retains retry authority; current reaper fail-stops instead of retrying begin"
+    )]
     pub(in crate::kernel::vm) fn into_control(self) -> VmControl {
         self.control
     }
 }
 
 /// Authority for polling a VM after the irreversible Installed->Quiescing cut.
-#[allow(dead_code)]
 #[must_use = "poll the exact quiescing VM authority until retirement can begin"]
 pub(in crate::kernel::vm) struct QuiescingVm {
     id: VmId,
@@ -75,14 +74,12 @@ pub(in crate::kernel::vm) struct QuiescingVm {
     _capability: crate::hal::vm::AdministrativeStopCapability,
 }
 
-#[allow(dead_code)]
 #[must_use = "retain the exact VM authority returned by a quiescence poll"]
 pub(in crate::kernel::vm) enum QuiescePoll {
     Pending(QuiescingVm),
     Quiescent(QuiescentControl),
 }
 
-#[allow(dead_code)]
 impl QuiescingVm {
     /// Attempts one allocation-free promotion to registry-held unique ownership.
     ///
@@ -105,14 +102,13 @@ impl QuiescingVm {
 /// Final retirement consumes this token before extracting any owner. Dropping
 /// it leaves an inert `QuiescentHeld` tombstone and cannot free an active
 /// address space.
-#[allow(dead_code)]
 #[must_use = "retire the exact quiescent VM authority"]
 pub(in crate::kernel::vm) struct QuiescentControl {
     id: VmId,
 }
 
-#[allow(dead_code)]
 impl QuiescentControl {
+    #[cfg(feature = "kernel-self-test")]
     pub(in crate::kernel::vm) const fn id(&self) -> VmId {
         self.id
     }
@@ -217,7 +213,6 @@ impl QuiescentControl {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::kernel::vm) enum RetirementError {
     DeviceQuarantined,
@@ -226,15 +221,21 @@ pub(in crate::kernel::vm) enum RetirementError {
     Unsupported,
 }
 
-#[allow(dead_code)]
 #[must_use = "retry with the exact quiescent VM retirement authority"]
 pub(in crate::kernel::vm) struct RetirementFailure {
     control: QuiescentControl,
+    #[expect(
+        dead_code,
+        reason = "retains the failure cause; current reaper retries every retirement failure"
+    )]
     error: RetirementError,
 }
 
-#[allow(dead_code)]
 impl RetirementFailure {
+    #[expect(
+        dead_code,
+        reason = "retirement cause accessor reserved for diagnostics; current reaper retries without classification"
+    )]
     pub(in crate::kernel::vm) const fn error(&self) -> RetirementError {
         self.error
     }

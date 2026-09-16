@@ -88,12 +88,6 @@ impl GuestMemoryBacking {
             .map_err(MemoryObjectError::Vmo)
     }
 
-    pub(crate) fn resident_page_count(&self) -> Result<usize, MemoryObjectError> {
-        self.storage
-            .resident_page_count()
-            .map_err(MemoryObjectError::Vmo)
-    }
-
     pub(crate) fn page_is_resident(&self, offset: u64) -> Result<bool, MemoryObjectError> {
         self.storage
             .page_is_resident(offset)
@@ -277,6 +271,10 @@ impl VmoObject {
     /// The caller must have independently resolved both the writable VMO with
     /// `READ` and the authority object with `CREATE_EXECUTABLE`. The pinned
     /// execution proof supplies the architecture cache-publication context.
+    #[expect(
+        dead_code,
+        reason = "reserved executable-authority conversion has no Native syscall consumer yet"
+    )]
     pub(crate) fn try_executable_snapshot<P: hyper::cpu::PinnedExecution + 'static>(
         &self,
         authority: &ExecutableAuthority,
@@ -285,19 +283,6 @@ impl VmoObject {
     ) -> Result<Self, MemoryObjectError> {
         let writable = self.writable().ok_or(MemoryObjectError::WrongVariant)?;
         let executable = writable.try_executable_snapshot(&authority.provenance(), pin)?;
-        Self::from_executable(executable, sponsor)
-    }
-
-    pub(crate) fn try_loader_executable_snapshot<P: hyper::cpu::PinnedExecution + 'static>(
-        &self,
-        pin: &P,
-        sponsor: &ResourceDomain,
-    ) -> Result<Self, MemoryObjectError> {
-        let writable = self.writable().ok_or(MemoryObjectError::WrongVariant)?;
-        let executable = writable.try_executable_snapshot(
-            &super::ExecutableProvenance::for_native_image_loader(),
-            pin,
-        )?;
         Self::from_executable(executable, sponsor)
     }
 }
@@ -416,10 +401,6 @@ impl VmarObject {
 
     pub(crate) const fn token(&self) -> Vmar {
         self.token.token()
-    }
-
-    pub(crate) const fn range(&self) -> UserSlice {
-        self.token.token().range()
     }
 }
 

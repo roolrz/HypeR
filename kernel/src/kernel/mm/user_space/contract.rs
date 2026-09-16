@@ -225,12 +225,6 @@ pub(crate) trait PageBackend: Clone {
         offset: usize,
         destination: &mut [u8],
     ) -> Result<(), Self::Error>;
-    fn write_owned(
-        &self,
-        page: &mut Self::Page,
-        offset: usize,
-        source: &[u8],
-    ) -> Result<(), Self::Error>;
 
     /// Copies an immutable owned page range into a distinct unpublished page.
     ///

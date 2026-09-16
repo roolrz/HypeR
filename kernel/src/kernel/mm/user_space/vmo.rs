@@ -509,12 +509,6 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
         write_exposed_inner(&self.inner, offset, source)
     }
 
-    pub(crate) fn resident_page_count(
-        &self,
-    ) -> Result<usize, VmoError<Backend::Error, Account::Error>> {
-        resident_count(&self.inner, 0, page_count(self.inner.size)?)
-    }
-
     pub(crate) fn page_is_resident(
         &self,
         offset: u64,
@@ -669,6 +663,13 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
     /// Snapshot admission excludes new writers and waits for no context: it
     /// reports `Busy` while a writer is active. The returned type exposes no
     /// write operation, and no source page is shared with executable backing.
+    #[cfg_attr(
+        not(any(test, feature = "kernel-self-test")),
+        expect(
+            dead_code,
+            reason = "executable snapshot conversion currently exercised by memory self-tests"
+        )
+    )]
     pub(crate) fn try_executable_snapshot(
         &self,
         _provenance: &ExecutableProvenance,

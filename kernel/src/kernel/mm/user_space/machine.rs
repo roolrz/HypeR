@@ -42,16 +42,20 @@ static ACTIVE: PerCpu<AtomicBool> =
 pub(crate) enum Error {
     Allocation,
     Address(AddressError),
+    #[expect(dead_code, reason = "error payload is retained for Debug diagnostics")]
     Hal(crate::hal::user::AddressSpaceError),
+    #[expect(dead_code, reason = "error payload is retained for Debug diagnostics")]
     Identifier(crate::kernel::mm::translation_id::Error),
     InvalidRange,
     Logical(LogicalAddressSpaceError),
+    #[expect(dead_code, reason = "error payload is retained for Debug diagnostics")]
     Page(hyper::mm::BuddyError),
     Residency(ResidencyError),
     Resource(ResourceError),
     SizeOverflow,
     Transport,
     Unsupported,
+    #[expect(dead_code, reason = "error payload is retained for Debug diagnostics")]
     Vmo(VmoError<KernelPageError, ResourceError>),
 }
 
@@ -1133,6 +1137,10 @@ pub(crate) fn service_local_rpc(
 unsafe impl hyper::hal::user::UserTranslationOwner for NativeAddressSpace {}
 
 #[cfg(feature = "kernel-self-test")]
+#[allow(
+    dead_code,
+    reason = "shared self-test entry; hardware coverage is architecture-dependent"
+)]
 pub(crate) fn prepare_native_entry_self_test(
     domain: ResourceDomain,
     range: UserSlice,
@@ -1177,6 +1185,10 @@ pub(crate) fn prepare_native_entry_self_test(
 }
 
 #[cfg(feature = "kernel-self-test")]
+#[allow(
+    dead_code,
+    reason = "shared self-test entry; hardware coverage is architecture-dependent"
+)]
 pub(crate) fn run_dormant_self_test() -> Result<(), Error> {
     let domain =
         ResourceDomain::try_new_root(crate::kernel::accounting::ResourceLimits::UNLIMITED)?;

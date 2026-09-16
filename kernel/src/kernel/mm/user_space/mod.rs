@@ -26,32 +26,46 @@ mod vmo;
 #[cfg(test)]
 pub(crate) use transaction::retry_stale;
 #[cfg(not(test))]
-pub(crate) use vmo::{ExclusiveHardwareWriteLease, WritableMappingLease};
+pub(crate) use vmo::ExclusiveHardwareWriteLease;
 
 pub(crate) use address_space::{
-    AddressSpaceError, AddressSpaceId, CommittedMappingChange, MappingChange, MappingSnapshot,
-    MappingToken, PreparedMappingChange, PreparedPageSnapshot, PreparedUserWrite, UserAddressSpace,
-    Vmar,
+    AddressSpaceError, MappingChange, MappingSnapshot, MappingToken, PreparedMappingChange,
+    PreparedPageSnapshot, PreparedUserWrite, UserAddressSpace, Vmar,
 };
 #[cfg(not(test))]
-pub(crate) use authority::{ExecutableAuthority, ExecutableAuthorityError};
+pub(crate) use authority::ExecutableAuthority;
+#[cfg(all(not(test), feature = "kernel-self-test"))]
+pub(crate) use authority::ExecutableAuthorityError;
 pub(crate) use contract::{
-    Access, AddressError, MemoryAccount, MemoryCharge, PageBackend, Permissions, UserAddress,
-    UserAddressWindow, UserSlice,
+    Access, AddressError, MemoryAccount, MemoryCharge, Permissions, UserAddress, UserSlice,
 };
 #[cfg(not(test))]
 pub(crate) use kernel_adapter::address_window;
 #[cfg(all(not(test), feature = "kernel-self-test"))]
+#[allow(
+    unused_imports,
+    reason = "shared self-test entry; hardware coverage is architecture-dependent"
+)]
 pub(crate) use kernel_adapter::fail_exposed_write_after_copy_for_test;
 #[cfg(not(test))]
 pub(crate) use kernel_adapter::{DomainAccount, KernelPageBackend, KernelPageError};
+#[cfg(all(not(test), feature = "kernel-self-test"))]
+#[allow(
+    unused_imports,
+    reason = "shared self-test entry; hardware coverage is architecture-dependent"
+)]
+pub(crate) use machine::prepare_native_entry_self_test;
+#[cfg(all(not(test), feature = "kernel-self-test"))]
+#[allow(
+    unused_imports,
+    reason = "shared self-test entry; hardware coverage is architecture-dependent"
+)]
+pub(crate) use machine::run_dormant_self_test;
 #[cfg(not(test))]
 pub(crate) use machine::{
-    ActiveNativeAddressSpace, Error as MachineError, NativeAddressSpace, NativeImageSegment,
-    StoppedNativeRun, UserWriteReservation,
+    Error as MachineError, NativeAddressSpace, NativeImageSegment, StoppedNativeRun,
+    UserWriteReservation,
 };
-#[cfg(all(not(test), feature = "kernel-self-test"))]
-pub(crate) use machine::{prepare_native_entry_self_test, run_dormant_self_test};
 #[cfg(not(test))]
 pub(crate) use objects::{GuestMemoryBacking, MemoryObjectError, VmarObject, VmoObject};
 #[cfg(not(test))]
@@ -66,10 +80,15 @@ pub(crate) use service::{
 pub(crate) use machine::service_local_rpc;
 pub(crate) use vmo::{
     ExecutableProvenance, ExecutableVmo, PrivateMappingMode, SnapshotVmo, VmoError,
-    VmoPopulateError, WeakSnapshotVmo, WritableVmo,
+    WeakSnapshotVmo, WritableVmo,
 };
 
 #[cfg(not(test))]
 pub(crate) use service::{
     PrivateMappingRequest, create_file_snapshot, create_vmo_snapshot, map_private,
 };
+
+#[cfg(test)]
+pub(crate) use address_space::CommittedMappingChange;
+#[cfg(test)]
+pub(crate) use contract::{PageBackend, UserAddressWindow};

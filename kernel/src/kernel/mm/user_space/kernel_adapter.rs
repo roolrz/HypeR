@@ -79,6 +79,10 @@ static FAIL_EXPOSED_WRITE_AFTER_COPY_COUNTDOWN: AtomicUsize = AtomicUsize::new(0
 /// countdown of one selects the next write, two the write after that, and zero
 /// disables injection.
 #[cfg(feature = "kernel-self-test")]
+#[allow(
+    dead_code,
+    reason = "fault injection is currently exercised by AArch64 channel tests"
+)]
 pub(crate) fn fail_exposed_write_after_copy_for_test(countdown: usize) {
     FAIL_EXPOSED_WRITE_AFTER_COPY_COUNTDOWN.store(countdown, Ordering::Release);
 }
@@ -216,19 +220,6 @@ impl PageBackend for KernelPageBackend {
                 destination.len(),
             )
         };
-        Ok(())
-    }
-
-    fn write_owned(
-        &self,
-        page: &mut Self::Page,
-        offset: usize,
-        source: &[u8],
-    ) -> Result<(), Self::Error> {
-        let destination = page_address(page, offset, source.len())?;
-        // SAFETY: page_address proves this destination lies in the uniquely
-        // locked owned page, and source remains kernel-owned for this call.
-        unsafe { copy_nonoverlapping(source.as_ptr(), destination, source.len()) };
         Ok(())
     }
 
