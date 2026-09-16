@@ -232,5 +232,5 @@ fn has_older_live(mut entry: Option<&Entry>, sequence: u64) -> bool {
 
 #[cold]
 fn directory_invariant_violation() -> ! {
-    hyper::debug::invariant_failure(format_args!("object directory invariant"))
+    hyper::debug::invariant_failure("object directory invariant")
 }

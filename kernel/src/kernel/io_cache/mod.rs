@@ -384,5 +384,5 @@ impl<Page> PublishError<Page> {
 
 #[cold]
 fn cache_invariant_violation() -> ! {
-    hyper::debug::invariant_failure(format_args!("I/O cache ownership invariant"))
+    hyper::debug::invariant_failure("I/O cache ownership invariant")
 }

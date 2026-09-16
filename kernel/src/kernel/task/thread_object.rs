@@ -202,7 +202,7 @@ impl ThreadObject {
 
 #[cold]
 fn thread_object_invariant_violation() -> ! {
-    hyper::debug::invariant_failure(format_args!(
-        "task::thread_object::thread_object_invariant_violation invariant"
-    ))
+    hyper::debug::invariant_failure(
+        "task::thread_object::thread_object_invariant_violation invariant",
+    )
 }

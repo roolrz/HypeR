@@ -439,9 +439,9 @@ impl NativeAddressSpace {
             .compare_exchange(true, false, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
-            hyper::debug::invariant_failure(format_args!(
-                "mm::user_space::machine::abort_root_vmar_object_publication invariant"
-            ));
+            hyper::debug::invariant_failure(
+                "mm::user_space::machine::abort_root_vmar_object_publication invariant",
+            );
         }
     }
 
@@ -814,9 +814,7 @@ impl<'owner> ActiveNativeAddressSpace<'owner> {
         service: &hyper::hal::user::NativeCallService<'_>,
     ) -> StoppedNativeUser<'context, 'owner> {
         let Some(backend) = self.backend.take() else {
-            hyper::debug::invariant_failure(format_args!(
-                "mm::user_space::machine::run_user invariant"
-            ));
+            hyper::debug::invariant_failure("mm::user_space::machine::run_user invariant");
         };
         match crate::hal::user::run_user(context, backend, binding, kernel_access, service) {
             Ok(stopped) => StoppedNativeUser {
@@ -851,14 +849,10 @@ impl<'owner> ActiveNativeAddressSpace<'owner> {
                     Ok(()) => {}
                 }
                 let Some(backend) = self.backend.take() else {
-                    hyper::debug::invariant_failure(format_args!(
-                        "mm::user_space::machine::leave invariant"
-                    ));
+                    hyper::debug::invariant_failure("mm::user_space::machine::leave invariant");
                 };
                 if backend.cpu() != self.cpu {
-                    hyper::debug::invariant_failure(format_args!(
-                        "mm::user_space::machine::leave invariant"
-                    ));
+                    hyper::debug::invariant_failure("mm::user_space::machine::leave invariant");
                 }
                 // SAFETY: The current-CPU check above, PinnedExecution borrow,
                 // and non-Send token prove same-PE teardown.
@@ -885,28 +879,20 @@ pub(crate) struct StoppedNativeUser<'context, 'owner> {
 impl<'context> StoppedNativeUser<'context, '_> {
     pub(crate) fn leave(mut self) -> (crate::hal::user::UserExit<'context>, StoppedNativeRun) {
         let Some(stopped) = self.stopped.take() else {
-            hyper::debug::invariant_failure(format_args!(
-                "mm::user_space::machine::leave invariant"
-            ));
+            hyper::debug::invariant_failure("mm::user_space::machine::leave invariant");
         };
         let (exit, backend, architecture) = stopped.release();
         let Some(mut active) = self.active.take() else {
-            hyper::debug::invariant_failure(format_args!(
-                "mm::user_space::machine::leave invariant"
-            ));
+            hyper::debug::invariant_failure("mm::user_space::machine::leave invariant");
         };
         if active.backend.is_some() || backend.cpu() != active.cpu {
-            hyper::debug::invariant_failure(format_args!(
-                "mm::user_space::machine::leave invariant"
-            ));
+            hyper::debug::invariant_failure("mm::user_space::machine::leave invariant");
         }
         active.backend = Some(backend);
         if active.leave().is_err() {
             // ActiveNativeAddressSpace::Drop already fail-stops if hardware
             // ownership could not be closed. Keep this branch explicit.
-            hyper::debug::invariant_failure(format_args!(
-                "mm::user_space::machine::leave invariant"
-            ));
+            hyper::debug::invariant_failure("mm::user_space::machine::leave invariant");
         }
         (
             exit,
@@ -920,9 +906,7 @@ impl<'context> StoppedNativeUser<'context, '_> {
 impl Drop for StoppedNativeUser<'_, '_> {
     fn drop(&mut self) {
         if self.stopped.is_some() || self.active.is_some() {
-            hyper::debug::invariant_failure(format_args!(
-                "mm::user_space::machine::drop invariant"
-            ));
+            hyper::debug::invariant_failure("mm::user_space::machine::drop invariant");
         }
     }
 }
@@ -941,9 +925,7 @@ impl StoppedNativeRun {
 impl Drop for ActiveNativeAddressSpace<'_> {
     fn drop(&mut self) {
         if self.backend.is_some() {
-            hyper::debug::invariant_failure(format_args!(
-                "mm::user_space::machine::drop invariant"
-            ));
+            hyper::debug::invariant_failure("mm::user_space::machine::drop invariant");
         }
     }
 }
@@ -976,9 +958,7 @@ impl PreparedNativeChange<'_> {
                     .with(|state| state.residency.abort_update(cut))
                     .is_err()
                 {
-                    hyper::debug::invariant_failure(format_args!(
-                        "mm::user_space::machine::commit invariant"
-                    ));
+                    hyper::debug::invariant_failure("mm::user_space::machine::commit invariant");
                 }
                 return Err(Error::Logical(error));
             }

@@ -1415,7 +1415,7 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
 
 #[cold]
 fn address_space_invariant_violation() -> ! {
-    hyper::debug::invariant_failure(format_args!("user address space invariant"))
+    hyper::debug::invariant_failure("user address space invariant")
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

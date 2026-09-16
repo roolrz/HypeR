@@ -34,5 +34,5 @@ pub(crate) use transfer::InTransitCapabilities;
 /// the binary panic handler, never the ordinary log path.
 #[cold]
 fn invariant_violation() -> ! {
-    hyper::debug::invariant_failure(format_args!("capability ownership invariant"))
+    hyper::debug::invariant_failure("capability ownership invariant")
 }

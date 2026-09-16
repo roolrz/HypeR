@@ -49,9 +49,7 @@ pub(crate) unsafe fn activate(
             // The residency capability becomes part of the exact composite VM
             // execution claim before any later fallible activation step.
             if let Err(_residency) = claim.attach_residency(residency) {
-                hyper::debug::invariant_failure(format_args!(
-                    "vm::vcpu::transition::activate invariant"
-                ))
+                hyper::debug::invariant_failure("vm::vcpu::transition::activate invariant")
             }
         }
         // Clear publication before acquiring the controller lock. A producer
@@ -391,17 +389,17 @@ fn restore_reconcile_if_claimed(execution: &super::VcpuExecution, claimed: bool)
         return;
     }
     let Some(binding) = execution.vm_binding() else {
-        hyper::debug::invariant_failure(format_args!(
-            "vm::vcpu::transition::restore_reconcile_if_claimed invariant"
-        ))
+        hyper::debug::invariant_failure(
+            "vm::vcpu::transition::restore_reconcile_if_claimed invariant",
+        )
     };
     if binding
         .restore_interrupt_reconcile(execution.vcpu_id)
         .is_err()
     {
-        hyper::debug::invariant_failure(format_args!(
-            "vm::vcpu::transition::restore_reconcile_if_claimed invariant"
-        ))
+        hyper::debug::invariant_failure(
+            "vm::vcpu::transition::restore_reconcile_if_claimed invariant",
+        )
     }
 }
 

@@ -110,7 +110,7 @@ impl ResourceRetirement {
             })
             .is_err()
         {
-            hyper::debug::invariant_failure(format_args!("task::scheduler::mod::begin invariant"));
+            hyper::debug::invariant_failure("task::scheduler::mod::begin invariant");
         }
         Self { _private: () }
     }
@@ -124,7 +124,7 @@ impl Drop for ResourceRetirement {
             })
             .is_err()
         {
-            hyper::debug::invariant_failure(format_args!("task::scheduler::mod::drop invariant"));
+            hyper::debug::invariant_failure("task::scheduler::mod::drop invariant");
         }
     }
 }
@@ -164,9 +164,9 @@ impl DormantUserThread {
                 .arm_dormant_user(self.thread, ownership)
         });
         if result.is_err() {
-            hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::mod::commit_before_process_publication invariant"
-            ));
+            hyper::debug::invariant_failure(
+                "task::scheduler::mod::commit_before_process_publication invariant",
+            );
         }
         self.rollback = false;
     }
@@ -183,9 +183,7 @@ impl Drop for DormantUserThread {
                 .take_dormant_user(self.thread)
         }) {
             Ok(thread) => thread,
-            Err(_) => hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::mod::drop invariant"
-            )),
+            Err(_) => hyper::debug::invariant_failure("task::scheduler::mod::drop invariant"),
         };
         drop(thread);
     }
@@ -232,9 +230,7 @@ impl Drop for DormantVcpuThread {
                 // fatal in release builds as well as debug builds. Drop can
                 // run under arbitrary locks, so use only crash-safe diagnostics.
                 let _ = error;
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::mod::drop invariant"
-                ))
+                hyper::debug::invariant_failure("task::scheduler::mod::drop invariant")
             }
         };
         // Drop the stack, architecture context, and raw VM binding only after
@@ -407,7 +403,7 @@ impl Drop for WaitRegistration {
             // This linear owner can be abandoned from arbitrary lock/IRQ
             // context. Report through the panic handler while retaining the
             // registered wait; do not attempt ordinary cleanup or logging.
-            hyper::debug::invariant_failure(format_args!("task::scheduler::mod::drop invariant"))
+            hyper::debug::invariant_failure("task::scheduler::mod::drop invariant")
         }
     }
 }
@@ -799,9 +795,9 @@ fn publish_thread(mut reservation: ThreadReservation, thread: Box<Thread>) -> Re
                 Ok(()) => Ok(()),
                 Err((error, thread)) => match scheduler.abandon_reservation(&reservation) {
                     Ok(()) => Err((error, thread)),
-                    Err(_) => hyper::debug::invariant_failure(format_args!(
-                        "task::scheduler::mod::publish_thread invariant"
-                    )),
+                    Err(_) => hyper::debug::invariant_failure(
+                        "task::scheduler::mod::publish_thread invariant",
+                    ),
                 },
             };
             (result, true)
@@ -830,9 +826,9 @@ fn publish_secondary(
                 Ok(stack) => Ok(stack),
                 Err((error, thread)) => match scheduler.abandon_reservation(&reservation) {
                     Ok(()) => Err((error, thread)),
-                    Err(_) => hyper::debug::invariant_failure(format_args!(
-                        "task::scheduler::mod::publish_secondary invariant"
-                    )),
+                    Err(_) => hyper::debug::invariant_failure(
+                        "task::scheduler::mod::publish_secondary invariant",
+                    ),
                 },
             };
             (result, true)

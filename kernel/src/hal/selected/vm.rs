@@ -135,9 +135,9 @@ pub(crate) fn prepare_guest_stage2_retirement(
     {
         let _ = (capability, address_space);
         // The private capability cannot be obtained on this target.
-        hyper::debug::invariant_failure(format_args!(
-            "selected HAL vm::prepare_guest_stage2_retirement invariant"
-        ))
+        hyper::debug::invariant_failure(
+            "selected HAL vm::prepare_guest_stage2_retirement invariant",
+        )
     }
 }
 
@@ -164,9 +164,7 @@ pub(crate) fn publish_guest_stage2_changes(_capability: &GuestStage2RetirementCa
     #[cfg(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64))]
     crate::arch::vm::publish_guest_stage2_changes();
     #[cfg(not(any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)))]
-    hyper::debug::invariant_failure(format_args!(
-        "selected HAL vm::publish_guest_stage2_changes invariant"
-    ));
+    hyper::debug::invariant_failure("selected HAL vm::publish_guest_stage2_changes invariant");
 }
 
 /// Selected per-vCPU machine state retained by one scheduler execution.
@@ -721,7 +719,7 @@ pub(crate) unsafe fn run(state: *mut VcpuHardwareState) -> Result<StoppedVcpuRun
     }
     // SAFETY: The caller guarantees a valid exclusive state pointer.
     if !unsafe { (*state).runtime_authorized } {
-        hyper::debug::invariant_failure(format_args!("selected HAL vm::run invariant"))
+        hyper::debug::invariant_failure("selected HAL vm::run invariant")
     }
     // SAFETY: The validated state pointer exclusively owns this pinned field.
     let context = unsafe { core::ptr::addr_of_mut!((*state).context) };

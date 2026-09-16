@@ -395,10 +395,10 @@ fn try_secondary_entry(cpu_index: usize) -> Result<Infallible, Error> {
 
 extern "C" fn enter_clean_idle(cpu_index: usize) -> ! {
     let Some(cpu_index) = CpuIndex::new(cpu_index) else {
-        hyper::debug::invariant_failure(format_args!("cpu::smp::enter_clean_idle invariant"))
+        hyper::debug::invariant_failure("cpu::smp::enter_clean_idle invariant")
     };
     if super::current_index() != Some(cpu_index) {
-        hyper::debug::invariant_failure(format_args!("cpu::smp::enter_clean_idle invariant"))
+        hyper::debug::invariant_failure("cpu::smp::enter_clean_idle invariant")
     }
     crate::hal::cpu::mark_current_online();
     crate::hal::irq::enable_local();
@@ -412,9 +412,9 @@ extern "C" fn enter_clean_idle(cpu_index: usize) -> ! {
 /// Release store therefore cannot strand work behind an unobserved idle wait.
 pub(crate) fn publish_current_online_from_idle_observation() {
     let Some(cpu) = super::current_index() else {
-        hyper::debug::invariant_failure(format_args!(
-            "cpu::smp::publish_current_online_from_idle_observation invariant"
-        ))
+        hyper::debug::invariant_failure(
+            "cpu::smp::publish_current_online_from_idle_observation invariant",
+        )
     };
     ONLINE[cpu].store(true, Ordering::Release);
 }

@@ -35,9 +35,7 @@ impl Shared {
             )
             .is_err()
         {
-            hyper::debug::invariant_failure(format_args!(
-                "vm::io::mailbox::native_signal invariant"
-            ));
+            hyper::debug::invariant_failure("vm::io::mailbox::native_signal invariant");
         }
     }
     fn mutate<R>(&self, operation: impl FnOnce(&mut model::MailboxState) -> R) -> Result<R, Error> {

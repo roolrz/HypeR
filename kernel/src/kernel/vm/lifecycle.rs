@@ -44,11 +44,11 @@ impl RetirementQueue {
 
     fn push(&mut self, work: RetirementWork) {
         if self.count == self.entries.len() {
-            hyper::debug::invariant_failure(format_args!("vm::lifecycle::push invariant"));
+            hyper::debug::invariant_failure("vm::lifecycle::push invariant");
         }
         let index = (self.head + self.count) % self.entries.len();
         if self.entries[index].replace(work).is_some() {
-            hyper::debug::invariant_failure(format_args!("vm::lifecycle::push invariant"));
+            hyper::debug::invariant_failure("vm::lifecycle::push invariant");
         }
         self.count += 1;
     }
@@ -62,7 +62,7 @@ impl RetirementQueue {
         self.count -= 1;
         match work {
             Some(work) => Some(work),
-            None => hyper::debug::invariant_failure(format_args!("vm::lifecycle::pop invariant")),
+            None => hyper::debug::invariant_failure("vm::lifecycle::pop invariant"),
         }
     }
 
@@ -153,7 +153,7 @@ fn reap_one() -> Option<ReapOutcome> {
         phase => phase,
     };
     let RetirementPhase::Retire(control) = work.phase else {
-        hyper::debug::invariant_failure(format_args!("vm::lifecycle::reap_one invariant"))
+        hyper::debug::invariant_failure("vm::lifecycle::reap_one invariant")
     };
     match control.retire() {
         Ok(()) => {

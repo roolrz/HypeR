@@ -172,9 +172,7 @@ impl VcpuEndpoint {
             (signal, SignalMask::EMPTY)
         };
         if self.signals.update(clear, set).is_err() {
-            hyper::debug::invariant_failure(format_args!(
-                "vm::endpoint::update_mmio_signal invariant"
-            ));
+            hyper::debug::invariant_failure("vm::endpoint::update_mmio_signal invariant");
         }
     }
 
@@ -400,7 +398,7 @@ impl VcpuEndpoint {
             hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_CPU_TERMINATED,
         );
         if self.signals.update(SignalMask::EMPTY, terminated).is_err() {
-            hyper::debug::invariant_failure(format_args!("vm::endpoint::publish_reaped invariant"));
+            hyper::debug::invariant_failure("vm::endpoint::publish_reaped invariant");
         }
         Ok(())
     }

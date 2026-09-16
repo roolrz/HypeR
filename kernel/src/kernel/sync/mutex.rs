@@ -162,7 +162,7 @@ impl<T: ?Sized> Drop for MutexGuard<'_, T> {
             // Drop can run beneath arbitrary subsystem locks. Ordinary logs may
             // deadlock while mutex ownership is inconsistent, so fail closed
             // without acquiring another lock.
-            hyper::debug::invariant_failure(format_args!("sync::mutex::drop invariant"))
+            hyper::debug::invariant_failure("sync::mutex::drop invariant")
         }
     }
 }

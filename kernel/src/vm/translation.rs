@@ -296,7 +296,7 @@ impl Drop for ExecutionClaim {
         if self.armed {
             // Losing the only release capability would make later execution
             // ownership unknowable. Report through the binary panic handler without releasing ownership.
-            crate::debug::invariant_failure(format_args!("armed VM execution claim dropped"))
+            crate::debug::invariant_failure("armed VM execution claim dropped")
         }
     }
 }

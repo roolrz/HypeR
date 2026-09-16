@@ -1360,5 +1360,5 @@ pub(crate) enum ActiveHandleError {
 
 #[cold]
 fn object_invariant_violation() -> ! {
-    hyper::debug::invariant_failure(format_args!("object lifecycle invariant"))
+    hyper::debug::invariant_failure("object lifecycle invariant")
 }

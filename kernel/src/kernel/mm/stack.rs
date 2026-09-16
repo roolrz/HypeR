@@ -209,7 +209,7 @@ impl Drop for KernelStack {
             // Destruction may occur under arbitrary allocator or scheduler
             // locks. Ordinary diagnostics could deadlock while a partially unmapped
             // stack owner is being released.
-            hyper::debug::invariant_failure(format_args!("mm::stack::drop invariant"))
+            hyper::debug::invariant_failure("mm::stack::drop invariant")
         }
     }
 }

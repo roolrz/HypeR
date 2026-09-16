@@ -44,13 +44,11 @@ pub(super) unsafe fn wait(
         // SAFETY: The scheduler exclusively owns this pinned, detached payload.
         let current = unsafe { &mut *execution };
         let Some(binding) = current.vm_binding() else {
-            hyper::debug::invariant_failure(format_args!("vm::vcpu::power::wait invariant"));
+            hyper::debug::invariant_failure("vm::vcpu::power::wait invariant");
         };
         let ticket = binding
             .wfi_wait_ticket(current.vcpu_id)
-            .unwrap_or_else(|_| {
-                hyper::debug::invariant_failure(format_args!("vm::vcpu::power::wait invariant"))
-            });
+            .unwrap_or_else(|_| hyper::debug::invariant_failure("vm::vcpu::power::wait invariant"));
         match binding.lifecycle().power_continuation(current.vcpu_id) {
             Continuation::Resume(value) => {
                 if let Err(error) =

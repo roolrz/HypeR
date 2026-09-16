@@ -125,7 +125,7 @@ pub unsafe fn set_raw(
     if let Err(error) = ACTIVE[cpu].publish(execution) {
         // SAFETY: publication failed and the same local masked CPU still owns the slot.
         let owner = unsafe { OWNERSHIP[cpu].take(execution) }.unwrap_or_else(|| {
-            hyper::debug::invariant_failure(format_args!("vm::active_vcpu::set_raw invariant"))
+            hyper::debug::invariant_failure("vm::active_vcpu::set_raw invariant")
         });
         return Err(PublicationFailure::new(
             match error {
@@ -162,9 +162,8 @@ pub fn clear(
     compiler_fence(Ordering::Acquire);
     let pointer = NonNull::from(&mut *execution);
     // SAFETY: unpublication succeeded on this same IRQ-masked CPU.
-    let owner = unsafe { OWNERSHIP[cpu].take(pointer) }.unwrap_or_else(|| {
-        hyper::debug::invariant_failure(format_args!("vm::active_vcpu::clear invariant"))
-    });
+    let owner = unsafe { OWNERSHIP[cpu].take(pointer) }
+        .unwrap_or_else(|| hyper::debug::invariant_failure("vm::active_vcpu::clear invariant"));
     Ok(owner.claim)
 }
 
@@ -192,7 +191,7 @@ impl Drop for PublicationFailure {
         if self.claim.is_some() {
             // Dropping a failed publication would abandon exclusive VM and
             // CPU-residency ownership without architecture teardown.
-            hyper::debug::invariant_failure(format_args!("vm::active_vcpu::drop invariant"))
+            hyper::debug::invariant_failure("vm::active_vcpu::drop invariant")
         }
     }
 }
@@ -295,9 +294,7 @@ fn fail_borrow_completion(error: Error) -> ! {
     // remain retained. This path may inherit arbitrary callback lock state, so
     // only the allocation-free, ordinary-lock-free panic path is safe.
     let _ = error;
-    hyper::debug::invariant_failure(format_args!(
-        "vm::active_vcpu::fail_borrow_completion invariant"
-    ))
+    hyper::debug::invariant_failure("vm::active_vcpu::fail_borrow_completion invariant")
 }
 
 fn ensure_interrupts_masked() -> Result<(), Error> {

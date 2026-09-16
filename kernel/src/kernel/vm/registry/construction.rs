@@ -95,9 +95,9 @@ impl VmBuilder {
                 .endpoint(id)
                 .map_err(VcpuPreparationError::Registry)?;
             if endpoint.bind_thread(thread).is_err() {
-                hyper::debug::invariant_failure(format_args!(
-                    "vm::registry::construction::prepare_boot_vcpu invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "vm::registry::construction::prepare_boot_vcpu invariant",
+                );
             }
             if id == vcpu_id {
                 boot_vcpu = Some(thread);

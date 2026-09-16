@@ -167,7 +167,7 @@ impl<T: Copy, const N: usize> Page<T, N> {
 
     fn push(&mut self, entry: T) {
         if self.len >= N {
-            hyper::debug::invariant_failure(format_args!("inspect::mod::push invariant"));
+            hyper::debug::invariant_failure("inspect::mod::push invariant");
         }
         self.entries[self.len] = Some(entry);
         self.len += 1;

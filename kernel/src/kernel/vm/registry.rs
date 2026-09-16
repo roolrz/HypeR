@@ -215,19 +215,13 @@ impl VmRegistry {
             .as_deref()
             .is_some_and(|candidate| self.validate_install(id, candidate).is_ok());
         if !valid {
-            hyper::debug::invariant_failure(format_args!(
-                "vm::registry::install_prevalidated invariant"
-            ));
+            hyper::debug::invariant_failure("vm::registry::install_prevalidated invariant");
         }
         let Some(machine) = machine.take() else {
-            hyper::debug::invariant_failure(format_args!(
-                "vm::registry::install_prevalidated invariant"
-            ));
+            hyper::debug::invariant_failure("vm::registry::install_prevalidated invariant");
         };
         let Some(entry) = self.slots.get_mut(id.slot as usize) else {
-            hyper::debug::invariant_failure(format_args!(
-                "vm::registry::install_prevalidated invariant"
-            ));
+            hyper::debug::invariant_failure("vm::registry::install_prevalidated invariant");
         };
         *entry = VmSlot::Installed(machine);
     }
@@ -267,7 +261,7 @@ impl VmRegistry {
         }
         let old = core::mem::replace(entry, VmSlot::Exhausted);
         let VmSlot::Installed(machine) = old else {
-            hyper::debug::invariant_failure(format_args!("vm::registry::begin_quiesce invariant"))
+            hyper::debug::invariant_failure("vm::registry::begin_quiesce invariant")
         };
         let lease = machine.clone();
         *entry = VmSlot::Quiescing(machine);
@@ -287,9 +281,7 @@ impl VmRegistry {
         }
         let old = core::mem::replace(entry, VmSlot::Exhausted);
         let VmSlot::Quiescing(machine) = old else {
-            hyper::debug::invariant_failure(format_args!(
-                "vm::registry::try_hold_quiescent invariant"
-            ))
+            hyper::debug::invariant_failure("vm::registry::try_hold_quiescent invariant")
         };
         match machine.try_into_unique() {
             Ok(owner) => {
@@ -330,9 +322,7 @@ impl VmRegistry {
         }
         let old = core::mem::replace(entry, VmSlot::Exhausted);
         let VmSlot::QuiescentHeld { owner } = old else {
-            hyper::debug::invariant_failure(format_args!(
-                "vm::registry::begin_retirement invariant"
-            ))
+            hyper::debug::invariant_failure("vm::registry::begin_retirement invariant")
         };
         let machine = owner.into_shared();
         let operation = machine.clone();
@@ -348,7 +338,7 @@ impl VmRegistry {
         }
         let old = core::mem::replace(entry, VmSlot::Exhausted);
         let VmSlot::RetiringHeld(machine) = old else {
-            hyper::debug::invariant_failure(format_args!("vm::registry::promote_retired invariant"))
+            hyper::debug::invariant_failure("vm::registry::promote_retired invariant")
         };
         match machine.try_into_unique() {
             Ok(owner) => {
@@ -375,7 +365,7 @@ impl VmRegistry {
             },
         );
         let VmSlot::RetiredHeld { owner } = old else {
-            hyper::debug::invariant_failure(format_args!("vm::registry::begin_destroy invariant"))
+            hyper::debug::invariant_failure("vm::registry::begin_destroy invariant")
         };
         Ok(owner)
     }

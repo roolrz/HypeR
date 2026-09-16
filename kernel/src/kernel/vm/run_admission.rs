@@ -119,5 +119,5 @@ impl Drop for RunAdmissionClaim {
 
 #[cold]
 fn fail_stop_invalid_claim() -> ! {
-    hyper::debug::invariant_failure(format_args!("invalid or abandoned VM run admission claim"))
+    hyper::debug::invariant_failure("invalid or abandoned VM run admission claim")
 }

@@ -842,5 +842,5 @@ fn rollback_or_fail_stop(mut instance: Box<dyn DriverInstance>) {
 fn ownership_violation() -> ! {
     // The binary panic handler owns crash policy. Keep the live owner on
     // this stack: no ordinary locks, allocation, or unwinding is permitted.
-    crate::debug::invariant_failure(format_args!("platform device ownership invariant"))
+    crate::debug::invariant_failure("platform device ownership invariant")
 }

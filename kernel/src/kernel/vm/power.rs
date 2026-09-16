@@ -97,17 +97,17 @@ impl InstalledMachine {
                         // Power state and bootstrap are committed above. This
                         // stable dormant scheduler owner must become runnable.
                         if endpoint.start().is_err() {
-                            hyper::debug::invariant_failure(format_args!(
-                                "vm::power::complete_power_request invariant"
-                            ));
+                            hyper::debug::invariant_failure(
+                                "vm::power::complete_power_request invariant",
+                            );
                         }
                     }
                     crate::kernel::vm::endpoint_state::Lifecycle::Started => {
                         endpoint.signal_waiter()
                     }
-                    _ => hyper::debug::invariant_failure(format_args!(
-                        "vm::power::complete_power_request invariant"
-                    )),
+                    _ => hyper::debug::invariant_failure(
+                        "vm::power::complete_power_request invariant",
+                    ),
                 }
             }
             self.endpoint(request.vcpu)?.signal_waiter();
@@ -132,9 +132,7 @@ impl InstalledMachine {
             (bit, SignalMask::EMPTY)
         };
         if self.vm_signals.update(clear, set).is_err() {
-            hyper::debug::invariant_failure(format_args!(
-                "vm::power::update_power_signal invariant"
-            ));
+            hyper::debug::invariant_failure("vm::power::update_power_signal invariant");
         }
     }
 
@@ -143,9 +141,7 @@ impl InstalledMachine {
             hyper::abi::native::HYPER_NATIVE_SIGNAL_VIRTUAL_MACHINE_VCPU_TERMINATED,
         );
         if self.vm_signals.update(SignalMask::EMPTY, bit).is_err() {
-            hyper::debug::invariant_failure(format_args!(
-                "vm::power::publish_vcpu_terminal invariant"
-            ));
+            hyper::debug::invariant_failure("vm::power::publish_vcpu_terminal invariant");
         }
     }
 }

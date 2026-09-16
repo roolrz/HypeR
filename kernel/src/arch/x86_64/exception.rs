@@ -310,9 +310,7 @@ pub unsafe fn install_runtime_vectors() {
 
 pub fn install_local_vectors() {
     if !INSTALLED.load(Ordering::Acquire) {
-        hyper::debug::invariant_failure(format_args!(
-            "x86_64/exception::install_local_vectors invariant"
-        ));
+        hyper::debug::invariant_failure("x86_64/exception::install_local_vectors invariant");
     }
     install_local_descriptors();
     // SAFETY: Acquire of INSTALLED observes completed immutable IDT initialization.
@@ -328,17 +326,13 @@ pub fn install_local_vectors() {
 fn install_local_descriptors() {
     let cpu = super::current_cpu_index();
     if cpu >= MAX_CPUS {
-        hyper::debug::invariant_failure(format_args!(
-            "x86_64/exception::install_local_descriptors invariant"
-        ));
+        hyper::debug::invariant_failure("x86_64/exception::install_local_descriptors invariant");
     }
     if !TASK_STATE_READY
         .get(cpu)
         .is_some_and(|ready| ready.load(Ordering::Acquire))
     {
-        hyper::debug::invariant_failure(format_args!(
-            "x86_64/exception::install_local_descriptors invariant"
-        ));
+        hyper::debug::invariant_failure("x86_64/exception::install_local_descriptors invariant");
     }
     // SAFETY: `cpu` is in range. Each CPU exclusively initializes its own GDT
     // element before enabling interrupts; projecting the raw array pointer

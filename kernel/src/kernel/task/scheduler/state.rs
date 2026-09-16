@@ -98,9 +98,7 @@ impl ThreadObservation {
 
     fn schedule(self) -> ThreadScheduleObservation {
         self.schedule.unwrap_or_else(|| {
-            hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::state::schedule invariant"
-            ))
+            hyper::debug::invariant_failure("task::scheduler::state::schedule invariant")
         })
     }
 
@@ -134,9 +132,9 @@ impl ThreadObservation {
     fn wait_record(&self) -> &WaitRecord {
         match &self.schedule {
             Some(schedule) => &schedule.wait,
-            None => hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::state::wait_record invariant"
-            )),
+            None => {
+                hyper::debug::invariant_failure("task::scheduler::state::wait_record invariant")
+            }
         }
     }
     fn pending_migration(self) -> Option<MigrationRequest> {
@@ -166,9 +164,7 @@ impl ThreadMutation<'_> {
     fn apply<R>(&mut self, operation: impl for<'thread> FnOnce(&'thread mut Thread) -> R) -> R {
         match self.registry.with_thread_mut(self.id, operation) {
             Ok(value) => value,
-            Err(_) => hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::state::apply invariant"
-            )),
+            Err(_) => hyper::debug::invariant_failure("task::scheduler::state::apply invariant"),
         }
     }
 
@@ -184,9 +180,9 @@ impl ThreadMutation<'_> {
                 unsafe { thread.with_cpu_schedule_mut(cpu, operation) }
             }) {
                 Ok(Some(value)) => value,
-                Ok(None) | Err(_) => hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::apply_schedule invariant"
-                )),
+                Ok(None) | Err(_) => hyper::debug::invariant_failure(
+                    "task::scheduler::state::apply_schedule invariant",
+                ),
             },
         }
     }
@@ -889,9 +885,9 @@ impl CpuScheduler {
         };
         let generation = self.next_switch_generation;
         self.next_switch_generation = generation.checked_add(1).unwrap_or_else(|| {
-            hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::state::prepare_local_switch invariant"
-            ))
+            hyper::debug::invariant_failure(
+                "task::scheduler::state::prepare_local_switch invariant",
+            )
         });
         self.switching_from = Some(SwitchingContext {
             thread: current,
@@ -951,7 +947,7 @@ impl Drop for PreparedContextSwitch {
             // Drop may run while scheduler or architecture transition locks
             // are held. Ordinary logs could deadlock before preserving the
             // committed context-switch state.
-            hyper::debug::invariant_failure(format_args!("task::scheduler::state::drop invariant"))
+            hyper::debug::invariant_failure("task::scheduler::state::drop invariant")
         }
     }
 }
@@ -1044,9 +1040,7 @@ impl Scheduler {
             true
         });
         if !installed {
-            hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::state::activate_boot_cpu invariant"
-            ));
+            hyper::debug::invariant_failure("task::scheduler::state::activate_boot_cpu invariant");
         }
         self.schedulable_cpus = self.schedulable_cpus.with_cpu(cpu);
         Ok(())
@@ -1111,9 +1105,9 @@ impl Scheduler {
         }
         for index in 0..hyper::cpu::MAX_CPUS {
             let Some(cpu) = CpuIndex::new(index) else {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::context_is_stopped invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "task::scheduler::state::context_is_stopped invariant",
+                );
             };
             let in_use = CPU_SCHEDULERS[cpu].with(|slot| {
                 slot.as_ref().is_some_and(|local| {
@@ -1181,9 +1175,7 @@ impl Scheduler {
             true
         });
         if !installed {
-            hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::state::publish_secondary invariant"
-            ));
+            hyper::debug::invariant_failure("task::scheduler::state::publish_secondary invariant");
         }
         self.cpu_reservations[reservation.cpu()] = false;
         Ok(SecondaryStack {
@@ -1226,9 +1218,7 @@ impl Scheduler {
         }
         for index in 0..hyper::cpu::MAX_CPUS {
             let Some(cpu) = CpuIndex::new(index) else {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::select_cpu invariant"
-                ));
+                hyper::debug::invariant_failure("task::scheduler::state::select_cpu invariant");
             };
             if affinity.contains(cpu) && self.cpu_is_schedulable(cpu) {
                 return Ok(cpu);
@@ -1426,9 +1416,9 @@ impl Scheduler {
         // would indicate internal queue corruption after lifecycle publication.
         match self.make_ready(id) {
             Ok(outcome) => Ok(outcome),
-            Err(_) => hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::state::make_user_ready invariant"
-            )),
+            Err(_) => {
+                hyper::debug::invariant_failure("task::scheduler::state::make_user_ready invariant")
+            }
         }
     }
 
@@ -2241,9 +2231,9 @@ impl Scheduler {
         if self.retirements.push(retired).is_err() {
             // A registry slot remains Retiring for every queued element, so
             // fixed-capacity overflow is an internal accounting violation.
-            hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::state::queue_terminated_retirement invariant"
-            ));
+            hyper::debug::invariant_failure(
+                "task::scheduler::state::queue_terminated_retirement invariant",
+            );
         }
         Ok(true)
     }
@@ -2291,9 +2281,7 @@ impl Scheduler {
         });
         for index in 0..hyper::cpu::MAX_CPUS {
             let Some(cpu) = CpuIndex::new(index) else {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::statistics invariant"
-                ));
+                hyper::debug::invariant_failure("task::scheduler::state::statistics invariant");
             };
             CPU_SCHEDULERS[cpu].with(|slot| {
                 let Some(local) = slot.as_mut() else {
@@ -2330,11 +2318,9 @@ impl Scheduler {
                                     match class {
                                         SchedulingClass::RealTime => observed_real_time_ready += 1,
                                         SchedulingClass::Fair => observed_fair_ready += 1,
-                                        SchedulingClass::Idle => {
-                                            hyper::debug::invariant_failure(format_args!(
-                                                "task::scheduler::state::statistics invariant"
-                                            ))
-                                        }
+                                        SchedulingClass::Idle => hyper::debug::invariant_failure(
+                                            "task::scheduler::state::statistics invariant",
+                                        ),
                                     }
                                 }
                                 ThreadState::Running => stats.running += 1,
@@ -2346,26 +2332,22 @@ impl Scheduler {
                         })
                         .is_err()
                     {
-                        hyper::debug::invariant_failure(format_args!(
-                            "task::scheduler::state::statistics invariant"
-                        ));
+                        hyper::debug::invariant_failure(
+                            "task::scheduler::state::statistics invariant",
+                        );
                     }
                 });
                 if observed_ready != topology_ready
                     || observed_real_time_ready != topology_real_time_ready
                     || observed_fair_ready != topology_fair_ready
                 {
-                    hyper::debug::invariant_failure(format_args!(
-                        "task::scheduler::state::statistics invariant"
-                    ));
+                    hyper::debug::invariant_failure("task::scheduler::state::statistics invariant");
                 }
                 if threads.with_thread(current, |_thread, schedule| {
                     matches!(schedule.state, ThreadState::Running | ThreadState::Idle)
                 }) != Ok(true)
                 {
-                    hyper::debug::invariant_failure(format_args!(
-                        "task::scheduler::state::statistics invariant"
-                    ));
+                    hyper::debug::invariant_failure("task::scheduler::state::statistics invariant");
                 }
             });
         }
@@ -2398,9 +2380,7 @@ impl Scheduler {
                         })
                     }
                     .unwrap_or_else(|| {
-                        hyper::debug::invariant_failure(format_args!(
-                            "task::scheduler::state::thread invariant"
-                        ))
+                        hyper::debug::invariant_failure("task::scheduler::state::thread invariant")
                     })
                 }
                 Some(_) => ThreadObservation {
@@ -2443,25 +2423,25 @@ impl Scheduler {
                 .registry
                 .with_thread(current, Thread::schedule_owner_cpu);
             if current_owner != Ok(Some(cpu)) {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::with_cpu_schedule_stored invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "task::scheduler::state::with_cpu_schedule_stored invariant",
+                );
             }
             operation(scheduler)
         });
         if let Some((id, target)) = self.deferred_ready_handoff.take() {
             if self.active_domain.is_some() {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::with_cpu_schedule_stored invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "task::scheduler::state::with_cpu_schedule_stored invariant",
+                );
             }
             if let Err(error) = self.enqueue_ready(id) {
                 scheduler_invariant(error);
             }
             if self.registry.with_thread(id, Thread::schedule_owner_cpu) != Ok(Some(target)) {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::with_cpu_schedule_stored invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "task::scheduler::state::with_cpu_schedule_stored invariant",
+                );
             }
         }
         if let Some((id, target)) = self.deferred_blocked_handoff.take()
@@ -2479,9 +2459,9 @@ impl Scheduler {
     ) -> Result<R, Error> {
         if let Some(active) = self.active_domain {
             if active.cpu != cpu {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::with_cpu_domain invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "task::scheduler::state::with_cpu_domain invariant",
+                );
             }
             // SAFETY: the matching CPU lock remains held by the outer scope;
             // nested access is serialized by the exclusive Scheduler borrow.
@@ -2493,9 +2473,9 @@ impl Scheduler {
                 None => return Err(Error::CpuNotRegistered),
             };
             if local.index != cpu {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::with_cpu_domain invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "task::scheduler::state::with_cpu_domain invariant",
+                );
             }
             let local = core::ptr::NonNull::from(&mut *local);
             self.active_domain = Some(ActiveCpuDomain { cpu, local });
@@ -2534,9 +2514,7 @@ impl Scheduler {
             }
             let generation = local.next_switch_generation;
             local.next_switch_generation = generation.checked_add(1).unwrap_or_else(|| {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::prepare_switch invariant"
-                ))
+                hyper::debug::invariant_failure("task::scheduler::state::prepare_switch invariant")
             });
             local.switching_from = Some(SwitchingContext {
                 thread: current,
@@ -2709,9 +2687,9 @@ impl Scheduler {
             // The global scheduler lock is held and queue state is no longer
             // recoverable. Use crash-safe reporting, which never waits for
             // scheduler locks, and retain all inconsistent ownership.
-            hyper::debug::invariant_failure(format_args!(
-                "task::scheduler::state::restore_ready_migration invariant"
-            ))
+            hyper::debug::invariant_failure(
+                "task::scheduler::state::restore_ready_migration invariant",
+            )
         }
     }
 
@@ -2735,9 +2713,9 @@ impl Scheduler {
             .is_some_and(|active| active.cpu != target)
         {
             if self.deferred_ready_handoff.replace((id, target)).is_some() {
-                hyper::debug::invariant_failure(format_args!(
-                    "task::scheduler::state::enqueue_ready_or_defer invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "task::scheduler::state::enqueue_ready_or_defer invariant",
+                );
             }
             // Conservatively notify the target after the two-phase handoff.
             return Ok(true);
@@ -2949,7 +2927,5 @@ fn scheduler_invariant(_error: Error) -> ! {
     // The caller holds CPU/queue locks or exclusive coordination after a
     // committed mutation. Ordinary logs could deadlock and returning would
     // expose inconsistent state. The panic path retains all protection.
-    hyper::debug::invariant_failure(format_args!(
-        "task::scheduler::state::scheduler_invariant invariant"
-    ))
+    hyper::debug::invariant_failure("task::scheduler::state::scheduler_invariant invariant")
 }

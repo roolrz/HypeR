@@ -264,7 +264,7 @@ impl InitializationReservation {
             // after releasing the platform-bus lock. Dropping that owner here
             // would enter its fail-stop path while the same lock was held.
             let _state = ManuallyDrop::new(state);
-            hyper::debug::invariant_failure(format_args!("device::platform_bus::commit invariant"))
+            hyper::debug::invariant_failure("device::platform_bus::commit invariant")
         }
         self.active = false;
     }
@@ -284,7 +284,7 @@ impl Drop for InitializationReservation {
             }
         });
         if !rolled_back {
-            hyper::debug::invariant_failure(format_args!("device::platform_bus::drop invariant"))
+            hyper::debug::invariant_failure("device::platform_bus::drop invariant")
         }
     }
 }

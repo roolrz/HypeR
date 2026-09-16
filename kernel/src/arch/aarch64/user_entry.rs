@@ -696,5 +696,5 @@ fn read_hcr_el2() -> u64 {
 }
 
 pub(super) fn fail_stop() -> ! {
-    hyper::debug::invariant_failure(format_args!("aarch64 Native entry ownership invariant"))
+    hyper::debug::invariant_failure("aarch64 Native entry ownership invariant")
 }

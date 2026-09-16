@@ -256,7 +256,7 @@ impl PreparedTimedWait {
 impl Drop for PreparedTimedWait {
     fn drop(&mut self) {
         if self.registration.is_some() || self.timer.is_some() {
-            hyper::debug::invariant_failure(format_args!("object::wait::drop invariant"))
+            hyper::debug::invariant_failure("object::wait::drop invariant")
         }
     }
 }
@@ -297,7 +297,7 @@ impl PublishedTimedWait {
 impl Drop for PublishedTimedWait {
     fn drop(&mut self) {
         if self.park.is_some() || self.timer.is_some() {
-            hyper::debug::invariant_failure(format_args!("object::wait::drop invariant"))
+            hyper::debug::invariant_failure("object::wait::drop invariant")
         }
     }
 }

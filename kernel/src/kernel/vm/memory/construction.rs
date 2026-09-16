@@ -214,9 +214,9 @@ impl GuestAddressSpace {
         let previous = core::mem::replace(&mut self.identifier, Stage2Identifier::Poisoned);
         let Stage2Identifier::Reserved(Some(reservation)) = previous else {
             // The exclusive preflight above makes this branch impossible.
-            hyper::debug::invariant_failure(format_args!(
-                "vm::memory::construction::activate_identifier_for_install invariant"
-            ))
+            hyper::debug::invariant_failure(
+                "vm::memory::construction::activate_identifier_for_install invariant",
+            )
         };
         let active = reservation
             .activate()

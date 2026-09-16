@@ -214,20 +214,15 @@ fn allocator_fault(fault: AllocatorFault) -> ! {
         Err(first) => first,
     };
     let Some(first) = AllocatorInvariant::from_code(first_code) else {
-        crate::debug::invariant_failure(format_args!(
-            "invalid allocator fault record: current {}, first {first_code}",
-            current.code()
-        ))
+        crate::debug::invariant_failure("invalid allocator fault record (see LAST_ALLOCATOR_FAULT)")
     };
     let report = AllocatorInvariantReport::new(current, first);
     if let Some(handler) = ALLOCATOR_INVARIANT_HANDLER.get() {
         handler(report)
     }
-    crate::debug::invariant_failure(format_args!(
-        "allocator failure before handler installation: current {:?}, first {:?}",
-        report.current(),
-        report.first()
-    ))
+    crate::debug::invariant_failure(
+        "allocator failure before handler installation (see LAST_ALLOCATOR_FAULT)",
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

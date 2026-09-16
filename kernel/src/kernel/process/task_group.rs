@@ -489,7 +489,5 @@ fn allocate_group_id() -> Result<TaskGroupId, TaskGroupError> {
 
 #[cold]
 fn group_invariant_violation() -> ! {
-    hyper::debug::invariant_failure(format_args!(
-        "process::task_group::group_invariant_violation invariant"
-    ))
+    hyper::debug::invariant_failure("process::task_group::group_invariant_violation invariant")
 }

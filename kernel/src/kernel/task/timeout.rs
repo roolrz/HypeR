@@ -109,7 +109,7 @@ impl ArmedTimeout {
 
     fn retire(mut self, disposition: Retirement) -> Result<(), TimedWaitError> {
         let Some(timer) = self.timer.take() else {
-            hyper::debug::invariant_failure(format_args!("task::timeout::retire invariant"))
+            hyper::debug::invariant_failure("task::timeout::retire invariant")
         };
         retire_timeout(timer, &self.context, disposition)
     }
@@ -136,7 +136,7 @@ impl Drop for ArmedTimeout {
             // Destruction may occur under an arbitrary lock or interrupt-mask
             // state. Logging could deadlock before protecting the callback
             // context, so only the crash-safe panic path may report the failure.
-            hyper::debug::invariant_failure(format_args!("task::timeout::drop invariant"))
+            hyper::debug::invariant_failure("task::timeout::drop invariant")
         }
     }
 }

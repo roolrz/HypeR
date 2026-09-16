@@ -182,7 +182,7 @@ impl Drop for GuestAddressSpace {
             // Drop runs before Rust destroys `backing`, `stage2`, and
             // `table_pages`. Fail closed here so active translation storage is
             // never returned while a CPU or stale TLB entry may reference it.
-            hyper::debug::invariant_failure(format_args!("vm::memory::drop invariant"))
+            hyper::debug::invariant_failure("vm::memory::drop invariant")
         }
     }
 }

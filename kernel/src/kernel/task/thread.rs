@@ -112,7 +112,7 @@ impl ThreadRetirement {
 
     fn retain_charge(&mut self, charge: crate::kernel::accounting::CommittedCharge) {
         if self._resource_charge.replace(charge).is_some() {
-            hyper::debug::invariant_failure(format_args!("task::thread::retain_charge invariant"));
+            hyper::debug::invariant_failure("task::thread::retain_charge invariant");
         }
     }
 }
@@ -451,18 +451,16 @@ impl ThreadResourceOwnership {
     fn take_object_charge(&mut self) -> crate::kernel::accounting::CommittedCharge {
         match self.object_charge.take() {
             Some(charge) => charge,
-            None => hyper::debug::invariant_failure(format_args!(
-                "task::thread::take_object_charge invariant"
-            )),
+            None => hyper::debug::invariant_failure("task::thread::take_object_charge invariant"),
         }
     }
 
     fn take_retirement_charge(&mut self) -> crate::kernel::accounting::CommittedCharge {
         match self.retirement_charge.take() {
             Some(charge) => charge,
-            None => hyper::debug::invariant_failure(format_args!(
-                "task::thread::take_retirement_charge invariant"
-            )),
+            None => {
+                hyper::debug::invariant_failure("task::thread::take_retirement_charge invariant")
+            }
         }
     }
 }
@@ -791,9 +789,7 @@ impl Thread {
 
     fn stored_schedule(&self) -> &ThreadScheduleState {
         if self.schedule_owner != ScheduleOwner::Coordinator {
-            hyper::debug::invariant_failure(format_args!(
-                "task::thread::stored_schedule invariant"
-            ));
+            hyper::debug::invariant_failure("task::thread::stored_schedule invariant");
         }
         // SAFETY: coordinator access is serialized by TransitionLock, and a
         // Cpu owner is rejected before the cell is dereferenced.
@@ -802,9 +798,7 @@ impl Thread {
 
     fn stored_schedule_mut(&mut self) -> &mut ThreadScheduleState {
         if self.schedule_owner != ScheduleOwner::Coordinator {
-            hyper::debug::invariant_failure(format_args!(
-                "task::thread::stored_schedule_mut invariant"
-            ));
+            hyper::debug::invariant_failure("task::thread::stored_schedule_mut invariant");
         }
         self.schedule.get_mut()
     }
@@ -991,9 +985,7 @@ impl Thread {
         match (ready.membership, control.membership) {
             (QueueMembership::None, _) => control,
             (_, QueueMembership::None) => ready,
-            _ => hyper::debug::invariant_failure(format_args!(
-                "task::thread::combined_queue_links invariant"
-            )),
+            _ => hyper::debug::invariant_failure("task::thread::combined_queue_links invariant"),
         }
     }
 
@@ -1104,15 +1096,11 @@ impl Thread {
         }
         let object = match self.object.user_thread() {
             Some(thread) => thread.clone(),
-            None => hyper::debug::invariant_failure(format_args!(
-                "task::thread::take_user_execution invariant"
-            )),
+            None => hyper::debug::invariant_failure("task::thread::take_user_execution invariant"),
         };
         match core::mem::replace(&mut self.resources.execution, ThreadExecution::Kernel) {
             ThreadExecution::User(execution) => Some((object, execution)),
-            _ => hyper::debug::invariant_failure(format_args!(
-                "task::thread::take_user_execution invariant"
-            )),
+            _ => hyper::debug::invariant_failure("task::thread::take_user_execution invariant"),
         }
     }
 
@@ -1125,9 +1113,9 @@ impl Thread {
         }?;
         let ownership = match self.resources._ownership.as_mut() {
             Some(ownership) => ownership,
-            None => hyper::debug::invariant_failure(format_args!(
-                "task::thread::take_vcpu_reap_publication invariant"
-            )),
+            None => hyper::debug::invariant_failure(
+                "task::thread::take_vcpu_reap_publication invariant",
+            ),
         };
         retirement.retain_charge(ownership.take_retirement_charge());
         Some(retirement)

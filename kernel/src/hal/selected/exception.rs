@@ -56,9 +56,7 @@ pub(crate) unsafe fn with_irq_tail_capability(_service: fn(IrqTailCapability)) {
     // This function is referenced by the stable kernel postlude, but the
     // selected backend below never publishes that postlude on this target.
     // Fail closed if an invalid caller bypasses the selection contract.
-    hyper::debug::invariant_failure(format_args!(
-        "selected HAL exception::with_irq_tail_capability invariant"
-    ))
+    hyper::debug::invariant_failure("selected HAL exception::with_irq_tail_capability invariant")
 }
 
 /// Qualifies a kernel IRQ-tail postlude for the selected entry backend.

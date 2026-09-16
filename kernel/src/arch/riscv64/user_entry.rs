@@ -519,7 +519,7 @@ fn fault_kind(cause: u64) -> UserFaultKind {
     }
 }
 fn fail_stop() -> ! {
-    hyper::debug::invariant_failure(format_args!("riscv64 Native entry ownership invariant"))
+    hyper::debug::invariant_failure("riscv64 Native entry ownership invariant")
 }
 const _: () = {
     assert!(offset_of!(NativeFrame, general) == 0);

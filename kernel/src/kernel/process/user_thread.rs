@@ -168,9 +168,7 @@ impl UserThread {
         match &self.object {
             UserThreadOwner::Service(object) => object.publication(),
             UserThreadOwner::Scheduler(_) | UserThreadOwner::Operation(_) => {
-                hyper::debug::invariant_failure(format_args!(
-                    "process::user_thread::publication invariant"
-                ))
+                hyper::debug::invariant_failure("process::user_thread::publication invariant")
             }
         }
     }
@@ -186,12 +184,12 @@ impl UserThread {
             UserThreadOwner::Service(object) => Self {
                 object: UserThreadOwner::Scheduler(object.into_scheduler()),
             },
-            UserThreadOwner::Scheduler(_) => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::into_scheduler_owner invariant"
-            )),
-            UserThreadOwner::Operation(_) => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::into_scheduler_owner invariant"
-            )),
+            UserThreadOwner::Scheduler(_) => hyper::debug::invariant_failure(
+                "process::user_thread::into_scheduler_owner invariant",
+            ),
+            UserThreadOwner::Operation(_) => hyper::debug::invariant_failure(
+                "process::user_thread::into_scheduler_owner invariant",
+            ),
         }
     }
 
@@ -322,9 +320,7 @@ impl UserThread {
         self.inner().joined.wait()?;
         match self.snapshot().terminal {
             Some(reason) => Ok(reason),
-            None => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::join invariant"
-            )),
+            None => hyper::debug::invariant_failure("process::user_thread::join invariant"),
         }
     }
 
@@ -339,23 +335,17 @@ impl UserThread {
         }
         match self.snapshot().terminal {
             Some(reason) => Some(reason),
-            None => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::try_join invariant"
-            )),
+            None => hyper::debug::invariant_failure("process::user_thread::try_join invariant"),
         }
     }
 
     pub(super) fn publish(&self, id: ThreadId) {
         if id == ThreadId::BOOTSTRAP || self.inner().scheduler_id.load(Ordering::Relaxed) != 0 {
-            hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::publish invariant"
-            ));
+            hyper::debug::invariant_failure("process::user_thread::publish invariant");
         }
         self.inner().control.with(|control| {
             if control.lifecycle.publish().is_err() {
-                hyper::debug::invariant_failure(format_args!(
-                    "process::user_thread::publish invariant"
-                ));
+                hyper::debug::invariant_failure("process::user_thread::publish invariant");
             }
         });
         // The ID is the publication word for every control field initialized
@@ -366,15 +356,15 @@ impl UserThread {
     fn publish_terminal_state(&self) -> TerminalReason {
         let terminal = self.inner().control.with(|control| {
             if control.prepared_run.is_some() || control.active_run.is_some() {
-                hyper::debug::invariant_failure(format_args!(
-                    "process::user_thread::publish_terminal_state invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "process::user_thread::publish_terminal_state invariant",
+                );
             }
             match control.lifecycle.detach() {
                 Ok(terminal) => terminal,
-                Err(_) => hyper::debug::invariant_failure(format_args!(
-                    "process::user_thread::publish_terminal_state invariant"
-                )),
+                Err(_) => hyper::debug::invariant_failure(
+                    "process::user_thread::publish_terminal_state invariant",
+                ),
             }
         });
         // Publish the object-visible terminal state before Process membership
@@ -387,18 +377,18 @@ impl UserThread {
             .update(SignalMask::EMPTY, Self::TERMINATED)
             .is_err()
         {
-            hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::publish_terminal_state invariant"
-            ));
+            hyper::debug::invariant_failure(
+                "process::user_thread::publish_terminal_state invariant",
+            );
         }
         terminal
     }
 
     fn publish_join_completion(&self) {
         if self.inner().joined.complete_all().is_err() {
-            hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::publish_join_completion invariant"
-            ));
+            hyper::debug::invariant_failure(
+                "process::user_thread::publish_join_completion invariant",
+            );
         }
     }
 }
@@ -474,18 +464,16 @@ impl UserExecution {
     pub(crate) fn address_space(&self) -> &NativeAddressSpace {
         match self.address_space.as_ref() {
             Some(address_space) => address_space,
-            None => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::address_space invariant"
-            )),
+            None => {
+                hyper::debug::invariant_failure("process::user_thread::address_space invariant")
+            }
         }
     }
 
     pub(crate) fn process(&self) -> &Process {
         match self.ownership.as_ref() {
             Some(ownership) => ownership.membership.process(),
-            None => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::process invariant"
-            )),
+            None => hyper::debug::invariant_failure("process::user_thread::process invariant"),
         }
     }
 
@@ -505,9 +493,9 @@ impl UserExecution {
         ownership: UserExecutionOwnership,
     ) {
         if self.armed || self.ownership.is_some() {
-            hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::arm_for_process_publication invariant"
-            ));
+            hyper::debug::invariant_failure(
+                "process::user_thread::arm_for_process_publication invariant",
+            );
         }
         self.ownership = Some(ownership);
         self.armed = true;
@@ -516,18 +504,16 @@ impl UserExecution {
     /// Completes scheduler-detach ownership outside the scheduler lock.
     pub(crate) fn complete_detach(mut self, thread: UserThread) {
         if !self.armed {
-            hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::complete_detach invariant"
-            ));
+            hyper::debug::invariant_failure("process::user_thread::complete_detach invariant");
         }
         self.armed = false;
         drop(self.address_space.take());
         let terminal = thread.publish_terminal_state();
         let ownership = match self.ownership.take() {
             Some(ownership) => ownership,
-            None => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::complete_detach invariant"
-            )),
+            None => {
+                hyper::debug::invariant_failure("process::user_thread::complete_detach invariant")
+            }
         };
         ownership.membership.detach(terminal);
         drop(ownership.execution_charge);
@@ -540,7 +526,7 @@ impl Drop for UserExecution {
         if self.armed || self.ownership.is_some() {
             // Reclamation must call complete_detach after releasing scheduler
             // ownership. Drop cannot acquire Process/completion lock graphs.
-            hyper::debug::invariant_failure(format_args!("process::user_thread::drop invariant"));
+            hyper::debug::invariant_failure("process::user_thread::drop invariant");
         }
     }
 }
@@ -602,18 +588,14 @@ impl PreparedUserRun {
     fn abort_inner(&mut self) -> crate::kernel::task::scheduler::UserRunGuard {
         self.thread.inner().control.with(|control| {
             if control.prepared_run != Some(self.identity) {
-                hyper::debug::invariant_failure(format_args!(
-                    "process::user_thread::abort_inner invariant"
-                ));
+                hyper::debug::invariant_failure("process::user_thread::abort_inner invariant");
             }
             control.prepared_run = None;
         });
         self.armed = false;
         match self.pin.take() {
             Some(pin) => pin,
-            None => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::abort_inner invariant"
-            )),
+            None => hyper::debug::invariant_failure("process::user_thread::abort_inner invariant"),
         }
     }
 }
@@ -621,7 +603,7 @@ impl PreparedUserRun {
 impl Drop for PreparedUserRun {
     fn drop(&mut self) {
         if self.armed {
-            hyper::debug::invariant_failure(format_args!("process::user_thread::drop invariant"));
+            hyper::debug::invariant_failure("process::user_thread::drop invariant");
         }
     }
 }
@@ -642,18 +624,14 @@ impl ActiveUserRun {
             self.identity.generation,
         ) {
             Some(binding) => binding,
-            None => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::binding invariant"
-            )),
+            None => hyper::debug::invariant_failure("process::user_thread::binding invariant"),
         }
     }
 
     pub(crate) fn pin(&self) -> &crate::kernel::task::scheduler::UserRunGuard {
         match self.pin.as_ref() {
             Some(pin) => pin,
-            None => {
-                hyper::debug::invariant_failure(format_args!("process::user_thread::pin invariant"))
-            }
+            None => hyper::debug::invariant_failure("process::user_thread::pin invariant"),
         }
     }
 
@@ -665,21 +643,21 @@ impl ActiveUserRun {
         proof: crate::kernel::mm::user_space::StoppedNativeRun,
     ) -> (StoppedUserRun, crate::kernel::task::scheduler::UserRunGuard) {
         if crate::kernel::cpu::current_index() != Some(self.identity.cpu) {
-            hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::stop_after_machine_exit invariant"
-            ));
+            hyper::debug::invariant_failure(
+                "process::user_thread::stop_after_machine_exit invariant",
+            );
         }
         if proof.binding() != self.binding() {
-            hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::stop_after_machine_exit invariant"
-            ));
+            hyper::debug::invariant_failure(
+                "process::user_thread::stop_after_machine_exit invariant",
+            );
         }
         self.armed = false;
         let pin = match self.pin.take() {
             Some(pin) => pin,
-            None => hyper::debug::invariant_failure(format_args!(
-                "process::user_thread::stop_after_machine_exit invariant"
-            )),
+            None => hyper::debug::invariant_failure(
+                "process::user_thread::stop_after_machine_exit invariant",
+            ),
         };
         (
             StoppedUserRun {
@@ -695,7 +673,7 @@ impl ActiveUserRun {
 impl Drop for ActiveUserRun {
     fn drop(&mut self) {
         if self.armed {
-            hyper::debug::invariant_failure(format_args!("process::user_thread::drop invariant"));
+            hyper::debug::invariant_failure("process::user_thread::drop invariant");
         }
     }
 }
@@ -717,9 +695,9 @@ impl StoppedUserRun {
     pub(crate) fn acknowledge_architecture_exit(mut self) {
         self.thread.inner().control.with(|control| {
             if control.active_run != Some(self.identity) {
-                hyper::debug::invariant_failure(format_args!(
-                    "process::user_thread::acknowledge_architecture_exit invariant"
-                ));
+                hyper::debug::invariant_failure(
+                    "process::user_thread::acknowledge_architecture_exit invariant",
+                );
             }
             control.active_run = None;
         });
@@ -730,7 +708,7 @@ impl StoppedUserRun {
 impl Drop for StoppedUserRun {
     fn drop(&mut self) {
         if self.armed {
-            hyper::debug::invariant_failure(format_args!("process::user_thread::drop invariant"));
+            hyper::debug::invariant_failure("process::user_thread::drop invariant");
         }
     }
 }

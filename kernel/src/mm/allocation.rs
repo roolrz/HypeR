@@ -356,7 +356,7 @@ impl<T> Drop for UniqueFallibleArc<T> {
 fn unreachable_unique_creation() -> ! {
     // A newly allocated FallibleArc has exactly one reference. Keep this
     // dependency-free primitive fail-stop if its own constructor is violated.
-    crate::debug::invariant_failure(format_args!("new FallibleArc is not uniquely owned"))
+    crate::debug::invariant_failure("new FallibleArc is not uniquely owned")
 }
 
 impl<T> Clone for FallibleArc<T> {

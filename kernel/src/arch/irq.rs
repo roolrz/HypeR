@@ -67,7 +67,7 @@ pub(crate) fn install_interrupt_entry_services(
 
 fn interrupt_entry_services() -> InterruptEntryServices {
     let Some(services) = INTERRUPT_ENTRY_SERVICES.get().copied() else {
-        hyper::debug::invariant_failure(format_args!("irq::interrupt_entry_services invariant"))
+        hyper::debug::invariant_failure("irq::interrupt_entry_services invariant")
     };
     services
 }
@@ -139,7 +139,7 @@ pub(crate) fn install_kernel_rpc_services(
 
 fn kernel_rpc_services() -> KernelRpcServices {
     let Some(services) = KERNEL_RPC_SERVICES.get().copied() else {
-        hyper::debug::invariant_failure(format_args!("irq::kernel_rpc_services invariant"))
+        hyper::debug::invariant_failure("irq::kernel_rpc_services invariant")
     };
     services
 }
