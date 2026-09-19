@@ -116,7 +116,7 @@ fn write_response(
             machines.sort_by(|a, b| a.name.cmp(&b.name));
             writeln!(
                 output,
-                "NAME                              STATE      AUTOSTART  IMAGE"
+                "NAME                              STATE      AUTOSTART  ACCESS      IMAGE"
             )?;
             if machines.is_empty() {
                 writeln!(
@@ -127,12 +127,24 @@ fn write_response(
             for machine in machines {
                 writeln!(
                     output,
-                    "{:<32}  {:<9}  {:<9}  {}",
+                    "{:<32}  {:<11}  {:<9}  {:<10}  {}",
                     machine.name,
                     machine.state,
                     if machine.autostart { "yes" } else { "no" },
+                    if machine.read_only {
+                        "read-only"
+                    } else {
+                        "managed"
+                    },
                     machine.image
                 )?;
+                if let (Some(vcpus), Some(bytes)) = (machine.vcpus, machine.memory_bytes) {
+                    writeln!(
+                        output,
+                        "  vCPUs: {vcpus}; memory: {} MiB",
+                        bytes / (1024 * 1024)
+                    )?;
+                }
             }
         }
     }

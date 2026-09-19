@@ -27,6 +27,7 @@ use std::num::NonZeroU64;
 pub(super) struct Broker {
     listener: Option<listener::Listener>,
     slots: Vec<Slot>,
+    observations: Vec<(CapabilityChannel, u64)>,
     #[cfg(feature = "broker-test")]
     fast_released: bool,
     #[cfg(feature = "broker-test")]
@@ -90,6 +91,7 @@ impl Broker {
             return Err("too many configured I/O clients".into());
         }
         Ok(Self {
+            observations: Vec::new(),
             #[cfg(feature = "broker-test")]
             fast_released: false,
             #[cfg(feature = "broker-test")]
@@ -166,6 +168,14 @@ impl Broker {
     }
     pub(super) fn wait_items(&self) -> Vec<WaitItem<'_>> {
         let mut items = Vec::new();
+        for (endpoint, _) in &self.observations {
+            items.push(WaitItem::new(
+                endpoint.as_handle_ref(),
+                ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING
+                    .union(ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED),
+            ));
+        }
+
         if let Some(listener) = &self.listener {
             items.push(WaitItem::new(
                 listener.bell.as_handle_ref(),
@@ -232,6 +242,7 @@ impl Broker {
                     hyper_os::DEADLINE_INFINITE
                 }
             })
+            .chain(self.observations.iter().map(|(_, limit)| *limit))
             .min()
             .unwrap_or(hyper_os::DEADLINE_INFINITE)
     }
@@ -241,7 +252,14 @@ impl Broker {
         let mut progress = false;
         match admission_policy::poll(&mut self.listener, listener::Listener::receive) {
             Poll::Received(admission) => {
-                self.admit(guest, admission)?;
+                match admission {
+                    listener::Request::Connect(admission) => self.admit(guest, admission)?,
+                    listener::Request::Observe(endpoint) => {
+                        if self.observations.len() < 4 {
+                            self.observations.push((endpoint, deadline(1)?));
+                        }
+                    }
+                }
                 progress = true;
             }
             Poll::Idle => {}
@@ -249,6 +267,29 @@ impl Broker {
                 "HypeR io-runtime: new client admissions disabled: {}",
                 show(error)
             ),
+        }
+        if !self.observations.is_empty() {
+            match vm::machine_info(guest.machine.as_handle_ref()) {
+                Ok(info) => {
+                    let snapshot =
+                        io::encode_observation(info, hyper_vm_runtime::io_guest::RAM_BYTES);
+                    self.observations.retain(|(endpoint, limit)| {
+                        let keep = check_deadline(*limit).is_ok()
+                            && matches!(
+                                endpoint.try_send(&snapshot, &mut []),
+                                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK))
+                            );
+                        progress |= !keep;
+                        keep
+                    });
+                }
+                Err(error) => {
+                    // Observation failure must never tear down the data plane.
+                    eprintln!("HypeR io-runtime: status unavailable: {error}");
+                    self.observations.clear();
+                    progress = true;
+                }
+            }
         }
         for slot in &mut self.slots {
             #[cfg(feature = "broker-test")]

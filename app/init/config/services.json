@@ -17,13 +17,19 @@
           "source": "bootstrap.console",
           "purpose": "console.system",
           "operation": "duplicate",
-          "rights": ["wait", "read"]
+          "rights": [
+            "wait",
+            "read"
+          ]
         },
         {
           "source": "bootstrap.console-input-channel",
           "purpose": "console.data",
           "operation": "move",
-          "rights": ["wait", "write"]
+          "rights": [
+            "wait",
+            "write"
+          ]
         }
       ]
     },
@@ -38,13 +44,19 @@
           "source": "bootstrap.console",
           "purpose": "console.system",
           "operation": "duplicate",
-          "rights": ["wait", "write"]
+          "rights": [
+            "wait",
+            "write"
+          ]
         },
         {
           "source": "bootstrap.console-output-channel",
           "purpose": "console.data",
           "operation": "move",
-          "rights": ["wait", "read"]
+          "rights": [
+            "wait",
+            "read"
+          ]
         }
       ]
     },
@@ -53,142 +65,157 @@
       "image": "/svc/session",
       "critical": true,
       "restart": "never",
-      "after": ["console-input", "console-output"],
+      "after": [
+        "console-input",
+        "console-output"
+      ],
       "capabilities": [
         {
           "source": "bootstrap.service-output-channel",
           "purpose": "stdio.output",
           "operation": "duplicate",
-          "rights": ["wait", "write", "duplicate", "transfer"]
+          "rights": [
+            "wait",
+            "write",
+            "duplicate",
+            "transfer"
+          ]
         },
         {
           "source": "bootstrap.service-output-channel",
           "purpose": "stdio.error",
           "operation": "duplicate",
-          "rights": ["wait", "write", "duplicate", "transfer"]
+          "rights": [
+            "wait",
+            "write",
+            "duplicate",
+            "transfer"
+          ]
         },
         {
           "source": "bootstrap.session-input-channel",
           "purpose": "session.console-input",
           "operation": "move",
-          "rights": ["wait", "read"]
+          "rights": [
+            "wait",
+            "read"
+          ]
         },
         {
           "source": "bootstrap.session-output-channel",
           "purpose": "session.console-output",
           "operation": "move",
-          "rights": ["wait", "write"]
-        },
-        {
-          "source": "bootstrap.session-client-input-channel",
-          "purpose": "session.client-input",
-          "operation": "move",
-          "rights": ["wait", "write"]
-        },
-        {
-          "source": "bootstrap.session-client-output-channel",
-          "purpose": "session.client-output",
-          "operation": "move",
-          "rights": ["wait", "read"]
-        },
-        {
-          "source": "bootstrap.session-client-error-channel",
-          "purpose": "session.client-error",
-          "operation": "move",
-          "rights": ["wait", "read"]
-        }
-      ]
-    },
-    {
-      "name": "shell",
-      "image": "/bin/sh",
-      "critical": false,
-      "restart": "never",
-      "after": ["session"],
-      "capabilities": [
-        {
-          "source": "bootstrap.shell-input-channel",
-          "purpose": "stdio.terminal-input",
-          "operation": "duplicate",
-          "rights": ["wait", "read", "duplicate", "transfer", "inspect"]
-        },
-        {
-          "source": "bootstrap.shell-input-channel",
-          "purpose": "stdio.input",
-          "operation": "move",
-          "rights": ["wait", "read", "duplicate", "transfer", "inspect"]
-        },
-        {
-          "source": "bootstrap.shell-output-channel",
-          "purpose": "stdio.output",
-          "operation": "move",
-          "rights": ["wait", "write", "duplicate", "transfer"]
-        },
-        {
-          "source": "bootstrap.shell-error-channel",
-          "purpose": "stdio.error",
-          "operation": "move",
-          "rights": ["wait", "write", "duplicate", "transfer"]
+          "rights": [
+            "wait",
+            "write"
+          ]
         },
         {
           "source": "bootstrap.root-directory",
           "purpose": "process.root-directory",
           "operation": "duplicate",
-          "rights": ["read", "duplicate", "transfer", "execute", "write", "inspect", "set-attributes", "lock-file"]
+          "rights": [
+            "read",
+            "duplicate",
+            "transfer",
+            "execute",
+            "write",
+            "inspect",
+            "set-attributes",
+            "lock-file"
+          ]
         },
         {
           "source": "bootstrap.task-factory",
           "purpose": "process.task-factory",
           "operation": "duplicate",
-          "rights": ["create-process", "duplicate", "transfer"]
+          "rights": [
+            "create-process",
+            "duplicate",
+            "transfer"
+          ]
         },
         {
           "source": "bootstrap.task-group",
           "purpose": "process.task-group",
           "operation": "duplicate",
-          "rights": ["attach-process", "duplicate", "transfer"]
+          "rights": [
+            "attach-process",
+            "duplicate",
+            "transfer"
+          ]
         },
         {
           "source": "bootstrap.resource-domain",
           "purpose": "process.resource-domain",
           "operation": "duplicate",
-          "rights": ["sponsor", "duplicate", "transfer"]
+          "rights": [
+            "sponsor",
+            "duplicate",
+            "transfer"
+          ]
         },
         {
           "source": "bootstrap.task-inspector",
           "purpose": "process.task-inspector",
           "operation": "duplicate",
-          "rights": ["duplicate", "transfer", "inspect"]
+          "rights": [
+            "duplicate",
+            "transfer",
+            "inspect"
+          ]
         },
         {
           "source": "bootstrap.object-inspector",
           "purpose": "process.object-inspector",
           "operation": "duplicate",
-          "rights": ["duplicate", "transfer", "inspect"]
+          "rights": [
+            "duplicate",
+            "transfer",
+            "inspect"
+          ]
         },
         {
           "source": "bootstrap.memory-inspector",
           "purpose": "process.memory-inspector",
           "operation": "duplicate",
-          "rights": ["duplicate", "transfer", "inspect"]
+          "rights": [
+            "duplicate",
+            "transfer",
+            "inspect"
+          ]
         },
         {
           "source": "bootstrap.cpu-inspector",
           "purpose": "process.cpu-inspector",
           "operation": "duplicate",
-          "rights": ["duplicate", "transfer", "inspect"]
+          "rights": [
+            "duplicate",
+            "transfer",
+            "inspect"
+          ]
         },
         {
           "source": "bootstrap.dynamic-library-directory",
           "purpose": "process.child-library-directory",
           "operation": "duplicate",
-          "rights": ["read", "execute", "duplicate", "transfer"]
+          "rights": [
+            "read",
+            "execute",
+            "duplicate",
+            "transfer"
+          ]
         },
         {
           "source": "bootstrap.vm-client-connection-channel",
           "purpose": "vm.manager-connection",
           "operation": "duplicate",
-          "rights": ["wait", "write"]
+          "rights": [
+            "wait",
+            "write",
+            "duplicate",
+            "transfer"
+          ]
         }
       ]
     },
@@ -197,67 +224,169 @@
       "image": "/svc/vm-manager",
       "critical": true,
       "restart": "never",
-      "after": ["console-output"],
+      "after": [
+        "console-output"
+      ],
       "capabilities": [
         {
           "source": "bootstrap.service-output-channel",
           "purpose": "stdio.output",
           "operation": "duplicate",
-          "rights": ["wait", "write", "duplicate", "transfer"]
+          "rights": [
+            "wait",
+            "write",
+            "duplicate",
+            "transfer"
+          ]
         },
         {
           "source": "bootstrap.service-output-channel",
           "purpose": "stdio.error",
           "operation": "duplicate",
-          "rights": ["wait", "write", "duplicate", "transfer"]
+          "rights": [
+            "wait",
+            "write",
+            "duplicate",
+            "transfer"
+          ]
         },
         {
           "source": "bootstrap.root-directory",
           "purpose": "process.root-directory",
           "operation": "duplicate",
-          "rights": ["read", "duplicate", "transfer"]
+          "rights": [
+            "read",
+            "duplicate",
+            "transfer"
+          ]
         },
         {
           "source": "bootstrap.vm-runtime-image",
           "purpose": "vm.runtime-image",
           "operation": "create",
-          "rights": ["execute"]
+          "rights": [
+            "execute"
+          ]
         },
         {
           "source": "bootstrap.vm-provisioning-channel",
           "purpose": "vm.provisioning",
           "operation": "move",
-          "rights": ["wait", "read"]
+          "rights": [
+            "wait",
+            "read"
+          ]
         },
         {
           "source": "bootstrap.vm-manager-connection-channel",
           "purpose": "vm.manager-connection",
           "operation": "move",
-          "rights": ["wait", "read"]
+          "rights": [
+            "wait",
+            "read"
+          ]
         },
         {
           "source": "bootstrap.task-factory",
           "purpose": "process.task-factory",
           "operation": "duplicate",
-          "rights": ["create-process", "create-task-group"]
+          "rights": [
+            "create-process",
+            "create-task-group"
+          ]
         },
         {
           "source": "bootstrap.resource-domain",
           "purpose": "process.resource-domain",
           "operation": "duplicate",
-          "rights": ["create-resource-domain"]
+          "rights": [
+            "create-resource-domain"
+          ]
         },
         {
           "source": "bootstrap.vm-creation-authority",
           "purpose": "vm.creation-authority",
           "operation": "duplicate",
-          "rights": ["derive", "create-virtual-machine"]
+          "rights": [
+            "derive",
+            "create-virtual-machine"
+          ]
         },
         {
           "source": "bootstrap.dynamic-library-directory",
           "purpose": "process.child-library-directory",
           "operation": "duplicate",
-          "rights": ["read", "execute", "duplicate", "transfer"]
+          "rights": [
+            "read",
+            "execute",
+            "duplicate",
+            "transfer"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "io-runtime",
+      "image": "/svc/io-runtime",
+      "critical": false,
+      "restart": "never",
+      "after": [
+        "console-output",
+        "vm-manager"
+      ],
+      "capabilities": [
+        {
+          "source": "bootstrap.service-output-channel",
+          "purpose": "stdio.output",
+          "operation": "duplicate",
+          "rights": [
+            "wait",
+            "write"
+          ]
+        },
+        {
+          "source": "bootstrap.service-output-channel",
+          "purpose": "stdio.error",
+          "operation": "duplicate",
+          "rights": [
+            "wait",
+            "write"
+          ]
+        },
+        {
+          "source": "bootstrap.root-directory",
+          "purpose": "process.root-directory",
+          "operation": "duplicate",
+          "rights": [
+            "read",
+            "inspect",
+            "duplicate"
+          ]
+        },
+        {
+          "source": "bootstrap.resource-domain",
+          "purpose": "process.resource-domain",
+          "operation": "duplicate",
+          "rights": [
+            "sponsor"
+          ]
+        },
+        {
+          "source": "bootstrap.vm-creation-authority",
+          "purpose": "vm.creation-authority",
+          "operation": "duplicate",
+          "rights": [
+            "derive",
+            "create-virtual-machine"
+          ]
+        },
+        {
+          "source": "bootstrap.device-assignment-authority",
+          "purpose": "io.device-authority",
+          "operation": "duplicate",
+          "rights": [
+            "inspect"
+          ]
         }
       ]
     }

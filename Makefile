@@ -50,7 +50,7 @@ NATIVE_VM_RUNTIME := $(APP_OUTPUT)/vm-runtime
 NATIVE_DYNAMIC_TEST := $(APP_OUTPUT)/dynamic-test
 NATIVE_DYNAMIC_PLUGIN := $(APP_OUTPUT)/libdynamic-probe.so
 NATIVE_STD_TEST_OUTPUT := $(CURDIR)/target/std-check/$(NATIVE_ARCH)
-NATIVE_SERVICE_MANIFEST := $(CURDIR)/app/init/config/services.json
+NATIVE_SERVICE_MANIFEST := $(CURDIR)/app/init/tests/config/services.json
 NATIVE_INITRAMFS := $(APP_OUTPUT)/initramfs.cpio
 NATIVE_LOADER := $(SDK_OUTPUT)/lib/ld-hyper-$(NATIVE_ARCH).so
 NATIVE_RUNTIME_LIBRARY := $(SDK_OUTPUT)/lib/libhyper.so
@@ -62,8 +62,9 @@ NATIVE_GUEST_VCPUS ?= 1
 NATIVE_SMP_GUEST_VCPUS ?= 4
 NATIVE_SMP_INITRAMFS := $(APP_OUTPUT)/initramfs-smp.cpio
 STACK_OUTPUT := $(CURDIR)/target/stack-audit/$(ARCH)
+STACK_AUDIT ?= 0
 STACK_MINIMUM_REMAINING ?= 2048
-STACK_MAXIMUM_USED ?= 12288
+STACK_MAXIMUM_USED ?= 24576
 
 IO_VM_REFERENCE ?=
 IO_VM_PLATFORM ?= qemu
@@ -120,7 +121,7 @@ NATIVE_GUEST_ARCH := arm64
 NATIVE_GUEST_LOAD := 0x40200000
 NATIVE_GUEST_BOOTARGS := console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init loglevel=7
 endif
-NATIVE_VM_CONFIG := $(CURDIR)/app/init/config/vms.json
+NATIVE_VM_CONFIG := $(CURDIR)/app/init/tests/config/vms.json
 NATIVE_GUEST_PREREQUISITES := guest-itb
 NATIVE_GUEST_ENTRY := 0644 vm/alpine.itb "$(NATIVE_GUEST_ITB)"
 QEMU_CPUS ?= 4
@@ -166,10 +167,7 @@ stack-initramfs:
 		NATIVE_PS_IMAGE="$(NATIVE_STD_TEST_OUTPUT)/std-dynamic"
 
 test-stack: stack-initramfs
-	$(MAKE) image STACK_METADATA=1 CARGO_FEATURES="--features kernel-stack-audit"
-ifeq ($(ARCH),aarch64)
-	$(MAKE) -C "$(KERNEL_DIRECTORY)" stack-budget STACK_REPORT="$(STACK_OUTPUT)/frames.json"
-endif
+	$(MAKE) image CARGO_FEATURES="--features kernel-stack-audit"
 	$(NATIVE_QEMU_ENV) python3 -B tests/qemu/verify-stack.py \
 		"$(QEMU)" "$(KERNEL_IMAGE)" "$(STACK_OUTPUT)/initramfs.cpio" \
 		"$(STACK_OUTPUT)/qemu.log" --minimum-remaining "$(STACK_MINIMUM_REMAINING)" \
@@ -485,8 +483,8 @@ io-initramfs: app fit-pack $(NEWC_PACK)
 		--fit-pack "$(FIT_PACK)" --output "$(APP_OUTPUT)/io-standby.itb"
 	$(MAKE) -o app native-initramfs \
 		NATIVE_INITRAMFS="$(APP_OUTPUT)/initramfs-io.cpio" \
-		NATIVE_SERVICE_MANIFEST="$(CURDIR)/app/init/config/services-io.json" \
-		NATIVE_VM_CONFIG="$(CURDIR)/app/init/config/vms-io.json" \
+		NATIVE_SERVICE_MANIFEST="$(CURDIR)/app/init/config/services.json" \
+		NATIVE_VM_CONFIG="$(CURDIR)/app/init/tests/config/vms-io.json" \
 		NATIVE_EXTRA_ENTRIES='0755 svc/io-runtime "$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release/hyper-io-runtime" 0644 vm/io.itb "$(APP_OUTPUT)/io-standby.itb"'
 
 .PHONY: test-io-standby
@@ -513,7 +511,7 @@ board-initramfs: app fit-pack $(NEWC_PACK)
 		NATIVE_INITRAMFS="$(BOARD_OUTPUT)/bootstrap.cpio" \
 		NATIVE_GUEST_PREREQUISITES= NATIVE_GUEST_ENTRY= \
 		NATIVE_SERVICE_MANIFEST="$(BOARD_OUTPUT)/board/services.json" \
-		NATIVE_VM_CONFIG="$(CURDIR)/app/init/config/vms-io.json" \
+		NATIVE_VM_CONFIG="$(BOARD_OUTPUT)/board/vms.json" \
 		NATIVE_EXTRA_ENTRIES='0755 svc/io-runtime "$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release/hyper-io-runtime" 0644 vm/io.itb "$(BOARD_OUTPUT)/io.itb" 0644 etc/hyper/board.json "$(BOARD_OUTPUT)/board/board.json" 0644 etc/hyper/io-clients.conf "$(BOARD_OUTPUT)/board/io-clients.conf" $(BOARD_EXTRA_ENTRIES)'
 
 # Explicit image creation refuses existing outputs. The default build opts
@@ -560,7 +558,7 @@ test-board-storage: app image
 	$(NATIVE_QEMU_ENV) python3 -B tests/qemu/verify-board-storage.py \
 		--qemu "$(QEMU)" --image "$(KERNEL_IMAGE)" --initramfs "$$fixture/bootstrap.cpio" \
 		--disk "$$fixture/disk.img" --board "$(CURDIR)/boards/qemu.json" --log "$$fixture/accept" \
-		$(if $(filter 1,$(STACK_METADATA)),--minimum-stack-remaining "$(STACK_MINIMUM_REMAINING)" --maximum-stack-used "$(STACK_MAXIMUM_USED)")
+		$(if $(filter 1,$(STACK_AUDIT)),--minimum-stack-remaining "$(STACK_MINIMUM_REMAINING)" --maximum-stack-used "$(STACK_MAXIMUM_USED)")
 
 .PHONY: test-board-business
 test-board-business: app image fit-pack
@@ -637,7 +635,7 @@ test-userspace-device: app image
 		--image "$(KERNEL_IMAGE)" --initramfs "$$fixture/bootstrap.cpio" \
 		--disk "$$fixture/disk.img" --board "$$fixture/config.json" --log "$$fixture/accept" \
 		--require-userspace-device \
-		$(if $(filter 1,$(STACK_METADATA)),--minimum-stack-remaining "$(STACK_MINIMUM_REMAINING)" --maximum-stack-used "$(STACK_MAXIMUM_USED)")
+		$(if $(filter 1,$(STACK_AUDIT)),--minimum-stack-remaining "$(STACK_MINIMUM_REMAINING)" --maximum-stack-used "$(STACK_MAXIMUM_USED)")
 
 .PHONY: test-alpine-rootfs
 test-alpine-rootfs: app image

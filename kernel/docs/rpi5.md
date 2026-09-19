@@ -69,8 +69,8 @@ Build HypeR and a Native-only initramfs from the HypeR repository root:
 ```sh
 make image native-initramfs ARCH=aarch64 \
   NATIVE_GUEST_PREREQUISITES= NATIVE_GUEST_ENTRY= \
-  NATIVE_VM_CONFIG="$PWD/app/init/config/vms-empty.json" \
-  NATIVE_SERVICE_MANIFEST="$PWD/app/init/config/services-native.json" \
+  NATIVE_VM_CONFIG="$PWD/app/init/config/native/vms.json" \
+  NATIVE_SERVICE_MANIFEST="$PWD/app/init/config/native/services.json" \
   NATIVE_INITRAMFS="$PWD/target/app/aarch64/initramfs-rpi5.cpio"
 ```
 

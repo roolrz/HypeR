@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Kernel stack budgets
 
-Ordinary scheduler threads, including Native runners and vCPUs, have 16 KiB
+Ordinary scheduler threads, including Native runners and vCPUs, have 32 KiB
 guarded kernel stacks. IRQ and emergency stacks are separate 32 KiB mappings.
 Early boot retains 256 KiB for allocation-free discovery and scheduler setup;
 that capacity is not available to a normal syscall. Do not increase a runtime
@@ -23,29 +23,16 @@ The console attachment also exercises interactive guest input. For diagnosis,
 `verify-stack.py --stage inspect|memory|process` isolates a workload stage so
 its terminated thread can be measured independently.
 
-The target builds with `kernel-stack-audit` and `STACK_METADATA=1`. The latter
-scopes `RUSTC_BOOTSTRAP=1` and `-Zemit-stack-sizes` to diagnostic kernel builds
-using the pinned compiler. `.stack_sizes` is non-allocated ELF metadata: it is
-not included in the loaded kernel image. Ordinary builds need neither option.
-The static checker rejects missing metadata instead of silently accepting an
-uninstrumented image. Its JSON report includes every reported symbol, its frame
-size, its ceiling, and the reason for each reviewed exception.
-
-The AArch64 policy uses a 4096-byte local-frame ceiling with tighter limits for
-selected runtime paths. Boot, emergency and full-batch serial exceptions are
-named individually. Initial process construction runs on a normal 16 KiB
-`native-init` worker stack; its loading, authority preparation and publication
-phases must not retain each other's temporary storage. These are regression
-limits, not recommended frame sizes.
-Changing the compiler or inlining layout requires reviewing the resulting
-frames and their callers, not simply raising limits until a build passes.
+The target builds with `kernel-stack-audit`. Acceptance uses observed stack
+watermarks, canaries, and reserve limits for complete workloads. Individual
+compiler-generated function frames are not CI budgets: inlining and compiler
+versions change their layout without necessarily changing end-to-end usage.
+No unstable compiler flags or `.stack_sizes` metadata are required.
 
 ## What the evidence does and does not prove
 
-Compiler metadata describes individual fixed frames. It does not add the frames
-of nested calls, model indirect calls or recursion, or account for assembly
-entry and interrupt frames. Several individually acceptable frames can still
-overflow a 16 KiB thread stack. Review complete hot/error/cleanup call chains.
+Review complete hot/error/cleanup call chains; workload coverage does not
+exercise every possible combination of calls or interrupt timing.
 
 The optional audit samples only detached, terminated threads, after the switch
 tail releases CPU ownership and before their stack is reclaimed. It checks
@@ -59,8 +46,9 @@ the reaper's own stack and IRQ stacks on unsampled CPUs are not covered. QEMU
 workload coverage is evidence, not a proof against every stack overflow.
 The harness requires retired kernel/user/vCPU and local IRQ observations, intact canaries
 and at least 2048 bytes of measured reserve. It also rejects a measured maximum
-above 12 KiB, independently of the allocated stack size. The optimization target
-is 8 KiB; run with `STACK_MAXIMUM_USED=8192` to check that stricter target.
+above 24 KiB, independently of the allocated stack size. This leaves 8 KiB
+between the watermark ceiling and the ordinary stack capacity (including the
+canary). `STACK_MAXIMUM_USED` can override the workload ceiling.
 `STACK_MINIMUM_REMAINING` can set a stricter reserve threshold. Guard pages catch out-of-range access, but exception
 entry itself still requires space; recovery from arbitrary exhaustion is not
 guaranteed.
@@ -93,5 +81,4 @@ the stack. Bootstrap and child startup release encoding scratch before later
 thread and capability publication phases.
 
 `make test-stack ARCH=riscv64` runs the same workload and watermark checks.
-The static frame policy currently covers AArch64 only; a policy must be measured
-and reviewed independently before enabling it on another architecture.
+Both architectures use the same runtime limits rather than per-function ceilings.

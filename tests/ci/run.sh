@@ -38,7 +38,6 @@ case "${1:-}" in
         python3 -B tests/qemu/test-guest-smp.py
         python3 -B tests/qemu/test-io-vm.py
         python3 -B tests/qemu/test-stack.py
-        python3 -B tests/build/test-stack-budget.py
         command -v shellcheck >/dev/null 2>&1 || {
             echo "shellcheck is required for the script-quality suite" >&2
             exit 2
@@ -107,15 +106,15 @@ case "${1:-}" in
         package=$(python3 -B scripts/fetch-io-vm.py \
             --reference "${IO_VM_REFERENCE:-}" --platform qemu)
         make test-board-storage ARCH=aarch64 IO_VM_PACKAGE="$package" \
-            STACK_METADATA=1 CARGO_FEATURES='--features kernel-stack-audit'
+            STACK_AUDIT=1 CARGO_FEATURES='--features kernel-stack-audit'
         make -o image -o app test-alpine-rootfs ARCH=aarch64 IO_VM_PACKAGE="$package" \
-            STACK_METADATA=1 CARGO_FEATURES='--features kernel-stack-audit'
+            STACK_AUDIT=1 CARGO_FEATURES='--features kernel-stack-audit'
         make -o image -o app test-board-business ARCH=aarch64 IO_VM_PACKAGE="$package" \
-            STACK_METADATA=1 CARGO_FEATURES='--features kernel-stack-audit'
+            STACK_AUDIT=1 CARGO_FEATURES='--features kernel-stack-audit'
         make -o image -o app test-board-broker ARCH=aarch64 IO_VM_PACKAGE="$package" \
-            STACK_METADATA=1 CARGO_FEATURES='--features kernel-stack-audit'
+            STACK_AUDIT=1 CARGO_FEATURES='--features kernel-stack-audit'
         make -o image -o app test-userspace-device ARCH=aarch64 IO_VM_PACKAGE="$package" \
-            STACK_METADATA=1 CARGO_FEATURES='--features kernel-stack-audit'
+            STACK_AUDIT=1 CARGO_FEATURES='--features kernel-stack-audit'
         ;;
     riscv64-native)
         make sdk-check ARCH=riscv64

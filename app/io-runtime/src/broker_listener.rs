@@ -18,6 +18,11 @@ pub(super) const MACHINE_RIGHTS: Rights = Rights::TRANSFER
     .union(Rights::INSPECT)
     .union(Rights::REQUEST_STOP);
 
+pub(super) enum Request {
+    Connect(Admission),
+    Observe(CapabilityChannel),
+}
+
 pub(super) struct Admission {
     pub(super) client: u32,
     pub(super) volume: String,
@@ -28,7 +33,7 @@ pub(super) struct Admission {
     pub(super) length: u64,
 }
 pub(super) struct Listener {
-    admissions: Receiver<hyper_os::Result<Option<Admission>>>,
+    admissions: Receiver<hyper_os::Result<Option<Request>>>,
     pub(super) bell: OwnedHandle<ByteChannelObject>,
 }
 impl Listener {
@@ -54,7 +59,7 @@ impl Listener {
             .map_err(|_| hyper_os::Error::Status(hyper_os::Status::NO_MEMORY))?;
         Ok(Self { admissions, bell })
     }
-    pub(super) fn receive(&self) -> hyper_os::Result<Option<Admission>> {
+    pub(super) fn receive(&self) -> hyper_os::Result<Option<Request>> {
         let mut byte = [0];
         if self.bell.as_byte_channel().try_receive(&mut byte)? != 1 || byte != [1] {
             return Err(hyper_os::Error::InvalidResponse);
@@ -64,15 +69,12 @@ impl Listener {
             .map_err(|_| hyper_os::Error::InvalidResponse)?
     }
 }
-fn receive(endpoint: &CapabilityChannel) -> hyper_os::Result<Option<Admission>> {
+fn receive(endpoint: &CapabilityChannel) -> hyper_os::Result<Option<Request>> {
     let mut bytes = [MaybeUninit::uninit(); io::CONNECT_BYTES];
     let mut slots = [CapabilityReceiveSlot::new::<CapabilityChannelObject>(
         io::SESSION_RIGHTS,
     )];
     let message = endpoint.receive(hyper_os::DEADLINE_INFINITE, &mut bytes, &mut slots)?;
-    let (client, volume) =
-        io::decode_connect(message.bytes()).ok_or(hyper_os::Error::InvalidResponse)?;
-    let volume = volume.to_owned();
     if message.capability_count() != 1 {
         return Err(hyper_os::Error::InvalidResponse);
     }
@@ -81,6 +83,12 @@ fn receive(endpoint: &CapabilityChannel) -> hyper_os::Result<Option<Admission>> 
             .take::<CapabilityChannelObject>()?
             .ok_or(hyper_os::Error::MissingHandle)?,
     );
+    if message.bytes() == io::OBSERVE_MESSAGE {
+        return Ok(Some(Request::Observe(session)));
+    }
+    let (client, volume) =
+        io::decode_connect(message.bytes()).ok_or(hyper_os::Error::InvalidResponse)?;
+    let volume = volume.to_owned();
     let admission = (|| -> hyper_os::Result<Admission> {
         let deadline = hyper_os::time::deadline_after(std::time::Duration::from_secs(60))?.as_raw();
         let mut bytes = [MaybeUninit::uninit(); io::MEMORY_BYTES];
@@ -110,5 +118,5 @@ fn receive(endpoint: &CapabilityChannel) -> hyper_os::Result<Option<Admission>> 
     })();
     // A cancelled per-runtime setup owns no DMA mapping and cannot take down
     // the shared configuration volume or other already-bound clients.
-    Ok(admission.ok())
+    Ok(admission.ok().map(Request::Connect))
 }

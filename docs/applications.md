@@ -101,7 +101,7 @@ inspected with `cat` and later imported with `vmm load`.
 
 The current filesystem is ramfs: all changes, including saved configurations,
 disappear at reboot. To change the next image's boot configuration, edit
-`app/init/config/vms.json` on the host and rebuild the initramfs. The first
+`app/init/tests/config/vms.json` on the host and rebuild the initramfs. The first
 autostart VM retains init's boot-critical supervision lease until it first stops;
 later instances and additional VMs are supervised independently by the manager.
 
@@ -163,3 +163,29 @@ The existing immutable file-page cache is bypassed by ramfs; no current backend
 populates it. Enabling it for a future backend also requires integrating its
 reclaimable storage into memory accounting.
 Default units retain small KiB quantities; `free --bytes` avoids rounding.
+
+## Console and storage visibility
+
+The critical virtual console manager (`/svc/session`) starts and supervises the
+ordinary `/bin/sh` client. Ctrl-D or `exit` ends that client and opens a fresh
+shell on the same console. Init does not treat shell termination as a system
+failure. Shell channels are recreated on each launch; the physical transport
+continues to belong to the console services.
+
+On board images, `vmm list` and `vmm status io` include the infrastructure I/O VM
+as read-only. The snapshot reports its lifecycle, vCPU count and guest memory;
+an unavailable management endpoint is reported as `unavailable`, not `stopped`.
+`start`, `stop`, `restart`, `delete` and `console` are not supported for this
+entry. Its lifecycle remains under `io-runtime` ownership.
+
+The configuration volume at `/data` uses FAT: long filenames preserve their
+spelling, while lookup compares Unicode uppercase forms and also accepts ASCII
+case-insensitive short-name aliases. Names differing only in letter case are
+not distinct files. This differs from ramfs, whose names are case-sensitive.
+Do not assume FAT reproduces every Linux VFAT Unicode/codepage corner case.
+This change does not alter either filesystem's case semantics.
+
+QEMU loads the hypervisor image directly from the host, so the configuration
+volume contains guest artifacts and configuration, not `hyper.img`. Pi 5 still
+needs its firmware boot files. Existing disks are intentionally preserved by
+`make run`; use the normal `make` image rebuild to refresh their packaged content.
