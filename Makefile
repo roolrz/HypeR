@@ -85,6 +85,9 @@ BOARD_IMAGE ?= $(BOARD_OUTPUT)/disk.img
 # deployment inputs, never compile-time board selections.
 BOARD_ARTIFACTS ?=
 BOARD_EXTRA_ENTRIES ?=
+RPI5_BOOT_PACKAGE ?= $(abspath $(CURDIR)/../HypeR-rpi5-boot/dist)
+RPI5_BRINGUP_OUTPUT ?= $(CURDIR)/target/board/rpi5-native
+
 BOARD_TEST_OUTPUT ?= $(CURDIR)/target/board-tests
 
 HOST_TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p')
@@ -520,6 +523,18 @@ test-io-standby: image io-initramfs
 		--qemu "$(QEMU)" --image "$(KERNEL_IMAGE)" \
 		--initramfs "$(APP_OUTPUT)/initramfs-io.cpio" \
 		--log "$(APP_OUTPUT)/io-standby-$(QEMU_CPUS).log"
+
+# Native-only hardware qualification does not download or start Linux guests.
+.PHONY: rpi5-bringup
+rpi5-bringup: image
+	@test "$(ARCH)" = aarch64 || { echo "Pi 5 requires ARCH=aarch64" >&2; exit 2; }
+	$(MAKE) native-initramfs NATIVE_IMAGE_PROFILE=system NATIVE_GUEST_PREREQUISITES= NATIVE_GUEST_ENTRY= \
+		NATIVE_SERVICE_MANIFEST="$(CURDIR)/app/init/config/native/services.json" \
+		NATIVE_VM_CONFIG="$(CURDIR)/app/init/config/native/vms.json" \
+		NATIVE_INITRAMFS="$(RPI5_BRINGUP_OUTPUT)/bootstrap.cpio"
+	python3 -B scripts/rpi5-bringup.py --package "$(RPI5_BOOT_PACKAGE)" \
+		--kernel "$(KERNEL_IMAGE)" --initramfs "$(RPI5_BRINGUP_OUTPUT)/bootstrap.cpio" \
+		--output "$(RPI5_BRINGUP_OUTPUT)/disk.img" $(BOARD_IMAGE_REPLACE)
 
 .PHONY: board-plan board-initramfs board-image board-rebuild board-run board-guest-images
 board-plan:

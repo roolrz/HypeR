@@ -1,0 +1,24 @@
+{
+  "SPDX-FileCopyrightText": "2026 roolrz",
+  "SPDX-License-Identifier": "Apache-2.0",
+  "format": "hyper.board.v1",
+  "board": "rpi5-native",
+  "architecture": "aarch64",
+  "boot": "rpi5-tfa",
+  "disk": {
+    "uuid": "90bbd4bb-efff-4640-89dc-f0d58a6d3467",
+    "config-mib": 64
+  },
+  "files": {
+    "hyper.img": "hyper",
+    "bootstrap.cpio": "bootstrap",
+    "bl31.bin": "tfa",
+    "bcm2712-rpi-5-b.dtb": "host-dtb",
+    "boot-notices.txt": "boot-notices"
+  },
+  "virtual-machines": [],
+  "io-device": {
+    "profile": "bcm2712-sdhci",
+    "path": "/soc@107c000000/mmc@fff000"
+  }
+}
