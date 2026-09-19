@@ -28,16 +28,6 @@ pub(crate) enum ThreadRole {
     Vcpu,
 }
 
-impl ThreadRole {
-    pub(crate) const fn execution_kind(self) -> super::thread::ExecutionKind {
-        match self {
-            Self::Bootstrap | Self::Idle | Self::Kernel => super::thread::ExecutionKind::Kernel,
-            Self::User => super::thread::ExecutionKind::User,
-            Self::Vcpu => super::thread::ExecutionKind::Vcpu,
-        }
-    }
-}
-
 /// Authority-free identity returned by scheduler diagnostics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ThreadObjectSnapshot {

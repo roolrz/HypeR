@@ -73,8 +73,6 @@ require 'begin_retirement\(id\)[\s\S]*ResourceRetirement::begin\(\)[\s\S]*retire
     "$state" 'detachment, retirement epoch, and queue publication must share the transition lock'
 require 'Retiring \{[\s\S]*thread: Some\(thread\)[\s\S]*fn take_retiring[\s\S]*thread\.take\(\)[\s\S]*fn complete_retirement[\s\S]*thread: None[\s\S]*ThreadSlot::Vacant' \
     "$registry" 'registry slots must remain Retiring across lock-external destruction'
-require 'fn vcpu_reaped[\s\S]*thread_registry_status\(thread\)[\s\S]*ThreadRegistryStatus::Retiring\([\s\S]*ExecutionKind::Vcpu[\s\S]*Ok\(false\)[\s\S]*ThreadRegistryStatus::Absent => Ok\(true\)' \
-    "$scheduler" 'vCPU reaping must remain false throughout the complete Retiring phase'
 reject 'reap_terminated_threads' "$scheduler" \
     'targeted retirement must not regress to a scheduler-wide hot-path scan'
 reject 'hyper::log::|DeferredDrain|DrainDisposition' "$scheduler" \

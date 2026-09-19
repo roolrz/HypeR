@@ -918,18 +918,6 @@ pub(in crate::kernel) fn request_vcpu_stop(thread: ThreadId) -> Result<(), Error
     Ok(())
 }
 
-/// Reports generation-qualified scheduler reaping without blocking.
-#[allow(dead_code)]
-pub(in crate::kernel) fn vcpu_reaped(thread: ThreadId) -> Result<bool, Error> {
-    read_scheduler(|scheduler| match scheduler.thread_registry_status(thread) {
-        registry::ThreadRegistryStatus::Occupied(super::thread::ExecutionKind::Vcpu)
-        | registry::ThreadRegistryStatus::Retiring(super::thread::ExecutionKind::Vcpu) => Ok(false),
-        registry::ThreadRegistryStatus::Occupied(_)
-        | registry::ThreadRegistryStatus::Retiring(_) => Err(Error::InvalidThreadState),
-        registry::ThreadRegistryStatus::Absent => Ok(true),
-    })
-}
-
 /// Returns the pinned native-user payload owned by the current Thread.
 ///
 /// The dedicated guard proves that the non-null payload address remains pinned

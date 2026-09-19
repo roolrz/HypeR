@@ -243,7 +243,6 @@ fn observation_from_atomics(
 /// Clears only per-CPU observations for the exact retained VMID allocation.
 ///
 /// Stage-C retirement will invoke this locally after its tagged invalidation.
-#[allow(dead_code)]
 pub(super) fn clear_local_observations(allocation: Stage2AllocationIdentity) -> Result<(), Error> {
     let cpu = crate::kernel::cpu::current_index().ok_or(Error::InvalidCpu)?;
     let mut stage2 = load_stage2_observation(cpu);

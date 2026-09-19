@@ -11,8 +11,8 @@ use hyper::sync::InterruptSpinLock;
 
 use super::queue::{self, CpuRunQueue};
 use super::registry::{
-    CpuScheduleAuthorityToken, CpuThreadTableAuthority, ThreadRegistry, ThreadRegistryStatus,
-    ThreadReservation, ThreadTableCapability,
+    CpuScheduleAuthorityToken, CpuThreadTableAuthority, ThreadRegistry, ThreadReservation,
+    ThreadTableCapability,
 };
 use super::{
     CrashTaskSnapshot, CurrentUser, CurrentVcpu, Error, MigrationStatus, SecondaryStack, Statistics,
@@ -953,10 +953,6 @@ impl Drop for PreparedContextSwitch {
 }
 
 impl Scheduler {
-    pub fn thread_registry_status(&self, id: ThreadId) -> ThreadRegistryStatus {
-        self.registry.status(id)
-    }
-
     #[cfg(feature = "kernel-self-test")]
     pub fn thread_object_snapshot(
         &self,

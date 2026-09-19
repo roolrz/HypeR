@@ -78,7 +78,10 @@ pub(crate) fn initialize(
 
 /// Observes reschedule-SGI dispatch for the bare-metal runtime proof.
 #[cfg(feature = "kernel-self-test")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "IPI delivery counters are exercised by AArch64 and x86 runtime tests"
+)]
 pub(crate) fn reschedule_delivery_count_for_test(cpu: hyper::cpu::CpuIndex) -> usize {
     reschedule::delivery_count_for_test(cpu)
 }

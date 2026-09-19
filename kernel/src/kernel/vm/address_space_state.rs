@@ -7,9 +7,6 @@
 pub(super) enum IdentifierState {
     Reserved,
     Active,
-    // Secondary targets compile the shared destruction policy but cannot yet
-    // complete architecture retirement and therefore never construct this.
-    #[allow(dead_code)]
     Retired,
     UnpublishedFailure,
 }

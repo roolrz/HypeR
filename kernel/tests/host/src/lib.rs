@@ -116,8 +116,8 @@ mod cpio;
 #[path = "cases/cpu.rs"]
 mod cpu;
 #[cfg(test)]
-#[path = "cases/crash_supplement.rs"]
-mod crash_supplement;
+#[path = "cases/crash_text.rs"]
+mod crash_text;
 #[cfg(test)]
 #[path = "cases/cross_call_pinning.rs"]
 mod cross_call_pinning;

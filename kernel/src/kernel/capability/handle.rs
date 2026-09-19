@@ -89,7 +89,12 @@ impl HandleValue {
     }
 
     /// Returns the first value published by a fresh table.
-    #[allow(dead_code)]
+    #[cfg(not(test))]
+    #[cfg(feature = "kernel-self-test")]
+    #[allow(
+        dead_code,
+        reason = "only the AArch64 Native-entry self-test needs the first handle value"
+    )]
     pub(crate) fn first_for_test() -> Self {
         Self::encode(storage::SLOTS_PER_PAGE - 1, 1)
     }

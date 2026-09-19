@@ -107,7 +107,10 @@ fn handle(_interrupt: VirtualInterrupt, _context: usize) -> HandlerResult {
 ///
 /// This observation seam is compiled only into the bare-metal self-test image.
 #[cfg(feature = "kernel-self-test")]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "IPI delivery counters are exercised by AArch64 and x86 runtime tests"
+)]
 pub(super) fn delivery_count_for_test(cpu: CpuIndex) -> usize {
     DELIVERY_COUNT[cpu].load(Ordering::Relaxed)
 }

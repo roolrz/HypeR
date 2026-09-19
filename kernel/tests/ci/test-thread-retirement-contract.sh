@@ -50,9 +50,6 @@ mutate 'resource ownership outlived retirement completion' \
 mutate 'switch tail performed resource teardown directly' \
     src/kernel/task/scheduler/mod.rs \
     'crate::kernel::reaper::request();' 'retire_detached_thread(thread);'
-mutate 'vCPU reaping treated a Retiring generation as absent' \
-    src/kernel/task/scheduler/mod.rs \
-    'ThreadRegistryStatus::Retiring(' 'ThreadRegistryStatus::Occupied('
 mutate 'retirement completion lost release publication' \
     src/kernel/task/scheduler/mod.rs \
     'fetch_update(Ordering::Release, Ordering::Relaxed' \
