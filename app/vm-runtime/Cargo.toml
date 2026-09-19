@@ -36,3 +36,4 @@ workspace = true
 startup-profile = []
 broker-test = []
 test-runtime-crash = []
+test-power-crash = []

@@ -417,6 +417,32 @@ test-runtime-crash: image native-initramfs
 	$(NATIVE_QEMU_ENV) python3 tests/qemu/verify-runtime-crash.py "$(QEMU)" "$(KERNEL_IMAGE)" \
 		"$(APP_OUTPUT)/runtime-crash.cpio" "$(APP_OUTPUT)/runtime-crash.log"
 
+# Test-only binaries: no power fault injection enters ordinary app artifacts.
+.PHONY: test-power-crash power-crash-case
+test-power-crash: image app
+	@test "$(ARCH)" = aarch64 || { echo "power crash acceptance requires AArch64" >&2; exit 2; }
+	@for state in dormant pending powered-off; do \
+		$(MAKE) -o image -o app power-crash-case POWER_CRASH_STATE=$$state || exit $$?; \
+	done
+
+power-crash-case:
+	@case "$(POWER_CRASH_STATE)" in dormant|pending|powered-off) ;; *) exit 2 ;; esac
+	CARGO_TARGET_DIR="$(APP_CARGO_OUTPUT)" HYPER_ARCH="$(NATIVE_ARCH)" \
+		HYPER_SYSROOT="$(SDK_OUTPUT)" HYPER_RUST_STD=1 \
+		HYPER_CLANG="$(CLANG)" HYPER_LD="$(HYPER_LD)" \
+		HYPER_TEST_POWER_CRASH="$(POWER_CRASH_STATE)" \
+		"$(SDK_OUTPUT)/bin/hyper-cargo" build --manifest-path app/Cargo.toml \
+		-p hyper-vm-runtime --features test-power-crash --release --locked --offline
+	$(MAKE) -o app native-initramfs ARCH=aarch64 \
+		NATIVE_GUEST_VCPUS=4 \
+		NATIVE_VM_CONFIG="$(CURDIR)/app/init/tests/config/vms-power-crash.json" \
+		NATIVE_GUEST_ITB="$(KERNEL_DIRECTORY)/target/guest/aarch64/alpine-smp.itb" \
+		NATIVE_VM_RUNTIME="$(APP_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release/hyper-vm-runtime" \
+		NATIVE_INITRAMFS="$(APP_OUTPUT)/power-crash-$(POWER_CRASH_STATE).cpio"
+	$(NATIVE_QEMU_ENV) python3 -B tests/qemu/verify-power-crash.py "$(QEMU)" "$(KERNEL_IMAGE)" \
+		"$(APP_OUTPUT)/power-crash-$(POWER_CRASH_STATE).cpio" \
+		"$(APP_OUTPUT)/power-crash-$(POWER_CRASH_STATE).log" "$(POWER_CRASH_STATE)"
+
 # Keep the SMP guest fixture separate from the default single-vCPU image.
 # The same archive exercises both hardware GIC backends and host overcommit.
 guest-smp-initramfs: app $(NEWC_PACK)

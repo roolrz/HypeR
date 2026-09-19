@@ -241,3 +241,21 @@ VM lifecycle state remains on the main Thread. Both Threads share the same
 Process and authority table; this is concurrency separation, not isolation. The event loop rotates ready
 sources and waits indefinitely when idle, using a finite deadline only for an
 outstanding runtime exit grace period. It does not periodically poll for clients.
+
+### Runtime loss during guest CPU power transitions
+
+`make test-power-crash ARCH=aarch64` builds explicitly enabled test runtimes
+and runs three restart/reclamation cycles at each of these boundaries:
+
+- all four guest vCPUs installed but still dormant;
+- a real Linux `CPU_ON` request pending before userspace accepts it;
+- a real Linux `CPU_OFF` request accepted after the requesting CPU detached from
+  hardware and entered the Off power state (scheduler parking may still race).
+
+The fixture disables VM autostart so deliberate runtime failure cannot trip
+init's initial-VM boot lease. Each abrupt process exit bypasses Rust destructors;
+the test verifies the selected boundary marker, failed VM state, exact guest-page
+reclamation, bounded runtime-memory retention, and successful new instances.
+`test-power-crash` and `HYPER_TEST_POWER_CRASH` are test-only build selections;
+ordinary runtime binaries contain neither the hooks nor a control protocol for
+triggering them. This is QEMU lifecycle coverage, not physical DMA/cache proof.

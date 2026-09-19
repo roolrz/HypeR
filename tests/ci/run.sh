@@ -86,6 +86,7 @@ case "${1:-}" in
             NATIVE_GUEST_VCPUS=4 \
             NATIVE_GUEST_ITB="$root/kernel/target/guest/aarch64/alpine-smp.itb"
         cp target/app/aarch64/runtime-crash.log target/app/aarch64/native-gicv2-guest-smp-runtime-crash.log
+        make -o image test-power-crash ARCH=aarch64 QEMU_CPUS=4
         make test-stack ARCH=aarch64
         ;;
     io-vm)
