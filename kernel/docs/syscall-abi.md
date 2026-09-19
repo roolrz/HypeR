@@ -14,6 +14,9 @@ The current integration goal is Native applications plus a trusted Linux I/O VM
 on Pi 5; see the [roadmap](../../docs/roadmap.md). HypeR is pre-release, so syscall
 numbers and binary layouts do not yet carry a release compatibility guarantee.
 
+For operation grouping and consolidation boundaries, see
+[Native syscall families](syscall-families.md).
+
 ## Design goals
 
 - Keep the EL2 kernel small enough to audit while exposing enough mechanism for
