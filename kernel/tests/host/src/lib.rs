@@ -310,3 +310,7 @@ mod guest_extent_index;
 #[cfg(test)]
 #[path = "../../../src/kernel/vm/memory/grant_state.rs"]
 mod guest_grant_state;
+
+#[cfg(test)]
+#[path = "../../../src/kernel/vm/retirement_observation.rs"]
+mod vm_retirement_observation;

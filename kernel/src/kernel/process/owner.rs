@@ -2155,10 +2155,15 @@ impl Process {
                 Ok(ProcessRetirementStep::Complete)
             }
             Err(failure) => {
-                let (_, address_space) = failure.into_parts();
+                let (error, address_space) = failure.into_parts();
+                crate::pr_warn!(
+                    "HypeR: Process {:?} address-space retirement deferred: {error:?}; retaining resources and retrying",
+                    self.id()
+                );
                 Ok(ProcessRetirementStep::Retry(AddressSpaceRetirement {
                     process: self.clone(),
                     address_space: Some(address_space),
+                    failed_attempts: 1,
                 }))
             }
         }
@@ -2395,6 +2400,7 @@ impl Drop for ProcessThreadMembership {
 pub(crate) struct AddressSpaceRetirement {
     process: Process,
     address_space: Option<UniqueFallibleArc<NativeAddressSpace>>,
+    failed_attempts: u32,
 }
 
 impl AddressSpaceRetirement {
@@ -2406,11 +2412,17 @@ impl AddressSpaceRetirement {
         match NativeAddressSpace::retire(address_space) {
             Ok(()) => {
                 self.process.finish_retirement();
+                crate::pr_info!(
+                    "HypeR: Process {:?} address-space retirement completed after {} failed attempts",
+                    self.process.id(),
+                    self.failed_attempts
+                );
                 Ok(())
             }
             Err(failure) => {
                 let (error, address_space) = failure.into_parts();
                 self.address_space = Some(address_space);
+                self.failed_attempts = self.failed_attempts.saturating_add(1);
                 Err((self, error))
             }
         }

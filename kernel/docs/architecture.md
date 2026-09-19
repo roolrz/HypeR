@@ -184,6 +184,14 @@ owns only a stable external-execution allocation, generic resource ownership,
 and an opaque detach-completion action; VM endpoint publication remains in the
 VM subsystem after the Thread allocation has been destroyed.
 
+The VM lifecycle queue remains the sole Begin -> Quiescing -> Retire owner.
+Begin failures and inconsistencies after irreversible retirement cuts fail-stop.
+Recoverable retirement preflight failures retain the exact authority and backing
+resources, including quarantined devices. The reaper reports each failure cause
+once per VM incarnation and reports recovery with the failed-attempt count;
+alternating causes do not produce a message on every retry. Diagnostics do not
+release quarantined resources or change the retry policy.
+
 The guest virtual-timer PPI is a level source. Injection may mask the host
 mapping while a list register owns the pending interrupt; maintenance
 reconciliation unmasks it only after the virtual interrupt can no longer be
@@ -226,6 +234,16 @@ be created only by converting a resolved operation pin as part of a successful
 consume-on-success handle transaction, and remains separately visible from
 ordinary kernel-service ownership until the VM device set is retired.
 
+Reference-class observation is not free: on 64-bit targets the eight counters
+occupy 64 bytes per object header. An ordinary counted clone/release updates
+both the strong lifetime count and its class counter; directory traversal is
+not part of that operation. Keep this cost distinct from business retirement.
+An Event needs signal state and accounting, while a VM object additionally owns
+an installed-machine reference and publishes stop on last-handle close. Only
+the VM lifecycle coordinator performs hardware retirement. Removing diagnostic
+classes requires measurement and an alternative ownership-observation contract,
+not flattening these two different lifetimes into one count.
+
 The scheduler retains a counted scheduler-class reference to every resident
 Thread object. CPU residence and scheduler authority continue to govern access
 to mutable scheduling state; an object reference alone never grants that
@@ -257,6 +275,8 @@ Timer cancellation follows its owner queue even after worker migration. Future
 CPU hotplug must transfer or drain live timer queues before taking a CPU offline,
 as required for all timed waits; this is a timer-subsystem obligation. Process and
 Thread termination observations remain durable throughout this cleanup.
+Address-space retirement reports its first preflight failure and eventual
+recovery with a saturating failure count. It never logs on every delayed poll.
 
 Process handle accounting uses a sidecar with the same segmented slot geometry
 as the handle table. Segment growth is fallible, prepared outside Process locks,
