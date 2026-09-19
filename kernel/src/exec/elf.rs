@@ -221,6 +221,7 @@ pub struct Image<'image> {
     interpreter: Option<&'image str>,
     program_header_address: u64,
     program_header_count: u16,
+    stack_size: Option<u64>,
 }
 
 /// Heap-storage upper bound established without allocating parser memory.
@@ -346,6 +347,7 @@ impl<'image> Image<'image> {
         let mut dynamic = None;
         let mut interpreter = None;
         let mut program_header_segment = false;
+        let mut stack_size = None;
         for index in 0..program_count {
             let offset = program_offset + index * PROGRAM_HEADER_SIZE;
             let header = &bytes[offset..offset + PROGRAM_HEADER_SIZE];
@@ -386,7 +388,15 @@ impl<'image> Image<'image> {
                     program_header_segment = true;
                 }
                 PT_TLS if read_u64(header, 40)? != 0 => return Err(Error::UnsupportedTls),
-                PT_GNU_STACK if flags & PF_EXECUTE != 0 => return Err(Error::ExecutableStack),
+                PT_GNU_STACK => {
+                    if flags & PF_EXECUTE != 0 {
+                        return Err(Error::ExecutableStack);
+                    }
+                    if stack_size.is_some() {
+                        return Err(Error::InvalidHeader);
+                    }
+                    stack_size = Some(read_u64(header, 40)?);
+                }
                 _ => {}
             }
         }
@@ -421,6 +431,7 @@ impl<'image> Image<'image> {
             relocations,
             interpreter,
             program_header_address,
+            stack_size,
             program_header_count: u16::try_from(program_count).map_err(|_| Error::InvalidHeader)?,
         })
     }
@@ -445,6 +456,17 @@ impl<'image> Image<'image> {
 
     pub const fn entry(&self) -> u64 {
         self.entry
+    }
+
+    /// Returns the main image's requested writable stack extent, rounded up to
+    /// pages. An absent header or zero size selects the loader's default.
+    pub fn initial_stack_size(&self, default: u64) -> Result<u64, Error> {
+        let requested = self.stack_size.filter(|size| *size != 0).unwrap_or(default);
+        requested
+            .checked_add(PAGE_SIZE - 1)
+            .map(|size| size & !(PAGE_SIZE - 1))
+            .filter(|size| *size != 0)
+            .ok_or(Error::ArithmeticOverflow)
     }
 
     pub const fn interpreter(&self) -> Option<&'image str> {

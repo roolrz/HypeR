@@ -356,3 +356,34 @@ fn relative_relocations_are_selected_by_elf_machine() {
         Err(Error::UnsupportedRelocation)
     );
 }
+
+#[test]
+fn initial_stack_declaration_defaults_rounds_and_rejects_ambiguity() {
+    let mut bytes = executable_image();
+    assert_eq!(
+        crate::require_ok(Image::parse(&bytes)).initial_stack_size(256 * 1024),
+        Ok(256 * 1024)
+    );
+    write_u16(&mut bytes, 56, 2);
+    for (requested, expected) in [(0, 256 * 1024), (1, 4096), (65536, 65536), (524289, 528384)] {
+        write_program_header(&mut bytes, 1, 0x6474_e551, 6, 0, 0, 0, requested, 16);
+        assert_eq!(
+            crate::require_ok(Image::parse(&bytes)).initial_stack_size(256 * 1024),
+            Ok(expected)
+        );
+    }
+    write_program_header(&mut bytes, 1, 0x6474_e551, 6, 0, 0, 0, u64::MAX, 16);
+    assert_eq!(
+        crate::require_ok(Image::parse(&bytes)).initial_stack_size(256 * 1024),
+        Err(Error::ArithmeticOverflow)
+    );
+    write_program_header(&mut bytes, 1, 0x6474_e551, 7, 0, 0, 0, 65536, 16);
+    assert_eq!(
+        Image::parse(&bytes).map(|_| ()),
+        Err(Error::ExecutableStack)
+    );
+    write_program_header(&mut bytes, 1, 0x6474_e551, 6, 0, 0, 0, 0, 16);
+    write_program_header(&mut bytes, 2, 0x6474_e551, 6, 0, 0, 0, 65536, 16);
+    write_u16(&mut bytes, 56, 3);
+    assert_eq!(Image::parse(&bytes).map(|_| ()), Err(Error::InvalidHeader));
+}

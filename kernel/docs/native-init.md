@@ -95,8 +95,15 @@ Sv39; these are provisional kernel layout policy. The current process
 layout grants only the smaller range from 1 MiB through 4 GiB.
 An `ET_DYN` image is biased so its lowest mapped page begins at 2 MiB. Total
 segment mappings and input image size are each limited to 64 MiB. The initial
-Thread receives a 256 KiB read/write stack below `0xffff0000`, separated from
-the image by an unmapped guard page. Its 16-byte-aligned entry stack follows
+Thread receives a read/write, non-executable stack below `0xffff0000`.
+The main executable's `PT_GNU_STACK.p_memsz` requests its size in bytes;
+a missing header or zero selects 256 KiB. The loader rounds up to a page,
+rejects duplicate or executable stack headers, and checks that both the stack
+and its lower unmapped guard page remain above the SDK heap ending at
+`0xf0000000`. The interpreter's stack declaration does not override the main
+executable. Startup arguments must fit in the selected extent; allocation and
+committed-page charges remain subject to the process ResourceDomain limits.
+Oversized or invalid requests fail before process publication. Its 16-byte-aligned entry stack follows
 the LP64 System V ordering for `argc`, `argv`, `envp`, and `auxv`. HypeR-private
 auxiliary entries point to a bounded array of generated, fixed-width startup
 handle records. TLS starts at zero. Before application entry, the SDK CRT reserves

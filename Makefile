@@ -262,15 +262,16 @@ app-fixtures: app
 	CARGO_TARGET_DIR="$(APP_STATIC_CARGO_OUTPUT)" HYPER_LINK_MODE=static \
 		HYPER_ARCH="$(NATIVE_ARCH)" HYPER_SYSROOT="$(SDK_OUTPUT)" \
 		HYPER_CLANG="$(CLANG)" HYPER_LD="$(HYPER_LD)" \
-		HYPER_RUST_STD=1 "$(SDK_OUTPUT)/bin/hyper-cargo" build \
-		--manifest-path "app/Cargo.toml" --bin hyper-echo --release --locked --offline
+		HYPER_RUST_STD=1 "$(SDK_OUTPUT)/bin/hyper-cargo" rustc \
+		--manifest-path "app/Cargo.toml" -p hyper-echo --bin hyper-echo --release --locked --offline \
+		-- -C link-arg=-Wl,-z,stack-size=65536
 	sh scripts/install-if-changed.sh 0755 \
 		"$(APP_STATIC_CARGO_OUTPUT)/$(NATIVE_RUST_TARGET)/release/hyper-echo" \
 		"$(NATIVE_STATIC_ECHO)"
 	"$(SDK_OUTPUT)/bin/hyper-brand-elf" --check-static "$(NATIVE_STATIC_ECHO)"
 	HYPER_CLANG="$(CLANG)" HYPER_LD="$(HYPER_LD)" \
 		"$(SDK_OUTPUT)/bin/hyper-clang" \
-		"$(CURDIR)/tests/native/dynamic-smoke.c" -o "$(NATIVE_DYNAMIC_TEST)"
+		-Wl,-z,stack-size=524288 "$(CURDIR)/tests/native/dynamic-smoke.c" -o "$(NATIVE_DYNAMIC_TEST)"
 	HYPER_CLANG="$(CLANG)" HYPER_LD="$(HYPER_LD)" \
 		"$(SDK_OUTPUT)/bin/hyper-clang" -std=c17 -Wall -Wextra -Werror -shared \
 		-Wl,-soname,libdynamic-probe.so \
