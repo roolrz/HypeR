@@ -154,6 +154,7 @@ pub enum Request {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
+    Unavailable,
     Stopped,
     Starting,
     Running,
@@ -163,6 +164,7 @@ pub enum State {
 impl State {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Unavailable => "unavailable",
             Self::Stopped => "stopped",
             Self::Starting => "starting",
             Self::Running => "running",
@@ -180,6 +182,12 @@ impl std::fmt::Display for State {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Summary {
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vcpus: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
     pub name: String,
     pub state: State,
     pub image: String,

@@ -5,6 +5,10 @@
 
 mod disk;
 
+#[cfg(feature = "test-power-crash")]
+#[path = "../tests/power_crash.rs"]
+mod power_crash;
+
 use hyper_os::handle::{ByteChannelObject, VirtualCpuObject, VirtualMachineObject};
 use hyper_os::memory::WritableVmo;
 use hyper_os::startup::Startup;
@@ -204,6 +208,8 @@ fn run(
     } else {
         (machine, None)
     };
+    #[cfg(feature = "test-power-crash")]
+    power_crash::at("dormant");
     hyper_os::vm::start_vcpu(vcpus[0].as_handle_ref()).map_err(Error::OperatingSystem)?;
     // This ends at the successful start request, not the first guest entry:
     // scheduling and the EL1/VS transition happen asynchronously in the kernel.
@@ -425,8 +431,16 @@ fn supervise_guest(
             use hyper_os::vm::PowerOperation;
             match request.operation {
                 PowerOperation::CpuOn | PowerOperation::CpuOff => {
+                    #[cfg(feature = "test-power-crash")]
+                    if request.operation == PowerOperation::CpuOn {
+                        power_crash::at("pending");
+                    }
                     hyper_os::vm::complete_power_request(machine.as_handle_ref(), request.id, true)
                         .map_err(Error::OperatingSystem)?;
+                    #[cfg(feature = "test-power-crash")]
+                    if request.operation == PowerOperation::CpuOff {
+                        power_crash::at("powered-off");
+                    }
                 }
                 PowerOperation::SystemOff | PowerOperation::SystemReset => {
                     // Never resume the requesting CPU after a successful system

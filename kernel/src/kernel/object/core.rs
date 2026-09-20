@@ -400,6 +400,13 @@ pub(crate) trait KernelObject: private::Sealed + Any + Send + Sync {
         None
     }
 
+    /// Completes the zero-active transition after releasing the handle-table lock.
+    ///
+    /// Native handle-close can invoke this from interrupt-masked exception
+    /// entry. Implementations must not allocate, block, fault on user memory,
+    /// or perform hardware retirement. Publish durable stop/close state and
+    /// wake existing waiters; transfer final destruction to `ObjectRetirement`
+    /// or the subsystem reaper. Resolved operation owners can still exist.
     fn on_zero_active_handles(&self, _retirement: &mut ObjectRetirement) {}
 }
 

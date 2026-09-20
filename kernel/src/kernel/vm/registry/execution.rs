@@ -58,7 +58,7 @@ impl VmBinding {
 
     /// Admits at most four detailed terminal-MMIO reports and one final
     /// suppression notice over this installed VM's complete lifetime.
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "x86 has no terminal MMIO-report producer")]
     pub(in crate::kernel::vm) fn admit_unhandled_mmio(
         &self,
         vcpu: u32,
@@ -161,7 +161,6 @@ impl VmBinding {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub(in crate::kernel) fn interrupt_reconcile_pending(&self, vcpu: u32) -> Result<bool, Error> {
         self.endpoint(vcpu)
             .map(crate::kernel::vm::endpoint::VcpuEndpoint::reconcile_pending)
@@ -169,7 +168,6 @@ impl VmBinding {
 
     /// Publishes a completed saved interrupt-model mutation, then prompts the
     /// scheduler-authoritative running CPU, if any.
-    #[allow(dead_code)]
     pub(in crate::kernel::vm) fn publish_interrupt_reconcile(
         &self,
         vcpu: u32,
@@ -245,7 +243,6 @@ impl VmBinding {
             .map_err(|_| Error::Scheduler)
     }
 
-    #[allow(dead_code)]
     pub(in crate::kernel::vm) fn close_vcpu_endpoint(
         &self,
         vcpu: u32,
@@ -268,7 +265,6 @@ impl VmBinding {
             .map_err(|_| Error::StaleIdentity)
     }
 
-    #[allow(dead_code)]
     pub(in crate::kernel::vm) fn administrative_stop_requested(
         &self,
         vcpu: u32,
@@ -279,7 +275,6 @@ impl VmBinding {
             .map_err(|_| Error::StaleIdentity)
     }
 
-    #[allow(dead_code)]
     pub(in crate::kernel::vm) fn publish_hardware_detached(
         &self,
         vcpu: u32,
@@ -291,10 +286,6 @@ impl VmBinding {
             .map_err(|_| Error::StaleIdentity)
     }
 
-    // Some selected guest platforms currently expose no emulated-device exit
-    // path. Retain one stable aggregate accessor so VM ownership and layout do
-    // not vary with the host architecture.
-    #[allow(dead_code)]
     pub(in crate::kernel::vm) fn devices(&self) -> &VirtualDeviceSet {
         &self.machine.devices
     }
@@ -436,9 +427,6 @@ pub(super) struct VirtualMachine {
     execution: ConcurrentExecution,
     run_admission: crate::kernel::vm::run_admission::RunAdmission,
     interrupts: VmInterruptController,
-    // RISC-V's current selected set is zero-sized and has no exit consumer,
-    // but the VM still owns it through the same lifecycle as other targets.
-    #[allow(dead_code)]
     devices: VirtualDeviceSet,
     physical: InterruptSpinLock<
         Option<crate::kernel::device::assigned::Assignment>,

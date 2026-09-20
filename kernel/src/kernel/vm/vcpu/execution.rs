@@ -109,7 +109,10 @@ impl VcpuExecution {
         self.instruction_context.enter(cpu)
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "x86 guest exits currently use port I/O rather than the MMIO device path"
+    )]
     pub(in crate::kernel) fn device_context(
         &mut self,
     ) -> Option<(
@@ -171,7 +174,10 @@ impl VcpuExecution {
         }
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "x86 guest exits currently use port I/O rather than the MMIO device path"
+    )]
     pub(in crate::kernel) fn publish_terminal_mmio_report(
         &mut self,
         report: crate::kernel::vm::UnhandledMmioReport,
@@ -227,7 +233,6 @@ impl VcpuExecution {
     ///
     /// `interrupts` must remain fixed and live until this execution is
     /// deactivated and dropped.
-    #[allow(dead_code)]
     pub(crate) unsafe fn for_timer_validation(
         hardware: crate::hal::vm::VcpuHardwareState,
         interrupts: &crate::kernel::vm::VmInterruptController,

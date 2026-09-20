@@ -54,7 +54,7 @@ impl VmId {
         ((self.generation as u64) << 32) | self.slot as u64
     }
 
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "x86 has no terminal MMIO-report producer")]
     const fn diagnostic_id(self) -> super::diagnostics::VmDiagnosticId {
         super::diagnostics::VmDiagnosticId::new(self.slot, self.generation)
     }
@@ -397,7 +397,6 @@ struct VmLease {
 /// The registry lock is released before `operation`; the temporary binding
 /// keeps every VM-owned device, endpoint, and interrupt model alive. Callers
 /// must release their subsystem locks before invoking scheduler notification.
-#[allow(dead_code)]
 pub(super) fn with_binding<R>(
     id: VmId,
     operation: impl FnOnce(&VmBinding) -> R,

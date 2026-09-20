@@ -10,7 +10,6 @@
     "config-mib": 1024
   },
   "files": {
-    "hyper.img": "hyper",
     "vm/alpine.itb": "alpine"
   },
   "virtual-machines": [

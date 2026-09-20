@@ -134,3 +134,47 @@ pub fn send_capabilities(
         }
     }
 }
+
+/// Read-only broker observation; no VM/control capability crosses this exchange.
+pub const OBSERVE_MESSAGE: &[u8] = b"HIOSTAT1";
+pub const OBSERVATION_BYTES: usize = 24;
+
+/// RAM is supplied by the owner: the VM address-space span also includes MMIO
+/// and shared guest-memory windows, and is not a resident-memory statistic.
+pub fn encode_observation(
+    info: hyper_os::vm::VirtualMachineInfo,
+    ram_bytes: u64,
+) -> [u8; OBSERVATION_BYTES] {
+    use hyper_os::vm::VirtualMachinePhase;
+    let mut bytes = [0; OBSERVATION_BYTES];
+    bytes[..8].copy_from_slice(OBSERVE_MESSAGE);
+    bytes[8] = match info.phase {
+        VirtualMachinePhase::Installed => 0,
+        VirtualMachinePhase::Running => 1,
+        VirtualMachinePhase::Stopping => 2,
+        VirtualMachinePhase::Stopped => 3,
+    };
+    bytes[12..16].copy_from_slice(&info.vcpu_count.to_le_bytes());
+    bytes[16..24].copy_from_slice(&ram_bytes.to_le_bytes());
+    bytes
+}
+
+pub fn decode_observation(bytes: &[u8]) -> Option<(hyper_os::vm::VirtualMachinePhase, u32, u64)> {
+    use hyper_os::vm::VirtualMachinePhase;
+    if bytes.len() != OBSERVATION_BYTES || &bytes[..8] != OBSERVE_MESSAGE || bytes[9..12] != [0; 3]
+    {
+        return None;
+    }
+    let phase = match bytes[8] {
+        0 => VirtualMachinePhase::Installed,
+        1 => VirtualMachinePhase::Running,
+        2 => VirtualMachinePhase::Stopping,
+        3 => VirtualMachinePhase::Stopped,
+        _ => return None,
+    };
+    Some((
+        phase,
+        u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+        u64::from_le_bytes(bytes[16..24].try_into().ok()?),
+    ))
+}

@@ -379,6 +379,9 @@ impl FleetManager {
         }
         let mut prepared = Vec::new();
         for definition in definitions {
+            if definition.name == "io" {
+                return Err("VM name 'io' is reserved for the read-only I/O VM".into());
+            }
             if self
                 .machines
                 .iter()
@@ -417,14 +420,13 @@ impl FleetManager {
     fn execute_command(&mut self, client: usize, command: Request) -> hyper_os::Result<()> {
         let (name, action) = match command {
             Request::List => {
-                return self.reply(
-                    client,
-                    Response::Entries {
-                        machines: (0..self.machines.len())
-                            .map(|vm| self.summary(vm))
-                            .collect(),
-                    },
-                );
+                let mut machines: Vec<_> = (0..self.machines.len())
+                    .map(|vm| self.summary(vm))
+                    .collect();
+                if self.io_broker.is_some() {
+                    machines.push(self.io_summary());
+                }
+                return self.reply(client, Response::Entries { machines });
             }
             Request::Create { definitions } => {
                 let first = self.machines.len();
@@ -451,6 +453,21 @@ impl FleetManager {
             }
             Request::Control { name, action } => (name, action),
         };
+        if name == "io" && self.io_broker.is_some() {
+            return if action == Action::Status {
+                self.reply(
+                    client,
+                    Response::Entries {
+                        machines: vec![self.io_summary()],
+                    },
+                )
+            } else {
+                self.reply_error(
+                    client,
+                    "I/O VM is read-only; its lifecycle belongs to io-runtime",
+                )
+            };
+        }
         let Some(vm) = self
             .machines
             .iter()
@@ -508,11 +525,60 @@ impl FleetManager {
         let definition = &self.machines[vm].definition;
         let state = self.fleet_state(vm);
         fleet::Summary {
+            read_only: false,
+            vcpus: None,
+            memory_bytes: None,
             name: definition.name.clone(),
             image: definition.image.clone(),
             autostart: definition.autostart,
             disk: definition.disk.clone(),
             state,
+        }
+    }
+
+    fn io_summary(&self) -> fleet::Summary {
+        use hyper_service::io;
+        let observation = (|| -> hyper_os::Result<_> {
+            let broker = self
+                .io_broker
+                .as_ref()
+                .ok_or(hyper_os::Error::MissingHandle)?;
+            let (local, remote) = CapabilityChannel::create()?;
+            let mut remote = Some(remote.into_handle());
+            let limit = hyper_os::time::deadline_after(Duration::from_millis(500))?.as_raw();
+            io::send_capabilities(
+                broker,
+                io::OBSERVE_MESSAGE,
+                &mut [CapabilityDisposition::move_handle(
+                    &mut remote,
+                    RightsOffer::Exact(io::SESSION_RIGHTS),
+                )?],
+                limit,
+            )?;
+            let mut bytes = [MaybeUninit::uninit(); io::OBSERVATION_BYTES];
+            let reply = local.receive(limit, &mut bytes, &mut [])?;
+            if reply.capability_count() != 0 {
+                return Err(hyper_os::Error::InvalidResponse);
+            }
+            io::decode_observation(reply.bytes()).ok_or(hyper_os::Error::InvalidResponse)
+        })()
+        .ok();
+        use hyper_os::vm::VirtualMachinePhase as Phase;
+        fleet::Summary {
+            name: "io".into(),
+            image: "/vm/io.itb".into(),
+            autostart: true,
+            disk: None,
+            read_only: true,
+            vcpus: observation.map(|(_, count, _)| count),
+            memory_bytes: observation.map(|(_, _, bytes)| bytes),
+            state: match observation.map(|(phase, _, _)| phase) {
+                Some(Phase::Installed) => fleet::State::Starting,
+                Some(Phase::Running) => fleet::State::Running,
+                Some(Phase::Stopping) => fleet::State::Stopping,
+                Some(Phase::Stopped) => fleet::State::Stopped,
+                None => fleet::State::Unavailable,
+            },
         }
     }
 

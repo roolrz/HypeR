@@ -95,8 +95,15 @@ Sv39; these are provisional kernel layout policy. The current process
 layout grants only the smaller range from 1 MiB through 4 GiB.
 An `ET_DYN` image is biased so its lowest mapped page begins at 2 MiB. Total
 segment mappings and input image size are each limited to 64 MiB. The initial
-Thread receives a 256 KiB read/write stack below `0xffff0000`, separated from
-the image by an unmapped guard page. Its 16-byte-aligned entry stack follows
+Thread receives a read/write, non-executable stack below `0xffff0000`.
+The main executable's `PT_GNU_STACK.p_memsz` requests its size in bytes;
+a missing header or zero selects 256 KiB. The loader rounds up to a page,
+rejects duplicate or executable stack headers, and checks that both the stack
+and its lower unmapped guard page remain above the SDK heap ending at
+`0xf0000000`. The interpreter's stack declaration does not override the main
+executable. Startup arguments must fit in the selected extent; allocation and
+committed-page charges remain subject to the process ResourceDomain limits.
+Oversized or invalid requests fail before process publication. Its 16-byte-aligned entry stack follows
 the LP64 System V ordering for `argc`, `argv`, `envp`, and `auxv`. HypeR-private
 auxiliary entries point to a bounded array of generated, fixed-width startup
 handle records. TLS starts at zero. Before application entry, the SDK CRT reserves
@@ -145,18 +152,20 @@ launch or later critical supervision fails.
 Init retains physical Console management authority. Separate input and output
 workers receive only the physical direction and raw byte-channel direction
 they require. The session manager owns the peer data endpoints and receives no
-physical Console capability. It routes one foreground client's input, output,
-and error channels without defining a generic byte-message envelope. The
-initial administrative shell receives those endpoints plus an attenuated root
-`Directory`,
-TaskFactory, TaskGroup, ResourceDomain, and system-inspection authorities. It
-can construct child processes, but cannot widen rights or delegate the
-construction authorities again. The shell keeps `DUPLICATE` and `TRANSFER`
-only on the inspectors so it can stage an `INSPECT`-only task or object view
-exclusively for the corresponding `ps` or `handle` command. Each command gets
-fresh handle-backed standard-I/O channels. This preserves duplex, blocking I/O
-without polling and leaves later foreground-session handoff to capability
-rendezvous without changing physical Console ownership.
+physical Console capability. It establishes a virtual console before creating
+its foreground shell with fresh input, output and error channels. The manager
+owns that Process supervisor; shell exit or failure triggers a rate-limited new
+client, without restarting the manager or physical workers. Init neither launches
+nor monitors the shell as a system service.
+
+The manager receives explicit delegatable root Directory, TaskFactory, TaskGroup,
+ResourceDomain, child library and inspection capabilities. It attenuates these
+into each shell's startup table. A VM connector is optional; when present, the
+manager can duplicate it but each shell gets only `WAIT|WRITE`. Each console
+instance keeps its own transport and client lifecycle. The current bootstrap
+wires one physical console; additional UART discovery and transport wiring remain
+future work. Commands continue to get fresh handle-backed standard I/O, with
+blocking multi-object waits rather than polling.
 
 The shell also receives one persistent manager connector with exactly
 `WAIT|WRITE`. It cannot duplicate that authority. Each `/bin/vmm` launch
@@ -201,7 +210,8 @@ they use the dynamic runtime.
 The manifest format reserves restart policies, but the current runtime accepts
 only `never` and requires at least one critical service. The physical Console
 input and output workers, the session service, and the VM manager are critical;
-the interactive shell is replaceable and remains noncritical. Init observes every
+the interactive shell is a replaceable, noncritical client owned by the session
+manager. Init observes every
 service Process and its initial VM instance endpoint in one bounded
 `object_wait_many` set without polling. It reports terminal Process information
 before releasing each dead supervisor handle. A noncritical service exit is
@@ -231,3 +241,21 @@ VM lifecycle state remains on the main Thread. Both Threads share the same
 Process and authority table; this is concurrency separation, not isolation. The event loop rotates ready
 sources and waits indefinitely when idle, using a finite deadline only for an
 outstanding runtime exit grace period. It does not periodically poll for clients.
+
+### Runtime loss during guest CPU power transitions
+
+`make test-power-crash ARCH=aarch64` builds explicitly enabled test runtimes
+and runs three restart/reclamation cycles at each of these boundaries:
+
+- all four guest vCPUs installed but still dormant;
+- a real Linux `CPU_ON` request pending before userspace accepts it;
+- a real Linux `CPU_OFF` request accepted after the requesting CPU detached from
+  hardware and entered the Off power state (scheduler parking may still race).
+
+The fixture disables VM autostart so deliberate runtime failure cannot trip
+init's initial-VM boot lease. Each abrupt process exit bypasses Rust destructors;
+the test verifies the selected boundary marker, failed VM state, exact guest-page
+reclamation, bounded runtime-memory retention, and successful new instances.
+`test-power-crash` and `HYPER_TEST_POWER_CRASH` are test-only build selections;
+ordinary runtime binaries contain neither the hooks nor a control protocol for
+triggering them. This is QEMU lifecycle coverage, not physical DMA/cache proof.

@@ -45,9 +45,9 @@ fn ordinary_policy_service_gets_only_explicit_attenuated_authority() -> Result<(
 fn existing_installed_manifests_still_validate_against_real_bootstrap_policy() -> Result<(), String>
 {
     for text in [
+        include_str!("config/services.json"),
         include_str!("../config/services.json"),
-        include_str!("../config/services-io.json"),
-        include_str!("../config/services-native.json"),
+        include_str!("../config/native/services.json"),
     ] {
         let manifest = manifest::parse(text).map_err(|e| format!("{e:?}"))?;
         manifest::validate(&manifest, &BootstrapPolicy).map_err(|e| format!("{e:?}"))?;
@@ -114,7 +114,7 @@ fn storage_readiness_requires_the_dedicated_moved_authority() -> Result<(), Stri
     for text in [
         IO_READY_SERVICE.replace(
             "bootstrap.io-ready-channel",
-            "bootstrap.shell-output-channel",
+            "bootstrap.session-output-channel",
         ),
         IO_READY_SERVICE.replace("io.ready", "stdio.output"),
     ] {
@@ -131,9 +131,9 @@ fn storage_readiness_requires_the_dedicated_moved_authority() -> Result<(), Stri
 #[test]
 fn legacy_manifests_do_not_wait_for_storage() -> Result<(), String> {
     for text in [
+        include_str!("config/services.json"),
+        include_str!("../config/native/services.json"),
         include_str!("../config/services.json"),
-        include_str!("../config/services-native.json"),
-        include_str!("../config/services-io.json"),
     ] {
         let manifest = manifest::parse(text).map_err(|e| format!("{e:?}"))?;
         let plan = manifest::validate(&manifest, &BootstrapPolicy).map_err(|e| format!("{e:?}"))?;
@@ -167,20 +167,11 @@ fn io_broker_requires_both_unique_bootstrap_endpoints() -> Result<(), String> {
 }
 
 #[test]
-fn terminal_alias_can_duplicate_before_move_but_never_after_consumption() -> Result<(), String> {
-    const INPUT: &str = r#"{"format":"hyper.service-manifest","services":[{"name":"shell","image":"/bin/sh","critical":true,"restart":"never","after":[],"capabilities":[
-{"source":"bootstrap.shell-input-channel","purpose":"stdio.terminal-input","operation":"duplicate","rights":["wait","read","duplicate","transfer","inspect"]},
-{"source":"bootstrap.shell-input-channel","purpose":"stdio.input","operation":"move","rights":["wait","read","duplicate","transfer","inspect"]}]}]}"#;
-    let parsed = manifest::parse(INPUT).map_err(|e| format!("{e:?}"))?;
-    manifest::validate(&parsed, &BootstrapPolicy).map_err(|e| format!("{e:?}"))?;
-    let reversed = INPUT
-        .replace("\"operation\":\"duplicate\"", "\"operation\":\"temporary\"")
-        .replace("\"operation\":\"move\"", "\"operation\":\"duplicate\"")
-        .replace("\"operation\":\"temporary\"", "\"operation\":\"move\"");
-    let parsed = manifest::parse(&reversed).map_err(|e| format!("{e:?}"))?;
-    assert!(
-        matches!(manifest::validate(&parsed, &BootstrapPolicy), Err(error)
-        if error.kind() == manifest::ValidationErrorKind::MoveSourceReused)
-    );
-    Ok(())
+fn virtual_console_owns_shell_launch_and_bootstrap_rejects_old_client_endpoints() {
+    for source in [
+        "bootstrap.shell-input-channel",
+        "bootstrap.session-client-input-channel",
+    ] {
+        assert!(BootstrapPolicy.authority(source).is_none());
+    }
 }

@@ -3,6 +3,7 @@
 
 //! Linear quiescence and architecture-retirement authorities.
 
+use super::super::retirement_observation::RetirementError;
 #[cfg(feature = "kernel-self-test")]
 use super::construction::InstalledVm;
 use super::construction::VmControl;
@@ -108,7 +109,6 @@ pub(in crate::kernel::vm) struct QuiescentControl {
 }
 
 impl QuiescentControl {
-    #[cfg(feature = "kernel-self-test")]
     pub(in crate::kernel::vm) const fn id(&self) -> VmId {
         self.id
     }
@@ -213,29 +213,13 @@ impl QuiescentControl {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(in crate::kernel::vm) enum RetirementError {
-    DeviceQuarantined,
-    TopologyUnavailable,
-    TransportBusy,
-    Unsupported,
-}
-
 #[must_use = "retry with the exact quiescent VM retirement authority"]
 pub(in crate::kernel::vm) struct RetirementFailure {
     control: QuiescentControl,
-    #[expect(
-        dead_code,
-        reason = "retains the failure cause; current reaper retries every retirement failure"
-    )]
     error: RetirementError,
 }
 
 impl RetirementFailure {
-    #[expect(
-        dead_code,
-        reason = "retirement cause accessor reserved for diagnostics; current reaper retries without classification"
-    )]
     pub(in crate::kernel::vm) const fn error(&self) -> RetirementError {
         self.error
     }

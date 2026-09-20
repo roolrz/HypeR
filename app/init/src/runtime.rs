@@ -108,12 +108,6 @@ impl Runtime {
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         let (session_output_channel, console_output_channel) =
             channel::create_pair().map_err(|_| Error::OperatingSystem)?;
-        let (session_client_input_channel, shell_input_channel) =
-            channel::create_pair().map_err(|_| Error::OperatingSystem)?;
-        let (shell_output_channel, session_client_output_channel) =
-            channel::create_pair().map_err(|_| Error::OperatingSystem)?;
-        let (shell_error_channel, session_client_error_channel) =
-            channel::create_pair().map_err(|_| Error::OperatingSystem)?;
         let factory = startup
             .take(startup::TASK_FACTORY)
             .map_err(|_| Error::OperatingSystem)?;
@@ -159,12 +153,6 @@ impl Runtime {
                 .duplicate(hyper_service::stdio::STANDARD_OUTPUT_CONTRACT.allowed_rights())
                 .map_err(|_| Error::OperatingSystem)?,
             session_output_channel: Some(session_output_channel),
-            session_client_input_channel: Some(session_client_input_channel),
-            session_client_output_channel: Some(session_client_output_channel),
-            session_client_error_channel: Some(session_client_error_channel),
-            shell_input_channel: Some(shell_input_channel),
-            shell_output_channel: Some(shell_output_channel),
-            shell_error_channel: Some(shell_error_channel),
             io_ready_channel: None,
             io_broker_server: None,
             io_broker_client: None,

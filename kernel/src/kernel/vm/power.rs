@@ -9,7 +9,10 @@ use hyper::vm::arm::psci::{Continuation, Operation, Request};
 
 impl InstalledMachine {
     // Used by guest firmware adapters on platforms with CPU power calls.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "guest PSCI power requests are currently AArch64-only"
+    )]
     pub(in crate::kernel) fn stage_power(
         &self,
         source: u32,
@@ -27,7 +30,10 @@ impl InstalledMachine {
         })
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "guest PSCI power requests are currently AArch64-only"
+    )]
     pub(in crate::kernel) fn affinity(&self, target: u64, level: u64) -> i64 {
         self.power.with(|power| power.affinity(target, level))
     }

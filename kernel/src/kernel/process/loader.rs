@@ -23,8 +23,10 @@ const USER_ROOT_END: u64 = 0x1_0000_0000;
 const PIE_MAPPING_BASE: u64 = 0x20_0000;
 const INTERPRETER_MAPPING_BASE: u64 = 0x1000_0000;
 const DYNAMIC_LIBRARY_MAPPING_BASE: u64 = 0x2000_0000;
-const INITIAL_STACK_SIZE: u64 = 256 * 1024;
+const DEFAULT_INITIAL_STACK_SIZE: u64 = 256 * 1024;
 pub(crate) const INITIAL_STACK_TOP: u64 = 0xffff_0000;
+// Keep the stack and its guard above the SDK heap reservation.
+const INITIAL_STACK_REGION_BASE: u64 = 0xf000_0000;
 const MAXIMUM_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug)]
@@ -100,7 +102,15 @@ pub(crate) fn load_native(
     let executable = Image::parse_process_with_plan(bytes, allocation).map_err(Error::Elf)?;
     validate_host_machine(executable.machine())?;
     let load_bias = select_load_bias(&executable)?;
-    validate_layout(&executable, load_bias)?;
+    let stack_size = executable
+        .initial_stack_size(DEFAULT_INITIAL_STACK_SIZE)
+        .map_err(Error::Elf)?;
+    let stack_guard = INITIAL_STACK_TOP
+        .checked_sub(stack_size)
+        .and_then(|base| base.checked_sub(PAGE_SIZE))
+        .filter(|guard| *guard >= INITIAL_STACK_REGION_BASE)
+        .ok_or(Error::Address)?;
+    validate_layout(&executable, load_bias, stack_guard)?;
 
     let root = UserSlice::new(
         UserAddress::new(USER_ROOT_BASE),
@@ -113,6 +123,7 @@ pub(crate) fn load_native(
         snapshot,
         load_bias,
         initial_stack,
+        stack_size,
         &address_space,
         &domain,
     ) {
@@ -132,6 +143,7 @@ fn prepare_address_space(
     snapshot: &crate::kernel::vfs::ExecutableSnapshot,
     load_bias: u64,
     initial_stack: StartupStackLayout,
+    stack_size: u64,
     address_space: &NativeAddressSpace,
     domain: &ResourceDomain,
 ) -> Result<ProcessImage, Error> {
@@ -153,10 +165,10 @@ fn prepare_address_space(
     }
 
     let stack_base = INITIAL_STACK_TOP
-        .checked_sub(INITIAL_STACK_SIZE)
+        .checked_sub(stack_size)
         .ok_or(Error::Address)?;
-    let stack_range = UserSlice::new(UserAddress::new(stack_base), INITIAL_STACK_SIZE)
-        .map_err(|_| Error::Address)?;
+    let stack_range =
+        UserSlice::new(UserAddress::new(stack_base), stack_size).map_err(|_| Error::Address)?;
     if initial_stack.stack_top() != INITIAL_STACK_TOP
         || initial_stack.stack_pointer() < stack_range.base().get()
         || initial_stack.stack_pointer() >= stack_range.end().get()
@@ -248,7 +260,7 @@ fn load_interpreter(
         .checked_sub(image.minimum_mapping_address())
         .filter(|bias| bias.is_multiple_of(PAGE_SIZE))
         .ok_or(Error::Address)?;
-    validate_layout(&image, load_bias)?;
+    validate_layout(&image, load_bias, DYNAMIC_LIBRARY_MAPPING_BASE)?;
     let mut segments = prepare_segments(&image, &snapshot, load_bias, address_space)?;
     apply_relocations(&image, load_bias, &mut segments)?;
     Ok(LoadedInterpreter {
@@ -299,14 +311,10 @@ fn select_load_bias(image: &Image<'_>) -> Result<u64, Error> {
     }
 }
 
-fn validate_layout(image: &Image<'_>, load_bias: u64) -> Result<(), Error> {
+fn validate_layout(image: &Image<'_>, load_bias: u64, mapping_end: u64) -> Result<(), Error> {
     let start = relocated_address(load_bias, image.minimum_mapping_address())?;
     let end = relocated_address(load_bias, image.maximum_mapping_address())?;
-    let stack_guard = INITIAL_STACK_TOP
-        .checked_sub(INITIAL_STACK_SIZE)
-        .and_then(|base| base.checked_sub(PAGE_SIZE))
-        .ok_or(Error::Address)?;
-    if start < USER_ROOT_BASE || start >= end || end > stack_guard {
+    if start < USER_ROOT_BASE || start >= end || end > mapping_end {
         return Err(Error::Address);
     }
     let mut total = 0u64;

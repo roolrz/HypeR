@@ -8,7 +8,7 @@
 //! diagnostic rendering, frame walking, and optional monitor commands remain
 //! in sibling modules. Local interrupts are masked before every publication.
 
-use core::fmt::{self, Write};
+use core::fmt;
 use core::hint::spin_loop;
 use core::panic::PanicInfo;
 
@@ -180,14 +180,6 @@ fn enter(context: CrashContext, reason: fmt::Arguments<'_>) -> ! {
     let Some(cpu) = super::super::cpu::current_index() else {
         crate::hal::cpu::halt();
     };
-    let mut owned_reason = owned_reason;
-    if let Some(supplement) = super::supplement::read_for_fatal(cpu) {
-        let _ = owned_reason.write_str("\nterminal context: ");
-        let _ = owned_reason.write_str(supplement.as_str());
-        if supplement.was_truncated() {
-            let _ = owned_reason.write_str(" [truncated]");
-        }
-    }
     let payload = super::state::CrashPayload::new(context, owned_reason);
     let Some(argument) = super::state::publish_payload(cpu, payload) else {
         if is_ready() {

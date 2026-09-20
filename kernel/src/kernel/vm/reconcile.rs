@@ -39,9 +39,7 @@ impl ReconcilePublication {
         self.publish();
     }
 
-    // Kept available to the architecture-independent model tests; secondary
-    // kernels do not observe the bit until they gain an asynchronous producer.
-    #[allow(dead_code)]
+    /// Observes durable work without consuming its reconciliation claim.
     pub(super) fn pending(&self) -> bool {
         self.pending.load(Ordering::Acquire)
     }

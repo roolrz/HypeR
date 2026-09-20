@@ -36,12 +36,6 @@ pub(super) struct AuthorityInventory {
     pub(super) session_input_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) service_output_channel: OwnedHandle<ByteChannelObject>,
     pub(super) session_output_channel: Option<OwnedHandle<ByteChannelObject>>,
-    pub(super) session_client_input_channel: Option<OwnedHandle<ByteChannelObject>>,
-    pub(super) session_client_output_channel: Option<OwnedHandle<ByteChannelObject>>,
-    pub(super) session_client_error_channel: Option<OwnedHandle<ByteChannelObject>>,
-    pub(super) shell_input_channel: Option<OwnedHandle<ByteChannelObject>>,
-    pub(super) shell_output_channel: Option<OwnedHandle<ByteChannelObject>>,
-    pub(super) shell_error_channel: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) io_broker_server: Option<OwnedHandle<CapabilityChannelObject>>,
     pub(super) io_broker_client: Option<OwnedHandle<CapabilityChannelObject>>,
     pub(super) io_ready_channel: Option<OwnedHandle<ByteChannelObject>>,
@@ -84,18 +78,6 @@ impl AuthorityInventory {
                 if kind == ConsoleObject::KIND.as_raw() =>
             {
                 builder.add_handle_duplicate(self.console.as_handle_ref(), purpose, offer)
-            }
-            (BootstrapAuthority::ShellInputChannel, CapabilityOperation::Duplicate)
-                if kind == ByteChannelObject::KIND.as_raw() =>
-            {
-                builder.add_handle_duplicate(
-                    self.shell_input_channel
-                        .as_ref()
-                        .ok_or(LaunchError::AuthorityConsumed)?
-                        .as_handle_ref(),
-                    purpose,
-                    offer,
-                )
             }
             (BootstrapAuthority::ServiceOutputChannel, CapabilityOperation::Duplicate)
                 if kind == ByteChannelObject::KIND.as_raw() =>
@@ -240,14 +222,6 @@ impl AuthorityInventory {
             BootstrapAuthority::ConsoleOutputChannel => &mut self.console_output_channel,
             BootstrapAuthority::SessionInputChannel => &mut self.session_input_channel,
             BootstrapAuthority::SessionOutputChannel => &mut self.session_output_channel,
-            BootstrapAuthority::SessionClientInputChannel => &mut self.session_client_input_channel,
-            BootstrapAuthority::SessionClientOutputChannel => {
-                &mut self.session_client_output_channel
-            }
-            BootstrapAuthority::SessionClientErrorChannel => &mut self.session_client_error_channel,
-            BootstrapAuthority::ShellInputChannel => &mut self.shell_input_channel,
-            BootstrapAuthority::ShellOutputChannel => &mut self.shell_output_channel,
-            BootstrapAuthority::ShellErrorChannel => &mut self.shell_error_channel,
             BootstrapAuthority::IoReadyChannel => &mut self.io_ready_channel,
             _ => return Err(LaunchError::UnsupportedAuthority),
         };

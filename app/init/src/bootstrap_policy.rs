@@ -61,12 +61,6 @@ define_bootstrap_authorities! {
     ConsoleOutputChannel = 3 => "bootstrap.console-output-channel",
     SessionInputChannel = 4 => "bootstrap.session-input-channel",
     SessionOutputChannel = 5 => "bootstrap.session-output-channel",
-    SessionClientInputChannel = 6 => "bootstrap.session-client-input-channel",
-    SessionClientOutputChannel = 7 => "bootstrap.session-client-output-channel",
-    SessionClientErrorChannel = 8 => "bootstrap.session-client-error-channel",
-    ShellInputChannel = 9 => "bootstrap.shell-input-channel",
-    ShellOutputChannel = 10 => "bootstrap.shell-output-channel",
-    ShellErrorChannel = 11 => "bootstrap.shell-error-channel",
     RootDirectory = 12 => "bootstrap.root-directory",
     DynamicLibraryDirectory = 13 => "bootstrap.dynamic-library-directory",
     TaskFactory = 14 => "bootstrap.task-factory",
@@ -102,18 +96,7 @@ impl AuthorityPolicy for BootstrapPolicy {
             | BootstrapAuthority::ConsoleOutputChannel
             | BootstrapAuthority::SessionInputChannel
             | BootstrapAuthority::SessionOutputChannel
-            | BootstrapAuthority::SessionClientInputChannel
-            | BootstrapAuthority::SessionClientOutputChannel
-            | BootstrapAuthority::SessionClientErrorChannel
-            | BootstrapAuthority::ShellOutputChannel
-            | BootstrapAuthority::ShellErrorChannel
             | BootstrapAuthority::IoReadyChannel => move_authority(authority),
-            BootstrapAuthority::ShellInputChannel => {
-                let mut declaration = move_authority(authority);
-                declaration.duplicable = true;
-                declaration.rights |= Rights::INSPECT.bits();
-                declaration
-            }
             BootstrapAuthority::ServiceOutputChannel => duplicate_authority(
                 authority,
                 ByteChannelObject::KIND.as_raw(),
@@ -219,7 +202,9 @@ impl AuthorityPolicy for BootstrapPolicy {
             CONSOLE_INPUT_IMAGE => find_contract(console_contract::INPUT_STARTUP_CONTRACTS, name),
             CONSOLE_OUTPUT_IMAGE => find_contract(console_contract::OUTPUT_STARTUP_CONTRACTS, name),
             SESSION_IMAGE => find_contract(session_contract::STARTUP_CONTRACTS, name)
-                .or_else(|| find_contract(stdio_contract::STARTUP_CONTRACTS, name)),
+                .or_else(|| find_contract(stdio_contract::STARTUP_CONTRACTS, name))
+                .or_else(|| find_contract(process_contract::SHELL_STARTUP_CONTRACTS, name))
+                .or_else(|| find_contract(vm_contract::CLIENT_STARTUP_CONTRACTS, name)),
             SHELL_IMAGE => find_contract(stdio_contract::STARTUP_CONTRACTS, name)
                 .or_else(|| find_contract(process_contract::SHELL_STARTUP_CONTRACTS, name))
                 .or_else(|| find_contract(vm_contract::CLIENT_STARTUP_CONTRACTS, name)),

@@ -310,7 +310,7 @@ impl AuthorityPolicy for Policy {
                 (302, 4, WAIT | WRITE | DUPLICATE | TRANSFER)
             }
             ("/svc/vm-manager", "process.root-directory") => (303, 5, READ | DUPLICATE | TRANSFER),
-            ("/bin/sh", "process.root-directory") => (
+            ("/bin/sh" | "/svc/session", "process.root-directory") => (
                 303,
                 5,
                 READ | WRITE
@@ -321,17 +321,36 @@ impl AuthorityPolicy for Policy {
                     | SET_ATTRIBUTES
                     | LOCK_FILE,
             ),
-            ("/bin/sh", "process.task-factory") => (304, 6, CREATE_PROCESS | DUPLICATE | TRANSFER),
-            ("/bin/sh", "process.task-group") => (305, 7, ATTACH_PROCESS | DUPLICATE | TRANSFER),
-            ("/bin/sh", "process.resource-domain") => (306, 8, SPONSOR | DUPLICATE | TRANSFER),
-            ("/bin/sh", "process.task-inspector") => (307, 16, DUPLICATE | TRANSFER | INSPECT),
-            ("/bin/sh", "process.object-inspector") => (308, 17, DUPLICATE | TRANSFER | INSPECT),
-            ("/bin/sh", "process.memory-inspector") => (309, 18, DUPLICATE | TRANSFER | INSPECT),
-            ("/bin/sh", "process.cpu-inspector") => (310, 19, DUPLICATE | TRANSFER | INSPECT),
-            ("/bin/sh", "process.child-library-directory")
+            ("/bin/sh" | "/svc/session", "process.task-factory") => {
+                (304, 6, CREATE_PROCESS | DUPLICATE | TRANSFER)
+            }
+            ("/bin/sh" | "/svc/session", "process.task-group") => {
+                (305, 7, ATTACH_PROCESS | DUPLICATE | TRANSFER)
+            }
+            ("/bin/sh" | "/svc/session", "process.resource-domain") => {
+                (306, 8, SPONSOR | DUPLICATE | TRANSFER)
+            }
+            ("/bin/sh" | "/svc/session", "process.task-inspector") => {
+                (307, 16, DUPLICATE | TRANSFER | INSPECT)
+            }
+            ("/bin/sh" | "/svc/session", "process.object-inspector") => {
+                (308, 17, DUPLICATE | TRANSFER | INSPECT)
+            }
+            ("/bin/sh" | "/svc/session", "process.memory-inspector") => {
+                (309, 18, DUPLICATE | TRANSFER | INSPECT)
+            }
+            ("/bin/sh" | "/svc/session", "process.cpu-inspector") => {
+                (310, 19, DUPLICATE | TRANSFER | INSPECT)
+            }
+            ("/bin/sh" | "/svc/session", "process.child-library-directory")
             | ("/svc/vm-manager", "process.child-library-directory") => {
                 (315, 5, READ | EXECUTE | DUPLICATE | TRANSFER)
             }
+            ("/svc/session", "vm.manager-connection") => (
+                hyper_service::vm::MANAGER_CONNECTION.as_raw(),
+                22,
+                WAIT | WRITE | DUPLICATE | TRANSFER,
+            ),
             ("/bin/sh", "vm.manager-connection") => (
                 hyper_service::vm::MANAGER_CONNECTION.as_raw(),
                 22,
@@ -408,7 +427,7 @@ impl AuthorityPolicy for CollidingPolicy {
 
 #[test]
 fn production_manifest_matches_the_validated_schema() {
-    let parsed = parse(include_str!("../config/services.json"));
+    let parsed = parse(include_str!("config/services.json"));
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
         return;
@@ -418,11 +437,11 @@ fn production_manifest_matches_the_validated_schema() {
     let Ok(plan) = validated else {
         return;
     };
-    assert_eq!(manifest.service_count(), 5);
+    assert_eq!(manifest.service_count(), 4);
     assert_eq!(plan.vm_config_path(), Some("/etc/hyper/vms.json"));
     let shell = manifest
         .services()
-        .find(|service| service.name() == "shell");
+        .find(|service| service.name() == "session");
     assert_eq!(
         shell.map(|service| service.capabilities().count()),
         Some(14)
@@ -432,7 +451,7 @@ fn production_manifest_matches_the_validated_schema() {
 #[test]
 fn rejects_a_noncanonical_vm_config_path() {
     let text =
-        include_str!("../config/services.json").replace("/etc/hyper/vms.json", "/etc/../vms.json");
+        include_str!("config/services.json").replace("/etc/hyper/vms.json", "/etc/../vms.json");
     let parsed = parse(&text);
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
@@ -446,7 +465,7 @@ fn rejects_a_noncanonical_vm_config_path() {
 
 #[test]
 fn production_vm_manager_is_bound_by_its_unique_provisioning_role() {
-    let parsed = parse(include_str!("../config/services.json"));
+    let parsed = parse(include_str!("config/services.json"));
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
         return;
@@ -484,7 +503,7 @@ fn singleton_role_lookup_rejects_an_ambiguous_purpose() {
 
 #[test]
 fn production_manifest_marks_required_data_plane_services_critical() {
-    let parsed = parse(include_str!("../config/services.json"));
+    let parsed = parse(include_str!("config/services.json"));
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
         return;
@@ -496,12 +515,12 @@ fn production_manifest_marks_required_data_plane_services_critical() {
     let shell = manifest
         .services()
         .find(|service| service.name() == "shell");
-    assert!(shell.is_some_and(|service| !service.critical()));
+    assert!(shell.is_none());
 }
 
 #[test]
 fn process_launchers_receive_a_separate_delegatable_library_capability() {
-    let parsed = parse(include_str!("../config/services.json"));
+    let parsed = parse(include_str!("config/services.json"));
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
         return;
@@ -512,7 +531,7 @@ fn process_launchers_receive_a_separate_delegatable_library_capability() {
         return;
     };
     let expected = READ | EXECUTE | DUPLICATE | TRANSFER;
-    for image in ["/bin/sh", "/svc/vm-manager"] {
+    for image in ["/svc/session", "/svc/vm-manager"] {
         let delegated = manifest
             .services()
             .enumerate()
@@ -698,9 +717,11 @@ fn rejects_rights_below_the_destination_contract() {
 
 #[test]
 fn rejects_rights_above_the_destination_contract() {
-    let production = include_str!("../config/services.json");
+    let production = include_str!("config/services.json")
+        .split_whitespace()
+        .collect::<String>();
     let over_delegated =
-        production.replacen("[\"wait\", \"read\"]", "[\"wait\", \"read\", \"write\"]", 1);
+        production.replacen("[\"wait\",\"read\"]", "[\"wait\", \"read\", \"write\"]", 1);
     let parsed = parse(&over_delegated);
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
@@ -718,14 +739,16 @@ fn rejects_rights_above_the_destination_contract() {
 
 #[test]
 fn production_launch_contract_rejects_under_delegated_directory_authority() {
-    let production = include_str!("../config/services.json");
+    let production = include_str!("config/services.json")
+        .split_whitespace()
+        .collect::<String>();
     for (under_delegated, service, capability) in [(
         production.replacen(
-            "[\"read\", \"duplicate\", \"transfer\", \"execute\", \"write\", \"inspect\", \"set-attributes\", \"lock-file\"]",
-            "[\"read\", \"execute\"]",
+            "[\"read\",\"duplicate\",\"transfer\",\"execute\",\"write\",\"inspect\",\"set-attributes\",\"lock-file\"]",
+            "[\"read\",\"execute\"]",
             1,
         ),
-        3,
+        2,
         4,
     )] {
         assert_ne!(under_delegated, production, "rights fixture must change the manifest");
@@ -855,7 +878,7 @@ fn rejects_invalid_and_duplicate_startup_purposes() {
 
 #[test]
 fn native_service_manifest_does_not_require_a_vm_fleet() {
-    let parsed = parse(include_str!("../config/services-native.json"));
+    let parsed = parse(include_str!("../config/native/services.json"));
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
         return;
@@ -865,7 +888,7 @@ fn native_service_manifest_does_not_require_a_vm_fleet() {
     let Ok(plan) = validated else {
         return;
     };
-    assert_eq!(manifest.service_count(), 4);
+    assert_eq!(manifest.service_count(), 3);
     assert_eq!(plan.vm_config_path(), None);
     assert_eq!(
         plan.unique_service_for_purpose(hyper_service::vm::PROVISIONING.as_raw()),
@@ -880,7 +903,7 @@ fn native_service_manifest_does_not_require_a_vm_fleet() {
 
 #[test]
 fn services_have_output_without_input_or_physical_console_authority() {
-    let parsed = parse(include_str!("../config/services.json"));
+    let parsed = parse(include_str!("config/services.json"));
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
         return;

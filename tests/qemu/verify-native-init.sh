@@ -383,7 +383,7 @@ while :; do
     if [ "$command_phase" = echo_done ] &&
         grep -q 'HypeR: starting Native init process' "$log" &&
         grep -Fxq 'HypeR session: console ready' "$native_output" &&
-        grep -Fxq 'HypeR session: router ready' "$native_output" &&
+        grep -Fxq 'HypeR virtual console: ready' "$native_output" &&
         grep -Fxq 'TYPE     KOID       OWNER      NAME                 STATE' "$native_output" &&
         grep -Fxq 'HANDLE             OBJECT     KIND                    RIGHTS                           PURPOSE' "$native_output" &&
         grep -Fxq 'KOID       KIND                    HANDLE-STATE HANDLES REFS PURPOSE' "$native_output" &&

@@ -8,6 +8,7 @@ use hyper::sync::InterruptSpinLock;
 
 use super::installed::InstalledMachine;
 use super::registry::{QuiescePoll, QuiescentControl, QuiescingVm, VmControl};
+use super::retirement_observation::RetirementObservation;
 
 type QueueLock = InterruptSpinLock<RetirementQueue, crate::hal::irq::LocalMask>;
 
@@ -16,6 +17,7 @@ static RETIREMENT_QUEUE: QueueLock = InterruptSpinLock::new(RetirementQueue::new
 struct RetirementWork {
     owner: FallibleArc<InstalledMachine>,
     phase: RetirementPhase,
+    observation: RetirementObservation,
 }
 
 enum RetirementPhase {
@@ -76,6 +78,7 @@ pub(super) fn enqueue(owner: FallibleArc<InstalledMachine>, control: VmControl) 
         queue.push(RetirementWork {
             owner,
             phase: RetirementPhase::Begin(control),
+            observation: RetirementObservation::new(),
         });
     });
     crate::kernel::reaper::request();
@@ -155,12 +158,25 @@ fn reap_one() -> Option<ReapOutcome> {
     let RetirementPhase::Retire(control) = work.phase else {
         hyper::debug::invariant_failure("vm::lifecycle::reap_one invariant")
     };
+    let id = control.id();
     match control.retire() {
         Ok(()) => {
             work.owner.publish_stopped();
+            if work.observation.failures() != 0 {
+                crate::pr_info!(
+                    "HypeR: VM {id:?} retirement completed after {} failed attempts",
+                    work.observation.failures()
+                );
+            }
             Some(ReapOutcome::Progress)
         }
         Err(failure) => {
+            let error = failure.error();
+            if work.observation.record(error) {
+                crate::pr_warn!(
+                    "HypeR: VM {id:?} retirement deferred: {error:?}; retaining resources and retrying"
+                );
+            }
             work.phase = RetirementPhase::Retire(failure.into_control());
             RETIREMENT_QUEUE.with(|queue| queue.push(work));
             Some(ReapOutcome::Deferred)

@@ -24,6 +24,7 @@ pub(crate) mod objects;
 mod reconcile;
 pub(crate) mod registry;
 mod residency_state;
+mod retirement_observation;
 mod run_admission;
 pub(crate) mod service;
 mod timer;

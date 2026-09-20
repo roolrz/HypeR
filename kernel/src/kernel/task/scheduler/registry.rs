@@ -17,13 +17,6 @@ use hyper::cpu::CpuIndex;
 use super::Error;
 use crate::kernel::task::thread::{Thread, ThreadId, ThreadScheduleState};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ThreadRegistryStatus {
-    Occupied(crate::kernel::task::thread::ExecutionKind),
-    Retiring(crate::kernel::task::thread::ExecutionKind),
-    Absent,
-}
-
 #[expect(
     clippy::large_enum_variant,
     reason = "retiring slots must preserve allocation-free thread diagnostics after ownership is detached"
@@ -732,30 +725,6 @@ impl ThreadRegistry {
             if let Some(ThreadSlot::Occupied(thread)) = self.table.access().table().slot(index) {
                 operation(thread);
             }
-        }
-    }
-
-    /// Observes one complete generation even while its allocation is detached.
-    pub fn status(&self, id: ThreadId) -> ThreadRegistryStatus {
-        let Some(slot) = id.scheduler_slot() else {
-            return ThreadRegistryStatus::Absent;
-        };
-        match self.table.access().table().slot(slot) {
-            Some(ThreadSlot::Occupied(thread)) if thread.id() == id => {
-                ThreadRegistryStatus::Occupied(thread.execution_kind())
-            }
-            Some(ThreadSlot::Retiring {
-                id: retiring,
-                object,
-                ..
-            }) if *retiring == id => ThreadRegistryStatus::Retiring(object.role.execution_kind()),
-            Some(
-                ThreadSlot::Vacant
-                | ThreadSlot::Reserved(_)
-                | ThreadSlot::Occupied(_)
-                | ThreadSlot::Retiring { .. },
-            )
-            | None => ThreadRegistryStatus::Absent,
         }
     }
 
