@@ -15,8 +15,8 @@ use hyper_vm_image::guest_fdt::{
     GuestHardwareMetadata,
     io::{DmaRange, IoDevices, MmioDevice, MmioWindow, SdhciDevice, SdhciRevision},
 };
-use hyper_vm_runtime::io_guest::{self, Image, InstalledGuest, PHYSICAL_MMIO, RAM_BASE, RAM_BYTES};
-use hyper_vm_runtime::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
+use hyper_vm_support::io_guest::{self, Image, InstalledGuest, PHYSICAL_MMIO, RAM_BASE, RAM_BYTES};
+use hyper_vm_support::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
 use std::io::{self, Write};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -99,7 +99,7 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
     .map_err(show)?;
     let platform = vm::platform_info(lease.as_handle_ref(), vm::PlatformProfile::Aarch64Reference)
         .map_err(show)?;
-    let metadata = hyper_vm_runtime::profile::validate_metadata(
+    let metadata = hyper_vm_support::profile::validate_metadata(
         image.plan.architecture(),
         image.plan.platform_profile(),
         platform,

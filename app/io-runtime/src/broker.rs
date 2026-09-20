@@ -18,9 +18,9 @@ use hyper_os::vm;
 use hyper_os::wait::{ObjectSignals, WaitItem};
 use hyper_service::io;
 use hyper_vm_image::guest_fdt::io::{DmaRange, IoClient, MmioDevice, SharedMemory};
-use hyper_vm_runtime::io_guest::InstalledGuest;
-use hyper_vm_runtime::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
-use hyper_vm_runtime::virtio_scsi::BackendOperation;
+use hyper_vm_support::io_guest::InstalledGuest;
+use hyper_vm_support::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
+use hyper_vm_support::virtio_scsi::BackendOperation;
 use std::io::Read;
 use std::num::NonZeroU64;
 
@@ -272,7 +272,7 @@ impl Broker {
             match vm::machine_info(guest.machine.as_handle_ref()) {
                 Ok(info) => {
                     let snapshot =
-                        io::encode_observation(info, hyper_vm_runtime::io_guest::RAM_BYTES);
+                        io::encode_observation(info, hyper_vm_support::io_guest::RAM_BYTES);
                     self.observations.retain(|(endpoint, limit)| {
                         let keep = check_deadline(*limit).is_ok()
                             && matches!(
@@ -707,7 +707,7 @@ struct HeldReply<'a> {
     hold: bool,
 }
 #[cfg(feature = "broker-test")]
-impl hyper_vm_runtime::io_backend::ControlTransport for HeldReply<'_> {
+impl hyper_vm_support::io_backend::ControlTransport for HeldReply<'_> {
     fn send(&self, bytes: &[u8]) -> hyper_os::Result<()> {
         self.mailbox.send(bytes)
     }

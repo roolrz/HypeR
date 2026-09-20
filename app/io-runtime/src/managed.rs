@@ -17,9 +17,9 @@ use hyper_os::startup::{self, Startup};
 use hyper_os::vm;
 use hyper_os::wait::{self, ObjectSignals, WaitItem};
 use hyper_vm_image::guest_fdt::io::{DmaRange, IoClient, MmioDevice, SharedMemory};
-use hyper_vm_runtime::io_guest::{InstalledGuest, RAM_BASE, RAM_BYTES, SharedGrant};
-use hyper_vm_runtime::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
-use hyper_vm_runtime::virtio_scsi::{BackendOperation, QUEUES, Queue, VERSION_1};
+use hyper_vm_support::io_guest::{InstalledGuest, RAM_BASE, RAM_BYTES, SharedGrant};
+use hyper_vm_support::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
+use hyper_vm_support::virtio_scsi::{BackendOperation, QUEUES, Queue, VERSION_1};
 
 const _: () = assert!(QUEUES == block::QUEUE_COUNT);
 

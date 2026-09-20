@@ -65,11 +65,11 @@ fn run(
         .map_err(Error::OperatingSystem)?;
     let image = hyper_vm_image::parse(&source).map_err(classify_image_error)?;
     let plan = linux::validate_reference(&source, image).map_err(classify_reference_error)?;
-    let profile = hyper_vm_runtime::profile::native_profile(plan.platform_profile())
+    let profile = hyper_vm_support::profile::native_profile(plan.platform_profile())
         .map_err(|_| Error::UnsupportedConfiguration)?;
     let platform_info = hyper_os::vm::platform_info(lease.as_handle_ref(), profile)
         .map_err(classify_platform_error)?;
-    let metadata = hyper_vm_runtime::profile::validate_metadata(
+    let metadata = hyper_vm_support::profile::validate_metadata(
         plan.architecture(),
         plan.platform_profile(),
         platform_info,
@@ -530,7 +530,7 @@ fn copy_payload(
         .load_address
         .checked_sub(memory_base)
         .ok_or(Error::InvalidImage)?;
-    let statistics = hyper_vm_runtime::image_io::copy(
+    let statistics = hyper_vm_support::image_io::copy(
         payload.file_offset,
         payload.length,
         |offset, bytes| source.read_exact_at(offset, bytes),
@@ -542,12 +542,12 @@ fn copy_payload(
         },
     )
     .map_err(|error| match error {
-        hyper_vm_runtime::image_io::Error::Read(error)
-        | hyper_vm_runtime::image_io::Error::Thread(error) => Error::Io(error.kind()),
-        hyper_vm_runtime::image_io::Error::Write(error) => error,
-        hyper_vm_runtime::image_io::Error::Allocation => Error::Io(std::io::ErrorKind::OutOfMemory),
-        hyper_vm_runtime::image_io::Error::InvalidRange => Error::InvalidImage,
-        hyper_vm_runtime::image_io::Error::WorkerStopped => Error::Io(std::io::ErrorKind::Other),
+        hyper_vm_support::image_io::Error::Read(error)
+        | hyper_vm_support::image_io::Error::Thread(error) => Error::Io(error.kind()),
+        hyper_vm_support::image_io::Error::Write(error) => error,
+        hyper_vm_support::image_io::Error::Allocation => Error::Io(std::io::ErrorKind::OutOfMemory),
+        hyper_vm_support::image_io::Error::InvalidRange => Error::InvalidImage,
+        hyper_vm_support::image_io::Error::WorkerStopped => Error::Io(std::io::ErrorKind::Other),
     })?;
     #[cfg(feature = "startup-profile")]
     eprintln!(

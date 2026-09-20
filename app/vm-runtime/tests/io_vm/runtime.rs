@@ -12,8 +12,8 @@ use hyper_os::vm::{self, PowerOperation};
 use hyper_os::wait::{self, ObjectSignals, WaitItem};
 use hyper_vm_image::guest_fdt;
 use hyper_vm_image::guest_fdt::io::{DmaRange, IoDevices, MmioDevice, SharedMemory};
-use hyper_vm_runtime::io_backend::{Backend, Completion};
-use hyper_vm_runtime::io_guest::Image;
+use hyper_vm_support::io_backend::{Backend, Completion};
+use hyper_vm_support::io_guest::Image;
 use std::io::{self, Write};
 use std::num::NonZeroU64;
 use std::process::ExitCode;
@@ -125,7 +125,7 @@ fn install(
     serial_address: u64,
 ) -> Result<Guest> {
     let installed =
-        hyper_vm_runtime::io_guest::install(startup, image, own, shared, physical, serial_address)?;
+        hyper_vm_support::io_guest::install(startup, image, own, shared, physical, serial_address)?;
     Ok(Guest {
         machine: installed.machine,
         cpus: installed.cpus,
@@ -271,7 +271,7 @@ fn suite(startup: &Startup<'_>) -> Result<()> {
     .map_err(show)?;
     let platform = vm::platform_info(lease.as_handle_ref(), vm::PlatformProfile::Aarch64Reference)
         .map_err(show)?;
-    let metadata = hyper_vm_runtime::profile::validate_metadata(
+    let metadata = hyper_vm_support::profile::validate_metadata(
         front.plan.architecture(),
         front.plan.platform_profile(),
         platform,

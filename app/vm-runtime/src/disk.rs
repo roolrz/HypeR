@@ -13,7 +13,7 @@ use hyper_os::handle::{
 };
 use hyper_os::wait::{ObjectSignals, RegistrationId, WaitSet};
 use hyper_service::io;
-use hyper_vm_runtime::io_backend::{Backend, OperationDeadline, RemoteNotification};
+use hyper_vm_support::io_backend::{Backend, OperationDeadline, RemoteNotification};
 use std::mem::MaybeUninit;
 use std::num::NonZeroU64;
 use std::sync::Arc;

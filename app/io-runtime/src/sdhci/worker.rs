@@ -9,7 +9,7 @@ use hyper_os::handle::{
 };
 use hyper_os::wait::{ObjectSignals, RegistrationId, WaitSet};
 use hyper_os::{Error, Result, Status, channel, device, vm};
-use hyper_vm_runtime::io_guest::{InstalledGuest, PHYSICAL_MMIO};
+use hyper_vm_support::io_guest::{InstalledGuest, PHYSICAL_MMIO};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 

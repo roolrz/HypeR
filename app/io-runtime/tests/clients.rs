@@ -77,7 +77,7 @@ fn dynamic_dma_translation_excludes_both_static_aliases() {
 
 #[test]
 fn runtime_cannot_advance_the_backend_epoch_or_change_mapping_identity() {
-    use hyper_vm_runtime::io_protocol::{Command, Request};
+    use hyper_vm_support::io_protocol::{Command, Request};
     let request = Request {
         binding: 2,
         epoch: 3,
