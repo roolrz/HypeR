@@ -738,14 +738,23 @@ fn dispatch_guest_synchronous(
         registers::ESR_EC_INSTRUCTION_ABORT_LOWER | registers::ESR_EC_DATA_ABORT_LOWER
     );
     if abort {
-        // HPFAR_EL2 is architecturally meaningful only for a lower-EL abort
-        // involving stage-2 translation. Do not read stale FIPA state for
-        // system-register, firmware-call, WFx, or Undefined exits.
-        let physical_address = guest_physical_address(frame.far);
+        // Recover the IPA according to the abort class. In particular,
+        // permission faults need a stage-1 walk rather than stale HPFAR state.
+        let Some(physical_address) = guest_physical_address(frame.esr, frame.far) else {
+            // A concurrent guest stage-1 update can invalidate the AT walk.
+            // Retry the instruction so hardware reports the current fault.
+            return Ok(GuestDispatch::Resume);
+        };
         if let Some(fault) = super::decode_guest_memory_fault(frame.esr, physical_address) {
             match crate::arch::vm::dispatch_memory_fault(fault) {
                 hyper::vm::exit::MemoryFaultAction::Retry => return Ok(GuestDispatch::Resume),
-                hyper::vm::exit::MemoryFaultAction::ForwardToDevice => {}
+                hyper::vm::exit::MemoryFaultAction::ForwardToDevice => {
+                    if exception_class == registers::ESR_EC_INSTRUCTION_ABORT_LOWER {
+                        return Ok(GuestDispatch::Terminal(
+                            super::context::GuestTerminalCause::MemoryFault,
+                        ));
+                    }
+                }
                 hyper::vm::exit::MemoryFaultAction::Stop => {
                     return Ok(GuestDispatch::Terminal(
                         super::context::GuestTerminalCause::MemoryFault,
@@ -850,7 +859,51 @@ fn capture_terminal_guest(
     super::lower_el::close_captured_guest(generation, context).map_err(|_| ())
 }
 
-fn guest_physical_address(fault_address: u64) -> u64 {
+fn guest_physical_address(syndrome: u64, fault_address: u64) -> Option<u64> {
+    let status = syndrome & registers::ESR_ABORT_FSC_MASK;
+    let permission = (registers::ESR_ABORT_PERMISSION_FAULT_LEVEL0
+        ..=registers::ESR_ABORT_PERMISSION_FAULT_LEVEL3)
+        .contains(&status);
+    if permission && syndrome & registers::ESR_DATA_ABORT_S1PTW == 0 {
+        // HPFAR is not guaranteed for a permission fault outside a stage-1
+        // walk. Translate the guest VA through its active stage-1 tables.
+        // Exception entry has restored host TGE; AT S1E1R would otherwise
+        // select the host regime. Only register operations occur while TGE
+        // is clear, and PAR belongs to the guest and must be preserved.
+        let result: u64;
+        // SAFETY: The synchronous guest exit pins this CPU with IRQs masked
+        // and retains the guest EL12 registers and stage-2 root. Restore HCR
+        // and PAR before any Rust code or host memory access can execute.
+        unsafe {
+            asm!(
+                "mrs {saved_par}, par_el1",
+                "mrs {saved_hcr}, hcr_el2",
+                "bic {guest_hcr}, {saved_hcr}, {tge}",
+                "msr hcr_el2, {guest_hcr}",
+                "isb",
+                "at s1e1r, {address}",
+                "isb",
+                "mrs {result}, par_el1",
+                "msr par_el1, {saved_par}",
+                "msr hcr_el2, {saved_hcr}",
+                "isb",
+                saved_par = out(reg) _,
+                saved_hcr = out(reg) _,
+                guest_hcr = out(reg) _,
+                result = out(reg) result,
+                address = in(reg) fault_address,
+                tge = const registers::HCR_EL2_TGE,
+                options(nostack, preserves_flags),
+            );
+        }
+        if result & 1 != 0 {
+            return None;
+        }
+        // HypeR's AArch64 translation contract is limited to 48-bit PA.
+        return Some(
+            (result & 0x0000_ffff_ffff_f000) | (fault_address & registers::PAGE_OFFSET_MASK_4K),
+        );
+    }
     let hpfar: u64;
     // SAFETY: HPFAR_EL2 is readable at EL2. Its FIPA field supplies IPA bits
     // above the page offset for a stage-2 abort.
@@ -861,8 +914,10 @@ fn guest_physical_address(fault_address: u64) -> u64 {
             options(nomem, nostack, preserves_flags)
         );
     }
-    ((hpfar & registers::HPFAR_EL2_FIPA_MASK) << registers::HPFAR_EL2_FIPA_TO_IPA_SHIFT)
-        | (fault_address & registers::PAGE_OFFSET_MASK_4K)
+    Some(
+        ((hpfar & registers::HPFAR_EL2_FIPA_MASK) << registers::HPFAR_EL2_FIPA_TO_IPA_SHIFT)
+            | (fault_address & registers::PAGE_OFFSET_MASK_4K),
+    )
 }
 
 fn interrupted_stack_pointer(frame: &ExceptionFrame, origin: ExceptionOrigin) -> u64 {

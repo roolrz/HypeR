@@ -35,6 +35,9 @@ pub trait NodeVisitor {
         Ok(())
     }
 
+    /// Observes a rejected resource property without changing error propagation.
+    fn resource_error(&mut self, _property: Property<'_>, _error: Error) {}
+
     fn end_node(&mut self, _node: NodeResources<'_>) -> Result<(), Self::Error> {
         Ok(())
     }
@@ -73,11 +76,17 @@ impl<First: NodeVisitor, Second: NodeVisitor> NodeVisitor for VisitorPair<'_, Fi
             .map_err(VisitorPairError::Second)
     }
 
+    fn resource_error(&mut self, property: Property<'_>, error: Error) {
+        self.first.resource_error(property, error);
+        self.second.resource_error(property, error);
+    }
+
     fn end_node(&mut self, node: NodeResources<'_>) -> Result<(), Self::Error> {
         self.first
             .end_node(NodeResources {
                 id: node.id,
                 enabled: node.enabled,
+                resource_error: node.resource_error,
                 registers: node.registers,
                 interrupt_cells: node.interrupt_cells,
             })
@@ -193,7 +202,10 @@ fn walk<V: NodeVisitor>(
             }
             Token::Property { name_offset, value } => {
                 let name = blob.property_name(name_offset).map_err(WalkError::Fdt)?;
-                let id = resources.property(name, value).map_err(WalkError::Fdt)?;
+                let id = resources.property(name, value).map_err(|error| {
+                    visitor.resource_error(Property { name, value }, error);
+                    WalkError::Fdt(error)
+                })?;
                 visitor
                     .property(id, Property { name, value })
                     .map_err(WalkError::Visitor)?;

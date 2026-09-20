@@ -257,11 +257,13 @@ aarch64_run_native_user:
     ldp     q28, q29, [x30, #(USER_CONTEXT_SIMD_OFFSET + 448)]
     ldp     q30, q31, [x30, #(USER_CONTEXT_SIMD_OFFSET + 480)]
 
-    // ESR_EL2 and FAR_EL2 are overwritten by the next exception, so they are
-    // safe register-only shuttles for entry HCR and user x30. This leaves no
-    // host pointer dereference after switching the lower-EL world.
+    // Keep the complete HCR value in the host frame. ESR_EL2 is not a
+    // general-purpose scratch register: its reserved upper bits cannot
+    // preserve HCR.E2H (bit 34), even if an emulator happens to retain them.
+    // FAR_EL2 carries the full-width link register across the final switch.
+    // Neither the context nor the stack is accessed after changing HCR.
     ldr     x1, [x30, #USER_CONTEXT_ENTRY_HCR_OFFSET]
-    msr     esr_el2, x1
+    str     x1, [sp, #USER_RUN_FRAME_ENTRY_HCR_OFFSET]
     ldr     x1, [x30, #USER_CONTEXT_X30_OFFSET]
     msr     far_el2, x1
     ldp     x0, x1, [x30, #(USER_CONTEXT_X0_OFFSET + 0)]
@@ -279,7 +281,7 @@ aarch64_run_native_user:
     ldp     x24, x25, [x30, #(USER_CONTEXT_X0_OFFSET + 192)]
     ldp     x26, x27, [x30, #(USER_CONTEXT_X0_OFFSET + 208)]
     ldp     x28, x29, [x30, #(USER_CONTEXT_X0_OFFSET + 224)]
-    mrs     x30, esr_el2
+    ldr     x30, [sp, #USER_RUN_FRAME_ENTRY_HCR_OFFSET]
     msr     hcr_el2, x30
     isb
     mrs     x30, far_el2

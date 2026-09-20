@@ -293,10 +293,8 @@ fn drain_received(
     mut next: impl FnMut() -> Option<RuntimeReceivedByte>,
 ) -> usize {
     let mut count = 0;
-    while let Some(byte) = next() {
-        let Some(slot) = received.get_mut(count) else {
-            break;
-        };
+    for slot in received {
+        let Some(byte) = next() else { break };
         *slot = byte;
         count += 1;
     }

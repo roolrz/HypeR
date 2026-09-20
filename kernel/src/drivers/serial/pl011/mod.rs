@@ -154,9 +154,12 @@ pub struct Pl011 {
 }
 
 impl Pl011 {
+    /// Operational registers, excluding optional `PrimeCell` identification.
+    pub const REGISTER_WINDOW_SIZE: u64 = (reg::TDR + 4) as u64;
+
     /// Binds a PL011 to a permanent, validated register mapping.
     pub fn from_mapped_mmio(mapping: PermanentMmioMapping) -> Result<Self, MmioMappingError> {
-        let mapping = mapping.validate_window((reg::TDR + 4) as u64, align_of::<u32>())?;
+        let mapping = mapping.validate_window(Self::REGISTER_WINDOW_SIZE, align_of::<u32>())?;
         Ok(Self {
             base: mapping.virtual_start(),
             has_identification_registers: mapping.resource().size() >= 0x1000,

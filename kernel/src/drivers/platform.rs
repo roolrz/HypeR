@@ -155,6 +155,7 @@ impl DeviceProperty {
 /// Resources discovered for one unclaimed, enabled platform device.
 #[derive(Debug)]
 pub struct PlatformDevice {
+    resources_valid: bool,
     kernel_claimed: bool,
     id: NodeId,
     path: String,
@@ -313,7 +314,12 @@ impl<'a> DeviceScanner<'a> {
             }
         }
         if name == "interrupts" {
-            let cells = property.cells().map_err(|_| ScanError::MalformedProperty)?;
+            // Resource decoding is quarantined per node by the FDT collector.
+            // Keep valid long interrupt lists for drivers without making an
+            // unknown device's private property fatal to global discovery.
+            let Ok(cells) = property.cells() else {
+                return Ok(());
+            };
             builder
                 .interrupt_cells
                 .try_reserve_exact(property.bytes().len() / 4)
@@ -376,13 +382,18 @@ impl<'a> DeviceScanner<'a> {
         path.push('/');
         path.push_str(&builder.name);
         self.devices.push(PlatformDevice {
+            resources_valid: node.resource_error.is_none(),
             kernel_claimed: self.is_claimed(node.id),
             id: builder.id,
             path,
             name: builder.name,
             compatibles: builder.compatibles,
             registers,
-            interrupt_cells: builder.interrupt_cells,
+            interrupt_cells: if node.resource_error.is_none() {
+                builder.interrupt_cells
+            } else {
+                Vec::new()
+            },
             properties: builder.properties,
         });
         Ok(())
@@ -675,6 +686,9 @@ impl DriverManager {
         device: &PlatformDevice,
         services: &dyn DriverServices,
     ) -> Result<(), ProbeError> {
+        if !device.resources_valid {
+            return Err(ProbeError::Resource);
+        }
         // Reserve the publication slot before probe can acquire resources.
         // Once probe succeeds, insertion is infallible and the manager owns
         // the instance before any activation can expose callbacks or DMA.

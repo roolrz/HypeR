@@ -197,6 +197,9 @@ impl NodeVisitor for EssentialDeviceDiscovery {
         let index = self.depth.checked_sub(1).ok_or(Error::InvalidDepth)?;
         let candidate = self.nodes[index];
         self.depth = index;
+        if node.enabled && node.resource_error.is_some() && (candidate.plic || candidate.cpu) {
+            return Err(Error::InvalidProperty);
+        }
         if candidate.cpu {
             candidate
                 .isa
