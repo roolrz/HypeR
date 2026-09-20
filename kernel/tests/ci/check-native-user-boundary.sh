@@ -35,7 +35,8 @@ require() {
     fi
 }
 
-kernel_user_files="$machine $adapter $module $entry $owner"
+service_files=$(find src/kernel/entry -name 'services.rs' -o -path '*/services/*.rs')
+kernel_user_files="$machine $adapter $module $entry $owner $service_files"
 reject "$kernel_user_files" \
     'CONFIG_ARCH_|target_arch|crate::arch::|TranslationKind|HostStage1|NvheStage2Only|prepare_vhe|prepare_nvhe|levels_per_leaf' \
     'kernel native-user policy must not select an architecture translation mechanism'

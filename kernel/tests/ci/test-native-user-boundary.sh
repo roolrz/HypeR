@@ -22,6 +22,8 @@ copy_sources() {
     cp "$root/src/kernel/mm/user_space/kernel_adapter.rs" "$fixture/src/kernel/mm/user_space/kernel_adapter.rs"
     cp "$root/src/kernel/mm/user_space/mod.rs" "$fixture/src/kernel/mm/user_space/mod.rs"
     cp "$root/src/kernel/entry/user.rs" "$fixture/src/kernel/entry/user.rs"
+    cp "$root/src/kernel/entry/services.rs" "$fixture/src/kernel/entry/services.rs"
+    cp -R "$root/src/kernel/entry/services" "$fixture/src/kernel/entry/services"
     cp "$root/src/kernel/process/owner.rs" "$fixture/src/kernel/process/owner.rs"
 }
 
@@ -50,6 +52,8 @@ inject_and_reject 'kernel must reject VHE mechanism policy' \
     src/kernel/mm/user_space/machine.rs 'const BAD: &str = "HostStage1";'
 inject_and_reject 'kernel entry must reject backend token forgetting' \
     src/kernel/entry/user.rs 'fn bad<T>(completion: T) { core::mem::forget(completion); }'
+inject_and_reject 'service adapters must reject architecture selection' \
+    src/kernel/entry/services/vfs.rs '#[cfg(target_arch = "aarch64")] const BAD: usize = 1;'
 inject_and_reject 'process policy must reject discriminant casts' \
     src/kernel/process/owner.rs 'fn bad(machine: MachineAbi) -> u8 { machine as u8 }'
 inject_and_reject 'kernel must not recreate the identifier selection enum' \
