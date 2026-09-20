@@ -78,11 +78,14 @@ Release adoption requires an explicit digest update. An incompatible package for
 architecture/platform, missing artifact, or failed checksum aborts import.
 Download and verification finish before a new generation becomes visible;
 failed updates leave the previously selected generation intact.
-The common AArch64 appliance is published as a prerelease in GHCR. Both QEMU
-and Pi 5 entries in [io-vm.lock.json](../scripts/io-vm.lock.json) pin the same
-immutable reference and source revision. Its supported-platforms metadata
-records compiled driver capabilities; it does not certify Pi hardware operation.
-The QEMU build/test and publication runs are recorded alongside the digest.
+Separate QEMU and Pi 5 AArch64 appliances are published as prereleases in GHCR.
+Each entry in [io-vm.lock.json](../scripts/io-vm.lock.json) pins its platform's
+immutable reference, source revision and successful qualification/publication
+runs. Platform metadata identifies the build profile; it does not certify Pi
+hardware operation. Earlier Pi 5 testing reached appliance userspace and
+mounted/read its physical SD configuration volume using a development
+reassembly. The newly pinned Pi package still requires hardware requalification.
+Final boot images follow the [image release contract](image-distribution.md).
 The import command also accepts `IO_VM_REFERENCE` explicitly. The qualified QEMU
 fixture consumes the imported generation. The ordinary AArch64 `make run`
 profile also imports it to start the board-managed I/O VM under Native init.
@@ -259,8 +262,8 @@ Only the runtime payload is fetched. The OCI manifest also identifies the
 matching configuration and corresponding-source archive for redistribution.
 To qualify another generation, pass
 `IO_VM_REFERENCE=ghcr.io/OWNER/PACKAGE@sha256:DIGEST` explicitly.
-`make io-vm-fetch IO_VM_PLATFORM=rpi5` verifies the same common package against
-its Pi capability metadata. The lock explicitly records `hardware_qualified: false`.
+`make io-vm-fetch IO_VM_PLATFORM=rpi5` downloads and verifies the separately
+built Pi package against its platform metadata. The lock explicitly records `hardware_qualified: false`.
 
 Linux build instructions and the vhost-scsi reserved-page acceptance test live
 in [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm). They run in that

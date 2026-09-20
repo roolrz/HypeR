@@ -4,7 +4,7 @@
   "format": "hyper.board.v1",
   "board": "rpi5",
   "architecture": "aarch64",
-  "boot": "rpi5-tfa",
+  "boot": "rpi5-firmware",
   "disk": {
     "uuid": "4e3c0876-f362-4395-9fcd-4d17002d2725",
     "config-mib": 1024
@@ -12,8 +12,10 @@
   "files": {
     "hyper.img": "hyper",
     "bootstrap.cpio": "bootstrap",
-    "bl31.bin": "tfa",
     "bcm2712-rpi-5-b.dtb": "host-dtb",
+    "bcm2712d0-rpi-5-b.dtb": "host-dtb-d0",
+    "overlays/bcm2712d0.dtbo": "host-overlay-d0",
+    "overlays/overlay_map.dtb": "host-overlay-map",
     "vm/alpine.itb": "alpine"
   },
   "virtual-machines": [

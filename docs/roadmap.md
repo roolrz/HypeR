@@ -65,19 +65,20 @@ capabilities; new privileged power operations require explicit Native authority.
 1. **Bring up the HypeR host on Pi 5.**
    - [x] Implement host GICv2, adapt the dedicated PL011 debug UART, and remove
      QEMU-specific early RAM/MMIO mapping assumptions.
-   - [x] Add QEMU GICv2 UP/SMP acceptance and document a TF-A/PSCI boot setup.
-   - [ ] Validate physical boot, four online CPUs, timer-driven scheduling,
-     interrupt-driven serial input and idle wakeup.
+   - [x] Add QEMU GICv2 UP/SMP acceptance and document the official EEPROM/PSCI boot setup.
+   - [x] Validate physical boot, four online CPUs, timer-driven scheduling
+     and interrupt-driven debug-UART input on Pi 5 D0.
+   - [ ] Qualify prolonged idle/wakeup and load stress on hardware.
 2. **Boot the Linux I/O VM on Pi 5.**
    - [x] Implement the GICv2 guest interrupt backend and its QEMU lifecycle tests.
    - [x] Implement Arm guest SMP (1..8 CPUs) and runtime-mediated PSCI CPU
      on/off, poweroff and reset; add GICv2/GICv3 QEMU acceptance.
    - [ ] Qualify the minimal upstream LTS configuration for Pi 5 in HypeR-io-vm.
-   - [ ] Complete the Linux-side service and initramfs, validate the appliance,
-     and publish its versioned GHCR package with corresponding source materials.
-   - [ ] Pin the first qualified package digest in HypeR and integrate it with
-     Native deployment; package download alone is not VM launch integration.
-   - [ ] Provide board/guest device trees, RAM reservations and VM configuration
+   - [x] Publish the common appliance with corresponding source materials.
+   - [x] Release the separate Pi 5 build profile after Linux CI qualification.
+   - [x] Pin the common package and integrate Native deployment.
+   - [ ] Adopt the separate Pi 5 package by immutable digest.
+   - [x] Provide board/guest device trees, RAM reservations and VM configuration
      through the existing VMM and vm-runtime path.
    - [ ] Validate guest SMP, console, timer/IPI wakeups, CPU off/on, reboot
      and poweroff on hardware, including cross-core cache/TLB retirement.
@@ -90,8 +91,9 @@ capabilities; new privileged power operations require explicit Native authority.
 4. **Expose I/O to Native clients.**
    - [x] Validate the AArch64 QEMU cross-VM virtio-scsi/vhost-scsi baseline,
      including a real disk, DMA translations, reset/rebind and VM retirement.
-   - [ ] Integrate that storage path with ordinary Native service deployment;
-     the current two-VM acceptance fixture is not a Native VFS block backend.
+   - [x] Integrate storage with ordinary Native service deployment and mount
+     the Pi 5 SD-backed configuration volume at `/data`; directory reads pass.
+   - [ ] Qualify SD writes and persistence across reboot.
    - [ ] Define the network frontend/backend contract separately; the storage
      choice does not by itself complete the network design.
    - [ ] Implement the Linux backend and HypeR Native frontend services/adapters.
