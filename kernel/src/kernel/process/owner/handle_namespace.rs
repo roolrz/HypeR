@@ -70,7 +70,7 @@ impl PreparedHandleConsumption {
         let mut retired_charge_storage = None;
         let values = process.inner.state.with(|state| {
             for value in source.moved_values.iter().copied() {
-                if !handle_charge_is_live(state, value) {
+                if !state.handle_accounting.is_live(value) {
                     process_invariant_violation();
                 }
             }
@@ -95,7 +95,7 @@ impl PreparedHandleConsumption {
             retired_transfer_storage = Some(retired);
 
             for value in source.moved_values.drain(..) {
-                let (charge, retired_record) = release_handle_charge(state, value);
+                let (charge, retired_record) = state.handle_accounting.release(value);
                 source.released_charges.push(charge);
                 if let Some(record) = retired_record {
                     source.retired_records.push(record);
@@ -110,22 +110,7 @@ impl PreparedHandleConsumption {
                 Some(record) => record,
                 None => process_invariant_violation(),
             };
-            record.state.with(|record_state| {
-                if record_state.entries.len() != charges.len() {
-                    process_invariant_violation();
-                }
-                for entry in record_state.entries.iter_mut().rev() {
-                    let charge = match charges.pop() {
-                        Some(charge) => charge,
-                        None => process_invariant_violation(),
-                    };
-                    entry.charge = Some(charge.commit());
-                }
-                if !charges.is_empty() {
-                    process_invariant_violation();
-                }
-            });
-            install_handle_charge_record(state, record);
+            state.handle_accounting.install(record, &mut charges);
             retired_charge_storage = Some(charges);
             values
         });
@@ -218,12 +203,12 @@ impl PreparedProcessHandleTransfer {
         let result = self.process.inner.state.with(|state| {
             require_handle_phase(state.lifecycle.phase())?;
             for value in self.moved_values.iter().copied() {
-                if !handle_charge_is_live(state, value) {
+                if !state.handle_accounting.is_live(value) {
                     process_invariant_violation();
                 }
             }
             for value in self.moved_values.drain(..) {
-                let (charge, retired_record) = release_handle_charge(state, value);
+                let (charge, retired_record) = state.handle_accounting.release(value);
                 self.released_charges.push(charge);
                 if let Some(record) = retired_record {
                     self.retired_records.push(record);
@@ -262,12 +247,12 @@ impl PreparedProcessHandleTransfer {
     fn commit_pre_admitted(mut self) -> InTransitCapabilities {
         let (handles, retired_transfer_storage) = self.process.inner.state.with(|state| {
             for value in self.moved_values.iter().copied() {
-                if !handle_charge_is_live(state, value) {
+                if !state.handle_accounting.is_live(value) {
                     process_invariant_violation();
                 }
             }
             for value in self.moved_values.drain(..) {
-                let (charge, retired_record) = release_handle_charge(state, value);
+                let (charge, retired_record) = state.handle_accounting.release(value);
                 self.released_charges.push(charge);
                 if let Some(record) = retired_record {
                     self.retired_records.push(record);
@@ -479,7 +464,7 @@ fn validate_direct_accounting(
         process_invariant_violation();
     }
     for value in source.moved_values.iter().copied() {
-        if !handle_charge_is_live(source_state, value) {
+        if !source_state.handle_accounting.is_live(value) {
             process_invariant_violation();
         }
     }
@@ -539,7 +524,7 @@ fn commit_source_accounting(
         None => process_invariant_violation(),
     };
     for value in source.moved_values.drain(..) {
-        let (charge, retired_record) = release_handle_charge(source_state, value);
+        let (charge, retired_record) = source_state.handle_accounting.release(value);
         source.released_charges.push(charge);
         if let Some(record) = retired_record {
             source.retired_records.push(record);
@@ -564,19 +549,9 @@ fn commit_destination_accounting(
         Some(record) => record,
         None => process_invariant_violation(),
     };
-    record.state.with(|record_state| {
-        for entry in record_state.entries.iter_mut().rev() {
-            let charge = match charges.pop() {
-                Some(charge) => charge,
-                None => process_invariant_violation(),
-            };
-            entry.charge = Some(charge.commit());
-        }
-        if !charges.is_empty() {
-            process_invariant_violation();
-        }
-    });
-    install_handle_charge_record(destination_state, record);
+    destination_state
+        .handle_accounting
+        .install(record, &mut charges);
     drop(charges);
 }
 
