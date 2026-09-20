@@ -126,7 +126,7 @@ if its terminal connection fails.
 
 Terminal stdin carries both `stdio.input` and a same-object
 `stdio.terminal-input` capability. The runtime verifies their identity. The
-console-input service splits command/EOF records and folds CRLF to CR across
+console-input service splits command/EOF records and normalizes CR and CRLF to LF across
 hardware reads; std terminal input translates CR to LF and consumes standalone
 Ctrl-D as EOF without closing the shared endpoint. Native channel readers such
 as `vmm console` still receive CR and Ctrl-D. This interactive path is not a

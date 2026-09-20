@@ -2,12 +2,12 @@
   "SPDX-FileCopyrightText": "2026 roolrz",
   "SPDX-License-Identifier": "Apache-2.0",
   "format": "hyper.board.v1",
-  "board": "rpi5-native",
+  "board": "rpi5-sd",
   "architecture": "aarch64",
   "boot": "rpi5-firmware",
   "disk": {
-    "uuid": "90bbd4bb-efff-4640-89dc-f0d58a6d3467",
-    "config-mib": 64
+    "uuid": "1c819098-62c0-4ee9-96e3-22ae2cc81556",
+    "config-mib": 1024
   },
   "files": {
     "hyper.img": "hyper",
@@ -16,9 +16,18 @@
     "bcm2712d0-rpi-5-b.dtb": "host-dtb-d0",
     "overlays/bcm2712d0.dtbo": "host-overlay-d0",
     "overlays/overlay_map.dtb": "host-overlay-map",
-    "boot-notices.txt": "boot-notices"
+    "boot-notices.txt": "boot-notices",
+    "vm/alpine.itb": "alpine"
   },
-  "virtual-machines": [],
+  "virtual-machines": [
+    {
+      "name": "alpine",
+      "image": "vm/alpine.itb",
+      "autostart": false,
+      "disk-mib": 2048,
+      "disk-image": "alpine-rootfs"
+    }
+  ],
   "io-device": {
     "profile": "bcm2712-sdhci",
     "path": "/soc@107c000000/mmc@fff000"

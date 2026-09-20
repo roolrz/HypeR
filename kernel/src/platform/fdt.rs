@@ -44,6 +44,8 @@ impl NodeId {
 pub struct NodeResources<'a> {
     pub id: NodeId,
     pub enabled: bool,
+    /// Invalid device resources are quarantined, not published as capabilities.
+    pub resource_error: Option<Error>,
     pub registers: &'a [PhysicalRange],
     pub interrupt_cells: &'a [u32],
 }

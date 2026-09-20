@@ -15,6 +15,8 @@ copy_sources() {
         "$fixture/src/kernel/mm/user_space" \
         "$fixture/src/kernel/entry" \
         "$fixture/src/kernel/process"
+    mkdir -p "$fixture/src/arch/aarch64"
+    cp "$root/src/arch/aarch64/context.S" "$fixture/src/arch/aarch64/context.S"
     cp "$root/src/hal/selected/user.rs" "$fixture/src/hal/selected/user.rs"
     cp "$root/src/kernel/mm/user_space/machine.rs" "$fixture/src/kernel/mm/user_space/machine.rs"
     cp "$root/src/kernel/mm/user_space/kernel_adapter.rs" "$fixture/src/kernel/mm/user_space/kernel_adapter.rs"
@@ -83,3 +85,6 @@ if check >/dev/null 2>&1; then
     echo 'terminal completion handling must retain rather than drop its owner' >&2
     exit 1
 fi
+
+inject_and_reject 'Native entry must not truncate HCR through ESR_EL2' \
+    src/arch/aarch64/context.S '    msr esr_el2, x1'

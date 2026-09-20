@@ -57,7 +57,7 @@ fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
         let console_channel = receive_console(&capabilities)?;
         writeln!(
             output,
-            "Connected to {name}. Press Ctrl-] for the control menu.\r"
+            "Connected to {name}. Press Ctrl-] for the control menu."
         )?;
         return console_session(input, &mut output, &console_channel);
     }
@@ -171,8 +171,8 @@ fn console_session(
     let mut bytes = [0u8; hyper_os::channel::MAX_MESSAGE_BYTES];
     let mut menu = false;
     loop {
-        // stdout is line-buffered. Publish prompts, key echoes and a trailing
-        // carriage return before waiting for more input from either peer.
+        // stdout is line-buffered. Publish prompts and partial guest output
+        // before waiting for more input from either peer.
         output.flush()?;
         let observation = match wait_many(&waits, hyper_os::DEADLINE_INFINITE) {
             Ok(observation) => observation,
@@ -188,7 +188,7 @@ fn console_session(
                 output.write_all(&bytes[..count])?;
                 continue;
             }
-            output.write_all(b"\r\n[vmm] virtual machine disconnected\r\n")?;
+            output.write_all(b"\n[vmm] virtual machine disconnected\n")?;
             return Ok(());
         }
         if observation.index != 0
@@ -207,11 +207,11 @@ fn console_session(
                 menu = false;
                 match byte {
                     b'd' | b'q' | ESCAPE => {
-                        output.write_all(b"\r\n[vmm] detached\r\n")?;
+                        output.write_all(b"\n[vmm] detached\n")?;
                         return Ok(());
                     }
                     _ => {
-                        output.write_all(b"\r\n[vmm] resumed\r\n")?;
+                        output.write_all(b"\n[vmm] resumed\n")?;
                     }
                 }
                 continue;
@@ -224,7 +224,7 @@ fn console_session(
                     guest_input.clear();
                 }
                 menu = true;
-                output.write_all(b"\r\n[vmm] d/q: detach, any other key: resume\r\n")?;
+                output.write_all(b"\n[vmm] d/q: detach, any other key: resume\n")?;
                 continue;
             }
             guest_input.push(byte);
@@ -242,7 +242,7 @@ fn console_error(
     operation: &[u8],
     error: hyper_os::Error,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = output.write_all(b"\r\n[vmm] console ");
+    let _ = output.write_all(b"\n[vmm] console ");
     let _ = output.write_all(operation);
     let _ = output.write_all(b" failed: ");
     let reason: &[u8] = match error {
@@ -257,7 +257,7 @@ fn console_error(
         _ => b"invalid response",
     };
     let _ = output.write_all(reason);
-    let _ = output.write_all(b"\r\n");
+    let _ = output.write_all(b"\n");
     Err(error.into())
 }
 

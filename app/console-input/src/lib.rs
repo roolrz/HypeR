@@ -3,7 +3,7 @@
 
 //! Preserve terminal command boundaries in the existing byte-message transport.
 
-/// The interactive service folds CRLF even when the UART divides it across reads.
+/// The interactive service normalizes CR and CRLF to LF across UART reads.
 /// The kernel console itself remains byte-transparent.
 #[derive(Default)]
 pub struct Newlines {
@@ -17,7 +17,7 @@ impl Newlines {
             let omit = self.previous_cr && byte == b'\n';
             self.previous_cr = byte == b'\r';
             if !omit {
-                bytes[output] = byte;
+                bytes[output] = if byte == b'\r' { b'\n' } else { byte };
                 output += 1;
             }
         }
@@ -69,7 +69,7 @@ mod tests {
                 let size = state.normalize(&mut bytes);
                 output.extend_from_slice(&bytes[..size]);
             }
-            assert_eq!(output, b"cat\rabc\n\x04echo\rnext\r");
+            assert_eq!(output, b"cat\nabc\n\x04echo\nnext\n");
         }
     }
 

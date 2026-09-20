@@ -268,6 +268,16 @@ impl NodeVisitor for EssentialDeviceDiscovery {
         let index = self.depth.checked_sub(1).ok_or(Error::InvalidDepth)?;
         let candidate = self.nodes[index];
         self.depth = index;
+        if node.enabled
+            && node.resource_error.is_some()
+            && (candidate.gic_v2
+                || candidate.gic_v3
+                || candidate.timer
+                || candidate.psci_legacy
+                || candidate.psci_version.is_some())
+        {
+            return Err(Error::InvalidProperty);
+        }
         self.discover_node(node, candidate)
     }
 }

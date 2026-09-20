@@ -24,9 +24,6 @@ pub trait Console: Sync {
 
     fn write_bytes(&self, bytes: &[u8]) {
         for &byte in bytes {
-            if byte == b'\n' {
-                self.write_byte(b'\r');
-            }
             self.write_byte(byte);
         }
     }

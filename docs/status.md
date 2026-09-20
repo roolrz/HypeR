@@ -16,6 +16,14 @@ acceptance boundaries. Planned work is tracked in the [roadmap](roadmap.md).
 | RISC-V 64-bit | Supported | QEMU `virt`; kernel self-tests; UP/SMP Native applications and userspace-managed Linux guests, interactive console and VM retirement |
 | x86-64 | Experimental | QEMU `q35`-targeted build and image validation; no public runtime contract yet |
 
+On Pi 5 D0, hardware bring-up has confirmed the official EEPROM boot path,
+four host CPUs, interrupt-driven debug UART, Linux I/O VM userspace and FAT
+directory reads through the SDIO1/dm-linear/vhost-scsi path. This does not yet
+qualify write persistence, guest SMP on hardware, physical DMA retirement or
+networking. Alpine is packaged for the next hardware validation step.
+See the [Pi 5 guide](../kernel/docs/rpi5.md) and
+[image release contract](image-distribution.md).
+
 The current foundation includes:
 
 - position-independent boot images and Linux-compatible architecture entry;

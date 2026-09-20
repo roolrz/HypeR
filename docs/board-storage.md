@@ -152,7 +152,7 @@ preallocated RAM or a guarantee that all eight guests fit the host.
 For Pi 5, provide board-specific `tfa` and `host-dtb` artifacts. Both board
 profiles use the same pinned AArch64 appliance; its Pi driver configuration is
 build-verified, but physical Pi qualification remains outstanding. The FAT boot
-volume contains the firmware configuration, TF-A, kernel and bootstrap archive.
+volume contains the firmware configuration, official DTBs/overlays, kernel and bootstrap archive.
 The userspace `bcm2712-sdhci` profile validates the upstream C0/D0 SDIO1
 resource graph: host/config registers, fixed clock, main/AON pinctrl and AON
 GPIO supplies/card detection using the kernel's immutable firmware catalogue.

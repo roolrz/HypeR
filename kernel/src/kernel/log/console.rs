@@ -202,6 +202,12 @@ pub(super) enum RuntimeByteWrite {
 
 /// Attempts one runtime byte while excluding emergency ownership transition.
 pub(super) fn try_write_runtime_byte(device: ConsoleDevice, byte: u8) -> RuntimeByteWrite {
+    // The gate records a CPU owner, so a byte transaction must not be
+    // preempted or migrated between identity capture and permit release.
+    // Release the CPU-owned permit before another thread can run on this CPU.
+    // SAFETY: This scope contains only atomic operations and nonblocking MMIO;
+    // the guard is dropped locally after the byte permit, with no scheduling.
+    let _mask = unsafe { hyper::sync::InterruptMaskGuard::<crate::hal::irq::LocalMask>::acquire() };
     let Some(cpu) = crate::kernel::cpu::current_index() else {
         return RuntimeByteWrite::WouldBlock;
     };
@@ -218,12 +224,9 @@ pub(super) fn try_write_runtime_byte(device: ConsoleDevice, byte: u8) -> Runtime
     }
 }
 
-/// Writes until the fixed attempt budget is consumed, preserving CRLF policy.
+/// Writes until the fixed attempt budget is consumed, without newline translation.
 fn emergency_write_bytes(console: &ConsoleDevice, bytes: &[u8], attempts: &mut usize) {
     for &byte in bytes {
-        if byte == b'\n' && !emergency_write_byte(console, b'\r', attempts) {
-            return;
-        }
         if !emergency_write_byte(console, byte, attempts) {
             return;
         }

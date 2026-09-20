@@ -490,7 +490,9 @@ fn early_console_mmio_resource(
 
 fn early_console_register_window(info: ConsoleInfo) -> Option<u64> {
     match info.kind {
-        hyper::platform::ConsoleKind::Pl011 => Some(0x1000),
+        hyper::platform::ConsoleKind::Pl011 => {
+            Some(hyper::drivers::serial::Pl011::REGISTER_WINDOW_SIZE)
+        }
         hyper::platform::ConsoleKind::Ns16550 => match info.access {
             hyper::platform::ConsoleRegisterAccess::Mmio8 { register_shift } => 1u64
                 .checked_shl(u32::from(register_shift))

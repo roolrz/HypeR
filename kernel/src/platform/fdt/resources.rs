@@ -87,6 +87,8 @@ struct NodeState {
     no_map: bool,
     children_are_reserved: bool,
     disabled: bool,
+    resource_error: Option<Error>,
+    ranges_error: Option<Error>,
     registers: RegisterList,
     raw_interrupts: [u32; MAX_INTERRUPT_CELLS],
     raw_interrupt_cells: usize,
@@ -112,6 +114,8 @@ impl NodeState {
         no_map: false,
         children_are_reserved: false,
         disabled: false,
+        resource_error: None,
+        ranges_error: None,
         registers: RegisterList::new(),
         raw_interrupts: [0; MAX_INTERRUPT_CELLS],
         raw_interrupt_cells: 0,
@@ -139,6 +143,7 @@ pub(super) struct ResourceCollector {
 pub(super) struct CompletedNode {
     id: NodeId,
     enabled: bool,
+    resource_error: Option<Error>,
     registers: [PhysicalRange; MAX_NODE_REGIONS],
     register_count: usize,
     interrupt_cells: [u32; MAX_INTERRUPT_CELLS],
@@ -150,6 +155,7 @@ impl CompletedNode {
         NodeResources {
             id: self.id,
             enabled: self.enabled,
+            resource_error: self.resource_error,
             registers: &self.registers[..self.register_count],
             interrupt_cells: &self.interrupt_cells[..self.interrupt_cell_count],
         }
@@ -187,7 +193,15 @@ impl ResourceCollector {
             .checked_sub(1)
             .and_then(|index| self.nodes.get_mut(index))
             .ok_or(Error::BadStructure)?;
-        apply_property(node, name, value)?;
+        if let Err(error) = apply_property(node, name, value) {
+            if !matches!(name, "reg" | "interrupts" | "ranges") {
+                return Err(error);
+            }
+            node.resource_error.get_or_insert(error);
+            if name == "ranges" {
+                node.ranges_error = Some(error);
+            }
+        }
         Ok(node.id)
     }
 
@@ -223,7 +237,7 @@ fn begin_node(
         return Err(Error::TooDeep);
     }
     if *depth != 0 {
-        decode_ranges(&mut nodes[*depth - 1])?;
+        prepare_ranges(&mut nodes[*depth - 1]);
     }
     let node_id = NodeId(*next_node_id);
     *next_node_id = next_node_id.checked_add(1).ok_or(Error::TooLarge)?;
@@ -262,15 +276,33 @@ fn end_node(
         return Err(Error::BadStructure);
     }
     *depth -= 1;
-    decode_ranges(&mut nodes[*depth])?;
+    prepare_ranges(&mut nodes[*depth]);
     finish_node(nodes[*depth], discovered, &nodes[..*depth])
 }
 
 fn finish_node(
-    node: NodeState,
+    mut node: NodeState,
     discovered: &mut DiscoveryState,
     ancestors: &[NodeState],
 ) -> Result<CompletedNode, Error> {
+    // A failed bus translation must not mint capabilities for descendants.
+    if let Some(error) = ancestors.iter().find_map(|bus| bus.ranges_error) {
+        node.resource_error.get_or_insert(error);
+    }
+    if let Some(error) = node.resource_error {
+        if node.is_memory || node.is_reserved_region || node.is_cpu || node.children_are_reserved {
+            return Err(error);
+        }
+        return Ok(CompletedNode {
+            id: node.id,
+            enabled: !node.disabled,
+            resource_error: Some(error),
+            registers: [PhysicalRange::EMPTY; MAX_NODE_REGIONS],
+            register_count: 0,
+            interrupt_cells: [0; MAX_INTERRUPT_CELLS],
+            interrupt_cell_count: 0,
+        });
+    }
     let (translated_registers, translated_count) = translated_registers(&node, ancestors)?;
     if !node.disabled {
         discover_node_resources(&node, discovered, ancestors)?;
@@ -279,6 +311,7 @@ fn finish_node(
     Ok(CompletedNode {
         id: node.id,
         enabled: !node.disabled,
+        resource_error: None,
         registers: translated_registers,
         register_count: translated_count,
         interrupt_cells: node.raw_interrupts,
@@ -445,6 +478,19 @@ fn parse_ranges(node: &mut NodeState, value: &[u8]) -> Result<(), Error> {
     }
     node.raw_range_cells = cell_count;
     Ok(())
+}
+
+fn prepare_ranges(node: &mut NodeState) {
+    if node.ranges_error.is_none()
+        && let Err(error) = decode_ranges(node)
+    {
+        node.ranges_error = Some(error);
+        node.resource_error.get_or_insert(error);
+    }
+    if node.ranges_error.is_some() {
+        node.ranges_supported = false;
+        node.range_count = 0;
+    }
 }
 
 fn decode_ranges(node: &mut NodeState) -> Result<(), Error> {

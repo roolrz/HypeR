@@ -145,4 +145,4 @@ make image ARCH=aarch64 CONFIG_FILE=kernel/configs/qemu_aarch64_defconfig
 
 See [Incremental builds](incremental-builds.md) for cache behavior and recovery.
 
-For physical Pi 5 bring-up, see the [TF-A boot and debug UART setup](../kernel/docs/rpi5.md).
+For physical Pi 5 bring-up, see the [official firmware boot and debug UART setup](../kernel/docs/rpi5.md).

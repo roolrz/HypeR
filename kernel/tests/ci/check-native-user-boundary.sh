@@ -88,3 +88,7 @@ if [ -z "$forget_line" ] || [ -z "$stop_line" ] || [ "$forget_line" -ge "$stop_l
     echo 'armed completion ownership must be retained before entering fail-stop' >&2
     exit 1
 fi
+
+# Syndrome registers have reserved bits and cannot retain a full-width HCR.
+reject src/arch/aarch64/context.S '^[[:space:]]*msr[[:space:]]+esr_el2,' \
+    'AArch64 entry must not use ESR_EL2 as a full-width scratch register'
