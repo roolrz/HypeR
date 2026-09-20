@@ -330,7 +330,27 @@ state. Run-queue links, per-CPU scheduler state, page-table entries, allocator
 blocks, architecture register contexts, wait nodes, and device bookkeeping do
 not acquire KOIDs merely because they participate in an object's implementation.
 
+## Internal transaction owners
+
+Process handle charge records and their generation-indexed sidecar are owned by
+`process::owner::handle_accounting`. Operations run under the existing Process
+state lock; Process still decides admission and retirement, and transactions
+release detached charges and backing after unlocking. The component adds no
+lock or second publication point.
+
+Each CPU scheduler owns a `SwitchHandoff` for its outgoing context and switch-tail
+generation. The CPU authority selects the correct owner; generations are local
+to that CPU. Completing a stale generation cannot clear a newer outgoing
+context. Host tests execute this production mechanism, while runtime scheduler
+tests cover queue, migration and architecture integration.
+
 ## Native userspace boundary
+
+`entry::user` owns execution sessions, pinning and machine completion.
+`entry::services` adapts Native operations using borrowed Process and UserThread
+authority; it cannot inspect the private UserSession or retain its return token.
+Filesystem adapters have their own child module. This does not change immediate
+versus deferred syscall classification or the ABI service traits.
 
 Native user entry follows the same policy-above-mechanism rule without reusing
 the vCPU world switch. Complete trap frames, translation registers, return

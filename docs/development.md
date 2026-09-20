@@ -228,3 +228,53 @@ std build flags, so changes to the installed std port invalidate cached
 retains the same identity regardless of file timestamps; app-only edits do not
 invalidate std. Native libraries and linker tools retain their separate link
 fingerprint.
+
+New project-authored files must carry an `SPDX-FileCopyrightText` declaration
+with the contributor or copyright holder and a year (or year range), together
+with `SPDX-License-Identifier: Apache-2.0`. Preserve existing and upstream
+attribution; the header check does not require the repository owner's name.
+
+### Dependency maintenance
+
+Dependabot proposes immutable Action updates and Cargo updates for the kernel,
+its host tests/kallsyms tool, Rust SDK and FIT tool. Dependency-free tool roots
+need no registry updates. Application and SDK smoke workspaces intentionally
+consume unpublished, installed SDK crates: their updates remain manual using
+the normal SDK preparation and consumer checks, rather than committing a source
+patch overlay into their production manifests. The repository owner reviews
+these updates and new external inputs.
+
+`sh scripts/audit-dependencies.sh` runs cargo-audit 0.22.2 against every tracked
+Cargo lockfile, including those consumers. CI runs it on lockfile changes and
+weekly so newly published advisories are noticed without a code change. It checks
+known RustSec advisories, not reachability or non-Rust appliance packages. Any
+future advisory exception must name its ID, applicability rationale, reviewer
+and review date in `.cargo/audit.toml`; no blanket advisory suppression is used.
+
+The SPDX source check preserves project and vendored notices. New dependency
+licenses still require owner review of the actual license text and distribution
+obligations; passing an advisory scan is not license approval. External Linux
+appliance and firmware distribution retain their separate provenance and
+corresponding-source requirements.
+
+The root Makefile retains shared defaults and command orchestration; component
+recipes live in `mk/sdk-app.mk`, `mk/native-tests.mk` and `mk/boards.mk`. The
+console, application and runtime-crash QEMU tests share subprocess ownership,
+serial buffering and deadlines through `tests/qemu/session.py`; their scenario
+assertions stay in each test. Editor check/build-script commands apply SDK source patches only to Native
+app consumers, not kernel or host-tool commands. The editor metadata overlay
+(`cargo.configPath`) still applies to all linked projects and may introduce
+unused-patch lockfile records; this change does not claim to isolate metadata
+resolution. Keep those incidental records out of unrelated commits.
+
+Host-test workspaces with ignored lockfiles are compiled and tested separately;
+the tracked-lock audit does not assert their exact independently resolved graph.
+
+For focused maintenance feedback, `make app-test APP_TEST_PACKAGE=hyper-vm-manager`
+executes the same fleet decisions used by the service, with explicit event time
+and recorded resource effects. `make app-test APP_TEST_PACKAGE=hyper-vm-support`
+checks the shared image/device/protocol mechanisms. `make sdk-test` includes
+C/Rust transport capture tests; `sh sdk/toolchain/scripts/check-loader-arch.sh`
+executes the production loader's parser, relocator and rollback paths against
+host fixtures (UBSan on all hosts, ASan additionally on Linux). These checks
+complement, rather than replace, Native dynamic-linking and cross-VM acceptance.
