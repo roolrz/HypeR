@@ -97,6 +97,16 @@ cmake --build target/sdk-lib/unit
 ctest --test-dir target/sdk-lib/unit --output-on-failure
 ```
 
+`syscall-veneer` and `syscall-rust-transport` intercept the production C and
+raw Rust SDK calls at `hyper_native_call6`. Their independent slot expectations
+cover argument arities, reserved zeros, high-bit scalar transport, pointers,
+implicit record sizes, and all three result fields on success and failure.
+The Rust test needs the repository's host Rust compiler and Python, but no SDK
+sysroot. It compiles the real crates and links the C veneers rather than copying
+FFI declarations into a mock. These tests cover transport shapes; they do not
+prove architecture assembly, kernel validation, or capability ownership policy.
+Target integration tests retain those responsibilities.
+
 `test-app` is not part of the Lib unit-test suite. The top-level SDK check
 compiles it against the assembled Native SDK to validate the public headers,
 runtime, and compiler-driver integration.
