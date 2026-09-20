@@ -10,6 +10,7 @@ mod registry;
 #[cfg(feature = "kernel-stack-audit")]
 mod stack_audit;
 mod state;
+mod switch_handoff;
 
 #[cfg(not(test))]
 use cpu_time::account_cpu_time;

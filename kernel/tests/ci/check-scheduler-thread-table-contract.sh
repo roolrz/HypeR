@@ -11,6 +11,7 @@ cd "$root"
 registry=src/kernel/task/scheduler/registry.rs
 queue=src/kernel/task/scheduler/queue.rs
 state=src/kernel/task/scheduler/state.rs
+handoff=src/kernel/task/scheduler/switch_handoff.rs
 scheduler=src/kernel/task/scheduler/mod.rs
 thread=src/kernel/task/thread.rs
 
@@ -82,8 +83,10 @@ require 'pub const fn real_time_len[\s\S]*pub const fn fair_len' "$queue" \
     'scheduler statistics need exact per-class ready counts'
 require 'thread\.schedule_owner_cpu\(\) != Some\(cpu\)[\s\S]*ThreadState::Ready =>[\s\S]*stats\.ready \+= 1[\s\S]*topology_real_time_ready[\s\S]*topology_fair_ready' \
     "$state" 'aggregate statistics must include every CPU-owned ready entity'
-require 'struct SwitchingContext' "$state" \
+require 'struct SwitchingContext' "$handoff" \
     'switch-tail context ownership must remain explicit beside schedule residence'
+require 'handoff: SwitchHandoff<ThreadId>' "$state" \
+    'CPU state must own its outgoing context handoff independently of queue residence'
 reject 'stack_statistics: thread\.kernel_stack_statistics\(\)' "$state" \
     'generic Thread observation must not scan possibly live stack memory'
 require 'pub fn stack_statistics[\s\S]*ThreadState::Blocked[\s\S]*switching_from[\s\S]*context_is_stopped\(id\)\?[\s\S]*self\.with_thread\(id, Thread::kernel_stack_statistics\)' \

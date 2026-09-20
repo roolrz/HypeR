@@ -14,6 +14,7 @@ use super::registry::{
     CpuScheduleAuthorityToken, CpuThreadTableAuthority, ThreadRegistry, ThreadReservation,
     ThreadTableCapability,
 };
+use super::switch_handoff::{SwitchDisposition, SwitchHandoff, SwitchingContext};
 use super::{
     CrashTaskSnapshot, CurrentUser, CurrentVcpu, Error, MigrationStatus, SecondaryStack, Statistics,
 };
@@ -351,7 +352,7 @@ pub(super) fn account_tick(cpu: CpuIndex, elapsed: u64) -> Result<bool, Error> {
 pub(super) fn prepare_local_yield(cpu: CpuIndex) -> Result<LocalScheduleAttempt, Error> {
     CPU_SCHEDULERS[cpu].with(|slot| {
         let local = slot.as_mut().ok_or(Error::CpuNotRegistered)?;
-        if local.switching_from.is_some() {
+        if local.handoff.current().is_some() {
             return Err(Error::ThreadTransitionInProgress);
         }
         let current = local.current;
@@ -419,7 +420,7 @@ pub(super) fn prepare_local_yield(cpu: CpuIndex) -> Result<LocalScheduleAttempt,
 pub(super) fn prepare_local_preemption(cpu: CpuIndex) -> Result<LocalScheduleAttempt, Error> {
     CPU_SCHEDULERS[cpu].with(|slot| {
         let local = slot.as_mut().ok_or(Error::CpuNotRegistered)?;
-        if local.switching_from.is_some() {
+        if local.handoff.current().is_some() {
             return Err(Error::ThreadTransitionInProgress);
         }
         if !super::super::preempt::pending(cpu)? {
@@ -523,10 +524,10 @@ pub(super) fn complete_local_switch_tail(
 ) -> Result<LocalTailCompletion, Error> {
     CPU_SCHEDULERS[cpu].with(|slot| {
         let local = slot.as_mut().ok_or(Error::CpuNotRegistered)?;
-        let switching = local.switching_from.ok_or(Error::PreemptionInvariant)?;
-        if switching.generation != ticket {
-            return Err(Error::PreemptionInvariant);
-        }
+        let switching = local
+            .handoff
+            .for_ticket(ticket)
+            .ok_or(Error::PreemptionInvariant)?;
         if switching.disposition != SwitchDisposition::Local {
             return Ok(LocalTailCompletion::NeedsCoordinator);
         }
@@ -544,10 +545,10 @@ pub(super) fn complete_local_switch_tail(
         {
             return Ok(LocalTailCompletion::NeedsCoordinator);
         }
-        if local.switching_from != Some(switching) {
-            return Err(Error::PreemptionInvariant);
-        }
-        local.switching_from = None;
+        local
+            .handoff
+            .complete(ticket)
+            .ok_or(Error::PreemptionInvariant)?;
         Ok(LocalTailCompletion::Complete)
     })
 }
@@ -647,19 +648,6 @@ pub(super) fn local_current_user(cpu: CpuIndex) -> Result<CurrentUser, Error> {
                 })
             })?
     })
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct SwitchingContext {
-    thread: ThreadId,
-    generation: u64,
-    disposition: SwitchDisposition,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SwitchDisposition {
-    Local,
-    Coordinated,
 }
 
 pub(super) enum LocalScheduleAttempt {
@@ -788,9 +776,7 @@ struct CpuScheduler {
     current: ThreadId,
     idle: Option<ThreadId>,
     run_queue: CpuRunQueue,
-    switching_from: Option<SwitchingContext>,
-    next_switch_generation: u64,
-    context_switches: u64,
+    handoff: SwitchHandoff<ThreadId>,
 }
 
 #[derive(Clone, Copy)]
@@ -813,9 +799,7 @@ impl CpuScheduler {
             current,
             idle: None,
             run_queue: CpuRunQueue::new(),
-            switching_from: None,
-            next_switch_generation: 1,
-            context_switches: 0,
+            handoff: SwitchHandoff::new(),
         }
     }
 
@@ -856,7 +840,7 @@ impl CpuScheduler {
         current: ThreadId,
         next: ThreadId,
     ) -> Result<PreparedContextSwitch, Error> {
-        if self.switching_from.is_some() || self.current != current || current == next {
+        if self.handoff.current().is_some() || self.current != current || current == next {
             return Err(Error::ThreadTransitionInProgress);
         }
         let cpu = self.index;
@@ -883,19 +867,15 @@ impl CpuScheduler {
             })??;
             (previous, next_context)
         };
-        let generation = self.next_switch_generation;
-        self.next_switch_generation = generation.checked_add(1).unwrap_or_else(|| {
-            hyper::debug::invariant_failure(
-                "task::scheduler::state::prepare_local_switch invariant",
-            )
-        });
-        self.switching_from = Some(SwitchingContext {
-            thread: current,
-            generation,
-            disposition: SwitchDisposition::Local,
-        });
+        let generation = self
+            .handoff
+            .begin(current, SwitchDisposition::Local)
+            .unwrap_or_else(|| {
+                hyper::debug::invariant_failure(
+                    "task::scheduler::state::prepare_local_switch invariant",
+                )
+            });
         self.current = next;
-        self.context_switches = self.context_switches.saturating_add(1);
         Ok(PreparedContextSwitch {
             previous,
             next: next_context,
@@ -1109,7 +1089,8 @@ impl Scheduler {
                 slot.as_ref().is_some_and(|local| {
                     local.current == id
                         || local
-                            .switching_from
+                            .handoff
+                            .current()
                             .is_some_and(|switching| switching.thread == id)
                 })
             });
@@ -2168,12 +2149,10 @@ impl Scheduler {
         }
         let cpu_slot = self.cpu_slot(cpu)?;
         let switching = self.with_cpu_domain(cpu_slot, |_scheduler, local| {
-            let switching = local.switching_from.ok_or(Error::PreemptionInvariant)?;
-            if switching.generation != ticket {
-                return Err(Error::PreemptionInvariant);
-            }
-            local.switching_from = None;
-            Ok(switching)
+            local
+                .handoff
+                .complete(ticket)
+                .ok_or(Error::PreemptionInvariant)
         })?;
         let plan = self.thread_mut(switching.thread)?.take_migration_request();
         let state = self.thread(switching.thread)?.state();
@@ -2283,9 +2262,8 @@ impl Scheduler {
                 let Some(local) = slot.as_mut() else {
                     return;
                 };
-                stats.context_switches = stats
-                    .context_switches
-                    .saturating_add(local.context_switches);
+                stats.context_switches =
+                    stats.context_switches.saturating_add(local.handoff.count());
                 let topology_ready = local.run_queue.len();
                 let topology_real_time_ready = local.run_queue.real_time_len();
                 let topology_fair_ready = local.run_queue.fair_len();
@@ -2505,20 +2483,18 @@ impl Scheduler {
                 .replenish_fair_slice(super::FAIR_QUANTUM_TICKS);
         }
         let generation = self.with_cpu_domain(cpu_slot, |_scheduler, local| {
-            if local.switching_from.is_some() || local.current != current {
+            if local.handoff.current().is_some() || local.current != current {
                 return Err(Error::ThreadTransitionInProgress);
             }
-            let generation = local.next_switch_generation;
-            local.next_switch_generation = generation.checked_add(1).unwrap_or_else(|| {
-                hyper::debug::invariant_failure("task::scheduler::state::prepare_switch invariant")
-            });
-            local.switching_from = Some(SwitchingContext {
-                thread: current,
-                generation,
-                disposition: SwitchDisposition::Coordinated,
-            });
+            let generation = local
+                .handoff
+                .begin(current, SwitchDisposition::Coordinated)
+                .unwrap_or_else(|| {
+                    hyper::debug::invariant_failure(
+                        "task::scheduler::state::prepare_switch invariant",
+                    )
+                });
             local.current = next;
-            local.context_switches = local.context_switches.saturating_add(1);
             Ok(generation)
         })?;
         let previous = self.thread(current)?.context_pointer();
@@ -2860,16 +2836,16 @@ impl Scheduler {
         })
     }
 
-    fn switching_from(&self, cpu: CpuIndex) -> Result<Option<SwitchingContext>, Error> {
+    fn switching_from(&self, cpu: CpuIndex) -> Result<Option<SwitchingContext<ThreadId>>, Error> {
         if let Some(active) = self.active_domain
             && active.cpu == cpu
         {
             // SAFETY: active domain is bounded by the matching lock closure.
-            return Ok(unsafe { active.local.as_ref() }.switching_from);
+            return Ok(unsafe { active.local.as_ref() }.handoff.current());
         }
         CPU_SCHEDULERS[cpu].with(|slot| {
             slot.as_ref()
-                .map(|local| local.switching_from)
+                .map(|local| local.handoff.current())
                 .ok_or(Error::CpuNotRegistered)
         })
     }

@@ -10,6 +10,7 @@ cd "$root"
 
 thread=src/kernel/task/thread.rs
 state=src/kernel/task/scheduler/state.rs
+handoff=src/kernel/task/scheduler/switch_handoff.rs
 registry=src/kernel/task/scheduler/registry.rs
 queue=src/kernel/task/scheduler/queue.rs
 scheduler=src/kernel/task/scheduler/mod.rs
@@ -42,7 +43,7 @@ require 'static CPU_SCHEDULERS: PerCpu<CpuSchedulerLock>' \
     "$state" 'running schedules must reside in static per-CPU locks'
 require 'struct Scheduler \{[\s\S]*schedulable_cpus: CpuMask' \
     "$state" 'cross-CPU admission must have one TransitionLock-owned truth'
-require 'struct CpuScheduler \{[\s\S]*current: ThreadId,[\s\S]*idle: Option<ThreadId>,[\s\S]*run_queue: CpuRunQueue,[\s\S]*switching_from: Option<SwitchingContext>[\s\S]*context_switches: u64' \
+require 'struct CpuScheduler \{[\s\S]*current: ThreadId,[\s\S]*idle: Option<ThreadId>,[\s\S]*run_queue: CpuRunQueue,[\s\S]*handoff: SwitchHandoff<ThreadId>' \
     "$state" 'per-CPU locks must own all runnable-domain state'
 reject '(cpus: Vec<CpuQueueState>|cpu_slots: PerCpu)' \
     "$state" 'Scheduler must not retain a second copy of per-CPU runtime truth'
@@ -57,12 +58,12 @@ require 'pub\(super\) fn prepare_local_yield[\s\S]{0,500}CPU_SCHEDULERS\[cpu\]\.
 require 'pub\(super\) fn prepare_local_preemption[\s\S]{0,500}CPU_SCHEDULERS\[cpu\]\.with' \
     "$state" 'IRQ-tail preemption must begin under only the current CPU lock'
 require 'enum SwitchDisposition[\s\S]*Local,[\s\S]*Coordinated' \
-    "$state" 'switch tail must distinguish local and coordinated ownership'
-require 'struct SwitchingContext \{[\s\S]*generation: u64,[\s\S]*disposition: SwitchDisposition' \
-    "$state" 'switch completion must retain an ABA-resistant generation and disposition'
+    "$handoff" 'switch tail must distinguish local and coordinated ownership'
+require 'struct SwitchingContext<T> \{[\s\S]*generation: u64,[\s\S]*disposition: SwitchDisposition' \
+    "$handoff" 'switch completion must retain an ABA-resistant generation and disposition'
 require 'fn finish_context_switch_tail\(ticket: usize\)[\s\S]*complete_local_switch_tail\(cpu, ticket\)[\s\S]*NeedsCoordinator => SCHEDULER\.with' \
     "$scheduler" 'switch tail must release the CPU lock before coordinator fallback'
-require 'pub\(super\) fn complete_local_switch_tail[\s\S]*switching\.generation != ticket[\s\S]*switching\.disposition' \
+require 'pub\(super\) fn complete_local_switch_tail[\s\S]*\.for_ticket\(ticket\)[\s\S]*switching\.disposition' \
     "$state" 'local switch tail must validate its exact generation before completion'
 require 'switch_thread_context\([\s\S]*finish_context_switch_tail,[\s\S]*self\.ticket as usize' \
     "$state" 'the architecture boundary must carry the exact switch generation'
@@ -128,3 +129,8 @@ require 'pub fn take[\s\S]*!thread\.schedule_is_coordinator_owned\(\)[\s\S]*Inva
     "$registry" 'registry removal must reject ready- or current-CPU-owned scheduling state'
 reject '(FallibleArc|Arc<|\*mut Thread|\*const Thread)' \
     "$state" 'CPU scheduler ownership must not use shared or raw Thread handles'
+
+require 'pub fn for_ticket[\s\S]*outgoing\.generation == ticket' \
+    "$handoff" 'handoff lookup must validate the exact incoming ticket'
+require 'pub fn complete[\s\S]*self\.for_ticket\(ticket\)\?[\s\S]*self\.outgoing = None' \
+    "$handoff" 'completion must validate before releasing outgoing context ownership'

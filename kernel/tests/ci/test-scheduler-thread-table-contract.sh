@@ -17,6 +17,7 @@ copy_sources() {
     cp "$root/src/kernel/task/thread.rs" "$fixture/src/kernel/task/thread.rs"
     cp "$root/src/kernel/task/scheduler/registry.rs" "$fixture/src/kernel/task/scheduler/registry.rs"
     cp "$root/src/kernel/task/scheduler/queue.rs" "$fixture/src/kernel/task/scheduler/queue.rs"
+    cp "$root/src/kernel/task/scheduler/switch_handoff.rs" "$fixture/src/kernel/task/scheduler/switch_handoff.rs"
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
     cp "$root/src/kernel/task/scheduler/mod.rs" "$fixture/src/kernel/task/scheduler/mod.rs"
 }
@@ -88,3 +89,8 @@ if check >/dev/null 2>&1; then
     echo 'IRQ-stack CPU identity check moved outside its migration mask' >&2
     exit 1
 fi
+
+mutate 'outgoing context handoff lost its distinct owner' \
+    src/kernel/task/scheduler/switch_handoff.rs 'struct SwitchingContext' 'struct RemovedContext'
+mutate 'CPU state stopped owning its handoff' \
+    src/kernel/task/scheduler/state.rs 'handoff: SwitchHandoff<ThreadId>' 'handoff: u64'

@@ -120,7 +120,7 @@ impl Scheduler {
                 PendingResolution::Armed => {}
                 _ => return Err(Error::InvalidWaitRegistration),
             }
-            if local.switching_from.is_some() {
+            if local.handoff.current().is_some() {
                 return Err(Error::ThreadTransitionInProgress);
             }
             // Preflight before changing queue topology or consuming a successor.
