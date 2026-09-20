@@ -709,9 +709,14 @@ static int apply_relr(Object *object)
 {
     uintptr_t cursor = 0;
     size_t expanded = 0;
+    int has_cursor = 0;
     for (size_t index = 0; index < object->dynamic.relr_count; ++index) {
         uint64_t entry = object->dynamic.relr[index];
         if ((entry & 1) == 0) {
+            if (expanded == MAX_RELOCATIONS) {
+                last_error = "too many RELR relocations";
+                return 0;
+            }
             if (!add_unsigned(object->base, entry, &cursor)
                 || !pointer_aligned((const void *)cursor, _Alignof(uintptr_t))
                 || !address_in_object(object, cursor, sizeof(uintptr_t), PF_W)) {
@@ -729,11 +734,20 @@ static int apply_relr(Object *object)
             }
             cursor += sizeof(uintptr_t);
             ++expanded;
+            has_cursor = 1;
             continue;
+        }
+        if (!has_cursor) {
+            last_error = "RELR bitmap without an address";
+            return 0;
         }
         for (unsigned bit = 1; bit < 64; ++bit) {
             if ((entry & (UINT64_C(1) << bit)) == 0) {
                 continue;
+            }
+            if (expanded == MAX_RELOCATIONS) {
+                last_error = "too many RELR relocations";
+                return 0;
             }
             uintptr_t delta = (bit - 1) * sizeof(uintptr_t);
             uintptr_t target = 0;
@@ -748,10 +762,7 @@ static int apply_relr(Object *object)
                 return 0;
             }
             *(uintptr_t *)target += object->base;
-            if (++expanded > MAX_RELOCATIONS) {
-                last_error = "too many RELR relocations";
-                return 0;
-            }
+            ++expanded;
         }
         if (!add_unsigned(cursor, 63 * sizeof(uintptr_t), &cursor)) {
             last_error = "RELR cursor overflow";
@@ -1286,6 +1297,38 @@ uintptr_t __hyper_rtld_start(const uintptr_t *stack)
     hyper_process_exit(HYPER_NATIVE_STATUS_BAD_STATE);
 }
 
+/* A failed dependency load must restore existing objects as well as discard
+ * newly mapped objects. This snapshot is owned by the locked dlopen operation;
+ * constructors run only after all load/relocation checks complete. */
+typedef struct {
+    size_t first;
+    uintptr_t next_address;
+    uint32_t references[MAX_OBJECTS];
+    uint32_t flags[MAX_OBJECTS];
+} LoadTransaction;
+
+static LoadTransaction begin_load_transaction(void)
+{
+    LoadTransaction transaction = {
+        .first = object_count,
+        .next_address = next_library_address,
+    };
+    for (size_t index = 0; index < transaction.first; ++index) {
+        transaction.references[index] = objects[index].references;
+        transaction.flags[index] = objects[index].flags;
+    }
+    return transaction;
+}
+
+static void rollback_load_transaction(const LoadTransaction *transaction)
+{
+    rollback_objects(transaction->first, transaction->next_address);
+    for (size_t index = 0; index < transaction->first; ++index) {
+        objects[index].references = transaction->references[index];
+        objects[index].flags = transaction->flags[index];
+    }
+}
+
 void *hyper_dlopen_at(hyper_native_handle_t directory, const char *name, uint32_t flags)
 {
     lock_loader();
@@ -1296,17 +1339,10 @@ void *hyper_dlopen_at(hyper_native_handle_t directory, const char *name, uint32_
         unlock_loader();
         return NULL;
     }
-    size_t previous_count = object_count;
-    uintptr_t previous_next_address = next_library_address;
-    uint32_t previous_references[MAX_OBJECTS];
-    uint32_t previous_flags[MAX_OBJECTS];
-    for (size_t index = 0; index < previous_count; ++index) {
-        previous_references[index] = objects[index].references;
-        previous_flags[index] = objects[index].flags;
-    }
+    const LoadTransaction transaction = begin_load_transaction();
     Object *object = load_object(directory, name, flags);
     if (object != NULL) {
-        for (size_t index = object_count; index > previous_count; --index) {
+        for (size_t index = object_count; index > transaction.first; --index) {
             if (!relocate_object(&objects[index - 1])) {
                 object = NULL;
                 break;
@@ -1315,7 +1351,7 @@ void *hyper_dlopen_at(hyper_native_handle_t directory, const char *name, uint32_
     }
     if (object != NULL && !relocate_object(object)) object = NULL;
     if (object != NULL) {
-        for (size_t index = object_count; index > previous_count; --index) {
+        for (size_t index = object_count; index > transaction.first; --index) {
             if (!initialize_object(&objects[index - 1])) {
                 object = NULL;
                 break;
@@ -1324,11 +1360,7 @@ void *hyper_dlopen_at(hyper_native_handle_t directory, const char *name, uint32_
         if (object != NULL && !initialize_object(object)) object = NULL;
     }
     if (object == NULL) {
-        rollback_objects(previous_count, previous_next_address);
-        for (size_t index = 0; index < previous_count; ++index) {
-            objects[index].references = previous_references[index];
-            objects[index].flags = previous_flags[index];
-        }
+        rollback_load_transaction(&transaction);
     }
     unlock_loader();
     return object;

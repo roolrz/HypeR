@@ -37,3 +37,19 @@ requires LP64D ELF flags and supports RELATIVE, 64 and JUMP_SLOT; its JUMP_SLOT
 calculation ignores the addend as required by the RISC-V psABI. COPY, TLS and
 resolver relocations are rejected. Both backends share loading and lifetime
 policy; only entry assembly and machine relocation rules differ.
+
+## Host verification
+
+Run `sh sdk/toolchain/scripts/check-loader-arch.sh` from the repository root.
+The architecture probe checks machine flags and relocation formulas. A second
+probe compiles the production `rtld.c` directly, supplies bounded in-memory ELF
+views and records Native syscall effects. It covers malformed dynamic metadata,
+file bounds, symbol indices, writable relocation targets, RELR cursor/work
+limits, mapping failure cleanup and restoration of a failed load transaction.
+The transaction retains pre-existing references and visibility while discarding
+new dependency mappings in reverse order. It does not promise to undo arbitrary
+constructor side effects.
+
+Both ELF architectures run under UBSan; Linux CI also enables ASan. These tests
+do not emulate page tables or prove the executable mapping/constructor path:
+the Native dynamic-loading QEMU acceptance tests remain required.
