@@ -270,17 +270,6 @@ impl<const CAPACITY: usize> OutputBuffer<CAPACITY> {
         Ok(())
     }
 
-    /// Appends bytes using the console's historical LF-to-CRLF convention.
-    pub fn push_console_bytes(&mut self, bytes: &[u8]) -> Result<(), OutputError> {
-        for &byte in bytes {
-            if byte == b'\n' {
-                self.push_byte(b'\r')?;
-            }
-            self.push_byte(byte)?;
-        }
-        Ok(())
-    }
-
     /// Attempts at most `limit` bytes, retaining the first rejected byte.
     pub fn try_write(&mut self, limit: usize, mut write: impl FnMut(u8) -> bool) -> OutputProgress {
         let mut accepted = 0;

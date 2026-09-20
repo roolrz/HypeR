@@ -25,7 +25,7 @@ const LOG_RECORDS_PER_BATCH: usize = 32;
 const CONSOLE_TX_QUEUE_CAPACITY: usize = 4096;
 const CONSOLE_TX_FRAME_BYTES: usize = 256;
 const LOG_LINE_MAX: usize = hyper::config::LOG_LINE_MAX as usize;
-const LOG_OUTPUT_BUFFER_SIZE: usize = LOG_LINE_MAX * 2 + 128;
+const LOG_OUTPUT_BUFFER_SIZE: usize = LOG_LINE_MAX + 128;
 const CONSOLE_TX_OUTPUT_BUFFER_SIZE: usize = CONSOLE_TX_FRAME_BYTES;
 const OUTPUT_BUFFER_SIZE: usize = if LOG_OUTPUT_BUFFER_SIZE > CONSOLE_TX_OUTPUT_BUFFER_SIZE {
     LOG_OUTPUT_BUFFER_SIZE
@@ -513,12 +513,12 @@ fn prepare_record(
         hyper::log::Timestamp::from_microseconds(record.timestamp_microseconds)
     )
     .map_err(|_| OutputError::Full)?;
-    output.push_console_bytes(message)?;
+    output.push_bytes(message)?;
     if record.flags.contains(RecordFlags::TRUNCATED) || record.copied != record.length {
-        output.push_console_bytes(b" [truncated]")?;
+        output.push_bytes(b" [truncated]")?;
     }
     if !message.ends_with(b"\n") {
-        output.push_console_bytes(b"\n")?;
+        output.push_bytes(b"\n")?;
     }
     Ok(())
 }
@@ -533,7 +533,7 @@ fn prepare_overrun(
         super::timestamp_now()
     )
     .map_err(|_| OutputError::Full)?;
-    output.push_console_bytes(b"\n")
+    output.push_bytes(b"\n")
 }
 
 fn prepare_ring_failure(
@@ -546,7 +546,7 @@ fn prepare_ring_failure(
         super::timestamp_now()
     )
     .map_err(|_| OutputError::Full)?;
-    output.push_console_bytes(b"\n")
+    output.push_bytes(b"\n")
 }
 
 fn prepare_console_tx_overflow(
@@ -559,7 +559,7 @@ fn prepare_console_tx_overflow(
         super::timestamp_now()
     )
     .map_err(|_| OutputError::Full)?;
-    output.push_console_bytes(b"\n")
+    output.push_bytes(b"\n")
 }
 
 fn drain_boot_log_records() -> bool {
