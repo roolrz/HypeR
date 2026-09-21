@@ -388,12 +388,30 @@ fn supervise_guest(
         if observation.registration == control_wait
             && ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observation.signals)
         {
-            let mut message = [0u8; vm_contract::MESSAGE_BYTES];
+            let mut message = [0u8; vm_contract::OBSERVATION_BYTES];
             let length = match control.try_receive(&mut message) {
                 Ok(length) => length,
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
                 Err(error) => return Err(Error::OperatingSystem(error)),
             };
+            if let Some(request) = vm_contract::ObservationRequest::decode(&message[..length]) {
+                let info = hyper_os::vm::machine_info(machine.as_handle_ref())
+                    .map_err(Error::OperatingSystem)?;
+                let reply = vm_contract::Observation {
+                    request,
+                    vcpus: info.vcpu_count,
+                    capacity_bytes: info.memory_size,
+                    resident_bytes: info.resident_memory_bytes,
+                }
+                .encode();
+                // Inspection must never block guest service or retirement if a
+                // manager times out or stops consuming replies.
+                match control.try_send(&reply) {
+                    Ok(()) | Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}
+                    Err(error) => return Err(Error::OperatingSystem(error)),
+                }
+                continue;
+            }
             let command = message
                 .get(..length)
                 .and_then(vm_contract::InstanceCommand::decode)

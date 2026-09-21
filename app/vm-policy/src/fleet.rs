@@ -188,6 +188,8 @@ pub struct Summary {
     pub vcpus: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resident_memory_bytes: Option<u64>,
     pub name: String,
     pub state: State,
     pub image: String,

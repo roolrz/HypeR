@@ -137,7 +137,7 @@ pub fn send_capabilities(
 
 /// Read-only broker observation; no VM/control capability crosses this exchange.
 pub const OBSERVE_MESSAGE: &[u8] = b"HIOSTAT1";
-pub const OBSERVATION_BYTES: usize = 24;
+pub const OBSERVATION_BYTES: usize = 32;
 
 /// RAM is supplied by the owner: the VM address-space span also includes MMIO
 /// and shared guest-memory windows, and is not a resident-memory statistic.
@@ -156,10 +156,13 @@ pub fn encode_observation(
     };
     bytes[12..16].copy_from_slice(&info.vcpu_count.to_le_bytes());
     bytes[16..24].copy_from_slice(&ram_bytes.to_le_bytes());
+    bytes[24..32].copy_from_slice(&info.resident_memory_bytes.unwrap_or(u64::MAX).to_le_bytes());
     bytes
 }
 
-pub fn decode_observation(bytes: &[u8]) -> Option<(hyper_os::vm::VirtualMachinePhase, u32, u64)> {
+pub fn decode_observation(
+    bytes: &[u8],
+) -> Option<(hyper_os::vm::VirtualMachinePhase, u32, u64, Option<u64>)> {
     use hyper_os::vm::VirtualMachinePhase;
     if bytes.len() != OBSERVATION_BYTES || &bytes[..8] != OBSERVE_MESSAGE || bytes[9..12] != [0; 3]
     {
@@ -176,5 +179,9 @@ pub fn decode_observation(bytes: &[u8]) -> Option<(hyper_os::vm::VirtualMachineP
         phase,
         u32::from_le_bytes(bytes[12..16].try_into().ok()?),
         u64::from_le_bytes(bytes[16..24].try_into().ok()?),
+        match u64::from_le_bytes(bytes[24..32].try_into().ok()?) {
+            u64::MAX => None,
+            bytes => Some(bytes),
+        },
     ))
 }

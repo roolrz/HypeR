@@ -419,11 +419,12 @@ impl FleetManager {
     fn execute_command(&mut self, client: usize, command: Request) -> hyper_os::Result<()> {
         let (name, action) = match command {
             Request::List => {
+                let deadline = hyper_os::time::deadline_after(Duration::from_millis(250))?.as_raw();
                 let mut machines: Vec<_> = (0..self.machines.len())
-                    .map(|vm| self.summary(vm))
+                    .map(|vm| self.summary(vm, deadline))
                     .collect();
                 if self.io_broker.is_some() {
-                    machines.push(self.io_summary());
+                    machines.push(self.io_summary(deadline));
                 }
                 return self.reply(client, Response::Entries { machines });
             }
@@ -457,7 +458,9 @@ impl FleetManager {
                 self.reply(
                     client,
                     Response::Entries {
-                        machines: vec![self.io_summary()],
+                        machines: vec![self.io_summary(
+                            hyper_os::time::deadline_after(Duration::from_millis(250))?.as_raw(),
+                        )],
                     },
                 )
             } else {
@@ -478,12 +481,16 @@ impl FleetManager {
             );
         };
         match action {
-            Action::Status => self.reply(
-                client,
-                Response::Entries {
-                    machines: vec![self.summary(vm)],
-                },
-            ),
+            Action::Status => {
+                let deadline = hyper_os::time::deadline_after(Duration::from_millis(250))?.as_raw();
+                let summary = self.summary(vm, deadline);
+                self.reply(
+                    client,
+                    Response::Entries {
+                        machines: vec![summary],
+                    },
+                )
+            }
             Action::Console => self.attach_console(vm, client),
             Action::Delete => {
                 if self.machines[vm].instance.is_some() {
@@ -520,13 +527,18 @@ impl FleetManager {
         }
     }
 
-    fn summary(&self, vm: usize) -> fleet::Summary {
+    fn summary(&mut self, vm: usize, deadline: u64) -> fleet::Summary {
+        let observation = self.machines[vm]
+            .instance
+            .as_mut()
+            .and_then(|instance| instance.observe_memory(deadline));
         let definition = &self.machines[vm].definition;
         let state = self.fleet_state(vm);
         fleet::Summary {
             read_only: false,
-            vcpus: None,
-            memory_bytes: None,
+            vcpus: observation.map(|value| value.vcpus),
+            memory_bytes: observation.map(|value| value.capacity_bytes),
+            resident_memory_bytes: observation.and_then(|value| value.resident_bytes),
             name: definition.name.clone(),
             image: definition.image.clone(),
             autostart: definition.autostart,
@@ -535,7 +547,7 @@ impl FleetManager {
         }
     }
 
-    fn io_summary(&self) -> fleet::Summary {
+    fn io_summary(&self, deadline: u64) -> fleet::Summary {
         use hyper_service::io;
         let observation = (|| -> hyper_os::Result<_> {
             let broker = self
@@ -544,7 +556,10 @@ impl FleetManager {
                 .ok_or(hyper_os::Error::MissingHandle)?;
             let (local, remote) = CapabilityChannel::create()?;
             let mut remote = Some(remote.into_handle());
-            let limit = hyper_os::time::deadline_after(Duration::from_millis(500))?.as_raw();
+            if hyper_os::time::monotonic_now()?.as_nanoseconds() >= deadline {
+                return Err(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT));
+            }
+            let limit = deadline;
             io::send_capabilities(
                 broker,
                 io::OBSERVE_MESSAGE,
@@ -569,9 +584,10 @@ impl FleetManager {
             autostart: true,
             disk: None,
             read_only: true,
-            vcpus: observation.map(|(_, count, _)| count),
-            memory_bytes: observation.map(|(_, _, bytes)| bytes),
-            state: match observation.map(|(phase, _, _)| phase) {
+            vcpus: observation.map(|(_, count, _, _)| count),
+            memory_bytes: observation.map(|(_, _, bytes, _)| bytes),
+            resident_memory_bytes: observation.and_then(|(_, _, _, bytes)| bytes),
+            state: match observation.map(|(phase, _, _, _)| phase) {
                 Some(Phase::Installed) => fleet::State::Starting,
                 Some(Phase::Running) => fleet::State::Running,
                 Some(Phase::Stopping) => fleet::State::Stopping,
@@ -799,6 +815,7 @@ impl FleetManager {
             runtime_control: Some(manager_runtime),
             console_connection,
             policy: InstancePolicy::default(),
+            observation_sequence: 0,
             disk_admission,
         });
         self.machines[vm].policy.started();
@@ -931,16 +948,66 @@ struct VmInstance {
     console_connection: CapabilityChannel,
     policy: InstancePolicy,
     disk_admission: Option<DiskAdmission>,
+    observation_sequence: u64,
 }
 
 impl VmInstance {
+    fn observe_memory(&mut self, deadline: u64) -> Option<vm_contract::Observation> {
+        if self.policy.state() != fleet::State::Running {
+            return None;
+        }
+        if hyper_os::time::monotonic_now().ok()?.as_nanoseconds() >= deadline {
+            return None;
+        }
+        self.observation_sequence = self.observation_sequence.checked_add(1)?;
+        let request = vm_contract::ObservationRequest(self.observation_sequence);
+        let control = self.runtime_control.as_ref()?.as_byte_channel();
+        control.try_send(&request.encode()).ok()?;
+        loop {
+            if hyper_os::time::monotonic_now().ok()?.as_nanoseconds() >= deadline {
+                return None;
+            }
+
+            let mut bytes = [0u8; vm_contract::OBSERVATION_BYTES];
+            match control.try_receive(&mut bytes) {
+                Ok(length) => match self.policy.observe_message(&bytes[..length]) {
+                    Ok(Some(observation)) if observation.request == request => {
+                        return Some(observation);
+                    }
+                    Ok(_) if self.policy.is_terminal() => {
+                        let _ = self.arm_exit_deadline();
+                        return None;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        self.policy.reject_protocol();
+                        self.force_stop();
+                        return None;
+                    }
+                },
+                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {
+                    let waits = [WaitItem::new(
+                        control.as_handle_ref(),
+                        ObjectSignals::<ByteChannelObject>::READABLE
+                            .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
+                    )];
+                    let ready = wait_many(&waits, deadline).ok()?;
+                    if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(ready.observed) {
+                        return None;
+                    }
+                }
+                Err(_) => return None,
+            }
+        }
+    }
+
     fn wants_disk_admission(&self) -> bool {
         self.policy
             .wants_disk_admission(self.disk_admission.is_some())
     }
 
     fn receive_runtime_status(&mut self) -> hyper_os::Result<()> {
-        let mut message = [0u8; vm_contract::MESSAGE_BYTES];
+        let mut message = [0u8; vm_contract::OBSERVATION_BYTES];
         let received = self
             .runtime_control
             .as_ref()
@@ -952,13 +1019,7 @@ impl VmInstance {
             Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(()),
             Err(error) => return Err(error),
         };
-        let status = message
-            .get(..length)
-            .and_then(vm_contract::InstanceStatus::decode)
-            .ok_or(hyper_os::Error::InvalidResponse)?;
-        self.policy
-            .observe(status)
-            .map_err(|_| hyper_os::Error::InvalidResponse)
+        self.policy.observe_message(&message[..length]).map(|_| ())
     }
 
     fn drain_runtime_statuses(&mut self) -> hyper_os::Result<()> {
@@ -966,15 +1027,13 @@ impl VmInstance {
             return Ok(());
         };
         loop {
-            let mut message = [0u8; vm_contract::MESSAGE_BYTES];
+            let mut message = [0u8; vm_contract::OBSERVATION_BYTES];
             match control.as_byte_channel().try_receive(&mut message) {
-                Ok(length) => match message
-                    .get(..length)
-                    .and_then(vm_contract::InstanceStatus::decode)
-                {
-                    Some(status) if self.policy.observe(status).is_ok() => {}
-                    Some(_) | None => self.policy.reject_protocol(),
-                },
+                Ok(length) => {
+                    if self.policy.observe_message(&message[..length]).is_err() {
+                        self.policy.reject_protocol();
+                    }
+                }
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK))
                 | Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => return Ok(()),
                 Err(error) => return Err(error),

@@ -824,6 +824,11 @@ pub(super) fn encode_virtual_machine_info(
 ) -> [u8; core::mem::size_of::<HyperNativeVirtualMachineInfo>()] {
     type Record = HyperNativeVirtualMachineInfo;
     let mut record = [0_u8; core::mem::size_of::<Record>()];
+    write_u64(
+        &mut record,
+        core::mem::offset_of!(Record, resident_memory_bytes),
+        snapshot.resident_memory_bytes.unwrap_or(u64::MAX),
+    );
     write_u32(
         &mut record,
         core::mem::offset_of!(Record, phase),

@@ -45,9 +45,8 @@ pub const DEADLINE_INFINITE: u64 = hyper_abi::HYPER_NATIVE_DEADLINE_INFINITE;
 /// Validates one extensible-info result and preserves the kernel record size.
 ///
 /// Decoders must keep the returned size beside the zero-initialized record and
-/// gate any field beyond the published minimum prefix on that size. Every
-/// current record has `MIN_SIZE == size_of::<Record>()`, so its current fields
-/// are all mandatory and need no per-field gates yet.
+/// gate every appended field on the size covering the entire field, including
+/// fields partially filled by an older kernel's shorter record.
 fn validate_info_result(result: hyper_sys::CallResult, minimum_size: usize) -> Result<usize> {
     Status::from_raw(result.status).into_result()?;
     let supported_size = usize::try_from(result.value0).map_err(|_| Error::InvalidResponse)?;

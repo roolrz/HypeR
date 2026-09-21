@@ -117,6 +117,10 @@ pub struct VirtualMachineInfo {
     pub vcpu_count: u32,
     pub guest_physical_base: u64,
     pub memory_size: u64,
+    /// Resident primary backing, including RAM and explicitly admitted shared pools.
+    /// Excludes dynamically attached alias windows and runtime overhead.
+    /// None while retirement prevents taking a memory snapshot.
+    pub resident_memory_bytes: Option<u64>,
     pub architecture: Architecture,
     pub platform_profile: PlatformProfile,
 }
@@ -425,12 +429,13 @@ pub fn machine_info(machine: HandleRef<'_, VirtualMachineObject>) -> Result<Virt
         vcpu_count: 0,
         guest_physical_base: 0,
         memory_size: 0,
+        resident_memory_bytes: u64::MAX,
         architecture: 0,
         platform_profile: 0,
     };
     // SAFETY: the handle remains borrowed and the output record writable.
     let result = unsafe { hyper_sys::virtual_machine_get_info(machine.raw().get(), &mut record) };
-    let _supported_size = crate::validate_info_result(
+    let supported_size = crate::validate_info_result(
         result,
         hyper_abi::HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE,
     )?;
@@ -439,9 +444,18 @@ pub fn machine_info(machine: HandleRef<'_, VirtualMachineObject>) -> Result<Virt
         vcpu_count: record.vcpu_count,
         guest_physical_base: record.guest_physical_base,
         memory_size: record.memory_size,
+        resident_memory_bytes: decode_resident_memory(record.resident_memory_bytes, supported_size),
         architecture: decode_architecture(record.architecture)?,
         platform_profile: decode_platform_profile(record.platform_profile)?,
     })
+}
+
+fn decode_resident_memory(raw: u64, supported_size: usize) -> Option<u64> {
+    let end = core::mem::offset_of!(
+        hyper_abi::HyperNativeVirtualMachineInfo,
+        resident_memory_bytes
+    ) + core::mem::size_of::<u64>();
+    (supported_size >= end && raw != u64::MAX).then_some(raw)
 }
 
 pub fn vcpu_info(vcpu: HandleRef<'_, VirtualCpuObject>) -> Result<VirtualCpuInfo> {
@@ -557,6 +571,16 @@ fn validate_adopted<T: TypedObject>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_memory_requires_complete_appended_info_field() {
+        for size in 32..40 {
+            assert_eq!(decode_resident_memory(4096, size), None);
+        }
+        assert_eq!(decode_resident_memory(4096, 40), Some(4096));
+        assert_eq!(decode_resident_memory(u64::MAX, 40), None);
+        assert_eq!(decode_resident_memory(0, 48), Some(0));
+    }
 
     #[test]
     fn virtual_machine_architectures_decode_to_typed_values() {

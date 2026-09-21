@@ -141,9 +141,20 @@ fn write_response(
                 if let (Some(vcpus), Some(bytes)) = (machine.vcpus, machine.memory_bytes) {
                     writeln!(
                         output,
-                        "  vCPUs: {vcpus}; memory: {} MiB",
+                        "  vCPUs: {vcpus}; RAM capacity: {} MiB",
                         bytes / (1024 * 1024)
                     )?;
+                    if let Some(resident) = machine.resident_memory_bytes {
+                        writeln!(
+                            output,
+                            "  allocated VM backing: {resident} bytes ({} KiB)",
+                            resident / 1024
+                        )?;
+                    } else {
+                        writeln!(output, "  allocated VM backing: unavailable")?;
+                    }
+                } else if !matches!(machine.state, fleet::State::Stopped | fleet::State::Failed) {
+                    writeln!(output, "  VM metrics: unavailable")?;
                 }
             }
         }
