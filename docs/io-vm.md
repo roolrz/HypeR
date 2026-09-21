@@ -336,3 +336,18 @@ Other failures are not treated as proof or silently retried. The I/O broker
 bounds transport retries to five seconds, sleeps between attempts, and keeps
 processing backend console and power notifications. A failed retirement keeps
 its mapping ownership and enters the backend shutdown/quarantine path.
+
+### Forwarded appliance logs
+
+The Native I/O runtime prefixes each forwarded guest console line with
+`HypeR IO VM:`, including lines split across serial reads. Native runtime messages
+retain their own service name. Prefixing does not buffer a whole line or alter
+its bytes; a partial line remains visible, so output from other services can
+still interleave before the guest emits its next newline.
+
+An appliance message such as `HypeR I/O [naa.5001405000000001]` identifies its
+LIO/vhost-scsi target. This NAA-format world-wide name binds the vhost endpoint
+to its storage target; it is not a VM ID, memory address, or disk capacity.
+The appliance currently constructs target names from the configured volume
+ordinal (the first volume uses the suffix `000000001`). These locally generated
+names do not assert a globally assigned hardware identity.

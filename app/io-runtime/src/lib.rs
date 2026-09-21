@@ -14,3 +14,5 @@ pub mod admission_policy;
 pub mod broker_exchange;
 
 pub mod sdhci;
+
+pub mod guest_log;

@@ -6,6 +6,7 @@ mod broker;
 #[path = "managed.rs"]
 mod managed;
 
+use hyper_io_runtime::guest_log::GuestLog;
 use hyper_os::guest_io::Mailbox;
 use hyper_os::handle::{GuestMailboxObject, VirtualMachineObject};
 use hyper_os::startup::{self, Startup};
@@ -17,7 +18,7 @@ use hyper_vm_image::guest_fdt::{
 };
 use hyper_vm_support::io_guest::{self, Image, InstalledGuest, PHYSICAL_MMIO, RAM_BASE, RAM_BYTES};
 use hyper_vm_support::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
-use std::io::{self, Write};
+use std::io;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -213,6 +214,7 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
     // Every fallible operation after installation is inside this result scope;
     // retirement runs even if mailbox creation, start or negotiation fails.
     let mut hardware_worker = None;
+    let mut guest_log = GuestLog::default();
     let outcome = (|| {
         let mailbox =
             Mailbox::create(guest.machine.as_handle_ref(), MAILBOX_MMIO, 41).map_err(show)?;
@@ -253,6 +255,7 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
             startup,
             &mut guest,
             &mailbox,
+            &mut guest_log,
             client.as_mut(),
             broker.as_mut(),
         )
@@ -269,20 +272,23 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
         .map(|worker| worker.stop().map_err(show))
         .transpose()
         .map(|_| ());
-    let drained = drain(&mut guest);
+    let drained = drain(&mut guest, &mut guest_log);
     // Attempt every cleanup step without hiding the failure that started
     // retirement behind a later timeout or worker shutdown error.
     outcome.and(stopped).and(worker_stopped).and(drained)
 }
 
-fn drain(guest: &mut InstalledGuest) -> Result<()> {
+fn drain(guest: &mut InstalledGuest, guest_log: &mut GuestLog) -> Result<()> {
     let mut bytes = [0; 2048];
+    let mut output = io::stdout().lock();
     for _ in 0..16 {
         let length = guest.output.try_read(&mut bytes).map_err(show)?;
         if length == 0 {
             break;
         }
-        io::stdout().write_all(&bytes[..length]).map_err(show)?;
+        guest_log
+            .write(&mut output, &bytes[..length])
+            .map_err(show)?;
     }
     Ok(())
 }
@@ -291,6 +297,7 @@ fn supervise(
     startup: &Startup<'_>,
     guest: &mut InstalledGuest,
     mailbox: &Mailbox,
+    guest_log: &mut GuestLog,
     mut client: Option<&mut managed::Client>,
     mut broker: Option<&mut broker::Broker>,
 ) -> Result<()> {
@@ -308,7 +315,7 @@ fn supervise(
     let startup_deadline = deadline(60)?;
     let mut ready = false;
     loop {
-        if !pump_guest(guest)? {
+        if !pump_guest(guest, guest_log)? {
             return Ok(());
         }
         if !ready {
@@ -324,6 +331,7 @@ fn supervise(
                             startup,
                             guest,
                             mailbox,
+                            guest_log,
                             reply.features.ok_or("HELLO omitted features")?,
                         )?;
                         println!("HypeR io-runtime: ready; configuration volume mounted at /data");
@@ -387,8 +395,8 @@ fn supervise(
     }
 }
 
-fn pump_guest(guest: &mut InstalledGuest) -> Result<bool> {
-    drain(guest)?;
+fn pump_guest(guest: &mut InstalledGuest, guest_log: &mut GuestLog) -> Result<bool> {
+    drain(guest, guest_log)?;
     for cpu in &guest.cpus {
         if let Some(reason) = vm::vcpu_info(cpu.as_handle_ref()).map_err(show)?.terminal {
             return Err(format!("I/O vCPU terminated: {reason:?}"));
