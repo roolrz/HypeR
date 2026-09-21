@@ -11,13 +11,13 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
 copy_sources() {
     rm -rf "$fixture/src"
-    mkdir -p "$fixture/src/hal/selected" \
+    mkdir -p "$fixture/hal/src/hal" \
         "$fixture/src/kernel/mm/user_space" \
         "$fixture/src/kernel/entry" \
         "$fixture/src/kernel/process"
-    mkdir -p "$fixture/src/arch/aarch64"
-    cp "$root/src/arch/aarch64/context.S" "$fixture/src/arch/aarch64/context.S"
-    cp "$root/src/hal/selected/user.rs" "$fixture/src/hal/selected/user.rs"
+    mkdir -p "$fixture/hal/src/arch/aarch64"
+    cp "$root/hal/src/arch/aarch64/context.S" "$fixture/hal/src/arch/aarch64/context.S"
+    cp "$root/hal/src/hal/user.rs" "$fixture/hal/src/hal/user.rs"
     cp "$root/src/kernel/mm/user_space/machine.rs" "$fixture/src/kernel/mm/user_space/machine.rs"
     cp "$root/src/kernel/mm/user_space/kernel_adapter.rs" "$fixture/src/kernel/mm/user_space/kernel_adapter.rs"
     cp "$root/src/kernel/mm/user_space/mod.rs" "$fixture/src/kernel/mm/user_space/mod.rs"
@@ -59,9 +59,9 @@ inject_and_reject 'process policy must reject discriminant casts' \
 inject_and_reject 'kernel must not recreate the identifier selection enum' \
     src/kernel/mm/user_space/machine.rs 'enum ReservedMachineIdentifier { Host, Second }'
 inject_and_reject 'HAL must reject removed translation-regime wrappers' \
-    src/hal/selected/user.rs 'struct AddressSpaceIdentifier<T> { asid: T }'
+    hal/src/hal/user.rs 'struct AddressSpaceIdentifier<T> { asid: T }'
 inject_and_reject 'completion abandonment must not return normally' \
-    src/hal/selected/user.rs 'impl CompletionFailure<'"'"'_> { pub(crate) fn abandon(self) {} }'
+    hal/src/hal/user.rs 'impl CompletionFailure<'"'"'_> { pub(crate) fn abandon(self) {} }'
 
 copy_sources
 sed 's/plan.asid_bits()/16/' \
@@ -83,12 +83,12 @@ fi
 
 copy_sources
 sed 's/core::mem::forget(completion);/drop(completion);/' \
-    "$fixture/src/hal/selected/user.rs" >"$fixture/mutated"
-mv "$fixture/mutated" "$fixture/src/hal/selected/user.rs"
+    "$fixture/hal/src/hal/user.rs" >"$fixture/mutated"
+mv "$fixture/mutated" "$fixture/hal/src/hal/user.rs"
 if check >/dev/null 2>&1; then
     echo 'terminal completion handling must retain rather than drop its owner' >&2
     exit 1
 fi
 
 inject_and_reject 'Native entry must not truncate HCR through ESR_EL2' \
-    src/arch/aarch64/context.S '    msr esr_el2, x1'
+    hal/src/arch/aarch64/context.S '    msr esr_el2, x1'

@@ -12,20 +12,20 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 copy_sources() {
     rm -rf "$fixture/src"
     mkdir -p "$fixture/src/kernel/log" "$fixture/src/kernel/entry" "$fixture/src/kernel/irq" \
-        "$fixture/src/arch/aarch64" "$fixture/src/arch/riscv64" "$fixture/src/arch/x86_64" \
-        "$fixture/src/hal" "$fixture/src/log" "$fixture/src/arch" "$fixture/src/sync"
+        "$fixture/hal/src/arch/aarch64" "$fixture/hal/src/arch/riscv64" "$fixture/hal/src/arch/x86_64" \
+        "$fixture/build_support" "$fixture/src/hal" "$fixture/src/log" "$fixture/src/arch" "$fixture/src/sync"
     cp "$root/Kconfig" "$fixture/Kconfig"
-    cp "$root/build.rs" "$fixture/build.rs"
+    cp "$root/build_support/config.rs" "$fixture/build_support/config.rs"
     cp "$root/src/kernel/log/mod.rs" "$fixture/src/kernel/log/mod.rs"
     cp "$root/src/kernel/log/drain.rs" "$fixture/src/kernel/log/drain.rs"
     cp "$root/src/kernel/log/console.rs" "$fixture/src/kernel/log/console.rs"
     cp "$root/src/kernel/entry/irq.rs" "$fixture/src/kernel/entry/irq.rs"
     cp "$root/src/kernel/irq/mod.rs" "$fixture/src/kernel/irq/mod.rs"
-    cp "$root/src/arch/irq.rs" "$fixture/src/arch/irq.rs"
-    cp "$root/src/arch/aarch64/exception.rs" "$fixture/src/arch/aarch64/exception.rs"
-    cp "$root/src/arch/riscv64/exception.rs" "$fixture/src/arch/riscv64/exception.rs"
-    cp "$root/src/arch/x86_64/exception.rs" "$fixture/src/arch/x86_64/exception.rs"
-    cp "$root/src/arch/x86_64/vmx.rs" "$fixture/src/arch/x86_64/vmx.rs"
+    cp "$root/hal/src/arch/irq.rs" "$fixture/hal/src/arch/irq.rs"
+    cp "$root/hal/src/arch/aarch64/exception.rs" "$fixture/hal/src/arch/aarch64/exception.rs"
+    cp "$root/hal/src/arch/riscv64/exception.rs" "$fixture/hal/src/arch/riscv64/exception.rs"
+    cp "$root/hal/src/arch/x86_64/exception.rs" "$fixture/hal/src/arch/x86_64/exception.rs"
+    cp "$root/hal/src/arch/x86_64/vmx.rs" "$fixture/hal/src/arch/x86_64/vmx.rs"
     cp "$root/src/hal/console.rs" "$fixture/src/hal/console.rs"
     cp "$root/src/log/drain.rs" "$fixture/src/log/drain.rs"
     cp "$root/src/log/output.rs" "$fixture/src/log/output.rs"
@@ -59,7 +59,7 @@ mutate 'the compile-time log ceiling must retain its default' \
 mutate 'the runtime Console threshold must remain independently configurable' \
     Kconfig 'config CONSOLE_LOGLEVEL_DEFAULT' 'config CONSOLE_LOGLEVEL_DEFAULT_REMOVED'
 mutate 'the build must export severity-specific compile gates' \
-    build.rs 'value("LOG_COMPILE_LEVEL")' 'value("LOG_COMPILE_LEVEL_REMOVED")'
+    build_support/config.rs 'value("LOG_COMPILE_LEVEL")' 'value("LOG_COMPILE_LEVEL_REMOVED")'
 mutate 'the public log API must enforce the compiled-in ceiling' \
     src/kernel/log/mod.rs 'if !compiled_in(level) {' 'if false {'
 mutate 'debug callsites must use their compile-time gate' \
@@ -152,13 +152,13 @@ mutate 'normal Console selection must prefer kernel diagnostics' \
     src/kernel/log/drain.rs 'match prepare_log_output(output, snapshot)' \
     'match PrepareOutcome::Idle'
 mutate 'RISC-V software prompts must reach the scheduler-safe log seam' \
-    src/arch/riscv64/exception.rs 'crate::arch::irq::service_kernel_rpc_interrupt' \
+    hal/src/arch/riscv64/exception.rs 'crate::arch::irq::service_kernel_rpc_interrupt' \
     'crate::arch::irq::discard_kernel_rpc_interrupt'
 mutate 'private IRQ service must drain RPC work before waking log waiters' \
     src/kernel/entry/irq.rs 'crate::kernel::irq::cross_call::service();' \
     'crate::kernel::log::service_irq_prompt();'
 mutate 'AArch64 private IRQ service must follow controller completion' \
-    src/arch/aarch64/exception.rs 'super::end_interrupt(interrupt);' \
+    hal/src/arch/aarch64/exception.rs 'super::end_interrupt(interrupt);' \
     'crate::arch::irq::discard_kernel_rpc_interrupt(interrupt_origin);'
 mutate 'the HAL must retain a nonblocking console primitive' \
     src/hal/console.rs 'fn try_write_byte(&self, byte: u8) -> bool;' \

@@ -11,23 +11,23 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
 copy_tree() {
     rm -rf "$fixture/src"
-    mkdir -p "$fixture/src/arch/aarch64" "$fixture/src/hal/selected" \
+    mkdir -p "$fixture/hal/src/arch/aarch64" "$fixture/hal/src/hal" \
         "$fixture/src/kernel/entry/vmexit" "$fixture/src/kernel/time" \
         "$fixture/src/kernel/task/scheduler" "$fixture/src/kernel/vm/vcpu" \
         "$fixture/src/kernel/vm/device" "$fixture/src/kernel/vm/memory" \
         "$fixture/src/time"
-    cp "$root/src/arch/aarch64/context.S" "$fixture/src/arch/aarch64/context.S"
-    cp "$root/src/arch/aarch64/context.rs" "$fixture/src/arch/aarch64/context.rs"
-    cp "$root/src/arch/aarch64/exception.rs" "$fixture/src/arch/aarch64/exception.rs"
-    cp "$root/src/arch/aarch64/guest_cpu_contract.rs" \
-        "$fixture/src/arch/aarch64/guest_cpu_contract.rs"
-    cp "$root/src/arch/aarch64/guest_cpu_model.rs" "$fixture/src/arch/aarch64/guest_cpu_model.rs"
-    cp "$root/src/arch/aarch64/mod.rs" "$fixture/src/arch/aarch64/mod.rs"
-    cp "$root/src/arch/aarch64/registers.rs" "$fixture/src/arch/aarch64/registers.rs"
-    cp "$root/src/arch/aarch64/vm_vcpu.rs" "$fixture/src/arch/aarch64/vm_vcpu.rs"
-    cp "$root/src/arch/aarch64/vsysreg.rs" "$fixture/src/arch/aarch64/vsysreg.rs"
-    cp "$root/src/arch/aarch64/vectors.S" "$fixture/src/arch/aarch64/vectors.S"
-    cp "$root/src/hal/selected/vm.rs" "$fixture/src/hal/selected/vm.rs"
+    cp "$root/hal/src/arch/aarch64/context.S" "$fixture/hal/src/arch/aarch64/context.S"
+    cp "$root/hal/src/arch/aarch64/context.rs" "$fixture/hal/src/arch/aarch64/context.rs"
+    cp "$root/hal/src/arch/aarch64/exception.rs" "$fixture/hal/src/arch/aarch64/exception.rs"
+    cp "$root/hal/src/arch/aarch64/guest_cpu_contract.rs" \
+        "$fixture/hal/src/arch/aarch64/guest_cpu_contract.rs"
+    cp "$root/hal/src/arch/aarch64/guest_cpu_model.rs" "$fixture/hal/src/arch/aarch64/guest_cpu_model.rs"
+    cp "$root/hal/src/arch/aarch64/mod.rs" "$fixture/hal/src/arch/aarch64/mod.rs"
+    cp "$root/hal/src/arch/aarch64/registers.rs" "$fixture/hal/src/arch/aarch64/registers.rs"
+    cp "$root/hal/src/arch/aarch64/vm_vcpu.rs" "$fixture/hal/src/arch/aarch64/vm_vcpu.rs"
+    cp "$root/hal/src/arch/aarch64/vsysreg.rs" "$fixture/hal/src/arch/aarch64/vsysreg.rs"
+    cp "$root/hal/src/arch/aarch64/vectors.S" "$fixture/hal/src/arch/aarch64/vectors.S"
+    cp "$root/hal/src/hal/vm.rs" "$fixture/hal/src/hal/vm.rs"
     cp "$root/src/kernel/entry/vmexit.rs" "$fixture/src/kernel/entry/vmexit.rs"
     cp "$root/src/kernel/entry/vmexit/selected.rs" \
         "$fixture/src/kernel/entry/vmexit/selected.rs"
@@ -72,40 +72,40 @@ copy_tree
 check
 
 mutate 'terminal vector unwind must not return to vector restoration' \
-    src/arch/aarch64/vectors.S 's/br      x1/blr     x1/'
+    hal/src/arch/aarch64/vectors.S 's/br      x1/blr     x1/'
 mutate 'terminal capture must precede lower-world closure' \
-    src/arch/aarch64/exception.rs 's/\.capture_terminal(frame, cause)/.capture_terminal_later(frame, cause)/'
+    hal/src/arch/aarch64/exception.rs 's/\.capture_terminal(frame, cause)/.capture_terminal_later(frame, cause)/'
 mutate 'terminal hardware must detach before report consumption' \
     src/kernel/vm/vcpu/runner.rs 's/super::transition::detach_stopped/super::transition::detach_stopped_later/'
 mutate 'endpoint close must precede execution-claim release' \
     src/kernel/vm/vcpu/runner.rs 's/close_vcpu_endpoint/close_vcpu_endpoint_after_release/'
 mutate 'HAL must preserve a typed terminal reason' \
-    src/hal/selected/vm.rs 's/enum VcpuTerminalReason/enum ErasedTerminalReason/'
+    hal/src/hal/vm.rs 's/enum VcpuTerminalReason/enum ErasedTerminalReason/'
 mutate 'terminal payload must retain captured processor state' \
-    src/arch/aarch64/context.rs \
+    hal/src/arch/aarch64/context.rs \
     's/processor_state: context_ref.processor_state/processor_state: 0/'
 mutate 'synchronous terminal payload must retain the decoded exit' \
-    src/arch/aarch64/exception.rs \
+    hal/src/arch/aarch64/exception.rs \
     's/GuestSynchronousTerminal::Failed { exit, failure }/GuestSynchronousTerminal::Undecodable/'
 mutate 'synchronous emulation failure must retain its typed error' \
-    src/arch/aarch64/vsysreg.rs \
+    hal/src/arch/aarch64/vsysreg.rs \
     's/Err(error) =>/Err(_error) =>/'
 mutate 'stage-2 execute permission faults must remain recoverable' \
-    src/arch/aarch64/vsysreg.rs \
+    hal/src/arch/aarch64/vsysreg.rs \
     's/ESR_ABORT_PERMISSION_FAULT_LEVEL0/ESR_ABORT_TRANSLATION_FAULT_LEVEL0/'
 mutate 'guest identity must initialize VMPIDR_EL2' \
-    src/arch/aarch64/vsysreg.rs 's/msr VMPIDR_EL2/msr TPIDR_EL2/'
+    hal/src/arch/aarch64/vsysreg.rs 's/msr VMPIDR_EL2/msr TPIDR_EL2/'
 mutate 'guest feature discovery must hide nested virtualization' \
-    src/arch/aarch64/guest_cpu_contract.rs \
+    hal/src/arch/aarch64/guest_cpu_contract.rs \
     's/raw.mmfr2 & !registers::ID_AA64MMFR2_NV_MASK/raw.mmfr2/'
 mutate 'secondary admission must enforce the frozen guest CPU model' \
-    src/arch/aarch64/mod.rs \
+    hal/src/arch/aarch64/mod.rs \
     's/guest_cpu_model::current_cpu_is_compatible()/guest_cpu_model::admission_bypassed()/'
 mutate 'virtual processor identity must remain frozen across migration' \
-    src/arch/aarch64/vsysreg.rs \
+    hal/src/arch/aarch64/vsysreg.rs \
     's/super::guest_cpu_model::processor_identity()/read_midr_el1()/'
 mutate 'guest activation must install its virtual processor identity' \
-    src/arch/aarch64/vm_vcpu.rs \
+    hal/src/arch/aarch64/vm_vcpu.rs \
     's/activate_virtual_identity(vcpu_id)/skip_virtual_identity(vcpu_id)/'
 mutate 'a CPU-affine guard must not span a migratable guest run' \
     src/kernel/vm/vcpu/runner.rs \
@@ -119,7 +119,7 @@ mutate 'guest MMIO must not leave a stale global crash supplement' \
 mutate 'unhandled MMIO must retain its report in the vCPU execution' \
     src/kernel/vm/device/aarch64.rs 's/publish_terminal_mmio_report/drop_terminal_mmio_report/'
 mutate 'WFx ISS.TI must not reverse WFI and WFE' \
-    src/arch/aarch64/vsysreg.rs 's/ESR_WFX_TI_WFE != 0/ESR_WFX_TI_WFE == 0/'
+    hal/src/arch/aarch64/vsysreg.rs 's/ESR_WFX_TI_WFE != 0/ESR_WFX_TI_WFE == 0/'
 mutate 'WFI must use the reserved endpoint timer before parking' \
     src/kernel/vm/vcpu/runner.rs 's/arm_wfi_timer/allocate_wfi_timer/'
 mutate 'WFI endpoint notification must use the registered-notification facade' \
@@ -152,7 +152,7 @@ mutate 'repeated VMID activation must preserve Active ownership' \
     src/kernel/vm/memory/construction.rs 's/activation_may_begin(state)/true/'
 
 mutate 'guest wait selection must reject failed architectural state application' \
-    src/arch/aarch64/exception.rs 's/if !applied {/if false {/'
+    hal/src/arch/aarch64/exception.rs 's/if !applied {/if false {/'
 mutate 'firmware waits must not advance HVC return PC a second time' \
-    src/arch/aarch64/vsysreg.rs \
+    hal/src/arch/aarch64/vsysreg.rs \
     's/GuestSyncAction::FirmwareWait => true/GuestSyncAction::FirmwareWait => { advance(program_counter); true }/'

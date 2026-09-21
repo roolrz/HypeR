@@ -25,20 +25,31 @@ Dependencies normally flow downward through these layers:
 4. Architecture-neutral mechanisms in `mm`, `sync`, `time`, `log`, `archive`,
    and similar modules provide reusable implementation building blocks.
 5. Architecture-neutral HAL contracts describe reusable capabilities. The
-   binary-only selected HAL binds those contracts and narrow kernel-facing
+   target-selected HAL binds those contracts and narrow kernel-facing
    operations to exactly one architecture backend; it owns neither kernel
    policy nor discoverable-device lifecycle.
 6. Architecture, platform, firmware, and physical-driver implementations
    execute machine operations and access registers, instructions, MMIO, or
    assembly.
 
-`src/arch` selects one backend and exposes topical machine mechanisms only to
-`src/hal/selected`. The kernel, architecture-neutral implementation modules,
-and kernel self-tests consume `crate::hal`; they must not import any
-`crate::arch` path. `main.rs` path-maps `hal/selected/mod.rs` into the binary as
-`crate::hal`, so the binding is statically selected without making it part of
-the reusable library HAL. AArch64 remains Tier 1: a common interface must not
-hide behavior required for its correctness or diagnosis.
+The binary package depends on `hyper-hal`, which compiles the selected HAL
+and architecture backend together. Its `arch` and `hal` modules are private;
+only the HAL capability interfaces are exported. Kernel code imports this crate
+as `hal` and cannot access backend modules. The HAL depends on `hyper-core`,
+not on the kernel binary. `hyper-core` packages the existing reusable library
+at `src/lib.rs`, including portable contracts and mechanisms, independently of
+kernel policy. It does not depend on the HAL implementation.
+
+```text
+kernel binary ──→ hyper-hal ──→ hyper-core
+       └─────────────────────→ hyper-core
+```
+
+Cargo dependencies and Rust privacy enforce these access boundaries. They do
+not prove lock ordering, memory ordering, or retirement correctness; those
+still require explicit protocols, review, and behavioral tests. AArch64 remains
+Tier 1: a common interface must not hide behavior required for its correctness
+or diagnosis.
 
 ## Placement rules
 
@@ -49,8 +60,8 @@ hide behavior required for its correctness or diagnosis.
 - `arch` owns context and exception ABIs, page-table and register encodings,
   instruction execution, CPU-specific behavior, and hardware virtualization
   entry/exit mechanics.
-- `hyper::hal` owns reusable capability contracts. `hal::selected` is a thin,
-  one-way binary adapter: it may depend on `arch`, but never on `kernel`, and
+- `hyper::hal` owns reusable capability contracts. `hyper-hal` supplies the thin,
+  one-way machine adapter: it may use its private `arch`, but never `kernel`, and
   must not acquire policy ownership or create an alternate entry path.
 - `drivers` owns discoverable physical devices and firmware protocols. Virtual
   devices are VM services or reusable VM models, not physical drivers.
@@ -61,9 +72,9 @@ Architecture-defined data layouts may remain portable and host-testable. The
 operation which applies such a layout to hardware belongs to the selected
 backend.
 
-## Selected binary HAL
+## Selected HAL crate
 
-The selected binary HAL exposes eleven enforced capability modules:
+The selected HAL crate exposes eleven capability modules:
 
 - `hal::context` owns schedulable register images, context switching, and the
   final stack-reset transition; task lifecycle and stack mapping remain kernel
@@ -106,7 +117,7 @@ the feature before accessing VHE-specific registers. An unsupported CPU stops
 in the pre-MMU `aarch64_unsupported_vhe` loop, observable through a debugger;
 this early path does not assume a platform UART is available.
 
-The checked [AArch64 address layout](../src/arch/aarch64/address_layout.rs)
+The checked [AArch64 address layout](../hal/src/arch/aarch64/address_layout.rs)
 defines permanent host windows for each supported `CONFIG_ARM64_VA_BITS`
 value from 42 through 48. Representative bases are:
 
@@ -135,11 +146,11 @@ authority and platform contracts; the HAL realizes register plans and supplies
 host virtualization mechanisms. Kernel tests use minimal dormant VM fixtures
 without embedding a Linux loader.
 
-Only files below `src/hal/selected` may call the topical `crate::arch`
-facades. Conversely, no selected-HAL file may call `crate::kernel`. The rule
-also rejects grouped imports, relative paths, and crate-root aliases rather
-than checking only familiar symbol names. `tests/ci/check-arch-facades.sh`
-enforces both directions for production code and kernel self-tests.
+Only the HAL crate can access its private architecture backend. Adding a
+kernel-policy dependency to that crate would create a Cargo dependency cycle;
+upward runtime transitions instead use explicitly registered services. Boundary
+checks should protect the package dependency direction and private exports,
+not require particular local variable names or call spellings.
 
 Allocation-free FDT discovery currently keeps its bounded collector scratch on
 the active boot stack. Linker bootstrap stacks and post-translation CPU0 boot
@@ -741,17 +752,19 @@ ownership after the scheduler boundary.
 
 ## Bootstrap boundary
 
-The only direct `src/arch -> crate::kernel` references are the three selected
-architecture bootstrap adapters which construct typed protocol inputs and
-transfer permanently into kernel boot. Ordinary exception, interrupt, VM-exit,
-failure, and virtualization mechanisms use immutable registered services or
-the selected HAL and have no kernel-policy dependency.
+Architecture assembly transfers the three machine-word boot arguments to the
+kernel-owned `hyper_bootstrap` entry. That entry calls
+`hal::platform::prepare_boot`, which performs architecture preparation and
+returns typed `ProtocolInputs`; kernel code then applies boot policy. Secondary
+CPU entry likewise transfers through an explicit kernel callback. The assembly
+linkage is an explicit executable entry contract, not a Rust dependency on
+kernel internals.
 
-The architecture-boundary CI check records the bootstrap references by source
-file and exact contract path, rejecting any new, substituted, or increased
-dependency. Architecture code also may not conceal logging or policy calls
-behind macros, aliases, or indirect imports. This lexical enforcement is
-reinforced by facade privacy and review of every upward entry contract.
+Ordinary exception, interrupt, VM-exit, failure, and virtualization mechanisms
+use immutable registered services. Raw frames and register manipulation remain
+inside the HAL crate. The binary owns final linking and boot policy; shared
+Kconfig parsing in `build_support/config.rs` keeps configuration definitions
+consistent across the binary, core, and HAL builds.
 
 ### Unrecoverable invariant failures
 

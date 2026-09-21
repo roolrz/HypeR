@@ -98,9 +98,9 @@ reject_commented_contract() {
     fi
 }
 
-tlb=src/arch/x86_64/tlb.rs
+tlb=hal/src/arch/x86_64/tlb.rs
 rpc=src/kernel/irq/cross_call.rs
-controller=src/arch/x86_64/interrupt_controller.rs
+controller=hal/src/arch/x86_64/interrupt_controller.rs
 publication=src/sync/publication.rs
 
 require 'if previous == u64::MAX \{[^}]*hyper::debug::invariant_failure\(' "$tlb" \
@@ -218,28 +218,28 @@ require 'poison\("kernel RPC route rejected"\)' "$rpc" \
 require 'poison\("kernel RPC acknowledgement timed out"\)' "$rpc" \
     'ambiguous Kernel RPC timeout must poison the transport'
 
-for source in src/arch/aarch64/smp.rs src/arch/riscv64/smp.rs src/arch/x86_64/smp.rs; do
+for source in hal/src/arch/aarch64/smp.rs hal/src/arch/riscv64/smp.rs hal/src/arch/x86_64/smp.rs; do
     require 'fetch_or\(reasons, Ordering::Release\)' "$source" \
         "$source must release-publish Kernel RPC reasons"
     require 'swap\(0, Ordering::Acquire\)' "$source" \
         "$source must acquire and atomically drain Kernel RPC reasons"
 done
 
-require_order src/arch/x86_64/exception.rs 'end_local_interrupt\(\)' \
+require_order hal/src/arch/x86_64/exception.rs 'end_local_interrupt\(\)' \
     'service_kernel_rpc_interrupt\(' 'IDT must EOI Kernel RPC before policy entry'
 require 'service_kernel_rpc_interrupt\([[:space:]]*hyper::hal::interrupt::InterruptOrigin::Host' \
-    src/arch/x86_64/exception.rs 'IDT Kernel RPC must retain typed host origin'
-require_order src/arch/x86_64/vmx.rs 'end_local_interrupt\(\)' \
+    hal/src/arch/x86_64/exception.rs 'IDT Kernel RPC must retain typed host origin'
+require_order hal/src/arch/x86_64/vmx.rs 'end_local_interrupt\(\)' \
     'service_kernel_rpc_interrupt\(' 'VMX must EOI Kernel RPC before policy entry'
 require 'service_kernel_rpc_interrupt\([[:space:]]*hyper::hal::interrupt::InterruptOrigin::Guest' \
-    src/arch/x86_64/vmx.rs 'VMX Kernel RPC must retain typed guest origin'
+    hal/src/arch/x86_64/vmx.rs 'VMX Kernel RPC must retain typed guest origin'
 require 'fn wait_for_lock_owner\(\) \{[^}]*crate::arch::irq::service_kernel_rpc\(\);' \
-    src/arch/x86_64/interrupts.rs 'masked lock waits must drain Kernel RPC'
+    hal/src/arch/x86_64/interrupts.rs 'masked lock waits must drain Kernel RPC'
 require 'static KERNEL_RPC_SERVICES: PublishedOnce<KernelRpcServices> = PublishedOnce::new\(\);' \
-    src/arch/irq.rs 'Kernel RPC services installation must use one-shot publication'
-require 'KERNEL_RPC_SERVICES[[:space:]]*\.publish\(KernelRpcServices \{ poll, interrupt \}\)' src/arch/irq.rs \
+    hal/src/arch/irq.rs 'Kernel RPC services installation must use one-shot publication'
+require 'KERNEL_RPC_SERVICES[[:space:]]*\.publish\(KernelRpcServices \{ poll, interrupt \}\)' hal/src/arch/irq.rs \
     'Kernel RPC callbacks must be published together through the one-shot cell'
-require 'KERNEL_RPC_SERVICES\.get\(\)\.copied\(\)' src/arch/irq.rs \
+require 'KERNEL_RPC_SERVICES\.get\(\)\.copied\(\)' hal/src/arch/irq.rs \
     'Kernel RPC callback entry must acquire the published services'
 require 'compare_exchange\(EMPTY, INSTALLING, Ordering::Relaxed, Ordering::Relaxed\)' \
     "$publication" 'one-shot publication must claim exactly one initializer'
@@ -258,9 +258,9 @@ require 'BOOT_STATE\.get\(\)' src/kernel/boot/state.rs \
 require_order src/kernel/irq/mod.rs 'install_kernel_rpc_services\(' \
     'initialize_local_rpc_transport\(\)' \
     'the opaque Kernel RPC dispatcher must be installed before its doorbell is armed'
-require 'KERNEL_RPC_VECTOR != TIMER_VECTOR' src/arch/x86_64/platform.rs \
+require 'KERNEL_RPC_VECTOR != TIMER_VECTOR' hal/src/arch/x86_64/platform.rs \
     'Kernel RPC and timer vectors must remain distinct'
-require 'KERNEL_RPC_VECTOR != RESCHEDULE_VECTOR' src/arch/x86_64/platform.rs \
+require 'KERNEL_RPC_VECTOR != RESCHEDULE_VECTOR' hal/src/arch/x86_64/platform.rs \
     'Kernel RPC and reschedule vectors must remain distinct'
 require '"mfence",[[:space:]]*"lfence",[[:space:]]*"wrmsr"' "$controller" \
     'x2APIC Kernel RPC publication must retain MFENCE;LFENCE;WRMSR ordering'
@@ -271,8 +271,8 @@ fi
 reject_commented_contract "$controller" 'pub fn send_fixed_ipi'
 
 require 'slot\.store\(true, Ordering::Release\);[[:space:]]*super::tlb::synchronize_online_cpu\(\);' \
-    src/arch/x86_64/smp.rs 'CPU admission must close the online/shootdown snapshot race'
-require_function src/arch/x86_64/smp.rs 'pub(super) fn for_each_online_remote_cpu' \
+    hal/src/arch/x86_64/smp.rs 'CPU admission must close the online/shootdown snapshot race'
+require_function hal/src/arch/x86_64/smp.rs 'pub(super) fn for_each_online_remote_cpu' \
     'ONLINE\[index\]\.load\(Ordering::Acquire\)' \
     'shootdown snapshots must acquire CPU-online publication'
 require 'with_relax\(operation, M::wait_for_lock_owner\)' src/sync/lock/interrupt.rs \
@@ -286,7 +286,7 @@ fi
 require 'static STACK_SLOTS: StackLock<StackSlots>' src/kernel/mm/stack.rs \
     'STACK_SLOTS must serialize slot ownership and stage-1 mutation'
 
-flushes=$(LC_ALL=C rg -c 'super::tlb::flush_all_online\(\);' src/arch/x86_64/memory.rs)
+flushes=$(LC_ALL=C rg -c 'super::tlb::flush_all_online\(\);' hal/src/arch/x86_64/memory.rs)
 if [ "$flushes" -ne 3 ]; then
     echo "every x86 live stage-1 update must shoot down all online CPUs (found $flushes, expected 3)" >&2
     exit 1

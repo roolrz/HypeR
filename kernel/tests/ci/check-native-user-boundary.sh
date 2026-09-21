@@ -13,7 +13,7 @@ adapter=src/kernel/mm/user_space/kernel_adapter.rs
 module=src/kernel/mm/user_space/mod.rs
 entry=src/kernel/entry/user.rs
 owner=src/kernel/process/owner.rs
-hal=src/hal/selected/user.rs
+hal=hal/src/hal/user.rs
 
 reject() {
     files=$1
@@ -60,7 +60,7 @@ reject "$machine" 'enum[[:space:]]+(ReservedMachineIdentifier|MachineIdentifier)
     'kernel must not reconstruct a removed translation-regime discriminant'
 require "$entry" 'failure\.abandon_with\(' \
     'fatal completion abandonment must be structurally diverging'
-reject "$hal" 'pub\(crate\)[[:space:]]+fn[[:space:]]+abandon\(' \
+reject "$hal" 'pub(\(crate\))?[[:space:]]+fn[[:space:]]+abandon\(' \
     'HAL must not expose a normally returning completion-abandon operation'
 require "$owner" 'requested[[:space:]]*==[[:space:]]*crate::hal::user::host_machine\(\)' \
     'host-machine admission must compare typed values'
@@ -74,7 +74,7 @@ if [ -z "$plan_line" ] || [ -z "$allocation_line" ] || [ "$plan_line" -ge "$allo
     exit 1
 fi
 
-abandon_body=$(sed -n '/pub(crate) fn abandon_with/,/^    }/p' "$hal")
+abandon_body=$(sed -n '/fn abandon_with/,/^    }/p' "$hal")
 printf '%s\n' "$abandon_body" | grep -Eq 'core::mem::forget\(completion\)' || {
     echo 'terminal completion handling must retain the armed return owner' >&2
     exit 1
@@ -91,5 +91,5 @@ if [ -z "$forget_line" ] || [ -z "$stop_line" ] || [ "$forget_line" -ge "$stop_l
 fi
 
 # Syndrome registers have reserved bits and cannot retain a full-width HCR.
-reject src/arch/aarch64/context.S '^[[:space:]]*msr[[:space:]]+esr_el2,' \
+reject hal/src/arch/aarch64/context.S '^[[:space:]]*msr[[:space:]]+esr_el2,' \
     'AArch64 entry must not use ESR_EL2 as a full-width scratch register'

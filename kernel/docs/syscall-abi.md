@@ -102,8 +102,8 @@ src/kernel/capability/      object header, rights, handles, transactions
 src/kernel/ipc/             channels, events, wait sets, backend sessions
 src/kernel/mm/user_space/   VMO, VMAR, mappings, safe user-copy ownership
 
-src/hal/selected/user.rs    selected user-world machine capability
-src/arch/*/user.rs          private frames, roots, registers, entry and return
+hal/src/hal/user.rs         selected user-world machine capability
+hal/src/arch/*/user.rs       private frames, roots, registers, entry and return
 ```
 
 Dependencies flow downward. `kernel::abi` contains fixed-width values and

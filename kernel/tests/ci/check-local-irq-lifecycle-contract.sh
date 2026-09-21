@@ -23,7 +23,7 @@ sed -n '/^fn synchronize_local_lifecycle(/,/^}/p' "$interrupt" >"$fixture/synchr
 sed -n '/^fn install(/,/^}/p' src/kernel/device/serial.rs >"$fixture/serial-install.rs"
 sed -n '/^pub(crate) fn initialize(/,/^}/p' src/kernel/vm/mod.rs >"$fixture/vm-initialize.rs"
 sed -n '/^pub fn wait_for_interrupt_masked(/,/^}/p' \
-    src/arch/riscv64/mod.rs >"$fixture/riscv-masked-wait.rs"
+    hal/src/arch/riscv64/mod.rs >"$fixture/riscv-masked-wait.rs"
 
 require() {
     pattern=$1
@@ -96,8 +96,8 @@ require 'LocalLifecycleOperation::Disable => crate::kernel::crash::fatal' \
 require 'crate::kernel::cpu::frozen_topology\(\)\.ok_or' "$fixture/synchronize.rs" \
     'late lifecycle transactions must snapshot FrozenTopology'
 
-for source in src/arch/aarch64/interrupts.rs src/arch/riscv64/interrupts.rs \
-    src/arch/x86_64/interrupts.rs; do
+for source in hal/src/arch/aarch64/interrupts.rs hal/src/arch/riscv64/interrupts.rs \
+    hal/src/arch/x86_64/interrupts.rs; do
     require 'fn wait_for_lock_owner\(\) \{[^}]*crate::arch::irq::service_kernel_rpc\(\);' \
         "$source" "$source must poll Kernel RPC while IRQ-masked lock contention blocks delivery"
 done
@@ -113,8 +113,8 @@ fi
 require_order "$interrupt" 'arm_kernel_rpc_source\(\)' 'kernel_rpc_interrupt\(\)' \
     'each CPU must arm its architecture Kernel RPC source before inspecting its registry ID'
 require 'pub fn arm_kernel_rpc_source\(\) \{[[:space:]]*interrupts::enable_software_interrupt_source\(\);' \
-    src/arch/riscv64/mod.rs 'the RISC-V boot hart must arm SSIE through the generic transport hook'
-require 'mask = in\(reg\) registers::SIE_SSIE as usize' src/arch/riscv64/interrupts.rs \
+    hal/src/arch/riscv64/mod.rs 'the RISC-V boot hart must arm SSIE through the generic transport hook'
+require 'mask = in\(reg\) registers::SIE_SSIE as usize' hal/src/arch/riscv64/interrupts.rs \
     'the RISC-V Kernel RPC hook must enable the supervisor software source'
 require 'asm!\("wfi", options\(nostack\)\)' "$fixture/riscv-masked-wait.rs" \
     'the RISC-V masked idle wait must use WFI while SSTATUS.SIE remains clear'
@@ -122,7 +122,7 @@ if LC_ALL=C rg -q 'csrsi[[:space:]]+sstatus' "$fixture/riscv-masked-wait.rs"; th
     echo 'the RISC-V masked idle wait must not open an interrupt window before WFI' >&2
     exit 1
 fi
-affinity_checks=$(LC_ALL=C rg -c 'affinity & 0xff >= 16' src/arch/aarch64/smp.rs)
+affinity_checks=$(LC_ALL=C rg -c 'affinity & 0xff >= 16' hal/src/arch/aarch64/smp.rs)
 if [ "$affinity_checks" -ne 2 ]; then
     echo "boot and secondary AArch64 CPUs must reject unreachable SGI affinities" >&2
     exit 1
@@ -139,7 +139,7 @@ require_order "$fixture/vm-initialize.rs" 'timer::prepare' 'initialize_devices' 
 require_order "$fixture/vm-initialize.rs" 'commit_interrupts' 'binding\.activate\(\)' \
     'VM IRQ mappings must activate only after interrupt virtualization is committed'
 
-registers=src/arch/aarch64/registers.rs
+registers=hal/src/arch/aarch64/registers.rs
 require 'GIC_KERNEL_RPC_SGI = 8;' "$registers" \
     'AArch64 Kernel RPC must use the first project-reserved non-secure SGI'
 require 'GIC_RESCHEDULE_SGI = 9;' "$registers" \

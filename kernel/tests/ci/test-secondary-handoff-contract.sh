@@ -9,7 +9,7 @@ root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/hyper-secondary-handoff-test.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
-mkdir -p "$fixture/src/kernel/cpu" "$fixture/src/hal/selected"
+mkdir -p "$fixture/src/kernel/cpu" "$fixture/hal/src/hal"
 mkdir -p "$fixture/src/kernel/task/scheduler"
 
 check() {
@@ -78,7 +78,7 @@ write_valid_fixture() {
         '}' \
         'fn valid_page_subdivision(line_size: usize, page_size: usize) -> bool {' \
         '    page_ownership_supports_line(line_size, page_size)' \
-        '}' >"$fixture/src/hal/selected/cache.rs"
+        '}' >"$fixture/hal/src/hal/cache.rs"
 }
 
 mutate() {
@@ -145,10 +145,10 @@ mutate 'the all-online path must reclaim retained handoffs' \
     src/kernel/cpu/smp.rs \
     's/boot_parameters.release()/boot_parameters.retain()/'
 mutate 'data and instruction line sizes must both be validated' \
-    src/hal/selected/cache.rs \
+    hal/src/hal/cache.rs \
     's/!valid_page_subdivision(instruction_line_size())/false/'
 mutate 'selected cache admission must use the neutral ownership proof' \
-    src/hal/selected/cache.rs \
+    hal/src/hal/cache.rs \
     's/page_ownership_supports_line/locally_assume_line/'
 
 write_valid_fixture

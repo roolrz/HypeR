@@ -8,19 +8,19 @@ set -eu
 root=${HYPER_RISCV_GUEST_FRAME_ROOT:-$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)}
 cd "$root"
 
-guest=src/arch/riscv64/guest.S
-trap=src/arch/riscv64/trap.S
-registers=src/arch/riscv64/registers.rs
-exception=src/arch/riscv64/exception.rs
-context=src/arch/riscv64/context.rs
-guest_rust=src/arch/riscv64/guest.rs
-platform=src/arch/riscv64/platform.rs
-isa=src/arch/riscv64/isa.rs
-arch_module=src/arch/riscv64/mod.rs
+guest=hal/src/arch/riscv64/guest.S
+trap=hal/src/arch/riscv64/trap.S
+registers=hal/src/arch/riscv64/registers.rs
+exception=hal/src/arch/riscv64/exception.rs
+context=hal/src/arch/riscv64/context.rs
+guest_rust=hal/src/arch/riscv64/guest.rs
+platform=hal/src/arch/riscv64/platform.rs
+isa=hal/src/arch/riscv64/isa.rs
+arch_module=hal/src/arch/riscv64/mod.rs
 boot=src/kernel/boot/mod.rs
 main=src/main.rs
-vm_vcpu=src/arch/riscv64/vm_vcpu.rs
-selected_exception=src/hal/selected/exception.rs
+vm_vcpu=hal/src/arch/riscv64/vm_vcpu.rs
+selected_exception=hal/src/hal/exception.rs
 kernel_irq=src/kernel/entry/irq.rs
 qemu_verify=tests/qemu/verify-riscv64.sh
 
@@ -152,8 +152,8 @@ rg -q 'sd[[:space:]]+t1,[[:space:]]+VCPU_HVIP_OFFSET\(a0\)' "$trap_body" &&
     rg -q 'csrc[[:space:]]+hvip,[[:space:]]+t2' "$trap_body" &&
     rg -q 'sd[[:space:]]+t1,[[:space:]]+VCPU_VSTIMECMP_OFFSET\(a0\)' "$trap_body" &&
     rg -q 'csrw[[:space:]]+0x24d,[[:space:]]+t1' "$trap_body" &&
-    rg -q 'pub hvip: u64' "$context" &&
-    ! rg -q 'pub vsip: u64' "$context" || {
+    rg -q '[[:space:]]hvip: u64' "$context" &&
+    ! rg -q '[[:space:]]vsip: u64' "$context" || {
     echo 'guest pending-interrupt and timer state must be owned and quiesced explicitly' >&2
     exit 1
 }

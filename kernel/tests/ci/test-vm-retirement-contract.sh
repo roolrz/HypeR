@@ -15,8 +15,8 @@ copy_sources() {
         "$fixture/src/kernel/vm/registry" \
         "$fixture/src/kernel/vm/memory" \
         "$fixture/src/kernel/entry" "$fixture/src/kernel/irq" \
-        "$fixture/src/hal/selected" "$fixture/src/hal" \
-        "$fixture/src/arch/aarch64"
+        "$fixture/hal/src/hal" "$fixture/src/hal" \
+        "$fixture/hal/src/arch/aarch64"
     cp "$root/src/kernel/vm/registry.rs" "$fixture/src/kernel/vm/registry.rs"
     cp "$root/src/kernel/vm/registry/construction.rs" \
         "$fixture/src/kernel/vm/registry/construction.rs"
@@ -34,9 +34,9 @@ copy_sources() {
     cp "$root/src/kernel/vm/memory/retirement.rs" \
         "$fixture/src/kernel/vm/memory/retirement.rs"
     cp "$root/src/kernel/irq/cross_call.rs" "$fixture/src/kernel/irq/cross_call.rs"
-    cp "$root/src/hal/selected/vm.rs" "$fixture/src/hal/selected/vm.rs"
+    cp "$root/hal/src/hal/vm.rs" "$fixture/hal/src/hal/vm.rs"
     cp "$root/src/hal/interrupt.rs" "$fixture/src/hal/interrupt.rs"
-    cp "$root/src/arch/aarch64/stage2.rs" "$fixture/src/arch/aarch64/stage2.rs"
+    cp "$root/hal/src/arch/aarch64/stage2.rs" "$fixture/hal/src/arch/aarch64/stage2.rs"
 }
 
 check() {
@@ -97,7 +97,7 @@ mutate 'guest stage-2 retirement needs a distinct RPC reason' \
     src/kernel/irq/cross_call.rs 'KernelRpcReasons::GUEST_STAGE2' \
     'KernelRpcReasons::USER_ADDRESS_SPACE'
 mutate 'retirement asm outputs must not overlap live inputs' \
-    src/arch/aarch64/stage2.rs 'saved_hcr = out(reg) _' 'saved_hcr = lateout(reg) _'
+    hal/src/arch/aarch64/stage2.rs 'saved_hcr = out(reg) _' 'saved_hcr = lateout(reg) _'
 
 mutate 'device closure must not precede administrative stop intent' src/kernel/vm/registry/control.rs \
     'let lease = REGISTRY.with' 'let _ = machine.quiesce_devices(); let lease = REGISTRY.with'

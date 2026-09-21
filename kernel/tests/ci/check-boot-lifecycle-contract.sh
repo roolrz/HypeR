@@ -38,6 +38,15 @@ require_order() {
     fi
 }
 
+# Architecture preparation returns typed facts; the kernel owns policy setup.
+require 'unsafe extern "C" fn hyper_bootstrap' src/main.rs \
+    'assembly boot handoff must enter the explicit kernel bootstrap adapter'
+require 'hal::platform::prepare_boot\(raw0, raw1, ticks\)' src/main.rs \
+    'kernel bootstrap must obtain typed platform inputs through HAL'
+require_order src/main.rs 'let inputs = unsafe \{ hal::platform::prepare_boot' \
+    'kernel::boot::prepare_boot_environment\(inputs\)' \
+    'HAL preparation must precede kernel boot policy'
+
 previous=0
 for call in \
     'crate::kernel::crash::early_initialize' \
