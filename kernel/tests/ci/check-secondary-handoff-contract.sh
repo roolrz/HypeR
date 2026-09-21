@@ -10,7 +10,7 @@ cd "$root"
 
 source=src/kernel/cpu/smp.rs
 scheduler_source=src/kernel/task/scheduler/mod.rs
-cache_source=src/hal/selected/cache.rs
+cache_source=hal/src/hal/cache.rs
 fixture=$(mktemp -d "${TMPDIR:-/tmp}/hyper-secondary-handoff-check.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 

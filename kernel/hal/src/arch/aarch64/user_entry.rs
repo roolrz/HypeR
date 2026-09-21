@@ -1,0 +1,700 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
+//! Native EL0 exception return and architecture-private unwind ownership.
+//!
+//! A raw vector frame never crosses this module. Never-blocking Native calls
+//! pass owned values to a borrowed service and return through the vector.
+//! Faults, preemption, and deferred calls copy into a generation-qualified
+//! pinned context before assembly resumes the ordinary kernel continuation.
+
+use core::arch::asm;
+use core::mem::{offset_of, size_of};
+use core::ptr::NonNull;
+
+use hyper::abi::native::{NativeInvocation, NativeResult};
+use hyper::hal::user::{
+    NativeCallAction, NativeCallService, UserFault, UserFaultKind, UserRunBinding,
+};
+#[cfg(feature = "kernel-self-test")]
+use hyper::sync::atomic::AtomicUsize;
+use hyper::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
+
+use super::exception::ExceptionFrame;
+use super::user_contract::{LowerElReturnRegime, UserMachineContractError};
+use super::{registers, user};
+
+const MAX_CPUS: usize = hyper::config::MAX_CPUS as usize;
+
+#[repr(C, align(16))]
+struct MachineContext {
+    general: [u64; 31],
+    program_counter: u64,
+    processor_state: u64,
+    stack_pointer: u64,
+    simd: [[u64; 2]; 32],
+    fpcr: u64,
+    fpsr: u64,
+    tpidr_el0: u64,
+    tpidrro_el0: u64,
+    thread: u64,
+    image_generation: u64,
+    run_generation: u64,
+    state: u64,
+    exit_kind: u64,
+    syndrome: u64,
+    fault_address: u64,
+    entry_hcr: u64,
+}
+
+const _: () = {
+    assert!(offset_of!(MachineContext, general) == registers::USER_CONTEXT_X0_OFFSET as usize);
+    assert!(
+        offset_of!(MachineContext, program_counter) == registers::USER_CONTEXT_PC_OFFSET as usize
+    );
+    assert!(
+        offset_of!(MachineContext, processor_state)
+            == registers::USER_CONTEXT_PSTATE_OFFSET as usize
+    );
+    assert!(
+        offset_of!(MachineContext, stack_pointer) == registers::USER_CONTEXT_SP_OFFSET as usize
+    );
+    assert!(offset_of!(MachineContext, simd) == registers::USER_CONTEXT_SIMD_OFFSET as usize);
+    assert!(offset_of!(MachineContext, fpcr) == registers::USER_CONTEXT_FPCR_OFFSET as usize);
+    assert!(offset_of!(MachineContext, fpsr) == registers::USER_CONTEXT_FPSR_OFFSET as usize);
+    assert!(
+        offset_of!(MachineContext, tpidr_el0) == registers::USER_CONTEXT_TPIDR_EL0_OFFSET as usize
+    );
+    assert!(
+        offset_of!(MachineContext, tpidrro_el0)
+            == registers::USER_CONTEXT_TPIDRRO_EL0_OFFSET as usize
+    );
+    assert!(offset_of!(MachineContext, thread) == registers::USER_CONTEXT_THREAD_OFFSET as usize);
+    assert!(
+        offset_of!(MachineContext, image_generation)
+            == registers::USER_CONTEXT_IMAGE_GENERATION_OFFSET as usize
+    );
+    assert!(
+        offset_of!(MachineContext, run_generation)
+            == registers::USER_CONTEXT_RUN_GENERATION_OFFSET as usize
+    );
+    assert!(offset_of!(MachineContext, state) == registers::USER_CONTEXT_STATE_OFFSET as usize);
+    assert!(
+        offset_of!(MachineContext, exit_kind) == registers::USER_CONTEXT_EXIT_KIND_OFFSET as usize
+    );
+    assert!(
+        offset_of!(MachineContext, syndrome) == registers::USER_CONTEXT_SYNDROME_OFFSET as usize
+    );
+    assert!(
+        offset_of!(MachineContext, fault_address)
+            == registers::USER_CONTEXT_FAULT_ADDRESS_OFFSET as usize
+    );
+    assert!(
+        offset_of!(MachineContext, entry_hcr) == registers::USER_CONTEXT_ENTRY_HCR_OFFSET as usize
+    );
+    assert!(size_of::<MachineContext>() == registers::USER_CONTEXT_SIZE as usize);
+};
+
+/// Pinned architecture register owner attached to one scheduler `UserThread`.
+pub(crate) struct UserContext {
+    machine: MachineContext,
+}
+
+impl UserContext {
+    pub(crate) fn set_entry_argument(&mut self, argument: u64) {
+        self.machine.general[0] = argument;
+    }
+
+    pub(crate) fn try_new(
+        entry: u64,
+        stack: u64,
+        tls: u64,
+        address_limit: u64,
+    ) -> Result<Self, Error> {
+        if entry == 0
+            || entry >= address_limit
+            || !entry.is_multiple_of(registers::AARCH64_INSTRUCTION_SIZE)
+            || stack == 0
+            || stack >= address_limit
+            || !stack.is_multiple_of(16)
+            || tls >= address_limit
+        {
+            return Err(Error::InvalidInitialContext);
+        }
+        user::execution_capabilities()?;
+        Ok(Self {
+            machine: MachineContext {
+                general: [0; 31],
+                program_counter: entry,
+                // Native userspace currently owns normal IRQ delivery only.
+                // Keep debug, SError, and FIQ masked until those classes have
+                // explicit context ownership and contained return paths.
+                processor_state: native_processor_state(),
+                stack_pointer: stack,
+                simd: [[0; 2]; 32],
+                fpcr: 0,
+                fpsr: 0,
+                tpidr_el0: tls,
+                tpidrro_el0: 0,
+                thread: 0,
+                image_generation: 0,
+                run_generation: 0,
+                state: registers::USER_CONTEXT_STATE_READY,
+                exit_kind: registers::USER_CONTEXT_EXIT_NONE,
+                syndrome: 0,
+                fault_address: 0,
+                entry_hcr: 0,
+            },
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Error {
+    AlreadyRunning,
+    CompletionBindingMismatch,
+    InvalidInitialContext,
+    InvalidMachineState,
+    InvalidProcessor,
+    LowerWorldUnavailable,
+    RunGenerationNotIncreasing,
+    Unsupported(UserMachineContractError),
+}
+
+impl From<UserMachineContractError> for Error {
+    fn from(error: UserMachineContractError) -> Self {
+        Self::Unsupported(error)
+    }
+}
+
+struct RunPublication {
+    /// A nonzero generation publishes the preceding context and service.
+    generation: AtomicU64,
+    context: AtomicPtr<MachineContext>,
+    service: AtomicPtr<NativeCallService<'static>>,
+}
+
+impl RunPublication {
+    const fn new() -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            context: AtomicPtr::new(core::ptr::null_mut()),
+            service: AtomicPtr::new(core::ptr::null_mut()),
+        }
+    }
+}
+
+static ACTIVE_RUNS: [RunPublication; MAX_CPUS] = [const { RunPublication::new() }; MAX_CPUS];
+#[cfg(feature = "kernel-self-test")]
+static DIRECT_NATIVE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+unsafe extern "C" {
+    fn aarch64_run_native_user(context: *mut MachineContext);
+    fn aarch64_unwind_native_user();
+}
+
+/// Runs one admitted user generation until an exit requires ordinary kernel state.
+///
+/// Direct Native calls return to EL0 from their exception vector. This call
+/// returns only through a vector-owned assembly unwind for a deferred call,
+/// interruption, fault, or termination request.
+/// The caller must keep its native address space active and execution pinned
+/// until this function returns, then deactivate it before inspecting the exit.
+/// # Safety
+///
+/// The caller must keep `context` pinned and uniquely owned while the native
+/// address space and the current-CPU execution pin remain active. No scheduler
+/// transition may occur until this call returns and that address space is
+/// deactivated.
+pub(crate) unsafe fn run_user<'context>(
+    context: &'context mut UserContext,
+    binding: UserRunBinding,
+    service: &NativeCallService<'_>,
+) -> Result<UserExit<'context>, Error> {
+    if !super::lower_el::native_world_available() {
+        return Err(Error::LowerWorldUnavailable);
+    }
+    prepare_run(context, binding)?;
+    let cpu = super::current_cpu_index();
+    let Some(publication) = ACTIVE_RUNS.get(cpu) else {
+        context.machine.state = registers::USER_CONTEXT_STATE_READY;
+        return Err(Error::InvalidProcessor);
+    };
+    let context_pointer = core::ptr::from_mut(&mut context.machine);
+    if publication.generation.load(Ordering::Acquire) != 0
+        || publication
+            .context
+            .compare_exchange(
+                core::ptr::null_mut(),
+                context_pointer,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_err()
+    {
+        context.machine.state = registers::USER_CONTEXT_STATE_READY;
+        return Err(Error::AlreadyRunning);
+    }
+    let service_address = core::ptr::from_ref(service)
+        .cast::<NativeCallService<'static>>()
+        .cast_mut();
+    if publication
+        .service
+        .compare_exchange(
+            core::ptr::null_mut(),
+            service_address,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        publication
+            .context
+            .store(core::ptr::null_mut(), Ordering::Relaxed);
+        context.machine.state = registers::USER_CONTEXT_STATE_READY;
+        return Err(Error::AlreadyRunning);
+    }
+    if publication
+        .generation
+        .swap(binding.run_generation(), Ordering::Release)
+        != 0
+    {
+        // Same-CPU pinning excludes a competing publisher. Observing a
+        // generation here means the mailbox invariants are already corrupt;
+        // clearing either owner's pointer would make that corruption unsafe.
+        fail_stop();
+    }
+
+    // SAFETY: The context is exclusively borrowed and pinned by the caller's
+    // active address-space/run guard. Publication is complete, and assembly
+    // returns only after exception entry has copied state and closed it.
+    unsafe { aarch64_run_native_user(&mut context.machine) };
+
+    if publication.generation.load(Ordering::Acquire) != 0
+        || !publication.context.load(Ordering::Relaxed).is_null()
+        || !publication.service.load(Ordering::Relaxed).is_null()
+        || context.machine.state != registers::USER_CONTEXT_STATE_STOPPED
+    {
+        fail_stop();
+    }
+    stopped_exit(context)
+}
+
+fn prepare_run(context: &mut UserContext, binding: UserRunBinding) -> Result<(), Error> {
+    if context.machine.state != registers::USER_CONTEXT_STATE_READY {
+        return Err(Error::InvalidMachineState);
+    }
+    if binding.run_generation() <= context.machine.run_generation {
+        return Err(Error::RunGenerationNotIncreasing);
+    }
+    let current_hcr = read_hcr_el2();
+    let entry_hcr = LowerElReturnRegime::Native.transition_hcr(current_hcr)?;
+    context.machine.thread = binding.thread();
+    context.machine.image_generation = binding.image_generation();
+    context.machine.run_generation = binding.run_generation();
+    context.machine.exit_kind = registers::USER_CONTEXT_EXIT_NONE;
+    context.machine.syndrome = 0;
+    context.machine.fault_address = 0;
+    context.machine.entry_hcr = entry_hcr;
+    context.machine.processor_state &= registers::SPSR_NZCV_MASK;
+    context.machine.processor_state |= native_processor_state();
+    context.machine.state = registers::USER_CONTEXT_STATE_RUNNING;
+    Ok(())
+}
+
+const fn native_processor_state() -> u64 {
+    // The EL2&0 root contains EL0 and privileged mappings. PAN protects the
+    // kernel even on exception paths which retain the process translation.
+    registers::SPSR_EL0T
+        | registers::SPSR_D
+        | registers::SPSR_A
+        | registers::SPSR_F
+        | registers::SPSR_PAN
+}
+
+fn stopped_exit(context: &mut UserContext) -> Result<UserExit<'_>, Error> {
+    let binding = current_binding(&context.machine)?;
+    let payload = match context.machine.exit_kind {
+        registers::USER_CONTEXT_EXIT_NATIVE_SYSCALL => {
+            let call_site = context
+                .machine
+                .program_counter
+                .checked_sub(registers::AARCH64_INSTRUCTION_SIZE)
+                .ok_or(Error::InvalidMachineState)?;
+            ExitPayload::NativeCall(NativeInvocation::new(
+                context.machine.general[8],
+                [
+                    context.machine.general[0],
+                    context.machine.general[1],
+                    context.machine.general[2],
+                    context.machine.general[3],
+                    context.machine.general[4],
+                    context.machine.general[5],
+                ],
+                call_site,
+            ))
+        }
+        registers::USER_CONTEXT_EXIT_FAULT => ExitPayload::Fault(UserFault::new(
+            fault_kind(context.machine.syndrome),
+            context.machine.syndrome,
+            context.machine.fault_address,
+            context.machine.program_counter,
+        )),
+        registers::USER_CONTEXT_EXIT_INTERRUPTED => ExitPayload::Interrupted,
+        _ => return Err(Error::InvalidMachineState),
+    };
+    let completion = ReturnCapability {
+        context: Some(&mut context.machine),
+        binding,
+    };
+    match payload {
+        ExitPayload::NativeCall(invocation) => Ok(UserExit::NativeCall {
+            invocation,
+            completion,
+        }),
+        ExitPayload::Fault(fault) => Ok(UserExit::Fault { fault, completion }),
+        ExitPayload::Interrupted => Ok(UserExit::Interrupted { completion }),
+    }
+}
+
+enum ExitPayload {
+    NativeCall(NativeInvocation),
+    Fault(UserFault),
+    Interrupted,
+}
+
+pub(crate) enum UserExit<'context> {
+    NativeCall {
+        invocation: NativeInvocation,
+        completion: ReturnCapability<'context>,
+    },
+    Fault {
+        fault: UserFault,
+        completion: ReturnCapability<'context>,
+    },
+    Interrupted {
+        completion: ReturnCapability<'context>,
+    },
+}
+
+#[must_use = "native-user return ownership must be resumed or discarded exactly once"]
+pub(crate) struct ReturnCapability<'context> {
+    context: Option<&'context mut MachineContext>,
+    binding: UserRunBinding,
+}
+
+impl<'context> ReturnCapability<'context> {
+    pub(crate) const fn binding(&self) -> UserRunBinding {
+        self.binding
+    }
+
+    pub(crate) fn complete_native(
+        mut self,
+        expected: UserRunBinding,
+        result: NativeResult,
+    ) -> Result<(), CompletionFailure<'context>> {
+        if let Err(error) = self.validate(expected) {
+            return Err(CompletionFailure {
+                error,
+                completion: self,
+            });
+        }
+        let context = self.context_mut();
+        context.general[0] = result.status() as u64;
+        context.general[1] = result.values()[0];
+        context.general[2] = result.values()[1];
+        context.exit_kind = registers::USER_CONTEXT_EXIT_NONE;
+        context.state = registers::USER_CONTEXT_STATE_READY;
+        self.context = None;
+        Ok(())
+    }
+
+    pub(crate) fn resume_execution(
+        mut self,
+        expected: UserRunBinding,
+    ) -> Result<(), CompletionFailure<'context>> {
+        if let Err(error) = self.validate(expected) {
+            return Err(CompletionFailure {
+                error,
+                completion: self,
+            });
+        }
+        let context = self.context_mut();
+        context.exit_kind = registers::USER_CONTEXT_EXIT_NONE;
+        context.state = registers::USER_CONTEXT_STATE_READY;
+        self.context = None;
+        Ok(())
+    }
+
+    pub(crate) fn discard(
+        mut self,
+        expected: UserRunBinding,
+    ) -> Result<(), CompletionFailure<'context>> {
+        if let Err(error) = self.validate(expected) {
+            return Err(CompletionFailure {
+                error,
+                completion: self,
+            });
+        }
+        let context = self.context_mut();
+        context.exit_kind = registers::USER_CONTEXT_EXIT_NONE;
+        context.state = registers::USER_CONTEXT_STATE_TERMINATED;
+        self.context = None;
+        Ok(())
+    }
+
+    fn validate(&self, expected: UserRunBinding) -> Result<(), Error> {
+        let Some(context) = self.context.as_deref() else {
+            return Err(Error::InvalidMachineState);
+        };
+        if self.binding != expected
+            || current_binding(context) != Ok(expected)
+            || context.state != registers::USER_CONTEXT_STATE_STOPPED
+        {
+            return Err(Error::CompletionBindingMismatch);
+        }
+        Ok(())
+    }
+
+    fn context_mut(&mut self) -> &mut MachineContext {
+        let Some(context) = self.context.as_deref_mut() else {
+            fail_stop();
+        };
+        context
+    }
+}
+
+impl Drop for ReturnCapability<'_> {
+    fn drop(&mut self) {
+        if self.context.is_some() {
+            fail_stop();
+        }
+    }
+}
+
+#[must_use = "completion failure retains the exactly-once return capability"]
+pub(crate) struct CompletionFailure<'context> {
+    error: Error,
+    completion: ReturnCapability<'context>,
+}
+
+impl<'context> CompletionFailure<'context> {
+    pub(crate) fn into_parts(self) -> (Error, ReturnCapability<'context>) {
+        (self.error, self.completion)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SynchronousAction {
+    Resume,
+    Unwind,
+}
+
+/// Dispatches a direct Native call or captures an exit requiring kernel state.
+pub(super) fn handle_synchronous(
+    frame: &mut ExceptionFrame,
+    generation: u64,
+) -> Result<SynchronousAction, Error> {
+    let active = active_run(generation)?;
+    let class = (frame.esr >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK;
+    let valid_native_call =
+        class == registers::ESR_EC_SVC64 && frame.esr & registers::ESR_ISS_MASK == 0;
+    if valid_native_call {
+        let invocation = invocation_from_frame(frame)?;
+        // SAFETY: The acquired publication proves this is the pinned run's
+        // live service, and exception entry retains the required local mask.
+        match unsafe { active.service.as_ref().handle(invocation) } {
+            NativeCallAction::Return(result) => {
+                #[cfg(feature = "kernel-self-test")]
+                DIRECT_NATIVE_CALLS.fetch_add(1, Ordering::Relaxed);
+                frame.general[0] = result.status() as u64;
+                frame.general[1] = result.values()[0];
+                frame.general[2] = result.values()[1];
+                return Ok(SynchronousAction::Resume);
+            }
+            NativeCallAction::Unwind => {
+                capture_frame(
+                    active.context,
+                    active.generation,
+                    frame,
+                    registers::USER_CONTEXT_EXIT_NATIVE_SYSCALL,
+                )?;
+                return Ok(SynchronousAction::Unwind);
+            }
+        }
+    }
+    capture_frame(
+        active.context,
+        active.generation,
+        frame,
+        registers::USER_CONTEXT_EXIT_FAULT,
+    )?;
+    Ok(SynchronousAction::Unwind)
+}
+
+/// Copies an interrupted native context before a kernel-selected unwind.
+pub(super) fn capture_interrupt(frame: &ExceptionFrame, generation: u64) -> Result<(), Error> {
+    let active = active_run(generation)?;
+    capture_frame(
+        active.context,
+        active.generation,
+        frame,
+        registers::USER_CONTEXT_EXIT_INTERRUPTED,
+    )?;
+    Ok(())
+}
+
+pub(super) fn active_generation() -> Option<u64> {
+    let cpu = super::current_cpu_index();
+    ACTIVE_RUNS
+        .get(cpu)
+        .map(|publication| publication.generation.load(Ordering::Acquire))
+        .filter(|generation| *generation != 0)
+}
+
+pub(super) const fn unwind_callback() -> unsafe extern "C" fn() {
+    aarch64_unwind_native_user
+}
+
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn direct_native_call_count_for_test() -> usize {
+    DIRECT_NATIVE_CALLS.load(Ordering::Relaxed)
+}
+
+struct ActiveRun {
+    context: NonNull<MachineContext>,
+    generation: u64,
+    service: NonNull<NativeCallService<'static>>,
+}
+
+fn active_run(generation: u64) -> Result<ActiveRun, Error> {
+    if generation == 0 {
+        return Err(Error::InvalidMachineState);
+    }
+    let cpu = super::current_cpu_index();
+    let publication = ACTIVE_RUNS.get(cpu).ok_or(Error::InvalidProcessor)?;
+    let pointer = NonNull::new(publication.context.load(Ordering::Relaxed))
+        .ok_or(Error::InvalidMachineState)?;
+    let service = NonNull::new(publication.service.load(Ordering::Relaxed))
+        .ok_or(Error::InvalidMachineState)?;
+    Ok(ActiveRun {
+        context: pointer,
+        generation,
+        service,
+    })
+}
+
+fn invocation_from_frame(frame: &ExceptionFrame) -> Result<NativeInvocation, Error> {
+    let call_site = frame
+        .elr
+        .checked_sub(registers::AARCH64_INSTRUCTION_SIZE)
+        .ok_or(Error::InvalidMachineState)?;
+    Ok(NativeInvocation::new(
+        frame.general[8],
+        [
+            frame.general[0],
+            frame.general[1],
+            frame.general[2],
+            frame.general[3],
+            frame.general[4],
+            frame.general[5],
+        ],
+        call_site,
+    ))
+}
+
+fn capture_frame(
+    mut pointer: NonNull<MachineContext>,
+    generation: u64,
+    frame: &ExceptionFrame,
+    exit_kind: u64,
+) -> Result<(), Error> {
+    // SAFETY: Lower-EL ownership acquired the generation which publishes this
+    // pointer while the caller holds the context's exclusive pinned borrow.
+    // The native vector is its sole accessor on this masked CPU, and the
+    // publication closes below before the trampoline releases that borrow.
+    let context = unsafe { pointer.as_mut() };
+    if context.state != registers::USER_CONTEXT_STATE_RUNNING
+        || context.run_generation != generation
+    {
+        return Err(Error::InvalidMachineState);
+    }
+    context.general = frame.general;
+    context.program_counter = frame.elr;
+    context.processor_state = frame.spsr;
+    context.stack_pointer = frame.sp_el0;
+    context.simd = frame.simd;
+    context.fpcr = frame.fpcr;
+    context.fpsr = frame.fpsr;
+    // SAFETY: These thread registers are readable at EL2. The native run is
+    // stopped and this context exclusively owns their lower-EL values.
+    unsafe {
+        asm!(
+            "mrs {tpidr_el0}, TPIDR_EL0",
+            "mrs {tpidrro_el0}, TPIDRRO_EL0",
+            tpidr_el0 = out(reg) context.tpidr_el0,
+            tpidrro_el0 = out(reg) context.tpidrro_el0,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+    context.exit_kind = exit_kind;
+    context.syndrome = frame.esr;
+    context.fault_address = frame.far;
+    context.state = registers::USER_CONTEXT_STATE_STOPPED;
+
+    let cpu = super::current_cpu_index();
+    let publication = ACTIVE_RUNS.get(cpu).ok_or(Error::InvalidProcessor)?;
+    publication
+        .context
+        .store(core::ptr::null_mut(), Ordering::Relaxed);
+    publication
+        .service
+        .store(core::ptr::null_mut(), Ordering::Relaxed);
+    publication.generation.store(0, Ordering::Release);
+    Ok(())
+}
+
+fn current_binding(context: &MachineContext) -> Result<UserRunBinding, Error> {
+    UserRunBinding::new(
+        context.thread,
+        context.image_generation,
+        context.run_generation,
+    )
+    .ok_or(Error::InvalidMachineState)
+}
+
+fn fault_kind(syndrome: u64) -> UserFaultKind {
+    if super::user_contract::is_user_write_page_fault(syndrome) {
+        return UserFaultKind::WritePageFault;
+    }
+    let class = (syndrome >> registers::ESR_EC_SHIFT) & registers::ESR_EC_MASK;
+    match class {
+        registers::ESR_EC_INSTRUCTION_ABORT_LOWER => UserFaultKind::InstructionAbort,
+        registers::ESR_EC_DATA_ABORT_LOWER => UserFaultKind::DataAbort,
+        registers::ESR_EC_PC_ALIGNMENT | registers::ESR_EC_SP_ALIGNMENT => UserFaultKind::Alignment,
+        registers::ESR_EC_SYSTEM_REGISTER => UserFaultKind::SystemAccess,
+        registers::ESR_EC_BREAKPOINT_LOWER
+        | registers::ESR_EC_SOFTWARE_STEP_LOWER
+        | registers::ESR_EC_WATCHPOINT_LOWER
+        | registers::ESR_EC_BRK64 => UserFaultKind::Breakpoint,
+        registers::ESR_EC_UNKNOWN => UserFaultKind::IllegalInstruction,
+        _ => UserFaultKind::OtherSynchronous,
+    }
+}
+
+fn read_hcr_el2() -> u64 {
+    let value: u64;
+    // SAFETY: HCR_EL2 is readable at EL2 and has no memory operand.
+    unsafe {
+        asm!(
+            "mrs {value}, HCR_EL2",
+            value = out(reg) value,
+            options(nomem, nostack, preserves_flags)
+        )
+    };
+    value
+}
+
+pub(super) fn fail_stop() -> ! {
+    hyper::debug::invariant_failure("aarch64 Native entry ownership invariant")
+}

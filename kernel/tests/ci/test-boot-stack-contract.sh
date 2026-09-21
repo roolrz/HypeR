@@ -10,28 +10,28 @@ fixture=$(mktemp -d "${TMPDIR:-/tmp}/hyper-boot-stack-test.XXXXXX")
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 
 mkdir -p \
-    "$fixture/src/arch/aarch64/memory" \
-    "$fixture/src/arch/riscv64/memory" \
-    "$fixture/src/arch/x86_64"
+    "$fixture/hal/src/arch/aarch64/memory" \
+    "$fixture/hal/src/arch/riscv64/memory" \
+    "$fixture/hal/src/arch/x86_64"
 
 write_linkers() {
     for linker in \
-        "$fixture/src/arch/aarch64/linker.ld" \
-        "$fixture/src/arch/riscv64/linker.ld" \
-        "$fixture/src/arch/x86_64/linker.ld"; do
+        "$fixture/hal/src/arch/aarch64/linker.ld" \
+        "$fixture/hal/src/arch/riscv64/linker.ld" \
+        "$fixture/hal/src/arch/x86_64/linker.ld"; do
         printf '%s\n' 'BOOT_STACK_SIZE = 256K;' >"$linker"
     done
 }
 
 write_sources() {
     printf '%s\n' 'pub const BOOT_STACK_PAGES: usize = 64;' \
-        >"$fixture/src/arch/aarch64/address_layout.rs"
+        >"$fixture/hal/src/arch/aarch64/address_layout.rs"
     printf '%s\n' 'pub(super) use super::super::address_layout::BOOT_STACK_PAGES as KERNEL_STACK_PAGES;' \
-        >"$fixture/src/arch/aarch64/memory/page_table.rs"
+        >"$fixture/hal/src/arch/aarch64/memory/page_table.rs"
     printf '%s\n' 'const KERNEL_STACK_PAGES: usize = 64;' \
-        >"$fixture/src/arch/riscv64/memory/page_table.rs"
+        >"$fixture/hal/src/arch/riscv64/memory/page_table.rs"
     printf '%s\n' 'const STACK_PAGES: usize = 64;' \
-        >"$fixture/src/arch/x86_64/memory.rs"
+        >"$fixture/hal/src/arch/x86_64/memory.rs"
 }
 
 check() {
@@ -44,7 +44,7 @@ check
 
 printf '%s\n' '// pub const BOOT_STACK_PAGES: usize = 64;' \
     'pub const BOOT_STACK_PAGES: usize = 16;' \
-    >"$fixture/src/arch/aarch64/address_layout.rs"
+    >"$fixture/hal/src/arch/aarch64/address_layout.rs"
 if check >/dev/null 2>&1; then
     echo 'AArch64 canonical boot stack must retain the 256 KiB minimum' >&2
     exit 1
@@ -53,7 +53,7 @@ fi
 write_sources
 printf '%s\n' '// pub(super) use super::super::address_layout::BOOT_STACK_PAGES as KERNEL_STACK_PAGES;' \
     'pub(super) const KERNEL_STACK_PAGES: usize = 64;' \
-    >"$fixture/src/arch/aarch64/memory/page_table.rs"
+    >"$fixture/hal/src/arch/aarch64/memory/page_table.rs"
 if check >/dev/null 2>&1; then
     echo 'AArch64 must not fork the canonical boot stack definition' >&2
     exit 1
@@ -62,7 +62,7 @@ fi
 write_sources
 printf '%s\n' '// const KERNEL_STACK_PAGES: usize = 64;' \
     'const KERNEL_STACK_PAGES: usize = 16;' \
-    >"$fixture/src/arch/riscv64/memory/page_table.rs"
+    >"$fixture/hal/src/arch/riscv64/memory/page_table.rs"
 if check >/dev/null 2>&1; then
     echo "commented stack constants must not satisfy the source ratchet" >&2
     exit 1
@@ -70,7 +70,7 @@ fi
 
 write_sources
 printf '%s\n' 'BOOT_STACK_SIZE = 256K;' 'BOOT_STACK_SIZE = 256K;' \
-    >"$fixture/src/arch/x86_64/linker.ld"
+    >"$fixture/hal/src/arch/x86_64/linker.ld"
 if check >/dev/null 2>&1; then
     echo "duplicate linker stack declarations must be rejected" >&2
     exit 1

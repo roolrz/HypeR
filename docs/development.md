@@ -11,7 +11,7 @@ SPDX-License-Identifier: Apache-2.0
 
 Open the repository root in VS Code with the `rust-lang.rust-analyzer`
 extension installed. The shared `.vscode/settings.json` explicitly loads all
-seven Cargo project roots, including the SDK workspace, Native applications,
+Cargo project roots, including the SDK workspace, Native applications,
 and build tools. Run `make sdk ARCH=aarch64` once to prepare the Native target
 and patched std sources, then **Developer: Reload Window** after updating editor
 settings. Continue opening
@@ -51,8 +51,9 @@ this does not change RISC-V builds. Rerun `make sdk ARCH=aarch64` and restart
 rust-analyzer after changing std/toolchain sources. Other LSP clients can reuse
 the settings in `.vscode/settings.json`, with the `rust-analyzer.` prefix removed
 and the repository root as their root directory. When adding an independent
-Cargo project, add its manifest to `linkedProjects`; SDK workspace members are
-discovered automatically.
+Cargo project, add its manifest to `linkedProjects`; kernel and SDK workspace
+members are discovered automatically. The kernel workspace includes the binary,
+`hyper-core`, and `hyper-hal`.
 
 ## Testing and CI
 
@@ -139,8 +140,10 @@ exact coverage and supported runtime expectations.
 | Path | Responsibility |
 | --- | --- |
 | `kernel/` | Independently buildable hypervisor kernel, configuration, documentation, tests, and build tooling |
-| `kernel/src/arch/` | Architecture entry, context, page-table, exception, and virtualization mechanisms |
-| `kernel/src/hal/` | Narrow architecture-neutral capability contracts |
+| `kernel/hal/` | `hyper-hal` crate: public machine capabilities and private architecture implementations in `src/arch/` |
+| `kernel/core/` | `hyper-core` manifest for reusable mechanisms in `kernel/src/lib.rs`; no dependency on kernel policy or the selected HAL |
+| `kernel/src/hal/` | Portable HAL contracts in `hyper-core` |
+| `kernel/build_support/` | Shared build-time configuration parsing |
 | `kernel/src/kernel/` | Runtime ownership, policy, scheduling, IRQ, memory, devices, and VM orchestration |
 | `kernel/src/vm/` | Reusable VM packages, guest-visible models, and architecture-neutral virtualization vocabulary |
 | `kernel/src/drivers/` | Physical devices and firmware-interface drivers |

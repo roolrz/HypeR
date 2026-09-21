@@ -57,6 +57,10 @@ swap_calls() {
 
 copy_sources
 check
+mutate 'removing the typed HAL boot preparation was accepted' \
+    src/main.rs 's/hal::platform::prepare_boot/hal::platform::removed/'
+mutate 'removing kernel boot policy handoff was accepted' \
+    src/main.rs 's/kernel::boot::prepare_boot_environment(inputs)/kernel::boot::removed(inputs)/'
 
 swap_calls 'memory must precede scheduler initialization' \
     'crate::kernel::mm::initialize' 'crate::kernel::task::initialize'

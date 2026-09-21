@@ -17,9 +17,9 @@ runner=src/kernel/vm/vcpu/runner.rs
 irq=src/kernel/entry/irq.rs
 memory=src/kernel/vm/memory/retirement.rs
 cross_call=src/kernel/irq/cross_call.rs
-hal_vm=src/hal/selected/vm.rs
+hal_vm=hal/src/hal/vm.rs
 hal_interrupt=src/hal/interrupt.rs
-aarch_stage2=src/arch/aarch64/stage2.rs
+aarch_stage2=hal/src/arch/aarch64/stage2.rs
 vcpu_execution=src/kernel/vm/vcpu/execution.rs
 
 if rg -n 'CONFIG_ARCH_' "$registry" "$construction" "$control" "$execution" \

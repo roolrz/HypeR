@@ -52,7 +52,7 @@ fn walk_frame_chain(mut frame: usize, bottom: usize, top: usize) {
         // and alignment before reading its initialized frame words.
         let record = match unsafe { CrashContext::previous_stack_frame(frame, bottom, top) } {
             Ok(record) => record,
-            Err(()) => {
+            Err(_) => {
                 super::super::log::emergency(format_args!(
                     "  invalid frame pointer {frame:#x}; unwind stopped"
                 ));

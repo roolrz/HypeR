@@ -13,8 +13,20 @@ fail() {
     exit 1
 }
 
-grep -F -x 'hyper-abi = { path = "../sdk/abi" }' kernel/Cargo.toml >/dev/null ||
-    fail "the kernel must consume the in-tree Native ABI crate"
+# Check the resolved manifest declaration rather than a particular TOML spelling.
+python3 - <<'PYTHON'
+from pathlib import Path
+import tomllib
+
+manifest = Path("kernel/core/Cargo.toml")
+core = tomllib.loads(manifest.read_text())
+dependency = core.get("dependencies", {}).get("hyper-abi", {})
+if (not isinstance(dependency, dict)
+        or dependency.get("package", "hyper-abi") != "hyper-abi"
+        or "path" not in dependency
+        or (manifest.parent / dependency["path"]).resolve() != Path("sdk/abi").resolve()):
+    raise SystemExit("kernel core must consume the in-tree Native ABI crate")
+PYTHON
 
 if git ls-files --stage | awk '$1 == "160000" { found = 1 } END { exit !found }'; then
     fail "the source tree must not contain Git submodules"
@@ -84,6 +96,8 @@ for required in \
     kernel/.cargo/config.toml \
     kernel/Makefile \
     kernel/src/lib.rs \
+    kernel/core/Cargo.toml \
+    kernel/hal/Cargo.toml \
     kernel/configs/qemu_aarch64_defconfig \
     kernel/docs/architecture.md \
     kernel/tests/ci/run.sh \

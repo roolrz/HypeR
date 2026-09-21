@@ -20,8 +20,8 @@ sed -n '/^pub(crate) fn dispatch_memory_fault(/,/^}/p' \
     src/kernel/entry/vmexit.rs >"$fixture/memory.rs"
 sed -n '/^pub(in crate::kernel) fn dispatch_mmio(/,/^}/p' \
     src/kernel/vm/device/aarch64.rs >"$fixture/device-mmio.rs"
-sed -n '/^fn capture_terminal_guest(/,/^}/p' src/arch/aarch64/exception.rs >"$fixture/capture.rs"
-sed -n '/^fn capture_waiting_guest(/,/^}/p' src/arch/aarch64/exception.rs >"$fixture/capture-wait.rs"
+sed -n '/^fn capture_terminal_guest(/,/^}/p' hal/src/arch/aarch64/exception.rs >"$fixture/capture.rs"
+sed -n '/^fn capture_waiting_guest(/,/^}/p' hal/src/arch/aarch64/exception.rs >"$fixture/capture-wait.rs"
 sed -n '/^fn guest_irq_tail(/,/^}/p' src/kernel/entry/irq.rs >"$fixture/guest-irq-tail.rs"
 sed -n '/^fn finish_detached_administrative_stop(/,/^}/p' \
     src/kernel/vm/vcpu/runner.rs >"$fixture/admin-detach.rs"
@@ -67,67 +67,67 @@ require_order() {
     fi
 }
 
-require src/arch/aarch64/context.S \
+require hal/src/arch/aarch64/context.S \
     '(?s)stp[[:space:]]+x19, x20.*stp[[:space:]]+x29, x30.*stp[[:space:]]+d8, d9.*stp[[:space:]]+d14, d15.*mrs[[:space:]]+x1, fpcr.*mrs[[:space:]]+x1, fpsr' \
     'guest run must save the complete host callee and floating-point control state'
-require src/arch/aarch64/context.S \
+require hal/src/arch/aarch64/context.S \
     '(?s)ldp[[:space:]]+q0, q1.*ldp[[:space:]]+q30, q31' \
     'guest run must restore every guest SIMD register'
-require src/arch/aarch64/context.S \
+require hal/src/arch/aarch64/context.S \
     '(?s)aarch64_unwind_guest:.*add[[:space:]]+sp, sp, #EXCEPTION_FRAME_SIZE.*ldp[[:space:]]+x29, x30.*mov[[:space:]]+x0, #GUEST_RUN_RETURN_STOPPED.*ret' \
     'terminal unwind must discard the private vector frame and return through the saved run frame'
-require src/arch/aarch64/vectors.S \
+require hal/src/arch/aarch64/vectors.S \
     '(?s)\.Lexception_unwind:.*cmp[[:space:]]+x0, #VECTOR_ACTION_UNWIND.*br[[:space:]]+x1' \
     'terminal vector action must branch out and never return to vector restoration'
-require src/arch/aarch64/context.rs \
+require hal/src/arch/aarch64/context.rs \
     '(?s)offset_of!\(VcpuContext, simd\).*VCPU_CONTEXT_SIMD_OFFSET.*offset_of!\(VcpuContext, fpcr\).*VCPU_CONTEXT_FPCR_OFFSET.*offset_of!\(VcpuContext, fpsr\).*VCPU_CONTEXT_FPSR_OFFSET' \
     'guest SIMD and floating-point assembly offsets must be statically validated'
-require src/arch/aarch64/context.rs \
+require hal/src/arch/aarch64/context.rs \
     '(?s)enum GuestSynchronousTerminal.*Undecodable.*Failed.*exit: super::vsysreg::GuestSyncExit.*failure: super::vsysreg::GuestSyncFailure.*enum GuestTerminalCause.*MemoryFault.*Mmio.*Synchronous\(GuestSynchronousTerminal\).*struct GuestTerminalExit.*cause: GuestTerminalCause.*syndrome: u64.*fault_address: u64.*program_counter: u64.*processor_state: u64.*vector: u64.*enum GuestRunExit.*Terminal\(GuestTerminalExit\)' \
     'terminal guest exits must carry one complete typed architecture payload'
-require src/arch/aarch64/context.rs \
+require hal/src/arch/aarch64/context.rs \
     '(?s)GuestRunExit::Terminal\(GuestTerminalExit.*syndrome: context_ref\.terminal_syndrome.*fault_address: context_ref\.terminal_fault_address.*program_counter: context_ref\.program_counter.*processor_state: context_ref\.processor_state.*vector: context_ref\.terminal_vector' \
     'terminal payload construction must copy the complete captured exception state'
 
 require_order "$fixture/capture.rs" 'capture_terminal\(' 'close_captured_guest\(' \
     'terminal state must be captured before lower-world publication closes'
-require src/arch/aarch64/exception.rs \
+require hal/src/arch/aarch64/exception.rs \
     '(?s)MemoryFaultAction::Stop[[:space:]]*=>.*GuestDispatch::Terminal.*GuestTerminalCause::MemoryFault' \
     'an explicit guest memory-policy stop must become a typed terminal exit'
-require src/arch/aarch64/exception.rs \
+require hal/src/arch/aarch64/exception.rs \
     '(?s)MmioAction::Unhandled \| hyper::vm::exit::MmioAction::Stop.*GuestDispatch::Terminal' \
     'terminal MMIO policy must become a typed terminal exit'
-require src/arch/aarch64/exception.rs \
+require hal/src/arch/aarch64/exception.rs \
     '(?s)action if completion\.apply.*GuestDispatch::Resume.*_ => Err\(\(\)\)' \
     'MMIO completion mismatch must remain a host invariant failure'
-require src/arch/aarch64/vsysreg.rs \
+require hal/src/arch/aarch64/vsysreg.rs \
     '(?s)enum GuestSyncAction.*Stop\(GuestSyncFailure\).*enum GuestSyncFailure.*VirtualInterrupt\(super::vm_vcpu::Error\).*fn software_interrupt_completion.*Err\(error\).*GuestSyncAction::Stop\(GuestSyncFailure::VirtualInterrupt\(error\)\)' \
     'synchronous emulation stop must retain the exact typed failure'
-require src/arch/aarch64/vsysreg.rs \
+require hal/src/arch/aarch64/vsysreg.rs \
     '(?s)fn decode_guest_memory_fault.*ESR_ABORT_TRANSLATION_FAULT_LEVEL0.*ESR_ABORT_TRANSLATION_FAULT_LEVEL3.*ESR_ABORT_PERMISSION_FAULT_LEVEL0.*ESR_ABORT_PERMISSION_FAULT_LEVEL3.*!translation_fault && !permission_fault' \
     'guest stage-2 recovery must decode both translation and permission faults'
-require src/arch/aarch64/vsysreg.rs \
+require hal/src/arch/aarch64/vsysreg.rs \
     '(?s)fn activate_virtual_identity\(vcpu_id: u32\).*msr VPIDR_EL2.*msr VMPIDR_EL2.*isb' \
     'guest identity must initialize both architected virtual ID registers before entry'
-require src/arch/aarch64/guest_cpu_contract.rs \
+require hal/src/arch/aarch64/guest_cpu_contract.rs \
     '(?s)struct GuestCpuModel.*from_raw.*ID_AA64ISAR0_TME_MASK.*ID_AA64ISAR1_POINTER_AUTH_MASK.*ID_AA64MMFR1_VH_FIELD_MASK.*ID_AA64MMFR2_NV_MASK' \
     'the frozen guest CPU model must remove unsupported architectural state'
-require src/arch/aarch64/guest_cpu_model.rs \
+require hal/src/arch/aarch64/guest_cpu_model.rs \
     '(?s)fn initialize_boot_cpu.*STATE\.store\(READY, Ordering::Release\).*fn current_cpu_is_compatible.*load_frozen\(\).*frozen == current' \
     'secondary admission must match the boot CPU frozen guest model'
-require src/arch/aarch64/mod.rs \
-    '(?s)fn secondary_cpu_is_compatible.*guest_cpu_model::current_cpu_is_compatible\(\).*fn aarch64_bootstrap.*guest_cpu_model::initialize_boot_cpu\(\).*smp::initialize_boot_cpu\(\)' \
+require hal/src/arch/aarch64/mod.rs \
+    '(?s)fn secondary_cpu_is_compatible.*guest_cpu_model::current_cpu_is_compatible\(\).*fn prepare_boot.*guest_cpu_model::initialize_boot_cpu\(\).*smp::initialize_boot_cpu\(\)' \
     'the guest model must freeze before secondaries start and gate every admitted PE'
-require src/arch/aarch64/vsysreg.rs \
+require hal/src/arch/aarch64/vsysreg.rs \
     '(?s)fn activate_virtual_identity.*guest_cpu_model::processor_identity\(\).*fn read_virtual_register.*guest_cpu_model::frozen\(\).*SYSREG_MIDR_EL1 => Some\(model\.midr\(\)\).*SYSREG_ID_AA64MMFR2_EL1 => Some\(model\.mmfr2\(\)\)' \
     'guest identity reads must consume only the frozen model'
-reject src/arch/aarch64/vsysreg.rs \
+reject hal/src/arch/aarch64/vsysreg.rs \
     'read_id_aa64[a-z0-9_]*_el1\(' \
     'guest ID emulation must not reread migration-sensitive physical features'
-require src/arch/aarch64/vm_vcpu.rs \
+require hal/src/arch/aarch64/vm_vcpu.rs \
     '(?s)activate_system_registers\(\).*activate_virtual_identity\(vcpu_id\).*activate_timer\(\)' \
     'virtual processor identity must be installed inside every stopped-vCPU activation'
-require src/arch/aarch64/exception.rs \
+require hal/src/arch/aarch64/exception.rs \
     '(?s)GuestSyncAction::Stop\(failure\).*GuestSynchronousTerminal::Failed \{ exit, failure \}' \
     'terminal synchronous unwind must retain the decoded exit and failure'
 
@@ -153,13 +153,13 @@ require_order "$fixture/finish.rs" 'set_host_timer_enabled\(true\)' \
     'release_execution_or_fail\(' \
     'detached proof must restore host timing before releasing VM execution'
 
-require src/hal/selected/vm.rs \
+require hal/src/hal/vm.rs \
     '(?s)enum VcpuTerminalReason.*MemoryFault.*Mmio.*Synchronous' \
     'HAL must retain a typed terminal reason across the architecture boundary'
-require src/hal/selected/vm.rs \
+require hal/src/hal/vm.rs \
     '(?s)enum VcpuSynchronousTerminal.*Undecodable.*Failed.*exit: GuestSyncExit.*failure: VcpuInterruptError.*enum VcpuTerminalCause.*Synchronous\(VcpuSynchronousTerminal\).*struct VcpuTerminalExit.*cause: VcpuTerminalCause.*syndrome: u64.*fault_address: u64.*program_counter: u64.*processor_state: u64.*vector: u64.*VcpuRunDisposition.*Terminal\(VcpuTerminalExit\)' \
     'HAL must preserve the complete terminal payload as one typed value'
-reject src/hal/selected/vm.rs \
+reject hal/src/hal/vm.rs \
     'const fn reason\(self\) -> &.*str' \
     'HAL terminal reason must not be erased into display text'
 
@@ -180,11 +180,11 @@ reject "$fixture/device-mmio.rs" 'pr_err!' \
 require src/kernel/vm/device/aarch64.rs \
     '(?s)if !matches!\(delivery, Ok\(Ok\(\(\)\)\)\).*disconnect_virtual_serial\(route.vm\)' \
     'failed virtual serial delivery must disconnect the exact VM endpoint'
-reject src/arch/aarch64/exception.rs \
+reject hal/src/arch/aarch64/exception.rs \
     'pub(?:\(crate\))?[[:space:]]+(?:struct|fn)[^\n]*ExceptionFrame' \
     'the raw architecture exception frame must not escape its private module'
 
-require src/arch/aarch64/context.rs \
+require hal/src/arch/aarch64/context.rs \
     '(?s)enum GuestRunExit.*AdministrativeStop\(GuestAdministrativeStopReason\).*ADMINISTRATIVE_STOP.*capture_administrative_stop' \
     'administrative stop must own a typed guest-run unwind disposition'
 require src/kernel/entry/irq.rs \
@@ -224,18 +224,18 @@ require_order "$fixture/vmid-activate.rs" 'activation_may_begin\(state\)' \
     'mem::replace' \
     'VMID activation must reject Active without replacing it with a drop-safe state'
 
-require src/arch/aarch64/vsysreg.rs \
+require hal/src/arch/aarch64/vsysreg.rs \
     '(?s)ESR_WFX_TI_WFE != 0.*WaitInstruction::Event.*WaitInstruction::Interrupt' \
     'WFx ISS.TI must decode zero as WFI and one as WFE'
-require src/arch/aarch64/vsysreg.rs \
+require hal/src/arch/aarch64/vsysreg.rs \
     '(?s)Wait\(WaitInstruction::Event\) => GuestSyncAction::Advance.*Wait\(WaitInstruction::Interrupt\) => GuestSyncAction::Wait' \
     'WFE must resume while WFI selects the typed wait disposition'
 require_order "$fixture/capture-wait.rs" 'capture_wait\(' 'close_captured_guest\(' \
     'WFI state must be captured before lower-world publication closes'
-require src/arch/aarch64/exception.rs \
+require hal/src/arch/aarch64/exception.rs \
     '(?s)let applied = super::apply_guest_sync_action\(.*if !applied.*return Err\(\(\)\).*if matches!\(.*action,.*super::GuestSyncAction::Wait \| super::GuestSyncAction::FirmwareWait.*GuestDispatch::Wait' \
     'WFI must complete its PC update before selecting the typed unwind'
-require src/arch/aarch64/vsysreg.rs \
+require hal/src/arch/aarch64/vsysreg.rs \
     '(?s)GuestSyncAction::Wait => \{[[:space:]]*advance\(program_counter\);[[:space:]]*true[[:space:]]*\}[[:space:]]*GuestSyncAction::FirmwareWait => true' \
     'WFI must advance PC while firmware waits preserve the already advanced HVC return PC'
 require "$fixture/runner.rs" \

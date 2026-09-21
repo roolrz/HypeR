@@ -12,9 +12,9 @@ minimum_kib=256
 minimum_pages=64
 
 for linker in \
-    src/arch/aarch64/linker.ld \
-    src/arch/riscv64/linker.ld \
-    src/arch/x86_64/linker.ld; do
+    hal/src/arch/aarch64/linker.ld \
+    hal/src/arch/riscv64/linker.ld \
+    hal/src/arch/x86_64/linker.ld; do
     declarations=$(sed -n 's/^BOOT_STACK_SIZE = \([0-9][0-9]*\)K;$/\1/p' "$linker")
     if [ "$(printf '%s\n' "$declarations" | sed '/^$/d' | wc -l | tr -d ' ')" -ne 1 ]; then
         echo "$linker must define BOOT_STACK_SIZE exactly once" >&2
@@ -44,13 +44,13 @@ check_final_stack_pages() {
     fi
 }
 
-check_final_stack_pages src/arch/aarch64/address_layout.rs BOOT_STACK_PAGES
+check_final_stack_pages hal/src/arch/aarch64/address_layout.rs BOOT_STACK_PAGES
 arm_stack_exports=$(LC_ALL=C rg --no-line-number \
     '^[[:space:]]*pub\(super\)[[:space:]]+use[[:space:]]+super::super::address_layout::BOOT_STACK_PAGES[[:space:]]+as[[:space:]]+KERNEL_STACK_PAGES[[:space:]]*;' \
-    src/arch/aarch64/memory/page_table.rs || true)
+    hal/src/arch/aarch64/memory/page_table.rs || true)
 if [ "$(printf '%s\n' "$arm_stack_exports" | sed '/^$/d' | wc -l | tr -d ' ')" -ne 1 ]; then
     echo 'AArch64 boot table construction must use the canonical layout stack size exactly once' >&2
     exit 1
 fi
-check_final_stack_pages src/arch/riscv64/memory/page_table.rs KERNEL_STACK_PAGES
-check_final_stack_pages src/arch/x86_64/memory.rs STACK_PAGES
+check_final_stack_pages hal/src/arch/riscv64/memory/page_table.rs KERNEL_STACK_PAGES
+check_final_stack_pages hal/src/arch/x86_64/memory.rs STACK_PAGES

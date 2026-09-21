@@ -327,6 +327,7 @@ pub fn initialize(
             stack.physical_top,
             stack.virtual_top as u64,
             cpu_index,
+            crate::start_secondary_cpu,
         ))?;
         let context = parameters.context();
         boot_parameters.push(parameters);

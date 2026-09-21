@@ -67,7 +67,7 @@ require_ordered_handoff() {
 }
 
 require_ordered_handoff \
-    src/arch/aarch64/context.S \
+    hal/src/arch/aarch64/context.S \
     aarch64_switch_context \
     'str[[:space:]]+x2,.*THREAD_CONTEXT_SP_OFFSET' \
     'str[[:space:]]+x2,.*THREAD_CONTEXT_DAIF_OFFSET' \
@@ -80,7 +80,7 @@ require_ordered_handoff \
     AArch64
 
 require_ordered_handoff \
-    src/arch/riscv64/context.S \
+    hal/src/arch/riscv64/context.S \
     riscv64_switch_context \
     'sd[[:space:]]+sp,.*THREAD_CONTEXT_SP_OFFSET' \
     'andi[[:space:]]+t0,[[:space:]]*a2,[[:space:]]*2' \
@@ -92,7 +92,7 @@ require_ordered_handoff \
     'csrr[[:space:]]+[^,]+,[[:space:]]*sstatus' \
     RISC-V
 
-riscv_body=$(function_body src/arch/riscv64/context.S riscv64_switch_context)
+riscv_body=$(function_body hal/src/arch/riscv64/context.S riscv64_switch_context)
 if ! printf '%s\n' "$riscv_body" | rg -q '^[[:space:]]*csrsi[[:space:]]+sstatus' ||
     ! printf '%s\n' "$riscv_body" | rg -q '^[[:space:]]*csrci[[:space:]]+sstatus'; then
     echo 'RISC-V must restore both enabled and disabled incoming SIE states' >&2
@@ -100,7 +100,7 @@ if ! printf '%s\n' "$riscv_body" | rg -q '^[[:space:]]*csrsi[[:space:]]+sstatus'
 fi
 
 require_ordered_handoff \
-    src/arch/x86_64/context.S \
+    hal/src/arch/x86_64/context.S \
     x86_64_switch_context \
     'movq[[:space:]]+%rsp,.*THREAD_CONTEXT_RSP_OFFSET' \
     'andq[[:space:]]+[$]0x200,[[:space:]]*%rdx' \
@@ -113,7 +113,7 @@ require_ordered_handoff \
     x86-64
 
 
-x86_body=$(function_body src/arch/x86_64/context.S x86_64_switch_context)
+x86_body=$(function_body hal/src/arch/x86_64/context.S x86_64_switch_context)
 if ! printf '%s\n' "$x86_body" | rg -q '^[[:space:]]*sti[[:space:]]*$' ||
     ! printf '%s\n' "$x86_body" | rg -q '^[[:space:]]*cli[[:space:]]*$'; then
     echo 'x86-64 must restore both enabled and disabled incoming IF states' >&2

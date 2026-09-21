@@ -107,26 +107,7 @@ fn format_error(
     report.finish()
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct ProtocolInputs {
-    pub(crate) dtb_address: usize,
-    pub(crate) command_line: Option<chosen::CommandLine>,
-    pub(crate) initial_ramdisk: Option<hyper::platform::PhysicalRange>,
-}
-
-impl ProtocolInputs {
-    pub(crate) const fn new(
-        dtb_address: usize,
-        command_line: Option<chosen::CommandLine>,
-        initial_ramdisk: Option<hyper::platform::PhysicalRange>,
-    ) -> Self {
-        Self {
-            dtb_address,
-            command_line,
-            initial_ramdisk,
-        }
-    }
-}
+use crate::hal::platform::ProtocolInputs;
 
 /// State shared only between the top-level kernel initialization steps.
 ///
