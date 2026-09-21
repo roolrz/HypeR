@@ -1,0 +1,216 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
+use super::*;
+use std::cell::Cell;
+
+fn running() -> InstancePolicy {
+    let mut policy = InstancePolicy::default();
+    policy.observe(InstanceStatus::ImageValidated).unwrap();
+    policy.observe(InstanceStatus::MemoryPrepared).unwrap();
+    policy.observe(InstanceStatus::Installed).unwrap();
+    policy.observe(InstanceStatus::Running).unwrap();
+    policy
+}
+
+fn finish(policy: InstancePolicy, succeeded: bool) -> InstanceOutcome {
+    policy.finish(succeeded, &mut None::<()>)
+}
+
+#[test]
+fn explicit_stop_cancels_guest_reboot_and_pending_admin_restart() {
+    let mut machine = MachinePolicy::default();
+    machine.request_stop(true);
+    let mut instance = running();
+    instance.observe(InstanceStatus::RebootRequested).unwrap();
+    machine.request_stop(false);
+    assert_eq!(
+        instance.request_cooperative_stop(),
+        StopAction::SendCooperative
+    );
+    assert_eq!(instance.request_cooperative_stop(), StopAction::None);
+    let outcome = finish(instance, true);
+    assert!(!outcome.reboot);
+    machine.finished(&outcome);
+    assert!(!machine.take_restart(false));
+}
+
+#[test]
+fn restart_waits_for_process_exit_not_terminal_message() {
+    let mut machine = MachinePolicy::default();
+    machine.request_stop(true);
+    let mut instance = running();
+    instance.observe(InstanceStatus::Stopped).unwrap();
+    assert_eq!(machine.state(Some(&instance)), fleet::State::Stopping);
+    assert!(!machine.take_restart(true));
+    machine.finished(&finish(instance, true));
+    assert!(machine.take_restart(false));
+    assert!(!machine.take_restart(false));
+}
+
+#[test]
+fn cleanup_timeout_preserves_successful_guest_reboot() {
+    let now = Instant::now();
+    let mut instance = running();
+    instance.observe(InstanceStatus::RebootRequested).unwrap();
+    instance.arm_exit_deadline(now).unwrap();
+    assert_eq!(
+        instance.expire_deadline(now + INSTANCE_EXIT_GRACE),
+        StopAction::ForceProcess
+    );
+    assert!(finish(instance, true).reboot);
+    let mut instance = running();
+    instance.observe(InstanceStatus::RebootRequested).unwrap();
+    assert!(!finish(instance, false).reboot);
+}
+
+#[test]
+fn deadlines_do_not_extend_and_escalate_once() {
+    let now = Instant::now();
+    let mut instance = running();
+    assert_eq!(
+        instance.request_cooperative_stop(),
+        StopAction::SendCooperative
+    );
+    instance.arm_exit_deadline(now).unwrap();
+    instance
+        .arm_exit_deadline(now + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(instance.exit_deadline(), Some(now + INSTANCE_EXIT_GRACE));
+    assert_eq!(instance.expire_deadline(now), StopAction::None);
+    assert_eq!(
+        instance.expire_deadline(now + INSTANCE_EXIT_GRACE),
+        StopAction::ForceProcess
+    );
+    assert_eq!(
+        instance.expire_deadline(now + INSTANCE_EXIT_GRACE),
+        StopAction::None
+    );
+    assert_eq!(instance.force_stop(), StopAction::None);
+}
+
+#[test]
+fn protocol_failure_cannot_be_hidden_by_terminal_status() {
+    let mut instance = running();
+    instance.reject_protocol();
+    assert!(instance.observe(InstanceStatus::Stopped).is_err());
+    assert_eq!(instance.force_stop(), StopAction::ForceProcess);
+    assert!(matches!(
+        finish(instance, true).event,
+        InstanceEvent::Failed(vm::InstanceFailure::InvalidControlProtocol)
+    ));
+}
+
+#[test]
+fn console_disconnect_only_releases_matching_owner() {
+    let mut instance = InstancePolicy::default();
+    assert!(!instance.can_attach_console());
+    instance.observe(InstanceStatus::ImageValidated).unwrap();
+    instance.observe(InstanceStatus::MemoryPrepared).unwrap();
+    instance.observe(InstanceStatus::Installed).unwrap();
+    instance.observe(InstanceStatus::Running).unwrap();
+    assert!(instance.can_attach_console());
+    instance.attach_console(3);
+    instance.disconnect_client(4);
+    assert!(!instance.can_attach_console());
+    instance.disconnect_client(3);
+    assert!(instance.can_attach_console());
+    instance.request_cooperative_stop();
+    assert!(!instance.can_attach_console());
+}
+
+struct Endpoint<'a>(&'a Cell<usize>);
+impl Drop for Endpoint<'_> {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() + 1);
+    }
+}
+
+#[test]
+fn broker_backpressure_retains_endpoint_but_exit_releases_it() {
+    let closed = Cell::new(0);
+    let mut pending = Some(Endpoint(&closed));
+    let mut instance = InstancePolicy::default();
+    assert!(!instance.wants_disk_admission(pending.is_some()));
+    instance.observe(InstanceStatus::ImageValidated).unwrap();
+    instance.observe(InstanceStatus::MemoryPrepared).unwrap();
+    instance.observe(InstanceStatus::Installed).unwrap();
+    assert!(instance.wants_disk_admission(pending.is_some()));
+    complete_admission(
+        &mut pending,
+        Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)),
+    );
+    assert_eq!(closed.get(), 0);
+    assert!(instance.wants_disk_admission(pending.is_some()));
+    let outcome = instance.finish(false, &mut pending);
+    assert_eq!(closed.get(), 1);
+    assert!(pending.is_none());
+    assert!(!outcome.reboot);
+    assert!(matches!(outcome.event, InstanceEvent::Failed(_)));
+}
+
+#[test]
+fn broker_completion_and_failure_release_pending_record() {
+    for result in [
+        Ok(()),
+        Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)),
+    ] {
+        let closed = Cell::new(0);
+        let mut pending = Some(Endpoint(&closed));
+        complete_admission(&mut pending, result);
+        assert!(pending.is_none());
+        assert_eq!(closed.get(), 1);
+    }
+}
+
+#[test]
+fn stopped_instance_cannot_be_admitted_to_disk_broker() {
+    let mut instance = InstancePolicy::default();
+    instance.observe(InstanceStatus::ImageValidated).unwrap();
+    instance.observe(InstanceStatus::MemoryPrepared).unwrap();
+    instance.observe(InstanceStatus::Installed).unwrap();
+    instance.request_cooperative_stop();
+    assert!(!instance.wants_disk_admission(true));
+}
+
+#[test]
+fn failed_restart_is_consumed_and_visible_until_next_success() {
+    let mut machine = MachinePolicy::default();
+    machine.request_stop(true);
+    assert!(machine.take_restart(false));
+    machine.start_failed();
+    assert!(!machine.take_restart(false));
+    assert_eq!(machine.state(None), fleet::State::Failed);
+    machine.started();
+    assert_eq!(machine.state(None), fleet::State::Stopped);
+}
+
+#[test]
+fn stop_send_failure_forces_cleanup_without_stranding_deadline() {
+    for error in [
+        hyper_os::Error::MissingHandle,
+        hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK),
+        hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED),
+        hyper_os::Error::InvalidResponse,
+    ] {
+        let mut instance = running();
+        assert_eq!(
+            instance.request_cooperative_stop(),
+            StopAction::SendCooperative
+        );
+        assert_eq!(
+            instance.cooperative_stop_sent(Err(error), Instant::now()),
+            StopAction::ForceProcess
+        );
+        assert_eq!(instance.exit_deadline(), None);
+        assert_eq!(instance.force_stop(), StopAction::None);
+    }
+    let now = Instant::now();
+    let mut instance = running();
+    instance.request_cooperative_stop();
+    assert_eq!(
+        instance.cooperative_stop_sent(Ok(()), now),
+        StopAction::None
+    );
+    assert_eq!(instance.exit_deadline(), Some(now + INSTANCE_EXIT_GRACE));
+}

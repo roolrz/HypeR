@@ -598,19 +598,7 @@ fn publish_unpublished_startup_handles(prepared: &mut PreparedChildProcessStart)
                 Some(record) => record,
                 None => process_invariant_violation(),
             };
-            record.state.with(|record_state| {
-                if record_state.entries.len() != charges.len() {
-                    process_invariant_violation();
-                }
-                for entry in record_state.entries.iter_mut().rev() {
-                    let charge = match charges.pop() {
-                        Some(charge) => charge,
-                        None => process_invariant_violation(),
-                    };
-                    entry.charge = Some(charge.commit());
-                }
-            });
-            install_handle_charge_record(state, record);
+            state.handle_accounting.install(record, &mut charges);
             prepared.retired_charge_storage.push(charges);
             match reservation.scratch_charge.take() {
                 Some(charge) => prepared.retired_scratch_charges.push(charge),
@@ -655,7 +643,7 @@ fn commit_parent_builder_replacement(
         if source.moved_values.as_slice() != [prepared.builder_handle] {
             process_invariant_violation();
         }
-        if !handle_charge_is_live(state, prepared.builder_handle) {
+        if !state.handle_accounting.is_live(prepared.builder_handle) {
             process_invariant_violation();
         }
         let claim = match source.claim.take() {
@@ -680,7 +668,7 @@ fn commit_parent_builder_replacement(
         supervisor_value = Some(values[0]);
 
         for value in source.moved_values.drain(..) {
-            let (charge, retired_record) = release_handle_charge(state, value);
+            let (charge, retired_record) = state.handle_accounting.release(value);
             source.released_charges.push(charge);
             if let Some(record) = retired_record {
                 source.retired_records.push(record);
@@ -695,21 +683,10 @@ fn commit_parent_builder_replacement(
             Some(record) => record,
             None => process_invariant_violation(),
         };
-        record.state.with(|record_state| {
-            if record_state.entries.len() != 1 || charges.len() != 1 {
-                process_invariant_violation();
-            }
-            let charge = match charges.pop() {
-                Some(charge) => charge,
-                None => process_invariant_violation(),
-            };
-            let entry = match record_state.entries.get_mut(0) {
-                Some(entry) => entry,
-                None => process_invariant_violation(),
-            };
-            entry.charge = Some(charge.commit());
-        });
-        install_handle_charge_record(state, record);
+        if charges.len() != 1 {
+            process_invariant_violation();
+        }
+        state.handle_accounting.install(record, &mut charges);
         destination.handle_charges = Some(charges);
     });
 

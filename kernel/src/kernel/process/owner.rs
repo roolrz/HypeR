@@ -3,7 +3,10 @@
 
 //! Process composition, publication, stop, and explicit retirement.
 
+mod handle_accounting;
 mod handle_namespace;
+
+use handle_accounting::HandleAccounting;
 mod start;
 
 pub(crate) use handle_namespace::{
@@ -229,9 +232,9 @@ struct ProcessState {
     group_membership: Option<TaskGroupMembership>,
     process_charge: Option<CommittedCharge>,
     threads: Option<FallibleArc<ThreadRecord>>,
-    handle_charges: Option<FallibleArc<HandleChargeRecord>>,
-    charge_index: HandleSidecar<HandleChargeLocation>,
-    // Table storage grows monotonically and is released together at retirement.
+    handle_accounting: HandleAccounting,
+    // Backing quota follows page reclamation; retained directory/generation
+    // storage stays charged until final table retirement.
     handle_table_charge: Option<CommittedCharge>,
     handles_retired: bool,
 }
@@ -513,8 +516,7 @@ impl PreparedProcess {
                 group_membership: None,
                 process_charge: Some(process_charge),
                 threads: None,
-                handle_charges: None,
-                charge_index: HandleSidecar::new(),
+                handle_accounting: HandleAccounting::new(),
                 handle_table_charge: None,
                 handles_retired: false,
             }),
@@ -1121,7 +1123,7 @@ impl Process {
                     .handles
                     .with(|table| table.reserve_with_plan(&mut storage.slots))?;
                 install_table_storage_charge(state, snapshot, &mut storage.charge);
-                state.charge_index.install(&mut storage.index);
+                state.handle_accounting.install_storage(&mut storage.index);
                 Ok(Some(reservation))
             });
             match attempt {
@@ -1266,7 +1268,7 @@ impl Process {
                     )
                 })?;
                 install_table_storage_charge(state, snapshot, &mut storage.charge);
-                state.charge_index.install(&mut storage.index);
+                state.handle_accounting.install_storage(&mut storage.index);
                 Ok(Some(reservation))
             });
             match attempt {
@@ -1404,22 +1406,7 @@ impl Process {
                 Some(record) => record,
                 None => process_invariant_violation(),
             };
-            record.state.with(|state| {
-                if state.entries.len() != charges.len() {
-                    process_invariant_violation();
-                }
-                for entry in state.entries.iter_mut().rev() {
-                    let charge = match charges.pop() {
-                        Some(charge) => charge,
-                        None => process_invariant_violation(),
-                    };
-                    entry.charge = Some(charge.commit());
-                }
-                if !charges.is_empty() {
-                    process_invariant_violation();
-                }
-            });
-            install_handle_charge_record(state, record);
+            state.handle_accounting.install(record, &mut charges);
             retired_charge_storage = Some(charges);
             Ok(values)
         });
@@ -1947,9 +1934,9 @@ impl Process {
                     .with(|table| table.replace_with_plan(value, rights, &mut storage.slots))?;
                 if let Some(snapshot) = snapshot {
                     install_table_storage_charge(state, snapshot, &mut storage.charge);
-                    state.charge_index.install(&mut storage.index);
+                    state.handle_accounting.install_storage(&mut storage.index);
                 }
-                replace_handle_charge_value(state, value, replacement);
+                state.handle_accounting.replace(value, replacement);
                 Ok(Some(replacement))
             });
             match attempt {
@@ -2065,7 +2052,7 @@ impl Process {
         ) = self.inner.state.with(|state| {
             require_handle_phase(state.lifecycle.phase())?;
             let closed = self.inner.handles.with(|table| table.remove(value))?;
-            let (charge, retired_record) = release_handle_charge(state, value);
+            let (charge, retired_record) = state.handle_accounting.release(value);
             Ok::<_, ProcessError>((closed, charge, retired_record))
         })?;
         closed.complete();
@@ -2084,7 +2071,7 @@ impl Process {
         for _ in 0..64 {
             let detached = self.inner.state.with(|state| {
                 let page = self.inner.handles.with(HandleTable::take_empty_page)?;
-                let sidecar = state.charge_index.detach_empty(page.index());
+                let sidecar = state.handle_accounting.detach_empty_page(page.index());
                 let amount = ResourceAmount::ZERO
                     .with(ResourceKind::KernelMemoryBytes, page.backing_bytes() as u64);
                 let charge = match state.handle_table_charge.as_mut() {
@@ -2196,7 +2183,7 @@ impl Process {
                     state.group_membership.take(),
                     state.process_charge.take(),
                     state.threads.take(),
-                    state.handle_charges.take(),
+                    state.handle_accounting.take_records(),
                     state.handle_table_charge.take(),
                 )
             });
@@ -2207,7 +2194,7 @@ impl Process {
         let index = self
             .inner
             .state
-            .with(|state| core::mem::replace(&mut state.charge_index, HandleSidecar::new()));
+            .with(|state| state.handle_accounting.take_index());
         drop(index);
         while let Some(record) = handle_charges {
             handle_charges = record.next.with(Option::take);
@@ -2531,111 +2518,6 @@ fn unlink_thread_record(
         current = next;
     }
     process_invariant_violation()
-}
-
-fn install_handle_charge_record(state: &mut ProcessState, record: FallibleArc<HandleChargeRecord>) {
-    record.state.with(|entries| {
-        for (entry, charge) in entries.entries.iter().enumerate() {
-            if state
-                .charge_index
-                .replace(
-                    charge.value,
-                    Some(HandleChargeLocation {
-                        record: record.clone(),
-                        entry,
-                    }),
-                )
-                .is_some()
-            {
-                process_invariant_violation();
-            }
-        }
-    });
-    let previous = state.handle_charges.take();
-    if let Some(previous) = previous.as_ref() {
-        previous
-            .previous
-            .with(|link| *link = Some(FallibleArc::downgrade(&record)));
-    }
-    record.next.with(|link| *link = previous);
-    state.handle_charges = Some(record);
-}
-
-fn release_handle_charge(
-    state: &mut ProcessState,
-    value: HandleValue,
-) -> (CommittedCharge, Option<FallibleArc<HandleChargeRecord>>) {
-    let location = match state.charge_index.replace(value, None) {
-        Some(location) => location,
-        None => process_invariant_violation(),
-    };
-    let record = location.record;
-    let (charge, empty) = record.state.with(|state| {
-        let entry = &mut state.entries[location.entry];
-        if entry.value != value {
-            process_invariant_violation();
-        }
-        let charge = match entry.charge.take() {
-            Some(charge) => charge,
-            None => process_invariant_violation(),
-        };
-        (
-            charge,
-            state.entries.iter().all(|entry| entry.charge.is_none()),
-        )
-    });
-    if !empty {
-        return (charge, None);
-    }
-    let previous = record.previous.with(Option::take);
-    let next = record.next.with(Option::take);
-    if let Some(next) = next.as_ref() {
-        next.previous.with(|link| *link = previous.clone());
-    }
-    if let Some(previous) = previous {
-        let previous = match previous.upgrade() {
-            Some(previous) => previous,
-            None => process_invariant_violation(),
-        };
-        previous.next.with(|link| *link = next);
-    } else {
-        state.handle_charges = next;
-    }
-    (charge, Some(record))
-}
-
-fn handle_charge_is_live(state: &ProcessState, value: HandleValue) -> bool {
-    state.charge_index.get(value).is_some_and(|location| {
-        location.record.state.with(|state| {
-            let entry = &state.entries[location.entry];
-            entry.value == value && entry.charge.is_some()
-        })
-    })
-}
-
-fn replace_handle_charge_value(
-    state: &mut ProcessState,
-    previous: HandleValue,
-    replacement: HandleValue,
-) {
-    let location = match state.charge_index.replace(previous, None) {
-        Some(location) => location,
-        None => process_invariant_violation(),
-    };
-    location.record.state.with(|state| {
-        let entry = &mut state.entries[location.entry];
-        if entry.value != previous || entry.charge.is_none() {
-            process_invariant_violation();
-        }
-        entry.value = replacement;
-    });
-    if state
-        .charge_index
-        .replace(replacement, Some(location))
-        .is_some()
-    {
-        process_invariant_violation();
-    }
 }
 
 fn allocate_process_id() -> Result<ProcessId, ProcessError> {

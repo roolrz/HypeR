@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! One bounded mailbox transaction, driven by the supervisor's fair slot loop.
-use hyper_vm_runtime::io_backend::ControlTransport;
-use hyper_vm_runtime::io_protocol::{MAX_RECORD, Reply, Request};
+use hyper_vm_support::io_backend::ControlTransport;
+use hyper_vm_support::io_protocol::{MAX_RECORD, Reply, Request};
 
 pub struct Pending {
     pub request: Request,

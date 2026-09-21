@@ -5,6 +5,7 @@
 
 mod listener;
 
+use hyper_vm_manager::{InstancePolicy, MachinePolicy, complete_admission};
 use hyper_vm_policy::fleet::{self, Action, Request, Response};
 use std::io::Read;
 use std::mem::MaybeUninit;
@@ -32,7 +33,6 @@ use std::process::ExitCode;
 const RUNTIME_ARGUMENT: &str = "/svc/vm-runtime";
 const MAX_CLIENTS: usize = 8;
 const CAPABILITY_REPLY_DEADLINE: Duration = Duration::from_millis(100);
-const INSTANCE_EXIT_GRACE: Duration = Duration::from_secs(2);
 
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     if hyper_os::require_core_abi().is_err() {
@@ -120,7 +120,7 @@ impl FleetManager {
         let has_boot_vm = self.initial_vm.is_some();
         for vm in 0..self.machines.len() {
             if self.machines[vm].definition.autostart && self.start_instance(vm).is_err() {
-                self.machines[vm].failed = true;
+                self.machines[vm].policy.start_failed();
                 self.publish_initial_event(
                     vm,
                     vm_contract::InstanceEvent::Failed(vm_contract::InstanceFailure::Runtime),
@@ -230,7 +230,7 @@ impl FleetManager {
                 machine
                     .instance
                     .as_ref()
-                    .and_then(|instance| instance.exit_deadline)
+                    .and_then(|instance| instance.policy.exit_deadline())
             })
             .min()
         {
@@ -282,11 +282,10 @@ impl FleetManager {
             &mut admission.endpoint,
             RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
         )?;
-        match broker.try_send(&admission.record, &mut [disposition]) {
-            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(()),
-            // Dropping the local endpoint wakes the runtime's bounded handshake;
-            // one failed admission must not terminate the fleet supervisor.
-            Err(_) | Ok(()) => drop(instance.disk_admission.take()),
+        let result = broker.try_send(&admission.record, &mut [disposition]);
+        complete_admission(&mut instance.disk_admission, result);
+        if instance.disk_admission.is_some() {
+            return Ok(());
         }
         #[cfg(feature = "broker-test")]
         if self
@@ -309,14 +308,14 @@ impl FleetManager {
         };
         if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed) {
             drop(instance.runtime_control.take());
-            if !instance.tracker.is_terminal() {
-                instance.tracker.reject_protocol();
+            if !instance.policy.is_terminal() {
+                instance.policy.reject_protocol();
                 instance.force_stop();
             }
         } else if instance.receive_runtime_status().is_err() {
-            instance.tracker.reject_protocol();
+            instance.policy.reject_protocol();
             instance.force_stop();
-        } else if instance.tracker.is_terminal() {
+        } else if instance.policy.is_terminal() {
             instance.arm_exit_deadline()?;
         }
         Ok(())
@@ -353,6 +352,7 @@ impl FleetManager {
                 == Some(vm_contract::InstanceCommand::Stop)
             {
                 if let Some(vm) = self.initial_vm {
+                    self.machines[vm].policy.request_stop(false);
                     self.request_stop(vm)?;
                 }
             } else {
@@ -408,8 +408,7 @@ impl FleetManager {
                 definition,
                 image: image.into_handle(),
                 instance: None,
-                restart_pending: false,
-                failed: false,
+                policy: MachinePolicy::default(),
             });
         }
         // No definition becomes visible until the whole batch is validated.
@@ -436,7 +435,7 @@ impl FleetManager {
                 let mut failures = Vec::new();
                 for vm in first..self.machines.len() {
                     if self.machines[vm].definition.autostart && self.start_instance(vm).is_err() {
-                        self.machines[vm].failed = true;
+                        self.machines[vm].policy.start_failed();
                         failures.push(self.machines[vm].definition.name.clone());
                     }
                 }
@@ -501,7 +500,7 @@ impl FleetManager {
                 self.reply(client, Response::Accepted)
             }
             Action::Stop => {
-                self.machines[vm].restart_pending = false;
+                self.machines[vm].policy.request_stop(false);
                 self.request_stop(vm)?;
                 self.reply(client, Response::Accepted)
             }
@@ -510,10 +509,10 @@ impl FleetManager {
                     if action == Action::Start {
                         return self.reply_error(client, "VM is already active");
                     }
-                    self.machines[vm].restart_pending = true;
+                    self.machines[vm].policy.request_stop(true);
                     self.request_stop(vm)?;
                 } else if let Err(error) = self.start_instance(vm) {
-                    self.machines[vm].failed = true;
+                    self.machines[vm].policy.start_failed();
                     return self.reply_error(client, &format!("cannot start VM '{name}': {error}"));
                 }
                 self.reply(client, Response::Accepted)
@@ -613,7 +612,7 @@ impl FleetManager {
                 "VM must be running and its console must be unattached",
             );
         };
-        if instance.console_client.is_some() || self.fleet_state(vm) != fleet::State::Running {
+        if !instance.policy.can_attach_console() {
             return self.reply_error(
                 client,
                 "VM must be running and its console must be unattached",
@@ -632,7 +631,7 @@ impl FleetManager {
         }
         let mut console_channel = Some(client_end);
         if let Some(instance) = self.machines[vm].instance.as_mut() {
-            instance.console_client = Some(client);
+            instance.policy.attach_console(client);
         }
         self.reply(client, Response::Accepted)?;
         if self.clients[client].is_none() {
@@ -681,10 +680,8 @@ impl FleetManager {
     fn disconnect_client(&mut self, index: usize) {
         drop(self.clients[index].take());
         for machine in &mut self.machines {
-            if let Some(instance) = machine.instance.as_mut()
-                && instance.console_client == Some(index)
-            {
-                instance.console_client = None;
+            if let Some(instance) = machine.instance.as_mut() {
+                instance.policy.disconnect_client(index);
             }
         }
     }
@@ -801,13 +798,10 @@ impl FleetManager {
             runtime,
             runtime_control: Some(manager_runtime),
             console_connection,
-            console_client: None,
-            tracker: vm_contract::InstanceTracker::new(),
-            stop: vm_contract::InstanceStopState::new(),
-            exit_deadline: None,
+            policy: InstancePolicy::default(),
             disk_admission,
         });
-        self.machines[vm].failed = false;
+        self.machines[vm].policy.started();
         Ok(())
     }
 
@@ -824,17 +818,11 @@ impl FleetManager {
             instance.runtime.as_process_supervisor().info()?.terminal,
             Some(ProcessTermination::ProcessExited { status: 0 })
         );
-        let event = instance.tracker.finish(succeeded);
-        // Guest reset requests become new instances only after the old runtime
-        // exited successfully and its VM completed retirement. An administrative
-        // stop wins over a concurrent guest reboot.
-        let reboot = instance.tracker.should_restart(succeeded, instance.stop);
-        if reboot {
-            self.machines[vm].restart_pending = true;
-        }
-        self.machines[vm].failed = matches!(event, vm_contract::InstanceEvent::Failed(_));
-        if !reboot {
-            self.publish_initial_event(vm, event);
+        let outcome =
+            std::mem::take(&mut instance.policy).finish(succeeded, &mut instance.disk_admission);
+        self.machines[vm].policy.finished(&outcome);
+        if !outcome.reboot {
+            self.publish_initial_event(vm, outcome.event);
         }
         drop(instance);
         Ok(())
@@ -859,42 +847,29 @@ impl FleetManager {
         let now = Instant::now();
         for vm in 0..self.machines.len() {
             if let Some(instance) = self.machines[vm].instance.as_mut()
-                && instance
-                    .exit_deadline
-                    .is_some_and(|deadline| deadline <= now)
+                && instance.policy.expire_deadline(now) == vm_contract::StopAction::ForceProcess
             {
-                instance.grace_period_expired();
+                let _ = instance.runtime.as_process_supervisor().request_stop();
             }
-            if self.machines[vm].restart_pending && self.machines[vm].instance.is_none() {
-                self.machines[vm].restart_pending = false;
-                if self.start_instance(vm).is_err() {
-                    self.machines[vm].failed = true;
-                    self.publish_initial_event(
-                        vm,
-                        vm_contract::InstanceEvent::Failed(vm_contract::InstanceFailure::Runtime),
-                    );
-                }
+            let machine = &mut self.machines[vm];
+            if machine.policy.take_restart(machine.instance.is_some())
+                && self.start_instance(vm).is_err()
+            {
+                self.machines[vm].policy.start_failed();
+                self.publish_initial_event(
+                    vm,
+                    vm_contract::InstanceEvent::Failed(vm_contract::InstanceFailure::Runtime),
+                );
             }
         }
         Ok(())
     }
 
     fn fleet_state(&self, vm: usize) -> fleet::State {
-        let Some(instance) = self.machines[vm].instance.as_ref() else {
-            return if self.machines[vm].failed {
-                fleet::State::Failed
-            } else {
-                fleet::State::Stopped
-            };
-        };
-        if instance.stop != vm_contract::InstanceStopState::new() || instance.tracker.is_terminal()
-        {
-            fleet::State::Stopping
-        } else if instance.tracker.last_status() == Some(vm_contract::InstanceStatus::Running) {
-            fleet::State::Running
-        } else {
-            fleet::State::Starting
-        }
+        let machine = &self.machines[vm];
+        machine
+            .policy
+            .state(machine.instance.as_ref().map(|instance| &instance.policy))
     }
 }
 
@@ -902,8 +877,7 @@ struct Machine {
     definition: fleet::Definition,
     image: OwnedHandle<hyper_os::handle::FileObject>,
     instance: Option<VmInstance>,
-    restart_pending: bool,
-    failed: bool,
+    policy: MachinePolicy,
 }
 
 struct Provision {
@@ -955,19 +929,14 @@ struct VmInstance {
     runtime: OwnedHandle<ProcessObject>,
     runtime_control: Option<OwnedHandle<ByteChannelObject>>,
     console_connection: CapabilityChannel,
-    console_client: Option<usize>,
-    tracker: vm_contract::InstanceTracker,
-    stop: vm_contract::InstanceStopState,
-    exit_deadline: Option<Instant>,
+    policy: InstancePolicy,
     disk_admission: Option<DiskAdmission>,
 }
 
 impl VmInstance {
     fn wants_disk_admission(&self) -> bool {
-        self.disk_admission.is_some()
-            && self.stop == vm_contract::InstanceStopState::new()
-            && self.tracker.last_status() == Some(vm_contract::InstanceStatus::Installed)
-            && !self.tracker.is_terminal()
+        self.policy
+            .wants_disk_admission(self.disk_admission.is_some())
     }
 
     fn receive_runtime_status(&mut self) -> hyper_os::Result<()> {
@@ -987,7 +956,7 @@ impl VmInstance {
             .get(..length)
             .and_then(vm_contract::InstanceStatus::decode)
             .ok_or(hyper_os::Error::InvalidResponse)?;
-        self.tracker
+        self.policy
             .observe(status)
             .map_err(|_| hyper_os::Error::InvalidResponse)
     }
@@ -1003,8 +972,8 @@ impl VmInstance {
                     .get(..length)
                     .and_then(vm_contract::InstanceStatus::decode)
                 {
-                    Some(status) if self.tracker.observe(status).is_ok() => {}
-                    Some(_) | None => self.tracker.reject_protocol(),
+                    Some(status) if self.policy.observe(status).is_ok() => {}
+                    Some(_) | None => self.policy.reject_protocol(),
                 },
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK))
                 | Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => return Ok(()),
@@ -1014,50 +983,37 @@ impl VmInstance {
     }
 
     fn request_cooperative_stop(&mut self) -> hyper_os::Result<()> {
-        if self.stop.request_cooperative() != vm_contract::StopAction::SendCooperative {
+        if self.policy.request_cooperative_stop() != vm_contract::StopAction::SendCooperative {
             return Ok(());
         }
-        match self
+        let sent = self
             .runtime_control
             .as_ref()
-            .ok_or(hyper_os::Error::MissingHandle)?
-            .as_byte_channel()
-            .try_send(&vm_contract::InstanceCommand::Stop.encode())
+            .ok_or(hyper_os::Error::MissingHandle)
+            .and_then(|control| {
+                control
+                    .as_byte_channel()
+                    .try_send(&vm_contract::InstanceCommand::Stop.encode())
+            });
+        if self.policy.cooperative_stop_sent(sent, Instant::now())
+            == vm_contract::StopAction::ForceProcess
         {
-            Ok(()) => self.arm_exit_deadline(),
-            Err(hyper_os::Error::Status(
-                hyper_os::Status::PEER_CLOSED | hyper_os::Status::WOULD_BLOCK,
-            )) => {
-                self.force_stop();
-                Ok(())
-            }
-            Err(error) => Err(error),
+            let _ = self.runtime.as_process_supervisor().request_stop();
         }
+        Ok(())
     }
 
     fn force_stop(&mut self) {
-        self.exit_deadline = None;
-        if self.stop.request_forced() == vm_contract::StopAction::ForceProcess {
+        if self.policy.force_stop() == vm_contract::StopAction::ForceProcess {
             let _ = self.runtime.as_process_supervisor().request_stop();
         }
     }
 
     fn arm_exit_deadline(&mut self) -> hyper_os::Result<()> {
-        if self.exit_deadline.is_none() {
-            self.exit_deadline = Some(
-                Instant::now()
-                    .checked_add(INSTANCE_EXIT_GRACE)
-                    .ok_or(hyper_os::Error::InvalidResponse)?,
-            );
+        if self.policy.arm_exit_deadline(Instant::now()).is_none() {
+            self.force_stop();
         }
         Ok(())
-    }
-
-    fn grace_period_expired(&mut self) {
-        self.exit_deadline = None;
-        if self.stop.grace_period_expired() == vm_contract::StopAction::ForceProcess {
-            let _ = self.runtime.as_process_supervisor().request_stop();
-        }
     }
 }
 

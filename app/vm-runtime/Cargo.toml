@@ -28,12 +28,13 @@ hyper-os = { workspace = true, features = ["std"] }
 hyper-rt.workspace = true
 hyper-service.workspace = true
 hyper-vm-image.workspace = true
+hyper-vm-support.workspace = true
 
 [lints]
 workspace = true
 
 [features]
-startup-profile = []
+startup-profile = ["hyper-vm-support/startup-profile"]
 broker-test = []
 test-runtime-crash = []
 test-power-crash = []

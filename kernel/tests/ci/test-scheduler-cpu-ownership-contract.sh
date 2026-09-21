@@ -14,6 +14,7 @@ copy_sources() {
     mkdir -p "$fixture/src/kernel/task/scheduler/state"
     cp "$root/src/kernel/task/scheduler/state/waiting.rs" "$fixture/src/kernel/task/scheduler/state/waiting.rs"
     cp "$root/src/kernel/task/thread.rs" "$fixture/src/kernel/task/thread.rs"
+    cp "$root/src/kernel/task/scheduler/switch_handoff.rs" "$fixture/src/kernel/task/scheduler/switch_handoff.rs"
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
     cp "$root/src/kernel/task/scheduler/registry.rs" "$fixture/src/kernel/task/scheduler/registry.rs"
     cp "$root/src/kernel/task/scheduler/queue.rs" "$fixture/src/kernel/task/scheduler/queue.rs"
@@ -88,3 +89,7 @@ mutate 'registry readers returned to a single exclusive lock' \
 mutate 'blocked migration stopped transferring CPU residence' \
     src/kernel/task/scheduler/state.rs \
     'fn move_blocked_thread' 'fn removed_blocked_migration'
+
+mutate 'switch handoff stopped validating the incoming generation' \
+    src/kernel/task/scheduler/switch_handoff.rs \
+    'outgoing.generation == ticket' 'true'

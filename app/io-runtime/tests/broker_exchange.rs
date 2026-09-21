@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
-use hyper_vm_runtime::io_protocol::Command;
+use hyper_vm_support::io_protocol::Command;
 use std::cell::RefCell;
 
 #[derive(Default)]

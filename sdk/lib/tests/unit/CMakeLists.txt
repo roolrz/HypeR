@@ -50,9 +50,11 @@ add_test(NAME startup-stack COMMAND hyper-startup-test)
 add_executable(hyper-syscall-test
     ../../src/syscall.c
     syscall.c
+    syscall-capture.c
 )
 target_compile_features(hyper-syscall-test PRIVATE c_std_17)
 target_compile_options(hyper-syscall-test PRIVATE
+    -UNDEBUG
     -Wall
     -Wextra
     -Werror
@@ -63,6 +65,14 @@ target_include_directories(hyper-syscall-test PRIVATE
 )
 
 add_test(NAME syscall-veneer COMMAND hyper-syscall-test)
+
+# Compile the real no_std SDK with the host compiler; no installed SDK/sysroot
+# or target executable is needed to verify the Rust/C transport correspondence.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+find_program(HYPER_HOST_RUSTC rustc REQUIRED)
+add_test(NAME syscall-rust-transport
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/check-syscall-rust.py
+        --cc ${CMAKE_C_COMPILER} --rustc ${HYPER_HOST_RUSTC})
 
 # Rename only the C allocation facade so the fixture never intercepts host libc.
 find_package(Threads REQUIRED)
