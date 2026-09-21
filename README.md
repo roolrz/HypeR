@@ -93,6 +93,14 @@ See the [roadmap](docs/roadmap.md) for scope and acceptance criteria, and the
 
 ## Try it
 
+**Raspberry Pi 5:** download a prebuilt image from
+[HypeR Pi 5 releases](https://github.com/roolrz/HypeR-pi5-images/releases).
+Decompress the whole-disk `.img.xz` and flash the resulting `.img` to an SD card.
+See the [artifact guide](https://github.com/roolrz/HypeR-pi5-images/blob/main/ARTIFACTS.md)
+to choose an image, the [Pi 5 boot guide](kernel/docs/rpi5.md) for serial-console
+setup, and [image distribution](docs/image-distribution.md) for build and licensing details.
+
+**QEMU:** build and run locally with the commands below.
 With the [prerequisites](docs/getting-started.md#prerequisites) installed, run
 from the repository root:
 
@@ -112,6 +120,8 @@ and [getting started](docs/getting-started.md) for configuration and build targe
 - [Development guide](docs/development.md): editor setup, testing, source layout,
   and contribution requirements.
 - [Architecture](kernel/docs/architecture.md): kernel boundaries and ownership.
+- [Pi 5 image distribution](docs/image-distribution.md): image builds, release
+  artifacts, dependency pins, and component licensing.
 - [Shell and text filtering](docs/shell.md): pipelines, file redirection, and grep.
 - [Native userspace](kernel/docs/native-init.md) and [SDK](sdk/README.md): host
   services and application interfaces.
