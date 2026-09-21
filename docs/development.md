@@ -24,10 +24,14 @@ changes; restarting rust-analyzer then reuses the cached client configuration.
 The extension's Output log should show the configured `cargo.extraEnv` and
 `check.overrideCommand`, rather than `{}` and `null`.
 
-The editor-only `.vscode/rust-analyzer.toml` supplies local SDK dependency
-patches and the AArch64 kernel configuration to Cargo. Applications and the std
-smoke program declare their default editor target in workspace-local Cargo
-configuration. The freestanding Rust smoke program selects `aarch64-unknown-none`;
+The editor-only `.vscode/rust-analyzer.toml` supplies the AArch64 kernel
+configuration, without dependency patches. Applications and the smoke programs
+keep SDK source patches and editor targets in their workspace-local Cargo
+configuration. This prevents editor discovery from adding `patch.unused` records
+to kernel, ABI and host-tool lockfiles that ordinary builds would remove.
+The production `hyper-cargo` driver overrides source paths with installed SDK
+paths; save-time editor checks explicitly select the local configuration.
+The freestanding Rust smoke program selects `aarch64-unknown-none`;
 kernel and host projects retain their host target. The shared std source
 tree contains both HypeR and upstream host implementations; each project selects
 its platform through the actual target cfgs. This resolves `File::into_std()`
