@@ -76,6 +76,18 @@ impl InstancePolicy {
         self.tracker.observe(status)
     }
 
+    /// Observation responses do not advance the monotonic lifecycle protocol.
+    /// Late responses remain valid after an inspection timeout.
+    pub fn observe_message(&mut self, message: &[u8]) -> hyper_os::Result<Option<vm::Observation>> {
+        if let Some(observation) = vm::Observation::decode(message) {
+            return Ok(Some(observation));
+        }
+        let status = vm::InstanceStatus::decode(message).ok_or(hyper_os::Error::InvalidResponse)?;
+        self.observe(status)
+            .map_err(|_| hyper_os::Error::InvalidResponse)?;
+        Ok(None)
+    }
+
     pub fn reject_protocol(&mut self) {
         self.tracker.reject_protocol();
     }

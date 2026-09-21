@@ -7,6 +7,7 @@ use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceDomain,
 use crate::kernel::mm::user_space::{GuestMemoryBacking, MemoryObjectError};
 use hyper::mm::{PAGE_SIZE, PhysicalAddress};
 
+#[derive(Clone)]
 pub(crate) struct Region {
     offset: u64,
     source_offset: u64,
@@ -38,6 +39,123 @@ impl Region {
             length,
             backing,
         })
+    }
+}
+
+/// Retains only primary backing leases while a normal-context inspector counts pages.
+/// No VM address-space or lifecycle lock is held during the VMO scans.
+pub(crate) struct ResidentMemory {
+    regions: [Option<Region>; 8],
+    #[cfg(feature = "kernel-self-test")]
+    owned_bytes: u64,
+}
+
+impl ResidentMemory {
+    #[cfg(feature = "kernel-self-test")]
+    pub(super) fn owned(bytes: u64) -> Self {
+        Self {
+            regions: [const { None }; 8],
+            owned_bytes: bytes,
+        }
+    }
+
+    pub(crate) fn bytes(&self) -> Result<u64, MemoryObjectError> {
+        #[cfg(not(feature = "kernel-self-test"))]
+        let mut total = 0u64;
+        #[cfg(feature = "kernel-self-test")]
+        let mut total = self.owned_bytes;
+        for (index, region) in self.regions.iter().enumerate() {
+            let Some(region) = region else { continue };
+            let end = region.source_offset + region.length;
+            let mut cursor = region.source_offset;
+            while cursor < end {
+                let mut next = end;
+                let mut covered_until = cursor;
+                for prior in self.regions[..index].iter().flatten() {
+                    if !region.backing.same_storage(&prior.backing) {
+                        continue;
+                    }
+                    let prior_end = prior.source_offset + prior.length;
+                    if prior.source_offset <= cursor && cursor < prior_end {
+                        covered_until = covered_until.max(prior_end.min(end));
+                    } else if prior.source_offset > cursor {
+                        next = next.min(prior.source_offset);
+                    }
+                }
+                if covered_until > cursor {
+                    cursor = covered_until;
+                } else {
+                    total = total
+                        .checked_add(region.backing.resident_bytes(cursor, next - cursor)?)
+                        .ok_or(MemoryObjectError::AllocationSize)?;
+                    cursor = next;
+                }
+            }
+        }
+        Ok(total)
+    }
+}
+
+#[cfg(feature = "kernel-self-test")]
+impl super::GuestAddressSpace {
+    pub(crate) fn verify_resident_memory_for_test(
+        domain: &ResourceDomain,
+    ) -> Result<(), &'static str> {
+        use crate::kernel::mm::user_space::VmoObject;
+
+        let vmo = VmoObject::try_new_writable(8 * PAGE_SIZE, domain).map_err(|_| "VMO")?;
+        let backing = GuestMemoryBacking::try_from_vmo(&vmo).map_err(|_| "RAM lease")?;
+        let mut layout = Layout::try_new(16 * PAGE_SIZE, domain).map_err(|_| "layout")?;
+        // Deliberately unordered overlapping source ranges, at disjoint GPAs.
+        for (offset, source, pages) in [(0, 2, 2), (2, 0, 3), (5, 1, 7), (12, 2, 2)] {
+            let mut region = Some(
+                Region::new(
+                    offset * PAGE_SIZE,
+                    source * PAGE_SIZE,
+                    pages * PAGE_SIZE,
+                    backing.clone(),
+                )
+                .map_err(|_| "region")?,
+            );
+            layout.insert(&mut region).map_err(|_| "insert")?;
+        }
+        if layout
+            .resident_memory()
+            .bytes()
+            .map_err(|_| "empty count")?
+            != 0
+        {
+            return Err("inspection populated sparse RAM");
+        }
+        for page in [0, 2, 4, 6] {
+            backing
+                .populate_page(page * PAGE_SIZE)
+                .map_err(|_| "populate")?;
+        }
+        // These physical pages have never been installed into any stage-2 table.
+        if layout
+            .resident_memory()
+            .bytes()
+            .map_err(|_| "sparse count")?
+            != 4 * PAGE_SIZE
+        {
+            return Err("resident source aliases counted repeatedly");
+        }
+        let other_vmo = VmoObject::try_new_writable(PAGE_SIZE, domain).map_err(|_| "other VMO")?;
+        let other = GuestMemoryBacking::try_from_vmo(&other_vmo).map_err(|_| "other lease")?;
+        other.populate_page(0).map_err(|_| "other populate")?;
+        let mut region =
+            Some(Region::new(14 * PAGE_SIZE, 0, PAGE_SIZE, other).map_err(|_| "other region")?);
+        layout.insert(&mut region).map_err(|_| "other insert")?;
+        let retained = layout.resident_memory();
+        drop(layout);
+        drop(backing);
+        drop(vmo);
+        drop(other_vmo);
+        if retained.bytes().map_err(|_| "retained count")? != 5 * PAGE_SIZE {
+            return Err("snapshot lost backing or merged different VMOs");
+        }
+        Ok(())
     }
 }
 
@@ -87,6 +205,14 @@ impl Layout {
             .ok_or(MemoryObjectError::AllocationSize)?;
         *slot = region.take();
         Ok(())
+    }
+
+    pub(crate) fn resident_memory(&self) -> ResidentMemory {
+        ResidentMemory {
+            regions: self.regions.clone(),
+            #[cfg(feature = "kernel-self-test")]
+            owned_bytes: 0,
+        }
     }
 
     pub(crate) fn complete(&self) -> bool {

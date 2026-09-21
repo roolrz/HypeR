@@ -220,6 +220,77 @@ impl ConsoleCapability {
     }
 }
 
+/// Bounded, request-correlated inspection separate from lifecycle status messages.
+pub const OBSERVATION_BYTES: usize = 40;
+const KIND_OBSERVATION_REQUEST: u8 = 9;
+const KIND_OBSERVATION: u8 = 10;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationRequest(pub u64);
+
+impl ObservationRequest {
+    #[must_use]
+    pub fn encode(self) -> [u8; 16] {
+        let mut bytes = [0; 16];
+        bytes[..8].copy_from_slice(&encode_message(KIND_OBSERVATION_REQUEST, 1, 0));
+        bytes[8..].copy_from_slice(&self.0.to_le_bytes());
+        bytes
+    }
+
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16
+            || decode_message(&bytes[..8], KIND_OBSERVATION_REQUEST) != Some((1, 0))
+        {
+            return None;
+        }
+        Some(Self(u64::from_le_bytes(bytes[8..16].try_into().ok()?)))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Observation {
+    pub request: ObservationRequest,
+    pub vcpus: u32,
+    pub capacity_bytes: u64,
+    pub resident_bytes: Option<u64>,
+}
+
+impl Observation {
+    #[must_use]
+    pub fn encode(self) -> [u8; OBSERVATION_BYTES] {
+        let mut bytes = [0; OBSERVATION_BYTES];
+        bytes[..8].copy_from_slice(&encode_message(KIND_OBSERVATION, 1, 0));
+        bytes[8..16].copy_from_slice(&self.request.0.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.vcpus.to_le_bytes());
+        bytes[24..32].copy_from_slice(&self.capacity_bytes.to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.resident_bytes.unwrap_or(u64::MAX).to_le_bytes());
+        bytes
+    }
+
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != OBSERVATION_BYTES
+            || decode_message(&bytes[..8], KIND_OBSERVATION) != Some((1, 0))
+            || bytes[20..24] != [0; 4]
+        {
+            return None;
+        }
+        let resident = u64::from_le_bytes(bytes[32..40].try_into().ok()?);
+        let capacity = u64::from_le_bytes(bytes[24..32].try_into().ok()?);
+        let vcpus = u32::from_le_bytes(bytes[16..20].try_into().ok()?);
+        if vcpus == 0 {
+            return None;
+        }
+        Some(Self {
+            request: ObservationRequest(u64::from_le_bytes(bytes[8..16].try_into().ok()?)),
+            vcpus,
+            capacity_bytes: capacity,
+            resident_bytes: (resident != u64::MAX).then_some(resident),
+        })
+    }
+}
+
 /// Cooperative command sent from a fleet manager to one VM runtime.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -915,6 +986,44 @@ mod tests {
         assert_eq!(
             tracker.finish(false),
             InstanceEvent::Failed(InstanceFailure::InvalidImage)
+        );
+    }
+}
+
+#[cfg(test)]
+mod observation_tests {
+    use super::{InstanceStatus, Observation, ObservationRequest};
+
+    #[test]
+    fn observation_roundtrips_and_rejects_bad_envelopes() {
+        let request = ObservationRequest(u64::MAX);
+        assert_eq!(ObservationRequest::decode(&request.encode()), Some(request));
+        let value = Observation {
+            request,
+            vcpus: 4,
+            capacity_bytes: 1 << 28,
+            resident_bytes: Some(4096),
+        };
+        let encoded = value.encode();
+        assert_eq!(Observation::decode(&encoded), Some(value));
+        assert_eq!(InstanceStatus::decode(&encoded), None);
+        assert_eq!(Observation::decode(&encoded[..39]), None);
+        let mut bad = encoded;
+        bad[20] = 1;
+        assert_eq!(Observation::decode(&bad), None);
+        // Explicit shared pools can add backing beyond the boot RAM capacity.
+        let with_pool = Observation {
+            resident_bytes: Some((1 << 28) + 4096),
+            ..value
+        };
+        assert_eq!(Observation::decode(&with_pool.encode()), Some(with_pool));
+        let unavailable = Observation {
+            resident_bytes: None,
+            ..value
+        };
+        assert_eq!(
+            Observation::decode(&unavailable.encode()),
+            Some(unavailable)
         );
     }
 }

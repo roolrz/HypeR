@@ -40,7 +40,7 @@ impl VirtualMachineObject {
     }
 
     pub(crate) fn snapshot(&self) -> VirtualMachineSnapshot {
-        self.owner.snapshot()
+        self.owner.information_snapshot()
     }
 
     pub(crate) fn configuration(&self) -> VirtualMachineConfiguration {

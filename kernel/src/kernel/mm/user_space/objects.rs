@@ -53,6 +53,20 @@ impl GuestMemoryBacking {
         self.storage.size()
     }
 
+    pub(crate) fn same_storage(&self, other: &Self) -> bool {
+        self.storage.same_storage(&other.storage)
+    }
+
+    pub(crate) fn resident_bytes(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> Result<u64, MemoryObjectError> {
+        self.storage
+            .resident_bytes(offset, length)
+            .map_err(MemoryObjectError::Vmo)
+    }
+
     pub(crate) fn populate_page(&self, offset: u64) -> Result<(), MemoryObjectError> {
         self.storage
             .populate(offset, hyper::mm::PAGE_SIZE)

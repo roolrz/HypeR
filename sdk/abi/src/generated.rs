@@ -1214,8 +1214,9 @@ pub struct HyperNativeVirtualMachineInfo {
     pub memory_size: u64,
     pub architecture: u32,
     pub platform_profile: u32,
+    pub resident_memory_bytes: u64,
 }
-const _: () = assert!(core::mem::size_of::<HyperNativeVirtualMachineInfo>() == 32);
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualMachineInfo>() == 40);
 const _: () = assert!(core::mem::align_of::<HyperNativeVirtualMachineInfo>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, phase) == 0);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, vcpu_count) == 4);
@@ -1224,6 +1225,8 @@ const _: () =
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, memory_size) == 16);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, architecture) == 24);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, platform_profile) == 28);
+const _: () =
+    assert!(core::mem::offset_of!(HyperNativeVirtualMachineInfo, resident_memory_bytes) == 32);
 
 pub const HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE: usize = 24;
 #[repr(C)]

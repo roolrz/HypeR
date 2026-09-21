@@ -214,3 +214,29 @@ fn stop_send_failure_forces_cleanup_without_stranding_deadline() {
     );
     assert_eq!(instance.exit_deadline(), Some(now + INSTANCE_EXIT_GRACE));
 }
+
+#[test]
+fn memory_observations_neither_advance_nor_poison_lifecycle() {
+    let mut instance = InstancePolicy::default();
+    let observation = hyper_service::vm::Observation {
+        request: hyper_service::vm::ObservationRequest(91),
+        vcpus: 4,
+        capacity_bytes: 128 * 1024 * 1024,
+        resident_bytes: Some(2 * 1024 * 1024),
+    };
+    assert_eq!(
+        instance.observe_message(&observation.encode()).unwrap(),
+        Some(observation)
+    );
+    instance.observe(InstanceStatus::ImageValidated).unwrap();
+    instance.observe(InstanceStatus::MemoryPrepared).unwrap();
+    instance.observe(InstanceStatus::Installed).unwrap();
+    instance.observe(InstanceStatus::Running).unwrap();
+    instance.observe(InstanceStatus::Stopped).unwrap();
+    // A timed-out request may finish after a terminal status; it is harmless.
+    assert_eq!(
+        instance.observe_message(&observation.encode()).unwrap(),
+        Some(observation)
+    );
+    assert!(instance.is_terminal());
+}

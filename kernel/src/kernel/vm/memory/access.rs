@@ -205,6 +205,16 @@ impl GuestAddressSpace {
             .unwrap_or(false)
     }
 
+    pub(crate) fn resident_memory(&self) -> super::backing::ResidentMemory {
+        match &self.backing {
+            GuestMemoryBacking::SharedVmo(layout) => layout.resident_memory(),
+            #[cfg(feature = "kernel-self-test")]
+            GuestMemoryBacking::KernelOwned(pages) => super::backing::ResidentMemory::owned(
+                pages.iter().filter(|page| page.is_some()).count() as u64 * PAGE_SIZE,
+            ),
+        }
+    }
+
     #[cfg(feature = "kernel-self-test")]
     pub fn statistics(&self) -> GuestMemoryStats {
         GuestMemoryStats {

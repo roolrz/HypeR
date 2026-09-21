@@ -321,7 +321,7 @@ pub fn initialize(
         let cpu_index = CpuIndex::new(next_cpu_index).ok_or(Error::CpuIndexOverflow)?;
         next_cpu_index += 1;
         super::super::mm::stack::prepare_cpu(cpu_index)?;
-        let stack = super::super::task::scheduler::register_secondary_cpu(cpu_index, "idle")?;
+        let stack = super::super::task::scheduler::register_secondary_cpu(cpu_index)?;
         let parameters = SecondaryBootHandoff::new(crate::hal::cpu::secondary_boot_parameters(
             memory,
             stack.physical_top,

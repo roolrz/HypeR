@@ -34,6 +34,7 @@ pub(crate) struct VirtualMachineConfiguration {
 pub(crate) struct VirtualMachineSnapshot {
     pub(crate) phase: u32,
     pub(crate) boot_vcpu: u64,
+    pub(crate) resident_memory_bytes: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -291,24 +292,50 @@ impl InstalledMachine {
             RuntimeState::Uninstalled => VirtualMachineSnapshot {
                 phase: hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPED as u32,
                 boot_vcpu: 0,
+                resident_memory_bytes: None,
             },
             RuntimeState::Installed { .. } => VirtualMachineSnapshot {
                 phase: hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_INSTALLED as u32,
                 boot_vcpu,
+                resident_memory_bytes: None,
             },
             RuntimeState::Running { .. } => VirtualMachineSnapshot {
                 phase: hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_RUNNING as u32,
                 boot_vcpu,
+                resident_memory_bytes: None,
             },
             RuntimeState::Stopping { .. } => VirtualMachineSnapshot {
                 phase: hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPING as u32,
                 boot_vcpu,
+                resident_memory_bytes: None,
             },
             RuntimeState::Stopped => VirtualMachineSnapshot {
                 phase: hyper::abi::native::HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPED as u32,
                 boot_vcpu,
+                resident_memory_bytes: None,
             },
         })
+    }
+
+    pub(crate) fn information_snapshot(&self) -> VirtualMachineSnapshot {
+        let mut snapshot = self.snapshot();
+        let id = self.state.with(|state| match state {
+            RuntimeState::Installed { id, .. }
+            | RuntimeState::Running { id, .. }
+            | RuntimeState::Stopping { id } => Some(*id),
+            RuntimeState::Uninstalled | RuntimeState::Stopped => None,
+        });
+        // Retain RAM leases under the address-space lock, then release the
+        // registry binding and all outer locks before walking resident pages.
+        snapshot.resident_memory_bytes = id.and_then(|id| {
+            super::registry::with_binding(id, |binding| {
+                binding.with_address_space(|space| space.resident_memory())
+            })
+            .ok()?
+            .bytes()
+            .ok()
+        });
+        snapshot
     }
 }
 

@@ -472,6 +472,34 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
             })
     }
 
+    pub(crate) fn same_storage(&self, other: &Self) -> bool {
+        core::ptr::eq(&*self.inner, &*other.inner)
+    }
+
+    /// Counts retained backing without populating pages or cloning page owners.
+    /// Bounded lock holds keep an inspection from delaying page publication.
+    pub(crate) fn resident_bytes(
+        &self,
+        offset: u64,
+        length: u64,
+    ) -> VmoResult<Backend, Account, u64> {
+        let length = usize::try_from(length).map_err(|_| VmoError::SizeOverflow)?;
+        validate_range(self.size(), offset, length)?;
+        let (first, count) = covered_pages(offset, length)?;
+        let end = first.checked_add(count).ok_or(VmoError::SizeOverflow)?;
+        let mut resident = 0;
+        for start in (first..end).step_by(256) {
+            let limit = end.min(start.saturating_add(256));
+            resident += self.inner.state.with(|state| {
+                state.pages[start..limit]
+                    .iter()
+                    .filter(|page| page.is_some())
+                    .count()
+            });
+        }
+        Ok(resident as u64 * PAGE_SIZE)
+    }
+
     /// Returns the stable physical page backing one resident object offset.
     ///
     /// The caller must retain this VMO, and any hardware mapping which may

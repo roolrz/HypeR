@@ -17,13 +17,14 @@ fn observations_validate_wire_format_and_preserve_metrics() {
             vcpu_count: 4,
             guest_physical_base: 0x4000_0000,
             memory_size: 512 * 1024 * 1024,
+            resident_memory_bytes: Some(65 * 1024 * 1024),
             architecture: Architecture::Aarch64,
             platform_profile: PlatformProfile::Aarch64Reference,
         };
         let bytes = encode_observation(info, 64 * 1024 * 1024);
         assert_eq!(
             decode_observation(&bytes),
-            Some((phase, 4, 64 * 1024 * 1024))
+            Some((phase, 4, 64 * 1024 * 1024, Some(65 * 1024 * 1024)))
         );
         assert_eq!(decode_observation(&bytes[..23]), None);
         let mut invalid = bytes;

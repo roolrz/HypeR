@@ -971,7 +971,7 @@ impl Scheduler {
             Some(id) => id,
             None => return Err(Error::IdentifierExhausted),
         };
-        let boot_idle = Thread::idle(boot_idle_id, boot_cpu, "idle", super::idle_thread_entry)?;
+        let boot_idle = Thread::idle(boot_idle_id, boot_cpu, super::idle_thread_entry)?;
         let boot_idle = hyper::mm::try_box(boot_idle).map_err(|_| Error::Allocation)?;
         let registry = ThreadRegistry::new(bootstrap, boot_idle)?;
         Ok(Self {

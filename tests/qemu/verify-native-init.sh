@@ -173,8 +173,9 @@ while :; do
             fi
             ;;
         threads)
-            if grep -Eq '^  thread [[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+user/(resident|retiring)' "$native_output" &&
-                grep -Eq '^  thread [[:space:]]*[0-9]+[[:space:]]+-[[:space:]]+[^[:space:]]+[[:space:]]+(bootstrap|idle|kernel|vcpu)/(resident|retiring)' "$native_output"; then
+            if grep -Eq '^  thread [[:space:]]*[0-9]+[[:space:]]+[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+user/(resident|retiring) process=[^[:space:]]+' "$native_output" &&
+                grep -Eq '^  thread [[:space:]]*[0-9]+[[:space:]]+kernel[[:space:]]+[^[:space:]]+[[:space:]]+(bootstrap|idle|kernel|vcpu)/(resident|retiring) process=kernel' "$native_output" &&
+                grep -Eq '[[:space:]]kernel[[:space:]]+idle/0[[:space:]]+idle/resident' "$native_output"; then
                 send_commands 1 '/bin/echo HYPER_NATIVE_PS_OK\n'
                 command_phase='ps_done'
             fi

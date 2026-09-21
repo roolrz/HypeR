@@ -46,7 +46,7 @@ fn list_tasks(
             }
             write_process(output, process)?;
             if args.threads {
-                write_process_threads(&threads, output, process.koid)?;
+                write_process_threads(&threads, output, process)?;
             }
         }
         cursor = page.next();
@@ -80,13 +80,13 @@ fn write_process(
 fn write_process_threads(
     threads: &[ThreadObservation],
     output: &mut impl Write,
-    process: Koid,
+    process: &ProcessObservation,
 ) -> Result<(), Box<dyn std::error::Error>> {
     for thread in threads
         .iter()
-        .filter(|thread| thread.process_koid == Some(process))
+        .filter(|thread| thread.process_koid == Some(process.koid))
     {
-        write_thread(output, thread)?;
+        write_thread(output, thread, process.name.as_str())?;
     }
     Ok(())
 }
@@ -99,7 +99,7 @@ fn write_kernel_threads(
         .iter()
         .filter(|thread| thread.process_koid.is_none())
     {
-        write_thread(output, thread)?;
+        write_thread(output, thread, "kernel")?;
     }
     Ok(())
 }
@@ -122,15 +122,17 @@ fn scan_threads(
 fn write_thread(
     output: &mut impl Write,
     thread: &ThreadObservation,
+    process_name: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         output,
-        "  thread {:<10} {:<10} {:<20} {}/{}",
+        "  thread {:<10} {:<10} {:<20} {}/{} process={}",
         thread.koid.get(),
         Owner(thread.process_koid),
         thread.name.as_str(),
         thread.role.name(),
         thread.registry_phase.name(),
+        process_name,
     )?;
     Ok(())
 }
@@ -142,7 +144,7 @@ impl std::fmt::Display for Owner {
         let width = formatter.width().unwrap_or(0);
         match self.0 {
             Some(koid) => write!(formatter, "{:<width$}", koid.get()),
-            None => write!(formatter, "{:<width$}", "-"),
+            None => write!(formatter, "{:<width$}", "kernel"),
         }
     }
 }

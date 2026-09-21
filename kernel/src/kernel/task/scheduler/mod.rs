@@ -533,17 +533,16 @@ pub(crate) fn crash_snapshot(cpu: usize) -> Option<CrashTaskSnapshot> {
     state::try_cpu_snapshot(cpu)
 }
 
-pub fn register_secondary_cpu(cpu: CpuIndex, name: &str) -> Result<SecondaryStack, Error> {
+pub fn register_secondary_cpu(cpu: CpuIndex) -> Result<SecondaryStack, Error> {
     let preemption = super::preempt::prepare_cpu(cpu)?;
     let reservation = reserve_thread(|scheduler| scheduler.reserve_secondary(cpu))?;
-    let thread =
-        match prepare_boxed_thread(Thread::secondary_bootstrap(reservation.id(), cpu, name)) {
-            Ok(thread) => thread,
-            Err(error) => {
-                abandon_reservation(reservation)?;
-                return Err(error);
-            }
-        };
+    let thread = match prepare_boxed_thread(Thread::secondary_bootstrap(reservation.id(), cpu)) {
+        Ok(thread) => thread,
+        Err(error) => {
+            abandon_reservation(reservation)?;
+            return Err(error);
+        }
+    };
     let stack = publish_secondary(reservation, thread)?;
     preemption.commit();
     Ok(stack)

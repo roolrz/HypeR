@@ -621,7 +621,6 @@ impl Thread {
     pub(super) fn idle(
         id: ThreadId,
         cpu_index: CpuIndex,
-        name: &str,
         entry: KernelThreadEntry,
     ) -> Result<Self, Error> {
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
@@ -630,7 +629,7 @@ impl Thread {
         Ok(Self {
             identity: ThreadIdentity {
                 id,
-                name: ThreadNameSnapshot::new(name)?,
+                name: ThreadNameSnapshot::idle(cpu_index)?,
             },
             object: ThreadObject::try_system(ThreadRole::Idle)?,
             schedule_owner: ScheduleOwner::Coordinator,
@@ -656,15 +655,11 @@ impl Thread {
     }
 
     /// Creates the already-running bootstrap context for a secondary CPU.
-    pub(super) fn secondary_bootstrap(
-        id: ThreadId,
-        cpu_index: CpuIndex,
-        name: &str,
-    ) -> Result<Self, Error> {
+    pub(super) fn secondary_bootstrap(id: ThreadId, cpu_index: CpuIndex) -> Result<Self, Error> {
         Ok(Self {
             identity: ThreadIdentity {
                 id,
-                name: ThreadNameSnapshot::new(name)?,
+                name: ThreadNameSnapshot::idle(cpu_index)?,
             },
             // A secondary bootstrap continuation exists solely to complete
             // local setup and become that CPU's permanent idle Thread.
@@ -1168,6 +1163,24 @@ pub struct ThreadNameSnapshot {
 }
 
 impl ThreadNameSnapshot {
+    fn idle(cpu: CpuIndex) -> Result<Self, Error> {
+        let mut name = Self::new("idle/")?;
+        let start = usize::from(name.len);
+        let mut number = cpu.get();
+        loop {
+            let index = usize::from(name.len);
+            let slot = name.bytes.get_mut(index).ok_or(Error::NameTooLong)?;
+            *slot = b'0' + (number % 10) as u8;
+            name.len += 1;
+            number /= 10;
+            if number == 0 {
+                break;
+            }
+        }
+        name.bytes[start..usize::from(name.len)].reverse();
+        Ok(name)
+    }
+
     fn new(name: &str) -> Result<Self, Error> {
         if name.len() > MAX_THREAD_NAME_BYTES {
             return Err(Error::NameTooLong);

@@ -5,6 +5,7 @@
 //! initiator pool; no business VM memory or per-request userspace relay is used.
 
 use super::{MAILBOX_MMIO, Result, check_deadline, deadline, pump_guest, show};
+use hyper_io_runtime::guest_log::GuestLog;
 use hyper_os::block::{self, NativeBlock};
 use hyper_os::device::{self, DmaExtent};
 use hyper_os::guest_io::Mailbox;
@@ -104,6 +105,7 @@ impl Client {
         startup: &Startup<'_>,
         guest: &mut InstalledGuest,
         mailbox: &Mailbox,
+        guest_log: &mut GuestLog,
         features: u64,
     ) -> Result<()> {
         if features & VERSION_1 == 0 {
@@ -112,6 +114,7 @@ impl Client {
         println!("HypeR io-runtime: preparing configuration volume");
         exchange(
             guest,
+            guest_log,
             mailbox,
             Request {
                 binding: 1,
@@ -137,6 +140,7 @@ impl Client {
         });
         exchange(
             guest,
+            guest_log,
             mailbox,
             Request {
                 binding: 1,
@@ -173,7 +177,7 @@ impl Client {
                     result
                 })
                 .map_err(show)?;
-            let pending = wait_mount(guest, mailbox, &receiver);
+            let pending = wait_mount(guest, guest_log, mailbox, &receiver);
             if pending.is_err() {
                 let _ = vm::request_stop(guest.machine.as_handle_ref());
             }
@@ -194,13 +198,18 @@ impl Client {
     }
 }
 
-fn exchange(guest: &mut InstalledGuest, mailbox: &Mailbox, request: Request) -> Result<()> {
+fn exchange(
+    guest: &mut InstalledGuest,
+    guest_log: &mut GuestLog,
+    mailbox: &Mailbox,
+    request: Request,
+) -> Result<()> {
     let mut record = [0; MAX_RECORD];
     let length = request.encode(&mut record).map_err(show)?;
     mailbox.send(&record[..length]).map_err(show)?;
     let limit = deadline(60)?;
     loop {
-        if !pump_guest(guest)? {
+        if !pump_guest(guest, guest_log)? {
             return Err("backend stopped during configuration".into());
         }
         match mailbox.receive(&mut record) {
@@ -243,12 +252,13 @@ fn exchange(guest: &mut InstalledGuest, mailbox: &Mailbox, request: Request) -> 
 
 fn wait_mount(
     guest: &mut InstalledGuest,
+    guest_log: &mut GuestLog,
     mailbox: &Mailbox,
     receiver: &OwnedHandle<ByteChannelObject>,
 ) -> Result<()> {
     let limit = deadline(hyper_service::io::READY_TIMEOUT_SECONDS)?;
     loop {
-        if !pump_guest(guest)? {
+        if !pump_guest(guest, guest_log)? {
             return Err("backend stopped during mount".into());
         }
         // Observe the durable worker result before serial readiness/deadline.

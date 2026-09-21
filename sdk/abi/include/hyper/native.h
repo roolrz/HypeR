@@ -1140,8 +1140,9 @@ typedef struct hyper_native_virtual_machine_info_t {
     uint64_t memory_size;
     uint32_t architecture;
     uint32_t platform_profile;
+    uint64_t resident_memory_bytes;
 } hyper_native_virtual_machine_info_t;
-HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_machine_info_t) == 32, "virtual_machine_info size");
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_machine_info_t) == 40, "virtual_machine_info size");
 HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_machine_info_t) == 8, "virtual_machine_info alignment");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, phase) == 0, "virtual_machine_info.phase offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, vcpu_count) == 4, "virtual_machine_info.vcpu_count offset");
@@ -1149,6 +1150,7 @@ HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, guest_phys
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, memory_size) == 16, "virtual_machine_info.memory_size offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, architecture) == 24, "virtual_machine_info.architecture offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, platform_profile) == 28, "virtual_machine_info.platform_profile offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_machine_info_t, resident_memory_bytes) == 32, "virtual_machine_info.resident_memory_bytes offset");
 
 #define HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE UINT64_C(24)
 typedef struct hyper_native_virtual_cpu_info_t {

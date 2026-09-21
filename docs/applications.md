@@ -15,7 +15,7 @@ options (echo treats option-looking arguments as literal text).
 | `cat` | `cat FILE...`, `cat -n FILE`, `cat -`; streams bytes without UTF-8 conversion, with continuous optional line numbering. No files means stdin. |
 | `grep` | `grep -in PATTERN FILE`, `grep -F TEXT`, `grep -v PATTERN`; filters files or stdin, with counting, filename and quiet modes. |
 | `ls` | `ls /etc/hyper`, `ls FILE DIRECTORY`, `ls -a`, `ls --sort size -r`; defaults to permission mode, IEC size, and sorted names. `--bytes` gives exact file sizes; `-1` prints names only. Directory sizes are shown as `-`. |
-| `ps` | `ps -T`, `ps -p KOID`, `ps --name vm-runtime`; select a process or filter names, optionally including threads. |
+| `ps` | `ps -T`, `ps -p KOID`, `ps --name vm-runtime`; select a process or filter names, optionally including threads. Thread rows include `process=NAME`; kernel-owned threads use `OWNER=kernel`, and per-CPU idle threads are named `idle/CPU`. |
 | `free` | `free`, `free --bytes`; physical totals, ownership and reclaimable cache pages, in human-readable units or exact bytes. |
 | `top` | `top -d 0.5`, `top -b -n 3`; interactive refresh with q/Ctrl-C to quit, or plain finite batch snapshots. |
 | `handle` | `handle KOID`, `handle --objects --kind process`; inspect process capabilities or filter the object registry by its printed kind. |
@@ -189,3 +189,21 @@ QEMU loads the hypervisor image directly from the host, so the configuration
 volume contains guest artifacts and configuration, not `hyper.img`. Pi 5 still
 needs its firmware boot files. Existing disks are intentionally preserved by
 `make run`; use the normal `make` image rebuild to refresh their packaged content.
+
+`vmm list` and `vmm status NAME` distinguish RAM capacity from **allocated VM
+backing**. Allocation is a live kernel snapshot of resident primary backing:
+RAM, uploaded image pages not yet accessed by the guest, and explicitly admitted
+shared pools. The I/O VM currently has 64 MiB of boot RAM plus a separate 1 MiB
+Native storage initiator pool, so its allocated backing can exceed the displayed
+RAM capacity. Dynamically attached alias windows are not primary backing. The
+metric excludes
+the runtime process, page tables, and I/O VM mappings of other guests' memory;
+it does not describe Linux's used/free memory. Repeated mappings of the same
+backing range within a VM count once, while a page shared by different VMs is
+attributed to each VM, so per-VM numbers must not be summed as system usage.
+
+Inspection uses the runtime control connection and grants no additional VM
+control rights. One command has a bounded observation budget shared by all
+listed VMs. Starting, stopping, disconnected or busy runtimes may have unavailable
+metrics; unavailable is never displayed as zero. Residency is sampled in short
+locked chunks and can grow during a query, rather than freezing guest execution.
