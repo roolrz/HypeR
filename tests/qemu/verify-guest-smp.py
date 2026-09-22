@@ -12,33 +12,13 @@ import subprocess
 import sys
 import time
 
-
-HOST_LOG = re.compile(rb'<[0-7]>\[[ \t]*[0-9]+\.[0-9]+\] [^\n]*\n')
-FAILURE_MARKERS = (
-    b'HypeR: fatal', b'kernel panic', b'Kernel panic', b'HypeR KERNEL PANIC',
-    b'HypeR crash monitor', b'kernel startup failed',
-)
+from guest_console import append_console_output
 
 
 # Shared CI TCG hosts can exceed 90 seconds while a fresh Alpine SMP guest
 # is still progressing (observed IPv6 initialization at guest t=76s). This
 # remains a fixed total boot deadline; ordinary commands keep 90 seconds.
 GUEST_BOOT_TIMEOUT_SECONDS = 180
-
-
-def append_console_output(pending, data):
-    """Reassemble console text across complete interleaved host log records.
-
-    The caller archives raw bytes first. Keep unfinished records in pending so
-    arbitrary read boundaries do not leak log fragments into prompt matching.
-    Check failures before removing records, and again after joining guest text.
-    """
-    pending.extend(data.replace(b'\r', b''))
-    if any(marker in pending for marker in FAILURE_MARKERS):
-        raise RuntimeError('host or guest kernel failure')
-    pending[:] = HOST_LOG.sub(b'', pending)
-    if any(marker in pending for marker in FAILURE_MARKERS):
-        raise RuntimeError('host or guest kernel failure')
 
 
 def main():

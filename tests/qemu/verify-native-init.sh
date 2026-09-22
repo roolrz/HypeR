@@ -24,6 +24,8 @@ total_timeout_seconds=${QEMU_NATIVE_TIMEOUT_SECONDS:-300}
 temp=$(mktemp -d -t hyper-native-init.XXXXXX)
 input=$temp/input
 native_output=$temp/native-output
+guest_output=$temp/guest-output
+script_dir=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 log=${QEMU_TEST_LOG:-$temp/output.log}
 pid=
 
@@ -113,6 +115,14 @@ while :; do
             [ "$prompts" -ge "$prompt_target" ] || prompt_ready=false
             ;;
     esac
+    # Guest UART output is a byte stream, unlike Native Console TX frames.
+    # Retain its CR/LF bytes while removing complete multiplexed host records;
+    # the helper checks fatal diagnostics before and after reassembly.
+    case "$command_phase" in
+        guest_console | guest_echo | guest_enter)
+            python3 -B "$script_dir/guest_console.py" <"$log" >"$guest_output"
+            ;;
+    esac
     if "$prompt_ready"; then
     case "$command_phase" in
         console)
@@ -141,21 +151,21 @@ while :; do
             ;;
         guest_console)
             if grep -q 'HypeR guest: Linux userspace is running' "$log" &&
-                grep -Fq '~ # ' "$log"; then
+                grep -Fq '~ # ' "$guest_output"; then
                 # No Enter yet: a line-buffered relay must not hide guest echo.
                 printf 'echo HYPER_GUEST_CONSOLE_RX' >&3
                 command_phase='guest_echo'
             fi
             ;;
         guest_echo)
-            if grep -Fq 'echo HYPER_GUEST_CONSOLE_RX' "$log"; then
+            if grep -Fq 'echo HYPER_GUEST_CONSOLE_RX' "$guest_output"; then
                 printf '\r' >&3
                 command_phase='guest_enter'
             fi
             ;;
         guest_enter)
-            # Check the raw stream: the Linux tty owns CR/LF conversion.
-            if grep -Fxq "$(printf 'HYPER_GUEST_CONSOLE_RX\r')" "$log"; then
+            # Preserve Linux tty CR/LF conversion after host-log reassembly.
+            if grep -Fxq "$(printf 'HYPER_GUEST_CONSOLE_RX\r')" "$guest_output"; then
                 printf '\035d' >&3
                 command_phase='guest_detach'
             fi
