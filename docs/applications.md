@@ -59,10 +59,16 @@ observe `starting`, `running`, `stopping`, `stopped`, or `failed`.
 Each VM owns a separate runtime process, resource domain, task group, lifecycle
 tracker, and console session. The current policy allows eight definitions and
 budgets two active VM instances. Guest memory and vCPU configuration still come
-from the FIT image: the reference packer defaults to 128 MiB and one vCPU;
+from the FIT image: the default Alpine build uses 256 MiB and two vCPUs on
+AArch64 (one on RISC-V);
 AArch64 supports 1..8 vCPUs and RISC-V currently supports one. The CLI has no
 memory or CPU overrides that would disagree with the image's boot contract.
 For a four-vCPU development image, use `make guest-itb NATIVE_GUEST_VCPUS=4`.
+`allocated VM backing` measures resident physical backing, not memory used
+inside Linux. Attaching an I/O-backed disk currently populates the guest's
+entire RAM VMO. See [I/O allocation and zero-copy](io-vm.md#allocation-and-zero-copy-scope)
+for the allocation policy and [memory observations](io-vm.md#memory-observations-and-queue-overhead)
+for shared-memory accounting and queue costs.
 Guest PSCI poweroff stops the instance cleanly; guest reboot creates a fresh
 instance under the same definition and disconnects the old console session.
 

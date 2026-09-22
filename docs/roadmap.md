@@ -80,8 +80,9 @@ capabilities; new privileged power operations require explicit Native authority.
    - [ ] Adopt the separate Pi 5 package by immutable digest.
    - [x] Provide board/guest device trees, RAM reservations and VM configuration
      through the existing VMM and vm-runtime path.
-   - [ ] Validate guest SMP, console, timer/IPI wakeups, CPU off/on, reboot
-     and poweroff on hardware, including cross-core cache/TLB retirement.
+   - [x] Validate two-vCPU Alpine boot and console, three CPU off/on cycles,
+     ordinary reboot and poweroff on Pi 5 hardware.
+   - [ ] Stress timer/IPI wakeups and cross-core cache/TLB retirement on hardware.
 3. **Connect physical network and storage devices.**
    - [ ] Inventory the selected controllers' MMIO, IRQ, DMA, clock/reset and
      firmware dependencies; assign each resource one owner.
@@ -94,8 +95,8 @@ capabilities; new privileged power operations require explicit Native authority.
    - [x] Integrate storage with ordinary Native service deployment and mount
      the Pi 5 SD-backed configuration volume at `/data`; directory reads pass.
    - [ ] Qualify SD writes and persistence across reboot.
-   - [ ] Define the network frontend/backend contract separately; the storage
-     choice does not by itself complete the network design.
+   - [ ] Define and implement the virtio-net frontend/backend contract; the
+     storage choice does not by itself complete the network design.
    - [ ] Implement the Linux backend and HypeR Native frontend services/adapters.
    - [ ] Integrate block I/O at the VFS backend boundary and provide the Native
      network APIs needed by the first end-to-end applications.

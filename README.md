@@ -16,6 +16,55 @@ service runtime. Native userspace services manage Linux guests through explicit
 capabilities. AArch64 is the primary platform and requires FEAT_VHE (Virtualization
 Host Extensions).
 
+## Architecture
+
+```mermaid
+flowchart TB
+    Apps("Native userspace<br/>Applications · VM management · I/O services")
+    Guests("Guest VMs")
+
+    Kernel["HypeR kernel<br/>Scheduling · Memory · Capabilities · Virtualization<br/>VFS · FAT · Native block frontend for /data"]
+    IO["Independent trusted Linux I/O VM<br/>vhost-scsi / LIO · Physical device drivers"]
+    Disk[("Physical storage")]
+
+    Apps -->|Native API / Rust std| Kernel
+    Guests -.->|Guest execution| Kernel
+    Guests -->|virtio-scsi · shared pages| IO
+    Kernel <-->|/data · shared I/O queues| IO
+    IO -->|Assigned device access / DMA| Disk
+
+    classDef client fill:#eef2ff,stroke:#818cf8,color:#273469
+    classDef kernel fill:#24354b,stroke:#182638,color:#ffffff,stroke-width:2px
+    classDef backend fill:#ecfdf5,stroke:#34a375,color:#14543b
+    classDef device fill:#fafafa,stroke:#a1a1aa,color:#3f3f46
+    class Apps,Guests client
+    class Kernel kernel
+    class IO backend
+    class Disk device
+```
+
+**One I/O backend serves both HypeR and its guests.** Native file access to
+`/data` goes through the kernel VFS and Native block frontend; guest disks use
+virtio-scsi. Both reach the independent, trusted Linux I/O VM through shared
+memory. Native io-runtime configures the backend and mounts `/data`.
+
+Both business guests and the Linux I/O VM execute under the HypeR kernel.
+Native VM management services control their lifecycles through capabilities;
+Linux is an I/O backend, not the host kernel.
+
+**Keep device drivers outside the HypeR kernel whenever practical.** An
+independent Linux I/O VM supplies the main physical I/O backend. HypeR Native
+userspace drivers can also access authorized devices and expose services to
+applications. The kernel retains essential platform drivers and the mechanisms
+for access control, interrupts, DMA and safe resource retirement; adding a
+physical device driver to it requires a concrete reason. VFS remains in the
+kernel. The selected I/O VM interfaces are **virtio-scsi** for storage,
+**virtio-net** for networking, and **vfio-user** for general device backends.
+Storage is implemented today; virtio-net and vfio-user are planned. Other
+device models are evaluated case by case, without a general support commitment.
+See the [architecture boundaries](kernel/docs/architecture.md#device-driver-placement)
+and [I/O VM design](docs/io-vm.md) for details.
+
 ## Why run HypeR?
 
 Run HypeR if you want to explore how a virtualization host is built, from CPU
@@ -36,23 +85,6 @@ Today, the reason to choose HypeR is to develop this architecture. It is not
 ready to host production or untrusted workloads, and the project makes no
 claim of better performance or stronger security than established alternatives.
 
-## How does it compare?
-
-These projects occupy different parts of the virtualization stack. Choose
-according to the layer you want to operate or develop:
-
-| Project | Where it fits |
-| --- | --- |
-| [KVM](https://docs.kernel.org/virt/kvm/api.html) | Linux kernel virtualization interfaces used by userspace VMMs; a fit when Linux is your host foundation. |
-| [Xen](https://handbook.xenproject.org/users/introduction.html) | An established bare-metal hypervisor with a domain-based architecture; a fit when you want to build on that ecosystem. |
-| [bhyve](https://docs.freebsd.org/en/books/handbook/virtualization/#virtualization-host-bhyve) | FreeBSD's hypervisor; a fit when FreeBSD is your host environment. |
-| [Cloud Hypervisor](https://www.cloudhypervisor.org/) | A Rust VMM focused on modern cloud workloads. |
-| [crosvm](https://crosvm.dev/book/) | A hosted Rust VMM focused on sandboxed guest execution. |
-
-HypeR's focus is developing its own Rust kernel and Native capability runtime
-together. Choose it when that host architecture is the thing you want to
-experiment with; choose an established stack when running VMs is the goal.
-
 ## What works today?
 
 The AArch64 QEMU system boots Native init, a shell, and VM management services
@@ -61,8 +93,9 @@ Linux guests with console access. RISC-V runs Native init,
 shell, std applications, and userspace-managed Linux guests on QEMU. x86-64 currently has build and image validation only.
 
 Pi 5 D0 hardware has booted the Native shell and Linux I/O VM, and read its
-SD-backed FAT volume through `/data`. Write durability, Alpine on hardware,
-networking and device-reset recovery remain under qualification.
+SD-backed FAT volume through `/data`. A two-vCPU Alpine guest has passed CPU
+off/on cycles, reboot with file persistence, and poweroff on hardware. Write
+durability, networking and device-reset recovery remain under qualification.
 
 The Native ABI is pre-release. Broad hardware support, general-purpose virtual
 I/O, device assignment, and transactional multi-vCPU reconfiguration remain unfinished.
@@ -78,7 +111,7 @@ virtio-scsi with Linux vhost-scsi/LIO.
 - [x] Implement host GICv2 and Pi 5 debug-UART support; validate in QEMU.
 - [x] Boot the Native shell on Pi 5 with four CPUs, timer and debug-UART input.
 - [x] Add GICv2 guest interrupts, Arm guest SMP and runtime-managed guest power control.
-- [ ] Validate guest SMP, CPU hotplug, reboot and poweroff on Pi 5.
+- [x] Validate guest SMP, CPU hotplug, reboot and poweroff on Pi 5 (two-vCPU Alpine).
 - [x] Boot the Linux I/O VM on physical Pi 5 and reach Linux userspace.
 - [x] Publish the complete appliance from [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm)
   and consume a digest-pinned package; HypeR owns apps and DTS/DTB.

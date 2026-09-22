@@ -89,6 +89,9 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
         .map(|ready| managed::Client::prepare(authority, ready))
         .transpose()?;
     let image = Image::load("/vm/io.itb")?;
+    if image.plan.memory_size() != RAM_BYTES {
+        return Err("resident I/O VM requires a rebuilt 128 MiB image".into());
+    }
     let dma =
         device::dma_extent(authority, image.memory.as_handle_ref(), 0, RAM_BYTES).map_err(show)?;
     let lease = vm::derive_creation_lease(

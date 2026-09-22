@@ -1545,7 +1545,7 @@ pub const CONSTANTS: &[AbiConstant] = &[
     },
     AbiConstant {
         name: "vmo_max_contiguous_size_bytes",
-        value: 64 * 1024 * 1024,
+        value: 128 * 1024 * 1024,
     },
     AbiConstant {
         name: "vmar_permission_read",

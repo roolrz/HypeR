@@ -120,7 +120,7 @@ fn fleet_domain_contains_all_business_slots_and_resident_io() {
 
 #[test]
 fn resident_io_and_two_full_guests_fit_without_weakening_child_limits() {
-    assert_eq!(INITIAL_VM_LIMITS.guest_pages, 32 * 1024);
+    assert_eq!(INITIAL_VM_LIMITS.guest_pages, 64 * 1024);
     assert_eq!(INITIAL_VM_LIMITS.virtual_machines, 1);
     assert!(
         IO_RUNTIME_LIMITS.guest_pages + 2 * INITIAL_VM_LIMITS.guest_pages
