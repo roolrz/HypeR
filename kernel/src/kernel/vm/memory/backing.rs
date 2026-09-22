@@ -315,6 +315,12 @@ impl Layout {
         Ok(())
     }
 
+    /// Require one retained region to authorize the complete block. Adjacent
+    /// regions need not share ownership even when their physical pages touch.
+    pub(crate) fn covers_range(&self, offset: u64, length: u64) -> bool {
+        self.resolve(offset, length).is_ok()
+    }
+
     pub(crate) fn populate_page(&self, offset: u64) -> Result<(), MemoryObjectError> {
         let (backing, offset) = self.resolve(offset, PAGE_SIZE)?;
         backing.populate_page(offset)

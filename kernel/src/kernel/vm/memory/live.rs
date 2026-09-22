@@ -116,6 +116,19 @@ impl Mapping {
         })
     }
 
+    fn covers_range(&self, address: u64, length: u64) -> bool {
+        let Some(end) = address.checked_add(length) else {
+            return false;
+        };
+        let index = self
+            .order
+            .partition_point(|index| self.extents[*index].alias <= address);
+        index.checked_sub(1).is_some_and(|index| {
+            let extent = self.extents[self.order[index]];
+            end <= extent.alias + extent.length
+        })
+    }
+
     pub(crate) fn contains(&self, address: u64) -> bool {
         let index = self
             .order
@@ -275,6 +288,51 @@ impl super::GuestAddressSpace {
         self.residency
             .check_active(cpu.get(), self.translation_epoch)
             .map_err(Error::Residency)?;
+        // Each extent retains one contiguous run of the same grant. Never
+        // combine neighboring grants: their DMA retirement is independent.
+        if let Some(size) = crate::hal::vm::Stage2AddressSpace::normal_block_size() {
+            let base = ipa & !(size - 1);
+            let eligible = self.live.slots.iter().flatten().any(|mapping| {
+                matches!(mapping.state, State::Admitted { .. }) && mapping.covers_range(base, size)
+            });
+            if eligible {
+                let mut allocate =
+                    |pages, alignment| self.table_pages.allocate_zeroed(pages, alignment);
+                // SAFETY: The active VM lock protects the admitted record,
+                // whose lease keeps the whole extent stable through retirement.
+                // Affine aliases preserve physical alignment and exact coverage.
+                let result = unsafe {
+                    self.stage2.try_map_normal_block_active(
+                        base,
+                        base - ALIAS_OFFSET,
+                        hyper::vm::translation::Stage2PagePermissions::ReadWrite,
+                        &mut allocate,
+                    )
+                };
+                match result {
+                    Ok(true) => return Ok(true),
+                    Ok(false) => {}
+                    Err(hyper::vm::translation::ActiveMappingError::BeforeInstall(
+                        crate::hal::vm::Stage2Error::Allocation,
+                    )) => {
+                        // Optional block admission must not prevent 4 KiB
+                        // progress under table-allocation pressure.
+                        let _ = self.table_pages.take_error();
+                    }
+                    Err(hyper::vm::translation::ActiveMappingError::BeforeInstall(error)) => {
+                        return Err(error.into());
+                    }
+                    Err(
+                        hyper::vm::translation::ActiveMappingError::InstalledButInvalidationFailed(
+                            error,
+                        ),
+                    ) => {
+                        self.poisoned = true;
+                        return Err(Error::Stage2(error));
+                    }
+                }
+            }
+        }
         let result = {
             let mut allocate =
                 |pages, alignment| self.table_pages.allocate_zeroed(pages, alignment);

@@ -250,6 +250,25 @@ device DMA layout. The Native configuration client also eagerly allocates its
 1 MiB pool. Imported business-guest pages are shared data, not free RAM that
 Linux can use for its own allocator or vhost metadata.
 
+On AArch64, Stage-2 keeps the 4 KiB translation granule but can install a
+2 MiB block for an aligned, physically contiguous range of already-resident
+RAM. Primary guest RAM must belong to one backing region, have no previously
+installed page mappings in that block, and have uniform instruction-publication
+state. Dynamic I/O aliases must fit wholly inside one admitted grant extent.
+Preallocation alone does not guarantee physical contiguity: the I/O VM's
+contiguous RAM benefits directly, while scattered business-guest backing falls
+back to 4 KiB mappings. The optimization does not populate additional RAM,
+move shared pages, or change DMA addresses.
+
+Device mappings retain 4 KiB granularity. A page-specific execute-permission
+change splits a RAM block into 4 KiB descriptors naming the original physical
+pages, with architectural break-before-make and translation invalidation.
+Complete grant extents can be revoked without allocating split tables; backing
+remains retained until the existing CPU/DMA retirement protocol completes.
+Split tables are not automatically promoted back into blocks. This reduces
+translation-table storage for eligible dense RAM; actual TLB and throughput
+benefits depend on the processor and workload.
+
 Whole-guest preallocation is a property of this implementation, **not a virtio
 or vhost protocol requirement**. Supporting first-touch allocation from either
 VM would require coordinated allocation from the same backing object, an import

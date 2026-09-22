@@ -145,6 +145,17 @@ The selected HAL crate exposes eleven capability modules:
   fixed-width events with exhaustive actions; raw frames and backend
   completion state remain architecture-private.
 
+Guest backing and translation leaf size are separate contracts. AArch64 may
+map already-resident, aligned contiguous RAM with 2 MiB Stage-2 blocks while
+retaining 4 KiB allocation/accounting and MMIO isolation. Kernel VM policy
+proves whole-range ownership and uniform execute authority; the HAL owns leaf
+selection, descriptor inspection and block demotion. Demotion prepares the
+replacement table before breaking the old descriptor, invalidates the exact
+VMID's translations, and publishes the table without moving physical backing.
+Range revocation prepares all fallible structural changes before withdrawing
+software admission; old backing survives until hardware invalidation and DMA
+quiescence complete. Existing page tables are not automatically coalesced.
+
 AArch64 requires FEAT_VHE, checked before establishing the host translation
 regime. The configured lower range belongs exclusively to Native Process roots;
 the canonical upper range contains MMIO, linear RAM, the randomized kernel image,

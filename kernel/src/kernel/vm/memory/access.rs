@@ -31,6 +31,13 @@ use crate::kernel::accounting::{ResourceAmount, ResourceKind};
 #[cfg(feature = "kernel-self-test")]
 use crate::kernel::mm::page_block::PageBlock;
 
+struct ResidentBlock {
+    ipa: u64,
+    physical: u64,
+    first: usize,
+    count: usize,
+}
+
 #[derive(Clone, Copy)]
 enum LeafPublication<'pin> {
     Inactive,
@@ -44,6 +51,123 @@ impl LeafPublication<'_> {
 }
 
 impl GuestAddressSpace {
+    #[cfg(feature = "kernel-self-test")]
+    pub(crate) fn verify_resident_blocks_for_test() -> Result<(), &'static str> {
+        use super::backing::{Layout, Region};
+        use crate::kernel::accounting::{ResourceDomain, ResourceLimits};
+        use crate::kernel::mm::user_space::{GuestMemoryBacking as Lease, VmoObject};
+
+        let Some(size) = crate::hal::vm::Stage2AddressSpace::normal_block_size() else {
+            return Ok(());
+        };
+        let domain = ResourceDomain::try_new_root(
+            ResourceLimits::UNLIMITED.with(ResourceKind::GuestPages, 1),
+        )
+        .map_err(|_| "block domain")?;
+        let vmo = VmoObject::try_new_contiguous(size, &domain).map_err(|_| "block VMO")?;
+        let lease = Lease::try_from_vmo(&vmo).map_err(|_| "block lease")?;
+        let mut layout = Layout::try_new(size, &domain).map_err(|_| "block layout")?;
+        let mut region = Some(Region::new(0, 0, size, lease.clone()).map_err(|_| "block region")?);
+        layout.insert(&mut region).map_err(|_| "block insert")?;
+        let identifier = crate::kernel::mm::translation_id::reserve::<
+            crate::kernel::mm::translation_id::Stage2Vmid,
+        >(8)
+        .map_err(|_| "block VMID")?;
+        let mut space = Self::from_vmo(identifier, 0x4000_0000, size, layout, &domain)
+            .map_err(|_| "block address space")?;
+        let candidate = space
+            .resident_block_candidate(17, Stage2PagePermissions::ReadWrite)
+            .map_err(|_| "block inspect")?
+            .ok_or("resident contiguous RAM rejected")?;
+        if candidate.first != 0
+            || candidate.count as u64 * PAGE_SIZE != size
+            || !candidate.physical.is_multiple_of(size)
+        {
+            return Err("block candidate boundaries");
+        }
+        if space.reserve_block_pages(candidate.count).is_some() {
+            return Err("block exceeded quota");
+        }
+        // The same production admission helper rejected the optional block,
+        // but the original one-page operation still has its full allowance.
+        let single = domain
+            .reserve(space.guest_page_amount())
+            .map_err(|_| "single-page quota lost")?;
+        drop(single);
+        if space
+            .resident_block_candidate(17, Stage2PagePermissions::ReadWriteExecute)
+            .map_err(|_| "execute inspect")?
+            .is_some()
+        {
+            return Err("unpublished execute block admitted");
+        }
+        space
+            .publish_resident_instructions()
+            .map_err(|_| "block instruction publication")?;
+        if space
+            .resident_block_candidate(17, Stage2PagePermissions::ReadWriteExecute)
+            .map_err(|_| "published inspect")?
+            .is_none()
+        {
+            return Err("published executable block rejected");
+        }
+        space
+            .instruction_ready_pages
+            .set(0, false)
+            .map_err(|_| "mixed bitmap")?;
+        if space
+            .resident_block_candidate(17, Stage2PagePermissions::ReadWriteExecute)
+            .map_err(|_| "mixed inspect")?
+            .is_some()
+        {
+            return Err("mixed instruction authority coalesced");
+        }
+        space
+            .instruction_ready_pages
+            .set(0, true)
+            .map_err(|_| "restore bitmap")?;
+        space
+            .mapped_pages
+            .set(0, true)
+            .map_err(|_| "mapped bitmap")?;
+        if space
+            .resident_block_candidate(17, Stage2PagePermissions::ReadWriteExecute)
+            .map_err(|_| "mapped inspect")?
+            .is_some()
+        {
+            return Err("existing leaf coalesced");
+        }
+        space
+            .mapped_pages
+            .set(0, false)
+            .map_err(|_| "restore mapped")?;
+        drop(space);
+
+        // Physically contiguous, identical-owner neighbors still do not give
+        // one region authority over a block that straddles their boundary.
+        let mut layout = Layout::try_new(size, &domain).map_err(|_| "split layout")?;
+        for offset in [0, size / 2] {
+            let mut region = Some(
+                Region::new(offset, offset, size / 2, lease.clone()).map_err(|_| "split region")?,
+            );
+            layout.insert(&mut region).map_err(|_| "split insert")?;
+        }
+        let identifier = crate::kernel::mm::translation_id::reserve::<
+            crate::kernel::mm::translation_id::Stage2Vmid,
+        >(8)
+        .map_err(|_| "split VMID")?;
+        let space = Self::from_vmo(identifier, 0x4000_0000, size, layout, &domain)
+            .map_err(|_| "split address space")?;
+        if space
+            .resident_block_candidate(17, Stage2PagePermissions::ReadWrite)
+            .map_err(|_| "split inspect")?
+            .is_some()
+        {
+            return Err("region boundary coalesced");
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "kernel-self-test")]
     pub fn copy_from(&mut self, ipa: u64, destination: &mut [u8]) -> Result<(), Error> {
         self.ensure_healthy()?;
@@ -151,8 +275,15 @@ impl GuestAddressSpace {
                     .get(page_index)
                     .unwrap_or(false)
             {
-                self.stage2
-                    .make_normal_page_executable(self.page_ipa(page_index)?)?;
+                let ipa = self.page_ipa(page_index)?;
+                let mut allocate =
+                    |pages, alignment| self.table_pages.allocate_zeroed(pages, alignment);
+                // SAFETY: The VM remains inactive; its table pool retains all
+                // zeroed allocations and no hardware can race this mutation.
+                unsafe {
+                    self.stage2
+                        .make_normal_page_executable(ipa, &mut allocate)?
+                };
                 translation_changed = true;
             }
         }
@@ -315,6 +446,11 @@ impl GuestAddressSpace {
                 .map_err(Error::Residency)?;
             None
         };
+        if let Some(cpu) = active_cpu
+            && self.try_commit_resident_block(page_index, permissions, cpu)?
+        {
+            return Ok(());
+        }
         let page_charge = self.domain.reserve(self.guest_page_amount())?;
         let physical = self.prepare_backing_page(page_index)?;
         if permissions.is_executable()
@@ -383,6 +519,145 @@ impl GuestAddressSpace {
         Ok(())
     }
 
+    /// Inspect only: never populate memory or widen a retained RAM region.
+    fn resident_block_candidate(
+        &self,
+        page_index: usize,
+        permissions: Stage2PagePermissions,
+    ) -> Result<Option<ResidentBlock>, Error> {
+        let Some(size) = crate::hal::vm::Stage2AddressSpace::normal_block_size() else {
+            return Ok(None);
+        };
+        let ipa = self.page_ipa(page_index)? & !(size - 1);
+        let Some(offset) = ipa.checked_sub(self.ipa_base) else {
+            return Ok(None);
+        };
+        #[cfg(not(feature = "kernel-self-test"))]
+        let GuestMemoryBacking::SharedVmo(backing) = &self.backing;
+        #[cfg(feature = "kernel-self-test")]
+        let backing = match &self.backing {
+            GuestMemoryBacking::SharedVmo(backing) => backing,
+            GuestMemoryBacking::KernelOwned(_) => return Ok(None),
+        };
+        if !backing.covers_range(offset, size) {
+            return Ok(None);
+        }
+        let Some(first) = self.page_index(ipa) else {
+            return Ok(None);
+        };
+        let count = usize::try_from(size / PAGE_SIZE).map_err(|_| Error::InvalidRange)?;
+        let end = first.checked_add(count).ok_or(Error::InvalidRange)?;
+        let executable = self.instruction_ready_pages.get(first).unwrap_or(false);
+        // An execute fault only earns execute authority for its own page. A
+        // block may execute only when every page was already cache-published.
+        if permissions.is_executable() && !executable {
+            return Ok(None);
+        }
+        // Once any page falls back to an L3 leaf this cheap check prevents
+        // repeatedly scanning the backing of the same unsuitable block.
+        for index in first..end {
+            if self.mapped_pages.get(index) != Some(false)
+                || self.instruction_ready_pages.get(index) != Some(executable)
+            {
+                return Ok(None);
+            }
+        }
+        if !backing.page_is_resident(offset)? {
+            return Ok(None);
+        }
+        let physical = backing.physical_page(offset)?.get();
+        if !physical.is_multiple_of(size) {
+            return Ok(None);
+        }
+        for index in 1..count {
+            let delta = index as u64 * PAGE_SIZE;
+            if !backing.page_is_resident(offset + delta)?
+                || backing.physical_page(offset + delta)?.get() != physical + delta
+            {
+                return Ok(None);
+            }
+        }
+        Ok(Some(ResidentBlock {
+            ipa,
+            physical,
+            first,
+            count,
+        }))
+    }
+
+    /// Map an already-resident, uniformly published RAM block without changing
+    /// backing allocation policy. A missed optimization must not make a
+    /// previously admissible single-page fault fail its resource quota.
+    fn try_commit_resident_block(
+        &mut self,
+        page_index: usize,
+        permissions: Stage2PagePermissions,
+        cpu: hyper::cpu::CpuIndex,
+    ) -> Result<bool, Error> {
+        let Some(ResidentBlock {
+            ipa,
+            physical,
+            first,
+            count,
+        }) = self.resident_block_candidate(page_index, permissions)?
+        else {
+            return Ok(false);
+        };
+        let end = first + count;
+        let Some(charge) = self.reserve_block_pages(count) else {
+            return Ok(false);
+        };
+        let result = {
+            let mut allocate =
+                |pages, alignment| self.table_pages.allocate_zeroed(pages, alignment);
+            // SAFETY: The active residency check in commit_page and VM lock
+            // serialize publication. One retained hardware-write lease covers
+            // all stable, resident, contiguous pages; no authority is widened.
+            unsafe {
+                self.stage2
+                    .try_map_normal_block_active(ipa, physical, permissions, &mut allocate)
+            }
+        };
+        let committed_error = match result {
+            Ok(false) => return Ok(false),
+            Ok(true) => None,
+            Err(ActiveMappingError::BeforeInstall(crate::hal::vm::Stage2Error::Allocation)) => {
+                // A block is optional, including its table allocations. Any
+                // successfully allocated empty tables remain owned by the pool.
+                let _ = self.table_pages.take_error();
+                return Ok(false);
+            }
+            Err(ActiveMappingError::BeforeInstall(error)) => return Err(error.into()),
+            Err(ActiveMappingError::InstalledButInvalidationFailed(error)) => Some(error),
+        };
+        accumulate_charge(&mut self.guest_page_charge, charge.commit());
+        for index in first..end {
+            self.mapped_pages.set(index, true)?;
+        }
+        self.committed_pages += count;
+        self.commit_translation_change(Some(cpu));
+        if let Some(error) = committed_error {
+            self.poisoned = true;
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: committed stage-2 block invalidation failed: {error:?}"
+            ));
+        }
+        Ok(true)
+    }
+
+    fn reserve_block_pages(
+        &self,
+        count: usize,
+    ) -> Option<crate::kernel::accounting::ChargeReservation> {
+        self.domain
+            .reserve(
+                ResourceAmount::ZERO
+                    .with(ResourceKind::PinnedPages, count as u64)
+                    .with(ResourceKind::GuestPages, count as u64),
+            )
+            .ok()
+    }
+
     fn promote_active_page_to_executable(
         &mut self,
         page_index: usize,
@@ -395,10 +670,14 @@ impl GuestAddressSpace {
             .check_active(cpu.get(), self.translation_epoch)
             .map_err(Error::Residency)?;
         let ipa = self.page_ipa(page_index)?;
+        let mut allocate = |pages, alignment| self.table_pages.allocate_zeroed(pages, alignment);
         // SAFETY: Fault dispatch proves this exact address space is active on
         // `cpu`, and the address-space lock serializes the
         // break-before-make/permission update.
-        let promotion = unsafe { self.stage2.make_normal_page_executable_active(ipa) };
+        let promotion = unsafe {
+            self.stage2
+                .make_normal_page_executable_active(ipa, &mut allocate)
+        };
         match promotion {
             Ok(()) => {}
             Err(ActiveMappingError::BeforeInstall(error)) => return Err(error.into()),
