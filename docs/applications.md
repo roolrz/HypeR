@@ -199,7 +199,7 @@ needs its firmware boot files. Existing disks are intentionally preserved by
 `vmm list` and `vmm status NAME` distinguish RAM capacity from **allocated VM
 backing**. Allocation is a live kernel snapshot of resident primary backing:
 RAM, uploaded image pages not yet accessed by the guest, and explicitly admitted
-shared pools. The I/O VM currently has 64 MiB of boot RAM plus a separate 1 MiB
+shared pools. The I/O VM currently has 128 MiB of boot RAM plus a separate 1 MiB
 Native storage initiator pool, so its allocated backing can exceed the displayed
 RAM capacity. Dynamically attached alias windows are not primary backing. The
 metric excludes
