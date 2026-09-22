@@ -147,8 +147,18 @@ pub enum Action {
 #[serde(tag = "command", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Request {
     List,
-    Control { name: String, action: Action },
-    Create { definitions: Vec<Definition> },
+    Affinity {
+        name: String,
+        vcpu: u32,
+        affinity_words: Vec<u64>,
+    },
+    Control {
+        name: String,
+        action: Action,
+    },
+    Create {
+        definitions: Vec<Definition>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -182,6 +192,8 @@ impl std::fmt::Display for State {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Summary {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placement: Vec<VcpuPlacement>,
     #[serde(default)]
     pub read_only: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,10 +211,18 @@ pub struct Summary {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct VcpuPlacement {
+    pub vcpu: u32,
+    pub host_cpu: Option<u32>,
+    pub pending_host_cpu: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "result", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum Response {
     Entries { machines: Vec<Summary> },
     Accepted,
+    AffinityAccepted { vcpu: u32 },
     Error { message: String },
 }
 

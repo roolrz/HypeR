@@ -4,3 +4,5 @@
 //! Business VM console session ownership.
 
 pub mod console;
+
+pub mod control;

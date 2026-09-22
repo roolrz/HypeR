@@ -39,7 +39,7 @@ The current foundation includes:
 - class-aware, intrusive ready queues with RT FIFO and a replaceable Fair
   class whose initial backend is time-sliced round-robin;
 - explicit affinity-controlled kernel-Thread migration with source-context
-  completion before target publication, including blocked waiters;
+  completion before target publication, including blocked waiters and affinity-driven vCPU migration;
 - generation-tagged, allocation-free wait arbitration across notification,
   timeout, and cancellation, with counted Completion, sleeping Mutex and
   Semaphore primitives, and migration-safe deadline waits;
@@ -106,8 +106,7 @@ The current foundation includes:
 
 This list describes implemented foundations, not a claim of production
 completeness. In particular, general-purpose VMM resource policy, device assignment, strong
-guest isolation policy, cross-architecture asynchronous preemption, controlled
-vCPU migration, automatic load balancing, broad hardware discovery, stable
+guest isolation policy, cross-architecture asynchronous preemption, automatic load balancing, broad hardware discovery, stable
 management APIs, and a general-purpose virtual I/O stack are still under
 development.
 
@@ -208,7 +207,8 @@ The x86-64 build gate does not establish a userspace guest-boot contract.
 Pi 5 host bring-up prerequisites and recommended firmware configuration are
 documented in [Raspberry Pi 5](../kernel/docs/rpi5.md). GICv2 Linux guest boot
 and lifecycle tests run in QEMU; physical Pi 5 boot remains unverified.
-The guest SMP acceptance target covers secondary CPU off/on cycles, concurrent
+The guest SMP acceptance target covers affinity-driven vCPU migration between host CPUs,
+timer progress across migration, secondary CPU off/on cycles, concurrent
 work, guest reboot/poweroff and reclamation on both GIC backends, including a
 four-vCPU guest on a single-host-CPU configuration. This checks integration,
 not physical cache, TLB or interrupt ordering.

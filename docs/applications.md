@@ -181,8 +181,20 @@ continues to belong to the console services.
 On board images, `vmm list` and `vmm status io` include the infrastructure I/O VM
 as read-only. The snapshot reports its lifecycle, vCPU count and guest memory;
 an unavailable management endpoint is reported as `unavailable`, not `stopped`.
-`start`, `stop`, `restart`, `delete` and `console` are not supported for this
+`start`, `stop`, `restart`, `delete`, `affinity` and `console` are not supported for this
 entry. Its lifecycle remains under `io-runtime` ownership.
+
+For a running managed VM, `vmm affinity alpine 0 1,3` sets the allowed host
+CPUs for guest vCPU 0. If its current CPU remains allowed, placement is unchanged;
+otherwise the scheduler chooses an eligible CPU and performs the safe handoff.
+CPU lists accept comma-separated IDs and inclusive ranges, such as `0,2-3`.
+This changes affinity, not guest CPU topology, and does not enable automatic
+load balancing. Affinity persists across guest CPU off/on cycles.
+
+Acceptance can precede completion of a running vCPU's handoff. `vmm status alpine`
+reports each vCPU's assigned host CPU and pending target. Assignment does not mean
+the vCPU is executing at that instant. A control timeout reports an unknown
+outcome rather than claiming the affinity update was rejected.
 
 The configuration volume at `/data` uses FAT: long filenames preserve their
 spelling, while lookup compares Unicode uppercase forms and also accepts ASCII

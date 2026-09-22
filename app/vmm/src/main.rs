@@ -110,6 +110,10 @@ fn write_response(
     response: Response,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match response {
+        Response::AffinityAccepted { vcpu } => writeln!(
+            output,
+            "vCPU {vcpu}: affinity accepted; inspect vmm status for placement"
+        )?,
         Response::Accepted => writeln!(output, "accepted")?,
         Response::Error { message } => return Err(std::io::Error::other(message).into()),
         Response::Entries { mut machines } => {
@@ -138,6 +142,19 @@ fn write_response(
                     },
                     machine.image
                 )?;
+                for placement in &machine.placement {
+                    writeln!(
+                        output,
+                        "  vCPU {}: host CPU {}; pending target: {}",
+                        placement.vcpu,
+                        placement
+                            .host_cpu
+                            .map_or_else(|| "unassigned".into(), |cpu| cpu.to_string()),
+                        placement
+                            .pending_host_cpu
+                            .map_or_else(|| "none".into(), |cpu| cpu.to_string())
+                    )?;
+                }
                 if let (Some(vcpus), Some(bytes)) = (machine.vcpus, machine.memory_bytes) {
                     writeln!(
                         output,

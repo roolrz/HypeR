@@ -240,3 +240,35 @@ fn memory_observations_neither_advance_nor_poison_lifecycle() {
     );
     assert!(instance.is_terminal());
 }
+
+#[test]
+fn affinity_cannot_control_io_or_stopping_instances() {
+    assert!(affinity_allowed("io", Some(fleet::State::Running)).is_err());
+    assert!(affinity_allowed("guest", Some(fleet::State::Running)).is_ok());
+    for state in [
+        None,
+        Some(fleet::State::Starting),
+        Some(fleet::State::Stopping),
+        Some(fleet::State::Stopped),
+        Some(fleet::State::Failed),
+    ] {
+        assert!(affinity_allowed("guest", state).is_err());
+    }
+}
+
+#[test]
+fn late_affinity_reply_does_not_corrupt_lifecycle() {
+    let mut policy = running();
+    let reply = vm::VcpuControlReply {
+        sequence: 9,
+        vcpu: 0,
+        host_cpu: Some(0),
+        pending_host_cpu: Some(1),
+        status: hyper_os::Status::OK,
+    };
+    assert!(policy.observe_message(&reply.encode()).unwrap().is_none());
+    assert_eq!(policy.state(), fleet::State::Running);
+    policy.observe(InstanceStatus::Stopped).unwrap();
+    assert!(policy.observe_message(&reply.encode()).unwrap().is_none());
+    assert!(policy.is_terminal());
+}

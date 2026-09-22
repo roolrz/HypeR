@@ -388,7 +388,7 @@ fn supervise_guest(
         if observation.registration == control_wait
             && ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observation.signals)
         {
-            let mut message = [0u8; vm_contract::OBSERVATION_BYTES];
+            let mut message = [0u8; vm_contract::CONTROL_BYTES];
             let length = match control.try_receive(&mut message) {
                 Ok(length) => length,
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
@@ -407,6 +407,24 @@ fn supervise_guest(
                 // Inspection must never block guest service or retirement if a
                 // manager times out or stops consuming replies.
                 match control.try_send(&reply) {
+                    Ok(()) | Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}
+                    Err(error) => return Err(Error::OperatingSystem(error)),
+                }
+                continue;
+            }
+            if let Some(request) = vm_contract::VcpuControlRequest::decode(&message[..length]) {
+                let reply = hyper_vm_runtime::control::handle(
+                    request,
+                    vcpus.len(),
+                    |vcpu, words| {
+                        hyper_os::vm::set_vcpu_affinity(vcpus[vcpu as usize].as_handle_ref(), words)
+                    },
+                    |vcpu| {
+                        hyper_os::vm::vcpu_info(vcpus[vcpu as usize].as_handle_ref())
+                            .map(|info| (info.host_cpu, info.migration_target))
+                    },
+                );
+                match control.try_send(&reply.encode()) {
                     Ok(()) | Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}
                     Err(error) => return Err(Error::OperatingSystem(error)),
                 }

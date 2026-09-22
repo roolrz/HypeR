@@ -29,6 +29,12 @@ pub enum VmCommand {
     Stop { name: String },
     /// Stop and then start the named VM.
     Restart { name: String },
+    /// Set a vCPU allowed CPU list, for example 0,2-3 (no automatic balancing).
+    Affinity {
+        name: String,
+        vcpu: u32,
+        cpus: String,
+    },
     /// Attach to the named VM's serial console.
     Console { name: String },
     /// Create an in-memory definition; use 'vmm save' to write it to a config file.
@@ -52,6 +58,13 @@ pub enum VmCommand {
 impl VmCommand {
     pub fn request(self) -> Result<Request, Box<dyn std::error::Error>> {
         let (name, action) = match self {
+            Self::Affinity { name, vcpu, cpus } => {
+                return Ok(Request::Affinity {
+                    name,
+                    vcpu,
+                    affinity_words: parse_cpu_list(&cpus).map_err(std::io::Error::other)?,
+                });
+            }
             Self::List | Self::Save { .. } => return Ok(Request::List),
             Self::Create {
                 name,
@@ -94,6 +107,36 @@ impl VmCommand {
         };
         Ok(Request::Control { name, action })
     }
+}
+
+fn parse_cpu_list(value: &str) -> Result<Vec<u64>, String> {
+    let max = hyper_os::vm::VCPU_AFFINITY_MAX_WORDS * 64;
+    let mut words = vec![0; hyper_os::vm::VCPU_AFFINITY_MAX_WORDS];
+    let parse = |part: &str| -> Result<usize, String> {
+        if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("CPU list must contain comma-separated IDs or ranges, e.g. 0,2-3".into());
+        }
+        part.parse::<usize>()
+            .ok()
+            .filter(|cpu| *cpu < max)
+            .ok_or_else(|| format!("CPU ID must be below {max}"))
+    };
+    for item in value.split(',') {
+        let (first, last) = match item.split_once('-') {
+            Some((first, last)) => (parse(first)?, parse(last)?),
+            None => {
+                let cpu = parse(item)?;
+                (cpu, cpu)
+            }
+        };
+        if first > last {
+            return Err("CPU range must be ascending".into());
+        }
+        for cpu in first..=last {
+            words[cpu / 64] |= 1 << (cpu % 64);
+        }
+    }
+    Ok(words)
 }
 
 #[cfg(test)]

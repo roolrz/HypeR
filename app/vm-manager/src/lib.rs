@@ -58,6 +58,17 @@ impl MachinePolicy {
     }
 }
 
+/// Explicit placement only belongs to managed, running VM instances.
+pub fn affinity_allowed(name: &str, state: Option<fleet::State>) -> Result<(), &'static str> {
+    if name == "io" {
+        return Err("I/O VM is read-only; its placement belongs to io-runtime");
+    }
+    if state != Some(fleet::State::Running) {
+        return Err("VM must be running");
+    }
+    Ok(())
+}
+
 pub struct InstanceOutcome {
     pub event: InstanceEvent,
     pub reboot: bool,
@@ -81,6 +92,9 @@ impl InstancePolicy {
     pub fn observe_message(&mut self, message: &[u8]) -> hyper_os::Result<Option<vm::Observation>> {
         if let Some(observation) = vm::Observation::decode(message) {
             return Ok(Some(observation));
+        }
+        if vm::VcpuControlReply::decode(message).is_some() {
+            return Ok(None);
         }
         let status = vm::InstanceStatus::decode(message).ok_or(hyper_os::Error::InvalidResponse)?;
         self.observe(status)
