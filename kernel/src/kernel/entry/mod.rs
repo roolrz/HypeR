@@ -17,4 +17,10 @@ pub(crate) mod vmexit;
     feature = "kernel-self-test",
     any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
 ))]
-pub(crate) use services::verify_thread_affinity_creation_for_test;
+#[path = "../../../tests/kernel/thread_create_affinity.rs"]
+mod thread_affinity_test;
+#[cfg(all(
+    feature = "kernel-self-test",
+    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
+))]
+pub(crate) use thread_affinity_test::verify_thread_affinity_creation_for_test;

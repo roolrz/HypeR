@@ -1632,15 +1632,3 @@ fn atomic_wait_error(error: crate::kernel::process::atomic_wait::Error) -> Objec
         Error::InvalidInput => ObjectServiceError::InvalidInput,
     }
 }
-
-#[cfg(all(
-    feature = "kernel-self-test",
-    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
-))]
-#[path = "../../../tests/kernel/thread_create_affinity.rs"]
-mod thread_affinity_test;
-#[cfg(all(
-    feature = "kernel-self-test",
-    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
-))]
-pub(crate) use thread_affinity_test::verify_thread_affinity_creation_for_test;

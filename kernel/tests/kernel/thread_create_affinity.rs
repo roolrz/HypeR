@@ -1,7 +1,12 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
+use super::services::DeferredProcessServices;
+use crate::kernel::abi::native::TaskServices;
+use crate::kernel::capability::{HandleValue, Rights};
+use crate::kernel::mm::user_space::{UserAddress, UserSlice};
+use crate::kernel::process::{Process, UserThread, UserThreadPhase};
+use crate::kernel::task::scheduler::CpuMask;
 
 /// Exercises the real deferred thread service before the caller becomes runnable.
 pub(crate) fn verify_thread_affinity_creation_for_test(
