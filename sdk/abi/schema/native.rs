@@ -1424,6 +1424,10 @@ pub const CONSTANTS: &[AbiConstant] = &[
         value: 4,
     },
     AbiConstant {
+        name: "vcpu_host_cpu_unknown",
+        value: u32::MAX as u64,
+    },
+    AbiConstant {
         name: "virtual_cpu_phase_dormant",
         value: 1,
     },
@@ -2475,6 +2479,16 @@ const VIRTUAL_CPU_INFO_FIELDS: &[Field] = &[
         kind: FieldKind::U32,
         offset: 20,
     },
+    Field {
+        name: "host_cpu",
+        kind: FieldKind::U32,
+        offset: 24,
+    },
+    Field {
+        name: "migration_target",
+        kind: FieldKind::U32,
+        offset: 28,
+    },
 ];
 
 const RESOURCE_LIMITS_FIELDS: &[Field] = &[
@@ -3188,7 +3202,7 @@ pub const RECORDS: &[Record] = &[
         name: "virtual_cpu_info",
         fields: VIRTUAL_CPU_INFO_FIELDS,
         minimum_size: 24,
-        size: 24,
+        size: 32,
         alignment: 8,
     },
     Record {
@@ -5485,6 +5499,8 @@ const THREAD_CREATE_ARGUMENTS: &[Argument] = &[
     scalar_argument("stack", ValueKind::U64),
     scalar_argument("tls", ValueKind::U64),
     scalar_argument("argument", ValueKind::U64),
+    PROCESS_BUILDER_SET_AFFINITY_ARGUMENTS[1],
+    PROCESS_BUILDER_SET_AFFINITY_ARGUMENTS[2],
 ];
 const THREAD_CREATE_RESULTS: &[ResultValue] = &[ResultValue {
     name: "thread",
@@ -9050,6 +9066,33 @@ pub const SYSCALLS: &[Syscall] = &[
         flags: FlagPolicy::None,
         failure_results: &[],
     },
+    Syscall {
+        number: 148,
+        name: "virtual_cpu_set_affinity",
+        arguments: &[
+            Argument {
+                name: "virtual_cpu",
+                kind: ValueKind::Handle,
+                handle: Some(HandleArgument {
+                    object: ObjectConstraint::Kind("virtual_cpu"),
+                    required_rights: RIGHT_WRITE,
+                    disposition: HandleDisposition::Borrow,
+                }),
+                memory: None,
+            },
+            PROCESS_BUILDER_SET_AFFINITY_ARGUMENTS[1],
+            PROCESS_BUILDER_SET_AFFINITY_ARGUMENTS[2],
+        ],
+        results: &[],
+        feature: FeatureGate::Core,
+        blocking: BlockingClass::Never,
+        cancellation: CancellationClass::None,
+        restart: RestartClass::Never,
+        completion: CompletionClass::Returns,
+        audit: AuditClass::Capability,
+        flags: FlagPolicy::None,
+        failure_results: &[],
+    },
 ];
 
 pub const NATIVE_ABI: AbiSchema = AbiSchema {
@@ -9066,6 +9109,7 @@ pub const NATIVE_ABI: AbiSchema = AbiSchema {
 };
 
 pub const SEMANTIC_RULES: &[&str] = &[
+    "Virtual CPU set_affinity borrows a VirtualCpu with WRITE and accepts the same nonempty little-endian u64 CPU-mask word array as process-builder affinity. Bits above the kernel CPU limit are rejected; the mask must contain a schedulable CPU. The current assignment is retained when allowed; otherwise the scheduler selects an allowed registered CPU and safely migrates the saved context. This is explicit affinity enforcement, not load balancing. OK means the update or required handoff was accepted; migration may complete before or after return. An overlapping incompatible handoff or CPU-local wait returns busy. VM stop or guest power operations may supersede the request. Stopping, detached, and reaped endpoints reject new affinity updates. VirtualCpu info extends its 24-byte prefix with host_cpu and migration_target at offsets 24 and 28, one scheduler placement observation rather than running state or a completion token. Value 0xffffffff means unavailable assignment or no pending migration; older kernels return only the original prefix.",
     "Guest mapping creation borrows backend VirtualMachine WRITE and GuestMemory MAP, populates the full stable grant, and returns an owned mapping handle plus a backend-VM-local non-reused token. The backend IPA envelope must contain all sparse aliases: alias = 64 GiB + host physical address, with host addresses below 256 GiB. Unadmitted envelope holes have no RAM or page bitmap entries. The kernel constructs immutable frontend-ordered, coalesced physical extents; neither Native policy nor Linux may replace their addresses. Backend notification write64 0x28 admits one token exactly once to that unique notification route; read64 0x30/0x38/0x40/0x48 return frontend base, total bytes, status, extent count. Write64 0x50 selects an extent index; read64 0x58/0x60/0x68/0x70 return alias, frontend-relative offset, byte length, and query status. Rejection clears the old reply. Extents cover the entire frontend range without holes or overlapping physical pages. After draining vhost and releasing all page pins, only that backend route may write64 the token at 0x20 to certify quiescence. Mapping release accepts never-admitted or quiescent tokens, withdraws lookup, clears leaves, waits for every CPU translation acknowledgement, then releases backing. Closing a mapping handle alone quarantines its pages until backend VM retirement. Notification control operation 3 permanently disconnects both routes, only when no admitted mapping remains; a disconnected route never affects an address or IRQ reused by a subsequent connection.",
     "Native block creation dedicates one fully resident 1048576-byte guest-memory grant permanently to one kernel virtio-scsi initiator; repeated creation from that grant fails. The backend VM must retain the matching mapping until execution and physical DMA are quiescent. Six standard split queues (control, event, and four request queues) have size 8, descriptor offsets n*4096, available offsets n*4096+256, and used offsets n*4096+512, relative to guest_base. Userspace negotiates VERSION_1 with the backend before activation. Activation enables notifications and issues READ CAPACITY(16), accepting only 512-byte sectors; capacity is never supplied by userspace. MAP on the block is exclusive filesystem mount authority; directory WRITE|EXECUTE is additionally required. Mounting retains an independent block owner after its setup handle closes. Reads use bounded batches across the four request queues; writes and flushes remain ordered. Requests use shared queues and blocking kernel notifications, not per-request userspace RPC. Unretired request failures permanently disconnect the initiator and never recycle its buffer. PEER_CLOSED reports disconnection. The physical pages remain retained by backend mappings until VM/DMA retirement; notification closure alone never proves DMA quiescence.",
     "VM power control requires WRITE authority. virtual_machine_get_power_request returns a non-consuming snapshot of one pending request, or would_block when none exists. Request IDs identify one completion and stale IDs are rejected. Operations are CPU_ON (1), CPU_OFF (2), SYSTEM_OFF (3), and SYSTEM_RESET (4); accept is strictly 0 or 1. Reserved output is zero. POWER_REQUEST signals pending work, and VCPU_TERMINATED prompts inspection of per-vCPU terminal state. virtual_machine_open_vcpu returns a control handle for an already configured vCPU; it does not change the immutable topology. The runtime owns lifecycle policy; no guest request is forwarded to host firmware. Guest suspend operations remain unsupported.",
@@ -9075,7 +9119,7 @@ pub const SEMANTIC_RULES: &[&str] = &[
     "ByteChannel duplicate authority permits shared endpoint ownership; peer_closed is published only when the last active endpoint handle closes. Internal operation pins, including WaitSet subscriptions, do not retain active endpoint authority.",
     "process_get_current_id returns the calling Process KOID for observation only. It creates no handle or operational authority and is not a PID-to-handle lookup.",
     "Ramfs storage and all current VFS operations remain kernel-owned. Open File and Directory objects pin their nodes after unlink. Directory WRITE permits namespace mutation; File WRITE permits content mutation. directory_create_file exclusively creates a regular file and publishes its requested handle atomically with the new name. Mode accepts permission bits 0777. directory_remove options 0 removes a non-directory entry without following the final symlink; 1 removes an empty directory. file_write_at options 0 uses offset, 1 atomically appends (offset must be zero); returns actual bytes and end offset. Transfers may complete short. file_resize zero-fills extension. Directory cookies are monotonic, never reused, and enumeration is weakly consistent across mutations. Executable snapshots remain immutable across writes.",
-    "Thread creation prepares a dormant thread in the calling Process and returns duplicate, wait, inspect, start and request_stop authority. Entry, 16-byte-aligned stack, TLS and an opaque first argument define its initial context. The caller retains stack/TLS ownership through the thread terminated signal. Start publishes runnable execution; request_stop abandons execution without language destructors. Closing the last handle to a dormant thread cancels it; running threads continue independently of handle ownership. Existing thread_exit terminates only the caller, while process_exit stops every thread.",
+    "Thread creation prepares a dormant thread in the calling Process and returns duplicate, wait, inspect, start and request_stop authority. Entry, 16-byte-aligned stack, TLS and an opaque first argument define its initial context. Affinity pointer/count zero together inherit the calling Thread current allowed CPU set; otherwise they name one to four little-endian u64 bitmap words. An explicit mask must be nonempty, fit supported CPU indices and include at least one schedulable CPU. The child remains dormant until start, with affinity already applied. The caller retains stack/TLS ownership through the thread terminated signal. Start publishes runnable execution; request_stop abandons execution without language destructors. Closing the last handle to a dormant thread cancels it; running threads continue independently of handle ownership. Existing thread_exit terminates only the caller, while process_exit stops every thread.",
     "Atomic wait/wake currently operate on aligned writable u32 words in the calling Process. Wait checks the value and publishes its generation atomically with respect to wake; mismatch returns ok, and spurious wakes are allowed. Wait uses an absolute monotonic nanosecond deadline, with UINT64_MAX meaning infinite; timeout returns timed_out and cancellation returns cancelled. Wake returns the number of registrations actually notified, bounded by count. Wake does not replace the caller's release operation or the waiter's acquire predicate check. Keys include the non-reused mapping identity and virtual address; aliases and other Processes have separate wait domains. Keep the mapping live while waiting: unmap/protect does not move an existing wait to a replacement mapping. Pinned backing survives concurrent unmap until admitted accesses finish; process stop cancels outstanding waits.",
     "Thread sleep accepts an absolute monotonic nanosecond deadline and returns ok when it expires, including an already elapsed deadline. UINT64_MAX sleeps until cancellation. It parks the current thread through scheduler timeout arbitration rather than polling or yielding.",
     "The monotonic clock syscall returns absolute nanoseconds from the kernel's monotonic clock domain. Ambient monotonic observation is intentionally not a capability because reading it conveys no mutable authority; future virtual or adjustable clocks may be represented by handle objects without changing this clock domain.",

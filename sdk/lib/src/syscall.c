@@ -549,6 +549,13 @@ hyper_native_status_t hyper_virtual_cpu_start(hyper_native_handle_t virtual_cpu)
         HYPER_NATIVE_SYS_VIRTUAL_CPU_START, virtual_cpu, 0, 0, 0, 0, 0).status;
 }
 
+hyper_native_status_t hyper_virtual_cpu_set_affinity(hyper_native_handle_t virtual_cpu,
+                                                    const uint64_t *words, size_t word_count)
+{
+    return hyper_native_call6(HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY,
+                             virtual_cpu, (uintptr_t)words, word_count, 0, 0, 0).status;
+}
+
 hyper_native_status_t hyper_pending_virtual_machine_abort(hyper_native_handle_t pending)
 {
     return hyper_native_call6(
@@ -886,8 +893,12 @@ _Noreturn void hyper_process_exit(int64_t status)
     __builtin_trap();
 }
 
-hyper_call_result_t hyper_thread_create(uint64_t entry, uint64_t stack, uint64_t tls, uint64_t argument)
-{ return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_CREATE, entry, stack, tls, argument, 0, 0); }
+hyper_call_result_t hyper_thread_create(uint64_t entry, uint64_t stack, uint64_t tls,
+    uint64_t argument, const uint64_t *affinity_words, size_t affinity_word_count)
+{
+    return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_CREATE, entry, stack, tls, argument,
+        (uintptr_t)affinity_words, affinity_word_count);
+}
 hyper_native_status_t hyper_thread_start(hyper_native_handle_t thread)
 { return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_START, thread, 0, 0, 0, 0, 0).status; }
 hyper_native_status_t hyper_thread_request_stop(hyper_native_handle_t thread)

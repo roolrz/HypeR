@@ -70,7 +70,7 @@ pub(crate) fn identifier_bits() -> Result<u8, Error> {
     ensure_initialized()?;
     // Untagged implementations still need software allocation generations.
     let bits = ASID_BITS.load(Ordering::Acquire);
-    Ok(if bits == 0 { 8 } else { bits.min(8) })
+    Ok(if bits == 0 { 8 } else { bits.min(16) })
 }
 pub(crate) fn user_address_limit() -> Result<u64, Error> {
     ensure_initialized()?;
@@ -112,7 +112,6 @@ pub(crate) struct MappingPage {
 #[derive(Clone, Copy)]
 pub(crate) struct PreparedAddressSpace {
     root: u64,
-    identifier: u16,
     generation: u64,
 }
 #[derive(Clone, Copy)]
@@ -137,6 +136,7 @@ struct LocalOwner {
     root: AtomicU64,
     identifier: AtomicU64,
     generation: AtomicU64,
+    epoch: AtomicU64,
 }
 impl LocalOwner {
     const fn new() -> Self {
@@ -144,11 +144,12 @@ impl LocalOwner {
             root: AtomicU64::new(0),
             identifier: AtomicU64::new(0),
             generation: AtomicU64::new(0),
+            epoch: AtomicU64::new(0),
         }
     }
-    fn publish(&self, root: &PreparedAddressSpace) {
+    fn publish(&self, root: &PreparedAddressSpace, identifier: u16) {
         self.identifier
-            .store(u64::from(root.identifier), Ordering::Relaxed);
+            .store(u64::from(identifier), Ordering::Relaxed);
         self.generation.store(root.generation, Ordering::Relaxed);
         self.root.store(root.root, Ordering::Release);
     }
@@ -162,8 +163,8 @@ fn local() -> &'static LocalOwner {
     }
 }
 impl PreparedAddressSpace {
-    pub(crate) fn root_register(&self) -> u64 {
-        registers::SATP_MODE_SV39 | (hardware_identifier(self.identifier) << ASID_SHIFT) | self.root
+    fn root_register(&self, identifier: u16) -> u64 {
+        registers::SATP_MODE_SV39 | (hardware_identifier(identifier) << ASID_SHIFT) | self.root
     }
     pub(crate) const fn local_request(&self, operation: LocalOperation) -> LocalRequest {
         LocalRequest {
@@ -183,13 +184,12 @@ impl PreparedAddressSpace {
 /// builder and retained through acknowledged retirement. Mapping owners keep
 /// each physical user page live. Kernel root slots are frozen after boot.
 pub(crate) unsafe fn prepare_host(
-    identifier: u16,
     generation: u64,
     mut enumerate: impl FnMut(&mut dyn FnMut(MappingPage)),
     allocator: &mut impl FnMut(usize) -> Option<PhysicalAddress>,
 ) -> Result<PreparedAddressSpace, Error> {
-    let bits = identifier_bits()?;
-    if identifier == 0 || u32::from(identifier) >= 1u32 << bits || generation == 0 {
+    ensure_initialized()?;
+    if generation == 0 {
         return Err(Error::InvalidRange);
     }
     let root = allocator(0).ok_or(Error::Allocation)?;
@@ -213,7 +213,6 @@ pub(crate) unsafe fn prepare_host(
     unsafe { asm!("fence rw, rw", options(nostack)) };
     Ok(PreparedAddressSpace {
         root: root.get() >> 12,
-        identifier,
         generation,
     })
 }
@@ -302,28 +301,48 @@ fn invalidate(identifier: u16) {
     // speculative page-table walks before the retirement acknowledgement.
     unsafe { asm!("sfence.vma zero, {tag}", tag = in(reg) tag, options(nostack)) };
 }
-fn install(root: &PreparedAddressSpace) {
+fn invalidate_all_local() {
+    // SAFETY: Local lower-EL execution is excluded; a full fence also retires
+    // stale walks belonging to leases recycled since this root last ran.
+    unsafe { asm!("sfence.vma", options(nostack)) };
+}
+fn install(root: &PreparedAddressSpace, identifier: u16) {
     // SAFETY: Shared supervisor mappings cover the executing code and stack
     // before and after SATP; the caller retains all hierarchy pages.
-    unsafe { asm!("csrw satp, {root}", root = in(reg) root.root_register(), options(nostack)) };
-    invalidate(root.identifier);
+    unsafe {
+        asm!("csrw satp, {root}", root = in(reg) root.root_register(identifier), options(nostack))
+    };
+    invalidate(identifier);
     // SAFETY: The caller retains every newly published executable page. Each
     // consuming hart must synchronize its own instruction stream after root
     // replacement as well as initial activation.
     unsafe { asm!("fence.i", options(nostack)) };
-    local().publish(root);
+    local().publish(root, identifier);
 }
 /// Installs one retained root on a pinned, interrupt-masked CPU.
 ///
 /// # Safety
 /// Caller closes admission against replacement and retains the root and ID for
 /// the complete CPU-local token lifetime. Native activations cannot nest.
-pub(crate) unsafe fn activate_local(root: &PreparedAddressSpace) -> LocalActivation {
+pub(crate) unsafe fn activate_local(
+    root: &PreparedAddressSpace,
+    identifier: u16,
+    epoch: u64,
+) -> LocalActivation {
     if local().root.load(Ordering::Acquire) != 0 {
         hyper::debug::invariant_failure("riscv64/user_machine::activate_local invariant");
     }
+    let valid = identifier_bits()
+        .is_ok_and(|bits| identifier != 0 && u32::from(identifier) < (1u32 << bits));
+    if epoch == 0 || !valid {
+        hyper::debug::invariant_failure("invalid Native ASID lease");
+    }
+    if local().epoch.load(Ordering::Relaxed) != epoch {
+        invalidate_all_local();
+        local().epoch.store(epoch, Ordering::Relaxed);
+    }
     let previous_root = read_satp();
-    install(root);
+    install(root, identifier);
     LocalActivation {
         previous_root,
         _not_send: PhantomData,
@@ -348,9 +367,11 @@ pub(crate) unsafe fn deactivate_local(activation: LocalActivation) {
 pub(crate) fn local_identity_is_active(identity: LocalIdentity) -> bool {
     let owner = local();
     owner.root.load(Ordering::Acquire) == identity.root.root
-        && owner.identifier.load(Ordering::Relaxed) == u64::from(identity.root.identifier)
         && owner.generation.load(Ordering::Relaxed) == identity.root.generation
-        && read_satp() == identity.root.root_register()
+        && read_satp()
+            == identity
+                .root
+                .root_register(owner.identifier.load(Ordering::Relaxed) as u16)
 }
 /// Applies a retained root replacement or final invalidation before RPC ack.
 ///
@@ -364,10 +385,13 @@ pub(crate) unsafe fn service_local_request(request: LocalRequest) -> Result<(), 
                 return Err(Error::InvalidLocalState);
             }
             let old = local().identifier.load(Ordering::Relaxed) as u16;
-            install(&request.root);
+            if local().generation.load(Ordering::Relaxed) != request.root.generation {
+                return Err(Error::InvalidLocalState);
+            }
+            install(&request.root, old);
             invalidate(old);
         }
-        LocalOperation::Invalidate => invalidate(request.root.identifier),
+        LocalOperation::Invalidate => invalidate_all_local(),
     }
     Ok(())
 }

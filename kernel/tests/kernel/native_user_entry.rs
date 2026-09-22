@@ -118,3 +118,31 @@ fn retire_process(process: &Process) -> Result<(), Error> {
         Err(Error::Lifecycle)
     }
 }
+
+fn verify_thread_creation_affinity(
+    domain: &ResourceDomain,
+    group: &TaskGroup,
+    program: &[u8],
+    machine: MachineAbi,
+) -> Result<(), Error> {
+    let process = prepare_process(domain, group, program, machine)?;
+    let caller = process
+        .create_initial_user_thread(
+            "selftest/affinity-parent",
+            crate::kernel::task::scheduler::CpuMask::ALL,
+        )
+        .map_err(|_| Error::Scheduler)?;
+    let result = crate::kernel::entry::verify_thread_affinity_creation_for_test(
+        &process,
+        &caller,
+        UserAddress::new(IMAGE_BASE + PAGE_SIZE * 2),
+    );
+    process.request_stop(crate::kernel::process::TerminalReason::Requested);
+    retire_process(&process)?;
+    if let Err(reason) = result {
+        crate::pr_err!("HypeR test: thread affinity creation failed: {reason}");
+        return Err(Error::Scheduler);
+    }
+    crate::pr_info!("HypeR test: Native thread creation affinity passed");
+    Ok(())
+}

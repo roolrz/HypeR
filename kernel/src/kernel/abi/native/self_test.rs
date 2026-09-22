@@ -26,10 +26,11 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_HANDLE_DUPLICATE, HYPER_NATIVE_SYS_HANDLE_GET_INFO,
     HYPER_NATIVE_SYS_OBJECT_WAIT_MANY, HYPER_NATIVE_SYS_PROCESS_BUILDER_ADD_HANDLE,
     HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_AFFINITY, HYPER_NATIVE_SYS_PROCESS_BUILDER_SET_NAME,
-    HYPER_NATIVE_SYS_PROCESS_EXIT, HYPER_NATIVE_SYS_PROCESS_GET_INFO, HYPER_NATIVE_SYS_THREAD_EXIT,
-    HYPER_NATIVE_SYS_THREAD_YIELD, HyperNativeCapabilityDisposition,
-    HyperNativeCapabilityReceiveSlot, HyperNativeDirectoryInfo, HyperNativeFileInfo,
-    HyperNativeObjectInspection, HyperNativeResourceLimits, NativeInvocation, NativeResult,
+    HYPER_NATIVE_SYS_PROCESS_EXIT, HYPER_NATIVE_SYS_PROCESS_GET_INFO,
+    HYPER_NATIVE_SYS_THREAD_CREATE, HYPER_NATIVE_SYS_THREAD_EXIT, HYPER_NATIVE_SYS_THREAD_YIELD,
+    HyperNativeCapabilityDisposition, HyperNativeCapabilityReceiveSlot, HyperNativeDirectoryInfo,
+    HyperNativeFileInfo, HyperNativeObjectInspection, HyperNativeResourceLimits, NativeInvocation,
+    NativeResult,
 };
 
 use crate::kernel::capability::{HandleInfo, HandleValue, Rights};
@@ -769,7 +770,10 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             _: u64,
             _: u64,
             _: u64,
+            _: Option<UserSlice>,
+            _: usize,
         ) -> Result<HandleValue, ObjectServiceError> {
+            self.calls.set(self.calls.get().saturating_add(1));
             Err(ObjectServiceError::InvalidInput)
         }
         fn start_thread(&self, _: HandleValue) -> Result<(), ProcessError> {
@@ -1209,6 +1213,16 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             Err(crate::kernel::vm::service::Error::NotSupported)
         }
 
+        fn set_virtual_cpu_affinity(
+            &self,
+            _: HandleValue,
+            _: Option<UserSlice>,
+            _: usize,
+        ) -> Result<(), crate::kernel::vm::service::Error> {
+            self.calls.set(self.calls.get().saturating_add(1));
+            Err(crate::kernel::vm::service::Error::NotSupported)
+        }
+
         fn start_virtual_cpu(
             &self,
             _: HandleValue,
@@ -1389,6 +1403,107 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED))
     {
         return Err(SelfTestError::DeferredDispatch);
+    }
+    let thread_services = RejectingServices {
+        calls: Cell::new(0),
+    };
+    for (pointer, count, expected) in [
+        (1, 0, HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
+        (0, 1, HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
+        (0x2000, 5, HYPER_NATIVE_STATUS_INVALID_ARGUMENT),
+        (u64::MAX, 1, HYPER_NATIVE_STATUS_FAULT),
+    ] {
+        if dispatch_deferred(
+            &thread_services,
+            invoke(
+                HYPER_NATIVE_SYS_THREAD_CREATE,
+                [0x1000, 0x2000, 0, 7, pointer, count],
+            ),
+        ) != DeferredAction::Return(failure(expected))
+            || thread_services.calls.get() != 0
+        {
+            return Err(SelfTestError::ValidationReachedService);
+        }
+    }
+    for (expected_calls, pointer, count) in [(1, 0, 0), (2, 0x3000, 1), (3, 0x3000, 4)] {
+        if dispatch_deferred(
+            &thread_services,
+            invoke(
+                HYPER_NATIVE_SYS_THREAD_CREATE,
+                [0x1000, 0x2000, 0, 7, pointer, count],
+            ),
+        ) != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT))
+            || thread_services.calls.get() != expected_calls
+        {
+            return Err(SelfTestError::DeferredDispatch);
+        }
+    }
+    let affinity_services = RejectingServices {
+        calls: Cell::new(0),
+    };
+    let affinity_handle = 1_u64 << 24 | 1;
+    for (arguments, expected) in [
+        ([0, 0x2000, 1, 0, 0, 0], HYPER_NATIVE_STATUS_BAD_HANDLE),
+        (
+            [affinity_handle, 0x2000, 0, 0, 0, 0],
+            HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        ),
+        (
+            [affinity_handle, 0x2000, u64::MAX, 0, 0, 0],
+            HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        ),
+        (
+            [affinity_handle, 0x2000, 1, 1, 0, 0],
+            HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        ),
+    ] {
+        if dispatch_deferred(
+            &affinity_services,
+            invoke(
+                hyper::abi::native::HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY,
+                arguments,
+            ),
+        ) != DeferredAction::Return(failure(expected))
+            || affinity_services.calls.get() != 0
+        {
+            return Err(SelfTestError::ValidationReachedService);
+        }
+    }
+    if dispatch_deferred(
+        &affinity_services,
+        invoke(
+            hyper::abi::native::HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY,
+            [affinity_handle, 0x2000, 1, 0, 0, 0],
+        ),
+    ) != DeferredAction::Return(failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED))
+        || affinity_services.calls.get() != 1
+    {
+        return Err(SelfTestError::DeferredDispatch);
+    }
+    for (error, status) in [
+        (
+            crate::kernel::task::scheduler::Error::CpuNotRegistered,
+            HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+        ),
+        (
+            crate::kernel::task::scheduler::Error::MigrationInProgress,
+            HYPER_NATIVE_STATUS_BUSY,
+        ),
+        (
+            crate::kernel::task::scheduler::Error::MigrationBlockedByCpuLocalWait,
+            HYPER_NATIVE_STATUS_BUSY,
+        ),
+        (
+            crate::kernel::task::scheduler::Error::TerminatedThread,
+            HYPER_NATIVE_STATUS_BAD_STATE,
+        ),
+    ] {
+        if status_from_vm_service_error(crate::kernel::vm::service::Error::from(
+            crate::kernel::vm::objects::Error::Scheduler(error),
+        )) != status
+        {
+            return Err(SelfTestError::VmErrorMapping);
+        }
     }
     let timer_allocation = ObjectWaitError::Timer(TimedWaitError::Time(
         crate::kernel::time::Error::TimerQueue(hyper::time::TimerQueueError::Allocation),

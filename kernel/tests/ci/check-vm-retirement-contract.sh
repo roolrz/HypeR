@@ -40,7 +40,7 @@ sed -n '/^    pub(super) fn request_all_stops(/,/^    pub(super) fn is_quiescent
 sed -n '/^    fn try_hold_quiescent(/,/^}/p' "$registry" >"$promotion"
 sed -n '/if let Err(error) = super::activate(execution)/,/prepare_interrupts_for_entry/p' \
     "$runner" >"$runner_activation"
-sed -n '/^pub(crate) fn retire_local(/,/^fn index(/p' "$aarch_stage2" | sed '$d' \
+sed -n '/^pub(crate) fn retire_root_local(/,/^fn index(/p' "$aarch_stage2" | sed '$d' \
     >"$arch_retire"
 
 line_first() {
@@ -167,24 +167,18 @@ rg -q 'try_guest_stage2_retirement' "$hal_vm" || {
     echo 'HAL must expose a typed retirement capability precheck' >&2
     exit 1
 }
-require_order "$memory" 'prepare_guest_stage2_retirement\(capability, &self\.stage2\)' \
-    'let cut = self' \
-    'stage-2 request preparation must precede the residency retirement cut'
-
-require_order "$arch_retire" 'mrs \{saved_hcr\}, HCR_EL2' \
-    'msr VTCR_EL2, \{guest_vtcr\}' \
-    'local retirement must save host translation state before guest selection'
+rg -q 'GuestStage2Invalidation::Retired' "$memory" &&
+    rg -q 'retire_guest_stage2_root_local' "$memory" || {
+    echo 'final retirement must park the root without acquiring a reusable tag' >&2
+    exit 1
+}
+require_order "$arch_retire" 'csel \{selected\}, xzr, \{selected\}, eq' \
+    'msr VTTBR_EL2, \{selected\}' \
+    'the exact retiring root must be replaced by a neutral selection'
 require_order "$arch_retire" 'dsb ishst' 'tlbi VMALLS12E1' \
-    'stage-2 descriptor publication must precede local combined invalidation'
-require_order "$arch_retire" 'tlbi VMALLS12E1' '"dsb ish",' \
-    'local combined invalidation must complete before restoring host state'
-require_order "$arch_retire" \
-    'csel \{restore_vttbr\}, xzr, \{saved_vttbr\}, eq' \
-    'msr VTTBR_EL2, \{restore_vttbr\}' \
-    'the exact retiring VTTBR must be replaced by a neutral selection'
-if rg -q '(saved_hcr|saved_vttbr|saved_vtcr|guest_hcr|restore_vttbr) = lateout' \
-    "$arch_retire"; then
-    echo 'early-written retirement asm temporaries must not overlap live inputs' >&2
+    'live stage-2 publication must precede leased invalidation'
+if rg -q '(saved_hcr|saved_vttbr|saved_vtcr|guest_hcr|selected|physical) = lateout' "$arch_retire"; then
+    echo 'early-written invalidation asm temporaries must not overlap live inputs' >&2
     exit 1
 fi
 

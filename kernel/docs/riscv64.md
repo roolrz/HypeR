@@ -42,7 +42,8 @@ and `a0`–`a2` for status and results.
 Native roots use the lower Sv39 canonical half for user mappings and share
 supervisor-only kernel mappings in the upper half. ASID capacity is probed on
 every admitted hart; implementations without hardware ASIDs retain software
-identifier generations and flush untagged translations. Root replacement and
+identities and flush untagged translations. Tagged implementations lease ASIDs
+from the epoch allocator and flush locally before entering a new epoch. Root replacement and
 retirement use acknowledged CPU-local requests through the common residency
 owner. Each consuming hart synchronizes its instruction stream before entry.
 
@@ -81,8 +82,11 @@ producers and joins the exact timer callback before reclaiming its storage.
 Guest traps capture VS state and current VS/VU privilege before entering Rust.
 Returning exits carry a linear stopped proof which must detach the matching
 local hardware owner. VMID width is probed on every admitted hart using a
-permanent empty 16 KiB root. Zero-bit implementations use software generations
-with full fences; acknowledged retirement precedes page or identifier reuse.
+permanent empty 16 KiB root. Implementations with fewer than eight VMID bits
+use a logical eight-bit namespace and hardware tag zero, with full guest fences
+on every entry and maintenance operation. Wider implementations use leased
+hardware tags with epoch rollover. Acknowledged retirement precedes page reuse;
+recycling an unpinned hardware tag requires a local epoch flush before use.
 
 The Native creation-lease platform query reports the immutable counter frequency
 and guaranteed guest ISA subset. Userspace uses these facts when constructing

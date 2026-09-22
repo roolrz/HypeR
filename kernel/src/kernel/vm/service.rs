@@ -157,12 +157,16 @@ const fn classify_scheduler_error(error: crate::kernel::task::scheduler::Error) 
         | SchedulerError::NoRegisteredCpuInAffinity
         | SchedulerError::InvalidCpuIndex
         | SchedulerError::CpuNotAllowed => Error::InvalidArgument,
+        SchedulerError::CpuNotRegistered => Error::InvalidArgument,
+        SchedulerError::ThreadNotFound | SchedulerError::TerminatedThread => Error::BadState,
+        SchedulerError::MigrationUnsupported => Error::NotSupported,
+        SchedulerError::MigrationInProgress
+        | SchedulerError::ThreadTransitionInProgress
+        | SchedulerError::MigrationBlockedByCpuLocalWait => Error::Busy,
         SchedulerError::Thread(error) => classify_thread_error(error),
         SchedulerError::NotInitialized
         | SchedulerError::AlreadyInitialized
         | SchedulerError::CurrentThreadMissing
-        | SchedulerError::ThreadNotFound
-        | SchedulerError::TerminatedThread
         | SchedulerError::ThreadBlocked
         | SchedulerError::ThreadAlreadyQueued
         | SchedulerError::QueueCorrupted
@@ -175,12 +179,7 @@ const fn classify_scheduler_error(error: crate::kernel::task::scheduler::Error) 
         | SchedulerError::IdleThreadAlreadyInstalled
         | SchedulerError::InvalidIdleTransition
         | SchedulerError::CpuAlreadyRegistered
-        | SchedulerError::CpuNotRegistered
-        | SchedulerError::MigrationUnsupported
-        | SchedulerError::MigrationInProgress
-        | SchedulerError::ThreadTransitionInProgress
         | SchedulerError::InvalidWaitRegistration
-        | SchedulerError::MigrationBlockedByCpuLocalWait
         | SchedulerError::PreemptionUnavailable
         | SchedulerError::PreemptionInvariant
         | SchedulerError::VmEntryUnavailable => Error::Internal,
@@ -312,6 +311,13 @@ const fn classify_registry_error(error: super::registry::Error) -> Error {
 
 const fn classify_guest_memory_error(error: super::memory::Error) -> Error {
     match error {
+        super::memory::Error::Identifier(crate::kernel::mm::translation_id::Error::Busy) => {
+            Error::Busy
+        }
+        super::memory::Error::Identifier(crate::kernel::mm::translation_id::Error::Allocation) => {
+            Error::NoMemory
+        }
+        super::memory::Error::Identifier(_) => Error::Internal,
         super::memory::Error::AddressOverflow | super::memory::Error::InvalidRange => {
             Error::InvalidArgument
         }
@@ -673,6 +679,16 @@ pub(crate) fn vcpu_info(process: &Process, vcpu: HandleValue) -> Result<VirtualC
 pub(crate) fn start_vcpu(process: &Process, vcpu: HandleValue) -> Result<(), Error> {
     let vcpu = process.resolve_handle::<VirtualCpuObject>(vcpu, Rights::START)?;
     vcpu.object().start()?;
+    Ok(())
+}
+
+pub(crate) fn set_vcpu_affinity(
+    process: &Process,
+    vcpu: HandleValue,
+    affinity: crate::kernel::task::policy::CpuMask,
+) -> Result<(), Error> {
+    let vcpu = process.resolve_handle::<VirtualCpuObject>(vcpu, Rights::WRITE)?;
+    vcpu.object().set_affinity(affinity)?;
     Ok(())
 }
 

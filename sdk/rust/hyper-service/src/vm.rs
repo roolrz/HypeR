@@ -224,6 +224,8 @@ impl ConsoleCapability {
 pub const OBSERVATION_BYTES: usize = 40;
 const KIND_OBSERVATION_REQUEST: u8 = 9;
 const KIND_OBSERVATION: u8 = 10;
+const KIND_VCPU_CONTROL_REQUEST: u8 = 11;
+const KIND_VCPU_CONTROL_REPLY: u8 = 12;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObservationRequest(pub u64);
@@ -287,6 +289,103 @@ impl Observation {
             vcpus,
             capacity_bytes: capacity,
             resident_bytes: (resident != u64::MAX).then_some(resident),
+        })
+    }
+}
+
+/// Bounded control storage, also large enough for observations and lifecycle records.
+pub const VCPU_AFFINITY_WORDS: usize = hyper_os::vm::VCPU_AFFINITY_MAX_WORDS;
+pub const CONTROL_BYTES: usize = 24 + VCPU_AFFINITY_WORDS * 8;
+
+/// Per-vCPU inspection and allowed-CPU policy; migration is a scheduler effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VcpuControlRequest {
+    pub sequence: u64,
+    pub vcpu: u32,
+    /// None inspects placement without changing policy.
+    pub affinity: Option<[u64; VCPU_AFFINITY_WORDS]>,
+}
+impl VcpuControlRequest {
+    #[must_use]
+    pub fn encode(self) -> [u8; CONTROL_BYTES] {
+        let mut bytes = [0; CONTROL_BYTES];
+        bytes[..8].copy_from_slice(&encode_message(
+            KIND_VCPU_CONTROL_REQUEST,
+            if self.affinity.is_some() { 2 } else { 1 },
+            0,
+        ));
+        bytes[8..16].copy_from_slice(&self.sequence.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.vcpu.to_le_bytes());
+        if let Some(words) = self.affinity {
+            for (chunk, word) in bytes[24..].chunks_exact_mut(8).zip(words) {
+                chunk.copy_from_slice(&word.to_le_bytes());
+            }
+        }
+        bytes
+    }
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != CONTROL_BYTES || bytes[20..24] != [0; 4] {
+            return None;
+        }
+        let (kind, detail) = decode_message(&bytes[..8], KIND_VCPU_CONTROL_REQUEST)?;
+        if !matches!(kind, 1 | 2) || detail != 0 {
+            return None;
+        }
+        let mut words = [0; VCPU_AFFINITY_WORDS];
+        for (word, chunk) in words.iter_mut().zip(bytes[24..].chunks_exact(8)) {
+            *word = u64::from_le_bytes(chunk.try_into().ok()?);
+        }
+        if kind == 1 && words.iter().any(|word| *word != 0) {
+            return None;
+        }
+        Some(Self {
+            sequence: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
+            vcpu: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+            affinity: (kind == 2).then_some(words),
+        })
+    }
+}
+/// An acknowledgement of policy acceptance plus a best-effort placement snapshot.
+/// Success does not promise that an automatic migration has already completed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VcpuControlReply {
+    pub sequence: u64,
+    pub vcpu: u32,
+    pub host_cpu: Option<u32>,
+    pub pending_host_cpu: Option<u32>,
+    pub status: hyper_os::Status,
+}
+impl VcpuControlReply {
+    #[must_use]
+    pub fn encode(self) -> [u8; OBSERVATION_BYTES] {
+        let mut bytes = [0; OBSERVATION_BYTES];
+        bytes[..8].copy_from_slice(&encode_message(KIND_VCPU_CONTROL_REPLY, 1, 0));
+        bytes[8..16].copy_from_slice(&self.sequence.to_le_bytes());
+        bytes[16..20].copy_from_slice(&self.vcpu.to_le_bytes());
+        bytes[20..24].copy_from_slice(&self.host_cpu.unwrap_or(u32::MAX).to_le_bytes());
+        bytes[24..28].copy_from_slice(&self.pending_host_cpu.unwrap_or(u32::MAX).to_le_bytes());
+        bytes[32..40].copy_from_slice(&self.status.as_raw().to_le_bytes());
+        bytes
+    }
+    #[must_use]
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != OBSERVATION_BYTES
+            || bytes[28..32] != [0; 4]
+            || decode_message(&bytes[..8], KIND_VCPU_CONTROL_REPLY) != Some((1, 0))
+        {
+            return None;
+        }
+        let cpu = |range: core::ops::Range<usize>| {
+            let raw = u32::from_le_bytes(bytes[range].try_into().ok()?);
+            Some((raw != u32::MAX).then_some(raw))
+        };
+        Some(Self {
+            sequence: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
+            vcpu: u32::from_le_bytes(bytes[16..20].try_into().ok()?),
+            host_cpu: cpu(20..24)?,
+            pending_host_cpu: cpu(24..28)?,
+            status: hyper_os::Status::from_raw(i64::from_le_bytes(bytes[32..40].try_into().ok()?)),
         })
     }
 }
@@ -1025,5 +1124,49 @@ mod observation_tests {
             Observation::decode(&unavailable.encode()),
             Some(unavailable)
         );
+    }
+}
+
+#[cfg(test)]
+mod vcpu_control_tests {
+    use super::*;
+    #[test]
+    fn affinity_and_inspection_wire_formats_are_distinct() {
+        for affinity in [
+            None,
+            Some([0; VCPU_AFFINITY_WORDS]),
+            Some([u64::MAX; VCPU_AFFINITY_WORDS]),
+        ] {
+            let request = VcpuControlRequest {
+                sequence: u64::MAX,
+                vcpu: u32::MAX,
+                affinity,
+            };
+            let bytes = request.encode();
+            assert_eq!(VcpuControlRequest::decode(&bytes), Some(request));
+            assert_eq!(
+                VcpuControlRequest::decode(&bytes[..CONTROL_BYTES - 1]),
+                None
+            );
+        }
+        let mut reserved = VcpuControlRequest {
+            sequence: 1,
+            vcpu: 0,
+            affinity: None,
+        }
+        .encode();
+        reserved[24] = 1;
+        assert_eq!(VcpuControlRequest::decode(&reserved), None);
+        let reply = VcpuControlReply {
+            sequence: 1,
+            vcpu: 0,
+            host_cpu: Some(0),
+            pending_host_cpu: Some(2),
+            status: hyper_os::Status::OK,
+        };
+        let mut bytes = reply.encode();
+        assert_eq!(VcpuControlReply::decode(&bytes), Some(reply));
+        bytes[28] = 1;
+        assert_eq!(VcpuControlReply::decode(&bytes), None);
     }
 }

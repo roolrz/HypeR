@@ -131,6 +131,11 @@ pub struct VirtualCpuInfo {
     pub phase: VirtualCpuPhase,
     pub scheduler_thread_id: u64,
     pub terminal: Option<VirtualCpuTermination>,
+    /// Assigned physical CPU, not a claim that the vCPU is executing.
+    /// Absent for retired threads or older kernels without placement observation.
+    pub host_cpu: Option<u32>,
+    /// Pending explicit migration destination at the same scheduler observation.
+    pub migration_target: Option<u32>,
 }
 
 /// A rejected consume-on-success VM operation and its unchanged input handle.
@@ -306,6 +311,36 @@ pub fn install(
     Ok((machine, vcpu))
 }
 
+/// Maximum number of 64-bit CPU-mask words accepted for vCPU affinity.
+pub const VCPU_AFFINITY_MAX_WORDS: usize =
+    hyper_abi::HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS as usize;
+
+/// Replaces the allowed host CPUs. Keeps the current CPU if allowed; otherwise
+/// the scheduler selects an allowed CPU and migrates the saved context.
+/// Success accepts the update; a required handoff may finish after return.
+pub fn set_vcpu_affinity(vcpu: HandleRef<'_, VirtualCpuObject>, words: &[u64]) -> Result<()> {
+    let encoded = encode_vcpu_affinity(words)?;
+    // SAFETY: the handle and bounded encoded mask remain borrowed for the call.
+    Status::from_raw(unsafe {
+        hyper_sys::virtual_cpu_set_affinity(vcpu.raw().get(), encoded.as_ptr(), words.len())
+    })
+    .into_result()
+}
+
+fn encode_vcpu_affinity(words: &[u64]) -> Result<[u64; VCPU_AFFINITY_MAX_WORDS]> {
+    if words.is_empty()
+        || words.len() > VCPU_AFFINITY_MAX_WORDS
+        || words.iter().all(|word| *word == 0)
+    {
+        return Err(Error::Status(Status::INVALID_ARGUMENT));
+    }
+    let mut encoded = [0; VCPU_AFFINITY_MAX_WORDS];
+    for (output, word) in encoded.iter_mut().zip(words) {
+        *output = word.to_le();
+    }
+    Ok(encoded)
+}
+
 /// Makes an installed dormant vCPU scheduler-runnable exactly once.
 pub fn start_vcpu(vcpu: HandleRef<'_, VirtualCpuObject>) -> Result<()> {
     // SAFETY: the typed vCPU handle remains borrowed for the complete call.
@@ -460,6 +495,8 @@ fn decode_resident_memory(raw: u64, supported_size: usize) -> Option<u64> {
 
 pub fn vcpu_info(vcpu: HandleRef<'_, VirtualCpuObject>) -> Result<VirtualCpuInfo> {
     let mut record = hyper_abi::HyperNativeVirtualCpuInfo {
+        host_cpu: u32::MAX,
+        migration_target: u32::MAX,
         vcpu_id: 0,
         phase: 0,
         scheduler_thread_id: 0,
@@ -468,7 +505,7 @@ pub fn vcpu_info(vcpu: HandleRef<'_, VirtualCpuObject>) -> Result<VirtualCpuInfo
     };
     // SAFETY: the handle remains borrowed and the output record writable.
     let result = unsafe { hyper_sys::virtual_cpu_get_info(vcpu.raw().get(), &mut record) };
-    let _supported_size =
+    let supported_size =
         crate::validate_info_result(result, hyper_abi::HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE)?;
     if record.reserved != 0 {
         return Err(Error::InvalidResponse);
@@ -483,7 +520,13 @@ pub fn vcpu_info(vcpu: HandleRef<'_, VirtualCpuObject>) -> Result<VirtualCpuInfo
         phase,
         scheduler_thread_id: record.scheduler_thread_id,
         terminal,
+        host_cpu: decode_cpu_assignment(record.host_cpu, supported_size, 28),
+        migration_target: decode_cpu_assignment(record.migration_target, supported_size, 32),
     })
+}
+
+fn decode_cpu_assignment(value: u32, supported_size: usize, field_end: usize) -> Option<u32> {
+    (supported_size >= field_end && value != u32::MAX).then_some(value)
 }
 
 fn decode_architecture(raw: u32) -> Result<Architecture> {
@@ -571,6 +614,30 @@ fn validate_adopted<T: TypedObject>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placement_requires_complete_appended_fields() {
+        for size in 24..28 {
+            assert_eq!(decode_cpu_assignment(2, size, 28), None);
+        }
+        assert_eq!(decode_cpu_assignment(2, 28, 28), Some(2));
+        for size in 24..32 {
+            assert_eq!(decode_cpu_assignment(3, size, 32), None);
+        }
+        assert_eq!(decode_cpu_assignment(3, 32, 32), Some(3));
+        assert_eq!(decode_cpu_assignment(u32::MAX, 32, 32), None);
+    }
+
+    #[test]
+    fn affinity_encoding_is_bounded_nonempty_and_little_endian() {
+        assert!(encode_vcpu_affinity(&[]).is_err());
+        assert!(encode_vcpu_affinity(&[0]).is_err());
+        assert!(encode_vcpu_affinity(&[1; VCPU_AFFINITY_MAX_WORDS + 1]).is_err());
+        let mut expected = [0; VCPU_AFFINITY_MAX_WORDS];
+        expected[0] = 5_u64.to_le();
+        expected[1] = (1_u64 << 63).to_le();
+        assert_eq!(encode_vcpu_affinity(&[5, 1_u64 << 63]), Ok(expected));
+    }
 
     #[test]
     fn resident_memory_requires_complete_appended_info_field() {

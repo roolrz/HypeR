@@ -43,6 +43,16 @@ fn transport(status: HyperNativeStatus) {
     // kernel transport. It treats handles/scalars as opaque values and does not
     // dereference payload pointers. All pointer objects outlive each call.
     unsafe {
+        let affinity_words = [3_u64, 1_u64 << 63];
+        expect!(
+            HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY,
+            [handle, affinity_words.as_ptr().addr() as u64, 2, 0, 0, 0]
+        );
+        assert_eq!(
+            sys::virtual_cpu_set_affinity(handle, affinity_words.as_ptr(), 2),
+            status
+        );
+        check_consumed();
         expect!(HYPER_NATIVE_SYS_ABI_QUERY, [0; 6]);
         result(sys::abi_query(), status);
         expect!(HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC, [0; 6]);
@@ -146,7 +156,19 @@ fn transport(status: HyperNativeStatus) {
             HYPER_NATIVE_SYS_THREAD_CREATE,
             [handle, other, offset, deadline, 0, 0]
         );
-        result(sys::thread_create(handle, other, offset, deadline), status);
+        result(
+            sys::thread_create(handle, other, offset, deadline, core::ptr::null(), 0),
+            status,
+        );
+        let affinity = [3_u64, 1_u64 << 63];
+        expect!(
+            HYPER_NATIVE_SYS_THREAD_CREATE,
+            [handle, other, offset, deadline, affinity.as_ptr() as u64, 2]
+        );
+        result(
+            sys::thread_create(handle, other, offset, deadline, affinity.as_ptr(), 2),
+            status,
+        );
         let word = 1_u32;
         expect!(
             HYPER_NATIVE_SYS_ATOMIC_WAIT,

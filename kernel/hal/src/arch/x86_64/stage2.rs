@@ -46,6 +46,19 @@ pub struct Stage2AddressSpace {
 }
 
 impl Stage2AddressSpace {
+    /// Selects a leased hardware tag independently of the hierarchy's lifetime.
+    ///
+    /// # Safety
+    /// The caller pins this identifier through every hardware use and serializes
+    /// selection with hierarchy mutation. Existing pins must identify the same tag.
+    pub unsafe fn bind_identifier(&mut self, vmid: u16) -> Result<(), Error> {
+        if vmid == 0 {
+            return Err(Error::InvalidVmid);
+        }
+
+        Ok(())
+    }
+
     /// Opportunistic RAM blocks are not implemented by this backend.
     pub const fn normal_block_size() -> Option<u64> {
         None
@@ -122,12 +135,8 @@ impl Stage2AddressSpace {
     /// through the kernel linear mapping for the lifetime of this address
     /// space.
     pub unsafe fn new(
-        vmid: u16,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<Self, Error> {
-        if vmid == 0 {
-            return Err(Error::InvalidVmid);
-        }
         let root = allocator(1, 1).ok_or(Error::Allocation)?;
         let backend = super::virtualization::selected().ok_or(Error::BackendUnavailable)?;
         Ok(Self { root, backend })

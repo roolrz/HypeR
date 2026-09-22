@@ -115,6 +115,7 @@ impl From<super::installed::Error> for Error {
         match error {
             super::installed::Error::Allocation => Self::Allocation,
             super::installed::Error::BadState => Self::BadState,
+            super::installed::Error::Scheduler(error) => Self::Scheduler(error),
         }
     }
 }

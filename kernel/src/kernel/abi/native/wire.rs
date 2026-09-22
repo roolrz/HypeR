@@ -368,22 +368,28 @@ pub(super) fn parse_builder_text(
     ))
 }
 
-pub(super) fn parse_builder_affinity(
-    arguments: &Arguments,
-) -> Result<(HandleValue, Option<UserSlice>, usize), HyperNativeStatus> {
-    if arguments[2] > HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS {
+pub(super) fn parse_affinity_words(
+    pointer: u64,
+    count: u64,
+) -> Result<(Option<UserSlice>, usize), HyperNativeStatus> {
+    if pointer == 0 || count == 0 || count > HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS {
         return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
     }
-    let bytes = arguments[2]
+    let bytes = count
         .checked_mul(core::mem::size_of::<u64>() as u64)
         .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
-    let word_count =
-        usize::try_from(arguments[2]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
-    Ok((
-        parse_handle(arguments[0])?,
-        optional_user_slice(arguments[1], bytes)?,
-        word_count,
-    ))
+    let word_count = usize::try_from(count).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
+    Ok((optional_user_slice(pointer, bytes)?, word_count))
+}
+
+pub(super) fn parse_affinity_request(
+    arguments: &Arguments,
+) -> Result<(HandleValue, Option<UserSlice>, usize), HyperNativeStatus> {
+    if arguments[3..].iter().any(|value| *value != 0) {
+        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+    }
+    let (words, count) = parse_affinity_words(arguments[1], arguments[2])?;
+    Ok((parse_handle(arguments[0])?, words, count))
 }
 
 pub(super) fn parse_builder_handle(
@@ -867,6 +873,16 @@ pub(super) fn encode_virtual_cpu_info(
 ) -> [u8; core::mem::size_of::<HyperNativeVirtualCpuInfo>()] {
     type Record = HyperNativeVirtualCpuInfo;
     let mut record = [0_u8; core::mem::size_of::<Record>()];
+    write_u32(
+        &mut record,
+        core::mem::offset_of!(Record, host_cpu),
+        snapshot.host_cpu.unwrap_or(u32::MAX),
+    );
+    write_u32(
+        &mut record,
+        core::mem::offset_of!(Record, migration_target),
+        snapshot.migration_target.unwrap_or(u32::MAX),
+    );
     write_u32(
         &mut record,
         core::mem::offset_of!(Record, vcpu_id),

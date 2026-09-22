@@ -29,12 +29,15 @@ const STATE_INITIALIZED: u64 = 1 << 63;
 const STATE_SELECTED_PA_SHIFT: u32 = 0;
 const STATE_SUPPORTED_PA_SHIFT: u32 = 8;
 const STATE_PARANGE_SHIFT: u32 = 16;
+const STATE_ASID_SHIFT: u32 = 24;
+const STATE_VMID_SHIFT: u32 = 32;
 const STATE_BYTE_MASK: u64 = 0xff;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     InvalidPhysicalAddressRange,
     Unsupported4KGranule,
+    UnsupportedIdentifierWidth,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +46,8 @@ pub struct Capabilities {
     pub physical_address_bits: u8,
     pub supported_physical_address_bits: u8,
     pub intermediate_physical_address_bits: u8,
+    pub asid_bits: u8,
+    pub vmid_bits: u8,
     parange: u8,
 }
 
@@ -61,10 +66,20 @@ impl Capabilities {
 
     pub const fn stage1_tcr_el2(self) -> u64 {
         registers::tcr_el2_vhe_stage1(self.virtual_address_bits, self.parange)
+            | if self.asid_bits == 16 {
+                registers::TCR_EL2_VHE_AS
+            } else {
+                0
+            }
     }
 
     pub const fn stage2_vtcr_el2(self) -> u64 {
         registers::VTCR_EL2_GUEST_BASE
+            | if self.vmid_bits == 16 {
+                registers::VTCR_EL2_VS
+            } else {
+                0
+            }
             | (64 - self.intermediate_physical_address_bits as u64)
             | ((self.parange as u64) << registers::VTCR_EL2_PS_SHIFT)
     }
@@ -74,7 +89,7 @@ static SELECTED: AtomicU64 = AtomicU64::new(0);
 
 /// Selects and publishes the address-size policy on the boot CPU.
 pub fn initialize() -> Result<Capabilities, Error> {
-    let capabilities = select(read_id_aa64mmfr0_el1())?;
+    let capabilities = select(read_id_aa64mmfr0_el1(), read_id_aa64mmfr1_el1())?;
     SELECTED.store(pack(capabilities), Ordering::Release);
     Ok(capabilities)
 }
@@ -96,21 +111,26 @@ pub fn physical_address_limit() -> u64 {
 /// Checks whether a secondary can safely use the boot CPU's translation regime.
 pub fn current_cpu_is_compatible() -> bool {
     let selected = capabilities();
-    match hardware_capabilities(read_id_aa64mmfr0_el1()) {
-        Ok(supported) => supported >= selected.physical_address_bits,
-        Err(_) => false,
-    }
+    let mmfr0 = read_id_aa64mmfr0_el1();
+    let mmfr1 = read_id_aa64mmfr1_el1();
+    hardware_capabilities(mmfr0).is_ok_and(|bits| bits >= selected.physical_address_bits)
+        && super::translation_identifiers::decode(mmfr0, mmfr1)
+            .is_some_and(|(asid, vmid)| asid >= selected.asid_bits && vmid >= selected.vmid_bits)
 }
 
-fn select(mmfr0: u64) -> Result<Capabilities, Error> {
+fn select(mmfr0: u64, mmfr1: u64) -> Result<Capabilities, Error> {
     let supported = hardware_capabilities(mmfr0)?;
     let selected = supported.min(CONFIGURED_PA_BITS as u8);
     let parange = parange_for_bits(selected).ok_or(Error::InvalidPhysicalAddressRange)?;
+    let (asid_bits, vmid_bits) = super::translation_identifiers::decode(mmfr0, mmfr1)
+        .ok_or(Error::UnsupportedIdentifierWidth)?;
     Ok(Capabilities {
         virtual_address_bits: STAGE1_VA_BITS as u8,
         physical_address_bits: selected,
         supported_physical_address_bits: supported,
         intermediate_physical_address_bits: STAGE2_IPA_BITS as u8,
+        asid_bits,
+        vmid_bits,
         parange,
     })
 }
@@ -156,6 +176,8 @@ const fn pack(capabilities: Capabilities) -> u64 {
         | ((capabilities.physical_address_bits as u64) << STATE_SELECTED_PA_SHIFT)
         | ((capabilities.supported_physical_address_bits as u64) << STATE_SUPPORTED_PA_SHIFT)
         | ((capabilities.parange as u64) << STATE_PARANGE_SHIFT)
+        | ((capabilities.asid_bits as u64) << STATE_ASID_SHIFT)
+        | ((capabilities.vmid_bits as u64) << STATE_VMID_SHIFT)
 }
 
 const fn unpack(state: u64) -> Capabilities {
@@ -165,6 +187,8 @@ const fn unpack(state: u64) -> Capabilities {
         supported_physical_address_bits: ((state >> STATE_SUPPORTED_PA_SHIFT) & STATE_BYTE_MASK)
             as u8,
         intermediate_physical_address_bits: STAGE2_IPA_BITS as u8,
+        asid_bits: ((state >> STATE_ASID_SHIFT) & STATE_BYTE_MASK) as u8,
+        vmid_bits: ((state >> STATE_VMID_SHIFT) & STATE_BYTE_MASK) as u8,
         parange: ((state >> STATE_PARANGE_SHIFT) & STATE_BYTE_MASK) as u8,
     }
 }
@@ -178,6 +202,16 @@ fn read_id_aa64mmfr0_el1() -> u64 {
             value = out(reg) value,
             options(nomem, nostack, preserves_flags)
         );
+    }
+    value
+}
+
+fn read_id_aa64mmfr1_el1() -> u64 {
+    let value: u64;
+    // SAFETY: ID_AA64MMFR1_EL1 is a read-only identification register at EL2.
+    unsafe {
+        asm!("mrs {value}, ID_AA64MMFR1_EL1", value = out(reg) value,
+            options(nomem, nostack, preserves_flags));
     }
     value
 }

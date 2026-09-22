@@ -122,7 +122,14 @@ unsafe extern "C" {
     ) -> CallResult;
 
     #[link_name = "hyper_thread_create"]
-    fn ffi_thread_create(entry: u64, stack: u64, tls: u64, argument: u64) -> CallResult;
+    fn ffi_thread_create(
+        entry: u64,
+        stack: u64,
+        tls: u64,
+        argument: u64,
+        affinity_words: *const u64,
+        affinity_word_count: usize,
+    ) -> CallResult;
     #[link_name = "hyper_thread_start"]
     fn ffi_thread_start(thread: u64) -> abi::HyperNativeStatus;
     #[link_name = "hyper_thread_request_stop"]
@@ -669,6 +676,32 @@ pub unsafe fn pending_virtual_machine_install(pending: abi::HyperNativeHandle) -
 pub unsafe fn virtual_cpu_start(vcpu: abi::HyperNativeHandle) -> abi::HyperNativeStatus {
     // SAFETY: the caller establishes the borrowed handle lifetime.
     unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_START, vcpu, 0, 0, 0, 0, 0).status }
+}
+
+/// Replaces a vCPU's host-CPU affinity mask.
+///
+/// # Safety
+/// `vcpu` must remain live with write rights and `words` must remain readable
+/// for `word_count` little-endian `u64` values throughout the call.
+#[inline]
+pub unsafe fn virtual_cpu_set_affinity(
+    vcpu: abi::HyperNativeHandle,
+    words: *const u64,
+    word_count: usize,
+) -> abi::HyperNativeStatus {
+    // SAFETY: the caller establishes the handle and input buffer lifetimes.
+    unsafe {
+        ffi_native_call6(
+            abi::HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY,
+            vcpu,
+            words.addr() as u64,
+            word_count as u64,
+            0,
+            0,
+            0,
+        )
+        .status
+    }
 }
 
 /// Aborts and consumes one pending VM only on success.
@@ -1848,9 +1881,26 @@ pub unsafe fn process_exit(status: i64) -> ! {
 /// # Safety
 /// Handles, addresses and thread entry state must satisfy the Native ABI;
 /// referenced memory must remain live through the operation or thread lifetime.
-pub unsafe fn thread_create(entry: u64, stack: u64, tls: u64, argument: u64) -> CallResult {
-    // SAFETY: the caller upholds the raw syscall contract.
-    unsafe { ffi_thread_create(entry, stack, tls, argument) }
+pub unsafe fn thread_create(
+    entry: u64,
+    stack: u64,
+    tls: u64,
+    argument: u64,
+    affinity_words: *const u64,
+    affinity_word_count: usize,
+) -> CallResult {
+    // SAFETY: the caller upholds the raw syscall contract, including the
+    // borrowed little-endian affinity array (or null/zero for inheritance).
+    unsafe {
+        ffi_thread_create(
+            entry,
+            stack,
+            tls,
+            argument,
+            affinity_words,
+            affinity_word_count,
+        )
+    }
 }
 
 /// Invokes Native `thread_start`.

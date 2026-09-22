@@ -11,8 +11,7 @@ use core::arch::asm;
 use super::user_contract::UserExecutionCapabilities;
 pub use super::user_contract::UserMachineContractError;
 
-/// Reports the native-user host-stage contract. Eight-bit ASIDs are selected
-/// conservatively until discovery publishes optional wider identifier fields.
+/// Reports the native-user host-stage contract selected during boot.
 pub(super) fn execution_capabilities() -> Result<UserExecutionCapabilities, UserMachineContractError>
 {
     let address = super::address::capabilities();
@@ -22,7 +21,7 @@ pub(super) fn execution_capabilities() -> Result<UserExecutionCapabilities, User
     UserExecutionCapabilities::new(
         address.virtual_address_bits,
         address.physical_address_bits,
-        8,
+        address.asid_bits,
     )
 }
 
@@ -138,4 +137,9 @@ pub(crate) unsafe fn copy_to_exposed(source: *const u8, destination: *mut u8, le
             options(nostack),
         );
     }
+}
+
+pub fn user_translation_identifier_bits() -> Result<u8, UserMachineContractError> {
+    execution_capabilities()?;
+    Ok(super::address::capabilities().asid_bits)
 }

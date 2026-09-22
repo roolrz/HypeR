@@ -88,9 +88,9 @@ mutate 'common VM lifecycle must not regain host-architecture selection' \
 mutate 'VMID completion must follow acknowledged residency retirement' \
     src/kernel/vm/memory/retirement.rs 'self.residency.finish_retirement(cut)' \
     'self.residency.finish_retirement_later(cut)'
-mutate 'stage-2 request preparation must precede every retirement cut' \
-    src/kernel/vm/memory/retirement.rs 'prepare_guest_stage2_retirement(capability, &self.stage2)' \
-    'prepare_guest_stage2_retirement_later()'
+mutate 'final retirement must park the root without borrowing a hardware tag' \
+    src/kernel/vm/memory/retirement.rs 'retire_guest_stage2_root_local' \
+    'skip_guest_stage2_root_retirement'
 mutate 'aggregate destruction must precede registry generation advance' \
     src/kernel/vm/registry/control.rs 'drop(owner);' 'core::mem::forget(owner);'
 mutate 'guest stage-2 retirement needs a distinct RPC reason' \

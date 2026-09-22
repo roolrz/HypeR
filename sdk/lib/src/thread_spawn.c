@@ -98,7 +98,7 @@ static int64_t ensure_reaper(void)
         void *stack = malloc(size);
         if (!stack) { unlock(&init_lock); return HYPER_NATIVE_STATUS_NO_MEMORY; }
         hyper_call_result_t result = hyper_thread_create((uintptr_t)reaper,
-            ((uintptr_t)stack + size) & ~(uintptr_t)15, 0, 0);
+            ((uintptr_t)stack + size) & ~(uintptr_t)15, 0, 0, NULL, 0);
         status = result.status;
         if (status == HYPER_NATIVE_STATUS_OK) {
             status = hyper_thread_start(result.value0);
@@ -126,7 +126,7 @@ hyper_native_status_t hyper_runtime_thread_spawn(size_t size, hyper_runtime_thre
     token->argument = argument;
     atomic_init(&token->completed, 0);
     hyper_call_result_t created = hyper_thread_create((uintptr_t)worker,
-        ((uintptr_t)token->stack + size) & ~(uintptr_t)15, 0, (uintptr_t)token);
+        ((uintptr_t)token->stack + size) & ~(uintptr_t)15, 0, (uintptr_t)token, NULL, 0);
     if (created.status != HYPER_NATIVE_STATUS_OK) {
         free(token->stack); free(token); return created.status;
     }

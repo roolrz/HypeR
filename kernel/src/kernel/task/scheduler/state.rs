@@ -1038,13 +1038,27 @@ impl Scheduler {
         })
     }
 
-    #[cfg(feature = "kernel-self-test")]
     pub fn thread_placement(&mut self, id: ThreadId) -> Result<(CpuIndex, CpuMask), Error> {
         if let Some(cpu) = self.cpu_lock_required_for(id)? {
             return self.with_cpu_schedule_stored(cpu, |scheduler| scheduler.thread_placement(id));
         }
         let thread = self.thread(id)?;
         Ok((thread.cpu_index(), thread.affinity()))
+    }
+
+    pub fn thread_migration_state(
+        &mut self,
+        id: ThreadId,
+    ) -> Result<(CpuIndex, Option<CpuIndex>), Error> {
+        if let Some(cpu) = self.cpu_lock_required_for(id)? {
+            return self
+                .with_cpu_schedule_stored(cpu, |scheduler| scheduler.thread_migration_state(id));
+        }
+        let thread = self.thread(id)?;
+        Ok((
+            thread.cpu_index(),
+            thread.pending_migration().map(|request| request.target),
+        ))
     }
 
     pub fn stack_statistics(
@@ -1492,7 +1506,7 @@ impl Scheduler {
         let thread = self.thread(id)?;
         if !matches!(
             thread.execution_kind(),
-            ExecutionKind::Kernel | ExecutionKind::User
+            ExecutionKind::Kernel | ExecutionKind::User | ExecutionKind::Vcpu
         ) || thread.placement_policy() != PlacementPolicy::Movable
         {
             return Err(Error::MigrationUnsupported);

@@ -12,3 +12,9 @@ pub(crate) mod irq;
 mod services;
 pub(crate) mod user;
 pub(crate) mod vmexit;
+
+#[cfg(all(
+    feature = "kernel-self-test",
+    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
+))]
+pub(crate) use services::verify_thread_affinity_creation_for_test;

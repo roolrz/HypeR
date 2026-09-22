@@ -43,12 +43,15 @@ pub(crate) struct VirtualCpuSnapshot {
     pub(crate) phase: u32,
     pub(crate) thread: u64,
     pub(crate) terminal_reason: u32,
+    pub(crate) host_cpu: Option<u32>,
+    pub(crate) migration_target: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Error {
     Allocation,
     BadState,
+    Scheduler(crate::kernel::task::scheduler::Error),
 }
 
 enum RuntimeState {
@@ -189,6 +192,35 @@ impl InstalledMachine {
         })
     }
 
+    /// Serializes placement admission against whole-VM stop. The scheduler
+    /// owns source save/target publication and arbitrates concurrent thread exit.
+    pub(super) fn set_vcpu_affinity(
+        &self,
+        id: u32,
+        affinity: crate::kernel::task::policy::CpuMask,
+    ) -> Result<(), Error> {
+        self.state.with(|state| {
+            if !matches!(
+                state,
+                RuntimeState::Installed { .. } | RuntimeState::Running { .. }
+            ) {
+                return Err(Error::BadState);
+            }
+            let endpoint = self.endpoint(id)?;
+            if !matches!(
+                endpoint.lifecycle().map_err(|_| Error::BadState)?,
+                super::endpoint_state::Lifecycle::Dormant
+                    | super::endpoint_state::Lifecycle::Started
+            ) {
+                return Err(Error::BadState);
+            }
+            let thread = endpoint.thread().ok_or(Error::BadState)?;
+            crate::kernel::task::scheduler::set_thread_affinity(thread, affinity)
+                .map(|_| ())
+                .map_err(Error::Scheduler)
+        })
+    }
+
     fn take_stop_control(&self) -> Option<VmControl> {
         self.state.with(|state| match state {
             RuntimeState::Installed { id, control } | RuntimeState::Running { id, control } => {
@@ -271,7 +303,14 @@ impl InstalledMachine {
                 encode_terminal_reason(reason),
             ),
         };
+        // This is an observation, not a lifetime claim: concurrent retirement
+        // may remove the scheduler thread after endpoint inspection.
+        let placement = endpoint
+            .thread()
+            .and_then(|thread| crate::kernel::task::scheduler::thread_migration_state(thread).ok());
         Ok(VirtualCpuSnapshot {
+            host_cpu: placement.map(|(cpu, _)| cpu.get() as u32),
+            migration_target: placement.and_then(|(_, target)| target.map(|cpu| cpu.get() as u32)),
             id,
             phase,
             thread,

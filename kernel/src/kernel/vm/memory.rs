@@ -37,6 +37,7 @@ pub(in crate::kernel) use synchronize::{SynchronizationError, prepare_live_synch
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Error {
+    Identifier(crate::kernel::mm::translation_id::Error),
     AddressOverflow,
     Allocation(BuddyError),
     Cache(hyper::hal::cache::CacheError),
@@ -149,6 +150,9 @@ pub(crate) type Stage2IdentifierReservation =
     crate::kernel::mm::translation_id::IdentifierReservation<
         crate::kernel::mm::translation_id::Stage2Vmid,
     >;
+type Stage2IdentifierLease = crate::kernel::mm::translation_id::IdentifierLease<
+    crate::kernel::mm::translation_id::Stage2Vmid,
+>;
 type ActiveStage2Identifier = crate::kernel::mm::translation_id::ActiveIdentifier<
     crate::kernel::mm::translation_id::Stage2Vmid,
 >;

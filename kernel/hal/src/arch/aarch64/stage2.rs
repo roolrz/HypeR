@@ -51,6 +51,19 @@ pub struct Stage2AddressSpace {
 }
 
 impl Stage2AddressSpace {
+    /// Selects a leased hardware tag independently of the hierarchy's lifetime.
+    ///
+    /// # Safety
+    /// The caller pins this identifier through every hardware use and serializes
+    /// selection with hierarchy mutation. Existing pins must identify the same tag.
+    pub unsafe fn bind_identifier(&mut self, vmid: u16) -> Result<(), Error> {
+        if vmid == 0 || u32::from(vmid) >= (1_u32 << address::capabilities().vmid_bits) {
+            return Err(Error::InvalidVmid);
+        }
+        self.vmid = vmid;
+        Ok(())
+    }
+
     pub fn required_table_pages(ipa: u64, size: u64) -> Result<usize, Error> {
         validate_ipa_range(ipa, size)?;
         let end = ipa.checked_add(size).ok_or(Error::AddressOverflow)?;
@@ -77,15 +90,11 @@ impl Stage2AddressSpace {
     /// the permanent host linear map, and kept alive until this address space
     /// can no longer be active or accessed.
     pub unsafe fn new(
-        vmid: u16,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<Self, Error> {
-        if vmid == 0 {
-            return Err(Error::InvalidVmid);
-        }
         let root = allocator(1, 1).ok_or(Error::Allocation)?;
         validate_table(root)?;
-        let mut result = Self { root, vmid };
+        let mut result = Self { root, vmid: 0 };
         if let Some(physical) = super::vgic::v2::guest_physical() {
             // SAFETY: Only the guest virtual CPU interface is exposed, never
             // GICC/GICH. It is banked by CPU and switched with the vCPU context.
@@ -552,9 +561,11 @@ impl Stage2AddressSpace {
         // fallible operation and every owner survives through VM retirement.
         // SAFETY: The VM lock serializes this parent slot and retains backing.
         unsafe { write_volatile(pointer, 0) };
-        self.invalidate_block_break();
-        // SAFETY: The synchronous break completed for the exact VMID on all
-        // shareable CPUs; its DSB also published the fully initialized child.
+        if self.vmid != 0 {
+            self.invalidate_block_break();
+        }
+        // SAFETY: Either no hardware has ever selected this hierarchy, or the
+        // synchronous break completed for the leased VMID on all shareable CPUs.
         unsafe { write_volatile(pointer, child.get() | registers::STAGE2_DESC_TABLE_OR_PAGE) };
         // SAFETY: Invalid-to-valid publication of the replacement table.
         unsafe { publish_new_leaf() };
@@ -747,16 +758,29 @@ const fn normal_memory_attributes(permissions: Stage2PagePermissions) -> u64 {
         }
 }
 
-/// Invalidates one retained guest translation identity on the current CPU.
-///
-/// The request is opaque outside the architecture. Its publisher retains the
-/// exact root and VMID until every targeted CPU acknowledges this operation.
-pub(crate) fn retire_local(request: super::GuestStage2RetirementRequest) {
-    invalidate_local(request, true);
+/// Invalidates a leased live guest translation identity while preserving selection.
+pub(crate) fn synchronize_local(request: super::GuestStage2RetirementRequest) {
+    invalidate_local(request);
 }
 
-pub(crate) fn synchronize_local(request: super::GuestStage2RetirementRequest) {
-    invalidate_local(request, false);
+/// Parks a retired root without selecting its potentially reassigned VMID.
+pub(crate) fn retire_root_local(root: u64) {
+    // SAFETY: Global retirement excluded every execution owner of this root.
+    // The register-only sequence preserves every unrelated selection.
+    unsafe {
+        asm!(
+            "mrs {selected}, VTTBR_EL2",
+            "and {physical}, {selected}, #0xffffffffffff",
+            "cmp {physical}, {root}",
+            "csel {selected}, xzr, {selected}, eq",
+            "msr VTTBR_EL2, {selected}",
+            "isb",
+            root = in(reg) root,
+            selected = out(reg) _, physical = out(reg) _,
+            options(nostack),
+        );
+    }
+    invalidate_namespace_local();
 }
 
 pub(crate) fn publish_changes() {
@@ -764,14 +788,13 @@ pub(crate) fn publish_changes() {
     unsafe { asm!("dsb ishst", options(nostack)) };
 }
 
-fn invalidate_local(request: super::GuestStage2RetirementRequest, retiring: bool) {
+fn invalidate_local(request: super::GuestStage2RetirementRequest) {
     let retiring_vttbr = request.retiring_vttbr();
     let guest_vtcr = request.guest_vtcr();
     // SAFETY: The caller retains the exact root and VMID and executes with
     // local guest execution stopped. This register-only interval selects that
     // regime and performs a local combined stage-1/stage-2 invalidation. Live
-    // synchronization restores all prior state; final retirement additionally
-    // parks a matching old selection after globally stopping that VM.
+    // synchronization restores all prior state; the lease pins its exact tag.
     unsafe {
         asm!(
             "mrs {saved_hcr}, HCR_EL2",
@@ -787,11 +810,7 @@ fn invalidate_local(request: super::GuestStage2RetirementRequest, retiring: bool
             "tlbi VMALLS12E1",
             "dsb ish",
             "isb",
-            "cmp {saved_vttbr}, {retiring_vttbr}",
-            "csel {restore_vttbr}, xzr, {saved_vttbr}, eq",
-            "cmp {retiring}, #0",
-            "csel {restore_vttbr}, {saved_vttbr}, {restore_vttbr}, eq",
-            "msr VTTBR_EL2, {restore_vttbr}",
+            "msr VTTBR_EL2, {saved_vttbr}",
             "msr VTCR_EL2, {saved_vtcr}",
             "msr HCR_EL2, {saved_hcr}",
             "isb",
@@ -799,10 +818,8 @@ fn invalidate_local(request: super::GuestStage2RetirementRequest, retiring: bool
             saved_vttbr = out(reg) _,
             saved_vtcr = out(reg) _,
             guest_hcr = out(reg) _,
-            restore_vttbr = out(reg) _,
             guest_vtcr = in(reg) guest_vtcr,
             retiring_vttbr = in(reg) retiring_vttbr,
-            retiring = in(reg) u64::from(retiring),
             vm = in(reg) registers::HCR_EL2_VM,
             tge = in(reg) registers::HCR_EL2_TGE,
             options(nostack)
@@ -994,4 +1011,19 @@ fn table_pointer(table: PhysicalAddress) -> Result<*mut u64, Error> {
     memory::linear_page_address(table)
         .map(core::ptr::with_exposed_provenance_mut::<u64>)
         .ok_or(Error::InvalidAddress)
+}
+
+/// Flushes every guest VMID locally before admitting a new allocator epoch.
+pub fn invalidate_namespace_local() {
+    // SAFETY: EL2 owns the EL1/guest translation regime; ALLE1 covers every
+    // VMID and leaves the VHE host regime intact. The caller keeps IRQs masked.
+    unsafe {
+        asm!(
+            "dsb ishst",
+            "tlbi ALLE1",
+            "dsb ish",
+            "isb",
+            options(nostack, preserves_flags)
+        );
+    }
 }

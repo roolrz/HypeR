@@ -55,8 +55,13 @@ static void transport(hyper_native_status_t status)
     RESULT(hyper_directory_open_file_with_options(handle, bytes, sizeof(bytes), other, options, 0754));
     EXPECT(VMAR_MAP, handle, other, offset, deadline, 4096, options);
     STATUS(hyper_vmar_map(handle, other, offset, deadline, 4096, options));
+    uint64_t affinity_words[2] = {3, UINT64_C(0x8000000000000000)};
+    EXPECT(VIRTUAL_CPU_SET_AFFINITY, handle, (uintptr_t)affinity_words, 2);
+    STATUS(hyper_virtual_cpu_set_affinity(handle, affinity_words, 2));
     EXPECT(THREAD_CREATE, handle, other, offset, deadline);
-    RESULT(hyper_thread_create(handle, other, offset, deadline));
+    RESULT(hyper_thread_create(handle, other, offset, deadline, NULL, 0));
+    EXPECT(THREAD_CREATE, handle, other, offset, deadline, (uintptr_t)affinity_words, 2);
+    RESULT(hyper_thread_create(handle, other, offset, deadline, affinity_words, 2));
     EXPECT(PROCESS_BUILDER_ADD_HANDLE, handle, other, options, 27, offset, 1);
     STATUS(hyper_process_builder_add_handle(handle, other, options, 27, offset, 1));
     EXPECT(WAIT_SET_WAIT, handle, deadline, (uintptr_t)bytes, sizeof(bytes));

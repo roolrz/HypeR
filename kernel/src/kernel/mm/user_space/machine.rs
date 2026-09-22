@@ -23,7 +23,7 @@ use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::mm::page_block::PageBlock;
-use crate::kernel::mm::translation_id::{ActiveIdentifier, HostAsid};
+use crate::kernel::mm::translation_id::{ActiveIdentifier, HostAsid, IdentifierLease};
 
 type LogicalAddressSpace = UserAddressSpace<KernelPageBackend, DomainAccount>;
 type LogicalPrepared<'a> = PreparedMappingChange<'a, KernelPageBackend, DomainAccount>;
@@ -44,7 +44,6 @@ pub(crate) enum Error {
     Address(AddressError),
     #[expect(dead_code, reason = "error payload is retained for Debug diagnostics")]
     Hal(crate::hal::user::AddressSpaceError),
-    #[expect(dead_code, reason = "error payload is retained for Debug diagnostics")]
     Identifier(crate::kernel::mm::translation_id::Error),
     InvalidRange,
     Logical(LogicalAddressSpaceError),
@@ -60,6 +59,13 @@ pub(crate) enum Error {
 }
 
 impl Error {
+    pub(crate) const fn is_identifier_busy(&self) -> bool {
+        matches!(
+            self,
+            Self::Identifier(crate::kernel::mm::translation_id::Error::Busy)
+        )
+    }
+
     pub(crate) const fn is_stale_mapping_transaction(&self) -> bool {
         match self {
             Self::Logical(error) => error.is_stale_transaction(),
@@ -98,7 +104,10 @@ impl From<crate::hal::user::AddressSpaceError> for Error {
 
 impl From<crate::kernel::mm::translation_id::Error> for Error {
     fn from(error: crate::kernel::mm::translation_id::Error) -> Self {
-        Self::Identifier(error)
+        match error {
+            crate::kernel::mm::translation_id::Error::Allocation => Self::Allocation,
+            other => Self::Identifier(other),
+        }
     }
 }
 
@@ -402,13 +411,13 @@ impl NativeAddressSpace {
         let reserved = crate::kernel::mm::translation_id::reserve::<HostAsid>(plan.asid_bits())?;
         let initial_epoch = logical.mapping_epoch();
         let image = build_image(
-            &reserved,
-            |identifier| (identifier.value(), identifier.generation()),
+            reserved.generation(),
             initial_epoch,
             0,
             account.clone(),
             |_| {},
         )?;
+        let residency = AddressSpaceResidency::try_new(initial_epoch)?;
         let identifier = reserved.activate()?;
         Ok(owner.write(Self {
             logical: ManuallyDrop::new(logical),
@@ -416,7 +425,7 @@ impl NativeAddressSpace {
             identifier: ManuallyDrop::new(identifier),
             state: ManuallyDrop::new(InterruptSpinLock::new(MachineState {
                 current: image,
-                residency: AddressSpaceResidency::try_new(initial_epoch)?,
+                residency,
             })),
             root_vmar_object_published: AtomicBool::new(false),
             _owner_charge: owner_charge,
@@ -557,8 +566,7 @@ impl NativeAddressSpace {
             mappings.push((snapshot, pages));
         }
         let image = build_image(
-            &self.identifier,
-            |identifier| (identifier.value(), identifier.generation()),
+            self.identifier.generation(),
             logical.next_epoch(),
             leaf_count,
             self.account.clone(),
@@ -585,11 +593,23 @@ impl NativeAddressSpace {
         })
     }
 
+    /// Acquire before publishing a machine-active user run, so temporary tag
+    /// pressure can release the scheduler pin and retry without an exit proof.
+    pub(crate) fn acquire_identifier(&self) -> Result<IdentifierLease<HostAsid>, Error> {
+        self.identifier.acquire().map_err(Error::Identifier)
+    }
+
     pub(crate) fn activate<'a>(
         &'a self,
         pin: &'a dyn PinnedExecution,
         kernel_access: &crate::hal::user::PreparedKernelAccess<'_>,
+        identifier: IdentifierLease<HostAsid>,
     ) -> Result<ActiveNativeAddressSpace<'a>, Error> {
+        if identifier.generation() != self.identifier.generation() {
+            return Err(Error::Identifier(
+                crate::kernel::mm::translation_id::Error::InvalidToken,
+            ));
+        }
         let cpu = crate::kernel::cpu::current_index().ok_or(Error::Unsupported)?;
         let owner = self.logical.id().get();
         if ACTIVE_OWNER[cpu]
@@ -607,6 +627,8 @@ impl NativeAddressSpace {
             let backend = unsafe {
                 crate::hal::user::activate_local(
                     &state.current.root,
+                    identifier.value(),
+                    identifier.epoch(),
                     cpu,
                     pin,
                     self,
@@ -635,12 +657,12 @@ impl NativeAddressSpace {
             owner: self,
             cpu,
             backend: Some(backend),
+            identifier: Some(identifier),
         })
     }
 
-    /// Retires the last machine root and returns its hardware identifier to
-    /// the allocator only after every previously resident CPU acknowledged a
-    /// tagged invalidation.
+    /// Retires the last machine root and unregisters its software identity only
+    /// after every previously resident CPU acknowledged local invalidation.
     // Returning the owner is intentional: a recoverable pre-publication Busy
     // result must preserve the address space without allocation or leakage.
     pub(crate) fn retire(owner: UniqueFallibleArc<Self>) -> Result<(), RetirementFailure> {
@@ -721,7 +743,7 @@ impl NativeAddressSpace {
             ));
         }
         // SAFETY: Residency is now irreversibly retired and every target
-        // acknowledged invalidating this exact identifier before reuse.
+        // acknowledged invalidating its old translations and speculative walks.
         if unsafe { retiring.complete() }.is_err() {
             crate::kernel::crash::fatal(format_args!(
                 "HypeR: native translation identifier completion is inconsistent"
@@ -803,6 +825,7 @@ pub(crate) struct ActiveNativeAddressSpace<'owner> {
     owner: &'owner NativeAddressSpace,
     cpu: hyper::cpu::CpuIndex,
     backend: Option<crate::hal::user::ActiveAddressSpace<'owner>>,
+    identifier: Option<IdentifierLease<HostAsid>>,
 }
 
 impl<'owner> ActiveNativeAddressSpace<'owner> {
@@ -857,6 +880,8 @@ impl<'owner> ActiveNativeAddressSpace<'owner> {
                 // SAFETY: The current-CPU check above, PinnedExecution borrow,
                 // and non-Send token prove same-PE teardown.
                 unsafe { crate::hal::user::deactivate_local(backend)? };
+                // Hardware is detached before this pin can make the ASID reusable.
+                drop(self.identifier.take());
                 ACTIVE[self.cpu].store(false, Ordering::Release);
                 ACTIVE_OWNER[self.cpu].store(0, Ordering::Release);
                 Ok(())
@@ -1043,9 +1068,8 @@ fn execute_cut(
     }
 }
 
-fn build_image<Asid>(
-    identifier: &Asid,
-    identity: impl FnOnce(&Asid) -> (u16, u64),
+fn build_image(
+    generation: u64,
     epoch: u64,
     leaf_count: usize,
     account: DomainAccount,
@@ -1053,20 +1077,14 @@ fn build_image<Asid>(
 ) -> Result<FallibleArc<MachineImage>, Error> {
     let capacity = crate::hal::user::table_page_capacity(leaf_count).ok_or(Error::SizeOverflow)?;
     let mut tables = TablePagePool::try_new(capacity, account.clone())?;
-    let (asid, generation) = identity(identifier);
     let root = {
         let mut allocator = |order| tables.allocate(order);
         // SAFETY: TablePagePool returns uniquely owned zeroed PageTable blocks
         // and is moved intact into the resulting image through acknowledged
-        // retirement. Both callers supply their retained HostAsid token: the
-        // initial reservation or this address space's active identifier.
+        // retirement. The stable software owner identity is retained independently
+        // of the hardware ASID lease acquired at each activation.
         unsafe {
-            crate::hal::user::prepare_host_address_space(
-                asid,
-                generation,
-                enumerate,
-                &mut allocator,
-            )
+            crate::hal::user::prepare_host_address_space(generation, enumerate, &mut allocator)
         }
     };
     let root = match root {
@@ -1134,8 +1152,8 @@ pub(crate) fn service_local_rpc(
 }
 
 // SAFETY: NativeAddressSpace leaks on safe Drop and releases an old image only
-// after every active/resident CPU acknowledged replacement. Its identifier is
-// retained until a future acknowledged final-retirement path.
+// after every active/resident CPU acknowledged replacement. Its software
+// identity remains registered until acknowledged final retirement.
 unsafe impl hyper::hal::user::UserTranslationOwner for NativeAddressSpace {}
 
 #[cfg(feature = "kernel-self-test")]

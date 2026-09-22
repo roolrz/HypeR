@@ -133,26 +133,26 @@ impl DeferredProcessServices<'_> {
         &self,
         input: Option<UserSlice>,
         word_count: usize,
-    ) -> Result<CpuMask, ProcessBuilderServiceError> {
+    ) -> Result<CpuMask, AffinityInputError> {
         const WORD_BYTES: usize = core::mem::size_of::<u64>();
         const MAX_WORDS: usize =
             hyper::abi::native::HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS as usize;
 
         if word_count > MAX_WORDS {
-            return Err(ProcessBuilderServiceError::InvalidInput);
+            return Err(AffinityInputError::Invalid);
         }
         let byte_count = word_count
             .checked_mul(WORD_BYTES)
-            .ok_or(ProcessBuilderServiceError::InvalidInput)?;
+            .ok_or(AffinityInputError::Invalid)?;
         let mut encoded = [0_u8; MAX_WORDS * WORD_BYTES];
         if let Some(input) = input {
             if input.length() != byte_count as u64 {
-                return Err(ProcessBuilderServiceError::InvalidInput);
+                return Err(AffinityInputError::Invalid);
             }
             self.process
                 .copy_from_user(input, &mut encoded[..byte_count])?;
         } else if byte_count != 0 {
-            return Err(ProcessBuilderServiceError::InvalidInput);
+            return Err(AffinityInputError::Invalid);
         }
 
         let mut words = [0_u64; MAX_WORDS];
@@ -164,7 +164,7 @@ impl DeferredProcessServices<'_> {
         }
         for cpu in hyper::cpu::MAX_CPUS..word_count * u64::BITS as usize {
             if words[cpu / u64::BITS as usize] & (1_u64 << (cpu % u64::BITS as usize)) != 0 {
-                return Err(ProcessBuilderServiceError::InvalidInput);
+                return Err(AffinityInputError::Invalid);
             }
         }
         let mut affinity = CpuMask::EMPTY;
@@ -173,11 +173,21 @@ impl DeferredProcessServices<'_> {
                 continue;
             }
             let Some(cpu) = hyper::cpu::CpuIndex::new(cpu) else {
-                return Err(ProcessBuilderServiceError::InvalidInput);
+                return Err(AffinityInputError::Invalid);
             };
             affinity = affinity.with_cpu(cpu);
         }
         Ok(affinity)
+    }
+}
+
+enum AffinityInputError {
+    Invalid,
+    Memory(ProcessError),
+}
+impl From<ProcessError> for AffinityInputError {
+    fn from(error: ProcessError) -> Self {
+        Self::Memory(error)
     }
 }
 
@@ -455,6 +465,21 @@ impl VmServices for DeferredProcessServices<'_> {
         crate::kernel::vm::service::vcpu_info(self.process, vcpu)
     }
 
+    fn set_virtual_cpu_affinity(
+        &self,
+        vcpu: HandleValue,
+        words: Option<UserSlice>,
+        word_count: usize,
+    ) -> Result<(), crate::kernel::vm::service::Error> {
+        let affinity = self
+            .copy_affinity(words, word_count)
+            .map_err(|error| match error {
+                AffinityInputError::Invalid => crate::kernel::vm::service::Error::InvalidArgument,
+                AffinityInputError::Memory(error) => crate::kernel::vm::service::Error::from(error),
+            })?;
+        crate::kernel::vm::service::set_vcpu_affinity(self.process, vcpu, affinity)
+    }
+
     fn start_virtual_cpu(
         &self,
         vcpu: HandleValue,
@@ -666,6 +691,8 @@ impl TaskServices for DeferredProcessServices<'_> {
         stack: u64,
         tls: u64,
         argument: u64,
+        affinity_words: Option<UserSlice>,
+        affinity_word_count: usize,
     ) -> Result<HandleValue, ObjectServiceError> {
         let start = crate::kernel::process::UserThreadStart::try_new(
             UserAddress::new(entry),
@@ -674,8 +701,27 @@ impl TaskServices for DeferredProcessServices<'_> {
         )
         .map_err(|_| ObjectServiceError::InvalidInput)?
         .with_argument(argument);
+        let affinity = if affinity_words.is_none() && affinity_word_count == 0 {
+            let caller = self
+                .thread
+                .scheduler_id()
+                .ok_or(ObjectServiceError::InvalidInput)?;
+            crate::kernel::task::scheduler::thread_placement(caller)
+                .map_err(ProcessError::from)?
+                .1
+        } else {
+            let affinity = self
+                .copy_affinity(affinity_words, affinity_word_count)
+                .map_err(|error| match error {
+                    AffinityInputError::Invalid => ObjectServiceError::InvalidInput,
+                    AffinityInputError::Memory(error) => ObjectServiceError::Process(error),
+                })?;
+            crate::kernel::task::scheduler::validate_affinity(affinity)
+                .map_err(|_| ObjectServiceError::InvalidInput)?;
+            affinity
+        };
         let process = self.process;
-        let thread = process.create_user_thread("native-worker", start, CpuMask::ALL)?;
+        let thread = process.create_user_thread("native-worker", start, affinity)?;
         let rights = Rights::DUPLICATE
             .union(Rights::WAIT)
             .union(Rights::INSPECT)
@@ -1272,7 +1318,12 @@ impl ProcessBuilderServices for DeferredProcessServices<'_> {
         let builder = self
             .process
             .resolve_handle::<ProcessBuilder>(builder, Rights::WRITE)?;
-        let affinity = self.copy_affinity(words, word_count)?;
+        let affinity = self
+            .copy_affinity(words, word_count)
+            .map_err(|error| match error {
+                AffinityInputError::Invalid => ProcessBuilderServiceError::InvalidInput,
+                AffinityInputError::Memory(error) => ProcessBuilderServiceError::Process(error),
+            })?;
         builder.object().set_affinity(affinity)?;
         Ok(())
     }
@@ -1581,3 +1632,15 @@ fn atomic_wait_error(error: crate::kernel::process::atomic_wait::Error) -> Objec
         Error::InvalidInput => ObjectServiceError::InvalidInput,
     }
 }
+
+#[cfg(all(
+    feature = "kernel-self-test",
+    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
+))]
+#[path = "../../../tests/kernel/thread_create_affinity.rs"]
+mod thread_affinity_test;
+#[cfg(all(
+    feature = "kernel-self-test",
+    any(CONFIG_ARCH_AARCH64, CONFIG_ARCH_RISCV64)
+))]
+pub(crate) use thread_affinity_test::verify_thread_affinity_creation_for_test;
