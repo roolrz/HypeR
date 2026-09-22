@@ -40,7 +40,7 @@ sed -n '/^    pub(super) fn request_all_stops(/,/^    pub(super) fn is_quiescent
 sed -n '/^    fn try_hold_quiescent(/,/^}/p' "$registry" >"$promotion"
 sed -n '/if let Err(error) = super::activate(execution)/,/prepare_interrupts_for_entry/p' \
     "$runner" >"$runner_activation"
-sed -n '/^pub(crate) fn retire_local(/,/^fn best_level(/p' "$aarch_stage2" | sed '$d' \
+sed -n '/^pub(crate) fn retire_local(/,/^fn index(/p' "$aarch_stage2" | sed '$d' \
     >"$arch_retire"
 
 line_first() {

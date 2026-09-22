@@ -42,9 +42,6 @@ pub enum Error {
 #[derive(Clone, Copy)]
 enum MemoryType {
     Normal,
-    // Retained for future device passthrough/driver-domain mappings. The
-    // built-in guest console is intentionally trapped and emulated instead.
-    #[allow(dead_code)]
     Device,
 }
 
@@ -133,22 +130,82 @@ impl Stage2AddressSpace {
             && hcr & registers::HCR_EL2_VM != 0
     }
 
-    #[allow(dead_code)]
-    /// Maps normal memory using page-table pages supplied by `allocator`.
+    /// Optional opportunistic normal-RAM block granule. Device mappings stay 4 KiB.
+    pub const fn normal_block_size() -> Option<u64> {
+        Some(registers::STAGE2_LEVEL_SIZES_4K[1])
+    }
+
+    /// Installs a 2 MiB normal-memory block, or accepts an identical mapping.
+    ///
+    /// Returns false if the slot already contains a final-level table; callers
+    /// must then use page mappings. Existing tables are never promoted or freed.
     ///
     /// # Safety
-    ///
-    /// Newly returned table pages must satisfy the ownership, initialization,
-    /// mapping, alignment, and lifetime contract of [`Self::new`]. The caller
-    /// must also serialize all updates to this hierarchy.
-    pub unsafe fn map_normal(
+    /// The entire aligned physical interval must be retained, contiguous, and
+    /// authorized with identical permissions. The hierarchy must be
+    /// exclusively mutated; allocator obeys `new`'s contract. Before a running
+    /// guest resumes, descriptor stores must be published.
+    pub unsafe fn try_map_normal_block(
         &mut self,
         ipa: u64,
         physical: u64,
-        size: u64,
+        permissions: Stage2PagePermissions,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
-    ) -> Result<(), Error> {
-        self.map_range(ipa, physical, size, MemoryType::Normal, allocator)
+    ) -> Result<bool, Error> {
+        let size = registers::STAGE2_LEVEL_SIZES_4K[1];
+        validate_range(ipa, physical, size)?;
+        if !ipa.is_multiple_of(size) || !physical.is_multiple_of(size) {
+            return Err(Error::InvalidRange);
+        }
+        let root_entry = read_entry(self.root, index(ipa, 0))?;
+        if root_entry != 0 {
+            if root_entry & registers::TRANSLATION_DESC_TYPE_MASK
+                != registers::STAGE2_DESC_TABLE_OR_PAGE
+            {
+                return Err(Error::Conflict);
+            }
+            let l2 =
+                PhysicalAddress::new(root_entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
+            let existing = read_entry(l2, index(ipa, 1))?;
+            if existing & registers::TRANSLATION_DESC_TYPE_MASK
+                == registers::STAGE2_DESC_TABLE_OR_PAGE
+            {
+                return Ok(false);
+            }
+            if existing != 0 {
+                let expected = leaf_descriptor(physical, 1, MemoryType::Normal, permissions);
+                return if existing == expected {
+                    Ok(true)
+                } else {
+                    Err(Error::Conflict)
+                };
+            }
+        }
+        self.map_leaf(ipa, physical, 1, MemoryType::Normal, permissions, allocator)?;
+        Ok(true)
+    }
+
+    /// Installs or republishes an identical normal block for the active VMID.
+    ///
+    /// # Safety
+    /// `try_map_normal_block`'s contracts apply and this address space must be
+    /// selected on the current CPU throughout publication.
+    pub unsafe fn try_map_normal_block_active(
+        &mut self,
+        ipa: u64,
+        physical: u64,
+        permissions: Stage2PagePermissions,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
+    ) -> Result<bool, ActiveMappingError<Error>> {
+        // SAFETY: The caller supplies the same allocator and mapping authority.
+        let mapped = unsafe { self.try_map_normal_block(ipa, physical, permissions, allocator) }
+            .map_err(ActiveMappingError::BeforeInstall)?;
+        if mapped {
+            // SAFETY: Only an absent or identical block was accepted, so
+            // publication cannot expose replacement backing or permissions.
+            unsafe { publish_new_leaf() };
+        }
+        Ok(mapped)
     }
 
     /// Adds one normal-memory page mapping.
@@ -201,47 +258,25 @@ impl Stage2AddressSpace {
         )
     }
 
-    /// Removes one normal 4 KiB leaf without reclaiming its page tables.
-    ///
-    /// # Safety
-    /// The caller serializes updates and retains the old backing until every
-    /// possible CPU consumer has acknowledged a subsequent live invalidation.
-    pub unsafe fn clear_page(&mut self, ipa: u64) -> Result<bool, Error> {
-        if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= address::STAGE2_IPA_LIMIT {
-            return Err(Error::InvalidAddress);
-        }
-        let mut table = self.root;
-        for level in 0..2 {
-            let entry = read_entry(table, index(ipa, level))?;
-            if entry == 0 {
-                return Ok(false);
-            }
-            if entry & registers::TRANSLATION_DESC_TYPE_MASK != registers::STAGE2_DESC_TABLE_OR_PAGE
-            {
-                return Err(Error::Conflict);
-            }
-            table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
-        }
-        let entry = read_entry(table, index(ipa, 2))?;
-        if entry == 0 {
-            return Ok(false);
-        }
-        let (pointer, _) = self.normal_page_leaf(ipa)?;
-        // SAFETY: The validated leaf is exclusively mutated and the caller
-        // retains every hardware-visible owner through the later flush.
-        unsafe { write_volatile(pointer, 0) };
-        Ok(true)
-    }
-
     /// Grants execute permission to an existing inactive normal-memory page.
     ///
     /// Instruction bytes must already have been published to the instruction
     /// coherence domain. The next activation publishes this descriptor store.
-    pub fn make_normal_page_executable(&mut self, ipa: u64) -> Result<(), Error> {
-        let (pointer, descriptor) = self.normal_page_leaf(ipa)?;
-        if descriptor & registers::STAGE2_DESC_XN == 0 {
+    ///
+    /// # Safety
+    /// The caller excludes guest execution and serializes hierarchy mutation;
+    /// newly allocated split tables satisfy `new`'s allocation contract.
+    pub unsafe fn make_normal_page_executable(
+        &mut self,
+        ipa: u64,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
+    ) -> Result<(), Error> {
+        if self.normal_leaf_is_executable(ipa)? {
             return Ok(());
         }
+        // SAFETY: The caller supplies uniquely owned, retained table pages
+        // and excludes concurrent mutation and guest execution.
+        let (pointer, descriptor) = unsafe { self.ensure_page_leaf(ipa, allocator)? };
         // SAFETY: The validated leaf belongs to this exclusively mutated,
         // inactive hierarchy.
         unsafe { write_volatile(pointer, descriptor & !registers::STAGE2_DESC_XN) };
@@ -255,17 +290,24 @@ impl Stage2AddressSpace {
     /// This address space must be active on the current CPU and serialized by
     /// the owning VM address-space lock. Invalidation is broadcast to all CPUs
     /// in the inner-shareable domain. Instruction bytes must have
-    /// completed cache publication before this call.
+    /// completed cache publication before this call. Newly allocated split
+    /// tables must satisfy `new`'s allocation and lifetime contract.
     pub unsafe fn make_normal_page_executable_active(
         &mut self,
         ipa: u64,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), ActiveMappingError<Error>> {
-        let (pointer, descriptor) = self
-            .normal_page_leaf(ipa)
-            .map_err(ActiveMappingError::BeforeInstall)?;
-        if descriptor & registers::STAGE2_DESC_XN == 0 {
+        if self
+            .normal_leaf_is_executable(ipa)
+            .map_err(ActiveMappingError::BeforeInstall)?
+        {
             return Ok(());
         }
+        // SAFETY: The caller supplies retained table pages and serializes
+        // mutation. A failed split has not changed any translation; a successful
+        // split returns the leaf directly, with no fallible post-commit walk.
+        let (pointer, descriptor) = unsafe { self.ensure_page_leaf(ipa, allocator) }
+            .map_err(ActiveMappingError::BeforeInstall)?;
         let executable = descriptor & !registers::STAGE2_DESC_XN;
         // Permission replacement uses break-before-make. All validation is
         // complete before the break, so no recoverable failure can strand the
@@ -301,7 +343,6 @@ impl Stage2AddressSpace {
         Ok(())
     }
 
-    #[allow(dead_code)]
     /// Maps device memory using page-table pages supplied by `allocator`.
     ///
     /// # Safety
@@ -360,6 +401,241 @@ impl Stage2AddressSpace {
         }
     }
 
+    /// Prepares a revocation range without changing its translations or permissions.
+    /// Only partially covered blocks require an L3 allocation. On failure any
+    /// completed split is translation-equivalent, and no backing was revoked.
+    /// The owning VM lock must remain held through the subsequent clear.
+    ///
+    /// # Safety
+    /// The caller serializes all hierarchy changes, and newly allocated tables
+    /// satisfy `new`'s ownership and lifetime contract.
+    pub unsafe fn prepare_clear_normal_range(
+        &mut self,
+        ipa: u64,
+        size: u64,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
+    ) -> Result<(), Error> {
+        validate_ipa_range(ipa, size)?;
+        let end = ipa + size;
+        let mut address = ipa;
+        while address < end {
+            if let Some((_, descriptor, level)) = self.leaf_at(address)? {
+                validate_normal_leaf(descriptor, level)?;
+                let span = registers::STAGE2_LEVEL_SIZES_4K[level];
+                let base = address & !(span - 1);
+                if level == 1 && (address != base || end - address < span) {
+                    // SAFETY: The outer contract retains allocator pages and
+                    // serializes this translation-equivalent split.
+                    unsafe { self.ensure_page_leaf(address, allocator)? };
+                    continue;
+                }
+                address = end.min(base + span);
+            } else {
+                address += PAGE_SIZE;
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears an already-prepared range while retaining backing and table owners.
+    ///
+    /// # Safety
+    /// The caller must serialize prepare/clear, retain removed backing until
+    /// all possible CPU consumers acknowledge subsequent live invalidation,
+    /// and exclude new software lookup before clearing.
+    pub unsafe fn clear_normal_range(&mut self, ipa: u64, size: u64) -> Result<(), Error> {
+        validate_ipa_range(ipa, size)?;
+        let end = ipa + size;
+        // Validate the entire range before the first store, even if the caller
+        // mistakenly omitted preparation. No partially cleared error result.
+        for clear in [false, true] {
+            let mut address = ipa;
+            while address < end {
+                if let Some((pointer, descriptor, level)) = self.leaf_at(address)? {
+                    validate_normal_leaf(descriptor, level)?;
+                    let span = registers::STAGE2_LEVEL_SIZES_4K[level];
+                    if !address.is_multiple_of(span) || end - address < span {
+                        return Err(Error::Conflict);
+                    }
+                    if clear {
+                        // SAFETY: Exclusive mutation; backing remains retained
+                        // through the caller's acknowledged invalidation.
+                        unsafe { write_volatile(pointer, 0) };
+                    }
+                    address += span;
+                } else {
+                    address += PAGE_SIZE;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the hardware leaf covering an IPA, including its level.
+    fn leaf_at(&self, ipa: u64) -> Result<Option<(*mut u64, u64, usize)>, Error> {
+        if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= address::STAGE2_IPA_LIMIT {
+            return Err(Error::InvalidAddress);
+        }
+        let mut table = self.root;
+        for level in 0..3 {
+            let pointer = table_pointer(table)?;
+            // SAFETY: The hierarchy owns the validated table; the index is in
+            // its 512-entry extent, and the VM owner serializes mutation.
+            let pointer = unsafe { pointer.add(index(ipa, level)) };
+            // SAFETY: The same retained aligned descriptor may be read by HW.
+            let entry = unsafe { read_volatile(pointer) };
+            if entry == 0 {
+                return Ok(None);
+            }
+            let kind = entry & registers::TRANSLATION_DESC_TYPE_MASK;
+            if (level == 1 && kind == registers::STAGE2_DESC_BLOCK)
+                || (level == 2 && kind == registers::STAGE2_DESC_TABLE_OR_PAGE)
+            {
+                return Ok(Some((pointer, entry, level)));
+            }
+            if level == 2 || kind != registers::STAGE2_DESC_TABLE_OR_PAGE {
+                return Err(Error::Conflict);
+            }
+            table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
+        }
+        Err(Error::Conflict)
+    }
+
+    fn normal_leaf_is_executable(&self, ipa: u64) -> Result<bool, Error> {
+        let (_, descriptor, level) = self.leaf_at(ipa)?.ok_or(Error::Conflict)?;
+        validate_normal_leaf(descriptor, level)?;
+        Ok(descriptor & registers::STAGE2_DESC_XN == 0)
+    }
+
+    /// Returns an existing page leaf or a translation-equivalent split leaf.
+    /// Every error precedes the break; successful publication is followed only
+    /// by returning pointers into the already-validated retained child.
+    ///
+    /// # Safety
+    /// The caller exclusively mutates the hierarchy and supplies uniquely owned,
+    /// zeroed table pages satisfying `new`'s retention/accessibility contract.
+    unsafe fn ensure_page_leaf(
+        &mut self,
+        ipa: u64,
+        allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
+    ) -> Result<(*mut u64, u64), Error> {
+        let (pointer, descriptor, level) = self.leaf_at(ipa)?.ok_or(Error::Conflict)?;
+        validate_normal_leaf(descriptor, level)?;
+        if level == 2 {
+            return Ok((pointer, descriptor));
+        }
+        let child = allocator(1, 1).ok_or(Error::Allocation)?;
+        let child_pointer = table_pointer(child)?;
+        let physical = descriptor & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT;
+        let attributes = descriptor
+            & !registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT
+            & !registers::TRANSLATION_DESC_TYPE_MASK;
+        for slot in 0..registers::TRANSLATION_TABLE_ENTRY_COUNT_4K {
+            let page = physical + slot as u64 * PAGE_SIZE;
+            // SAFETY: A fresh zeroed exclusive table has exactly 512 entries;
+            // each preserves the original block PA and all leaf attributes.
+            unsafe {
+                write_volatile(
+                    child_pointer.add(slot),
+                    page | attributes | registers::STAGE2_DESC_TABLE_OR_PAGE,
+                )
+            };
+        }
+        let slot = index(ipa, 2);
+        // SAFETY: The initialized child is a retained 512-entry table and the
+        // IPA-derived index lies within it. Resolve the result before commit.
+        let page_pointer = unsafe { child_pointer.add(slot) };
+        let page_descriptor = (physical + slot as u64 * PAGE_SIZE)
+            | attributes
+            | registers::STAGE2_DESC_TABLE_OR_PAGE;
+        // All validation/allocation precedes break. From here there is no
+        // fallible operation and every owner survives through VM retirement.
+        // SAFETY: The VM lock serializes this parent slot and retains backing.
+        unsafe { write_volatile(pointer, 0) };
+        self.invalidate_block_break();
+        // SAFETY: The synchronous break completed for the exact VMID on all
+        // shareable CPUs; its DSB also published the fully initialized child.
+        unsafe { write_volatile(pointer, child.get() | registers::STAGE2_DESC_TABLE_OR_PAGE) };
+        // SAFETY: Invalid-to-valid publication of the replacement table.
+        unsafe { publish_new_leaf() };
+        Ok((page_pointer, page_descriptor))
+    }
+
+    fn invalidate_block_break(&self) {
+        let vttbr = (u64::from(self.vmid) << registers::VTTBR_EL2_VMID_SHIFT) | self.root.get();
+        let vtcr = address::capabilities().stage2_vtcr_el2();
+        // A block can have produced several cached combined translations. A
+        // complete VMID invalidation avoids relying on a single IPA to cover
+        // every subpage/translation size. Select the exact root even for an
+        // inactive local VM; other CPUs may still execute or retain this VMID.
+        // SAFETY: The caller exclusively owns the hierarchy and retains its
+        // root/backing. Local IRQs are masked across this register-only interval
+        // to prevent preemption under a temporary root. It restores the prior
+        // selection; it neither schedules nor touches host memory with TGE off.
+        unsafe {
+            asm!(
+                "mrs {saved_daif}, DAIF",
+                "msr DAIFSet, #2",
+                "dsb ishst",
+                "mrs {saved_hcr}, HCR_EL2",
+                "mrs {saved_vttbr}, VTTBR_EL2",
+                "mrs {saved_vtcr}, VTCR_EL2",
+                "orr {guest_hcr}, {saved_hcr}, {vm}",
+                "bic {guest_hcr}, {guest_hcr}, {tge}",
+                "msr VTCR_EL2, {vtcr}",
+                "msr VTTBR_EL2, {vttbr}",
+                "msr HCR_EL2, {guest_hcr}",
+                "isb",
+                "tlbi VMALLS12E1IS",
+                "dsb ish",
+                "isb",
+                "msr VTTBR_EL2, {saved_vttbr}",
+                "msr VTCR_EL2, {saved_vtcr}",
+                "msr HCR_EL2, {saved_hcr}",
+                "isb",
+                "msr DAIF, {saved_daif}",
+                vttbr = in(reg) vttbr,
+                vtcr = in(reg) vtcr,
+                vm = in(reg) registers::HCR_EL2_VM,
+                tge = in(reg) registers::HCR_EL2_TGE,
+                saved_daif = out(reg) _,
+                saved_hcr = out(reg) _,
+                saved_vttbr = out(reg) _,
+                saved_vtcr = out(reg) _,
+                guest_hcr = out(reg) _,
+                options(nostack, preserves_flags)
+            );
+        }
+    }
+
+    #[cfg(feature = "kernel-self-test")]
+    pub fn leaf_size_for_test(&self, ipa: u64) -> Result<Option<u64>, Error> {
+        Ok(self
+            .leaf_at(ipa)?
+            .map(|(_, _, level)| registers::STAGE2_LEVEL_SIZES_4K[level]))
+    }
+
+    #[cfg(feature = "kernel-self-test")]
+    pub fn normal_leaf_for_test(
+        &self,
+        ipa: u64,
+    ) -> Result<Option<(u64, u64, Stage2PagePermissions)>, Error> {
+        self.leaf_at(ipa)?
+            .map(|(_, descriptor, level)| {
+                validate_normal_leaf(descriptor, level)?;
+                let size = registers::STAGE2_LEVEL_SIZES_4K[level];
+                let physical = (descriptor & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT)
+                    + (ipa & (size - 1));
+                let permissions = if descriptor & registers::STAGE2_DESC_XN == 0 {
+                    Stage2PagePermissions::ReadWriteExecute
+                } else {
+                    Stage2PagePermissions::ReadWrite
+                };
+                Ok((physical, size, permissions))
+            })
+            .transpose()
+    }
+
     fn map_range(
         &mut self,
         ipa: u64,
@@ -374,8 +650,7 @@ impl Stage2AddressSpace {
         while offset < size {
             let current_ipa = ipa + offset;
             let current_physical = physical + offset;
-            let remaining = size - offset;
-            let level = best_level(current_ipa, current_physical, remaining);
+            let level = 2;
             self.map_leaf(
                 current_ipa,
                 current_physical,
@@ -420,21 +695,7 @@ impl Stage2AddressSpace {
             };
         }
 
-        let kind = if leaf_level == 2 {
-            registers::STAGE2_DESC_TABLE_OR_PAGE
-        } else {
-            registers::STAGE2_DESC_BLOCK
-        };
-        let attributes = registers::STAGE2_DESC_ACCESS_FLAG
-            | registers::STAGE2_DESC_READ_WRITE
-            | match memory {
-                MemoryType::Normal => normal_memory_attributes(permissions),
-                MemoryType::Device => {
-                    registers::STAGE2_DESC_MEMATTR_DEVICE_NGNRE | registers::STAGE2_DESC_XN
-                }
-            };
-        let descriptor =
-            (physical & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT) | attributes | kind;
+        let descriptor = leaf_descriptor(physical, leaf_level, memory, permissions);
         let slot = index(ipa, leaf_level);
         let existing = read_entry(table, slot)?;
         if existing != 0 && existing != descriptor {
@@ -442,35 +703,38 @@ impl Stage2AddressSpace {
         }
         write_entry(table, slot, descriptor)
     }
+}
 
-    fn normal_page_leaf(&self, ipa: u64) -> Result<(*mut u64, u64), Error> {
-        if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= address::STAGE2_IPA_LIMIT {
-            return Err(Error::InvalidAddress);
-        }
-        let mut table = self.root;
-        for level in 0..2 {
-            let entry = read_entry(table, index(ipa, level))?;
-            if entry & registers::TRANSLATION_DESC_TYPE_MASK != registers::STAGE2_DESC_TABLE_OR_PAGE
-            {
-                return Err(Error::Conflict);
+fn leaf_descriptor(
+    physical: u64,
+    leaf_level: usize,
+    memory: MemoryType,
+    permissions: Stage2PagePermissions,
+) -> u64 {
+    let kind = if leaf_level == 2 {
+        registers::STAGE2_DESC_TABLE_OR_PAGE
+    } else {
+        registers::STAGE2_DESC_BLOCK
+    };
+    let attributes = registers::STAGE2_DESC_ACCESS_FLAG
+        | registers::STAGE2_DESC_READ_WRITE
+        | match memory {
+            MemoryType::Normal => normal_memory_attributes(permissions),
+            MemoryType::Device => {
+                registers::STAGE2_DESC_MEMATTR_DEVICE_NGNRE | registers::STAGE2_DESC_XN
             }
-            table = PhysicalAddress::new(entry & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT);
-        }
-        let pointer = table_pointer(table)?;
-        // SAFETY: The walk validated both parent descriptors and the computed
-        // slot belongs to their live final-level table.
-        let pointer = unsafe { pointer.add(index(ipa, 2)) };
-        // SAFETY: The address-space owner retains and serializes this table.
-        let descriptor = unsafe { read_volatile(pointer) };
-        const MEMATTR_MASK: u64 = 0xf << 2;
-        if descriptor & registers::TRANSLATION_DESC_TYPE_MASK
-            != registers::STAGE2_DESC_TABLE_OR_PAGE
-            || descriptor & MEMATTR_MASK != registers::STAGE2_DESC_MEMATTR_NORMAL_WB
-        {
-            return Err(Error::Conflict);
-        }
-        Ok((pointer, descriptor))
+        };
+    (physical & registers::TRANSLATION_DESC_ADDRESS_MASK_48BIT) | attributes | kind
+}
+
+fn validate_normal_leaf(descriptor: u64, level: usize) -> Result<(), Error> {
+    const MEMATTR_MASK: u64 = 0xf << 2;
+    if (level != 1 && level != 2)
+        || descriptor & MEMATTR_MASK != registers::STAGE2_DESC_MEMATTR_NORMAL_WB
+    {
+        return Err(Error::Conflict);
     }
+    Ok(())
 }
 
 const fn normal_memory_attributes(permissions: Stage2PagePermissions) -> u64 {
@@ -544,15 +808,6 @@ fn invalidate_local(request: super::GuestStage2RetirementRequest, retiring: bool
             options(nostack)
         );
     }
-}
-
-fn best_level(ipa: u64, physical: u64, remaining: u64) -> usize {
-    for (level, &size) in registers::STAGE2_LEVEL_SIZES_4K.iter().enumerate() {
-        if ipa & (size - 1) == 0 && physical & (size - 1) == 0 && remaining >= size {
-            return level;
-        }
-    }
-    2
 }
 
 fn index(ipa: u64, level: usize) -> usize {

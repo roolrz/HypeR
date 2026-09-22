@@ -46,6 +46,64 @@ pub struct Stage2AddressSpace {
 }
 
 impl Stage2AddressSpace {
+    /// Opportunistic RAM blocks are not implemented by this backend.
+    pub const fn normal_block_size() -> Option<u64> {
+        None
+    }
+
+    /// Declines block installation; callers retain the 4 KiB mapping path.
+    ///
+    /// # Safety
+    /// The caller must follow the active page-mapping ownership contract.
+    pub unsafe fn try_map_normal_block_active(
+        &mut self,
+        _ipa: u64,
+        _physical: u64,
+        _permissions: Stage2PagePermissions,
+        _allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
+    ) -> Result<bool, ActiveMappingError<Error>> {
+        Ok(false)
+    }
+
+    /// Validates a page-granular revocation range; no splitting is required.
+    ///
+    /// # Safety
+    /// Caller serializes hierarchy mutation through the subsequent clear.
+    pub unsafe fn prepare_clear_normal_range(
+        &mut self,
+        ipa: u64,
+        size: u64,
+        _allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
+    ) -> Result<(), Error> {
+        validate_range(ipa, ipa, size)?;
+        for address in (ipa..ipa + size).step_by(PAGE_SIZE as usize) {
+            // SAFETY: Exclusive inspection; no descriptor stores in this pass.
+            unsafe {
+                self.visit_clear_page(address, false)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Clears normal pages, retaining backing for subsequent invalidation.
+    ///
+    /// # Safety
+    /// The caller excludes mutation and retains all removed backing until the
+    /// existing architecture-specific synchronization completes.
+    pub unsafe fn clear_normal_range(&mut self, ipa: u64, size: u64) -> Result<(), Error> {
+        validate_range(ipa, ipa, size)?;
+        for clear in [false, true] {
+            for address in (ipa..ipa + size).step_by(PAGE_SIZE as usize) {
+                // SAFETY: Validate the whole range before revoking any leaf;
+                // mutation and backing retention follow the outer contract.
+                unsafe {
+                    self.visit_clear_page(address, clear)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn required_table_pages(ipa: u64, size: u64) -> Result<usize, Error> {
         validate_range(ipa, ipa, size)?;
         let pages = size.div_ceil(1 << 21);
@@ -126,7 +184,14 @@ impl Stage2AddressSpace {
     }
 
     /// Grants execute permission to an inactive normal-memory leaf.
-    pub fn make_normal_page_executable(&mut self, ipa: u64) -> Result<(), Error> {
+    ///
+    /// # Safety
+    /// The caller excludes guest execution and serializes hierarchy mutation.
+    pub unsafe fn make_normal_page_executable(
+        &mut self,
+        ipa: u64,
+        _allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
+    ) -> Result<(), Error> {
         self.install_execute_permission(ipa)
     }
 
@@ -139,6 +204,7 @@ impl Stage2AddressSpace {
     pub unsafe fn make_normal_page_executable_active(
         &mut self,
         ipa: u64,
+        _allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<(), ActiveMappingError<Error>> {
         publish_active_mapping(
             self,
@@ -262,7 +328,7 @@ impl Stage2AddressSpace {
     /// # Safety
     /// The caller serializes mutation and retains the old backing until all
     /// possible CPU consumers have invalidated the affected translation.
-    pub unsafe fn clear_page(&mut self, ipa: u64) -> Result<bool, Error> {
+    unsafe fn visit_clear_page(&mut self, ipa: u64, clear: bool) -> Result<bool, Error> {
         if !ipa.is_multiple_of(PAGE_SIZE) || ipa >= GUEST_LIMIT {
             return Err(Error::InvalidAddress);
         }
@@ -284,8 +350,10 @@ impl Stage2AddressSpace {
             return Ok(false);
         }
         let (pointer, _) = self.normal_page_leaf(ipa)?;
-        // SAFETY: The caller retains the old backing until invalidation completes.
-        unsafe { write_volatile(pointer, 0) };
+        if clear {
+            // SAFETY: The caller retains the old backing until invalidation completes.
+            unsafe { write_volatile(pointer, 0) };
+        }
         Ok(true)
     }
 

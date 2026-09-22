@@ -36,11 +36,15 @@ impl State {
     /// Retirement removes admission before leaf removal and the hardware
     /// acknowledgement barrier. The backing remains owned through that barrier.
     pub(crate) fn retire(&mut self) -> bool {
-        if !matches!(self, Self::Created | Self::Quiescent) {
+        if !self.can_retire() {
             return false;
         }
         *self = Self::Retired;
         true
+    }
+
+    pub(crate) const fn can_retire(self) -> bool {
+        matches!(self, Self::Created | Self::Quiescent)
     }
 }
 

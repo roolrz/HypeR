@@ -141,18 +141,43 @@ pub(crate) fn release(process: &Process, handle: HandleValue) -> Result<(), Erro
         })?;
     binding.with_address_space(|space| {
         let record = space.live.find_mut(mapping.token).ok_or(Error::BadState)?;
-        if !record.state.retire() {
+        if !record.state.can_retire() {
             return Err(Error::Busy);
         }
+        // Prepare every extent before withdrawing admission. Splitting a
+        // boundary block preserves its exact backing and permissions; a
+        // preparation failure therefore leaves this grant retryable. Whole
+        // blocks require no allocation, including during memory pressure.
         for extent in &record.extents {
-            for ipa in (extent.alias..extent.alias + extent.length).step_by(4096) {
-                // SAFETY: lookup was withdrawn under this address-space lock;
-                // the record still owns every page through the all-CPU barrier.
-                if unsafe { space.stage2.clear_page(ipa) }.is_err() {
-                    crate::kernel::crash::fatal(format_args!(
-                        "HypeR: live grant contains non-page stage-2 leaf"
-                    ));
-                }
+            let mut allocator =
+                |pages, alignment| space.table_pages.allocate_zeroed(pages, alignment);
+            // SAFETY: The address-space lock serializes mutation, the table
+            // pool retains every new table, and the grant retains backing.
+            if let Err(error) = unsafe {
+                space
+                    .stage2
+                    .prepare_clear_normal_range(extent.alias, extent.length, &mut allocator)
+            } {
+                return Err(classify(
+                    space
+                        .table_pages
+                        .take_error()
+                        .unwrap_or_else(|| error.into()),
+                ));
+            }
+        }
+        if !record.state.retire() {
+            crate::kernel::crash::fatal(format_args!(
+                "HypeR: prepared live grant lost retirement eligibility"
+            ));
+        }
+        for extent in &record.extents {
+            // SAFETY: All ranges were prepared under this same lock. Lookup
+            // is now withdrawn, and backing survives the all-CPU barrier.
+            if unsafe { space.stage2.clear_normal_range(extent.alias, extent.length) }.is_err() {
+                crate::kernel::crash::fatal(format_args!(
+                    "HypeR: prepared live grant stage-2 removal failed"
+                ));
             }
         }
         Ok(())
