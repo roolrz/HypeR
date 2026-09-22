@@ -65,6 +65,8 @@ Replacing individual boot files is appropriate only when the partition and
 configuration contracts remain compatible.
 
 Hardware results currently establish Native boot, Linux appliance userspace
-and SD-backed configuration-directory reads on Pi 5 D0. Write durability,
-Alpine guest disk operation, device-reset recovery and networking still need
-qualification.
+and SD-backed configuration-directory reads on Pi 5 D0. A two-vCPU Alpine
+guest has also passed three secondary-CPU off/on cycles, ordinary reboot with
+a synced file preserved on its ext4 root, and ordinary poweroff while the I/O
+VM remained available. Write durability under power loss, device-reset recovery
+and networking still need qualification.

@@ -28,7 +28,7 @@ pub struct WritableVmo {
 }
 
 impl WritableVmo {
-    /// Eager DMA backing. Size must be a power of two from one page to 64 MiB.
+    /// Eager DMA backing. Size must be a power of two from one page to 128 MiB.
     /// The entire physical extent remains allocated until all derived page
     /// owners retire; ordinary applications should use sparse `create`.
     pub fn create_contiguous(size: u64) -> Result<Self> {

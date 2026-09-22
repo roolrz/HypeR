@@ -3,6 +3,12 @@
 
 # Linux I/O VM
 
+Keeping an independent I/O VM and preferring device drivers outside the HypeR
+kernel is an [architectural decision](../kernel/docs/architecture.md#device-driver-placement),
+not a temporary bring-up arrangement. Native userspace drivers are another
+supported placement; applications consume their services through controlled
+interfaces.
+
 The I/O VM is a trusted Linux service VM. HypeR owns the Native applications,
 virtual hardware, launch policy, and authoritative DTS/DTB. The separate
 [HypeR-io-vm repository](https://github.com/roolrz/HypeR-io-vm) owns everything
@@ -19,6 +25,27 @@ on the host and checks DMA memory admission after both VMs retire.
 See [implementation status](status.md#linux-io-vm-baseline) for the acceptance
 boundary. Pi 5 device assignment still requires hardware qualification.
 The board deployment path is described in [board storage](board-storage.md).
+
+## Selected backend interfaces
+
+The I/O VM architecture selects three interface families:
+
+| Interface | Purpose | Current status |
+| --- | --- | --- |
+| virtio-scsi | Storage for Native clients and guest disks | Implemented with vhost-scsi/LIO |
+| virtio-net | Network connectivity | Planned |
+| vfio-user | General device backends beyond the storage and network interfaces | Planned; cross-VM integration remains to be designed |
+
+These are the supported design directions, not a claim that all three are
+implemented. Other device models are assessed against actual requirements;
+there is no promise of universal support. Native userspace services remain an
+option for devices that do not fit these interfaces.
+
+The third family is **vfio-user**, not virtio-user or vhost-user. Its integration
+must define device presentation, cross-VM transport, memory authorization,
+interrupts, DMA and reset/retirement. The existing storage bridge is not a
+vfio-user implementation, and this decision does not claim wire compatibility
+or automatic physical-device passthrough.
 
 ## Resident startup
 
@@ -114,6 +141,11 @@ checks both fields against `/etc/hyper/io-clients.conf`, generated from the same
 board JSON as the Linux volume table. Duplicate active bindings are refused.
 `vmm create` accepts `--disk-client` and `--disk-volume`; `vmm save` retains them.
 
+The resident I/O VM has 128 MiB of ordinary RAM for Linux, services and
+vhost-scsi queue allocations; shared business-guest pages are additional mappings,
+not allocator memory for Linux. The isolated two-VM fixture below retains its
+64 MiB per-VM layout.
+
 The fleet has a finite allowance for eight business VMs plus the resident I/O
 VM and manager overhead. Physical memory admission remains fallible; the quota
 does not reserve backing RAM in advance.
@@ -183,7 +215,8 @@ and guest-visible capabilities.
 
 Direct queue consumption requires Linux to access queue metadata, responses,
 and every guest data buffer referenced by descriptors. The trusted deployment
-may grant an entire business VM's RAM. The Native configuration-volume client
+currently grants the entire RAM VMO of each business VM with an I/O-backed disk.
+The Native configuration-volume client
 uses a dedicated 1 MiB shared I/O pool. Bridge protocol version 2 carries six
 split queues: control, event, and four request queues. The Native client submits
 up to four 128 KiB reads before issuing one combined notification. Each request
@@ -191,6 +224,70 @@ queue owns its descriptor chain and data buffer until completion. Writes and
 flushes remain ordered by the device session. Unretired requests poison the
 session on failure; their memory lease remains retained until backend quiescence.
 The rest of HypeR memory is not exported.
+
+### Allocation and zero-copy scope
+
+The business disk path shares the original guest pages: Linux vhost-scsi reads
+virtqueue descriptors and accesses payload buffers through an I/O VM mapping
+of those same physical pages. HypeR and vm-runtime do not copy each disk payload
+through an intermediate buffer. This is cross-VM zero-copy, not a guarantee
+that every Linux block driver or physical device avoids bounce buffers.
+
+Guest RAM starts as a sparse VMO. However, admitting that VMO to the I/O VM
+currently populates **every page**, before the backend starts serving requests.
+`Mapping::prepare` in `kernel/src/kernel/vm/memory/live.rs` walks the full VMO,
+calls `populate_page`, obtains physical addresses and constructs the shared
+extents. The current alias address is derived from the host physical address,
+so the complete extent description requires physical pages to exist first.
+Thus attaching a disk removes the memory-saving benefit of demand allocation
+for that guest, even if stage-2 entries are subsequently installed on faults.
+Guests without this backend admission can retain sparse backing; their actual
+resident footprint still depends on image loading and guest accesses.
+
+The resident I/O VM has a separate allocation policy: its own 128 MiB RAM is
+allocated eagerly as one physically contiguous VMO for the current physical
+device DMA layout. The Native configuration client also eagerly allocates its
+1 MiB pool. Imported business-guest pages are shared data, not free RAM that
+Linux can use for its own allocator or vhost metadata.
+
+Whole-guest preallocation is a property of this implementation, **not a virtio
+or vhost protocol requirement**. Supporting first-touch allocation from either
+VM would require coordinated allocation from the same backing object, an import
+address model that does not require a physical address in advance, and DMA
+admission that makes the relevant pages resident and stable before submission.
+CPU stage-2 faults alone cannot service a physical device's DMA access.
+There is currently no configurable buffered-copy alternative; a bounded shared
+pool would also require descriptor translation, backpressure and safe request
+cancellation/reset handling.
+
+### Memory observations and queue overhead
+
+`vmm` reports two different quantities:
+
+- `RAM capacity` is the configured guest RAM size.
+- `allocated VM backing` counts resident physical backing in the VM's primary
+  backing regions, deduplicating overlapping ranges of the same VMO within that
+  snapshot. It does not count installed stage-2 entries, Linux's internal used
+  memory, or all VM overhead such as page tables and vCPU stacks. It is not an
+  exhaustive census of dynamically imported device mappings or a system-wide
+  exclusive-memory accounting value.
+
+For the resident I/O VM, 128 MiB RAM plus the 1 MiB configuration-client pool
+produces 129 MiB (135,266,304 bytes). A disk-backed 256 MiB Alpine guest can
+report the full 256 MiB even when idle, because backend admission populated
+its RAM. Neither observation measures Linux `MemAvailable`. Shared backing
+must not be added across owners as if each mapping were another allocation.
+
+Virtio-scsi permits multiple request queues but does not require one per guest
+CPU. The guest driver chooses how many to use within the advertised limit of
+four. The pinned Linux vhost-scsi backend defaults to 2,048 preallocated data
+scatterlist entries per command. At a queue depth of 128 and a 32-byte entry,
+that alone is approximately 8 MiB per enabled request queue, excluding command
+metadata and other allocations. This is an implementation-dependent estimate,
+not a fixed per-vCPU cost or measured peak. Queue depth, enabled queue count and
+concurrent clients must all inform the I/O VM's RAM budget. These kernel
+allocations cannot be replaced with swap; shared pages must also remain stable
+through backend CPU/DMA use and retirement.
 
 Business guests may enable one through four request queues; unused optional
 queues have canonical zero entries in activation records. Version 1 peers are
@@ -218,7 +315,7 @@ excluded until the last retained hardware lease retires. The grant may be
 delegated through startup capabilities or a capability-channel rendezvous.
 
 `vmo_create_contiguous` provides eagerly allocated, zeroed physical backing for
-power-of-two sizes from one page through the ABI's current 64 MiB limit. The
+power-of-two sizes from one page through the ABI's current 128 MiB limit. The
 whole allocation is charged to its resource domain and retained until the last
 derived page owner retires. This is an explicit alternative to sparse VMOs,
 not implicit DMA authority: device assignment, DMA address translation, and

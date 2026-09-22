@@ -243,7 +243,7 @@ ABI revision: `0`.
 | `file_max_read_bytes` | `2097152` |
 | `vmo_max_size_bytes` | `4294967296` |
 | `vmo_max_transfer_bytes` | `65536` |
-| `vmo_max_contiguous_size_bytes` | `67108864` |
+| `vmo_max_contiguous_size_bytes` | `134217728` |
 | `vmar_permission_read` | `1` |
 | `vmar_permission_write` | `2` |
 | `vmar_permission_execute` | `4` |

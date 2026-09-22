@@ -296,8 +296,16 @@ The boot files remain ordinary firmware-readable FAT files in this volume.
 
 Expected readiness is `configuration volume mounted at /data`. Check
 `vmm status io`, `ls /data`, and a small file write/read after it appears.
-The configuration mount and directory reads have passed on Pi 5 D0. Writes,
-reboot persistence and DMA retirement remain unqualified. The kernel retains generic device ownership and
+The configuration mount and directory reads have passed on Pi 5 D0.
+
+The 2026-09-22 hardware run also verified a 256 MiB, two-vCPU Alpine guest
+with a 128 MiB resident I/O VM: both CPUs online, three CPU 1 off/on cycles,
+one ordinary `reboot`, and one ordinary `poweroff`. A file written and synced
+on the SD-backed ext4 root survived the reboot. After poweroff, Alpine reached
+`stopped`, the I/O VM remained `running`, `/data` remained readable, and the
+backend reported successful memory release. This establishes basic guest
+lifecycle operation, not repeated power-cycle durability or DMA retirement
+under faults. Those stress and failure cases remain unqualified. The kernel retains generic device ownership and
 notification mechanisms; SDHCI policy remains in userspace.
 
 ## Release boundary

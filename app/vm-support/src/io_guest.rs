@@ -18,7 +18,8 @@ use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, String>;
 pub const RAM_BASE: u64 = 0x4000_0000;
-pub const RAM_BYTES: u64 = 64 * 1024 * 1024;
+/// RAM budget for the resident, multi-client I/O appliance.
+pub const RAM_BYTES: u64 = 128 * 1024 * 1024;
 pub const PHYSICAL_MMIO: u64 = 0x0b00_0000;
 fn show(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")
@@ -60,13 +61,13 @@ impl Image {
         let image = hyper_vm_image::parse(&source).map_err(show)?;
         let plan = linux::validate_reference(&source, image).map_err(show)?;
         if plan.memory_base() != RAM_BASE
-            || plan.memory_size() != RAM_BYTES
+            || ![64 * 1024 * 1024, RAM_BYTES].contains(&plan.memory_size())
             || plan.architecture() != hyper_vm_image::Architecture::Aarch64
         {
-            return Err("I/O deployment requires 64 MiB AArch64 reference images".into());
+            return Err("I/O deployment requires 64 or 128 MiB AArch64 reference images".into());
         }
         println!("HypeR I/O loader: validated {path}, allocating guest RAM");
-        let memory = WritableVmo::create_contiguous(RAM_BYTES).map_err(show)?;
+        let memory = WritableVmo::create_contiguous(plan.memory_size()).map_err(show)?;
         println!("HypeR I/O loader: copying {path} kernel");
         copy_payload(&source, &memory, image.kernel)?;
         if let Some(payload) = image.initramfs {
@@ -85,7 +86,7 @@ impl Image {
         let length = guest_fdt::build_aarch64_linux_with_io(
             guest_fdt::Aarch64LinuxBoot {
                 memory_base: RAM_BASE,
-                memory_size: RAM_BYTES,
+                memory_size: self.plan.memory_size(),
                 vcpu_count: self.plan.vcpu_count(),
                 gic_version,
                 initramfs: self
@@ -137,11 +138,12 @@ pub fn install(
     physical: Option<&hyper_os::OwnedHandle<hyper_os::handle::PhysicalDeviceObject>>,
     serial_address: u64,
 ) -> Result<InstalledGuest> {
+    let ram_bytes = image.plan.memory_size();
     let mapping = shared.map(|memory| SharedGrant {
         memory: memory.as_handle_ref(),
-        guest_offset: RAM_BYTES,
+        guest_offset: ram_bytes,
         memory_offset: 0,
-        size: RAM_BYTES,
+        size: ram_bytes,
     });
     install_mapped(
         startup,
@@ -149,9 +151,9 @@ pub fn install(
         own,
         mapping.as_slice(),
         if shared.is_some() {
-            RAM_BYTES * 2
+            ram_bytes * 2
         } else {
-            RAM_BYTES
+            ram_bytes
         },
         physical,
         serial_address,
@@ -175,7 +177,7 @@ pub fn install_mapped(
     physical: Option<&hyper_os::OwnedHandle<hyper_os::handle::PhysicalDeviceObject>>,
     serial_address: u64,
 ) -> Result<InstalledGuest> {
-    if address_space_bytes < RAM_BYTES {
+    if address_space_bytes < image.plan.memory_size() {
         return Err("I/O VM address space cannot truncate its boot RAM".into());
     }
     let lease = vm::derive_creation_lease(
@@ -201,7 +203,7 @@ pub fn install_mapped(
         own.as_handle_ref(),
         0,
         0,
-        RAM_BYTES,
+        image.plan.memory_size(),
     )
     .map_err(show)?;
     for shared in shared {

@@ -72,6 +72,44 @@ Architecture-defined data layouts may remain portable and host-testable. The
 operation which applies such a layout to hardware belongs to the selected
 backend.
 
+## Device-driver placement
+
+An independent, trusted Linux I/O VM is an architectural foundation of HypeR's
+physical I/O design. It provides reusable Linux device drivers and exports
+services to Native userspace and business guests. It runs as a guest under
+HypeR; it is not the host kernel. Storage already uses this path; networking
+remains a roadmap target.
+
+The selected I/O VM interface families are virtio-scsi for storage, virtio-net
+for networking, and vfio-user for general device backends. Virtio-scsi is
+implemented; virtio-net and vfio-user are architectural targets, not currently
+available interfaces. Additional device models require a concrete use case
+and an explicit design review; universal device coverage is not a goal.
+The vfio-user target requires a cross-VM transport, memory-authorization and
+device-lifecycle design before protocol compatibility can be claimed. It does
+not imply automatic forwarding of arbitrary Linux-driven physical devices.
+
+Physical device drivers should live in the I/O VM or HypeR Native userspace
+whenever those environments can implement them correctly. Native drivers use
+explicit device capabilities and expose application-facing services. Kernel
+placement is an exception requiring a documented need, such as early boot,
+interrupt control, architectural timers or diagnostic-console availability.
+Convenience alone is not sufficient reason to move a driver or service into
+the kernel.
+
+The kernel owns device authority, permitted MMIO access, interrupt delivery,
+DMA admission and translation, and safe revocation/retirement. Delegating a
+driver does not delegate these ownership guarantees, and userspace placement
+alone does not establish DMA isolation on hardware without suitable support.
+The current Linux I/O VM is trusted.
+
+This decision does not move the VFS out of the kernel. Namespace semantics,
+file handles and VFS policy remain kernel responsibilities; filesystem and
+block backends can be supplied by services. Keep driver execution, service
+policy and kernel resource lifetime separate. See the
+[I/O VM design](../../docs/io-vm.md) for the current transport and shared-memory
+contract.
+
 ## Selected HAL crate
 
 The selected HAL crate exposes eleven capability modules:

@@ -14,9 +14,9 @@ pub const INITIAL_VM_LIMITS: ResourceLimits = ResourceLimits {
     threads: 16,
     handles: 256,
     kernel_objects: 1024,
-    committed_pages: 40 * 1024,
-    pinned_pages: 33 * 1024,
-    guest_pages: 32 * 1024,
+    committed_pages: 72 * 1024,
+    pinned_pages: 65 * 1024,
+    guest_pages: 64 * 1024,
     ipc_messages: 128,
     ipc_bytes: 1024 * 1024,
     ipc_handles: 64,
@@ -57,13 +57,13 @@ const FLEET_CONTROL_PLANE_HEADROOM: ResourceLimits = ResourceLimits {
 /// Resource limits bound charges; they do not reserve physical RAM in advance.
 pub const BUSINESS_VM_CAPACITY: u64 = (hyper_os::vm::IO_MAX_CLIENTS - 1) as u64;
 
-/// Dedicated allowance for the resident 64 MiB I/O VM and its Native runtime.
+/// Dedicated allowance for the resident 128 MiB I/O VM and its Native runtime.
 /// Its guest, driver, mapping and service resources must not consume one of the
 /// business VM allowances. Actual hardware/memory admission remains fallible.
 pub const IO_RUNTIME_LIMITS: ResourceLimits = ResourceLimits {
-    committed_pages: 24 * 1024,
-    pinned_pages: 17 * 1024,
-    guest_pages: 16 * 1024,
+    committed_pages: 40 * 1024,
+    pinned_pages: 33 * 1024,
+    guest_pages: 32 * 1024,
     virtual_cpus: 1,
     ..INITIAL_VM_LIMITS
 };

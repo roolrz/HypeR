@@ -18,9 +18,11 @@ acceptance boundaries. Planned work is tracked in the [roadmap](roadmap.md).
 
 On Pi 5 D0, hardware bring-up has confirmed the official EEPROM boot path,
 four host CPUs, interrupt-driven debug UART, Linux I/O VM userspace and FAT
-directory reads through the SDIO1/dm-linear/vhost-scsi path. This does not yet
-qualify write persistence, guest SMP on hardware, physical DMA retirement or
-networking. Alpine is packaged for the next hardware validation step.
+directory reads through the SDIO1/dm-linear/vhost-scsi path. A two-vCPU Alpine
+guest has passed three CPU 1 off/on cycles, ordinary reboot with a synced ext4
+file preserved, and ordinary poweroff with the I/O VM and `/data` still
+available. Power-loss durability, physical DMA retirement under faults and
+networking remain unqualified.
 See the [Pi 5 guide](../kernel/docs/rpi5.md) and
 [image release contract](image-distribution.md).
 
