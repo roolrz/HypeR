@@ -6,26 +6,17 @@
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct Stage2AllocationIdentity {
     root: u64,
-    vmid: u64,
     generation: u64,
 }
 
 #[cfg_attr(test, allow(dead_code))]
 impl Stage2AllocationIdentity {
-    pub(super) const fn new(root: u64, vmid: u16, generation: u64) -> Self {
-        Self {
-            root,
-            vmid: vmid as u64,
-            generation,
-        }
+    pub(super) const fn new(root: u64, generation: u64) -> Self {
+        Self { root, generation }
     }
 
     pub(super) const fn root(self) -> u64 {
         self.root
-    }
-
-    pub(super) const fn vmid(self) -> u64 {
-        self.vmid
     }
 
     pub(super) const fn generation(self) -> u64 {
@@ -41,9 +32,9 @@ pub(super) struct Stage2Incarnation {
 
 #[cfg_attr(test, allow(dead_code))]
 impl Stage2Incarnation {
-    pub(super) const fn new(root: u64, vmid: u16, generation: u64, translation_epoch: u64) -> Self {
+    pub(super) const fn new(root: u64, generation: u64, translation_epoch: u64) -> Self {
         Self {
-            allocation: Stage2AllocationIdentity::new(root, vmid, generation),
+            allocation: Stage2AllocationIdentity::new(root, generation),
             translation_epoch,
         }
     }
@@ -58,7 +49,6 @@ impl Stage2Incarnation {
 
     pub(super) const fn same_allocation(self, other: Self) -> bool {
         self.allocation.root == other.allocation.root
-            && self.allocation.vmid == other.allocation.vmid
             && self.allocation.generation == other.allocation.generation
     }
 }
@@ -73,7 +63,7 @@ pub(super) struct LocalStage2Observation {
 #[cfg_attr(test, allow(dead_code))]
 impl LocalStage2Observation {
     pub(super) const EMPTY: Self = Self {
-        allocation: Stage2AllocationIdentity::new(0, 0, 0),
+        allocation: Stage2AllocationIdentity::new(0, 0),
         translation_epoch: 0,
         synchronization_epoch: 0,
     };
@@ -92,7 +82,6 @@ impl LocalStage2Observation {
         synchronization_epoch: u64,
     ) -> bool {
         self.allocation.root == incarnation.allocation.root
-            && self.allocation.vmid == incarnation.allocation.vmid
             && self.allocation.generation == incarnation.allocation.generation
             && self.translation_epoch == incarnation.translation_epoch
             && self.synchronization_epoch == synchronization_epoch
@@ -128,8 +117,8 @@ mod tests {
 
     #[test]
     fn generation_prevents_root_and_epoch_aba() {
-        let old = Stage2Incarnation::new(0x4000, 7, 11, 1);
-        let reused = Stage2Incarnation::new(0x4000, 7, 12, 1);
+        let old = Stage2Incarnation::new(0x4000, 11, 1);
+        let reused = Stage2Incarnation::new(0x4000, 12, 1);
         let observed = LocalStage2Observation::new(old, 3);
         assert!(observed.matches(old, 3));
         assert!(!observed.matches(reused, 3));
@@ -137,9 +126,9 @@ mod tests {
 
     #[test]
     fn exact_allocation_clear_preserves_foreign_observations() {
-        let incarnation = Stage2Incarnation::new(0x8000, 9, 4, 6);
+        let incarnation = Stage2Incarnation::new(0x8000, 4, 6);
         let mut observed = LocalStage2Observation::new(incarnation, 12);
-        assert!(!observed.clear_allocation(Stage2AllocationIdentity::new(0x8000, 9, 5)));
+        assert!(!observed.clear_allocation(Stage2AllocationIdentity::new(0x8000, 5)));
         assert!(observed.matches(incarnation, 12));
         assert!(observed.clear_allocation(incarnation.allocation()));
         assert_eq!(observed, LocalStage2Observation::EMPTY);
@@ -147,8 +136,8 @@ mod tests {
 
     #[test]
     fn mapping_epoch_advance_preserves_the_admission_allocation() {
-        let admitted = Stage2Incarnation::new(0xc000, 3, 8, 21);
-        let current = Stage2Incarnation::new(0xc000, 3, 8, 22);
+        let admitted = Stage2Incarnation::new(0xc000, 8, 21);
+        let current = Stage2Incarnation::new(0xc000, 8, 22);
         assert!(admitted.same_allocation(current));
         assert_ne!(admitted, current);
     }

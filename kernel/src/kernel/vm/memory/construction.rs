@@ -101,14 +101,13 @@ impl GuestAddressSpace {
         let instruction_ready_pages = super::FixedBitmap::try_new(page_count)?;
 
         let mut table_pages = Stage2PagePool::with_capacity(table_capacity, domain)?;
-        let identifier = hardware_vmid.value();
         let stage2 = {
             let mut allocate_table =
                 |pages, alignment| table_pages.allocate_zeroed(pages, alignment);
-            // SAFETY: The consumed reservation uniquely owns this VMID.
+            // SAFETY: The unpublished hierarchy owns no hardware identifier.
             // Stage2PagePool returns accounted, uniquely owned, zeroed, aligned
             // RAM and retains every hierarchy page through retirement.
-            unsafe { Stage2AddressSpace::new(identifier, &mut allocate_table) }
+            unsafe { Stage2AddressSpace::new(&mut allocate_table) }
         };
         let stage2 = match stage2 {
             Ok(stage2) => stage2,
@@ -237,7 +236,6 @@ impl GuestAddressSpace {
         let identifier = self.active_identifier()?;
         Ok(Stage2Incarnation::new(
             self.stage2.root_address(),
-            identifier.value(),
             identifier.generation(),
             self.translation_epoch,
         ))

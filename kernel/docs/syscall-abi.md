@@ -63,6 +63,24 @@ isolation. Device-visible memory cannot be released until DMA is quiescent.
 IOMMU-backed leases are a later prerequisite for untrusted device domains, not
 for this trusted bring-up. See the [current roadmap](../../docs/roadmap.md).
 
+## vCPU affinity
+
+`virtual_cpu_set_affinity` borrows a `VirtualCpu` with `WRITE` and accepts the
+same bounded little-endian `u64` CPU-mask words as process-builder affinity.
+The nonempty mask must include an allowed registered CPU; bits above the kernel
+CPU limit are rejected. If the current CPU remains allowed, placement is kept.
+Otherwise the scheduler chooses an allowed CPU and safely migrates the saved
+context. This enforces explicit affinity without automatic load balancing.
+
+Success means the update or required source-context handoff was accepted; the
+handoff may finish before or after return. Stopping VMs and retired vCPUs reject
+updates; an incompatible in-flight update or CPU-local wait returns `busy`.
+The stable scheduler Thread retains affinity across guest CPU off/on.
+`virtual_cpu_get_info` retains its 24-byte prefix and appends `host_cpu` and
+`migration_target`. These fields are one placement snapshot, not running state
+or a completion token. `0xffffffff` denotes unavailable assignment or no pending
+destination. SDK bindings handle shorter records from older kernels.
+
 ## Trust and containment
 
 The design assumes that any EL0 caller can:
@@ -776,8 +794,8 @@ merely from a lower-EL vector.
 
 Threads in one Process may execute concurrently on several CPUs. Native roots
 therefore carry an active-CPU residency set, mapping epoch, acknowledged
-shootdown, and ASID generation and retirement. Guest VMID ownership remains
-separate. Mapping removal cannot release physical backing until every relevant
+shootdown, and stable software identity. Runtime ASID leases belong to a
+separate rollover namespace from guest VMID leases. Mapping removal cannot release physical backing until every relevant
 CPU has acknowledged the old root's retirement. Hardware qualification must
 verify exception routing, SMP migration, cache and TLB maintenance, FP/SIMD,
 TLS, counter access, and transitions between Native EL0, the host, and guests.
@@ -830,3 +848,15 @@ contracts and validation are reviewed:
 - the compatibility policy to adopt when ABI versioning eventually begins.
 
 These questions remain outside the current ABI design until resolved.
+
+### Native thread creation affinity
+
+`thread_create(entry, stack, tls, argument, affinity_words, word_count)` creates
+an inert Thread; `thread_start` publishes runnable execution. Passing zero for
+both affinity arguments inherits the calling Thread's current allowed CPU set,
+including changes made after that caller was created. An explicit affinity is
+one to four little-endian `u64` bitmap words. Empty masks, unsupported CPU bits,
+unmapped payloads and masks with no schedulable CPU fail before publishing a
+child handle. As with Process affinity, offline bits may remain in the allowed
+set if at least one selected CPU is schedulable. No automatic balancing policy
+is implied by this creation interface.

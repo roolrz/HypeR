@@ -37,6 +37,10 @@ static REGISTRY: RegistryLock = InterruptSpinLock::new(VmRegistry::new());
 /// Registry metadata is fixed-capacity so reservation never allocates while
 /// holding the global identity lock.
 pub(super) const MAX_VIRTUAL_MACHINES: usize = 64;
+// Every installed/retiring VM may pin one distinct VMID. HAL offers at least
+// 255 logical tags (untagged fallback on narrower RISC-V hardware). Preserve
+// this strict spare-tag bound unless detached admission gains a wait protocol.
+const _: () = assert!(MAX_VIRTUAL_MACHINES < 255);
 
 /// Logical identity issued by the VM registry.
 ///
@@ -112,6 +116,7 @@ impl VmReservation {
 impl Drop for VmReservation {
     fn drop(&mut self) {
         if self.unpublished {
+            drop(self.hardware_vmid.take());
             REGISTRY.with(|registry| registry.cancel(self.id));
         }
     }
@@ -421,9 +426,12 @@ pub(crate) fn reserve() -> Result<VmReservation, Error> {
     >(identifier_bits)
     {
         Ok(identifier) => identifier,
-        Err(_) => {
+        Err(error) => {
             REGISTRY.with(|registry| registry.cancel(id));
-            return Err(Error::IdentityExhausted);
+            return Err(match error {
+                crate::kernel::mm::translation_id::Error::Allocation => Error::Allocation,
+                _ => Error::IdentityExhausted,
+            });
         }
     };
     Ok(VmReservation {

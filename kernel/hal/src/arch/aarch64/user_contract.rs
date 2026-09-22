@@ -60,7 +60,6 @@ impl UserExecutionCapabilities {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct UserTranslationRegisters {
     root_register: u64,
-    generation: u64,
 }
 
 impl UserTranslationRegisters {
@@ -95,16 +94,11 @@ impl UserTranslationRegisters {
         Ok(Self {
             root_register: ((translation_identifier as u64) << registers::TTBR_ASID_SHIFT)
                 | root_address,
-            generation,
         })
     }
 
     pub(super) const fn root_register(self) -> u64 {
         self.root_register
-    }
-
-    pub(super) const fn generation(self) -> u64 {
-        self.generation
     }
 }
 

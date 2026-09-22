@@ -113,6 +113,15 @@ impl VirtualCpuObject {
         Ok(())
     }
 
+    pub(crate) fn set_affinity(
+        &self,
+        affinity: crate::kernel::task::policy::CpuMask,
+    ) -> Result<(), Error> {
+        self.owner
+            .set_vcpu_affinity(self.id, affinity)
+            .map_err(Into::into)
+    }
+
     /// Commits this installed vCPU from dormant to scheduler-runnable.
     pub(crate) fn start(&self) -> Result<(), Error> {
         self.owner.start_vcpu(self.id)?;

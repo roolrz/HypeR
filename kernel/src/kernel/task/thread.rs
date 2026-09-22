@@ -697,6 +697,11 @@ impl Thread {
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
         let mut scheduling_context = crate::hal::context::ThreadContext::empty();
         scheduling_context.prepare_vcpu(stack.top(), entry, 0);
+        let placement = ThreadPlacement::movable_with_affinity(
+            cpu_index,
+            crate::kernel::task::policy::CpuMask::ALL,
+        )
+        .ok_or(Error::InvalidPlacement)?;
         Ok(Self {
             identity: ThreadIdentity {
                 id,
@@ -708,7 +713,7 @@ impl Thread {
             )?,
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
-                placement: ThreadPlacement::prefer(cpu_index),
+                placement,
                 scheduling: SchedulingPolicy::fair(),
                 fair_runtime: FairRuntime::NEW,
                 deferred_fifo_placement: None,

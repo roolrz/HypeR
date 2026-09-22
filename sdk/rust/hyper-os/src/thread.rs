@@ -7,7 +7,7 @@ use crate::handle::{AnyObject, HandleRef, OwnedHandle, ThreadObject};
 use crate::{Result, Status};
 use core::sync::atomic::AtomicU32;
 
-/// Prepares a dormant thread in the current Process.
+/// Prepares a dormant thread inheriting the calling thread's CPU affinity.
 ///
 /// # Safety
 /// Entry must follow the Native function ABI and exit through `thread_exit`.
@@ -20,8 +20,55 @@ pub unsafe fn create(
     tls: u64,
     argument: u64,
 ) -> Result<OwnedHandle<ThreadObject>> {
-    // SAFETY: the caller supplies valid initial execution state.
-    let result = unsafe { hyper_sys::thread_create(entry, stack, tls, argument) };
+    // SAFETY: the caller supplies valid initial execution state; null/zero
+    // requests a kernel snapshot of the calling thread's affinity.
+    let result =
+        unsafe { hyper_sys::thread_create(entry, stack, tls, argument, core::ptr::null(), 0) };
+    adopt_thread(result)
+}
+
+/// Prepares a dormant thread with an explicit allowed CPU set. Bit N selects
+/// logical CPU N. The kernel validates that the mask admits an available CPU.
+///
+/// # Safety
+/// The entry, stack, TLS and argument have the same requirements as [`create`].
+pub unsafe fn create_with_affinity(
+    entry: u64,
+    stack: u64,
+    tls: u64,
+    argument: u64,
+    affinity: &[u64],
+) -> Result<OwnedHandle<ThreadObject>> {
+    let encoded = encode_affinity(affinity)?;
+    // SAFETY: The caller supplies valid initial state. The bounded encoded
+    // affinity is aligned and borrowed until the syscall has copied it.
+    let result = unsafe {
+        hyper_sys::thread_create(
+            entry,
+            stack,
+            tls,
+            argument,
+            encoded.as_ptr(),
+            affinity.len(),
+        )
+    };
+    adopt_thread(result)
+}
+
+const AFFINITY_WORDS: usize = hyper_abi::HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS as usize;
+
+fn encode_affinity(words: &[u64]) -> Result<[u64; AFFINITY_WORDS]> {
+    if words.is_empty() || words.len() > AFFINITY_WORDS || words.iter().all(|word| *word == 0) {
+        return Err(crate::Error::Status(Status::INVALID_ARGUMENT));
+    }
+    let mut encoded = [0; AFFINITY_WORDS];
+    for (output, word) in encoded.iter_mut().zip(words) {
+        *output = word.to_le();
+    }
+    Ok(encoded)
+}
+
+fn adopt_thread(result: hyper_sys::CallResult) -> Result<OwnedHandle<ThreadObject>> {
     Status::from_raw(result.status).into_result()?;
     // SAFETY: success transfers one fresh handle.
     let owner =

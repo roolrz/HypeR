@@ -73,3 +73,19 @@ fn disk_identity_is_explicit_exclusive_and_survives_round_trip() {
         .is_err()
     );
 }
+
+#[test]
+fn affinity_wire_preserves_multiple_allowed_cpus() {
+    let request = Request::Affinity {
+        name: "alpine".into(),
+        vcpu: 1,
+        affinity_words: vec![0b1101],
+    };
+    assert!(
+        matches!(super::request(&encode(&request).unwrap()).unwrap(), Request::Affinity { vcpu: 1, affinity_words, .. } if affinity_words == [13])
+    );
+    assert!(
+        super::request(br#"{"command":"affinity","name":"alpine","vcpu":-1,"affinity_words":[1]}"#)
+            .is_err()
+    );
+}

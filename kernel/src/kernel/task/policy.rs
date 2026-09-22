@@ -179,7 +179,6 @@ impl CpuMask {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PlacementPolicy {
     Movable,
-    Prefer(CpuIndex),
     Pinned(CpuIndex),
 }
 
@@ -205,7 +204,6 @@ impl ThreadPlacement {
     ) -> Option<Self> {
         let policy_valid = match policy {
             PlacementPolicy::Movable => true,
-            PlacementPolicy::Prefer(cpu) => affinity.contains(cpu),
             PlacementPolicy::Pinned(cpu) => {
                 affinity.contains(cpu) && assigned_cpu.get() == cpu.get()
             }
@@ -254,16 +252,6 @@ impl ThreadPlacement {
             })
         } else {
             None
-        }
-    }
-
-    /// Creates an initially assigned placement which prefers its creating CPU.
-    pub const fn prefer(cpu: CpuIndex) -> Self {
-        Self {
-            assigned_cpu: cpu,
-            affinity: CpuMask::ALL,
-            policy: PlacementPolicy::Prefer(cpu),
-            last_cpu: None,
         }
     }
 

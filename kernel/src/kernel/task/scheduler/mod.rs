@@ -664,12 +664,21 @@ fn kthread_create_with_policy_and_affinity(
     Ok(id)
 }
 
-#[cfg(feature = "kernel-self-test")]
 pub(crate) fn thread_placement(id: ThreadId) -> Result<(CpuIndex, CpuMask), Error> {
     SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
             .thread_placement(id)
+    })
+}
+
+/// Observes assignment and the accepted, not-yet-committed migration target.
+/// Assignment is not a claim that the Thread is currently executing.
+pub(crate) fn thread_migration_state(id: ThreadId) -> Result<(CpuIndex, Option<CpuIndex>), Error> {
+    SCHEDULER.with(|slot| {
+        slot.as_mut()
+            .ok_or(Error::NotInitialized)?
+            .thread_migration_state(id)
     })
 }
 
@@ -956,24 +965,25 @@ pub(in crate::kernel) fn ready_user_thread(id: ThreadId) -> Result<bool, Error> 
     Ok(outcome.changed)
 }
 
-/// Moves a kernel Thread to one allowed registered CPU.
+/// Moves a movable Thread to one allowed registered CPU.
 ///
 /// Dormant, Ready, and fully stopped Blocked Threads move synchronously. A
 /// running or switch-in-flight Thread returns [`MigrationStatus::Pending`]
 /// when deferred handoff is accepted; target publication occurs only after the
 /// source context is saved and may finish before the caller observes the return.
-/// Idle, bootstrap, user, and vCPU Threads do not currently expose a safe
-/// migration contract and are rejected.
+/// Kernel, user, and vCPU Threads use the same saved-context handoff. User
+/// address spaces and vCPU hardware are detached before the scheduling point
+/// and reactivated on the destination CPU. Idle and bootstrap remain pinned.
 pub fn migrate_thread(id: ThreadId, target: CpuIndex) -> Result<MigrationStatus, Error> {
     let outcome = SCHEDULER.with(|slot| {
         slot.as_mut()
             .ok_or(Error::NotInitialized)?
             .migrate_thread(id, target)
     })?;
-    publish_migration_outcome(outcome)
+    Ok(publish_migration_outcome(outcome))
 }
 
-/// Replaces a kernel Thread's CPU affinity and migrates it when required.
+/// Replaces a movable Thread's CPU affinity and migrates it when required.
 ///
 /// The affinity update and assignment change are one scheduler transaction.
 /// If the current assignment remains allowed, the Thread keeps its run-queue
@@ -984,7 +994,7 @@ pub fn set_thread_affinity(id: ThreadId, affinity: CpuMask) -> Result<MigrationS
             .ok_or(Error::NotInitialized)?
             .set_thread_affinity(id, affinity)
     })?;
-    publish_migration_outcome(outcome)
+    Ok(publish_migration_outcome(outcome))
 }
 
 /// Assigns or updates a thread's real-time FIFO policy.
@@ -1574,14 +1584,18 @@ fn publish_committed_ready(outcome: state::ReadyOutcome) {
     }
 }
 
-fn publish_migration_outcome(outcome: state::MigrationOutcome) -> Result<MigrationStatus, Error> {
+fn publish_migration_outcome(outcome: state::MigrationOutcome) -> MigrationStatus {
     if let Some(ready) = outcome.target_ready {
-        publish_ready_outcome(ready)?;
+        publish_committed_ready(ready);
     }
-    if let Some(source) = outcome.source_reschedule {
-        request_reschedule(source)?;
+    if let Some(source) = outcome.source_reschedule
+        && let Err(error) = request_reschedule(source)
+    {
+        // Assignment or a durable migration request is already committed.
+        // A normal error would falsely imply rejection and could strand it.
+        scheduler_invariant("committed migration notification", error);
     }
-    Ok(outcome.status)
+    outcome.status
 }
 
 fn scheduler_invariant(operation: &str, error: Error) -> ! {

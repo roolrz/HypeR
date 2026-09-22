@@ -451,6 +451,13 @@ impl FleetManager {
                 }
                 return self.reply(client, Response::Accepted);
             }
+            Request::Affinity {
+                name,
+                vcpu,
+                affinity_words,
+            } => {
+                return self.set_vcpu_affinity(client, &name, vcpu, affinity_words);
+            }
             Request::Control { name, action } => (name, action),
         };
         if name == "io" && self.io_broker.is_some() {
@@ -527,14 +534,90 @@ impl FleetManager {
         }
     }
 
+    fn set_vcpu_affinity(
+        &mut self,
+        client: usize,
+        name: &str,
+        vcpu: u32,
+        cpus: Vec<u64>,
+    ) -> hyper_os::Result<()> {
+        if name == "io" {
+            return self.reply_error(
+                client,
+                "I/O VM is read-only; its placement belongs to io-runtime",
+            );
+        }
+        let Some(machine) = self
+            .machines
+            .iter_mut()
+            .find(|machine| machine.definition.name == name)
+        else {
+            return self.reply_error(client, "VM does not exist; use 'vmm list'");
+        };
+        if let Err(message) = hyper_vm_manager::affinity_allowed(
+            name,
+            machine
+                .instance
+                .as_ref()
+                .map(|instance| instance.policy.state()),
+        ) {
+            return self.reply_error(client, message);
+        }
+        let Some(instance) = machine.instance.as_mut() else {
+            return self.reply_error(client, "VM must be running");
+        };
+        let mut affinity = [0; vm_contract::VCPU_AFFINITY_WORDS];
+        if cpus.is_empty() || cpus.len() > affinity.len() || cpus.iter().all(|word| *word == 0) {
+            return self.reply_error(
+                client,
+                "affinity must contain at least one CPU within the supported bitmap",
+            );
+        }
+        affinity[..cpus.len()].copy_from_slice(&cpus);
+        let deadline = hyper_os::time::deadline_after(Duration::from_millis(250))?.as_raw();
+        match instance.control_vcpu(vcpu, Some(affinity), deadline) {
+            Ok(reply) if reply.status == hyper_os::Status::OK => {
+                self.reply(client, Response::AffinityAccepted { vcpu })
+            }
+            Ok(reply) => {
+                self.reply_error(client, &format!("affinity rejected: {:?}", reply.status))
+            }
+            Err(error) => self.reply_error(
+                client,
+                &format!(
+                    "affinity reply unavailable ({error}); outcome unknown, inspect vmm status"
+                ),
+            ),
+        }
+    }
+
     fn summary(&mut self, vm: usize, deadline: u64) -> fleet::Summary {
         let observation = self.machines[vm]
             .instance
             .as_mut()
             .and_then(|instance| instance.observe_memory(deadline));
+        let mut placement = Vec::new();
+        if let Some(observation) = observation {
+            for vcpu in 0..observation.vcpus {
+                let Some(instance) = self.machines[vm].instance.as_mut() else {
+                    break;
+                };
+                let Ok(reply) = instance.control_vcpu(vcpu, None, deadline) else {
+                    break;
+                };
+                if reply.status == hyper_os::Status::OK {
+                    placement.push(fleet::VcpuPlacement {
+                        vcpu,
+                        host_cpu: reply.host_cpu,
+                        pending_host_cpu: reply.pending_host_cpu,
+                    });
+                }
+            }
+        }
         let definition = &self.machines[vm].definition;
         let state = self.fleet_state(vm);
         fleet::Summary {
+            placement,
             read_only: false,
             vcpus: observation.map(|value| value.vcpus),
             memory_bytes: observation.map(|value| value.capacity_bytes),
@@ -584,6 +667,7 @@ impl FleetManager {
             autostart: true,
             disk: None,
             read_only: true,
+            placement: Vec::new(),
             vcpus: observation.map(|(_, count, _, _)| count),
             memory_bytes: observation.map(|(_, _, bytes, _)| bytes),
             resident_memory_bytes: observation.and_then(|(_, _, _, bytes)| bytes),
@@ -952,51 +1036,91 @@ struct VmInstance {
 }
 
 impl VmInstance {
+    fn next_request_sequence(&mut self) -> hyper_os::Result<u64> {
+        self.observation_sequence = self
+            .observation_sequence
+            .checked_add(1)
+            .ok_or(hyper_os::Error::InvalidResponse)?;
+        Ok(self.observation_sequence)
+    }
+
+    fn control_vcpu(
+        &mut self,
+        vcpu: u32,
+        affinity: Option<[u64; vm_contract::VCPU_AFFINITY_WORDS]>,
+        deadline: u64,
+    ) -> hyper_os::Result<vm_contract::VcpuControlReply> {
+        let request = vm_contract::VcpuControlRequest {
+            sequence: self.next_request_sequence()?,
+            vcpu,
+            affinity,
+        };
+        self.exchange(&request.encode(), deadline, |bytes| {
+            vm_contract::VcpuControlReply::decode(bytes)
+                .filter(|reply| reply.sequence == request.sequence && reply.vcpu == request.vcpu)
+        })
+    }
+
     fn observe_memory(&mut self, deadline: u64) -> Option<vm_contract::Observation> {
         if self.policy.state() != fleet::State::Running {
             return None;
         }
-        if hyper_os::time::monotonic_now().ok()?.as_nanoseconds() >= deadline {
-            return None;
-        }
-        self.observation_sequence = self.observation_sequence.checked_add(1)?;
-        let request = vm_contract::ObservationRequest(self.observation_sequence);
-        let control = self.runtime_control.as_ref()?.as_byte_channel();
-        control.try_send(&request.encode()).ok()?;
-        loop {
-            if hyper_os::time::monotonic_now().ok()?.as_nanoseconds() >= deadline {
-                return None;
-            }
+        let request = vm_contract::ObservationRequest(self.next_request_sequence().ok()?);
+        self.exchange(&request.encode(), deadline, |bytes| {
+            vm_contract::Observation::decode(bytes).filter(|reply| reply.request == request)
+        })
+        .ok()
+    }
 
+    /// One bounded transport for observations and control acknowledgements.
+    /// Lifecycle messages keep advancing, and late replies remain harmless.
+    fn exchange<T>(
+        &mut self,
+        request: &[u8],
+        deadline: u64,
+        decode: impl Fn(&[u8]) -> Option<T>,
+    ) -> hyper_os::Result<T> {
+        if hyper_os::time::monotonic_now()?.as_nanoseconds() >= deadline {
+            return Err(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT));
+        }
+        let control = self
+            .runtime_control
+            .as_ref()
+            .ok_or(hyper_os::Error::MissingHandle)?
+            .as_byte_channel();
+        control.try_send(request)?;
+        loop {
+            if hyper_os::time::monotonic_now()?.as_nanoseconds() >= deadline {
+                return Err(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT));
+            }
             let mut bytes = [0u8; vm_contract::OBSERVATION_BYTES];
             match control.try_receive(&mut bytes) {
-                Ok(length) => match self.policy.observe_message(&bytes[..length]) {
-                    Ok(Some(observation)) if observation.request == request => {
-                        return Some(observation);
+                Ok(length) => {
+                    if let Some(reply) = decode(&bytes[..length]) {
+                        return Ok(reply);
                     }
-                    Ok(_) if self.policy.is_terminal() => {
-                        let _ = self.arm_exit_deadline();
-                        return None;
-                    }
-                    Ok(_) => {}
-                    Err(_) => {
+                    if self.policy.observe_message(&bytes[..length]).is_err() {
                         self.policy.reject_protocol();
                         self.force_stop();
-                        return None;
+                        return Err(hyper_os::Error::InvalidResponse);
                     }
-                },
+                    if self.policy.is_terminal() {
+                        let _ = self.arm_exit_deadline();
+                        return Err(hyper_os::Error::Status(hyper_os::Status::BAD_STATE));
+                    }
+                }
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {
                     let waits = [WaitItem::new(
                         control.as_handle_ref(),
                         ObjectSignals::<ByteChannelObject>::READABLE
                             .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
                     )];
-                    let ready = wait_many(&waits, deadline).ok()?;
+                    let ready = wait_many(&waits, deadline)?;
                     if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(ready.observed) {
-                        return None;
+                        return Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED));
                     }
                 }
-                Err(_) => return None,
+                Err(error) => return Err(error),
             }
         }
     }

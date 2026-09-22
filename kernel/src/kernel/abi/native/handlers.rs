@@ -55,11 +55,12 @@ use super::wire::{
     encode_file_info, encode_handle_info, encode_handle_inspection, encode_memory_observation,
     encode_object_basic_info, encode_object_inspection, encode_process_info, encode_task_process,
     encode_task_thread, encode_virtual_cpu_info, encode_virtual_machine_info, optional_user_slice,
-    parse_builder_affinity, parse_builder_create, parse_builder_handle, parse_builder_text,
-    parse_byte_channel_io, parse_capability_channel_receive, parse_capability_channel_send,
-    parse_console_io, parse_handle, parse_handle_and_rights, parse_handle_inspector_scan,
-    parse_inspector_derivation, parse_inspector_scan, parse_single_handle, parse_two_handles,
-    parse_virtual_serial_io, parse_wait_many, prepare_info_request, require_zero,
+    parse_affinity_request, parse_affinity_words, parse_builder_create, parse_builder_handle,
+    parse_builder_text, parse_byte_channel_io, parse_capability_channel_receive,
+    parse_capability_channel_send, parse_console_io, parse_handle, parse_handle_and_rights,
+    parse_handle_inspector_scan, parse_inspector_derivation, parse_inspector_scan,
+    parse_single_handle, parse_two_handles, parse_virtual_serial_io, parse_wait_many,
+    prepare_info_request, require_zero,
 };
 
 // Keep each syscall as a distinct machine frame. The routing match must not
@@ -483,7 +484,7 @@ pub(super) fn sys_process_builder_set_affinity(
     services: &impl ProcessBuilderServices,
     arguments: &Arguments,
 ) -> DeferredAction {
-    let result = parse_builder_affinity(arguments).and_then(|(builder, words, word_count)| {
+    let result = parse_affinity_request(arguments).and_then(|(builder, words, word_count)| {
         services
             .set_process_builder_affinity(builder, words, word_count)
             .map_err(status_from_process_builder_service_error)
@@ -1106,6 +1107,19 @@ pub(super) fn sys_pending_virtual_machine_install(
 }
 
 #[inline(never)]
+pub(super) fn sys_virtual_cpu_set_affinity(
+    services: &impl VmServices,
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = parse_affinity_request(arguments).and_then(|(vcpu, words, count)| {
+        services
+            .set_virtual_cpu_affinity(vcpu, words, count)
+            .map_err(status_from_vm_service_error)
+    });
+    DeferredAction::Return(status_only(result))
+}
+
+#[inline(never)]
 pub(super) fn sys_virtual_cpu_start(
     services: &impl VmServices,
     arguments: &Arguments,
@@ -1361,9 +1375,14 @@ pub(super) fn sys_vmar_destroy(
 
 #[inline(never)]
 pub(super) fn sys_thread_create(services: &impl TaskServices, args: &Arguments) -> NativeResult {
-    handle_result(require_zero(&args[4..]).and_then(|()| {
+    let affinity = if args[4] == 0 && args[5] == 0 {
+        Ok((None, 0))
+    } else {
+        parse_affinity_words(args[4], args[5])
+    };
+    handle_result(affinity.and_then(|(words, count)| {
         services
-            .create_thread(args[0], args[1], args[2], args[3])
+            .create_thread(args[0], args[1], args[2], args[3], words, count)
             .map_err(status_from_object_service_error)
     }))
 }

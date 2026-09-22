@@ -206,9 +206,27 @@ fn run_session(
             }
         };
 
+        let identifier = match execution_owner.address_space().acquire_identifier() {
+            Ok(identifier) => identifier,
+            Err(error) => {
+                let aborted_pin = prepared.abort();
+                drop(interrupt_mask);
+                finish_pin(aborted_pin);
+                if !error.is_identifier_busy() {
+                    fail_run("failed to acquire Native translation identifier", error);
+                }
+                if let Err(error) = crate::kernel::task::scheduler::yield_now() {
+                    fail_run("failed to yield under Native translation pressure", error);
+                }
+                (pin, execution) = reacquire_execution(session);
+                continue;
+            }
+        };
+
         let active_run = match prepared.commit() {
             Ok(active) => active,
             Err((pin, error)) => {
+                drop(identifier);
                 drop(interrupt_mask);
                 finish_pin(pin);
                 if error == RunAdmissionError::AdmissionClosed {
@@ -217,10 +235,11 @@ fn run_session(
                 fail_run("failed to publish native-user generation", error);
             }
         };
-        let active_address = match execution_owner
-            .address_space()
-            .activate(active_run.pin(), &kernel_access)
-        {
+        let active_address = match execution_owner.address_space().activate(
+            active_run.pin(),
+            &kernel_access,
+            identifier,
+        ) {
             Ok(active) => active,
             Err(error) => fail_run("failed to activate native-user address space", error),
         };

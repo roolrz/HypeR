@@ -268,7 +268,8 @@ execution without a userspace thread per vCPU. Guest memory execution claims
 are concurrent across host CPUs, while each individual vCPU payload and local
 hardware context remain scheduler-owned. Retirement closes run admission and
 waits for every claim, CPU context, translation residency, and configured Thread
-before releasing backing storage or reusing the VMID. See
+before releasing backing storage or retiring its software identity. Hardware
+VMIDs are separately leased and recycled through rollover epochs. See
 [guest power requests and SMP](vm-bundle.md#guest-power-requests-and-smp) for the
 Native completion protocol and vm-runtime/vm-manager responsibilities.
 
@@ -449,9 +450,10 @@ paths, builder storage, scheduler allocations, or authority-bearing references.
 
 AArch64 keeps the permanent host mapping in the canonical upper range through
 `TTBR1_EL2` and gives each Process an immutable lower-range `TTBR0_EL2` root.
-Native ASIDs and guest VMIDs have separate ownership and retirement. Old roots
-and tags remain retained until every cut target acknowledges; safe abandonment
-leaks published owners rather than risking reuse. A kernel self-test exercises
+Native ASIDs and guest VMIDs use separate rollover namespaces. Old roots remain
+retained until every cut target acknowledges; hardware leases cover execution
+and tagged maintenance. Safe abandonment leaks published owners rather than
+risking premature page reuse. A kernel self-test exercises
 repeated direct Native syscall return, register-result validation, deferred-call
 unwind and re-entry, contained fault unwind, join, and retirement on VHE QEMU
 CPUs. The production path mounts the firmware initramfs, validates and maps
@@ -669,12 +671,20 @@ Ordinary kernel threads carry movable placement policy and may retain an
 explicit `CpuMask`; creation prefers the calling CPU when admitted, then the
 lowest-numbered registered CPU in the mask. Empty masks and masks with no
 registered CPU are rejected. Explicit migration and affinity updates move
-dormant, ready, and fully stopped blocked kernel threads synchronously under the
+dormant, ready, and fully stopped blocked movable threads synchronously under the
 exclusive coordinator. A running or switch-in-flight thread retains the request
 on its own `Thread`; the source CPU commits a switch and the incoming switch tail
 publishes target membership only after assembly has saved the complete source
-context. vCPU and user threads do not yet have certified execution-state
-migration hooks, while bootstrap and idle threads remain pinned. Automatic load
+context. Native user runs detach their translation root before scheduling;
+vCPU IRQ tails save and detach virtual hardware, active execution publication,
+and Stage-2 residency before this same handoff. Resumption reacquires execution
+on the destination CPU, synchronizes migrated guest instructions, and restores
+virtual interrupt and timer state. WFI and MMIO waits retain durable work while
+their detached threads move. The public vCPU control is `set_affinity`: keeping
+its assigned CPU in the mask preserves placement; excluding it selects an
+eligible CPU and triggers this handoff. The scheduler Thread owns the mask,
+which survives guest CPU off/on cycles. No separate public migrate operation
+or duplicate vCPU affinity state is needed. Bootstrap and idle threads remain pinned. Automatic load
 selection and balancing are deliberately separate future policy.
 The kernel always builds the SMP-capable scheduler and per-CPU infrastructure;
 the same image remains valid when firmware admits only the boot CPU. There is
@@ -831,3 +841,68 @@ output cannot be guaranteed before its hardware prerequisites exist.
 This requirement does not prohibit busy waits, CAS retries, scheduler idle
 loops, or the final CPU halt after crash handling. Those have different
 progress or terminal-state contracts.
+
+### Translation identifiers and rollover
+
+AArch64 selects ASID and VMID widths independently from
+`ID_AA64MMFR0_EL1.ASIDBits` and `ID_AA64MMFR1_EL1.VMIDBits` during boot.
+Hardware supporting 16 bits uses `TCR_EL2.AS` for VHE host translations and
+`VTCR_EL2.VS` for guest translations; 8-bit implementations remain supported.
+FEAT_VHE alone does not imply either 16-bit capability. The immutable selection
+is checked on secondary CPUs before admission; the stage-1 ASID requirement is
+also checked before installing their TCR.
+
+Hardware bindings use the transparent `TranslationTag(u64)` type. A validated
+namespace width determines the layout: low 8 or 16 bits contain the hardware ID,
+and the upper 56 or 48 bits contain the allocation epoch (other admitted widths
+use the same rule). Encoding and decoding stay inside the tag/lease types;
+callers do not shift or mask raw values. Hardware receives only the decoded ID.
+The packed tag grants no execution authority without its retained lease.
+
+ASID and VMID namespaces use independent rollover epochs. Software address-space
+identity is a monotonic 64-bit serial, not a permanent hardware tag. Creating an
+address space does not consume one of the 255 nonzero tags on 8-bit hardware.
+A run acquires a hardware lease before publishing execution; concurrent vCPUs
+of one VM share the same binding. The lease pins that tag until local hardware
+is detached. Live page-table maintenance also retains a lease through its last
+invalidation acknowledgement.
+
+When unused tags run out, the namespace advances its epoch and makes unpinned
+tags reusable. Pinned tags retain their owners across any number of rollovers.
+Before a CPU installs a lease from an unseen epoch, the HAL completes a local
+namespace-wide TLB invalidation. This avoids a synchronous cross-CPU rendezvous
+under the namespace lock. Mapping and instruction-cache publication epochs are
+separate and remain unchanged by tag rollover. A stale cached binding is only a
+hint; the pool validates its owner before reuse.
+
+An approximately 2 KiB directory indexes up to 256 optional segments, each
+covering 256 tags. Per-segment bitmaps select unused tags; each software owner
+caches its current binding, avoiding a namespace scan on the execution path.
+Metadata is prepared when software owners are registered, outside the namespace
+lock; acquiring a run lease never allocates. Hardware width fixes the namespace
+limit: 8 bits admits tags 1..255 and 16 bits admits tags 1..65535. RISC-V uses its
+independently probed ASID and VMID widths. RISC-V implementations with fewer
+than eight VMID bits use an eight-bit logical namespace with hardware VMID zero;
+they flush all guest translations on every admission instead of relying on
+hardware tags. This also covers implementations without VMID bits.
+
+Unregistering an owner leaves a used-tag tombstone until the next epoch, so it
+cannot enable reuse before CPUs flush. Excess unpinned segments can be detached;
+this also advances the epoch before removing reuse history. Memory is freed
+outside the namespace lock. Neither software serial nor epoch wraps: the epoch is bounded by the remaining
+`64 - width` bits, and overflow fails without publishing a replacement identity
+or recycling live tags.
+
+A fully pinned namespace reports temporary `Busy`. Native admission handles
+this before committing a user run, releases its execution pin, and yields before
+retrying. Guest execution cannot saturate the production VMID namespace: at
+most 64 installed or retiring VMs can hold leases, each uses one tag regardless
+of vCPU count, and the HAL provides at least 255 nonzero logical tags, using the untagged
+RISC-V fallback where necessary.
+Construction-only reservations do not pin a tag. This bound must be revisited
+if the VM registry limit or supported hardware widths change.
+
+Final retirement still closes admission and waits for every resident CPU to
+acknowledge the end of hardware access before freeing page tables or backing.
+It uses stable software identity and conservative local invalidation, without
+claiming a new hardware tag merely to destroy an inactive address space.

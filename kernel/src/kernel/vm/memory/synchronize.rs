@@ -21,6 +21,7 @@ pub(in crate::kernel) struct LiveSynchronization<'a> {
     // disappearing during a cross-call. Registry retirement shares the same
     // transport reservation, so it cannot retire the identity concurrently.
     _binding: &'a VmBinding,
+    _identifier: super::Stage2IdentifierLease,
     capability: crate::hal::vm::GuestStage2RetirementCapability,
     transaction: GuestStage2Transaction,
     request: GuestStage2LocalRequest,
@@ -41,21 +42,29 @@ pub(in crate::kernel) fn prepare_live_synchronization(
     }
     let transaction =
         GuestStage2Transaction::try_acquire().map_err(|()| SynchronizationError::TransportBusy)?;
-    let request = binding
+    let (request, identifier) = binding
         .with_address_space(|space| {
             space.ensure_healthy()?;
-            Ok(GuestStage2LocalRequest {
-                allocation: space.incarnation()?.allocation(),
-                hardware: crate::hal::vm::prepare_guest_stage2_retirement(
-                    &capability,
-                    &space.stage2,
-                ),
-                live: true,
-            })
+            let identifier = space
+                .active_identifier()?
+                .acquire()
+                .map_err(Error::Identifier)?;
+            // SAFETY: This transaction pins the tag until all remote acknowledgements.
+            unsafe { space.stage2.bind_identifier(identifier.value()) }.map_err(Error::Stage2)?;
+            Ok((
+                GuestStage2LocalRequest {
+                    allocation: space.incarnation()?.allocation(),
+                    invalidation: super::retirement::GuestStage2Invalidation::Live(
+                        crate::hal::vm::prepare_guest_stage2_retirement(&capability, &space.stage2),
+                    ),
+                },
+                identifier,
+            ))
         })
         .map_err(SynchronizationError::Memory)?;
     Ok(LiveSynchronization {
         _binding: binding,
+        _identifier: identifier,
         capability,
         transaction,
         request,

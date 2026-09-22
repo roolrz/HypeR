@@ -17,7 +17,7 @@ static ACTIVE_STAGE2_ROOT: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 static ACTIVE_STAGE2_EPOCH: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
-static ACTIVE_STAGE2_VMID: PerCpu<AtomicU64> =
+static VMID_EPOCH: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 static ACTIVE_STAGE2_GENERATION: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
@@ -26,8 +26,6 @@ static ACTIVE_INSTRUCTION_ROOT: PerCpu<AtomicU64> =
 static ACTIVE_INSTRUCTION_EPOCH: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 static ACTIVE_INSTRUCTION_TRANSLATION_EPOCH: PerCpu<AtomicU64> =
-    PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
-static ACTIVE_INSTRUCTION_VMID: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
 static ACTIVE_INSTRUCTION_GENERATION: PerCpu<AtomicU64> =
     PerCpu::new([const { AtomicU64::new(0) }; hyper::cpu::MAX_CPUS]);
@@ -38,15 +36,21 @@ static ACTIVE_INSTRUCTION_GENERATION: PerCpu<AtomicU64> =
 pub(in crate::kernel) struct GuestResidencyClaim {
     cpu: hyper::cpu::CpuIndex,
     admitted: Stage2Incarnation,
+    _identifier: super::Stage2IdentifierLease,
     armed: bool,
     cpu_affine: PhantomData<*mut ()>,
 }
 
 impl GuestResidencyClaim {
-    fn new(cpu: hyper::cpu::CpuIndex, admitted: Stage2Incarnation) -> Self {
+    fn new(
+        cpu: hyper::cpu::CpuIndex,
+        admitted: Stage2Incarnation,
+        identifier: super::Stage2IdentifierLease,
+    ) -> Self {
         Self {
             cpu,
             admitted,
+            _identifier: identifier,
             armed: true,
             cpu_affine: PhantomData,
         }
@@ -91,10 +95,18 @@ pub(in crate::kernel) unsafe fn activate(
     vm.with_address_space(|address_space| {
         address_space.ensure_healthy()?;
         let incarnation = address_space.incarnation()?;
-        if incarnation.allocation().vmid() == 0 {
-            return Err(Error::Poisoned);
-        }
+        let identifier = address_space
+            .active_identifier()?
+            .acquire()
+            .map_err(Error::Identifier)?;
+        // SAFETY: The lease pins this tag and the VM lock serializes selection metadata.
+        unsafe { address_space.stage2.bind_identifier(identifier.value()) }
+            .map_err(Error::Stage2)?;
         let cpu = crate::kernel::cpu::current_index().ok_or(Error::InvalidCpu)?;
+        if VMID_EPOCH[cpu].load(Ordering::Relaxed) != identifier.epoch() {
+            crate::hal::vm::invalidate_guest_translation_namespace_local();
+            VMID_EPOCH[cpu].store(identifier.epoch(), Ordering::Relaxed);
+        }
         address_space
             .residency
             .check_admission(cpu.get(), incarnation.translation_epoch())
@@ -136,7 +148,7 @@ pub(in crate::kernel) unsafe fn activate(
                 "HypeR: guest residency publication failed after stage-2 activation"
             ));
         }
-        Ok(GuestResidencyClaim::new(cpu, incarnation))
+        Ok(GuestResidencyClaim::new(cpu, incarnation, identifier))
     })
 }
 
@@ -192,7 +204,6 @@ pub(super) fn publish_current_residency(incarnation: Stage2Incarnation) {
 fn load_stage2_observation(cpu: hyper::cpu::CpuIndex) -> LocalStage2Observation {
     observation_from_atomics(
         ACTIVE_STAGE2_ROOT[cpu].load(Ordering::Relaxed),
-        ACTIVE_STAGE2_VMID[cpu].load(Ordering::Relaxed),
         ACTIVE_STAGE2_GENERATION[cpu].load(Ordering::Relaxed),
         ACTIVE_STAGE2_EPOCH[cpu].load(Ordering::Relaxed),
         ACTIVE_STAGE2_EPOCH[cpu].load(Ordering::Relaxed),
@@ -202,7 +213,6 @@ fn load_stage2_observation(cpu: hyper::cpu::CpuIndex) -> LocalStage2Observation 
 fn store_stage2_observation(cpu: hyper::cpu::CpuIndex, observation: LocalStage2Observation) {
     let allocation = observation.allocation();
     ACTIVE_STAGE2_ROOT[cpu].store(allocation.root(), Ordering::Relaxed);
-    ACTIVE_STAGE2_VMID[cpu].store(allocation.vmid(), Ordering::Relaxed);
     ACTIVE_STAGE2_GENERATION[cpu].store(allocation.generation(), Ordering::Relaxed);
     ACTIVE_STAGE2_EPOCH[cpu].store(observation.translation_epoch(), Ordering::Relaxed);
 }
@@ -210,7 +220,6 @@ fn store_stage2_observation(cpu: hyper::cpu::CpuIndex, observation: LocalStage2O
 fn load_instruction_observation(cpu: hyper::cpu::CpuIndex) -> LocalStage2Observation {
     observation_from_atomics(
         ACTIVE_INSTRUCTION_ROOT[cpu].load(Ordering::Relaxed),
-        ACTIVE_INSTRUCTION_VMID[cpu].load(Ordering::Relaxed),
         ACTIVE_INSTRUCTION_GENERATION[cpu].load(Ordering::Relaxed),
         ACTIVE_INSTRUCTION_TRANSLATION_EPOCH[cpu].load(Ordering::Relaxed),
         ACTIVE_INSTRUCTION_EPOCH[cpu].load(Ordering::Relaxed),
@@ -220,7 +229,6 @@ fn load_instruction_observation(cpu: hyper::cpu::CpuIndex) -> LocalStage2Observa
 fn store_instruction_observation(cpu: hyper::cpu::CpuIndex, observation: LocalStage2Observation) {
     let allocation = observation.allocation();
     ACTIVE_INSTRUCTION_ROOT[cpu].store(allocation.root(), Ordering::Relaxed);
-    ACTIVE_INSTRUCTION_VMID[cpu].store(allocation.vmid(), Ordering::Relaxed);
     ACTIVE_INSTRUCTION_GENERATION[cpu].store(allocation.generation(), Ordering::Relaxed);
     ACTIVE_INSTRUCTION_TRANSLATION_EPOCH[cpu]
         .store(observation.translation_epoch(), Ordering::Relaxed);
@@ -229,13 +237,12 @@ fn store_instruction_observation(cpu: hyper::cpu::CpuIndex, observation: LocalSt
 
 fn observation_from_atomics(
     root: u64,
-    vmid: u64,
     generation: u64,
     translation_epoch: u64,
     synchronization_epoch: u64,
 ) -> LocalStage2Observation {
     LocalStage2Observation::new(
-        Stage2Incarnation::new(root, vmid as u16, generation, translation_epoch),
+        Stage2Incarnation::new(root, generation, translation_epoch),
         synchronization_epoch,
     )
 }

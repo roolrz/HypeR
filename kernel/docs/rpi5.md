@@ -173,7 +173,9 @@ Exercise per-CPU timer wakeups, SGI/IPI traffic, SPI routing, and console input
 under concurrent load. Repeat guest `reboot -f` and `poweroff -f`, verify that
 HypeR itself stays running, and check guest pages return to the stopped baseline.
 Also terminate vm-runtime during a pending power request and with CPUs powered
-off; every configured Thread and translation must retire before page/VMID reuse.
+off; every configured Thread and translation must retire before page reuse.
+Include VMID rollover while guests run and resume on another CPU, checking that
+new epochs flush old translations before recycled tags enter hardware.
 Record cold/warm boot logs and firmware-provided GICH/GICV/maintenance resources.
 Real hardware must validate cross-core cache publication, TLB invalidation,
 interrupt ordering, and device quiescence; QEMU cannot establish those properties.

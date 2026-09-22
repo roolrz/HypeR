@@ -19,10 +19,9 @@ impl GuestAddressSpace {
             return Err(Error::InvalidCpu);
         }
         let incarnation = self.incarnation()?;
-        // The registry acquired this selected-mechanism proof before its own
-        // irreversible cut. Request preparation is therefore infallible and
-        // remains ahead of residency and identifier retirement.
-        let request = crate::hal::vm::prepare_guest_stage2_retirement(capability, &self.stage2);
+        // Retirement flushes the whole local namespace on sticky CPUs. It must
+        // not reacquire a tag after the registry's irreversible retirement cut.
+        let _ = capability;
         let cut = self
             .residency
             .begin_retirement(incarnation.translation_epoch())
@@ -55,20 +54,14 @@ impl GuestAddressSpace {
         Ok(GuestStage2Retirement {
             cut,
             allocation: incarnation.allocation(),
-            request,
         })
     }
 
     pub(in crate::kernel) fn finish_retirement(&mut self, retirement: GuestStage2Retirement) {
-        let GuestStage2Retirement {
-            cut,
-            allocation,
-            request: _,
-        } = retirement;
+        let GuestStage2Retirement { cut, allocation } = retirement;
         let identity_matches = match &self.identifier {
             Stage2Identifier::Retiring(identifier) => {
                 self.stage2.root_address() == allocation.root()
-                    && u64::from(identifier.value()) == allocation.vmid()
                     && identifier.generation() == allocation.generation()
             }
             _ => false,
@@ -104,7 +97,6 @@ impl GuestAddressSpace {
 pub(in crate::kernel) struct GuestStage2Retirement {
     cut: RetirementCut<{ hyper::cpu::MAX_CPUS }>,
     allocation: Stage2AllocationIdentity,
-    request: crate::hal::vm::GuestStage2RetirementRequest,
 }
 
 impl GuestStage2Retirement {
@@ -115,8 +107,7 @@ impl GuestStage2Retirement {
     pub(in crate::kernel) const fn local_request(&self) -> GuestStage2LocalRequest {
         GuestStage2LocalRequest {
             allocation: self.allocation,
-            hardware: self.request,
-            live: false,
+            invalidation: GuestStage2Invalidation::Retired,
         }
     }
 }
@@ -124,15 +115,25 @@ impl GuestStage2Retirement {
 #[derive(Clone, Copy)]
 pub(in crate::kernel) struct GuestStage2LocalRequest {
     pub(super) allocation: Stage2AllocationIdentity,
-    pub(super) hardware: crate::hal::vm::GuestStage2RetirementRequest,
-    pub(super) live: bool,
+    pub(super) invalidation: GuestStage2Invalidation,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum GuestStage2Invalidation {
+    /// The owner is permanently inactive: no leased hardware tag is needed.
+    Retired,
+    /// The caller retains a maintenance lease through acknowledgement.
+    Live(crate::hal::vm::GuestStage2RetirementRequest),
 }
 
 pub(in crate::kernel) fn service_local_retirement(request: GuestStage2LocalRequest) {
-    if request.live {
-        crate::hal::vm::service_guest_stage2_live(request.hardware);
-    } else {
-        crate::hal::vm::service_guest_stage2_retirement(request.hardware);
+    match request.invalidation {
+        GuestStage2Invalidation::Live(hardware) => {
+            crate::hal::vm::service_guest_stage2_live(hardware)
+        }
+        GuestStage2Invalidation::Retired => {
+            crate::hal::vm::retire_guest_stage2_root_local(request.allocation.root())
+        }
     }
     if super::residency::clear_local_observations(request.allocation).is_err() {
         crate::kernel::crash::fatal(format_args!(

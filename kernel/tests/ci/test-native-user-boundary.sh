@@ -68,16 +68,16 @@ sed 's/plan.asid_bits()/16/' \
     "$fixture/src/kernel/mm/user_space/machine.rs" >"$fixture/mutated"
 mv "$fixture/mutated" "$fixture/src/kernel/mm/user_space/machine.rs"
 if check >/dev/null 2>&1; then
-    echo 'Native ASID reservation must use the admitted hardware width' >&2
+    echo 'Native ASID namespace registration must use the admitted hardware width' >&2
     exit 1
 fi
 
 copy_sources
-sed 's/identity(identifier)/identity(unrelated_identifier)/' \
+sed 's/reserved.generation()/unrelated.generation()/' \
     "$fixture/src/kernel/mm/user_space/machine.rs" >"$fixture/mutated"
 mv "$fixture/mutated" "$fixture/src/kernel/mm/user_space/machine.rs"
 if check >/dev/null 2>&1; then
-    echo 'Native page tables must use the retained ASID owner' >&2
+    echo 'Native page tables must retain their software translation identity' >&2
     exit 1
 fi
 

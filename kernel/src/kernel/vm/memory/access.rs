@@ -71,7 +71,9 @@ impl GuestAddressSpace {
         layout.insert(&mut region).map_err(|_| "block insert")?;
         let identifier = crate::kernel::mm::translation_id::reserve::<
             crate::kernel::mm::translation_id::Stage2Vmid,
-        >(8)
+        >(
+            crate::hal::vm::guest_translation_identifier_bits().map_err(|_| "VMID width")?,
+        )
         .map_err(|_| "block VMID")?;
         let mut space = Self::from_vmo(identifier, 0x4000_0000, size, layout, &domain)
             .map_err(|_| "block address space")?;
@@ -154,7 +156,9 @@ impl GuestAddressSpace {
         }
         let identifier = crate::kernel::mm::translation_id::reserve::<
             crate::kernel::mm::translation_id::Stage2Vmid,
-        >(8)
+        >(
+            crate::hal::vm::guest_translation_identifier_bits().map_err(|_| "VMID width")?,
+        )
         .map_err(|_| "split VMID")?;
         let space = Self::from_vmo(identifier, 0x4000_0000, size, layout, &domain)
             .map_err(|_| "split address space")?;
@@ -166,6 +170,25 @@ impl GuestAddressSpace {
             return Err("region boundary coalesced");
         }
         Ok(())
+    }
+
+    /// Returns a raw pointer into retained test RAM, without creating a borrow.
+    /// Dereferencing requires retaining this VM and using only atomic accesses.
+    #[cfg(all(feature = "kernel-self-test", CONFIG_ARCH_AARCH64))]
+    pub(crate) fn atomic_counter_for_test(
+        &self,
+        ipa: u64,
+    ) -> Result<*const core::sync::atomic::AtomicU64, Error> {
+        self.ensure_healthy()?;
+        if ipa & 7 != 0 {
+            return Err(Error::InvalidRange);
+        }
+        let index = self.page_index(ipa).ok_or(Error::InvalidRange)?;
+        let physical = self.backing_physical_page(index)?;
+        let address = linear_address(physical)?
+            .checked_add((ipa & (PAGE_SIZE - 1)) as usize)
+            .ok_or(Error::AddressOverflow)?;
+        Ok(address as *const core::sync::atomic::AtomicU64)
     }
 
     #[cfg(feature = "kernel-self-test")]

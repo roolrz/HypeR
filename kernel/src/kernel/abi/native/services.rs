@@ -478,6 +478,12 @@ pub(in crate::kernel) trait VmServices: UserMemoryServices {
         &self,
         vcpu: HandleValue,
     ) -> Result<crate::kernel::vm::objects::VirtualCpuSnapshot, crate::kernel::vm::service::Error>;
+    fn set_virtual_cpu_affinity(
+        &self,
+        vcpu: HandleValue,
+        words: Option<UserSlice>,
+        word_count: usize,
+    ) -> Result<(), crate::kernel::vm::service::Error>;
     fn start_virtual_cpu(&self, vcpu: HandleValue)
     -> Result<(), crate::kernel::vm::service::Error>;
 }
@@ -837,6 +843,8 @@ pub(in crate::kernel) trait TaskServices: UserMemoryServices {
         stack: u64,
         tls: u64,
         argument: u64,
+        affinity_words: Option<UserSlice>,
+        affinity_word_count: usize,
     ) -> Result<HandleValue, ObjectServiceError>;
     fn start_thread(&self, thread: HandleValue) -> Result<(), ProcessError>;
     fn stop_thread(&self, thread: HandleValue) -> Result<(), ProcessError>;

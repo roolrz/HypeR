@@ -153,6 +153,9 @@ hyper_native_status_t hyper_pending_virtual_machine_set_bootstrap(
 hyper_native_status_t hyper_pending_virtual_machine_seal(hyper_native_handle_t pending);
 hyper_call_result_t hyper_pending_virtual_machine_install(hyper_native_handle_t pending);
 hyper_native_status_t hyper_virtual_cpu_start(hyper_native_handle_t virtual_cpu);
+/* Success accepts the mask update; a required source handoff may still be pending. */
+hyper_native_status_t hyper_virtual_cpu_set_affinity(hyper_native_handle_t virtual_cpu,
+                                                   const uint64_t *words, size_t word_count);
 hyper_native_status_t hyper_pending_virtual_machine_abort(hyper_native_handle_t pending);
 hyper_native_status_t hyper_virtual_machine_request_stop(hyper_native_handle_t machine);
 hyper_call_result_t hyper_virtual_machine_creation_lease_get_platform_info(
@@ -284,7 +287,10 @@ hyper_call_result_t hyper_object_inspector_derive_task_group(
 hyper_call_result_t hyper_object_inspector_derive_resource_domain(
     hyper_native_handle_t inspector,
     hyper_native_handle_t resource_domain);
-hyper_call_result_t hyper_thread_create(uint64_t entry, uint64_t stack, uint64_t tls, uint64_t argument);
+/* affinity_words is a little-endian CPU-mask array. NULL, 0 inherits the
+ * calling thread's affinity; an explicit mask must be nonempty and nonzero. */
+hyper_call_result_t hyper_thread_create(uint64_t entry, uint64_t stack, uint64_t tls,
+    uint64_t argument, const uint64_t *affinity_words, size_t affinity_word_count);
 hyper_native_status_t hyper_thread_start(hyper_native_handle_t thread);
 hyper_native_status_t hyper_thread_request_stop(hyper_native_handle_t thread);
 hyper_native_status_t hyper_atomic_wait(const uint32_t *address, uint32_t expected, uint64_t deadline);

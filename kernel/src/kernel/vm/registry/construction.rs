@@ -238,7 +238,54 @@ impl InstalledVm {
     }
 
     #[cfg(feature = "kernel-self-test")]
+    #[allow(
+        dead_code,
+        reason = "the executable migration fixture currently has only an AArch64 guest payload"
+    )]
+    pub(crate) fn start_boot_for_test(self) -> Result<RunningVmForTest, &'static str> {
+        let running = RunningVmForTest {
+            thread: self.boot_vcpu,
+            owner: self.publish_handle_lifecycle(),
+        };
+        if running.owner.start_vcpu(0).is_err() {
+            running.stop();
+            return Err("installed boot vCPU did not start");
+        }
+        Ok(running)
+    }
+
+    #[cfg(feature = "kernel-self-test")]
     pub(crate) const fn boot_vcpu_for_test(&self) -> ThreadId {
         self.boot_vcpu
+    }
+}
+
+/// Retains test RAM until the test explicitly requests administrative stop.
+#[cfg(feature = "kernel-self-test")]
+#[allow(
+    dead_code,
+    reason = "the executable migration fixture currently has only an AArch64 guest payload"
+)]
+pub(crate) struct RunningVmForTest {
+    thread: ThreadId,
+    owner: FallibleArc<crate::kernel::vm::installed::InstalledMachine>,
+}
+
+#[cfg(feature = "kernel-self-test")]
+impl RunningVmForTest {
+    #[allow(
+        dead_code,
+        reason = "the executable migration fixture currently has only an AArch64 guest payload"
+    )]
+    pub(crate) const fn thread(&self) -> ThreadId {
+        self.thread
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the executable migration fixture currently has only an AArch64 guest payload"
+    )]
+    pub(crate) fn stop(self) {
+        crate::kernel::vm::installed::InstalledMachine::request_stop(&self.owner);
     }
 }

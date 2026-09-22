@@ -44,8 +44,8 @@ use hyper::abi::native::{
     HYPER_NATIVE_SYS_THREAD_CREATE, HYPER_NATIVE_SYS_THREAD_EXIT,
     HYPER_NATIVE_SYS_THREAD_REQUEST_STOP, HYPER_NATIVE_SYS_THREAD_SLEEP,
     HYPER_NATIVE_SYS_THREAD_START, HYPER_NATIVE_SYS_THREAD_YIELD,
-    HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO, HYPER_NATIVE_SYS_VIRTUAL_CPU_START,
-    HYPER_NATIVE_SYS_VIRTUAL_MACHINE_COMPLETE_POWER_REQUEST,
+    HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO, HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY,
+    HYPER_NATIVE_SYS_VIRTUAL_CPU_START, HYPER_NATIVE_SYS_VIRTUAL_MACHINE_COMPLETE_POWER_REQUEST,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATE,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_CREATE,
     HYPER_NATIVE_SYS_VIRTUAL_MACHINE_CREATION_LEASE_GET_PLATFORM_INFO,
@@ -86,8 +86,9 @@ use super::handlers::{
     sys_task_inspector_derive_resource_domain, sys_task_inspector_derive_task_group,
     sys_task_inspector_scan_processes, sys_task_inspector_scan_threads, sys_thread_create,
     sys_thread_exit, sys_thread_request_stop, sys_thread_sleep, sys_thread_start, sys_thread_yield,
-    sys_virtual_cpu_get_info, sys_virtual_cpu_start, sys_virtual_machine_complete_power_request,
-    sys_virtual_machine_create, sys_virtual_machine_creation_lease_create,
+    sys_virtual_cpu_get_info, sys_virtual_cpu_set_affinity, sys_virtual_cpu_start,
+    sys_virtual_machine_complete_power_request, sys_virtual_machine_create,
+    sys_virtual_machine_creation_lease_create,
     sys_virtual_machine_creation_lease_get_platform_info, sys_virtual_machine_get_info,
     sys_virtual_machine_get_power_request, sys_virtual_machine_open_vcpu,
     sys_virtual_machine_request_stop, sys_virtual_serial_acknowledge_output,
@@ -451,6 +452,9 @@ pub(in crate::kernel) fn dispatch_deferred(
         }
         HYPER_NATIVE_SYS_VIRTUAL_CPU_GET_INFO => {
             sys_virtual_cpu_get_info(services, invocation.arguments())
+        }
+        HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY => {
+            sys_virtual_cpu_set_affinity(services, invocation.arguments())
         }
         HYPER_NATIVE_SYS_VIRTUAL_CPU_START => {
             sys_virtual_cpu_start(services, invocation.arguments())

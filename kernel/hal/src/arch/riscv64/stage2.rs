@@ -84,15 +84,14 @@ pub(crate) fn identifier_bits() -> Result<u8, Error> {
         return Err(Error::NotInitialized);
     }
     let bits = VMID_BITS.load(Ordering::Acquire);
-    Ok(if bits == 0 { 8 } else { bits.min(8) })
+    Ok(super::translation_id_policy::guest_software_bits(bits))
 }
 
 fn hardware_identifier(identifier: u16) -> u16 {
-    if VMID_BITS.load(Ordering::Acquire) == 0 {
-        0
-    } else {
-        identifier
-    }
+    super::translation_id_policy::guest_hardware_identifier(
+        VMID_BITS.load(Ordering::Acquire),
+        identifier,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,6 +127,19 @@ pub struct Stage2AddressSpace {
 }
 
 impl Stage2AddressSpace {
+    /// Selects a leased hardware tag independently of the hierarchy's lifetime.
+    ///
+    /// # Safety
+    /// The caller pins this identifier through every hardware use and serializes
+    /// selection with hierarchy mutation. Existing pins must identify the same tag.
+    pub unsafe fn bind_identifier(&mut self, vmid: u16) -> Result<(), Error> {
+        if vmid == 0 || u64::from(vmid) >= 1 << identifier_bits()? {
+            return Err(Error::InvalidVmid);
+        }
+        self.vmid = vmid;
+        Ok(())
+    }
+
     /// Opportunistic RAM blocks are not implemented by this backend.
     pub const fn normal_block_size() -> Option<u64> {
         None
@@ -206,20 +218,13 @@ impl Stage2AddressSpace {
     /// accessible through the kernel linear mapping for the lifetime of this
     /// address space.
     pub unsafe fn new(
-        vmid: u16,
         allocator: &mut impl FnMut(usize, usize) -> Option<PhysicalAddress>,
     ) -> Result<Self, Error> {
-        if vmid == 0 || u64::from(vmid) >= 1 << identifier_bits()? {
-            return Err(Error::InvalidVmid);
-        }
         let root = allocator(4, 4).ok_or(Error::Allocation)?;
         if !root.get().is_multiple_of(4 * PAGE_SIZE) {
             return Err(Error::InvalidAddress);
         }
-        Ok(Self {
-            root,
-            vmid: hardware_identifier(vmid),
-        })
+        Ok(Self { root, vmid: 0 })
     }
 
     pub const fn root_address(&self) -> u64 {
@@ -418,7 +423,7 @@ impl Stage2AddressSpace {
 
     fn hgatp(&self) -> u64 {
         registers::HGATP_MODE_SV39X4
-            | (u64::from(self.vmid) << registers::HGATP_VMID_SHIFT)
+            | (u64::from(hardware_identifier(self.vmid)) << registers::HGATP_VMID_SHIFT)
             | (self.root.get() >> registers::PAGE_SHIFT)
     }
 
@@ -426,6 +431,13 @@ impl Stage2AddressSpace {
     /// translation-cache epoch. Detachment may clear HGATP without changing
     /// that epoch, so residency alone cannot authorize skipping activation.
     pub(crate) fn is_active_local(&self) -> bool {
+        // Untagged execution must pass through the assembly switch fences on
+        // every admission, even when the retained root selection still matches.
+        if !super::translation_id_policy::guest_selection_cacheable(
+            VMID_BITS.load(Ordering::Acquire),
+        ) {
+            return false;
+        }
         let current: u64;
         // SAFETY: The selected RISC-V backend runs in HS mode with H admitted.
         // This read does not grant ownership or alter the current selection.
@@ -613,18 +625,10 @@ unsafe fn invalidate(ipa: u64, vmid: u16) -> Result<(), Error> {
     // broadcasting an SBI remote fence on every demand fault is unnecessary.
     // SAFETY: The caller guarantees this VMID is active and invalidation is
     // serialized.
+    let vmid = hardware_identifier(vmid);
     if vmid == 0 {
-        // SAFETY: Untagged implementations share hardware identity zero. The
-        // exclusive owner contract permits a full local guest translation fence.
-        unsafe {
-            asm!(
-                ".option push",
-                ".option arch, +h",
-                "hfence.gvma zero, zero",
-                ".option pop",
-                options(nostack)
-            )
-        };
+        // All logical owners share tag zero in the narrow-hardware fallback.
+        invalidate_namespace_local();
     } else {
         // SAFETY: The validated hardware identifier belongs to this active root.
         unsafe { riscv64_invalidate_stage2_page(start >> 2, usize::from(vmid)) };
@@ -632,45 +636,28 @@ unsafe fn invalidate(ipa: u64, vmid: u16) -> Result<(), Error> {
     Ok(())
 }
 
-/// Completes the local part of acknowledged retirement. Policy keeps the root
-/// and logical identifier alive until every sticky resident CPU has replied.
-pub(crate) fn retire_local(request: GuestStage2RetirementRequest) -> Result<(), Error> {
-    let root = (request.hgatp & ((1 << 44) - 1)) << registers::PAGE_SHIFT;
+/// Parks a retired root without selecting its potentially reassigned VMID.
+pub(crate) fn retire_root_local(root: u64) {
     if super::vm_vcpu::stage2_root_is_active(root) {
-        return Err(Error::ActiveOwner);
+        hyper::debug::invariant_failure("retiring guest root still has execution owner");
     }
     let current: u64;
-    // SAFETY: Retirement runs on the addressed CPU with execution serialized.
-    // The explicit owner check excludes a live consumer of the retiring root.
+    // SAFETY: HS reads its selected guest root with execution serialized.
     unsafe { asm!("csrr {current}, hgatp", current = out(reg) current, options(nostack)) };
-    if current == request.hgatp {
-        // SAFETY: The matching selection is stale, not a live execution lease.
-        // Remove both roots before the final fence so speculative guest walks
-        // cannot repopulate translations into storage released after the ack.
+    if (current & ((1 << 44) - 1)) << registers::PAGE_SHIFT == root {
+        // SAFETY: Global retirement excludes consumers of this matching root.
         unsafe {
             asm!(
                 ".option push",
                 ".option arch, +h",
                 "csrw vsatp, zero",
-                "hfence.vvma zero, zero",
                 "csrw hgatp, zero",
                 ".option pop",
                 options(nostack)
             );
         }
     }
-    // SAFETY: A full fence covers implementations with zero VMID bits and
-    // preserves any unrelated live HGATP selection and its execution lease.
-    unsafe {
-        asm!(
-            ".option push",
-            ".option arch, +h",
-            "hfence.gvma zero, zero",
-            ".option pop",
-            options(nostack)
-        )
-    };
-    Ok(())
+    invalidate_namespace_local();
 }
 
 pub(crate) fn publish_changes() {
@@ -680,6 +667,10 @@ pub(crate) fn publish_changes() {
 
 pub(crate) fn synchronize_local(request: GuestStage2RetirementRequest) {
     let vmid = (request.hgatp & registers::HGATP_VMID_MASK) >> registers::HGATP_VMID_SHIFT;
+    if vmid == 0 {
+        invalidate_namespace_local();
+        return;
+    }
     // SAFETY: The request retains its translation identity. HFENCE.GVMA targets
     // the supplied VMID without changing the current HGATP or VSATP selection.
     unsafe {
@@ -697,4 +688,20 @@ pub(crate) fn synchronize_local(request: GuestStage2RetirementRequest) {
 unsafe extern "C" {
     fn riscv64_activate_stage2(value: u64);
     fn riscv64_invalidate_stage2_page(guest_physical_operand: usize, vmid: usize);
+}
+
+/// Flushes every guest VMID locally before admitting a new allocator epoch.
+pub fn invalidate_namespace_local() {
+    // SAFETY: The caller runs in HS with guest execution stopped and IRQs masked.
+    unsafe {
+        core::arch::asm!(
+            ".option push",
+            ".option arch, +h",
+            "fence rw, rw",
+            "hfence.gvma zero, zero",
+            "hfence.vvma zero, zero",
+            ".option pop",
+            options(nostack)
+        );
+    }
 }

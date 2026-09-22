@@ -295,6 +295,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_RUNNING UINT64_C(2)
 #define HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPING UINT64_C(3)
 #define HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPED UINT64_C(4)
+#define HYPER_NATIVE_VCPU_HOST_CPU_UNKNOWN UINT64_C(4294967295)
 #define HYPER_NATIVE_VIRTUAL_CPU_PHASE_DORMANT UINT64_C(1)
 #define HYPER_NATIVE_VIRTUAL_CPU_PHASE_STARTED UINT64_C(2)
 #define HYPER_NATIVE_VIRTUAL_CPU_PHASE_STOPPED UINT64_C(3)
@@ -513,6 +514,7 @@ static inline uint32_t hyper_native_object_transfer_class(uint32_t object_kind) 
 #define HYPER_NATIVE_SYS_DEVICE_MMIO UINT64_C(145)
 #define HYPER_NATIVE_SYS_DEVICE_IRQ_PENDING UINT64_C(146)
 #define HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE UINT64_C(147)
+#define HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY UINT64_C(148)
 
 static inline uint64_t hyper_native_failure_result_mask(
     uint64_t syscall_number, hyper_native_status_t status)
@@ -1159,14 +1161,18 @@ typedef struct hyper_native_virtual_cpu_info_t {
     uint64_t scheduler_thread_id;
     uint32_t terminal_reason;
     uint32_t reserved;
+    uint32_t host_cpu;
+    uint32_t migration_target;
 } hyper_native_virtual_cpu_info_t;
-HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_cpu_info_t) == 24, "virtual_cpu_info size");
+HYPER_ABI_STATIC_ASSERT(sizeof(hyper_native_virtual_cpu_info_t) == 32, "virtual_cpu_info size");
 HYPER_ABI_STATIC_ASSERT(HYPER_ABI_ALIGNOF(hyper_native_virtual_cpu_info_t) == 8, "virtual_cpu_info alignment");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, vcpu_id) == 0, "virtual_cpu_info.vcpu_id offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, phase) == 4, "virtual_cpu_info.phase offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, scheduler_thread_id) == 8, "virtual_cpu_info.scheduler_thread_id offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, terminal_reason) == 16, "virtual_cpu_info.terminal_reason offset");
 HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, reserved) == 20, "virtual_cpu_info.reserved offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, host_cpu) == 24, "virtual_cpu_info.host_cpu offset");
+HYPER_ABI_STATIC_ASSERT(offsetof(hyper_native_virtual_cpu_info_t, migration_target) == 28, "virtual_cpu_info.migration_target offset");
 
 #define HYPER_NATIVE_RESOURCE_LIMITS_MIN_SIZE UINT64_C(160)
 typedef struct hyper_native_resource_limits_t {

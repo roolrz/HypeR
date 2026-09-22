@@ -47,15 +47,19 @@ require "$hal" 'struct AddressSpacePlan' \
 reject "$hal $kernel_user_files" 'AddressSpaceIdentifier|SelectedIdentifier|Stage2Vmid|NvheStage2Only|prepare_nvhe' \
     'Native address spaces must not acquire guest VMID or removed regime wrappers'
 require "$machine" 'identifier:[[:space:]]*ManuallyDrop<ActiveIdentifier<HostAsid>>' \
-    'kernel address-space ownership must retain its typed active ASID'
+    'kernel address-space ownership must retain its typed ASID software identity'
 require "$machine" 'reserve::<HostAsid>\(plan\.asid_bits\(\)\)' \
-    'Native ASID reservation must use the admitted hardware width'
+    'Native ASID namespace registration must use the admitted hardware width'
 require "$machine" 'address_space_plan\(\)' \
     'kernel machine ownership must obtain selected HAL limits'
 require "$machine" 'crate::hal::user::prepare_host_address_space\(' \
     'kernel machine ownership must build through the host-stage HAL'
-require "$machine" 'let \(asid, generation\) = identity\(identifier\)' \
-    'Native construction must project its retained identifier and generation'
+require "$machine" 'reserved\.generation\(\)' \
+    'Native construction must retain a stable software translation identity'
+require "$machine" 'IdentifierLease<HostAsid>' \
+    'Native execution must retain a typed hardware ASID lease'
+require "$entry" 'acquire_identifier\(' \
+    'Native entry must acquire a runtime translation lease before machine execution'
 reject "$machine" 'enum[[:space:]]+(ReservedMachineIdentifier|MachineIdentifier)' \
     'kernel must not reconstruct a removed translation-regime discriminant'
 require "$entry" 'failure\.abandon_with\(' \

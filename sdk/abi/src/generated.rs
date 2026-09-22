@@ -283,6 +283,7 @@ pub const HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_INSTALLED: u64 = 1;
 pub const HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_RUNNING: u64 = 2;
 pub const HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPING: u64 = 3;
 pub const HYPER_NATIVE_VIRTUAL_MACHINE_PHASE_STOPPED: u64 = 4;
+pub const HYPER_NATIVE_VCPU_HOST_CPU_UNKNOWN: u64 = 4294967295;
 pub const HYPER_NATIVE_VIRTUAL_CPU_PHASE_DORMANT: u64 = 1;
 pub const HYPER_NATIVE_VIRTUAL_CPU_PHASE_STARTED: u64 = 2;
 pub const HYPER_NATIVE_VIRTUAL_CPU_PHASE_STOPPED: u64 = 3;
@@ -501,6 +502,7 @@ pub const HYPER_NATIVE_SYS_DEVICE_CLAIM_BUNDLE: u64 = 144;
 pub const HYPER_NATIVE_SYS_DEVICE_MMIO: u64 = 145;
 pub const HYPER_NATIVE_SYS_DEVICE_IRQ_PENDING: u64 = 146;
 pub const HYPER_NATIVE_SYS_DEVICE_IRQ_COMPLETE: u64 = 147;
+pub const HYPER_NATIVE_SYS_VIRTUAL_CPU_SET_AFFINITY: u64 = 148;
 
 pub const fn hyper_native_failure_result_mask(
     syscall_number: u64,
@@ -1237,14 +1239,18 @@ pub struct HyperNativeVirtualCpuInfo {
     pub scheduler_thread_id: u64,
     pub terminal_reason: u32,
     pub reserved: u32,
+    pub host_cpu: u32,
+    pub migration_target: u32,
 }
-const _: () = assert!(core::mem::size_of::<HyperNativeVirtualCpuInfo>() == 24);
+const _: () = assert!(core::mem::size_of::<HyperNativeVirtualCpuInfo>() == 32);
 const _: () = assert!(core::mem::align_of::<HyperNativeVirtualCpuInfo>() == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, vcpu_id) == 0);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, phase) == 4);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, scheduler_thread_id) == 8);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, terminal_reason) == 16);
 const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, reserved) == 20);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, host_cpu) == 24);
+const _: () = assert!(core::mem::offset_of!(HyperNativeVirtualCpuInfo, migration_target) == 28);
 
 pub const HYPER_NATIVE_RESOURCE_LIMITS_MIN_SIZE: usize = 160;
 #[repr(C)]

@@ -1,39 +1,35 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Kernel ownership of architectural translation-identifier namespaces.
+//! Software address-space identities and leased architectural translation tags.
 //!
-//! Native address spaces use the ASID namespace; guests use the separate
-//! VMID namespace. Namespace marker types keep their reservation, activation,
-//! and acknowledged-retirement ownership distinct.
-
-use core::marker::PhantomData;
+//! Owners outlive individual hardware bindings. A lease pins its tag across
+//! namespace rollover; callers flush locally for its epoch before installation
+//! and retain it through hardware detachment or the last maintenance ack.
 
 use hyper::mm::{
-    ActiveTranslationId, ReservedTranslationId, RetiringTranslationId, TranslationIdError,
-    TranslationIdPool,
+    TranslationEpochError, TranslationEpochPool, TranslationEpochSegment, TranslationLease,
+    TranslationOwner,
 };
 use hyper::sync::InterruptSpinLock;
-
-const IDENTIFIER_COUNT: usize = 1 << 8;
 
 pub(crate) enum HostAsid {}
 pub(crate) enum Stage2Vmid {}
 
-type AsidPool = TranslationIdPool<HostAsid, IDENTIFIER_COUNT>;
-type VmidPool = TranslationIdPool<Stage2Vmid, IDENTIFIER_COUNT>;
+type AsidPool = TranslationEpochPool<HostAsid>;
+type VmidPool = TranslationEpochPool<Stage2Vmid>;
 type AsidLock = InterruptSpinLock<AsidPool, crate::hal::irq::LocalMask>;
 type VmidLock = InterruptSpinLock<VmidPool, crate::hal::irq::LocalMask>;
 
-// SAFETY: These are the sole pools instantiated for their private namespace
-// marker types in the kernel.
-static ASIDS: AsidLock = InterruptSpinLock::new(unsafe { TranslationIdPool::new() });
-// SAFETY: See ASIDS; Stage2Vmid is private and has exactly this one pool.
-static VMIDS: VmidLock = InterruptSpinLock::new(unsafe { TranslationIdPool::new() });
+// SAFETY: These are the only pools for their private namespace types. They
+// remain alive throughout the kernel lifetime, including every retained lease.
+static ASIDS: AsidLock = InterruptSpinLock::new(unsafe { TranslationEpochPool::new() });
+// SAFETY: Same unique-namespace lifetime contract as ASIDS.
+static VMIDS: VmidLock = InterruptSpinLock::new(unsafe { TranslationEpochPool::new() });
 
 pub(crate) trait IdentifierNamespace: Sized + 'static {
     fn with_pool<Result>(
-        operation: impl FnOnce(&mut TranslationIdPool<Self, IDENTIFIER_COUNT>) -> Result,
+        operation: impl FnOnce(&mut TranslationEpochPool<Self>) -> Result,
     ) -> Result;
 }
 
@@ -52,122 +48,184 @@ impl IdentifierNamespace for Stage2Vmid {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Error {
     Exhausted,
+    Busy,
     InvalidToken,
     UnsupportedWidth,
+    Allocation,
 }
 
-impl From<TranslationIdError> for Error {
-    fn from(error: TranslationIdError) -> Self {
+impl From<TranslationEpochError> for Error {
+    fn from(error: TranslationEpochError) -> Self {
         match error {
-            TranslationIdError::Exhausted => Self::Exhausted,
-            TranslationIdError::InvalidToken => Self::InvalidToken,
+            TranslationEpochError::Allocation => Self::Allocation,
+            TranslationEpochError::Overflow => Self::Exhausted,
+            TranslationEpochError::Busy => Self::Busy,
+            TranslationEpochError::InvalidToken => Self::InvalidToken,
+            TranslationEpochError::InvalidWidth | TranslationEpochError::WidthChanged => {
+                Self::UnsupportedWidth
+            }
         }
     }
 }
 
-#[must_use = "an identifier reservation must be activated or cancelled"]
+#[must_use = "a software identity reservation must be activated or cancelled"]
 pub(crate) struct IdentifierReservation<Namespace: IdentifierNamespace> {
-    token: Option<ReservedTranslationId<Namespace>>,
+    owner: Option<TranslationOwner<Namespace>>,
 }
 
 impl<Namespace: IdentifierNamespace> IdentifierReservation<Namespace> {
-    pub(crate) fn value(&self) -> u16 {
-        self.token.as_ref().map_or(0, ReservedTranslationId::value)
-    }
-
     pub(crate) fn generation(&self) -> u64 {
-        self.token
-            .as_ref()
-            .map_or(0, ReservedTranslationId::generation)
+        self.owner.as_ref().map_or(0, TranslationOwner::serial)
     }
 
     pub(crate) fn activate(mut self) -> Result<ActiveIdentifier<Namespace>, Error> {
-        let token = self.token.take().ok_or(Error::InvalidToken)?;
-        let active = Namespace::with_pool(|pool| pool.activate(token))?;
         Ok(ActiveIdentifier {
-            token: Some(active),
-            namespace: PhantomData,
+            owner: Some(self.owner.take().ok_or(Error::InvalidToken)?),
         })
     }
 }
 
 impl<Namespace: IdentifierNamespace> Drop for IdentifierReservation<Namespace> {
     fn drop(&mut self) {
-        let Some(token) = self.token.take() else {
-            return;
-        };
-        if Namespace::with_pool(|pool| pool.cancel(token)).is_err() {
-            hyper::debug::invariant_failure("mm::translation_id::drop invariant");
+        if let Some(owner) = self.owner.take() {
+            unregister(owner);
         }
     }
 }
 
-/// Activated hardware identifier retained until acknowledged retirement.
-///
-/// Safe Drop intentionally leaves the pool slot active. This fail-safe leak
-/// prevents reuse while stale hardware translations might still exist.
-#[must_use = "an active identifier must stay retained or enter acknowledged retirement"]
+/// Published identity retained until the address space's retirement is acked.
+/// Dropping it without retirement deliberately retains ownership: safe Rust
+/// cannot make a still-published address space eligible for resource reuse.
+#[must_use = "published identity must enter acknowledged retirement"]
 pub(crate) struct ActiveIdentifier<Namespace: IdentifierNamespace> {
-    token: Option<ActiveTranslationId<Namespace>>,
-    namespace: PhantomData<Namespace>,
+    owner: Option<TranslationOwner<Namespace>>,
 }
 
 impl<Namespace: IdentifierNamespace> ActiveIdentifier<Namespace> {
-    pub(crate) fn value(&self) -> u16 {
-        self.token.as_ref().map_or(0, ActiveTranslationId::value)
+    pub(crate) fn generation(&self) -> u64 {
+        self.owner.as_ref().map_or(0, TranslationOwner::serial)
     }
 
-    pub(crate) fn generation(&self) -> u64 {
-        self.token
-            .as_ref()
-            .map_or(0, ActiveTranslationId::generation)
+    pub(crate) fn acquire(&self) -> Result<IdentifierLease<Namespace>, Error> {
+        let owner = self.owner.as_ref().ok_or(Error::InvalidToken)?;
+        let token = Namespace::with_pool(|pool| pool.acquire(owner, None))?;
+        Ok(IdentifierLease { token: Some(token) })
     }
 
     pub(crate) fn begin_retirement(mut self) -> Result<RetiringIdentifier<Namespace>, Error> {
-        let token = self.token.take().ok_or(Error::InvalidToken)?;
-        let retiring = Namespace::with_pool(|pool| pool.begin_retirement(token))?;
         Ok(RetiringIdentifier {
-            token: Some(retiring),
-            namespace: PhantomData,
+            owner: Some(self.owner.take().ok_or(Error::InvalidToken)?),
         })
     }
 }
 
-#[must_use = "a retiring identifier must stay retained until invalidation is acknowledged"]
-pub(crate) struct RetiringIdentifier<Namespace: IdentifierNamespace> {
-    token: Option<RetiringTranslationId<Namespace>>,
-    namespace: PhantomData<Namespace>,
+/// Scoped hardware ownership. Release only after detaching the hardware or
+/// receiving every acknowledgement for a maintenance operation using this tag.
+#[must_use = "retain the lease throughout hardware use and maintenance"]
+pub(crate) struct IdentifierLease<Namespace: IdentifierNamespace> {
+    token: Option<TranslationLease<Namespace>>,
 }
 
-impl<Namespace: IdentifierNamespace> RetiringIdentifier<Namespace> {
+impl<Namespace: IdentifierNamespace> IdentifierLease<Namespace> {
     pub(crate) fn value(&self) -> u16 {
-        self.token.as_ref().map_or(0, RetiringTranslationId::value)
+        self.token.as_ref().map_or(0, |token| token.binding().id())
     }
 
     pub(crate) fn generation(&self) -> u64 {
         self.token
             .as_ref()
-            .map_or(0, RetiringTranslationId::generation)
+            .map_or(0, |token| token.binding().owner())
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.token.as_ref().map_or(0, TranslationLease::epoch)
+    }
+}
+
+impl<Namespace: IdentifierNamespace> Drop for IdentifierLease<Namespace> {
+    fn drop(&mut self) {
+        if let Some(token) = self.token.take()
+            && Namespace::with_pool(|pool| pool.release(token)).is_err()
+        {
+            hyper::debug::invariant_failure("translation identifier lease release");
+        }
+    }
+}
+
+#[must_use = "retiring identity must be retained until invalidation is acknowledged"]
+pub(crate) struct RetiringIdentifier<Namespace: IdentifierNamespace> {
+    owner: Option<TranslationOwner<Namespace>>,
+}
+
+impl<Namespace: IdentifierNamespace> RetiringIdentifier<Namespace> {
+    pub(crate) fn generation(&self) -> u64 {
+        self.owner.as_ref().map_or(0, TranslationOwner::serial)
     }
 
     /// # Safety
-    ///
-    /// Every CPU which could cache this identifier must have acknowledged the
-    /// matching tagged invalidation. Ambiguous completion must fail-stop.
+    /// Every CPU which could retain translations or an in-flight walk must
+    /// have acknowledged retirement. No execution or maintenance lease remains.
     pub(crate) unsafe fn complete(mut self) -> Result<(), Error> {
-        let token = self.token.take().ok_or(Error::InvalidToken)?;
-        // SAFETY: The caller supplies the acknowledgement proof unchanged.
-        unsafe { Namespace::with_pool(|pool| pool.complete_retirement(token))? };
+        let owner = self.owner.take().ok_or(Error::InvalidToken)?;
+        unregister(owner);
         Ok(())
+    }
+}
+
+fn unregister<Namespace: IdentifierNamespace>(owner: TranslationOwner<Namespace>) {
+    if Namespace::with_pool(|pool| pool.unregister_owner(owner)).is_err() {
+        hyper::debug::invariant_failure("translation owner retired with outstanding lease");
+    }
+    // Unlink under the pool lock, destroy outside it. Detaching a segment
+    // advances the epoch so re-expansion cannot erase tag reuse history.
+    while let Some(segment) = Namespace::with_pool(TranslationEpochPool::take_unused_segment) {
+        drop(segment);
     }
 }
 
 pub(crate) fn reserve<Namespace: IdentifierNamespace>(
     width: u8,
 ) -> Result<IdentifierReservation<Namespace>, Error> {
-    if width == 0 || width > 8 {
-        return Err(Error::UnsupportedWidth);
-    }
-    let token = Namespace::with_pool(|pool| pool.reserve_below(1usize << width))?;
-    Ok(IdentifierReservation { token: Some(token) })
+    let mut spare = None;
+    let owner = loop {
+        if let Some(owner) = Namespace::with_pool(|pool| pool.register_owner(width, &mut spare))? {
+            break owner;
+        }
+        spare = Some(TranslationEpochSegment::try_new()?);
+    };
+    Ok(IdentifierReservation { owner: Some(owner) })
+}
+
+/// Force real namespace rollover without installing synthetic owners into
+/// hardware. An anchor proves that a pinned tag survives the rollover.
+#[cfg(all(feature = "kernel-self-test", CONFIG_ARCH_AARCH64))]
+pub(crate) fn test_rollover<Namespace: IdentifierNamespace>(width: u8) -> Result<(), Error> {
+    let anchor = reserve::<Namespace>(width)?.activate()?;
+    let pinned = anchor.acquire()?;
+    let before = Namespace::with_pool(|pool| pool.epoch());
+    let result = (|| {
+        for _ in 0..(1usize << width) {
+            let owner = reserve::<Namespace>(width)?.activate()?;
+            let lease = owner.acquire()?;
+            drop(lease);
+            // SAFETY: This synthetic owner was never installed in hardware;
+            // there can be neither cached translations nor an outstanding walk.
+            unsafe { owner.begin_retirement()?.complete()? };
+            if Namespace::with_pool(|pool| pool.epoch()) != before {
+                let retained = anchor.acquire()?;
+                if retained.value() != pinned.value()
+                    || retained.generation() != pinned.generation()
+                    || retained.epoch() == before
+                {
+                    return Err(Error::InvalidToken);
+                }
+                return Ok(());
+            }
+        }
+        Err(Error::Exhausted)
+    })();
+    drop(pinned);
+    // SAFETY: The anchor also has never been installed into hardware.
+    unsafe { anchor.begin_retirement()?.complete()? };
+    result
 }
