@@ -98,9 +98,11 @@ impl Stage2AddressSpace {
         if let Some(physical) = super::vgic::v2::guest_physical() {
             // SAFETY: Only the guest virtual CPU interface is exposed, never
             // GICC/GICH. It is banked by CPU and switched with the vCPU context.
+            // Only the first page is exposed: the second page contains DIR,
+            // which must trap so software-resident active interrupts can retire.
             // The root is unpublished and allocator ownership is unchanged.
             unsafe {
-                result.map_device(hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_BASE, physical, hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_SIZE, allocator)?;
+                result.map_device(hyper::abi::native::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_BASE, physical, 0x1000, allocator)?;
             }
         }
         Ok(result)

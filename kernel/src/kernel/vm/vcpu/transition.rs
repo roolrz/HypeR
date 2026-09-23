@@ -83,7 +83,11 @@ pub(crate) unsafe fn activate(
             Err(error) => {
                 restore_reconcile_if_claimed(execution, reconcile_claimed);
                 release_execution_or_fail(execution, execution_claim);
-                return Err(HardwareTransitionError::Hardware(error));
+                return Err(if crate::hal::vm::interrupt_entry_deferred(&error) {
+                    HardwareTransitionError::InterruptGateClosed
+                } else {
+                    HardwareTransitionError::Hardware(error)
+                });
             }
         };
         if let Err(timer) = super::timer::set_host_timer_enabled(!timer_asserted) {
@@ -458,6 +462,7 @@ fn fatal_ambiguous_hardware(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HardwareTransitionError {
+    InterruptGateClosed,
     Active(super::active_vcpu::Error),
     Hardware(crate::hal::vm::VcpuInterruptError),
     Execution(super::registry::VmExecutionError),

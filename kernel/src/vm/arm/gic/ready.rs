@@ -11,13 +11,18 @@ pub(super) struct EntryIndex(pub(super) u32);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct ReadyRank {
+    pub(super) active: bool,
     pub(super) priority: u8,
     pub(super) interrupt: u32,
 }
 
 impl Ord for ReadyRank {
     fn cmp(&self, other: &Self) -> Ordering {
-        (self.priority, self.interrupt).cmp(&(other.priority, other.interrupt))
+        (!self.active, self.priority, self.interrupt).cmp(&(
+            !other.active,
+            other.priority,
+            other.interrupt,
+        ))
     }
 }
 
@@ -151,6 +156,10 @@ impl ReadyQueue {
 
     pub(super) fn remaining(&self) -> usize {
         self.entries.remaining()
+    }
+
+    pub(super) fn first(&self) -> Option<EntryIndex> {
+        self.entries.first().copied()
     }
 
     pub(super) fn is_empty(&self) -> bool {

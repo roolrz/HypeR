@@ -55,6 +55,9 @@ fn suite(startup: &Startup<'_>) -> Result<()> {
             startup.borrow(startup::RESOURCE_DOMAIN).map_err(show)?,
         )
         .map_err(show)?;
+        let platform =
+            vm::platform_info(lease.as_handle_ref(), vm::PlatformProfile::Aarch64Reference)
+                .map_err(show)?;
         let pending = vm::create(
             lease,
             vm::Configuration {
@@ -98,7 +101,7 @@ fn suite(startup: &Startup<'_>) -> Result<()> {
             vm::VirtualCpuBootstrap {
                 entry: RAM_BASE,
                 stack: RAM_BASE + RAM_BYTES,
-                arguments: [0; 4],
+                arguments: [platform.aarch64_gic_version, 0, 0, 0],
             },
         )
         .map_err(show)?;

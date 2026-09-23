@@ -34,6 +34,8 @@ pub enum GuestSyncAction {
     Wait,
     /// HVC already advanced ELR; park until userspace completes its request.
     FirmwareWait,
+    /// A GIC transaction must finish after all affected hardware banks detach.
+    InterruptAccess,
 }
 
 /// Typed failure which prevented a decoded synchronous exit from completing.
@@ -365,6 +367,27 @@ pub struct GuestMmioCompletion {
     register_64_bit: bool,
 }
 
+/// Typed completion of a suspended guest device instruction. A system-register
+/// DIR is not represented as a fabricated memory access.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum GuestDeviceCompletion {
+    Mmio(GuestMmioCompletion),
+    DeactivateInterrupt,
+}
+
+impl GuestDeviceCompletion {
+    pub(crate) fn apply(self, general: &mut [u64; 31], pc: &mut u64, action: MmioAction) -> bool {
+        match self {
+            Self::Mmio(completion) => completion.apply(general, pc, action),
+            Self::DeactivateInterrupt if action == MmioAction::CompleteWrite => {
+                advance(pc);
+                true
+            }
+            Self::DeactivateInterrupt => false,
+        }
+    }
+}
+
 impl GuestMmioCompletion {
     pub(crate) fn apply(
         self,
@@ -454,11 +477,11 @@ pub(crate) fn apply_guest_sync_action(
             true
         }
         GuestSyncAction::FirmwareWait => true,
-        GuestSyncAction::Stop(_) => false,
+        GuestSyncAction::Stop(_) | GuestSyncAction::InterruptAccess => false,
     }
 }
 
-fn guest_sync_action_matches(exit: GuestSyncExit, action: GuestSyncAction) -> bool {
+pub(crate) fn guest_sync_action_matches(exit: GuestSyncExit, action: GuestSyncAction) -> bool {
     if action == GuestSyncAction::FirmwareWait {
         return matches!(exit, GuestSyncExit::HypervisorCall { .. });
     }
@@ -466,6 +489,14 @@ fn guest_sync_action_matches(exit: GuestSyncExit, action: GuestSyncAction) -> bo
         return true;
     }
     match (exit, action) {
+        (
+            GuestSyncExit::SystemRegister(SystemRegisterExit {
+                encoding: registers::SYSREG_ICC_DIR_EL1,
+                direction: Direction::Write,
+                ..
+            }),
+            GuestSyncAction::InterruptAccess,
+        ) => true,
         (
             GuestSyncExit::SystemRegister(SystemRegisterExit {
                 target,
@@ -713,6 +744,33 @@ fn emulate_system_register(
     interrupts: &VmInterruptController,
     exit: SystemRegisterExit,
 ) -> GuestSyncAction {
+    if exit.encoding == registers::SYSREG_ICC_DIR_EL1 && exit.direction == Direction::Write {
+        return match super::vm_vcpu::deactivate_guest_interrupt(
+            context, vcpu_id, interrupts, exit.value, false,
+        ) {
+            Ok(true) => GuestSyncAction::InterruptAccess,
+            Ok(false) => GuestSyncAction::Advance,
+            Err(error) => GuestSyncAction::Stop(GuestSyncFailure::VirtualInterrupt(error)),
+        };
+    }
+    if matches!(
+        exit.encoding,
+        registers::SYSREG_ICC_PMR_EL1
+            | registers::SYSREG_ICC_CTLR_EL1
+            | registers::SYSREG_ICC_RPR_EL1
+    ) {
+        let write = (exit.direction == Direction::Write).then_some(exit.value);
+        return match super::vm_vcpu::access_common_register(context, exit.encoding, write) {
+            Ok(Some(value)) if write.is_none() => GuestSyncAction::WriteRegister {
+                register: exit.target,
+                value,
+                advance: true,
+            },
+            Ok(Some(_)) => GuestSyncAction::Advance,
+            Ok(None) => inject_undefined(context, exit.undefined),
+            Err(error) => GuestSyncAction::Stop(GuestSyncFailure::VirtualInterrupt(error)),
+        };
+    }
     match exit.direction {
         Direction::Read => match read_virtual_register(context, vcpu_id, exit.encoding) {
             Some(value) => GuestSyncAction::WriteRegister {
@@ -723,10 +781,21 @@ fn emulate_system_register(
             None => inject_undefined(context, exit.undefined),
         },
         Direction::Write => {
-            if exit.encoding == registers::SYSREG_ICC_SGI1R_EL1 {
-                return software_interrupt_completion(super::vm_vcpu::deliver_software_interrupt(
-                    context, vcpu_id, interrupts, exit.value,
-                ));
+            if matches!(
+                exit.encoding,
+                registers::SYSREG_ICC_SGI1R_EL1
+                    | registers::SYSREG_ICC_SGI0R_EL1
+                    | registers::SYSREG_ICC_ASGI1R_EL1
+            ) {
+                // With a single security state, SGI1R may generate either
+                // configured group; SGI0R and ASGI1R only generate Group0.
+                let group = (exit.encoding != registers::SYSREG_ICC_SGI1R_EL1)
+                    .then_some(hyper::vm::arm::gic::InterruptGroup::Group0);
+                return software_interrupt_completion(
+                    super::vm_vcpu::deliver_software_interrupt_group(
+                        context, vcpu_id, interrupts, exit.value, group,
+                    ),
+                );
             }
             if write_virtual_register(exit.encoding, exit.value) {
                 GuestSyncAction::Advance

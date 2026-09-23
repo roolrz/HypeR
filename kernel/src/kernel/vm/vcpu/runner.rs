@@ -71,6 +71,10 @@ fn run_current() {
         // pinned, exclusive, and IRQ-masked through run and exact detachment.
         unsafe {
             if let Err(error) = super::activate(execution) {
+                if error == super::HardwareTransitionError::InterruptGateClosed {
+                    super::wait_for_interrupt_gate(execution, current.thread);
+                    continue;
+                }
                 if error
                     == super::transition::HardwareTransitionError::Execution(
                         crate::kernel::vm::registry::VmExecutionError::AdmissionClosed,
@@ -97,11 +101,19 @@ fn run_current() {
             let exit = stopped.exit();
             let detached = super::transition::detach_stopped(&mut *execution, stopped);
             match exit.disposition() {
-                crate::hal::vm::VcpuRunDisposition::Wait(crate::hal::vm::VcpuWaitReason::Mmio) => {
+                crate::hal::vm::VcpuRunDisposition::Wait(
+                    crate::hal::vm::VcpuWaitReason::Device,
+                ) => {
                     detached.finish();
                     let Some(binding) = (&*execution).vm_binding() else {
                         hyper::debug::invariant_failure("vm::vcpu::runner::run_current invariant");
                     };
+                    if crate::hal::vm::interrupt_access_pending(binding.interrupts(), vcpu_id) {
+                        if !super::mmio::wait_interrupt_access(execution, current.thread) {
+                            return;
+                        }
+                        continue;
+                    }
                     if binding.lifecycle().publish_mmio(vcpu_id).is_err()
                         && administrative_stop_reason(execution, current.thread).is_none()
                     {
