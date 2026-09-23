@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! UTC seeded once from firmware's RTC and advanced by the host clocksource.
+//! Wall time seeded from RTC, or Unix epoch at monotonic zero when uncalibrated.
 
 use hyper::drivers::platform::{DriverServices, PlatformDevice};
 use hyper::drivers::rtc::{Goldfish, Pl031};
@@ -48,16 +48,21 @@ pub(crate) fn initialize(devices: &[PlatformDevice], services: &impl DriverServi
         };
         // The anchor retains the device's precision (seconds for PL031,
         // nanoseconds for Goldfish). Interpolation cannot improve accuracy.
-        // No image-build timestamp or uptime is substituted for UTC.
+        // An available RTC replaces the uncalibrated epoch baseline.
         if ANCHOR.publish(Anchor { utc, monotonic }).is_ok() {
             crate::pr_info!("HypeR: UTC clock initialized from {} RTC", rtc.name());
         }
         return;
     }
+    crate::pr_warn!("HypeR: no usable RTC; wall clock is uncalibrated (Unix epoch + uptime)");
 }
 
 pub(crate) fn now() -> Option<Timestamp> {
-    let anchor = ANCHOR.get()?;
+    let fallback = Anchor {
+        utc: Timestamp::new(0, 0)?,
+        monotonic: 0,
+    };
+    let anchor = ANCHOR.get().unwrap_or(&fallback);
     let elapsed = super::monotonic_nanoseconds()
         .ok()?
         .checked_sub(anchor.monotonic)?;

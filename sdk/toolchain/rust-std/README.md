@@ -43,7 +43,7 @@ input, output, and static/dynamic linking.
 | Paths and cwd | Canonicalization, current-directory observation and mutation through rooted Directory scopes |
 | Subprocesses | Native ProcessBuilder, arguments/environment, cwd capability, wait/try_wait/kill, piped or inherited byte-channel stdio |
 | Networking | Upstream unsupported implementation |
-| Wall-clock time | RTC-anchored UTC when available; absent platform clocks retain unsupported behavior |
+| Wall-clock time | RTC-anchored UTC, or uncalibrated Unix epoch plus uptime without RTC |
 | Environment mutation | Upstream unsupported behavior |
 | Cryptographic randomness | Unsupported; no entropy source is claimed |
 | HashMap seeds | Upstream unsupported-target address-based fallback; no strong collision-attack resistance claim |
@@ -97,9 +97,10 @@ The runtime creates a dormant Native Thread, publishes its token, then starts
 it with an owned stack and entry argument. Failure keeps the argument with
 the caller. The child attaches TLS before Rust entry and runs TLS destructors
 before thread_exit. Join observes Native TERMINATED before freeing the stack.
-A single process-lifetime cleanup worker performs the same wait for detached
-threads; its own stack lives until Process retirement. Process exit may
-abandon all remaining language destructors, as before.
+A single process-lifetime cleanup worker blocks on a WaitSet of Native
+TERMINATED events for detached threads, including direct Native exits; its own
+stack lives until Process retirement. Process exit may abandon all remaining
+language destructors, as before.
 
 The atomic wait bridge uses process-private u32 wait/wake syscalls. Kernel
 mapping identities distinguish virtual-address reuse; pinned backing survives
@@ -114,6 +115,16 @@ against a host syscall substitute. Native tests exercise concurrent thread
 creation, Mutex/Condvar progress, independent TLS, join and detached cleanup.
 Physical AArch64 qualification must still stress weak ordering, migration,
 concurrent mapping retirement and interrupt timing beyond QEMU coverage.
+
+SDK-created threads, including the detached-thread reaper, have one no-access
+page below and above their usable stack. Requested stack size excludes guards,
+is rounded up to pages, and has a 64 KiB runtime minimum. Guards and storage
+are reclaimed only after Native thread termination; the reaper lives until
+process exit. The main thread adopts the loader's guarded reservation into the
+same SDK stack abstraction. Both main and workers support explicit downward
+growth through `hyper_os::thread::grow_current_stack()` within reserved capacity,
+without moving existing frames. See [SDK stacks](../../lib/README.md#guarded-growable-stacks).
+A guard catches accesses to that page, not arbitrary jumps over it.
 
 ## Filesystem semantics
 
@@ -154,9 +165,9 @@ so replacing an entry with a symlink cannot redirect traversal into its target.
 Concurrent namespace mutation can still make the operation fail partway through.
 
 Timestamps use signed UTC seconds and nanoseconds. Unavailable metadata times
-return `Unsupported` instead of fabricated epoch or uptime values. A missing
-platform wall clock makes the infallible `SystemTime::now` panic; explicit
-metadata times remain usable without an RTC. Shared file mappings, Unix
+return `Unsupported` instead of fabricated epoch or uptime values. Without a usable RTC, the kernel supplies uncalibrated Unix epoch plus uptime
+for `SystemTime::now()` and newly generated file timestamps; RTC absence does
+not panic. This baseline does not represent the actual calendar date. Shared file mappings, Unix
 credentials, and file descriptors are not provided by these interfaces.
 
 ## Subprocesses

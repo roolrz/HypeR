@@ -7,6 +7,7 @@ mod controller;
 pub mod lr;
 pub mod lr_v2;
 pub mod mmio;
+pub mod quiesce;
 mod ready;
 
 pub use controller::{

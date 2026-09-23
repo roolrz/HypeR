@@ -60,6 +60,59 @@ used by Rust. Each pointer must be released through the same process heap.
 Dynamic applications and their DSOs share the allocator in `libhyper.so`;
 static applications use the same implementation from `libhyper.a`.
 
+## Guarded, growable stacks
+
+`<hyper/stack.h>` provides one stack descriptor for the initial thread and
+SDK-created threads. `hyper_stack_current()` borrows the current descriptor;
+`hyper_stack_get_info()` reports its usable range, fixed top and reserved
+capacity. `hyper_stack_grow()` extends downwards without moving existing frames.
+Call it before a deeper workload while sufficient stack headroom remains.
+Growth is explicit, not triggered by a page fault, and never shrinks a stack.
+
+Every reservation has an unmapped page at each end. Uncommitted capacity below
+the usable range also remains unmapped. The main stack reserves at least 8 MiB;
+worker capacity defaults to max(initial size, 1 MiB). These are virtual address
+reservations, not eagerly allocated physical memory. Workers use the Native
+stack arena from `0xf0000000` up to the main reservation; arena exhaustion is
+reported, and reclaimed reservations are reusable. `hyper_stack_create()` and
+`hyper_runtime_thread_spawn_with_stack()` accept an explicit capacity.
+
+The loader supplies the main reservation through INITIAL_STACK_VMAR and stack
+geometry auxiliary entries. Runtime initialization adopts it and removes that
+handle from the application startup view. Both main and worker stacks enter the
+same reservation registry, with heap-allocated descriptors and common ownership,
+query, growth and retirement operations. Only initial reservation creation differs:
+the loader must provide a usable stack before the runtime can execute. Normal
+main return terminates the process, whose address space reclaims its reservation.
+Worker reclamation waits for Native TERMINATED, including detached
+workers, even when an entry exits directly instead of returning through the
+runtime trampoline. One blocking WaitSet watches at most 1024 outstanding
+termination subscriptions; exhausted registration capacity fails spawn before
+start. Consuming termination releases a subscription even before join. Direct
+Native exit still bypasses language/TLS destructors; callers must perform their
+own cleanup. Runtime-owned stacks cannot be destroyed through the public stack API.
+If destruction fails, ownership and the reserved address range remain until a
+successful retry; an already unmapped payload cannot be queried or grown.
+Failed internal cleanup is retained and retried on subsequent creation/release.
+
+Rust applications can use `hyper_os::thread::current_stack()` and
+`grow_current_stack()` on main or `std::thread` workers. Ordinary Rust lifetime,
+TLS destruction and join semantics remain unchanged. Guards detect accesses to
+unmapped pages; they do not make arbitrary jumps beyond a reservation safe.
+
+For example, the same Rust code can run on the main thread or a worker:
+
+```rust
+let stack = hyper_os::thread::current_stack()?;
+let next = stack.size.saturating_add(64 * 1024).min(stack.capacity);
+hyper_os::thread::grow_current_stack(next)?;
+```
+
+`size` is the total desired usable extent, not an increment. Reaching `capacity`
+requires choosing a larger reservation at creation; live frames cannot be moved
+by growing the stack. No main-thread check is needed at the call site.
+
+
 ## Build
 
 HypeR Lib consumes the generated C header from `sdk/abi/`. The include

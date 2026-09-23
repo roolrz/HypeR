@@ -171,6 +171,19 @@ impl FleetManager {
         if let Some(index) = self.clients.iter().position(Option::is_none) {
             self.clients[index] =
                 Some(Client::command(connection.control, connection.capabilities));
+        } else {
+            let bytes = fleet::encode(&Response::Error {
+                message: format!("client limit reached (maximum {MAX_CLIENTS} connections); retry after another client exits"),
+            })
+            .map_err(|_| hyper_os::Error::InvalidResponse)?;
+            // A fresh connection has no earlier server response. Never block
+            // the supervisor on a client that is not reading or has exited.
+            if let Err(error) = connection.control.as_byte_channel().try_send(&bytes) {
+                eprintln!(
+                    "HypeR vm-manager: client limit reached; rejection delivery failed: {error}"
+                );
+            }
+            // Dropping the rejected connection closes both received handles.
         }
         Ok(())
     }
@@ -667,11 +680,20 @@ impl FleetManager {
             autostart: true,
             disk: None,
             read_only: true,
-            placement: Vec::new(),
-            vcpus: observation.map(|(_, count, _, _)| count),
-            memory_bytes: observation.map(|(_, _, bytes, _)| bytes),
-            resident_memory_bytes: observation.and_then(|(_, _, _, bytes)| bytes),
-            state: match observation.map(|(phase, _, _, _)| phase) {
+            placement: observation
+                .filter(|info| info.vcpus != 0)
+                .map(|info| {
+                    vec![fleet::VcpuPlacement {
+                        vcpu: 0,
+                        host_cpu: info.boot_host_cpu,
+                        pending_host_cpu: None,
+                    }]
+                })
+                .unwrap_or_default(),
+            vcpus: observation.map(|info| info.vcpus),
+            memory_bytes: observation.map(|info| info.ram_bytes),
+            resident_memory_bytes: observation.and_then(|info| info.resident_bytes),
+            state: match observation.map(|info| info.phase) {
                 Some(Phase::Installed) => fleet::State::Starting,
                 Some(Phase::Running) => fleet::State::Running,
                 Some(Phase::Stopping) => fleet::State::Stopping,

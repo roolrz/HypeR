@@ -189,7 +189,13 @@ pub(super) fn dispatch_mmio(
         let resolution = match handle_mmio(binding, hardware, interrupts, vcpu_id, access) {
             Ok(Some(outcome)) => resolve_access(access.operation(), outcome),
             Ok(None) => match handle_gic(hardware, interrupts, vcpu_id, access) {
-                Ok(Some(outcome)) => resolve_access(access.operation(), outcome),
+                Ok(Some(outcome)) => {
+                    if crate::hal::vm::interrupt_access_pending(interrupts, vcpu_id) {
+                        Resolution::Action(MmioAction::Deferred)
+                    } else {
+                        resolve_access(access.operation(), outcome)
+                    }
+                }
                 Ok(None) => match binding
                     .route_physical_mmio(access)
                     .or_else(|| binding.route_io_mmio(access))

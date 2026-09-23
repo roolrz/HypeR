@@ -24,6 +24,7 @@ const PIE_MAPPING_BASE: u64 = 0x20_0000;
 const INTERPRETER_MAPPING_BASE: u64 = 0x1000_0000;
 const DYNAMIC_LIBRARY_MAPPING_BASE: u64 = 0x2000_0000;
 const DEFAULT_INITIAL_STACK_SIZE: u64 = 256 * 1024;
+const DEFAULT_INITIAL_STACK_CAPACITY: u64 = 8 * 1024 * 1024;
 pub(crate) const INITIAL_STACK_TOP: u64 = 0xffff_0000;
 // Keep the stack and its guard above the SDK heap reservation.
 const INITIAL_STACK_REGION_BASE: u64 = 0xf000_0000;
@@ -105,12 +106,16 @@ pub(crate) fn load_native(
     let stack_size = executable
         .initial_stack_size(DEFAULT_INITIAL_STACK_SIZE)
         .map_err(Error::Elf)?;
-    let stack_guard = INITIAL_STACK_TOP
-        .checked_sub(stack_size)
-        .and_then(|base| base.checked_sub(PAGE_SIZE))
-        .filter(|guard| *guard >= INITIAL_STACK_REGION_BASE)
-        .ok_or(Error::Address)?;
-    validate_layout(&executable, load_bias, stack_guard)?;
+    let stack = hyper::exec::startup::StackReservation::try_new(
+        INITIAL_STACK_TOP,
+        stack_size,
+        stack_size.max(DEFAULT_INITIAL_STACK_CAPACITY),
+        INITIAL_STACK_REGION_BASE,
+    )
+    .map_err(|_| Error::Address)?;
+    // Keep executable mappings out of the runtime stack arena, including
+    // currently uncommitted worker capacity below the main reservation.
+    validate_layout(&executable, load_bias, INITIAL_STACK_REGION_BASE)?;
 
     let root = UserSlice::new(
         UserAddress::new(USER_ROOT_BASE),
@@ -123,7 +128,7 @@ pub(crate) fn load_native(
         snapshot,
         load_bias,
         initial_stack,
-        stack_size,
+        stack,
         &address_space,
         &domain,
     ) {
@@ -143,7 +148,7 @@ fn prepare_address_space(
     snapshot: &crate::kernel::vfs::ExecutableSnapshot,
     load_bias: u64,
     initial_stack: StartupStackLayout,
-    stack_size: u64,
+    stack: hyper::exec::startup::StackReservation,
     address_space: &NativeAddressSpace,
     domain: &ResourceDomain,
 ) -> Result<ProcessImage, Error> {
@@ -164,11 +169,11 @@ fn prepare_address_space(
         apply_relocations(executable, load_bias, &mut segments)?;
     }
 
-    let stack_base = INITIAL_STACK_TOP
-        .checked_sub(stack_size)
-        .ok_or(Error::Address)?;
-    let stack_range =
-        UserSlice::new(UserAddress::new(stack_base), stack_size).map_err(|_| Error::Address)?;
+    let stack_range = UserSlice::new(UserAddress::new(stack.mapped_base()), stack.size)
+        .map_err(|_| Error::Address)?;
+    let reservation_range = UserSlice::new(UserAddress::new(stack.base), stack.reservation_size())
+        .map_err(|_| Error::Address)?;
+    let stack_vmar = address_space.reserve_initial_stack(reservation_range)?;
     if initial_stack.stack_top() != INITIAL_STACK_TOP
         || initial_stack.stack_pointer() < stack_range.base().get()
         || initial_stack.stack_pointer() >= stack_range.end().get()
@@ -176,7 +181,8 @@ fn prepare_address_space(
     {
         return Err(Error::Address);
     }
-    let stack = NativeImageSegment::try_new(address_space, stack_range, Permissions::read_write())?;
+    let stack_segment =
+        NativeImageSegment::try_new(address_space, stack_range, Permissions::read_write())?;
 
     let pin = crate::kernel::task::scheduler::preempt_disable()?;
     let (entry, interpreter_base) = interpreter.as_ref().map_or(
@@ -187,7 +193,8 @@ fn prepare_address_space(
         address_space,
         segments,
         interpreter.map(|loaded| loaded.segments),
-        stack,
+        stack_segment,
+        stack_vmar,
         &pin,
     );
     // Mapping installation needs CPU affinity, but it does not define a
@@ -210,8 +217,12 @@ fn prepare_address_space(
             program_header_count: u64::from(executable.program_header_count()),
             interpreter_base,
             program_entry,
+            initial_stack_base: stack.base,
+            initial_stack_capacity: stack.capacity,
+            initial_stack_size: stack.size,
         },
     )
+    .map(|image| image.with_initial_stack_vmar(stack_vmar))
     .map_err(Error::Image)
 }
 
@@ -382,6 +393,7 @@ fn install_segments(
     segments: Vec<NativeImageSegment>,
     interpreter: Option<Vec<NativeImageSegment>>,
     stack: NativeImageSegment,
+    stack_vmar: crate::kernel::mm::user_space::Vmar,
     pin: &(impl hyper::cpu::PinnedExecution + 'static),
 ) -> Result<(), Error> {
     for segment in segments {
@@ -392,7 +404,7 @@ fn install_segments(
             segment.install(address_space, pin)?;
         }
     }
-    stack.install(address_space, pin)?;
+    stack.install_in_vmar(address_space, stack_vmar, pin)?;
     Ok(())
 }
 

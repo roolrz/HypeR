@@ -51,7 +51,10 @@ vmm delete test
 
 `vmm` without a subcommand lists definitions. Every control operation requires
 an explicit name from that list. Console attachment applies to that VM alone;
-Ctrl-] opens the detach menu. Delete requires the VM to be stopped and removes
+Ctrl-] opens the detach menu. Guest input uses nonblocking sends and a bounded
+64 KiB pending buffer. If the guest stops consuming input, excess keyboard data
+is discarded with a warning; the detach controls remain responsive. Detaching
+discards input still buffered locally. Delete requires the VM to be stopped and removes
 only its definition, leaving its image intact. Stop cancels a pending restart.
 Start/restart acceptance means the lifecycle request was accepted; use status to
 observe `starting`, `running`, `stopping`, `stopped`, or `failed`.
@@ -98,23 +101,18 @@ components or control characters. Unknown fields are errors. The manager validat
 and opens every image before publishing a batch of definitions. If autostart
 fails afterward, the definitions remain visible with the failed VM state.
 
-`vmm load FILE` imports a config into the running manager. Existing names are
-rejected; a rejected batch adds no definitions. `vmm create` changes the running
-manager only. `vmm save FILE` writes its current definitions to a **new** config
-file. It refuses to overwrite an existing configuration. Failed writes remove
-the new file. Saved files can be
-inspected with `cat` and later imported with `vmm load`.
+VM configuration is managed at deployment time. Board images provide
+`/data/vms.json`; update the board's VM definitions before building the image.
+`vmm create` and `vmm delete` only change the running manager and do not persist
+across reboot. Native test images use `app/init/tests/config/vms.json`.
 
-The current filesystem is ramfs: all changes, including saved configurations,
-disappear at reboot. To change the next image's boot configuration, edit
-`app/init/tests/config/vms.json` on the host and rebuild the initramfs. The first
-autostart VM retains init's boot-critical supervision lease until it first stops;
+The first autostart VM retains init's boot-critical supervision lease until it first stops;
 later instances and additional VMs are supervised independently by the manager.
 
 ## Validation
 
 `make test-apps ARCH=aarch64` checks file tools, error statuses, batch monitoring,
-two simultaneous VMs, name isolation, create/delete, and config save/load through
+two simultaneous VMs, name isolation, and create/delete/restart through
 the real shell. It runs as part of Native CI, alongside the existing startup and
 repeated runtime-crash cleanup tests.
 
@@ -179,7 +177,8 @@ failure. Shell channels are recreated on each launch; the physical transport
 continues to belong to the console services.
 
 On board images, `vmm list` and `vmm status io` include the infrastructure I/O VM
-as read-only. The snapshot reports its lifecycle, vCPU count and guest memory;
+as read-only. The snapshot reports its lifecycle, vCPU count, guest memory and current pCPU
+assignment of its boot vCPU;
 an unavailable management endpoint is reported as `unavailable`, not `stopped`.
 `start`, `stop`, `restart`, `delete`, `affinity` and `console` are not supported for this
 entry. Its lifecycle remains under `io-runtime` ownership.
@@ -192,7 +191,7 @@ This changes affinity, not guest CPU topology, and does not enable automatic
 load balancing. Affinity persists across guest CPU off/on cycles.
 
 Acceptance can precede completion of a running vCPU's handoff. `vmm status alpine`
-reports each vCPU's assigned host CPU and pending target. Assignment does not mean
+reports each vCPU's currently assigned physical CPU (`pCPU`). Assignment does not mean
 the vCPU is executing at that instant. A control timeout reports an unknown
 outcome rather than claiming the affinity update was rejected.
 
@@ -206,7 +205,8 @@ This change does not alter either filesystem's case semantics.
 QEMU loads the hypervisor image directly from the host, so the configuration
 volume contains guest artifacts and configuration, not `hyper.img`. Pi 5 still
 needs its firmware boot files. Existing disks are intentionally preserved by
-`make run`; use the normal `make` image rebuild to refresh their packaged content.
+`make` and `make run`; use `make rebuild` to reset the disk and refresh its
+packaged content. Normal `make` refreshes only the host-side kernel and ramdisk.
 
 `vmm list` and `vmm status NAME` distinguish RAM capacity from **allocated VM
 backing**. Allocation is a live kernel snapshot of resident primary backing:

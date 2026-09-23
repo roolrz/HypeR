@@ -31,6 +31,7 @@ impl RegisterState {
 
     pub const fn read_for_cpu(&self, register: ServiceRegister, cpu: u32, count: u32) -> u64 {
         match register {
+            ServiceRegister::CpuDeactivateV2 => 0,
             ServiceRegister::DistributorControl | ServiceRegister::DistributorControlV2 => {
                 self.distributor_control as u64
             }
@@ -251,16 +252,6 @@ fn read_bitmap(
     register: BitmapRegister,
     first_interrupt: u32,
 ) -> Result<u64, ModelError> {
-    // Active state can reside in hardware list registers while a vCPU runs.
-    // A correct ISACTIVER/ICACTIVER implementation must synchronize that
-    // hardware state before mutation or readback. Model both exact instances
-    // as RAZ/WI until that transaction exists; do not expose stale model state.
-    if matches!(
-        register,
-        BitmapRegister::SetActive | BitmapRegister::ClearActive
-    ) {
-        return Ok(0);
-    }
     let mut value = 0;
     for bit in 0..32u32 {
         let snapshot = snapshot(controller, vcpu, lane(first_interrupt, bit)?)?;
@@ -268,7 +259,7 @@ fn read_bitmap(
             BitmapRegister::Group => snapshot.group == InterruptGroup::Group1,
             BitmapRegister::SetEnable | BitmapRegister::ClearEnable => snapshot.enabled,
             BitmapRegister::SetPending | BitmapRegister::ClearPending => snapshot.pending,
-            BitmapRegister::SetActive | BitmapRegister::ClearActive => false,
+            BitmapRegister::SetActive | BitmapRegister::ClearActive => snapshot.active,
         };
         if set {
             value |= 1 << bit;
@@ -284,13 +275,6 @@ fn write_bitmap(
     first_interrupt: u32,
     value: u64,
 ) -> Result<(), ModelError> {
-    if matches!(
-        register,
-        BitmapRegister::SetActive | BitmapRegister::ClearActive
-    ) {
-        return Ok(());
-    }
-
     // Validate the complete mutation set before changing the first lane. The
     // controller is exclusively borrowed, so these entries cannot disappear
     // between this pass and the infallible-by-construction update pass.
@@ -321,7 +305,8 @@ fn write_bitmap(
             BitmapRegister::ClearEnable => controller.set_enabled(interrupt, target, false)?,
             BitmapRegister::SetPending => controller.inject(interrupt, target)?,
             BitmapRegister::ClearPending => controller.clear_pending(interrupt, target)?,
-            BitmapRegister::SetActive | BitmapRegister::ClearActive => {}
+            BitmapRegister::SetActive => controller.set_active(interrupt, target, true)?,
+            BitmapRegister::ClearActive => controller.set_active(interrupt, target, false)?,
         }
     }
     Ok(())

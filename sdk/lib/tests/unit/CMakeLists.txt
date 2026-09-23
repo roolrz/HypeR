@@ -102,3 +102,24 @@ target_compile_features(hyper-stdio-test PRIVATE c_std_17)
 target_compile_options(hyper-stdio-test PRIVATE -Wall -Wextra -Werror)
 target_include_directories(hyper-stdio-test PRIVATE ../../include ${HYPER_ABI_INCLUDE_DIR})
 add_test(NAME standard-streams COMMAND hyper-stdio-test)
+
+# Real host page protection verifies unmapped stack guards before/after growth.
+add_executable(hyper-stack-test ../../src/stack.c ../../src/startup.c stack.c)
+target_compile_features(hyper-stack-test PRIVATE c_std_17)
+target_compile_options(hyper-stack-test PRIVATE -Wall -Wextra -Werror -UNDEBUG
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/stack-host.h)
+target_include_directories(hyper-stack-test PRIVATE ../../include ${HYPER_ABI_INCLUDE_DIR})
+target_link_libraries(hyper-stack-test PRIVATE Threads::Threads)
+add_test(NAME userspace-stacks COMMAND hyper-stack-test)
+
+add_executable(hyper-runtime-startup-test ../../src/runtime.c ../../src/startup.c runtime-startup.c)
+target_compile_features(hyper-runtime-startup-test PRIVATE c_std_17)
+target_compile_options(hyper-runtime-startup-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_include_directories(hyper-runtime-startup-test PRIVATE ../../include ${HYPER_ABI_INCLUDE_DIR})
+add_test(NAME runtime-startup-ownership COMMAND hyper-runtime-startup-test)
+
+add_executable(hyper-thread-spawn-test thread-spawn.c)
+target_compile_features(hyper-thread-spawn-test PRIVATE c_std_17)
+target_compile_options(hyper-thread-spawn-test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+target_include_directories(hyper-thread-spawn-test PRIVATE ../../include ${HYPER_ABI_INCLUDE_DIR})
+add_test(NAME thread-termination-ownership COMMAND hyper-thread-spawn-test)

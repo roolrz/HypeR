@@ -10,6 +10,7 @@ use super::{VcpuContext, VmInterruptController, vm_timer};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
+    InterruptGateClosed,
     Architecture(super::VgicError),
     Bridge(vm_timer::Error),
     Controller(hyper::vm::arm::gic::RuntimeError),
@@ -61,6 +62,26 @@ impl From<super::lower_el::Error> for Error {
 /// virtual hardware may already be active locally, stage-2 must already select
 /// this VM, and local interrupts must remain masked.
 pub unsafe fn activate(
+    context: &mut VcpuContext,
+    vcpu_id: u32,
+    interrupts: &VmInterruptController,
+    physical_count: u64,
+) -> Result<bool, Error> {
+    if !interrupts.try_enter(VirtualCpuId::new(vcpu_id)) {
+        return Err(Error::InterruptGateClosed);
+    }
+    // SAFETY: The caller owns this detached context; admission above keeps
+    // a concurrent quiesce transaction from completing until we detach.
+    let result = unsafe { activate_admitted(context, vcpu_id, interrupts, physical_count) };
+    if result.is_err() {
+        // No guest instruction ran. The saved model already describes every
+        // LR loaded by the failed activation; release the entry reservation.
+        interrupts.abandon_entry(VirtualCpuId::new(vcpu_id));
+    }
+    result
+}
+
+unsafe fn activate_admitted(
     context: &mut VcpuContext,
     vcpu_id: u32,
     interrupts: &VmInterruptController,
@@ -179,9 +200,7 @@ unsafe fn deactivate_banks(
     // SAFETY: This context owns the live guest system-register bank.
     unsafe { context.deactivate_system_registers() };
     vgic_result?;
-    interrupts.with(|controller| {
-        controller.synchronize(VirtualCpuId::new(vcpu_id), context.vgic.slots())
-    })?;
+    interrupts.synchronize_detached(VirtualCpuId::new(vcpu_id), context.vgic.slots())?;
     vm_timer::reconcile_saved(context, vcpu_id, interrupts, physical_count)?;
     Ok(())
 }
@@ -197,11 +216,12 @@ impl StoppedDeactivationFailure {
     }
 }
 
-pub(crate) fn deliver_software_interrupt(
+pub(crate) fn deliver_software_interrupt_group(
     context: &mut VcpuContext,
     vcpu_id: u32,
     interrupts: &VmInterruptController,
     request: u64,
+    group: Option<hyper::vm::arm::gic::InterruptGroup>,
 ) -> Result<(), Error> {
     const TARGET_LIST_MASK: u64 = 0xffff;
     const AFFINITY_1_SHIFT: u32 = 16;
@@ -244,7 +264,13 @@ pub(crate) fn deliver_software_interrupt(
                     && aff0 < range * 16 + 16
                     && target_list & (1 << (aff0 - range * 16)) != 0
             };
-            if selected {
+            if selected
+                && group.is_none_or(|group| {
+                    controller
+                        .snapshot(interrupt, VirtualCpuId::new(index))
+                        .is_ok_and(|snapshot| snapshot.group == group)
+                })
+            {
                 controller.inject(interrupt, VirtualCpuId::new(index))?;
             }
         }
@@ -398,11 +424,13 @@ pub(crate) fn access_guest_gic(
         super::disable_vgic();
         return Err(GicAccessError::Architecture(error));
     }
+    let split_eoi = context.vgic.split_eoi_mode();
     let result = interrupts.access_saved_bank(
         VirtualCpuId::new(vcpu_id),
         context.vgic.slots_mut(),
         access,
         operation,
+        split_eoi,
     );
     let value = match result {
         Ok(value) => value,
@@ -417,4 +445,51 @@ pub(crate) fn access_guest_gic(
         return Err(GicAccessError::Architecture(error));
     }
     Ok(value)
+}
+
+/// Captures the current CPU-interface state before emulating trapped common
+/// registers. Never read the host's physical ICC state on behalf of a guest.
+pub(crate) fn access_common_register(
+    context: &mut VcpuContext,
+    encoding: super::registers::SystemRegisterEncoding,
+    write: Option<u64>,
+) -> Result<Option<u64>, Error> {
+    // SAFETY: Synchronous guest dispatch owns the local bank with IRQs masked.
+    unsafe { context.deactivate_vgic()? };
+    let result = match write {
+        Some(value) => context.vgic.write_common(encoding, value).then_some(0),
+        None => context.vgic.read_common(encoding),
+    };
+    // SAFETY: The same owner restores the captured bank with validated edits.
+    unsafe { context.activate_vgic()? };
+    Ok(result)
+}
+
+pub(crate) fn deactivate_guest_interrupt(
+    context: &mut VcpuContext,
+    vcpu_id: u32,
+    interrupts: &VmInterruptController,
+    value: u64,
+    v2: bool,
+) -> Result<bool, Error> {
+    // SAFETY: The current trapped guest exclusively owns this masked CPU bank.
+    unsafe { context.deactivate_vgic()? };
+    let interrupt = if v2 {
+        value as u32 & 0x3ff
+    } else {
+        value as u32 & 0xffffff
+    };
+    let source = v2.then_some(((value >> 10) & 7) as u8);
+    let split = context.vgic.split_eoi_mode();
+    let deferred = interrupts.deactivate_saved_bank(
+        VirtualCpuId::new(vcpu_id),
+        context.vgic.slots_mut(),
+        interrupt,
+        source,
+        split,
+    )?;
+    // SAFETY: A deferred request still holds its entry reservation. The runner
+    // subsequently saves/detaches this bank before the transaction can commit.
+    unsafe { context.activate_vgic()? };
+    Ok(deferred)
 }

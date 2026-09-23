@@ -151,6 +151,8 @@ struct Interrupt {
     enabled: bool,
     routed: bool,
     pending_command: PendingCommand,
+    software_active: bool,
+    active_command: Option<bool>,
     list_state: Option<ListState>,
     ready_position: Option<usize>,
     listed_position: Option<usize>,
@@ -171,6 +173,7 @@ impl ReadyEntries for EntryStore<'_> {
     fn rank(&self, index: EntryIndex) -> ReadyRank {
         let entry = &self.0[index.0 as usize];
         ReadyRank {
+            active: entry.software_active,
             priority: entry.priority,
             interrupt: entry.id.get(),
         }
@@ -298,6 +301,8 @@ impl VirtualGicBuilder {
             enabled: false,
             routed: true,
             pending_command: PendingCommand::None,
+            software_active: false,
+            active_command: None,
             list_state: None,
             ready_position: None,
             listed_position: None,
@@ -494,7 +499,8 @@ impl VirtualGic {
 
     fn settle_unlisted(&mut self, index: EntryIndex) -> Result<(), RuntimeError> {
         let entry = &self.entries[index.0 as usize];
-        if entry.list_state.is_some() {
+        if entry.list_state.is_some() || entry.software_active || entry.active_command == Some(true)
+        {
             return Ok(());
         }
         if entry.target != entry.route_target {
@@ -537,6 +543,20 @@ impl VirtualGic {
             }
             entry.list_state = None;
             entry.listed_position = None;
+            entry.software_active = false;
+            entry.active_command = None;
+            self.settle_unlisted(index)?;
+            self.reconcile_ready(index)?;
+        }
+        // Unlisted active interrupts also belong to the retiring bank.
+        for raw in 0..self.entries.len() {
+            let entry = &mut self.entries[raw];
+            if entry.target != vcpu || entry.id.is_private() || !entry.software_active {
+                continue;
+            }
+            entry.software_active = false;
+            entry.active_command = None;
+            let index = EntryIndex(raw as u32);
             self.settle_unlisted(index)?;
             self.reconcile_ready(index)?;
         }
@@ -556,6 +576,8 @@ impl VirtualGic {
                 InterruptTrigger::Level
             };
             entry.pending_command = PendingCommand::None;
+            entry.software_active = false;
+            entry.active_command = None;
             entry.sgi_sources = 0;
             entry.sgi_source = 0;
             entry.line_asserted = false;
@@ -859,6 +881,72 @@ impl VirtualGic {
         Ok(())
     }
 
+    /// Implements a trapped DIR after all potentially owning LR banks were
+    /// synchronized. Unlike ICACTIVER, DIR is disabled in combined EOI mode
+    /// and the `GICv2` SGI source must identify the active instance.
+    pub fn deactivate(
+        &mut self,
+        requester: VirtualCpuId,
+        interrupt: u32,
+        source: Option<u8>,
+        split_eoi: bool,
+    ) -> Result<(), RuntimeError> {
+        self.validate_cpu(requester)?;
+        if !split_eoi {
+            return Ok(());
+        }
+        let Some(id) = GicInterruptId::new(interrupt) else {
+            return Ok(());
+        };
+        let index = match if id.is_private() {
+            self.lookup(id, requester)
+        } else {
+            self.lookup_shared(id)
+        } {
+            Ok(index) => index,
+            Err(RuntimeError::NotConfigured) => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let entry = &self.entries[index.0 as usize];
+        if interrupt < 16 && source.is_some_and(|source| source != entry.sgi_source) {
+            return Ok(());
+        }
+        self.set_active(id, entry.target, false)
+    }
+
+    /// Changes architectural active state without requiring an LR slot.
+    /// The caller synchronizes the relevant hardware bank before access; queued
+    /// commands also survive a later snapshot from a remotely running owner.
+    pub fn set_active(
+        &mut self,
+        interrupt: GicInterruptId,
+        target: VirtualCpuId,
+        active: bool,
+    ) -> Result<(), RuntimeError> {
+        let index = self.lookup(interrupt, target)?;
+        self.validate_ready_position(index)?;
+        if active {
+            self.preflight_ready_insert(index)?;
+        }
+        let entry = &mut self.entries[index.0 as usize];
+        if entry.list_state.is_some() {
+            entry.active_command = Some(active);
+        } else {
+            if active && !entry.software_active && interrupt.get() < 16 {
+                // ISACTIVER carries no source CPU. Give the manufactured
+                // instance the same canonical source in shadow and in an LR.
+                entry.sgi_source = 0;
+            }
+            entry.software_active = active;
+            entry.active_command = None;
+            if !active {
+                self.settle_unlisted(index)?;
+            }
+        }
+        self.changed(index);
+        self.reconcile_ready(index)
+    }
+
     pub fn snapshot(
         &self,
         interrupt: GicInterruptId,
@@ -875,7 +963,9 @@ impl VirtualGic {
             enabled: entry.enabled,
             routed: entry.routed,
             pending: pending || entry.sgi_sources != 0,
-            active: entry.list_state.is_some_and(ListState::active),
+            active: entry.active_command.unwrap_or(
+                entry.software_active || entry.list_state.is_some_and(ListState::active),
+            ),
             listed: entry.list_state.is_some(),
             priority: entry.priority,
             group: entry.group,
@@ -915,6 +1005,9 @@ impl VirtualGic {
             entry.list_state = None;
             entry.listed_position = None;
             if !validated.indices.contains(&Some(index)) {
+                if let Some(active) = entry.active_command.take() {
+                    entry.software_active = active;
+                }
                 self.settle_unlisted(index)?;
             }
             self.reconcile_ready(index)?;
@@ -962,6 +1055,7 @@ impl VirtualGic {
             let entry = &mut self.entries[index.0 as usize];
             let mut state = Some(listed.state);
             state = apply_pending_command(entry, state);
+            state = apply_active_command(entry, state);
             state = apply_disabled_policy(
                 entry,
                 state,
@@ -984,12 +1078,56 @@ impl VirtualGic {
             *slot = Some(listed);
             self.reconcile_ready(index)?;
         }
+        // Prefer active residency over pending-only delivery so normal hardware
+        // EOI handling remains available. Trapped DIR also handles overflow
+        // instances which cannot occupy an LR.
+        if self.deliveries[cpu]
+            .ready
+            .first()
+            .is_some_and(|index| self.entries[index.0 as usize].software_active)
+        {
+            let active_waiting = self
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.target == vcpu && entry.software_active && entry.list_state.is_none()
+                })
+                .count();
+            let free = slots.iter().filter(|slot| slot.is_none()).count();
+            let mut needed = active_waiting.saturating_sub(free);
+            for (slot, index) in slots.iter_mut().zip(validated.indices) {
+                if needed == 0 {
+                    break;
+                }
+                if !slot.is_some_and(|listed| listed.state == ListState::Pending) {
+                    continue;
+                }
+                let Some(index) = index else {
+                    continue;
+                };
+                let entry = &mut self.entries[index.0 as usize];
+                entry.pending_command = PendingCommand::Assert;
+                if entry.id.get() < 16 {
+                    entry.sgi_sources |= 1 << entry.sgi_source;
+                }
+                entry.list_state = None;
+                entry.listed_position = None;
+                *slot = None;
+                self.reconcile_ready(index)?;
+                needed -= 1;
+            }
+        }
         self.rebuild_listed(cpu, &validated)?;
         let mut filled = 0;
-        if !self.distributor_enabled {
-            return Ok(filled);
-        }
         for slot in slots.iter_mut().filter(|slot| slot.is_none()) {
+            if !self.distributor_enabled
+                && !self.deliveries[cpu]
+                    .ready
+                    .first()
+                    .is_some_and(|index| self.entries[index.0 as usize].software_active)
+            {
+                break;
+            }
             let index = {
                 let (entries, deliveries) = (&mut self.entries, &mut self.deliveries);
                 deliveries[cpu].ready.pop(&mut EntryStore(entries))
@@ -998,14 +1136,38 @@ impl VirtualGic {
                 break;
             };
             let entry = &mut self.entries[index.0 as usize];
-            entry.pending_command = PendingCommand::None;
-            entry.sgi_source = if entry.sgi_sources != 0 {
-                entry.sgi_sources.trailing_zeros() as u8
+            let active = entry.software_active;
+            let pending = entry.pending_command == PendingCommand::Assert
+                && entry.enabled
+                && entry.routed
+                && entry.target == entry.route_target
+                && self.distributor_enabled
+                && (!active
+                    || entry.id.get() >= 16
+                    || entry.sgi_sources & (1 << entry.sgi_source) != 0);
+            if pending {
+                entry.pending_command = PendingCommand::None;
+            }
+            entry.software_active = false;
+            if !active {
+                entry.sgi_source = if entry.sgi_sources != 0 {
+                    entry.sgi_sources.trailing_zeros() as u8
+                } else {
+                    0
+                };
+            }
+            if pending {
+                entry.sgi_sources &= !(1 << entry.sgi_source);
+            }
+            let state = if active {
+                if pending {
+                    ListState::PendingActive
+                } else {
+                    ListState::Active
+                }
             } else {
-                0
+                ListState::Pending
             };
-            entry.sgi_sources &= !(1 << entry.sgi_source);
-            let state = ListState::Pending;
             entry.list_state = Some(state);
             entry.listed_position = Some(self.deliveries[cpu].listed.len());
             self.deliveries[cpu]
@@ -1048,10 +1210,11 @@ impl VirtualGic {
 
     fn reconcile_ready(&mut self, index: EntryIndex) -> Result<(), RuntimeError> {
         let entry = &self.entries[index.0 as usize];
-        let should = entry.enabled
-            && entry.routed
-            && entry.pending_command == PendingCommand::Assert
-            && entry.list_state.is_none();
+        let should = entry.list_state.is_none()
+            && (entry.software_active
+                || (entry.enabled
+                    && entry.routed
+                    && entry.pending_command == PendingCommand::Assert));
         let present = entry.ready_position.is_some();
         let cpu = entry.target.get() as usize;
         match (present, should) {
@@ -1067,6 +1230,12 @@ impl VirtualGic {
                 deliveries[cpu]
                     .ready
                     .remove(index, &mut EntryStore(entries));
+            }
+            (true, true) => {
+                let (entries, deliveries) = (&mut self.entries, &mut self.deliveries);
+                deliveries[cpu]
+                    .ready
+                    .reprioritize(index, &mut EntryStore(entries));
             }
             _ => {}
         }
@@ -1257,6 +1426,7 @@ impl ReadyEntries for EntryView<'_> {
     fn rank(&self, index: EntryIndex) -> ReadyRank {
         let entry = &self.0[index.0 as usize];
         ReadyRank {
+            active: entry.software_active,
             priority: entry.priority,
             interrupt: entry.id.get(),
         }
@@ -1298,10 +1468,31 @@ const fn shared_offset(interrupt: GicInterruptId) -> usize {
     interrupt.get() as usize - PRIVATE_INTERRUPT_COUNT
 }
 
+fn apply_active_command(entry: &mut Interrupt, state: Option<ListState>) -> Option<ListState> {
+    let Some(active) = entry.active_command.take() else {
+        return state;
+    };
+    match (active, state.is_some_and(ListState::pending)) {
+        (true, true) => Some(ListState::PendingActive),
+        (true, false) => Some(ListState::Active),
+        (false, true) => Some(ListState::Pending),
+        (false, false) => None,
+    }
+}
+
 fn apply_pending_command(entry: &mut Interrupt, state: Option<ListState>) -> Option<ListState> {
     match entry.pending_command {
         PendingCommand::None => state,
         PendingCommand::Assert if entry.enabled => {
+            // One LR can represent only one GICv2 SGI source. Keep other
+            // sources queued until this active instance has been deactivated.
+            if entry.id.get() < 16
+                && state.is_some_and(ListState::active)
+                && entry.sgi_sources != 0
+                && entry.sgi_sources & (1 << entry.sgi_source) == 0
+            {
+                return state;
+            }
             let state = match state {
                 None => None,
                 Some(ListState::Active) => Some(ListState::PendingActive),
@@ -1309,6 +1500,11 @@ fn apply_pending_command(entry: &mut Interrupt, state: Option<ListState>) -> Opt
             };
             if state.is_some_and(ListState::pending) {
                 entry.pending_command = PendingCommand::None;
+                if entry.id.get() < 16 {
+                    // This pending instance now lives in the LR. Leaving its
+                    // source in the software queue would deliver it twice.
+                    entry.sgi_sources &= !(1 << entry.sgi_source);
+                }
             }
             state
         }

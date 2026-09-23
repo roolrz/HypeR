@@ -139,6 +139,7 @@ from the repository root:
 
 ```sh
 make defconfig
+make
 make run
 ```
 

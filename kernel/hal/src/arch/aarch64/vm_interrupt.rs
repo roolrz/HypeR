@@ -56,6 +56,7 @@ pub struct VmInterruptController {
 struct ControllerState {
     controller: VirtualGic,
     registers: RegisterState,
+    active_access: hyper::vm::arm::gic::quiesce::ActiveAccessQuiesce,
 }
 
 impl VmInterruptController {
@@ -66,7 +67,11 @@ impl VmInterruptController {
             SHARED_ENTRIES,
             list_registers,
         )
-        .map_err(Error::Build)
+        .map_err(Error::Build)?
+        .checked_add(
+            hyper::vm::arm::gic::quiesce::ActiveAccessQuiesce::allocation_requirement(vcpu_count),
+        )
+        .ok_or(Error::Build(VgicBuildError::Allocation))
     }
 
     pub fn new(
@@ -117,7 +122,14 @@ impl VmInterruptController {
             )?;
         }
         let mut controller = builder.finish(list_registers)?;
-        if controller.allocation_size() != Some(expected_allocation) {
+        if controller.allocation_size().and_then(|size| {
+            size.checked_add(
+                hyper::vm::arm::gic::quiesce::ActiveAccessQuiesce::allocation_requirement(
+                    vcpu_count,
+                ),
+            )
+        }) != Some(expected_allocation)
+        {
             return Err(Error::Build(VgicBuildError::InvalidStoragePlan));
         }
         for index in 0..vcpu_count {
@@ -137,10 +149,13 @@ impl VmInterruptController {
                 }
             }
         }
+        let active_access = hyper::vm::arm::gic::quiesce::ActiveAccessQuiesce::try_new(vcpu_count)
+            .map_err(Error::Build)?;
         Ok(Self {
             state: InterruptSpinLock::new(ControllerState {
                 controller,
                 registers: RegisterState::new(),
+                active_access,
             }),
             timer_interrupt,
             vcpu_count,
@@ -149,6 +164,7 @@ impl VmInterruptController {
 
     /// Requires the caller to have detached and retired the old hardware bank.
     pub fn reset_vcpu(&self, vcpu: VirtualCpuId) -> Result<(), VgicError> {
+        self.cancel_active_access(vcpu.get());
         let v2 = super::vgic::v2::guest_physical().is_some();
         self.with(|controller| {
             controller.reset_vcpu(
@@ -165,7 +181,9 @@ impl VmInterruptController {
     }
 
     pub fn take_reconcile_targets(&self) -> u64 {
-        self.with(VirtualGic::take_reconcile_targets)
+        self.state.with(|state| {
+            state.controller.take_reconcile_targets() | state.active_access.take_prompts()
+        })
     }
 
     pub(crate) fn enable_distributor_for_validation(&self) {
@@ -182,11 +200,63 @@ impl VmInterruptController {
     }
 
     pub fn allocation_size(&self) -> Option<usize> {
-        self.state.with(|state| state.controller.allocation_size())
+        self.state.with(|state| {
+            state
+                .controller
+                .allocation_size()
+                .and_then(|size| size.checked_add(state.active_access.allocation_size()))
+        })
     }
 
     pub(super) fn with<R>(&self, operation: impl FnOnce(&mut VirtualGic) -> R) -> R {
         self.state.with(|state| operation(&mut state.controller))
+    }
+
+    pub(super) fn try_enter(&self, vcpu: VirtualCpuId) -> bool {
+        self.state.with(|state| state.active_access.try_enter(vcpu))
+    }
+
+    pub(super) fn abandon_entry(&self, vcpu: VirtualCpuId) {
+        self.state
+            .with(|state| state.active_access.bank_saved(vcpu, &mut state.controller));
+    }
+
+    pub(super) fn synchronize_detached(
+        &self,
+        vcpu: VirtualCpuId,
+        slots: &[Option<ListEntry>],
+    ) -> Result<(), VgicError> {
+        self.state.with(|state| {
+            state.controller.synchronize(vcpu, slots)?;
+            state.active_access.bank_saved(vcpu, &mut state.controller);
+            Ok(())
+        })
+    }
+
+    pub fn entry_gate_closed(&self) -> bool {
+        self.state.with(|state| state.active_access.gate_closed())
+    }
+
+    pub fn active_access_pending(&self, vcpu: u32) -> bool {
+        self.state
+            .with(|state| state.active_access.pending(VirtualCpuId::new(vcpu)))
+    }
+
+    pub fn take_active_access(&self, vcpu: u32) -> Option<Result<Option<u64>, AccessError>> {
+        self.state.with(|state| {
+            state
+                .active_access
+                .take(VirtualCpuId::new(vcpu))
+                .map(|result| result.map_err(AccessError::Model))
+        })
+    }
+
+    pub fn cancel_active_access(&self, vcpu: u32) {
+        self.state.with(|state| {
+            state
+                .active_access
+                .cancel(VirtualCpuId::new(vcpu), &mut state.controller)
+        });
     }
 
     pub fn timer_snapshot(&self, vcpu: VirtualCpuId) -> Result<InterruptSnapshot, VgicError> {
@@ -198,13 +268,53 @@ impl VmInterruptController {
         self.state.with(|state| state.controller.may_wake_wfi(vcpu))
     }
 
+    pub(super) fn deactivate_saved_bank(
+        &self,
+        vcpu: VirtualCpuId,
+        slots: &mut [Option<ListEntry>],
+        interrupt: u32,
+        source: Option<u8>,
+        split_eoi: bool,
+    ) -> Result<bool, VgicError> {
+        self.state.with(|state| {
+            state.controller.synchronize(vcpu, slots)?;
+            if split_eoi && (32..1020).contains(&interrupt) {
+                state
+                    .active_access
+                    .begin_deactivate(vcpu, interrupt, source, split_eoi)?;
+                return Ok(true);
+            }
+            state
+                .controller
+                .deactivate(vcpu, interrupt, source, split_eoi)?;
+            state.controller.refill(vcpu, slots)?;
+            Ok(false)
+        })
+    }
+
     pub(super) fn access_saved_bank(
         &self,
         vcpu: VirtualCpuId,
         slots: &mut [Option<ListEntry>],
         access: hyper::vm::arm::gic::mmio::DecodedAccess,
         operation: MmioOperation,
+        split_eoi: bool,
     ) -> Result<Option<u64>, AccessError> {
+        if let (
+            DecodedRegister::Service(hyper::vm::arm::gic::mmio::ServiceRegister::CpuDeactivateV2),
+            MmioOperation::Write(value),
+        ) = (access.register(), operation)
+        {
+            self.deactivate_saved_bank(
+                vcpu,
+                slots,
+                value as u32 & 0x3ff,
+                Some(((value >> 10) & 7) as u8),
+                split_eoi,
+            )
+            .map_err(AccessError::Controller)?;
+            return Ok(None);
+        }
         self.state.with(|state| {
             state
                 .controller
@@ -212,6 +322,26 @@ impl VmInterruptController {
                 .map_err(AccessError::Controller)?;
             let register = access.register();
             let bank = VirtualCpuId::new(access.redistributor().unwrap_or(vcpu.get()));
+            // Only local private active registers are authoritative after
+            // this bank's synchronization. Shared and remote-private accesses
+            // quiesce all banks, because shared IRQ ownership may migrate.
+            if let DecodedRegister::Model(model) = register {
+                use hyper::vm::arm::gic::mmio::{BitmapRegister, ModelRegisterDescriptor};
+                if let ModelRegisterDescriptor::Bitmap {
+                    register: BitmapRegister::SetActive | BitmapRegister::ClearActive,
+                    first_interrupt,
+                } = model.descriptor()
+                    && (first_interrupt >= 32 || bank != vcpu)
+                {
+                    state
+                        .active_access
+                        .begin(vcpu, bank, model, operation)
+                        .map_err(AccessError::Controller)?;
+                    // The caller still owns its live bank and must detach
+                    // before this request can execute or be completed.
+                    return Ok(None);
+                }
+            }
             let value = match (register, operation) {
                 (DecodedRegister::Service(register), MmioOperation::Read) => Some(
                     state

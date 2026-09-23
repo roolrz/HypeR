@@ -185,49 +185,60 @@ fn guest_irq_tail(tail: crate::hal::exception::IrqTailCapability) {
             ));
         }
         let execution = typed_vcpu_execution(resumed);
-        // SAFETY: ordinary IRQ-tail deactivation completed before scheduling,
-        // the query above returned the exact current continuation, and local
-        // interrupts remain masked.
-        let stopped = match unsafe {
-            crate::kernel::vm::vcpu::complete_detached_stop_if_requested(resumed)
-        } {
-            Ok(stopped) => stopped,
-            Err(error) => fail_detached_stop(error),
-        };
-        if stopped {
-            // Nonreturning scheduler exit lets the suspended continuation
-            // unwind through its normal Thread destruction/reap path without
-            // ever restoring guest hardware.
-            crate::kernel::task::scheduler::exit_current()
-        }
-        // SAFETY: This continuation can resume only when its pinned vCPU Thread
-        // is current again. The preceding deactivation removed all local
-        // architectural ownership, and interrupts are still masked.
-        if let Err(error) = unsafe { crate::kernel::vm::vcpu::activate(execution) } {
-            if error
-                == crate::kernel::vm::vcpu::HardwareTransitionError::Execution(
-                    crate::kernel::vm::registry::VmExecutionError::AdmissionClosed,
-                )
-            {
-                // Admission is closed only after every bound endpoint has an
-                // exact durable stop request. Recheck that authority instead
-                // of treating an unrelated close as a graceful guest exit.
-                // SAFETY: activation failed before publication and hardware
-                // ownership, while the exact current vCPU remains pinned.
-                let stopped = match unsafe {
-                    crate::kernel::vm::vcpu::complete_detached_stop_if_requested(resumed)
-                } {
-                    Ok(stopped) => stopped,
-                    Err(error) => fail_detached_stop(error),
-                };
-                if stopped {
-                    crate::kernel::task::scheduler::exit_current()
-                }
-                crate::kernel::crash::fatal(format_args!(
-                    "HypeR: IRQ-tail VM admission closed without an exact vCPU stop request"
-                ));
+        loop {
+            // SAFETY: ordinary IRQ-tail deactivation completed before scheduling,
+            // the query above returned the exact current continuation, and local
+            // interrupts remain masked.
+            let stopped = match unsafe {
+                crate::kernel::vm::vcpu::complete_detached_stop_if_requested(resumed)
+            } {
+                Ok(stopped) => stopped,
+                Err(error) => fail_detached_stop(error),
+            };
+            if stopped {
+                // Nonreturning scheduler exit lets the suspended continuation
+                // unwind through its normal Thread destruction/reap path without
+                // ever restoring guest hardware.
+                crate::kernel::task::scheduler::exit_current()
             }
-            fail_vcpu_tail("failed to reactivate interrupted vCPU", error)
+            // SAFETY: This continuation can resume only when its pinned vCPU Thread
+            // is current again. The preceding deactivation removed all local
+            // architectural ownership, and interrupts are still masked.
+            if let Err(error) = unsafe { crate::kernel::vm::vcpu::activate(execution) } {
+                if error == crate::kernel::vm::vcpu::HardwareTransitionError::InterruptGateClosed {
+                    // SAFETY: Failed admission retains no live hardware or claim.
+                    // The suspended Thread owns this exact pinned execution.
+                    unsafe {
+                        crate::kernel::vm::vcpu::wait_for_interrupt_gate(execution, resumed.thread);
+                    }
+                    continue;
+                }
+                if error
+                    == crate::kernel::vm::vcpu::HardwareTransitionError::Execution(
+                        crate::kernel::vm::registry::VmExecutionError::AdmissionClosed,
+                    )
+                {
+                    // Admission is closed only after every bound endpoint has an
+                    // exact durable stop request. Recheck that authority instead
+                    // of treating an unrelated close as a graceful guest exit.
+                    // SAFETY: activation failed before publication and hardware
+                    // ownership, while the exact current vCPU remains pinned.
+                    let stopped = match unsafe {
+                        crate::kernel::vm::vcpu::complete_detached_stop_if_requested(resumed)
+                    } {
+                        Ok(stopped) => stopped,
+                        Err(error) => fail_detached_stop(error),
+                    };
+                    if stopped {
+                        crate::kernel::task::scheduler::exit_current()
+                    }
+                    crate::kernel::crash::fatal(format_args!(
+                        "HypeR: IRQ-tail VM admission closed without an exact vCPU stop request"
+                    ));
+                }
+                fail_vcpu_tail("failed to reactivate interrupted vCPU", error)
+            }
+            break;
         }
     }
 }

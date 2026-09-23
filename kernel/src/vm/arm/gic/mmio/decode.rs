@@ -13,6 +13,7 @@ const FRAME_SIZE: u64 = 0x0001_0000;
 pub enum Frame {
     Distributor,
     DistributorV2,
+    CpuDeactivateV2,
     RedistributorControl,
     RedistributorSgi,
 }
@@ -41,6 +42,7 @@ impl InterruptRoute {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ServiceRegister {
+    CpuDeactivateV2,
     DistributorControl,
     DistributorControlV2,
     DistributorTypeV2,
@@ -271,12 +273,24 @@ pub fn decode_v3_cpus(
     })
 }
 
-/// Decodes the `GICv2` distributor. GICV is a hardware stage-2 mapping.
+/// Decodes the distributor and trapped DIR page. The first GICV page
+/// remains a hardware stage-2 mapping.
 pub fn decode_v2(
     address: GuestPhysicalAddress,
     width: AccessWidth,
 ) -> Result<Option<DecodedAccess>, DecodeError> {
     let address = address.get();
+    let dir_base =
+        hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GICV2_CPU_BASE + 0x1000;
+    if (dir_base..dir_base + 0x1000).contains(&address) {
+        if address
+            .checked_add(width.bytes() as u64)
+            .is_none_or(|end| end > dir_base + 0x1000)
+        {
+            return Err(DecodeError::CrossesFrame);
+        }
+        return decode_frame(Frame::CpuDeactivateV2, address - dir_base, width).map(Some);
+    }
     let base = u64::from(DISTRIBUTOR_BASE);
     if !(base..base + 0x1000).contains(&address) {
         return Ok(None);
@@ -397,6 +411,14 @@ fn decode_frame(
 ) -> Result<DecodedAccess, DecodeError> {
     let offset = u32::try_from(offset).map_err(|_| DecodeError::CrossesFrame)?;
     let register = match frame {
+        Frame::CpuDeactivateV2 => fixed(
+            offset,
+            width,
+            0,
+            AccessWidth::Word,
+            ServiceRegister::CpuDeactivateV2,
+        )
+        .unwrap_or(Ok(DecodedRegister::Reserved))?,
         Frame::Distributor => decode_distributor(offset, width)?,
         Frame::DistributorV2 => decode_distributor_v2(offset, width)?,
         Frame::RedistributorControl => decode_redistributor_control(offset, width)?,

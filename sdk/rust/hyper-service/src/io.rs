@@ -136,14 +136,17 @@ pub fn send_capabilities(
 }
 
 /// Read-only broker observation; no VM/control capability crosses this exchange.
-pub const OBSERVE_MESSAGE: &[u8] = b"HIOSTAT1";
-pub const OBSERVATION_BYTES: usize = 32;
+pub const OBSERVE_MESSAGE: &[u8] = b"HIOSTAT2";
+pub const OBSERVATION_BYTES: usize = 40;
 
 /// RAM is supplied by the owner: the VM address-space span also includes MMIO
 /// and shared guest-memory windows, and is not a resident-memory statistic.
+/// Placement observes vCPU 0 of the current single-vCPU I/O service. A missing
+/// CPU means unavailable, never an assumed CPU 0 assignment.
 pub fn encode_observation(
     info: hyper_os::vm::VirtualMachineInfo,
     ram_bytes: u64,
+    boot_host_cpu: Option<u32>,
 ) -> [u8; OBSERVATION_BYTES] {
     use hyper_os::vm::VirtualMachinePhase;
     let mut bytes = [0; OBSERVATION_BYTES];
@@ -157,14 +160,26 @@ pub fn encode_observation(
     bytes[12..16].copy_from_slice(&info.vcpu_count.to_le_bytes());
     bytes[16..24].copy_from_slice(&ram_bytes.to_le_bytes());
     bytes[24..32].copy_from_slice(&info.resident_memory_bytes.unwrap_or(u64::MAX).to_le_bytes());
+    bytes[32..36].copy_from_slice(&boot_host_cpu.unwrap_or(u32::MAX).to_le_bytes());
     bytes
 }
 
-pub fn decode_observation(
-    bytes: &[u8],
-) -> Option<(hyper_os::vm::VirtualMachinePhase, u32, u64, Option<u64>)> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Observation {
+    pub phase: hyper_os::vm::VirtualMachinePhase,
+    pub vcpus: u32,
+    pub ram_bytes: u64,
+    pub resident_bytes: Option<u64>,
+    /// Current assignment of the I/O VM's boot vCPU (vCPU 0).
+    pub boot_host_cpu: Option<u32>,
+}
+
+pub fn decode_observation(bytes: &[u8]) -> Option<Observation> {
     use hyper_os::vm::VirtualMachinePhase;
-    if bytes.len() != OBSERVATION_BYTES || &bytes[..8] != OBSERVE_MESSAGE || bytes[9..12] != [0; 3]
+    if bytes.len() != OBSERVATION_BYTES
+        || &bytes[..8] != OBSERVE_MESSAGE
+        || bytes[9..12] != [0; 3]
+        || bytes[36..40] != [0; 4]
     {
         return None;
     }
@@ -175,13 +190,17 @@ pub fn decode_observation(
         3 => VirtualMachinePhase::Stopped,
         _ => return None,
     };
-    Some((
+    Some(Observation {
         phase,
-        u32::from_le_bytes(bytes[12..16].try_into().ok()?),
-        u64::from_le_bytes(bytes[16..24].try_into().ok()?),
-        match u64::from_le_bytes(bytes[24..32].try_into().ok()?) {
+        vcpus: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
+        ram_bytes: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
+        resident_bytes: match u64::from_le_bytes(bytes[24..32].try_into().ok()?) {
             u64::MAX => None,
             bytes => Some(bytes),
         },
-    ))
+        boot_host_cpu: match u32::from_le_bytes(bytes[32..36].try_into().ok()?) {
+            u32::MAX => None,
+            cpu => Some(cpu),
+        },
+    })
 }

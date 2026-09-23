@@ -31,7 +31,7 @@ pub(super) unsafe fn wait(
             }
             Ok(Some(action)) => {
                 if let Err(error) =
-                    crate::hal::vm::complete_mmio_call(&mut current.hardware, action)
+                    crate::hal::vm::complete_device_call(&mut current.hardware, action)
                 {
                     crate::kernel::crash::fatal(format_args!(
                         "invalid detached MMIO completion: {error:?}"
@@ -59,6 +59,57 @@ pub(super) unsafe fn wait(
             Err(error) => crate::kernel::crash::fatal(format_args!(
                 "MMIO continuation park failed: {error:?}"
             )),
+        }
+    }
+}
+
+/// An internal controller transaction waits with all of this vCPU's hardware
+/// detached. In particular it cannot prevent an oversubscribed peer from
+/// running its save path on this same host CPU.
+pub(super) unsafe fn wait_interrupt_access(
+    execution: *mut VcpuExecution,
+    thread: crate::kernel::task::thread::ThreadId,
+) -> bool {
+    loop {
+        // SAFETY: This continuation owns the scheduler-pinned detached payload.
+        let current = unsafe { &*execution };
+        let Some(binding) = current.vm_binding() else {
+            hyper::debug::invariant_failure("vGIC continuation missing binding");
+        };
+        let ticket = binding
+            .wfi_wait_ticket(current.vcpu_id)
+            .unwrap_or_else(|_| hyper::debug::invariant_failure("vGIC wait ticket"));
+        if let Some(reason) = super::runner::administrative_stop_reason(execution, thread) {
+            crate::hal::vm::cancel_interrupt_access(binding.interrupts(), current.vcpu_id);
+            binding.publish_changed_interrupts();
+            super::runner::finish_inactive_administrative_stop(execution, thread, reason);
+            return false;
+        }
+        if let Some(action) =
+            crate::hal::vm::take_interrupt_access(binding.interrupts(), current.vcpu_id)
+        {
+            if action == hyper::vm::exit::MmioAction::Stop {
+                crate::kernel::vm::installed::InstalledMachine::request_stop(&binding.lifecycle());
+                continue;
+            }
+            // SAFETY: No binding borrow survives into the exclusive saved-frame update.
+            let current = unsafe { &mut *execution };
+            if let Err(error) = crate::hal::vm::complete_device_call(&mut current.hardware, action)
+            {
+                crate::kernel::crash::fatal(format_args!(
+                    "invalid GIC device completion: {error:?}"
+                ));
+            }
+            return true;
+        }
+        match binding.prepare_wfi_wait(current.vcpu_id, ticket) {
+            Ok(crate::kernel::vm::endpoint::PreparedWait::Park(park)) => {
+                let _ = park.complete();
+            }
+            Ok(_) => {}
+            Err(error) => {
+                crate::kernel::crash::fatal(format_args!("GIC MMIO park failed: {error:?}"))
+            }
         }
     }
 }

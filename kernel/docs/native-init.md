@@ -98,15 +98,21 @@ segment mappings and input image size are each limited to 64 MiB. The initial
 Thread receives a read/write, non-executable stack below `0xffff0000`.
 The main executable's `PT_GNU_STACK.p_memsz` requests its size in bytes;
 a missing header or zero selects 256 KiB. The loader rounds up to a page,
-rejects duplicate or executable stack headers, and checks that both the stack
-and its lower unmapped guard page remain above the SDK heap ending at
-`0xf0000000`. The interpreter's stack declaration does not override the main
+rejects duplicate or executable stack headers, and reserves a dedicated VMAR
+with capacity max(initial size, 8 MiB) and an unmapped guard page at each end.
+Only the initial extent is mapped. The whole reservation remains above
+`0xf0000000`; executable mappings must stay below that stack arena. The interpreter's stack declaration does not override the main
 executable. Startup arguments must fit in the selected extent; allocation and
 committed-page charges remain subject to the process ResourceDomain limits.
 Oversized or invalid requests fail before process publication. Its 16-byte-aligned entry stack follows
 the LP64 System V ordering for `argc`, `argv`, `envp`, and `auxv`. HypeR-private
 auxiliary entries point to a bounded array of generated, fixed-width startup
-handle records. TLS starts at zero. Before application entry, the SDK CRT reserves
+handle records. INITIAL_STACK_VMAR plus the initial-stack base/capacity/size
+auxiliary entries transfer the guarded reservation to the SDK. Its application
+startup view omits this runtime-owned handle. The SDK adopts main and worker
+stacks into the same fixed-top, explicit downward-growth abstraction; the
+worker arena occupies `0xf0000000` through the main reservation base. TLS starts
+at zero. Before application entry, the SDK CRT reserves
 `[0xe0000000, 0xf0000000)` under ROOT_VMAR for the process heap. This is separate
 from the loader's `[0x20000000, 0xe0000000)` library range; backing pages are
 mapped only on allocation. The kernel still owns the root address space and

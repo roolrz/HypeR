@@ -81,8 +81,10 @@ require_order "$fixture/activate.rs" \
     'super::timer::set_host_timer_enabled\(!timer_asserted\)' \
     'super::active_vcpu::set_raw\(' \
     'the active vCPU must be published only after timer programming succeeds'
+# Ownership release is required for both deferred admission and hardware errors;
+# the returned error classification is not part of this lifetime contract.
 require_in "$fixture/activate.rs" \
-    '(?s)Err\(error\)[[:space:]]*=>[[:space:]]*\{.*?release_execution_or_fail\(execution, execution_claim\);[[:space:]]*return Err\(HardwareTransitionError::Hardware\(error\)\);' \
+    '(?s)Err\(error\)[[:space:]]*=>[[:space:]]*\{.*?release_execution_or_fail\(execution, execution_claim\);[[:space:]]*return Err\(' \
     'hardware activation failure must release VM execution before returning'
 require_in "$fixture/activate.rs" \
     'if let Err\(timer\) = super::timer::set_host_timer_enabled\(!timer_asserted\)[^}]*deactivate_hardware\([^;]*\)[[:space:]]*\};[[:space:]]*match rollback' \

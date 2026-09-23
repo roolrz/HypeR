@@ -273,6 +273,36 @@ VMIDs are separately leased and recycled through rollover epochs. See
 [guest power requests and SMP](vm-bundle.md#guest-power-requests-and-smp) for the
 Native completion protocol and vm-runtime/vm-manager responsibilities.
 
+Arm virtual GIC active-state registers (`ISACTIVER` and `ICACTIVER`) share
+the interrupt model with hardware list-register residency. Local private
+accesses synchronize the caller's bank directly. Shared or remote private
+accesses temporarily close that VM's guest-entry gate and prompt its resident
+vCPUs to save their banks. The register transaction runs after those banks
+detach, then entry reopens. This is independent of PSCI power state and VM
+administrative stop; unrelated VMs continue to run. Waiting happens only in
+scheduler-owned, hardware-detached continuations, including when several guest
+CPUs share one physical CPU. Maintenance interrupts and ordinary exits use the
+same bank synchronization path; maintenance alone cannot guarantee a fresh
+snapshot on demand.
+
+Software-set active interrupts take precedence over pending-only entries when
+assigning list registers. Existing active entries are never evicted to admit
+another interrupt. Active state beyond hardware LR capacity remains in the
+software model. Both `ICACTIVER` and split-EOI `DIR` clear that state, including
+interrupts absent from the hardware bank. DIR preserves pending state and, for
+GICv2 SGIs, checks the source CPU of the active instance. Shared-SPI DIR uses the
+same detached-bank transaction as shared active-register writes.
+
+GICv2 exposes the first CPU-interface page directly and traps the second page
+containing DIR. GICv3 traps DIR with `ICH_HCR_EL2.TDIR` when the destination CPU
+supports it; otherwise it uses the common-register trap (`TC`). The latter also
+emulates PMR, CTLR and RPR from the saved guest VMCR/APRs, never from host ICC
+registers. SGI register traps respect the virtual GIC's single-security-state
+group rules. This compatibility path costs additional traps; it does not drop
+nonresident active interrupts or infer an interrupt ID from maintenance
+`EOIcount`, which carries no ID. Ordinary acknowledged active LRs remain resident
+until deactivation, so combined-EOI handling remains in hardware.
+
 ## Kernel-object ownership
 
 Kernel objects are the standard identity mechanism for service entities with

@@ -8,7 +8,8 @@ SPDX-License-Identifier: Apache-2.0
 Scheduler deadlines, sleeps, and timeouts use the existing monotonic clock.
 `clock_get_realtime` separately returns UTC as signed Unix seconds plus
 nanoseconds in `0..1_000_000_000`. The SDK maps this to Native timestamps and
-Rust `SystemTime`; it does not reinterpret uptime as a calendar date.
+Rust `SystemTime`. Without a usable RTC, wall time starts at the Unix epoch
+and advances with uptime; this is an uncalibrated clock, not the actual date.
 
 On platforms describing an `arm,pl031` RTC in their device tree, kernel device
 discovery binds its permanent MMIO resource to a read-only PL031 driver. The
@@ -33,15 +34,18 @@ a real calendar time; a fabricated kernel timestamp is unnecessary. See the
 [QEMU RTC options](https://www.qemu.org/docs/master/system/qemu-manpage.html)
 and [virt platform documentation](https://www.qemu.org/docs/master/system/arm/virt.html).
 
-Missing, disabled, unmappable RTCs or rejected calibration samples leave UTC
-unavailable. MMIO bus faults are not converted into optional-clock absence. Native
-calls then return `NotSupported`; APIs with an error channel propagate it.
-Rust's infallible `SystemTime::now()` follows the platform unsupported panic
-path. Secondary architectures continue to compile without claiming an RTC
-source their platform has not supplied.
+Missing, disabled, unmappable RTCs or rejected calibration samples use the
+uncalibrated baseline (Unix epoch plus monotonic uptime), with a boot warning.
+Native calls, Rust `SystemTime::now()` and newly generated filesystem timestamps
+all use this same clock. RTC absence alone does not return `NotSupported` or
+panic. MMIO bus faults are not converted into optional-clock absence. A missing
+monotonic clock or timestamp arithmetic failure still reports an error.
+The fallback is not suitable as trusted UTC for certificate validity or audit
+correlation. Deadlines continue to use the separate monotonic API.
 
-Host tests cover timestamp normalization and arithmetic. QEMU integration must
-verify real-time reads and filesystem timestamps through the installed std
-adapter. Physical hardware qualification must additionally confirm device-tree
+Host tests cover timestamp normalization and arithmetic.
+`make test-clock ARCH=aarch64` checks the installed std adapter both with a
+PL031 RTC and with its device-tree node disabled (requires `fdtput`). The
+no-RTC case verifies advancing time, file timestamps, and thread creation. Physical hardware qualification must additionally confirm device-tree
 resources, Device memory attributes, an initialized UTC counter and correct
 clocksource behavior; QEMU cannot establish those board-specific properties.

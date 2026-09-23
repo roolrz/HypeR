@@ -3,6 +3,7 @@
 
 //! Selected `AArch64` GIC virtualization backend.
 
+mod common;
 pub(super) mod v2;
 const MAX_LIST_REGISTERS: usize = 64;
 
@@ -40,6 +41,8 @@ pub struct MaintenanceState {
 /// Per-vCPU hardware state retained while the vCPU is not running.
 pub struct CpuContext {
     control: u64,
+    type_register: u64,
+    extended_interrupt_range: u64,
     virtual_machine_control: u64,
     active_priorities_group0: [u64; 4],
     active_priorities_group1: [u64; 4],
@@ -52,6 +55,8 @@ impl CpuContext {
     pub const fn empty() -> Self {
         Self {
             control: registers::ICH_HCR_ENABLE,
+            type_register: 0,
+            extended_interrupt_range: 0,
             virtual_machine_control: registers::ICH_VMCR_ENABLE_GROUP1
                 | registers::ICH_VMCR_PRIORITY_MASK_ALLOW_ALL,
             active_priorities_group0: [0; 4],
@@ -60,6 +65,42 @@ impl CpuContext {
             list_register_count: 0,
             active_priority_register_count: 0,
         }
+    }
+
+    /// Read common registers only after detaching the current hardware bank.
+    pub fn read_common(&self, encoding: registers::SystemRegisterEncoding) -> Option<u64> {
+        if v2::guest_physical().is_some() {
+            return None;
+        }
+        common::read_common(
+            self.type_register,
+            self.extended_interrupt_range,
+            self.virtual_machine_control,
+            &self.active_priorities_group0,
+            &self.active_priorities_group1,
+            encoding,
+        )
+    }
+
+    /// Update the saved bank; the next activation installs it in hardware.
+    pub fn write_common(
+        &mut self,
+        encoding: registers::SystemRegisterEncoding,
+        value: u64,
+    ) -> bool {
+        if v2::guest_physical().is_some() {
+            return false;
+        }
+        common::write_common(
+            self.type_register,
+            &mut self.virtual_machine_control,
+            encoding,
+            value,
+        )
+    }
+
+    pub fn split_eoi_mode(&self) -> bool {
+        self.virtual_machine_control & registers::ICH_VMCR_EOI_MODE != 0
     }
 
     pub fn slots(&self) -> &[Option<ListEntry>] {
@@ -81,6 +122,11 @@ pub fn capabilities() -> Result<Capabilities, Error> {
     if v2::guest_physical().is_some() {
         return v2::capabilities();
     }
+    let value = type_register();
+    decode_capabilities(value)
+}
+
+fn type_register() -> u64 {
     let value: u64;
     // SAFETY: ICH_VTR_EL2 is a read-only capability register available at EL2.
     unsafe {
@@ -90,6 +136,23 @@ pub fn capabilities() -> Result<Capabilities, Error> {
             options(nomem, nostack, preserves_flags)
         );
     }
+    value
+}
+
+// ICV_CTLR.ExtRange is architecturally an alias of ICC_CTLR.ExtRange.
+// No mutable physical CPU-interface control is incorporated into guest state.
+fn extended_interrupt_range() -> u64 {
+    let value: u64;
+    // SAFETY: The GICv3 system-register interface is enabled before vCPU
+    // construction/activation. This only reads an immutable capability bit.
+    unsafe {
+        asm!("mrs {value}, ICC_CTLR_EL1", value = out(reg) value,
+            options(nomem, nostack, preserves_flags));
+    }
+    value & common::EXTENDED_INTERRUPT_RANGE
+}
+
+fn decode_capabilities(value: u64) -> Result<Capabilities, Error> {
     let list_registers = ((value & registers::ICH_VTR_LIST_REGISTERS_MASK) + 1) as u8;
     let priority_bits = (((value >> registers::ICH_VTR_PRIORITY_BITS_SHIFT)
         & registers::ICH_VTR_BITS_MASK)
@@ -123,6 +186,9 @@ pub fn initialize_context(context: &mut CpuContext) -> Result<Capabilities, Erro
     let capabilities = capabilities()?;
     if v2::guest_physical().is_some() {
         context.virtual_machine_control = 1 | (31 << 27);
+    } else {
+        context.type_register = type_register();
+        context.extended_interrupt_range = extended_interrupt_range();
     }
     context.list_register_count = capabilities.list_registers;
     context.active_priority_register_count = active_priority_register_count(capabilities);
@@ -133,7 +199,7 @@ pub fn initialize_context(context: &mut CpuContext) -> Result<Capabilities, Erro
 pub fn validate_context_switch() -> Result<Capabilities, Error> {
     let mut context = CpuContext::empty();
     let capabilities = initialize_context(&mut context)?;
-    let probe = ListEntry {
+    let mut probe = ListEntry {
         source: 0,
         interrupt: GicInterruptId::new(31).ok_or(Error::InvalidVirtualInterrupt)?,
         priority: 0xa0,
@@ -145,18 +211,26 @@ pub fn validate_context_switch() -> Result<Capabilities, Error> {
         state: ListState::Pending,
         request_eoi_maintenance: false,
     };
-    let Some(first) = context.slots_mut().first_mut() else {
-        return Err(Error::InvalidListRegisterCount);
-    };
-    *first = Some(probe);
-    // SAFETY: Boot validation owns the local virtual interface and no vCPU can
-    // be active before the kernel vGIC subsystem is installed.
-    unsafe {
-        activate(&context)?;
-        deactivate(&mut context)?;
-    }
-    if context.slots().first().copied() != Some(Some(probe)) {
-        return Err(Error::StateMismatch);
+    for state in [
+        ListState::Pending,
+        ListState::Active,
+        ListState::PendingActive,
+    ] {
+        probe.state = state;
+        let Some(first) = context.slots_mut().first_mut() else {
+            return Err(Error::InvalidListRegisterCount);
+        };
+        *first = Some(probe);
+        // SAFETY: Boot validation owns the local virtual interface and no vCPU
+        // can be active before the kernel vGIC subsystem is installed. No guest
+        // instruction can acknowledge or deactivate the probe between saves.
+        unsafe {
+            activate(&context)?;
+            deactivate(&mut context)?;
+        }
+        if context.slots().first().copied() != Some(Some(probe)) {
+            return Err(Error::StateMismatch);
+        }
     }
 
     context.slots_mut().fill(None);
@@ -176,7 +250,13 @@ pub unsafe fn activate(context: &CpuContext) -> Result<(), Error> {
     if v2::guest_physical().is_some() {
         return v2::activate(context);
     }
-    let capabilities = capabilities()?;
+    let local_type = type_register();
+    let capabilities = decode_capabilities(local_type)?;
+    if common::guest_capabilities(local_type) != common::guest_capabilities(context.type_register)
+        || extended_interrupt_range() != context.extended_interrupt_range
+    {
+        return Err(Error::IncompatibleCpuInterface);
+    }
     let implemented = usize::from(capabilities.list_registers);
     let count = usize::from(context.list_register_count);
     let active_priority_count = active_priority_register_count(capabilities);
@@ -186,6 +266,14 @@ pub unsafe fn activate(context: &CpuContext) -> Result<(), Error> {
     {
         return Err(Error::IncompatibleCpuInterface);
     }
+    // QEMU advertises TDIR even for Cortex-A76, so the TC-test image forces
+    // the wider compatibility trap to exercise PMR/CTLR/RPR emulation. Normal
+    // images retain the destination CPU's most selective supported trap.
+    let trap_type = if cfg!(feature = "kernel-vgic-tc-test") {
+        local_type & !registers::ICH_VTR_TRAP_DIR_SUPPORTED
+    } else {
+        local_type
+    };
     // SAFETY: Guest delivery is disabled while the complete banked virtual CPU
     // interface state is installed. HCR is enabled only after all state writes.
     unsafe {
@@ -207,7 +295,7 @@ pub unsafe fn activate(context: &CpuContext) -> Result<(), Error> {
         asm!(
             "msr ICH_HCR_EL2, {value}",
             "isb",
-            value = in(reg) context.control | registers::ICH_HCR_ENABLE,
+            value = in(reg) common::trap_control(context.control, trap_type),
             options(nostack)
         );
     }

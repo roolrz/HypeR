@@ -4,6 +4,7 @@
 //! vCPU scheduler runner and local hardware-transition facade.
 
 mod execution;
+mod interrupt_gate;
 mod lifecycle;
 mod runner;
 mod transition;
@@ -11,6 +12,7 @@ mod transition;
 use super::{active_vcpu, memory, registry, timer};
 
 pub(in crate::kernel) use execution::VcpuExecution;
+pub(crate) use interrupt_gate::wait_for_interrupt_gate;
 pub(crate) use lifecycle::{DetachedStopError, complete_detached_stop_if_requested};
 pub(super) use runner::create_thread;
 pub(crate) use transition::HardwareTransitionError;

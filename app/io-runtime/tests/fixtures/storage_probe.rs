@@ -70,14 +70,18 @@ fn run(mode: &str) -> io::Result<()> {
         }
         let mut file = File::create(PENDING)?;
         println!("BOARD-STORAGE: writing payload");
-        let mut buffer = vec![0; 64 * 1024];
+        let mut buffer = vec![0; 512 * 1024];
         let mut offset = 0;
         while offset < LENGTH {
             let count = buffer.len().min(LENGTH - offset);
             for (i, byte) in buffer[..count].iter_mut().enumerate() {
                 *byte = ((offset + i) % 251) as u8;
             }
-            file.write_all(&buffer[..count])?;
+            // A healthy backing device accepts this bounded batch in one
+            // syscall; catch accidental reintroduction of the 1 KiB cap.
+            if file.write(&buffer[..count])? != count {
+                return Err(io::Error::other("unexpected short bulk write"));
+            }
             offset += count;
         }
         file.seek(SeekFrom::Start((LENGTH + GAP) as u64))?;

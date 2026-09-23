@@ -41,7 +41,8 @@ hyper_native_status_t hyper_startup_find_handle(
 /* Loader startup hook: after relocation and before constructors. Static
  * applications initialize through CRT instead; repeated initialization is safe. */
 hyper_native_status_t hyper_runtime_initialize(const uintptr_t *initial_stack);
-/* Immutable process startup view, valid after runtime initialization. */
+/* Immutable application startup view, valid after runtime initialization.
+ * Runtime-owned initial-stack VMAR is consumed during initialization and omitted. */
 const hyper_startup_t *hyper_runtime_startup(void);
 
 /* Borrowed process-lifetime runtime copy, or zero when not delegated with

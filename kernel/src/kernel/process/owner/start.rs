@@ -69,6 +69,7 @@ pub(crate) struct PreparedChildProcessStart {
     parent_supervisor: Option<ProcessHandleReservation<1>>,
     builder_consumption: Option<PreparedHandleConsumption>,
     root_vmar_object: Option<PreparedHandle>,
+    stack_vmar_object: Option<PreparedHandle>,
     root_vmar_address_space: FallibleArc<NativeAddressSpace>,
     root_vmar_claimed: bool,
     process_object: Option<PublishableRef<ProcessObject, KernelService>>,
@@ -167,6 +168,14 @@ fn write_startup_stack(
         purpose: hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR as u32,
         handle: root_vmar_value.get(),
     });
+    let stack_vmar_value = match values.next() {
+        Some(value) => *value,
+        None => process_invariant_violation(),
+    };
+    startup_records.push(StartupHandle {
+        purpose: hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR as u32,
+        handle: stack_vmar_value.get(),
+    });
     if values.next().is_some() {
         process_invariant_violation();
     }
@@ -210,7 +219,7 @@ impl PreparedChildProcessStart {
         build: SealedProcessBuild,
     ) -> Result<Self, StartPreparationFailure<ChildProcessStartError>> {
         let child = build.child().process().clone();
-        let startup_count = match build.startup_capabilities().len().checked_add(1) {
+        let startup_count = match build.startup_capabilities().len().checked_add(2) {
             Some(count) => count,
             None => {
                 return Err(start_failure(
@@ -310,6 +319,16 @@ impl PreparedChildProcessStart {
             }
         };
         let root_vmar_address_space = build.child().address_space_owner();
+        let stack_vmar_object = match prepare_stack_vmar(&child, root_vmar_address_space.clone()) {
+            Ok(handle) => handle,
+            Err(error) => {
+                builder_consumption.rollback();
+                parent.abort_handles(parent_supervisor);
+                drop(initial_thread);
+                abort_child_handle_batches(&child, &mut child_handle_batches);
+                return Err(start_failure(error, build));
+            }
+        };
         let root_vmar_publication = match VmarObject::try_root_publication(
             root_vmar_address_space.clone(),
             &child.resource_domain(),
@@ -395,6 +414,7 @@ impl PreparedChildProcessStart {
             parent_supervisor: Some(parent_supervisor),
             builder_consumption: Some(builder_consumption),
             root_vmar_object: Some(root_vmar_object),
+            stack_vmar_object: Some(stack_vmar_object),
             root_vmar_address_space,
             root_vmar_claimed: true,
             process_object: Some(process_object),
@@ -431,6 +451,11 @@ impl PreparedChildProcessStart {
             None => process_invariant_violation(),
         };
         self.prepared_startup_handles.push(root_vmar);
+        let stack_vmar = match self.stack_vmar_object.take() {
+            Some(handle) => handle,
+            None => process_invariant_violation(),
+        };
+        self.prepared_startup_handles.push(stack_vmar);
         self.prepared_startup_handles.reverse();
         publish_unpublished_startup_handles(&mut self);
 
@@ -472,6 +497,7 @@ impl PreparedChildProcessStart {
         }
         drop(self.initial_thread.take());
         drop(self.root_vmar_object.take());
+        drop(self.stack_vmar_object.take());
         if self.root_vmar_claimed {
             VmarObject::abort_root_publication(&self.root_vmar_address_space);
             self.root_vmar_claimed = false;
@@ -495,6 +521,7 @@ impl Drop for PreparedChildProcessStart {
             || self.parent_supervisor.is_some()
             || self.builder_consumption.is_some()
             || self.root_vmar_object.is_some()
+            || self.stack_vmar_object.is_some()
             || self.root_vmar_claimed
             || self.process_object.is_some()
             || self.supervisor_object.is_some()
@@ -713,4 +740,24 @@ fn commit_parent_builder_replacement(
         value,
         InTransitCapabilities::new(detached_builder, storage_charge),
     )
+}
+
+/// The loader owns the VMAR reservation throughout a retryable start. The
+/// prepared handle only wraps it; cancellation drops the wrapper, not the VMAR.
+fn prepare_stack_vmar(
+    child: &Process,
+    address_space: FallibleArc<NativeAddressSpace>,
+) -> Result<PreparedHandle, ChildProcessStartError> {
+    let token = child
+        .image()
+        .initial_stack_vmar()
+        .ok_or(ChildProcessStartError::VmarObject(
+            MemoryObjectError::AllocationSize,
+        ))?;
+    let object = VmarObject::try_existing(address_space, token, &child.resource_domain())
+        .map_err(ChildProcessStartError::VmarObject)?;
+    let publication = ObjectPublication::try_new(object)
+        .map_err(|error| ChildProcessStartError::VmarObject(MemoryObjectError::Object(error)))?;
+    PreparedHandle::try_from_new_object(publication, VmarObject::ROOT_RIGHTS, HandleFlags::NONE)
+        .map_err(|error| ChildProcessStartError::Process(error.into()))
 }

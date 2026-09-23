@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <hyper/thread.h>
+#include "stack-internal.h"
 #include <hyper/heap.h>
 #include <hyper/syscall.h>
 #include <stdatomic.h>
@@ -21,6 +22,7 @@ typedef struct tls_value {
 } tls_value_t;
 typedef struct thread_state {
     tls_value_t *values;
+    hyper_stack_t *stack;
 } thread_state_t;
 
 #ifdef HYPER_THREAD_HOST_TEST
@@ -59,6 +61,22 @@ hyper_native_status_t hyper_runtime_thread_attach(void)
     thread_state_t *state = calloc(1, sizeof(*state));
     if (state == NULL) return HYPER_NATIVE_STATUS_NO_MEMORY;
     install(state);
+    return HYPER_NATIVE_STATUS_OK;
+}
+
+hyper_stack_t *hyper_stack_current(void)
+{
+    thread_state_t *state = current();
+    return state ? state->stack : NULL;
+}
+hyper_native_status_t hyper_runtime_thread_attach_stack(hyper_stack_t *stack)
+{
+    if (!stack) return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+    hyper_native_status_t status = hyper_runtime_thread_attach();
+    if (status != HYPER_NATIVE_STATUS_OK) return status;
+    thread_state_t *state = current();
+    if (state->stack && state->stack != stack) return HYPER_NATIVE_STATUS_BAD_STATE;
+    state->stack = stack;
     return HYPER_NATIVE_STATUS_OK;
 }
 

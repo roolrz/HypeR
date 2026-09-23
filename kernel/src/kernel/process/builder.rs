@@ -39,8 +39,8 @@ use super::{
     LoaderError, PreparedProcess, Process, TaskFactory, TaskGroup, TaskGroupObject, load_native,
 };
 const _: () = assert!(hyper::cpu::MAX_CPUS <= ABI_AFFINITY_WORDS * u64::BITS as usize);
-const _: () = assert!(MAX_STARTUP_HANDLES > 0);
-const MAX_USER_STARTUP_HANDLES: usize = MAX_STARTUP_HANDLES - 1;
+const _: () = assert!(MAX_STARTUP_HANDLES > 1);
+const MAX_USER_STARTUP_HANDLES: usize = MAX_STARTUP_HANDLES - 2;
 
 /// Failure before the atomic child-publication commit.
 #[derive(Debug)]
@@ -951,7 +951,7 @@ fn prepare_sealed_process(
     let startup_handle_count = plan
         .startup
         .len()
-        .checked_add(1)
+        .checked_add(2)
         .ok_or(ProcessBuilderError::StartupHandleLimit)?;
     let stack_layout = StartupStackLayout::try_new(
         super::INITIAL_STACK_TOP,
@@ -984,10 +984,14 @@ fn validate_startup_capability(
     capability: StartupCapability,
     source: &Process,
 ) -> Result<HandleInfo, ProcessBuilderError<()>> {
-    if capability.purpose == 0 || capability.purpose == child_root_vmar_purpose() {
+    if capability.purpose == 0
+        || capability.purpose == child_root_vmar_purpose()
+        || u64::from(capability.purpose)
+            == hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR
+    {
         return Err(ProcessBuilderError::InvalidStartupPurpose);
     }
-    // The coordinator-minted child ROOT_VMAR occupies the final ABI slot.
+    // The coordinator mints the child ROOT_VMAR and INITIAL_STACK_VMAR slots.
     if plan.startup.len() >= MAX_USER_STARTUP_HANDLES {
         return Err(ProcessBuilderError::StartupHandleLimit);
     }

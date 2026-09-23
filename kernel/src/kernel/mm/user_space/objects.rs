@@ -362,6 +362,24 @@ impl VmarObject {
         })
     }
 
+    /// Wrap an existing loader-created VMAR without allocating another region.
+    /// Closing this handle does not destroy its address-space-owned reservation.
+    pub(crate) fn try_existing(
+        address_space: FallibleArc<NativeAddressSpace>,
+        token: Vmar,
+        sponsor: &ResourceDomain,
+    ) -> Result<Self, MemoryObjectError> {
+        let token = address_space
+            .logical()
+            .application_vmar(token)
+            .ok_or(MemoryObjectError::AllocationSize)?;
+        Ok(Self {
+            address_space,
+            token,
+            _object_charge: reserve_object_charge::<Self>(sponsor)?,
+        })
+    }
+
     pub(crate) fn try_child(
         parent: &Self,
         range: UserSlice,
