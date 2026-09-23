@@ -77,18 +77,20 @@ capabilities; new privileged power operations require explicit Native authority.
    - [x] Publish the common appliance with corresponding source materials.
    - [x] Release the separate Pi 5 build profile after Linux CI qualification.
    - [x] Pin the common package and integrate Native deployment.
-   - [ ] Adopt the separate Pi 5 package by immutable digest.
+   - [x] Adopt the separate Pi 5 package by immutable digest; hardware
+     requalification of that exact generation remains outstanding.
    - [x] Provide board/guest device trees, RAM reservations and VM configuration
      through the existing VMM and vm-runtime path.
    - [x] Validate two-vCPU Alpine boot and console, three CPU off/on cycles,
      ordinary reboot and poweroff on Pi 5 hardware.
    - [ ] Stress timer/IPI wakeups and cross-core cache/TLB retirement on hardware.
 3. **Connect physical network and storage devices.**
-   - [ ] Inventory the selected controllers' MMIO, IRQ, DMA, clock/reset and
-     firmware dependencies; assign each resource one owner.
-   - [ ] Add the required Native device/memory authorities and Linux handoff.
-   - [ ] Verify direct network and storage operation inside the I/O VM, with
-     HypeR-owned RAM excluded from the guest allocator.
+   - [x] Implement SDIO1 MMIO/IRQ and clock/pinctrl/GPIO resource validation,
+     exclusive Native bundle claims and Linux handoff.
+   - [x] Exercise the SD storage path on Pi 5 with HypeR-owned RAM excluded
+     from Linux's allocator; basic reads and guest persistence are recorded.
+   - [ ] Inventory and assign the network controller's dependencies.
+   - [ ] Qualify storage stress, DMA fault retirement and direct networking.
 4. **Expose I/O to Native clients.**
    - [x] Validate the AArch64 QEMU cross-VM virtio-scsi/vhost-scsi baseline,
      including a real disk, DMA translations, reset/rebind and VM retirement.
@@ -97,9 +99,10 @@ capabilities; new privileged power operations require explicit Native authority.
    - [ ] Qualify SD writes and persistence across reboot.
    - [ ] Define and implement the virtio-net frontend/backend contract; the
      storage choice does not by itself complete the network design.
-   - [ ] Implement the Linux backend and HypeR Native frontend services/adapters.
-   - [ ] Integrate block I/O at the VFS backend boundary and provide the Native
-     network APIs needed by the first end-to-end applications.
+   - [x] Integrate the storage backend and Native block frontend with kernel
+     VFS/FAT and the configuration-volume mount.
+   - [ ] Implement network backend/frontend services and the Native network APIs
+     needed by the first end-to-end applications.
    - [ ] Prove teardown: fence sessions, fail outstanding requests, quiesce DMA
      before releasing memory, and prevent stale completions after reconnect.
 5. **Qualify the complete system on physical Pi 5.**

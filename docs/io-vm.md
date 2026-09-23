@@ -64,8 +64,9 @@ VMs are started only when their configuration requests autostart or through
 profile: it boots a resident backend without mounting Native storage or
 provisioning business clients.
 
-The default board profile creates `target/board/qemu/disk.img` once and validates
-existing images without replacing their persistent contents. `BOARD_IMAGE`
+Building the default board profile creates `target/board/qemu/disk.img` once
+and validates existing images without replacing their persistent contents.
+`make run` only launches the existing kernel, ramdisk and disk. `BOARD_IMAGE`
 selects another board disk. The diagnostic `RUN_PROFILE=io` instead creates
 `target/app/aarch64/io-disk.img`; `IO_VM_DISK` overrides that diagnostic disk.
 `RUN_PROFILE=native` selects the previous boot profile. `IO_VM_PACKAGE` can override the downloaded
@@ -114,8 +115,9 @@ mounted/read its physical SD configuration volume using a development
 reassembly. The newly pinned Pi package still requires hardware requalification.
 Final boot images follow the [image release contract](image-distribution.md).
 The import command also accepts `IO_VM_REFERENCE` explicitly. The qualified QEMU
-fixture consumes the imported generation. The ordinary AArch64 `make run`
-profile also imports it to start the board-managed I/O VM under Native init.
+fixture consumes the imported generation. The ordinary AArch64 `make` build
+also imports it for the board-managed I/O VM; `make run` then starts the built
+deployment under Native init.
 
 The I/O VM repository owns the pinned upstream LTS version and builds each
 external module against the exact kernel configuration and release. HypeR
@@ -365,7 +367,8 @@ to reuse them.
 
 ## Build and validation
 
-Install ORAS 1.3 and import the pinned, anonymously downloadable QEMU package:
+Import the pinned, anonymously downloadable QEMU package (ORAS is discovered
+or downloaded automatically; `IO_VM_ORAS` can override it):
 
 ```sh
 make io-vm-fetch
@@ -406,7 +409,7 @@ sector and all untouched bytes after stopping its QEMU process, retaining the
 disk and `result.json` beside the log. This uses LIO iblock, not a RAM disk.
 A Linux-only successful appliance test is a separate prerequisite.
 
-The **I/O VM package qualification** GitHub workflow runs both reset
+The **HypeR / I/O VM integration** GitHub workflow runs both reset
 configurations on pull requests and main pushes using the pinned package.
 Manual dispatch can override the public immutable reference. Its local
 equivalent is `sh tests/ci/run.sh io-vm`; set `IO_VM_REFERENCE` to qualify

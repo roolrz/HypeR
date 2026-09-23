@@ -19,8 +19,11 @@ Commands in this guide run from the repository root.
 - QEMU for the selected architecture; AArch64 uses `-cpu max` by default and
   requires FEAT_VHE (hardware without it is unsupported);
 - `curl`, `cpio`, `gzip`, `tar`, and SHA-256 tooling for the Linux guest assets;
-- ORAS 1.3 for the digest-pinned I/O appliance download (`IO_VM_ORAS` can select
-  its executable); verified downloads are cached for offline reuse;
+- dosfstools and mtools for the default board FAT image; e2fsprogs and
+  squashfs-tools for the Alpine root disk;
+- ORAS for digest-pinned I/O appliance downloads: the importer uses `PATH` or
+  downloads a checksum-pinned ORAS 1.3.0 automatically on supported hosts.
+  `IO_VM_ORAS` can select an executable; verified packages are reused offline;
 - `dtc` when building the x86-64 QEMU platform description.
 
 Build the AArch64 kernel, Native SDK, and initramfs, then run the complete

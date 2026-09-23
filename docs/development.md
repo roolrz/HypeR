@@ -142,8 +142,11 @@ with guest-memory reclamation. x86-64 has a build and image contract only.
 Stable local equivalents live in `tests/ci/run.sh`:
 
 ```sh
+sh tests/ci/run.sh scripts
 sh tests/ci/run.sh quality
 sh tests/ci/run.sh native
+sh tests/ci/run.sh board-storage
+sh tests/ci/run.sh io-vm
 sh tests/ci/run.sh riscv64-native
 sh tests/ci/run.sh aarch64-build
 QEMU_CPU=max QEMU_CPUS=4 sh tests/ci/run.sh aarch64-qemu
@@ -288,11 +291,10 @@ The root Makefile retains shared defaults and command orchestration; component
 recipes live in `mk/sdk-app.mk`, `mk/native-tests.mk` and `mk/boards.mk`. The
 console, application and runtime-crash QEMU tests share subprocess ownership,
 serial buffering and deadlines through `tests/qemu/session.py`; their scenario
-assertions stay in each test. Editor check/build-script commands apply SDK source patches only to Native
-app consumers, not kernel or host-tool commands. The editor metadata overlay
-(`cargo.configPath`) still applies to all linked projects and may introduce
-unused-patch lockfile records; this change does not claim to isolate metadata
-resolution. Keep those incidental records out of unrelated commits.
+assertions stay in each test. Editor metadata and save-time checks use Native
+workspace-local SDK patches; the shared configuration contains no dependency
+patches. Kernel and host-tool lockfiles therefore do not acquire Native
+`patch.unused` records through the editor configuration.
 
 Host-test workspaces with ignored lockfiles are compiled and tested separately;
 the tracked-lock audit does not assert their exact independently resolved graph.

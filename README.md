@@ -144,13 +144,16 @@ make run
 ```
 
 This boots the AArch64 system with the HypeR shell and a resident Linux I/O VM
-in QEMU. The first run downloads pinned assets and creates a persistent board
-disk; HypeR mounts its configuration volume at `/data`. The default guest is
+in QEMU. The first build downloads pinned assets and creates a persistent board
+disk; `make run` launches those existing artifacts without building them; HypeR mounts its configuration volume at `/data`. The default guest is
 available through `vmm start alpine`. See [board storage](docs/board-storage.md)
 and [getting started](docs/getting-started.md) for configuration and build targets.
 
 ## Explore and contribute
 
+- [Reading the code](docs/reading-the-code.md): a contributor’s guide to code paths,
+  subsystem ownership, debugging and tests—from boot and scheduling to memory,
+  IPC, virtualization, storage and image packaging.
 - [Development guide](docs/development.md): editor setup, testing, source layout,
   and contribution requirements.
 - [Architecture](kernel/docs/architecture.md): kernel boundaries and ownership.

@@ -6,9 +6,11 @@ SPDX-License-Identifier: Apache-2.0
 # VM image and boot ownership
 
 HypeR keeps firmware boot, system userspace, and guest boot as separate trust
-and ownership layers. U-Boot selects and authenticates the HypeR system image,
-loads the HypeR kernel and its system initramfs, and describes both through the
-standard platform DTB. It does not select, relocate, or modify a guest VM.
+and ownership layers. The platform boot chain loads the HypeR kernel and its
+system initramfs and describes them through the architecture boot protocol.
+QEMU uses direct kernel/initrd loading; Pi 5 uses the official EEPROM firmware
+and bundled BL31. This does not imply image authentication or a secure-boot
+contract. Firmware does not select, relocate or modify a guest VM.
 
 The system initramfs is an uncompressed SVR4 `newc` or `crc` CPIO archive. It
 contains `/init`, system services, SDK runtime libraries, configuration, and
@@ -20,26 +22,19 @@ backing for the Native root filesystem.
 
 The initial service graph identifies exactly one VM manager by its validated
 provisioning purpose, then starts it inside an init-created fleet resource
-domain and task group. That bounded ancestor accounts the manager and every
-domain it creates, so delegated domain-creation authority cannot charge init's
-shared service domain without limit. Init retains the peer CapabilityChannel
-endpoint, opens the selected guest image, creates a per-instance ByteChannel
-control pair, and transfers the image plus the manager-side control endpoint in
-one typed rendezvous. Each transport right survives until its final ownership
-hop: the manager attenuates it from the image and control endpoint, while the
-runtime creates its own VirtualSerial and registers a caller-allocated output
-VMO before transferring device-assignment authority into the VM. The retained control endpoint
-is the instance's authority-bearing identity; lifecycle requests do not use
-ambient numeric VM identifiers. Neither the manager nor a VM runtime receives
-physical Console authority.
+domain and task group. Init opens the deployment's VM configuration file and
+transfers it through the provisioning channel, with a ByteChannel for initial
+boot supervision. The manager validates named definitions and opens their FIT
+images through its delegated Directory. Each start gets private runtime control
+and console-connector channels; numeric VM IDs are not ambient authority.
+Neither the manager nor a business VM runtime receives physical Console authority.
 
-The fleet policy admits two active VM instances and eight named definitions.
-Each instance has a bounded child domain, including up to eight vCPUs and
-32,768 guest pages. The fleet ancestor charges both instance budgets plus
-explicit control-plane headroom; see `app/vm-policy/src/lib.rs` for the complete
-limits. These are admission ceilings, not usage targets. A stopped instance can
-be recreated from its retained image with a fresh domain, task group, creation
-lease, runtime process, and console connector.
+The policy allows eight named business definitions and budgets their instances,
+a separate resident I/O VM and control-plane headroom. Each business child domain
+allows up to eight vCPUs and 65,536 guest pages (256 MiB). These are admission
+ceilings, not reserved RAM or a promise that every guest fits concurrently.
+See `app/vm-policy/src/lib.rs` for the complete limits. A stopped instance can
+be recreated from its retained image with fresh resource and lifecycle owners.
 
 For each provisioned VM, the manager creates a child resource domain and task
 group, derives a one-shot VM creation lease, and starts an isolated
@@ -144,7 +139,7 @@ with polling, scheduler yields, or unrelated inspection authority.
 boots a separate archive; the production runtime keeps its default features.
 The test first stops the boot-critical initial VM cleanly. The fixture then
 exits without destructors during console forwarding on later instances. Five fresh
-VM/runtime cycles in a 512 MiB machine check teardown and continued allocation.
+VM/runtime cycles with the default 1 GiB QEMU RAM check teardown and continued allocation.
 Kernel self-tests verify invalid registration, hostile cursor values, full-ring
 behavior, exclusive assignment, last-handle output closure, and release of
 pinned and committed pages only after the final device owner drops. Host tests

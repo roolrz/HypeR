@@ -136,8 +136,9 @@ initial set can use the existing batch reservation and publication transaction.
 The production init transaction reserves and writes only the authorities init
 currently consumes: the root `ResourceDomain`, root `TaskGroup`,
 `TaskFactory`, root and `/lib` `Directory` capabilities, system `TaskInspector`
-and `ObjectInspector` views, the process root VMAR, and (when available)
-Console. Future handle values are
+and `ObjectInspector` views, the process root VMAR, the runtime-owned initial
+stack VMAR, and (when available) Console, VM creation and device-assignment
+authorities. Future handle values are
 encoded while unresolved and the complete batch is published before the
 initial Thread can run. No self-Process handle is installed in its own table.
 The root VMAR and executable File-to-VMO path are delegated with narrowly

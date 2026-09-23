@@ -133,5 +133,5 @@ isolation, owner-process loss and repeated stage-2 retirement on one/four harts.
 - Cache publication and invalidation use Zicbom CBOs bracketed by full
   memory-and-I/O fences. Firmware must permit HS-mode CBO execution through the
   corresponding environment configuration.
-- PLIC and NS16550 are the only current host devices; a platform-specific cache
+- The host device support includes PLIC, NS16550 and Goldfish RTC; a platform-specific cache
   maintenance backend for hardware without Zicbom is not implemented.

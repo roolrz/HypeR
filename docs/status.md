@@ -91,7 +91,8 @@ The current foundation includes:
   suspend remains unsupported, and RISC-V guests currently retain one vCPU;
 - a compatibility-matched platform driver framework, PL011 and NS16550 UARTs,
   and reusable virtual-device models;
-- Linux guest FIT images delivered through the Native root initramfs;
+- board guest FIT images loaded from `/data`, with only the I/O VM FIT in the
+  bootstrap initramfs; standalone Native acceptance archives retain guest fixtures;
 - rollback-safe VM construction with one generational registry publication for
   guest memory, virtual interrupts, devices, and all configured dormant vCPUs;
 - a capability-scoped Native VM manager contained by a bounded fleet resource
@@ -120,7 +121,8 @@ block driver. The Native fixture verifies 32 direct write/flush/read rounds,
 host disk bytes, and restoration of Native memory access after both VMs retire.
 Both GICv2 with one host CPU and GICv3 with four host CPUs pass driver
 unbind/rebind followed by repeated I/O, exercising backend endpoint reset and
-a new notification epoch. Each storage guest currently has one vCPU.
+a new notification epoch. Each guest in this isolated storage fixture has one vCPU; board Alpine
+deployment uses two on AArch64.
 
 The implementation includes capability-gated physical device claims, explicit
 DMA translations, shared guest-memory grants, bounded asynchronous per-vCPU
@@ -132,11 +134,18 @@ peer exit, stale completion rejection and interrupted MMIO retirement.
 Linux build, modules, services, rootfs assembly and source packaging live in
 [HypeR-io-vm](https://github.com/roolrz/HypeR-io-vm). HypeR owns Native deployment,
 DT generation and digest-pinned import. Default AArch64 `make run` keeps the
-Native shell and starts an idle I/O VM under init, with a persistent QEMU disk
-and no client VM or shared queues. `test-io-standby` checks shell responsiveness
-and preservation of disk contents; `test-io-vm` remains the explicit full-path
-writing fixture. Live client attachment, Native VFS block integration,
-networking and Pi 5 controller assignment are not implemented by this baseline. QEMU does not qualify physical cache, interrupt or DMA behavior.
+Native shell and starts the resident I/O VM, whose shared queues back the FAT
+configuration volume mounted at `/data`. The manager loads `/data/vms.json`;
+`vmm start alpine` boots its configured disk-backed guest. `make` prepares these
+artifacts, while `make run` only launches them. The optional `RUN_PROFILE=io`
+standby profile deliberately omits Native storage and business clients.
+
+`board-storage` tests persistent Native files, Alpine ext4 root, ordinary VM
+disks, broker isolation and userspace device access. `test-io-vm` checks the
+isolated two-VM data path; `test-io-standby` checks idle backend operation.
+Pi 5 SDIO1 assignment is implemented in Native userspace. Networking, automatic
+recovery of quarantined devices and fault-time DMA retirement remain unfinished.
+QEMU does not qualify physical cache, interrupt or DMA behavior.
 
 ## Design priorities
 
@@ -169,7 +178,7 @@ networking and Pi 5 controller assignment are not implemented by this baseline. 
 HypeR keeps policy above mechanism:
 
 ```text
-Native userspace VMM, services, and future compatibility supervisors
+Native userspace VMM, applications and services
     -> schema-defined pre-release syscall and capability boundary
     -> kernel user-entry adapters and services
     -> kernel policy: task, IRQ, time, memory, crash, device
@@ -190,8 +199,9 @@ and failure decisions.
 Exceptions and VM exits necessarily travel upward. Named entry adapters confine
 that transition, copy architecture-private state into owned typed events,
 invoke immutable registered kernel services, and encode exhaustive completion
-actions only after policy returns. CI rejects direct architecture-to-kernel
-policy dependencies outside the three non-returning bootstrap transfers.
+actions only after policy returns. Cargo enforces the HAL-to-core dependency
+direction, Rust privacy hides architecture internals, and CI checks that graph
+and rejects direct private-backend imports.
 
 Read [the architecture guide](../kernel/docs/architecture.md) for the normative
 boundary rules and migration constraints. The Native contracts are specified in the
@@ -206,7 +216,9 @@ The x86-64 build gate does not establish a userspace guest-boot contract.
 
 Pi 5 host bring-up prerequisites and recommended firmware configuration are
 documented in [Raspberry Pi 5](../kernel/docs/rpi5.md). GICv2 Linux guest boot
-and lifecycle tests run in QEMU; physical Pi 5 boot remains unverified.
+and lifecycle tests run in QEMU; physical Pi 5 validation has established the
+bounded hardware results listed above. Broader stress and fault qualification
+remain outstanding.
 The guest SMP acceptance target covers affinity-driven vCPU migration between host CPUs,
 timer progress across migration, secondary CPU off/on cycles, concurrent
 work, guest reboot/poweroff and reclamation on both GIC backends, including a

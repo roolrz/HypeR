@@ -185,10 +185,11 @@ with an unredirected foreground process: only a process that reads consumes
 input. Pipelines and file redirections omit the terminal alias and stay binary.
 Default `std::process::Command` inheritance preserves both capabilities.
 
-The console-input service splits command/EOF records and folds CRLF to CR across
-hardware reads. Terminal std reads translate CR to LF and interpret a standalone
-Ctrl-D record as one EOF indication; the endpoint remains open for the next shell
-command. Native channel reads retain Ctrl-D and CR, including `vmm console`.
+The console-input service splits command/EOF records and normalizes CR and CRLF
+to LF across hardware reads. Terminal std reads also accept CR and interpret a
+standalone Ctrl-D record as one EOF indication; the endpoint remains open for
+the next shell command. Native channel readers, including `vmm console`, receive
+the normalized line endings and retain the Ctrl-D byte.
 This is an interactive terminal path, not a byte-transparent serial tunnel; the
 kernel Console API remains unchanged. This is not a full POSIX canonical tty.
 
