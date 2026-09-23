@@ -151,6 +151,8 @@ and [getting started](docs/getting-started.md) for configuration and build targe
 
 ## Explore and contribute
 
+- [Reading the code](docs/reading-the-code.md): guided paths through VM exits,
+  process/thread creation, Native syscalls and storage I/O.
 - [Development guide](docs/development.md): editor setup, testing, source layout,
   and contribution requirements.
 - [Architecture](kernel/docs/architecture.md): kernel boundaries and ownership.
