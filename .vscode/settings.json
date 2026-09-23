@@ -2,6 +2,8 @@
 // "SPDX-License-Identifier": "Apache-2.0"
 
 {
+    "editor.tabSize": 8,
+    "editor.detectIndentation": false,
     "rust-analyzer.linkedProjects": [
         "kernel/Cargo.toml",
         "sdk/abi/Cargo.toml",

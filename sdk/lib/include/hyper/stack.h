@@ -11,11 +11,12 @@ extern "C" {
 #endif
 
 typedef struct hyper_stack hyper_stack_t;
+
 typedef struct hyper_stack_info {
-    uintptr_t base;       /* First currently usable byte. */
-    uintptr_t top;        /* Fixed, exclusive top; initial SP for a new thread. */
-    size_t size;          /* Currently usable bytes, excluding guards. */
-    size_t capacity;      /* Maximum usable bytes in this reservation. */
+	uintptr_t base;	 /* First currently usable byte. */
+	uintptr_t top;	 /* Fixed, exclusive top; initial SP for a new thread. */
+	size_t size;	 /* Currently usable bytes, excluding guards. */
+	size_t capacity; /* Maximum usable bytes in this reservation. */
 } hyper_stack_info_t;
 
 /* Reserve a dedicated VMAR with an unmapped page at each end. Size and
