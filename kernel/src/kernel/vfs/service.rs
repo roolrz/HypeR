@@ -16,8 +16,8 @@ use super::{
 
 const MAX_PATH_BYTES: usize = hyper::abi::native::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES as usize;
 const MAX_READ_BYTES: usize = hyper::abi::native::HYPER_NATIVE_FILE_MAX_READ_BYTES as usize;
-const TRANSFER_BATCH_BYTES: usize = 1024;
-const READ_BATCH_BYTES: usize = 512 * 1024;
+const SMALL_TRANSFER_BYTES: usize = 1024;
+const BULK_TRANSFER_BYTES: usize = 512 * 1024;
 
 #[derive(Debug)]
 pub(crate) enum ServiceError {
@@ -142,13 +142,13 @@ pub(crate) fn read_file_at(
     // Small reads remain allocation-free apart from user-memory preparation.
     // Bulk scratch is bounded independently of the ABI request limit and is
     // charged to the caller, never placed on the kernel stack.
-    let mut small = [0_u8; TRANSFER_BATCH_BYTES];
+    let mut small = [0_u8; SMALL_TRANSFER_BYTES];
     let mut large = ScratchVec::new(ScratchBudget::new(&process.resource_domain()));
     let bytes = if capacity <= small.len() {
         &mut small[..capacity]
     } else {
         large
-            .resize(capacity.min(READ_BATCH_BYTES), 0)
+            .resize(capacity.min(BULK_TRANSFER_BYTES), 0)
             .map_err(VfsError::from)?;
         &mut large[..]
     };
@@ -284,12 +284,21 @@ pub(crate) fn write_file_at(
     if size > MAX_READ_BYTES {
         return Err(ServiceError::InvalidInput);
     }
-    let size = size.min(TRANSFER_BATCH_BYTES);
-    let mut bytes = [0; TRANSFER_BATCH_BYTES];
+    // Copy the entire accepted batch before entering the backend: user faults
+    // must not occur while holding its file lock, including atomic append.
+    let size = size.min(BULK_TRANSFER_BYTES);
+    let mut small = [0_u8; SMALL_TRANSFER_BYTES];
+    let mut large = ScratchVec::new(ScratchBudget::new(&process.resource_domain()));
+    let bytes = if size <= small.len() {
+        &mut small[..size]
+    } else {
+        large.resize(size, 0).map_err(VfsError::from)?;
+        &mut large[..]
+    };
     let source =
         UserSlice::new(input.base(), size as u64).map_err(|_| ServiceError::InvalidInput)?;
-    process.copy_from_user(source, &mut bytes[..size])?;
-    let (actual, end) = file.object().write(offset, &bytes[..size])?;
+    process.copy_from_user(source, bytes)?;
+    let (actual, end) = file.object().write(offset, bytes)?;
     Ok((actual as u64, end))
 }
 

@@ -177,11 +177,11 @@ domain. Directory hard links and cross-filesystem rename/link are rejected.
 Ramfs `file_sync` completes its in-memory operation; it does not promise durable
 storage. Shared writable mappings and persistent writeback remain absent.
 
-## Native read batching
+## Native file transfer batching
 
 File transfer requests accept up to 2 MiB; this limit is independent of the
 64 KiB VMO transfer limit. Reads process the request through the existing
-File/backend interface in at most 64 KiB batches. Larger reads use fallible
+File/backend interface in at most 512 KiB batches. Larger reads use fallible
 scratch storage charged to the calling process; reads up to 1 KiB retain a
 small stack buffer. Only the current batch's user destination is prepared and
 pinned, after the backend has released its locks. Syscalls run in scheduled,
@@ -192,7 +192,12 @@ before any copy is reported to the caller; after completed batches, the copied
 prefix is returned. Callers must still handle short reads. The operation is
 not an atomic snapshot across concurrent file mutations. Scratch storage is
 released on return and is not a file-data cache. Writes accept the same request
-limit but retain their existing bounded short-write behavior.
+limit and accept at most 512 KiB per call, returning a short count for larger
+requests. Large writes use the same charged, fallible scratch storage; small
+writes retain the 1 KiB stack buffer. The accepted input is copied before taking
+the backend lock, then submitted in one backend call so append offset selection
+and that batch's write remain serialized. Callers must handle short writes.
+This does not introduce a writeback cache or change `file_sync` semantics.
 
 ## Rooted directory scopes
 
@@ -250,8 +255,9 @@ publication and bounded to 256 per node, including records awaiting retirement.
 
 Metadata carries signed Unix seconds and normalized nanoseconds, with validity
 bits for individual timestamps. The boot archive supplies modification times.
-New mutations use the optional kernel UTC clock; an unavailable timestamp is
-reported as unavailable, never fabricated from uptime. Native callers can set
+New mutations use the kernel wall clock. Without an RTC this is an
+uncalibrated Unix epoch plus uptime baseline, shared with `SystemTime::now()`.
+An unavailable monotonic clock still leaves timestamps unavailable. Native callers can set
 access and modification times, including times before the Unix epoch.
 
 The [UTC clock](time.md) is independent of filesystem policy. Filesystems
