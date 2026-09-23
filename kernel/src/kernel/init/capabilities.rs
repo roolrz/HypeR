@@ -15,9 +15,9 @@ use super::Error;
 use super::bootstrap::{self, BootProcess};
 
 #[cfg(not(feature = "kernel-self-test"))]
-const CORE_HANDLE_COUNT: usize = 11;
+const CORE_HANDLE_COUNT: usize = 12;
 #[cfg(feature = "kernel-self-test")]
-const CORE_HANDLE_COUNT: usize = 10;
+const CORE_HANDLE_COUNT: usize = 11;
 
 const HAS_VM_AUTHORITY: bool = crate::hal::vm::userspace_vm_lifecycle_available();
 const HAS_DEVICE_AUTHORITY: bool = crate::kernel::device::assigned::available();
@@ -35,6 +35,7 @@ const CORE_PURPOSES: [u32; CORE_HANDLE_COUNT] = [
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_MEMORY_INSPECTOR),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CPU_INSPECTOR),
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR),
+    purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR),
     #[cfg(not(feature = "kernel-self-test"))]
     purpose(hyper::abi::native::HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_CONSOLE),
 ];
@@ -175,7 +176,7 @@ fn prepare_handles(
     }
     #[cfg(not(feature = "kernel-self-test"))]
     {
-        handles[10] = Some(prepare_handle(
+        handles[11] = Some(prepare_handle(
             crate::kernel::device::console::SystemConsole::try_publication(domain)
                 .map_err(Error::ConsoleObject)?,
             Rights::DUPLICATE
@@ -202,6 +203,21 @@ fn prepare_handles(
     // Prepare the root VMAR last. Its one-per-address-space publication claim
     // needs explicit rollback, while every earlier handle is self-contained.
     let address_space = init.process.address_space_owner()?;
+    let token = init
+        .process
+        .image()
+        .initial_stack_vmar()
+        .ok_or(Error::MemoryObject(
+            crate::kernel::mm::user_space::MemoryObjectError::AllocationSize,
+        ))?;
+    handles[10] = Some(prepare_handle(
+        ObjectPublication::try_new(
+            VmarObject::try_existing(address_space.clone(), token, domain)
+                .map_err(Error::MemoryObject)?,
+        )
+        .map_err(Error::Object)?,
+        VmarObject::ROOT_RIGHTS,
+    )?);
     let root_vmar_publication = VmarObject::try_root_publication(address_space.clone(), domain)
         .map_err(Error::MemoryObject)?;
     let root_vmar = match PreparedHandle::try_from_new_object(

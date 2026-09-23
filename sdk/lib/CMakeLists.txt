@@ -32,6 +32,7 @@ set(HYPER_RUNTIME_SOURCES
     src/directory.c
     src/thread.c
     src/thread_spawn.c
+    src/stack.c
     src/stdio.c
     src/heap.c
     src/stdlib.c

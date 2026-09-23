@@ -121,6 +121,7 @@ pub(crate) struct ProcessImage {
     stack: UserAddress,
     tls: UserAddress,
     auxiliary: hyper::exec::startup::AuxiliaryValues,
+    initial_stack_vmar: Option<crate::kernel::mm::user_space::Vmar>,
 }
 
 impl ProcessImage {
@@ -204,7 +205,22 @@ impl ProcessImage {
             stack,
             tls,
             auxiliary,
+            initial_stack_vmar: None,
         })
+    }
+
+    /// The address space owns the reservation; this token identifies the
+    /// loader-created VMAR to wrap in a startup capability before first entry.
+    pub(crate) fn with_initial_stack_vmar(
+        mut self,
+        vmar: crate::kernel::mm::user_space::Vmar,
+    ) -> Self {
+        self.initial_stack_vmar = Some(vmar);
+        self
+    }
+
+    pub(crate) const fn initial_stack_vmar(&self) -> Option<crate::kernel::mm::user_space::Vmar> {
+        self.initial_stack_vmar
     }
 
     pub(crate) const fn machine(&self) -> MachineAbi {

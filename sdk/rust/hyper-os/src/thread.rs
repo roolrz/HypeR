@@ -115,3 +115,41 @@ pub fn sleep_until(deadline: u64) -> Result<()> {
     // SAFETY: a scalar monotonic deadline carries no borrowed resources.
     Status::from_raw(unsafe { hyper_sys::thread_sleep(deadline) }).into_result()
 }
+
+/// Usable extent and reserved growth capacity of the current runtime stack.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StackInfo {
+    pub base: usize,
+    pub top: usize,
+    pub size: usize,
+    pub capacity: usize,
+}
+
+unsafe extern "C" {
+    fn hyper_stack_current() -> *mut core::ffi::c_void;
+    fn hyper_stack_get_info(stack: *mut core::ffi::c_void, info: *mut StackInfo) -> i64;
+    fn hyper_stack_grow(stack: *mut core::ffi::c_void, size: usize) -> i64;
+}
+
+/// Queries the same guarded stack abstraction on main and SDK/std threads.
+/// Raw Native threads without a runtime stack return an error.
+pub fn current_stack() -> Result<StackInfo> {
+    let mut info = StackInfo::default();
+    // SAFETY: the borrowed descriptor stays live while this thread executes;
+    // the output has the matching C layout and is exclusively borrowed.
+    Status::from_raw(unsafe { hyper_stack_get_info(hyper_stack_current(), &mut info) })
+        .into_result()?;
+    Ok(info)
+}
+
+/// Extends the current stack downwards, within its reserved capacity.
+///
+/// Existing frames and the top address remain unchanged. Call with enough
+/// headroom before entering a deeper workload; this is not automatic fault
+/// growth. The size rounds up to pages; shrinking is rejected.
+pub fn grow_current_stack(size: usize) -> Result<()> {
+    // SAFETY: the current thread keeps its runtime descriptor alive. Growth
+    // only adds disjoint mappings and never moves or unmaps existing frames.
+    Status::from_raw(unsafe { hyper_stack_grow(hyper_stack_current(), size) }).into_result()
+}

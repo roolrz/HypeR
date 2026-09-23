@@ -28,7 +28,7 @@ const AT_PAGESZ: u64 = 6;
 const AT_BASE: u64 = 7;
 const AT_ENTRY: u64 = 9;
 const STANDARD_AUXILIARY_ENTRIES: usize = 6;
-const HYPER_AUXILIARY_ENTRIES: usize = 2;
+const HYPER_AUXILIARY_ENTRIES: usize = 5;
 const AUXILIARY_TERMINATORS: usize = 1;
 const AUXILIARY_ENTRY_COUNT: usize =
     STANDARD_AUXILIARY_ENTRIES + HYPER_AUXILIARY_ENTRIES + AUXILIARY_TERMINATORS;
@@ -56,6 +56,12 @@ pub struct AuxiliaryValues {
     pub program_header_count: u64,
     pub interpreter_base: u64,
     pub program_entry: u64,
+    /// Dedicated stack VMAR base, including its lower guard page.
+    pub initial_stack_base: u64,
+    /// Maximum usable bytes; the reservation additionally retains two guards.
+    pub initial_stack_capacity: u64,
+    /// Currently mapped usable bytes at the fixed top of the reservation.
+    pub initial_stack_size: u64,
 }
 
 impl AuxiliaryValues {
@@ -66,7 +72,54 @@ impl AuxiliaryValues {
             program_header_count: 0,
             interpreter_base: 0,
             program_entry,
+            initial_stack_base: 0,
+            initial_stack_capacity: 0,
+            initial_stack_size: 0,
         }
+    }
+}
+
+/// Downward-growing initial stack with a fixed top and two unmapped guards.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StackReservation {
+    pub base: u64,
+    pub capacity: u64,
+    pub size: u64,
+}
+
+impl StackReservation {
+    pub fn try_new(top: u64, size: u64, capacity: u64, floor: u64) -> Result<Self, Error> {
+        if size == 0
+            || capacity < size
+            || !top.is_multiple_of(PAGE_SIZE)
+            || !size.is_multiple_of(PAGE_SIZE)
+            || !capacity.is_multiple_of(PAGE_SIZE)
+        {
+            return Err(Error::LayoutMismatch);
+        }
+        let base = top
+            .checked_sub(capacity)
+            .and_then(|base| base.checked_sub(PAGE_SIZE))
+            .filter(|base| *base >= floor)
+            .ok_or(Error::AddressOverflow)?;
+        top.checked_add(PAGE_SIZE).ok_or(Error::AddressOverflow)?;
+        Ok(Self {
+            base,
+            capacity,
+            size,
+        })
+    }
+
+    pub const fn top(self) -> u64 {
+        self.base + PAGE_SIZE + self.capacity
+    }
+
+    pub const fn mapped_base(self) -> u64 {
+        self.top() - self.size
+    }
+
+    pub const fn reservation_size(self) -> u64 {
+        self.capacity + 2 * PAGE_SIZE
     }
 }
 
@@ -246,6 +299,22 @@ impl Layout {
             crate::abi::native::HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT,
             u64::try_from(handles.len()).map_err(|_| Error::TooLarge)?,
         )?;
+        for (tag, value) in [
+            (
+                crate::abi::native::HYPER_NATIVE_AUXV_INITIAL_STACK_BASE,
+                auxiliary.initial_stack_base,
+            ),
+            (
+                crate::abi::native::HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY,
+                auxiliary.initial_stack_capacity,
+            ),
+            (
+                crate::abi::native::HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE,
+                auxiliary.initial_stack_size,
+            ),
+        ] {
+            write_auxiliary(&mut bytes, &mut word_offset, tag, value)?;
+        }
         write_auxiliary(&mut bytes, &mut word_offset, AT_NULL, 0)?;
         if word_offset > self.records_offset {
             return Err(Error::LayoutMismatch);

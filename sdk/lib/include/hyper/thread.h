@@ -30,8 +30,19 @@ void hyper_runtime_tls_set(uintptr_t key, void *value);
 int hyper_runtime_wait_u32(const uint32_t *address, uint32_t expected, uint64_t deadline);
 uint32_t hyper_runtime_wake_u32(const uint32_t *address, uint32_t count);
 typedef void (*hyper_runtime_thread_entry_t)(void *);
+/* Usable stack size excludes one no-access page at each end; rounded up to
+ * Native pages with a 64 KiB minimum. Join/detached cleanup reclaims the stack
+ * only after the kernel publishes termination. See hyper/stack.h for the same
+ * grow/query interface used by the main thread. Raw thread_create callers
+ * remain responsible for their own stack allocation and protection. At most
+ * 1024 outstanding termination subscriptions are admitted; exhaustion fails
+ * spawn before start. Entry should return to run TLS cleanup; direct Native
+ * exit skips destructors but its terminated stack is still reclaimed. */
 hyper_native_status_t hyper_runtime_thread_spawn(size_t stack_size, hyper_runtime_thread_entry_t entry,
     void *argument, uintptr_t *token);
+/* Explicit reservation capacity permits in-place growth by the worker. */
+hyper_native_status_t hyper_runtime_thread_spawn_with_stack(size_t stack_size, size_t capacity,
+    hyper_runtime_thread_entry_t entry, void *argument, uintptr_t *token);
 hyper_native_status_t hyper_runtime_thread_join(uintptr_t token);
 void hyper_runtime_thread_release(uintptr_t token);
 #endif

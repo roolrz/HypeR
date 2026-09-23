@@ -19,7 +19,7 @@ __attribute__((noreturn)) void __hyper_crt_start(
     if (heap_status != HYPER_NATIVE_STATUS_OK) {
         hyper_process_exit(heap_status);
     }
-    int result = hyper_main(&startup);
+    int result = hyper_main(hyper_runtime_startup());
     hyper_runtime_thread_detach();
     hyper_process_exit(result);
 }

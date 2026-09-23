@@ -22,6 +22,9 @@ fn encodes_system_v_vectors_and_tagged_handles() {
         program_header_count: 9,
         interpreter_base: 0x1000_0000,
         program_entry: 0x20_1000,
+        initial_stack_base: 0x8000,
+        initial_stack_capacity: 0x7000,
+        initial_stack_size: 0x2000,
     };
     let stack = crate::require_ok(layout.encode(
         auxiliary,
@@ -64,8 +67,23 @@ fn encodes_system_v_vectors_and_tagged_handles() {
         hyper::abi::native::HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT
     );
     assert_eq!(word(bytes, 160), 1);
-    assert_eq!(word(bytes, 168), 0);
-    assert_eq!(word(bytes, 176), 0);
+    assert_eq!(
+        word(bytes, 168),
+        hyper::abi::native::HYPER_NATIVE_AUXV_INITIAL_STACK_BASE
+    );
+    assert_eq!(word(bytes, 176), auxiliary.initial_stack_base);
+    assert_eq!(
+        word(bytes, 184),
+        hyper::abi::native::HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY
+    );
+    assert_eq!(word(bytes, 192), auxiliary.initial_stack_capacity);
+    assert_eq!(
+        word(bytes, 200),
+        hyper::abi::native::HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE
+    );
+    assert_eq!(word(bytes, 208), auxiliary.initial_stack_size);
+    assert_eq!(word(bytes, 216), 0);
+    assert_eq!(word(bytes, 224), 0);
 
     let argv_offset = crate::require_ok(usize::try_from(argv0 - stack.base()));
     let env_offset = crate::require_ok(usize::try_from(env0 - stack.base()));
@@ -136,4 +154,26 @@ fn rejects_oversized_and_underflowing_layouts() {
         Layout::try_new(32, &["/init"], &[], 0),
         Err(Error::AddressOverflow)
     );
+}
+
+#[test]
+fn initial_stack_reserves_growth_and_both_guards() {
+    use hyper::exec::startup::StackReservation;
+    const PAGE: u64 = hyper::mm::PAGE_SIZE;
+    let stack = crate::require_ok(StackReservation::try_new(
+        0x100_0000,
+        4 * PAGE,
+        16 * PAGE,
+        PAGE,
+    ));
+    assert_eq!(stack.base + PAGE + stack.capacity, stack.top());
+    assert_eq!(stack.top(), 0x100_0000);
+    assert_eq!(stack.mapped_base(), stack.top() - 4 * PAGE);
+    assert_eq!(stack.base + stack.reservation_size(), stack.top() + PAGE);
+    assert!(stack.base + PAGE < stack.mapped_base());
+    assert!(StackReservation::try_new(0x100_0000, 4 * PAGE, 3 * PAGE, PAGE).is_err());
+    assert!(StackReservation::try_new(0x100_0000, 4 * PAGE, 16 * PAGE, stack.base + PAGE).is_err());
+    assert!(StackReservation::try_new(u64::MAX - PAGE + 1, PAGE, PAGE, 0).is_err());
+    assert!(StackReservation::try_new(0x100_0000, 0, PAGE, 0).is_err());
+    assert!(StackReservation::try_new(0x100_0000, PAGE + 1, 2 * PAGE, 0).is_err());
 }

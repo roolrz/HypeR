@@ -344,10 +344,19 @@ impl NativeImageSegment {
         address_space: &NativeAddressSpace,
         pin: &(impl PinnedExecution + 'static),
     ) -> Result<(), Error> {
+        self.install_in_vmar(address_space, address_space.logical().root_vmar(), pin)
+    }
+
+    pub(crate) fn install_in_vmar(
+        self,
+        address_space: &NativeAddressSpace,
+        vmar: super::Vmar,
+        pin: &(impl PinnedExecution + 'static),
+    ) -> Result<(), Error> {
         let logical = address_space.logical();
         let prepared = match self.storage {
             ImageStorage::Writable(storage) => logical.prepare_map_writable(
-                logical.root_vmar(),
+                vmar,
                 self.range,
                 storage,
                 0,
@@ -364,7 +373,7 @@ impl NativeImageSegment {
                     storage.finish()
                 };
                 logical.prepare_map_private_view(
-                    logical.root_vmar(),
+                    vmar,
                     self.range,
                     storage,
                     self.permissions,
@@ -430,6 +439,14 @@ impl NativeAddressSpace {
             root_vmar_object_published: AtomicBool::new(false),
             _owner_charge: owner_charge,
         }))
+    }
+
+    /// Reserve a child range before installing any loader-owned stack pages.
+    /// Failure of the unpublished image retires this reservation with its root.
+    pub(crate) fn reserve_initial_stack(&self, range: UserSlice) -> Result<super::Vmar, Error> {
+        Ok(self
+            .logical()
+            .try_create_vmar(self.logical().root_vmar(), range)?)
     }
 
     pub(super) fn logical(&self) -> &LogicalAddressSpace {
