@@ -3,6 +3,7 @@
 
 //! Selected `AArch64` GIC virtualization backend.
 
+pub(super) mod bank;
 mod common;
 pub(super) mod v2;
 const MAX_LIST_REGISTERS: usize = 64;

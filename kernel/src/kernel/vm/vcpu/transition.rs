@@ -348,9 +348,15 @@ impl Drop for DetachedVcpuExecution {
 }
 
 fn release_execution_or_fail(
-    execution: &super::VcpuExecution,
+    execution: &mut super::VcpuExecution,
     mut claim: Option<super::registry::VmExecutionClaim>,
 ) {
+    if crate::hal::vm::take_reused_interrupt_save(&mut execution.hardware) {
+        crate::pr_warn!(
+            "HypeR: vCPU {} cleanup reused saved interrupt state after an incomplete local transition",
+            execution.vcpu_id
+        );
+    }
     let Some(cpu) = crate::kernel::cpu::current_index() else {
         crate::kernel::crash::fatal(format_args!(
             "HypeR: vCPU execution capability release has no registered CPU"
