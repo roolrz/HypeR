@@ -14,29 +14,25 @@ extern "C" {
 #endif
 
 typedef struct hyper_auxiliary_entry {
-    uintptr_t key;
-    uintptr_t value;
+	uintptr_t key;
+	uintptr_t value;
 } hyper_auxiliary_entry_t;
 
 typedef struct hyper_startup {
-    size_t argument_count;
-    char *const *arguments;
-    size_t environment_count;
-    char *const *environment;
-    size_t auxiliary_count;
-    const hyper_auxiliary_entry_t *auxiliary;
-    size_t handle_count;
-    const hyper_native_startup_handle_t *handles;
+	size_t argument_count;
+	char *const *arguments;
+	size_t environment_count;
+	char *const *environment;
+	size_t auxiliary_count;
+	const hyper_auxiliary_entry_t *auxiliary;
+	size_t handle_count;
+	const hyper_native_startup_handle_t *handles;
 } hyper_startup_t;
 
-hyper_native_status_t hyper_startup_parse(
-    const uintptr_t *initial_stack,
-    hyper_startup_t *startup);
+hyper_native_status_t hyper_startup_parse(const uintptr_t *initial_stack, hyper_startup_t *startup);
 
-hyper_native_status_t hyper_startup_find_handle(
-    const hyper_startup_t *startup,
-    uint32_t purpose,
-    hyper_native_handle_t *handle);
+hyper_native_status_t hyper_startup_find_handle(const hyper_startup_t *startup, uint32_t purpose,
+						hyper_native_handle_t *handle);
 
 /* Loader startup hook: after relocation and before constructors. Static
  * applications initialize through CRT instead; repeated initialization is safe. */
@@ -50,9 +46,11 @@ const hyper_startup_t *hyper_runtime_startup(void);
 hyper_native_handle_t hyper_runtime_capability(uint32_t purpose);
 /* Each successful acquisition returns a caller-owned Directory snapshot. */
 hyper_native_status_t hyper_runtime_directory_root(hyper_native_handle_t *output);
-hyper_native_status_t hyper_runtime_directory_acquire(const char *path, size_t size, hyper_native_handle_t *output);
+hyper_native_status_t hyper_runtime_directory_acquire(const char *path, size_t size,
+						      hyper_native_handle_t *output);
 hyper_native_status_t hyper_runtime_directory_change(const char *path, size_t size);
-hyper_native_status_t hyper_runtime_directory_scope(hyper_native_handle_t start, hyper_native_handle_t *output);
+hyper_native_status_t hyper_runtime_directory_scope(hyper_native_handle_t start,
+						    hyper_native_handle_t *output);
 
 hyper_native_status_t hyper_runtime_capabilities_initialize(const hyper_startup_t *startup);
 

@@ -38,11 +38,13 @@ typedef void (*hyper_runtime_thread_entry_t)(void *);
  * 1024 outstanding termination subscriptions are admitted; exhaustion fails
  * spawn before start. Entry should return to run TLS cleanup; direct Native
  * exit skips destructors but its terminated stack is still reclaimed. */
-hyper_native_status_t hyper_runtime_thread_spawn(size_t stack_size, hyper_runtime_thread_entry_t entry,
-    void *argument, uintptr_t *token);
+hyper_native_status_t hyper_runtime_thread_spawn(size_t stack_size,
+						 hyper_runtime_thread_entry_t entry, void *argument,
+						 uintptr_t *token);
 /* Explicit reservation capacity permits in-place growth by the worker. */
 hyper_native_status_t hyper_runtime_thread_spawn_with_stack(size_t stack_size, size_t capacity,
-    hyper_runtime_thread_entry_t entry, void *argument, uintptr_t *token);
+							    hyper_runtime_thread_entry_t entry,
+							    void *argument, uintptr_t *token);
 hyper_native_status_t hyper_runtime_thread_join(uintptr_t token);
 void hyper_runtime_thread_release(uintptr_t token);
 #endif

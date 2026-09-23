@@ -7,19 +7,18 @@
 #include <hyper/syscall.h>
 #include <hyper/thread.h>
 
-__attribute__((noreturn)) void __hyper_crt_start(
-    const uintptr_t *initial_stack)
+__attribute__((noreturn)) void __hyper_crt_start(const uintptr_t *initial_stack)
 {
-    hyper_startup_t startup;
-    const hyper_native_status_t status = hyper_startup_parse(initial_stack, &startup);
-    if (status != HYPER_NATIVE_STATUS_OK) {
-        hyper_process_exit(status);
-    }
-    const hyper_native_status_t heap_status = hyper_runtime_initialize(initial_stack);
-    if (heap_status != HYPER_NATIVE_STATUS_OK) {
-        hyper_process_exit(heap_status);
-    }
-    int result = hyper_main(hyper_runtime_startup());
-    hyper_runtime_thread_detach();
-    hyper_process_exit(result);
+	hyper_startup_t startup;
+	const hyper_native_status_t status = hyper_startup_parse(initial_stack, &startup);
+	if (status != HYPER_NATIVE_STATUS_OK) {
+		hyper_process_exit(status);
+	}
+	const hyper_native_status_t heap_status = hyper_runtime_initialize(initial_stack);
+	if (heap_status != HYPER_NATIVE_STATUS_OK) {
+		hyper_process_exit(heap_status);
+	}
+	int result = hyper_main(hyper_runtime_startup());
+	hyper_runtime_thread_detach();
+	hyper_process_exit(result);
 }
