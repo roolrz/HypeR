@@ -271,8 +271,15 @@ impl Broker {
         if !self.observations.is_empty() {
             match vm::machine_info(guest.machine.as_handle_ref()) {
                 Ok(info) => {
-                    let snapshot =
-                        io::encode_observation(info, hyper_vm_support::io_guest::RAM_BYTES);
+                    let boot_host_cpu = guest
+                        .cpus
+                        .first()
+                        .and_then(|cpu| vm::vcpu_info(cpu.as_handle_ref()).ok()?.host_cpu);
+                    let snapshot = io::encode_observation(
+                        info,
+                        hyper_vm_support::io_guest::RAM_BYTES,
+                        boot_host_cpu,
+                    );
                     self.observations.retain(|(endpoint, limit)| {
                         let keep = check_deadline(*limit).is_ok()
                             && matches!(

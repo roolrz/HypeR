@@ -91,8 +91,10 @@ make board-image BOARD=qemu
 make board-run BOARD=qemu
 ```
 
-Plain AArch64 `make` also creates the complete board image and atomically
-replaces an existing disk, resetting its data; `make run` preserves the disk.
+Plain AArch64 `make` creates the complete board image only when missing;
+otherwise it updates the host-side kernel/bootstrap and preserves disk contents.
+`make rebuild` atomically repacks the full disk, resetting its data.
+`make run` only starts existing artifacts.
 The Alpine volume is initialized from the pinned base rootfs as an ext4 disk.
 Alpine boots it through I/O VM virtio-scsi; `apk` and BusyBox tools are included.
 Rootfs generation additionally requires e2fsprogs and squashfs-tools (Homebrew:
@@ -116,11 +118,11 @@ still carry their guest fixtures.
 `BOARD_IMAGE` selects the resulting raw image. `board-image` always refuses to
 overwrite an existing image. To create another generation, choose a new output
 name; rebuilding applications must not silently erase persistent disk contents.
-AArch64 `make run` selects this QEMU deployment profile. On first use,
-`board-run` creates the configured image only if its output does not exist;
-`board-image` refuses replacement unless the default build explicitly requests it. Existing images must pass GPT
-validation against the selected configuration. QEMU uses the freshly built kernel/bootstrap
-while persistent files and VM images remain those stored on the disk.
+AArch64 `make run` selects this QEMU deployment profile. Build with `make` first;
+`board-run` never creates a disk or rebuilds kernel/bootstrap. Existing images
+must pass GPT validation against the selected configuration. QEMU uses the
+kernel/bootstrap from the last build while persistent files and VM images remain
+those stored on disk. Use `make rebuild` to refresh packaged guest artifacts.
 
 An optional VM `disk-image` names a disk artifact. The default board profiles
 select `alpine-rootfs`, generated from the pinned Alpine rootfs and sized to the

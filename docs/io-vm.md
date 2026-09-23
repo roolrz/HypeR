@@ -139,7 +139,8 @@ A VM definition may include `"disk": {"client": 1, "volume": "alpine"}`. The
 manager creates a unique capability session for that runtime. The I/O runtime
 checks both fields against `/etc/hyper/io-clients.conf`, generated from the same
 board JSON as the Linux volume table. Duplicate active bindings are refused.
-`vmm create` accepts `--disk-client` and `--disk-volume`; `vmm save` retains them.
+`vmm create` accepts `--disk-client` and `--disk-volume` for temporary VM
+definitions. Persistent disk assignments belong in the deployment configuration.
 
 The resident I/O VM has 128 MiB of ordinary RAM for Linux, services and
 vhost-scsi queue allocations; shared business-guest pages are additional mappings,

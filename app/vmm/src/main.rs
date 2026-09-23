@@ -15,8 +15,6 @@ use hyper_vm_policy::fleet::{self, Action, Request, Response};
 use std::io::Write;
 use std::process::ExitCode;
 
-const ESCAPE: u8 = 0x1d;
-
 fn application_main(mut startup: Startup<'_>) -> ExitCode {
     match run(&mut startup) {
         Ok(()) => ExitCode::SUCCESS,
@@ -35,13 +33,16 @@ fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let control = startup.take(vm::CLIENT_CONTROL)?;
     let capabilities = CapabilityChannel::from_handle(startup.take(vm::CLIENT_CAPABILITIES)?);
     let command = args.command.unwrap_or(hyper_vmm::cli::VmCommand::List);
-    let save_path = match &command {
-        hyper_vmm::cli::VmCommand::Save { path } => Some(path.clone()),
-        _ => None,
-    };
     let command = command.request()?;
     let bytes = fleet::encode(&command).map_err(std::io::Error::other)?;
-    control.as_byte_channel().send(&bytes)?;
+    match control.as_byte_channel().send(&bytes) {
+        Ok(()) | Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => {
+            // Admission can reject and close before we send. ByteChannel keeps
+            // its queued response readable after peer closure; report that
+            // reason instead of losing it behind the failed request send.
+        }
+        Err(error) => return Err(error.into()),
+    }
     let response = receive_response(&control)?;
     if let Response::Error { message } = response {
         return Err(std::io::Error::other(message).into());
@@ -60,23 +61,6 @@ fn run(startup: &mut Startup<'_>) -> Result<(), Box<dyn std::error::Error>> {
             "Connected to {name}. Press Ctrl-] for the control menu."
         )?;
         return console_session(input, &mut output, &console_channel);
-    }
-    if let Some(path) = save_path {
-        let Response::Entries { machines } = response else {
-            return Err(std::io::Error::other("invalid list response").into());
-        };
-        let definitions = machines
-            .into_iter()
-            .map(|machine| fleet::Definition {
-                name: machine.name,
-                image: machine.image,
-                autostart: machine.autostart,
-                disk: machine.disk,
-            })
-            .collect();
-        hyper_vmm::save_config(&path, definitions)?;
-        writeln!(output, "Saved {}.", path.display())?;
-        return Ok(());
     }
     write_response(&mut output, response)
 }
@@ -145,14 +129,11 @@ fn write_response(
                 for placement in &machine.placement {
                     writeln!(
                         output,
-                        "  vCPU {}: host CPU {}; pending target: {}",
+                        "  vCPU {}: pCPU {}",
                         placement.vcpu,
                         placement
                             .host_cpu
-                            .map_or_else(|| "unassigned".into(), |cpu| cpu.to_string()),
-                        placement
-                            .pending_host_cpu
-                            .map_or_else(|| "none".into(), |cpu| cpu.to_string())
+                            .map_or_else(|| "unassigned".into(), |cpu| cpu.to_string())
                     )?;
                 }
                 if let (Some(vcpus), Some(bytes)) = (machine.vcpus, machine.memory_bytes) {
@@ -184,21 +165,33 @@ fn console_session(
     output: &mut impl Write,
     console_channel: &OwnedHandle<ByteChannelObject>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let waits = [
-        WaitItem::new(
-            input.as_handle_ref(),
-            ObjectSignals::<ByteChannelObject>::READABLE
-                .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
-        ),
-        WaitItem::new(
-            console_channel.as_handle_ref(),
-            ObjectSignals::<ByteChannelObject>::READABLE
-                .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
-        ),
-    ];
+    use hyper_vmm::console::{Input, InputAction};
     let mut bytes = [0u8; hyper_os::channel::MAX_MESSAGE_BYTES];
-    let mut menu = false;
+    let mut keyboard = Input::default();
     loop {
+        if keyboard.is_pending() {
+            match console_channel
+                .as_byte_channel()
+                .try_send(keyboard.pending())
+            {
+                Ok(()) => keyboard.sent(),
+                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}
+                Err(error) => return console_error(output, b"write", error),
+            }
+        }
+        let mut guest_signals = ObjectSignals::<ByteChannelObject>::READABLE
+            .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED);
+        if keyboard.is_pending() {
+            guest_signals = guest_signals.union(ObjectSignals::<ByteChannelObject>::WRITABLE);
+        }
+        let waits = [
+            WaitItem::new(
+                input.as_handle_ref(),
+                ObjectSignals::<ByteChannelObject>::READABLE
+                    .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
+            ),
+            WaitItem::new(console_channel.as_handle_ref(), guest_signals),
+        ];
         // stdout is line-buffered. Publish prompts and partial guest output
         // before waiting for more input from either peer.
         output.flush()?;
@@ -216,6 +209,10 @@ fn console_session(
                 output.write_all(&bytes[..count])?;
                 continue;
             }
+            if !ObjectSignals::<ByteChannelObject>::PEER_CLOSED.is_present_in(observation.observed)
+            {
+                continue; // Writable: retry the buffered input on the next pass.
+            }
             output.write_all(b"\n[vmm] virtual machine disconnected\n")?;
             return Ok(());
         }
@@ -229,38 +226,17 @@ fn console_session(
             Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
             Err(error) => return console_error(output, b"input", error),
         };
-        let mut guest_input = Vec::with_capacity(count);
         for byte in bytes[..count].iter().copied() {
-            if menu {
-                menu = false;
-                match byte {
-                    b'd' | b'q' | ESCAPE => {
-                        output.write_all(b"\n[vmm] detached\n")?;
-                        return Ok(());
-                    }
-                    _ => {
-                        output.write_all(b"\n[vmm] resumed\n")?;
-                    }
+            match keyboard.push(byte) {
+                InputAction::Continue => {}
+                InputAction::Menu => output.write_all(b"\n[vmm] d/q: detach, any other key: resume\n")?,
+                InputAction::Resume => output.write_all(b"\n[vmm] resumed\n")?,
+                InputAction::Overflow => output.write_all(b"\n[vmm] guest input buffer full; excess input discarded (Ctrl-] still works)\n")?,
+                InputAction::Detach => {
+                    output.write_all(b"\n[vmm] detached\n")?;
+                    return Ok(());
                 }
-                continue;
             }
-            if byte == ESCAPE {
-                if !guest_input.is_empty() {
-                    if let Err(error) = console_channel.as_byte_channel().send(&guest_input) {
-                        return console_error(output, b"write", error);
-                    }
-                    guest_input.clear();
-                }
-                menu = true;
-                output.write_all(b"\n[vmm] d/q: detach, any other key: resume\n")?;
-                continue;
-            }
-            guest_input.push(byte);
-        }
-        if !guest_input.is_empty()
-            && let Err(error) = console_channel.as_byte_channel().send(&guest_input)
-        {
-            return console_error(output, b"write", error);
         }
     }
 }

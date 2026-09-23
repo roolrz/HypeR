@@ -96,13 +96,33 @@ Packaging still copies ELF files before stripping only debug information and
 preserves unchanged output timestamps. Use a separate `NATIVE_INITRAMFS` or
 `BOARD_OUTPUT` when comparing profiles.
 
-On AArch64, plain `make` (or `make all`) rebuilds the board disk with current
-guest artifacts and resets all data in that disk. Packing completes in a
-temporary file before atomically replacing `BOARD_IMAGE`; a failed build keeps
-the previous disk intact. `make board-rebuild` explicitly requests the same
-behavior. `make run` reuses an existing disk and creates one only if missing.
-`make board-image` still refuses an existing output. On other architectures,
-plain `make` continues to build the kernel image.
+Before packing, `services.json` is checked on the host using init's production
+parser, bootstrap authority policy, and supervision rules. Invalid syntax,
+dependencies, capability declarations, unsupported restart policies, or missing
+service images reject the build without replacing the existing ramdisk. The
+check also runs before an incremental packaging cache hit.
+For a standalone configuration check (without image membership checks), run:
+
+```sh
+python3 scripts/check-service-manifest.py app/init/config/services.json
+```
+
+This uses the source workspace and host Rust toolchain; it does not need a built
+HypeR SDK. Live handle availability and kernel authorization remain boot-time
+checks. `python3 -B tests/build/service-manifest.py` runs the host regression
+suite, also included in Native CI.
+
+Plain `make` (or `make all`) builds the kernel and the selected profile's ramdisk.
+The default AArch64 board profile creates a disk only if missing; subsequent
+builds preserve `/data` and guest disks while updating the host-side kernel and
+bootstrap loaded by QEMU. `make run` only starts existing artifacts and fails if
+any are missing; it never builds or packages them.
+
+`make rebuild` (or `make board-rebuild` for the board profile) repacks the full
+board disk, resetting persistent contents after successful packing. Use
+`make clean && make rebuild` to compile from a clean build tree as well.
+`make board-image` still refuses an existing output unless explicitly replaced.
+For Native/standby profiles, select the same `RUN_PROFILE` for build and run.
 
 GitHub Actions separates source quality, architecture builds, image contracts,
 Native SDK integration, and runtime acceptance. The AArch64 matrix exercises

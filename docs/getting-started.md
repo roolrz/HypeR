@@ -28,35 +28,35 @@ system:
 
 ```sh
 make defconfig
+make
 make run
 ```
 
-`make run` builds the Rust std-based init, direction-attenuated Console workers,
+`make` builds the Rust std-based init, direction-attenuated Console workers,
 session manager, capability-scoped shell, VM manager, and isolated VM runtime
 only through the assembled SDK under `target/sdk/aarch64`. It also downloads
-the checksum-pinned AArch64 Linux inputs, packages the guest FIT, and places it
-in the Native initramfs for userspace-managed boot. The applications do not
+the checksum-pinned AArch64 Linux inputs and, on first build, packages the guest
+FIT and root disk into the board disk. Later builds preserve that disk.
+`make run` only starts existing artifacts; `make rebuild` repacks the whole disk. The applications do not
 include private kernel or SDK source paths. Native applications are dynamic
 PIEs by default and share the capability-loaded `libhyper.so` runtime through
 the in-tree AArch64 ELF interpreter. SDK consumers can select a self-contained
 static PIE backed by the matching `libhyper.a` with `HYPER_LINK_MODE=static`.
 Pass `INITRAMFS=/path/to/archive.cpio` to test another Native userspace image.
 
-The default AArch64 run profile retains the HypeR shell and starts a resident
-Linux I/O VM with its own assigned QEMU virtio-scsi disk. Its Native owner is
-`io-runtime`, visible in `ps`; after Linux and the control handshake are ready
-it prints `HypeR io-runtime: ready; storage backend idle (no client attached)`.
-Both sides then block waiting for work. The ordinary Alpine VM remains
-configured but does not autostart in this profile; `vmm start alpine` still
-starts it independently.
+The default AArch64 board profile retains the HypeR shell and starts a resident
+Linux I/O VM with its assigned QEMU virtio-scsi disk. Its Native owner is
+`io-runtime`, visible in `ps`. It mounts the configuration volume at `/data`
+and provides disks to configured guest VMs. The persistent disk is
+`target/board/qemu/disk.img`; `BOARD_IMAGE` selects another board disk.
 
-The default disk is `target/app/aarch64/io-disk.img` (64 MiB, created once).
-Existing content is preserved between boots. Select another raw disk with
-`make run IO_VM_DISK=/path/to/disk.img`. Standby does not attach a business VM
-or expose storage through Native VFS, and it never runs the writing acceptance
-fixture. Live client attachment remains separate work. See [I/O VM](io-vm.md).
+For an idle-backend diagnostic without mounted Native storage, build with
+`make RUN_PROFILE=io`, then launch with `make run RUN_PROFILE=io`. Its separate
+64 MiB disk is created once during the build. Set `IO_VM_DISK=/path/to/disk.img`
+on both commands to select another diagnostic disk. See [I/O VM](io-vm.md).
 
-Use `make run RUN_PROFILE=native` for the previous Native/Alpine profile without
+Use `make RUN_PROFILE=native` followed by `make run RUN_PROFILE=native`
+for the Native/Alpine profile without
 an I/O appliance or physical disk. Explicit `INITRAMFS=...` also defaults to
 that profile. RISC-V retains its existing Native run profile.
 
@@ -95,7 +95,8 @@ Useful targets:
 | `make sdk` | Assemble the AArch64 Native SDK under `target/sdk/aarch64` |
 | `make sdk-check` / `make sdk-test` | Verify SDK generation, publication, compilation, and portable runtime behavior |
 | `make native-initramfs` | Build Native `/init` through the SDK and package it as deterministic `newc` |
-| `make run ARCH=aarch64` | Build and start the complete Native system |
+| `make` / `make run ARCH=aarch64` | Build while preserving persistent disk contents / start existing artifacts |
+| `make rebuild` | Repack the board disk, resetting persistent contents |
 | `make test-native` | Verify the Native service graph, command execution, and managed Linux VM console attach/detach under QEMU |
 | `make guest-assets ARCH=<arch>` | Download and package the pinned Linux guest inputs |
 | `make check ARCH=<arch>` | Run target checks and Clippy, including kernel self-test builds |
