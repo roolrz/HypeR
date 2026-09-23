@@ -136,7 +136,7 @@ application checks multi-megabyte file contents, extension gaps, timestamps,
 rename, copy, directory enumeration and explicit synchronization. The second
 cold boot checks persisted contents; both boots also exercise paced shell input
 and, in stack-audit builds, require at least 2 KiB of measured stack reserve
-and no more than 12 KiB of measured use (`STACK_MAXIMUM_USED`).
+and no more than 24 KiB of measured use (`STACK_MAXIMUM_USED`).
 The fixture keeps its disk and logs for diagnosis and never uses `BOARD_IMAGE`
 as a scratch disk.
 
@@ -151,9 +151,13 @@ The finite fleet quota includes eight business VM allowances and one resident
 I/O VM allowance, plus manager overhead. This is an admission ceiling, not
 preallocated RAM or a guarantee that all eight guests fit the host.
 
-For Pi 5, provide board-specific `tfa` and `host-dtb` artifacts. Both board
-profiles use the same pinned AArch64 appliance; its Pi driver configuration is
-build-verified, but physical Pi qualification remains outstanding. The FAT boot
+For Pi 5, use `make rpi5-sd` to fetch the pinned official prebuilt DTBs/overlays
+and the separately pinned Pi 5 I/O appliance. The boot chain uses the official
+EEPROM firmware and its built-in BL31; no custom TF-A artifact is required.
+QEMU and Pi 5 package selections live in `scripts/io-vm.lock.json`. Recorded
+Pi 5 development runs established SD-backed reads and basic guest persistence;
+the selected package's hardware qualification and DMA fault recovery remain
+separate validation requirements. The FAT boot
 volume contains the firmware configuration, official DTBs/overlays, kernel and bootstrap archive.
 The userspace `bcm2712-sdhci` profile validates the upstream C0/D0 SDIO1
 resource graph: host/config registers, fixed clock, main/AON pinctrl and AON

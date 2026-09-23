@@ -144,9 +144,10 @@ Directory scope; concurrent operations retain their own capability snapshots.
 including directory renames, rather than returning a cached lexical path.
 
 `File::try_clone` shares the adapter's offset and Native File owner. Append
-chooses the end atomically for each short write. Open files survive unlink and
-rename replacement. Rename, hard links, symbolic links, permissions, timestamps,
-copy, and recursive directory removal are supported. `fs::copy` also applies the
+chooses the end atomically for each short write. On ramfs, open files survive
+unlink and rename replacement. The adapter exposes rename, hard links, symbolic
+links, permissions, timestamps, copy, and recursive directory removal, subject
+to backend support. `fs::copy` also applies the
 source permission bits. `fs::metadata` follows symbolic links, while
 `fs::symlink_metadata` and `DirEntry::metadata` inspect the final link itself.
 `std::os::hyper::fs` provides symbolic-link creation and Native mode extensions.
@@ -158,8 +159,13 @@ owner, independent opens compete, and final active handle closure releases the
 grant. Contended upgrades preserve the shared grant and return an error;
 callers can unlock before requesting a blocking exclusive lock.
 
-The current filesystem is volatile ramfs. `sync_all` and `sync_data` acknowledge
-completed in-memory changes without promising persistence across restart.
+Filesystem behavior depends on the backend. On ramfs, `sync_all` and `sync_data`
+acknowledge in-memory changes without restart persistence. Board deployments
+also mount FAT at `/data` through the Native block frontend and I/O VM; sync
+flushes that backend, with durability dependent on device completion and flush
+semantics. FAT has additional limits on links, modes, unlink and rename;
+see [FAT semantics](../../../kernel/docs/fat.md). The std surface does not
+make unsupported backend operations available.
 Recursive deletion uses pinned directory capabilities and conditional removal,
 so replacing an entry with a symlink cannot redirect traversal into its target.
 Concurrent namespace mutation can still make the operation fail partway through.

@@ -8,8 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 HypeR supports the host GICv2 MMIO interface and adapts its PL011 driver for
 Pi 5's dedicated three-pin debug UART, including its smaller AXI register window. The intended first milestone is a
 four-core Native shell with timer-driven scheduling and interrupt-driven input.
-Native boot, bidirectional UART and diskless Linux guest userspace were
-confirmed on a Pi 5 D0 board. Physical storage and DMA still require validation.
+Native boot, bidirectional UART, SD-backed `/data` reads and basic Alpine
+SMP/reboot/poweroff with file persistence were confirmed on a Pi 5 D0 board.
+See the SD-card qualification record below; sustained load, power-loss durability
+and DMA retirement under faults remain unqualified.
 
 GICv2 guest virtualization is implemented and tested with Linux on QEMU.
 Firmware must describe the GICH and GICV register windows plus the maintenance
@@ -18,8 +20,10 @@ support and reject VM admission. The current backend requires five priority
 and preemption bits and supports up to 64 list registers.
 
 Each vCPU owns its saved GICH control, VMCR, APR and list-register state. Guest
-stage-2 maps only the banked GICV CPU interface as Device memory; GICC and GICH
-remain host-only. The emulated distributor exposes 1..8 vCPUs and 64 interrupt
+stage-2 maps the first 4 KiB of the banked GICV CPU interface as Device
+memory. The second page, containing DIR, traps for software deactivation so
+active interrupts outside the hardware list registers can also be retired.
+GICC and GICH remain host-only. The emulated distributor exposes 1..8 vCPUs and 64 interrupt
 IDs using GICv2 without security extensions. The Native platform-info query reports the
 GIC revision so vm-runtime emits matching guest firmware. GICv3 hosts retain
 their existing guest profile.
@@ -34,8 +38,9 @@ console used by this configuration.
 The I/O appliance is built and published by the separate HypeR-io-vm repository.
 HypeR consumes its pinned GHCR package and provides the guest DTS/DTB and
 launch configuration. The firmware-provided host DTB used below is not a guest
-device-assignment description. The common AArch64 package includes the upstream
-Pi storage drivers, but has not been qualified on physical Pi 5 hardware. See
+device-assignment description. The lock selects separate QEMU and Pi 5 build
+profiles. The Pi profile includes the upstream storage drivers; its package
+hardware-qualification status is separate from the recorded development runs. See
 the [I/O VM contract](../../docs/io-vm.md) and
 [board storage deployment](../../docs/board-storage.md).
 
@@ -170,7 +175,7 @@ and repeated `top` entry/exit. QEMU passing is not a substitute for these checks
 After host bring-up, use a four-vCPU guest image and verify all guest CPUs are
 online, then repeatedly offline/online secondary CPUs through Linux sysfs.
 Exercise per-CPU timer wakeups, SGI/IPI traffic, SPI routing, and console input
-under concurrent load. Repeat guest `reboot -f` and `poweroff -f`, verify that
+under concurrent load. Repeat guest `reboot` and `poweroff`, verify that
 HypeR itself stays running, and check guest pages return to the stopped baseline.
 Also terminate vm-runtime during a pending power request and with CPUs powered
 off; every configured Thread and translation must retire before page reuse.
@@ -313,8 +318,8 @@ notification mechanisms; SDHCI policy remains in userspace.
 ## Release boundary
 
 These Make targets are local integration tools. The separate image distribution
-repository will pin merged HypeR and I/O VM revisions plus immutable binary and
-source artifacts; see [image distribution](../../docs/image-distribution.md).
+repository pins merged HypeR; HypeR's locks select the I/O VM and official boot
+inputs, including immutable binary and source artifacts; see [image distribution](../../docs/image-distribution.md).
 Do not promote local reassemblies or uncommitted builds to release pins.
 
 On AArch64, stage-2 permission faults outside a stage-1 walk do not provide a

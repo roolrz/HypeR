@@ -44,8 +44,8 @@ vmm start alpine
 vmm console alpine
 vmm stop alpine
 vmm restart alpine
-vmm create test --image /vm/alpine.itb
-vmm create worker --image /vm/alpine.itb --start
+vmm create test --image /data/vm/alpine.itb
+vmm create worker --image /data/vm/alpine.itb --start
 vmm delete test
 ```
 
@@ -60,8 +60,9 @@ Start/restart acceptance means the lifecycle request was accepted; use status to
 observe `starting`, `running`, `stopping`, `stopped`, or `failed`.
 
 Each VM owns a separate runtime process, resource domain, task group, lifecycle
-tracker, and console session. The current policy allows eight definitions and
-budgets two active VM instances. Guest memory and vCPU configuration still come
+tracker, and console session. The current policy allows eight definitions and budgets up to eight business
+VM instances plus the resident I/O VM and manager overhead. Actual resource
+admission may fail below that ceiling. Guest memory and vCPU configuration still come
 from the FIT image: the default Alpine build uses 256 MiB and two vCPUs on
 AArch64 (one on RISC-V);
 AArch64 supports 1..8 vCPUs and RISC-V currently supports one. The CLI has no
@@ -89,8 +90,8 @@ The VM file contains definitions, not service capabilities:
 {
   "format": "hyper.vm-config",
   "virtual-machines": [
-    { "name": "alpine", "image": "/vm/alpine.itb", "autostart": true },
-    { "name": "test", "image": "/vm/alpine.itb", "autostart": false }
+    { "name": "alpine", "image": "/data/vm/alpine.itb", "autostart": true },
+    { "name": "test", "image": "/data/vm/alpine.itb", "autostart": false }
   ]
 }
 ```
@@ -131,9 +132,9 @@ if its terminal connection fails.
 Terminal stdin carries both `stdio.input` and a same-object
 `stdio.terminal-input` capability. The runtime verifies their identity. The
 console-input service splits command/EOF records and normalizes CR and CRLF to LF across
-hardware reads; std terminal input translates CR to LF and consumes standalone
+hardware reads; std terminal input also accepts CR and consumes standalone
 Ctrl-D as EOF without closing the shared endpoint. Native channel readers such
-as `vmm console` still receive CR and Ctrl-D. This interactive path is not a
+as `vmm console` receive normalized line endings and the unchanged Ctrl-D byte. This interactive path is not a
 binary serial tunnel or a full POSIX tty. Ordinary pipes and files preserve all
 bytes. Default std child-process inheritance preserves terminal provenance.
 See [the runtime contract](../sdk/lib/README.md) for compatibility details.

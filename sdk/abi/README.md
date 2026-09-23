@@ -11,8 +11,8 @@ a C/C++ header, syscall metadata, wire-layout assertions, and an auditable
 reference generated from one schema.
 
 The Native ABI is intentionally independent of kernel implementation details
-and language runtime policy. Linux, FreeBSD, POSIX, and other compatibility
-interfaces are separate personalities and are not defined by this component.
+and language runtime policy. Foreign OS compatibility interfaces are not
+defined by this component and are not implemented Native SDK capabilities.
 
 HypeR is pre-release. The ABI revision remains zero until the project explicitly
 publishes its first supported ABI; schema changes before then do not imply
