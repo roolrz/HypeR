@@ -209,6 +209,7 @@ struct MappingSet<Backend: PageBackend, Account: MemoryAccount> {
 }
 
 struct VmarSet<Account: MemoryAccount> {
+    // Ordered by base for linear free-gap traversal; identity lookup uses tokens.
     records: Vec<VmarRecord<Account::Charge>>,
     _storage_charge: Option<Account::Charge>,
 }
@@ -386,44 +387,38 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         let range = match requested {
             Some(range) => range,
             None => {
-                // Walk free gaps without allocating a second interval index. Choose
-                // the closest feasible base to the hint; ties favor the lower base.
-                // Zero naturally selects the lowest free address. The shared epoch
-                // check below commits selection and reservation atomically.
-                let occupied = || {
-                    snapshot
-                        .vmars
-                        .records
-                        .iter()
-                        .filter(|record| record.parent_id == parent.id)
-                        .map(|record| record.token.range)
-                        .chain(
-                            snapshot
-                                .mappings
-                                .records
-                                .iter()
-                                .filter(|mapping| mapping.owner_vmar == parent.id)
-                                .map(|mapping| mapping.snapshot.range),
-                        )
-                };
+                // Both snapshots are ordered by base. Merge direct children and
+                // parent-owned mappings in one allocation-free O(V + M) pass.
+                // Nearest feasible base wins; ascending traversal breaks ties
+                // toward the lower address. Zero selects the lowest free base.
+                let mut children = snapshot
+                    .vmars
+                    .records
+                    .iter()
+                    .filter(|record| record.parent_id == parent.id)
+                    .map(|record| record.token.range)
+                    .peekable();
+                let mut mappings = snapshot
+                    .mappings
+                    .records
+                    .iter()
+                    .filter(|mapping| mapping.owner_vmar == parent.id)
+                    .map(|mapping| mapping.snapshot.range)
+                    .peekable();
                 let mut cursor = authority.base().get();
                 let end = authority.end().get();
                 let mut best: Option<(u64, u64)> = None;
-                while cursor < end {
-                    if let Some(next) = occupied()
-                        .filter(|range| range.base().get() <= cursor && range.end().get() > cursor)
-                        .map(|range| range.end().get())
-                        .max()
-                    {
-                        cursor = next;
-                        continue;
-                    }
-                    let gap_end = occupied()
-                        .filter(|range| range.base().get() > cursor)
-                        .map(|range| range.base().get())
-                        .min()
-                        .unwrap_or(end);
-                    if size <= gap_end - cursor {
+                loop {
+                    let next = match (children.peek(), mappings.peek()) {
+                        (Some(child), Some(mapping)) if child.base() <= mapping.base() => {
+                            children.next()
+                        }
+                        (_, Some(_)) => mappings.next(),
+                        (Some(_), None) => children.next(),
+                        (None, None) => None,
+                    };
+                    let gap_end = next.map_or(end, |range| range.base().get());
+                    if gap_end >= cursor && size <= gap_end - cursor {
                         let base = hint.clamp(cursor, gap_end - size);
                         let distance = base.abs_diff(hint);
                         if best.is_none_or(|(_, previous)| distance < previous) {
@@ -433,7 +428,8 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
                             break;
                         }
                     }
-                    cursor = gap_end;
+                    let Some(occupied) = next else { break };
+                    cursor = cursor.max(occupied.end().get());
                 }
                 let (base, _) = best.ok_or(AddressSpaceError::Allocation)?;
                 UserSlice::new(UserAddress::new(base), size)
@@ -476,11 +472,16 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             range,
         };
         replacement.extend(snapshot.vmars.records.iter().cloned());
-        replacement.push(VmarRecord {
-            token,
-            parent_id: parent.id,
-            ownership,
-        });
+        let position =
+            replacement.partition_point(|record| record.token.range.base() < range.base());
+        replacement.insert(
+            position,
+            VmarRecord {
+                token,
+                parent_id: parent.id,
+                ownership,
+            },
+        );
         let replacement = FallibleArc::try_new(VmarSet {
             records: replacement,
             _storage_charge: storage_charge,
