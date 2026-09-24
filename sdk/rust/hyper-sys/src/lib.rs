@@ -1423,7 +1423,7 @@ pub unsafe fn vmo_write(
 }
 
 /// Allocates a child VMAR. Options zero treats address as a low-end hint;
-/// address zero selects the lowest free range. VMAR_ALLOCATE_EXACT forbids
+/// address zero selects the lowest free range. `VMAR_ALLOCATE_EXACT` forbids
 /// relocation, including for address zero. Success returns its base in value1.
 ///
 /// # Safety
