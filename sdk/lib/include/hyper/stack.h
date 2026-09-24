@@ -24,10 +24,14 @@ typedef struct hyper_stack_info {
  * and at least the initial size. A nonzero capacity smaller than size is invalid.
  * Placement prefers the high application range, not a fixed SDK arena.
  * Only size bytes are initially mapped; reservation is not physical memory.
+ * Capacity is fixed at creation and is the hard limit for in-place growth;
+ * request a larger capacity here if needed. Guard pages are additional.
  * A successful create returns an owned descriptor, not a malloc pointer. */
 hyper_native_status_t hyper_stack_create(size_t size, size_t capacity, hyper_stack_t **result);
 hyper_native_status_t hyper_stack_get_info(hyper_stack_t *stack, hyper_stack_info_t *result);
 /* Extend downwards without moving any existing byte or changing SP/top.
+ * Size must not exceed the capacity reported by hyper_stack_get_info();
+ * this operation cannot enlarge the reservation, even into adjacent free VA.
  * Failure leaves the old usable extent intact. No shrink or automatic fault
  * growth: call before exhausting the old stack, with sufficient call headroom.
  * Grow/query serialize internally; descriptor destruction requires exclusive

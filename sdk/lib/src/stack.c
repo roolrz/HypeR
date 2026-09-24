@@ -43,7 +43,7 @@ static void close_owned(hyper_native_handle_t handle)
 		hyper_process_exit(HYPER_NATIVE_STATUS_INTERNAL);
 }
 
-static bool page_round(size_t size, size_t *rounded)
+static inline bool page_round_up(size_t size, size_t *rounded)
 {
 	if (!page_size || !size || size > SIZE_MAX - (page_size - 1))
 		return false;
@@ -54,7 +54,7 @@ static bool page_round(size_t size, size_t *rounded)
 /* Register a runtime-created reservation. All descriptors have the same
  * allocation, registry and retirement rules. Caller
  * serializes publication (startup is single-threaded). */
-static void register_stack(hyper_stack_t *stack, uintptr_t base, size_t capacity, size_t size,
+static inline void register_stack(hyper_stack_t *stack, uintptr_t base, size_t capacity, size_t size,
 			   hyper_native_handle_t vmar)
 {
 	*stack = (hyper_stack_t){.top = base + page_size + capacity,
@@ -100,7 +100,7 @@ static hyper_native_status_t retire(hyper_stack_t *stack)
 	return status;
 }
 
-static void collect(void)
+static void reclaim_retired_stacks(void)
 {
 	hyper_stack_t **link = &stacks;
 	while (*link) {
@@ -192,7 +192,7 @@ hyper_native_status_t hyper_stack_create(size_t size, size_t capacity, hyper_sta
 
 static hyper_native_status_t create_stack(size_t size, size_t capacity, hyper_stack_t **result)
 {
-	if (!page_round(size, &size))
+	if (!page_round_up(size, &size))
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	if (capacity && capacity < size)
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
@@ -200,14 +200,14 @@ static hyper_native_status_t create_stack(size_t size, size_t capacity, hyper_st
 		capacity = size;
 	if (capacity < DEFAULT_CAPACITY)
 		capacity = DEFAULT_CAPACITY;
-	if (!page_round(capacity, &capacity) || size > capacity ||
+	if (!page_round_up(capacity, &capacity) || size > capacity ||
 	    capacity > SIZE_MAX - 2 * page_size)
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	hyper_stack_t *stack = calloc(1, sizeof(*stack));
 	if (!stack)
 		return HYPER_NATIVE_STATUS_NO_MEMORY;
 	hyper_mutex_lock(&registry_lock);
-	collect();
+	reclaim_retired_stacks();
 	size_t extent = capacity + 2 * page_size;
 	hyper_call_result_t region = hyper_vmar_allocate(
 		root_vmar, stack_ceiling > extent ? stack_ceiling - extent : 0, extent, 0);
@@ -222,7 +222,7 @@ static hyper_native_status_t create_stack(size_t size, size_t capacity, hyper_st
 		*result = stack;
 	else {
 		stack->garbage = true;
-		collect();
+		reclaim_retired_stacks();
 	}
 	hyper_mutex_unlock(&registry_lock);
 	return status;
@@ -245,7 +245,7 @@ hyper_native_status_t hyper_stack_get_info(hyper_stack_t *stack, hyper_stack_inf
 
 hyper_native_status_t hyper_stack_grow(hyper_stack_t *stack, size_t size)
 {
-	if (!stack || !page_round(size, &size))
+	if (!stack || !page_round_up(size, &size))
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	hyper_mutex_lock(&registry_lock);
 	hyper_native_status_t status;
@@ -294,6 +294,6 @@ void hyper_stack_release_runtime(hyper_stack_t *stack)
 	hyper_mutex_lock(&registry_lock);
 	stack->managed = false;
 	stack->garbage = true;
-	collect();
+	reclaim_retired_stacks();
 	hyper_mutex_unlock(&registry_lock);
 }
