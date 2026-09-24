@@ -38,7 +38,7 @@ Single/double quotes and backslash escaping protect literal operators. A `#`
 at the beginning of a word starts a comment. There is no variable expansion,
 command substitution, globbing, background execution, `&&`/`||`, descriptor
 duplication (`2>&1`) or here-document support. Lines are limited to 512 bytes,
-commands to 32 arguments and pipelines to eight stages.
+commands to 32 words including the command name, and pipelines to eight stages.
 
 `pwd`, `help` and `clear` can run as pipeline stages or redirect their output.
 `cd` and `exit` require a standalone command without redirection. Ctrl-D sent

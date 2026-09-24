@@ -7,9 +7,9 @@ SPDX-License-Identifier: Apache-2.0
 
 HypeR keeps policy above mechanism. A subsystem should expose the smallest
 contract its caller needs and keep ownership, lifecycle, address domains, and
-hardware effects explicit. This document describes the target dependency
-model. It is normative for new code; the migration notes identify existing
-debt rather than presenting the target as complete.
+hardware effects explicit. This document describes the implemented dependency
+model and its ownership contracts. Explicitly identified extensions remain outside the current
+implementation.
 
 ## Layer model
 
@@ -486,10 +486,12 @@ and tagged maintenance. Safe abandonment leaks published owners rather than
 risking premature page reuse. A kernel self-test exercises
 repeated direct Native syscall return, register-result validation, deferred-call
 unwind and re-entry, contained fault unwind, join, and retirement on VHE QEMU
-CPUs. The production path mounts the firmware initramfs, validates and maps
-`/init`, publishes its Process and initial UserThread, and transfers bootstrap
-execution to the scheduler. Physical-hardware qualification remains necessary
-for guarantees that QEMU cannot establish.
+CPUs. The production path mounts the firmware initramfs during bootstrap,
+schedules the `native-init` kernel worker, and retires bootstrap execution.
+That worker validates and maps `/init`, publishes its Process and initial
+UserThread, and then exits. Runtime file operations may sleep, so loading
+requires this ordinary scheduler context. Physical-hardware qualification
+remains necessary for guarantees that QEMU cannot establish.
 
 The kernel exposes one Native ABI. Linux currently participates as the trusted
 I/O VM described by the project roadmap. Foreign application personalities are
@@ -554,8 +556,9 @@ path.
 The concrete startup order is boot-critical CPU power, memory/allocator,
 immutable initramfs publication, debug and scheduler, host IRQ/crash/time,
 one-shot SMP admission, stage-1 address-space sealing, platform drivers,
-complete VM initialization, and Native init publication. Kernel self-test
-images run standalone mechanism tests, report completion and retire the
+complete VM initialization, and scheduling of the Native init worker. The
+worker loads and publishes init after interrupt-masked bootstrap has exited.
+Kernel self-test images run standalone mechanism tests, report completion and retire the
 bootstrap execution. Linux integration boots Native init and uses userspace VMM
 tools; kernel self-tests need only an empty ramfs archive. Sealing takes the
 same mutation lock as guarded-stack map/unmap and retires identity aliases only

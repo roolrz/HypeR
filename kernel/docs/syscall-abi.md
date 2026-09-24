@@ -286,17 +286,18 @@ safe `Any` downcast creates an operation-pin reference. An object-kind tag is
 never followed by an unchecked pointer cast. One generated declaration keeps
 Rust types and ABI object kinds unique and coherent.
 
-Object construction is fallible. Phase 1 must provide an audited no-std,
-Apache/MIT-compatible fallible shared owner or a comparably small reviewed
-allocation boundary. Untrusted creation paths may not use an infallible shared
-owner constructor or an unaudited hand-written reference count.
+Object construction uses the shared `FallibleArc` allocation boundary and
+returns allocation failure before publication. Untrusted creation paths may
+not replace this with an infallible shared-owner constructor or duplicate the
+reference-count implementation.
 
 Constructed objects also enter a global diagnostic directory through a weak
 reference. The directory never grants authority or retains the payload. Its
 newest-first cursor excludes later registrations from subsequent pages, while
 each snapshot reports KOID, kind, immutable export policy, active-handle state,
 and weakly consistent counts for service, scheduler, publication,
-user-authority, operation-pin, diagnostic, and retirement owners. Published
+user-authority, operation-pin, diagnostic, retirement, and VM-device-binding
+owners. Published
 Processes have a corresponding weak directory, and each Process exposes
 bounded pages of generation-qualified `handle -> KOID` edges. Native
 `TaskInspector` and `ObjectInspector` objects turn those mechanisms into
@@ -413,8 +414,9 @@ amplification while allowing init to build a restricted view and then pass an
 
 `handle_get_info` reports handle-local kind, rights, and flags. A fixed
 `object_get_basic_info` may report common identity under `INSPECT`. Lifecycle,
-memory, peer, task, accounting, and hardware state use typed calls such as
-`vmo_get_info` or `resource_domain_get_usage`; there is no topic selector.
+task, memory-accounting, and hardware observations use typed calls such as
+`process_get_info`, `memory_inspector_read`, and `physical_device_info`; there
+is no generic object-topic selector.
 `file_get_info` and `directory_get_info` follow that typed model. They expose
 live attributes and observation-only filesystem, mount, and node identities.
 The extensible metadata calls also expose timestamp validity and normalized UTC
@@ -610,9 +612,11 @@ even when no subscription is armed. Bind and rearm atomically compare
 consumers detect ready/not-ready/ready transitions between one-shot deliveries
 without making object waits edge-triggered.
 
-InterruptSession uses the same observation mechanism, but
-`interrupt_ack(session, sequence)` is a typed operation. A stale observation
-cannot acknowledge a later interrupt.
+A claimed PhysicalDevice exposes interrupt readiness through `READABLE`.
+`device_irq_pending` returns its pending sequence, and
+`device_irq_complete(device, sequence, asserted)` completes that exact request.
+A stale sequence cannot acknowledge a later interrupt. This sequence belongs
+to device IRQ completion, independently of the WaitSet observation sequence.
 
 Native atomic wait/wake currently use process-private aligned writable u32
 words. The key contains the address-space, non-reused mapping token, and virtual
@@ -754,30 +758,37 @@ ancestors. Process, TaskGroup, and ResourceDomain metadata is charged to the
 parent domain. The kernel retains a separate emergency budget which untrusted
 domains cannot consume.
 
-## Target Native object and syscall surface
+## Implemented Native object and syscall surface
 
-The planned Native surface is intentionally broad enough for a real EL0 VMM and
-service runtime. Names are design identifiers; numbers and final signatures are
-assigned only through schema review.
+The compiler-checked schema owns syscall numbers, signatures and completion
+contracts. These are representative implemented families; consult the
+[generated reference](../../sdk/abi/docs/native.md) for the complete surface.
 
-| Family | Objects and representative calls |
+| Family | Objects and representative operations |
 | --- | --- |
-| ABI | `abi_get_version`, monotonic clock read, secure random fill |
-| Handles | close, close-many, duplicate, replace/attenuate, handle basic info |
-| Accounting | ResourceDomain create/limit/usage/revoke-all, TaskGroup create/request-stop |
-| Tasks | Process create/start/exit/terminate; Thread create/start/exit/yield/request-stop/set-affinity; termination observed by wait |
-| Memory | VMO create/child/read/write/resize/executable-view; VMAR allocate/map/unmap/protect/destroy |
-| IPC | Channel create/read/write; Event and EventPair create/signal; Counter create/read/add |
-| Wait | wait-one/wait-many; WaitSet create/bind/rearm/cancel/wait |
-| Time and atomic wait | Timer create/set/cancel, sleep-until, atomic wait/wake/requeue |
-| Exceptions | exception endpoint/token, typed register sets, resume |
-| Virtualization | VM create/map/unmap/protect; vCPU create/run/kick/inject; typed architecture state operations |
-| Driver-domain resources | MemoryGrant, DeviceLease, DmaMapping, InterruptSession, and later BackendSession/SharedQueue |
+| ABI and observation | `abi_query`, `system_config`, monotonic and UTC clocks, scoped inspectors |
+| Handles | Close, duplicate, replace/attenuate, handle and object information |
+| Accounting | ResourceDomain and TaskGroup creation, resource sponsorship |
+| Tasks | ProcessBuilder construction/seal/start/abort; Process stop and exit; Thread create/start/exit/yield/sleep/request-stop |
+| Memory | VMO creation/read/write/snapshot; file executable/snapshot views; VMAR allocate/map/private-map/unmap/protect/destroy |
+| IPC | ByteChannel queues, CapabilityChannel rendezvous, Event create/signal |
+| Wait | Object wait-one/wait-many; WaitSet create/add/rearm/remove/wait; atomic wait/wake |
+| Filesystem | Capability-relative Directory operations, File data/metadata/sync and advisory locks |
+| Virtualization | Creation leases, PendingVirtualMachine construction/install/abort, VM stop and power completion, vCPU start/affinity/MMIO completion, VirtualSerial |
+| Physical devices and I/O | DeviceAssignmentAuthority, PhysicalDevice claims/MMIO/IRQ, GuestMemory, GuestMapping, GuestMailbox, GuestNotification and NativeBlock |
 
-Hardware operations consume typed factory or lease handles. MMIO may be exposed
-as a non-resizable physical VMO derived from a DeviceLease and mapped through
-VMAR. Device detach, DMA unmap, and grant revoke remain explicit asynchronous
-lifecycle operations; handle close merely requests safe cleanup.
+Device claims require explicit assignment authority and validate the selected
+resource profile. Userspace device drivers use bounded `device_mmio` operations
+and IRQ pending/completion calls; the current ABI does not expose a generic
+DeviceLease-to-physical-VMO mapping interface. Contiguous VMOs and
+`vmo_get_dma_extent` provide the admitted DMA backing path. Device assignment
+and guest mappings retain their backing through acknowledged retirement;
+quarantined devices may retain it until host reboot.
+
+Timer, EventPair, Counter, exception endpoint/token, atomic requeue, and generic
+DMA-map/revoke calls are not current Native operations. `ExecutableAuthority`
+and its creation right remain reserved; executable VMOs currently derive from
+Files. Reserved rights or accounting fields do not establish callable APIs.
 
 ## AArch64 Tier-1 execution
 

@@ -79,11 +79,11 @@ upstream licensing terms.
 
 ## Thread and synchronization runtime
 
-No component assumes that a process has only one thread. A Native thread
-starts with a zero thread pointer (`TPIDR_EL0` on AArch64, `tp` on RV64); the shared runtime attaches an allocated thread
-control block. The kernel already preserves this register across user
+No component assumes that a process has only one thread. The initial thread and
+SDK-created workers start with a zero thread pointer (`TPIDR_EL0` on AArch64,
+`tp` on RV64); the shared runtime attaches an allocated thread control block. The kernel already preserves this register across user
 context switches. Rust uses the OS-key TLS implementation, not compiler
-ELF TLS. Native ELF TLS relocations and PT_TLS remain outside this patch.
+ELF TLS. Native ELF TLS relocations and nonempty PT_TLS segments are unsupported.
 
 `hyper_runtime_tls_*` uses process-wide, non-reused keys and per-thread
 values. Key metadata lives until process exit so that deletion cannot alias
@@ -98,9 +98,11 @@ it with an owned stack and entry argument. Failure keeps the argument with
 the caller. The child attaches TLS before Rust entry and runs TLS destructors
 before thread_exit. Join observes Native TERMINATED before freeing the stack.
 A single process-lifetime cleanup worker blocks on a WaitSet of Native
-TERMINATED events for detached threads, including direct Native exits; its own
-stack lives until Process retirement. Process exit may abandon all remaining
-language destructors, as before.
+TERMINATED events for all SDK workers, including direct Native exits. Consuming
+an event releases its subscription; detached workers are reclaimed immediately,
+while joinable workers retain their token, Thread handle and stack until join
+or release. The cleanup worker's own stack lives until Process retirement.
+Process exit may abandon all remaining language destructors.
 
 The atomic wait bridge uses process-private u32 wait/wake syscalls. Kernel
 mapping identities distinguish virtual-address reuse; pinned backing survives
@@ -117,12 +119,14 @@ Physical AArch64 qualification must still stress weak ordering, migration,
 concurrent mapping retirement and interrupt timing beyond QEMU coverage.
 
 SDK-created threads, including the detached-thread reaper, have one no-access
-page below and above their usable stack. Requested stack size excludes guards,
-is rounded up to pages, and has a 64 KiB runtime minimum. Guards and storage
-are reclaimed only after Native thread termination; the reaper lives until
-process exit. The main thread adopts the loader's guarded reservation into the
-same SDK stack abstraction. Both main and workers support explicit downward
-growth through `hyper_os::thread::grow_current_stack()` within reserved capacity,
+page at each end of their reserved capacity. Uncommitted capacity below the
+usable stack also remains unmapped. Requested stack size excludes guards,
+is rounded up to Native pages with a one-page minimum for nonzero requests.
+Zero selects the C runtime's 64 KiB default; the std platform default is 256 KiB.
+Guards and storage are reclaimed only after Native thread termination; the reaper
+lives until process exit. The runtime creates the final main stack with the same
+SDK allocator and retires the kernel's temporary bootstrap reservation before
+constructors. Both main and workers support explicit downward growth through `hyper_os::thread::grow_current_stack()` within reserved capacity,
 without moving existing frames. See [SDK stacks](../../lib/README.md#guarded-growable-stacks).
 A guard catches accesses to that page, not arbitrary jumps over it.
 

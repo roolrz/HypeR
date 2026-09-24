@@ -18,6 +18,7 @@ them with the Rust toolchain selected for the application.
 | `hyper-os` | Safe capability-oriented operating-system interfaces |
 | `hyper-rt` | Rust application entry, process-heap allocator, panic termination, and exit status |
 | `hyper-service` | Shared typed startup contracts for Native system services |
+| `hyper-vm-image` | Bounded FIT parsing and guest boot metadata for Native VMMs |
 
 Unsafe machine interactions are confined to `hyper-sys`. Application code
 should normally depend only on `hyper-os` and `hyper-rt`. `hyper-os` is an

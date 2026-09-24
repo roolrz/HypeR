@@ -121,6 +121,8 @@ any are missing; it never builds or packages them.
 `make rebuild` (or `make board-rebuild` for the board profile) repacks the full
 board disk, resetting persistent contents after successful packing. Use
 `make clean && make rebuild` to compile from a clean build tree as well.
+`make clean` deletes all of `target/`, including default persistent disks;
+disks that must survive cleaning need an external `BOARD_IMAGE` or `IO_VM_DISK`.
 `make board-image` still refuses an existing output unless explicitly replaced.
 For Native/standby profiles, select the same `RUN_PROFILE` for build and run.
 
@@ -218,7 +220,8 @@ Before opening a pull request:
    obligations that are not evident from the types.
 4. Add host tests for portable mechanisms and architecture acceptance coverage
    for changed low-level paths.
-5. Run `sh tests/ci/run.sh quality` and `make check` for every affected
+5. Run `git diff --check`, `sh tests/ci/run.sh quality`,
+   `sh tests/ci/run.sh scripts`, and `make check` for every affected
    architecture. Run the relevant QEMU contract when runtime behavior changes.
 6. Do not add GPL-derived implementation code. New dependencies require
    explicit `no_std`, maintenance, and license review.
