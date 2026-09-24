@@ -164,8 +164,10 @@ truncate invalidation and writeback before using that cache. The backend seam
 in `instance.rs` separates node leases, owned metadata, data operations and
 executable snapshots from path policy. A userspace filesystem adapter can add
 its own lease variant and request lifetime/cancellation protocol there; block
-transport stays below the filesystem adapter. No userspace filesystem or block
-protocol is claimed by this implementation.
+transport stays below the filesystem adapter. A userspace filesystem server
+protocol is not implemented. The current block-backed path mounts the
+kernel [FAT32 adapter](fat.md) over a NativeBlock service supplied by the
+trusted Linux I/O VM; see the [I/O VM contract](../../docs/io-vm.md).
 
 The Native surface includes atomic open/create/create-new/truncate, file
 write/append/resize, directory creation, rename with replacement, regular-file

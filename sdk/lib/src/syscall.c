@@ -588,11 +588,11 @@ _Noreturn void hyper_process_exit(int64_t status)
 	__builtin_trap();
 }
 
-hyper_call_result_t hyper_thread_create(uint64_t entry, uint64_t stack, uint64_t tls,
+hyper_call_result_t hyper_thread_create(uint64_t entry, uint64_t initial_sp, uint64_t tls,
 					uint64_t argument, const uint64_t *affinity_words,
 					size_t affinity_word_count)
 {
-	return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_CREATE, entry, stack, tls, argument,
+	return hyper_native_call6(HYPER_NATIVE_SYS_THREAD_CREATE, entry, initial_sp, tls, argument,
 				  (uintptr_t)affinity_words, affinity_word_count);
 }
 

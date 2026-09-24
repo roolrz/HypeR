@@ -10,9 +10,9 @@ for the HypeR Native ABI. It provides low-level syscall veneers and the small
 set of C primitives required before a complete native runtime exists.
 
 This component is deliberately not a Linux, FreeBSD, or POSIX compatibility
-layer. Foreign binaries retain their original ABI and will run through separate
-whole-personality supervisors. A future POSIX source runtime may build on HypeR
-Native services, but its contracts do not belong in HypeR Lib.
+layer. Foreign OS personalities are outside the Native SDK and are not a
+roadmap commitment. Any future compatibility runtime would keep its contracts
+separate from HypeR Lib.
 
 ## Current scope
 
@@ -32,11 +32,11 @@ functional.
 
 ## Process heap
 
-The loader initializes the shared runtime after relocation and before any
-application or DSO constructors; CRT performs the same idempotent initialization
-before calling `hyper_main` (including static applications), using the process's
-bootstrap ROOT_VMAR capability. The heap's low-end address hint is `0xe0000000`,
-after the shared-library range. Its initial reservation is one eighth of the
+The loader enters the shared runtime startup handoff after relocation and before
+any application or DSO constructors. Static CRT performs this handoff itself;
+dynamic CRT uses the already initialized runtime before calling `hyper_main`.
+Initialization uses the process's bootstrap ROOT_VMAR capability. The heap's
+low-end address hint is `0xe0000000`, after the shared-library range. Its initial reservation is one eighth of the
 HAL application address limit, rounded down to pages (16 TiB on the default
 AArch64 profile, 16 GiB on RISC-V Sv39). A conflicting hint may be relocated;
 the allocator always uses the returned base. This is SDK layout policy, not a
@@ -77,6 +77,18 @@ Every reservation has an unmapped page at each end. Uncommitted capacity below
 the usable range also remains unmapped. Main and SDK-created worker stacks
 reserve at least 256 MiB; larger initial sizes or requested worker capacities
 are honored. These are virtual reservations, not eagerly allocated RAM.
+
+**The reservation capacity is the per-stack hard limit for in-place growth.**
+For an ordinary SDK worker, a zero initial-size request selects 64 KiB of
+usable stack, while the default capacity is 256 MiB, excluding both guard
+pages. `hyper_stack_grow()` can increase the usable size up to that capacity,
+but cannot enlarge the reservation, relocate the stack, or grow beyond it even
+if adjacent addresses are free. Request a larger capacity at creation with
+`hyper_runtime_thread_spawn_with_stack()` or `hyper_stack_create()` when needed;
+256 MiB is the default minimum reservation, not a global maximum stack size.
+The final main stack follows the same fixed-capacity rule. Query its actual
+limit with `hyper_stack_get_info()` rather than assuming the default.
+
 Stacks independently reserve root children, using a low-end hint that prefers
 the top of the application range. The kernel selects the
 nearest feasible range; there is no fixed SDK stack arena or slot stride.
@@ -98,7 +110,9 @@ Worker reclamation waits for Native TERMINATED, including detached
 workers, even when an entry exits directly instead of returning through the
 runtime trampoline. One blocking WaitSet watches at most 1024 outstanding
 termination subscriptions; exhausted registration capacity fails spawn before
-start. Consuming termination releases a subscription even before join. Direct
+start. Consuming termination releases a subscription even before join. A completed
+joinable worker retains its token, Thread handle and stack until join or release;
+a detached worker is reclaimed after termination is observed. Direct
 Native exit still bypasses language/TLS destructors; callers must perform their
 own cleanup. Runtime-owned stacks cannot be destroyed through the public stack API.
 If destruction fails, ownership and the reserved address range remain until a
@@ -213,7 +227,9 @@ behavior is not promised.
 
 `hyper_system_config(key)` queries public scalar kernel properties without an
 inspector capability. `HYPER_NATIVE_SYSTEM_CONFIG_PAGE_SIZE` returns the Native
-mapping granule; unknown keys return `NOT_SUPPORTED`. `<hyper/system.h>` exposes
+mapping granule, and `HYPER_NATIVE_SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT`
+returns the exclusive application address limit; unknown keys return
+`NOT_SUPPORTED`. `<hyper/system.h>` exposes
 `hyper_page_size(&size)`, an allocation-free, thread-safe cached query used by
 the heap and unified stack manager. Failed or malformed replies are not cached.
 Rust callers can use `hyper_os::system::{config, page_size}`.
@@ -222,7 +238,7 @@ An explicit nonzero SDK thread-stack request rounds up to runtime pages, with a
 one-page minimum. Zero selects the 64 KiB SDK default; the internal reaper also
 requests 64 KiB. Guard pages are additional to usable size. A one-page request
 is permitted, not a guarantee that arbitrary C/Rust code fits. Main and worker
-stack adoption/growth use the same runtime page geometry. The kernel still
+stack creation/growth use the same runtime page geometry. The kernel still
 independently checks VMAR alignment, range overflow, ownership and permissions;
 raw `thread_create` takes an aligned SP, not a stack descriptor, so callers must
 supply their own stack reservation and guards.

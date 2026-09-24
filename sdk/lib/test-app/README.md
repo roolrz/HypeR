@@ -10,8 +10,8 @@ interfaces. The top-level SDK check consumes it as the stable application
 input for assembled SDK and compiler integration checks.
 
 The application is deliberately separate from `tests/unit`: it is not a unit
-test for library implementation details. The integration pipeline currently
-compiles it as an AArch64 PIE object with compiler builtins disabled, preserving
-its library dependencies for the link stage. It can become a linked and
-executable acceptance image without changing its source-level interface once
-the Native startup and static PIE link contracts are available.
+test for library implementation details. `make sdk-check` compiles it through
+the assembled SDK for the selected AArch64 or RV64 target, then links both
+dynamic and static PIE executables and validates their ELF contracts. These
+checks establish the installed header, runtime and linker boundary; Native
+QEMU tests separately exercise application execution.

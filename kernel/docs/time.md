@@ -11,19 +11,25 @@ nanoseconds in `0..1_000_000_000`. The SDK maps this to Native timestamps and
 Rust `SystemTime`. Without a usable RTC, wall time starts at the Unix epoch
 and advances with uptime; this is an uncalibrated clock, not the actual date.
 
-On platforms describing an `arm,pl031` RTC in their device tree, kernel device
-discovery binds its permanent MMIO resource to a read-only PL031 driver. The
-driver reads only an already enabled counter: it does not reset, program,
-start, or enable interrupts on the device. UTC initialization brackets the RTC
-read with monotonic samples and rejects excessive interruption between them.
+Kernel device discovery supports `arm,pl031` and `google,goldfish-rtc`
+device-tree nodes through read-only drivers and permanent MMIO mappings. PL031
+reads only an already enabled counter. Goldfish, used by the RISC-V QEMU
+profile, reads signed Unix nanoseconds by latching the low word before reading
+the high word, with device-read ordering barriers between accesses. Boot owns
+the sole Goldfish latch reader. Neither driver programs the counter or alarms
+or enables interrupts. UTC initialization brackets each RTC read with
+monotonic samples, makes up to three attempts, and accepts a bracket no longer
+than one millisecond. It tries subsequent devices if a device cannot supply an
+accepted sample.
 The kernel publishes one immutable UTC/monotonic anchor and advances it using
 the clocksource. Reading UTC thereafter performs no MMIO and requires no
 polling worker or RTC interrupt.
 
 PL031 supplies whole seconds in a 32-bit unsigned counter, covering dates from
 1970 through early 2106. Its initial precision is one second; nanosecond
-interpolation does not improve that initial accuracy. The current implementation
-has no time-setting, network synchronization, suspend compensation, or later
+interpolation does not improve that initial accuracy. Goldfish supplies
+nanosecond units, which likewise do not establish clock accuracy. The current
+implementation has no time-setting, network synchronization, suspend compensation, or later
 host-clock adjustment protocol. A future clock-discipline service must define
 these semantics explicitly rather than changing monotonic deadlines.
 

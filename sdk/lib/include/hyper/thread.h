@@ -8,7 +8,8 @@
 #include <stdint.h>
 
 /* SDK-private thread runtime, not a syscall ABI. Each SDK-created thread starts
- * with TPIDR_EL0 == 0 and must attach before entering language runtimes.
+ * with a zero thread pointer (TPIDR_EL0 on AArch64, tp on RV64) and must
+ * attach before entering language runtimes.
  * Detach runs key destructors on that thread before releasing its storage.
  * The runtime trampoline performs attach -> entry -> detach -> thread_exit.
  * Rust uses key TLS; ELF PT_TLS / compiler-native TLS is not supported yet. */
@@ -41,7 +42,10 @@ typedef void (*hyper_runtime_thread_entry_t)(void *);
 hyper_native_status_t hyper_runtime_thread_spawn(size_t stack_size,
 						 hyper_runtime_thread_entry_t entry, void *argument,
 						 uintptr_t *token);
-/* Explicit reservation capacity permits in-place growth by the worker. */
+/* Explicit reservation capacity permits in-place growth by the worker.
+ * Reserves at least 256 MiB, excluding guards, without mapping that entire
+ * capacity. The resulting capacity is fixed and limits later stack growth;
+ * request more here if the worker needs a larger limit. */
 hyper_native_status_t hyper_runtime_thread_spawn_with_stack(size_t stack_size, size_t capacity,
 							    hyper_runtime_thread_entry_t entry,
 							    void *argument, uintptr_t *token);

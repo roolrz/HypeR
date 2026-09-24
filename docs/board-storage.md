@@ -115,9 +115,10 @@ they are not duplicated in the bootstrap ramfs. Standalone Native test archives
 still carry their guest fixtures.
 
 `BOARD_CONFIG` selects a custom JSON file, `BOARD_OUTPUT` selects staging, and
-`BOARD_IMAGE` selects the resulting raw image. `board-image` always refuses to
-overwrite an existing image. To create another generation, choose a new output
-name; rebuilding applications must not silently erase persistent disk contents.
+`BOARD_IMAGE` selects the resulting raw image. `board-image` refuses to
+overwrite an existing image unless `BOARD_IMAGE_REPLACE=--replace` is supplied.
+Use `make board-rebuild` for an explicit full replacement, or choose a new
+output name to preserve the previous disk.
 AArch64 `make run` selects this QEMU deployment profile. Build with `make` first;
 `board-run` never creates a disk or rebuilds kernel/bootstrap. Existing images
 must pass GPT validation against the selected configuration. QEMU uses the

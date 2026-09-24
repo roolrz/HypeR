@@ -23,12 +23,15 @@ require an explicit process-wide quiescence protocol.
 
 ## Runtime initialization
 
-After relocating the initial dependency graph and before running constructors,
-the loader resolves `hyper_runtime_initialize` directly in `libhyper.so` and
-passes it the original startup stack. This initializes the shared process heap
-before a constructor can allocate. The interpreter's statically linked runtime
-primitives do not own a second heap. CRT repeats initialization idempotently
-before application entry; later `dlopen` constructors use the existing heap.
+After relocating the initial dependency graph, the loader resolves
+`hyper_runtime_start` directly in `libhyper.so` and passes the original startup
+stack and a non-returning continuation. The shared runtime initializes the heap,
+creates the final main stack, copies startup data, switches SP and releases the
+kernel bootstrap stack. The continuation then runs constructors and enters the
+application on the final stack. The interpreter never restores its abandoned
+bootstrap frames, and its statically linked runtime primitives do not own a
+second heap. Dynamic CRT uses the initialized runtime; static CRT performs the
+same handoff itself. Later `dlopen` constructors use the existing heap.
 
 ## Architecture contracts
 

@@ -42,8 +42,10 @@ Cargo retains its own upstream freshness rules for Rust compilation.
 
 Removing an SDK or initramfs output (or its adjacent `.build-state.json`) causes
 reconstruction on the next invocation. Missing extracted guest images are
-regenerated from the guest download cache. `make clean` intentionally removes
-build outputs and requires a fresh build afterward.
+regenerated from the guest download cache. `make clean` removes both `target/`
+and `kernel/target/`, including the default persistent board and diagnostic
+disks, and requires a fresh build afterward. Keep disks outside these output
+trees with `BOARD_IMAGE` or `IO_VM_DISK` if they must survive cleaning.
 
 The additional kallsyms and std-mode Cargo directories trade disk space and a
 larger first build for stable subsequent builds. Content validation and small

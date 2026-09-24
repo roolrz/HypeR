@@ -65,9 +65,9 @@ profile: it boots a resident backend without mounting Native storage or
 provisioning business clients.
 
 Building the default board profile creates `target/board/qemu/disk.img` once
-and validates existing images without replacing their persistent contents.
-`make run` only launches the existing kernel, ramdisk and disk. `BOARD_IMAGE`
-selects another board disk. The diagnostic `RUN_PROFILE=io` instead creates
+and preserves existing disks. `make run` validates the disk's GPT against the
+selected board configuration, then launches the existing kernel, ramdisk and
+disk. `BOARD_IMAGE` selects another board disk. The diagnostic `RUN_PROFILE=io` instead creates
 `target/app/aarch64/io-disk.img`; `IO_VM_DISK` overrides that diagnostic disk.
 `RUN_PROFILE=native` selects the previous boot profile. `IO_VM_PACKAGE` can override the downloaded
 package with a complete, locally qualified boot generation. The importer also
@@ -368,11 +368,16 @@ to reuse them.
 ## Build and validation
 
 Import the pinned, anonymously downloadable QEMU package (ORAS is discovered
-or downloaded automatically; `IO_VM_ORAS` can override it):
+or downloaded automatically):
 
 ```sh
 make io-vm-fetch
 ```
+
+The standalone fetch target does not forward `IO_VM_ORAS`. To select an ORAS
+executable for this step, run
+`python3 -B scripts/fetch-io-vm.py --platform qemu --oras /path/to/oras`.
+Board and I/O initramfs composition targets accept `IO_VM_ORAS`.
 
 The command prints the verified generation directory under
 `target/io-vm/packages/`. Repeating it verifies and reuses that directory without

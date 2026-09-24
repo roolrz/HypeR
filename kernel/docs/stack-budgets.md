@@ -5,8 +5,12 @@ SPDX-License-Identifier: Apache-2.0
 
 # Kernel stack budgets
 
-Ordinary scheduler threads, including Native runners and vCPUs, have 32 KiB
-guarded kernel stacks. IRQ and emergency stacks are separate 32 KiB mappings.
+The default configuration gives ordinary scheduler threads, including Native
+runners and vCPUs, 32 KiB guarded kernel stacks. IRQ and emergency stacks default
+to separate 32 KiB mappings. These capacities are selected by
+`CONFIG_KERNEL_STACK_SIZE_KB`, `CONFIG_IRQ_STACK_SIZE_KB` and
+`CONFIG_EMERGENCY_STACK_SIZE_KB`; the audit ceilings below remain independent
+of the configured capacities.
 Early boot retains 256 KiB for allocation-free discovery and scheduler setup;
 that capacity is not available to a normal syscall. Do not increase a runtime
 stack or reduce an ABI batch merely to hide a large temporary.

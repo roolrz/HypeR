@@ -249,10 +249,36 @@ loads a new image and address space.
   [scheduler Thread](../kernel/src/kernel/task/thread.rs) serve different ownership roles.
 - **Stack:** [stack.c](../sdk/lib/src/stack.c) manages guarded reservations and
   explicit growth for both the runtime-created main stack and SDK-created worker stacks.
-  `sdk/lib/src/bootstrap.c` copies startup data and switches to the final stack;
-  only then does it release the kernel bootstrap reservation.
+  [Runtime initialization](../sdk/lib/src/runtime.c) copies startup data;
+  [bootstrap handoff](../sdk/lib/src/bootstrap.c) builds the final entry vector,
+  switches to the final stack and only then releases the kernel bootstrap reservation.
   See [stack APIs](../sdk/lib/README.md#guarded-growable-stacks) before changing
   stack size or cleanup. A userspace stack is separate from its kernel stack.
+
+**Where the new Thread's SP comes from:** `hyper_runtime_thread_spawn_with_stack`
+creates the stack and obtains its address information with `hyper_stack_get_info`.
+It passes `info.top` as the `initial_sp` argument of `hyper_thread_create`, with
+`worker` as the entry and the user-heap token pointer as the entry argument.
+The kernel does not dereference that token to discover the stack. The Process
+owner passes the supplied SP into `hal::user::prepare_context`;
+[AArch64 user context construction](../kernel/hal/src/arch/aarch64/user_entry.rs)
+stores it in `MachineContext.stack_pointer`. When the scheduled Thread enters
+userspace, `aarch64_run_native_user` in
+[context.S](../kernel/hal/src/arch/aarch64/context.S) explicitly loads that field,
+writes `SP_EL0`, and executes `eret` after restoring the remaining user state.
+`worker` therefore starts on its final stack; it does not perform another stack
+switch. Its `hyper_runtime_thread_attach_stack` call only associates the stack
+descriptor with the per-thread SDK state in [thread.c](../sdk/lib/src/thread.c).
+
+**Who reclaims it:** the SDK starts one process-lifetime reaper lazily on the
+first runtime thread spawn. It waits for kernel `THREAD_TERMINATED` events,
+removes subscriptions, and reclaims detached threads. Joinable threads retain
+their token, handle and stack until `join` or release consumes them. This is a
+user thread, separate from the kernel's object reaper. The terminating worker
+cannot unmap its own live stack. Normal worker return runs TLS cleanup before
+`thread_exit`; a raw exit or stop can bypass that cleanup, although the termination
+event still allows the SDK to reclaim the stack. Runtime stack growth is explicit
+and bounded by the capacity reserved at creation, not automatic fault-driven growth.
 
 ## 6. Native file access: ramfs versus `/data`
 
