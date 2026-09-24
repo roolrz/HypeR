@@ -293,13 +293,20 @@ pub(crate) fn allocate_vmar(
     parent: HandleValue,
     address: u64,
     size: u64,
-) -> Result<HandleValue, ServiceError> {
-    let range = aligned_range(address, size)?;
+    exact: bool,
+) -> Result<(HandleValue, u64), ServiceError> {
+    let _ = aligned_range(address, size)?;
     let parent = process.resolve_handle::<VmarObject>(parent, Rights::MAP)?;
     let reservation = process.reserve_handles::<1>()?;
     let child = match retry_mapping_transaction(process, || {
-        VmarObject::try_child(parent.object(), range, &process.resource_domain())
-            .map_err(Into::into)
+        VmarObject::try_child(
+            parent.object(),
+            address,
+            size,
+            exact,
+            &process.resource_domain(),
+        )
+        .map_err(Into::into)
     }) {
         Ok(child) => child,
         Err(error) => {
@@ -309,7 +316,7 @@ pub(crate) fn allocate_vmar(
     };
     let child_token = child.token();
     match process.publish_reserved_object(reservation, child, vmar_rights()) {
-        Ok(value) => Ok(value),
+        Ok(value) => Ok((value, child_token.range().base().get())),
         Err(error) => {
             let rollback = super::transaction::retry_stale(
                 || {

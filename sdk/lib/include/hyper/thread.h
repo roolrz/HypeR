@@ -31,7 +31,7 @@ int hyper_runtime_wait_u32(const uint32_t *address, uint32_t expected, uint64_t 
 uint32_t hyper_runtime_wake_u32(const uint32_t *address, uint32_t count);
 typedef void (*hyper_runtime_thread_entry_t)(void *);
 /* Usable stack size excludes one no-access page at each end; rounded up to
- * Native pages with a 64 KiB minimum. Join/detached cleanup reclaims the stack
+ * runtime Native pages with a one-page minimum. Zero selects 64 KiB. Join/detached cleanup reclaims the stack
  * only after the kernel publishes termination. See hyper/stack.h for the same
  * grow/query interface used by the main thread. Raw thread_create callers
  * remain responsible for their own stack allocation and protection. At most

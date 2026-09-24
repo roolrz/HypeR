@@ -74,6 +74,13 @@ pub struct InstanceOutcome {
     pub reboot: bool,
 }
 
+/// Actual receive progress; readiness signals are only advisory snapshots.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeControlState {
+    Open,
+    Closed,
+}
+
 #[derive(Default)]
 pub struct InstancePolicy {
     tracker: vm::InstanceTracker,
@@ -100,6 +107,27 @@ impl InstancePolicy {
         self.observe(status)
             .map_err(|_| hyper_os::Error::InvalidResponse)?;
         Ok(None)
+    }
+
+    /// Drain queued records before accepting EOF. A stale `READABLE` snapshot
+    /// may lead to `WOULD_BLOCK` or `PEER_CLOSED` after another receive completed.
+    pub fn observe_receive(
+        &mut self,
+        received: hyper_os::Result<&[u8]>,
+    ) -> hyper_os::Result<RuntimeControlState> {
+        match received {
+            Ok(message) => {
+                self.observe_message(message)?;
+                Ok(RuntimeControlState::Open)
+            }
+            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {
+                Ok(RuntimeControlState::Open)
+            }
+            Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) if self.is_terminal() => {
+                Ok(RuntimeControlState::Closed)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn reject_protocol(&mut self) {

@@ -5,6 +5,7 @@
 #include <hyper/startup.h>
 #include <hyper/syscall.h>
 #include <stdatomic.h>
+#include "mutex-internal.h"
 #include <string.h>
 
 /* Matches hyper-service::stdio startup purposes. A byte channel transports
@@ -12,7 +13,7 @@
  * in one process-wide buffer, including across separately linked std shims. */
 #define STDIO_INPUT UINT32_C(0x80030001)
 #define TERMINAL_INPUT UINT32_C(0x80030004)
-static atomic_flag input_lock = ATOMIC_FLAG_INIT;
+static hyper_mutex_t input_lock;
 static unsigned char pending[HYPER_NATIVE_BYTE_CHANNEL_MAX_MESSAGE_BYTES];
 static size_t pending_start;
 static size_t pending_end;
@@ -171,9 +172,8 @@ static int64_t read_locked(void *buffer, size_t capacity, size_t *actual)
 int64_t hyper_runtime_stdio_read(void *buffer, size_t capacity, size_t *actual)
 {
 	*actual = 0;
-	while (atomic_flag_test_and_set_explicit(&input_lock, memory_order_acquire))
-		(void)hyper_thread_yield();
+	hyper_mutex_lock(&input_lock);
 	int64_t result = read_locked(buffer, capacity, actual);
-	atomic_flag_clear_explicit(&input_lock, memory_order_release);
+	hyper_mutex_unlock(&input_lock);
 	return result;
 }

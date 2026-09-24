@@ -7,12 +7,17 @@
 .global _start
 .type _start, @function
 _start:
-    mv s0, sp
     mv a0, sp
-    call __hyper_rtld_start
-    mv sp, s0
+    tail __hyper_rtld_start
+.size _start, . - _start
+.global __hyper_rtld_enter
+.hidden __hyper_rtld_enter
+.type __hyper_rtld_enter, @function
+__hyper_rtld_enter:
+    mv sp, a0
     li s0, 0
     li ra, 0
-    jr a0
-.size _start, . - _start
+    jr a1
+.size __hyper_rtld_enter, . - __hyper_rtld_enter
+
 .section .note.GNU-stack, "", @progbits

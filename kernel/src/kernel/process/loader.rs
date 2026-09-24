@@ -18,17 +18,24 @@ use crate::kernel::mm::user_space::{
     MachineError, NativeAddressSpace, NativeImageSegment, Permissions, UserAddress, UserSlice,
 };
 
-const USER_ROOT_BASE: u64 = 0x10_0000;
-const USER_ROOT_END: u64 = 0x1_0000_0000;
-const PIE_MAPPING_BASE: u64 = 0x20_0000;
+const USER_ROOT_BASE: u64 = PAGE_SIZE;
+const PIE_MAPPING_BASE: u64 = 0x40_0000;
 const INTERPRETER_MAPPING_BASE: u64 = 0x1000_0000;
 const DYNAMIC_LIBRARY_MAPPING_BASE: u64 = 0x2000_0000;
-const DEFAULT_INITIAL_STACK_SIZE: u64 = 256 * 1024;
-const DEFAULT_INITIAL_STACK_CAPACITY: u64 = 8 * 1024 * 1024;
-pub(crate) const INITIAL_STACK_TOP: u64 = 0xffff_0000;
-// Keep the stack and its guard above the SDK heap reservation.
-const INITIAL_STACK_REGION_BASE: u64 = 0xf000_0000;
+// Temporary execution space for the SDK loader/runtime, not the app stack.
+const BOOTSTRAP_STACK_SIZE: u64 = 128 * 1024;
+const BOOTSTRAP_STACK_TOP: u64 = 0x3f_f000;
 const MAXIMUM_IMAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn application_address_limit() -> Result<u64, Error> {
+    let plan = crate::hal::user::address_space_plan().map_err(MachineError::from)?;
+    Ok(plan.application_limit())
+}
+
+/// Architecture-independent bootstrap layout; the SDK owns final stack policy.
+pub(crate) fn initial_stack_top() -> Result<u64, Error> {
+    Ok(BOOTSTRAP_STACK_TOP)
+}
 
 #[derive(Debug)]
 pub(crate) enum Error {
@@ -103,23 +110,23 @@ pub(crate) fn load_native(
     let executable = Image::parse_process_with_plan(bytes, allocation).map_err(Error::Elf)?;
     validate_host_machine(executable.machine())?;
     let load_bias = select_load_bias(&executable)?;
-    let stack_size = executable
-        .initial_stack_size(DEFAULT_INITIAL_STACK_SIZE)
-        .map_err(Error::Elf)?;
     let stack = hyper::exec::startup::StackReservation::try_new(
-        INITIAL_STACK_TOP,
-        stack_size,
-        stack_size.max(DEFAULT_INITIAL_STACK_CAPACITY),
-        INITIAL_STACK_REGION_BASE,
+        initial_stack_top()?,
+        BOOTSTRAP_STACK_SIZE,
+        BOOTSTRAP_STACK_SIZE,
+        USER_ROOT_BASE,
     )
     .map_err(|_| Error::Address)?;
-    // Keep executable mappings out of the runtime stack arena, including
-    // currently uncommitted worker capacity below the main reservation.
-    validate_layout(&executable, load_bias, INITIAL_STACK_REGION_BASE)?;
+    validate_layout(&executable, load_bias, application_address_limit()?)?;
+    if relocated_address(load_bias, executable.minimum_mapping_address())? < PIE_MAPPING_BASE {
+        return Err(Error::Address);
+    }
 
     let root = UserSlice::new(
         UserAddress::new(USER_ROOT_BASE),
-        USER_ROOT_END - USER_ROOT_BASE,
+        application_address_limit()?
+            .checked_sub(USER_ROOT_BASE)
+            .ok_or(Error::Address)?,
     )
     .map_err(|_| Error::Address)?;
     let address_space = NativeAddressSpace::try_new(domain.clone(), root)?;
@@ -174,7 +181,7 @@ fn prepare_address_space(
     let reservation_range = UserSlice::new(UserAddress::new(stack.base), stack.reservation_size())
         .map_err(|_| Error::Address)?;
     let stack_vmar = address_space.reserve_initial_stack(reservation_range)?;
-    if initial_stack.stack_top() != INITIAL_STACK_TOP
+    if initial_stack.stack_top() != stack.base + PAGE_SIZE + stack.capacity
         || initial_stack.stack_pointer() < stack_range.base().get()
         || initial_stack.stack_pointer() >= stack_range.end().get()
         || !initial_stack.stack_pointer().is_multiple_of(16)
@@ -220,6 +227,7 @@ fn prepare_address_space(
             initial_stack_base: stack.base,
             initial_stack_capacity: stack.capacity,
             initial_stack_size: stack.size,
+            main_stack_size: executable.requested_stack_size(),
         },
     )
     .map(|image| image.with_initial_stack_vmar(stack_vmar))

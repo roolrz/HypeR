@@ -26,7 +26,7 @@ pub(crate) use image::{
     AbiFamily, ExecutionRoute, ImageError, MachineAbi, ProcessImage, UserThreadStart,
 };
 pub(crate) use lifecycle::{ProcessPhase, TerminalReason, UserThreadPhase};
-pub(crate) use loader::{Error as LoaderError, INITIAL_STACK_TOP, load_native};
+pub(crate) use loader::{Error as LoaderError, initial_stack_top, load_native};
 pub(crate) use objects::{ProcessObject, TaskFactory, TaskGroupObject, TaskObjectError};
 pub(crate) use owner::{
     ChildProcessStartError, PreparedDirectProcessHandleTransfer, PreparedProcess, Process,

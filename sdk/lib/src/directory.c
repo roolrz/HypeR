@@ -5,25 +5,14 @@
 #include <hyper/syscall.h>
 #include <hyper/thread.h>
 #include <stdatomic.h>
+#include "mutex-internal.h"
 
 /* Root and cwd owners live in libhyper, shared by all language shims/DSOs.
  * Acquirers duplicate under the mutex; replace releases the old owner after
  * unlocking. No borrowed handle can race a cwd change and close. */
-static atomic_uint cwd_lock;
+static hyper_mutex_t cwd_lock;
 static hyper_native_handle_t normalized_root;
 static hyper_native_handle_t current;
-
-static void lock(void)
-{
-	while (atomic_exchange_explicit(&cwd_lock, 1, memory_order_acquire))
-		hyper_runtime_wait_u32((const uint32_t *)&cwd_lock, 1, UINT64_MAX);
-}
-
-static void unlock(void)
-{
-	atomic_store_explicit(&cwd_lock, 0, memory_order_release);
-	hyper_runtime_wake_u32((const uint32_t *)&cwd_lock, UINT32_MAX);
-}
 
 static hyper_native_status_t scope_from(hyper_native_handle_t root, hyper_native_handle_t start,
 					hyper_native_handle_t *output)
@@ -73,11 +62,11 @@ static hyper_native_status_t prepare_root_locked(void)
 hyper_native_status_t hyper_runtime_directory_root(hyper_native_handle_t *output)
 {
 	*output = 0;
-	lock();
+	hyper_mutex_lock(&cwd_lock);
 	int64_t status = prepare_root_locked();
 	if (!status)
 		status = duplicate(normalized_root, output);
-	unlock();
+	hyper_mutex_unlock(&cwd_lock);
 	return status;
 }
 
@@ -102,7 +91,7 @@ hyper_native_status_t hyper_runtime_directory_acquire(const char *path, size_t s
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	if (path[0] == '/')
 		return hyper_runtime_directory_root(output);
-	lock();
+	hyper_mutex_lock(&cwd_lock);
 	int64_t status = prepare_root_locked();
 	if (!status && !current) {
 		uint64_t start = hyper_runtime_capability(UINT32_C(0x80040001));
@@ -112,7 +101,7 @@ hyper_native_status_t hyper_runtime_directory_acquire(const char *path, size_t s
 	}
 	if (!status)
 		status = duplicate(current, output);
-	unlock();
+	hyper_mutex_unlock(&cwd_lock);
 	return status;
 }
 
@@ -137,10 +126,10 @@ hyper_native_status_t hyper_runtime_directory_change(const char *path, size_t si
 	(void)hyper_handle_close(opened.value0);
 	if (status)
 		return status;
-	lock();
+	hyper_mutex_lock(&cwd_lock);
 	uint64_t previous = current;
 	current = replacement;
-	unlock();
+	hyper_mutex_unlock(&cwd_lock);
 	if (previous)
 		(void)hyper_handle_close(previous);
 	return 0;

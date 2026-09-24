@@ -76,6 +76,28 @@ pub(super) fn sys_abi_query(
 }
 
 #[inline(never)]
+pub(super) fn sys_system_config(
+    _services: &impl ImmediateServices,
+    arguments: &Arguments,
+) -> NativeResult {
+    if let Err(status) = require_zero(&arguments[1..]) {
+        return failure(status);
+    }
+    match arguments[0] {
+        hyper::abi::native::HYPER_NATIVE_SYSTEM_CONFIG_PAGE_SIZE => {
+            success([hyper::mm::PAGE_SIZE, 0])
+        }
+        hyper::abi::native::HYPER_NATIVE_SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT => {
+            match crate::hal::user::address_space_plan() {
+                Ok(plan) => success([plan.application_limit(), 0]),
+                Err(_) => failure(HYPER_NATIVE_STATUS_INTERNAL),
+            }
+        }
+        _ => failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED),
+    }
+}
+
+#[inline(never)]
 pub(super) fn sys_clock_get_monotonic(
     _services: &impl ImmediateServices,
     arguments: &Arguments,
@@ -1285,16 +1307,21 @@ pub(super) fn sys_vmar_allocate(
     services: &impl MemoryServices,
     arguments: &Arguments,
 ) -> DeferredAction {
-    let result = if arguments[3..].iter().any(|value| *value != 0) {
+    let result = if arguments[4..].iter().any(|value| *value != 0)
+        || arguments[3] & !hyper::abi::native::HYPER_NATIVE_VMAR_ALLOCATE_EXACT != 0
+    {
         Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
     } else {
         parse_handle(arguments[0]).and_then(|parent| {
             services
-                .allocate_vmar(parent, arguments[1], arguments[2])
+                .allocate_vmar(parent, arguments[1], arguments[2], arguments[3] != 0)
                 .map_err(status_from_memory_service_error)
         })
     };
-    DeferredAction::Return(handle_result(result))
+    DeferredAction::Return(match result {
+        Ok((handle, address)) => success([handle.get(), address]),
+        Err(status) => failure(status),
+    })
 }
 
 #[inline(never)]

@@ -772,7 +772,8 @@ pub(in crate::kernel) trait MemoryServices {
         parent: HandleValue,
         address: u64,
         size: u64,
-    ) -> Result<HandleValue, MemoryServiceError>;
+        exact: bool,
+    ) -> Result<(HandleValue, u64), MemoryServiceError>;
     fn protect_vmar(
         &self,
         vmar: HandleValue,

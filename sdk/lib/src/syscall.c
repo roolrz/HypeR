@@ -14,6 +14,11 @@ hyper_call_result_t hyper_abi_query(void)
 	return call0(HYPER_NATIVE_SYS_ABI_QUERY);
 }
 
+hyper_call_result_t hyper_system_config(uint64_t key)
+{
+	return hyper_native_call6(HYPER_NATIVE_SYS_SYSTEM_CONFIG, key, 0, 0, 0, 0, 0);
+}
+
 hyper_call_result_t hyper_clock_get_monotonic(void)
 {
 	return call0(HYPER_NATIVE_SYS_CLOCK_GET_MONOTONIC);
@@ -206,9 +211,10 @@ hyper_native_status_t hyper_vmo_write(hyper_native_handle_t vmo, uint64_t offset
 }
 
 hyper_call_result_t hyper_vmar_allocate(hyper_native_handle_t parent, uintptr_t address,
-					size_t size)
+					size_t size, uint64_t options)
 {
-	return hyper_native_call6(HYPER_NATIVE_SYS_VMAR_ALLOCATE, parent, address, size, 0, 0, 0);
+	return hyper_native_call6(HYPER_NATIVE_SYS_VMAR_ALLOCATE, parent, address, size, options, 0,
+				  0);
 }
 
 hyper_native_status_t hyper_vmar_map(hyper_native_handle_t vmar, hyper_native_handle_t vmo,

@@ -4,7 +4,7 @@
 #include <hyper/thread.h>
 #include "stack-internal.h"
 #include <hyper/syscall.h>
-#include <stdatomic.h>
+#include "mutex-internal.h"
 #include <stdlib.h>
 
 /* Tokens have one caller owner until join or release. The worker borrows its
@@ -28,23 +28,11 @@ typedef struct thread_token {
 	struct thread_token *next;
 } thread_token_t;
 
-static atomic_uint queue_lock;
+static hyper_mutex_t queue_lock;
 static thread_token_t *registered;
-static atomic_uint init_lock;
+static hyper_mutex_t init_lock;
 static int reaper_started;
 static hyper_native_handle_t termination_set;
-
-static void lock(atomic_uint *word)
-{
-	while (atomic_exchange_explicit(word, 1, memory_order_acquire))
-		hyper_runtime_wait_u32((const uint32_t *)word, 1, UINT64_MAX);
-}
-
-static void unlock(atomic_uint *word)
-{
-	atomic_store_explicit(word, 0, memory_order_release);
-	hyper_runtime_wake_u32((const uint32_t *)word, UINT32_MAX);
-}
 
 static int64_t wait_terminated(hyper_native_handle_t thread)
 {
@@ -95,7 +83,7 @@ static void unregister_locked(thread_token_t *token)
 
 static void completed_registration(uint64_t registration)
 {
-	lock(&queue_lock);
+	hyper_mutex_lock(&queue_lock);
 	thread_token_t *token = registered;
 
 	while (token && token->registration != registration)
@@ -103,14 +91,14 @@ static void completed_registration(uint64_t registration)
 	if (!token) {
 		/* Join may remove a registration after wait dequeues its event but
 		 * before this lock is acquired. IDs are never reused. */
-		unlock(&queue_lock);
+		hyper_mutex_unlock(&queue_lock);
 		return;
 	}
 	unregister_locked(token);
 	token->terminated = 1;
 	int detached = token->detached;
 
-	unlock(&queue_lock);
+	hyper_mutex_unlock(&queue_lock);
 	if (detached)
 		reclaim(token);
 }
@@ -132,13 +120,13 @@ static _Noreturn void reaper(void *argument)
 
 static int64_t ensure_reaper(void)
 {
-	lock(&init_lock);
+	hyper_mutex_lock(&init_lock);
 	int64_t status = HYPER_NATIVE_STATUS_OK;
 
 	if (!reaper_started) {
 		hyper_call_result_t set = hyper_wait_set_create(1024);
 		if (set.status != HYPER_NATIVE_STATUS_OK) {
-			unlock(&init_lock);
+			hyper_mutex_unlock(&init_lock);
 			return set.status;
 		}
 		termination_set = set.value0;
@@ -149,7 +137,7 @@ static int64_t ensure_reaper(void)
 			if (hyper_handle_close(termination_set) != HYPER_NATIVE_STATUS_OK)
 				hyper_process_exit(HYPER_NATIVE_STATUS_INTERNAL);
 			termination_set = 0;
-			unlock(&init_lock);
+			hyper_mutex_unlock(&init_lock);
 			return status;
 		}
 
@@ -176,7 +164,7 @@ static int64_t ensure_reaper(void)
 			termination_set = 0;
 		}
 	}
-	unlock(&init_lock);
+	hyper_mutex_unlock(&init_lock);
 	return status;
 }
 
@@ -186,7 +174,7 @@ hyper_native_status_t hyper_runtime_thread_spawn_with_stack(size_t size, size_t 
 {
 	if (!entry || !result)
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
-	if (size < 64 * 1024)
+	if (!size)
 		size = 64 * 1024;
 
 	thread_token_t *token = calloc(1, sizeof(*token));
@@ -220,7 +208,7 @@ hyper_native_status_t hyper_runtime_thread_spawn_with_stack(size_t size, size_t 
 	}
 
 	token->thread = created.value0;
-	lock(&queue_lock);
+	hyper_mutex_lock(&queue_lock);
 	hyper_call_result_t subscription = hyper_wait_set_add(
 		termination_set, token->thread, HYPER_NATIVE_SIGNAL_THREAD_TERMINATED);
 	if (subscription.status == HYPER_NATIVE_STATUS_OK) {
@@ -228,7 +216,7 @@ hyper_native_status_t hyper_runtime_thread_spawn_with_stack(size_t size, size_t 
 		token->next = registered;
 		registered = token;
 	}
-	unlock(&queue_lock);
+	hyper_mutex_unlock(&queue_lock);
 	if (subscription.status != HYPER_NATIVE_STATUS_OK) {
 		reclaim(token);
 		return subscription.status;
@@ -236,9 +224,9 @@ hyper_native_status_t hyper_runtime_thread_spawn_with_stack(size_t size, size_t 
 
 	status = hyper_thread_start(token->thread);
 	if (status != HYPER_NATIVE_STATUS_OK) {
-		lock(&queue_lock);
+		hyper_mutex_lock(&queue_lock);
 		unregister_locked(token);
-		unlock(&queue_lock);
+		hyper_mutex_unlock(&queue_lock);
 		reclaim(token);
 		return status;
 	}
@@ -259,9 +247,9 @@ hyper_native_status_t hyper_runtime_thread_join(uintptr_t raw)
 
 	int64_t status = wait_terminated(token->thread);
 	if (status == HYPER_NATIVE_STATUS_OK) {
-		lock(&queue_lock);
+		hyper_mutex_lock(&queue_lock);
 		unregister_locked(token);
-		unlock(&queue_lock);
+		hyper_mutex_unlock(&queue_lock);
 		reclaim(token);
 	}
 	return status;
@@ -271,10 +259,10 @@ void hyper_runtime_thread_release(uintptr_t raw)
 {
 	thread_token_t *token = (thread_token_t *)raw;
 
-	lock(&queue_lock);
+	hyper_mutex_lock(&queue_lock);
 	token->detached = 1;
 	int terminated = token->terminated;
-	unlock(&queue_lock);
+	hyper_mutex_unlock(&queue_lock);
 	if (terminated)
 		reclaim(token);
 }

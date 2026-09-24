@@ -47,7 +47,7 @@ pub(super) fn prepare(
     }
     let executable = executable.into_executable().ok_or(Error::NotExecutable)?;
     let stack_layout = StackLayout::try_new(
-        crate::kernel::process::INITIAL_STACK_TOP,
+        crate::kernel::process::initial_stack_top().map_err(Error::Image)?,
         arguments,
         ENVIRONMENT,
         startup_handle_count,

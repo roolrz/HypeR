@@ -358,9 +358,89 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         parent: Vmar,
         range: UserSlice,
     ) -> Result<Vmar, AddressSpaceError<Backend::Error, Account::Error>> {
-        require_nonempty_aligned(range)?;
+        self.create_vmar(parent, Some(range), range.length(), 0)
+    }
+
+    /// Select and reserve a free range in the same optimistic transaction.
+    pub(crate) fn try_create_vmar_hint(
+        &self,
+        parent: Vmar,
+        size: u64,
+        hint: u64,
+    ) -> Result<Vmar, AddressSpaceError<Backend::Error, Account::Error>> {
+        self.create_vmar(parent, None, size, hint)
+    }
+
+    fn create_vmar(
+        &self,
+        parent: Vmar,
+        requested: Option<UserSlice>,
+        size: u64,
+        hint: u64,
+    ) -> Result<Vmar, AddressSpaceError<Backend::Error, Account::Error>> {
+        if size == 0 || !size.is_multiple_of(PAGE_SIZE) || !hint.is_multiple_of(PAGE_SIZE) {
+            return Err(AddressSpaceError::InvalidRange);
+        }
         let snapshot = self.snapshot();
         let authority = validate_vmar(self.id, self.root, &snapshot, parent)?;
+        let range = match requested {
+            Some(range) => range,
+            None => {
+                // Walk free gaps without allocating a second interval index. Choose
+                // the closest feasible base to the hint; ties favor the lower base.
+                // Zero naturally selects the lowest free address. The shared epoch
+                // check below commits selection and reservation atomically.
+                let occupied = || {
+                    snapshot
+                        .vmars
+                        .records
+                        .iter()
+                        .filter(|record| record.parent_id == parent.id)
+                        .map(|record| record.token.range)
+                        .chain(
+                            snapshot
+                                .mappings
+                                .records
+                                .iter()
+                                .filter(|mapping| mapping.owner_vmar == parent.id)
+                                .map(|mapping| mapping.snapshot.range),
+                        )
+                };
+                let mut cursor = authority.base().get();
+                let end = authority.end().get();
+                let mut best: Option<(u64, u64)> = None;
+                while cursor < end {
+                    if let Some(next) = occupied()
+                        .filter(|range| range.base().get() <= cursor && range.end().get() > cursor)
+                        .map(|range| range.end().get())
+                        .max()
+                    {
+                        cursor = next;
+                        continue;
+                    }
+                    let gap_end = occupied()
+                        .filter(|range| range.base().get() > cursor)
+                        .map(|range| range.base().get())
+                        .min()
+                        .unwrap_or(end);
+                    if size <= gap_end - cursor {
+                        let base = hint.clamp(cursor, gap_end - size);
+                        let distance = base.abs_diff(hint);
+                        if best.is_none_or(|(_, previous)| distance < previous) {
+                            best = Some((base, distance));
+                        }
+                        if distance == 0 || hint == 0 {
+                            break;
+                        }
+                    }
+                    cursor = gap_end;
+                }
+                let (base, _) = best.ok_or(AddressSpaceError::Allocation)?;
+                UserSlice::new(UserAddress::new(base), size)
+                    .map_err(|_| AddressSpaceError::InvalidRange)?
+            }
+        };
+        require_nonempty_aligned(range)?;
         validate_child_range(&snapshot, parent.id, authority, range)?;
         let next_epoch = snapshot
             .authority_epoch

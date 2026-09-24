@@ -5,7 +5,7 @@
 
 mod listener;
 
-use hyper_vm_manager::{InstancePolicy, MachinePolicy, complete_admission};
+use hyper_vm_manager::{InstancePolicy, MachinePolicy, RuntimeControlState, complete_admission};
 use hyper_vm_policy::fleet::{self, Action, Request, Response};
 use std::io::Read;
 use std::mem::MaybeUninit;
@@ -269,7 +269,7 @@ impl FleetManager {
             WaitSource::Connection => self.accept_client(),
             WaitSource::DiskAdmission => self.admit_disk(),
             WaitSource::RuntimeProcess(vm) => self.finish_instance(vm),
-            WaitSource::RuntimeControl(vm) => self.handle_runtime_control(vm, observation.observed),
+            WaitSource::RuntimeControl(vm) => self.handle_runtime_control(vm),
             WaitSource::Client(index) => self.handle_client(index, observation.observed),
         }
     }
@@ -315,20 +315,24 @@ impl FleetManager {
         Ok(())
     }
 
-    fn handle_runtime_control(&mut self, vm: usize, observed: u64) -> hyper_os::Result<()> {
+    fn handle_runtime_control(&mut self, vm: usize) -> hyper_os::Result<()> {
         let Some(instance) = self.machines[vm].instance.as_mut() else {
             return Ok(());
         };
-        if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed) {
-            drop(instance.runtime_control.take());
-            if !instance.policy.is_terminal() {
+        // Signal publication can lag the channel queue. Always read first:
+        // READABLE may already be drained, and EOF must not discard records.
+        match instance.receive_runtime_status() {
+            Ok(RuntimeControlState::Closed) => {
+                drop(instance.runtime_control.take());
+            }
+            Ok(RuntimeControlState::Open) => {}
+            Err(error) => {
+                eprintln!("HypeR vm-manager: VM {vm} runtime control failed: {error}");
                 instance.policy.reject_protocol();
                 instance.force_stop();
             }
-        } else if instance.receive_runtime_status().is_err() {
-            instance.policy.reject_protocol();
-            instance.force_stop();
-        } else if instance.policy.is_terminal() {
+        }
+        if instance.policy.is_terminal() {
             instance.arm_exit_deadline()?;
         }
         Ok(())
@@ -1152,7 +1156,7 @@ impl VmInstance {
             .wants_disk_admission(self.disk_admission.is_some())
     }
 
-    fn receive_runtime_status(&mut self) -> hyper_os::Result<()> {
+    fn receive_runtime_status(&mut self) -> hyper_os::Result<RuntimeControlState> {
         let mut message = [0u8; vm_contract::OBSERVATION_BYTES];
         let received = self
             .runtime_control
@@ -1160,12 +1164,8 @@ impl VmInstance {
             .ok_or(hyper_os::Error::MissingHandle)?
             .as_byte_channel()
             .try_receive(&mut message);
-        let length = match received {
-            Ok(length) => length,
-            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => return Ok(()),
-            Err(error) => return Err(error),
-        };
-        self.policy.observe_message(&message[..length]).map(|_| ())
+        self.policy
+            .observe_receive(received.map(|length| &message[..length]))
     }
 
     fn drain_runtime_statuses(&mut self) -> hyper_os::Result<()> {

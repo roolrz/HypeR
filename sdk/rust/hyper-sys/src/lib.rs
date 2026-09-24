@@ -163,6 +163,16 @@ pub unsafe fn abi_query() -> CallResult {
     unsafe { ffi_abi_query() }
 }
 
+/// Queries a public scalar system configuration item.
+///
+/// # Safety
+/// The caller must execute as a Native process with the matching syscall veneer.
+#[inline]
+pub unsafe fn system_config(key: u64) -> CallResult {
+    // SAFETY: caller establishes the Native execution contract; no pointers.
+    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_SYSTEM_CONFIG, key, 0, 0, 0, 0, 0) }
+}
+
 /// Reads absolute nanoseconds from the kernel monotonic clock domain.
 ///
 /// # Safety
@@ -1412,14 +1422,21 @@ pub unsafe fn vmo_write(
     }
 }
 
-/// Allocates an exact child VMAR.
+/// Allocates a child VMAR. Options zero treats address as a low-end hint;
+/// address zero selects the lowest free range. `VMAR_ALLOCATE_EXACT` forbids
+/// relocation, including for address zero. Success returns its base in value1.
 ///
 /// # Safety
 ///
 /// `parent` must remain live with map rights. On `OK`, the caller assumes
 /// exclusive ownership of the child VMAR in `value0`.
 #[inline]
-pub unsafe fn vmar_allocate(parent: abi::HyperNativeHandle, address: u64, size: u64) -> CallResult {
+pub unsafe fn vmar_allocate(
+    parent: abi::HyperNativeHandle,
+    address: u64,
+    size: u64,
+    options: u64,
+) -> CallResult {
     // SAFETY: the caller establishes the parent and result ownership contract.
     unsafe {
         ffi_native_call6(
@@ -1427,7 +1444,7 @@ pub unsafe fn vmar_allocate(parent: abi::HyperNativeHandle, address: u64, size: 
             parent,
             address,
             size,
-            0,
+            options,
             0,
             0,
         )

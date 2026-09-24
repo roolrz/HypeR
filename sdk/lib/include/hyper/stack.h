@@ -20,7 +20,9 @@ typedef struct hyper_stack_info {
 } hyper_stack_info_t;
 
 /* Reserve a dedicated VMAR with an unmapped page at each end. Size and
- * capacity round up to Native pages. Capacity zero selects max(size, 1 MiB).
+ * capacity round up to Native pages. Reservation capacity is at least 256 MiB
+ * and at least the initial size. A nonzero capacity smaller than size is invalid.
+ * Placement prefers the high application range, not a fixed SDK arena.
  * Only size bytes are initially mapped; reservation is not physical memory.
  * A successful create returns an owned descriptor, not a malloc pointer. */
 hyper_native_status_t hyper_stack_create(size_t size, size_t capacity, hyper_stack_t **result);

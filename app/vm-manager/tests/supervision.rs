@@ -272,3 +272,34 @@ fn late_affinity_reply_does_not_corrupt_lifecycle() {
     assert!(policy.observe_message(&reply.encode()).unwrap().is_none());
     assert!(policy.is_terminal());
 }
+
+#[test]
+fn stale_readiness_at_reboot_does_not_poison_terminal_status() {
+    let mut instance = running();
+    assert_eq!(
+        instance.observe_receive(Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK))),
+        Ok(RuntimeControlState::Open)
+    );
+    // READABLE can be observed again while its previous publisher catches up.
+    // The actual queue has already delivered the reboot record and closed.
+    assert_eq!(
+        instance.observe_receive(Ok(&InstanceStatus::RebootRequested.encode())),
+        Ok(RuntimeControlState::Open)
+    );
+    assert_eq!(
+        instance.observe_receive(Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED))),
+        Ok(RuntimeControlState::Closed)
+    );
+    assert!(finish(instance, true).reboot);
+}
+
+#[test]
+fn control_eof_without_terminal_record_is_still_an_error() {
+    let mut instance = running();
+    assert!(
+        instance
+            .observe_receive(Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)))
+            .is_err()
+    );
+    assert!(instance.observe_receive(Ok(b"malformed")).is_err());
+}
