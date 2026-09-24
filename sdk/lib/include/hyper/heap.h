@@ -11,14 +11,14 @@
 extern "C" {
 #endif
 
-/* Native address-layout contract: after the loader's library range and below
- * the user stack. Reservation consumes virtual space, not physical pages. */
+/* Default heap address hint, after the loader library range. The first
+ * reservation uses one eighth of the application address limit; additional
+ * regions are allowed. Reservation consumes VA, not physical pages. */
 #ifndef HYPER_HEAP_BASE
 #define HYPER_HEAP_BASE UINT64_C(0xe0000000)
 #endif
-#define HYPER_HEAP_SIZE UINT64_C(0x10000000)
 
-/* Idempotent loader/CRT setup; borrows ROOT_VMAR only during initialization. */
+/* Idempotent loader/CRT setup; retains an independent MAP-only ROOT_VMAR handle. */
 hyper_native_status_t hyper_heap_initialize(const hyper_startup_t *startup);
 
 /* Runtime allocation interface. Alignment must be a nonzero power of two.

@@ -24,6 +24,8 @@ hyper_call_result_t hyper_native_call6(uint64_t number, uint64_t argument0, uint
 				       uint64_t argument5);
 
 hyper_call_result_t hyper_abi_query(void);
+/* Public scalar configuration; unknown keys return NOT_SUPPORTED. */
+hyper_call_result_t hyper_system_config(uint64_t key);
 hyper_call_result_t hyper_process_get_current_id(void);
 /* Returns absolute nanoseconds from the kernel monotonic clock domain. */
 hyper_call_result_t hyper_clock_get_monotonic(void);
@@ -137,8 +139,11 @@ hyper_native_status_t hyper_vmo_read(hyper_native_handle_t vmo, uint64_t offset,
 				     size_t byte_count);
 hyper_native_status_t hyper_vmo_write(hyper_native_handle_t vmo, uint64_t offset, const void *input,
 				      size_t byte_count);
+/* With options zero, address is a low-end hint (zero: lowest free range).
+ * EXACT requires that address, including zero. Unknown flags are invalid.
+ * Success returns child in value0 and actual base in value1. */
 hyper_call_result_t hyper_vmar_allocate(hyper_native_handle_t parent, uintptr_t address,
-					size_t size);
+					size_t size, uint64_t options);
 hyper_native_status_t hyper_vmar_map(hyper_native_handle_t vmar, hyper_native_handle_t vmo,
 				     uint64_t vmo_offset, uintptr_t address, size_t size,
 				     uint32_t permissions);

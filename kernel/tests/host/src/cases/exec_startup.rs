@@ -25,6 +25,7 @@ fn encodes_system_v_vectors_and_tagged_handles() {
         initial_stack_base: 0x8000,
         initial_stack_capacity: 0x7000,
         initial_stack_size: 0x2000,
+        main_stack_size: 0x40000,
     };
     let stack = crate::require_ok(layout.encode(
         auxiliary,
@@ -82,8 +83,13 @@ fn encodes_system_v_vectors_and_tagged_handles() {
         hyper::abi::native::HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE
     );
     assert_eq!(word(bytes, 208), auxiliary.initial_stack_size);
-    assert_eq!(word(bytes, 216), 0);
-    assert_eq!(word(bytes, 224), 0);
+    assert_eq!(
+        word(bytes, 216),
+        hyper::abi::native::HYPER_NATIVE_AUXV_MAIN_STACK_SIZE
+    );
+    assert_eq!(word(bytes, 224), auxiliary.main_stack_size);
+    assert_eq!(word(bytes, 232), 0);
+    assert_eq!(word(bytes, 240), 0);
 
     let argv_offset = crate::require_ok(usize::try_from(argv0 - stack.base()));
     let env_offset = crate::require_ok(usize::try_from(env0 - stack.base()));
@@ -176,4 +182,24 @@ fn initial_stack_reserves_growth_and_both_guards() {
     assert!(StackReservation::try_new(u64::MAX - PAGE + 1, PAGE, PAGE, 0).is_err());
     assert!(StackReservation::try_new(0x100_0000, 0, PAGE, 0).is_err());
     assert!(StackReservation::try_new(0x100_0000, PAGE + 1, 2 * PAGE, 0).is_err());
+}
+
+#[test]
+fn high_application_stack_preserves_64_bit_startup_addresses() {
+    use hyper::exec::startup::{Layout, StackReservation};
+    for limit in [1u64 << 37, 1u64 << 47] {
+        let top = limit - 4096;
+        let reservation = crate::require_ok(StackReservation::try_new(
+            top,
+            256 * 1024,
+            8 * 1024 * 1024,
+            0xf000_0000,
+        ));
+        assert_eq!(reservation.base + reservation.reservation_size(), limit);
+        let layout = crate::require_ok(Layout::try_new(top, &["/init"], &[], 0));
+        assert_eq!(layout.stack_top(), top);
+        assert!(layout.stack_pointer() > (1u64 << 32));
+        assert!(layout.stack_pointer() >= reservation.mapped_base());
+        assert_eq!(layout.stack_pointer() % 16, 0);
+    }
 }

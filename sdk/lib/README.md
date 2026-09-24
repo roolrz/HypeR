@@ -35,18 +35,22 @@ functional.
 The loader initializes the shared runtime after relocation and before any
 application or DSO constructors; CRT performs the same idempotent initialization
 before calling `hyper_main` (including static applications), using the process's
-bootstrap ROOT_VMAR capability. It reserves `[0xe0000000, 0xf0000000)` for the
-heap, after the loader's shared-library range and below the user stack. This
-is a Native address-layout contract; applications must not destroy or replace
-that reservation. Initialization borrows ROOT_VMAR and retains its own child
-VMAR, so normal startup-handle ownership remains with the application.
+bootstrap ROOT_VMAR capability. The heap's low-end address hint is `0xe0000000`,
+after the shared-library range. Its initial reservation is one eighth of the
+HAL application address limit, rounded down to pages (16 TiB on the default
+AArch64 profile, 16 GiB on RISC-V Sv39). A conflicting hint may be relocated;
+the allocator always uses the returned base. This is SDK layout policy, not a
+fixed-address ABI guarantee or a total allocation limit. The runtime retains
+an independent MAP-only root handle for later overflow reservations.
 
 Reservation allocates no backing pages. Allocations map read/write, non-executable
-VMOs in regions of at least 64 KiB, bounded by the 256 MiB virtual reservation
-and the process's resource budget. First-fit blocks are split and neighboring
-free blocks coalesced. Fully free regions are unmapped and their backing pages
-released; partially occupied regions remain available for reuse. All metadata
-is serialized by a process-local atomic lock, yielding while contended.
+VMOs in regions of at least 64 KiB. If the first reservation cannot fit a region,
+an independent VMAR is requested with a hint immediately above the first one.
+No recursive malloc is needed: metadata lives in the mapped region itself.
+First-fit blocks split and coalesce. Fully free regions release their backing;
+overflow regions also destroy their VMAR. The initial reservation remains for
+reuse. Allocation is subject to address-space and process resource limits.
+A private mutex serializes metadata, blocking rather than spinning on contention.
 This is a general-purpose initial allocator, not a constant-time or real-time
 allocation contract. It is not reentrant from asynchronous handlers.
 
@@ -70,19 +74,25 @@ Call it before a deeper workload while sufficient stack headroom remains.
 Growth is explicit, not triggered by a page fault, and never shrinks a stack.
 
 Every reservation has an unmapped page at each end. Uncommitted capacity below
-the usable range also remains unmapped. The main stack reserves at least 8 MiB;
-worker capacity defaults to max(initial size, 1 MiB). These are virtual address
-reservations, not eagerly allocated physical memory. Workers use the Native
-stack arena from `0xf0000000` up to the main reservation; arena exhaustion is
-reported, and reclaimed reservations are reusable. `hyper_stack_create()` and
+the usable range also remains unmapped. Main and SDK-created worker stacks
+reserve at least 256 MiB; larger initial sizes or requested worker capacities
+are honored. These are virtual reservations, not eagerly allocated RAM.
+Stacks independently reserve root children, using a low-end hint that prefers
+the top of the application range. The kernel selects the
+nearest feasible range; there is no fixed SDK stack arena or slot stride.
+The runtime retains a separate MAP-only root handle, so closing the application's
+startup handle cannot break later thread creation. Address-space exhaustion is
+reported and destroyed reservations are reusable. `hyper_stack_create()` and
 `hyper_runtime_thread_spawn_with_stack()` accept an explicit capacity.
 
-The loader supplies the main reservation through INITIAL_STACK_VMAR and stack
-geometry auxiliary entries. Runtime initialization adopts it and removes that
-handle from the application startup view. Both main and worker stacks enter the
-same reservation registry, with heap-allocated descriptors and common ownership,
-query, growth and retirement operations. Only initial reservation creation differs:
-the loader must provide a usable stack before the runtime can execute. Normal
+The kernel loader supplies only a temporary bootstrap stack through
+INITIAL_STACK_VMAR and geometry auxiliary entries. Runtime initialization
+creates the final main stack through the same allocator as worker stacks,
+copies startup strings and records, and performs a non-returning assembly SP
+switch. It releases the bootstrap mapping and VMAR from the new stack before
+constructors and app entry. The consumed handle is omitted from the app startup
+view. The dynamic loader uses the same shared-runtime handoff as static CRT;
+it never restores the abandoned bootstrap SP. Normal
 main return terminates the process, whose address space reclaims its reservation.
 Worker reclamation waits for Native TERMINATED, including detached
 workers, even when an entry exits directly instead of returning through the
@@ -198,3 +208,36 @@ capability, but do not implement the terminal alias convention. Consumers that
 validate the old exact rights allowlist must update to permit INSPECT. HypeR ships
 its service manifests, SDK and std runtime together; cross-version terminal EOF
 behavior is not promised.
+
+### Runtime system configuration
+
+`hyper_system_config(key)` queries public scalar kernel properties without an
+inspector capability. `HYPER_NATIVE_SYSTEM_CONFIG_PAGE_SIZE` returns the Native
+mapping granule; unknown keys return `NOT_SUPPORTED`. `<hyper/system.h>` exposes
+`hyper_page_size(&size)`, an allocation-free, thread-safe cached query used by
+the heap and unified stack manager. Failed or malformed replies are not cached.
+Rust callers can use `hyper_os::system::{config, page_size}`.
+
+An explicit nonzero SDK thread-stack request rounds up to runtime pages, with a
+one-page minimum. Zero selects the 64 KiB SDK default; the internal reaper also
+requests 64 KiB. Guard pages are additional to usable size. A one-page request
+is permitted, not a guarantee that arbitrary C/Rust code fits. Main and worker
+stack adoption/growth use the same runtime page geometry. The kernel still
+independently checks VMAR alignment, range overflow, ownership and permissions;
+raw `thread_create` takes an aligned SP, not a stack descriptor, so callers must
+supply their own stack reservation and guards.
+
+This does not change the current kernel/ELF 4 KiB configuration or fixed device
+protocol layouts; making those configurable is a separate change.
+
+### Internal synchronization
+
+Heap, stack topology, standard input, cwd and thread-cleanup bookkeeping share
+one private, zero-initialized mutex implementation. Uncontended lock/unlock use
+only acquire/release atomics. Contention uses Native atomic wait, with a possible
+waiter marker retained across handoff and wake-one on contended unlock. There
+is no allocation or TLS initialization in the userspace lock path and no yield
+polling. Locks are nonrecursive and provide no fairness or owner-death recovery.
+Their storage must outlive all lock, wait and wake calls. Unexpected Native wait
+errors retain the runtime's existing process-termination policy; the kernel's
+current waiter allocation policy is unchanged.

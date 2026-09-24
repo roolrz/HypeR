@@ -342,8 +342,10 @@ pub(crate) struct VmarObject {
 
 impl VmarObject {
     /// Initial authority installed for a Process's own root VMAR.
-    pub(crate) const ROOT_RIGHTS: Rights =
-        Rights::TRANSFER.union(Rights::INSPECT).union(Rights::MAP);
+    pub(crate) const ROOT_RIGHTS: Rights = Rights::DUPLICATE
+        .union(Rights::TRANSFER)
+        .union(Rights::INSPECT)
+        .union(Rights::MAP);
 
     fn root(
         address_space: FallibleArc<NativeAddressSpace>,
@@ -382,15 +384,21 @@ impl VmarObject {
 
     pub(crate) fn try_child(
         parent: &Self,
-        range: UserSlice,
+        address: u64,
+        size: u64,
+        exact: bool,
         sponsor: &ResourceDomain,
     ) -> Result<Self, MemoryObjectError> {
         let object_charge = reserve_object_charge::<Self>(sponsor)?;
-        let token = parent
-            .address_space
-            .logical()
-            .try_create_vmar(parent.token.token(), range)
-            .map_err(MemoryObjectError::AddressSpace)?;
+        let space = parent.address_space.logical();
+        let token = if !exact {
+            space.try_create_vmar_hint(parent.token.token(), size, address)
+        } else {
+            let range = UserSlice::new(super::UserAddress::new(address), size)
+                .map_err(|_| MemoryObjectError::AllocationSize)?;
+            space.try_create_vmar(parent.token.token(), range)
+        }
+        .map_err(MemoryObjectError::AddressSpace)?;
         // Child construction proves containment within the checked parent.
         let token = parent
             .address_space

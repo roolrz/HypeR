@@ -19,10 +19,12 @@ static struct fake_thread threads[128];
 static uint64_t next_thread = 2, next_registration = 100;
 static unsigned allocated_stacks, live_registrations, registration_limit = 1024;
 static int fail_start, fail_add;
+static size_t smallest_requested_stack = SIZE_MAX;
 
 hyper_native_status_t hyper_stack_create(size_t size, size_t capacity, hyper_stack_t **out)
 {
-	(void)size;
+	if (size < smallest_requested_stack)
+		smallest_requested_stack = size;
 	(void)capacity;
 	*out = calloc(1, sizeof(**out));
 	assert(*out);
@@ -178,8 +180,9 @@ static void entry(void *argument)
 static thread_token_t *spawn(void)
 {
 	uintptr_t token = 0;
-	assert(hyper_runtime_thread_spawn(65536, entry, NULL, &token) == 0);
+	assert(hyper_runtime_thread_spawn(1, entry, NULL, &token) == 0);
 	assert(token);
+	assert(smallest_requested_stack == 1);
 	return (thread_token_t *)token;
 }
 

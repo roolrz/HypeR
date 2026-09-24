@@ -458,6 +458,11 @@ impl<'image> Image<'image> {
         self.entry
     }
 
+    /// Preserve the executable's request without choosing a runtime layout.
+    pub fn requested_stack_size(&self) -> u64 {
+        self.stack_size.unwrap_or(0)
+    }
+
     /// Returns the main image's requested writable stack extent, rounded up to
     /// pages. An absent header or zero size selects the loader's default.
     pub fn initial_stack_size(&self, default: u64) -> Result<u64, Error> {

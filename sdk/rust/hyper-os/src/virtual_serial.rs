@@ -71,7 +71,14 @@ impl Output {
         }
         let base = usize::try_from(address).map_err(|_| Error::InvalidMemoryRange)?;
         // SAFETY: root remains borrowed; success reserves an exact unused region.
-        let result = unsafe { hyper_sys::vmar_allocate(root.raw().get(), address, size) };
+        let result = unsafe {
+            hyper_sys::vmar_allocate(
+                root.raw().get(),
+                address,
+                size,
+                hyper_abi::HYPER_NATIVE_VMAR_ALLOCATE_EXACT,
+            )
+        };
         Status::from_raw(result.status).into_result()?;
         // SAFETY: success transfers a fresh child VMAR owner.
         let region = unsafe {

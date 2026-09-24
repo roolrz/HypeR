@@ -14,11 +14,22 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+hyper_call_result_t hyper_system_config(uint64_t key)
+{
+	if (key == HYPER_NATIVE_SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT) {
+		extern uintptr_t hyper_stack_test_base;
+		return (hyper_call_result_t){.value0 = hyper_stack_test_base + (UINT64_C(4) << 30)};
+	}
+	assert(key == HYPER_NATIVE_SYSTEM_CONFIG_PAGE_SIZE);
+	return (hyper_call_result_t){.status = HYPER_NATIVE_STATUS_OK,
+				     .value0 = (uint64_t)sysconf(_SC_PAGESIZE)};
+}
+
 uintptr_t hyper_stack_test_base;
 static hyper_stack_t *current_stack;
-static int fail_vmo, fail_map, fail_destroy, fail_unmap, fail_allocate;
+static int fail_vmo, fail_map, fail_destroy, fail_unmap, fail_allocate, fail_duplicate;
 static size_t backing_size;
-static unsigned backing_live;
+static unsigned backing_live, root_live;
 
 static struct region {
 	uintptr_t base;
@@ -50,11 +61,44 @@ _Noreturn void hyper_process_exit(int64_t status)
 	__builtin_trap();
 }
 
-hyper_call_result_t hyper_vmar_allocate(uint64_t parent, uintptr_t base, size_t size)
+hyper_call_result_t hyper_handle_duplicate(uint64_t source, uint64_t rights)
 {
+	assert(source == 1 && rights == HYPER_NATIVE_RIGHT_MAP);
+	if (fail_duplicate)
+		return (hyper_call_result_t){HYPER_NATIVE_STATUS_NO_MEMORY, 0, 0};
+	assert(!root_live);
+	root_live = 1;
+	return (hyper_call_result_t){HYPER_NATIVE_STATUS_OK, 2, 0};
+}
+
+hyper_call_result_t hyper_vmar_allocate(uint64_t parent, uintptr_t base, size_t size,
+					uint64_t options)
+{
+	assert(options == 0);
+	/* The runtime must use its own handle, never the application's handle. */
+	assert(parent == 2);
+	parent = 1;
 	assert(parent < 128 && regions[parent].size);
 	if (fail_allocate)
 		return (hyper_call_result_t){HYPER_NATIVE_STATUS_NO_MEMORY, 0, 0};
+	if (!options) {
+		uintptr_t end = regions[parent].base + regions[parent].size;
+		for (;;) {
+			if (size > end - regions[parent].base)
+				return (hyper_call_result_t){HYPER_NATIVE_STATUS_NO_MEMORY, 0, 0};
+			base = end - size;
+			uintptr_t next = end;
+			for (size_t i = 1; i < 128; ++i) {
+				if (regions[i].size && regions[i].parent == parent &&
+				    base < regions[i].base + regions[i].size &&
+				    regions[i].base < end && regions[i].base < next)
+					next = regions[i].base;
+			}
+			if (next == end)
+				break;
+			end = next;
+		}
+	}
 	assert(base >= regions[parent].base && size <= regions[parent].size);
 	assert(base - regions[parent].base <= regions[parent].size - size);
 	for (size_t i = 1; i < 128; ++i) {
@@ -65,7 +109,7 @@ hyper_call_result_t hyper_vmar_allocate(uint64_t parent, uintptr_t base, size_t 
 	for (size_t i = 4; i < 128; ++i) {
 		if (!regions[i].size) {
 			regions[i] = (struct region){base, size, 0, parent};
-			return (hyper_call_result_t){HYPER_NATIVE_STATUS_OK, i, 0};
+			return (hyper_call_result_t){HYPER_NATIVE_STATUS_OK, i, base};
 		}
 	}
 	return (hyper_call_result_t){HYPER_NATIVE_STATUS_NO_MEMORY, 0, 0};
@@ -83,6 +127,11 @@ hyper_call_result_t hyper_vmo_create(uint64_t size)
 
 hyper_native_status_t hyper_handle_close(uint64_t handle)
 {
+	if (handle == 2) {
+		assert(root_live);
+		root_live = 0;
+		return HYPER_NATIVE_STATUS_OK;
+	}
 	assert(handle == backing_handle && backing_live);
 	backing_live = 0;
 	return HYPER_NATIVE_STATUS_OK;
@@ -232,7 +281,7 @@ static void concurrent_growth(hyper_stack_t *stack)
 int main(void)
 {
 	const size_t page = HYPER_NATIVE_PAGE_SIZE;
-	const size_t arena_size = 32 * 1024 * 1024;
+	const size_t arena_size = (size_t)4 * 1024 * 1024 * 1024;
 	void *arena = mmap(NULL, arena_size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	assert(arena != MAP_FAILED);
 	hyper_stack_test_base = (uintptr_t)arena;
@@ -251,27 +300,30 @@ int main(void)
 		{HYPER_NATIVE_AUXV_INITIAL_STACK_BASE, main_base},
 		{HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY, main_capacity},
 		{HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE, 2 * page},
+		{HYPER_NATIVE_AUXV_MAIN_STACK_SIZE, 3 * page + 1},
 	};
 	hyper_startup_t startup = {.handle_count = 2,
 				   .handles = handles,
 				   .auxiliary_count = 3,
 				   .auxiliary = auxiliary};
 	hyper_stack_t *initial = NULL;
-	startup.auxiliary_count = 2;
-	assert(hyper_stack_initialize(&startup, &initial) == HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-	startup.auxiliary_count = 3;
-	auxiliary[2].value = main_capacity + page;
-	assert(hyper_stack_initialize(&startup, &initial) == HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-	auxiliary[2].value = 2 * page;
-	auxiliary[1].key = HYPER_NATIVE_AUXV_INITIAL_STACK_BASE;
-	assert(hyper_stack_initialize(&startup, &initial) == HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-	auxiliary[1].key = HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY;
+	assert(hyper_stack_initialize(NULL, &initial) == HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+	assert(hyper_stack_initialize(&startup, NULL) == HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
+	fail_duplicate = 1;
+	assert(hyper_stack_initialize(&startup, &initial) == HYPER_NATIVE_STATUS_NO_MEMORY);
+	fail_duplicate = 0;
 	fail_allocate = 1;
 	assert(hyper_stack_initialize(&startup, &initial) == HYPER_NATIVE_STATUS_NO_MEMORY);
+	assert(!root_live);
 	fail_allocate = 0;
+	startup.auxiliary_count = 4;
 	assert(hyper_stack_initialize(&startup, &initial) == HYPER_NATIVE_STATUS_OK && initial);
 	current_stack = initial;
-	assert(info(initial).base == main_low);
+	assert(info(initial).base != main_low);
+	assert(info(initial).capacity == 256 * 1024 * 1024);
+	assert(info(initial).size == 4 * page);
+	/* Initialization must not free a bootstrap stack it still executes on. */
+	assert(regions[3].size && regions[3].mapped == 2 * page);
 	assert(hyper_stack_destroy(initial) == HYPER_NATIVE_STATUS_BAD_STATE);
 	growth(initial);
 	concurrent_growth(initial);
@@ -280,6 +332,18 @@ int main(void)
 	assert(adopted_again == initial);
 
 	hyper_stack_t *stack = NULL;
+	/* A sparse reservation larger than the removed 248 MiB arena. */
+	assert(hyper_stack_create(page, 300 * 1024 * 1024, &stack) == HYPER_NATIVE_STATUS_OK);
+	assert(info(stack).capacity == 300 * 1024 * 1024 && info(stack).size == page);
+	guard_fault(info(stack).base - 1);
+	guard_fault(info(stack).top);
+	assert(hyper_stack_destroy(stack) == HYPER_NATIVE_STATUS_OK);
+	stack = NULL;
+
+	assert(hyper_stack_create(1, page, &stack) == HYPER_NATIVE_STATUS_OK);
+	assert(info(stack).size == page && info(stack).capacity == 256 * 1024 * 1024);
+	assert(hyper_stack_destroy(stack) == HYPER_NATIVE_STATUS_OK);
+	stack = NULL;
 	assert(hyper_stack_create(SIZE_MAX, 0, &stack) != HYPER_NATIVE_STATUS_OK);
 	assert(hyper_stack_create(page, SIZE_MAX, &stack) != HYPER_NATIVE_STATUS_OK);
 	assert(hyper_stack_create(4 * page, 2 * page, &stack) != HYPER_NATIVE_STATUS_OK);
@@ -336,17 +400,16 @@ int main(void)
 	size_t live_regions = 0;
 	for (size_t i = 1; i < 128; ++i)
 		live_regions += regions[i].size != 0;
-	assert(live_regions == 3); /* root, process-lifetime pool and main stack */
-	/* Model termination on a different stack: loader-adopted stacks follow
-	 * exactly the same retirement/retry path as runtime-created stacks. */
+	assert(live_regions == 3); /* root, bootstrap and final main stack */
+	/* Main and worker stacks follow exactly the same retirement path. */
 	current_stack = NULL;
 	fail_destroy = 1;
 	hyper_stack_release_runtime(initial);
 	assert(hyper_stack_get_info(initial, &unavailable) == HYPER_NATIVE_STATUS_BAD_STATE);
-	assert(regions[3].size && !regions[3].mapped);
+	assert(regions[4].size && !regions[4].mapped);
 	fail_destroy = 0;
 	assert(hyper_stack_create(page, 4 * page, &stack) == HYPER_NATIVE_STATUS_OK);
-	assert(!regions[3].size);
+	assert(regions[3].size && regions[3].mapped == 2 * page);
 	assert(hyper_stack_destroy(stack) == HYPER_NATIVE_STATUS_OK);
 	assert(munmap(arena, arena_size) == 0);
 	return 0;

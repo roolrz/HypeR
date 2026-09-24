@@ -28,7 +28,7 @@ const AT_PAGESZ: u64 = 6;
 const AT_BASE: u64 = 7;
 const AT_ENTRY: u64 = 9;
 const STANDARD_AUXILIARY_ENTRIES: usize = 6;
-const HYPER_AUXILIARY_ENTRIES: usize = 5;
+const HYPER_AUXILIARY_ENTRIES: usize = 6;
 const AUXILIARY_TERMINATORS: usize = 1;
 const AUXILIARY_ENTRY_COUNT: usize =
     STANDARD_AUXILIARY_ENTRIES + HYPER_AUXILIARY_ENTRIES + AUXILIARY_TERMINATORS;
@@ -62,6 +62,8 @@ pub struct AuxiliaryValues {
     pub initial_stack_capacity: u64,
     /// Currently mapped usable bytes at the fixed top of the reservation.
     pub initial_stack_size: u64,
+    /// Raw main ELF stack request; the SDK chooses its final stack layout.
+    pub main_stack_size: u64,
 }
 
 impl AuxiliaryValues {
@@ -75,6 +77,7 @@ impl AuxiliaryValues {
             initial_stack_base: 0,
             initial_stack_capacity: 0,
             initial_stack_size: 0,
+            main_stack_size: 0,
         }
     }
 }
@@ -311,6 +314,10 @@ impl Layout {
             (
                 crate::abi::native::HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE,
                 auxiliary.initial_stack_size,
+            ),
+            (
+                crate::abi::native::HYPER_NATIVE_AUXV_MAIN_STACK_SIZE,
+                auxiliary.main_stack_size,
             ),
         ] {
             write_auxiliary(&mut bytes, &mut word_offset, tag, value)?;

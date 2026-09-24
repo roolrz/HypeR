@@ -954,7 +954,7 @@ fn prepare_sealed_process(
         .checked_add(2)
         .ok_or(ProcessBuilderError::StartupHandleLimit)?;
     let stack_layout = StartupStackLayout::try_new(
-        super::INITIAL_STACK_TOP,
+        super::initial_stack_top().map_err(ProcessBuilderError::Image)?,
         &arguments,
         &environment,
         startup_handle_count,

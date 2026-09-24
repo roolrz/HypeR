@@ -52,8 +52,7 @@ application-controlled VMARs to `[0, 0x0000_0020_0000_0000)` (128 GiB), reservin
 `[0x0000_0020_0000_0000, 0x0000_0040_0000_0000)` for kernel-managed user mappings
 such as a future vDSO. This reservation is separate from HS kernel mappings.
 The boundary is provisional and may expand application space later; equal
-halves are not an ABI requirement. Actual process grants currently stay below
-4 GiB. See the [Native address-space contract](syscall-abi.md#native-64-bit-application-address-space-contract).
+halves are not an ABI requirement. Process ROOT_VMAR grants extend from one page to this application limit. See the [Native address-space contract](syscall-abi.md#native-64-bit-application-address-space-contract).
 
 ## Architecture boundaries
 

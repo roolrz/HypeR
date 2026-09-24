@@ -34,11 +34,17 @@ hyper_native_status_t hyper_startup_parse(const uintptr_t *initial_stack, hyper_
 hyper_native_status_t hyper_startup_find_handle(const hyper_startup_t *startup, uint32_t purpose,
 						hyper_native_handle_t *handle);
 
-/* Loader startup hook: after relocation and before constructors. Static
- * applications initialize through CRT instead; repeated initialization is safe. */
+/* One-way startup handoff: creates the final runtime stack, copies startup
+ * data, switches SP and releases the kernel bootstrap stack before entry.
+ * The continuation must not return. Called once by CRT or the dynamic loader. */
+__attribute__((noreturn)) void hyper_runtime_start(const uintptr_t *initial_stack,
+						   void (*entry)(const uintptr_t *));
+
+/* Runtime preparation used by the startup handoff, before constructors.
+ * Creates final storage but does not itself switch SP or retire bootstrap. */
 hyper_native_status_t hyper_runtime_initialize(const uintptr_t *initial_stack);
 /* Immutable application startup view, valid after runtime initialization.
- * Runtime-owned initial-stack VMAR is consumed during initialization and omitted. */
+ * Bootstrap-stack VMAR is reserved for the handoff and omitted. */
 const hyper_startup_t *hyper_runtime_startup(void);
 
 /* Borrowed process-lifetime runtime copy, or zero when not delegated with

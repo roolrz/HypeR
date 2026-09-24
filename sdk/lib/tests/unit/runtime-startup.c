@@ -3,6 +3,12 @@
  */
 #include <hyper/heap.h>
 #include <hyper/stack.h>
+#include <hyper/system.h>
+#include <hyper/syscall.h>
+#include <setjmp.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <stdlib.h>
 #include "../../src/stack-internal.h"
 #include <assert.h>
 #include <string.h>
@@ -10,6 +16,12 @@
 struct hyper_stack {
 	unsigned cookie;
 };
+
+static _Alignas(16) unsigned char final_stack[256 * 1024];
+static jmp_buf returned;
+static unsigned switched, unmapped, destroyed;
+static const uintptr_t *final_vector;
+static int64_t expected_failure;
 static struct hyper_stack initial = {123};
 static unsigned heap_calls, stack_calls, attach_calls, capability_calls;
 static const hyper_native_startup_handle_t *original_handles;
@@ -53,6 +65,69 @@ hyper_native_status_t hyper_runtime_capabilities_initialize(const hyper_startup_
 	return HYPER_NATIVE_STATUS_OK;
 }
 
+hyper_native_status_t hyper_page_size(size_t *page)
+{
+	*page = 4096;
+	return HYPER_NATIVE_STATUS_OK;
+}
+
+hyper_native_status_t hyper_stack_get_info(hyper_stack_t *stack, hyper_stack_info_t *info)
+{
+	assert(stack == &initial);
+	*info = (hyper_stack_info_t){.top = (uintptr_t)final_stack + sizeof(final_stack),
+				     .capacity = 256 * 1024 * 1024,
+				     .size = sizeof(final_stack)};
+	return HYPER_NATIVE_STATUS_OK;
+}
+
+hyper_stack_t *hyper_stack_current(void)
+{
+	return &initial;
+}
+
+hyper_native_status_t hyper_stack_grow(hyper_stack_t *stack, size_t size)
+{
+	(void)stack;
+	(void)size;
+	__builtin_trap();
+}
+
+_Noreturn void hyper_process_exit(int64_t status)
+{
+	if (expected_failure)
+		_exit(status == expected_failure ? 0 : 1);
+	__builtin_trap();
+}
+
+hyper_native_status_t hyper_vmar_unmap(uint64_t handle, uintptr_t base, size_t size)
+{
+	assert(switched && !unmapped++ && !destroyed);
+	assert(handle == 22 && base == 0xf17c1000 && size == 0x40000);
+	return HYPER_NATIVE_STATUS_OK;
+}
+
+hyper_native_status_t hyper_vmar_destroy(uint64_t handle)
+{
+	assert(handle == 22 && unmapped && !destroyed++);
+	return HYPER_NATIVE_STATUS_OK;
+}
+
+_Noreturn void __hyper_runtime_switch_stack(uintptr_t sp, void (*entry)(const uintptr_t *))
+{
+	assert(!switched++ && !unmapped && !destroyed);
+	assert(sp % 16 == 0 && sp >= (uintptr_t)final_stack &&
+	       sp < (uintptr_t)final_stack + sizeof(final_stack));
+	entry((const uintptr_t *)sp);
+	__builtin_trap();
+}
+
+static void entered(const uintptr_t *stack)
+{
+	assert(switched && unmapped && destroyed);
+	final_vector = stack;
+	longjmp(returned, 1);
+}
+
 int main(void)
 {
 	assert(hyper_runtime_startup() == NULL);
@@ -89,14 +164,35 @@ int main(void)
 		0,
 		0,
 	};
-	assert(hyper_runtime_initialize(words) == HYPER_NATIVE_STATUS_OK);
+	/* Reject malformed bootstrap ownership before any allocation or SP change. */
+	for (unsigned mode = 0; mode < 3; ++mode) {
+		pid_t child = fork();
+		assert(child >= 0);
+		if (child == 0) {
+			expected_failure = HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+			if (mode == 0)
+				words[14] = 123; /* Missing mapped-size tag. */
+			else if (mode == 1)
+				words[13] = UINTPTR_MAX; /* Overflow/misalignment. */
+			else
+				words[14] = HYPER_NATIVE_AUXV_INITIAL_STACK_BASE;
+			hyper_runtime_start(words, entered);
+		}
+		int status;
+		assert(waitpid(child, &status, 0) == child);
+		assert(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+	}
+	if (!setjmp(returned))
+		hyper_runtime_start(words, entered);
 	const hyper_startup_t *view = hyper_runtime_startup();
 	assert(view && view->handle_count == 2 && view->handles != handles);
 	assert(view->handles[0].purpose == handles[0].purpose && view->handles[0].handle == 11);
 	assert(view->handles[1].purpose == handles[2].purpose && view->handles[1].handle == 33);
-	assert(view->argument_count == 2 && view->arguments[0] == argument &&
-	       view->arguments[1] == option);
-	assert(view->environment_count == 1 && view->environment[0] == environment);
+	assert(view->argument_count == 2 && view->arguments[0] != argument &&
+	       memcmp(view->arguments[0], argument, sizeof(argument)) == 0 &&
+	       memcmp(view->arguments[1], option, sizeof(option)) == 0);
+	assert(view->environment_count == 1 && view->environment[0] != environment &&
+	       memcmp(view->environment[0], environment, sizeof(environment)) == 0);
 	assert(view->auxiliary_count == 6);
 	assert(view->auxiliary[view->auxiliary_count].key == 0);
 	assert(view->auxiliary[view->auxiliary_count].value == 0);
@@ -107,9 +203,24 @@ int main(void)
 			assert(view->auxiliary[i].value == (uintptr_t)view->handles);
 		else if (view->auxiliary[i].key == HYPER_NATIVE_AUXV_STARTUP_HANDLE_COUNT)
 			assert(view->auxiliary[i].value == view->handle_count);
+		else if (view->auxiliary[i].key == HYPER_NATIVE_AUXV_INITIAL_STACK_BASE)
+			assert(view->auxiliary[i].value == (uintptr_t)final_stack +
+								   sizeof(final_stack) -
+								   256 * 1024 * 1024 - 4096);
+		else if (view->auxiliary[i].key == HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY)
+			assert(view->auxiliary[i].value == 256 * 1024 * 1024);
 		else
 			assert(view->auxiliary[i].value == original_aux[i].value);
 	}
+	hyper_startup_t moved;
+	assert(hyper_startup_parse(final_vector, &moved) == HYPER_NATIVE_STATUS_OK);
+	assert(moved.handle_count == 2 && moved.argument_count == 2);
+	memset(argument, 0xcc, sizeof(argument));
+	memset(option, 0xcc, sizeof(option));
+	memset(environment, 0xcc, sizeof(environment));
+	assert(memcmp(moved.arguments[0], "/bin/example", sizeof(argument)) == 0);
+	assert(memcmp(moved.arguments[1], "--help", sizeof(option)) == 0);
+	assert(memcmp(moved.environment[0], "TERM=hyper", sizeof(environment)) == 0);
 	assert(handles[1].handle == 22 && original_aux[1].value == 3);
 	hyper_native_handle_t output = 0;
 	assert(hyper_startup_find_handle(view,

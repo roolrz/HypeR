@@ -637,7 +637,8 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
             _: HandleValue,
             _: u64,
             _: u64,
-        ) -> Result<HandleValue, MemoryServiceError> {
+            _: bool,
+        ) -> Result<(HandleValue, u64), MemoryServiceError> {
             self.calls.set(self.calls.get().saturating_add(1));
             Err(MemoryServiceError::Process(ProcessError::Allocation))
         }
@@ -1361,6 +1362,26 @@ pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
         || query.values() != &[HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_FEATURE_CORE]
     {
         return Err(SelfTestError::AbiQuery);
+    }
+    let config = hyper::abi::native::HYPER_NATIVE_SYS_SYSTEM_CONFIG;
+    let page_key = hyper::abi::native::HYPER_NATIVE_SYSTEM_CONFIG_PAGE_SIZE;
+    let page = dispatch_immediate(&services, invoke(config, [page_key, 0, 0, 0, 0, 0]));
+    if page.status() != HYPER_NATIVE_STATUS_OK || page.values() != &[hyper::mm::PAGE_SIZE, 0] {
+        return Err(SelfTestError::AbiQuery);
+    }
+    for key in [0, u64::MAX] {
+        let unknown = dispatch_immediate(&services, invoke(config, [key, 0, 0, 0, 0, 0]));
+        if unknown.status() != HYPER_NATIVE_STATUS_NOT_SUPPORTED || unknown.values() != &[0, 0] {
+            return Err(SelfTestError::AbiQuery);
+        }
+    }
+    for index in 1..6 {
+        let mut args = [page_key, 0, 0, 0, 0, 0];
+        args[index] = 1;
+        let malformed = dispatch_immediate(&services, invoke(config, args));
+        if malformed.status() != HYPER_NATIVE_STATUS_INVALID_ARGUMENT {
+            return Err(SelfTestError::AbiQuery);
+        }
     }
     let first_clock = dispatch_immediate(
         &services,

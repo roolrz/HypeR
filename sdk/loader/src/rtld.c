@@ -1009,7 +1009,8 @@ static Object *load_object(hyper_native_handle_t directory, const char *name, ui
 		last_error = "shared-object address space exhausted";
 		goto fail;
 	}
-	hyper_call_result_t area = hyper_vmar_allocate(root_vmar, mapped_start, span);
+	hyper_call_result_t area = hyper_vmar_allocate(root_vmar, mapped_start, span,
+						       HYPER_NATIVE_VMAR_ALLOCATE_EXACT);
 	if (area.status != HYPER_NATIVE_STATUS_OK) {
 		last_error = "shared-object VMAR allocation failed";
 		goto fail;
@@ -1316,44 +1317,51 @@ static int initialize_main(const uintptr_t *stack)
 		if (!relocate_object(&objects[index - 1]))
 			return 0;
 	}
-	/* Heap setup must precede every application/DSO constructor. Resolve the
-	 * hook in the shared runtime itself, never in the interpreter's static
-	 * libhyper primitives or an interposing application symbol. */
-	Object *runtime = find_object("libhyper.so");
-	if (runtime != NULL) {
-		int weak = 0;
-		void *hook = find_symbol_in(runtime, "hyper_runtime_initialize", &weak);
-		if (hook == NULL || ((hyper_native_status_t (*)(const uintptr_t *))hook)(stack) !=
-					    HYPER_NATIVE_STATUS_OK) {
-			last_error = "Native runtime initialization failed";
-			return 0;
-		}
-	}
-	for (size_t index = object_count; index > 1; --index) {
-		if (!initialize_object(&objects[index - 1]))
-			return 0;
-	}
-	if (!initialize_object(main))
-		return 0;
 	return 1;
 }
 
-uintptr_t __hyper_rtld_start(const uintptr_t *stack)
+extern _Noreturn void __hyper_rtld_enter(uintptr_t stack, uintptr_t entry);
+
+static _Noreturn void enter_application(const uintptr_t *stack)
 {
-	if (!initialize_main(stack)) {
-		report_startup_failure();
-		hyper_process_exit(HYPER_NATIVE_STATUS_NOT_SUPPORTED);
+	/* Runtime initialization and bootstrap-stack retirement have completed.
+	 * Constructors execute exclusively on the final app stack. */
+	for (size_t index = object_count; index > 1; --index) {
+		if (!initialize_object(&objects[index - 1]))
+			hyper_process_exit(HYPER_NATIVE_STATUS_BAD_STATE);
 	}
+	if (!initialize_object(&objects[0]))
+		hyper_process_exit(HYPER_NATIVE_STATUS_BAD_STATE);
 	const uintptr_t *cursor = stack + 1 + stack[0];
 	++cursor;
 	while (*cursor++ != 0) {
 	}
 	while (cursor[0] != AT_NULL) {
 		if (cursor[0] == AT_ENTRY)
-			return cursor[1];
+			__hyper_rtld_enter((uintptr_t)stack, cursor[1]);
 		cursor += 2;
 	}
 	hyper_process_exit(HYPER_NATIVE_STATUS_BAD_STATE);
+}
+
+_Noreturn void __hyper_rtld_start(const uintptr_t *stack)
+{
+	if (!initialize_main(stack)) {
+		report_startup_failure();
+		hyper_process_exit(HYPER_NATIVE_STATUS_NOT_SUPPORTED);
+	}
+	/* Resolve in the relocated shared runtime, never the interpreter's static
+	 * primitives or an interposing app. This call abandons our bootstrap frames. */
+	Object *runtime = find_object("libhyper.so");
+	int weak = 0;
+	void *hook = runtime ? find_symbol_in(runtime, "hyper_runtime_start", &weak) : NULL;
+	if (!hook) {
+		last_error = "missing Native runtime startup handoff";
+		report_startup_failure();
+		hyper_process_exit(HYPER_NATIVE_STATUS_NOT_SUPPORTED);
+	}
+	((void (*)(const uintptr_t *, void (*)(const uintptr_t *)))hook)(stack, enter_application);
+	hyper_process_exit(HYPER_NATIVE_STATUS_INTERNAL);
 }
 
 /* A failed dependency load must restore existing objects as well as discard

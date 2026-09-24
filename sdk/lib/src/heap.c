@@ -4,7 +4,9 @@
 
 #include <hyper/heap.h>
 #include <hyper/syscall.h>
+#include <hyper/system.h>
 #include <stdatomic.h>
+#include "mutex-internal.h"
 #include <stdbool.h>
 #include <string.h>
 
@@ -13,7 +15,7 @@
  * First-fit blocks split and coalesce; wholly free regions are unmapped. */
 #define BLOCK_ALIGNMENT _Alignof(max_align_t)
 #define REGION_GRANULE ((size_t)65536)
-#define PAGE_SIZE ((size_t)HYPER_NATIVE_PAGE_SIZE)
+static size_t page_size;
 
 typedef struct region region_t;
 typedef struct block block_t;
@@ -29,24 +31,15 @@ struct block {
 
 struct region {
 	size_t size;
+	hyper_native_handle_t vmar;
 	region_t *next;
 };
 
-static atomic_flag heap_lock = ATOMIC_FLAG_INIT;
-static hyper_native_handle_t heap_vmar;
+static hyper_mutex_t heap_lock;
+static hyper_native_handle_t heap_vmar, root_vmar;
+static uintptr_t heap_base;
+static size_t heap_size;
 static region_t *regions;
-
-static void lock(void)
-{
-	while (atomic_flag_test_and_set_explicit(&heap_lock, memory_order_acquire)) {
-		(void)hyper_thread_yield();
-	}
-}
-
-static void unlock(void)
-{
-	atomic_flag_clear_explicit(&heap_lock, memory_order_release);
-}
 
 static void require_success(hyper_native_status_t status)
 {
@@ -83,55 +76,96 @@ hyper_native_status_t hyper_heap_initialize(const hyper_startup_t *startup)
 	if (status != HYPER_NATIVE_STATUS_OK) {
 		return status;
 	}
-	lock();
+	hyper_mutex_lock(&heap_lock);
 	if (heap_vmar != 0) {
-		unlock();
+		hyper_mutex_unlock(&heap_lock);
 		return HYPER_NATIVE_STATUS_OK;
 	}
-	hyper_call_result_t result = hyper_vmar_allocate(root, HYPER_HEAP_BASE, HYPER_HEAP_SIZE);
-	if (result.status == HYPER_NATIVE_STATUS_OK) {
-		heap_vmar = result.value0;
+	status = hyper_page_size(&page_size);
+	if (status != HYPER_NATIVE_STATUS_OK) {
+		hyper_mutex_unlock(&heap_lock);
+		return status;
 	}
-	unlock();
+	hyper_call_result_t configuration =
+		hyper_system_config(HYPER_NATIVE_SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT);
+	if (configuration.status != HYPER_NATIVE_STATUS_OK || configuration.value1 ||
+	    configuration.value0 / 8 < page_size || configuration.value0 > SIZE_MAX) {
+		hyper_mutex_unlock(&heap_lock);
+		return configuration.status ? configuration.status
+					    : HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+	}
+	heap_size = (configuration.value0 / 8) & ~(page_size - 1);
+	if (!heap_size || HYPER_HEAP_BASE % page_size) {
+		hyper_mutex_unlock(&heap_lock);
+		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+	}
+	hyper_call_result_t root_owner = hyper_handle_duplicate(root, HYPER_NATIVE_RIGHT_MAP);
+	if (root_owner.status != HYPER_NATIVE_STATUS_OK) {
+		hyper_mutex_unlock(&heap_lock);
+		return root_owner.status;
+	}
+	hyper_call_result_t result =
+		hyper_vmar_allocate(root_owner.value0, HYPER_HEAP_BASE, heap_size, 0);
+	if (result.status == HYPER_NATIVE_STATUS_OK) {
+		root_vmar = root_owner.value0;
+		heap_vmar = result.value0;
+		heap_base = result.value1;
+	} else {
+		require_success(hyper_handle_close(root_owner.value0));
+	}
+	hyper_mutex_unlock(&heap_lock);
 	return result.status;
 }
 
 static region_t *grow(size_t minimum)
 {
 	size_t size;
-	if (!round_up(minimum, PAGE_SIZE, &size) || size > HYPER_HEAP_SIZE) {
+	if (!round_up(minimum, page_size, &size)) {
 		return NULL;
 	}
-	if (size < REGION_GRANULE) {
-		size = REGION_GRANULE;
-	}
-	uintptr_t address = HYPER_HEAP_BASE;
-	region_t **link = &regions;
-	while (*link != NULL) {
-		if ((uintptr_t)*link - address >= size) {
+	if (size < REGION_GRANULE && !round_up(REGION_GRANULE, page_size, &size))
+		return NULL;
+	uintptr_t address = heap_base;
+	const uintptr_t end = heap_base + heap_size;
+	for (region_t *region = regions; region; region = region->next) {
+		if (region->vmar != heap_vmar)
+			continue;
+		if ((uintptr_t)region - address >= size)
 			break;
-		}
-		address = (uintptr_t)*link + (*link)->size;
-		link = &(*link)->next;
+		address = (uintptr_t)region + region->size;
 	}
-	if (size > HYPER_HEAP_BASE + HYPER_HEAP_SIZE - address) {
-		return NULL;
+	hyper_native_handle_t vmar = heap_vmar;
+	if (size > end - address) {
+		/* Overflow allocations have their own reservation, with metadata in
+		 * the mapping itself: extending the allocator never calls malloc. */
+		hyper_call_result_t extra = hyper_vmar_allocate(root_vmar, end, size, 0);
+		if (extra.status != HYPER_NATIVE_STATUS_OK)
+			return NULL;
+		vmar = extra.value0;
+		address = extra.value1;
 	}
 	hyper_call_result_t backing = hyper_vmo_create(size);
 	if (backing.status != HYPER_NATIVE_STATUS_OK) {
+		if (vmar != heap_vmar)
+			require_success(hyper_vmar_destroy(vmar));
 		return NULL;
 	}
-	hyper_native_status_t status = hyper_vmar_map(heap_vmar, backing.value0, 0, address, size,
+	hyper_native_status_t status = hyper_vmar_map(vmar, backing.value0, 0, address, size,
 						      HYPER_NATIVE_VMAR_PERMISSION_READ |
 							      HYPER_NATIVE_VMAR_PERMISSION_WRITE);
 	/* The successful mapping retains backing ownership. Failed maps leave no
 	 * published region and must release any pages populated by the kernel. */
 	require_success(hyper_handle_close(backing.value0));
 	if (status != HYPER_NATIVE_STATUS_OK) {
+		if (vmar != heap_vmar)
+			require_success(hyper_vmar_destroy(vmar));
 		return NULL;
 	}
+	region_t **link = &regions;
+	while (*link && (uintptr_t)*link < address)
+		link = &(*link)->next;
 	region_t *region = (region_t *)address;
-	*region = (region_t){.size = size, .next = *link};
+	*region = (region_t){.size = size, .vmar = vmar, .next = *link};
 	*link = region;
 	block_t *block = first_block(region);
 	*block = (block_t){
@@ -196,27 +230,26 @@ void *hyper_alloc(size_t size, size_t alignment)
 	/* Bound every later metadata/padding addition before touching the heap. */
 	size_t overhead =
 		region_header_size() + sizeof(block_t) + sizeof(block_t *) + BLOCK_ALIGNMENT;
-	if (alignment > HYPER_HEAP_SIZE || size > HYPER_HEAP_SIZE - alignment ||
-	    size + alignment > HYPER_HEAP_SIZE - overhead) {
+	if (alignment > SIZE_MAX - overhead || size > SIZE_MAX - alignment - overhead) {
 		return NULL;
 	}
-	lock();
+	hyper_mutex_lock(&heap_lock);
 	if (heap_vmar == 0) {
-		unlock();
+		hyper_mutex_unlock(&heap_lock);
 		return NULL;
 	}
 	for (region_t *region = regions; region != NULL; region = region->next) {
 		for (block_t *block = first_block(region); block != NULL; block = block->next) {
 			void *pointer = take(block, size, alignment);
 			if (pointer != NULL) {
-				unlock();
+				hyper_mutex_unlock(&heap_lock);
 				return pointer;
 			}
 		}
 	}
 	region_t *region = grow(size + alignment + overhead);
 	void *pointer = region == NULL ? NULL : take(first_block(region), size, alignment);
-	unlock();
+	hyper_mutex_unlock(&heap_lock);
 	return pointer;
 }
 
@@ -235,7 +268,7 @@ void hyper_free(void *pointer)
 	if (pointer == NULL) {
 		return;
 	}
-	lock();
+	hyper_mutex_lock(&heap_lock);
 	block_t *block = ((block_t **)pointer)[-1];
 	block->available = true;
 	if (block->next != NULL && block->next->available) {
@@ -252,10 +285,13 @@ void hyper_free(void *pointer)
 			link = &(*link)->next;
 		}
 		const size_t size = region->size;
+		const hyper_native_handle_t vmar = region->vmar;
 		*link = region->next;
-		require_success(hyper_vmar_unmap(heap_vmar, (uintptr_t)region, size));
+		require_success(hyper_vmar_unmap(vmar, (uintptr_t)region, size));
+		if (vmar != heap_vmar)
+			require_success(hyper_vmar_destroy(vmar));
 	}
-	unlock();
+	hyper_mutex_unlock(&heap_lock);
 }
 
 void *hyper_realloc(void *pointer, size_t size, size_t alignment)

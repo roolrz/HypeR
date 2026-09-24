@@ -248,7 +248,9 @@ loads a new image and address space.
   [UserThread](../kernel/src/kernel/process/user_thread.rs) and
   [scheduler Thread](../kernel/src/kernel/task/thread.rs) serve different ownership roles.
 - **Stack:** [stack.c](../sdk/lib/src/stack.c) manages guarded reservations and
-  explicit growth for both the adopted main stack and SDK-created worker stacks.
+  explicit growth for both the runtime-created main stack and SDK-created worker stacks.
+  `sdk/lib/src/bootstrap.c` copies startup data and switches to the final stack;
+  only then does it release the kernel bootstrap reservation.
   See [stack APIs](../sdk/lib/README.md#guarded-growable-stacks) before changing
   stack size or cleanup. A userspace stack is separate from its kernel stack.
 

@@ -27,6 +27,7 @@ pub mod memory;
 mod relay;
 pub mod startup;
 mod status;
+pub mod system;
 pub mod task;
 pub mod thread;
 pub mod time;

@@ -1195,8 +1195,9 @@ impl MemoryServices for DeferredProcessServices<'_> {
         parent: HandleValue,
         address: u64,
         size: u64,
-    ) -> Result<HandleValue, crate::kernel::mm::user_space::MemoryServiceError> {
-        crate::kernel::mm::user_space::allocate_vmar(self.process, parent, address, size)
+        exact: bool,
+    ) -> Result<(HandleValue, u64), crate::kernel::mm::user_space::MemoryServiceError> {
+        crate::kernel::mm::user_space::allocate_vmar(self.process, parent, address, size, exact)
     }
 
     fn map_vmo(

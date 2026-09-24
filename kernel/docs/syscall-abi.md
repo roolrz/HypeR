@@ -676,11 +676,10 @@ shared ABI pages; individual permissions and discovery belong to the facility
 which installs them. The reservation does not establish a fixed vDSO address,
 grant application write authority, or allocate physical memory.
 
-The current loader still grants a smaller process range below 4 GiB, as
-specified in the [Native init contract](native-init.md#executable-image).
-Expanding that layout and installing system mappings are separate changes.
-The reservation check remains enforced if a future loader requests a larger
-process range. RISC-V needs no wider translation mode to reserve system pages
+The loader grants process ROOT_VMAR from one page up to the HAL application
+limit, as specified in the [Native init contract](native-init.md#executable-image).
+The main stack and both guards remain below that limit. System-reserved user
+addresses remain outside application authority. RISC-V needs no wider translation mode to reserve system pages
 within its existing Sv39 user range.
 
 ### Memory mappings and backing ownership
@@ -860,3 +859,40 @@ unmapped payloads and masks with no schedulable CPU fail before publishing a
 child handle. As with Process affinity, offline bits may remain in the allowed
 set if at least one selected CPU is schedulable. No automatic balancing policy
 is implied by this creation interface.
+
+### Public system configuration
+
+`system_config(key)` returns a scalar in `value0` and zero in `value1`. The first
+key, `SYSTEM_CONFIG_PAGE_SIZE`, reports the Native mapping granule in bytes from
+the kernel memory implementation. It is immutable during a process lifetime.
+Unused argument registers must be zero (`INVALID_ARGUMENT` otherwise); unknown
+keys return `NOT_SUPPORTED`. No inspector authority is needed for this public
+configuration. New public scalar keys can extend the same syscall.
+
+Runtime stack/heap alignment derives from this query. It does not relax the
+kernel VMAR service's independent page-alignment, nonempty-range, checked-address
+and permission validation. Thread SP alignment remains the architecture calling
+convention's alignment, not page alignment.
+
+### VMAR address selection
+
+`vmar_allocate(parent, address, size, options)` always interprets address as
+the low end of the requested interval. With options zero, nonzero address is
+a hint: first try it, otherwise choose the nearest fitting free interval
+(lowest base wins equal distances). Address zero with options zero chooses the
+lowest free range. `VMAR_ALLOCATE_EXACT` requires that exact address, including
+zero; no relocation occurs. Unknown flags are INVALID_ARGUMENT. Addresses and
+nonzero sizes must be page aligned and representable without overflow.
+Success returns child in value0 and actual base in value1. The parent's authority
+and system-reserved boundary constrain every mode. Selection and reservation
+commit atomically against concurrent mappings/child reservations. No fitting
+free range is NO_MEMORY; exact overlap keeps the existing conflict status.
+
+SDK worker stacks use independent automatically placed child VMARs, including
+their guard pages; they no longer consume a fixed SDK stack arena. The loader supplies a temporary bootstrap stack; the runtime creates the final
+main stack through its ordinary allocator and retires the bootstrap after switching SP.
+
+`SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT` (key 2) returns the selected HAL
+application-exclusive address limit in value0, with value1 zero. It describes
+the architecture profile, not authority over a particular VMAR. The loader's
+ROOT_VMAR covers one page up to this limit; libraries must still obey their handles.

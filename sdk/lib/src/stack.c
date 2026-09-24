@@ -3,19 +3,17 @@
  */
 #include <hyper/stack.h>
 #include <hyper/syscall.h>
+#include <hyper/system.h>
 #include "stack-internal.h"
 #include <stdatomic.h>
+#include "mutex-internal.h"
 #include <stdbool.h>
 #include <stdlib.h>
 
-#ifndef HYPER_STACK_POOL_BASE
-#define HYPER_STACK_POOL_BASE UINT64_C(0xf0000000)
-#endif
-#define PAGE_SIZE ((size_t)HYPER_NATIVE_PAGE_SIZE)
-#define DEFAULT_CAPACITY ((size_t)1024 * 1024)
+static size_t page_size;
+#define DEFAULT_CAPACITY ((size_t)256 * 1024 * 1024)
 
 struct hyper_stack {
-	uintptr_t reservation;
 	uintptr_t top;
 	size_t capacity;
 	size_t size;
@@ -26,29 +24,18 @@ struct hyper_stack {
 	struct hyper_stack *next;
 };
 
-/* Stack topology has one owner, separate from the general heap. Empty and
- * guard addresses remain reserved even while no backing page is installed.
- * Slow VMAR operations may block, so this is a userspace yield lock, never a
- * kernel spinlock or a lock held by the thread whose termination we await. */
-static atomic_flag topology_lock = ATOMIC_FLAG_INIT;
+/* The registry owns stack descriptors and retirement retries. VMARs own the
+ * address reservations, including guards and uncommitted capacity.
+ * Slow VMAR operations may block; contending callers sleep on a Native atomic
+ * wait. No thread termination is awaited while holding this mutex. */
+static hyper_mutex_t registry_lock;
 static atomic_bool initialized;
-static hyper_native_handle_t pool_vmar;
-static uintptr_t pool_end;
+static hyper_native_handle_t root_vmar;
+static uintptr_t stack_ceiling;
 static hyper_stack_t *stacks;
 /* Bootstrap handoff reference; ownership lives in the same registry as every
  * other stack. Initialization only runs before secondary threads exist. */
 static hyper_stack_t *initial_stack;
-
-static void lock(void)
-{
-	while (atomic_flag_test_and_set_explicit(&topology_lock, memory_order_acquire))
-		(void)hyper_thread_yield();
-}
-
-static void unlock(void)
-{
-	atomic_flag_clear_explicit(&topology_lock, memory_order_release);
-}
 
 static void close_owned(hyper_native_handle_t handle)
 {
@@ -58,28 +45,24 @@ static void close_owned(hyper_native_handle_t handle)
 
 static bool page_round(size_t size, size_t *rounded)
 {
-	if (!size || size > SIZE_MAX - (PAGE_SIZE - 1))
+	if (!page_size || !size || size > SIZE_MAX - (page_size - 1))
 		return false;
-	*rounded = (size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+	*rounded = (size + page_size - 1) & ~(page_size - 1);
 	return true;
 }
 
-/* Adopt either a loader-created reservation or a newly allocated one. All
- * descriptors have the same allocation, topology and retirement rules. Caller
+/* Register a runtime-created reservation. All descriptors have the same
+ * allocation, registry and retirement rules. Caller
  * serializes publication (startup is single-threaded). */
 static void register_stack(hyper_stack_t *stack, uintptr_t base, size_t capacity, size_t size,
 			   hyper_native_handle_t vmar)
 {
-	hyper_stack_t **link = &stacks;
-	while (*link && (*link)->reservation < base)
-		link = &(*link)->next;
-	*stack = (hyper_stack_t){.reservation = base,
-				 .top = base + PAGE_SIZE + capacity,
+	*stack = (hyper_stack_t){.top = base + page_size + capacity,
 				 .capacity = capacity,
 				 .size = size,
 				 .vmar = vmar,
-				 .next = *link};
-	*link = stack;
+				 .next = stacks};
+	stacks = stack;
 }
 
 /* Publication is the successful map. No descriptor allocation follows it;
@@ -131,6 +114,8 @@ static void collect(void)
 	}
 }
 
+static hyper_native_status_t create_stack(size_t size, size_t capacity, hyper_stack_t **result);
+
 hyper_native_status_t hyper_stack_initialize(const hyper_startup_t *startup, hyper_stack_t **result)
 {
 	if (!startup || !result || (startup->auxiliary_count && !startup->auxiliary))
@@ -139,61 +124,57 @@ hyper_native_status_t hyper_stack_initialize(const hyper_startup_t *startup, hyp
 		*result = initial_stack;
 		return HYPER_NATIVE_STATUS_OK;
 	}
-	uintptr_t base = 0, capacity = 0, size = 0;
-	unsigned seen = 0;
-	for (size_t index = 0; index < startup->auxiliary_count; ++index) {
-		const hyper_auxiliary_entry_t entry = startup->auxiliary[index];
-		unsigned bit = 0;
-		switch (entry.key) {
-		case HYPER_NATIVE_AUXV_INITIAL_STACK_BASE:
-			bit = 1;
-			base = entry.value;
-			break;
-		case HYPER_NATIVE_AUXV_INITIAL_STACK_CAPACITY:
-			bit = 2;
-			capacity = entry.value;
-			break;
-		case HYPER_NATIVE_AUXV_INITIAL_STACK_SIZE:
-			bit = 4;
-			size = entry.value;
-			break;
-		default:
-			break;
-		}
-		if (seen & bit)
-			return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
-		seen |= bit;
-	}
-	if (seen != 7 || !size || size > capacity || base < HYPER_STACK_POOL_BASE ||
-	    (base | capacity | size) % PAGE_SIZE || capacity > UINTPTR_MAX - 2 * PAGE_SIZE ||
-	    base > UINTPTR_MAX - capacity - 2 * PAGE_SIZE)
-		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
-	hyper_native_handle_t root, vmar;
-	hyper_native_status_t status = hyper_startup_find_handle(
-		startup, HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_INITIAL_STACK_VMAR, &vmar);
-	if (status != HYPER_NATIVE_STATUS_OK)
-		return status;
+	hyper_native_status_t query_status = hyper_page_size(&page_size);
+	if (query_status != HYPER_NATIVE_STATUS_OK)
+		return query_status;
+	hyper_native_handle_t root;
+	hyper_native_status_t status;
 	status = hyper_startup_find_handle(startup, HYPER_NATIVE_STARTUP_HANDLE_PURPOSE_ROOT_VMAR,
 					   &root);
 	if (status != HYPER_NATIVE_STATUS_OK)
 		return status;
-	hyper_stack_t *stack = calloc(1, sizeof(*stack));
-	if (!stack)
-		return HYPER_NATIVE_STATUS_NO_MEMORY;
-	/* Loader/CRT calls this before constructors or any secondary thread. */
-	if (base > HYPER_STACK_POOL_BASE) {
-		hyper_call_result_t pool = hyper_vmar_allocate(root, HYPER_STACK_POOL_BASE,
-							       base - HYPER_STACK_POOL_BASE);
-		if (pool.status != HYPER_NATIVE_STATUS_OK) {
-			free(stack);
-			return pool.status;
-		}
-		pool_vmar = pool.value0;
+	/* The kernel provides only a disposable bootstrap stack. Final stack
+	 * placement belongs to this runtime and uses the same allocator as workers. */
+	hyper_call_result_t limits =
+		hyper_system_config(HYPER_NATIVE_SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT);
+	if (limits.status != HYPER_NATIVE_STATUS_OK)
+		return limits.status;
+	if (limits.value1 || !limits.value0 || limits.value0 % page_size)
+		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+
+	/* PT_GNU_STACK is an application request, not a bootstrap-stack size. */
+	size_t requested = 256 * 1024;
+	for (size_t i = 0; i < startup->auxiliary_count; ++i) {
+		if (startup->auxiliary[i].key == HYPER_NATIVE_AUXV_MAIN_STACK_SIZE &&
+		    startup->auxiliary[i].value)
+			requested = startup->auxiliary[i].value;
 	}
-	register_stack(stack, base, capacity, size, vmar);
+	/* The main entry vector lives at the final top. Retain at least one page
+	 * below it for the handoff/CRT frames, including tiny ELF stack requests. */
+	if (startup->argument_count > 4096 || startup->environment_count > 4096 ||
+	    startup->auxiliary_count > 256)
+		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+	size_t words = 3 + startup->argument_count + startup->environment_count +
+		       2 * (startup->auxiliary_count + 1);
+	size_t entry_bytes = (words * sizeof(uintptr_t) + 15) & ~(size_t)15;
+	if (entry_bytes > SIZE_MAX - page_size)
+		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+	if (requested < entry_bytes + page_size)
+		requested = entry_bytes + page_size;
+	hyper_call_result_t owned_root = hyper_handle_duplicate(root, HYPER_NATIVE_RIGHT_MAP);
+	if (owned_root.status != HYPER_NATIVE_STATUS_OK)
+		return owned_root.status;
+	root_vmar = owned_root.value0;
+	stack_ceiling = limits.value0;
+	hyper_stack_t *stack;
+	status = create_stack(requested, 0, &stack);
+	if (status != HYPER_NATIVE_STATUS_OK) {
+		close_owned(root_vmar);
+		root_vmar = 0;
+		return status;
+	}
 	hyper_stack_claim_runtime(stack);
 	initial_stack = stack;
-	pool_end = base;
 	atomic_store_explicit(&initialized, true, memory_order_release);
 	*result = initial_stack;
 	return HYPER_NATIVE_STATUS_OK;
@@ -204,39 +185,38 @@ hyper_native_status_t hyper_stack_create(size_t size, size_t capacity, hyper_sta
 	if (!result)
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	*result = NULL;
-	if (!page_round(size, &size))
-		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
-	if (!capacity)
-		capacity = size > DEFAULT_CAPACITY ? size : DEFAULT_CAPACITY;
-	if (!page_round(capacity, &capacity) || size > capacity ||
-	    capacity > SIZE_MAX - 2 * PAGE_SIZE)
-		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	if (!atomic_load_explicit(&initialized, memory_order_acquire))
 		return HYPER_NATIVE_STATUS_BAD_STATE;
+	return create_stack(size, capacity, result);
+}
+
+static hyper_native_status_t create_stack(size_t size, size_t capacity, hyper_stack_t **result)
+{
+	if (!page_round(size, &size))
+		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+	if (capacity && capacity < size)
+		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+	if (capacity < size)
+		capacity = size;
+	if (capacity < DEFAULT_CAPACITY)
+		capacity = DEFAULT_CAPACITY;
+	if (!page_round(capacity, &capacity) || size > capacity ||
+	    capacity > SIZE_MAX - 2 * page_size)
+		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	hyper_stack_t *stack = calloc(1, sizeof(*stack));
 	if (!stack)
 		return HYPER_NATIVE_STATUS_NO_MEMORY;
-	lock();
+	hyper_mutex_lock(&registry_lock);
 	collect();
-	size_t extent = capacity + 2 * PAGE_SIZE;
-	uintptr_t base = HYPER_STACK_POOL_BASE;
-	hyper_stack_t **link = &stacks;
-	while (*link && (*link)->reservation - base < extent) {
-		base = (*link)->top + PAGE_SIZE;
-		link = &(*link)->next;
-	}
-	if (!pool_vmar || base > pool_end || extent > pool_end - base) {
-		unlock();
-		free(stack);
-		return HYPER_NATIVE_STATUS_NO_MEMORY;
-	}
-	hyper_call_result_t region = hyper_vmar_allocate(pool_vmar, base, extent);
+	size_t extent = capacity + 2 * page_size;
+	hyper_call_result_t region = hyper_vmar_allocate(
+		root_vmar, stack_ceiling > extent ? stack_ceiling - extent : 0, extent, 0);
 	if (region.status != HYPER_NATIVE_STATUS_OK) {
-		unlock();
+		hyper_mutex_unlock(&registry_lock);
 		free(stack);
 		return region.status;
 	}
-	register_stack(stack, base, capacity, 0, region.value0);
+	register_stack(stack, region.value1, capacity, 0, region.value0);
 	hyper_native_status_t status = extend(stack, size);
 	if (status == HYPER_NATIVE_STATUS_OK)
 		*result = stack;
@@ -244,7 +224,7 @@ hyper_native_status_t hyper_stack_create(size_t size, size_t capacity, hyper_sta
 		stack->garbage = true;
 		collect();
 	}
-	unlock();
+	hyper_mutex_unlock(&registry_lock);
 	return status;
 }
 
@@ -252,14 +232,14 @@ hyper_native_status_t hyper_stack_get_info(hyper_stack_t *stack, hyper_stack_inf
 {
 	if (!stack || !result)
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
-	lock();
+	hyper_mutex_lock(&registry_lock);
 	if (stack->retiring) {
-		unlock();
+		hyper_mutex_unlock(&registry_lock);
 		return HYPER_NATIVE_STATUS_BAD_STATE;
 	}
 	*result = (hyper_stack_info_t){stack->top - stack->size, stack->top, stack->size,
 				       stack->capacity};
-	unlock();
+	hyper_mutex_unlock(&registry_lock);
 	return HYPER_NATIVE_STATUS_OK;
 }
 
@@ -267,7 +247,7 @@ hyper_native_status_t hyper_stack_grow(hyper_stack_t *stack, size_t size)
 {
 	if (!stack || !page_round(size, &size))
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
-	lock();
+	hyper_mutex_lock(&registry_lock);
 	hyper_native_status_t status;
 	if (stack->retiring)
 		status = HYPER_NATIVE_STATUS_BAD_STATE;
@@ -275,7 +255,7 @@ hyper_native_status_t hyper_stack_grow(hyper_stack_t *stack, size_t size)
 		status = HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 	else
 		status = size == stack->size ? HYPER_NATIVE_STATUS_OK : extend(stack, size);
-	unlock();
+	hyper_mutex_unlock(&registry_lock);
 	return status;
 }
 
@@ -283,9 +263,9 @@ hyper_native_status_t hyper_stack_destroy(hyper_stack_t *stack)
 {
 	if (!stack)
 		return HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
-	lock();
+	hyper_mutex_lock(&registry_lock);
 	if (stack->managed || stack == hyper_stack_current()) {
-		unlock();
+		hyper_mutex_unlock(&registry_lock);
 		return HYPER_NATIVE_STATUS_BAD_STATE;
 	}
 	hyper_native_status_t status = retire(stack);
@@ -296,24 +276,24 @@ hyper_native_status_t hyper_stack_destroy(hyper_stack_t *stack)
 		*link = stack->next;
 		free(stack);
 	}
-	unlock();
+	hyper_mutex_unlock(&registry_lock);
 	return status;
 }
 
 void hyper_stack_claim_runtime(hyper_stack_t *stack)
 {
-	lock();
+	hyper_mutex_lock(&registry_lock);
 	stack->managed = true;
-	unlock();
+	hyper_mutex_unlock(&registry_lock);
 }
 
 void hyper_stack_release_runtime(hyper_stack_t *stack)
 {
 	/* Caller has observed kernel termination (or never published a thread).
 	 * Cleanup failure keeps explicit ownership, not a dangling pool slot. */
-	lock();
+	hyper_mutex_lock(&registry_lock);
 	stack->managed = false;
 	stack->garbage = true;
 	collect();
-	unlock();
+	hyper_mutex_unlock(&registry_lock);
 }

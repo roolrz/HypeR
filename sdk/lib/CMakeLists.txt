@@ -27,7 +27,10 @@ endif()
 
 set(HYPER_RUNTIME_SOURCES
     src/arch/${HYPER_ARCH}/syscall.S
+    src/system.c
     src/runtime.c
+    src/bootstrap.c
+    src/arch/${HYPER_ARCH}/stack.S
     src/capabilities.c
     src/directory.c
     src/thread.c

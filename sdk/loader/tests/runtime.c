@@ -287,6 +287,13 @@ hyper_call_result_t hyper_console_write(hyper_native_handle_t h, const void *b, 
 	abort();
 }
 
+_Noreturn void __hyper_rtld_enter(uintptr_t stack, uintptr_t entry)
+{
+	(void)stack;
+	(void)entry;
+	abort();
+}
+
 _Noreturn void hyper_process_exit(int64_t status)
 {
 	(void)status;
@@ -329,8 +336,10 @@ hyper_native_status_t hyper_vmo_read(hyper_native_handle_t h, uint64_t off, void
 	return HYPER_NATIVE_STATUS_OK;
 }
 
-hyper_call_result_t hyper_vmar_allocate(hyper_native_handle_t h, uintptr_t a, size_t n)
+hyper_call_result_t hyper_vmar_allocate(hyper_native_handle_t h, uintptr_t a, size_t n,
+					uint64_t options)
 {
+	assert(options == HYPER_NATIVE_VMAR_ALLOCATE_EXACT);
 	assert(fail_mapping && h == root_vmar && a == LIBRARY_BASE && n == PAGE_SIZE);
 	effect(400);
 	return (hyper_call_result_t){0, 42, 0};

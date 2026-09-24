@@ -78,7 +78,14 @@ impl SnapshotVmo {
             return Err(Error::InvalidMemoryRange);
         }
         // SAFETY: the caller supplies an unused current-process range.
-        let result = unsafe { hyper_sys::vmar_allocate(parent.raw().get(), address, options.size) };
+        let result = unsafe {
+            hyper_sys::vmar_allocate(
+                parent.raw().get(),
+                address,
+                options.size,
+                hyper_abi::HYPER_NATIVE_VMAR_ALLOCATE_EXACT,
+            )
+        };
         Status::from_raw(result.status).into_result()?;
         // SAFETY: vmar_allocate's successful result transfers a VMAR handle,
         // so no fallible kind query is needed after reserving the child region.

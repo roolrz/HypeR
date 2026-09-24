@@ -92,30 +92,41 @@ The [Native 64-bit application ABI](syscall-abi.md#native-64-bit-application-add
 uses architecture-specific application and system-managed user regions.
 Current application limits are 128 TiB on AArch64 VA48 and 128 GiB on RISC-V
 Sv39; these are provisional kernel layout policy. The current process
-layout grants only the smaller range from 1 MiB through 4 GiB.
-An `ET_DYN` image is biased so its lowest mapped page begins at 2 MiB. Total
-segment mappings and input image size are each limited to 64 MiB. The initial
-Thread receives a read/write, non-executable stack below `0xffff0000`.
-The main executable's `PT_GNU_STACK.p_memsz` requests its size in bytes;
-a missing header or zero selects 256 KiB. The loader rounds up to a page,
-rejects duplicate or executable stack headers, and reserves a dedicated VMAR
-with capacity max(initial size, 8 MiB) and an unmapped guard page at each end.
-Only the initial extent is mapped. The whole reservation remains above
-`0xf0000000`; executable mappings must stay below that stack arena. The interpreter's stack declaration does not override the main
-executable. Startup arguments must fit in the selected extent; allocation and
-committed-page charges remain subject to the process ResourceDomain limits.
-Oversized or invalid requests fail before process publication. Its 16-byte-aligned entry stack follows
-the LP64 System V ordering for `argc`, `argv`, `envp`, and `auxv`. HypeR-private
-auxiliary entries point to a bounded array of generated, fixed-width startup
-handle records. INITIAL_STACK_VMAR plus the initial-stack base/capacity/size
-auxiliary entries transfer the guarded reservation to the SDK. Its application
-startup view omits this runtime-owned handle. The SDK adopts main and worker
-stacks into the same fixed-top, explicit downward-growth abstraction; the
-worker arena occupies `0xf0000000` through the main reservation base. TLS starts
-at zero. Before application entry, the SDK CRT reserves
-`[0xe0000000, 0xf0000000)` under ROOT_VMAR for the process heap. This is separate
-from the loader's `[0x20000000, 0xe0000000)` library range; backing pages are
-mapped only on allocation. The kernel still owns the root address space and
+layout grants ROOT_VMAR from one page up to the HAL application address limit.
+An `ET_DYN` image is biased so its lowest mapped page begins at `0x40_0000`.
+Total segment mappings and input image size are each limited to 64 MiB.
+The kernel supplies a temporary, non-executable 128 KiB bootstrap stack with
+its exclusive top at `0x3f_f000`, plus one unmapped guard page at each end.
+Its 16-byte-aligned entry SP carries `argc`, `argv`, `envp`, and `auxv` in
+LP64 System V order. INITIAL_STACK_VMAR and the initial-stack geometry entries
+transfer ownership of this temporary reservation to the SDK.
+
+The SDK initializes the heap and creates the final main stack using the same
+allocator as secondary threads. The main image's `PT_GNU_STACK.p_memsz` requests
+the final usable size through `AUXV_MAIN_STACK_SIZE`; absent/zero selects 256 KiB. The kernel validates ELF
+headers (including rejecting duplicate or executable stack headers), but does
+not use this request to size its bootstrap stack. The runtime rounds the final
+size to pages, reserves at least 256 MiB of capacity, and keeps a guard page at
+each end. Placement prefers the top of the application range; this is SDK
+policy, not a fixed-address app ABI. Only the initial usable extent is mapped.
+
+Before any constructors or app entry execute, the runtime copies arguments,
+environment strings, auxiliary entries and handle records out of bootstrap
+storage, switches SP through an architecture-specific non-returning handoff,
+and unmaps/destroys the bootstrap reservation from the final stack. No old C
+frame is resumed. The dynamic loader makes this handoff through the relocated
+shared runtime before constructors; static CRT uses the same implementation.
+The application startup view omits the consumed bootstrap-stack handle and
+reports final-stack geometry. Main and worker stacks share creation, explicit
+downward growth and retirement; there is no fixed SDK worker stack arena.
+The root capability permits duplication; the runtime retains a MAP-only
+process-lifetime duplicate independent of the application's startup handle.
+TLS starts at zero. Before application entry, the SDK CRT reserves an initial heap VMAR of about
+one eighth of the application address range, using `0xe0000000` as a low-end
+hint after the loader's `[0x20000000, 0xe0000000)` library range. The returned
+base is authoritative. Backing is mapped only as allocations need it; overflow
+regions have independent VMARs, so this reservation is not a heap size limit.
+The kernel still owns the root address space and
 resource accounting; allocator policy lives in `sdk/lib`.
 
 Executable bytes are copied into writable unpublished staging memory,

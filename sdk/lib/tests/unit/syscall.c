@@ -35,6 +35,8 @@ static void transport(hyper_native_status_t status)
 	hyper_native_capability_receive_slot_t slots[2] = {0};
 	hyper_native_capability_disposition_t dispositions[3] = {0};
 
+	EXPECT(SYSTEM_CONFIG, other);
+	RESULT(hyper_system_config(other));
 	EXPECT(ABI_QUERY, 0);
 	RESULT(hyper_abi_query());
 	EXPECT(CLOCK_GET_MONOTONIC, 0);
