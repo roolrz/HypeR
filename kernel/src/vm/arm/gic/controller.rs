@@ -339,7 +339,8 @@ impl VirtualGicBuilder {
                 .checked_add(shared_count)
                 .ok_or(BuildError::Allocation)?;
             let ready = ReadyQueue::try_with_capacity(ready_capacity).map_err(map_ready_build)?;
-            let listed = BoundedVec::try_new(list_register_count).map_err(map_ready_build)?;
+            let listed = BoundedVec::try_new(list_register_count)
+                .map_err(|error| map_ready_build(error.into()))?;
             deliveries.push(VcpuDelivery { ready, listed });
         }
         Ok(VirtualGic {
@@ -1025,7 +1026,7 @@ impl VirtualGic {
                 self.deliveries[cpu]
                     .listed
                     .push(index)
-                    .map_err(map_ready_runtime)?;
+                    .map_err(|error| map_ready_runtime(error.into()))?;
             }
             self.reconcile_ready(index)?;
         }
@@ -1173,7 +1174,7 @@ impl VirtualGic {
             self.deliveries[cpu]
                 .listed
                 .push(index)
-                .map_err(map_ready_runtime)?;
+                .map_err(|error| map_ready_runtime(error.into()))?;
             *slot = Some(ListEntry {
                 source: entry.sgi_source,
                 interrupt: entry.id,
@@ -1203,7 +1204,7 @@ impl VirtualGic {
             self.deliveries[cpu]
                 .listed
                 .push(index)
-                .map_err(map_ready_runtime)?;
+                .map_err(|error| map_ready_runtime(error.into()))?;
         }
         Ok(())
     }

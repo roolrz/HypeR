@@ -41,57 +41,13 @@ impl ResidentInstructionSnapshot {
     }
 }
 
-/// Fixed-size bitmap whose exact word allocation is admitted before creation.
-///
-/// An explicit word representation avoids `Vec<bool>`'s implementation-defined
-/// capacity rounding and makes retained kernel-byte accounting auditable.
-pub(super) struct FixedBitmap {
-    words: Vec<usize>,
-    bit_count: usize,
-}
-
-impl FixedBitmap {
-    pub(super) fn try_new(bit_count: usize) -> Result<Self, Error> {
-        let word_count = bitmap_word_count(bit_count).ok_or(Error::MetadataAllocation)?;
-        let mut words = try_exact_capacity_vec(word_count)?;
-        words.resize(word_count, 0);
-        Ok(Self { words, bit_count })
-    }
-
-    pub(super) const fn len(&self) -> usize {
-        self.bit_count
-    }
-
-    pub(super) fn get(&self, index: usize) -> Option<bool> {
-        if index >= self.bit_count {
-            return None;
+pub(super) use hyper::collections::fixed_bitmap::FixedBitmap;
+impl From<hyper::collections::fixed_bitmap::Error> for Error {
+    fn from(error: hyper::collections::fixed_bitmap::Error) -> Self {
+        match error {
+            hyper::collections::fixed_bitmap::Error::Allocation => Self::MetadataAllocation,
+            hyper::collections::fixed_bitmap::Error::InvalidRange => Self::InvalidRange,
         }
-        let word_bits = usize::BITS as usize;
-        Some(self.words[index / word_bits] & (1usize << (index % word_bits)) != 0)
-    }
-
-    pub(super) fn set(&mut self, index: usize, value: bool) -> Result<(), Error> {
-        if index >= self.bit_count {
-            return Err(Error::InvalidRange);
-        }
-        let word_bits = usize::BITS as usize;
-        let bit = 1usize << (index % word_bits);
-        let word = &mut self.words[index / word_bits];
-        if value {
-            *word |= bit;
-        } else {
-            *word &= !bit;
-        }
-        Ok(())
-    }
-
-    pub(super) fn iter(&self) -> impl Iterator<Item = bool> + '_ {
-        (0..self.bit_count).map(|index| self.get(index).unwrap_or(false))
-    }
-
-    #[cfg(feature = "kernel-self-test")]
-    pub(super) fn retained_bytes(&self) -> usize {
-        self.words.capacity() * core::mem::size_of::<usize>()
     }
 }
 
@@ -270,14 +226,7 @@ pub(super) fn admit_metadata(
 ///
 /// The final partial machine word remains fully retained and charged.
 pub(super) fn bitmap_storage_bytes(bit_count: usize) -> Option<usize> {
-    bitmap_word_count(bit_count).and_then(|words| words.checked_mul(core::mem::size_of::<usize>()))
-}
-
-fn bitmap_word_count(bit_count: usize) -> Option<usize> {
-    let word_bits = usize::BITS as usize;
-    bit_count
-        .checked_add(word_bits - 1)
-        .map(|bits| bits / word_bits)
+    hyper::collections::fixed_bitmap::storage_bytes(bit_count)
 }
 
 /// Allocates a Vec whose retained allocator request is exactly the admitted

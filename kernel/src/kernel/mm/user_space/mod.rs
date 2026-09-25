@@ -13,6 +13,8 @@ mod address_space;
 #[cfg(not(test))]
 mod authority;
 mod contract;
+mod free_ranges;
+mod index;
 #[cfg(not(test))]
 mod kernel_adapter;
 #[cfg(not(test))]

@@ -7,6 +7,7 @@ extern crate alloc;
 
 pub mod abi;
 pub mod archive;
+pub mod collections;
 pub mod config;
 pub mod cpu;
 pub mod debug;

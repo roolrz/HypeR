@@ -14,6 +14,9 @@ use super::contract::{
     Access, MemoryAccount, MemoryCharge, PageBackend, Permissions, UserAddress, UserAddressWindow,
     UserSlice,
 };
+use super::free_ranges::FreeRanges;
+use super::index::{self, Entry, Index};
+
 use super::vmo::{
     ExecutableVmo, MappingObject, PrivateMappingMode, PrivateView, SnapshotVmo, VmoError,
     WritableMappingLease, WritableVmo, resident_pages,
@@ -186,21 +189,33 @@ struct VmarOwnership<Charge> {
     _charge: Charge,
 }
 
-struct VmarRecord<Charge> {
+struct VmarRecord<Account: MemoryAccount> {
     token: Vmar,
     parent_id: u64,
-    ownership: FallibleArc<VmarOwnership<Charge>>,
+    ownership: Option<VmarOwner<Account>>,
+    free: FreeRanges<Account>,
 }
 
-impl<Charge> Clone for VmarRecord<Charge> {
+impl<Account: MemoryAccount> Clone for VmarRecord<Account> {
     fn clone(&self) -> Self {
         Self {
             token: self.token,
             parent_id: self.parent_id,
             ownership: self.ownership.clone(),
+            free: self.free.clone(),
         }
     }
 }
+
+impl<Account: MemoryAccount> Entry for VmarRecord<Account> {
+    type Key = u64;
+    type Weight = u64;
+    fn key(&self) -> u64 {
+        self.token.id
+    }
+}
+
+type VmarSet<Account> = Index<VmarRecord<Account>, Account>;
 
 struct MappingSet<Backend: PageBackend, Account: MemoryAccount> {
     records: Vec<Mapping<Backend, Account>>,
@@ -208,10 +223,15 @@ struct MappingSet<Backend: PageBackend, Account: MemoryAccount> {
     _storage_charge: Option<Account::Charge>,
 }
 
-struct VmarSet<Account: MemoryAccount> {
-    // Ordered by base for linear free-gap traversal; identity lookup uses tokens.
-    records: Vec<VmarRecord<Account::Charge>>,
-    _storage_charge: Option<Account::Charge>,
+impl<BackendError, AccountError> From<index::Error<AccountError>>
+    for AddressSpaceError<BackendError, AccountError>
+{
+    fn from(error: index::Error<AccountError>) -> Self {
+        match error {
+            index::Error::Account(error) => Self::Account(error),
+            index::Error::Allocation => Self::Allocation,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -222,7 +242,7 @@ struct UserWriteRange {
 
 struct AddressSpaceState<Backend: PageBackend, Account: MemoryAccount> {
     mappings: FallibleArc<MappingSet<Backend, Account>>,
-    vmars: FallibleArc<VmarSet<Account>>,
+    vmars: VmarSet<Account>,
     next_mapping_id: u64,
     next_vmar_id: u64,
     authority_epoch: u64,
@@ -234,7 +254,7 @@ struct AddressSpaceState<Backend: PageBackend, Account: MemoryAccount> {
 
 struct AddressSpaceSnapshot<Backend: PageBackend, Account: MemoryAccount> {
     mappings: FallibleArc<MappingSet<Backend, Account>>,
-    vmars: FallibleArc<VmarSet<Account>>,
+    vmars: VmarSet<Account>,
     authority_epoch: u64,
     mapping_epoch: u64,
 }
@@ -282,23 +302,21 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             _storage_charge: Some(mapping_set_charge),
         })
         .map_err(|_| AddressSpaceError::Allocation)?;
-        let vmar_set_charge = account
-            .try_charge(MemoryCharge {
-                kernel_bytes: FallibleArc::<VmarSet<Account>>::allocation_size() as u64,
-                ..MemoryCharge::default()
-            })
-            .map_err(AddressSpaceError::Account)?;
-        let vmars = FallibleArc::try_new(VmarSet {
-            records: Vec::new(),
-            _storage_charge: Some(vmar_set_charge),
-        })
-        .map_err(|_| AddressSpaceError::Allocation)?;
         let root = Vmar {
             address_space: id,
             id: 0,
             generation: 1,
             range,
         };
+        let vmars = VmarSet::new().insert(
+            VmarRecord {
+                token: root,
+                parent_id: 0,
+                ownership: None,
+                free: FreeRanges::new(range, &account)?,
+            },
+            &account,
+        )?;
         Ok(Self {
             id,
             root,
@@ -384,60 +402,29 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         }
         let snapshot = self.snapshot();
         let authority = validate_vmar(self.id, self.root, &snapshot, parent)?;
+        let parent_record = snapshot
+            .vmars
+            .get(parent.id)
+            .ok_or(AddressSpaceError::StaleVmar)?;
         let range = match requested {
             Some(range) => range,
             None => {
-                // Both snapshots are ordered by base. Merge direct children and
-                // parent-owned mappings in one allocation-free O(V + M) pass.
-                // Nearest feasible base wins; ascending traversal breaks ties
-                // toward the lower address. Zero selects the lowest free base.
-                let mut children = snapshot
-                    .vmars
-                    .records
-                    .iter()
-                    .filter(|record| record.parent_id == parent.id)
-                    .map(|record| record.token.range)
-                    .peekable();
-                let mut mappings = snapshot
-                    .mappings
-                    .records
-                    .iter()
-                    .filter(|mapping| mapping.owner_vmar == parent.id)
-                    .map(|mapping| mapping.snapshot.range)
-                    .peekable();
-                let mut cursor = authority.base().get();
-                let end = authority.end().get();
-                let mut best: Option<(u64, u64)> = None;
-                loop {
-                    let next = match (children.peek(), mappings.peek()) {
-                        (Some(child), Some(mapping)) if child.base() <= mapping.base() => {
-                            children.next()
-                        }
-                        (_, Some(_)) => mappings.next(),
-                        (Some(_), None) => children.next(),
-                        (None, None) => None,
-                    };
-                    let gap_end = next.map_or(end, |range| range.base().get());
-                    if gap_end >= cursor && size <= gap_end - cursor {
-                        let base = hint.clamp(cursor, gap_end - size);
-                        let distance = base.abs_diff(hint);
-                        if best.is_none_or(|(_, previous)| distance < previous) {
-                            best = Some((base, distance));
-                        }
-                        if distance == 0 || hint == 0 {
-                            break;
-                        }
-                    }
-                    let Some(occupied) = next else { break };
-                    cursor = cursor.max(occupied.end().get());
-                }
-                let (base, _) = best.ok_or(AddressSpaceError::Allocation)?;
+                let base = parent_record
+                    .free
+                    .nearest(size, hint)
+                    .ok_or(AddressSpaceError::Allocation)?;
                 UserSlice::new(UserAddress::new(base), size)
                     .map_err(|_| AddressSpaceError::InvalidRange)?
             }
         };
         require_nonempty_aligned(range)?;
-        validate_child_range(&snapshot, parent.id, authority, range)?;
+        if !authority.contains(range) {
+            return Err(AddressSpaceError::InvalidRange);
+        }
+        let free = parent_record
+            .free
+            .reserve(range, &self.account)?
+            .ok_or(AddressSpaceError::Overlap)?;
         let next_epoch = snapshot
             .authority_epoch
             .checked_add(1)
@@ -453,40 +440,24 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             state.next_vmar_id = next;
             Ok(id)
         })?;
-        let capacity = snapshot
-            .vmars
-            .records
-            .len()
-            .checked_add(1)
-            .ok_or(AddressSpaceError::SizeOverflow)?;
-        let ownership = self.try_charge_vmar_record()?;
-        let storage_charge = self.try_vmar_set_charge(capacity)?;
-        let mut replacement = Vec::new();
-        replacement
-            .try_reserve_exact(capacity)
-            .map_err(|_| AddressSpaceError::Allocation)?;
         let token = Vmar {
             address_space: self.id,
             id,
             generation: next_epoch,
             range,
         };
-        replacement.extend(snapshot.vmars.records.iter().cloned());
-        let position =
-            replacement.partition_point(|record| record.token.range.base() < range.base());
-        replacement.insert(
-            position,
-            VmarRecord {
-                token,
-                parent_id: parent.id,
-                ownership,
-            },
-        );
-        let replacement = FallibleArc::try_new(VmarSet {
-            records: replacement,
-            _storage_charge: storage_charge,
-        })
-        .map_err(|_| AddressSpaceError::Allocation)?;
+        let child = VmarRecord {
+            token,
+            parent_id: parent.id,
+            ownership: Some(self.try_charge_vmar_record()?),
+            free: FreeRanges::new(range, &self.account)?,
+        };
+        let mut updated_parent = parent_record.clone();
+        updated_parent.free = free;
+        let replacement = snapshot
+            .vmars
+            .insert(updated_parent, &self.account)?
+            .insert(child, &self.account)?;
         let retired = self.state.with(|state| {
             if state.authority_epoch != snapshot.authority_epoch {
                 return Err(AddressSpaceError::StaleTransaction);
@@ -510,44 +481,31 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             return Err(AddressSpaceError::InvalidRange);
         }
         let snapshot = self.snapshot();
-        let index = vmar_index(self.id, self.root, &snapshot, token)?;
-        if snapshot
-            .mappings
-            .records
-            .iter()
-            .any(|mapping| mapping.owner_vmar == token.id)
-            || snapshot
-                .vmars
-                .records
-                .iter()
-                .any(|record| record.parent_id == token.id)
-        {
+        validate_vmar(self.id, self.root, &snapshot, token)?;
+        let record = snapshot
+            .vmars
+            .get(token.id)
+            .ok_or(AddressSpaceError::StaleVmar)?;
+        if !record.free.contains(token.range) {
             return Err(AddressSpaceError::InvalidRange);
         }
         let next_epoch = snapshot
             .authority_epoch
             .checked_add(1)
             .ok_or(AddressSpaceError::IdentityExhausted)?;
-        let capacity = snapshot.vmars.records.len() - 1;
-        let storage_charge = self.try_vmar_set_charge(capacity)?;
-        let mut records = Vec::new();
-        records
-            .try_reserve_exact(capacity)
-            .map_err(|_| AddressSpaceError::Allocation)?;
-        records.extend(
-            snapshot
-                .vmars
-                .records
-                .iter()
-                .enumerate()
-                .filter(|(candidate, _)| *candidate != index)
-                .map(|(_, record)| record.clone()),
-        );
-        let replacement = FallibleArc::try_new(VmarSet {
-            records,
-            _storage_charge: storage_charge,
-        })
-        .map_err(|_| AddressSpaceError::Allocation)?;
+        let mut parent = snapshot
+            .vmars
+            .get(record.parent_id)
+            .ok_or(AddressSpaceError::StaleVmar)?
+            .clone();
+        parent.free = parent
+            .free
+            .release(token.range, &self.account)?
+            .ok_or(AddressSpaceError::Overlap)?;
+        let replacement = snapshot
+            .vmars
+            .remove(token.id, &self.account)?
+            .insert(parent, &self.account)?;
         let retired = self.state.with(|state| {
             if state.authority_epoch != snapshot.authority_epoch {
                 return Err(AddressSpaceError::StaleTransaction);
@@ -901,9 +859,33 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             next_authority_epoch,
             snapshot.mapping_epoch,
             next_mapping_epoch,
-            replacement,
+            (
+                replacement,
+                self.mapping_vmar_update(&snapshot, vmar, range, true)?,
+            ),
             range,
         )
+    }
+
+    fn mapping_vmar_update(
+        &self,
+        snapshot: &AddressSpaceSnapshot<Backend, Account>,
+        vmar: Vmar,
+        range: UserSlice,
+        reserve: bool,
+    ) -> SpaceResult<Backend, Account, VmarSet<Account>> {
+        let mut record = snapshot
+            .vmars
+            .get(vmar.id)
+            .ok_or(AddressSpaceError::StaleVmar)?
+            .clone();
+        record.free = if reserve {
+            record.free.reserve(range, &self.account)?
+        } else {
+            record.free.release(range, &self.account)?
+        }
+        .ok_or(AddressSpaceError::Overlap)?;
+        Ok(snapshot.vmars.insert(record, &self.account)?)
     }
 
     pub(crate) fn prepare_unmap(
@@ -1041,7 +1023,14 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
             generation,
             snapshot.mapping_epoch,
             next_mapping_epoch,
-            replacement,
+            (
+                replacement,
+                if permissions.is_none() {
+                    self.mapping_vmar_update(&snapshot, vmar, range, false)?
+                } else {
+                    snapshot.vmars.clone()
+                },
+            ),
             range,
         )
     }
@@ -1464,16 +1453,6 @@ impl<Backend: PageBackend, Account: MemoryAccount> UserAddressSpace<Backend, Acc
         )
     }
 
-    fn try_vmar_set_charge(
-        &self,
-        capacity: usize,
-    ) -> SpaceResult<Backend, Account, Option<Account::Charge>> {
-        self.try_owner_storage_charge::<VmarRecord<Account::Charge>>(
-            capacity,
-            FallibleArc::<VmarSet<Account>>::allocation_size(),
-        )
-    }
-
     fn try_owner_storage_charge<Item>(
         &self,
         capacity: usize,
@@ -1517,6 +1496,7 @@ pub(crate) struct PreparedMappingChange<'a, Backend: PageBackend, Account: Memor
     base_mapping_epoch: u64,
     next_mapping_epoch: u64,
     replacement: FallibleArc<MappingSet<Backend, Account>>,
+    replacement_vmars: Option<VmarSet<Account>>,
     kind: MappingChangeKind,
 }
 
@@ -1527,7 +1507,7 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
         next_authority_epoch: u64,
         base_mapping_epoch: u64,
         next_mapping_epoch: u64,
-        replacement: FallibleArc<MappingSet<Backend, Account>>,
+        replacement: (FallibleArc<MappingSet<Backend, Account>>, VmarSet<Account>),
         range: UserSlice,
     ) -> Result<Self, AddressSpaceError<Backend::Error, Account::Error>> {
         Ok(Self {
@@ -1536,7 +1516,8 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
             next_authority_epoch,
             base_mapping_epoch,
             next_mapping_epoch,
-            replacement,
+            replacement: replacement.0,
+            replacement_vmars: Some(replacement.1),
             kind: MappingChangeKind::Authority { range },
         })
     }
@@ -1559,6 +1540,7 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
             base_mapping_epoch,
             next_mapping_epoch,
             replacement,
+            replacement_vmars: None,
             kind: MappingChangeKind::PrivateBacking,
         })
     }
@@ -1617,7 +1599,7 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
         CommittedMappingChange<Backend, Account>,
         AddressSpaceError<Backend::Error, Account::Error>,
     > {
-        let retired = self.address_space.state.with(|state| {
+        let (retired, retired_vmars) = self.address_space.state.with(|state| {
             if state.authority_epoch != self.base_authority_epoch
                 || state.mapping_epoch != self.base_mapping_epoch
             {
@@ -1636,8 +1618,16 @@ impl<'a, Backend: PageBackend, Account: MemoryAccount> PreparedMappingChange<'a,
             let old = core::mem::replace(&mut state.mappings, self.replacement.clone());
             state.authority_epoch = self.next_authority_epoch;
             state.mapping_epoch = self.next_mapping_epoch;
-            Ok(old)
+            let old_vmars = self
+                .replacement_vmars
+                .as_ref()
+                .map(|replacement| core::mem::replace(&mut state.vmars, replacement.clone()));
+            Ok((old, old_vmars))
         })?;
+        // Authority metadata has no hardware residency. Release displaced
+        // path nodes outside the IRQ-safe lock; mapping owners still wait for
+        // the machine retirement acknowledgement below.
+        drop(retired_vmars);
         Ok(CommittedMappingChange {
             change: MappingChange {
                 address_space: self.address_space.id,
@@ -1975,49 +1965,10 @@ fn validate_vmar<Backend: PageBackend, Account: MemoryAccount>(
     }
     state
         .vmars
-        .records
-        .iter()
-        .find(|record| record.token == token)
+        .get(token.id)
+        .filter(|record| record.token == token)
         .map(|record| record.token.range)
         .ok_or(AddressSpaceError::StaleVmar)
-}
-
-fn vmar_index<Backend: PageBackend, Account: MemoryAccount>(
-    address_space: AddressSpaceId,
-    root: Vmar,
-    state: &AddressSpaceSnapshot<Backend, Account>,
-    token: Vmar,
-) -> Result<usize, AddressSpaceError<Backend::Error, Account::Error>> {
-    validate_vmar(address_space, root, state, token)?;
-    state
-        .vmars
-        .records
-        .iter()
-        .position(|record| record.token == token)
-        .ok_or(AddressSpaceError::StaleVmar)
-}
-
-fn validate_child_range<Backend: PageBackend, Account: MemoryAccount>(
-    state: &AddressSpaceSnapshot<Backend, Account>,
-    parent_id: u64,
-    authority: UserSlice,
-    range: UserSlice,
-) -> Result<(), AddressSpaceError<Backend::Error, Account::Error>> {
-    if !authority.contains(range) {
-        return Err(AddressSpaceError::InvalidRange);
-    }
-    if state
-        .vmars
-        .records
-        .iter()
-        .any(|record| record.parent_id == parent_id && ranges_overlap(record.token.range, range))
-        || state.mappings.records.iter().any(|mapping| {
-            mapping.owner_vmar == parent_id && ranges_overlap(mapping.snapshot.range, range)
-        })
-    {
-        return Err(AddressSpaceError::Overlap);
-    }
-    Ok(())
 }
 
 fn validate_mapping_range<Backend: PageBackend, Account: MemoryAccount>(
@@ -2031,16 +1982,10 @@ fn validate_mapping_range<Backend: PageBackend, Account: MemoryAccount>(
     if !authority.contains(range) {
         return Err(AddressSpaceError::InvalidRange);
     }
-    if state
+    if !state
         .vmars
-        .records
-        .iter()
-        .any(|record| record.parent_id == vmar.id && ranges_overlap(record.token.range, range))
-        || state
-            .mappings
-            .records
-            .iter()
-            .any(|mapping| ranges_overlap(mapping.snapshot.range, range))
+        .get(vmar.id)
+        .is_some_and(|record| record.free.contains(range))
     {
         return Err(AddressSpaceError::Overlap);
     }
@@ -2055,13 +2000,7 @@ fn validate_owned_mapped_range<Backend: PageBackend, Account: MemoryAccount>(
     range: UserSlice,
 ) -> Result<(), AddressSpaceError<Backend::Error, Account::Error>> {
     let authority = validate_vmar(address_space, root, state, vmar)?;
-    if !authority.contains(range)
-        || state
-            .vmars
-            .records
-            .iter()
-            .any(|record| record.parent_id == vmar.id && ranges_overlap(record.token.range, range))
-    {
+    if !authority.contains(range) {
         return Err(AddressSpaceError::NotMapped);
     }
     let mut cursor = range.base();

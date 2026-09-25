@@ -5,13 +5,7 @@
 
 use alloc::vec::Vec;
 
-/// Admission precedes allocation; dropping a charge releases the reservation.
-pub trait StorageBudget {
-    type Charge;
-    type Error;
-
-    fn reserve(&self, bytes: usize) -> Result<Self::Charge, Self::Error>;
-}
+pub use crate::collections::allocation_account::StorageBudget;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error<E> {

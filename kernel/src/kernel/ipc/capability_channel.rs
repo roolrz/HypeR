@@ -228,6 +228,15 @@ struct ReceiverNode {
     next: Option<Box<ReceiverNode>>,
 }
 
+impl hyper::collections::linked_list::NextLink for Box<ReceiverNode> {
+    fn next(&self) -> &Option<Self> {
+        &self.next
+    }
+    fn next_mut(&mut self) -> &mut Option<Self> {
+        &mut self.next
+    }
+}
+
 struct ReceiverQueue {
     head: Option<Box<ReceiverNode>>,
     len: usize,
@@ -242,40 +251,22 @@ impl ReceiverQueue {
         if self.len >= MAX_RECEIVERS_PER_ENDPOINT {
             return Err(node);
         }
-        let mut link = &mut self.head;
-        while let Some(current) = link {
-            link = &mut current.next;
-        }
-        *link = Some(node);
+        hyper::collections::linked_list::insert_before(&mut self.head, node, |_, _| false)?;
         self.len += 1;
         Ok(())
     }
 
     fn pop_front(&mut self) -> Option<Box<ReceiverNode>> {
-        let mut node = self.head.take()?;
-        self.head = node.next.take();
-        self.len = match self.len.checked_sub(1) {
-            Some(len) => len,
-            None => queue_invariant(),
-        };
+        let node = hyper::collections::linked_list::pop_front(&mut self.head)?;
+        self.len = self.len.checked_sub(1).unwrap_or_else(queue_invariant);
         Some(node)
     }
 
     fn remove(&mut self, id: RegistrationId) -> Option<Box<ReceiverNode>> {
-        let mut link = &mut self.head;
-        loop {
-            let matches = link.as_ref().is_some_and(|node| node.id == id);
-            if matches {
-                let mut node = link.take()?;
-                *link = node.next.take();
-                self.len = match self.len.checked_sub(1) {
-                    Some(len) => len,
-                    None => queue_invariant(),
-                };
-                return Some(node);
-            }
-            link = &mut link.as_mut()?.next;
-        }
+        let node =
+            hyper::collections::linked_list::remove_first(&mut self.head, |node| node.id == id)?;
+        self.len = self.len.checked_sub(1).unwrap_or_else(queue_invariant);
+        Some(node)
     }
 
     fn detach(&mut self) -> Option<Box<ReceiverNode>> {
