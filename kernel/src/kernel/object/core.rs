@@ -1166,8 +1166,8 @@ impl WeakObjectRef {
 /// stack. Each top-level handle release drains its complete callback closure
 /// synchronously before returning.
 pub(crate) struct ObjectRetirement {
-    head: Option<ErasedKernelRef<Retirement>>,
-    tail: Option<ErasedKernelRef<Retirement>>,
+    head: Option<RetirementLink>,
+    tail: Option<RetirementLink>,
 }
 
 impl ObjectRetirement {
@@ -1179,16 +1179,11 @@ impl ObjectRetirement {
     }
 
     fn enqueue(&mut self, object: ErasedKernelRef<Retirement>) {
-        if let Some(tail) = self.tail.as_ref() {
-            tail.link_retirement_successor(object.clone());
-            self.tail = Some(object);
-        } else {
-            if self.head.is_some() {
-                object_invariant_violation();
-            }
-            self.head = Some(object.clone());
-            self.tail = Some(object);
-        }
+        hyper::collections::linked_list::push_back(
+            &mut self.head,
+            &mut self.tail,
+            RetirementLink(object),
+        );
     }
 
     /// Consumes the outer worklist owner. A callback only borrows the worklist
@@ -1200,12 +1195,20 @@ impl ObjectRetirement {
     }
 
     fn pop(&mut self) -> Option<ErasedKernelRef<Retirement>> {
-        let head = self.head.take()?;
-        self.head = head.take_retirement_successor();
-        if self.head.is_none() {
-            self.tail = None;
-        }
-        Some(head)
+        hyper::collections::linked_list::pop_front_with_tail(&mut self.head, &mut self.tail)
+            .map(|link| link.0)
+    }
+}
+
+#[derive(Clone)]
+struct RetirementLink(ErasedKernelRef<Retirement>);
+
+impl hyper::collections::linked_list::TailLink for RetirementLink {
+    fn link_successor(&self, next: Self) {
+        self.0.link_retirement_successor(next.0);
+    }
+    fn take_successor(&self) -> Option<Self> {
+        self.0.take_retirement_successor().map(Self)
     }
 }
 

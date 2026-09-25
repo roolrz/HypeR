@@ -899,6 +899,19 @@ and system-reserved boundary constrain every mode. Selection and reservation
 commit atomically against concurrent mappings/child reservations. No fitting
 free range is NO_MEMORY; exact overlap keeps the existing conflict status.
 
+The implementation stores VMAR identities in a persistent AVL tree and keeps
+an augmented free-interval tree for each VMAR. Subtree maximum free lengths
+allow nearest-hint selection without scanning all reservations. Creating or
+destroying a VMAR takes O(log V + log F) index work and path-copy allocations,
+where V is the address space's VMAR count and F is the affected free-interval
+count. Unchanged subtrees remain shared with concurrent snapshots. Every node
+allocation is fallible and accounted; failed preparation leaves the published
+index unchanged. Mapping transactions publish their free-space changes together
+with the mapping snapshot. Mapping payload snapshots still use a vector, so
+map/unmap/protect and page-table work do not acquire a logarithmic bound from
+this index change. Tree nodes also have more per-entry overhead than a packed
+vector.
+
 SDK worker stacks use independent automatically placed child VMARs, including
 their guard pages; they no longer consume a fixed SDK stack arena. The loader supplies a temporary bootstrap stack; the runtime creates the final
 main stack through its ordinary allocator and retires the bootstrap after switching SP.

@@ -124,38 +124,26 @@ fn unregister(id: ProcessId) {
     }
 }
 
+impl hyper::collections::linked_list::NextLink for Box<Entry> {
+    fn next(&self) -> &Option<Self> {
+        &self.next
+    }
+    fn next_mut(&mut self) -> &mut Option<Self> {
+        &mut self.next
+    }
+}
 impl Directory {
-    fn insert(&mut self, mut entry: Box<Entry>) {
-        let sequence = entry.sequence;
-        let mut link = &mut self.head;
-        loop {
-            let insert_here = match link.as_ref() {
-                Some(current) => current.sequence < sequence,
-                None => true,
-            };
-            if insert_here {
-                entry.next = link.take();
-                *link = Some(entry);
-                return;
-            }
-            link = match link.as_mut() {
-                Some(current) => &mut current.next,
-                None => directory_invariant_violation(),
-            };
+    fn insert(&mut self, entry: Box<Entry>) {
+        if hyper::collections::linked_list::insert_before(&mut self.head, entry, |new, current| {
+            current.sequence < new.sequence
+        })
+        .is_err()
+        {
+            directory_invariant_violation();
         }
     }
-
     fn remove(&mut self, id: ProcessId) -> Option<Box<Entry>> {
-        let mut link = &mut self.head;
-        loop {
-            let matches = link.as_ref()?.id == id;
-            if matches {
-                let mut removed = link.take()?;
-                *link = removed.next.take();
-                return Some(removed);
-            }
-            link = &mut link.as_mut()?.next;
-        }
+        hyper::collections::linked_list::remove_first(&mut self.head, |entry| entry.id == id)
     }
 }
 

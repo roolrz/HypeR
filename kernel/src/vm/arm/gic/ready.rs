@@ -3,7 +3,8 @@
 
 //! Indexed, eagerly maintained virtual-interrupt ready queue.
 
-use alloc::vec::Vec;
+pub(super) use crate::collections::bounded_vec::BoundedVec;
+use crate::collections::indexed_heap::{self, Storage};
 use core::cmp::Ordering;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,75 +46,12 @@ pub(super) enum ReadyError {
     CorruptPosition,
 }
 
-/// Heap-backed storage whose allocation is completed before runtime use.
-pub(super) struct BoundedVec<T> {
-    entries: Vec<T>,
-    limit: usize,
-}
-
-impl<T> BoundedVec<T> {
-    pub(super) fn try_new(limit: usize) -> Result<Self, ReadyError> {
-        let mut entries = Vec::new();
-        entries
-            .try_reserve_exact(limit)
-            .map_err(|_| ReadyError::Allocation)?;
-        Ok(Self { entries, limit })
-    }
-
-    pub(super) fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    pub(super) fn allocation_size(&self) -> Option<usize> {
-        self.entries
-            .capacity()
-            .checked_mul(core::mem::size_of::<T>())
-    }
-
-    pub(super) fn remaining(&self) -> usize {
-        self.limit - self.entries.len()
-    }
-
-    pub(super) fn get(&self, index: usize) -> Option<&T> {
-        self.entries.get(index)
-    }
-
-    pub(super) fn first(&self) -> Option<&T> {
-        self.entries.first()
-    }
-
-    pub(super) fn iter(&self) -> core::slice::Iter<'_, T> {
-        self.entries.iter()
-    }
-
-    pub(super) fn push(&mut self, value: T) -> Result<(), ReadyError> {
-        if self.entries.len() == self.limit {
-            return Err(ReadyError::Capacity);
+impl From<crate::collections::bounded_vec::Error> for ReadyError {
+    fn from(error: crate::collections::bounded_vec::Error) -> Self {
+        match error {
+            crate::collections::bounded_vec::Error::Allocation => Self::Allocation,
+            crate::collections::bounded_vec::Error::Capacity => Self::Capacity,
         }
-        // `try_new` reserved the immutable limit before publication, so this
-        // push never enters Vec's allocation path.
-        self.entries.push(value);
-        Ok(())
-    }
-
-    pub(super) fn pop(&mut self) -> Option<T> {
-        self.entries.pop()
-    }
-
-    pub(super) fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    pub(super) fn swap(&mut self, left: usize, right: usize) {
-        self.entries.swap(left, right);
-    }
-}
-
-impl<T> core::ops::Index<usize> for BoundedVec<T> {
-    type Output = T;
-
-    fn index(&self, index: usize) -> &Self::Output {
-        &self.entries[index]
     }
 }
 
@@ -175,7 +113,7 @@ impl ReadyQueue {
         let position = self.entries.len();
         self.entries.push(index)?;
         store.set_position(index, Some(position));
-        self.sift_up(position, store);
+        indexed_heap::sift_up(&mut HeapView { queue: self, store }, position);
         Ok(())
     }
 
@@ -206,47 +144,7 @@ impl ReadyQueue {
     }
 
     fn repair<S: ReadyEntries>(&mut self, position: usize, store: &mut S) {
-        if position > 0 {
-            let parent = (position - 1) / 2;
-            if store.rank(self.entries[position]) < store.rank(self.entries[parent]) {
-                self.sift_up(position, store);
-                return;
-            }
-        }
-        self.sift_down(position, store);
-    }
-
-    fn sift_up<S: ReadyEntries>(&mut self, mut position: usize, store: &mut S) {
-        while position > 0 {
-            let parent = (position - 1) / 2;
-            if store.rank(self.entries[parent]) <= store.rank(self.entries[position]) {
-                break;
-            }
-            self.swap(parent, position, store);
-            position = parent;
-        }
-    }
-
-    fn sift_down<S: ReadyEntries>(&mut self, mut position: usize, store: &mut S) {
-        loop {
-            let left = position * 2 + 1;
-            if left >= self.entries.len() {
-                break;
-            }
-            let right = left + 1;
-            let smallest = if right < self.entries.len()
-                && store.rank(self.entries[right]) < store.rank(self.entries[left])
-            {
-                right
-            } else {
-                left
-            };
-            if store.rank(self.entries[position]) <= store.rank(self.entries[smallest]) {
-                break;
-            }
-            self.swap(position, smallest, store);
-            position = smallest;
-        }
+        indexed_heap::repair(&mut HeapView { queue: self, store }, position);
     }
 
     fn swap<S: ReadyEntries>(&mut self, left: usize, right: usize, store: &mut S) {
@@ -256,5 +154,21 @@ impl ReadyQueue {
         self.entries.swap(left, right);
         store.set_position(self.entries[left], Some(left));
         store.set_position(self.entries[right], Some(right));
+    }
+}
+
+struct HeapView<'a, S> {
+    queue: &'a mut ReadyQueue,
+    store: &'a mut S,
+}
+impl<S: ReadyEntries> Storage for HeapView<'_, S> {
+    fn len(&self) -> usize {
+        self.queue.entries.len()
+    }
+    fn precedes(&self, left: usize, right: usize) -> bool {
+        self.store.rank(self.queue.entries[left]) < self.store.rank(self.queue.entries[right])
+    }
+    fn swap(&mut self, left: usize, right: usize) {
+        self.queue.swap(left, right, self.store);
     }
 }

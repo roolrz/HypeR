@@ -67,9 +67,12 @@ struct RetirementQueue {
     delayed: RetirementList,
 }
 
+#[derive(Clone)]
+struct RetirementLink(Process);
+
 struct RetirementList {
-    head: Option<Process>,
-    tail: Option<Process>,
+    head: Option<RetirementLink>,
+    tail: Option<RetirementLink>,
 }
 
 static RETIREMENTS: ProcessLock<RetirementQueue> = ProcessLock::new(RetirementQueue {
@@ -150,54 +153,39 @@ pub(crate) fn reap_one_process(_access: &mut crate::kernel::reaper::ReaperAccess
     }
 }
 
+impl hyper::collections::linked_list::TailLink for RetirementLink {
+    fn link_successor(&self, next: Self) {
+        self.0
+            .inner
+            .retirement_next
+            .with(|link| *link = Some(next.0));
+    }
+    fn take_successor(&self) -> Option<Self> {
+        self.0.inner.retirement_next.with(Option::take).map(Self)
+    }
+}
 impl RetirementList {
     fn is_empty(&self) -> bool {
         self.head.is_none()
     }
-
     fn push_back(&mut self, process: Process) {
-        if let Some(tail) = self.tail.as_ref() {
-            tail.inner
-                .retirement_next
-                .with(|next| *next = Some(process.clone()));
-        } else {
-            self.head = Some(process.clone());
-        }
-        self.tail = Some(process);
+        hyper::collections::linked_list::push_back(
+            &mut self.head,
+            &mut self.tail,
+            RetirementLink(process),
+        );
     }
-
     fn pop_front(&mut self) -> Option<Process> {
-        let process = self.head.take()?;
-        self.head = process.inner.retirement_next.with(Option::take);
-        if self.head.is_none() {
-            self.tail = None;
-        }
-        Some(process)
+        hyper::collections::linked_list::pop_front_with_tail(&mut self.head, &mut self.tail)
+            .map(|link| link.0)
     }
-
     fn append(&mut self, other: &mut Self) {
-        let Some(head) = other.head.take() else {
-            if other.tail.is_some() {
-                process_invariant_violation();
-            }
-            return;
-        };
-        let tail = match other.tail.take() {
-            Some(tail) => tail,
-            None => process_invariant_violation(),
-        };
-        if let Some(current_tail) = self.tail.as_ref() {
-            current_tail
-                .inner
-                .retirement_next
-                .with(|next| *next = Some(head));
-        } else {
-            if self.head.is_some() {
-                process_invariant_violation();
-            }
-            self.head = Some(head);
-        }
-        self.tail = Some(tail);
+        hyper::collections::linked_list::append(
+            &mut self.head,
+            &mut self.tail,
+            &mut other.head,
+            &mut other.tail,
+        );
     }
 }
 

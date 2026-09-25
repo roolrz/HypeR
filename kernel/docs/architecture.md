@@ -51,6 +51,55 @@ still require explicit protocols, review, and behavioral tests. AArch64 remains
 Tier 1: a common interface must not hide behavior required for its correctness
 or diagnosis.
 
+## Shared data structures
+
+`hyper::collections` owns reusable algorithms without subsystem authority or
+locking policy. Modules define their own entry types, implement the public
+traits, and may wrap a container with domain-specific methods.
+
+- `persistent_avl::PersistentAvl` stores generic ordered keys and maintains a
+  subtree maximum weight. `Entry` defines stable keys and weights; `()` disables
+  weighted filtering. `NodeAccount` supplies fallible per-node accounting.
+  Clones share immutable subtrees, and updates return a new root without
+  publishing it. VMAR wraps this with memory accounting and free-range rules;
+  its authority checks and transactional publication stay in `user_space`.
+- `indexed_heap` provides allocation-free sift and repair operations over a
+  `Storage` adapter. The adapter supplies comparison, storage and swaps that
+  update reverse positions. Fixed-capacity deadline queues and vGIC ready queues
+  share these operations while retaining their own capacity, handle, deadline
+  wraparound and interrupt-priority rules.
+
+- `bounded_vec::BoundedVec` retains an immutable logical capacity and never
+  grows after construction. vGIC uses it through a local error adapter.
+- `budgeted_vec::BudgetedVec` and `budgeted_string::BudgetedString` retain the caller's storage charge
+  through allocation lifetime, including consuming iterators. The shared
+  `allocation_account::StorageBudget` trait defines admission and RAII release; filesystem
+  facades preserve existing import paths without duplicating implementations.
+
+`byte_ring::ByteRing` provides the byte FIFO shared by console input and output.
+The log module re-exports it; record-oriented logging and drain synchronization
+remain in the log subsystem.
+
+`fixed_bitmap::FixedBitmap` owns fixed-length word storage, with checked bit
+access and an exact payload-size query. VM code retains resource admission and
+maps container errors to VM errors; no page state or synchronization lives in
+the bitmap.
+
+`linked_list` contains operations over caller-owned endpoints, not an owning
+list container. `NextLink` supports insert/remove over exclusively borrowed
+successor fields; `TailLink` supports constant-time append/pop/splice for
+reference-handle chains. Adapters select the link field and preserve existing
+reference retention and lock behavior. Process discovery, IPC receiver queues,
+and Process/Object retirement use these helpers. Queue limits, unique
+membership, wakeup arbitration, retirement readiness and destruction remain
+with their respective subsystems. Scheduler membership transitions are not
+replaced by these link operations.
+
+The runtime `OwnedDeadlineQueue` remains a separately owned linked queue. Its
+preallocated-node and lock-context requirements are not changed by extracting
+these helpers. Containers do not acquire subsystem locks, publish resources,
+or infer a caller's allocation policy.
+
 ## Placement rules
 
 - `kernel` owns host policy, resource publication, initialization order, and

@@ -3,6 +3,7 @@
 
 //! Fixed-capacity indexed deadline heap.
 
+use crate::collections::indexed_heap::{self, Storage};
 use crate::hal::timer::deadline_reached;
 
 const NONE: usize = usize::MAX;
@@ -320,7 +321,7 @@ impl<const CAPACITY: usize> DeadlineQueue<CAPACITY> {
         self.heap[heap_index] = slot_index;
         self.slots[slot_index].heap_index = heap_index;
         self.heap_len += 1;
-        self.sift_up(heap_index);
+        indexed_heap::sift_up(&mut HeapView(self), heap_index);
     }
 
     fn heap_remove(&mut self, heap_index: usize) {
@@ -333,39 +334,7 @@ impl<const CAPACITY: usize> DeadlineQueue<CAPACITY> {
         let replacement = self.heap[self.heap_len];
         self.heap[heap_index] = replacement;
         self.slots[replacement].heap_index = heap_index;
-        let position = self.sift_down(heap_index);
-        self.sift_up(position);
-    }
-
-    fn sift_up(&mut self, mut position: usize) {
-        while position != 0 {
-            let parent = (position - 1) / 2;
-            if !self.earlier(position, parent) {
-                break;
-            }
-            self.heap_swap(position, parent);
-            position = parent;
-        }
-    }
-
-    fn sift_down(&mut self, mut position: usize) -> usize {
-        loop {
-            let left = position * 2 + 1;
-            if left >= self.heap_len {
-                return position;
-            }
-            let right = left + 1;
-            let child = if right < self.heap_len && self.earlier(right, left) {
-                right
-            } else {
-                left
-            };
-            if !self.earlier(child, position) {
-                return position;
-            }
-            self.heap_swap(position, child);
-            position = child;
-        }
+        indexed_heap::repair(&mut HeapView(self), heap_index);
     }
 
     fn earlier(&self, left: usize, right: usize) -> bool {
@@ -397,3 +366,17 @@ pub(super) const fn next_generation(current: u64) -> u64 {
 }
 
 fn empty_callback(_: TimerEvent, _: usize) {}
+
+struct HeapView<'a, const CAPACITY: usize>(&'a mut DeadlineQueue<CAPACITY>);
+
+impl<const CAPACITY: usize> Storage for HeapView<'_, CAPACITY> {
+    fn len(&self) -> usize {
+        self.0.heap_len
+    }
+    fn precedes(&self, left: usize, right: usize) -> bool {
+        self.0.earlier(left, right)
+    }
+    fn swap(&mut self, left: usize, right: usize) {
+        self.0.heap_swap(left, right);
+    }
+}
