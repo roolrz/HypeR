@@ -8,6 +8,10 @@ SPDX-License-Identifier: Apache-2.0
 [![CI](https://github.com/roolrz/HypeR/actions/workflows/ci.yml/badge.svg)](https://github.com/roolrz/HypeR/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+<p align="center">
+  <img src="HypeR%20Logo.png" alt="HypeR logo" width="320">
+</p>
+
 **An experimental virtualization host built around a Rust kernel and a native
 capability-based userspace.**
 
