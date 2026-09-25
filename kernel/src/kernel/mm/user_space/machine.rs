@@ -25,6 +25,9 @@ use crate::kernel::accounting::{
 use crate::kernel::mm::page_block::PageBlock;
 use crate::kernel::mm::translation_id::{ActiveIdentifier, HostAsid, IdentifierLease};
 
+pub(crate) type NativePinnedAtomicWord =
+    super::address_space::PinnedAtomicWord<KernelPageBackend, DomainAccount>;
+
 type LogicalAddressSpace = UserAddressSpace<KernelPageBackend, DomainAccount>;
 type LogicalPrepared<'a> = PreparedMappingChange<'a, KernelPageBackend, DomainAccount>;
 type LogicalUserWrite = PreparedUserWrite<KernelPageBackend, DomainAccount>;
@@ -520,8 +523,7 @@ impl NativeAddressSpace {
     pub(crate) fn pin_atomic_u32(
         &self,
         address: UserAddress,
-    ) -> Result<super::address_space::PinnedAtomicWord<KernelPageBackend, DomainAccount>, Error>
-    {
+    ) -> Result<NativePinnedAtomicWord, Error> {
         match self.logical.pin_atomic_u32(address) {
             Ok(pin) => Ok(pin),
             Err(LogicalError::CowRequired) => {

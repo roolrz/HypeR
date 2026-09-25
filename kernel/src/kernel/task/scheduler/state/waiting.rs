@@ -41,7 +41,10 @@ impl Scheduler {
             let current = local.current;
             local
                 .thread_authority()
-                .with_thread_mut(current, |_thread, schedule| {
+                .with_thread_mut(current, |thread, schedule| {
+                    if !thread.wait_context().is_idle() {
+                        return Err(Error::InvalidWaitRegistration);
+                    }
                     if schedule.state != ThreadState::Running {
                         return Err(Error::CannotBlockIdle);
                     }

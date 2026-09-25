@@ -1881,7 +1881,9 @@ impl Scheduler {
         }
         let cpu_slot = self.cpu_slot(cpu)?;
         let current = self.current_thread(cpu_slot)?;
-        if !self.thread(current)?.wait_record().is_idle() {
+        if !self.thread(current)?.wait_record().is_idle()
+            || !self.with_thread(current, |thread| thread.wait_context().is_idle())?
+        {
             return Err(Error::InvalidWaitRegistration);
         }
         // Validate a distinct successor before publishing termination. Once
@@ -1970,6 +1972,9 @@ impl Scheduler {
     }
 
     fn enqueue_terminated(&mut self, id: ThreadId) -> Result<(), Error> {
+        if !self.with_thread(id, |thread| thread.wait_context().is_idle())? {
+            return Err(Error::InvalidWaitRegistration);
+        }
         if self.thread(id)?.queue_links().membership != QueueMembership::None {
             return Err(Error::QueueCorrupted);
         }
@@ -2202,6 +2207,11 @@ impl Scheduler {
         let thread = self.thread(id)?;
         if thread.state() != ThreadState::Terminated {
             return Ok(false);
+        }
+        if !thread.wait_record().is_idle()
+            || !self.with_thread(id, |thread| thread.wait_context().is_idle())?
+        {
+            return Err(Error::InvalidWaitRegistration);
         }
         if thread.queue_links().membership != QueueMembership::Terminated {
             return Err(Error::QueueCorrupted);

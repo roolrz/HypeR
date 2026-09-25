@@ -17,6 +17,8 @@ pub mod thread;
 mod thread_object;
 mod timeout;
 mod wait;
+mod wait_context;
+pub(crate) use wait_context::{ThreadWaitContext, WaitSource, WaitSourceRegistration};
 
 pub(crate) use thread_object::{
     ThreadObjectObservation, ThreadObjectRegistryPhase, ThreadObjectScanCursor,

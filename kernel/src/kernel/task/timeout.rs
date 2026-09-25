@@ -21,6 +21,7 @@ use super::wait::{WaitMobility, WaitOutcome, WaitQueue, WaitTicket};
 struct TimeoutContext {
     ticket: Option<WaitTicket>,
     callback_complete: AtomicBool,
+    _source: Option<super::WaitSourceRegistration>,
 }
 
 impl TimeoutContext {
@@ -28,6 +29,7 @@ impl TimeoutContext {
         Self {
             ticket: None,
             callback_complete: AtomicBool::new(false),
+            _source: None,
         }
     }
 
@@ -78,6 +80,10 @@ impl PreparedTimeout {
         deadline: u64,
     ) -> Result<ArmedTimeout, TimedWaitError> {
         self.context.ticket = Some(ticket);
+        self.context._source = Some(super::WaitSourceRegistration::new(
+            ticket,
+            super::WaitSource::Timer,
+        ));
         let timer = crate::kernel::time::schedule_at(
             deadline,
             crate::kernel::time::TimerMode::OneShot,

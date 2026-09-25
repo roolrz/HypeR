@@ -152,6 +152,7 @@ impl PreparedSignalWait {
     ) -> Result<Self, SignalWaitError> {
         let waiter = try_box(SignalWaiter {
             ticket: None,
+            _source: None,
             requested,
             observed: None,
             next: None,
@@ -165,6 +166,7 @@ impl PreparedSignalWait {
 struct SignalWaiter {
     // `None` exists only while the fallible preparation is unpublished.
     ticket: Option<WaitTicket>,
+    _source: Option<crate::kernel::task::WaitSourceRegistration>,
     requested: SignalMask,
     observed: Option<SignalSnapshot>,
     next: Option<Box<SignalWaiter>>,
@@ -354,6 +356,10 @@ impl SignalState {
     ) -> Result<SignalWaitOutcome, SignalWaitError> {
         let ticket = registration.ticket();
         prepared.waiter.ticket = Some(ticket);
+        prepared.waiter._source = Some(crate::kernel::task::WaitSourceRegistration::new(
+            ticket,
+            crate::kernel::task::WaitSource::Signal,
+        ));
 
         // SAFETY: The retained local mask is transferred into a committed
         // park below or dropped before normal execution resumes. The waiter
@@ -409,6 +415,10 @@ impl SignalState {
         ticket: WaitTicket,
     ) {
         prepared.waiter.ticket = Some(ticket);
+        prepared.waiter._source = Some(crate::kernel::task::WaitSourceRegistration::new(
+            ticket,
+            crate::kernel::task::WaitSource::Signal,
+        ));
         self.state.with(|state| {
             link_waiter(state, prepared.waiter);
             if let Err(error) = notify_ticket_if_matching(state, ticket) {

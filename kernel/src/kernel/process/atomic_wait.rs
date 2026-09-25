@@ -3,7 +3,6 @@
 
 //! Process-private atomic waits, keyed by non-reused mapping identity.
 
-use alloc::boxed::Box;
 use core::sync::atomic::{AtomicU32, Ordering};
 use hyper::sync::InterruptSpinLock;
 #[derive(Debug)]
@@ -24,22 +23,148 @@ impl From<crate::kernel::object::ObjectWaitError> for Error {
 }
 use super::{Process, ProcessError};
 use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceKind};
-use crate::kernel::mm::user_space::{MappingToken, UserAddress};
+use crate::kernel::mm::user_space::{MappingToken, NativePinnedAtomicWord, UserAddress};
 use crate::kernel::object::{TimedWaitPreparation, prepare_timed_wait};
 use crate::kernel::task::{WaitOutcome, WaitQueue, WaitTicket, scheduler};
 
 type Bucket = InterruptSpinLock<State, crate::hal::irq::LocalMask>;
 struct State {
     queue: WaitQueue,
-    waiters: Option<Box<Waiter>>,
+    waiters: Option<WaitTicket>,
 }
+
+/// One condition registration owned by the scheduler Thread, including its
+/// backing lease and resource admission. Bucket links are generation-qualified
+/// identities, never pointers into a suspended continuation.
 struct Waiter {
-    key: MappingToken,
+    word: NativePinnedAtomicWord,
     address: u64,
     ticket: WaitTicket,
-    next: Option<Box<Waiter>>,
+    next: Option<WaitTicket>,
     _charge: CommittedCharge,
 }
+
+#[derive(Clone, Copy)]
+struct WaiterSnapshot {
+    key: MappingToken,
+    address: u64,
+    next: Option<WaitTicket>,
+}
+
+/// Embedded once in each Thread. Registry protection retains the owner during
+/// access; this lock protects the slot independently of CPU schedule ownership.
+/// Lock order is bucket -> registry reader -> slot. Slot operations never call
+/// the scheduler or acquire a bucket, and return owners for destruction outside
+/// all three locks.
+pub(crate) struct ThreadWaiter {
+    node: InterruptSpinLock<Option<Waiter>, crate::hal::irq::LocalMask>,
+}
+
+impl ThreadWaiter {
+    pub(crate) const fn new() -> Self {
+        Self {
+            node: InterruptSpinLock::new(None),
+        }
+    }
+
+    pub(crate) fn is_idle(&self) -> bool {
+        self.node.with(|node| node.is_none())
+    }
+
+    fn install(&self, waiter: Waiter) {
+        self.node.with(|node| {
+            if node.is_some() {
+                invariant();
+            }
+            *node = Some(waiter);
+        });
+    }
+
+    fn snapshot(&self, ticket: WaitTicket) -> WaiterSnapshot {
+        self.node.with(|node| {
+            let waiter = Self::matching(node, ticket);
+            WaiterSnapshot {
+                key: waiter.word.token,
+                address: waiter.address,
+                next: waiter.next,
+            }
+        })
+    }
+
+    fn set_next(&self, ticket: WaitTicket, next: Option<WaitTicket>) {
+        self.node
+            .with(|node| Self::matching(node, ticket).next = next);
+    }
+
+    fn remove(&self, ticket: WaitTicket) -> Waiter {
+        self.node.with(|node| {
+            Self::matching(node, ticket);
+            match node.take() {
+                Some(waiter) => waiter,
+                None => invariant(),
+            }
+        })
+    }
+
+    fn matching(node: &mut Option<Waiter>, ticket: WaitTicket) -> &mut Waiter {
+        match node {
+            Some(waiter) if waiter.ticket == ticket => waiter,
+            _ => invariant(),
+        }
+    }
+}
+
+impl Drop for ThreadWaiter {
+    fn drop(&mut self) {
+        if !self.is_idle() {
+            hyper::debug::invariant_failure(
+                "atomic wait Thread destroyed with linked registration",
+            );
+        }
+    }
+}
+
+fn with_waiter<R>(ticket: WaitTicket, operation: impl FnOnce(&ThreadWaiter) -> R) -> R {
+    match scheduler::with_wait_context(ticket.thread(), |context| operation(&context.atomic)) {
+        Ok(value) => value,
+        Err(_) => invariant(),
+    }
+}
+
+struct Registration {
+    ticket: WaitTicket,
+    bucket: &'static Bucket,
+}
+
+impl Drop for Registration {
+    fn drop(&mut self) {
+        let waiter = self.bucket.with(|state| state.unlink(self.ticket));
+        // Mapping owners and quota charges must be released outside IRQ locks.
+        drop(waiter);
+    }
+}
+
+impl State {
+    fn unlink(&mut self, target: WaitTicket) -> Waiter {
+        let mut current = self.waiters;
+        let mut previous = None;
+        while let Some(ticket) = current {
+            let next = with_waiter(ticket, |slot| slot.snapshot(ticket)).next;
+            if ticket == target {
+                if let Some(previous) = previous {
+                    with_waiter(previous, |slot| slot.set_next(previous, next));
+                } else {
+                    self.waiters = next;
+                }
+                return with_waiter(ticket, |slot| slot.remove(ticket));
+            }
+            previous = Some(ticket);
+            current = next;
+        }
+        invariant()
+    }
+}
+
 const BUCKET_COUNT: usize = 64;
 static BUCKETS: [Bucket; BUCKET_COUNT] = [const {
     Bucket::new(State {
@@ -80,28 +205,24 @@ pub(crate) fn wait(
         ))
         .map_err(ProcessError::from)?
         .commit();
-    // Allocate before arming a scheduler generation; no fallible allocation is
-    // allowed once a PreparedTimedWait must be explicitly resolved.
-    let mut storage = hyper::mm::try_box(core::mem::MaybeUninit::<Waiter>::uninit())
-        .map_err(|_| ProcessError::Allocation)?;
+    // Preserve per-wait resource admission without allocating a condition node.
+    // Storage belongs to the Thread from its construction until retirement.
     let prepared = match prepare_timed_wait(&domain, deadline)? {
         TimedWaitPreparation::Completed(outcome) => return Ok(outcome),
         TimedWaitPreparation::Armed(prepared) => prepared,
     };
     let ticket = prepared.ticket();
-    storage.write(Waiter {
-        key: word.token,
+    let bucket = bucket(address);
+    let mut candidate = Some(Waiter {
+        word,
         address,
         ticket,
         next: None,
         _charge: charge,
     });
-    // SAFETY: the entire Waiter was initialized immediately above.
-    let mut waiter = unsafe { storage.assume_init() };
-    let bucket = bucket(address);
     enum Publication {
         Mismatch(crate::kernel::object::PreparedTimedWait),
-        Waiting(crate::kernel::object::PublishedTimedWait),
+        Waiting(crate::kernel::object::PublishedTimedWait, Registration),
     }
     // SAFETY: condition check, registration and wake all use this bucket lock.
     // The retained IRQ mask goes directly to finish or is dropped on mismatch.
@@ -113,21 +234,27 @@ pub(crate) fn wait(
             if cancelled() {
                 prepared.request_cancellation();
             }
-            waiter.next = state.waiters.take();
-            state.waiters = Some(waiter);
-            Publication::Waiting(prepared.publish_locked(&state.queue))
+            let mut waiter = match candidate.take() {
+                Some(waiter) => waiter,
+                None => invariant(),
+            };
+            waiter.next = state.waiters;
+            with_waiter(ticket, |slot| slot.install(waiter));
+            state.waiters = Some(ticket);
+            let registration = Registration { ticket, bucket };
+            Publication::Waiting(prepared.publish_locked(&state.queue), registration)
         })
     };
     match published {
         Publication::Mismatch(prepared) => {
             drop(mask);
             prepared.abort()?;
+            drop(candidate);
             Ok(WaitOutcome::Notified)
         }
-        Publication::Waiting(published) => {
+        Publication::Waiting(published, registration) => {
             let (outcome, retirement) = published.finish(mask);
-            let removed = bucket.with(|state| unlink(state, ticket));
-            drop(removed);
+            drop(registration);
             retirement?;
             Ok(outcome)
         }
@@ -142,41 +269,26 @@ pub(crate) fn wake(process: &Process, address: u64, count: u32) -> Result<u64, E
         process.retry_user_memory(|space| space.pin_atomic_u32(UserAddress::new(address)))?;
     bucket(address).with(|state| {
         let mut woke = 0;
-        let mut current = state.waiters.as_deref();
-        while let Some(waiter) = current {
+        let mut current = state.waiters;
+        while let Some(ticket) = current {
+            let waiter = with_waiter(ticket, |slot| slot.snapshot(ticket));
+            current = waiter.next;
             if woke == u64::from(count) {
                 break;
             }
             if waiter.key == word.token
                 && waiter.address == address
-                && scheduler::notify_registered_with(waiter.ticket, || {})
+                && scheduler::notify_registered_with(ticket, || {})
                     .map_err(ProcessError::from)?
                     .won
             {
                 woke += 1;
             }
-            current = waiter.next.as_deref();
         }
         Ok(woke)
     })
 }
 
-fn unlink(state: &mut State, ticket: WaitTicket) -> Box<Waiter> {
-    let mut link = &mut state.waiters;
-    loop {
-        if link.as_ref().is_some_and(|node| node.ticket == ticket) {
-            let Some(mut node) = link.take() else {
-                invariant()
-            };
-            *link = node.next.take();
-            return node;
-        }
-        link = match link.as_mut() {
-            Some(node) => &mut node.next,
-            None => invariant(),
-        };
-    }
-}
 fn invariant() -> ! {
     crate::kernel::crash::fatal(format_args!("HypeR: atomic wait lost registration"))
 }
@@ -215,13 +327,51 @@ pub(crate) fn waiter_count(process: &Process, address: u64) -> Result<usize, Err
         process.retry_user_memory(|space| space.pin_atomic_u32(UserAddress::new(address)))?;
     Ok(bucket(address).with(|state| {
         let mut count = 0;
-        let mut current = state.waiters.as_deref();
-        while let Some(waiter) = current {
+        let mut current = state.waiters;
+        while let Some(ticket) = current {
+            let waiter = with_waiter(ticket, |slot| slot.snapshot(ticket));
+            current = waiter.next;
             if waiter.key == word.token && waiter.address == address {
                 count += 1;
             }
-            current = waiter.next.as_deref();
         }
         count
     }))
+}
+
+/// Exercises the interval after scheduler completion but before condition
+/// unlink: an idle arbitration record alone must not authorize Thread exit.
+#[cfg(all(feature = "kernel-self-test", CONFIG_ARCH_AARCH64))]
+pub(crate) fn verify_exit_guard(process: &Process, address: u64) -> Result<bool, Error> {
+    let word =
+        process.retry_user_memory(|space| space.pin_atomic_u32(UserAddress::new(address)))?;
+    let domain = process.resource_domain();
+    let charge = domain
+        .reserve(ResourceAmount::ZERO.with(
+            ResourceKind::KernelMemoryBytes,
+            core::mem::size_of::<Waiter>() as u64,
+        ))
+        .map_err(ProcessError::from)?
+        .commit();
+    let registration = scheduler::begin_wait(crate::kernel::task::WaitMobility::Migratable)
+        .map_err(ProcessError::from)?;
+    let ticket = registration.ticket();
+    let _ = scheduler::finish_wait(registration).map_err(ProcessError::from)?;
+    let bucket = bucket(address);
+    bucket.with(|state| {
+        with_waiter(ticket, |slot| {
+            slot.install(Waiter {
+                word,
+                address,
+                ticket,
+                next: state.waiters,
+                _charge: charge,
+            })
+        });
+        state.waiters = Some(ticket);
+    });
+    let guard = Registration { ticket, bucket };
+    let rejected = scheduler::verify_wait_exit_rejected();
+    drop(guard);
+    rejected.map_err(ProcessError::from).map_err(Error::from)
 }
