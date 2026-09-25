@@ -7,10 +7,17 @@
 //! notification, and cancellation therefore share the same generation-tagged
 //! arbitration used by every other scheduler wait.
 
+use hyper::cpu::PerCpu;
 use hyper::hal::timer::deadline_reached;
 
 use super::{TimedWaitError, WaitOutcome, WaitQueue};
 use crate::kernel::task::scheduler;
+
+// Permanent shards: timer/cancellation paths must never follow a queue head
+// into a suspended caller's stack. The selection CPU is only a sharding hint;
+// migration leaves the selected queue valid, and exact tickets select wakeups.
+static SLEEPERS: PerCpu<WaitQueue> =
+    PerCpu::new([const { WaitQueue::new() }; hyper::cpu::MAX_CPUS]);
 
 const NANOSECONDS_PER_MICROSECOND: u64 = 1_000;
 const NANOSECONDS_PER_MILLISECOND: u64 = 1_000_000;
@@ -102,8 +109,9 @@ pub fn sleep_until(deadline: u64) -> Result<(), SleepError> {
 }
 
 fn sleep_until_future(deadline: u64) -> Result<(), SleepError> {
-    let waiters = WaitQueue::new();
-    match waiters.wait_until(deadline)? {
+    scheduler::ensure_sleepable()?;
+    let cpu = crate::kernel::cpu::current_index().ok_or(scheduler::Error::InvalidCpuIndex)?;
+    match SLEEPERS[cpu].wait_until(deadline)? {
         WaitOutcome::TimedOut => Ok(()),
         outcome => Err(SleepError::UnexpectedWake(outcome)),
     }

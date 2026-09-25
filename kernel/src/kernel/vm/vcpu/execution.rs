@@ -27,7 +27,9 @@ const _: fn() = || {
 
 enum VcpuVm {
     Installed(crate::kernel::vm::registry::VmBinding),
-    TimerValidation { interrupts: usize },
+    TimerValidation {
+        interrupts: alloc::boxed::Box<crate::kernel::vm::VmInterruptController>,
+    },
 }
 
 enum ReapOwnership {
@@ -146,15 +148,7 @@ impl VcpuExecution {
     ) {
         let interrupts = match &self.vm {
             VcpuVm::Installed(binding) => binding.interrupts(),
-            VcpuVm::TimerValidation { interrupts } => {
-                // SAFETY: `for_timer_validation` requires the pointed-to model
-                // to remain fixed and live through execution deactivation.
-                unsafe {
-                    &*core::ptr::with_exposed_provenance::<crate::kernel::vm::VmInterruptController>(
-                        *interrupts,
-                    )
-                }
-            }
+            VcpuVm::TimerValidation { interrupts } => interrupts,
         };
         (&mut self.hardware, self.vcpu_id, interrupts)
     }
@@ -162,15 +156,7 @@ impl VcpuExecution {
     pub(crate) fn interrupts(&self) -> &crate::kernel::vm::VmInterruptController {
         match &self.vm {
             VcpuVm::Installed(binding) => binding.interrupts(),
-            VcpuVm::TimerValidation { interrupts } => {
-                // SAFETY: `for_timer_validation` requires the pointed-to model
-                // to remain fixed and live through execution deactivation.
-                unsafe {
-                    &*core::ptr::with_exposed_provenance::<crate::kernel::vm::VmInterruptController>(
-                        *interrupts,
-                    )
-                }
-            }
+            VcpuVm::TimerValidation { interrupts } => interrupts,
         }
     }
 
@@ -227,26 +213,21 @@ impl VcpuExecution {
         ))
     }
 
-    /// Builds the non-runnable execution used by architecture timer checks.
-    ///
-    /// # Safety
-    ///
-    /// `interrupts` must remain fixed and live until this execution is
-    /// deactivated and dropped.
-    pub(crate) unsafe fn for_timer_validation(
+    /// Owns the non-runnable validation execution and its interrupt model.
+    /// Both allocations are complete before active-vCPU publication.
+    pub(crate) fn try_timer_validation(
         hardware: crate::hal::vm::VcpuHardwareState,
-        interrupts: &crate::kernel::vm::VmInterruptController,
-    ) -> Self {
-        Self {
-            vm: VcpuVm::TimerValidation {
-                interrupts: core::ptr::from_ref(interrupts).expose_provenance(),
-            },
+        interrupts: crate::kernel::vm::VmInterruptController,
+    ) -> Result<alloc::boxed::Box<Self>, hyper::mm::AllocationError> {
+        let interrupts = hyper::mm::try_box(interrupts)?;
+        hyper::mm::try_box(Self {
+            vm: VcpuVm::TimerValidation { interrupts },
             instruction_context: hyper::vm::translation::GuestInstructionContext::new(),
             terminal_mmio_report: None,
             reap: ReapOwnership::None,
             vcpu_id: 0,
             hardware,
-        }
+        })
     }
 }
 

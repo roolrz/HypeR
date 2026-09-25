@@ -25,6 +25,7 @@ pub enum Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ValidationError {
+    Allocation,
     Active(super::active_vcpu::Error),
     Hardware(super::vcpu::HardwareTransitionError),
     Interrupts(crate::hal::vm::InterruptError),
@@ -192,14 +193,11 @@ pub(super) fn validate_hardware(
         return Ok(false);
     };
     let (capability, interrupts, hardware) = prepared.into_parts();
-    // SAFETY: `interrupts` remains fixed and outlives execution activation,
-    // publication, deactivation, and drop.
-    let mut execution = unsafe {
-        crate::kernel::vm::vcpu::VcpuExecution::for_timer_validation(hardware, &interrupts)
-    };
-    let execution_pointer = core::ptr::addr_of_mut!(execution);
-    // SAFETY: This boot-local validation object is pinned on the stack, is
-    // exclusively owned, and local interrupts remain masked.
+    let mut execution = super::vcpu::VcpuExecution::try_timer_validation(hardware, interrupts)
+        .map_err(|_| ValidationError::Allocation)?;
+    let execution_pointer = core::ptr::from_mut(execution.as_mut());
+    // SAFETY: the owned allocation stays live through deactivation below;
+    // validation is exclusive and local interrupts remain masked.
     unsafe { super::vcpu::activate(execution_pointer) }.map_err(ValidationError::Hardware)?;
     let validation = (|| {
         super::active_vcpu::with(|execution| {
@@ -209,7 +207,7 @@ pub(super) fn validate_hardware(
         .map_err(ValidationError::Active)?
         .ok_or(ValidationError::StateMismatch)?
         .map_err(|_| ValidationError::StateMismatch)?;
-        if !crate::hal::vm::timer_validation_succeeded(&capability, &interrupts)
+        if !crate::hal::vm::timer_validation_succeeded(&capability, execution.interrupts())
             .map_err(ValidationError::Interrupts)?
         {
             return Err(ValidationError::StateMismatch);

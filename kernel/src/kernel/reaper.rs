@@ -10,7 +10,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use hyper::sync::{DeferredWork, WorkDisposition};
+use hyper::sync::{DeferredWork, PublishedOnce, WorkDisposition};
 
 const REAP_BATCH: usize = 16;
 const RETIREMENT_RETRY_NS: u64 = 10_000_000;
@@ -19,6 +19,9 @@ static WORK: DeferredWork = DeferredWork::new();
 static WAKE: crate::kernel::sync::Completion = crate::kernel::sync::Completion::new();
 static WORKER_PUBLISHED: AtomicBool = AtomicBool::new(false);
 static IRQ_PROMPTS_READY: AtomicBool = AtomicBool::new(false);
+// The timer callback borrows this service-owned reservation, never the
+// worker's stack. Publication occurs once before any retry can be armed.
+static RETRY_TIMER: PublishedOnce<crate::kernel::time::ReservedTimer> = PublishedOnce::new();
 static RETRY_DUE: AtomicBool = AtomicBool::new(false);
 
 #[cfg(feature = "kernel-self-test")]
@@ -142,6 +145,13 @@ extern "C" fn worker_entry(_argument: usize) {
         Err(error) => crate::kernel::crash::fatal(format_args!(
             "HypeR: reaper timer reservation failed: {error:?}"
         )),
+    };
+    if RETRY_TIMER.publish(retry_timer).is_err() {
+        hyper::debug::invariant_failure("reaper retry timer published twice");
+    }
+    let retry_timer = match RETRY_TIMER.get() {
+        Some(timer) => timer,
+        None => hyper::debug::invariant_failure("reaper retry timer missing after publication"),
     };
     let mut armed_retry: Option<crate::kernel::time::ArmedReservedTimer<'_>> = None;
     loop {
