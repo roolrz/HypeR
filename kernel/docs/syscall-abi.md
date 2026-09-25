@@ -618,12 +618,35 @@ A claimed PhysicalDevice exposes interrupt readiness through `READABLE`.
 A stale sequence cannot acknowledge a later interrupt. This sequence belongs
 to device IRQ completion, independently of the WaitSet observation sequence.
 
+Each Thread has a `ThreadWaitContext` for wait-resource lifetime. It owns the
+atomic condition slot and tracks generation-qualified signal subscriptions and
+timeout registrations. Completing scheduler arbitration does not make the
+context reusable: every signal node must be unlinked and every timer must be
+cancelled or joined first. New wait admission, Thread termination, and retirement
+reject remaining registrations. Multi-object waits share one scheduler ticket
+but retain a separate registration for each signal source. Persistent WaitSet
+subscriptions belong to the WaitSet, independently of a Thread blocking on it.
+The scheduler's `WaitRecord` remains in CPU-owned scheduling state; the stable
+resource context does not change scheduler lock ownership or migration rules.
+
 Native atomic wait/wake currently use process-private aligned writable u32
 words. The key contains the address-space, non-reused mapping token, and virtual
 byte address. The kernel retains a writable backing lease through each admitted
 wait and performs the value check and wait publication under the same sharded
 condition lock used by wake. Scheduler tickets arbitrate wake, timeout and
-cancellation exactly once. A replaced mapping cannot wake an old wait; callers
+cancellation exactly once. The condition registration lives in a slot embedded in the
+scheduler Thread, together with its backing lease and per-wait resource charge.
+Buckets link generation-qualified tickets and look up nodes under registry
+protection; they retain no pointers into kernel stacks. A scoped registration
+unlinks the node before releasing its lease and charge outside locks. Thread
+termination and retirement reject a still-linked slot, and destruction checks
+the same invariant. CPU migration preserves the Thread-owned slot. Thread/Process
+stop resumes cancellation cleanup rather than discarding a parked continuation.
+Finite deadlines still allocate and charge a timeout timer;
+infinite deadlines do not require timer storage. The 64 hash buckets are not a
+limit on waiter count.
+
+A replaced mapping cannot wake an old wait; callers
 must keep mappings live until their waits finish. Aliases and other Processes
 have separate wait domains. Shared VMO keys, requeue and priority inheritance
 remain separately specified extensions, not implemented contracts.

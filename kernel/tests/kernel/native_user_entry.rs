@@ -5,6 +5,8 @@
 
 #[cfg(CONFIG_ARCH_AARCH64)]
 mod aarch64;
+#[cfg(CONFIG_ARCH_AARCH64)]
+mod atomic_wait;
 #[cfg(CONFIG_ARCH_RISCV64)]
 mod riscv64;
 #[cfg(CONFIG_ARCH_AARCH64)]
@@ -24,6 +26,8 @@ const IMAGE_BASE: u64 = 0x40_0000;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Error {
     AddressSpace,
+    #[cfg(CONFIG_ARCH_AARCH64)]
+    AtomicWait(&'static str),
     Construction,
     Group,
     Image,

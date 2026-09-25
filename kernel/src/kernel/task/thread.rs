@@ -336,6 +336,8 @@ pub struct Thread {
     /// Independent storage lets one queue link neighbors owned by different
     /// CPUs without borrowing their schedules.
     control_queue_links: UnsafeCell<QueueLinks>,
+    /// Stable wait resources; arbitration stays in the CPU-owned schedule.
+    wait_context: super::ThreadWaitContext,
     /// Monotonic scheduler ticks charged while this Thread is current.
     runtime_ticks: AtomicU64,
     resources: Box<ThreadResources>,
@@ -566,6 +568,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            wait_context: super::ThreadWaitContext::new(),
             runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 crate::hal::context::ThreadContext::empty(),
@@ -607,6 +610,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            wait_context: super::ThreadWaitContext::new(),
             runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 context,
@@ -644,6 +648,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            wait_context: super::ThreadWaitContext::new(),
             runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 context,
@@ -676,6 +681,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            wait_context: super::ThreadWaitContext::new(),
             runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 crate::hal::context::ThreadContext::empty(),
@@ -723,6 +729,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            wait_context: super::ThreadWaitContext::new(),
             runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 scheduling_context,
@@ -765,6 +772,7 @@ impl Thread {
                 pending_migration: None,
             }),
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
+            wait_context: super::ThreadWaitContext::new(),
             runtime_ticks: AtomicU64::new(0),
             resources: Self::allocate_resources(
                 context,
@@ -1017,6 +1025,10 @@ impl Thread {
     ) -> R {
         // SAFETY: guaranteed by the caller's linear control authority.
         operation(unsafe { &mut *self.control_queue_links.get() })
+    }
+
+    pub(super) fn wait_context(&self) -> &super::ThreadWaitContext {
+        &self.wait_context
     }
 
     pub(super) fn wait_record(&self) -> &WaitRecord {

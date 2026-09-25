@@ -67,6 +67,30 @@ type TransitionMaskState =
 
 static SCHEDULER: CoordinatorLock = InterruptShardedLock::new(None);
 
+/// Accesses Thread-owned wait resources without exposing registry pointers.
+/// The callback must not re-enter the scheduler or acquire a condition bucket.
+pub(crate) fn with_wait_context<R>(
+    id: ThreadId,
+    operation: impl FnOnce(&super::ThreadWaitContext) -> R,
+) -> Result<R, Error> {
+    read_scheduler(|scheduler| scheduler.with_thread(id, |thread| operation(thread.wait_context())))
+}
+
+/// Negative test of the real exit gate with an idle scheduler wait record and
+/// a still-linked condition node. Unexpected success cannot be rolled back.
+#[cfg(all(feature = "kernel-self-test", CONFIG_ARCH_AARCH64))]
+pub(crate) fn verify_wait_exit_rejected() -> Result<bool, Error> {
+    let cpu = current_cpu()?;
+    SCHEDULER.with(|slot| {
+        let scheduler = slot.as_mut().ok_or(Error::NotInitialized)?;
+        match scheduler.prepare_exit(cpu) {
+            Err(Error::InvalidWaitRegistration) => Ok(true),
+            Err(error) => Err(error),
+            Ok(_) => hyper::debug::invariant_failure("live wait resources passed Thread exit gate"),
+        }
+    })
+}
+
 /// Pins registry lifetime and placement without serializing other CPUs.
 /// No reader may upgrade to exclusive coordination or enter another reader.
 fn read_scheduler<R>(operation: impl FnOnce(&Scheduler) -> Result<R, Error>) -> Result<R, Error> {
@@ -1671,6 +1695,9 @@ pub(crate) fn retirement_pending(_access: &crate::kernel::reaper::ReaperAccess) 
 }
 
 fn retire_detached_thread(mut thread: Box<Thread>) {
+    if !thread.wait_context().is_idle() {
+        hyper::debug::invariant_failure("scheduler retirement with live wait resources");
+    }
     if let Some((object, execution)) = thread.take_user_execution() {
         drop(thread);
         execution.into_inner().complete_detach(object);
