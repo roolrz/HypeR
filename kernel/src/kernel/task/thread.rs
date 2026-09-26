@@ -545,24 +545,27 @@ impl Thread {
         .map_err(|_| Error::Allocation)
     }
 
-    pub(super) fn bootstrap(cpu_index: CpuIndex) -> Result<Self, Error> {
-        let name = match ThreadNameSnapshot::new("bootstrap") {
-            Ok(name) => name,
-            Err(_) => ThreadNameSnapshot::empty(),
-        };
-        Ok(Self {
-            identity: ThreadIdentity {
-                id: ThreadId::BOOTSTRAP,
-                name,
-            },
-            object: ThreadObject::try_system(ThreadRole::Bootstrap)?,
+    /// Assembles an unpublished Thread after each named constructor has
+    /// prepared its identity, role and machine resources. This adds no fallible
+    /// step after resource preparation and preserves coordinator ownership.
+    fn from_parts(
+        identity: ThreadIdentity,
+        object: ThreadObject,
+        placement: ThreadPlacement,
+        scheduling: SchedulingPolicy,
+        state: ThreadState,
+        resources: Box<ThreadResources>,
+    ) -> Self {
+        Self {
+            identity,
+            object,
             schedule_owner: ScheduleOwner::Coordinator,
             schedule: UnsafeCell::new(ThreadScheduleState {
-                placement: ThreadPlacement::pinned(cpu_index),
-                scheduling: SchedulingPolicy::fair(),
+                placement,
+                scheduling,
                 fair_runtime: FairRuntime::NEW,
                 deferred_fifo_placement: None,
-                state: ThreadState::Running,
+                state,
                 ready_queue_links: QueueLinks::EMPTY,
                 wait: WaitRecord::NEW,
                 pending_migration: None,
@@ -570,13 +573,31 @@ impl Thread {
             control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
             wait_context: super::ThreadWaitContext::new(),
             runtime_ticks: AtomicU64::new(0),
-            resources: Self::allocate_resources(
+            resources,
+        }
+    }
+
+    pub(super) fn bootstrap(cpu_index: CpuIndex) -> Result<Self, Error> {
+        let name = match ThreadNameSnapshot::new("bootstrap") {
+            Ok(name) => name,
+            Err(_) => ThreadNameSnapshot::empty(),
+        };
+        Ok(Self::from_parts(
+            ThreadIdentity {
+                id: ThreadId::BOOTSTRAP,
+                name,
+            },
+            ThreadObject::try_system(ThreadRole::Bootstrap)?,
+            ThreadPlacement::pinned(cpu_index),
+            SchedulingPolicy::fair(),
+            ThreadState::Running,
+            Self::allocate_resources(
                 crate::hal::context::ThreadContext::empty(),
                 None,
                 ThreadExecution::Kernel,
                 None,
             )?,
-        })
+        ))
     }
 
     pub(super) fn kernel(
@@ -592,33 +613,17 @@ impl Thread {
         context.prepare(stack.top(), entry, argument);
         let placement = ThreadPlacement::movable_with_affinity(cpu_index, affinity)
             .ok_or(Error::InvalidPlacement)?;
-        Ok(Self {
-            identity: ThreadIdentity {
+        Ok(Self::from_parts(
+            ThreadIdentity {
                 id,
                 name: ThreadNameSnapshot::new(name)?,
             },
-            object: ThreadObject::try_system(ThreadRole::Kernel)?,
-            schedule_owner: ScheduleOwner::Coordinator,
-            schedule: UnsafeCell::new(ThreadScheduleState {
-                placement,
-                scheduling: SchedulingPolicy::fair(),
-                fair_runtime: FairRuntime::NEW,
-                deferred_fifo_placement: None,
-                state: ThreadState::Dormant,
-                ready_queue_links: QueueLinks::EMPTY,
-                wait: WaitRecord::NEW,
-                pending_migration: None,
-            }),
-            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
-            wait_context: super::ThreadWaitContext::new(),
-            runtime_ticks: AtomicU64::new(0),
-            resources: Self::allocate_resources(
-                context,
-                Some(stack),
-                ThreadExecution::Kernel,
-                None,
-            )?,
-        })
+            ThreadObject::try_system(ThreadRole::Kernel)?,
+            placement,
+            SchedulingPolicy::fair(),
+            ThreadState::Dormant,
+            Self::allocate_resources(context, Some(stack), ThreadExecution::Kernel, None)?,
+        ))
     }
 
     /// Creates the permanent fallback Thread for one already-registered CPU.
@@ -630,66 +635,39 @@ impl Thread {
         let stack = KernelStack::allocate_thread().map_err(|_| Error::Allocation)?;
         let mut context = crate::hal::context::ThreadContext::empty();
         context.prepare(stack.top(), entry, 0);
-        Ok(Self {
-            identity: ThreadIdentity {
+        Ok(Self::from_parts(
+            ThreadIdentity {
                 id,
                 name: ThreadNameSnapshot::idle(cpu_index)?,
             },
-            object: ThreadObject::try_system(ThreadRole::Idle)?,
-            schedule_owner: ScheduleOwner::Coordinator,
-            schedule: UnsafeCell::new(ThreadScheduleState {
-                placement: ThreadPlacement::pinned(cpu_index),
-                scheduling: SchedulingPolicy::Idle,
-                fair_runtime: FairRuntime::NEW,
-                deferred_fifo_placement: None,
-                state: ThreadState::Idle,
-                ready_queue_links: QueueLinks::EMPTY,
-                wait: WaitRecord::NEW,
-                pending_migration: None,
-            }),
-            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
-            wait_context: super::ThreadWaitContext::new(),
-            runtime_ticks: AtomicU64::new(0),
-            resources: Self::allocate_resources(
-                context,
-                Some(stack),
-                ThreadExecution::Kernel,
-                None,
-            )?,
-        })
+            ThreadObject::try_system(ThreadRole::Idle)?,
+            ThreadPlacement::pinned(cpu_index),
+            SchedulingPolicy::Idle,
+            ThreadState::Idle,
+            Self::allocate_resources(context, Some(stack), ThreadExecution::Kernel, None)?,
+        ))
     }
 
     /// Creates the already-running bootstrap context for a secondary CPU.
     pub(super) fn secondary_bootstrap(id: ThreadId, cpu_index: CpuIndex) -> Result<Self, Error> {
-        Ok(Self {
-            identity: ThreadIdentity {
+        Ok(Self::from_parts(
+            ThreadIdentity {
                 id,
                 name: ThreadNameSnapshot::idle(cpu_index)?,
             },
             // A secondary bootstrap continuation exists solely to complete
             // local setup and become that CPU's permanent idle Thread.
-            object: ThreadObject::try_system(ThreadRole::Idle)?,
-            schedule_owner: ScheduleOwner::Coordinator,
-            schedule: UnsafeCell::new(ThreadScheduleState {
-                placement: ThreadPlacement::pinned(cpu_index),
-                scheduling: SchedulingPolicy::fair(),
-                fair_runtime: FairRuntime::NEW,
-                deferred_fifo_placement: None,
-                state: ThreadState::Running,
-                ready_queue_links: QueueLinks::EMPTY,
-                wait: WaitRecord::NEW,
-                pending_migration: None,
-            }),
-            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
-            wait_context: super::ThreadWaitContext::new(),
-            runtime_ticks: AtomicU64::new(0),
-            resources: Self::allocate_resources(
+            ThreadObject::try_system(ThreadRole::Idle)?,
+            ThreadPlacement::pinned(cpu_index),
+            SchedulingPolicy::fair(),
+            ThreadState::Running,
+            Self::allocate_resources(
                 crate::hal::context::ThreadContext::empty(),
                 Some(KernelStack::allocate_thread().map_err(|_| Error::Allocation)?),
                 ThreadExecution::Kernel,
                 None,
             )?,
-        })
+        ))
     }
 
     pub(super) fn vcpu(
@@ -708,36 +686,22 @@ impl Thread {
             crate::kernel::task::policy::CpuMask::ALL,
         )
         .ok_or(Error::InvalidPlacement)?;
-        Ok(Self {
-            identity: ThreadIdentity {
+        Ok(Self::from_parts(
+            ThreadIdentity {
                 id,
                 name: ThreadNameSnapshot::new(name)?,
             },
-            object: ThreadObject::try_accounted_system(
-                ThreadRole::Vcpu,
-                ownership.take_object_charge(),
-            )?,
-            schedule_owner: ScheduleOwner::Coordinator,
-            schedule: UnsafeCell::new(ThreadScheduleState {
-                placement,
-                scheduling: SchedulingPolicy::fair(),
-                fair_runtime: FairRuntime::NEW,
-                deferred_fifo_placement: None,
-                state: ThreadState::Dormant,
-                ready_queue_links: QueueLinks::EMPTY,
-                wait: WaitRecord::NEW,
-                pending_migration: None,
-            }),
-            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
-            wait_context: super::ThreadWaitContext::new(),
-            runtime_ticks: AtomicU64::new(0),
-            resources: Self::allocate_resources(
+            ThreadObject::try_accounted_system(ThreadRole::Vcpu, ownership.take_object_charge())?,
+            placement,
+            SchedulingPolicy::fair(),
+            ThreadState::Dormant,
+            Self::allocate_resources(
                 scheduling_context,
                 Some(stack),
                 ThreadExecution::Vcpu(execution),
                 Some(ownership),
             )?,
-        })
+        ))
     }
 
     pub(super) fn user(
@@ -754,33 +718,17 @@ impl Thread {
         context.prepare(stack.top(), entry, 0);
         let placement = ThreadPlacement::movable_with_affinity(cpu_index, affinity)
             .ok_or(Error::InvalidPlacement)?;
-        Ok(Self {
-            identity: ThreadIdentity {
+        Ok(Self::from_parts(
+            ThreadIdentity {
                 id,
                 name: ThreadNameSnapshot::new(name)?,
             },
-            object: ThreadObject::user(object),
-            schedule_owner: ScheduleOwner::Coordinator,
-            schedule: UnsafeCell::new(ThreadScheduleState {
-                placement,
-                scheduling: SchedulingPolicy::fair(),
-                fair_runtime: FairRuntime::NEW,
-                deferred_fifo_placement: None,
-                state: ThreadState::Dormant,
-                ready_queue_links: QueueLinks::EMPTY,
-                wait: WaitRecord::NEW,
-                pending_migration: None,
-            }),
-            control_queue_links: UnsafeCell::new(QueueLinks::EMPTY),
-            wait_context: super::ThreadWaitContext::new(),
-            runtime_ticks: AtomicU64::new(0),
-            resources: Self::allocate_resources(
-                context,
-                Some(stack),
-                ThreadExecution::User(execution),
-                None,
-            )?,
-        })
+            ThreadObject::user(object),
+            placement,
+            SchedulingPolicy::fair(),
+            ThreadState::Dormant,
+            Self::allocate_resources(context, Some(stack), ThreadExecution::User(execution), None)?,
+        ))
     }
 
     pub const fn id(&self) -> ThreadId {
