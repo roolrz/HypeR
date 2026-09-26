@@ -443,6 +443,29 @@ pub(crate) enum PreparedWait {
     Completed(WaitOutcome),
 }
 
+impl PrepareWait {
+    /// Transfers the retained IRQ mask to the switch, or restores it when the
+    /// wait already completed without parking.
+    pub(crate) fn retain_mask(self, interrupt_mask: TransitionMask) -> PreparedWait {
+        match self {
+            Self::Park(commit) => PreparedWait::Park(retain_park_mask(commit, interrupt_mask)),
+            Self::Completed(outcome) => {
+                drop(interrupt_mask);
+                PreparedWait::Completed(outcome)
+            }
+        }
+    }
+}
+
+impl PreparedWait {
+    pub(crate) fn complete(self) -> WaitOutcome {
+        match self {
+            Self::Park(token) => complete_park(token),
+            Self::Completed(outcome) => outcome,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ResolveWait {
     pub won: bool,
@@ -1367,15 +1390,7 @@ pub(crate) fn prepare_registered_park(
     // SAFETY: either the committed park consumes this exact mask state, or the
     // already-completed path drops it before returning to the caller.
     let interrupt_mask = unsafe { TransitionMask::acquire() };
-    match prepare_registered_park_locked(wait_queue, registration)? {
-        PrepareWait::Park(commit) => {
-            Ok(PreparedWait::Park(retain_park_mask(commit, interrupt_mask)))
-        }
-        PrepareWait::Completed(outcome) => {
-            drop(interrupt_mask);
-            Ok(PreparedWait::Completed(outcome))
-        }
-    }
+    Ok(prepare_registered_park_locked(wait_queue, registration)?.retain_mask(interrupt_mask))
 }
 
 /// Binds a synchronization lock's retained interrupt mask to a committed park.

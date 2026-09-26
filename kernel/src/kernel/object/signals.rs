@@ -9,7 +9,7 @@ use hyper::mm::{FallibleArc, try_box};
 use hyper::sync::InterruptSpinLock;
 
 use crate::kernel::accounting::CommittedCharge;
-use crate::kernel::task::scheduler::{self, PrepareWait, WaitRegistration};
+use crate::kernel::task::scheduler::{self, WaitRegistration};
 use crate::kernel::task::{WaitOutcome, WaitQueue, WaitTicket};
 
 type StateLock = InterruptSpinLock<State, crate::hal::irq::LocalMask>;
@@ -394,15 +394,7 @@ impl SignalState {
                 };
             }
         };
-        let outcome = match park {
-            PrepareWait::Park(commit) => {
-                scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask))
-            }
-            PrepareWait::Completed(outcome) => {
-                drop(interrupt_mask);
-                outcome
-            }
-        };
+        let outcome = park.retain_mask(interrupt_mask).complete();
         let waiter = self.state.with(|state| unlink_waiter(state, ticket));
         classify_outcome(outcome, waiter.observed)
     }
@@ -449,15 +441,7 @@ impl SignalState {
                 return Err(error.into());
             }
         };
-        Ok(match park {
-            PrepareWait::Park(commit) => {
-                scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask))
-            }
-            PrepareWait::Completed(outcome) => {
-                drop(interrupt_mask);
-                outcome
-            }
-        })
+        Ok(park.retain_mask(interrupt_mask).complete())
     }
 
     /// Removes one member of a completed shared wait and returns only the

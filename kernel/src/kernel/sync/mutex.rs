@@ -78,15 +78,7 @@ impl<T: ?Sized> Mutex<T> {
                 not_send: PhantomData,
             });
         };
-        let outcome = match prepared {
-            scheduler::PrepareWait::Park(commit) => {
-                scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask))
-            }
-            scheduler::PrepareWait::Completed(outcome) => {
-                drop(interrupt_mask);
-                outcome
-            }
-        };
+        let outcome = prepared.retain_mask(interrupt_mask).complete();
         super::expect_notification(outcome)?;
         Ok(MutexGuard {
             mutex: self,

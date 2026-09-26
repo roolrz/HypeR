@@ -327,7 +327,7 @@ pub(super) fn register_flush_barrier() -> Result<FlushBarrierRegistration, Drain
 pub(super) fn wait_for_drain(
     mut barrier: FlushBarrier,
 ) -> Result<ConsoleFlushOutcome, crate::kernel::sync::Error> {
-    use crate::kernel::task::scheduler::{self, PrepareWait};
+    use crate::kernel::task::scheduler;
     use crate::kernel::task::{WaitMobility, WaitOutcome};
 
     scheduler::ensure_sleepable()?;
@@ -362,15 +362,7 @@ pub(super) fn wait_for_drain(
             barrier.release();
             return Ok(outcome);
         };
-        let outcome = match prepared {
-            PrepareWait::Park(commit) => {
-                scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask))
-            }
-            PrepareWait::Completed(outcome) => {
-                drop(interrupt_mask);
-                outcome
-            }
-        };
+        let outcome = prepared.retain_mask(interrupt_mask).complete();
         if outcome != WaitOutcome::Notified {
             return Err(crate::kernel::sync::Error::WaitInterrupted(outcome));
         }
