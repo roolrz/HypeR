@@ -210,10 +210,7 @@ impl WaitQueue {
                 return Err(error.into());
             }
         };
-        let outcome = match prepared {
-            scheduler::PreparedWait::Park(token) => scheduler::complete_park(token),
-            scheduler::PreparedWait::Completed(outcome) => outcome,
-        };
+        let outcome = prepared.complete();
         timeout.retire_after(outcome)?;
         Ok(outcome)
     }

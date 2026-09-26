@@ -203,7 +203,7 @@ require 'let target_sequence = super::statistics\(\)\.next_sequence[\s\S]*\.regi
     'flush barrier registration must capture cursor and target under one console lock'
 require 'CONSOLE\.with_mask_retained[\s\S]*DrainBarrierStatus::Pending[\s\S]*scheduler::begin_wait[\s\S]*prepare_registered_park_locked' "$waiter" \
     'flush waiting must close the condition-check-to-park race under the console lock'
-require 'PrepareWait::Park[\s\S]*scheduler::complete_park\(scheduler::retain_park_mask' "$waiter" \
+require 'prepared\.retain_mask\(interrupt_mask\)\.complete\(\)' "$waiter" \
     'flush waiting must retain the console IRQ mask through its committed park'
 require 'impl Drop for FlushBarrier[\s\S]*self\.release\(\)' "$console" \
     'every flush exit path must release its generation-qualified barrier slot'

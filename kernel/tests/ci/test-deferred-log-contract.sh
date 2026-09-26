@@ -119,8 +119,8 @@ mutate 'overrun attribution must retain its exact sequence interval' \
     src/kernel/log/console.rs '.advance_overrun(state.next_sequence, sequence, missed)' \
     '.advance(sequence)'
 mutate 'flush wait must retain the IRQ mask through its committed park' \
-    src/kernel/log/console.rs 'scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask))' \
-    'scheduler::complete_park_without_mask(commit)'
+    src/kernel/log/console.rs 'prepared.retain_mask(interrupt_mask).complete()' \
+    'prepared.complete_without_mask()'
 mutate 'flush barrier slots must be released on every exit path' \
     src/kernel/log/console.rs 'self.release();' \
     'return;'

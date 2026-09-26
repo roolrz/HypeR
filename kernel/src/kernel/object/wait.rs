@@ -276,15 +276,7 @@ impl PublishedTimedWait {
             Some(park) => park,
             None => object_wait_invariant("published wait completed twice", None),
         };
-        let outcome = match park {
-            scheduler::PrepareWait::Park(commit) => {
-                scheduler::complete_park(scheduler::retain_park_mask(commit, interrupt_mask))
-            }
-            scheduler::PrepareWait::Completed(outcome) => {
-                drop(interrupt_mask);
-                outcome
-            }
-        };
+        let outcome = park.retain_mask(interrupt_mask).complete();
         let timer = match self.timer.take() {
             Some(timer) => timer,
             None => object_wait_invariant("published wait lost timer", Some(outcome)),
