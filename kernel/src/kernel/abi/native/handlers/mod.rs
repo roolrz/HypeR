@@ -5,6 +5,9 @@
 
 mod console;
 mod handles;
+mod inspect;
+mod ipc;
+mod object;
 mod system;
 mod task;
 
@@ -12,6 +15,23 @@ pub(super) use console::{sys_console_read, sys_console_write};
 pub(super) use handles::{
     sys_handle_close, sys_handle_duplicate, sys_handle_get_info, sys_handle_replace,
     sys_object_get_basic_info,
+};
+pub(super) use inspect::{
+    sys_cpu_inspector_read, sys_memory_inspector_read, sys_object_inspector_derive_process,
+    sys_object_inspector_derive_resource_domain, sys_object_inspector_derive_task_group,
+    sys_object_inspector_scan_handles, sys_object_inspector_scan_objects,
+    sys_task_inspector_derive_process, sys_task_inspector_derive_resource_domain,
+    sys_task_inspector_derive_task_group, sys_task_inspector_scan_processes,
+    sys_task_inspector_scan_threads,
+};
+pub(super) use ipc::{
+    sys_byte_channel_create, sys_byte_channel_read, sys_byte_channel_write,
+    sys_capability_channel_create, sys_capability_channel_receive, sys_capability_channel_try_send,
+};
+pub(super) use object::{
+    sys_event_create, sys_event_signal, sys_object_wait_many, sys_object_wait_one,
+    sys_wait_set_add, sys_wait_set_create, sys_wait_set_rearm, sys_wait_set_remove,
+    sys_wait_set_wait,
 };
 pub(super) use system::{
     sys_abi_query, sys_clock_get_monotonic, sys_not_supported, sys_system_config,
@@ -23,257 +43,43 @@ pub(super) use task::{
     sys_thread_sleep, sys_thread_start, sys_thread_yield,
 };
 
+#[cfg(feature = "kernel-self-test")]
+pub(super) use ipc::capability_receive_result;
+
 use super::Arguments;
-use super::services::ObjectServiceError;
 use super::services::{
-    DeferredAction, InspectServices, IpcServices, MemoryServices, ObjectServices,
-    ProcessBuilderServices, SystemInspectServices, VfsServices, VmServices,
+    DeferredAction, MemoryServices, ProcessBuilderServices, VfsServices, VmServices,
 };
 use super::status::{
     console_io_result, failure, handle_result, info_result, scan_result, status_from_address_error,
-    status_from_byte_channel_service_error, status_from_capability_channel_error,
-    status_from_capability_channel_service_error, status_from_inspection_error,
-    status_from_memory_service_error, status_from_object_service_error,
-    status_from_process_builder_service_error, status_from_vfs_service_error,
-    status_from_vm_service_error, status_only, success,
+    status_from_memory_service_error, status_from_process_builder_service_error,
+    status_from_vfs_service_error, status_from_vm_service_error, status_only, success,
 };
 use super::wire::{
-    copy_directory_page, copy_encoded_page, copy_info_record, decode_virtual_cpu_bootstrap,
-    decode_virtual_machine_configuration, encode_cpu_observation, encode_directory_info,
-    encode_file_info, encode_handle_inspection, encode_memory_observation,
-    encode_object_inspection, encode_task_process, encode_task_thread, encode_virtual_cpu_info,
-    encode_virtual_machine_info, optional_user_slice, parse_affinity_request, parse_builder_create,
-    parse_builder_handle, parse_builder_text, parse_byte_channel_io,
-    parse_capability_channel_receive, parse_capability_channel_send, parse_handle,
-    parse_handle_inspector_scan, parse_inspector_derivation, parse_inspector_scan,
-    parse_single_handle, parse_two_handles, parse_virtual_serial_io, parse_wait_many,
+    copy_directory_page, copy_info_record, decode_virtual_cpu_bootstrap,
+    decode_virtual_machine_configuration, encode_directory_info, encode_file_info,
+    encode_virtual_cpu_info, encode_virtual_machine_info, optional_user_slice,
+    parse_affinity_request, parse_builder_create, parse_builder_handle, parse_builder_text,
+    parse_handle, parse_single_handle, parse_two_handles, parse_virtual_serial_io,
     prepare_info_request, require_zero,
 };
 use crate::kernel::capability::{HandleValue, Rights};
-use crate::kernel::inspect::{OBJECT_PAGE_CAPACITY, Page};
-use crate::kernel::ipc::{
-    ByteChannelReadOutcome, CapabilityChannelError, CapabilityReceiveOutcome,
-};
 use crate::kernel::mm::user_space::{UserAddress, UserSlice};
-use crate::kernel::object::{SignalWaitManyOutcome, SignalWaitOutcome};
 use hyper::abi::native::{
-    HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE, HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY,
-    HYPER_NATIVE_DIRECTORY_INFO_MIN_SIZE, HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES,
-    HYPER_NATIVE_FILE_INFO_MIN_SIZE, HYPER_NATIVE_FILE_MAX_READ_BYTES,
-    HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE, HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES,
+    HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY, HYPER_NATIVE_DIRECTORY_INFO_MIN_SIZE,
+    HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES, HYPER_NATIVE_FILE_INFO_MIN_SIZE,
+    HYPER_NATIVE_FILE_MAX_READ_BYTES, HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES,
     HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES, HYPER_NATIVE_PROCESS_NAME_MAX_BYTES,
-    HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL, HYPER_NATIVE_STATUS_CANCELLED,
-    HYPER_NATIVE_STATUS_INTERNAL, HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
-    HYPER_NATIVE_STATUS_TIMED_OUT, HYPER_NATIVE_SYS_BYTE_CHANNEL_READ,
-    HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
+    HYPER_NATIVE_STATUS_INVALID_ARGUMENT, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
     HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE, HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE,
-    HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES, HyperNativeCpuObservation, HyperNativeDirectoryEntry,
-    HyperNativeDirectoryInfo, HyperNativeFileInfo, HyperNativeMemoryObservation,
-    HyperNativeObjectInspection, HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread,
-    HyperNativeVirtualCpuInfo, HyperNativeVirtualMachineInfo, NativeResult,
+    HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES, HyperNativeDirectoryEntry, HyperNativeDirectoryInfo,
+    HyperNativeFileInfo, HyperNativeStatus, HyperNativeVirtualCpuInfo,
+    HyperNativeVirtualMachineInfo,
 };
 
 // Keep each syscall as a distinct machine frame. The routing match must not
 // inherit the largest handler's stack requirement, and crash traces should
 // identify the operation which was active at the fault boundary.
-
-#[inline(never)]
-pub(super) fn sys_event_create(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> NativeResult {
-    if arguments[0] != 0 {
-        return failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-    }
-    handle_result(
-        services
-            .create_event()
-            .map_err(status_from_object_service_error),
-    )
-}
-
-#[inline(never)]
-pub(super) fn sys_byte_channel_create(
-    services: &impl IpcServices,
-    arguments: &Arguments,
-) -> NativeResult {
-    if arguments[0] != 0 {
-        return failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-    }
-    match services
-        .create_byte_channel()
-        .map_err(status_from_byte_channel_service_error)
-    {
-        Ok([first, second]) => success([first.get(), second.get()]),
-        Err(status) => failure(status),
-    }
-}
-
-#[inline(never)]
-pub(super) fn sys_capability_channel_create(
-    services: &impl IpcServices,
-    arguments: &Arguments,
-) -> NativeResult {
-    if arguments[0] != 0 {
-        return failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-    }
-    match services
-        .create_capability_channel()
-        .map_err(status_from_capability_channel_service_error)
-    {
-        Ok([first, second]) => success([first.get(), second.get()]),
-        Err(status) => failure(status),
-    }
-}
-
-#[inline(never)]
-pub(super) fn sys_event_signal(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_handle(arguments[0]).and_then(|value| {
-        services
-            .signal_event(value, arguments[1], arguments[2])
-            .map_err(status_from_object_service_error)
-    });
-    DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_object_wait_one(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_handle(arguments[0]).and_then(|value| {
-        services
-            .wait_one(value, arguments[1], arguments[2])
-            .map_err(status_from_object_service_error)
-    });
-    let result = match result {
-        Ok(SignalWaitOutcome::Observed(snapshot)) => success([snapshot.signals().bits(), 0]),
-        Ok(SignalWaitOutcome::TimedOut) => failure(HYPER_NATIVE_STATUS_TIMED_OUT),
-        Ok(SignalWaitOutcome::Cancelled) => failure(HYPER_NATIVE_STATUS_CANCELLED),
-        Err(status) => failure(status),
-    };
-    DeferredAction::Return(result)
-}
-
-#[inline(never)]
-pub(super) fn sys_object_wait_many(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_wait_many(arguments).and_then(|(items, item_count, deadline)| {
-        services
-            .wait_many(items, item_count, deadline)
-            .map_err(status_from_object_service_error)
-    });
-    let result = match result {
-        Ok(SignalWaitManyOutcome::Observed { index, snapshot }) => match u64::try_from(index) {
-            Ok(index) => success([index, snapshot.signals().bits()]),
-            Err(_) => failure(HYPER_NATIVE_STATUS_INTERNAL),
-        },
-        Ok(SignalWaitManyOutcome::TimedOut) => failure(HYPER_NATIVE_STATUS_TIMED_OUT),
-        Ok(SignalWaitManyOutcome::Cancelled) => failure(HYPER_NATIVE_STATUS_CANCELLED),
-        Err(status) => failure(status),
-    };
-    DeferredAction::Return(result)
-}
-
-#[inline(never)]
-pub(super) fn sys_byte_channel_write(
-    services: &impl IpcServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_byte_channel_io(arguments).and_then(|(endpoint, bytes)| {
-        services
-            .write_byte_channel(endpoint, bytes)
-            .map_err(status_from_byte_channel_service_error)
-    });
-    DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_byte_channel_read(
-    services: &impl IpcServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_byte_channel_io(arguments).and_then(|(endpoint, bytes)| {
-        services
-            .read_byte_channel(endpoint, bytes)
-            .map_err(status_from_byte_channel_service_error)
-    });
-    let result = match result {
-        Ok(ByteChannelReadOutcome::Received { bytes }) => success([bytes, 0]),
-        Ok(ByteChannelReadOutcome::BufferTooSmall { bytes }) => NativeResult::for_syscall(
-            HYPER_NATIVE_SYS_BYTE_CHANNEL_READ,
-            HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL,
-            [bytes, 0],
-        ),
-        Err(status) => failure(status),
-    };
-    DeferredAction::Return(result)
-}
-
-#[inline(never)]
-pub(super) fn sys_capability_channel_try_send(
-    services: &impl IpcServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result =
-        parse_capability_channel_send(arguments).and_then(|(endpoint, bytes, dispositions)| {
-            services
-                .try_send_capability_channel(endpoint, bytes, dispositions)
-                .map_err(status_from_capability_channel_service_error)
-        });
-    DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_capability_channel_receive(
-    services: &impl IpcServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_capability_channel_receive(arguments).and_then(
-        |(endpoint, deadline, bytes, slots)| {
-            services
-                .receive_capability_channel(endpoint, deadline, bytes, slots)
-                .map_err(status_from_capability_channel_service_error)
-        },
-    );
-    DeferredAction::Return(capability_receive_result(result))
-}
-
-pub(super) fn capability_receive_result(
-    result: Result<CapabilityReceiveOutcome, HyperNativeStatus>,
-) -> NativeResult {
-    match result {
-        Ok(CapabilityReceiveOutcome::Delivered(info)) => {
-            match (u64::try_from(info.bytes), u64::try_from(info.handles)) {
-                (Ok(bytes), Ok(handles)) => success([bytes, handles]),
-                _ => failure(HYPER_NATIVE_STATUS_INTERNAL),
-            }
-        }
-        Ok(CapabilityReceiveOutcome::Failed(CapabilityChannelError::BufferTooSmall {
-            required_bytes,
-            required_handles,
-        })) => match (
-            u64::try_from(required_bytes),
-            u64::try_from(required_handles),
-        ) {
-            (Ok(bytes), Ok(handles)) => NativeResult::for_syscall(
-                HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE,
-                HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL,
-                [bytes, handles],
-            ),
-            _ => failure(HYPER_NATIVE_STATUS_INTERNAL),
-        },
-        Ok(CapabilityReceiveOutcome::Failed(error)) => {
-            failure(status_from_capability_channel_error(error))
-        }
-        Err(status) => failure(status),
-    }
-}
 
 #[inline(never)]
 pub(super) fn sys_process_builder_create(
@@ -405,200 +211,6 @@ pub(super) fn sys_process_builder_abort(
             .map_err(status_from_process_builder_service_error)
     });
     DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_task_inspector_scan_processes(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_inspector_scan(
-        arguments,
-        crate::kernel::inspect::PROCESS_PAGE_CAPACITY,
-        core::mem::size_of::<HyperNativeTaskProcess>(),
-    )
-    .and_then(|(inspector, cursor, destination)| {
-        let mut page = Page::empty();
-        services
-            .scan_processes(inspector, cursor, &mut page)
-            .map_err(status_from_inspection_error)?;
-        copy_encoded_page(services, destination, &page, encode_task_process)
-    });
-    DeferredAction::Return(scan_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_task_inspector_scan_threads(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_inspector_scan(
-        arguments,
-        crate::kernel::inspect::THREAD_PAGE_CAPACITY,
-        core::mem::size_of::<HyperNativeTaskThread>(),
-    )
-    .and_then(|(inspector, cursor, destination)| {
-        let mut page = Page::empty();
-        services
-            .scan_threads(inspector, cursor, &mut page)
-            .map_err(status_from_inspection_error)?;
-        copy_encoded_page(services, destination, &page, encode_task_thread)
-    });
-    DeferredAction::Return(scan_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_object_inspector_scan_objects(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_inspector_scan(
-        arguments,
-        OBJECT_PAGE_CAPACITY,
-        core::mem::size_of::<HyperNativeObjectInspection>(),
-    )
-    .and_then(|(inspector, cursor, destination)| {
-        let mut page = Page::empty();
-        services
-            .scan_objects(inspector, cursor, &mut page)
-            .map_err(status_from_inspection_error)?;
-        copy_encoded_page(services, destination, &page, encode_object_inspection)
-    });
-    DeferredAction::Return(scan_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_object_inspector_scan_handles(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_handle_inspector_scan(arguments).and_then(
-        |(inspector, process_koid, cursor, destination)| {
-            let page = services
-                .scan_process_handles(inspector, process_koid, cursor)
-                .map_err(status_from_inspection_error)?;
-            copy_encoded_page(services, destination, &page, encode_handle_inspection)
-        },
-    );
-    DeferredAction::Return(scan_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_task_inspector_derive_process(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_inspector_derivation(arguments).and_then(|(inspector, process)| {
-        services
-            .derive_task_inspector(inspector, process)
-            .map_err(status_from_inspection_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_object_inspector_derive_process(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_inspector_derivation(arguments).and_then(|(inspector, process)| {
-        services
-            .derive_object_inspector(inspector, process)
-            .map_err(status_from_inspection_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_task_inspector_derive_task_group(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_inspector_derivation(arguments).and_then(|(inspector, group)| {
-        services
-            .derive_task_inspector_for_task_group(inspector, group)
-            .map_err(status_from_inspection_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_object_inspector_derive_task_group(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_inspector_derivation(arguments).and_then(|(inspector, group)| {
-        services
-            .derive_object_inspector_for_task_group(inspector, group)
-            .map_err(status_from_inspection_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_task_inspector_derive_resource_domain(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_inspector_derivation(arguments).and_then(|(inspector, domain)| {
-        services
-            .derive_task_inspector_for_resource_domain(inspector, domain)
-            .map_err(status_from_inspection_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_object_inspector_derive_resource_domain(
-    services: &impl InspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_inspector_derivation(arguments).and_then(|(inspector, domain)| {
-        services
-            .derive_object_inspector_for_resource_domain(inspector, domain)
-            .map_err(status_from_inspection_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_memory_inspector_read(
-    services: &impl SystemInspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = prepare_info_request(
-        arguments,
-        HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE,
-        core::mem::size_of::<HyperNativeMemoryObservation>(),
-    )
-    .and_then(|request| {
-        let inspector = request.value;
-        let observation = services
-            .memory_observation(inspector)
-            .map_err(status_from_inspection_error)?;
-        copy_info_record(services, request, &encode_memory_observation(observation))
-    });
-    DeferredAction::Return(info_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_cpu_inspector_read(
-    services: &impl SystemInspectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = prepare_info_request(
-        arguments,
-        HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE,
-        core::mem::size_of::<HyperNativeCpuObservation>(),
-    )
-    .and_then(|request| {
-        let inspector = request.value;
-        let observation = services
-            .cpu_observation(inspector)
-            .map_err(status_from_inspection_error)?;
-        copy_info_record(services, request, &encode_cpu_observation(observation))
-    });
-    DeferredAction::Return(info_result(result))
 }
 
 #[inline(never)]
@@ -1283,105 +895,6 @@ pub(super) fn sys_directory_remove(
         Ok(()) => success([0, 0]),
         Err(status) => failure(status),
     })
-}
-
-#[inline(never)]
-pub(super) fn sys_wait_set_create(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[1..].iter().any(|value| *value != 0) {
-            return Err(ObjectServiceError::InvalidInput);
-        }
-        services.wait_set_create(
-            usize::try_from(arguments[0]).map_err(|_| ObjectServiceError::InvalidInput)?,
-        )
-    })();
-    DeferredAction::Return(match result {
-        Ok(value) => success([value.get(), 0]),
-        Err(error) => failure(status_from_object_service_error(error)),
-    })
-}
-
-#[inline(never)]
-pub(super) fn sys_wait_set_add(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[3..].iter().any(|value| *value != 0) {
-            return Err(ObjectServiceError::InvalidInput);
-        }
-        services.wait_set_add(
-            parse_handle(arguments[0]).map_err(|_| ObjectServiceError::InvalidInput)?,
-            parse_handle(arguments[1]).map_err(|_| ObjectServiceError::InvalidInput)?,
-            arguments[2],
-        )
-    })();
-    DeferredAction::Return(match result {
-        Ok(value) => success([value, 0]),
-        Err(error) => failure(status_from_object_service_error(error)),
-    })
-}
-
-#[inline(never)]
-pub(super) fn sys_wait_set_rearm(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[2..].iter().any(|value| *value != 0) {
-            return Err(ObjectServiceError::InvalidInput);
-        }
-        services.wait_set_rearm(
-            parse_handle(arguments[0]).map_err(|_| ObjectServiceError::InvalidInput)?,
-            arguments[1],
-        )
-    })();
-    DeferredAction::Return(match result {
-        Ok(_) => success([0, 0]),
-        Err(error) => failure(status_from_object_service_error(error)),
-    })
-}
-
-#[inline(never)]
-pub(super) fn sys_wait_set_remove(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[2..].iter().any(|value| *value != 0) {
-            return Err(ObjectServiceError::InvalidInput);
-        }
-        services.wait_set_remove(
-            parse_handle(arguments[0]).map_err(|_| ObjectServiceError::InvalidInput)?,
-            arguments[1],
-        )
-    })();
-    DeferredAction::Return(match result {
-        Ok(_) => success([0, 0]),
-        Err(error) => failure(status_from_object_service_error(error)),
-    })
-}
-
-#[inline(never)]
-pub(super) fn sys_wait_set_wait(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[3] != 24 || arguments[4] != 0 || arguments[5] != 0 {
-            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-        }
-        let set = parse_handle(arguments[0])?;
-        let output = UserSlice::new(UserAddress::new(arguments[2]), 24)
-            .map_err(status_from_address_error)?;
-        services
-            .wait_set_wait(set, arguments[1], output)
-            .map_err(status_from_object_service_error)
-    })();
-    DeferredAction::Return(status_only(result))
 }
 
 #[inline(never)]
