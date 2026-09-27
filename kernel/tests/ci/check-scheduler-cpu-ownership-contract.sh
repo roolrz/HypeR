@@ -10,6 +10,7 @@ cd "$root"
 
 thread=src/kernel/task/thread.rs
 state=src/kernel/task/scheduler/state.rs
+local_state=src/kernel/task/scheduler/state/local.rs
 handoff=src/kernel/task/scheduler/switch_handoff.rs
 registry=src/kernel/task/scheduler/registry.rs
 queue=src/kernel/task/scheduler/queue.rs
@@ -53,18 +54,18 @@ reject 'struct LocalReadyQueueAuthority[^\{]*\{[\s\S]{0,220}(coordinator|control
     "$queue" 'local ready authority must not carry coordinator or control capability'
 require 'enum LocalScheduleAttempt \{[\s\S]*NeedsCoordinator' \
     "$state" 'local scheduling must return a typed coordinator fallback'
-require 'pub\(super\) fn prepare_local_yield[\s\S]{0,500}CPU_SCHEDULERS\[cpu\]\.with' \
-    "$state" 'ordinary yield must begin under only the current CPU lock'
-require 'pub\(super\) fn prepare_local_preemption[\s\S]{0,500}CPU_SCHEDULERS\[cpu\]\.with' \
-    "$state" 'IRQ-tail preemption must begin under only the current CPU lock'
+require 'pub\(in crate::kernel::task::scheduler\) fn prepare_local_yield[\s\S]{0,500}CPU_SCHEDULERS\[cpu\]\.with' \
+    "$local_state" 'ordinary yield must begin under only the current CPU lock'
+require 'pub\(in crate::kernel::task::scheduler\) fn prepare_local_preemption[\s\S]{0,500}CPU_SCHEDULERS\[cpu\]\.with' \
+    "$local_state" 'IRQ-tail preemption must begin under only the current CPU lock'
 require 'enum SwitchDisposition[\s\S]*Local,[\s\S]*Coordinated' \
     "$handoff" 'switch tail must distinguish local and coordinated ownership'
 require 'struct SwitchingContext<T> \{[\s\S]*generation: u64,[\s\S]*disposition: SwitchDisposition' \
     "$handoff" 'switch completion must retain an ABA-resistant generation and disposition'
 require 'fn finish_context_switch_tail\(ticket: usize\)[\s\S]*complete_local_switch_tail\(cpu, ticket\)[\s\S]*NeedsCoordinator => SCHEDULER\.with' \
     "$scheduler" 'switch tail must release the CPU lock before coordinator fallback'
-require 'pub\(super\) fn complete_local_switch_tail[\s\S]*\.for_ticket\(ticket\)[\s\S]*switching\.disposition' \
-    "$state" 'local switch tail must validate its exact generation before completion'
+require 'pub\(in crate::kernel::task::scheduler\) fn complete_local_switch_tail[\s\S]*\.for_ticket\(ticket\)[\s\S]*switching\.disposition' \
+    "$local_state" 'local switch tail must validate its exact generation before completion'
 require 'switch_thread_context\([\s\S]*finish_context_switch_tail,[\s\S]*self\.ticket as usize' \
     "$state" 'the architecture boundary must carry the exact switch generation'
 reject 'fn prepare_schedule[\s\S]{0,180}reap_terminated_threads' \
@@ -103,8 +104,8 @@ require 'pub fn complete_retirement[\s\S]*if slot != 0 \{[\s\S]*preflight_releas
     "$registry" 'bootstrap retirement must complete without making slot zero reusable'
 reject 'reap_terminated_threads' "$scheduler" \
     'local yield and idle paths must not perform global retirement scans'
-require 'pub\(super\) fn local_current_vcpu[\s\S]*CPU_SCHEDULERS\[cpu\]\.with' \
-    "$state" 'current vCPU observation must use one local CPU authority snapshot'
+require 'pub\(in crate::kernel::task::scheduler\) fn local_current_vcpu[\s\S]*CPU_SCHEDULERS\[cpu\]\.with' \
+    "$local_state" 'current vCPU observation must use one local CPU authority snapshot'
 require 'pub\(crate\) fn current_vcpu_if_present[\s\S]*state::local_current_vcpu\(cpu\)' \
     "$scheduler" 'IRQ-tail vCPU queries must bypass the global scheduler lock'
 require 'pub fn running_vcpu_cpu[\s\S]*ThreadState::Running if current == id => Ok\(Some\(cpu\)\)[\s\S]*ThreadState::Ready[\s\S]*=> Ok\(None\)' \
@@ -117,8 +118,8 @@ reject 'Ok::<_, Error>\(\(thread\.(cpu_index|wait_record)\(' \
     "$state" 'resource access must not reborrow CPU-owned stored schedule state'
 reject 'FAIR_READY' "$state" \
     'Fair-ready state must not be duplicated in an atomic mirror'
-require 'pub\(super\) fn account_tick[\s\S]*CPU_SCHEDULERS\[cpu\]\.with[\s\S]*local\.run_queue\.has_fair_threads\(\)' \
-    "$state" 'tick accounting must read ready topology under the CPU-local scheduler lock'
+require 'pub\(in crate::kernel::task::scheduler\) fn account_tick[\s\S]*CPU_SCHEDULERS\[cpu\]\.with[\s\S]*local\.run_queue\.has_fair_threads\(\)' \
+    "$local_state" 'tick accounting must read ready topology under the CPU-local scheduler lock'
 require 'fn cpu_is_schedulable[^\{]*\{[^}]*self\.schedulable_cpus\.contains\(cpu\)' \
     "$state" 'placement admission must not acquire a target CPU lock'
 reject 'fn cpu_is_schedulable[^\{]*\{[^}]*CPU_SCHEDULERS' \
@@ -134,3 +135,13 @@ require 'pub fn for_ticket[\s\S]*outgoing\.generation == ticket' \
     "$handoff" 'handoff lookup must validate the exact incoming ticket'
 require 'pub fn complete[\s\S]*self\.for_ticket\(ticket\)\?[\s\S]*self\.outgoing = None' \
     "$handoff" 'completion must validate before releasing outgoing context ownership'
+
+# The private transition modules retain the same scheduling-state constraints.
+for module in src/kernel/task/scheduler/state/*.rs; do
+    reject '(FallibleArc|Arc<|\*mut Thread|\*const Thread)' "$module" \
+        'CPU scheduler ownership must not use shared or raw Thread handles'
+    reject 'FAIR_READY' "$module" \
+        'Fair-ready state must not be duplicated in an atomic mirror'
+    reject 'if[^\n]*schedule_owner_cpu\([^\n]*\n([^\n]*\n){0,4}[^\n]*with_cpu_schedule_stored' \
+        "$module" 'CPU-owned entry routing must use cpu_lock_required_for instead of recursive observation checks'
+done

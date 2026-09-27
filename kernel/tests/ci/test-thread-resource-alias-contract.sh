@@ -16,6 +16,7 @@ copy_sources() {
     cp "$root/src/kernel/task/external_execution.rs" \
         "$fixture/src/kernel/task/external_execution.rs"
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
+    cp -R "$root/src/kernel/task/scheduler/state/." "$fixture/src/kernel/task/scheduler/state"
     cp "$root/src/kernel/task/scheduler/mod.rs" "$fixture/src/kernel/task/scheduler/mod.rs"
     cp "$root/src/kernel/entry/user.rs" "$fixture/src/kernel/entry/user.rs"
 }
@@ -55,7 +56,7 @@ mutate 'user payload lost interior raw-pointer ownership' \
     'User(Box<UnsafeCell<crate::kernel::process::UserExecution>>)' \
     'User(Box<crate::kernel::process::UserExecution>)'
 mutate 'vCPU lookup again relied on a mutable payload borrow' \
-    src/kernel/task/scheduler/state.rs \
+    src/kernel/task/scheduler/state/local.rs \
     'vcpu_execution_pointer()' 'vcpu_execution_mut()'
 mutate 'native-user owner pointer became an exclusive reference' \
     src/kernel/entry/user.rs \

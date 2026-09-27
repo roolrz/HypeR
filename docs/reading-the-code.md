@@ -446,8 +446,11 @@ Read these in order:
    as identical.
 2. [Scheduler state](../kernel/src/kernel/task/scheduler/state.rs) and
    [queues](../kernel/src/kernel/task/scheduler/queue.rs) decide where a Thread
-   resides and whether it can run. [Policy](../kernel/src/kernel/task/policy.rs)
-   defines priority and CPU masks.
+   resides and whether it can run. The state owner retains registry, CPU locks,
+   context-switch commit and retirement. Its private
+   [CPU-local decisions](../kernel/src/kernel/task/scheduler/state/local.rs) module
+   handles local scheduling and observations under the matching CPU lock.
+   [Policy types](../kernel/src/kernel/task/policy.rs) define priority and CPU masks.
 3. [Wait records](../kernel/src/kernel/task/wait.rs) track a particular wait
    attempt, its ticket and outcome. [Waiting transitions](../kernel/src/kernel/task/scheduler/state/waiting.rs)
    connect that protocol to scheduling; [timeouts](../kernel/src/kernel/task/timeout.rs)

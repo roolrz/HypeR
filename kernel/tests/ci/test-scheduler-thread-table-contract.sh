@@ -19,6 +19,7 @@ copy_sources() {
     cp "$root/src/kernel/task/scheduler/queue.rs" "$fixture/src/kernel/task/scheduler/queue.rs"
     cp "$root/src/kernel/task/scheduler/switch_handoff.rs" "$fixture/src/kernel/task/scheduler/switch_handoff.rs"
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
+    cp -R "$root/src/kernel/task/scheduler/state/." "$fixture/src/kernel/task/scheduler/state"
     cp "$root/src/kernel/task/scheduler/mod.rs" "$fixture/src/kernel/task/scheduler/mod.rs"
 }
 
@@ -50,7 +51,7 @@ mutate 'queue counter overflow stopped being preflighted' \
 mutate 'ready ownership publication disappeared' \
     src/kernel/task/thread.rs 'publish_ready_ownership' 'publish_ready_state'
 mutate 'crash observation resumed scanning the current stack' \
-    src/kernel/task/scheduler/state.rs 'stack_statistics: None' \
+    src/kernel/task/scheduler/state/local.rs 'stack_statistics: None' \
     'stack_statistics: thread.kernel_stack_statistics()'
 mutate 'stopped-stack scan lost its closure-bounded second lookup' \
     src/kernel/task/scheduler/state.rs \
@@ -65,7 +66,7 @@ mutate 'control queue lost its registry-only mutation authority' \
 mutate 'waiting insertion bypassed the control queue API' \
     src/kernel/task/scheduler/state.rs 'queue::control_push' 'queue::push'
 mutate 'crash observation changed from a try-lock to a blocking CPU lock' \
-    src/kernel/task/scheduler/state.rs '.try_with(|slot|' '.with(|slot|'
+    src/kernel/task/scheduler/state/local.rs '.try_with(|slot|' '.with(|slot|'
 
 copy_sources
 python3 - "$fixture/src/kernel/mm/stack.rs" <<'PY'

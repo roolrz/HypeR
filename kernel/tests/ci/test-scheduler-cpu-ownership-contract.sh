@@ -12,10 +12,10 @@ trap 'rm -rf "$fixture"' EXIT HUP INT TERM
 copy_sources() {
     rm -rf "$fixture/src"
     mkdir -p "$fixture/src/kernel/task/scheduler/state"
-    cp "$root/src/kernel/task/scheduler/state/waiting.rs" "$fixture/src/kernel/task/scheduler/state/waiting.rs"
     cp "$root/src/kernel/task/thread.rs" "$fixture/src/kernel/task/thread.rs"
     cp "$root/src/kernel/task/scheduler/switch_handoff.rs" "$fixture/src/kernel/task/scheduler/switch_handoff.rs"
     cp "$root/src/kernel/task/scheduler/state.rs" "$fixture/src/kernel/task/scheduler/state.rs"
+    cp -R "$root/src/kernel/task/scheduler/state/." "$fixture/src/kernel/task/scheduler/state"
     cp "$root/src/kernel/task/scheduler/registry.rs" "$fixture/src/kernel/task/scheduler/registry.rs"
     cp "$root/src/kernel/task/scheduler/queue.rs" "$fixture/src/kernel/task/scheduler/queue.rs"
     cp "$root/src/kernel/task/scheduler/mod.rs" "$fixture/src/kernel/task/scheduler/mod.rs"
@@ -46,7 +46,7 @@ mutate 'schedule storage stopped being address stable' \
     src/kernel/task/thread.rs \
     'UnsafeCell<ThreadScheduleState>' 'ThreadScheduleState'
 mutate 'tick stopped reading the locked run-queue topology' \
-    src/kernel/task/scheduler/state.rs \
+    src/kernel/task/scheduler/state/local.rs \
     'local.run_queue.has_fair_threads()' 'false'
 mutate 'placement admission reacquired the target CPU scheduler lock' \
     src/kernel/task/scheduler/state.rs \
@@ -55,8 +55,8 @@ mutate 'local ready authority gained coordinator capability' \
     src/kernel/task/scheduler/queue.rs \
     'cpu: CpuThreadTableAuthority' 'coordinator: ThreadTableWriteAuthority'
 mutate 'ordinary yield stopped using the local CPU path' \
-    src/kernel/task/scheduler/state.rs \
-    'pub(super) fn prepare_local_yield' 'pub(super) fn removed_local_yield'
+    src/kernel/task/scheduler/state/local.rs \
+    'pub(in crate::kernel::task::scheduler) fn prepare_local_yield' 'pub(in crate::kernel::task::scheduler) fn removed_local_yield'
 mutate 'switch tail bypassed local completion' \
     src/kernel/task/scheduler/mod.rs \
     'state::complete_local_switch_tail(cpu, ticket)' 'Ok(state::LocalTailCompletion::NeedsCoordinator)'
