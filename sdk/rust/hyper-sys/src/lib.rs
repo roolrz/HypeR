@@ -11,9 +11,20 @@
 
 pub mod allocator;
 
-pub use hyper_abi as abi;
+mod ffi;
+mod startup;
+mod system;
 
-use core::ffi::c_char;
+pub use hyper_abi as abi;
+pub use startup::{AuxiliaryEntry, RawStartup, startup_find_handle};
+pub use system::{abi_query, clock_get_monotonic, clock_get_realtime, system_config};
+
+use ffi::{
+    ffi_atomic_wait, ffi_atomic_wake, ffi_byte_channel_read, ffi_byte_channel_write,
+    ffi_console_read, ffi_console_write, ffi_handle_close, ffi_native_call6, ffi_object_wait_one,
+    ffi_process_exit, ffi_thread_create, ffi_thread_exit, ffi_thread_request_stop,
+    ffi_thread_sleep, ffi_thread_start, ffi_thread_yield,
+};
 
 /// Register result returned by one `HypeR` Native syscall.
 #[repr(C)]
@@ -24,183 +35,8 @@ pub struct CallResult {
     pub value1: u64,
 }
 
-/// One architecture-width auxiliary-vector entry.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct AuxiliaryEntry {
-    pub key: usize,
-    pub value: usize,
-}
-
-/// Parsed process-startup view produced by the Native C runtime.
-#[repr(C)]
-#[derive(Debug)]
-pub struct RawStartup {
-    pub argument_count: usize,
-    pub arguments: *const *const c_char,
-    pub environment_count: usize,
-    pub environment: *const *const c_char,
-    pub auxiliary_count: usize,
-    pub auxiliary: *const AuxiliaryEntry,
-    pub handle_count: usize,
-    pub handles: *const abi::HyperNativeStartupHandle,
-}
-
 const _: () = assert!(core::mem::size_of::<CallResult>() == 24);
 const _: () = assert!(core::mem::align_of::<CallResult>() == 8);
-const _: () = assert!(core::mem::size_of::<AuxiliaryEntry>() == 2 * core::mem::size_of::<usize>());
-const _: () = assert!(core::mem::align_of::<AuxiliaryEntry>() == core::mem::align_of::<usize>());
-const _: () = assert!(core::mem::size_of::<RawStartup>() == 8 * core::mem::size_of::<usize>());
-const _: () = assert!(core::mem::align_of::<RawStartup>() == core::mem::align_of::<usize>());
-const _: () = assert!(core::mem::offset_of!(RawStartup, argument_count) == 0);
-const _: () =
-    assert!(core::mem::offset_of!(RawStartup, arguments) == core::mem::size_of::<usize>());
-const _: () =
-    assert!(core::mem::offset_of!(RawStartup, handles) == 7 * core::mem::size_of::<usize>());
-
-unsafe extern "C" {
-    #[link_name = "hyper_native_call6"]
-    fn ffi_native_call6(
-        number: u64,
-        argument0: u64,
-        argument1: u64,
-        argument2: u64,
-        argument3: u64,
-        argument4: u64,
-        argument5: u64,
-    ) -> CallResult;
-
-    #[link_name = "hyper_abi_query"]
-    fn ffi_abi_query() -> CallResult;
-
-    #[link_name = "hyper_clock_get_monotonic"]
-    fn ffi_clock_get_monotonic() -> CallResult;
-
-    #[link_name = "hyper_startup_find_handle"]
-    fn ffi_startup_find_handle(
-        startup: *const RawStartup,
-        purpose: u32,
-        handle: *mut abi::HyperNativeHandle,
-    ) -> abi::HyperNativeStatus;
-
-    #[link_name = "hyper_handle_close"]
-    fn ffi_handle_close(handle: abi::HyperNativeHandle) -> abi::HyperNativeStatus;
-
-    #[link_name = "hyper_object_wait_one"]
-    fn ffi_object_wait_one(
-        object: abi::HyperNativeHandle,
-        signals: u64,
-        deadline: u64,
-    ) -> CallResult;
-
-    #[link_name = "hyper_byte_channel_write"]
-    fn ffi_byte_channel_write(
-        endpoint: abi::HyperNativeHandle,
-        bytes: *const u8,
-        byte_count: usize,
-    ) -> abi::HyperNativeStatus;
-
-    #[link_name = "hyper_byte_channel_read"]
-    fn ffi_byte_channel_read(
-        endpoint: abi::HyperNativeHandle,
-        bytes: *mut u8,
-        byte_capacity: usize,
-    ) -> CallResult;
-
-    #[link_name = "hyper_console_read"]
-    fn ffi_console_read(
-        console: abi::HyperNativeHandle,
-        bytes: *mut u8,
-        capacity: usize,
-    ) -> CallResult;
-
-    #[link_name = "hyper_console_write"]
-    fn ffi_console_write(
-        console: abi::HyperNativeHandle,
-        bytes: *const u8,
-        count: usize,
-    ) -> CallResult;
-
-    #[link_name = "hyper_thread_create"]
-    fn ffi_thread_create(
-        entry: u64,
-        stack: u64,
-        tls: u64,
-        argument: u64,
-        affinity_words: *const u64,
-        affinity_word_count: usize,
-    ) -> CallResult;
-    #[link_name = "hyper_thread_start"]
-    fn ffi_thread_start(thread: u64) -> abi::HyperNativeStatus;
-    #[link_name = "hyper_thread_request_stop"]
-    fn ffi_thread_request_stop(thread: u64) -> abi::HyperNativeStatus;
-    #[link_name = "hyper_atomic_wait"]
-    fn ffi_atomic_wait(address: *const u32, expected: u32, deadline: u64)
-    -> abi::HyperNativeStatus;
-    #[link_name = "hyper_atomic_wake"]
-    fn ffi_atomic_wake(address: *const u32, count: u32) -> CallResult;
-    #[link_name = "hyper_thread_sleep"]
-    fn ffi_thread_sleep(deadline: u64) -> abi::HyperNativeStatus;
-    #[link_name = "hyper_thread_yield"]
-    fn ffi_thread_yield() -> abi::HyperNativeStatus;
-
-    #[link_name = "hyper_thread_exit"]
-    fn ffi_thread_exit(status: i64) -> !;
-
-    #[link_name = "hyper_process_exit"]
-    fn ffi_process_exit(status: i64) -> !;
-}
-
-/// Queries the Native ABI revision and feature mask.
-///
-/// # Safety
-///
-/// The caller must be executing as a `HypeR` Native process through the runtime
-/// and syscall veneer installed with this crate.
-#[inline]
-pub unsafe fn abi_query() -> CallResult {
-    // SAFETY: the caller establishes the Native runtime and syscall contract.
-    unsafe { ffi_abi_query() }
-}
-
-/// Queries a public scalar system configuration item.
-///
-/// # Safety
-/// The caller must execute as a Native process with the matching syscall veneer.
-#[inline]
-pub unsafe fn system_config(key: u64) -> CallResult {
-    // SAFETY: caller establishes the Native execution contract; no pointers.
-    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_SYSTEM_CONFIG, key, 0, 0, 0, 0, 0) }
-}
-
-/// Reads absolute nanoseconds from the kernel monotonic clock domain.
-///
-/// # Safety
-///
-/// The caller must be executing as a `HypeR` Native process through the runtime
-/// and syscall veneer installed with this crate.
-#[inline]
-pub unsafe fn clock_get_monotonic() -> CallResult {
-    // SAFETY: the caller establishes the Native runtime and syscall contract.
-    unsafe { ffi_clock_get_monotonic() }
-}
-
-/// Finds one handle in a C-runtime-validated startup record.
-///
-/// # Safety
-///
-/// `startup` must point to a live `RawStartup` produced by the matching Native
-/// runtime. `handle` must be valid and writable for one handle value. The
-/// returned raw value remains owned by the process handle table.
-#[inline]
-pub unsafe fn startup_find_handle(
-    startup: *const RawStartup,
-    purpose: u32,
-    handle: *mut abi::HyperNativeHandle,
-) -> abi::HyperNativeStatus {
-    // SAFETY: the caller supplies both pointer validity contracts.
-    unsafe { ffi_startup_find_handle(startup, purpose, handle) }
-}
 
 /// Closes one raw process handle.
 ///
@@ -2616,17 +2452,6 @@ pub unsafe fn file_lock(file: abi::HyperNativeHandle, mode: u32, deadline: u64) 
 pub unsafe fn file_unlock(file: abi::HyperNativeHandle) -> CallResult {
     // SAFETY: the caller establishes handle lifetime and buffer validity.
     unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_FILE_UNLOCK, file, 0, 0, 0, 0, 0) }
-}
-
-/// Invokes Native `clock_get_realtime`.
-///
-/// # Safety
-/// Borrowed handles must stay live with required rights. Input pointers must
-/// reference readable initialized records or the specified byte ranges; output
-/// pointers must exclusively reference writable records or byte ranges.
-pub unsafe fn clock_get_realtime() -> CallResult {
-    // SAFETY: the caller establishes handle lifetime and buffer validity.
-    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_CLOCK_GET_REALTIME, 0, 0, 0, 0, 0, 0) }
 }
 
 /// Invokes Native `directory_open_file_with_options`.
