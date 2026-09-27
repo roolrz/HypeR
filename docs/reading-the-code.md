@@ -371,6 +371,7 @@ Read [vm-runtime disk setup](../app/vm-runtime/src/disk.rs),
 [The runtime control loop](../app/vm-runtime/src/control.rs) services deferred
 MMIO and backend replies without holding the vCPU in a synchronous RPC.
 The [I/O broker](../app/io-runtime/src/runtime/broker/mod.rs) authorizes client sessions;
+[client bindings](../app/io-runtime/src/runtime/broker/client.rs) own their admission and retirement;
 [broker exchange](../app/io-runtime/src/broker_exchange.rs) handles their control
 traffic. [The protocol](../app/vm-support/src/io_protocol.rs) defines the
 negotiation records.
