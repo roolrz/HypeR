@@ -1,10 +1,8 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-#[path = "broker.rs"]
 mod broker;
-#[path = "managed.rs"]
-mod managed;
+mod storage;
 
 use hyper_io_runtime::guest_log::GuestLog;
 use hyper_os::guest_io::Mailbox;
@@ -86,7 +84,7 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
     };
     let profile = device::profile_info(physical.as_handle_ref()).map_err(show)?;
     let mut client = ready
-        .map(|ready| managed::Client::prepare(authority, ready))
+        .map(|ready| storage::NativeStorage::prepare(authority, ready))
         .transpose()?;
     let image = Image::load("/vm/io.itb")?;
     if image.plan.memory_size() != RAM_BYTES {
@@ -301,7 +299,7 @@ fn supervise(
     guest: &mut InstalledGuest,
     mailbox: &Mailbox,
     guest_log: &mut GuestLog,
-    mut client: Option<&mut managed::Client>,
+    mut client: Option<&mut storage::NativeStorage>,
     mut broker: Option<&mut broker::Broker>,
 ) -> Result<()> {
     // HELLO has no DMA/queue side effects. There is deliberately no periodic

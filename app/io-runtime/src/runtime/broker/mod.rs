@@ -3,7 +3,6 @@
 
 //! Board-scoped ownership of mailbox control and dynamic guest mappings.
 
-#[path = "broker_listener.rs"]
 mod listener;
 
 use super::{Result, check_deadline, deadline, show};
