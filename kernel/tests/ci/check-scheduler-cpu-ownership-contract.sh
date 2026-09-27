@@ -11,6 +11,7 @@ cd "$root"
 thread=src/kernel/task/thread.rs
 state=src/kernel/task/scheduler/state.rs
 local_state=src/kernel/task/scheduler/state/local.rs
+migration=src/kernel/task/scheduler/state/migration.rs
 handoff=src/kernel/task/scheduler/switch_handoff.rs
 registry=src/kernel/task/scheduler/registry.rs
 queue=src/kernel/task/scheduler/queue.rs
@@ -89,7 +90,7 @@ require 'fn begin_wait[\s\S]*read_scheduler[\s\S]*arm_wait_shared' \
 require 'fn wake_one_with[\s\S]*read_scheduler[\s\S]*notify_one_shared' \
     "$scheduler" 'wakeups must bypass exclusive coordination'
 require 'fn move_blocked_thread[\s\S]*release_schedule[\s\S]*reassign_stopped_with_affinity[\s\S]*deferred_blocked_handoff' \
-    "$state" 'blocked migration must transfer CPU residence after releasing the source lock'
+    "$migration" 'blocked migration must transfer CPU residence after releasing the source lock'
 require 'pub fn queue_terminated_retirement[\s\S]*schedule_owner_cpu[\s\S]*QueueMembership::Terminated[\s\S]*registry\.begin_retirement' \
     "$state" 'termination must stage exact identity-directed retirement'
 require 'request_user_stop\(id, reason\)[\s\S]*queue_terminated_retirement\(id\)[\s\S]*crate::kernel::reaper::request' \

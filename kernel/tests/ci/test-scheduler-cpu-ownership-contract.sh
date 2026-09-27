@@ -87,7 +87,7 @@ mutate 'registry readers returned to a single exclusive lock' \
     src/kernel/task/scheduler/mod.rs \
     'InterruptShardedLock<Option<Scheduler>' 'InterruptSpinLock<Option<Scheduler>'
 mutate 'blocked migration stopped transferring CPU residence' \
-    src/kernel/task/scheduler/state.rs \
+    src/kernel/task/scheduler/state/migration.rs \
     'fn move_blocked_thread' 'fn removed_blocked_migration'
 
 mutate 'switch handoff stopped validating the incoming generation' \
