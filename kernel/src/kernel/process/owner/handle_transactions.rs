@@ -3,7 +3,7 @@
 
 //! Linear Process handle reservation, transfer, and consumption transactions.
 
-use super::require_handle_phase;
+use super::handles::require_handle_phase;
 use super::{
     HandleAccounting, HandleChargeRecord, Process, ProcessError, ProcessId, ProcessState,
     process_invariant_violation,
