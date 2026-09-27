@@ -25,6 +25,12 @@ should normally depend only on `hyper-os` and `hyper-rt`. `hyper-os` is an
 application-independent semantic layer and keeps Rust standard-library
 platform adapters separate from its stable-facing capability interfaces.
 
+Within `hyper-sys`, syscall bindings are grouped by capability family: task,
+memory, filesystem, IPC, VM, device, and guest I/O. `ffi.rs` declares the C
+runtime veneers, and `startup.rs` owns the startup record layouts. The crate
+root explicitly re-exports the raw functions and types used by runtime
+consumers.
+
 The safe layer includes bounded byte streams, transactional capability
 rendezvous, startup-capability parsing, directory access, physical and emergency
 Console access, object waits, and staged Process construction. Rust owners keep
