@@ -3,27 +3,52 @@
 
 //! Native syscall leaf handlers.
 
-use hyper::abi::native::{
-    HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE,
-    HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY, HYPER_NATIVE_DIRECTORY_INFO_MIN_SIZE,
-    HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES, HYPER_NATIVE_FEATURE_CORE,
-    HYPER_NATIVE_FILE_INFO_MIN_SIZE, HYPER_NATIVE_FILE_MAX_READ_BYTES,
-    HYPER_NATIVE_HANDLE_INFO_MIN_SIZE, HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE,
-    HYPER_NATIVE_OBJECT_BASIC_INFO_MIN_SIZE, HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES,
-    HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES, HYPER_NATIVE_PROCESS_INFO_MIN_SIZE,
-    HYPER_NATIVE_PROCESS_NAME_MAX_BYTES, HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL,
-    HYPER_NATIVE_STATUS_CANCELLED, HYPER_NATIVE_STATUS_INTERNAL,
-    HYPER_NATIVE_STATUS_INVALID_ARGUMENT, HYPER_NATIVE_STATUS_NOT_SUPPORTED,
-    HYPER_NATIVE_STATUS_TIMED_OUT, HYPER_NATIVE_SYS_BYTE_CHANNEL_READ,
-    HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_CONSOLE_READ,
-    HYPER_NATIVE_SYS_CONSOLE_WRITE, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
-    HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE, HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE,
-    HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES, HyperNativeCpuObservation, HyperNativeDirectoryEntry,
-    HyperNativeDirectoryInfo, HyperNativeFileInfo, HyperNativeMemoryObservation,
-    HyperNativeObjectInspection, HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread,
-    HyperNativeVirtualCpuInfo, HyperNativeVirtualMachineInfo, NativeResult,
+mod console;
+mod handles;
+mod system;
+mod task;
+
+pub(super) use console::{sys_console_read, sys_console_write};
+pub(super) use handles::{
+    sys_handle_close, sys_handle_duplicate, sys_handle_get_info, sys_handle_replace,
+    sys_object_get_basic_info,
+};
+pub(super) use system::{
+    sys_abi_query, sys_clock_get_monotonic, sys_not_supported, sys_system_config,
+};
+pub(super) use task::{
+    sys_atomic_wait, sys_atomic_wake, sys_process_exit, sys_process_get_current_id,
+    sys_process_get_info, sys_process_request_stop, sys_resource_domain_create,
+    sys_task_group_create, sys_thread_create, sys_thread_exit, sys_thread_request_stop,
+    sys_thread_sleep, sys_thread_start, sys_thread_yield,
 };
 
+use super::Arguments;
+use super::services::ObjectServiceError;
+use super::services::{
+    DeferredAction, InspectServices, IpcServices, MemoryServices, ObjectServices,
+    ProcessBuilderServices, SystemInspectServices, VfsServices, VmServices,
+};
+use super::status::{
+    console_io_result, failure, handle_result, info_result, scan_result, status_from_address_error,
+    status_from_byte_channel_service_error, status_from_capability_channel_error,
+    status_from_capability_channel_service_error, status_from_inspection_error,
+    status_from_memory_service_error, status_from_object_service_error,
+    status_from_process_builder_service_error, status_from_vfs_service_error,
+    status_from_vm_service_error, status_only, success,
+};
+use super::wire::{
+    copy_directory_page, copy_encoded_page, copy_info_record, decode_virtual_cpu_bootstrap,
+    decode_virtual_machine_configuration, encode_cpu_observation, encode_directory_info,
+    encode_file_info, encode_handle_inspection, encode_memory_observation,
+    encode_object_inspection, encode_task_process, encode_task_thread, encode_virtual_cpu_info,
+    encode_virtual_machine_info, optional_user_slice, parse_affinity_request, parse_builder_create,
+    parse_builder_handle, parse_builder_text, parse_byte_channel_io,
+    parse_capability_channel_receive, parse_capability_channel_send, parse_handle,
+    parse_handle_inspector_scan, parse_inspector_derivation, parse_inspector_scan,
+    parse_single_handle, parse_two_handles, parse_virtual_serial_io, parse_wait_many,
+    prepare_info_request, require_zero,
+};
 use crate::kernel::capability::{HandleValue, Rights};
 use crate::kernel::inspect::{OBJECT_PAGE_CAPACITY, Page};
 use crate::kernel::ipc::{
@@ -31,195 +56,26 @@ use crate::kernel::ipc::{
 };
 use crate::kernel::mm::user_space::{UserAddress, UserSlice};
 use crate::kernel::object::{SignalWaitManyOutcome, SignalWaitOutcome};
-
-use super::Arguments;
-use super::services::ObjectServiceError;
-use super::services::{
-    ConsoleServices, DeferredAction, HandleServices, HierarchyServices, ImmediateServices,
-    InspectServices, IpcServices, MemoryServices, ObjectServices, ProcessBuilderServices,
-    SystemInspectServices, TaskServices, VfsServices, VmServices,
-};
-use super::status::{
-    console_io_result, failure, handle_result, info_result, scan_result, status_from_address_error,
-    status_from_byte_channel_service_error, status_from_capability_channel_error,
-    status_from_capability_channel_service_error, status_from_console_service_error,
-    status_from_hierarchy_error, status_from_inspection_error, status_from_memory_service_error,
-    status_from_object_service_error, status_from_process_builder_service_error,
-    status_from_process_error, status_from_vfs_service_error, status_from_vm_service_error,
-    status_only, success,
-};
-use super::wire::{
-    HANDLE_INFO_SIZE, OBJECT_BASIC_INFO_SIZE, PROCESS_INFO_SIZE, copy_directory_page,
-    copy_encoded_page, copy_info_record, decode_resource_limits, decode_virtual_cpu_bootstrap,
-    decode_virtual_machine_configuration, encode_cpu_observation, encode_directory_info,
-    encode_file_info, encode_handle_info, encode_handle_inspection, encode_memory_observation,
-    encode_object_basic_info, encode_object_inspection, encode_process_info, encode_task_process,
-    encode_task_thread, encode_virtual_cpu_info, encode_virtual_machine_info, optional_user_slice,
-    parse_affinity_request, parse_affinity_words, parse_builder_create, parse_builder_handle,
-    parse_builder_text, parse_byte_channel_io, parse_capability_channel_receive,
-    parse_capability_channel_send, parse_console_io, parse_handle, parse_handle_and_rights,
-    parse_handle_inspector_scan, parse_inspector_derivation, parse_inspector_scan,
-    parse_single_handle, parse_two_handles, parse_virtual_serial_io, parse_wait_many,
-    prepare_info_request, require_zero,
+use hyper::abi::native::{
+    HYPER_NATIVE_CPU_OBSERVATION_MIN_SIZE, HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY,
+    HYPER_NATIVE_DIRECTORY_INFO_MIN_SIZE, HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES,
+    HYPER_NATIVE_FILE_INFO_MIN_SIZE, HYPER_NATIVE_FILE_MAX_READ_BYTES,
+    HYPER_NATIVE_MEMORY_OBSERVATION_MIN_SIZE, HYPER_NATIVE_PROCESS_ARGUMENT_MAX_BYTES,
+    HYPER_NATIVE_PROCESS_ENVIRONMENT_MAX_BYTES, HYPER_NATIVE_PROCESS_NAME_MAX_BYTES,
+    HYPER_NATIVE_STATUS_BUFFER_TOO_SMALL, HYPER_NATIVE_STATUS_CANCELLED,
+    HYPER_NATIVE_STATUS_INTERNAL, HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
+    HYPER_NATIVE_STATUS_TIMED_OUT, HYPER_NATIVE_SYS_BYTE_CHANNEL_READ,
+    HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE, HYPER_NATIVE_SYS_VIRTUAL_SERIAL_WRITE,
+    HYPER_NATIVE_VIRTUAL_CPU_INFO_MIN_SIZE, HYPER_NATIVE_VIRTUAL_MACHINE_INFO_MIN_SIZE,
+    HYPER_NATIVE_VMO_MAX_TRANSFER_BYTES, HyperNativeCpuObservation, HyperNativeDirectoryEntry,
+    HyperNativeDirectoryInfo, HyperNativeFileInfo, HyperNativeMemoryObservation,
+    HyperNativeObjectInspection, HyperNativeStatus, HyperNativeTaskProcess, HyperNativeTaskThread,
+    HyperNativeVirtualCpuInfo, HyperNativeVirtualMachineInfo, NativeResult,
 };
 
 // Keep each syscall as a distinct machine frame. The routing match must not
 // inherit the largest handler's stack requirement, and crash traces should
 // identify the operation which was active at the fault boundary.
-
-#[inline(never)]
-pub(super) fn sys_abi_query(
-    _services: &impl ImmediateServices,
-    _arguments: &Arguments,
-) -> NativeResult {
-    success([HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_FEATURE_CORE])
-}
-
-#[inline(never)]
-pub(super) fn sys_system_config(
-    _services: &impl ImmediateServices,
-    arguments: &Arguments,
-) -> NativeResult {
-    if let Err(status) = require_zero(&arguments[1..]) {
-        return failure(status);
-    }
-    match arguments[0] {
-        hyper::abi::native::HYPER_NATIVE_SYSTEM_CONFIG_PAGE_SIZE => {
-            success([hyper::mm::PAGE_SIZE, 0])
-        }
-        hyper::abi::native::HYPER_NATIVE_SYSTEM_CONFIG_APPLICATION_ADDRESS_LIMIT => {
-            match crate::hal::user::address_space_plan() {
-                Ok(plan) => success([plan.application_limit(), 0]),
-                Err(_) => failure(HYPER_NATIVE_STATUS_INTERNAL),
-            }
-        }
-        _ => failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED),
-    }
-}
-
-#[inline(never)]
-pub(super) fn sys_clock_get_monotonic(
-    _services: &impl ImmediateServices,
-    arguments: &Arguments,
-) -> NativeResult {
-    let result = require_zero(arguments).and_then(|()| {
-        crate::kernel::time::monotonic_nanoseconds().map_err(|_| HYPER_NATIVE_STATUS_INTERNAL)
-    });
-    match result {
-        Ok(nanoseconds) => success([nanoseconds, 0]),
-        Err(status) => failure(status),
-    }
-}
-
-#[inline(never)]
-pub(super) fn sys_handle_close(
-    services: &impl ImmediateServices,
-    arguments: &Arguments,
-) -> NativeResult {
-    let result = parse_handle(arguments[0]).and_then(|value| {
-        services
-            .close_handle(value)
-            .map_err(status_from_process_error)
-    });
-    status_only(result)
-}
-
-#[inline(never)]
-pub(super) fn sys_handle_duplicate(
-    services: &impl HandleServices,
-    arguments: &Arguments,
-) -> NativeResult {
-    let result = parse_handle_and_rights(arguments[0], arguments[1]).and_then(|(value, rights)| {
-        services
-            .duplicate_handle(value, rights)
-            .map_err(status_from_process_error)
-    });
-    handle_result(result)
-}
-
-#[inline(never)]
-pub(super) fn sys_handle_replace(
-    services: &impl HandleServices,
-    arguments: &Arguments,
-) -> NativeResult {
-    let result = parse_handle_and_rights(arguments[0], arguments[1]).and_then(|(value, rights)| {
-        services
-            .replace_handle(value, rights)
-            .map_err(status_from_process_error)
-    });
-    handle_result(result)
-}
-
-#[inline(never)]
-pub(super) fn sys_handle_get_info(
-    services: &(impl HandleServices + super::services::UserMemoryServices),
-    arguments: &Arguments,
-) -> NativeResult {
-    let result = prepare_info_request(
-        arguments,
-        HYPER_NATIVE_HANDLE_INFO_MIN_SIZE,
-        HANDLE_INFO_SIZE,
-    )
-    .and_then(|request| {
-        let value = request.value;
-        let info = services
-            .handle_info(value, Rights::NONE)
-            .map_err(status_from_process_error)?;
-        let record = encode_handle_info(info);
-        copy_info_record(services, request, &record)
-    });
-    info_result(result)
-}
-
-#[inline(never)]
-pub(super) fn sys_object_get_basic_info(
-    services: &(impl HandleServices + super::services::UserMemoryServices),
-    arguments: &Arguments,
-) -> NativeResult {
-    let result = prepare_info_request(
-        arguments,
-        HYPER_NATIVE_OBJECT_BASIC_INFO_MIN_SIZE,
-        OBJECT_BASIC_INFO_SIZE,
-    )
-    .and_then(|request| {
-        let value = request.value;
-        let info = services
-            .handle_info(value, Rights::INSPECT)
-            .map_err(status_from_process_error)?;
-        let record = encode_object_basic_info(info);
-        copy_info_record(services, request, &record)
-    });
-    info_result(result)
-}
-
-#[inline(never)]
-pub(super) fn sys_resource_domain_create(
-    services: &impl HierarchyServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_handle(arguments[0]).and_then(|parent| {
-        let limits = decode_resource_limits(services, arguments)?;
-        services
-            .create_resource_domain(parent, limits)
-            .map_err(status_from_hierarchy_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_task_group_create(
-    services: &impl HierarchyServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_handle(arguments[0]).and_then(|factory| {
-        let domain = parse_handle(arguments[1])?;
-        require_zero(&arguments[2..])?;
-        services
-            .create_task_group(factory, domain)
-            .map_err(status_from_hierarchy_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
 
 #[inline(never)]
 pub(super) fn sys_event_create(
@@ -281,30 +137,6 @@ pub(super) fn sys_event_signal(
             .map_err(status_from_object_service_error)
     });
     DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_not_supported() -> NativeResult {
-    failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED)
-}
-
-#[inline(never)]
-pub(super) fn sys_thread_yield() -> DeferredAction {
-    DeferredAction::Yield(success([0, 0]))
-}
-
-#[inline(never)]
-pub(super) fn sys_thread_exit(arguments: &Arguments) -> DeferredAction {
-    DeferredAction::ExitThread {
-        status: arguments[0] as i64,
-    }
-}
-
-#[inline(never)]
-pub(super) fn sys_process_exit(arguments: &Arguments) -> DeferredAction {
-    DeferredAction::ExitProcess {
-        status: arguments[0] as i64,
-    }
 }
 
 #[inline(never)]
@@ -576,40 +408,6 @@ pub(super) fn sys_process_builder_abort(
 }
 
 #[inline(never)]
-pub(super) fn sys_process_request_stop(
-    services: &impl TaskServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_handle(arguments[0]).and_then(|process| {
-        services
-            .request_process_stop(process)
-            .map_err(status_from_process_error)
-    });
-    DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_process_get_info(
-    services: &impl TaskServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = prepare_info_request(
-        arguments,
-        HYPER_NATIVE_PROCESS_INFO_MIN_SIZE,
-        PROCESS_INFO_SIZE,
-    )
-    .and_then(|request| {
-        let process = request.value;
-        let snapshot = services
-            .process_info(process)
-            .map_err(status_from_process_error)?;
-        let record = encode_process_info(snapshot);
-        copy_info_record(services, request, &record)
-    });
-    DeferredAction::Return(info_result(result))
-}
-
-#[inline(never)]
 pub(super) fn sys_task_inspector_scan_processes(
     services: &impl InspectServices,
     arguments: &Arguments,
@@ -801,32 +599,6 @@ pub(super) fn sys_cpu_inspector_read(
         copy_info_record(services, request, &encode_cpu_observation(observation))
     });
     DeferredAction::Return(info_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_console_read(
-    services: &impl ConsoleServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_console_io(arguments).and_then(|(console, bytes)| {
-        services
-            .read_console(console, bytes)
-            .map_err(status_from_console_service_error)
-    });
-    DeferredAction::Return(console_io_result(HYPER_NATIVE_SYS_CONSOLE_READ, result))
-}
-
-#[inline(never)]
-pub(super) fn sys_console_write(
-    services: &impl ConsoleServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_console_io(arguments).and_then(|(console, bytes)| {
-        services
-            .write_console(console, bytes)
-            .map_err(status_from_console_service_error)
-    });
-    DeferredAction::Return(console_io_result(HYPER_NATIVE_SYS_CONSOLE_WRITE, result))
 }
 
 #[inline(never)]
@@ -1401,85 +1173,6 @@ pub(super) fn sys_vmar_destroy(
 }
 
 #[inline(never)]
-pub(super) fn sys_thread_create(services: &impl TaskServices, args: &Arguments) -> NativeResult {
-    let affinity = if args[4] == 0 && args[5] == 0 {
-        Ok((None, 0))
-    } else {
-        parse_affinity_words(args[4], args[5])
-    };
-    handle_result(affinity.and_then(|(words, count)| {
-        services
-            .create_thread(args[0], args[1], args[2], args[3], words, count)
-            .map_err(status_from_object_service_error)
-    }))
-}
-#[inline(never)]
-pub(super) fn sys_thread_start(services: &impl TaskServices, args: &Arguments) -> NativeResult {
-    status_only(parse_single_handle(args).and_then(|handle| {
-        services
-            .start_thread(handle)
-            .map_err(status_from_process_error)
-    }))
-}
-#[inline(never)]
-pub(super) fn sys_thread_request_stop(
-    services: &impl TaskServices,
-    args: &Arguments,
-) -> NativeResult {
-    status_only(parse_single_handle(args).and_then(|handle| {
-        services
-            .stop_thread(handle)
-            .map_err(status_from_process_error)
-    }))
-}
-#[inline(never)]
-pub(super) fn sys_atomic_wait(services: &impl TaskServices, args: &Arguments) -> NativeResult {
-    let result = require_zero(&args[3..]).and_then(|()| {
-        let expected = u32::try_from(args[1]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
-        services
-            .atomic_wait(args[0], expected, args[2])
-            .map_err(status_from_object_service_error)
-    });
-    wait_status(result, false)
-}
-#[inline(never)]
-pub(super) fn sys_atomic_wake(services: &impl TaskServices, args: &Arguments) -> NativeResult {
-    match require_zero(&args[2..]).and_then(|()| {
-        let count = u32::try_from(args[1]).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
-        services
-            .atomic_wake(args[0], count)
-            .map_err(status_from_object_service_error)
-    }) {
-        Ok(count) => success([count, 0]),
-        Err(status) => failure(status),
-    }
-}
-#[inline(never)]
-pub(super) fn sys_thread_sleep(services: &impl TaskServices, args: &Arguments) -> NativeResult {
-    wait_status(
-        require_zero(&args[1..]).and_then(|()| {
-            services
-                .sleep_thread(args[0])
-                .map_err(status_from_object_service_error)
-        }),
-        true,
-    )
-}
-fn wait_status(
-    result: Result<crate::kernel::task::WaitOutcome, HyperNativeStatus>,
-    sleep: bool,
-) -> NativeResult {
-    use crate::kernel::task::WaitOutcome;
-    match result {
-        Ok(WaitOutcome::Notified) => success([0, 0]),
-        Ok(WaitOutcome::TimedOut) if sleep => success([0, 0]),
-        Ok(WaitOutcome::TimedOut) => failure(HYPER_NATIVE_STATUS_TIMED_OUT),
-        Ok(WaitOutcome::Cancelled) => failure(HYPER_NATIVE_STATUS_CANCELLED),
-        Err(status) => failure(status),
-    }
-}
-
-#[inline(never)]
 pub(super) fn sys_file_write_at(
     services: &impl VfsServices,
     arguments: &Arguments,
@@ -1689,18 +1382,6 @@ pub(super) fn sys_wait_set_wait(
             .map_err(status_from_object_service_error)
     })();
     DeferredAction::Return(status_only(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_process_get_current_id(
-    services: &impl ObjectServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    DeferredAction::Return(if arguments.iter().any(|value| *value != 0) {
-        failure(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
-    } else {
-        success([services.current_process_id(), 0])
-    })
 }
 
 #[inline(never)]
@@ -1965,6 +1646,7 @@ pub(super) fn sys_pending_virtual_machine_map_memory(
     })();
     DeferredAction::Return(status_only(result))
 }
+
 #[inline(never)]
 pub(super) fn sys_vmo_create_contiguous(
     services: &impl MemoryServices,
