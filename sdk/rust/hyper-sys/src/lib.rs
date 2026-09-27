@@ -12,18 +12,38 @@
 pub mod allocator;
 
 mod ffi;
+mod handle;
+mod inspect;
+mod ipc;
 mod startup;
 mod system;
+mod wait;
 
+pub use handle::{
+    handle_close, handle_duplicate, handle_get_info, handle_replace, object_get_basic_info,
+};
 pub use hyper_abi as abi;
+pub use inspect::{
+    cpu_inspector_read, memory_inspector_read, object_inspector_derive_process,
+    object_inspector_derive_resource_domain, object_inspector_derive_task_group,
+    object_inspector_scan_handles, object_inspector_scan_objects, task_inspector_derive_process,
+    task_inspector_derive_resource_domain, task_inspector_derive_task_group,
+    task_inspector_scan_processes, task_inspector_scan_threads,
+};
+pub use ipc::{
+    byte_channel_create, byte_channel_read, byte_channel_write, capability_channel_create,
+    capability_channel_receive, capability_channel_try_send,
+};
 pub use startup::{AuxiliaryEntry, RawStartup, startup_find_handle};
 pub use system::{abi_query, clock_get_monotonic, clock_get_realtime, system_config};
+pub use wait::{
+    atomic_wait, atomic_wake, object_wait_many, object_wait_one, wait_set_add, wait_set_create,
+    wait_set_rearm, wait_set_remove, wait_set_wait,
+};
 
 use ffi::{
-    ffi_atomic_wait, ffi_atomic_wake, ffi_byte_channel_read, ffi_byte_channel_write,
-    ffi_console_read, ffi_console_write, ffi_handle_close, ffi_native_call6, ffi_object_wait_one,
-    ffi_process_exit, ffi_thread_create, ffi_thread_exit, ffi_thread_request_stop,
-    ffi_thread_sleep, ffi_thread_start, ffi_thread_yield,
+    ffi_console_read, ffi_console_write, ffi_native_call6, ffi_process_exit, ffi_thread_create,
+    ffi_thread_exit, ffi_thread_request_stop, ffi_thread_sleep, ffi_thread_start, ffi_thread_yield,
 };
 
 /// Register result returned by one `HypeR` Native syscall.
@@ -37,158 +57,6 @@ pub struct CallResult {
 
 const _: () = assert!(core::mem::size_of::<CallResult>() == 24);
 const _: () = assert!(core::mem::align_of::<CallResult>() == 8);
-
-/// Closes one raw process handle.
-///
-/// # Safety
-///
-/// The caller must exclusively own `handle` and must prevent every subsequent
-/// use of that value, including use through safe wrappers.
-#[inline]
-pub unsafe fn handle_close(handle: abi::HyperNativeHandle) -> abi::HyperNativeStatus {
-    // SAFETY: the caller owns the raw capability and its close transition.
-    unsafe { ffi_handle_close(handle) }
-}
-
-/// Duplicates one raw process handle with attenuated rights.
-///
-/// # Safety
-///
-/// `source` must remain live for the call. The caller assumes exclusive
-/// ownership of a nonzero handle returned in `value0` only when the status is
-/// `OK`.
-#[inline]
-pub unsafe fn handle_duplicate(source: abi::HyperNativeHandle, rights: u64) -> CallResult {
-    // SAFETY: the caller establishes the source-handle lifetime and ownership
-    // contract for the returned value.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_HANDLE_DUPLICATE,
-            source,
-            rights,
-            0,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Replaces one raw process handle with an attenuated value.
-///
-/// # Safety
-///
-/// The caller must exclusively own `source`. An `OK` result consumes it and
-/// transfers exclusive ownership of the nonzero `value0` handle to the caller;
-/// every failure preserves ownership of `source`.
-#[inline]
-pub unsafe fn handle_replace(source: abi::HyperNativeHandle, rights: u64) -> CallResult {
-    // SAFETY: the caller owns the source's consume-on-success transition.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_HANDLE_REPLACE,
-            source,
-            rights,
-            0,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Retrieves handle-local metadata into one ABI record.
-///
-/// # Safety
-///
-/// `handle` must remain live during the call and `info` must be aligned and
-/// writable for one complete [`abi::HyperNativeHandleInfo`] record.
-#[inline]
-pub unsafe fn handle_get_info(
-    handle: abi::HyperNativeHandle,
-    info: *mut abi::HyperNativeHandleInfo,
-) -> CallResult {
-    // SAFETY: the caller establishes both handle and output-pointer validity.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_HANDLE_GET_INFO,
-            handle,
-            info.addr() as u64,
-            core::mem::size_of::<abi::HyperNativeHandleInfo>() as u64,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Retrieves object identity and kind into one ABI record.
-///
-/// # Safety
-///
-/// `handle` must remain live during the call and carry `INSPECT` rights.
-/// `info` must be aligned and writable for one complete
-/// [`abi::HyperNativeObjectBasicInfo`] record.
-#[inline]
-pub unsafe fn object_get_basic_info(
-    handle: abi::HyperNativeHandle,
-    info: *mut abi::HyperNativeObjectBasicInfo,
-) -> CallResult {
-    // SAFETY: the caller establishes both handle and output-pointer validity.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_OBJECT_GET_BASIC_INFO,
-            handle,
-            info.addr() as u64,
-            core::mem::size_of::<abi::HyperNativeObjectBasicInfo>() as u64,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Waits for signals on one raw process handle.
-///
-/// # Safety
-///
-/// `object` must remain a live waitable handle for the duration of the call.
-#[inline]
-pub unsafe fn object_wait_one(
-    object: abi::HyperNativeHandle,
-    signals: u64,
-    deadline: u64,
-) -> CallResult {
-    // SAFETY: the caller keeps the raw handle live across the syscall.
-    unsafe { ffi_object_wait_one(object, signals, deadline) }
-}
-
-/// Waits for one member of a raw object-wait array.
-///
-/// # Safety
-///
-/// Every record must contain a live handle with wait rights and a valid signal
-/// mask for that object's kind. `items` must remain readable for `item_count`
-/// complete records throughout the call.
-#[inline]
-pub unsafe fn object_wait_many(
-    items: *const abi::HyperNativeObjectWaitItem,
-    item_count: usize,
-    deadline: u64,
-) -> CallResult {
-    // SAFETY: the caller establishes the array and borrowed-handle contracts.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_OBJECT_WAIT_MANY,
-            items.addr() as u64,
-            item_count as u64,
-            deadline,
-            0,
-            0,
-            0,
-        )
-    }
-}
 
 /// Derives one resource-domain-bound VM creation lease.
 ///
@@ -646,73 +514,6 @@ pub unsafe fn virtual_cpu_get_info(
     }
 }
 
-/// Creates one raw `ByteChannel` endpoint pair.
-///
-/// # Safety
-///
-/// On `OK`, the caller assumes exclusive ownership of both nonzero handles in
-/// `value0` and `value1`. Every failure publishes no handle.
-#[inline]
-pub unsafe fn byte_channel_create() -> CallResult {
-    // SAFETY: the caller accepts ownership of both successful raw results.
-    unsafe { ffi_native_call6(abi::HYPER_NATIVE_SYS_BYTE_CHANNEL_CREATE, 0, 0, 0, 0, 0, 0) }
-}
-
-/// Sends one handle-free message through a raw `ByteChannel` endpoint.
-///
-/// # Safety
-///
-/// `endpoint` must remain live with write rights. For a nonzero `byte_count`,
-/// `bytes` must remain readable for that extent during the call.
-#[inline]
-pub unsafe fn byte_channel_write(
-    endpoint: abi::HyperNativeHandle,
-    bytes: *const u8,
-    byte_count: usize,
-) -> abi::HyperNativeStatus {
-    // SAFETY: the caller establishes the handle and input-buffer contracts.
-    unsafe { ffi_byte_channel_write(endpoint, bytes, byte_count) }
-}
-
-/// Receives one handle-free message through a raw `ByteChannel` endpoint.
-///
-/// # Safety
-///
-/// `endpoint` must remain live with read rights. For a nonzero
-/// `byte_capacity`, `bytes` must remain writable for that extent during the
-/// call. Messages carrying handles are reported as too large by this veneer.
-#[inline]
-pub unsafe fn byte_channel_read(
-    endpoint: abi::HyperNativeHandle,
-    bytes: *mut u8,
-    byte_capacity: usize,
-) -> CallResult {
-    // SAFETY: the caller establishes the handle and output-buffer contracts.
-    unsafe { ffi_byte_channel_read(endpoint, bytes, byte_capacity) }
-}
-
-/// Creates one raw `CapabilityChannel` endpoint pair.
-///
-/// # Safety
-///
-/// On `OK`, the caller assumes exclusive ownership of both nonzero handles in
-/// `value0` and `value1`. Every failure publishes no handle.
-#[inline]
-pub unsafe fn capability_channel_create() -> CallResult {
-    // SAFETY: the caller accepts ownership of both successful raw results.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_CREATE,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
 /// Retrieves terminal and lifecycle information for one raw Process handle.
 ///
 /// # Safety
@@ -734,244 +535,6 @@ pub unsafe fn process_get_info(
             0,
             0,
             0,
-        )
-    }
-}
-
-/// Scans one fixed-capacity page of Processes visible through a task inspector.
-///
-/// # Safety
-///
-/// `inspector` must remain live with inspect rights. `records` must be writable
-/// for `capacity` complete records, and capacity must equal the ABI page size.
-#[inline]
-pub unsafe fn task_inspector_scan_processes(
-    inspector: abi::HyperNativeHandle,
-    cursor: u64,
-    records: *mut abi::HyperNativeTaskProcess,
-    capacity: usize,
-) -> CallResult {
-    // SAFETY: the caller establishes the handle and output-array contracts.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_PROCESSES,
-            inspector,
-            cursor,
-            records.addr() as u64,
-            capacity as u64,
-            0,
-            0,
-        )
-    }
-}
-
-/// Scans one fixed-capacity page of Threads visible through a task inspector.
-///
-/// # Safety
-///
-/// The typed handle and complete writable record-array contracts must hold.
-#[inline]
-pub unsafe fn task_inspector_scan_threads(
-    inspector: abi::HyperNativeHandle,
-    cursor: u64,
-    records: *mut abi::HyperNativeTaskThread,
-    capacity: usize,
-) -> CallResult {
-    // SAFETY: the caller establishes the handle and output-array contracts.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_TASK_INSPECTOR_SCAN_THREADS,
-            inspector,
-            cursor,
-            records.addr() as u64,
-            capacity as u64,
-            0,
-            0,
-        )
-    }
-}
-
-/// Scans one fixed-capacity page of global object observations.
-///
-/// # Safety
-///
-/// The typed handle and complete writable record-array contracts must hold.
-#[inline]
-pub unsafe fn object_inspector_scan_objects(
-    inspector: abi::HyperNativeHandle,
-    cursor: u64,
-    records: *mut abi::HyperNativeObjectInspection,
-    capacity: usize,
-) -> CallResult {
-    // SAFETY: the caller establishes the handle and output-array contracts.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_OBJECTS,
-            inspector,
-            cursor,
-            records.addr() as u64,
-            capacity as u64,
-            0,
-            0,
-        )
-    }
-}
-
-/// Scans handles owned by one visible Process KOID.
-///
-/// # Safety
-///
-/// The typed handle and complete writable record-array contracts must hold.
-#[inline]
-pub unsafe fn object_inspector_scan_handles(
-    inspector: abi::HyperNativeHandle,
-    process_koid: u64,
-    cursor: u64,
-    records: *mut abi::HyperNativeHandleInspection,
-    capacity: usize,
-) -> CallResult {
-    // SAFETY: the caller establishes the handle and output-array contracts.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_OBJECT_INSPECTOR_SCAN_HANDLES,
-            inspector,
-            process_koid,
-            cursor,
-            records.addr() as u64,
-            capacity as u64,
-            0,
-        )
-    }
-}
-
-/// Derives a Process-scoped inspector from a wider inspector.
-///
-/// # Safety
-///
-/// Both handles must remain live with the ABI-required rights. On `OK`, the
-/// caller assumes exclusive ownership of the returned nonzero handle.
-#[inline]
-unsafe fn inspector_derive(
-    syscall: u64,
-    inspector: abi::HyperNativeHandle,
-    scope: abi::HyperNativeHandle,
-) -> CallResult {
-    // SAFETY: the caller owns successful output-handle adoption.
-    unsafe { ffi_native_call6(syscall, inspector, scope, 0, 0, 0, 0) }
-}
-
-macro_rules! inspector_derivation {
-    ($name:ident, $syscall:ident, $scope:literal) => {
-        #[doc = concat!("Derives an inspector scoped to one ", $scope, ".")]
-        ///
-        /// # Safety
-        ///
-        /// Both handles must remain live with the ABI-required rights. On
-        /// `OK`, the caller assumes exclusive ownership of the returned handle.
-        #[inline]
-        pub unsafe fn $name(
-            inspector: abi::HyperNativeHandle,
-            scope: abi::HyperNativeHandle,
-        ) -> CallResult {
-            // SAFETY: the caller owns successful output-handle adoption.
-            unsafe { inspector_derive(abi::$syscall, inspector, scope) }
-        }
-    };
-}
-
-inspector_derivation!(
-    task_inspector_derive_process,
-    HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_PROCESS,
-    "Process"
-);
-inspector_derivation!(
-    task_inspector_derive_task_group,
-    HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_TASK_GROUP,
-    "TaskGroup"
-);
-inspector_derivation!(
-    task_inspector_derive_resource_domain,
-    HYPER_NATIVE_SYS_TASK_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
-    "ResourceDomain"
-);
-inspector_derivation!(
-    object_inspector_derive_process,
-    HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_PROCESS,
-    "Process"
-);
-inspector_derivation!(
-    object_inspector_derive_task_group,
-    HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_TASK_GROUP,
-    "TaskGroup"
-);
-inspector_derivation!(
-    object_inspector_derive_resource_domain,
-    HYPER_NATIVE_SYS_OBJECT_INSPECTOR_DERIVE_RESOURCE_DOMAIN,
-    "ResourceDomain"
-);
-
-/// Attempts one transactional capability rendezvous.
-///
-/// # Safety
-///
-/// `endpoint` must remain live with write rights. The byte and disposition
-/// arrays must remain readable for their complete extents. Every disposition
-/// must describe an exclusively owned or validly borrowed handle according to
-/// its operation. `OK` consumes every MOVE source and creates the corresponding
-/// destination owners; every non-`OK` result preserves all source ownership.
-#[inline]
-pub unsafe fn capability_channel_try_send(
-    endpoint: abi::HyperNativeHandle,
-    bytes: *const u8,
-    byte_count: usize,
-    dispositions: *const abi::HyperNativeCapabilityDisposition,
-    disposition_count: usize,
-) -> abi::HyperNativeStatus {
-    // SAFETY: the caller establishes all pointer, handle, and transactional
-    // ownership contracts.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_TRY_SEND,
-            endpoint,
-            0,
-            bytes.addr() as u64,
-            byte_count as u64,
-            dispositions.addr() as u64,
-            disposition_count as u64,
-        )
-        .status
-    }
-}
-
-/// Receives one transactional capability rendezvous.
-///
-/// # Safety
-///
-/// `endpoint` must remain live with read rights. `bytes` and `slots` must be
-/// writable for their declared extents; slots must also contain initialized
-/// receive requests. On `OK`, the caller owns each nonzero handle installed in
-/// the first `value1` slots. On non-`OK`, no output handle is live. A `FAULT`
-/// may have partially modified output memory, which the caller must ignore.
-#[inline]
-pub unsafe fn capability_channel_receive(
-    endpoint: abi::HyperNativeHandle,
-    deadline: u64,
-    bytes: *mut u8,
-    byte_capacity: usize,
-    slots: *mut abi::HyperNativeCapabilityReceiveSlot,
-    slot_count: usize,
-) -> CallResult {
-    // SAFETY: the caller establishes all pointer, handle, initialization, and
-    // successful-result ownership contracts.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_CAPABILITY_CHANNEL_RECEIVE,
-            endpoint,
-            deadline,
-            bytes.addr() as u64,
-            byte_capacity as u64,
-            slots.addr() as u64,
-            slot_count as u64,
         )
     }
 }
@@ -1116,52 +679,6 @@ pub unsafe fn directory_get_info(
             directory,
             info.addr() as u64,
             core::mem::size_of::<abi::HyperNativeDirectoryInfo>() as u64,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Reads one immutable physical-memory accounting snapshot.
-///
-/// # Safety
-///
-/// `observation` must designate one writable ABI observation record.
-pub unsafe fn memory_inspector_read(
-    inspector: abi::HyperNativeHandle,
-    observation: *mut abi::HyperNativeMemoryObservation,
-) -> CallResult {
-    // SAFETY: the caller owns the pointer contract stated above.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_MEMORY_INSPECTOR_READ,
-            inspector,
-            observation.addr() as u64,
-            core::mem::size_of::<abi::HyperNativeMemoryObservation>() as u64,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Reads one immutable scheduler CPU-time snapshot.
-///
-/// # Safety
-///
-/// `observation` must designate one writable ABI observation record.
-pub unsafe fn cpu_inspector_read(
-    inspector: abi::HyperNativeHandle,
-    observation: *mut abi::HyperNativeCpuObservation,
-) -> CallResult {
-    // SAFETY: the caller owns the pointer contract stated above.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_CPU_INSPECTOR_READ,
-            inspector,
-            observation.addr() as u64,
-            core::mem::size_of::<abi::HyperNativeCpuObservation>() as u64,
             0,
             0,
             0,
@@ -1776,30 +1293,6 @@ pub unsafe fn thread_request_stop(thread: u64) -> abi::HyperNativeStatus {
     unsafe { ffi_thread_request_stop(thread) }
 }
 
-/// Invokes Native `atomic_wait`.
-///
-/// # Safety
-/// Handles, addresses and thread entry state must satisfy the Native ABI;
-/// referenced memory must remain live through the operation or thread lifetime.
-pub unsafe fn atomic_wait(
-    address: *const u32,
-    expected: u32,
-    deadline: u64,
-) -> abi::HyperNativeStatus {
-    // SAFETY: the caller upholds the raw syscall contract.
-    unsafe { ffi_atomic_wait(address, expected, deadline) }
-}
-
-/// Invokes Native `atomic_wake`.
-///
-/// # Safety
-/// Handles, addresses and thread entry state must satisfy the Native ABI;
-/// referenced memory must remain live through the operation or thread lifetime.
-pub unsafe fn atomic_wake(address: *const u32, count: u32) -> CallResult {
-    // SAFETY: the caller upholds the raw syscall contract.
-    unsafe { ffi_atomic_wake(address, count) }
-}
-
 /// Invokes Native `thread_sleep`.
 ///
 /// # Safety
@@ -1921,115 +1414,6 @@ pub unsafe fn directory_remove(
             path.addr() as u64,
             path_size as u64,
             options as u64,
-            0,
-            0,
-        )
-    }
-}
-
-/// Creates a `WaitSet` and transfers exclusive ownership of the returned handle.
-///
-/// # Safety
-///
-/// Every borrowed handle must remain live with the required rights.
-pub unsafe fn wait_set_create(capacity: usize) -> CallResult {
-    // SAFETY: the caller establishes handle validity and output ownership.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_WAIT_SET_CREATE,
-            capacity as u64,
-            0,
-            0,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Invokes Native `wait_set_add`.
-///
-/// # Safety
-///
-/// Every borrowed handle must remain live with the required rights.
-pub unsafe fn wait_set_add(
-    set: abi::HyperNativeHandle,
-    source: abi::HyperNativeHandle,
-    signals: u64,
-) -> CallResult {
-    // SAFETY: the caller establishes handle validity and output ownership.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_WAIT_SET_ADD,
-            set,
-            source,
-            signals,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Invokes Native `wait_set_rearm`.
-///
-/// # Safety
-///
-/// Every borrowed handle must remain live with the required rights.
-pub unsafe fn wait_set_rearm(set: abi::HyperNativeHandle, registration: u64) -> CallResult {
-    // SAFETY: the caller establishes handle validity and output ownership.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_WAIT_SET_REARM,
-            set,
-            registration,
-            0,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Invokes Native `wait_set_remove`.
-///
-/// # Safety
-///
-/// Every borrowed handle must remain live with the required rights.
-pub unsafe fn wait_set_remove(set: abi::HyperNativeHandle, registration: u64) -> CallResult {
-    // SAFETY: the caller establishes handle validity and output ownership.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_WAIT_SET_REMOVE,
-            set,
-            registration,
-            0,
-            0,
-            0,
-            0,
-        )
-    }
-}
-
-/// Invokes Native `wait_set_wait`.
-///
-/// # Safety
-///
-/// The handle must remain live and output must be writable for `output_size` bytes.
-pub unsafe fn wait_set_wait(
-    set: abi::HyperNativeHandle,
-    deadline: u64,
-    output: *mut u8,
-    output_size: usize,
-) -> CallResult {
-    // SAFETY: the caller pins the handle and provides writable output storage.
-    unsafe {
-        ffi_native_call6(
-            abi::HYPER_NATIVE_SYS_WAIT_SET_WAIT,
-            set,
-            deadline,
-            output as u64,
-            output_size as u64,
             0,
             0,
         )
