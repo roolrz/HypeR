@@ -7,7 +7,7 @@ use super::{Error, invalid, schema, validate_identifier};
 use schema::{AbiSchema, FieldKind};
 use std::collections::BTreeSet;
 
-pub(in super::super) fn validate_records(schema: &AbiSchema) -> Result<(), Error> {
+pub(super) fn validate_records(schema: &AbiSchema) -> Result<(), Error> {
     let mut names = BTreeSet::new();
     for record in schema.records {
         validate_identifier("record", record.name)?;
@@ -91,7 +91,7 @@ pub(in super::super) fn validate_records(schema: &AbiSchema) -> Result<(), Error
     Ok(())
 }
 
-pub(in super::super) fn require_record_field(
+pub(super) fn require_record_field(
     record: &schema::Record,
     field: &str,
     kind: FieldKind,

@@ -26,7 +26,10 @@ stability.
 | `src/generated.rs` | Generated dependency-free Rust values and layouts |
 | `include/hyper/native.h` | Generated C and C++ interface |
 | `docs/native.md` | Generated syscall and object reference |
-| `generator/` | Schema validation and deterministic rendering |
+| `generator/mod.rs` | Generation, drift checks, and repository output |
+| `generator/validation/` | Scalar namespaces, record layouts, and syscall ownership contracts |
+| `generator/render/` | Deterministic Rust, C, and reference renderers |
+| `generator/names.rs` | Shared spelling of generated public identifiers |
 | `tests/` | Rust, C, and C++ layout conformance |
 
 ## Use from Rust
