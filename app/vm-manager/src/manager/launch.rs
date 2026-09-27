@@ -1,0 +1,133 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
+//! Prepare child authorities before publishing a started VM runtime.
+
+use super::{
+    FleetManager,
+    instance::{DiskAdmission, VmInstance},
+};
+use hyper_os::capability_channel::CapabilityChannel;
+use hyper_os::channel;
+use hyper_os::handle::{Rights, RightsOffer};
+use hyper_os::startup;
+use hyper_os::task::{ProcessBuilder, create_resource_domain, create_task_group};
+use hyper_service::stdio as stdio_contract;
+use hyper_service::vm as vm_contract;
+use hyper_vm_manager::InstancePolicy;
+
+const RUNTIME_ARGUMENT: &str = "/svc/vm-runtime";
+
+impl FleetManager {
+    pub(super) fn start_instance(&mut self, vm: usize) -> hyper_os::Result<()> {
+        if self.machines[vm].instance.is_some() {
+            return Err(hyper_os::Error::InvalidResponse);
+        }
+        let definition = &self.machines[vm];
+        let domain = create_resource_domain(
+            self.fleet_domain.as_handle_ref(),
+            hyper_vm_policy::INITIAL_VM_LIMITS,
+        )?;
+        let group = create_task_group(self.factory.as_handle_ref(), domain.as_handle_ref())?;
+        let lease = hyper_os::vm::derive_creation_lease(
+            self.authority.as_handle_ref(),
+            domain.as_handle_ref(),
+        )?;
+        let (console_connection, runtime_connection) = CapabilityChannel::create()?;
+        let (manager_runtime, runtime_control) = channel::create_pair()?;
+        let builder = ProcessBuilder::create(
+            self.factory.as_handle_ref(),
+            group.as_handle_ref(),
+            domain.as_handle_ref(),
+            self.runtime_image.as_handle_ref(),
+        )?;
+        builder.set_name("vm-runtime")?;
+        builder.add_argument(RUNTIME_ARGUMENT)?;
+        for (output, contract) in [
+            (
+                hyper_rt::process::stdout()?,
+                stdio_contract::STANDARD_OUTPUT_CONTRACT,
+            ),
+            (
+                hyper_rt::process::stderr()?,
+                stdio_contract::STANDARD_ERROR_CONTRACT,
+            ),
+        ] {
+            builder.add_handle_duplicate(
+                output.as_handle_ref(),
+                contract.purpose(),
+                RightsOffer::Exact(contract.required_rights()),
+            )?;
+        }
+        builder.add_handle_duplicate(
+            self.libraries.as_handle_ref(),
+            startup::DYNAMIC_LIBRARY_DIRECTORY.as_raw(),
+            RightsOffer::Exact(Rights::READ.union(Rights::EXECUTE)),
+        )?;
+        builder.add_handle_duplicate(
+            definition.image.as_handle_ref(),
+            vm_contract::RUNTIME_IMAGE_CONTRACT.purpose(),
+            RightsOffer::Exact(vm_contract::RUNTIME_IMAGE_CONTRACT.required_rights()),
+        )?;
+        builder
+            .add_handle_move(
+                lease,
+                vm_contract::RUNTIME_CREATION_LEASE_CONTRACT.purpose(),
+                RightsOffer::Exact(vm_contract::RUNTIME_CREATION_LEASE_CONTRACT.required_rights()),
+            )
+            .map_err(|failure| failure.error())?;
+        builder
+            .add_handle_move(
+                runtime_control,
+                vm_contract::RUNTIME_INSTANCE_CONTROL_CONTRACT.purpose(),
+                RightsOffer::Exact(
+                    vm_contract::RUNTIME_INSTANCE_CONTROL_CONTRACT.required_rights(),
+                ),
+            )
+            .map_err(|failure| failure.error())?;
+        builder
+            .add_handle_move(
+                runtime_connection.into_handle(),
+                vm_contract::RUNTIME_CONSOLE_CONNECTION_CONTRACT.purpose(),
+                RightsOffer::Exact(
+                    vm_contract::RUNTIME_CONSOLE_CONNECTION_CONTRACT.required_rights(),
+                ),
+            )
+            .map_err(|failure| failure.error())?;
+        let disk_admission = if let Some(disk) = &definition.definition.disk {
+            self.io_broker
+                .as_ref()
+                .ok_or(hyper_os::Error::MissingHandle)?;
+            let (owner, runtime) = CapabilityChannel::create()?;
+            builder
+                .add_handle_move(
+                    runtime.into_handle(),
+                    hyper_service::io::SESSION.as_raw(),
+                    RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
+                )
+                .map_err(|failure| failure.error())?;
+            let record = hyper_service::io::encode_connect(disk.client, &disk.volume)
+                .ok_or(hyper_os::Error::InvalidResponse)?;
+            Some(DiskAdmission {
+                endpoint: Some(owner.into_handle()),
+                record,
+            })
+        } else {
+            None
+        };
+        builder.seal()?;
+        let runtime = builder.start().map_err(|failure| failure.error())?;
+        self.machines[vm].instance = Some(VmInstance {
+            _resource_domain: domain,
+            _task_group: group,
+            runtime,
+            runtime_control: Some(manager_runtime),
+            console_connection,
+            policy: InstancePolicy::default(),
+            observation_sequence: 0,
+            disk_admission,
+        });
+        self.machines[vm].policy.started();
+        Ok(())
+    }
+}

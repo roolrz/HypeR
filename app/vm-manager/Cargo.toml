@@ -13,7 +13,7 @@ autotests = false
 
 [[bin]]
 name = "hyper-vm-manager"
-path = "src/manager/mod.rs"
+path = "src/main.rs"
 test = false
 bench = false
 

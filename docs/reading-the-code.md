@@ -99,8 +99,8 @@ flowchart TB
 ```
 
 1. [vmm](../app/vmm/src/main.rs) parses the command and sends a management
-   request. [vm-manager](../app/vm-manager/src/manager/mod.rs), especially
-   `start_instance`, owns the named definition, resource policy and per-instance
+   request. [vm-manager](../app/vm-manager/src/manager/mod.rs), with
+   [runtime launch](../app/vm-manager/src/manager/launch.rs), owns the named definition, resource policy and per-instance
    runtime process. Start with the manager when investigating admission errors.
 2. [vm-runtime `run`](../app/vm-runtime/src/runtime.rs) validates the image, prepares
    its memory and serial channel, creates a pending VM, attaches memory and

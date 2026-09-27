@@ -1,15 +1,11 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fleet policy and supervision for Native virtual-machine runtimes.
+//! Fleet ownership and client dispatch, with isolated runtime transactions.
 
+mod instance;
+mod launch;
 mod listener;
-
-use hyper_vm_manager::{InstancePolicy, MachinePolicy, RuntimeControlState, complete_admission};
-use hyper_vm_policy::fleet::{self, Action, Request, Response};
-use std::io::Read;
-use std::mem::MaybeUninit;
-use std::time::{Duration, Instant};
 
 use hyper_os::capability_channel::{
     CapabilityChannel, CapabilityDisposition, CapabilityReceiveSlot,
@@ -18,44 +14,24 @@ use hyper_os::channel;
 use hyper_os::fs::{Directory, File};
 use hyper_os::handle::{
     ByteChannelObject, CapabilityChannelObject, OwnedHandle, ProcessObject, ResourceDomainObject,
-    Rights, RightsOffer, TaskGroupObject,
+    RightsOffer,
 };
 use hyper_os::startup::{self, Startup};
-use hyper_os::task::{
-    ProcessBuilder, ProcessTermination, create_resource_domain, create_task_group,
-};
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_service::process as process_contract;
-use hyper_service::stdio as stdio_contract;
 use hyper_service::vm as vm_contract;
-use std::process::ExitCode;
+use hyper_vm_manager::MachinePolicy;
+use hyper_vm_policy::fleet::{self, Action, Request, Response};
+use instance::VmInstance;
+use std::io::Read;
+use std::mem::MaybeUninit;
+use std::time::{Duration, Instant};
 
-const RUNTIME_ARGUMENT: &str = "/svc/vm-runtime";
 const MAX_CLIENTS: usize = 8;
 const CAPABILITY_REPLY_DEADLINE: Duration = Duration::from_millis(100);
 
-fn application_main(mut startup: Startup<'_>) -> ExitCode {
-    if hyper_os::require_core_abi().is_err() {
-        return ExitCode::FAILURE;
-    }
-    let mut manager = match FleetManager::from_startup(&mut startup) {
-        Ok(manager) => manager,
-        Err(error) => {
-            eprintln!("vm-manager: startup failed: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    match manager.run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("vm-manager: supervisor failed: {error}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
 /// Long-lived fleet authority separated from disposable VM instances.
-struct FleetManager {
+pub(super) struct FleetManager {
     runtime_image: File,
     libraries: Directory,
     factory: OwnedHandle<hyper_os::handle::TaskFactoryObject>,
@@ -72,7 +48,7 @@ struct FleetManager {
 }
 
 impl FleetManager {
-    fn from_startup(startup: &mut Startup<'_>) -> hyper_os::Result<Self> {
+    pub(super) fn from_startup(startup: &mut Startup<'_>) -> hyper_os::Result<Self> {
         Ok(Self {
             runtime_image: File::from_handle(startup.take(vm_contract::RUNTIME_IMAGE)?),
             libraries: Directory::from_handle(
@@ -96,7 +72,7 @@ impl FleetManager {
         })
     }
 
-    fn run(&mut self) -> hyper_os::Result<()> {
+    pub(super) fn run(&mut self) -> hyper_os::Result<()> {
         eprintln!("HypeR vm-manager: ready");
         let provision = self.receive_provision()?;
         let config = File::from_handle(provision.config).into_std();
@@ -272,70 +248,6 @@ impl FleetManager {
             WaitSource::RuntimeControl(vm) => self.handle_runtime_control(vm),
             WaitSource::Client(index) => self.handle_client(index, observation.observed),
         }
-    }
-
-    fn admit_disk(&mut self) -> hyper_os::Result<()> {
-        let Some(instance) = self.machines.iter_mut().find_map(|machine| {
-            machine
-                .instance
-                .as_mut()
-                .filter(|instance| instance.wants_disk_admission())
-        }) else {
-            return Ok(());
-        };
-        let admission = instance
-            .disk_admission
-            .as_mut()
-            .ok_or(hyper_os::Error::InvalidResponse)?;
-        let broker = self
-            .io_broker
-            .as_ref()
-            .ok_or(hyper_os::Error::MissingHandle)?;
-        let disposition = CapabilityDisposition::move_handle(
-            &mut admission.endpoint,
-            RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
-        )?;
-        let result = broker.try_send(&admission.record, &mut [disposition]);
-        complete_admission(&mut instance.disk_admission, result);
-        if instance.disk_admission.is_some() {
-            return Ok(());
-        }
-        #[cfg(feature = "broker-test")]
-        if self
-            .machines
-            .iter()
-            .filter_map(|machine| machine.instance.as_ref())
-            .filter(|instance| instance.disk_admission.is_none())
-            .count()
-            == 2
-        {
-            self.io_broker = None;
-            println!("BROKER-TEST MANAGER-ENDPOINT-CLOSED");
-        }
-        Ok(())
-    }
-
-    fn handle_runtime_control(&mut self, vm: usize) -> hyper_os::Result<()> {
-        let Some(instance) = self.machines[vm].instance.as_mut() else {
-            return Ok(());
-        };
-        // Signal publication can lag the channel queue. Always read first:
-        // READABLE may already be drained, and EOF must not discard records.
-        match instance.receive_runtime_status() {
-            Ok(RuntimeControlState::Closed) => {
-                drop(instance.runtime_control.take());
-            }
-            Ok(RuntimeControlState::Open) => {}
-            Err(error) => {
-                eprintln!("HypeR vm-manager: VM {vm} runtime control failed: {error}");
-                instance.policy.reject_protocol();
-                instance.force_stop();
-            }
-        }
-        if instance.policy.is_terminal() {
-            instance.arm_exit_deadline()?;
-        }
-        Ok(())
     }
 
     fn handle_client(&mut self, index: usize, observed: u64) -> hyper_os::Result<()> {
@@ -812,186 +724,6 @@ impl FleetManager {
         }
     }
 
-    fn request_stop(&mut self, vm: usize) -> hyper_os::Result<()> {
-        if let Some(instance) = self.machines[vm].instance.as_mut() {
-            instance.request_cooperative_stop()?;
-            drop(instance.disk_admission.take());
-        }
-        Ok(())
-    }
-
-    fn start_instance(&mut self, vm: usize) -> hyper_os::Result<()> {
-        if self.machines[vm].instance.is_some() {
-            return Err(hyper_os::Error::InvalidResponse);
-        }
-        let definition = &self.machines[vm];
-        let domain = create_resource_domain(
-            self.fleet_domain.as_handle_ref(),
-            hyper_vm_policy::INITIAL_VM_LIMITS,
-        )?;
-        let group = create_task_group(self.factory.as_handle_ref(), domain.as_handle_ref())?;
-        let lease = hyper_os::vm::derive_creation_lease(
-            self.authority.as_handle_ref(),
-            domain.as_handle_ref(),
-        )?;
-        let (console_connection, runtime_connection) = CapabilityChannel::create()?;
-        let (manager_runtime, runtime_control) = channel::create_pair()?;
-        let builder = ProcessBuilder::create(
-            self.factory.as_handle_ref(),
-            group.as_handle_ref(),
-            domain.as_handle_ref(),
-            self.runtime_image.as_handle_ref(),
-        )?;
-        builder.set_name("vm-runtime")?;
-        builder.add_argument(RUNTIME_ARGUMENT)?;
-        for (output, contract) in [
-            (
-                hyper_rt::process::stdout()?,
-                stdio_contract::STANDARD_OUTPUT_CONTRACT,
-            ),
-            (
-                hyper_rt::process::stderr()?,
-                stdio_contract::STANDARD_ERROR_CONTRACT,
-            ),
-        ] {
-            builder.add_handle_duplicate(
-                output.as_handle_ref(),
-                contract.purpose(),
-                RightsOffer::Exact(contract.required_rights()),
-            )?;
-        }
-        builder.add_handle_duplicate(
-            self.libraries.as_handle_ref(),
-            startup::DYNAMIC_LIBRARY_DIRECTORY.as_raw(),
-            RightsOffer::Exact(Rights::READ.union(Rights::EXECUTE)),
-        )?;
-        builder.add_handle_duplicate(
-            definition.image.as_handle_ref(),
-            vm_contract::RUNTIME_IMAGE_CONTRACT.purpose(),
-            RightsOffer::Exact(vm_contract::RUNTIME_IMAGE_CONTRACT.required_rights()),
-        )?;
-        builder
-            .add_handle_move(
-                lease,
-                vm_contract::RUNTIME_CREATION_LEASE_CONTRACT.purpose(),
-                RightsOffer::Exact(vm_contract::RUNTIME_CREATION_LEASE_CONTRACT.required_rights()),
-            )
-            .map_err(|failure| failure.error())?;
-        builder
-            .add_handle_move(
-                runtime_control,
-                vm_contract::RUNTIME_INSTANCE_CONTROL_CONTRACT.purpose(),
-                RightsOffer::Exact(
-                    vm_contract::RUNTIME_INSTANCE_CONTROL_CONTRACT.required_rights(),
-                ),
-            )
-            .map_err(|failure| failure.error())?;
-        builder
-            .add_handle_move(
-                runtime_connection.into_handle(),
-                vm_contract::RUNTIME_CONSOLE_CONNECTION_CONTRACT.purpose(),
-                RightsOffer::Exact(
-                    vm_contract::RUNTIME_CONSOLE_CONNECTION_CONTRACT.required_rights(),
-                ),
-            )
-            .map_err(|failure| failure.error())?;
-        let disk_admission = if let Some(disk) = &definition.definition.disk {
-            self.io_broker
-                .as_ref()
-                .ok_or(hyper_os::Error::MissingHandle)?;
-            let (owner, runtime) = CapabilityChannel::create()?;
-            builder
-                .add_handle_move(
-                    runtime.into_handle(),
-                    hyper_service::io::SESSION.as_raw(),
-                    RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
-                )
-                .map_err(|failure| failure.error())?;
-            let record = hyper_service::io::encode_connect(disk.client, &disk.volume)
-                .ok_or(hyper_os::Error::InvalidResponse)?;
-            Some(DiskAdmission {
-                endpoint: Some(owner.into_handle()),
-                record,
-            })
-        } else {
-            None
-        };
-        builder.seal()?;
-        let runtime = builder.start().map_err(|failure| failure.error())?;
-        self.machines[vm].instance = Some(VmInstance {
-            _resource_domain: domain,
-            _task_group: group,
-            runtime,
-            runtime_control: Some(manager_runtime),
-            console_connection,
-            policy: InstancePolicy::default(),
-            observation_sequence: 0,
-            disk_admission,
-        });
-        self.machines[vm].policy.started();
-        Ok(())
-    }
-
-    fn finish_instance(&mut self, vm: usize) -> hyper_os::Result<()> {
-        let Some(mut instance) = self.machines[vm].instance.take() else {
-            return Ok(());
-        };
-        instance
-            .runtime
-            .as_process_supervisor()
-            .wait_terminated(hyper_os::DEADLINE_INFINITE)?;
-        instance.drain_runtime_statuses()?;
-        let succeeded = matches!(
-            instance.runtime.as_process_supervisor().info()?.terminal,
-            Some(ProcessTermination::ProcessExited { status: 0 })
-        );
-        let outcome =
-            std::mem::take(&mut instance.policy).finish(succeeded, &mut instance.disk_admission);
-        self.machines[vm].policy.finished(&outcome);
-        if !outcome.reboot {
-            self.publish_initial_event(vm, outcome.event);
-        }
-        drop(instance);
-        Ok(())
-    }
-
-    fn publish_boot_event(&self, event: vm_contract::BootEvent) {
-        if let Some(client) = self.clients[0].as_ref()
-            && client.initial
-        {
-            let _ = client.control.as_byte_channel().try_send(&event.encode());
-        }
-    }
-
-    fn publish_initial_event(&mut self, vm: usize, event: vm_contract::InstanceEvent) {
-        if self.initial_vm == Some(vm) {
-            self.initial_vm = None;
-            self.publish_boot_event(vm_contract::BootEvent::InstanceTerminated(event));
-        }
-    }
-
-    fn complete_restarts(&mut self) -> hyper_os::Result<()> {
-        let now = Instant::now();
-        for vm in 0..self.machines.len() {
-            if let Some(instance) = self.machines[vm].instance.as_mut()
-                && instance.policy.expire_deadline(now) == vm_contract::StopAction::ForceProcess
-            {
-                let _ = instance.runtime.as_process_supervisor().request_stop();
-            }
-            let machine = &mut self.machines[vm];
-            if machine.policy.take_restart(machine.instance.is_some())
-                && self.start_instance(vm).is_err()
-            {
-                self.machines[vm].policy.start_failed();
-                self.publish_initial_event(
-                    vm,
-                    vm_contract::InstanceEvent::Failed(vm_contract::InstanceFailure::Runtime),
-                );
-            }
-        }
-        Ok(())
-    }
-
     fn fleet_state(&self, vm: usize) -> fleet::State {
         let machine = &self.machines[vm];
         machine
@@ -1045,183 +777,6 @@ enum WaitSource {
     Client(usize),
 }
 
-struct DiskAdmission {
-    endpoint: Option<OwnedHandle<CapabilityChannelObject>>,
-    record: [u8; hyper_service::io::CONNECT_BYTES],
-}
-
-struct VmInstance {
-    _resource_domain: OwnedHandle<ResourceDomainObject>,
-    _task_group: OwnedHandle<TaskGroupObject>,
-    runtime: OwnedHandle<ProcessObject>,
-    runtime_control: Option<OwnedHandle<ByteChannelObject>>,
-    console_connection: CapabilityChannel,
-    policy: InstancePolicy,
-    disk_admission: Option<DiskAdmission>,
-    observation_sequence: u64,
-}
-
-impl VmInstance {
-    fn next_request_sequence(&mut self) -> hyper_os::Result<u64> {
-        self.observation_sequence = self
-            .observation_sequence
-            .checked_add(1)
-            .ok_or(hyper_os::Error::InvalidResponse)?;
-        Ok(self.observation_sequence)
-    }
-
-    fn control_vcpu(
-        &mut self,
-        vcpu: u32,
-        affinity: Option<[u64; vm_contract::VCPU_AFFINITY_WORDS]>,
-        deadline: u64,
-    ) -> hyper_os::Result<vm_contract::VcpuControlReply> {
-        let request = vm_contract::VcpuControlRequest {
-            sequence: self.next_request_sequence()?,
-            vcpu,
-            affinity,
-        };
-        self.exchange(&request.encode(), deadline, |bytes| {
-            vm_contract::VcpuControlReply::decode(bytes)
-                .filter(|reply| reply.sequence == request.sequence && reply.vcpu == request.vcpu)
-        })
-    }
-
-    fn observe_memory(&mut self, deadline: u64) -> Option<vm_contract::Observation> {
-        if self.policy.state() != fleet::State::Running {
-            return None;
-        }
-        let request = vm_contract::ObservationRequest(self.next_request_sequence().ok()?);
-        self.exchange(&request.encode(), deadline, |bytes| {
-            vm_contract::Observation::decode(bytes).filter(|reply| reply.request == request)
-        })
-        .ok()
-    }
-
-    /// One bounded transport for observations and control acknowledgements.
-    /// Lifecycle messages keep advancing, and late replies remain harmless.
-    fn exchange<T>(
-        &mut self,
-        request: &[u8],
-        deadline: u64,
-        decode: impl Fn(&[u8]) -> Option<T>,
-    ) -> hyper_os::Result<T> {
-        if hyper_os::time::monotonic_now()?.as_nanoseconds() >= deadline {
-            return Err(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT));
-        }
-        let control = self
-            .runtime_control
-            .as_ref()
-            .ok_or(hyper_os::Error::MissingHandle)?
-            .as_byte_channel();
-        control.try_send(request)?;
-        loop {
-            if hyper_os::time::monotonic_now()?.as_nanoseconds() >= deadline {
-                return Err(hyper_os::Error::Status(hyper_os::Status::TIMED_OUT));
-            }
-            let mut bytes = [0u8; vm_contract::OBSERVATION_BYTES];
-            match control.try_receive(&mut bytes) {
-                Ok(length) => {
-                    if let Some(reply) = decode(&bytes[..length]) {
-                        return Ok(reply);
-                    }
-                    if self.policy.observe_message(&bytes[..length]).is_err() {
-                        self.policy.reject_protocol();
-                        self.force_stop();
-                        return Err(hyper_os::Error::InvalidResponse);
-                    }
-                    if self.policy.is_terminal() {
-                        let _ = self.arm_exit_deadline();
-                        return Err(hyper_os::Error::Status(hyper_os::Status::BAD_STATE));
-                    }
-                }
-                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {
-                    let waits = [WaitItem::new(
-                        control.as_handle_ref(),
-                        ObjectSignals::<ByteChannelObject>::READABLE
-                            .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
-                    )];
-                    let ready = wait_many(&waits, deadline)?;
-                    if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(ready.observed) {
-                        return Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED));
-                    }
-                }
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn wants_disk_admission(&self) -> bool {
-        self.policy
-            .wants_disk_admission(self.disk_admission.is_some())
-    }
-
-    fn receive_runtime_status(&mut self) -> hyper_os::Result<RuntimeControlState> {
-        let mut message = [0u8; vm_contract::OBSERVATION_BYTES];
-        let received = self
-            .runtime_control
-            .as_ref()
-            .ok_or(hyper_os::Error::MissingHandle)?
-            .as_byte_channel()
-            .try_receive(&mut message);
-        self.policy
-            .observe_receive(received.map(|length| &message[..length]))
-    }
-
-    fn drain_runtime_statuses(&mut self) -> hyper_os::Result<()> {
-        let Some(control) = self.runtime_control.as_ref() else {
-            return Ok(());
-        };
-        loop {
-            let mut message = [0u8; vm_contract::OBSERVATION_BYTES];
-            match control.as_byte_channel().try_receive(&mut message) {
-                Ok(length) => {
-                    if self.policy.observe_message(&message[..length]).is_err() {
-                        self.policy.reject_protocol();
-                    }
-                }
-                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK))
-                | Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => return Ok(()),
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn request_cooperative_stop(&mut self) -> hyper_os::Result<()> {
-        if self.policy.request_cooperative_stop() != vm_contract::StopAction::SendCooperative {
-            return Ok(());
-        }
-        let sent = self
-            .runtime_control
-            .as_ref()
-            .ok_or(hyper_os::Error::MissingHandle)
-            .and_then(|control| {
-                control
-                    .as_byte_channel()
-                    .try_send(&vm_contract::InstanceCommand::Stop.encode())
-            });
-        if self.policy.cooperative_stop_sent(sent, Instant::now())
-            == vm_contract::StopAction::ForceProcess
-        {
-            let _ = self.runtime.as_process_supervisor().request_stop();
-        }
-        Ok(())
-    }
-
-    fn force_stop(&mut self) {
-        if self.policy.force_stop() == vm_contract::StopAction::ForceProcess {
-            let _ = self.runtime.as_process_supervisor().request_stop();
-        }
-    }
-
-    fn arm_exit_deadline(&mut self) -> hyper_os::Result<()> {
-        if self.policy.arm_exit_deadline(Instant::now()).is_none() {
-            self.force_stop();
-        }
-        Ok(())
-    }
-}
-
 fn send_console_endpoint(
     endpoint: &CapabilityChannel,
     handle: &mut Option<OwnedHandle<ByteChannelObject>>,
@@ -1247,12 +802,5 @@ fn send_console_endpoint(
             Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}
             result => return result,
         }
-    }
-}
-
-fn main() -> ExitCode {
-    match hyper_rt::process::startup() {
-        Ok(startup) => application_main(startup),
-        Err(_) => ExitCode::FAILURE,
     }
 }
