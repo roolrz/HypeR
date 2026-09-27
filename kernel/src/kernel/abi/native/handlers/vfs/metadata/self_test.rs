@@ -3,15 +3,14 @@
 
 //! Filesystem record validation without dereferencing real userspace addresses.
 
-use core::cell::{Cell, RefCell};
-
 use super::{
     INVALID, METADATA_SIZE, Metadata, MetadataUpdate, Timestamp, UserMemoryServices,
-    copy_info_record, metadata_bytes, metadata_request, read_update,
+    copy_info_record, decode_metadata_update, encode_metadata, metadata_request,
 };
 use crate::kernel::mm::user_space::UserSlice;
 use crate::kernel::process::ProcessError;
 use crate::kernel::vfs::NodeLocationInfo;
+use core::cell::{Cell, RefCell};
 use hyper::abi::native as abi;
 use hyper::fs::{NodeAttributes, NodeKind};
 
@@ -108,13 +107,13 @@ pub(crate) fn run() -> Result<(), Error> {
     let memory = Memory::new();
     for size in [0, 39, abi::HYPER_NATIVE_EXTENSIBLE_RECORD_MAX_BYTES + 1] {
         memory.reset();
-        if read_update(&memory, BASE, size) != Err(INVALID) || memory.copies.get() != 0 {
+        if decode_metadata_update(&memory, BASE, size) != Err(INVALID) || memory.copies.get() != 0 {
             return Err(Error(1));
         }
     }
     for size in [40, 41, 104, 256] {
         memory.reset();
-        if read_update(&memory, BASE, size) != Ok(MetadataUpdate::default()) {
+        if decode_metadata_update(&memory, BASE, size) != Ok(MetadataUpdate::default()) {
             return Err(Error(2));
         }
     }
@@ -122,7 +121,7 @@ pub(crate) fn run() -> Result<(), Error> {
     for offset in [40, 103, 104, 255] {
         memory.reset();
         memory.bytes.borrow_mut()[offset] = 1;
-        if read_update(&memory, BASE, 256) != Err(INVALID) {
+        if decode_metadata_update(&memory, BASE, 256) != Err(INVALID) {
             return Err(Error(3));
         }
     }
@@ -137,7 +136,7 @@ pub(crate) fn run() -> Result<(), Error> {
     ] {
         memory.reset();
         memory.word(offset, value);
-        if read_update(&memory, BASE, 40) != Err(INVALID) {
+        if decode_metadata_update(&memory, BASE, 40) != Err(INVALID) {
             return Err(Error(4));
         }
     }
@@ -147,7 +146,7 @@ pub(crate) fn run() -> Result<(), Error> {
     memory.long(8, -1);
     memory.word(16, 999_999_999);
     memory.long(24, i64::MIN);
-    let update = read_update(&memory, BASE, 40).map_err(|_| Error(5))?;
+    let update = decode_metadata_update(&memory, BASE, 40).map_err(|_| Error(5))?;
     if update.mode != Some(0o640)
         || update.accessed != Timestamp::new(-1, 999_999_999)
         || update.modified != Timestamp::new(i64::MIN, 0)
@@ -155,16 +154,16 @@ pub(crate) fn run() -> Result<(), Error> {
         return Err(Error(6));
     }
     memory.word(16, 1_000_000_000);
-    if read_update(&memory, BASE, 40) != Err(INVALID) {
+    if decode_metadata_update(&memory, BASE, 40) != Err(INVALID) {
         return Err(Error(7));
     }
     memory.word(16, 0);
     memory.word(32, u32::MAX);
-    if read_update(&memory, BASE, 40) != Err(INVALID) {
+    if decode_metadata_update(&memory, BASE, 40) != Err(INVALID) {
         return Err(Error(8));
     }
     memory.fail.set(true);
-    if read_update(&memory, BASE, 40) != Err(abi::HYPER_NATIVE_STATUS_NO_MEMORY) {
+    if decode_metadata_update(&memory, BASE, 40) != Err(abi::HYPER_NATIVE_STATUS_NO_MEMORY) {
         return Err(Error(9));
     }
     check_output(&memory)
@@ -188,7 +187,7 @@ fn check_output(memory: &Memory) -> Result<(), Error> {
             abi::HYPER_NATIVE_DIRECTORY_ENTRY_KIND_OTHER,
         ),
     ] {
-        let record = metadata_bytes(Metadata {
+        let record = encode_metadata(Metadata {
             location: NodeLocationInfo {
                 filesystem_id: 7,
                 mount_id: 8,
@@ -205,7 +204,7 @@ fn check_output(memory: &Memory) -> Result<(), Error> {
             return Err(Error(17));
         }
     }
-    let bytes = metadata_bytes(Metadata {
+    let bytes = encode_metadata(Metadata {
         location: NodeLocationInfo {
             filesystem_id: 7,
             mount_id: 8,

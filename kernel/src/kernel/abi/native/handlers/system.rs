@@ -4,9 +4,10 @@
 //! Native system syscall validation.
 
 use crate::kernel::abi::native::Arguments;
-use crate::kernel::abi::native::services::ImmediateServices;
+use crate::kernel::abi::native::services::{DeferredAction, ImmediateServices};
 use crate::kernel::abi::native::status::{failure, success};
 use crate::kernel::abi::native::wire::require_zero;
+use hyper::abi::native as abi;
 use hyper::abi::native::{
     HYPER_NATIVE_ABI_REVISION, HYPER_NATIVE_FEATURE_CORE, HYPER_NATIVE_STATUS_INTERNAL,
     HYPER_NATIVE_STATUS_NOT_SUPPORTED, NativeResult,
@@ -59,4 +60,18 @@ pub(in crate::kernel::abi::native) fn sys_clock_get_monotonic(
 #[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_not_supported() -> NativeResult {
     failure(HYPER_NATIVE_STATUS_NOT_SUPPORTED)
+}
+
+#[inline(never)]
+pub(in crate::kernel::abi::native) fn sys_clock_get_realtime(
+    arguments: &Arguments,
+) -> DeferredAction {
+    let result = (|| {
+        require_zero(arguments)?;
+        crate::kernel::time::realtime().ok_or(abi::HYPER_NATIVE_STATUS_NOT_SUPPORTED)
+    })();
+    DeferredAction::Return(match result {
+        Ok(time) => success([time.seconds() as u64, u64::from(time.nanoseconds())]),
+        Err(status) => failure(status),
+    })
 }

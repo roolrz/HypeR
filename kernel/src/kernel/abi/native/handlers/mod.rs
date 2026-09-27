@@ -1,7 +1,10 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Native syscall leaf handlers.
+//! Native syscall leaves grouped by the capability domain they validate.
+//!
+//! Keep each syscall as a distinct machine frame: routing must not inherit
+//! the largest handler stack, and crash traces must identify the active call.
 
 mod console;
 mod handles;
@@ -12,6 +15,7 @@ mod object;
 mod process_builder;
 mod system;
 mod task;
+mod vfs;
 mod vm;
 
 pub(super) use console::{sys_console_read, sys_console_write};
@@ -48,13 +52,24 @@ pub(super) use process_builder::{
     sys_process_builder_set_name, sys_process_builder_start,
 };
 pub(super) use system::{
-    sys_abi_query, sys_clock_get_monotonic, sys_not_supported, sys_system_config,
+    sys_abi_query, sys_clock_get_monotonic, sys_clock_get_realtime, sys_not_supported,
+    sys_system_config,
 };
 pub(super) use task::{
     sys_atomic_wait, sys_atomic_wake, sys_process_exit, sys_process_get_current_id,
     sys_process_get_info, sys_process_request_stop, sys_resource_domain_create,
     sys_task_group_create, sys_thread_create, sys_thread_exit, sys_thread_request_stop,
     sys_thread_sleep, sys_thread_start, sys_thread_yield,
+};
+pub(super) use vfs::{
+    sys_directory_canonicalize, sys_directory_create_directory, sys_directory_create_file,
+    sys_directory_get_info, sys_directory_get_metadata, sys_directory_get_self_metadata,
+    sys_directory_link, sys_directory_open_directory, sys_directory_open_directory_nofollow,
+    sys_directory_open_file, sys_directory_open_file_with_options, sys_directory_read,
+    sys_directory_read_link, sys_directory_remove, sys_directory_remove_if, sys_directory_rename,
+    sys_directory_scope_create, sys_directory_set_metadata, sys_directory_symlink,
+    sys_file_get_info, sys_file_get_metadata, sys_file_lock, sys_file_read_at, sys_file_resize,
+    sys_file_set_metadata, sys_file_sync, sys_file_unlock, sys_file_write_at,
 };
 pub(super) use vm::{
     sys_guest_memory_create, sys_pending_virtual_machine_abort,
@@ -74,285 +89,5 @@ pub(super) use vm::{
 
 #[cfg(feature = "kernel-self-test")]
 pub(super) use ipc::capability_receive_result;
-
-use super::Arguments;
-use super::services::{DeferredAction, VfsServices};
-use super::status::{
-    failure, handle_result, info_result, scan_result, status_from_address_error,
-    status_from_vfs_service_error, success,
-};
-use super::wire::{
-    copy_directory_page, copy_info_record, encode_directory_info, encode_file_info,
-    optional_user_slice, parse_handle, prepare_info_request,
-};
-use crate::kernel::capability::{HandleValue, Rights};
-use crate::kernel::mm::user_space::{UserAddress, UserSlice};
-use hyper::abi::native::{
-    HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY, HYPER_NATIVE_DIRECTORY_INFO_MIN_SIZE,
-    HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES, HYPER_NATIVE_FILE_INFO_MIN_SIZE,
-    HYPER_NATIVE_FILE_MAX_READ_BYTES, HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
-    HyperNativeDirectoryEntry, HyperNativeDirectoryInfo, HyperNativeFileInfo, HyperNativeStatus,
-};
-
-// Keep each syscall as a distinct machine frame. The routing match must not
-// inherit the largest handler's stack requirement, and crash traces should
-// identify the operation which was active at the fault boundary.
-
-#[inline(never)]
-pub(super) fn sys_directory_open_file(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_handle(arguments[0]).and_then(|root| {
-        if arguments[4] != 0
-            || arguments[5] != 0
-            || arguments[2] == 0
-            || arguments[2] > HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES
-        {
-            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-        }
-        let path = UserSlice::new(UserAddress::new(arguments[1]), arguments[2])
-            .map_err(status_from_address_error)?;
-        let rights = Rights::from_bits(arguments[3]).ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
-        services
-            .open_file(root, path, rights)
-            .map_err(status_from_vfs_service_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_directory_open_directory(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_directory_open(arguments).and_then(|(root, path, rights)| {
-        services
-            .open_directory(root, path, rights)
-            .map_err(status_from_vfs_service_error)
-    });
-    DeferredAction::Return(handle_result(result))
-}
-
-pub(super) fn parse_directory_open(
-    arguments: &Arguments,
-) -> Result<(HandleValue, UserSlice, Rights), HyperNativeStatus> {
-    let root = parse_handle(arguments[0])?;
-    if arguments[4] != 0
-        || arguments[5] != 0
-        || arguments[2] == 0
-        || arguments[2] > HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES
-    {
-        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-    }
-    let path = UserSlice::new(UserAddress::new(arguments[1]), arguments[2])
-        .map_err(status_from_address_error)?;
-    let rights = Rights::from_bits(arguments[3]).ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
-    Ok((root, path, rights))
-}
-
-#[inline(never)]
-pub(super) fn sys_directory_read(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_directory_read(arguments).and_then(|(directory, cookie, destination)| {
-        let mut page = crate::kernel::vfs::DirectoryPage::empty();
-        services
-            .read_directory(directory, cookie, &mut page)
-            .map_err(status_from_vfs_service_error)?;
-        copy_directory_page(services, destination, &page)
-    });
-    DeferredAction::Return(scan_result(result))
-}
-
-pub(super) fn parse_directory_read(
-    arguments: &Arguments,
-) -> Result<(HandleValue, u64, UserSlice), HyperNativeStatus> {
-    if arguments[3] != HYPER_NATIVE_DIRECTORY_ENTRY_PAGE_CAPACITY
-        || arguments[4] != 0
-        || arguments[5] != 0
-    {
-        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-    }
-    let bytes = arguments[3]
-        .checked_mul(core::mem::size_of::<HyperNativeDirectoryEntry>() as u64)
-        .ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
-    let destination =
-        UserSlice::new(UserAddress::new(arguments[2]), bytes).map_err(status_from_address_error)?;
-    Ok((parse_handle(arguments[0])?, arguments[1], destination))
-}
-
-#[inline(never)]
-pub(super) fn sys_file_read_at(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = parse_handle(arguments[0]).and_then(|file| {
-        if arguments[1] != 0 || arguments[4] > HYPER_NATIVE_FILE_MAX_READ_BYTES {
-            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-        }
-        let output = optional_user_slice(arguments[3], arguments[4])?;
-        services
-            .read_file_at(file, arguments[2], output)
-            .map_err(status_from_vfs_service_error)
-    });
-    let result = match result {
-        Ok((actual, file_size)) => success([actual, file_size]),
-        Err(status) => failure(status),
-    };
-    DeferredAction::Return(result)
-}
-
-#[inline(never)]
-pub(super) fn sys_file_get_info(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = prepare_info_request(
-        arguments,
-        HYPER_NATIVE_FILE_INFO_MIN_SIZE,
-        core::mem::size_of::<HyperNativeFileInfo>(),
-    )
-    .and_then(|request| {
-        let file = request.value;
-        let info = services
-            .file_info(file)
-            .map_err(status_from_vfs_service_error)?;
-        copy_info_record(services, request, &encode_file_info(info))
-    });
-    DeferredAction::Return(info_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_directory_get_info(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = prepare_info_request(
-        arguments,
-        HYPER_NATIVE_DIRECTORY_INFO_MIN_SIZE,
-        core::mem::size_of::<HyperNativeDirectoryInfo>(),
-    )
-    .and_then(|request| {
-        let directory = request.value;
-        let info = services
-            .directory_info(directory)
-            .map_err(status_from_vfs_service_error)?;
-        copy_info_record(services, request, &encode_directory_info(info))
-    });
-    DeferredAction::Return(info_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_file_write_at(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[1] > 1
-            || (arguments[1] == 1 && arguments[2] != 0)
-            || arguments[4] > HYPER_NATIVE_FILE_MAX_READ_BYTES
-            || arguments[5] != 0
-        {
-            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-        }
-        let file = parse_handle(arguments[0])?;
-        let input = optional_user_slice(arguments[3], arguments[4])?;
-        services
-            .write_file_at(file, (arguments[1] == 0).then_some(arguments[2]), input)
-            .map_err(status_from_vfs_service_error)
-    })();
-    DeferredAction::Return(match result {
-        Ok((actual, end)) => success([actual, end]),
-        Err(status) => failure(status),
-    })
-}
-
-#[inline(never)]
-pub(super) fn sys_file_resize(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[2..].iter().any(|value| *value != 0) {
-            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-        }
-        services
-            .resize_file(parse_handle(arguments[0])?, arguments[1])
-            .map_err(status_from_vfs_service_error)
-    })();
-    DeferredAction::Return(match result {
-        Ok(()) => success([0, 0]),
-        Err(status) => failure(status),
-    })
-}
-
-fn mutation_path(arguments: &Arguments) -> Result<(HandleValue, UserSlice), HyperNativeStatus> {
-    if arguments[2] == 0 || arguments[2] > HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES {
-        return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-    }
-    Ok((
-        parse_handle(arguments[0])?,
-        UserSlice::new(UserAddress::new(arguments[1]), arguments[2])
-            .map_err(status_from_address_error)?,
-    ))
-}
-
-#[inline(never)]
-pub(super) fn sys_directory_create_file(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[5] != 0 || arguments[4] & !0o777 != 0 {
-            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-        }
-        let (directory, path) = mutation_path(arguments)?;
-        let rights = Rights::from_bits(arguments[3]).ok_or(HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?;
-        services
-            .create_file(directory, path, rights, arguments[4] as u32)
-            .map_err(status_from_vfs_service_error)
-    })();
-    DeferredAction::Return(handle_result(result))
-}
-
-#[inline(never)]
-pub(super) fn sys_directory_create_directory(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[4] != 0 || arguments[5] != 0 || arguments[3] & !0o777 != 0 {
-            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-        }
-        let (directory, path) = mutation_path(arguments)?;
-        services
-            .create_directory(directory, path, arguments[3] as u32)
-            .map_err(status_from_vfs_service_error)
-    })();
-    DeferredAction::Return(match result {
-        Ok(()) => success([0, 0]),
-        Err(status) => failure(status),
-    })
-}
-
-#[inline(never)]
-pub(super) fn sys_directory_remove(
-    services: &impl VfsServices,
-    arguments: &Arguments,
-) -> DeferredAction {
-    let result = (|| {
-        if arguments[4] != 0 || arguments[5] != 0 || arguments[3] > 1 {
-            return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
-        }
-        let (directory, path) = mutation_path(arguments)?;
-        services
-            .remove_entry(directory, path, arguments[3] == 1)
-            .map_err(status_from_vfs_service_error)
-    })();
-    DeferredAction::Return(match result {
-        Ok(()) => success([0, 0]),
-        Err(status) => failure(status),
-    })
-}
+#[cfg(feature = "kernel-self-test")]
+pub(super) use vfs::run_wire_self_test;
