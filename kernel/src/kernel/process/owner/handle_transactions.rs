@@ -1,9 +1,20 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Process-local handle reservation, transfer, and accounting transactions.
+//! Linear Process handle reservation, transfer, and consumption transactions.
 
-use super::*;
+use super::require_handle_phase;
+use super::{
+    HandleAccounting, HandleChargeRecord, Process, ProcessError, ProcessId, ProcessState,
+    process_invariant_violation,
+};
+use crate::kernel::accounting::{ChargeReservation, CommittedCharge};
+use crate::kernel::capability::{
+    DirectHandleTransfer, HandleBatchReservation, HandleReservation, HandleTable,
+    HandleTransferClaim, HandleValue, InTransitCapabilities, PreparedHandle,
+    RetiredDirectHandleTransfer,
+};
+use hyper::mm::FallibleArc;
 
 pub(crate) struct HandlePublishFailure<const N: usize> {
     pub(crate) error: ProcessError,
@@ -94,13 +105,7 @@ impl PreparedHandleConsumption {
             detached_source = Some(detached);
             retired_transfer_storage = Some(retired);
 
-            for value in source.moved_values.drain(..) {
-                let (charge, retired_record) = state.handle_accounting.release(value);
-                source.released_charges.push(charge);
-                if let Some(record) = retired_record {
-                    source.retired_records.push(record);
-                }
-            }
+            source.detach_source_charges(&mut state.handle_accounting);
 
             let mut charges = match destination.handle_charges.take() {
                 Some(charges) => charges,
@@ -157,6 +162,21 @@ pub(crate) struct PreparedProcessHandleTransfer {
 }
 
 impl PreparedProcessHandleTransfer {
+    /// Detaches committed source charges under the Process state lock.
+    ///
+    /// The source values were validated before table mutation. Both retention
+    /// buffers were reserved before locking; retain every owner here so neither
+    /// quota release nor record destruction runs while the Process is locked.
+    pub(super) fn detach_source_charges(&mut self, accounting: &mut HandleAccounting) {
+        for value in self.moved_values.drain(..) {
+            let (charge, retired_record) = accounting.release(value);
+            self.released_charges.push(charge);
+            if let Some(record) = retired_record {
+                self.retired_records.push(record);
+            }
+        }
+    }
+
     // A drained Vec still owns its allocation. Release all three buffers before
     // returning their shared scratch quota, on both rollback and commit paths.
     fn release_scratch(&mut self) {
@@ -523,13 +543,7 @@ fn commit_source_accounting(
         Some(source) => source,
         None => process_invariant_violation(),
     };
-    for value in source.moved_values.drain(..) {
-        let (charge, retired_record) = source_state.handle_accounting.release(value);
-        source.released_charges.push(charge);
-        if let Some(record) = retired_record {
-            source.retired_records.push(record);
-        }
-    }
+    source.detach_source_charges(&mut source_state.handle_accounting);
 }
 
 fn commit_destination_accounting(

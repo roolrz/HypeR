@@ -3,6 +3,7 @@
 
 //! Atomic child Process preparation, publication, and rollback.
 
+use super::handle_transactions::PreparedHandleConsumption;
 use super::*;
 
 /// Failure before a child Process becomes visible in any kernel directory.
@@ -694,13 +695,7 @@ fn commit_parent_builder_replacement(
         retired_transfer_storage = Some(retired);
         supervisor_value = Some(values[0]);
 
-        for value in source.moved_values.drain(..) {
-            let (charge, retired_record) = state.handle_accounting.release(value);
-            source.released_charges.push(charge);
-            if let Some(record) = retired_record {
-                source.retired_records.push(record);
-            }
-        }
+        source.detach_source_charges(&mut state.handle_accounting);
 
         let mut charges = match destination.handle_charges.take() {
             Some(charges) => charges,

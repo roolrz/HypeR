@@ -4,28 +4,28 @@
 //! Process composition, publication, stop, and explicit retirement.
 
 mod handle_accounting;
-mod handle_namespace;
+mod handle_transactions;
 
 use handle_accounting::HandleAccounting;
 mod start;
 
-pub(crate) use handle_namespace::{
-    HandlePublishFailure, PreparedDirectProcessHandleTransfer, PreparedHandleConsumption,
-    PreparedProcessHandleTransfer, ProcessHandleBatchReservation, ProcessHandleReservation,
+use handle_transactions::{
+    HandlePublishFailure, PreparedHandleConsumption, PreparedProcessHandleTransfer,
+};
+pub(crate) use handle_transactions::{
+    PreparedDirectProcessHandleTransfer, ProcessHandleBatchReservation, ProcessHandleReservation,
 };
 pub(crate) use start::{ChildProcessStartError, ProcessStartCoordinator, StartedChildProcess};
 
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-use hyper::exec::startup::StartupHandle;
-use hyper::mm::{FallibleArc, UniqueFallibleArc, WeakFallibleArc};
-use hyper::sync::{InterruptSpinLock, PublishedOnce};
-
+use super::builder::{
+    ProcessBuilderError, ProcessStartTransaction, SealedProcessBuild, StartPreparationFailure,
+};
 use super::directory::PreparedRegistration;
 use super::image::{AbiFamily, ExecutionRoute, MachineAbi, ProcessImage, UserThreadStart};
 use super::lifecycle::{
     LifecycleError, ProcessLifecycle, ProcessPhase, StopDispatchProgress, TerminalReason,
 };
+use super::objects::ProcessObject;
 use super::task_group::{
     PreparedTaskGroupMembership, TaskGroup, TaskGroupError, TaskGroupMembership,
 };
@@ -34,12 +34,12 @@ use crate::kernel::accounting::{
     ChargeReservation, CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::capability::{
-    ClosedHandle, DirectHandleTransfer, HandleBatchReservation, HandleBatchReservationStorage,
-    HandleError, HandleFlags, HandleInfo, HandleReservation, HandleScanCursor, HandleSidecar,
-    HandleSidecarPlan, HandleSnapshotPage, HandleTable, HandleTableStoragePlan,
-    HandleTableStorageSnapshot, HandleTransferClaim, HandleTransferRequest, HandleTransferRoute,
-    HandleTransferStorage, HandleValue, InTransitCapabilities, PreparedHandle, ResolvedObject,
-    ResolvedWaitable, RetiredDirectHandleTransfer, RetiredHandleBatchReservationStorage, Rights,
+    ClosedHandle, HandleBatchReservation, HandleBatchReservationStorage, HandleError, HandleFlags,
+    HandleInfo, HandleReservation, HandleScanCursor, HandleSidecar, HandleSidecarPlan,
+    HandleSnapshotPage, HandleTable, HandleTableStoragePlan, HandleTableStorageSnapshot,
+    HandleTransferClaim, HandleTransferRequest, HandleTransferRoute, HandleTransferStorage,
+    HandleValue, InTransitCapabilities, PreparedHandle, ResolvedObject, ResolvedWaitable,
+    RetiredHandleBatchReservationStorage, Rights,
 };
 use crate::kernel::mm::user_space::{
     MachineError, MemoryObjectError, NativeAddressSpace, UserAddress, UserSlice,
@@ -52,11 +52,10 @@ use crate::kernel::object::{
 use crate::kernel::sync::Completion;
 use crate::kernel::task::scheduler::{self, CpuMask};
 use crate::kernel::task::thread::ThreadId;
-
-use super::builder::{
-    ProcessBuilderError, ProcessStartTransaction, SealedProcessBuild, StartPreparationFailure,
-};
-use super::objects::ProcessObject;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use hyper::exec::startup::StartupHandle;
+use hyper::mm::{FallibleArc, UniqueFallibleArc, WeakFallibleArc};
+use hyper::sync::{InterruptSpinLock, PublishedOnce};
 
 type ProcessLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 
