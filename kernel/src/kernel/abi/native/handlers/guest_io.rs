@@ -16,6 +16,7 @@ use crate::kernel::mm::user_space::{UserAddress, UserSlice};
 use crate::kernel::vm::service::Error;
 use hyper::abi::native::HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_guest_mailbox_create(
     services: &impl GuestIoServices,
     arguments: &Arguments,
@@ -59,6 +60,7 @@ pub(in crate::kernel::abi::native) fn sys_guest_mailbox_send(
     DeferredAction::Return(status_only(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_guest_mailbox_receive(
     services: &impl GuestIoServices,
     arguments: &Arguments,
@@ -90,6 +92,7 @@ pub(in crate::kernel::abi::native) fn sys_guest_mailbox_receive(
     })
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_guest_notification_create(
     services: &impl GuestIoServices,
     arguments: &Arguments,
@@ -109,6 +112,7 @@ pub(in crate::kernel::abi::native) fn sys_guest_notification_create(
     DeferredAction::Return(handle_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_guest_notification_control(
     services: &impl GuestIoServices,
     arguments: &Arguments,
@@ -125,6 +129,7 @@ pub(in crate::kernel::abi::native) fn sys_guest_notification_control(
     })
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_native_block_create(
     services: &impl GuestIoServices,
     arguments: &Arguments,
@@ -144,6 +149,7 @@ pub(in crate::kernel::abi::native) fn sys_native_block_create(
     DeferredAction::Return(handle_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_native_block_activate(
     services: &impl GuestIoServices,
     arguments: &Arguments,
@@ -182,6 +188,7 @@ pub(in crate::kernel::abi::native) fn sys_native_block_activate(
     })
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_native_block_mount(
     services: &impl GuestIoServices,
     arguments: &Arguments,
@@ -204,6 +211,7 @@ pub(in crate::kernel::abi::native) fn sys_native_block_mount(
     DeferredAction::Return(status_only(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_guest_mapping_create(
     services: &impl GuestIoServices,
     arguments: &Arguments,
@@ -224,6 +232,7 @@ pub(in crate::kernel::abi::native) fn sys_guest_mapping_create(
     })
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_guest_mapping_release(
     services: &impl GuestIoServices,
     arguments: &Arguments,

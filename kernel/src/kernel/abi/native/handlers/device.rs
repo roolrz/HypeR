@@ -26,6 +26,7 @@ fn status_from_match_error(
     }
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_device_firmware_read(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -103,6 +104,7 @@ pub(in crate::kernel::abi::native) fn sys_device_firmware_read(
     DeferredAction::Return(info_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_device_claim_bundle(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -152,6 +154,7 @@ pub(in crate::kernel::abi::native) fn sys_device_claim_bundle(
     DeferredAction::Return(handle_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_device_mmio(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -177,6 +180,7 @@ pub(in crate::kernel::abi::native) fn sys_device_mmio(
     DeferredAction::Return(info_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_device_irq_pending(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -190,6 +194,7 @@ pub(in crate::kernel::abi::native) fn sys_device_irq_pending(
     DeferredAction::Return(info_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_device_irq_complete(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -206,6 +211,7 @@ pub(in crate::kernel::abi::native) fn sys_device_irq_complete(
     DeferredAction::Return(status_only(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_device_profile_info(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -220,6 +226,7 @@ pub(in crate::kernel::abi::native) fn sys_device_profile_info(
     DeferredAction::Return(info_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_device_resource_info(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -236,6 +243,7 @@ pub(in crate::kernel::abi::native) fn sys_device_resource_info(
     DeferredAction::Return(info_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_device_claim_matching(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -267,6 +275,7 @@ pub(in crate::kernel::abi::native) fn sys_device_claim_matching(
     DeferredAction::Return(handle_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_device_claim(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -280,6 +289,7 @@ pub(in crate::kernel::abi::native) fn sys_device_claim(
     DeferredAction::Return(handle_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_physical_device_info(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -298,6 +308,7 @@ pub(in crate::kernel::abi::native) fn sys_physical_device_info(
     DeferredAction::Return(info_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_vmo_get_dma_extent(
     services: &impl DeviceServices,
     arguments: &Arguments,
@@ -321,6 +332,7 @@ pub(in crate::kernel::abi::native) fn sys_vmo_get_dma_extent(
     DeferredAction::Return(info_result(result))
 }
 
+#[inline(never)]
 pub(in crate::kernel::abi::native) fn sys_pending_virtual_machine_assign_device(
     services: &impl DeviceServices,
     arguments: &Arguments,
