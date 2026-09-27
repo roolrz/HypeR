@@ -288,14 +288,6 @@ pub(in crate::kernel::abi::native) fn sys_directory_remove(
     })
 }
 
-fn parse_follow_symlinks(options: u64) -> Result<bool, Status> {
-    match options {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(INVALID),
-    }
-}
-
 fn parse_path(address: u64, length: u64) -> Result<UserSlice, Status> {
     if length == 0 || length > abi::HYPER_NATIVE_DIRECTORY_MAX_PATH_BYTES {
         return Err(INVALID);
@@ -350,7 +342,11 @@ pub(in crate::kernel::abi::native) fn sys_directory_remove_if(
 ) -> DeferredAction {
     let result = (|| {
         require_zero(&arguments[5..])?;
-        let is_directory = !parse_follow_symlinks(arguments[3])?;
+        let is_directory = match arguments[3] {
+            0 => false,
+            1 => true,
+            _ => return Err(INVALID),
+        };
         services
             .directory_remove_if(
                 parse_handle(arguments[0])?,

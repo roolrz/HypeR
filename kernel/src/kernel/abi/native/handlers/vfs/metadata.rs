@@ -3,7 +3,7 @@
 
 //! Native filesystem metadata records and syscall leaves.
 
-use super::{parse_follow_symlinks, parse_path};
+use super::parse_path;
 use crate::kernel::abi::native::Arguments;
 use crate::kernel::abi::native::services::{DeferredAction, UserMemoryServices, VfsServices};
 use crate::kernel::abi::native::status::{info_result, status_from_vfs_service_error, status_only};
@@ -21,6 +21,14 @@ type UpdateRecord = abi::HyperNativeFileMetadataUpdate;
 const METADATA_SIZE: usize = core::mem::size_of::<MetadataRecord>();
 const UPDATE_SIZE: usize = core::mem::size_of::<UpdateRecord>();
 const INVALID: Status = abi::HYPER_NATIVE_STATUS_INVALID_ARGUMENT;
+
+fn parse_follow_symlinks(options: u64) -> Result<bool, Status> {
+    match options {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(INVALID),
+    }
+}
 
 #[cfg(feature = "kernel-self-test")]
 mod self_test;
