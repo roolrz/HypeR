@@ -20,7 +20,6 @@ mod dispatch;
 
 pub(in crate::kernel) use dispatch::{dispatch_deferred, dispatch_immediate, is_immediate};
 mod handlers;
-mod io_handlers;
 #[cfg(feature = "kernel-self-test")]
 mod self_test;
 mod status;

@@ -7,6 +7,8 @@
 //! the largest handler stack, and crash traces must identify the active call.
 
 mod console;
+mod device;
+mod guest_io;
 mod handles;
 mod inspect;
 mod ipc;
@@ -19,6 +21,18 @@ mod vfs;
 mod vm;
 
 pub(super) use console::{sys_console_read, sys_console_write};
+pub(super) use device::{
+    sys_device_claim, sys_device_claim_bundle, sys_device_claim_matching, sys_device_firmware_read,
+    sys_device_irq_complete, sys_device_irq_pending, sys_device_mmio, sys_device_profile_info,
+    sys_device_resource_info, sys_pending_virtual_machine_assign_device, sys_physical_device_info,
+    sys_vmo_get_dma_extent,
+};
+pub(super) use guest_io::{
+    sys_guest_mailbox_create, sys_guest_mailbox_receive, sys_guest_mailbox_send,
+    sys_guest_mapping_create, sys_guest_mapping_release, sys_guest_notification_control,
+    sys_guest_notification_create, sys_native_block_activate, sys_native_block_create,
+    sys_native_block_mount,
+};
 pub(super) use handles::{
     sys_handle_close, sys_handle_duplicate, sys_handle_get_info, sys_handle_replace,
     sys_object_get_basic_info,
