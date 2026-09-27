@@ -242,7 +242,7 @@ loads a new image and address space.
   have distinct failure/rollback boundaries.
 - **Additional Thread:** [std thread adapter](../sdk/toolchain/rust-std/overlay/std/src/sys/thread/hyper.rs)
   uses [thread_spawn.c](../sdk/lib/src/thread_spawn.c). Native `thread_create`
-  reaches `create_thread` in [Process services](../kernel/src/kernel/entry/services.rs),
+  reaches `create_thread` in [task services](../kernel/src/kernel/entry/services/task.rs),
   which validates start information and affinity and asks the Process owner to
   prepare the user Thread. Creation and `thread_start` are separate operations.
   [UserThread](../kernel/src/kernel/process/user_thread.rs) and

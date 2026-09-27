@@ -3,36 +3,34 @@
 
 //! Concrete Native service adapters over borrowed Process and Thread authority.
 
+mod affinity;
+mod console;
+mod process_builder;
+mod task;
 mod vfs;
 
-use alloc::vec::Vec;
-
 use crate::kernel::abi::native::{
-    ConsoleServiceError, ConsoleServices, HandleServices, HierarchyServices, ImmediateServices,
-    InspectServices, IpcServices, MemoryServices, ObjectServiceError, ObjectServices,
-    ProcessBuilderServiceError, ProcessBuilderServices, SystemInspectServices, TaskServices,
-    UserMemoryServices, VmServices,
+    HandleServices, ImmediateServices, InspectServices, IpcServices, MemoryServices,
+    ObjectServiceError, ObjectServices, SystemInspectServices, UserMemoryServices, VmServices,
 };
-use crate::kernel::accounting::{
-    CommittedCharge, ResourceAmount, ResourceDomainObject, ResourceKind,
-};
+use crate::kernel::accounting::{ResourceAmount, ResourceDomainObject, ResourceKind};
 use crate::kernel::capability::{HandleInfo, HandleValue, ResolvedWaitable, Rights};
 use crate::kernel::inspect::{CpuInspector, MemoryInspector, ObjectInspector, TaskInspector};
 use crate::kernel::ipc::{
     ByteChannelReadOutcome, ByteChannelServiceError, CapabilityChannelServiceError,
     CapabilityReceiveOutcome,
 };
-use crate::kernel::mm::user_space::UserAddress;
 use crate::kernel::mm::user_space::UserSlice;
 use crate::kernel::object::{
-    self, Event, KernelObject, ObjectKind, SignalWaitManyOutcome, SignalWaitOutcome,
-    SignalWaitRequest,
+    self, Event, KernelObject, SignalWaitManyOutcome, SignalWaitOutcome, SignalWaitRequest,
 };
 use crate::kernel::process::{
-    Process, ProcessBuilder, ProcessError, ProcessObject, ProcessSnapshot, StartupCapability,
-    TaskGroupObject, TerminalReason, UserThread, UserThreadPhase,
+    Process, ProcessError, ProcessObject, ProcessSnapshot, TaskGroupObject, UserThread,
+    UserThreadPhase,
 };
-use crate::kernel::task::scheduler::CpuMask;
+use alloc::vec::Vec;
+
+use self::affinity::AffinityInputError;
 
 /// Borrowed syscall authority; contains no machine-run or return-token state.
 pub(super) struct DeferredProcessServices<'process> {
@@ -60,20 +58,9 @@ impl UserMemoryServices for DeferredProcessServices<'_> {
     }
 }
 
-struct ChargedBuilderInput {
-    bytes: Vec<u8>,
-    _charge: CommittedCharge,
-}
-
 struct ResolvedWaitEntry {
     object: ResolvedWaitable,
     signals: u64,
-}
-
-impl ChargedBuilderInput {
-    fn as_bytes(&self) -> &[u8] {
-        &self.bytes
-    }
 }
 
 impl DeferredProcessServices<'_> {
@@ -97,97 +84,6 @@ impl DeferredProcessServices<'_> {
             .write_input(bytes)
             .map_err(crate::kernel::vm::objects::Error::from)
             .map_err(Into::into)
-    }
-
-    fn copy_builder_input(
-        &self,
-        input: Option<UserSlice>,
-    ) -> Result<ChargedBuilderInput, ProcessBuilderServiceError> {
-        let length = input.map_or(0, UserSlice::length);
-        let length =
-            usize::try_from(length).map_err(|_| ProcessBuilderServiceError::InvalidInput)?;
-        let charge = self
-            .process
-            .resource_domain()
-            .reserve(ResourceAmount::ZERO.with(
-                ResourceKind::KernelMemoryBytes,
-                u64::try_from(length).map_err(|_| ProcessBuilderServiceError::InvalidInput)?,
-            ))
-            .map_err(ProcessError::from)?
-            .commit();
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(length)
-            .map_err(|_| ProcessBuilderServiceError::Process(ProcessError::Allocation))?;
-        bytes.resize(length, 0);
-        if let Some(input) = input {
-            self.process.copy_from_user(input, &mut bytes)?;
-        }
-        Ok(ChargedBuilderInput {
-            bytes,
-            _charge: charge,
-        })
-    }
-
-    fn copy_affinity(
-        &self,
-        input: Option<UserSlice>,
-        word_count: usize,
-    ) -> Result<CpuMask, AffinityInputError> {
-        const WORD_BYTES: usize = core::mem::size_of::<u64>();
-        const MAX_WORDS: usize =
-            hyper::abi::native::HYPER_NATIVE_PROCESS_AFFINITY_MAX_WORDS as usize;
-
-        if word_count > MAX_WORDS {
-            return Err(AffinityInputError::Invalid);
-        }
-        let byte_count = word_count
-            .checked_mul(WORD_BYTES)
-            .ok_or(AffinityInputError::Invalid)?;
-        let mut encoded = [0_u8; MAX_WORDS * WORD_BYTES];
-        if let Some(input) = input {
-            if input.length() != byte_count as u64 {
-                return Err(AffinityInputError::Invalid);
-            }
-            self.process
-                .copy_from_user(input, &mut encoded[..byte_count])?;
-        } else if byte_count != 0 {
-            return Err(AffinityInputError::Invalid);
-        }
-
-        let mut words = [0_u64; MAX_WORDS];
-        for (index, destination) in words[..word_count].iter_mut().enumerate() {
-            let offset = index * WORD_BYTES;
-            let mut word = [0_u8; WORD_BYTES];
-            word.copy_from_slice(&encoded[offset..offset + WORD_BYTES]);
-            *destination = u64::from_le_bytes(word);
-        }
-        for cpu in hyper::cpu::MAX_CPUS..word_count * u64::BITS as usize {
-            if words[cpu / u64::BITS as usize] & (1_u64 << (cpu % u64::BITS as usize)) != 0 {
-                return Err(AffinityInputError::Invalid);
-            }
-        }
-        let mut affinity = CpuMask::EMPTY;
-        for cpu in 0..hyper::cpu::MAX_CPUS {
-            if words[cpu / u64::BITS as usize] & (1_u64 << (cpu % u64::BITS as usize)) == 0 {
-                continue;
-            }
-            let Some(cpu) = hyper::cpu::CpuIndex::new(cpu) else {
-                return Err(AffinityInputError::Invalid);
-            };
-            affinity = affinity.with_cpu(cpu);
-        }
-        Ok(affinity)
-    }
-}
-
-enum AffinityInputError {
-    Invalid,
-    Memory(ProcessError),
-}
-impl From<ProcessError> for AffinityInputError {
-    fn from(error: ProcessError) -> Self {
-        Self::Memory(error)
     }
 }
 
@@ -219,24 +115,6 @@ impl HandleServices for DeferredProcessServices<'_> {
         rights: Rights,
     ) -> Result<HandleValue, ProcessError> {
         self.process.replace_handle(value, rights)
-    }
-}
-
-impl HierarchyServices for DeferredProcessServices<'_> {
-    fn create_resource_domain(
-        &self,
-        parent: HandleValue,
-        limits: crate::kernel::accounting::ResourceLimits,
-    ) -> Result<HandleValue, crate::kernel::process::hierarchy::Error> {
-        crate::kernel::process::hierarchy::create_resource_domain(self.process, parent, limits)
-    }
-
-    fn create_task_group(
-        &self,
-        factory: HandleValue,
-        domain: HandleValue,
-    ) -> Result<HandleValue, crate::kernel::process::hierarchy::Error> {
-        crate::kernel::process::hierarchy::create_task_group(self.process, factory, domain)
     }
 }
 
@@ -684,132 +562,6 @@ impl ObjectServices for DeferredProcessServices<'_> {
     }
 }
 
-impl TaskServices for DeferredProcessServices<'_> {
-    fn create_thread(
-        &self,
-        entry: u64,
-        stack: u64,
-        tls: u64,
-        argument: u64,
-        affinity_words: Option<UserSlice>,
-        affinity_word_count: usize,
-    ) -> Result<HandleValue, ObjectServiceError> {
-        let start = crate::kernel::process::UserThreadStart::try_new(
-            UserAddress::new(entry),
-            UserAddress::new(stack),
-            UserAddress::new(tls),
-        )
-        .map_err(|_| ObjectServiceError::InvalidInput)?
-        .with_argument(argument);
-        let affinity = if affinity_words.is_none() && affinity_word_count == 0 {
-            let caller = self
-                .thread
-                .scheduler_id()
-                .ok_or(ObjectServiceError::InvalidInput)?;
-            crate::kernel::task::scheduler::thread_placement(caller)
-                .map_err(ProcessError::from)?
-                .1
-        } else {
-            let affinity = self
-                .copy_affinity(affinity_words, affinity_word_count)
-                .map_err(|error| match error {
-                    AffinityInputError::Invalid => ObjectServiceError::InvalidInput,
-                    AffinityInputError::Memory(error) => ObjectServiceError::Process(error),
-                })?;
-            crate::kernel::task::scheduler::validate_affinity(affinity)
-                .map_err(|_| ObjectServiceError::InvalidInput)?;
-            affinity
-        };
-        let process = self.process;
-        let thread = process.create_user_thread("native-worker", start, affinity)?;
-        let rights = Rights::DUPLICATE
-            .union(Rights::WAIT)
-            .union(Rights::INSPECT)
-            .union(Rights::START)
-            .union(Rights::REQUEST_STOP);
-        match process.publish_thread_handle(&thread, rights) {
-            Ok(handle) => Ok(handle),
-            Err(error) => {
-                if let Some(id) = thread.scheduler_id() {
-                    crate::kernel::task::scheduler::request_user_thread_stop(
-                        id,
-                        TerminalReason::Requested,
-                    )
-                    .map_err(ProcessError::from)?;
-                }
-                Err(error.into())
-            }
-        }
-    }
-    fn start_thread(&self, value: HandleValue) -> Result<(), ProcessError> {
-        let thread = self
-            .process
-            .resolve_user_thread_handle(value, Rights::START)?;
-        thread.ready()?;
-        Ok(())
-    }
-    fn stop_thread(&self, value: HandleValue) -> Result<(), ProcessError> {
-        let thread = self
-            .process
-            .resolve_user_thread_handle(value, Rights::REQUEST_STOP)?;
-        if thread.snapshot().phase == UserThreadPhase::Detached {
-            return Ok(());
-        }
-        if let Some(id) = thread.scheduler_id() {
-            match crate::kernel::task::scheduler::request_user_thread_stop(
-                id,
-                TerminalReason::Requested,
-            ) {
-                Ok(()) => {}
-                Err(crate::kernel::task::scheduler::Error::ThreadNotFound)
-                    if thread.snapshot().phase == UserThreadPhase::Detached => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        Ok(())
-    }
-    fn atomic_wait(
-        &self,
-        address: u64,
-        expected: u32,
-        deadline: u64,
-    ) -> Result<crate::kernel::task::WaitOutcome, ObjectServiceError> {
-        crate::kernel::process::atomic_wait::wait(self.process, address, expected, deadline, || {
-            self.thread.snapshot().phase == UserThreadPhase::StopRequested
-        })
-        .map_err(atomic_wait_error)
-    }
-    fn atomic_wake(&self, address: u64, count: u32) -> Result<u64, ObjectServiceError> {
-        crate::kernel::process::atomic_wait::wake(self.process, address, count)
-            .map_err(atomic_wait_error)
-    }
-    fn sleep_thread(
-        &self,
-        deadline: u64,
-    ) -> Result<crate::kernel::task::WaitOutcome, ObjectServiceError> {
-        crate::kernel::process::atomic_wait::sleep(self.process, deadline, || {
-            self.thread.snapshot().phase == UserThreadPhase::StopRequested
-        })
-        .map_err(atomic_wait_error)
-    }
-
-    fn process_info(&self, process: HandleValue) -> Result<ProcessSnapshot, ProcessError> {
-        Ok(self
-            .process
-            .resolve_handle::<ProcessObject>(process, Rights::INSPECT)?
-            .object()
-            .snapshot())
-    }
-
-    fn request_process_stop(&self, process: HandleValue) -> Result<(), ProcessError> {
-        let process = self
-            .process
-            .resolve_handle::<ProcessObject>(process, Rights::REQUEST_STOP)?;
-        process.object().request_stop(TerminalReason::Requested);
-        Ok(())
-    }
-}
-
 impl InspectServices for DeferredProcessServices<'_> {
     fn scan_processes(
         &self,
@@ -1077,60 +829,6 @@ impl IpcServices for DeferredProcessServices<'_> {
     }
 }
 
-impl ConsoleServices for DeferredProcessServices<'_> {
-    fn read_console(
-        &self,
-        value: HandleValue,
-        destination: Option<UserSlice>,
-    ) -> Result<usize, ConsoleServiceError> {
-        let console = self
-            .process
-            .resolve_handle::<crate::kernel::device::console::SystemConsole>(value, Rights::READ)?;
-        let Some(destination) = destination else {
-            return Ok(0);
-        };
-        let capacity =
-            usize::try_from(destination.length()).map_err(|_| ProcessError::Allocation)?;
-        let claim = console.object().claim_read(capacity)?;
-        let actual = claim.bytes().len();
-        let actual_bytes = u64::try_from(actual).map_err(|_| ProcessError::Allocation)?;
-        let destination = UserSlice::new(destination.base(), actual_bytes)
-            .map_err(|error| ProcessError::UserMemory(error.into()))?;
-        let write = self.process.reserve_user_write(destination)?;
-        write
-            .copy_from(claim.bytes())
-            .map_err(ProcessError::UserMemory)?;
-        write.complete();
-        claim.commit();
-        Ok(actual)
-    }
-
-    fn write_console(
-        &self,
-        value: HandleValue,
-        source: Option<UserSlice>,
-    ) -> Result<usize, ConsoleServiceError> {
-        let console = self
-            .process
-            .resolve_handle::<crate::kernel::device::console::SystemConsole>(
-                value,
-                Rights::WRITE,
-            )?;
-        let Some(source) = source else {
-            return Ok(0);
-        };
-        let length = usize::try_from(source.length())
-            .map_err(|_| ProcessError::Allocation)?
-            .min(crate::kernel::device::console::TRANSFER_BATCH_BYTES);
-        let length_bytes = u64::try_from(length).map_err(|_| ProcessError::Allocation)?;
-        let source = UserSlice::new(source.base(), length_bytes)
-            .map_err(|error| ProcessError::UserMemory(error.into()))?;
-        let mut bytes = [0; crate::kernel::device::console::TRANSFER_BATCH_BYTES];
-        self.process.copy_from_user(source, &mut bytes[..length])?;
-        Ok(console.object().try_write(&bytes[..length])?)
-    }
-}
-
 impl MemoryServices for DeferredProcessServices<'_> {
     fn create_contiguous_vmo(
         &self,
@@ -1244,139 +942,6 @@ impl MemoryServices for DeferredProcessServices<'_> {
         vmar: HandleValue,
     ) -> Result<(), crate::kernel::mm::user_space::MemoryServiceError> {
         crate::kernel::mm::user_space::destroy_vmar(self.process, vmar)
-    }
-}
-
-impl ProcessBuilderServices for DeferredProcessServices<'_> {
-    fn create_process_builder(
-        &self,
-        factory: HandleValue,
-        group: HandleValue,
-        domain: HandleValue,
-        executable: HandleValue,
-    ) -> Result<HandleValue, ProcessBuilderServiceError> {
-        crate::kernel::process::create_process_builder(
-            self.process,
-            factory,
-            group,
-            domain,
-            executable,
-        )
-        .map_err(ProcessBuilderServiceError::Builder)
-    }
-
-    fn set_process_builder_name(
-        &self,
-        builder: HandleValue,
-        name: Option<UserSlice>,
-    ) -> Result<(), ProcessBuilderServiceError> {
-        let builder = self
-            .process
-            .resolve_handle::<ProcessBuilder>(builder, Rights::WRITE)?;
-        let bytes = self.copy_builder_input(name)?;
-        let name = core::str::from_utf8(bytes.as_bytes())
-            .map_err(|_| ProcessBuilderServiceError::InvalidInput)?;
-        builder.object().set_name(name)?;
-        Ok(())
-    }
-
-    fn add_process_builder_argument(
-        &self,
-        builder: HandleValue,
-        argument: Option<UserSlice>,
-    ) -> Result<(), ProcessBuilderServiceError> {
-        let builder = self
-            .process
-            .resolve_handle::<ProcessBuilder>(builder, Rights::WRITE)?;
-        let bytes = self.copy_builder_input(argument)?;
-        let argument = core::str::from_utf8(bytes.as_bytes())
-            .map_err(|_| ProcessBuilderServiceError::InvalidInput)?;
-        builder.object().add_argument(argument)?;
-        Ok(())
-    }
-
-    fn add_process_builder_environment(
-        &self,
-        builder: HandleValue,
-        environment: Option<UserSlice>,
-    ) -> Result<(), ProcessBuilderServiceError> {
-        let builder = self
-            .process
-            .resolve_handle::<ProcessBuilder>(builder, Rights::WRITE)?;
-        let bytes = self.copy_builder_input(environment)?;
-        let environment = core::str::from_utf8(bytes.as_bytes())
-            .map_err(|_| ProcessBuilderServiceError::InvalidInput)?;
-        builder.object().add_environment(environment)?;
-        Ok(())
-    }
-
-    fn set_process_builder_affinity(
-        &self,
-        builder: HandleValue,
-        words: Option<UserSlice>,
-        word_count: usize,
-    ) -> Result<(), ProcessBuilderServiceError> {
-        let builder = self
-            .process
-            .resolve_handle::<ProcessBuilder>(builder, Rights::WRITE)?;
-        let affinity = self
-            .copy_affinity(words, word_count)
-            .map_err(|error| match error {
-                AffinityInputError::Invalid => ProcessBuilderServiceError::InvalidInput,
-                AffinityInputError::Memory(error) => ProcessBuilderServiceError::Process(error),
-            })?;
-        builder.object().set_affinity(affinity)?;
-        Ok(())
-    }
-
-    fn add_process_builder_handle(
-        &self,
-        builder: HandleValue,
-        source: HandleValue,
-        purpose: u32,
-        expected_kind: ObjectKind,
-        requested_rights: Option<Rights>,
-        operation: crate::kernel::capability::HandleTransferOperation,
-    ) -> Result<(), ProcessBuilderServiceError> {
-        let builder = self
-            .process
-            .resolve_handle::<ProcessBuilder>(builder, Rights::WRITE)?;
-        builder.object().add_startup_capability(
-            self.process,
-            StartupCapability::new(
-                purpose,
-                source,
-                requested_rights,
-                Some(expected_kind),
-                operation,
-            ),
-        )?;
-        Ok(())
-    }
-
-    fn seal_process_builder(&self, builder: HandleValue) -> Result<(), ProcessBuilderServiceError> {
-        let builder = self
-            .process
-            .resolve_handle::<ProcessBuilder>(builder, Rights::WRITE)?;
-        builder.object().seal()?;
-        Ok(())
-    }
-
-    fn start_process_builder(
-        &self,
-        builder: HandleValue,
-    ) -> Result<HandleValue, ProcessBuilderServiceError> {
-        let started = crate::kernel::process::start_process_builder(self.process, builder)
-            .map_err(ProcessBuilderServiceError::Start)?;
-        Ok(started.supervisor_handle())
-    }
-
-    fn abort_process_builder(
-        &self,
-        builder: HandleValue,
-    ) -> Result<(), ProcessBuilderServiceError> {
-        crate::kernel::process::abort_process_builder(self.process, builder)?;
-        Ok(())
     }
 }
 
@@ -1622,14 +1187,5 @@ impl crate::kernel::abi::native::GuestIoServices for DeferredProcessServices<'_>
         operation: u32,
     ) -> Result<u32, crate::kernel::vm::service::Error> {
         crate::kernel::vm::io::service::control_notification(self.process, notification, operation)
-    }
-}
-
-fn atomic_wait_error(error: crate::kernel::process::atomic_wait::Error) -> ObjectServiceError {
-    use crate::kernel::process::atomic_wait::Error;
-    match error {
-        Error::Process(error) => ObjectServiceError::Process(error),
-        Error::Wait(error) => ObjectServiceError::Wait(error),
-        Error::InvalidInput => ObjectServiceError::InvalidInput,
     }
 }
