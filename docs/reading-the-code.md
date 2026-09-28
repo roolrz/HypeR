@@ -102,7 +102,7 @@ flowchart TB
    request. [vm-manager](../app/vm-manager/src/main.rs), especially
    `start_instance`, owns the named definition, resource policy and per-instance
    runtime process. Start with the manager when investigating admission errors.
-2. [vm-runtime `run`](../app/vm-runtime/src/main.rs) validates the image, prepares
+2. [vm-runtime `run`](../app/vm-runtime/src/runtime.rs) validates the image, prepares
    its memory and serial channel, creates a pending VM, attaches memory and
    bootstrap information, seals it, installs it and starts the boot vCPU.
    [vm-support](../app/vm-support/src/lib.rs) contains shared loading/device
@@ -368,7 +368,7 @@ flowchart TB
 Read [vm-runtime disk setup](../app/vm-runtime/src/disk.rs),
 [virtio-scsi device model](../app/vm-support/src/virtio_scsi.rs) and
 [asynchronous backend control](../app/vm-support/src/io_backend.rs).
-[The runtime control loop](../app/vm-runtime/src/control.rs) services deferred
+[The runtime supervisor](../app/vm-runtime/src/supervisor.rs) services deferred
 MMIO and backend replies without holding the vCPU in a synchronous RPC.
 The [I/O broker](../app/io-runtime/src/runtime/broker/mod.rs) authorizes client sessions;
 [client bindings](../app/io-runtime/src/runtime/broker/client.rs) own their admission and retirement;

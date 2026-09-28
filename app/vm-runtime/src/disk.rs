@@ -3,7 +3,7 @@
 
 //! One disk's slow configuration channel and direct notification route.
 
-use super::Error;
+use crate::error::Error;
 use hyper_os::capability_channel::{
     CapabilityChannel, CapabilityDisposition, CapabilityReceiveSlot,
 };
