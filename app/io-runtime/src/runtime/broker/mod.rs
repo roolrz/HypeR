@@ -3,15 +3,17 @@
 
 //! Board-scoped ownership of mailbox control and dynamic guest mappings.
 
-#[path = "broker_listener.rs"]
+mod client;
 mod listener;
 
+use client::session_closed;
+
 use super::{Result, check_deadline, deadline, show};
-use hyper_io_runtime::broker_exchange::{Pending, Step};
-use hyper_os::capability_channel::{CapabilityChannel, CapabilityDisposition};
-use hyper_os::guest_io::{Mailbox, Notification, Operation};
+use hyper_io_runtime::broker_exchange::Pending;
+use hyper_os::capability_channel::CapabilityChannel;
+use hyper_os::guest_io::{Mailbox, Notification};
 use hyper_os::handle::{
-    ByteChannelObject, CapabilityChannelObject, GuestMailboxObject, OwnedHandle, RightsOffer,
+    ByteChannelObject, CapabilityChannelObject, GuestMailboxObject, OwnedHandle,
     VirtualMachineObject,
 };
 use hyper_os::vm;
@@ -19,24 +21,22 @@ use hyper_os::wait::{ObjectSignals, WaitItem};
 use hyper_service::io;
 use hyper_vm_image::guest_fdt::io::{DmaRange, IoClient, MmioDevice, SharedMemory};
 use hyper_vm_support::io_guest::InstalledGuest;
-use hyper_vm_support::io_protocol::{Command, MAX_RECORD, Reply, Request, Status};
-use hyper_vm_support::virtio_scsi::BackendOperation;
 use std::io::Read;
 use std::num::NonZeroU64;
 
 pub(super) struct Broker {
     listener: Option<listener::Listener>,
-    slots: Vec<Slot>,
+    slots: Vec<ClientSlot>,
     observations: Vec<(CapabilityChannel, u64)>,
     #[cfg(feature = "broker-test")]
     fast_released: bool,
     #[cfg(feature = "broker-test")]
     fast_was_bound: bool,
 }
-struct Slot {
+struct ClientSlot {
     policy: hyper_io_runtime::clients::Client,
     mailbox: Option<Mailbox>,
-    binding: Option<Binding>,
+    binding: Option<ClientBinding>,
     transaction: u64,
     generation: u64,
     queued: Option<listener::Admission>,
@@ -45,8 +45,8 @@ struct Slot {
     #[cfg(feature = "broker-test")]
     held_announced: bool,
 }
-struct Binding {
-    _session: CapabilityChannel,
+struct ClientBinding {
+    session: CapabilityChannel,
     identity: u64,
     channel: OwnedHandle<ByteChannelObject>,
     mapping: vm::GuestMapping,
@@ -54,7 +54,7 @@ struct Binding {
     epoch: u32,
     reply: Option<Vec<u8>>,
     prepare_sent: bool,
-    phase: Phase,
+    phase: BindingPhase,
     pending: Option<Pending>,
     retiring: bool,
     machine: Option<OwnedHandle<VirtualMachineObject>>,
@@ -65,7 +65,7 @@ struct Binding {
     retry_at: u64,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Phase {
+enum BindingPhase {
     Hello,
     Prepare,
     ReturnHandles,
@@ -102,7 +102,7 @@ impl Broker {
             ),
             slots: clients
                 .into_iter()
-                .map(|policy| Slot {
+                .map(|policy| ClientSlot {
                     policy,
                     mailbox: None,
                     binding: None,
@@ -191,11 +191,11 @@ impl Broker {
             // our wait set while the independent backend drains.
             if !binding.retiring {
                 let mut signals = ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED;
-                if binding.phase == Phase::ReturnHandles {
+                if binding.phase == BindingPhase::ReturnHandles {
                     signals =
                         signals.union(ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING);
                 }
-                items.push(WaitItem::new(binding._session.as_handle_ref(), signals));
+                items.push(WaitItem::new(binding.session.as_handle_ref(), signals));
             }
             if let Some(pending) = &binding.pending {
                 let signals = if pending.sent {
@@ -204,7 +204,7 @@ impl Broker {
                     ObjectSignals::<GuestMailboxObject>::WRITABLE
                 };
                 #[cfg(feature = "broker-test")]
-                if slot.hold_reply && pending.sent && binding.phase == Phase::Hello {
+                if slot.hold_reply && pending.sent && binding.phase == BindingPhase::Hello {
                     continue;
                 }
                 if let Some(mailbox) = &slot.mailbox {
@@ -213,7 +213,7 @@ impl Broker {
                         signals.union(ObjectSignals::<GuestMailboxObject>::PEER_CLOSED),
                     ));
                 }
-            } else if binding.phase == Phase::Active {
+            } else if binding.phase == BindingPhase::Active {
                 let signals = if binding.reply.is_some() {
                     ObjectSignals::<ByteChannelObject>::WRITABLE
                 } else {
@@ -236,7 +236,9 @@ impl Broker {
                     pending.limit
                 } else if binding.retry_at != 0 {
                     binding.retry_at.min(binding.limit)
-                } else if matches!(binding.phase, Phase::ReturnHandles) || binding.reply.is_some() {
+                } else if matches!(binding.phase, BindingPhase::ReturnHandles)
+                    || binding.reply.is_some()
+                {
                     binding.limit
                 } else {
                     hyper_os::DEADLINE_INFINITE
@@ -309,7 +311,7 @@ impl Broker {
                 if slot
                     .binding
                     .as_ref()
-                    .is_some_and(|binding| binding.phase == Phase::Active)
+                    .is_some_and(|binding| binding.phase == BindingPhase::Active)
                 {
                     self.fast_was_bound = true;
                 }
@@ -343,7 +345,7 @@ impl Broker {
         };
         let slot = &mut self.slots[index];
         if let Some(binding) = slot.binding.as_mut() {
-            if closed(&binding._session) && slot.queued.is_none() {
+            if session_closed(&binding.session) && slot.queued.is_none() {
                 binding.retiring = true;
                 slot.queued = Some(admission);
             } else {
@@ -405,8 +407,8 @@ impl Broker {
             }
         };
         slot.generation = generation;
-        slot.binding = Some(Binding {
-            _session: admission.session,
+        slot.binding = Some(ClientBinding {
+            session: admission.session,
             identity: identity.get(),
             channel,
             mapping,
@@ -414,7 +416,7 @@ impl Broker {
             epoch: 1,
             reply: None,
             prepare_sent: false,
-            phase: Phase::Hello,
+            phase: BindingPhase::Hello,
             pending: None,
             retiring: false,
             machine: Some(admission.machine),
@@ -425,304 +427,5 @@ impl Broker {
             retry_at: 0,
         });
         Ok(())
-    }
-}
-
-fn closed(session: &CapabilityChannel) -> bool {
-    hyper_os::wait::wait_many(
-        &[WaitItem::new(
-            session.as_handle_ref(),
-            ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED,
-        )],
-        0,
-    )
-    .is_ok()
-}
-fn would_block(error: &hyper_os::Error) -> bool {
-    *error == hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)
-}
-impl Slot {
-    fn service(&mut self) -> Result<bool> {
-        let Some(binding) = self.binding.as_mut() else {
-            return Ok(false);
-        };
-        if !binding.retiring && closed(&binding._session) {
-            binding.retiring = true;
-        }
-        // An already-sent request must finish before RESET may reuse this
-        // mailbox, including cancelled admission and peer death during ACTIVATE.
-        if let Some(pending) = binding.pending.as_mut() {
-            if binding.retiring
-                && pending.can_cancel()
-                && !matches!(binding.phase, Phase::Reset | Phase::Release)
-            {
-                binding.pending = None;
-                binding.phase = Phase::Retire;
-                return Ok(true);
-            }
-            let mailbox = self.mailbox.as_ref().ok_or("missing mailbox")?;
-            let now = hyper_os::time::monotonic_now()
-                .map_err(show)?
-                .as_nanoseconds();
-            #[cfg(feature = "broker-test")]
-            let step = {
-                let hold = self.hold_reply && binding.phase == Phase::Hello;
-                if hold && pending.sent && !self.held_announced {
-                    self.held_announced = true;
-                    println!(
-                        "BROKER-TEST REPLY-HELD client=1 generation={}",
-                        binding.identity
-                    );
-                }
-                pending.poll(&HeldReply { mailbox, hold }, now)?
-            };
-            #[cfg(not(feature = "broker-test"))]
-            let step = pending.poll(mailbox, now)?;
-            match step {
-                Step::Sent => {
-                    #[cfg(feature = "broker-test")]
-                    if self.policy.id == 1 && binding.phase == Phase::Hello {
-                        println!(
-                            "BROKER-TEST HELLO-SENT client=1 generation={}",
-                            binding.identity
-                        );
-                    }
-                    if matches!(pending.request.command, Command::Prepare { .. }) {
-                        binding.prepare_sent = true;
-                    }
-                    return Ok(true);
-                }
-                Step::Waiting => return Ok(false),
-                Step::Reply(mut record) => {
-                    let length = record.len();
-                    let reply = Reply::decode(&record[..length], pending.request).map_err(show)?;
-                    if let Some(original) = pending.original {
-                        if !binding.retiring {
-                            record[32..40].copy_from_slice(&original.to_le_bytes());
-                            binding.reply = Some(record[..length].to_vec());
-                            binding.limit = deadline(30)?;
-                        }
-                    } else if reply.status != Status::Success {
-                        if matches!(binding.phase, Phase::Reset | Phase::Release) {
-                            return Err("backend refused retirement".into());
-                        }
-                        binding.retiring = true;
-                    }
-                    binding.pending = None;
-                    binding.phase = match binding.phase {
-                        Phase::Hello => Phase::Prepare,
-                        Phase::Prepare => {
-                            binding.limit = deadline(30)?;
-                            Phase::ReturnHandles
-                        }
-                        Phase::Reset => Phase::Release,
-                        Phase::Release => {
-                            binding.limit = deadline(5)?;
-                            Phase::FinalRelease
-                        }
-                        phase => phase,
-                    };
-                    return Ok(true);
-                }
-            }
-        }
-        if binding.retiring
-            && matches!(
-                binding.phase,
-                Phase::Hello | Phase::Prepare | Phase::ReturnHandles | Phase::Active
-            )
-        {
-            binding.phase = Phase::Retire;
-        }
-        let command = match binding.phase {
-            Phase::Hello => Some(Command::Hello),
-            Phase::Prepare => Some(Command::Prepare {
-                alias: 0,
-                guest_base: binding.base,
-                length: binding.length,
-                mapping_token: binding.mapping.token(),
-            }),
-            Phase::Reset => Some(Command::Device(BackendOperation::Reset)),
-            Phase::Release => Some(Command::Release),
-            _ => None,
-        };
-        if let Some(command) = command {
-            self.queue(command, None)?;
-            return Ok(true);
-        }
-        match binding.phase {
-            Phase::ReturnHandles => {
-                let mut message = io::BOUND_MESSAGE.to_vec();
-                message.extend_from_slice(&binding.identity.to_le_bytes());
-                let result = binding._session.try_send(
-                    &message,
-                    &mut [
-                        CapabilityDisposition::move_handle(
-                            &mut binding.machine,
-                            RightsOffer::Exact(listener::MACHINE_RIGHTS),
-                        )
-                        .map_err(show)?,
-                        CapabilityDisposition::move_handle(
-                            &mut binding.remote,
-                            RightsOffer::Exact(io::MAILBOX_RIGHTS),
-                        )
-                        .map_err(show)?,
-                    ],
-                );
-                match result {
-                    Ok(()) => {
-                        binding.phase = Phase::Active;
-                        #[cfg(feature = "broker-test")]
-                        println!(
-                            "BROKER-TEST BOUND client={} generation={}",
-                            self.policy.id, binding.identity
-                        );
-                    }
-                    Err(error) if would_block(&error) && check_deadline(binding.limit).is_ok() => {
-                        return Ok(false);
-                    }
-                    Err(_) => binding.retiring = true,
-                }
-            }
-            Phase::Retire => {
-                if let Some(machine) = &binding.machine {
-                    let _ = vm::request_stop(machine.as_handle_ref());
-                }
-                binding.reply = None;
-                binding.epoch = binding
-                    .notification
-                    .control(Operation::Disable)
-                    .map_err(show)?;
-                binding.limit = deadline(5)?;
-                binding.phase = Phase::TryRelease;
-            }
-            Phase::TryRelease | Phase::FinalRelease => {
-                if binding.retry_at != 0 && check_deadline(binding.retry_at).is_ok() {
-                    check_deadline(binding.limit)?;
-                    return Ok(false);
-                }
-                match binding.mapping.release() {
-                    Ok(()) => {
-                        binding.retry_at = 0;
-                        binding.phase = Phase::Disconnect;
-                    }
-                    Err(hyper_os::Error::Status(hyper_os::Status::BUSY))
-                        if binding.phase == Phase::TryRelease && binding.prepare_sent =>
-                    {
-                        binding.retry_at = 0;
-                        binding.phase = Phase::Reset;
-                    }
-                    Err(error) if would_block(&error) => {
-                        check_deadline(binding.limit)?;
-                        binding.retry_at =
-                            hyper_os::time::deadline_after(std::time::Duration::from_millis(1))
-                                .map_err(show)?
-                                .as_raw();
-                        return Ok(false);
-                    }
-                    Err(error) => return Err(show(error)),
-                }
-            }
-            Phase::Disconnect => {
-                binding.notification.disconnect().map_err(show)?;
-                self.binding = None;
-            }
-            Phase::Active => {
-                if let Some(reply) = &binding.reply {
-                    match binding.channel.as_byte_channel().try_send(reply) {
-                        Ok(()) => binding.reply = None,
-                        Err(error)
-                            if would_block(&error) && check_deadline(binding.limit).is_ok() =>
-                        {
-                            return Ok(false);
-                        }
-                        Err(_) => binding.retiring = true,
-                    }
-                    return Ok(true);
-                }
-                let mut bytes = [0; MAX_RECORD];
-                match binding.channel.as_byte_channel().try_receive(&mut bytes) {
-                    Ok(16) if &bytes[..8] == b"HIONOT01" && bytes[12..16] == [0; 4] => {
-                        let operation =
-                            match u32::from_le_bytes(bytes[8..12].try_into().map_err(show)?) {
-                                0 => Some(Operation::Disable),
-                                1 => Some(Operation::Enable),
-                                2 => Some(Operation::RaiseConfigurationInterrupt),
-                                _ => None,
-                            };
-                        if let Some(epoch) = operation
-                            .and_then(|operation| binding.notification.control(operation).ok())
-                        {
-                            binding.epoch = epoch;
-                            let mut reply = b"HIONOTR1".to_vec();
-                            reply.extend_from_slice(&epoch.to_le_bytes());
-                            reply.extend_from_slice(&[0; 4]);
-                            binding.reply = Some(reply);
-                            binding.limit = deadline(30)?;
-                        } else {
-                            binding.retiring = true;
-                        }
-                    }
-                    Ok(length) => {
-                        if let Ok(request) = Request::decode(&bytes[..length])
-                            && hyper_io_runtime::clients::authorize_request(
-                                request,
-                                binding.identity,
-                                binding.epoch,
-                            )
-                        {
-                            self.queue(request.command, Some(request.transaction))?;
-                        } else {
-                            binding.retiring = true;
-                        }
-                    }
-                    Err(error) if would_block(&error) => return Ok(false),
-                    Err(_) => binding.retiring = true,
-                }
-            }
-            _ => return Err("invalid broker phase".into()),
-        }
-        Ok(true)
-    }
-    fn queue(&mut self, command: Command, original: Option<u64>) -> Result<()> {
-        let binding = self.binding.as_mut().ok_or("missing binding")?;
-        let request = Request {
-            binding: binding.identity,
-            epoch: binding.epoch,
-            transaction: self.transaction,
-            command,
-        };
-        self.transaction = self
-            .transaction
-            .checked_add(1)
-            .ok_or("backend sequence exhausted")?;
-        binding.pending = Some(Pending {
-            request,
-            original,
-            sent: false,
-            limit: deadline(60)?,
-        });
-        Ok(())
-    }
-}
-
-/// Fault injection below the production pending transaction: the request really
-/// reaches Linux, but its response stays queued until another slot retires.
-#[cfg(feature = "broker-test")]
-struct HeldReply<'a> {
-    mailbox: &'a Mailbox,
-    hold: bool,
-}
-#[cfg(feature = "broker-test")]
-impl hyper_vm_support::io_backend::ControlTransport for HeldReply<'_> {
-    fn send(&self, bytes: &[u8]) -> hyper_os::Result<()> {
-        self.mailbox.send(bytes)
-    }
-    fn receive(&self, bytes: &mut [u8]) -> hyper_os::Result<usize> {
-        if self.hold {
-            Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK))
-        } else {
-            self.mailbox.receive(bytes)
-        }
     }
 }

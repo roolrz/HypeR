@@ -317,9 +317,9 @@ For `/data`, read [the FAT adapter](../kernel/src/kernel/vfs/fat.rs),
 [request lifecycle](../kernel/src/kernel/block/request.rs) and
 [queue wire format](../kernel/src/kernel/block/wire.rs).
 
-[io-runtime `managed.rs`](../app/io-runtime/src/managed.rs) negotiates the
+[Native storage](../app/io-runtime/src/runtime/storage.rs) negotiates the
 configuration-volume client and its dedicated shared pool;
-[runtime.rs](../app/io-runtime/src/runtime.rs) mounts it and publishes readiness.
+[I/O runtime](../app/io-runtime/src/runtime/mod.rs) mounts it and publishes readiness.
 Once established, individual filesystem requests use the kernel block queues
 and notifications directly. io-runtime is not a userspace relay for each read
 or write. VFS and FAT remain in HypeR's kernel; the Linux backend supplies block
@@ -370,7 +370,8 @@ Read [vm-runtime disk setup](../app/vm-runtime/src/disk.rs),
 [asynchronous backend control](../app/vm-support/src/io_backend.rs).
 [The runtime control loop](../app/vm-runtime/src/control.rs) services deferred
 MMIO and backend replies without holding the vCPU in a synchronous RPC.
-The [I/O broker](../app/io-runtime/src/broker.rs) authorizes client sessions;
+The [I/O broker](../app/io-runtime/src/runtime/broker/mod.rs) authorizes client sessions;
+[client bindings](../app/io-runtime/src/runtime/broker/client.rs) own their admission and retirement;
 [broker exchange](../app/io-runtime/src/broker_exchange.rs) handles their control
 traffic. [The protocol](../app/vm-support/src/io_protocol.rs) defines the
 negotiation records.

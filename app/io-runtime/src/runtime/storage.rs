@@ -27,14 +27,14 @@ const _: () = assert!(QUEUES == block::QUEUE_COUNT);
 const SHARED_BASE: u64 = RAM_BASE + RAM_BYTES;
 const NOTIFICATION_MMIO: u64 = 0x0a02_0000;
 
-pub(super) struct Client {
+pub(super) struct NativeStorage {
     _memory: WritableVmo,
     grant: OwnedHandle<GuestMemoryObject>,
     dma: DmaExtent,
     ready: Option<OwnedHandle<ByteChannelObject>>,
     block: Option<NativeBlock>,
 }
-impl Client {
+impl NativeStorage {
     pub(super) fn prepare(
         authority: HandleRef<'_, DeviceAssignmentAuthorityObject>,
         ready: OwnedHandle<ByteChannelObject>,
