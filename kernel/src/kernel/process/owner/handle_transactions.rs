@@ -179,7 +179,7 @@ impl PreparedProcessHandleTransfer {
 
     // A drained Vec still owns its allocation. Release all three buffers before
     // returning their shared scratch quota, on both rollback and commit paths.
-    fn release_scratch(&mut self) {
+    pub(super) fn release_scratch(&mut self) {
         drop(core::mem::take(&mut self.released_charges));
         drop(core::mem::take(&mut self.retired_records));
         drop(core::mem::take(&mut self.moved_values));

@@ -713,10 +713,8 @@ fn commit_parent_builder_replacement(
     });
 
     drop(retired_transfer_storage.take());
-    drop(core::mem::take(&mut source.released_charges));
-    drop(core::mem::take(&mut source.retired_records));
     drop(source.entry_charge.take());
-    drop(source.scratch_charge.take());
+    source.release_scratch();
     let storage_charge = match source.handle_charge.take() {
         Some(charge) => charge,
         None => process_invariant_violation(),
