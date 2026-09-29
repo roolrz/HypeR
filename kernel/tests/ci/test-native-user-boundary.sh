@@ -25,6 +25,7 @@ copy_sources() {
     cp "$root/src/kernel/entry/services.rs" "$fixture/src/kernel/entry/services.rs"
     cp -R "$root/src/kernel/entry/services" "$fixture/src/kernel/entry/services"
     cp "$root/src/kernel/process/owner.rs" "$fixture/src/kernel/process/owner.rs"
+    cp -R "$root/src/kernel/process/owner" "$fixture/src/kernel/process/owner"
 }
 
 check() {
@@ -54,6 +55,8 @@ inject_and_reject 'kernel entry must reject backend token forgetting' \
     src/kernel/entry/user.rs 'fn bad<T>(completion: T) { core::mem::forget(completion); }'
 inject_and_reject 'service adapters must reject architecture selection' \
     src/kernel/entry/services/vfs.rs '#[cfg(target_arch = "aarch64")] const BAD: usize = 1;'
+inject_and_reject 'Process handle operations must reject architecture selection' \
+    src/kernel/process/owner/handles.rs '#[cfg(target_arch = "aarch64")] const BAD: usize = 1;'
 inject_and_reject 'process policy must reject discriminant casts' \
     src/kernel/process/owner.rs 'fn bad(machine: MachineAbi) -> u8 { machine as u8 }'
 inject_and_reject 'kernel must not recreate the identifier selection enum' \

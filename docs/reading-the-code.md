@@ -522,7 +522,8 @@ flowchart TB
 ```
 
 Begin with [handle storage](../kernel/src/kernel/capability/handle.rs), then
-[Process handle operations](../kernel/src/kernel/process/owner/handle_namespace.rs).
+[Process handle operations](../kernel/src/kernel/process/owner/handles.rs) and
+[linear handle transactions](../kernel/src/kernel/process/owner/handle_transactions.rs).
 A handle is local to a Process. Its numeric value is not a globally meaningful
 object identity, and copying the number into another Process does not delegate
 the object. [Handle pages](../kernel/src/kernel/capability/handle/page.rs) and
