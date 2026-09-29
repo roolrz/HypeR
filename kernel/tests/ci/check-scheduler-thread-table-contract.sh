@@ -11,6 +11,7 @@ cd "$root"
 registry=src/kernel/task/scheduler/registry.rs
 queue=src/kernel/task/scheduler/queue.rs
 state=src/kernel/task/scheduler/state.rs
+local_state=src/kernel/task/scheduler/state/local.rs
 handoff=src/kernel/task/scheduler/switch_handoff.rs
 scheduler=src/kernel/task/scheduler/mod.rs
 thread=src/kernel/task/thread.rs
@@ -95,5 +96,8 @@ require 'pub fn cpu_stack_statistics\([^}]*CPU_STACKS\.with\(\|stacks\| \{[^}]*c
     src/kernel/mm/stack.rs 'local IRQ-stack scans must check CPU identity while LocalMask prevents migration'
 require 'pub\(crate\) fn crash_snapshot[\s\S]*state::try_cpu_snapshot\(cpu\)' "$scheduler" \
     'crash snapshots must delegate to one non-blocking CPU-domain observation'
-require 'pub\(super\) fn try_cpu_snapshot[\s\S]*CPU_SCHEDULERS\[cpu\][\s\S]*\.try_with[\s\S]*stack_statistics: None' \
-    "$state" 'crash snapshots must use one try-lock and never scan the current live stack'
+require 'pub\(in crate::kernel::task::scheduler\) fn try_cpu_snapshot[\s\S]*CPU_SCHEDULERS\[cpu\][\s\S]*\.try_with[\s\S]*stack_statistics: None' \
+    "$local_state" 'crash snapshots must use one try-lock and never scan the current live stack'
+
+reject 'stack_statistics: thread\.kernel_stack_statistics\(\)' "$local_state" \
+    'local Thread observation must not scan live stack memory'
