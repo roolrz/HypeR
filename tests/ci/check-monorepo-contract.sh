@@ -112,7 +112,7 @@ for required in \
     sdk/toolchain/bin/hyper-cargo \
     sdk/toolchain/bin/hyper-clang \
     app/Cargo.toml \
-    app/init/config/services.json \
+    app/init/config/services-with-vms.json \
     app/init/src/lib.rs \
     app/init/src/main.rs \
     app/init/src/manifest/mod.rs \

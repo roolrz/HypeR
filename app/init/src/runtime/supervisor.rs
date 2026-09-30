@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Process and initial-VM supervision wait set.
+//! Service process supervision during startup handshakes and steady operation.
 
 use std::convert::Infallible;
 
@@ -9,10 +9,9 @@ use hyper_init::manifest::{MAX_SERVICES, Manifest};
 use hyper_init::supervision::{self, TerminationAction};
 use hyper_os::handle::{ByteChannelObject, ConsoleObject, OwnedHandle, ProcessObject};
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
-use hyper_service::vm as vm_contract;
 
 use super::LaunchError;
-use super::report::{report_boot_event, report_service_termination, report_vm_protocol_failure};
+use super::report::report_service_termination;
 
 const _: () = assert!(MAX_SERVICES < hyper_os::wait::MAX_ITEMS);
 
@@ -21,13 +20,57 @@ pub(super) struct SupervisorSet {
     pub(super) processes: [Option<OwnedHandle<ProcessObject>>; MAX_SERVICES],
 }
 
-#[derive(Clone, Copy)]
-enum SupervisedItem {
-    Service(usize),
-    InitialVm,
-}
-
 impl SupervisorSet {
+    /// Waits for one startup endpoint while continuing to supervise every
+    /// service. The endpoint's provider must remain alive until completion.
+    pub(super) fn wait_for_service_event(
+        &mut self,
+        manifest: &Manifest<'_>,
+        required_service: usize,
+        event: WaitItem<'_>,
+        deadline: u64,
+        console: &OwnedHandle<ConsoleObject>,
+    ) -> Result<u64, LaunchError> {
+        if self
+            .processes
+            .get(required_service)
+            .and_then(Option::as_ref)
+            .is_none()
+        {
+            return Err(LaunchError::InvalidPlan);
+        }
+        loop {
+            let selected = {
+                let mut items = Vec::with_capacity(MAX_SERVICES + 1);
+                let mut services = Vec::with_capacity(MAX_SERVICES);
+                for (index, process) in self.processes.iter().enumerate() {
+                    if let Some(process) = process {
+                        items.push(WaitItem::new(
+                            process.as_handle_ref(),
+                            ObjectSignals::<ProcessObject>::TERMINATED,
+                        ));
+                        services.push(index);
+                    }
+                }
+                // Process events precede endpoint readiness, so a queued
+                // successful reply cannot hide an observed critical failure.
+                items.push(event);
+                let observation =
+                    wait_many(&items, deadline).map_err(|_| LaunchError::OperatingSystem)?;
+                if observation.index == services.len() {
+                    return Ok(observation.observed);
+                }
+                *services
+                    .get(observation.index)
+                    .ok_or(LaunchError::InvalidPlan)?
+            };
+            self.observe_service_termination(manifest, selected, console)?;
+            if selected == required_service {
+                return Err(LaunchError::CriticalServiceTerminated);
+            }
+        }
+    }
+
     pub(super) fn wait_for_storage(
         &mut self,
         manifest: &Manifest<'_>,
@@ -41,45 +84,22 @@ impl SupervisorSet {
         .map_err(|_| LaunchError::OperatingSystem)?
         .as_raw();
         loop {
-            let (selected, observed) = {
-                let mut items = Vec::with_capacity(MAX_SERVICES + 1);
-                let mut services = Vec::with_capacity(MAX_SERVICES);
-                for (index, process) in self.processes.iter().enumerate() {
-                    if let Some(process) = process {
-                        items.push(WaitItem::new(
-                            process.as_handle_ref(),
-                            ObjectSignals::<ProcessObject>::TERMINATED,
-                        ));
-                        services.push(index);
-                    }
-                }
-                // Process events precede readiness, so an already observed
-                // critical failure cannot be hidden by a queued READY record.
-                items.push(WaitItem::new(
-                    reader.as_handle_ref(),
-                    ObjectSignals::<ByteChannelObject>::READABLE
-                        .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
-                ));
-                let observation =
-                    wait_many(&items, deadline).map_err(|_| LaunchError::StorageNotReady)?;
-                (
-                    services.get(observation.index).copied(),
-                    observation.observed,
+            let observed = self
+                .wait_for_service_event(
+                    manifest,
+                    ready_service,
+                    WaitItem::new(
+                        reader.as_handle_ref(),
+                        ObjectSignals::<ByteChannelObject>::READABLE
+                            .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
+                    ),
+                    deadline,
+                    console,
                 )
-            };
-            if let Some(index) = selected {
-                let service = manifest.service(index).ok_or(LaunchError::InvalidPlan)?;
-                let process = self
-                    .processes
-                    .get_mut(index)
-                    .and_then(Option::take)
-                    .ok_or(LaunchError::InvalidPlan)?;
-                report_service_termination(console, service.name(), service.critical(), &process);
-                if service.critical() || index == ready_service {
-                    return Err(LaunchError::CriticalServiceTerminated);
-                }
-                continue;
-            }
+                .map_err(|error| match error {
+                    LaunchError::OperatingSystem => LaunchError::StorageNotReady,
+                    other => other,
+                })?;
             if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed) {
                 return Err(LaunchError::StorageNotReady);
             }
@@ -97,112 +117,50 @@ impl SupervisorSet {
     pub(super) fn supervise(
         &mut self,
         manifest: &Manifest<'_>,
-        vm_instance_control: &mut Option<OwnedHandle<ByteChannelObject>>,
         console: &OwnedHandle<ConsoleObject>,
     ) -> Result<Infallible, LaunchError> {
         loop {
             let selected = {
-                let mut wait_items = Vec::with_capacity(MAX_SERVICES + 1);
-                let mut supervised = Vec::with_capacity(MAX_SERVICES + 1);
-
-                for (service_index, supervisor) in self.processes.iter().enumerate() {
-                    let Some(supervisor) = supervisor.as_ref() else {
-                        continue;
-                    };
-                    wait_items.push(WaitItem::new(
-                        supervisor.as_handle_ref(),
-                        ObjectSignals::<ProcessObject>::TERMINATED,
-                    ));
-                    supervised.push(SupervisedItem::Service(service_index));
+                let mut items = Vec::with_capacity(MAX_SERVICES);
+                let mut services = Vec::with_capacity(MAX_SERVICES);
+                for (index, process) in self.processes.iter().enumerate() {
+                    if let Some(process) = process {
+                        items.push(WaitItem::new(
+                            process.as_handle_ref(),
+                            ObjectSignals::<ProcessObject>::TERMINATED,
+                        ));
+                        services.push(index);
+                    }
                 }
-                if let Some(control) = vm_instance_control.as_ref() {
-                    wait_items.push(WaitItem::new(
-                        control.as_handle_ref(),
-                        ObjectSignals::<ByteChannelObject>::READABLE
-                            .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
-                    ));
-                    supervised.push(SupervisedItem::InitialVm);
-                }
-
-                let observation = wait_many(&wait_items, hyper_os::DEADLINE_INFINITE)
+                let observation = wait_many(&items, hyper_os::DEADLINE_INFINITE)
                     .map_err(|_| LaunchError::OperatingSystem)?;
-                (
-                    *supervised
-                        .get(observation.index)
-                        .ok_or(LaunchError::InvalidPlan)?,
-                    observation.observed,
-                )
+                *services
+                    .get(observation.index)
+                    .ok_or(LaunchError::InvalidPlan)?
             };
+            self.observe_service_termination(manifest, selected, console)?;
+        }
+    }
 
-            match selected {
-                (SupervisedItem::Service(service_index), _) => {
-                    let service = manifest
-                        .service(service_index)
-                        .ok_or(LaunchError::InvalidPlan)?;
-                    let supervisor = self
-                        .processes
-                        .get(service_index)
-                        .and_then(Option::as_ref)
-                        .ok_or(LaunchError::InvalidPlan)?;
-                    report_service_termination(
-                        console,
-                        service.name(),
-                        service.critical(),
-                        supervisor,
-                    );
-                    drop(
-                        self.processes
-                            .get_mut(service_index)
-                            .ok_or(LaunchError::InvalidPlan)?
-                            .take(),
-                    );
-                    if supervision::service_termination_action(service.critical())
-                        == TerminationAction::FailSystem
-                    {
-                        return Err(LaunchError::CriticalServiceTerminated);
-                    }
-                }
-                (SupervisedItem::InitialVm, observed) => {
-                    let readable =
-                        ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed);
-                    if !readable {
-                        drop(vm_instance_control.take());
-                        report_vm_protocol_failure(
-                            console,
-                            b"control endpoint closed without event",
-                        );
-                        return Err(LaunchError::VmInstanceProtocol);
-                    }
-                    let mut message = [0u8; vm_contract::MESSAGE_BYTES];
-                    let received = vm_instance_control
-                        .as_ref()
-                        .ok_or(LaunchError::InvalidPlan)?
-                        .as_byte_channel()
-                        .try_receive(&mut message);
-                    let length = match received {
-                        Ok(length) => length,
-                        Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
-                        Err(_) => {
-                            drop(vm_instance_control.take());
-                            report_vm_protocol_failure(console, b"terminal event is unavailable");
-                            return Err(LaunchError::VmInstanceProtocol);
-                        }
-                    };
-                    let Some(event) = message
-                        .get(..length)
-                        .and_then(vm_contract::BootEvent::decode)
-                    else {
-                        drop(vm_instance_control.take());
-                        report_vm_protocol_failure(console, b"terminal event is malformed");
-                        return Err(LaunchError::VmInstanceProtocol);
-                    };
-                    report_boot_event(console, event);
-                    drop(vm_instance_control.take());
-                    if supervision::boot_event_action(event) == TerminationAction::FailSystem {
-                        return Err(LaunchError::VmInstanceFailed);
-                    }
-                }
-            }
+    fn observe_service_termination(
+        &mut self,
+        manifest: &Manifest<'_>,
+        index: usize,
+        console: &OwnedHandle<ConsoleObject>,
+    ) -> Result<(), LaunchError> {
+        let service = manifest.service(index).ok_or(LaunchError::InvalidPlan)?;
+        let process = self
+            .processes
+            .get_mut(index)
+            .and_then(Option::take)
+            .ok_or(LaunchError::InvalidPlan)?;
+        report_service_termination(console, service.name(), service.critical(), &process);
+        if supervision::service_termination_action(service.critical())
+            == TerminationAction::FailSystem
+        {
+            Err(LaunchError::CriticalServiceTerminated)
+        } else {
+            Ok(())
         }
     }
 

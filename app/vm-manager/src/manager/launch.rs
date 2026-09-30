@@ -19,14 +19,29 @@ use hyper_vm_manager::InstancePolicy;
 const RUNTIME_ARGUMENT: &str = "/svc/vm-runtime";
 
 impl FleetManager {
-    pub(super) fn start_instance(&mut self, vm: usize) -> hyper_os::Result<()> {
+    pub(super) fn start_instance(&mut self, vm: usize) -> Result<(), String> {
         if self.machines[vm].instance.is_some() {
-            return Err(hyper_os::Error::InvalidResponse);
+            return Err("VM is already active".into());
         }
+        let result = self
+            .check_observed_names(std::iter::once(self.machines[vm].definition.name.as_str()))
+            .and_then(|()| self.launch_instance(vm).map_err(|error| error.to_string()));
+        if let Err(error) = &result {
+            let machine = &mut self.machines[vm];
+            machine.policy.start_failed();
+            eprintln!(
+                "HypeR vm-manager: cannot start VM '{}': {error}",
+                machine.definition.name
+            );
+        }
+        result
+    }
+
+    fn launch_instance(&mut self, vm: usize) -> hyper_os::Result<()> {
         let definition = &self.machines[vm];
         let domain = create_resource_domain(
             self.fleet_domain.as_handle_ref(),
-            hyper_vm_policy::INITIAL_VM_LIMITS,
+            hyper_vm_policy::VM_INSTANCE_LIMITS,
         )?;
         let group = create_task_group(self.factory.as_handle_ref(), domain.as_handle_ref())?;
         let lease = hyper_os::vm::derive_creation_lease(
@@ -103,7 +118,7 @@ impl FleetManager {
             )
             .map_err(|failure| failure.error())?;
         let disk_admission = if let Some(disk) = &definition.definition.disk {
-            self.io_broker
+            self.io_service
                 .as_ref()
                 .ok_or(hyper_os::Error::MissingHandle)?;
             let (owner, runtime) = CapabilityChannel::create()?;

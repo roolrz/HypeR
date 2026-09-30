@@ -6,11 +6,13 @@
 mod commands;
 mod console;
 mod instance;
+mod inventory;
 mod launch;
 mod listener;
+mod provision;
 
 use self::instance::VmInstance;
-use hyper_os::capability_channel::{CapabilityChannel, CapabilityReceiveSlot};
+use hyper_os::capability_channel::CapabilityChannel;
 use hyper_os::fs::{Directory, File};
 use hyper_os::handle::{
     ByteChannelObject, CapabilityChannelObject, OwnedHandle, ProcessObject, ResourceDomainObject,
@@ -21,8 +23,6 @@ use hyper_service::process as process_contract;
 use hyper_service::vm as vm_contract;
 use hyper_vm_manager::MachinePolicy;
 use hyper_vm_policy::fleet;
-use std::io::Read;
-use std::mem::MaybeUninit;
 use std::time::Instant;
 
 const MAX_CLIENTS: usize = 8;
@@ -34,19 +34,21 @@ pub(super) struct FleetManager {
     factory: OwnedHandle<hyper_os::handle::TaskFactoryObject>,
     fleet_domain: OwnedHandle<ResourceDomainObject>,
     authority: OwnedHandle<hyper_os::handle::VirtualMachineCreationAuthorityObject>,
-    provisioning: CapabilityChannel,
-    io_broker: Option<CapabilityChannel>,
+    io_service: Option<inventory::ObservedVm>,
     connections: listener::Listener,
     root: Directory,
     machines: Vec<Machine>,
-    initial_vm: Option<usize>,
     clients: [Option<Client>; MAX_CLIENTS],
     next_wait: usize,
 }
 
 impl FleetManager {
     pub(super) fn from_startup(startup: &mut Startup<'_>) -> hyper_os::Result<Self> {
-        Ok(Self {
+        let provisioning = CapabilityChannel::from_handle(startup.take(vm_contract::PROVISIONING)?);
+        let io_broker = startup
+            .take_optional(hyper_service::io::BROKER_CLIENT)?
+            .map(CapabilityChannel::from_handle);
+        let mut manager = Self {
             runtime_image: File::from_handle(startup.take(vm_contract::RUNTIME_IMAGE)?),
             libraries: Directory::from_handle(
                 startup.take(process_contract::CHILD_LIBRARY_DIRECTORY)?,
@@ -54,89 +56,31 @@ impl FleetManager {
             factory: startup.take(startup::TASK_FACTORY)?,
             fleet_domain: startup.take(startup::RESOURCE_DOMAIN)?,
             authority: startup.take(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)?,
-            provisioning: CapabilityChannel::from_handle(startup.take(vm_contract::PROVISIONING)?),
-            io_broker: startup
-                .take_optional(hyper_service::io::BROKER_CLIENT)?
-                .map(CapabilityChannel::from_handle),
+            io_service: None,
             connections: listener::Listener::start(CapabilityChannel::from_handle(
                 startup.take(vm_contract::MANAGER_CONNECTION)?,
             ))?,
             root: Directory::from_handle(startup.take(startup::ROOT_DIRECTORY)?),
             machines: Vec::new(),
-            initial_vm: None,
             clients: std::array::from_fn(|_| None),
             next_wait: 0,
-        })
+        };
+        manager.configure_fleet(provisioning, io_broker)?;
+        Ok(manager)
     }
 
     pub(super) fn run(&mut self) -> hyper_os::Result<()> {
         eprintln!("HypeR vm-manager: ready");
-        let provision = self.receive_provision()?;
-        let config = File::from_handle(provision.config).into_std();
-        // Bound allocation even if the file grows after provisioning.
-        let mut bytes = Vec::new();
-        config
-            .take(fleet::MAX_CONFIG_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| hyper_os::Error::InvalidResponse)?;
-        if bytes.len() as u64 > fleet::MAX_CONFIG_BYTES {
-            return Err(hyper_os::Error::InvalidResponse);
-        }
-        let config = fleet::Config::parse(&bytes).map_err(|_| hyper_os::Error::InvalidResponse)?;
-        self.clients[0] = Some(Client::initial(provision.control));
-        self.install_definitions(config.machines).map_err(|error| {
-            eprintln!("HypeR vm-manager: {error}");
-            hyper_os::Error::InvalidResponse
-        })?;
-        self.initial_vm = self
-            .machines
-            .iter()
-            .position(|machine| machine.definition.autostart);
-        let has_boot_vm = self.initial_vm.is_some();
         for vm in 0..self.machines.len() {
-            if self.machines[vm].definition.autostart && self.start_instance(vm).is_err() {
-                self.machines[vm].policy.start_failed();
-                self.publish_initial_event(
-                    vm,
-                    vm_contract::InstanceEvent::Failed(vm_contract::InstanceFailure::Runtime),
-                );
+            if self.machines[vm].definition.autostart {
+                // Failure is recorded on this definition; other guests still start.
+                let _ = self.start_instance(vm);
             }
-        }
-        if !has_boot_vm {
-            self.publish_boot_event(vm_contract::BootEvent::NoAutostart);
         }
         loop {
             self.observe_one_event()?;
-            self.complete_restarts()?;
+            self.complete_restarts();
         }
-    }
-
-    fn receive_provision(&self) -> hyper_os::Result<Provision> {
-        let mut bytes = [MaybeUninit::<u8>::uninit(); vm_contract::MESSAGE_BYTES];
-        let mut slots = [
-            CapabilityReceiveSlot::new::<hyper_os::handle::FileObject>(
-                vm_contract::PROVISIONED_CONFIG_RIGHTS,
-            ),
-            CapabilityReceiveSlot::new::<ByteChannelObject>(
-                vm_contract::PROVISIONED_INSTANCE_CONTROL_RIGHTS,
-            ),
-        ];
-        let message =
-            self.provisioning
-                .receive(hyper_os::DEADLINE_INFINITE, &mut bytes, &mut slots)?;
-        let request = vm_contract::ProvisionRequest::decode(message.bytes())
-            .ok_or(hyper_os::Error::InvalidResponse)?;
-        if message.capability_count() != request.capability_count() {
-            return Err(hyper_os::Error::InvalidResponse);
-        }
-        Ok(Provision {
-            config: slots[0]
-                .take::<hyper_os::handle::FileObject>()?
-                .ok_or(hyper_os::Error::MissingHandle)?,
-            control: slots[1]
-                .take::<ByteChannelObject>()?
-                .ok_or(hyper_os::Error::MissingHandle)?,
-        })
     }
 
     fn observe_one_event(&mut self) -> hyper_os::Result<()> {
@@ -150,10 +94,10 @@ impl FleetManager {
                 .instance
                 .as_ref()
                 .is_some_and(VmInstance::wants_disk_admission)
-        }) && let Some(broker) = self.io_broker.as_ref()
+        }) && let Some(broker) = self.io_service.as_ref()
         {
             waits.push(WaitItem::new(
-                broker.as_handle_ref(),
+                broker.broker().as_handle_ref(),
                 ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING
                     .union(ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED),
             ));
@@ -233,11 +177,13 @@ impl FleetManager {
                 fleet::MAX_DEFINITIONS
             ));
         }
+        self.check_observed_names(
+            definitions
+                .iter()
+                .map(|definition| definition.name.as_str()),
+        )?;
         let mut prepared = Vec::new();
         for definition in definitions {
-            if definition.name == "io" {
-                return Err("VM name 'io' is reserved for the read-only I/O VM".into());
-            }
             if self
                 .machines
                 .iter()
@@ -281,33 +227,9 @@ struct Machine {
     policy: MachinePolicy,
 }
 
-struct Provision {
-    config: OwnedHandle<hyper_os::handle::FileObject>,
-    control: OwnedHandle<ByteChannelObject>,
-}
-
 struct Client {
     control: OwnedHandle<ByteChannelObject>,
-    capabilities: Option<CapabilityChannel>,
-    initial: bool,
-}
-
-impl Client {
-    fn initial(control: OwnedHandle<ByteChannelObject>) -> Self {
-        Self {
-            control,
-            capabilities: None,
-            initial: true,
-        }
-    }
-
-    fn command(control: OwnedHandle<ByteChannelObject>, capabilities: CapabilityChannel) -> Self {
-        Self {
-            control,
-            capabilities: Some(capabilities),
-            initial: false,
-        }
-    }
+    capabilities: CapabilityChannel,
 }
 
 #[derive(Clone, Copy)]

@@ -26,12 +26,26 @@ fn show(error: impl std::fmt::Debug) -> String {
 }
 
 pub struct InstalledGuest {
+    name: String,
+    image: String,
     pub machine: Arc<hyper_os::OwnedHandle<VirtualMachineObject>>,
     pub cpus: Vec<Arc<hyper_os::OwnedHandle<VirtualCpuObject>>>,
     pub output: Output,
 }
 
+impl InstalledGuest {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn image(&self) -> &str {
+        &self.image
+    }
+}
+
 pub struct Image {
+    name: String,
+    path: String,
     pub memory: WritableVmo,
     pub plan: linux::BootPlan,
     pub arguments: String,
@@ -52,22 +66,9 @@ impl ReadAt for Source {
 }
 
 impl Image {
-    pub fn load(path: &str, configuration_path: &str) -> Result<Self> {
-        use std::io::Read;
-        let file = File::open(configuration_path).map_err(show)?;
-        let mut bytes = Vec::new();
-        file.take(hyper_vm_policy::fleet::MAX_CONFIG_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(show)?;
-        let config = hyper_vm_policy::fleet::Config::parse(&bytes)?;
-        let mut matches = config
-            .machines
-            .iter()
-            .filter(|machine| machine.image == path);
-        let definition = matches.next().ok_or("missing I/O VM configuration")?;
-        if matches.next().is_some() {
-            return Err("ambiguous I/O VM configuration".into());
-        }
+    pub fn load(definition: &hyper_vm_policy::fleet::Definition) -> Result<Self> {
+        definition.validate()?;
+        let path = &definition.image;
         let file = File::open(path).map_err(|error| format!("open {path}: {error}"))?;
         let length = file
             .metadata()
@@ -91,6 +92,8 @@ impl Image {
             copy_payload(&source, &memory, payload)?;
         }
         Ok(Self {
+            name: definition.name.clone(),
+            path: definition.image.clone(),
             memory,
             plan,
             arguments: image.boot_arguments.as_str().into(),
@@ -281,6 +284,8 @@ pub fn install_mapped(
         vm::set_vcpu_affinity(cpu.as_handle_ref(), words)
     })?;
     Ok(InstalledGuest {
+        name: image.name.clone(),
+        image: image.path.clone(),
         machine,
         cpus,
         output,

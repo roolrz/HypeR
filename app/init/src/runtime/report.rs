@@ -5,7 +5,6 @@
 
 use hyper_init::diagnostics::write_process_termination;
 use hyper_os::handle::{ConsoleObject, OwnedHandle, ProcessObject};
-use hyper_service::vm as vm_contract;
 
 use super::LaunchError;
 
@@ -49,47 +48,8 @@ pub(super) fn report_service_termination(
     let _ = console.write_all(b"\n");
 }
 
-pub(super) fn report_boot_event(
-    output: &OwnedHandle<ConsoleObject>,
-    event: vm_contract::BootEvent,
-) {
-    let console = output.as_emergency_console();
-    match event {
-        vm_contract::BootEvent::NoAutostart => {
-            let _ = console.write_all(b"HypeR init: VM configuration loaded; no autostart VMs\n");
-        }
-        vm_contract::BootEvent::InstanceTerminated(vm_contract::InstanceEvent::Stopped) => {
-            let _ = console.write_all(b"HypeR init: initial VM stopped cleanly\n");
-        }
-        vm_contract::BootEvent::InstanceTerminated(vm_contract::InstanceEvent::Failed(reason)) => {
-            let _ = console.write_all(b"HypeR init: initial VM failed: ");
-            let _ = console.write_all(vm_failure_reason(reason));
-            let _ = console.write_all(b"\n");
-        }
-    }
-}
-
-pub(super) fn report_vm_protocol_failure(output: &OwnedHandle<ConsoleObject>, reason: &[u8]) {
-    let console = output.as_emergency_console();
-    let _ = console.write_all(b"HypeR init: initial VM protocol failed: ");
-    let _ = console.write_all(reason);
-    let _ = console.write_all(b"\n");
-}
-
-const fn vm_failure_reason(reason: vm_contract::InstanceFailure) -> &'static [u8] {
-    match reason {
-        vm_contract::InstanceFailure::Runtime => b"runtime process failed",
-        vm_contract::InstanceFailure::InvalidImage => b"guest image is invalid",
-        vm_contract::InstanceFailure::GuestMemoryFault => b"guest memory access failed",
-        vm_contract::InstanceFailure::GuestMmio => b"guest MMIO emulation failed",
-        vm_contract::InstanceFailure::GuestSynchronous => b"guest synchronous exit failed",
-        vm_contract::InstanceFailure::UnexpectedAdministrativeStop => {
-            b"guest stopped without a lifecycle request"
-        }
-        vm_contract::InstanceFailure::InvalidControlProtocol => b"control protocol is invalid",
-        vm_contract::InstanceFailure::MissingTerminalStatus => b"terminal status is missing",
-        vm_contract::InstanceFailure::UnsupportedConfiguration => {
-            b"requested configuration is unsupported"
-        }
-    }
+pub(super) fn report_fleet_configured(output: &OwnedHandle<ConsoleObject>) {
+    let _ = output
+        .as_emergency_console()
+        .write_all(b"HypeR init: VM fleet configured\n");
 }

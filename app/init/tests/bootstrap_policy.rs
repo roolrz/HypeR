@@ -46,8 +46,8 @@ fn existing_installed_manifests_still_validate_against_real_bootstrap_policy() -
 {
     for text in [
         include_str!("config/services.json"),
-        include_str!("../config/services.json"),
-        include_str!("../config/native/services.json"),
+        include_str!("../config/services-with-vms.json"),
+        include_str!("../config/services-console-only.json"),
     ] {
         let manifest = manifest::parse(text).map_err(|e| format!("{e:?}"))?;
         manifest::validate(&manifest, &BootstrapPolicy).map_err(|e| format!("{e:?}"))?;
@@ -132,8 +132,8 @@ fn storage_readiness_requires_the_dedicated_moved_authority() -> Result<(), Stri
 fn legacy_manifests_do_not_wait_for_storage() -> Result<(), String> {
     for text in [
         include_str!("config/services.json"),
-        include_str!("../config/native/services.json"),
-        include_str!("../config/services.json"),
+        include_str!("../config/services-console-only.json"),
+        include_str!("../config/services-with-vms.json"),
     ] {
         let manifest = manifest::parse(text).map_err(|e| format!("{e:?}"))?;
         let plan = manifest::validate(&manifest, &BootstrapPolicy).map_err(|e| format!("{e:?}"))?;

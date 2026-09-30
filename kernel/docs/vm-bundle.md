@@ -123,8 +123,8 @@ pages. User unmapping, handle close, and runtime address-space teardown therefor
 cannot turn a cached kernel pointer into a write to freed/reused memory. Pinned
 page charges follow the registration lifetime, independently of user mappings.
 
-The manager validates the runtime's monotonic lifecycle records and publishes
-one terminal event on the per-instance endpoint. Loss of either control peer or
+The manager validates each runtime's monotonic lifecycle records and records
+its terminal outcome in that VM's lifecycle state. Loss of either control peer or
 malformed protocol data triggers an idempotent forced-stop transition; it does
 not terminate the fleet manager. A client stop first requests cooperative
 shutdown. The state machine also defines an explicit grace-deadline escalation
@@ -138,9 +138,13 @@ with polling, scheduler yields, or unrelated inspection authority.
 `make test-native` covers console attachment, output, and detachment.
 `make test-runtime-crash` builds the explicit `test-runtime-crash` fixture and
 boots a separate archive; the production runtime keeps its default features.
-The test first stops the boot-critical initial VM cleanly. The fixture then
-exits without destructors during console forwarding on later instances. Five fresh
-VM/runtime cycles with the default 1 GiB QEMU RAM check teardown and continued allocation.
+Two guest definitions autostart. Attaching the first guest's console makes its
+runtime exit without destructors during console forwarding; the other guest
+must still answer live status requests, and the Native shell must remain usable.
+A second short boot reverses the definition order and repeats the isolation
+check. After stopping the survivor in the first boot, five fresh VM/runtime
+cycles with the default 1 GiB QEMU RAM check teardown and continued allocation
+against an idle memory baseline.
 Kernel self-tests verify invalid registration, hostile cursor values, full-ring
 behavior, exclusive assignment, last-handle output closure, and release of
 pinned and committed pages only after the final device owner drops. Host tests

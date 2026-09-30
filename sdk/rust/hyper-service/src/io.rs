@@ -136,19 +136,24 @@ pub fn send_capabilities(
 }
 
 /// Read-only broker observation; no VM/control capability crosses this exchange.
-pub const OBSERVE_MESSAGE: &[u8] = b"HIOSTAT2";
-pub const OBSERVATION_BYTES: usize = 40;
+pub const OBSERVE_MESSAGE: &[u8] = b"HIOSTAT3";
+pub const OBSERVATION_BYTES: usize = 584;
 
 /// RAM is supplied by the owner: the VM address-space span also includes MMIO
 /// and shared guest-memory windows, and is not a resident-memory statistic.
 /// Placement observes vCPU 0 of the current single-vCPU I/O service. A missing
 /// CPU means unavailable, never an assumed CPU 0 assignment.
 pub fn encode_observation(
+    name: &str,
+    image: &str,
     info: hyper_os::vm::VirtualMachineInfo,
     ram_bytes: u64,
     boot_host_cpu: Option<u32>,
-) -> [u8; OBSERVATION_BYTES] {
+) -> Option<[u8; OBSERVATION_BYTES]> {
     use hyper_os::vm::VirtualMachinePhase;
+    if !valid_observed_name(name) || !valid_observed_image(image) {
+        return None;
+    }
     let mut bytes = [0; OBSERVATION_BYTES];
     bytes[..8].copy_from_slice(OBSERVE_MESSAGE);
     bytes[8] = match info.phase {
@@ -161,11 +166,18 @@ pub fn encode_observation(
     bytes[16..24].copy_from_slice(&ram_bytes.to_le_bytes());
     bytes[24..32].copy_from_slice(&info.resident_memory_bytes.unwrap_or(u64::MAX).to_le_bytes());
     bytes[32..36].copy_from_slice(&boot_host_cpu.unwrap_or(u32::MAX).to_le_bytes());
-    bytes
+    bytes[36] = name.len() as u8;
+    bytes[38..40].copy_from_slice(&(image.len() as u16).to_le_bytes());
+    bytes[40..40 + name.len()].copy_from_slice(name.as_bytes());
+    bytes[72..72 + image.len()].copy_from_slice(image.as_bytes());
+    Some(bytes)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Observation {
+pub struct Observation<'a> {
+    /// Owner-supplied identity, immutable for the lifetime of the broker endpoint.
+    pub name: &'a str,
+    pub image: &'a str,
     pub phase: hyper_os::vm::VirtualMachinePhase,
     pub vcpus: u32,
     pub ram_bytes: u64,
@@ -174,13 +186,19 @@ pub struct Observation {
     pub boot_host_cpu: Option<u32>,
 }
 
-pub fn decode_observation(bytes: &[u8]) -> Option<Observation> {
+pub fn decode_observation(bytes: &[u8]) -> Option<Observation<'_>> {
     use hyper_os::vm::VirtualMachinePhase;
     if bytes.len() != OBSERVATION_BYTES
         || &bytes[..8] != OBSERVE_MESSAGE
         || bytes[9..12] != [0; 3]
-        || bytes[36..40] != [0; 4]
+        || bytes[37] != 0
     {
+        return None;
+    }
+    let name = padded_text(&bytes[40..72], usize::from(bytes[36]))?;
+    let image_length = usize::from(u16::from_le_bytes(bytes[38..40].try_into().ok()?));
+    let image = padded_text(&bytes[72..], image_length)?;
+    if !valid_observed_name(name) || !valid_observed_image(image) {
         return None;
     }
     let phase = match bytes[8] {
@@ -191,6 +209,8 @@ pub fn decode_observation(bytes: &[u8]) -> Option<Observation> {
         _ => return None,
     };
     Some(Observation {
+        name,
+        image,
         phase,
         vcpus: u32::from_le_bytes(bytes[12..16].try_into().ok()?),
         ram_bytes: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
@@ -203,4 +223,32 @@ pub fn decode_observation(bytes: &[u8]) -> Option<Observation> {
             cpu => Some(cpu),
         },
     })
+}
+
+fn padded_text(bytes: &[u8], length: usize) -> Option<&str> {
+    let (text, padding) = bytes.split_at_checked(length)?;
+    if padding.iter().any(|byte| *byte != 0) {
+        return None;
+    }
+    core::str::from_utf8(text).ok()
+}
+
+fn valid_observed_image(image: &str) -> bool {
+    image.starts_with('/')
+        && image.len() <= 512
+        && !image.chars().any(char::is_control)
+        && !image
+            .split('/')
+            .skip(1)
+            .any(|part| matches!(part, "" | "." | ".."))
+}
+
+fn valid_observed_name(name: &str) -> bool {
+    // Same namespace as fleet definitions; reject ambiguous or unprintable wire names.
+    !name.is_empty()
+        && name.len() <= 32
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
 }

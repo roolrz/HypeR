@@ -32,13 +32,18 @@
       }
     }
   ],
-  "io-device": {
-    "profile": "bcm2712-sdhci",
-    "path": "/soc@107c000000/mmc@fff000"
-  },
   "io-vm": {
-    "memory-bytes": 134217728,
-    "vcpus": 1,
-    "bootargs": "console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init loglevel=4 hyper.role=io hyper.mode=standby hyper.volumes=required"
+    "runtime": "io-runtime",
+    "name": "io",
+    "image": "/vm/io.itb",
+    "configuration": {
+      "memory-bytes": 134217728,
+      "vcpus": 1,
+      "bootargs": "console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init loglevel=4 hyper.role=io hyper.mode=standby hyper.volumes=required"
+    },
+    "io-device": {
+      "profile": "bcm2712-sdhci",
+      "path": "/soc@107c000000/mmc@fff000"
+    }
   }
 }

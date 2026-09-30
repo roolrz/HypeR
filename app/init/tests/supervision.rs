@@ -3,11 +3,7 @@
 
 extern crate std;
 
-use hyper_service::vm::{BootEvent, InstanceEvent, InstanceFailure};
-
-use super::{
-    SupportError, TerminationAction, boot_event_action, service_termination_action, validate,
-};
+use super::{SupportError, TerminationAction, service_termination_action, validate};
 use crate::manifest::parse;
 
 fn manifest(critical: &str, restart: &str) -> std::string::String {
@@ -57,7 +53,7 @@ fn rejects_polling_or_ambiguous_supervision_graphs() {
 }
 
 #[test]
-fn termination_policy_keeps_noncritical_services_and_clean_vms_nonfatal() {
+fn termination_policy_follows_service_criticality() {
     assert_eq!(
         service_termination_action(false),
         TerminationAction::Continue
@@ -65,23 +61,5 @@ fn termination_policy_keeps_noncritical_services_and_clean_vms_nonfatal() {
     assert_eq!(
         service_termination_action(true),
         TerminationAction::FailSystem
-    );
-    assert_eq!(
-        boot_event_action(BootEvent::InstanceTerminated(InstanceEvent::Stopped)),
-        TerminationAction::Continue
-    );
-    assert_eq!(
-        boot_event_action(BootEvent::InstanceTerminated(InstanceEvent::Failed(
-            InstanceFailure::Runtime
-        ))),
-        TerminationAction::FailSystem
-    );
-}
-
-#[test]
-fn no_autostart_completes_boot_supervision_without_failing_init() {
-    assert_eq!(
-        boot_event_action(BootEvent::NoAutostart),
-        TerminationAction::Continue
     );
 }

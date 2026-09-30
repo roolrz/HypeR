@@ -158,8 +158,11 @@ Migration: rebuild old ITBs with the current packer and add `configuration` to
 existing JSON definitions. The v2 ITB contract rejects v1 bundles and embedded
 runtime policy; it never falls back to values from an image.
 
-The first autostart VM retains init's boot-critical supervision lease until it first stops;
-later instances and additional VMs are supervised independently by the manager.
+Init waits for the manager to accept the complete fleet configuration, including
+an empty fleet or definitions with no autostart VMs. It continues supervising
+the manager as a critical service. Every guest lifecycle belongs to the manager:
+an autostart or later runtime failure marks that VM failed without stopping init
+or unrelated guests. Configuration admission errors still fail system startup.
 
 ## Validation
 
@@ -167,6 +170,8 @@ later instances and additional VMs are supervised independently by the manager.
 two simultaneous VMs, name isolation, and create/delete/restart through
 the real shell. It runs as part of Native CI, alongside the existing startup and
 repeated runtime-crash cleanup tests.
+`make test-fleet-config` checks empty and idle fleets, atomic configuration
+rejection, and an autostart failure followed by a successful independent guest.
 
 ## Interactive transport
 
@@ -228,12 +233,21 @@ shell on the same console. Init does not treat shell termination as a system
 failure. Shell channels are recreated on each launch; the physical transport
 continues to belong to the console services.
 
-On board images, `vmm list` and `vmm status io` include the infrastructure I/O VM
-as read-only. The snapshot reports its lifecycle, vCPU count, guest memory and current pCPU
+On board images, `vmm list` and `vmm status NAME` include the infrastructure I/O VM
+as read-only, using `io-vm.name` from the board JSON (default `io`). The snapshot reports its lifecycle, vCPU count, guest memory and current pCPU
 assignment of its boot vCPU;
 an unavailable management endpoint is reported as `unavailable`, not `stopped`.
-`start`, `stop`, `restart`, `delete`, `affinity` and `console` are not supported for this
-entry. Its lifecycle remains under `io-runtime` ownership.
+The manager holds a broker observation channel for this entry, not its VM handle
+or runtime control channel. `start`, `stop`, `restart`, `delete`, `affinity` and
+`console` require management authority and are rejected for observation-only
+entries. Authorization follows the capability held for the resolved entry;
+names are not reserved by service role. The owner reports the VM name and image path from its
+loaded board configuration. After I/O readiness, the manager discovers that name over
+the broker, and checks for conflicts when admitting definitions and before each
+instance start. A failed observation blocks admission/start instead of treating
+the observed namespace as empty. Without an I/O broker, `io` is an ordinary
+managed VM name. The infrastructure VM's lifecycle remains under `io-runtime`
+ownership.
 
 For a running managed VM, `vmm affinity alpine 0 1,3` sets the allowed host
 CPUs for guest vCPU 0. If its current CPU remains allowed, placement is unchanged;

@@ -4,7 +4,6 @@
 //! Admission policy for the currently implemented service supervisor.
 
 use crate::manifest::{Manifest, RestartPolicy};
-use hyper_service::vm::{BootEvent, InstanceEvent};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SupportError {
@@ -26,17 +25,6 @@ pub const fn service_termination_action(critical: bool) -> TerminationAction {
         TerminationAction::FailSystem
     } else {
         TerminationAction::Continue
-    }
-}
-
-/// Applies init's policy when boot-time fleet supervision completes.
-#[must_use]
-pub const fn boot_event_action(event: BootEvent) -> TerminationAction {
-    match event {
-        BootEvent::NoAutostart | BootEvent::InstanceTerminated(InstanceEvent::Stopped) => {
-            TerminationAction::Continue
-        }
-        BootEvent::InstanceTerminated(InstanceEvent::Failed(_)) => TerminationAction::FailSystem,
     }
 }
 

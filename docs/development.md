@@ -104,7 +104,7 @@ check also runs before an incremental packaging cache hit.
 For a standalone configuration check (without image membership checks), run:
 
 ```sh
-python3 scripts/check-service-manifest.py app/init/config/services.json
+python3 scripts/check-service-manifest.py app/init/config/services-with-vms.json
 ```
 
 This uses the source workspace and host Rust toolchain; it does not need a built

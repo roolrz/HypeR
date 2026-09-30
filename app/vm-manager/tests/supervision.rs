@@ -242,17 +242,17 @@ fn memory_observations_neither_advance_nor_poison_lifecycle() {
 }
 
 #[test]
-fn affinity_cannot_control_io_or_stopping_instances() {
-    assert!(affinity_allowed("io", Some(fleet::State::Running)).is_err());
-    assert!(affinity_allowed("guest", Some(fleet::State::Running)).is_ok());
+fn affinity_requires_a_running_managed_instance() {
+    assert!(affinity_allowed(Some(fleet::State::Running)).is_ok());
     for state in [
         None,
         Some(fleet::State::Starting),
         Some(fleet::State::Stopping),
         Some(fleet::State::Stopped),
         Some(fleet::State::Failed),
+        Some(fleet::State::Unavailable),
     ] {
-        assert!(affinity_allowed("guest", state).is_err());
+        assert!(affinity_allowed(state).is_err());
     }
 }
 

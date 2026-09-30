@@ -1,22 +1,38 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
+//! A physical device selector validated independently of board-file loading.
+
 use hyper_os::device::{FirmwareIdentity, Profile};
 use serde::Deserialize;
-use std::io::Read;
 
 #[derive(Deserialize)]
-struct Board {
-    #[serde(rename = "io-device")]
-    device: Policy,
+#[serde(try_from = "Selector")]
+pub struct Policy {
+    profile: ProfileName,
+    identity: Identity,
+}
+
+enum Identity {
+    Compatible(String),
+    Path(String),
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Policy {
+struct Selector {
     profile: ProfileName,
+    #[serde(default, deserialize_with = "identity_field")]
     compatible: Option<String>,
+    #[serde(default, deserialize_with = "identity_field")]
     path: Option<String>,
+}
+
+fn identity_field<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    // Absence selects the other identity field; an explicit null is malformed.
+    String::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
@@ -25,6 +41,35 @@ enum ProfileName {
     VirtioScsi,
     #[serde(rename = "bcm2712-sdhci")]
     Sdhci,
+}
+
+impl TryFrom<Selector> for Policy {
+    type Error = String;
+
+    fn try_from(selector: Selector) -> Result<Self, Self::Error> {
+        let identity = match (selector.compatible, selector.path) {
+            (Some(value), None) => Identity::Compatible(value),
+            (None, Some(value))
+                if value.starts_with('/')
+                    && !value
+                        .split('/')
+                        .skip(1)
+                        .any(|part| matches!(part, "" | "." | "..")) =>
+            {
+                Identity::Path(value)
+            }
+            _ => return Err("device requires exactly one canonical firmware identity".into()),
+        };
+        let (Identity::Compatible(text) | Identity::Path(text)) = &identity;
+        if text.is_empty() || text.len() > 512 || text.bytes().any(|byte| byte <= 32 || byte == 127)
+        {
+            return Err("invalid firmware identity".into());
+        }
+        Ok(Self {
+            profile: selector.profile,
+            identity,
+        })
+    }
 }
 
 impl Policy {
@@ -36,46 +81,11 @@ impl Policy {
     }
 
     pub fn identity(&self) -> FirmwareIdentity<'_> {
-        match &self.compatible {
-            Some(value) => FirmwareIdentity::Compatible(value),
-            None => FirmwareIdentity::FdtPath(self.path.as_deref().unwrap_or_default()),
+        match &self.identity {
+            Identity::Compatible(value) => FirmwareIdentity::Compatible(value),
+            Identity::Path(value) => FirmwareIdentity::FdtPath(value),
         }
     }
-}
-
-pub fn parse(document: &[u8]) -> Result<Policy, String> {
-    let board: Board = serde_json::from_slice(document).map_err(|error| error.to_string())?;
-    let policy = board.device;
-    let text = match (&policy.compatible, &policy.path) {
-        (Some(value), None) => value,
-        (None, Some(value))
-            if value.starts_with('/')
-                && !value
-                    .split('/')
-                    .skip(1)
-                    .any(|part| matches!(part, "" | "." | "..")) =>
-        {
-            value
-        }
-        _ => return Err("device requires exactly one canonical firmware identity".into()),
-    };
-    if text.is_empty() || text.len() > 512 || text.bytes().any(|byte| byte <= 32 || byte == 127) {
-        return Err("invalid firmware identity".into());
-    }
-    Ok(policy)
-}
-
-pub fn load(path: &str) -> Result<Policy, String> {
-    let mut data = Vec::new();
-    std::fs::File::open(path)
-        .map_err(|error| error.to_string())?
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut data)
-        .map_err(|error| error.to_string())?;
-    if data.len() > 1024 * 1024 {
-        return Err("board configuration exceeds 1 MiB".into());
-    }
-    parse(&data)
 }
 
 #[cfg(test)]
@@ -85,20 +95,25 @@ mod tests {
     #[test]
     fn explicit_unique_selector_required() {
         assert!(
-            parse(br#"{"io-device":{"profile":"virtio-mmio-scsi","compatible":"virtio,mmio"}}"#)
-                .is_ok()
+            serde_json::from_str::<Policy>(
+                r#"{"profile":"virtio-mmio-scsi","compatible":"virtio,mmio"}"#
+            )
+            .is_ok()
         );
         for identity in [
             r#""path":"relative""#,
             r#""path":"/soc/../x""#,
             r#""compatible":"x","path":"/x""#,
             r#""compatible":"""#,
+            r#""compatible":"x","path":null"#,
+            r#""compatible":null,"path":"/soc/device""#,
+            r#""compatible":null"#,
+            r#""path":null"#,
         ] {
             assert!(
-                parse(
-                    format!(r#"{{"io-device":{{"profile":"virtio-mmio-scsi",{identity}}}}}"#)
-                        .as_bytes()
-                )
+                serde_json::from_str::<Policy>(&format!(
+                    r#"{{"profile":"virtio-mmio-scsi",{identity}}}"#
+                ))
                 .is_err()
             );
         }
