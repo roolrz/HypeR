@@ -4,7 +4,7 @@
 //! Kernel ownership and fault policy for the Rust global allocator.
 
 use hyper::hal::interrupt::InterruptMask;
-use hyper::mm::allocator::heap::{CpuLocalCachePolicy, KernelGlobalAllocator};
+use hyper::mm::allocator::heap::{CpuLocalCachePolicy, KernelGlobalAllocator, PageAvailability};
 
 pub struct KernelAllocatorPolicy;
 
@@ -36,6 +36,18 @@ unsafe impl CpuLocalCachePolicy for KernelAllocatorPolicy {
 
     fn current_cpu(_pin: &Self::Pin) -> Option<hyper::cpu::CpuIndex> {
         crate::kernel::cpu::current_index()
+    }
+
+    fn memory_pressure(available: PageAvailability) {
+        super::cache_memory::observe_pressure(available);
+    }
+
+    fn memory_released(_available: PageAvailability) {
+        crate::kernel::io_cache::worker::page_released();
+    }
+
+    fn try_reclaim(pages: usize) -> usize {
+        crate::kernel::io_cache::worker::try_reclaim(pages)
     }
 }
 

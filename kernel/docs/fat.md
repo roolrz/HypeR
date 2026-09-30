@@ -121,12 +121,47 @@ for performance measurements.
 
 ## VFS semantics
 
+Regular-file read caching belongs to the common VFS layer, described in
+[VFS file-data cache](vfs.md#file-data-cache). The FAT adapter supplies raw
+positioned reads, file length, and a cheap check for a closed or failed volume.
+The shared file record owns the common content gate and revision; all writes,
+resizes and truncating opens pass through that gate before entering FAT.
+Alternate names therefore share cached contents and mutation ordering. Cached
+pages retain that content record, independently of active node leases, and do
+not prevent unlink.
+These clean pages do not change the synchronous write or explicit sync contract.
+When the last live lease closes, resident or reader-pinned pages can preserve
+the record. Reopening the canonical name or an alias then reuses its identity,
+revision and known length. After both active leases and cached pages disappear,
+the next open gets a fresh, never-reused incarnation. Sharing is therefore
+opportunistic across close/reopen and across processes, not a permanent inode
+table or a promise to retain pages under pressure.
+
+Weak namespace bindings retain charged path storage until a later lookup or
+bounded scheduled cleanup removes them. Records and paths remain charged to
+the mount sponsor. Each binding has its own fallible allocation, so removing it
+releases its storage and charge without retaining a historical table capacity.
+Its charge also covers the full node and content-record allocations retained
+by weak references, conservatively overlapping their charges while live.
+Two linked lists provide a constant-work housekeeping cursor; teardown is
+iterative. A quota failure during unpublished preparation requests one finite
+cache sweep for the denying resource domain, including descendant sponsors.
+The worker drops matching clean pages outside the cache lock and tries idle
+namespace cleanup without waiting for a volume mutex. The requester then
+prunes its own expired bindings and retries preparation while new cache
+admissions remain paused. Active leases, in-flight readers and concurrent quota
+users can still prevent admission; namespace mutations and handle callbacks
+are never replayed.
+
 Long filenames and their 8.3 aliases resolve to the same canonical stored name,
 so alternate spellings cannot create separate live node or lock identities.
 Exclusive creation rejects an already existing entry through either spelling.
 Node leases have stable in-memory IDs distinct from reusable FAT directory
-slots. Live leases prevent unlink. Successful rename updates every live
-matching descendant path under the volume lock. Mount pins additionally
+slots. Live leases prevent unlink. Successful rename updates active and cached
+idle descendant paths under the volume lock. Creation prepares its owners and
+binding allocation before media mutation and publishes the binding only after
+success. Unlink retires the name binding before a same-name creation can resolve
+it, so retained old pages cannot identify the replacement. Mount pins additionally
 prevent moving a mounted subtree. A newly created same-name file therefore
 cannot become visible through a previous file's handle.
 

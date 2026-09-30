@@ -26,6 +26,34 @@ impl StorageBudget for ScratchBudget {
 }
 pub(crate) type ScratchVec<T> = hyper::fs::scratch::BudgetedVec<T, ScratchBudget>;
 pub(crate) type ScratchString = hyper::fs::scratch::BudgetedString<ScratchBudget>;
+
+/// Prepare byte scratch before backend access or user-copy side effects.
+/// Capacity overflow and unrelated quota errors remain terminal; only the
+/// exact physical backing or denying memory domain requests scheduled reclaim.
+pub(crate) fn resize_bytes(
+    values: &mut ScratchVec<u8>,
+    length: usize,
+) -> Result<(), hyper::fs::scratch::Error<ResourceError>> {
+    use crate::kernel::mm::reclaim::{Target, retry_prepare_with};
+    use hyper::fs::scratch::Error;
+
+    retry_prepare_with(
+        || values.resize(length, 0),
+        |error| match error {
+            Error::Allocation => core::alloc::Layout::array::<u8>(length)
+                .ok()
+                .and_then(crate::kernel::mm::cache_memory::allocation_page_bound)
+                .map(|pages| Target::PhysicalOrder(pages.trailing_zeros() as usize)),
+            Error::Budget(ResourceError::LimitExceeded {
+                domain,
+                resource: ResourceKind::KernelMemoryBytes,
+                ..
+            }) => Some(Target::Domain(*domain)),
+            _ => None,
+        },
+    )
+}
+
 impl From<hyper::fs::scratch::Error<ResourceError>> for super::Error {
     fn from(error: hyper::fs::scratch::Error<ResourceError>) -> Self {
         match error {

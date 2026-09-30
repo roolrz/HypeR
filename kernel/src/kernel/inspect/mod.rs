@@ -538,7 +538,13 @@ impl MemoryInspector {
                 .checked_add(runtime.large_heap_pages)
                 .ok_or(Error::InconsistentAccounting)?,
         )?;
-        let kernel_bytes = pages_to_bytes(runtime.kernel_pages.pages)?;
+        let kernel_bytes = pages_to_bytes(
+            runtime
+                .kernel_pages
+                .pages
+                .checked_add(runtime.file_cache_pages.pages)
+                .ok_or(Error::InconsistentAccounting)?,
+        )?;
         let page_table_bytes = pages_to_bytes(runtime.page_table_pages.pages)?;
         let user_bytes = pages_to_bytes(runtime.user_pages.pages)?;
         let guest_bytes = pages_to_bytes(runtime.guest_pages.pages)?;
@@ -553,6 +559,18 @@ impl MemoryInspector {
             .ok_or(Error::InconsistentAccounting)?;
         let reserved_bytes = total_bytes
             .checked_sub(managed_bytes)
+            .ok_or(Error::InconsistentAccounting)?;
+        let file_cache_reclaimable =
+            crate::kernel::vfs::file_cache().and_then(|cache| cache.reclaimable_pages());
+        let reclaimable_pages = runtime
+            .cache
+            .reclaimable_pages
+            .unwrap_or(0)
+            .checked_add(
+                file_cache_reclaimable
+                    .unwrap_or(0)
+                    .min(runtime.file_cache_pages.pages),
+            )
             .ok_or(Error::InconsistentAccounting)?;
         let captured_at_ns = crate::kernel::time::monotonic_nanoseconds().unwrap_or_default();
         Ok(MemoryObservation {
@@ -569,11 +587,14 @@ impl MemoryInspector {
             user_bytes,
             guest_bytes,
             unattributed_bytes,
-            reclaimable_bytes: pages_to_bytes(runtime.cache.reclaimable_pages.unwrap_or(0))?,
-            cache_sample_complete: u64::from(runtime.cache.reclaimable_pages.is_some()),
-            // No independent block-I/O buffer pool exists yet. Ramfs contents
-            // are authoritative data, not discardable read-cache copies.
-            buffered_bytes: 0,
+            reclaimable_bytes: pages_to_bytes(reclaimable_pages)?,
+            cache_sample_complete: u64::from(
+                runtime.cache.reclaimable_pages.is_some() && file_cache_reclaimable.is_some(),
+            ),
+            // These physical pages are included in kernel ownership above.
+            // Pinned or loading pages remain buffered but are not immediately
+            // reclaimable; metadata allocations remain charged to the heap.
+            buffered_bytes: pages_to_bytes(runtime.file_cache_pages.pages)?,
         })
     }
 }

@@ -30,6 +30,19 @@ impl PageBlock {
         })
     }
 
+    pub(super) fn allocate_cache(min_free_pages: usize) -> Result<Self, BuddyError> {
+        let physical = super::allocator::GLOBAL_ALLOCATOR.allocate_pages_above_reserve(
+            0,
+            PageOwner::FileCache,
+            min_free_pages,
+        )?;
+        Ok(Self {
+            physical,
+            order: 0,
+            owner: PageOwner::FileCache,
+        })
+    }
+
     pub const fn physical(&self) -> PhysicalAddress {
         self.physical
     }

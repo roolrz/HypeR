@@ -14,6 +14,7 @@ pub(crate) fn dispatch_kernel_rpc() {
     crate::kernel::irq::cross_call::service();
     crate::kernel::reaper::service_irq_prompt();
     crate::kernel::log::service_irq_prompt();
+    crate::kernel::io_cache::worker::service_irq_prompt();
 }
 
 /// Services one architecture-private doorbell as a real outer IRQ entry.
@@ -52,6 +53,7 @@ pub(crate) fn dispatch(interrupt: InterruptId, origin: InterruptOrigin) -> Actio
         crate::kernel::irq::interrupt::dispatch(interrupt);
         crate::kernel::reaper::service_irq_prompt();
         crate::kernel::log::service_irq_prompt();
+        crate::kernel::io_cache::worker::service_irq_prompt();
         Action::Resume { postlude: None }
     };
     complete_entry(irq, action, origin, Some(interrupt))

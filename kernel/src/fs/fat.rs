@@ -353,6 +353,17 @@ impl<D: BlockDevice> FatVolume<D> {
     pub fn is_read_only(&self) -> bool {
         self.device.readonly
     }
+    /// Checks latched failures and closure without media access. Upper layers
+    /// use this before serving cached bytes or metadata from this volume.
+    pub fn read_status(&self) -> Result<(), Error> {
+        if let Some(error) = self.device.failure() {
+            return Err(Error::Block(error));
+        }
+        if self.fs.is_none() {
+            return Err(Error::Closed);
+        }
+        Ok(())
+    }
     fn writable(&mut self) -> Result<(), Error> {
         if let Some(error) = self.device.failure() {
             return Err(Error::Block(error));

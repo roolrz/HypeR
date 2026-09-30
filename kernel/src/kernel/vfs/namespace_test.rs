@@ -3,6 +3,9 @@
 
 //! Real ramfs namespace and publication contracts in scheduled kernel context.
 
+mod content;
+mod fat_identity;
+
 static EMPTY_ARCHIVE: &[u8] = b"07070100000001000000000000000000000000000000010000000000000000000000000000000000000000000000000000000b00000000TRAILER!!!\0\0\0\0";
 
 use super::{DirectoryObject, Error, FileObject, FileOpenOptions, MetadataUpdate, ScratchBudget};
@@ -21,6 +24,11 @@ impl From<Error> for TestError {
         Self::Vfs(error)
     }
 }
+impl From<super::instance::Error> for TestError {
+    fn from(error: super::instance::Error) -> Self {
+        Self::Vfs(error.into())
+    }
+}
 fn check(condition: bool, label: &'static str) -> Result<(), TestError> {
     if condition {
         Ok(())
@@ -32,16 +40,19 @@ fn check(condition: bool, label: &'static str) -> Result<(), TestError> {
 pub(crate) fn run() -> Result<(), TestError> {
     let domain =
         ResourceDomain::try_new_root(ResourceLimits::UNLIMITED).map_err(Error::Resource)?;
+    fat_identity::run(&domain)?;
     let scratch = ScratchBudget::new(&domain);
     let archive = RamFs::from_newc(EMPTY_ARCHIVE)
         .map_err(|error| Error::Backend(super::instance::Error::RamFs(error)))?;
     let filesystem =
         super::instance::FilesystemInstance::try_from_ramfs(archive).map_err(Error::from)?;
-    let cache = crate::kernel::io_cache::FileDataCache::try_new_system().map_err(Error::Cache)?;
+    let cache =
+        crate::kernel::io_cache::FileDataCache::try_new_system().map_err(|_| Error::Allocation)?;
     let cache = FallibleArc::try_new(cache).map_err(|_| Error::Allocation)?;
     let namespace =
         super::instance::MountNamespace::try_new(filesystem, cache).map_err(Error::from)?;
     let root = DirectoryObject::try_root(namespace, &domain)?;
+    content::run(&root, &domain, &scratch)?;
     snapshot_cache(&root, &domain, &scratch)?;
     mounted_namespace(&root, &domain, &scratch)?;
     root.create("left", NodeKind::Directory, 0o755, &scratch)?;

@@ -110,7 +110,7 @@ fn copy_path(process: &Process, path: UserSlice) -> Result<ScratchString, Servic
         return Err(ServiceError::InvalidInput);
     }
     let mut path_bytes = ScratchVec::new(ScratchBudget::new(&process.resource_domain()));
-    path_bytes.resize(length, 0).map_err(VfsError::from)?;
+    super::scratch::resize_bytes(&mut path_bytes, length).map_err(VfsError::from)?;
     process.copy_from_user(path, &mut path_bytes)?;
     if path_bytes.contains(&0) {
         return Err(ServiceError::InvalidInput);
@@ -139,16 +139,16 @@ pub(crate) fn read_file_at(
     if capacity == 0 {
         return Ok((0, file_size));
     }
-    // Small reads remain allocation-free apart from user-memory preparation.
-    // Bulk scratch is bounded independently of the ABI request limit and is
+    // Small reads use stack scratch. Optional page-cache retention and
+    // user-memory preparation have their own allocation contracts. Bulk
+    // scratch is bounded independently of the ABI request limit and is
     // charged to the caller, never placed on the kernel stack.
     let mut small = [0_u8; SMALL_TRANSFER_BYTES];
     let mut large = ScratchVec::new(ScratchBudget::new(&process.resource_domain()));
     let bytes = if capacity <= small.len() {
         &mut small[..capacity]
     } else {
-        large
-            .resize(capacity.min(BULK_TRANSFER_BYTES), 0)
+        super::scratch::resize_bytes(&mut large, capacity.min(BULK_TRANSFER_BYTES))
             .map_err(VfsError::from)?;
         &mut large[..]
     };
@@ -292,7 +292,7 @@ pub(crate) fn write_file_at(
     let bytes = if size <= small.len() {
         &mut small[..size]
     } else {
-        large.resize(size, 0).map_err(VfsError::from)?;
+        super::scratch::resize_bytes(&mut large, size).map_err(VfsError::from)?;
         &mut large[..]
     };
     let source =

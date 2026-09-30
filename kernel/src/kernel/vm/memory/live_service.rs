@@ -73,11 +73,20 @@ pub(crate) fn create(
         .map_err(|_| Error::NoMemory)?;
         let mut committed = false;
         for _ in 0..8 {
-            binding
-                .with_address_space(|space| {
-                    space.prepare_live_install(mapping.as_ref().ok_or(super::Error::InvalidRange)?)
-                })
-                .map_err(classify)?;
+            // Retry only unpublished metadata preparation. Reclaim may sleep,
+            // so every attempt releases the address-space lock first and
+            // revalidates the candidate after the wait.
+            crate::kernel::mm::reclaim::retry_prepare_with(
+                || {
+                    binding.with_address_space(|space| {
+                        space.prepare_live_install(
+                            mapping.as_ref().ok_or(super::Error::InvalidRange)?,
+                        )
+                    })
+                },
+                |failure| failure.reclaim,
+            )
+            .map_err(|failure| classify(failure.error))?;
             let installed = owner
                 .with_io_update(|current| {
                     if current != id {

@@ -556,6 +556,19 @@ impl ResourceDomain {
         self.inner.id
     }
 
+    /// Tests immutable quota ancestry without locking or allocating. Domain
+    /// construction bounds this walk by `MAX_DOMAIN_DEPTH`.
+    pub(crate) fn charges_domain(&self, id: ResourceDomainId) -> bool {
+        let mut current = Some(self);
+        while let Some(domain) = current {
+            if domain.id() == id {
+                return true;
+            }
+            current = domain.inner.parent.as_ref();
+        }
+        false
+    }
+
     #[cfg(test)]
     pub(crate) fn parent_id(&self) -> Option<ResourceDomainId> {
         self.inner.parent.as_ref().map(Self::id)
@@ -946,6 +959,10 @@ pub(crate) struct CommittedCharge {
 }
 
 impl CommittedCharge {
+    pub(crate) fn charges_domain(&self, id: ResourceDomainId) -> bool {
+        self.domain.charges_domain(id)
+    }
+
     /// Separates an already admitted subset without changing usage counters.
     /// The returned owner must outlive the storage whose charge it carries.
     pub(crate) fn split_off(&mut self, amount: ResourceAmount) -> Self {

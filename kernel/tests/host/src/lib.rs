@@ -42,6 +42,9 @@ mod aarch64_guest_cpu_contract_model;
 #[path = "../../../hal/src/arch/aarch64/user_contract.rs"]
 mod aarch64_user_contract_model;
 #[cfg(test)]
+#[path = "../../../src/kernel/io_cache/worker/request_state.rs"]
+mod cache_reclaim_requests;
+#[cfg(test)]
 #[path = "../../../src/kernel/task/external_execution.rs"]
 mod external_execution_model;
 #[cfg(test)]
@@ -145,6 +148,9 @@ mod fallible_ownership;
 #[cfg(test)]
 #[path = "cases/fdt.rs"]
 mod fdt;
+#[cfg(test)]
+#[path = "cases/file_cache_read.rs"]
+mod file_cache_read;
 #[cfg(test)]
 #[path = "cases/file_data_cache.rs"]
 mod file_data_cache_cases;

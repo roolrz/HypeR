@@ -55,8 +55,7 @@ impl Mapping {
             .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, bytes as u64))?
             .commit();
         let mut extents: Vec<Extent> = Vec::new();
-        extents
-            .try_reserve_exact(count)
+        crate::kernel::mm::reclaim::reserve_exact(&mut extents, count)
             .map_err(|_| Error::MetadataAllocation)?;
         for offset in (0..length).step_by(PAGE as usize) {
             backing.populate_page(offset)?;
@@ -81,8 +80,7 @@ impl Mapping {
             }
         }
         let mut order = Vec::new();
-        order
-            .try_reserve_exact(count)
+        crate::kernel::mm::reclaim::reserve_exact(&mut order, count)
             .map_err(|_| Error::MetadataAllocation)?;
         order.extend(0..extents.len());
         order.sort_unstable_by_key(|index| extents[*index].alias);
@@ -215,7 +213,10 @@ impl LiveMappings {
 
 impl super::GuestAddressSpace {
     /// Allocate pool metadata before entering the VM lifecycle commit gate.
-    pub(crate) fn prepare_live_install(&mut self, candidate: &Mapping) -> Result<(), Error> {
+    pub(crate) fn prepare_live_install(
+        &mut self,
+        candidate: &Mapping,
+    ) -> Result<(), super::storage::LivePreparationError> {
         let capacity = self.validate_live_install(candidate)?;
         self.table_pages.reserve_live(capacity)
     }

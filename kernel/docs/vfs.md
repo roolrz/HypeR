@@ -62,16 +62,19 @@ credentials and POSIX path semantics are not implied by this Native API.
 The namespace strongly owns mounted filesystems. Directory and File objects
 hold the namespace view and the resolved mount/node location needed to keep an
 open object valid after namespace detachment. Mounts do not strongly reference
-their namespace, and node caches may retain only weak discovery references, so
-the ownership graph cannot form a namespace--mount--node cycle.
+their namespace. File-data cache pins own only a content record, which has no
+mount, namespace, backend or active-node backreference. Namespace discovery
+references to that record and its active node are weak, so content retention
+cannot form a namespace--mount--node cycle or acquire file authority.
 
 ## Backend contract
 
 A backend receives validated names and opaque, counted node leases. Its results are
 bounded owned metadata or caller-provided buffers; it may not retain borrowed
-VFS storage. VFS locks are released before any backend operation. This permits
-a later remote adapter to block or perform IPC without holding namespace,
-node-cache, handle-table, or file-data-cache locks.
+VFS storage. Namespace, mount, handle-table and cache-index spinlocks are
+released before backend operations. The shared sleeping content gate spans
+regular-file I/O. A later remote adapter may block or perform IPC under that
+gate without retaining a spinlock.
 
 Executable lookup has a separate, fallible snapshot contract. Immutable
 kernel-resident storage may be borrowed, while a mutable or remote backend must
@@ -90,9 +93,35 @@ publication.
 
 ## File-data cache
 
-Cache entries are keyed by filesystem generation, stable node identity, and
-page index. A path or raw reusable inode number is never a cache key. The first
-read-only state machine is:
+The common VFS layer owns file-content coherence. Ramfs nodes embed one
+`FileContent`; cacheable FAT nodes share a `FileRecord` which owns it. Independent
+opens and aliases therefore use the same content gate and identity. Its
+sleeping gate protects a non-repeating content revision and optional known
+length. Cache entries are keyed by filesystem identity, node incarnation,
+content revision and page index. A path or raw reusable inode number is never
+a cache key. A clean page also retains an opaque content-owner pin; the portable
+cache has no dependency on VFS types. This preserves FAT identity across the
+last close and a later open while pages remain, including opens by another
+process. Page reclamation releases these pins outside the cache lock. The record
+contains only its identity, content state and quota charge; advisory locks and
+mount pins remain on the active node. Cached records do not keep unlink busy.
+After every record owner disappears, reopening requires a fresh incarnation.
+FAT bindings use individually charged storage, released when the binding is
+removed. If retained content exhausts a mount sponsor or ancestor quota,
+unpublished preparation can request a finite domain-scoped cache sweep and
+binding cleanup. Cache admission remains paused through that retry; neither
+backend mutations nor handle-publication callbacks are replayed.
+
+Reads, writes, append, resize, open-with-truncate and executable snapshots use
+this common gate. A mutation advances the revision and forgets the known length
+before calling the backend, including attempts that later return an error:
+part of the file may already have changed. Old cache entries remain unreachable
+and are reclaimed by ordinary eviction. Open-with-truncate retains its existing
+prepare-handle, change-contents, publish-handle transaction. This implementation
+serializes operations on the same file for one backend batch; a multi-batch
+Native read is still not an atomic file snapshot.
+
+The clean-page residency state machine remains:
 
 ```text
 Vacant -> Loading(generation) -> Clean(valid length)
@@ -105,27 +134,93 @@ Only one caller owns a loading reservation. Backend fill occurs outside the
 cache lock, and completion must present the same generation token before it can
 publish. A failed or stale completion cannot overwrite a recycled entry.
 Published pages are immutable shared owners; eviction removes the index owner
-but cannot invalidate an active reader. The cache has a fixed budget for
-cache-owned clean entries, and only clean entries are eviction candidates in
-this milestone. In-flight load buffers and pages retained by active readers
-are separately bounded by caller concurrency and lifetime rather than that
-clean-entry budget.
+but cannot invalidate an active reader. Payload reservations remain charged
+until the last owner releases the page, covering loading, resident and evicted
+but still referenced pages. Each production payload owns one physical 4 KiB
+page, including partial EOF tails; it is accounted separately from allocator
+metadata. Hash buckets index loading and clean entries, a free-slot stack finds
+vacant slots, and an indexed minimum heap tracks the oldest clean entry. Hits
+refresh the access sequence; fill completion preserves the reservation sequence.
+Victim lookup is constant time and heap updates are logarithmic in capacity.
+Hash chains contain at most 64 entries, bounding index work while interrupts
+are masked. A colliding miss bypasses retention once that limit is reached.
+Shrinking metadata may discard entries that would exceed a merged bucket's
+limit; growth preserves resident entries.
 
-Dirty data, writeback, truncate invalidation, direct I/O, external coherence,
-and shared writable mappings are intentionally absent until their state and
-cancellation protocols are implemented. Destructors never pretend to flush or
-complete fallible storage work.
+Cache capacity grows on demand rather than imposing a fixed byte budget. The
+`kio-reclaim` kernel thread grows metadata geometrically and reclaims cold clean
+pages in bounded batches. It temporarily stops new loading reservations, waits
+for existing loaders, and parks the table with a constant-time ownership move.
+Allocation, migration and destruction happen outside the cache lock. Reads
+bypass retention while the table is parked. Failed growth restores the old
+table; pressure can release empty oversized metadata before attempting a small
+replacement, leaving a disabled cache if even that allocation fails.
+
+Admission uses allocator-managed RAM, excluding firmware and other unmanaged
+regions. Normally the high watermark stops admission at 90% utilization and
+reclamation continues to 85%. Small heaps also retain a minimum free reserve.
+Checks for each physical payload and conservative metadata reservation occur
+under the allocator lock, so concurrent fills cannot overbook cache headroom.
+Live non-cache allocations may still consume that headroom. Loading and
+reader-pinned pages remain charged until their final release, and load
+completion or memory release wakes a pressure-blocked worker. Cache admission
+never waits for reclamation: a miss falls back to ordinary backend I/O.
+
+Ordinary allocation failure also permits a bounded, nonblocking attempt to
+reclaim at most 64 unpinned clean pages before retrying once. This runs outside
+allocator and cache locks and uses only the audited page/content-record
+payload, whose destructor performs no filesystem or scheduler operation.
+The generic allocator never sleeps to reclaim memory. Audited, unpublished
+allocation preparation can additionally request a scheduled reclaim pass for
+the actual buddy order or denying resource domain, even when usage is below
+the pressure watermark. The worker scans a finite snapshot in bounded batches
+and does not wait for pinned pages, in-flight loads or filesystem locks.
+Requests use non-repeating generations; cancellation and delayed completion
+cannot complete a later request. Request serialization ends before retrying
+preparation, while a separate guard keeps cache admissions paused through the
+retry. Mutating syscalls are not replayed. Competing ordinary allocations or
+unreclaimable fragmentation can still cause a bounded retry to fail.
+
+The memory observer includes cache payloads in used kernel memory and reports
+unpinned indexed pages as reclaimable; pinned and loading pages are not
+reclaimable.
+
+An evicted payload can be reused only after acquiring unique ownership, with
+no remaining reader or weak reference. Its allocation permit follows that
+owner throughout the refill. The exact-page allocation can hold either a full
+page or an EOF tail without growing. Readers holding an evicted page keep
+immutable bytes. Refill, allocation and destruction occur outside the cache
+lock; pressure prevents recycled pages from admitting new cache contents too.
+
+The backend-neutral reader preserves consecutive miss ranges up to the native
+512 KiB batch, using the caller's existing scratch storage. It issues no read
+outside the requested range. Only fully returned pages, or a page-start-to-EOF
+tail validated against the known length, are eligible for retention. Partial
+cold reads need not populate the cache; partial warm reads can use complete
+cached pages. Short backend reads retain their ordinary short-prefix semantics,
+and backend errors are never hidden as cache misses.
+
+Backends provide raw range I/O, metadata, stable node identity and a cheap read
+admission check. Cached data and cached length still honor a failed or closed
+backend once that state is latched; the check does not probe the media on a
+cache hit. FAT uses this common reader; it owns no file-page cache algorithm.
+Writes continue through the existing synchronous backend path and explicit
+`file_sync` durability contract. Dirty-page writeback, external coherence,
+direct I/O and shared writable mappings require separate protocols. Destructors
+perform no fallible storage work.
 
 ## Concurrency and lifecycle
 
 Namespace resolution and file-data backend operations run in scheduled kernel
 context. Short, nonblocking active-handle retirement callbacks may also execute
 from masked Native handle-close entry.
-The conceptual lock order is namespace/mount, node state, cache shard, then
-cache entry, but hot paths acquire a counted owner and release the preceding
-layer before descending. VFS policy and cache spinlocks never span backend execution, userspace copy,
-IPC, allocation, or scheduler blocking. Ramfs sleeping mutexes may span its
-fallible allocation, but never a userspace copy.
+Namespace traversal retains a node lease before entering file-content policy.
+The file operation lock order is common content gate, then backend volume or
+node-data lock. Cache spinlocks cover only short residency transitions and never
+span backend execution, userspace copy, allocation, destruction or scheduler
+blocking. The sleeping content gate may span backend I/O; it is released before
+preparing or copying a userspace destination. Backend callbacks must not reenter
+the common file operation and acquire the same content gate recursively.
 
 Mount construction is prepare-then-publish. Publication is the only point at
 which a namespace can discover the mount. Future unmount removes namespace
@@ -158,9 +253,10 @@ committing its name. Failed preparation leaves the namespace unchanged.
 Executable snapshots borrow unchanged archive bytes or own a charged immutable
 copy taken under the file lock. Later writes cannot modify an admitted image.
 
-Ramfs bypasses the immutable page cache: its owned bytes are the authoritative
-storage. A future cached writable backend must add content-version validation,
-truncate invalidation and writeback before using that cache. The backend seam
+Ramfs bypasses page retention because its owned bytes are authoritative storage,
+while sharing the common file-content coordination contract. Cached writable
+backends use the same revision and mutation protocol; a clean read cache does
+not require dirty-page writeback. The backend seam
 in `instance.rs` separates node leases, owned metadata, data operations and
 executable snapshots from path policy. A userspace filesystem adapter can add
 its own lease variant and request lifetime/cancellation protocol there; block

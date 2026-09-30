@@ -151,14 +151,17 @@ pub(super) fn contiguous_pages(
         ))?
         .commit();
     let mut pages = alloc::vec::Vec::new();
-    pages
-        .try_reserve_exact(count)
+    crate::kernel::mm::reclaim::reserve_exact(&mut pages, count)
         .map_err(|_| MemoryObjectError::AllocationSize)?;
-    let block = PageBlock::allocate_for(count.trailing_zeros() as usize, PageOwner::User).map_err(
-        |error| {
-            MemoryObjectError::Vmo(super::VmoError::Backend(KernelPageError::Allocation(error)))
-        },
-    )?;
+    let order = count.trailing_zeros() as usize;
+    let block = crate::kernel::mm::reclaim::retry_prepare(
+        crate::kernel::mm::reclaim::Target::PhysicalOrder(order),
+        || PageBlock::allocate_for(order, PageOwner::User),
+        |error| *error == hyper::mm::BuddyError::OutOfMemory,
+    )
+    .map_err(|error| {
+        MemoryObjectError::Vmo(super::VmoError::Backend(KernelPageError::Allocation(error)))
+    })?;
     let base = block.physical().get();
     base.checked_add(size)
         .ok_or(MemoryObjectError::AllocationSize)?;

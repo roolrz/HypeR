@@ -3,12 +3,13 @@
 
 //! Immutable mount-table snapshots; publication never holds a lock across I/O.
 
+use core::sync::atomic::{AtomicUsize, Ordering};
 use hyper::mm::FallibleArc;
 use hyper::sync::SpinLock;
 
 use super::instance::{Error, FilesystemInstance, Location, Mount};
 use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
-use crate::kernel::accounting::{CommittedCharge, ResourceDomain};
+use crate::kernel::accounting::{CommittedCharge, ResourceDomain, ResourceDomainId};
 
 const MAX_MOUNTS: usize = 128;
 
@@ -122,12 +123,14 @@ impl View {
 
 pub(super) struct MountTable {
     current: SpinLock<View>,
+    reclaim_cursor: AtomicUsize,
 }
 
 impl MountTable {
     pub(super) const fn new() -> Self {
         Self {
             current: SpinLock::new(View(None)),
+            reclaim_cursor: AtomicUsize::new(0),
         }
     }
 
@@ -137,6 +140,46 @@ impl MountTable {
 
     pub(super) fn is_current(&self, view: &View) -> bool {
         self.current.with(|current| current.same(view))
+    }
+
+    pub(super) fn reclaim_file_records(
+        &self,
+        root: &FilesystemInstance,
+        mut limit: usize,
+    ) -> usize {
+        let view = self.snapshot();
+        let count = view.entries().len() + 1;
+        let start = self.reclaim_cursor.fetch_add(1, Ordering::Relaxed) % count;
+        let mut reclaimed = 0;
+        for offset in 0..count {
+            if limit == 0 {
+                break;
+            }
+            let index = (start + offset) % count;
+            let filesystem = if index == 0 {
+                root
+            } else {
+                view.entries()[index - 1].mounted.filesystem()
+            };
+            let (inspected, removed) = filesystem.reclaim_file_records(limit);
+            limit -= inspected;
+            reclaimed += removed;
+        }
+        reclaimed
+    }
+
+    pub(super) fn reclaim_idle_records(
+        &self,
+        root: &FilesystemInstance,
+        domain: Option<ResourceDomainId>,
+    ) {
+        // Cloning the immutable topology requires no allocation. Never hold
+        // the mount-table lock while trying a filesystem's namespace mutex.
+        let view = self.snapshot();
+        root.reclaim_idle_records(domain);
+        for attachment in view.entries() {
+            attachment.mounted.filesystem().reclaim_idle_records(domain);
+        }
     }
 
     pub(super) fn attach(

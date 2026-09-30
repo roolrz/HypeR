@@ -11,9 +11,14 @@ use hyper::fs::{MAX_NAME_BYTES, Name, NodeAttributes};
 use hyper::mm::{AllocationError, FallibleArc};
 use hyper::time::Timestamp;
 
-use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceDomain, ResourceKind};
+use crate::kernel::accounting::{
+    CommittedCharge, ResourceAmount, ResourceDomain, ResourceDomainId, ResourceKind,
+};
+use crate::kernel::io_cache::{self, FileDataCache, FileIdentity, NodeIdentity, ReadError};
 
 use super::ExecutableSnapshot;
+use super::file_data::FileContent;
+use super::file_record::CachePage;
 use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
 
 static NEXT_FILESYSTEM_ID: AtomicU64 = AtomicU64::new(1);
@@ -95,18 +100,15 @@ enum Backend {
     Fat(FallibleArc<super::fat::Fatfs<crate::kernel::block::MountedDevice>>),
 }
 
-/// Whether immutable reads benefit from copying backend data into page cache.
+/// Whether reads benefit from copying backend data into clean page cache.
 ///
 /// A memory-resident filesystem already owns stable bytes, so caching it would
-/// create a second physical copy without avoiding I/O. Block and remote
-/// backends added later can opt into `PageCache` at their adapter boundary.
+/// create a second physical copy without avoiding I/O. Cached backends must
+/// route every content mutation through the node's shared content gate and
+/// must not reuse node identities within one filesystem generation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum ReadCachePolicy {
+enum ReadCachePolicy {
     Direct,
-    #[allow(
-        dead_code,
-        reason = "mutable file cache requires generation-coherent invalidation before admission"
-    )]
     PageCache,
 }
 
@@ -142,6 +144,12 @@ impl NodeLease {
         match &self.0 {
             NodeBackend::RamFs(node) => &node.locks,
             NodeBackend::Fat(node) => &node.locks,
+        }
+    }
+    fn content(&self) -> &FileContent {
+        match &self.0 {
+            NodeBackend::RamFs(node) => &node.content,
+            NodeBackend::Fat(node) => &node.record.content,
         }
     }
     fn ramfs(&self) -> Result<&FallibleArc<super::ramfs::Node>, Error> {
@@ -219,6 +227,19 @@ impl FilesystemInstance {
         self.id
     }
 
+    pub(super) fn reclaim_file_records(&self, limit: usize) -> (usize, usize) {
+        match &self.backend {
+            Backend::RamFs(_) => (0, 0),
+            Backend::Fat(fs) => fs.reclaim_records(limit),
+        }
+    }
+
+    pub(super) fn reclaim_idle_records(&self, domain: Option<ResourceDomainId>) {
+        if let Backend::Fat(fs) = &self.backend {
+            fs.reclaim_idle_records(domain);
+        }
+    }
+
     pub(crate) fn cache_generation(&self) -> crate::kernel::io_cache::FilesystemGeneration {
         let Some(generation) = NonZeroU64::new(self.id().get()) else {
             instance_invariant_violation();
@@ -226,9 +247,10 @@ impl FilesystemInstance {
         crate::kernel::io_cache::FilesystemGeneration::new(generation)
     }
 
-    pub(super) const fn read_cache_policy(&self) -> ReadCachePolicy {
+    const fn read_cache_policy(&self) -> ReadCachePolicy {
         match &self.backend {
-            Backend::RamFs(_) | Backend::Fat(_) => ReadCachePolicy::Direct,
+            Backend::RamFs(_) => ReadCachePolicy::Direct,
+            Backend::Fat(_) => ReadCachePolicy::PageCache,
         }
     }
 
@@ -261,7 +283,63 @@ impl FilesystemInstance {
         }
     }
 
-    pub(crate) fn read_at(
+    /// Check backend health without reading metadata or file contents. Cached
+    /// bytes and lengths must not hide a latched volume failure.
+    fn read_status(&self) -> Result<(), Error> {
+        match &self.backend {
+            Backend::RamFs(_) => Ok(()),
+            Backend::Fat(fs) => fs.read_status(),
+        }
+    }
+
+    pub(super) fn file_len(&self, node: &NodeLease) -> Result<u64, Error> {
+        let mut content = node.content().lock()?;
+        self.read_status()?;
+        content.length(|| self.attributes(node).map(|attributes| attributes.size()))
+    }
+
+    pub(super) fn read_file(
+        &self,
+        node: &NodeLease,
+        cache: &FileDataCache<CachePage>,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> Result<usize, Error> {
+        let mut content = node.content().lock()?;
+        self.read_status()?;
+        match self.read_cache_policy() {
+            ReadCachePolicy::Direct => self.read_backend_at(node, offset, destination),
+            ReadCachePolicy::PageCache => {
+                let length =
+                    content.length(|| self.attributes(node).map(|attributes| attributes.size()))?;
+                let identity = FileIdentity::new(
+                    self.cache_generation(),
+                    NodeIdentity::new(NonZeroU64::new(node.get()).ok_or(Error::NotRegularFile)?),
+                    content.revision(),
+                );
+                // The guard covers both cache publication and the copy into
+                // kernel scratch. Callers release it before user-page access.
+                io_cache::read(
+                    cache,
+                    identity,
+                    &node.fat()?.record,
+                    length,
+                    offset,
+                    destination,
+                    |offset, output| self.read_backend_at(node, offset, output),
+                )
+                .map_err(|error| match error {
+                    ReadError::Backend(error) => error,
+                    ReadError::InvalidBackendResult => Error::InvalidBackendResult,
+                    ReadError::ArithmeticOverflow => Error::InvalidInput,
+                })
+            }
+        }
+    }
+
+    /// Raw regular-file reads are private to the content coordinator. A
+    /// backend must never call back through a guarded `FileObject` operation.
+    fn read_backend_at(
         &self,
         node: &NodeLease,
         offset: u64,
@@ -300,6 +378,8 @@ impl FilesystemInstance {
         node: &NodeLease,
         sponsor: &ResourceDomain,
     ) -> Result<Option<ExecutableSnapshot>, Error> {
+        let _content = node.content().lock()?;
+        self.read_status()?;
         match &self.backend {
             Backend::RamFs(fs) => fs.executable(node.ramfs()?, sponsor),
             Backend::Fat(fs) => fs.executable(node.fat()?, sponsor),
@@ -312,6 +392,8 @@ impl FilesystemInstance {
         offset: Option<u64>,
         input: &[u8],
     ) -> Result<(usize, u64), Error> {
+        let mut content = node.content().lock()?;
+        content.begin_mutation()?;
         match &self.backend {
             Backend::RamFs(fs) => fs.write(node.ramfs()?, offset, input),
             Backend::Fat(fs) => fs.write(node.fat()?, offset, input),
@@ -319,10 +401,14 @@ impl FilesystemInstance {
     }
 
     pub(super) fn resize(&self, node: &NodeLease, length: u64) -> Result<(), Error> {
+        let mut content = node.content().lock()?;
+        content.begin_mutation()?;
         match &self.backend {
             Backend::RamFs(fs) => fs.resize(node.ramfs()?, length),
             Backend::Fat(fs) => fs.resize(node.fat()?, length),
-        }
+        }?;
+        content.set_length(length);
+        Ok(())
     }
 
     pub(super) fn epoch(&self) -> u64 {
@@ -407,10 +493,21 @@ impl FilesystemInstance {
         truncate: bool,
         publish: impl FnOnce(NodeAttributes) -> Result<R, E>,
     ) -> Result<R, E> {
-        match &self.backend {
+        let mut content = node.content().lock()?;
+        if truncate {
+            content.begin_mutation()?;
+        }
+        // The callback prepares an object from the supplied attributes; it
+        // must not reenter content operations while backend locks are held.
+        // Actual handle publication follows a successful backend operation.
+        let prepared = match &self.backend {
             Backend::RamFs(fs) => fs.open_existing(node.ramfs()?, truncate, publish),
             Backend::Fat(fs) => fs.open_existing(node.fat()?, truncate, publish),
+        }?;
+        if truncate {
+            content.set_length(0);
         }
+        Ok(prepared)
     }
     pub(super) fn remove_at(
         &self,
@@ -536,13 +633,13 @@ impl Location {
 pub(crate) struct MountNamespace {
     root: Location,
     pub(super) mounts: super::mounts::MountTable,
-    cache: FallibleArc<crate::kernel::io_cache::FileDataCache<super::read::FilePage>>,
+    cache: FallibleArc<FileDataCache<CachePage>>,
 }
 
 impl MountNamespace {
     pub(super) fn try_new(
         filesystem: FallibleArc<FilesystemInstance>,
-        cache: FallibleArc<crate::kernel::io_cache::FileDataCache<super::read::FilePage>>,
+        cache: FallibleArc<FileDataCache<CachePage>>,
     ) -> Result<FallibleArc<Self>, Error> {
         let mount = Mount::try_new(filesystem, None, None)?;
         let root = Location::new(mount.clone(), mount.root());
@@ -558,10 +655,22 @@ impl MountNamespace {
         self.root.clone()
     }
 
-    pub(super) fn cache(
-        &self,
-    ) -> FallibleArc<crate::kernel::io_cache::FileDataCache<super::read::FilePage>> {
+    pub(super) fn cache(&self) -> FallibleArc<FileDataCache<CachePage>> {
         self.cache.clone()
+    }
+
+    pub(super) fn cache_ref(&self) -> &FileDataCache<CachePage> {
+        &self.cache
+    }
+
+    pub(super) fn reclaim_file_records(&self, limit: usize) -> usize {
+        self.mounts
+            .reclaim_file_records(self.root.mount().filesystem(), limit)
+    }
+
+    pub(super) fn reclaim_idle_records(&self, domain: Option<ResourceDomainId>) {
+        self.mounts
+            .reclaim_idle_records(self.root.mount().filesystem(), domain);
     }
 
     pub(super) fn read_directory_entry(

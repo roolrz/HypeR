@@ -590,10 +590,6 @@ pub(super) const fn status_from_vfs_error(error: VfsError) -> HyperNativeStatus 
             }
         }
         VfsError::Backend(_) => HYPER_NATIVE_STATUS_INTERNAL,
-        VfsError::Cache(crate::kernel::io_cache::CacheError::Allocation) => {
-            HYPER_NATIVE_STATUS_NO_MEMORY
-        }
-        VfsError::Cache(_) => HYPER_NATIVE_STATUS_INTERNAL,
         VfsError::InvalidDirectoryCookie => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         VfsError::InvalidPath => HYPER_NATIVE_STATUS_INVALID_ARGUMENT,
         VfsError::AlreadyExists => hyper::abi::native::HYPER_NATIVE_STATUS_ALREADY_EXISTS,
