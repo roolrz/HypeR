@@ -4,6 +4,15 @@
 {
     "editor.tabSize": 8,
     "editor.detectIndentation": false,
+    "[rust]": {
+        "editor.tabSize": 4
+    },
+    "[c]": {
+        "editor.tabSize": 8
+    },
+    "[cpp]": {
+        "editor.tabSize": 8
+    },
     "rust-analyzer.linkedProjects": [
         "kernel/Cargo.toml",
         "sdk/abi/Cargo.toml",
