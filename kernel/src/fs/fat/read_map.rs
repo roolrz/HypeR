@@ -6,7 +6,6 @@
 
 use super::{BlockDevice, BlockError, DeviceSlot, Disk, Error, SECTOR_SIZE, sector_cache};
 use alloc::{boxed::Box, string::String, vec::Vec};
-use fatfs::{Seek, SeekFrom};
 
 const FILES: usize = 4;
 const EXTENTS: usize = 128;
@@ -118,7 +117,7 @@ impl Map {
         self.path.clear();
         self.path.push_str(path);
         let mut file = fs.root_dir().open_file(path).map_err(Error::from)?;
-        self.size = file.seek(SeekFrom::End(0)).map_err(Error::from)?;
+        self.size = u64::from(file.size().ok_or(Error::Corrupt)?);
         let mut logical = 0u64;
         for extent in file.extents() {
             if logical == self.size {

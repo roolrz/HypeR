@@ -89,26 +89,9 @@ pub(crate) fn assert_kernel_pan() -> Result<(), UserMachineContractError> {
 /// If an asynchronous machine failure interrupts the loop, earlier bytes may
 /// already have been copied.
 pub(crate) unsafe fn copy_from_exposed(source: *const u8, destination: *mut u8, length: usize) {
-    // SAFETY: The caller establishes residency, validity, and non-overlap. A
-    // single asm block prevents LLVM from replacing the operation with memcpy
-    // or assuming exclusive Rust access. Omitting `nomem` supplies the compiler
-    // memory clobber required for externally mutable memory.
-    unsafe {
-        asm!(
-            "cbz {length}, 3f",
-            "2:",
-            "ldrb {byte:w}, [{source}], #1",
-            "strb {byte:w}, [{destination}], #1",
-            "subs {length}, {length}, #1",
-            "b.ne 2b",
-            "3:",
-            source = inout(reg) source => _,
-            destination = inout(reg) destination => _,
-            length = inout(reg) length => _,
-            byte = out(reg) _,
-            options(nostack),
-        );
-    }
+    // SAFETY: This is the same resident Normal-memory contract in the input
+    // direction; protocol synchronization remains with the mapping owner.
+    unsafe { super::exposed_copy::copy(source, destination, length) };
 }
 
 /// Copies bytes from private kernel memory into machine-visible normal memory.
@@ -119,24 +102,9 @@ pub(crate) unsafe fn copy_from_exposed(source: *const u8, destination: *mut u8, 
 /// non-overlapping. The destination may be concurrently accessed by another
 /// PE. Earlier bytes are observable if the operation is interrupted.
 pub(crate) unsafe fn copy_to_exposed(source: *const u8, destination: *mut u8, length: usize) {
-    // SAFETY: The proof and compiler-memory contract are identical to
-    // copy_from_exposed; direction does not change the byte-loop mechanics.
-    unsafe {
-        asm!(
-            "cbz {length}, 3f",
-            "2:",
-            "ldrb {byte:w}, [{source}], #1",
-            "strb {byte:w}, [{destination}], #1",
-            "subs {length}, {length}, #1",
-            "b.ne 2b",
-            "3:",
-            source = inout(reg) source => _,
-            destination = inout(reg) destination => _,
-            length = inout(reg) length => _,
-            byte = out(reg) _,
-            options(nostack),
-        );
-    }
+    // SAFETY: The caller supplies the same resident Normal-memory contract,
+    // with the externally visible range on the destination side.
+    unsafe { super::exposed_copy::copy(source, destination, length) };
 }
 
 pub fn user_translation_identifier_bits() -> Result<u8, UserMachineContractError> {

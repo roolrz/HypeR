@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::require_ok;
-use hyper::fs::block::{BlockDevice, Error as BlockError, SECTOR_SIZE, validate_range};
+use hyper::fs::block::{
+    BlockDevice, Error as BlockError, SECTOR_SIZE, WriteRequest, validate_range,
+};
 use hyper::fs::fat::{Error, FatVolume};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -16,6 +18,8 @@ struct State {
     fail_flush: bool,
     fail_reads: bool,
     fail_writes: bool,
+    fail_write_number: Option<usize>,
+    largest_write: usize,
     readonly: bool,
 }
 #[derive(Clone)]
@@ -83,6 +87,7 @@ impl BlockDevice for Disk {
         validate_range(self.sector_count(), first, input.len())?;
         let mut state = require_ok(self.0.lock());
         state.writes += 1;
+        state.largest_write = state.largest_write.max(input.len());
         if state.readonly {
             return Err(BlockError::ReadOnly);
         }
@@ -92,7 +97,7 @@ impl BlockDevice for Disk {
             state.sectors.insert(first + i as u64, copy);
         }
         // Model a device that reports failure after touching the media.
-        if state.fail_writes {
+        if state.fail_writes || state.fail_write_number == Some(state.writes) {
             return Err(BlockError::Io);
         }
         Ok(())
@@ -107,6 +112,201 @@ impl BlockDevice for Disk {
         }
     }
 }
+#[test]
+fn fat_first_read_builds_the_allocation_map_without_an_eof_seek() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("large", false));
+    let contents: Vec<u8> = (0..4 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    require_ok(fs.write_at("large", 0, &contents));
+    require_ok(fs.sync());
+    drop(fs);
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    let before = require_ok(disk.0.lock()).reads;
+    let mut byte = [0];
+    assert_eq!(require_ok(fs.read_at("large", 17, &mut byte)), 1);
+    assert_eq!(byte, [contents[17]]);
+    // Eight FAT windows plus directory/data windows: a preliminary seek to
+    // EOF would traverse and evict this chain before mapping it a second time.
+    let reads = require_ok(disk.0.lock()).reads - before;
+    assert!(
+        reads <= 12,
+        "first read walked the FAT twice: {reads} requests"
+    );
+    let last = contents.len() - 1;
+    assert_eq!(require_ok(fs.read_at("large", last as u64, &mut byte)), 1);
+    assert_eq!(byte, [contents[last]]);
+}
+
+#[test]
+fn fat_writes_coalesce_clusters_and_complete_before_returning() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("large", false));
+    let contents: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
+    let before = require_ok(disk.0.lock()).writes;
+    assert_eq!(
+        require_ok(fs.write_at("large", 0, &contents)),
+        contents.len()
+    );
+    {
+        let state = require_ok(disk.0.lock());
+        let writes = state.writes - before;
+        assert!(
+            writes <= 16,
+            "256 KiB write issued {writes} device requests"
+        );
+        assert!(state.largest_write >= 64 * 1024);
+        assert_eq!(
+            state.flushes, 0,
+            "ordinary write must not add a durability fence"
+        );
+    }
+    // Drop does no I/O. Re-admitting the on-device view proves that success
+    // did not leave unreported dirty sectors in the operation buffer.
+    drop(fs);
+    let mut fs = require_ok(FatVolume::mount(disk));
+    let mut output = vec![0; contents.len()];
+    assert_eq!(
+        require_ok(fs.read_at("large", 0, &mut output)),
+        output.len()
+    );
+    assert_eq!(output, contents);
+}
+
+#[test]
+fn fat_write_buffer_eviction_and_partial_overwrites_preserve_other_sectors() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("large", false));
+    let mut contents: Vec<u8> = (0..2 * 1024 * 1024 + 37).map(|i| (i % 251) as u8).collect();
+    require_ok(fs.write_at("large", 0, &contents));
+    for offset in [511, 128 * 1024 - 7, 1024 * 1024 + 511] {
+        let replacement = [0xa7; 1031];
+        require_ok(fs.write_at("large", offset as u64, &replacement));
+        contents[offset..offset + replacement.len()].copy_from_slice(&replacement);
+    }
+    require_ok(fs.sync());
+    drop(fs);
+    let mut fs = require_ok(FatVolume::mount(disk));
+    let mut output = vec![0; contents.len()];
+    assert_eq!(
+        require_ok(fs.read_at("large", 0, &mut output)),
+        output.len()
+    );
+    assert_eq!(output, contents);
+}
+
+#[test]
+fn fat_read_cache_refill_keeps_pending_neighbor_writes_after_drain() {
+    for full_bytes in [20 * 1024, 2 * 1024 * 1024] {
+        let disk = Disk::fresh();
+        let mut fs = require_ok(FatVolume::mount(disk.clone()));
+        require_ok(fs.create("refill", false));
+        let mut contents: Vec<u8> = (0..full_bytes + 37).map(|i| (i % 251) as u8).collect();
+        // The partial tail reads a previously uncached window containing a
+        // neighboring full sector whose new contents are still buffered.
+        require_ok(fs.write_at("refill", 0, &contents));
+        let offset = full_bytes - SECTOR_SIZE + 17;
+        // After the operation drains its writes, a read-modify-write must
+        // preserve every other byte of that neighboring sector.
+        require_ok(fs.write_at("refill", offset as u64, &[0xa7]));
+        contents[offset] = 0xa7;
+        require_ok(fs.sync());
+        drop(fs);
+        let mut fs = require_ok(FatVolume::mount(disk));
+        let mut output = vec![0; contents.len()];
+        assert_eq!(
+            require_ok(fs.read_at("refill", 0, &mut output)),
+            output.len()
+        );
+        let mismatch = output.iter().zip(&contents).position(|(a, b)| a != b);
+        assert_eq!(
+            mismatch, None,
+            "corrupted {full_bytes}-byte write plus tail"
+        );
+    }
+}
+
+#[test]
+fn fat_partial_buffer_drain_failure_stops_all_later_io() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("file", false));
+    {
+        let mut state = require_ok(disk.0.lock());
+        state.fail_write_number = Some(state.writes + 2);
+    }
+    assert!(matches!(
+        fs.write_at("file", 0, &vec![0x7a; 256 * 1024]),
+        Err(Error::Block(BlockError::Io))
+    ));
+    let counts = {
+        let state = require_ok(disk.0.lock());
+        (state.reads, state.writes, state.flushes)
+    };
+    assert!(matches!(fs.stat("file"), Err(Error::Block(BlockError::Io))));
+    assert!(matches!(fs.sync(), Err(Error::Block(BlockError::Io))));
+    drop(fs);
+    let state = require_ok(disk.0.lock());
+    assert_eq!((state.reads, state.writes, state.flushes), counts);
+}
+
+#[test]
+fn fat_random_overwrites_reuse_chain_positions_and_forget_freed_clusters() {
+    let disk = Disk::fresh();
+    let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.create("large", false));
+    let mut expected = vec![0x29; 4 * 1024 * 1024];
+    require_ok(fs.write_at("large", 0, &expected));
+    // Warm a chain larger than the metadata windows. Reopened File objects
+    // must not traverse this FAT again for each random seek.
+    let tail = expected.len() - SECTOR_SIZE;
+    require_ok(fs.write_at("large", tail as u64, &[0x66; SECTOR_SIZE]));
+    expected[tail..].fill(0x66);
+    let reads = require_ok(disk.0.lock()).reads;
+    for i in 0..32 {
+        let offset = (i * 397 % (expected.len() / SECTOR_SIZE)) * SECTOR_SIZE;
+        require_ok(fs.write_at("large", offset as u64, &[0x72; SECTOR_SIZE]));
+        expected[offset..offset + SECTOR_SIZE].fill(0x72);
+    }
+    let metadata_reads = require_ok(disk.0.lock()).reads - reads;
+    assert!(
+        metadata_reads <= 64,
+        "random writes repeated chain walks: {metadata_reads} reads"
+    );
+    let mut output = vec![0; expected.len()];
+    require_ok(fs.read_at("large", 0, &mut output));
+    assert_eq!(output, expected);
+
+    require_ok(fs.resize("large", 512));
+    require_ok(fs.create("other", false));
+    let other = vec![0x91; expected.len()];
+    require_ok(fs.write_at("other", 0, &other));
+    // Extension now follows a different chain. Reopen it once more after it
+    // grows, when EOF no longer clamps seeks into formerly cached positions.
+    require_ok(fs.write_at("large", tail as u64, &[0x35; SECTOR_SIZE]));
+    require_ok(fs.write_at("large", (tail - SECTOR_SIZE) as u64, &[0x47; SECTOR_SIZE]));
+    require_ok(fs.sync());
+    drop(fs);
+    let mut fs = require_ok(FatVolume::mount(disk));
+    require_ok(fs.read_at("other", 0, &mut output));
+    assert_eq!(output, other);
+    require_ok(fs.read_at("large", 0, &mut output));
+    assert_eq!(&output[..512], &expected[..512]);
+    assert!(
+        output[512..tail - SECTOR_SIZE]
+            .iter()
+            .all(|&byte| byte == 0)
+    );
+    assert!(
+        output[tail - SECTOR_SIZE..tail]
+            .iter()
+            .all(|&byte| byte == 0x47)
+    );
+    assert!(output[tail..].iter().all(|&byte| byte == 0x35));
+}
+
 #[test]
 fn fat_tiny_file_reads_reuse_windows_and_refresh_after_writes() {
     let disk = Disk::fresh();
@@ -241,7 +441,7 @@ fn fat_read_maps_coalesce_data_and_invalidate_on_mutation() {
 }
 
 #[test]
-fn fat_fragmented_reads_remain_correct_beyond_mapping_cache_limit() {
+fn fat_fragmented_reads_and_writes_remain_correct_beyond_mapping_cache_limit() {
     let disk = Disk::fresh();
     let mut fs = require_ok(FatVolume::mount(disk));
     require_ok(fs.create("a", false));
@@ -257,6 +457,17 @@ fn fat_fragmented_reads_remain_correct_beyond_mapping_cache_limit() {
             assert!(sector.iter().all(|byte| *byte == index as u8));
         }
     }
+    for index in (0..140u64).rev() {
+        require_ok(fs.write_at("a", index * 512 + 7, &[0x37; 31]));
+    }
+    require_ok(fs.read_at("a", 0, &mut data));
+    for (index, sector) in data.chunks_exact(512).enumerate() {
+        assert!(sector[..7].iter().all(|&byte| byte == index as u8));
+        assert!(sector[7..38].iter().all(|&byte| byte == 0x37));
+        assert!(sector[38..].iter().all(|&byte| byte == index as u8));
+    }
+    require_ok(fs.read_at("b", 0, &mut data));
+    assert!(data.iter().all(|&byte| byte == 0xee));
 }
 
 #[test]
@@ -439,6 +650,63 @@ fn block_ranges_reject_overflow_and_partial_sectors() {
     );
     assert_eq!(validate_range(10, 0, 1), Err(BlockError::InvalidRange));
     assert_eq!(validate_range(10, 10, 0), Ok(()));
+}
+
+#[test]
+fn block_write_batches_validate_every_range_before_modifying_media() {
+    let mut disk = Disk::fresh();
+    let sector = [0x5a; SECTOR_SIZE];
+    let first = WriteRequest {
+        first: 20,
+        bytes: &sector,
+    };
+    for invalid in [
+        WriteRequest {
+            first: 70000,
+            bytes: &sector,
+        },
+        WriteRequest {
+            first: u64::MAX,
+            bytes: &sector,
+        },
+        WriteRequest {
+            first: 21,
+            bytes: &sector[..1],
+        },
+        WriteRequest {
+            first: 20,
+            bytes: &sector,
+        },
+    ] {
+        assert_eq!(
+            disk.write_batch(&[first, invalid]),
+            Err(BlockError::InvalidRange)
+        );
+        assert_eq!(require_ok(disk.0.lock()).writes, 0);
+    }
+    require_ok(disk.write_batch(&[
+        first,
+        WriteRequest {
+            first: 19,
+            bytes: &sector,
+        },
+        WriteRequest {
+            first: 21,
+            bytes: &sector,
+        },
+        WriteRequest {
+            first: 20,
+            bytes: &[],
+        },
+        WriteRequest {
+            first: 70000,
+            bytes: &[],
+        },
+    ]));
+    assert_eq!(require_ok(disk.0.lock()).writes, 3);
+    let mut output = [0; 3 * SECTOR_SIZE];
+    require_ok(disk.read_sectors(19, &mut output));
+    assert_eq!(output, [0x5a; 3 * SECTOR_SIZE]);
 }
 
 #[test]

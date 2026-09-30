@@ -45,13 +45,32 @@ metadata. Device errors may have committed part of an operation.
 
 ## Synchronization and lifetime
 
-Sector writes are write-through. Four 4 KiB read-through windows batch nearby
-metadata fields and keep directory and FAT lookups from displacing each other
-on every read. Their fixed heap storage is charged to the mount sponsor; bulk
-file data bypasses these windows. Completed writes update overlapping windows;
-failed writes invalidate them and poison the volume. Ordinary writes do not
-claim stable-storage durability. `sync` explicitly commits upstream FSInfo and directory metadata,
+Writes complete before the volume operation returns. Within an operation, eight
+128 KiB heap windows coalesce cluster-sized data writes and repeated FAT sector
+updates. Dirty-sector bitmaps retain only modified sectors; contiguous dirty
+runs become block requests. Up to four disjoint requests can be submitted
+together, with independent queue storage retained until completion. Eviction,
+upstream stream flushes and the operation boundary drain pending writes. A
+recoverable error such as no space also drains completed metadata rollback.
+An uncertain device error poisons the volume without retrying a partial batch.
+
+Pending sectors are the authoritative read view until drained. Four 4 KiB
+read-through windows batch nearby metadata fields and keep directory and FAT
+lookups from displacing each other on every read; bulk file data bypasses them.
+Writes update overlapping read windows, and failed writes invalidate them.
+All fixed buffer storage, including the 1 MiB write buffer, is charged to the
+mount sponsor. Ordinary writes do not claim stable-storage durability. `sync`
+explicitly commits upstream FSInfo and directory metadata, drains the adapter,
 issues the block device's durable flush, and retains the mounted metadata view.
+
+The filesystem also retains sixteen coalesced FAT-chain seek checkpoints. These
+avoid traversing a file from its first cluster on every positioned write.
+Checkpoints belong to the mounted filesystem, so reopened files share them
+without retaining upstream file editors. Appending preserves existing positions;
+freeing or truncating any chain invalidates all checkpoints before mutation,
+even when mutation subsequently fails. Fragmentation falls back to walking from
+the nearest retained checkpoint. This bounded inline cache allocates no memory
+per seek and never changes FAT allocation or error handling.
 
 File reads retain bounded allocation maps for four paths, with at most 128
 coalesced disk extents per path. Once mapped, reads locate the requested offset
@@ -63,8 +82,10 @@ storage is charged to the mount sponsor. Highly fragmented files
 fall back to ordinary FAT reads without allocating an unbounded extent table.
 All potentially mutating operations invalidate maps and their windows before touching media,
 including operations that subsequently fail. The volume mutex serializes map
-construction, use and invalidation. An initial map build traverses the file's
-chain; this cost is amortized across subsequent reads until mutation or eviction.
+construction, use and invalidation. An initial map build takes the size from
+the open file's directory entry and traverses its chain once; it does not first
+seek through the chain to EOF. This cost is amortized across subsequent reads
+until mutation or eviction.
 An exclusive filesystem borrow ensures all temporary file editors have been
 dropped before synchronization. It does not reparse the boot sector or repeat
 the admission scan. A failed synchronization closes the mounted view.
@@ -72,8 +93,8 @@ the admission scan. A failed synchronization closes the mounted view.
 Upstream destructors attempt I/O. Device access is therefore gated to explicit
 operations, with failures latched and returned to the caller. Dropping the
 HypeR volume closes this gate before dropping upstream state; no destructor
-can submit I/O. Upstream's frequent stream flushes only finish write-through
-work; they do not turn every file read or stat into a physical cache barrier.
+can submit I/O. Upstream's frequent stream flushes only drain buffered transfers;
+they do not turn every file read or stat into a physical cache barrier.
 
 A read-only block volume rejects mutations before changing cached metadata.
 Read, stat, synchronization and teardown issue no writes or device flushes;

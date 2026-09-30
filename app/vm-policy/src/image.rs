@@ -5,6 +5,8 @@
 
 mod read_cache;
 
+pub use read_cache::{CachedSource, Error as CachedReadError};
+
 use crate::fleet::Configuration;
 use hyper_vm_image::{Architecture, ConfiguredImage, GuestImage, ReadAt};
 
