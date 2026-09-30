@@ -219,6 +219,11 @@ handler is short. For usercopy, follow the service's user-memory helpers into
 [the address-space owner](../kernel/src/kernel/mm/user_space/address_space.rs),
 not an assumed global `copy_from_user` function.
 
+The [service adapter modules](../kernel/src/kernel/entry/services.rs) share a
+borrowed Process and Thread context. [Task services](../kernel/src/kernel/entry/services/task.rs),
+[memory services](../kernel/src/kernel/entry/services/memory.rs), and the other
+capability-specific children implement those contracts without extending that borrow.
+
 **Adding or changing a syscall:** trace schema → generated bindings → dispatch
 classification → handler → service owner → SDK/std caller. An error needs to
 survive that return path with its meaning intact. Changing only the handler
@@ -242,7 +247,7 @@ loads a new image and address space.
   have distinct failure/rollback boundaries.
 - **Additional Thread:** [std thread adapter](../sdk/toolchain/rust-std/overlay/std/src/sys/thread/hyper.rs)
   uses [thread_spawn.c](../sdk/lib/src/thread_spawn.c). Native `thread_create`
-  reaches `create_thread` in [Process services](../kernel/src/kernel/entry/services.rs),
+  reaches `create_thread` in [task services](../kernel/src/kernel/entry/services/task.rs),
   which validates start information and affinity and asks the Process owner to
   prepare the user Thread. Creation and `thread_start` are separate operations.
   [UserThread](../kernel/src/kernel/process/user_thread.rs) and
