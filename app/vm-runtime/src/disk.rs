@@ -35,6 +35,8 @@ pub(super) fn bind(
     base: u64,
     length: u64,
 ) -> Result<(OwnedHandle<VirtualMachineObject>, Disk), Error> {
+    #[cfg(feature = "startup-profile")]
+    let started = std::time::Instant::now();
     let deadline = hyper_os::time::deadline_after(std::time::Duration::from_secs(60))
         .map_err(Error::OperatingSystem)?
         .as_raw();
@@ -56,6 +58,11 @@ pub(super) fn bind(
     ];
     io::send_capabilities(&session, &record, dispositions, deadline)
         .map_err(Error::OperatingSystem)?;
+    #[cfg(feature = "startup-profile")]
+    eprintln!(
+        "HypeR startup profile: disk memory sent at {} us",
+        started.elapsed().as_micros()
+    );
     let mut bytes = [MaybeUninit::uninit(); 32];
     let mut slots = [
         CapabilityReceiveSlot::new::<VirtualMachineObject>(rights),
@@ -85,6 +92,11 @@ pub(super) fn bind(
         .map_err(Error::OperatingSystem)?
         .ok_or(Error::InvalidControl)?;
     let channel = Arc::new(channel);
+    #[cfg(feature = "startup-profile")]
+    eprintln!(
+        "HypeR startup profile: disk bound at {} us",
+        started.elapsed().as_micros()
+    );
     let mut backend = Backend::new(
         channel.clone(),
         RemoteNotification::new(channel),
@@ -121,6 +133,11 @@ pub(super) fn bind(
         )
         .map_err(Error::OperatingSystem)?;
     }
+    #[cfg(feature = "startup-profile")]
+    eprintln!(
+        "HypeR startup profile: disk ready at {} us",
+        started.elapsed().as_micros()
+    );
     Ok((
         machine,
         Disk {
