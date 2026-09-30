@@ -77,6 +77,10 @@ pub(super) type ProcessBuilderHandleRequest = (
     crate::kernel::capability::HandleTransferOperation,
 );
 
+pub(super) fn parse_u32(value: u64) -> Result<u32, HyperNativeStatus> {
+    u32::try_from(value).map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)
+}
+
 pub(super) fn parse_handle(raw: u64) -> Result<HandleValue, HyperNativeStatus> {
     HandleValue::try_from_raw(raw).map_err(status_from_handle_error)
 }

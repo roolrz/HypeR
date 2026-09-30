@@ -96,7 +96,7 @@ pub(crate) enum SelfTestError {
 
 #[cfg(feature = "kernel-self-test")]
 pub(crate) fn run_self_test() -> Result<(), SelfTestError> {
-    super::fs_handlers::run_wire_self_test().map_err(|_| SelfTestError::RecordEncoding)?;
+    super::handlers::run_wire_self_test().map_err(|_| SelfTestError::RecordEncoding)?;
     use core::cell::Cell;
 
     struct RejectingServices {

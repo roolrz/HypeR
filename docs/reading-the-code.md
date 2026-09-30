@@ -207,10 +207,12 @@ Process/Thread execution context and the return/deferred-call protocol.
 Immediate calls can return through the exception vector using a borrowed
 service; deferred calls resume the ordinary kernel continuation.
 [Native dispatch](../kernel/src/kernel/abi/native/dispatch.rs) classifies calls;
-[handlers](../kernel/src/kernel/abi/native/handlers.rs) and
-[filesystem handlers](../kernel/src/kernel/abi/native/fs_handlers.rs) decode
-requests against service contracts. [Process services](../kernel/src/kernel/entry/services.rs)
-bind those contracts to the current Process, handles and user memory.
+[capability-domain handlers](../kernel/src/kernel/abi/native/handlers/mod.rs)
+decode requests against service contracts. Each syscall retains a separate
+machine frame, including [device calls](../kernel/src/kernel/abi/native/handlers/device.rs)
+and [filesystem calls](../kernel/src/kernel/abi/native/handlers/vfs/mod.rs).
+[Process services](../kernel/src/kernel/entry/services.rs) bind those contracts
+to the current Process, handles and user memory.
 
 Calls classified as deferred run after leaving the restricted user execution
 context, where the kernel can perform the required scheduled work. Do not add
