@@ -6,6 +6,7 @@
 
 import argparse
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -78,10 +79,17 @@ def boot(args, mode):
             child.stdin.write(f'vmm status {args.observed_name}\n'.encode())
             child.stdin.flush()
             observed = await_text(rb'hyper-sh\$ ')
-            if not re.search(re.escape(args.observed_name.encode()) + rb'\s+running\s+yes\s+read-only', observed):
+            if not re.search(re.escape(args.observed_name.encode())
+                             + rb'\s+running\s+yes\s+read-only\s+'
+                             + re.escape(args.observed_image.encode()) + rb'\n', observed):
                 raise RuntimeError(f'I/O VM observation unavailable: {observed!r}')
             if b'vCPUs:' not in observed or b'RAM capacity: 128 MiB' not in observed:
                 raise RuntimeError(f'I/O VM metrics missing: {observed!r}')
+            for affinity in args.io_configuration.get('affinity', []):
+                vcpu = affinity['vcpu']
+                placement = re.search(fr'vCPU {vcpu}: pCPU ([0-9]+)\b'.encode(), observed)
+                if placement is None or int(placement[1]) not in affinity['cpus']:
+                    raise RuntimeError(f'configured I/O VM affinity not applied: {observed!r}')
             # The fixture admits 128 MiB RAM plus a 1 MiB initiator pool.
             resident = re.search(rb'allocated VM backing: ([0-9]+) bytes', observed)
             if resident is None or not 0 < int(resident[1]) <= 129 * 1024 * 1024:
@@ -131,8 +139,6 @@ def boot(args, mode):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--qemu', required=True)
-    parser.add_argument('--observed-name', default='io',
-                        help='name reported by the I/O VM owner in this fixture')
     parser.add_argument('--minimum-stack-remaining', type=int)
     parser.add_argument('--maximum-stack-used', type=int)
     parser.add_argument('--require-userspace-device', action='store_true',
@@ -142,6 +148,10 @@ def main():
     for name in ('image', 'initramfs', 'disk', 'board', 'log'):
         parser.add_argument('--' + name, type=Path, required=True)
     args = parser.parse_args()
+    io_vm = json.loads(args.board.read_text())['io-vm']
+    args.observed_name = io_vm['name']
+    args.observed_image = io_vm['image']
+    args.io_configuration = io_vm['configuration']
     if args.minimum_stack_remaining is not None and args.minimum_stack_remaining < 0:
         parser.error('stack reserve must be nonnegative')
     if args.maximum_stack_used is not None and args.maximum_stack_used < 1:

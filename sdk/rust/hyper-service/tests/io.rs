@@ -21,12 +21,19 @@ fn observations_validate_wire_format_and_preserve_metrics() -> Result<(), &'stat
             architecture: Architecture::Aarch64,
             platform_profile: PlatformProfile::Aarch64Reference,
         };
-        let bytes = encode_observation("storage-backend", info, 64 * 1024 * 1024, Some(3))
-            .ok_or("valid observation rejected")?;
+        let bytes = encode_observation(
+            "storage-backend",
+            "/vm/storage/oi.itb",
+            info,
+            64 * 1024 * 1024,
+            Some(3),
+        )
+        .ok_or("valid observation rejected")?;
         assert_eq!(
             decode_observation(&bytes),
             Some(hyper_service::io::Observation {
                 name: "storage-backend",
+                image: "/vm/storage/oi.itb",
                 phase,
                 vcpus: 4,
                 ram_bytes: 64 * 1024 * 1024,
@@ -68,23 +75,69 @@ fn observations_validate_wire_format_and_preserve_metrics() -> Result<(), &'stat
             "a\0b",
             "abcdefghijklmnopqrstuvwxyz1234567",
         ] {
-            assert!(encode_observation(name, info, 0, None).is_none());
+            assert!(encode_observation(name, "/vm/storage/oi.itb", info, 0, None).is_none());
         }
         let longest = "abcdefghijklmnopqrstuvwxyz123456";
-        let maximum =
-            encode_observation(longest, info, 0, None).ok_or("valid observation rejected")?;
+        let maximum = encode_observation(longest, "/vm/storage/oi.itb", info, 0, None)
+            .ok_or("valid observation rejected")?;
         assert_eq!(
             decode_observation(&maximum).map(|info| info.name),
             Some(longest)
         );
-        let unavailable = encode_observation("storage-backend", info, 64 * 1024 * 1024, None)
-            .ok_or("valid observation rejected")?;
+        for length in [0u16, 513, u16::MAX] {
+            invalid = bytes;
+            invalid[38..40].copy_from_slice(&length.to_le_bytes());
+            assert_eq!(decode_observation(&invalid), None);
+        }
+        for byte in [0, 0xff, b'x'] {
+            invalid = bytes;
+            invalid[72] = byte;
+            assert_eq!(decode_observation(&invalid), None);
+        }
+        invalid = bytes;
+        invalid[37] = 1;
+        assert_eq!(decode_observation(&invalid), None);
+        invalid = bytes;
+        invalid[583] = 1;
+        assert_eq!(decode_observation(&invalid), None);
+        for path in [
+            "",
+            "vm/oi.itb",
+            "/vm/../oi.itb",
+            "/vm/./oi.itb",
+            "/vm//oi.itb",
+            "/vm/oi\nitb",
+        ] {
+            assert!(encode_observation("oi", path, info, 0, None).is_none());
+        }
+        let long_path = format!("/vm/{}", "a".repeat(508));
+        let longest_image = encode_observation("oi", &long_path, info, 0, None)
+            .ok_or("maximum length image path rejected")?;
+        assert_eq!(
+            decode_observation(&longest_image).map(|info| info.image),
+            Some(long_path.as_str())
+        );
+        assert!(encode_observation("oi", &(long_path + "a"), info, 0, None).is_none());
+        let unavailable = encode_observation(
+            "storage-backend",
+            "/vm/storage/oi.itb",
+            info,
+            64 * 1024 * 1024,
+            None,
+        )
+        .ok_or("valid observation rejected")?;
         assert_eq!(
             decode_observation(&unavailable).map(|info| info.boot_host_cpu),
             Some(None)
         );
-        let cpu_zero = encode_observation("storage-backend", info, 64 * 1024 * 1024, Some(0))
-            .ok_or("valid observation rejected")?;
+        let cpu_zero = encode_observation(
+            "storage-backend",
+            "/vm/storage/oi.itb",
+            info,
+            64 * 1024 * 1024,
+            Some(0),
+        )
+        .ok_or("valid observation rejected")?;
         assert_eq!(
             decode_observation(&cpu_zero).map(|info| info.boot_host_cpu),
             Some(Some(0))

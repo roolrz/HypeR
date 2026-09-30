@@ -26,6 +26,7 @@ native-initramfs: app $(if $(filter development,$(NATIVE_IMAGE_PROFILE)),app-fix
 		--replace "bin/ps=$(NATIVE_PS_IMAGE)" \
 		--replace "svc/vm-manager=$(NATIVE_VM_MANAGER)" \
 		--replace "svc/vm-runtime=$(NATIVE_VM_RUNTIME)" \
+		$(if $(strip $(NATIVE_ENTRY_MANIFEST)),--entries-from "$(NATIVE_ENTRY_MANIFEST)") \
 		$(NATIVE_GUEST_ENTRY) \
 		$(if $(strip $(NATIVE_VM_CONFIG)),0644 etc/hyper/vms.json "$(NATIVE_VM_CONFIG)") \
 		0644 etc/hyper/services.json "$(NATIVE_SERVICE_MANIFEST)" $(NATIVE_EXTRA_ENTRIES)
@@ -45,7 +46,7 @@ test-apps: image native-initramfs
 
 .PHONY: test-clock
 # The no-RTC case intentionally tests Native std without starting a guest VM.
-test-clock: NATIVE_SERVICE_MANIFEST = $(CURDIR)/app/init/config/native/services.json
+test-clock: NATIVE_SERVICE_MANIFEST = $(CURDIR)/app/init/config/services-console-only.json
 test-clock: NATIVE_VM_CONFIG =
 test-clock: image native-initramfs
 	@test "$(ARCH)" = aarch64 || { echo "clock fixture requires aarch64" >&2; exit 2; }

@@ -14,7 +14,7 @@ use hyper_vm_image::guest_fdt;
 use hyper_vm_image::guest_fdt::io::{DmaRange, IoDevices, MmioDevice, SharedMemory};
 use hyper_vm_support::io_backend::{Backend, Completion};
 use hyper_vm_support::io_guest::Image;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::num::NonZeroU64;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -32,6 +32,20 @@ const DISK_PASS: &[u8] = b"HypeR business disk: PASS read/write/flush (32 rounds
 
 fn show(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")
+}
+
+fn fixture_image(config: &hyper_vm_policy::fleet::Config, path: &str) -> Result<Image> {
+    let mut matches = config
+        .machines
+        .iter()
+        .filter(|machine| machine.image == path);
+    let definition = matches
+        .next()
+        .ok_or("missing fixture image configuration")?;
+    if matches.next().is_some() {
+        return Err("ambiguous fixture image configuration".into());
+    }
+    Image::load(definition)
 }
 fn device_node(base: u64, irq: u32) -> MmioDevice {
     MmioDevice {
@@ -245,11 +259,18 @@ fn suite(startup: &Startup<'_>) -> Result<()> {
         return Err("expected modern physical virtio-scsi".into());
     }
     println!("IO-VM-SMOKE: loading business image");
-    let front = Image::load("/vm/business.itb", "/etc/hyper/io-vms.json")
+    let mut config_bytes = Vec::new();
+    std::fs::File::open("/etc/hyper/io-vms.json")
+        .map_err(show)?
+        .take(hyper_vm_policy::fleet::MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut config_bytes)
+        .map_err(show)?;
+    let config = hyper_vm_policy::fleet::Config::parse(&config_bytes)?;
+    let front = fixture_image(&config, "/vm/business.itb")
         .map_err(|error| format!("load business image: {error}"))?;
     println!("IO-VM-SMOKE: loading I/O image");
-    let io = Image::load("/vm/io.itb", "/etc/hyper/io-vms.json")
-        .map_err(|error| format!("load I/O image: {error}"))?;
+    let io =
+        fixture_image(&config, "/vm/io.itb").map_err(|error| format!("load I/O image: {error}"))?;
     let io_extent =
         device::dma_extent(authority, io.memory.as_handle_ref(), 0, RAM_BYTES).map_err(show)?;
     let front_extent =

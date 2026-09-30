@@ -5,6 +5,8 @@
 
 pub mod clients;
 
+pub mod config;
+
 pub mod device_policy;
 
 pub mod deadline;

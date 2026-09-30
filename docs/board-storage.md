@@ -15,9 +15,9 @@ a different kernel or app ABI.
 The image builder creates an outer GPT with a 1 GiB FAT32 configuration volume
 and one opaque partition per configured VM. The configuration volume contains
 the boot payloads, `board.json`, `vms.json`, `volumes.json`, and guest ITBs.
-The I/O VM image lives only at `/vm/io.itb` inside `bootstrap.cpio`; no separate
-`/data/vm/io.itb` is packaged. Business guest images remain on the configuration
-volume.
+The I/O VM image lives inside `bootstrap.cpio` at the path selected by
+`io-vm.image` (default `/vm/io.itb`); it is not duplicated on `/data`.
+Business guest images remain on the configuration volume.
 QEMU loads `bootstrap.cpio` directly from the host with `-initrd`, so its
 configuration volume omits this archive. Pi 5 firmware loads the archive from
 the FAT boot/configuration partition; that required boot file remains visible
@@ -143,7 +143,7 @@ The fixture keeps its disk and logs for diagnosis and never uses `BOARD_IMAGE`
 as a scratch disk.
 
 The bootstrap board document selects the physical controller explicitly through
-`io-device`: `profile` selects the I/O runtime's device policy and
+`io-vm.io-device`: `profile` selects the I/O runtime's device policy and
 exactly one of `compatible` or `path` identifies its firmware node. QEMU uses
 `virtio-mmio-scsi` with `virtio,mmio`. Multiple eligible matches are rejected;
 use the full canonical FDT path when a machine exposes several controllers.
@@ -212,14 +212,40 @@ VM runtime settings live in each board `virtual-machines` entry's required
 `affinity`). For example, `"affinity": [{"vcpu": 0, "cpus": [1, 3]}]` allows
 vCPU 0 to run on host CPU 1 or 3; omitted entries retain normal scheduler
 placement. The packer
-copies it unchanged into `/data/vms.json`. The board's `io-vm` object uses the same
-schema for the resident I/O VM and is projected into `/etc/hyper/io-vms.json` in
-the bootstrap archive, where it is available before `/data` mounts. Resident I/O
-currently requires 128 MiB and an AArch64 ITB matching the host. Standalone I/O
-also reads `BOARD_CONFIG` (by default `boards/qemu.json`); diskless Pi 5 I/O
-bring-up defaults to `boards/rpi5.json`. There is no independent I/O VM settings
-file in `app/init/config`. The installed `io-vms.json` is generated output.
-Storage mode preserves the board's settings verbatim. Standby and bring-up keep
-its CPU count, affinity, memory and ordinary boot arguments, remove the storage-volume
-requirement, and select the corresponding `hyper.mode`. ITBs contain payloads,
-not these settings.
+copies it unchanged into `/data/vms.json`.
+
+The resident I/O VM has its own `io-vm` node, outside `virtual-machines`:
+
+```json
+"io-vm": {
+  "runtime": "io-runtime",
+  "name": "oi",
+  "image": "/vm/storage/oi.itb",
+  "configuration": {
+    "memory-bytes": 134217728,
+    "vcpus": 1,
+    "bootargs": "console=ttyAMA0 rdinit=/init hyper.role=io hyper.mode=standby hyper.volumes=required",
+    "affinity": [{"vcpu": 0, "cpus": [1, 3]}]
+  },
+  "io-device": {
+    "profile": "virtio-mmio-scsi",
+    "compatible": "virtio,mmio"
+  }
+}
+```
+
+`runtime` assigns this node to io-runtime. Its `configuration` uses the same
+schema as an ordinary VM; the resident runtime currently supports exactly
+128 MiB and one vCPU. `name` is an ordinary VM name. `image` selects a canonical
+absolute `.itb` path beneath `/vm/` in the bootstrap archive, available before
+`/data` mounts. The packer places the generated ITB at this path, and io-runtime
+opens that same path from `/etc/hyper/board.json`. No separate I/O VM fleet
+configuration is generated for deployment. Name, image path and placement in
+`vmm status NAME` come from the runtime's observation reply.
+
+Storage mode packages the board settings unchanged. Standby and diskless Pi 5
+bring-up derive their settings from `BOARD_CONFIG`, preserving name, image,
+affinity and memory while removing the storage-volume requirement and selecting
+the corresponding `hyper.mode`. Bring-up is an explicit diagnostic mode: it
+registers the configured name with the ordinary VM manager for manual startup,
+without physical-device authority. ITBs contain payloads, not these settings.

@@ -45,6 +45,7 @@ fn check_deadline(limit: u64) -> Result<()> {
 }
 
 fn run(startup: &mut Startup<'_>) -> Result<()> {
+    let config = hyper_io_runtime::config::Config::load("/etc/hyper/board.json")?;
     let ready = startup
         .take_optional(hyper_service::io::READY)
         .map_err(show)?;
@@ -59,34 +60,28 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
     let authority = startup
         .borrow(startup::DEVICE_ASSIGNMENT_AUTHORITY)
         .map_err(show)?;
-    let (physical, sdhci_profile) = if ready.is_some() {
-        let policy = hyper_io_runtime::device_policy::load("/etc/hyper/board.json")?;
-        match policy.profile() {
-            device::Profile::Userspace => {
-                let (physical, profile) =
-                    hyper_io_runtime::sdhci::claim(authority, policy.identity()).map_err(show)?;
-                (physical, Some(profile))
-            }
-            device::Profile::VirtioMmioScsi => {
-                #[cfg(feature = "userspace-device-test")]
-                let physical =
-                    hyper_io_runtime::sdhci::claim_virtio_test(authority, policy.identity())
-                        .map_err(show)?;
-                #[cfg(not(feature = "userspace-device-test"))]
-                let physical =
-                    device::claim_matching(authority, policy.profile(), policy.identity())
-                        .map_err(show)?;
-                (physical, None)
-            }
+    let policy = config.device();
+    let (physical, sdhci_profile) = match policy.profile() {
+        device::Profile::Userspace => {
+            let (physical, profile) =
+                hyper_io_runtime::sdhci::claim(authority, policy.identity()).map_err(show)?;
+            (physical, Some(profile))
         }
-    } else {
-        (device::claim(authority, 0).map_err(show)?, None)
+        device::Profile::VirtioMmioScsi => {
+            #[cfg(feature = "userspace-device-test")]
+            let physical = hyper_io_runtime::sdhci::claim_virtio_test(authority, policy.identity())
+                .map_err(show)?;
+            #[cfg(not(feature = "userspace-device-test"))]
+            let physical = device::claim_matching(authority, policy.profile(), policy.identity())
+                .map_err(show)?;
+            (physical, None)
+        }
     };
     let profile = device::profile_info(physical.as_handle_ref()).map_err(show)?;
     let mut client = ready
         .map(|ready| storage::NativeStorage::prepare(authority, ready))
         .transpose()?;
-    let image = Image::load("/vm/io.itb", "/etc/hyper/io-vms.json")?;
+    let image = Image::load(config.definition())?;
     if image.plan.memory_size() != RAM_BYTES {
         return Err("resident I/O VM requires a 128 MiB configuration".into());
     }

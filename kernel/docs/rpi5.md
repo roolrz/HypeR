@@ -80,8 +80,8 @@ make rpi5-bringup ARCH=aarch64
 override for a verified v2 package. Old custom-TF-A v1 packages are not accepted.
 
 This builds the same architecture-wide kernel/application binaries and a
-Native-only initramfs using `app/init/config/native/`. It validates every
-external package checksum, then creates
+Native-only initramfs using `app/init/config/services-console-only.json`.
+It validates every external package checksum, then creates
 `target/board/rpi5-native/disk.img` from `boards/rpi5-native.json`. The image has
 a 64 MiB FAT32 GPT boot partition; no Linux I/O VM, Alpine download or VM disk
 is needed to qualify the kernel and shell. The unused device selector in this
@@ -259,10 +259,10 @@ results used a development reassembly. The newly pinned package still requires
 hardware requalification.
 
 This replaces `target/board/rpi5-native/disk.img`, retaining the official
-firmware boot chain and HypeR shell. It registers `io-bringup` for manual startup through
+firmware boot chain and HypeR shell. It registers the board's `io-vm.name` (default `io`) for manual startup through
 vm-manager/vm-runtime without io-runtime, device assignment or a /data mount.
-Use `vmm start io-bringup`, `vmm status io-bringup` and
-`vmm console io-bringup`. Manual startup preserves the Native shell if guest
+Use `vmm start io`, `vmm status io` and
+`vmm console io`. Manual startup preserves the Native shell if guest
 bring-up fails; inspect `dmesg` for the terminal vCPU syndrome and address.
 The guest reports `bring-up ready; no devices assigned, storage service disabled`.
 It waits under VM supervision; it does not provide an interactive Linux shell

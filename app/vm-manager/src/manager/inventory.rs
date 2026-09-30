@@ -23,6 +23,7 @@ pub(super) enum VmTarget<'a> {
 /// It has no VM handle or runtime control channel.
 pub(super) struct ObservedVm {
     name: String,
+    image: String,
     broker: CapabilityChannel,
 }
 
@@ -105,8 +106,14 @@ impl FleetManager {
 impl ObservedVm {
     pub(super) fn connect(broker: CapabilityChannel) -> hyper_os::Result<Self> {
         let deadline = hyper_os::time::deadline_after(Duration::from_secs(5))?.as_raw();
-        let name = read_observation(&broker, deadline, |info| info.name.to_owned())?;
-        Ok(Self { name, broker })
+        let (name, image) = read_observation(&broker, deadline, |info| {
+            (info.name.to_owned(), info.image.to_owned())
+        })?;
+        Ok(Self {
+            name,
+            image,
+            broker,
+        })
     }
 
     pub(super) fn broker(&self) -> &CapabilityChannel {
@@ -117,7 +124,7 @@ impl ObservedVm {
         let check = (|| {
             let deadline = hyper_os::time::deadline_after(Duration::from_millis(250))?.as_raw();
             read_observation(&self.broker, deadline, |info| {
-                if info.name != self.name {
+                if info.name != self.name || info.image != self.image {
                     return Err("observed VM identity changed on the broker endpoint".into());
                 }
                 match names.find(|name| *name == info.name) {
@@ -134,7 +141,7 @@ impl ObservedVm {
     pub(super) fn summary(&self, deadline: u64) -> fleet::Summary {
         let mut summary = fleet::Summary {
             name: self.name.clone(),
-            image: "/vm/io.itb".into(),
+            image: self.image.clone(),
             autostart: true,
             disk: None,
             read_only: true,
@@ -147,7 +154,7 @@ impl ObservedVm {
         // Keep the discovered identity visible if observations fail. A failed
         // query must not make its name available for a managed definition.
         let _ = read_observation(&self.broker, deadline, |info| {
-            if info.name != self.name {
+            if info.name != self.name || info.image != self.image {
                 return;
             }
             summary.vcpus = Some(info.vcpus);

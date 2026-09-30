@@ -233,16 +233,16 @@ shell on the same console. Init does not treat shell termination as a system
 failure. Shell channels are recreated on each launch; the physical transport
 continues to belong to the console services.
 
-On board images, `vmm list` and `vmm status io` include the infrastructure I/O VM
-as read-only. The snapshot reports its lifecycle, vCPU count, guest memory and current pCPU
+On board images, `vmm list` and `vmm status NAME` include the infrastructure I/O VM
+as read-only, using `io-vm.name` from the board JSON (default `io`). The snapshot reports its lifecycle, vCPU count, guest memory and current pCPU
 assignment of its boot vCPU;
 an unavailable management endpoint is reported as `unavailable`, not `stopped`.
 The manager holds a broker observation channel for this entry, not its VM handle
 or runtime control channel. `start`, `stop`, `restart`, `delete`, `affinity` and
 `console` require management authority and are rejected for observation-only
 entries. Authorization follows the capability held for the resolved entry;
-names are not reserved by service role. The owner reports the VM name from its
-loaded configuration. After I/O readiness, the manager discovers that name over
+names are not reserved by service role. The owner reports the VM name and image path from its
+loaded board configuration. After I/O readiness, the manager discovers that name over
 the broker, and checks for conflicts when admitting definitions and before each
 instance start. A failed observation blocks admission/start instead of treating
 the observed namespace as empty. Without an I/O broker, `io` is an ordinary

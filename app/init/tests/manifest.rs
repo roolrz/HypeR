@@ -878,7 +878,7 @@ fn rejects_invalid_and_duplicate_startup_purposes() {
 
 #[test]
 fn native_service_manifest_does_not_require_a_vm_fleet() {
-    let parsed = parse(include_str!("../config/native/services.json"));
+    let parsed = parse(include_str!("../config/services-console-only.json"));
     assert!(parsed.is_ok());
     let Ok(manifest) = parsed else {
         return;
