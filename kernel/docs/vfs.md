@@ -201,6 +201,20 @@ the backend lock, then submitted in one backend call so append offset selection
 and that batch's write remain serialized. Callers must handle short writes.
 This does not introduce a writeback cache or change `file_sync` semantics.
 
+Machine-visible buffers use the HAL's non-faulting external-memory copy
+contract, not Rust references that assume exclusive access. AArch64 copies
+8-byte-aligned ranges with GPR pairs, then whole words and an exact byte tail;
+unaligned ranges retain the byte path. No access crosses the validated range,
+uses SIMD state, supplies a snapshot, or replaces the owner's publication
+barriers. MMIO is excluded from this Normal-memory contract.
+
+The actual AArch64 copy instructions run in host tests on AArch64, including
+all source/destination alignment combinations and protected-page boundaries
+on macOS. QEMU storage and Native user-copy acceptance cover their callers.
+Physical VHE-board validation must additionally exercise simultaneous Native
+and I/O-VM transfers, aligned/unaligned buffers, checksums and stop/restart;
+host/QEMU tests do not establish a real device's DMA or cache-coherence behavior.
+
 ## Rooted directory scopes
 
 `directory_scope_create` combines an explicit root location and a reachable

@@ -7,6 +7,7 @@ use core::fmt::Debug;
 use core::marker::PhantomData;
 
 use crate::boot_sector::{format_boot_sector, BiosParameterBlock, BootSector};
+use crate::chain_cache::ChainCache;
 use crate::dir::{Dir, DirRawStream};
 use crate::dir_entry::{DirFileEntryData, FileAttributes, SFN_PADDING, SFN_SIZE};
 use crate::error::Error;
@@ -337,6 +338,7 @@ pub struct FileSystem<IO: ReadWriteSeek, TP = DefaultTimeProvider, OCC = LossyOe
     total_clusters: u32,
     fs_info: RefCell<FsInfoSector>,
     current_status_flags: Cell<FsStatusFlags>,
+    chain_cache: RefCell<ChainCache>,
 }
 
 pub trait IntoStorage<T: Read + Write + Seek> {
@@ -429,6 +431,7 @@ impl<IO: Read + Write + Seek, TP, OCC> FileSystem<IO, TP, OCC> {
             total_clusters,
             fs_info: RefCell::new(fs_info),
             current_status_flags: Cell::new(status_flags),
+            chain_cache: RefCell::new(ChainCache::new()),
         })
     }
 
@@ -497,7 +500,31 @@ impl<IO: Read + Write + Seek, TP, OCC> FileSystem<IO, TP, OCC> {
         ClusterIterator::new(disk_slice, self.fat_type, cluster)
     }
 
+    pub(crate) fn cluster_at(
+        &self,
+        first: u32,
+        index: u32,
+    ) -> Result<(u32, u32), Error<IO::Error>> {
+        let (mut cluster, mut logical) = self.chain_cache.borrow().lookup(first, index);
+        self.chain_cache
+            .borrow_mut()
+            .record(first, logical, cluster);
+        let mut chain = self.cluster_iter(cluster);
+        while logical < index {
+            let Some(next) = chain.next() else { break };
+            cluster = next?;
+            logical += 1;
+            // Release the RefCell borrow before the next potentially blocking
+            // device read. No cache reference escapes the mounted owner.
+            self.chain_cache
+                .borrow_mut()
+                .record(first, logical, cluster);
+        }
+        Ok((cluster, logical))
+    }
+
     pub(crate) fn truncate_cluster_chain(&self, cluster: u32) -> Result<(), Error<IO::Error>> {
+        self.chain_cache.borrow_mut().invalidate();
         let mut iter = self.cluster_iter(cluster);
         let num_free = iter.truncate()?;
         let mut fs_info = self.fs_info.borrow_mut();
@@ -506,6 +533,7 @@ impl<IO: Read + Write + Seek, TP, OCC> FileSystem<IO, TP, OCC> {
     }
 
     pub(crate) fn free_cluster_chain(&self, cluster: u32) -> Result<(), Error<IO::Error>> {
+        self.chain_cache.borrow_mut().invalidate();
         let mut iter = self.cluster_iter(cluster);
         let num_free = iter.free()?;
         let mut fs_info = self.fs_info.borrow_mut();
@@ -611,6 +639,13 @@ impl<IO: Read + Write + Seek, TP, OCC> FileSystem<IO, TP, OCC> {
     /// synchronization does not guarantee that earlier writes were rolled back.
     pub fn sync(&mut self) -> Result<(), Error<IO::Error>> {
         self.unmount_internal()?;
+        self.disk.get_mut().flush()?;
+        Ok(())
+    }
+
+    /// Drain the storage adapter after all temporary file editors are dropped.
+    /// Unlike `sync`, this does not commit deferred filesystem bookkeeping.
+    pub fn flush_storage(&mut self) -> Result<(), Error<IO::Error>> {
         self.disk.get_mut().flush()?;
         Ok(())
     }

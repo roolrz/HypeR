@@ -19,6 +19,24 @@ const LENGTH: usize = 3 * 1024 * 1024 + 37;
 #[cfg(feature = "userspace-device-test")]
 const LENGTH: usize = 256 * 1024 + 37;
 const GAP: usize = 4096;
+const OVERWRITE_BYTES: usize = 4096;
+const OVERWRITE_OFFSETS: [usize; 4] = [
+    17,
+    128 * 1024 - 7,
+    LENGTH / 2 + 511,
+    LENGTH - OVERWRITE_BYTES,
+];
+
+fn payload_byte(offset: usize) -> u8 {
+    if OVERWRITE_OFFSETS
+        .iter()
+        .any(|start| (*start..*start + OVERWRITE_BYTES).contains(&offset))
+    {
+        ((offset * 13 + 71) % 251) as u8
+    } else {
+        (offset % 251) as u8
+    }
+}
 
 fn verify(path: &str) -> io::Result<()> {
     println!("BOARD-STORAGE: opening {path}");
@@ -41,7 +59,7 @@ fn verify(path: &str) -> io::Result<()> {
         if buffer[..count]
             .iter()
             .enumerate()
-            .any(|(i, byte)| *byte != ((offset + i) % 251) as u8)
+            .any(|(i, byte)| *byte != payload_byte(offset + i))
         {
             return Err(io::Error::other("persisted data mismatch"));
         }
@@ -83,6 +101,16 @@ fn run(mode: &str) -> io::Result<()> {
                 return Err(io::Error::other("unexpected short bulk write"));
             }
             offset += count;
+        }
+        // Reopen the FAT cursor at unrelated offsets, including sector/window
+        // boundaries. Different bytes expose stale seek mappings or lost writes
+        // both immediately and after the cold restart.
+        for offset in OVERWRITE_OFFSETS.into_iter().rev() {
+            for (i, byte) in buffer[..OVERWRITE_BYTES].iter_mut().enumerate() {
+                *byte = payload_byte(offset + i);
+            }
+            file.seek(SeekFrom::Start(offset as u64))?;
+            file.write_all(&buffer[..OVERWRITE_BYTES])?;
         }
         file.seek(SeekFrom::Start((LENGTH + GAP) as u64))?;
         file.write_all(&[0xa5])?;

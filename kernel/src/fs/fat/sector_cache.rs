@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Small read-through windows keep directory and FAT lookups from evicting
-//! each other. The owning Disk updates them after completed sector writes;
-//! failed writes poison the volume before any subsequent cache access.
+//! each other. The owning Disk overlays pending writes before publishing a
+//! refill and updates resident windows when staging new sector writes. Failed
+//! writes poison the volume before any subsequent cache access.
 
 use super::{BlockDevice, BlockError, DeviceSlot, Error, SECTOR_SIZE};
 use alloc::{boxed::Box, vec::Vec};
@@ -64,6 +65,18 @@ impl Cache {
         device: &DeviceSlot<D>,
         sector: u64,
     ) -> Result<&[u8], BlockError> {
+        self.sector_with_overlay(device, sector, |_, _| {})
+    }
+
+    /// Merge the caller's pending sectors into a fresh window before it becomes
+    /// readable. Overlay the whole window: a neighboring sector may remain in
+    /// this cache after its pending write has drained or been evicted.
+    pub(super) fn sector_with_overlay<D: BlockDevice>(
+        &mut self,
+        device: &DeviceSlot<D>,
+        sector: u64,
+        overlay: impl FnOnce(u64, &mut [u8]),
+    ) -> Result<&[u8], BlockError> {
         let first = sector / WINDOW_SECTORS * WINDOW_SECTORS;
         let index = if let Some(index) = self.first.iter().position(|entry| *entry == Some(first)) {
             index
@@ -75,6 +88,7 @@ impl Cache {
             let count = (device.sectors - first).min(WINDOW_SECTORS) as usize * SECTOR_SIZE;
             let start = index * WINDOW_BYTES;
             device.access(|d| d.read_sectors(first, &mut self.bytes[start..start + count]))?;
+            overlay(first, &mut self.bytes[start..start + count]);
             self.first[index] = Some(first);
             index
         };

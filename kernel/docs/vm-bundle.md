@@ -219,6 +219,12 @@ the complete metadata contract succeeds. These are runtime implementation
 limits, not a storage-format promise for other architectures or future VMM
 implementations.
 
+Manager admission, VM runtime validation and the I/O loader use four temporary
+4 KiB windows for sparse FIT metadata reads. Each pass creates its own view;
+the runtime revalidates at every start. The view is not an immutable file
+snapshot and is discarded before streaming payloads. Bulk payload reads retain
+their two-buffer, 512 KiB pipeline rather than being split into metadata pages.
+
 JSON `configuration.vcpus` fixes the machine's immutable processor topology before
 construction. AArch64 GICv2 and GICv3 profiles accept 1..8 vCPUs; the RISC-V
 reference profile still accepts one. `pending_virtual_machine_set_bootstrap`

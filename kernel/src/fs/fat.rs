@@ -18,6 +18,7 @@ use fatfs::{Read, Seek, SeekFrom, Write};
 
 mod read_map;
 mod sector_cache;
+mod write_buffer;
 
 // Gap filling and extension only read these bytes. Keep one immutable sector
 // instead of retaining a zeroed stack buffer across blocking filesystem I/O.
@@ -135,6 +136,7 @@ struct Disk<D> {
     owner: FallibleArc<DeviceSlot<D>>,
     offset: u64,
     cache: Box<sector_cache::Cache>,
+    writes: Box<write_buffer::Buffer>,
     sector: Box<[u8; SECTOR_SIZE]>,
 }
 impl<D> fatfs::IoBase for Disk<D> {
@@ -152,11 +154,25 @@ impl<D: BlockDevice> Read for Disk<D> {
         let first = self.offset / SECTOR_SIZE as u64;
         let n = if within == 0 && count >= SECTOR_SIZE {
             let n = count / SECTOR_SIZE * SECTOR_SIZE;
-            self.owner
-                .access(|d| d.read_sectors(first, &mut output[..n]))?;
+            if n == SECTOR_SIZE
+                && let Some(pending) = self.writes.sector(first)
+            {
+                output[..n].copy_from_slice(pending);
+            } else {
+                self.owner
+                    .access(|d| d.read_sectors(first, &mut output[..n]))?;
+                self.writes.overlay(first, &mut output[..n]);
+            }
             n
         } else {
-            let sector = self.cache.sector(&self.owner, first)?;
+            let sector = match self.writes.sector(first) {
+                Some(pending) => pending,
+                None => self
+                    .cache
+                    .sector_with_overlay(&self.owner, first, |first, bytes| {
+                        self.writes.overlay(first, bytes);
+                    })?,
+            };
             let n = count.min(SECTOR_SIZE - within);
             output[..n].copy_from_slice(&sector[within..within + n]);
             n
@@ -177,7 +193,7 @@ impl<D: BlockDevice> Write for Disk<D> {
         let first = self.offset / SECTOR_SIZE as u64;
         let n = if within == 0 && count >= SECTOR_SIZE {
             let n = count / SECTOR_SIZE * SECTOR_SIZE;
-            if let Err(error) = self.owner.access(|d| d.write_sectors(first, &input[..n])) {
+            if let Err(error) = self.writes.write(&self.owner, first, &input[..n]) {
                 self.cache.invalidate();
                 return Err(error);
             }
@@ -185,13 +201,18 @@ impl<D: BlockDevice> Write for Disk<D> {
             n
         } else {
             self.sector
-                .copy_from_slice(self.cache.sector(&self.owner, first)?);
+                .copy_from_slice(match self.writes.sector(first) {
+                    Some(pending) => pending,
+                    None => {
+                        self.cache
+                            .sector_with_overlay(&self.owner, first, |first, bytes| {
+                                self.writes.overlay(first, bytes);
+                            })?
+                    }
+                });
             let n = count.min(SECTOR_SIZE - within);
             self.sector[within..within + n].copy_from_slice(&input[..n]);
-            if let Err(error) = self
-                .owner
-                .access(|d| d.write_sectors(first, self.sector.as_ref()))
-            {
+            if let Err(error) = self.writes.write(&self.owner, first, self.sector.as_ref()) {
                 self.cache.invalidate();
                 return Err(error);
             }
@@ -202,11 +223,10 @@ impl<D: BlockDevice> Write for Disk<D> {
         Ok(n)
     }
     fn flush(&mut self) -> Result<(), BlockError> {
-        // Sector writes are write-through and already completed. Upstream
-        // calls this even when dropping a read-only directory iterator; do
-        // not turn every stat/read into a physical cache barrier. Volume
-        // sync separately commits FSInfo and issues the durable device flush.
-        self.owner.charge()
+        // Complete buffered transfers, without a physical durability barrier.
+        // Upstream also calls this from read-only directory destructors.
+        self.owner.charge()?;
+        self.writes.drain(&self.owner)
     }
 }
 impl<D: BlockDevice> Seek for Disk<D> {
@@ -276,6 +296,7 @@ impl<D: BlockDevice> FatVolume<D> {
             + SECTOR_SIZE
             + read_map::Cache::allocation_bytes()
             + sector_cache::Cache::allocation_bytes()
+            + write_buffer::Buffer::allocation_bytes()
     }
     pub fn mount(device: D) -> Result<Self, Error> {
         Self::mount_with_clock(device, || None)
@@ -312,6 +333,7 @@ impl<D: BlockDevice> FatVolume<D> {
                 owner: owner.clone(),
                 offset: 0,
                 cache: sector_cache::Cache::new()?,
+                writes: write_buffer::Buffer::new()?,
                 sector,
             },
             fatfs::FsOptions::new().strict(true).time_provider(clock),
@@ -353,14 +375,20 @@ impl<D: BlockDevice> FatVolume<D> {
         if let Some(error) = self.device.failure() {
             return Err(Error::Block(error));
         }
-        let fs = self.fs.as_ref().ok_or(Error::Closed)?;
+        let fs = self.fs.as_mut().ok_or(Error::Closed)?;
         self.device.remaining.store(self.budget, Ordering::Relaxed);
         self.device.enabled.store(true, Ordering::Relaxed);
-        let result = operation(fs);
+        let mut result = operation(fs);
         match &result {
             Err(Error::Corrupt) => self.device.fail(BlockError::Corrupt),
             Err(Error::Block(error)) => self.device.fail(*error),
             _ => {}
+        }
+        // Even a recoverable error may have changed metadata (for example,
+        // allocation rollback after ENOSPC). Finish it before closing the gate.
+        // A poisoned device rejects this drain without any further transfers.
+        if let Err(error) = fs.flush_storage() {
+            result = Err(Error::from(error));
         }
         self.device.enabled.store(false, Ordering::Relaxed);
         match self.device.failure() {

@@ -66,6 +66,7 @@ extern crate alloc;
 mod log_macros;
 
 mod boot_sector;
+mod chain_cache;
 mod dir;
 mod dir_entry;
 mod error;

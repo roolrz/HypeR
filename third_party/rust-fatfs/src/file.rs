@@ -172,7 +172,9 @@ impl<'a, IO: ReadWriteSeek, TP, OCC> File<'a, IO, TP, OCC> {
         }
     }
 
-    fn size(&self) -> Option<u32> {
+    /// Return the size recorded in the directory entry without traversing the
+    /// allocation chain. Directory streams have no recorded file size.
+    pub fn size(&self) -> Option<u32> {
         match self.entry {
             Some(ref e) => e.inner().size(),
             None => None,
@@ -451,16 +453,10 @@ impl<IO: ReadWriteSeek, TP, OCC> Seek for File<'_, IO, TP, OCC> {
             // Note: new_offset_in_clusters cannot be 0 here because new_offset is not 0
             debug_assert!(new_offset_in_clusters > 0);
             let clusters_to_skip = new_offset_in_clusters - 1;
-            let mut cluster = first_cluster;
-            let mut iter = self.fs.cluster_iter(first_cluster);
-            for i in 0..clusters_to_skip {
-                cluster = if let Some(r) = iter.next() {
-                    r?
-                } else {
-                    // cluster chain ends before the new position - seek to the end of the last cluster
-                    new_offset = self.fs.bytes_from_clusters(i + 1) as u32;
-                    break;
-                };
+            let (cluster, reached) = self.fs.cluster_at(first_cluster, clusters_to_skip)?;
+            if reached < clusters_to_skip {
+                // The chain ends before the requested position.
+                new_offset = self.fs.bytes_from_clusters(reached + 1) as u32;
             }
             Some(cluster)
         } else {

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Bounded read-ahead for one admission pass over sparse FIT metadata.
+//! Bounded read-ahead for one validation pass over sparse FIT metadata.
 
 use hyper_vm_image::ReadAt;
 use std::cell::RefCell;
@@ -10,7 +10,7 @@ const PAGE_BYTES: usize = 4096;
 const CACHE_PAGES: usize = 4;
 
 #[derive(Debug)]
-pub(super) enum Error<E> {
+pub enum Error<E> {
     Source(E),
     Allocation,
     InvalidRange,
@@ -27,14 +27,16 @@ struct Cache {
     next: usize,
 }
 
-pub(super) struct CachedSource<S> {
+/// A temporary metadata view, not a file snapshot. Create a fresh view for each
+/// validation and recover the source before streaming the large payloads.
+pub struct CachedSource<S> {
     source: S,
     length: u64,
     cache: RefCell<Cache>,
 }
 
 impl<S: ReadAt> CachedSource<S> {
-    pub(super) fn new(source: S) -> Result<Self, Error<S::Error>> {
+    pub fn new(source: S) -> Result<Self, Error<S::Error>> {
         let length = source.length().map_err(Error::Source)?;
         // Reserve on the heap without constructing a 16 KiB stack temporary.
         let mut pages = Vec::new();
@@ -52,6 +54,10 @@ impl<S: ReadAt> CachedSource<S> {
             length,
             cache: RefCell::new(Cache { pages, next: 0 }),
         })
+    }
+
+    pub fn into_inner(self) -> S {
+        self.source
     }
 }
 

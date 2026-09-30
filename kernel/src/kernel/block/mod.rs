@@ -249,21 +249,21 @@ impl BlockDevice for MountedDevice {
         Ok(())
     }
     fn write_sectors(&mut self, first: u64, input: &[u8]) -> Result<(), Error> {
+        self.write_batch(&[hyper::fs::block::WriteRequest {
+            first,
+            bytes: input,
+        }])
+    }
+    fn write_batch(
+        &mut self,
+        requests: &[hyper::fs::block::WriteRequest<'_>],
+    ) -> Result<(), Error> {
+        hyper::fs::block::validate_writes(self.sector_count(), requests)?;
         let session = self.device.acquire(true)?;
         if self.device.state.with(|state| state.readonly) {
             return Err(Error::ReadOnly);
         }
-        check_range(first, input.len(), self.sector_count())?;
-        let mut sector = first;
-        for bytes in input.chunks(wire::DATA_BYTES) {
-            session.command(
-                &wire::transfer_cdb(true, sector, (bytes.len() / SECTOR_SIZE) as u32),
-                Some(bytes),
-                None,
-            )?;
-            sector += (bytes.len() / SECTOR_SIZE) as u64;
-        }
-        Ok(())
+        session.write_batch(requests)
     }
     fn flush(&mut self) -> Result<(), Error> {
         let session = self.device.acquire(true)?;

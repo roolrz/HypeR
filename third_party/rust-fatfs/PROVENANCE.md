@@ -46,6 +46,19 @@ cleanup and then flushing the underlying storage without consuming/remounting
 the filesystem. Its exclusive borrow requires open file editors to be dropped first. HypeR's
 adapter enforces that lifetime boundary, issues its explicit device durability
 barrier, and closes the filesystem on failure with destructor I/O disabled.
+`FileSystem::flush_storage` separately drains the underlying adapter without
+committing FSInfo. Its exclusive borrow provides the same editor lifetime
+boundary when completing an ordinary operation, including a recoverable error.
+
+`src/file.rs` seeks through bounded checkpoints owned by `FileSystem`, using
+the HypeR-authored, Apache-2.0-licensed `src/chain_cache.rs`. Sixteen coalesced
+runs remember previously traversed cluster positions across file opens. The
+lookup preserves EOF clamping and falls back to ordinary FAT traversal when
+needed. The filesystem invalidates all checkpoints before freeing or truncating
+a chain; append-only allocation does not change existing positions. No file
+editor, disk reference, or unbounded allocation is retained by the cache.
+`File::size` exposes the already recorded directory-entry size, letting the
+adapter construct an allocation map without a preliminary full-chain EOF seek.
 
 This is not a journaled transaction. A device I/O failure after destination
 publication can leave an incomplete rename; HypeR latches the error and stops

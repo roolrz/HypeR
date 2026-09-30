@@ -25,11 +25,14 @@ pub(super) fn run(
         .take_optional(hyper_service::io::SESSION)
         .map_err(Error::OperatingSystem)?
         .map(hyper_os::capability_channel::CapabilityChannel::from_handle);
-    let source = ImageSource::new(hyper_os::fs::File::from_handle(
-        startup
-            .take(vm_contract::IMAGE)
-            .map_err(Error::OperatingSystem)?,
-    ))?;
+    let source = hyper_vm_policy::image::CachedSource::new(ImageSource::new(
+        hyper_os::fs::File::from_handle(
+            startup
+                .take(vm_contract::IMAGE)
+                .map_err(Error::OperatingSystem)?,
+        ),
+    )?)
+    .map_err(Error::from)?;
     let lease = startup
         .take(vm_contract::CREATION_LEASE)
         .map_err(Error::OperatingSystem)?;
@@ -43,6 +46,9 @@ pub(super) fn run(
         Error::UnsupportedConfiguration
     })?;
     let plan = linux::validate_reference(&source, image).map_err(classify_reference_error)?;
+    // Drop this validation view before parallel payload reads. Each start
+    // still revalidates the current file; no cache survives the VM lifetime.
+    let source = source.into_inner();
     let profile = hyper_vm_support::profile::native_profile(plan.platform_profile())
         .map_err(|_| Error::UnsupportedConfiguration)?;
     let platform_info = hyper_os::vm::platform_info(lease.as_handle_ref(), profile)

@@ -72,6 +72,47 @@ impl Session<'_> {
         Ok(())
     }
 
+    pub(super) fn write_batch(
+        &self,
+        requests: &[hyper::fs::block::WriteRequest<'_>],
+    ) -> Result<(), Error> {
+        let mut chunks = requests.iter().flat_map(|request| {
+            request
+                .bytes
+                .chunks(wire::DATA_BYTES)
+                .enumerate()
+                .map(move |(index, bytes)| {
+                    (
+                        request.first + (index * wire::DATA_BYTES / SECTOR_SIZE) as u64,
+                        bytes,
+                    )
+                })
+        });
+        loop {
+            let mut flights: [Option<Flight<'_>>; wire::REQUEST_QUEUES] =
+                core::array::from_fn(|_| None);
+            let mut mask = 0;
+            for (queue, flight) in flights.iter_mut().enumerate() {
+                let Some((sector, bytes)) = chunks.next() else {
+                    break;
+                };
+                let cdb = wire::transfer_cdb(true, sector, (bytes.len() / SECTOR_SIZE) as u32);
+                *flight = Some(self.submit(queue, &cdb, Some(bytes), bytes.len(), false)?);
+                mask |= 1 << queue;
+            }
+            if mask == 0 {
+                return Ok(());
+            }
+            self.kick(mask)?;
+            // Each queue keeps its own input grant until completion. On an
+            // early failure remaining Flights quarantine the whole device,
+            // exactly as in read_batch; no in-flight grant can be reused.
+            for flight in flights.into_iter().flatten() {
+                flight.finish(None)?;
+            }
+        }
+    }
+
     fn kick(&self, mask: u32) -> Result<(), Error> {
         fence(Ordering::SeqCst);
         self.device

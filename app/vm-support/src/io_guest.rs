@@ -74,10 +74,12 @@ impl Image {
             .metadata()
             .map_err(|error| format!("stat {path}: {error}"))?
             .len();
-        let source = Source { file, length };
+        let source =
+            hyper_vm_policy::image::CachedSource::new(Source { file, length }).map_err(show)?;
         let image = hyper_vm_image::parse(&source).map_err(show)?;
         let image = hyper_vm_policy::image::configure(image, &definition.configuration)?;
         let plan = linux::validate_reference(&source, image).map_err(show)?;
+        let source = source.into_inner();
         if plan.memory_base() != RAM_BASE
             || ![64 * 1024 * 1024, RAM_BYTES].contains(&plan.memory_size())
             || plan.architecture() != hyper_vm_image::Architecture::Aarch64
