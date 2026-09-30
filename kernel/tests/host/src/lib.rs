@@ -9,6 +9,10 @@
 
 extern crate alloc;
 
+#[cfg(test)]
+#[path = "../../../src/mm/allocation/refcount.rs"]
+mod fallible_refcount;
+
 #[cfg(all(test, target_arch = "aarch64"))]
 #[path = "../../../hal/src/arch/aarch64/exposed_copy.rs"]
 mod aarch64_exposed_copy;
