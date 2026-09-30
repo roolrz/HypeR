@@ -237,8 +237,17 @@ On board images, `vmm list` and `vmm status io` include the infrastructure I/O V
 as read-only. The snapshot reports its lifecycle, vCPU count, guest memory and current pCPU
 assignment of its boot vCPU;
 an unavailable management endpoint is reported as `unavailable`, not `stopped`.
-`start`, `stop`, `restart`, `delete`, `affinity` and `console` are not supported for this
-entry. Its lifecycle remains under `io-runtime` ownership.
+The manager holds a broker observation channel for this entry, not its VM handle
+or runtime control channel. `start`, `stop`, `restart`, `delete`, `affinity` and
+`console` require management authority and are rejected for observation-only
+entries. Authorization follows the capability held for the resolved entry;
+names are not reserved by service role. The owner reports the VM name from its
+loaded configuration. After I/O readiness, the manager discovers that name over
+the broker, and checks for conflicts when admitting definitions and before each
+instance start. A failed observation blocks admission/start instead of treating
+the observed namespace as empty. Without an I/O broker, `io` is an ordinary
+managed VM name. The infrastructure VM's lifecycle remains under `io-runtime`
+ownership.
 
 For a running managed VM, `vmm affinity alpine 0 1,3` sets the allowed host
 CPUs for guest vCPU 0. If its current CPU remains allowed, placement is unchanged;

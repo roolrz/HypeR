@@ -208,14 +208,16 @@ impl FleetManager {
             .as_mut()
             .ok_or(hyper_os::Error::InvalidResponse)?;
         let broker = self
-            .io_broker
+            .io_service
             .as_ref()
             .ok_or(hyper_os::Error::MissingHandle)?;
         let disposition = CapabilityDisposition::move_handle(
             &mut admission.endpoint,
             RightsOffer::Exact(hyper_service::io::SESSION_RIGHTS),
         )?;
-        let result = broker.try_send(&admission.record, &mut [disposition]);
+        let result = broker
+            .broker()
+            .try_send(&admission.record, &mut [disposition]);
         complete_admission(&mut instance.disk_admission, result);
         if instance.disk_admission.is_some() {
             return Ok(());
@@ -229,7 +231,7 @@ impl FleetManager {
             .count()
             == 2
         {
-            self.io_broker = None;
+            self.io_service = None;
             println!("BROKER-TEST MANAGER-ENDPOINT-CLOSED");
         }
         Ok(())

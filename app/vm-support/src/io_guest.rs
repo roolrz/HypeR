@@ -26,12 +26,20 @@ fn show(error: impl std::fmt::Debug) -> String {
 }
 
 pub struct InstalledGuest {
+    name: String,
     pub machine: Arc<hyper_os::OwnedHandle<VirtualMachineObject>>,
     pub cpus: Vec<Arc<hyper_os::OwnedHandle<VirtualCpuObject>>>,
     pub output: Output,
 }
 
+impl InstalledGuest {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 pub struct Image {
+    name: String,
     pub memory: WritableVmo,
     pub plan: linux::BootPlan,
     pub arguments: String,
@@ -91,6 +99,7 @@ impl Image {
             copy_payload(&source, &memory, payload)?;
         }
         Ok(Self {
+            name: definition.name.clone(),
             memory,
             plan,
             arguments: image.boot_arguments.as_str().into(),
@@ -281,6 +290,7 @@ pub fn install_mapped(
         vm::set_vcpu_affinity(cpu.as_handle_ref(), words)
     })?;
     Ok(InstalledGuest {
+        name: image.name.clone(),
         machine,
         cpus,
         output,

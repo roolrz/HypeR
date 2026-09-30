@@ -6,6 +6,7 @@
 mod commands;
 mod console;
 mod instance;
+mod inventory;
 mod launch;
 mod listener;
 mod provision;
@@ -33,7 +34,7 @@ pub(super) struct FleetManager {
     factory: OwnedHandle<hyper_os::handle::TaskFactoryObject>,
     fleet_domain: OwnedHandle<ResourceDomainObject>,
     authority: OwnedHandle<hyper_os::handle::VirtualMachineCreationAuthorityObject>,
-    io_broker: Option<CapabilityChannel>,
+    io_service: Option<inventory::ObservedVm>,
     connections: listener::Listener,
     root: Directory,
     machines: Vec<Machine>,
@@ -44,6 +45,9 @@ pub(super) struct FleetManager {
 impl FleetManager {
     pub(super) fn from_startup(startup: &mut Startup<'_>) -> hyper_os::Result<Self> {
         let provisioning = CapabilityChannel::from_handle(startup.take(vm_contract::PROVISIONING)?);
+        let io_broker = startup
+            .take_optional(hyper_service::io::BROKER_CLIENT)?
+            .map(CapabilityChannel::from_handle);
         let mut manager = Self {
             runtime_image: File::from_handle(startup.take(vm_contract::RUNTIME_IMAGE)?),
             libraries: Directory::from_handle(
@@ -52,9 +56,7 @@ impl FleetManager {
             factory: startup.take(startup::TASK_FACTORY)?,
             fleet_domain: startup.take(startup::RESOURCE_DOMAIN)?,
             authority: startup.take(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)?,
-            io_broker: startup
-                .take_optional(hyper_service::io::BROKER_CLIENT)?
-                .map(CapabilityChannel::from_handle),
+            io_service: None,
             connections: listener::Listener::start(CapabilityChannel::from_handle(
                 startup.take(vm_contract::MANAGER_CONNECTION)?,
             ))?,
@@ -63,7 +65,7 @@ impl FleetManager {
             clients: std::array::from_fn(|_| None),
             next_wait: 0,
         };
-        manager.configure_fleet(provisioning)?;
+        manager.configure_fleet(provisioning, io_broker)?;
         Ok(manager)
     }
 
@@ -92,10 +94,10 @@ impl FleetManager {
                 .instance
                 .as_ref()
                 .is_some_and(VmInstance::wants_disk_admission)
-        }) && let Some(broker) = self.io_broker.as_ref()
+        }) && let Some(broker) = self.io_service.as_ref()
         {
             waits.push(WaitItem::new(
-                broker.as_handle_ref(),
+                broker.broker().as_handle_ref(),
                 ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING
                     .union(ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED),
             ));
@@ -175,11 +177,13 @@ impl FleetManager {
                 fleet::MAX_DEFINITIONS
             ));
         }
+        self.check_observed_names(
+            definitions
+                .iter()
+                .map(|definition| definition.name.as_str()),
+        )?;
         let mut prepared = Vec::new();
         for definition in definitions {
-            if definition.name == "io" {
-                return Err("VM name 'io' is reserved for the read-only I/O VM".into());
-            }
             if self
                 .machines
                 .iter()

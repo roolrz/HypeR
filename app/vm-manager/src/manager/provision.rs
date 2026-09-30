@@ -16,6 +16,7 @@ impl FleetManager {
     pub(super) fn configure_fleet(
         &mut self,
         provisioning: CapabilityChannel,
+        io_broker: Option<CapabilityChannel>,
     ) -> hyper_os::Result<()> {
         let mut bytes = [MaybeUninit::<u8>::uninit(); vm_contract::MESSAGE_BYTES];
         let mut slots = [
@@ -34,8 +35,16 @@ impl FleetManager {
         let result = slots[1]
             .take::<ByteChannelObject>()?
             .ok_or(hyper_os::Error::MissingHandle)?;
-        let admitted = read_config(File::from_handle(config))
-            .and_then(|config| self.install_definitions(config.machines));
+        let admitted = (|| {
+            let config = read_config(File::from_handle(config))?;
+            // Init sends this request only after the I/O service reports ready.
+            // Discover its actual VM identity before admitting any fleet names.
+            self.io_service = io_broker
+                .map(super::inventory::ObservedVm::connect)
+                .transpose()
+                .map_err(|error| format!("cannot discover observed VMs: {error}"))?;
+            self.install_definitions(config.machines)
+        })();
         let response = match &admitted {
             Ok(()) => vm_contract::ProvisionResult::Configured,
             Err(error) => {

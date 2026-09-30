@@ -75,10 +75,10 @@ def boot(args, mode):
             copied = await_text(rb'hyper-sh\$ ')
             if b'sh: command failed' in copied or b'cp:' in copied:
                 raise RuntimeError(f'copy across ramfs/FAT failed: {copied!r}')
-            child.stdin.write(b'vmm status io\n')
+            child.stdin.write(f'vmm status {args.observed_name}\n'.encode())
             child.stdin.flush()
             observed = await_text(rb'hyper-sh\$ ')
-            if not re.search(rb'\bio\s+running\s+yes\s+read-only', observed):
+            if not re.search(re.escape(args.observed_name.encode()) + rb'\s+running\s+yes\s+read-only', observed):
                 raise RuntimeError(f'I/O VM observation unavailable: {observed!r}')
             if b'vCPUs:' not in observed or b'RAM capacity: 128 MiB' not in observed:
                 raise RuntimeError(f'I/O VM metrics missing: {observed!r}')
@@ -86,11 +86,30 @@ def boot(args, mode):
             resident = re.search(rb'allocated VM backing: ([0-9]+) bytes', observed)
             if resident is None or not 0 < int(resident[1]) <= 129 * 1024 * 1024:
                 raise RuntimeError(f'I/O VM allocated backing missing or invalid: {observed!r}')
-            child.stdin.write(b'vmm stop io\n')
+            # Observation is granted by the broker; no management capability is
+            # held for this target, including console and placement operations.
+            commands = [f'vmm {action} {args.observed_name}' for action in
+                        ('start', 'stop', 'restart', 'delete', 'console')]
+            commands.append(f'vmm affinity {args.observed_name} 0 0')
+            for command in commands:
+                child.stdin.write(command.encode() + b'\n')
+                child.stdin.flush()
+                refused = await_text(rb'hyper-sh\$ ')
+                if (f"VM '{args.observed_name}' is read-only: vm-manager has no management capability".encode() not in refused
+                        or b'sh: command failed' not in refused):
+                    raise RuntimeError(f'{command}: missing capability rejection: {refused!r}')
+            child.stdin.write(f'vmm status {args.observed_name}\n'.encode())
+            child.stdin.flush()
+            if not re.search(re.escape(args.observed_name.encode()) + rb'\s+running\s+yes\s+read-only',
+                             await_text(rb'hyper-sh\$ ')):
+                raise RuntimeError('rejected control request changed the observed VM')
+            child.stdin.write(
+                f'vmm create {args.observed_name} --config /etc/hyper/vms.json --from alpine\n'.encode())
             child.stdin.flush()
             refused = await_text(rb'hyper-sh\$ ')
-            if b'I/O VM is read-only' not in refused:
-                raise RuntimeError(f'I/O VM control was not rejected: {refused!r}')
+            if (f"VM '{args.observed_name}' already exists (observed through broker)".encode() not in refused
+                    or b'sh: command failed' not in refused):
+                raise RuntimeError(f'observed VM name was not protected from shadowing: {refused!r}')
             # Keep the real human-paced console path in coverage too.
             for character in b'echo BOARD-SHELL-RESPONSIVE\n':
                 child.stdin.write(bytes([character]))
@@ -112,6 +131,8 @@ def boot(args, mode):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--qemu', required=True)
+    parser.add_argument('--observed-name', default='io',
+                        help='name reported by the I/O VM owner in this fixture')
     parser.add_argument('--minimum-stack-remaining', type=int)
     parser.add_argument('--maximum-stack-used', type=int)
     parser.add_argument('--require-userspace-device', action='store_true',

@@ -58,11 +58,8 @@ impl MachinePolicy {
     }
 }
 
-/// Explicit placement only belongs to managed, running VM instances.
-pub fn affinity_allowed(name: &str, state: Option<fleet::State>) -> Result<(), &'static str> {
-    if name == "io" {
-        return Err("I/O VM is read-only; its placement belongs to io-runtime");
-    }
+/// A managed instance must be running before its placement can change.
+pub fn affinity_allowed(state: Option<fleet::State>) -> Result<(), &'static str> {
     if state != Some(fleet::State::Running) {
         return Err("VM must be running");
     }
