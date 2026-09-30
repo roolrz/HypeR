@@ -141,8 +141,8 @@ A VM definition may include `"disk": {"client": 1, "volume": "alpine"}`. The
 manager creates a unique capability session for that runtime. The I/O runtime
 checks both fields against `/etc/hyper/io-clients.conf`, generated from the same
 board JSON as the Linux volume table. Duplicate active bindings are refused.
-`vmm create` accepts `--disk-client` and `--disk-volume` for temporary VM
-definitions. Persistent disk assignments belong in the deployment configuration.
+`vmm create NAME --config FILE` reads disk assignments and runtime settings from
+the named definition in the configuration file; `--from SOURCE` selects a template.
 
 The resident I/O VM has 128 MiB of ordinary RAM for Linux, services and
 vhost-scsi queue allocations; shared business-guest pages are additional mappings,
@@ -401,8 +401,9 @@ make test-io-vm ARCH=aarch64 IO_VM_PACKAGE=/path/to/qualified/generation \
   IO_VM_TEST=reset QEMU_CPUS=1 QEMU_MACHINE=virt,virtualization=on,gic-version=2
 ```
 
-The fixture constructs two FIT images from the same appliance, with
-`hyper.role=io` and `hyper.role=business`, and adds HypeR-owned device trees.
+The fixture constructs identical FIT payloads from the same appliance. Separate
+JSON configurations supply `hyper.role=io` and `hyper.role=business`; the runtime
+adds HypeR-owned device trees.
 It boots `hyper-io-smoke` as a privileged Native `/init`; it does not replace
 the normal init/service configuration. Each guest has 64 MiB of ordinary RAM;
 the I/O VM additionally maps the business VM's RAM as reserved shared pages.

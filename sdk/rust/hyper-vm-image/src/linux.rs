@@ -5,7 +5,7 @@
 
 pub use crate::placement::AddressRange;
 use crate::{
-    Architecture, GuestImage, PlatformProfile, ReadAt, aarch64_linux, placement, riscv64_linux,
+    Architecture, ConfiguredImage, PlatformProfile, ReadAt, aarch64_linux, placement, riscv64_linux,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,7 +89,7 @@ pub enum Error<E> {
 
 pub fn validate_reference<S: ReadAt>(
     source: &S,
-    image: GuestImage,
+    image: ConfiguredImage,
 ) -> Result<BootPlan, Error<S::Error>> {
     let (protocol, base, kernel, initramfs, device_tree) = match image.architecture {
         Architecture::Aarch64 => {

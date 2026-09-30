@@ -27,12 +27,12 @@ const MAX_RESERVATION_RECORDS: usize = 64;
 const MAX_STRUCTURE_DEPTH: u32 = 32;
 const MAX_STRUCTURE_TOKENS: usize = 4096;
 /// Storage contract required on the selected FIT configuration.
-pub const GUEST_IMAGE_COMPATIBLE: &str = "hyper,guest-image-v1";
-/// FIT name of the initial `AArch64` immutable virtual board.
+pub const GUEST_IMAGE_COMPATIBLE: &str = "hyper,guest-image-v2";
+/// Configuration name of the initial `AArch64` immutable virtual board.
 pub const AARCH64_REFERENCE_PROFILE: &str = "aarch64-reference";
-/// FIT name of the RV64 immutable virtual board.
+/// Configuration name of the RV64 immutable virtual board.
 pub const RISCV64_REFERENCE_PROFILE: &str = "riscv64-reference";
-/// Maximum accepted command-line bytes, excluding the FIT terminator.
+/// Maximum accepted command-line bytes, excluding any terminator.
 pub const MAX_BOOT_ARGUMENT_BYTES: usize = 2048;
 
 /// Random-access byte source used without requiring an allocation policy.
@@ -95,11 +95,22 @@ pub struct BootArguments {
 }
 
 impl BootArguments {
-    const fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self {
             bytes: [0; MAX_BOOT_ARGUMENT_BYTES],
             length: 0,
         }
+    }
+
+    /// Builds command-line bytes from external VM configuration.
+    pub fn new(value: &str) -> Result<Self, ConfigurationError> {
+        if value.len() > MAX_BOOT_ARGUMENT_BYTES || value.as_bytes().contains(&0) {
+            return Err(ConfigurationError::InvalidBootArguments);
+        }
+        let mut result = Self::empty();
+        result.bytes[..value.len()].copy_from_slice(value.as_bytes());
+        result.length = value.len();
+        Ok(result)
     }
 
     pub fn as_str(&self) -> &str {
@@ -115,8 +126,94 @@ impl BootArguments {
     }
 }
 
+/// Payload metadata only; VM policy never comes from the FIT container.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GuestImage {
+    pub architecture: Architecture,
+    pub kernel: Payload,
+    pub initramfs: Option<Payload>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Configuration {
+    pub memory_size: u64,
+    pub vcpu_count: u32,
+    pub boot_arguments: BootArguments,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConfigurationError {
+    InvalidBootArguments,
+    InvalidVcpuCount,
+    ArchitectureMismatch {
+        image: Architecture,
+        host: Architecture,
+    },
+    UnsupportedArchitecture,
+    Placement(linux::PlacementError),
+}
+
+impl GuestImage {
+    /// Reject foreign guests before planning memory or constructing a VM.
+    pub fn configure_for_host(
+        self,
+        config: Configuration,
+        host: Architecture,
+    ) -> Result<ConfiguredImage, ConfigurationError> {
+        if self.architecture != host {
+            return Err(ConfigurationError::ArchitectureMismatch {
+                image: self.architecture,
+                host,
+            });
+        }
+        self.configure(config)
+    }
+
+    /// Places the initramfs using the selected instance's RAM, before validation.
+    pub fn configure(self, config: Configuration) -> Result<ConfiguredImage, ConfigurationError> {
+        let platform_profile = match self.architecture {
+            Architecture::Aarch64 => PlatformProfile::Aarch64Reference,
+            Architecture::Riscv64 => PlatformProfile::Riscv64Reference,
+            Architecture::X86_64 => return Err(ConfigurationError::UnsupportedArchitecture),
+        };
+        let max = match platform_profile {
+            PlatformProfile::Aarch64Reference => {
+                hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_MAX_VCPUS
+            }
+            _ => 1,
+        };
+        if !(1..=max).contains(&u64::from(config.vcpu_count)) {
+            return Err(ConfigurationError::InvalidVcpuCount);
+        }
+        let initramfs = self
+            .initramfs
+            .map(|mut payload| {
+                payload.load_address = linux::plan_initramfs_load(
+                    self.architecture,
+                    platform_profile,
+                    config.memory_size,
+                    payload.length,
+                )
+                .map_err(ConfigurationError::Placement)?;
+                payload.entry_address = payload.load_address;
+                Ok(payload)
+            })
+            .transpose()?;
+        Ok(ConfiguredImage {
+            architecture: self.architecture,
+            platform_profile,
+            memory_size: config.memory_size,
+            vcpu_count: config.vcpu_count,
+            boot_arguments: config.boot_arguments,
+            kernel: self.kernel,
+            initramfs,
+        })
+    }
+}
+
+/// Payloads placed according to external policy; validate before allocating RAM.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConfiguredImage {
     pub architecture: Architecture,
     pub platform_profile: PlatformProfile,
     pub memory_size: u64,
@@ -159,10 +256,6 @@ impl Name {
 struct Selection {
     kernel: Name,
     ramdisk: Option<Name>,
-    memory_size: u64,
-    vcpu_count: u32,
-    boot_arguments: BootArguments,
-    platform_profile: PlatformProfile,
 }
 
 #[derive(Clone, Copy)]
@@ -189,12 +282,8 @@ pub fn parse<Source: ReadAt>(source: &Source) -> Result<GuestImage, Error<Source
     };
     Ok(GuestImage {
         architecture,
-        platform_profile: selection.platform_profile,
-        memory_size: selection.memory_size,
-        vcpu_count: selection.vcpu_count,
         kernel,
         initramfs,
-        boot_arguments: selection.boot_arguments,
     })
 }
 
@@ -297,11 +386,7 @@ fn read_selection<Source: ReadAt>(
     let mut configuration_found = false;
     let mut kernel = None;
     let mut ramdisk = None;
-    let mut memory_size = None;
-    let mut vcpu_count = None;
-    let mut boot_arguments = None;
     let mut compatible = None;
-    let mut platform_profile = None;
     while let Some(event) = cursor.next()? {
         match event {
             Event::Begin(name) => {
@@ -346,22 +431,13 @@ fn read_selection<Source: ReadAt>(
                     match property.name.as_bytes() {
                         b"kernel" => set_once(&mut kernel, property.read_name(source)?)?,
                         b"ramdisk" => set_once(&mut ramdisk, property.read_name(source)?)?,
-                        b"hyper,memory-size" => {
-                            set_once(&mut memory_size, property.read_u64(source)?)?
-                        }
-                        b"hyper,vcpu-count" => {
-                            set_once(&mut vcpu_count, property.read_u32(source)?)?
-                        }
-                        b"bootargs" => {
-                            set_once(&mut boot_arguments, property.read_boot_arguments(source)?)?
-                        }
+                        b"hyper,memory-size"
+                        | b"hyper,vcpu-count"
+                        | b"bootargs"
+                        | b"hyper,platform-profile" => return Err(Error::UnsupportedImage),
                         b"compatible" => set_once(
                             &mut compatible,
                             property.string_equals(source, GUEST_IMAGE_COMPATIBLE)?,
-                        )?,
-                        b"hyper,platform-profile" => set_once(
-                            &mut platform_profile,
-                            property.read_platform_profile(source)?,
                         )?,
                         _ => {}
                     }
@@ -378,10 +454,6 @@ fn read_selection<Source: ReadAt>(
     Ok(Selection {
         kernel: kernel.ok_or(Error::MissingProperty)?,
         ramdisk,
-        memory_size: memory_size.ok_or(Error::MissingProperty)?,
-        vcpu_count: vcpu_count.ok_or(Error::MissingProperty)?,
-        boot_arguments: boot_arguments.unwrap_or(BootArguments::empty()),
-        platform_profile: platform_profile.ok_or(Error::MissingProperty)?,
     })
 }
 
@@ -502,7 +574,14 @@ fn read_image<Source: ReadAt>(
         return Err(Error::MissingProperty);
     }
     let (file_offset, length) = data.ok_or(Error::MissingProperty)?;
-    let load_address = load.ok_or(Error::MissingProperty)?;
+    let load_address = if kernel {
+        load.ok_or(Error::MissingProperty)?
+    } else {
+        if load.is_some() || entry.is_some() {
+            return Err(Error::UnsupportedImage);
+        }
+        0 // Relocated from external VM configuration at startup.
+    };
     if image_type_valid != Some(true) || operating_system_valid != Some(true) || length == 0 {
         return Err(Error::UnsupportedImage);
     }
@@ -548,17 +627,6 @@ impl Property {
         Ok(name)
     }
 
-    fn read_u32<Source: ReadAt>(&self, source: &Source) -> Result<u32, Error<Source::Error>> {
-        if self.length != 4 {
-            return Err(Error::InvalidStructure);
-        }
-        let mut bytes = [0u8; 4];
-        source
-            .read_exact_at(self.value_offset, &mut bytes)
-            .map_err(Error::Source)?;
-        Ok(u32::from_be_bytes(bytes))
-    }
-
     fn read_u64<Source: ReadAt>(&self, source: &Source) -> Result<u64, Error<Source::Error>> {
         if self.length != 8 {
             return Err(Error::InvalidStructure);
@@ -598,21 +666,6 @@ impl Property {
         }
     }
 
-    fn read_platform_profile<Source: ReadAt>(
-        &self,
-        source: &Source,
-    ) -> Result<PlatformProfile, Error<Source::Error>> {
-        if self.string_equals(source, AARCH64_REFERENCE_PROFILE)? {
-            Ok(PlatformProfile::Aarch64Reference)
-        } else if self.string_equals(source, "riscv64-reference")? {
-            Ok(PlatformProfile::Riscv64Reference)
-        } else if self.string_equals(source, "x86_64-reference")? {
-            Ok(PlatformProfile::X86_64Reference)
-        } else {
-            Err(Error::UnsupportedImage)
-        }
-    }
-
     fn string_equals<Source: ReadAt>(
         &self,
         source: &Source,
@@ -623,38 +676,6 @@ impl Property {
             value.length.checked_add(1) == usize::try_from(self.length).ok()
                 && value.as_bytes() == expected.as_bytes(),
         )
-    }
-
-    fn read_boot_arguments<Source: ReadAt>(
-        &self,
-        source: &Source,
-    ) -> Result<BootArguments, Error<Source::Error>> {
-        let length = usize::try_from(self.length).map_err(|_| Error::AddressOverflow)?;
-        if length == 0 || length > MAX_BOOT_ARGUMENT_BYTES + 1 {
-            return Err(Error::InvalidString);
-        }
-        let mut result = BootArguments::empty();
-        source
-            .read_exact_at(
-                self.value_offset,
-                result
-                    .bytes
-                    .get_mut(..length - 1)
-                    .ok_or(Error::InvalidString)?,
-            )
-            .map_err(Error::Source)?;
-        let mut nul = [0u8; 1];
-        source
-            .read_exact_at(self.value_offset + u64::from(self.length) - 1, &mut nul)
-            .map_err(Error::Source)?;
-        if nul[0] != 0
-            || result.bytes[..length - 1].contains(&0)
-            || core::str::from_utf8(&result.bytes[..length - 1]).is_err()
-        {
-            return Err(Error::InvalidString);
-        }
-        result.length = length - 1;
-        Ok(result)
     }
 }
 

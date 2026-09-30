@@ -43,6 +43,14 @@ impl FleetManager {
         )?;
         builder.set_name("vm-runtime")?;
         builder.add_argument(RUNTIME_ARGUMENT)?;
+        for argument in definition
+            .definition
+            .configuration
+            .runtime_arguments()
+            .map_err(|_| hyper_os::Error::InvalidResponse)?
+        {
+            builder.add_argument(&argument)?;
+        }
         for (output, contract) in [
             (
                 hyper_rt::process::stdout()?,

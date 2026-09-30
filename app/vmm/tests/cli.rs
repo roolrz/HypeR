@@ -9,40 +9,38 @@ fn commands_require_explicit_names() {
         assert!(Vmm::try_parse_from(["vmm", command, "alpine"]).is_ok());
     }
     assert!(Vmm::try_parse_from(["vmm", "create", "test"]).is_err());
-    assert!(Vmm::try_parse_from(["vmm", "create", "test", "--image", "/vm/alpine.itb"]).is_ok());
+    assert!(
+        Vmm::try_parse_from(["vmm", "create", "test", "--config", "/etc/hyper/vms.json"]).is_ok()
+    );
 }
 
 #[test]
-fn disk_arguments_are_paired_and_preserved() {
-    assert!(
-        Vmm::try_parse_from([
-            "vmm",
-            "create",
-            "vm",
-            "--image",
-            "/data/vm.itb",
-            "--disk-client",
-            "1"
-        ])
-        .is_err()
-    );
-    let cli = Vmm::try_parse_from([
-        "vmm",
-        "create",
-        "vm",
-        "--image",
-        "/data/vm.itb",
-        "--disk-client",
-        "1",
-        "--disk-volume",
-        "vm",
-    ])
-    .unwrap();
-    let Request::Create { definitions } = cli.command.unwrap().request().unwrap() else {
+fn create_uses_complete_named_configuration_and_preserves_disk() {
+    let config = || {
+        Config::parse(
+            br#"{"format":"hyper.vm-config","virtual-machines":[{
+        "name":"alpine","image":"/data/vm.itb","autostart":true,
+        "configuration":{"vcpus":4,"memory-bytes":134217728,"bootargs":"console=test",
+                         "affinity":[{"vcpu":1,"cpus":[0,2]}]},
+        "disk":{"client":1,"volume":"vm"}}]}"#,
+        )
+        .unwrap()
+    };
+    assert!(create_request(config(), "missing".into(), None, false).is_err());
+    let Request::Create { definitions } =
+        create_request(config(), "copy".into(), Some("alpine".into()), false).unwrap()
+    else {
         panic!("expected create");
     };
-    assert_eq!(definitions[0].disk.as_ref().unwrap().client, 1);
-    assert_eq!(definitions[0].disk.as_ref().unwrap().volume, "vm");
+    let vm = &definitions[0];
+    assert_eq!(vm.name, "copy");
+    assert!(!vm.autostart);
+    assert_eq!(vm.configuration.vcpus, 4);
+    assert_eq!(vm.configuration.bootargs, "console=test");
+    assert_eq!(vm.configuration.affinity[0].vcpu, 1);
+    assert_eq!(vm.configuration.affinity[0].cpus, [0, 2]);
+    assert_eq!(vm.disk.as_ref().unwrap().client, 1);
+    assert!(Vmm::try_parse_from(["vmm", "create", "test", "--image", "/vm/a.itb"]).is_err());
 }
 
 #[test]

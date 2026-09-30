@@ -13,6 +13,7 @@ autotests = false
 
 [dependencies]
 hyper-os.workspace = true
+hyper-vm-image.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

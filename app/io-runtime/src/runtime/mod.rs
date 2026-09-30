@@ -86,9 +86,9 @@ fn run(startup: &mut Startup<'_>) -> Result<()> {
     let mut client = ready
         .map(|ready| storage::NativeStorage::prepare(authority, ready))
         .transpose()?;
-    let image = Image::load("/vm/io.itb")?;
+    let image = Image::load("/vm/io.itb", "/etc/hyper/io-vms.json")?;
     if image.plan.memory_size() != RAM_BYTES {
-        return Err("resident I/O VM requires a rebuilt 128 MiB image".into());
+        return Err("resident I/O VM requires a 128 MiB configuration".into());
     }
     let dma =
         device::dma_extent(authority, image.memory.as_handle_ref(), 0, RAM_BYTES).map_err(show)?;

@@ -14,8 +14,8 @@ impl Source {
         source.0[56..60].copy_from_slice(b"RSC\x05");
         source
     }
-    fn image() -> GuestImage {
-        GuestImage {
+    fn image() -> ConfiguredImage {
+        ConfiguredImage {
             architecture: Architecture::Riscv64,
             platform_profile: PlatformProfile::Riscv64Reference,
             memory_size: 128 * 1024 * 1024,

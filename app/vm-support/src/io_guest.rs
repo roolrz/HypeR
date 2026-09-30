@@ -35,6 +35,7 @@ pub struct Image {
     pub memory: WritableVmo,
     pub plan: linux::BootPlan,
     pub arguments: String,
+    affinity: Vec<hyper_vm_policy::affinity::Affinity>,
 }
 struct Source {
     file: File,
@@ -51,7 +52,22 @@ impl ReadAt for Source {
 }
 
 impl Image {
-    pub fn load(path: &str) -> Result<Self> {
+    pub fn load(path: &str, configuration_path: &str) -> Result<Self> {
+        use std::io::Read;
+        let file = File::open(configuration_path).map_err(show)?;
+        let mut bytes = Vec::new();
+        file.take(hyper_vm_policy::fleet::MAX_CONFIG_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(show)?;
+        let config = hyper_vm_policy::fleet::Config::parse(&bytes)?;
+        let mut matches = config
+            .machines
+            .iter()
+            .filter(|machine| machine.image == path);
+        let definition = matches.next().ok_or("missing I/O VM configuration")?;
+        if matches.next().is_some() {
+            return Err("ambiguous I/O VM configuration".into());
+        }
         let file = File::open(path).map_err(|error| format!("open {path}: {error}"))?;
         let length = file
             .metadata()
@@ -59,6 +75,7 @@ impl Image {
             .len();
         let source = Source { file, length };
         let image = hyper_vm_image::parse(&source).map_err(show)?;
+        let image = hyper_vm_policy::image::configure(image, &definition.configuration)?;
         let plan = linux::validate_reference(&source, image).map_err(show)?;
         if plan.memory_base() != RAM_BASE
             || ![64 * 1024 * 1024, RAM_BYTES].contains(&plan.memory_size())
@@ -77,6 +94,7 @@ impl Image {
             memory,
             plan,
             arguments: image.boot_arguments.as_str().into(),
+            affinity: definition.configuration.affinity.clone(),
         })
     }
     pub fn device_tree(&self, gic_version: u32, devices: IoDevices<'_>) -> Result<()> {
@@ -256,6 +274,12 @@ pub fn install_mapped(
             vm::open_vcpu(machine.as_handle_ref(), index).map_err(show)?,
         ));
     }
+    hyper_vm_policy::affinity::apply(&image.affinity, image.plan.vcpu_count(), |index, words| {
+        let cpu = cpus
+            .get(index as usize)
+            .ok_or(hyper_os::Error::InvalidResponse)?;
+        vm::set_vcpu_affinity(cpu.as_handle_ref(), words)
+    })?;
     Ok(InstalledGuest {
         machine,
         cpus,

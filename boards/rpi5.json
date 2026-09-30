@@ -24,11 +24,21 @@
       "image": "vm/alpine.itb",
       "autostart": false,
       "disk-mib": 2048,
-      "disk-image": "alpine-rootfs"
+      "disk-image": "alpine-rootfs",
+      "configuration": {
+        "memory-bytes": 268435456,
+        "vcpus": 2,
+        "bootargs": "console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init loglevel=7 hyper.root=/dev/sda"
+      }
     }
   ],
   "io-device": {
     "profile": "bcm2712-sdhci",
     "path": "/soc@107c000000/mmc@fff000"
+  },
+  "io-vm": {
+    "memory-bytes": 134217728,
+    "vcpus": 1,
+    "bootargs": "console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init loglevel=4 hyper.role=io hyper.mode=standby hyper.volumes=required"
   }
 }

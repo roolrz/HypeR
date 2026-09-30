@@ -6,7 +6,12 @@
     {
       "name": "alpine",
       "image": "/vm/alpine.itb",
-      "autostart": false
+      "autostart": false,
+      "configuration": {
+        "memory-bytes": 268435456,
+        "vcpus": 2,
+        "bootargs": "console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init loglevel=7"
+      }
     }
   ]
 }

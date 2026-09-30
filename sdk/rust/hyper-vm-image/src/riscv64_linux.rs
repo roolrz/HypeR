@@ -6,7 +6,7 @@
 //! and <https://docs.kernel.org/arch/riscv/boot.html>.
 
 use crate::placement::{self, AddressRange};
-use crate::{Architecture, Compression, GuestImage, Payload, PlatformProfile, ReadAt};
+use crate::{Architecture, Compression, ConfiguredImage, Payload, PlatformProfile, ReadAt};
 
 pub const REFERENCE_GUEST_RAM_BASE: u64 =
     hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_RISCV64_REFERENCE_GUEST_RAM_BASE;
@@ -156,7 +156,7 @@ pub fn validate<S: ReadAt>(source: &S, payload: Payload) -> Result<ImageHeader, 
 
 pub fn validate_reference<S: ReadAt>(
     source: &S,
-    image: GuestImage,
+    image: ConfiguredImage,
 ) -> Result<ReferenceLayout, ReferenceLayoutError<S::Error>> {
     if image.architecture != Architecture::Riscv64 {
         return Err(ReferenceLayoutError::UnsupportedArchitecture);

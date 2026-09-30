@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Bounded application-level fleet configuration and request protocol.
+pub use crate::affinity::Affinity;
 use serde::{Deserialize, Serialize};
 
 pub const CONFIG_PATH: &str = "/etc/hyper/vms.json";
@@ -14,11 +15,79 @@ pub const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 pub struct Definition {
     pub name: String,
     pub image: String,
+    pub configuration: Configuration,
     #[serde(default)]
     pub autostart: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk: Option<Disk>,
 }
+/// Explicit per-instance policy, stored in JSON rather than the image bundle.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Configuration {
+    #[serde(rename = "memory-bytes")]
+    pub memory_bytes: u64,
+    pub vcpus: u32,
+    pub bootargs: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub affinity: Vec<Affinity>,
+}
+impl Configuration {
+    pub fn image_configuration(&self) -> Result<hyper_vm_image::Configuration, String> {
+        use hyper_vm_image::BootArguments;
+        // Architecture-specific limits are checked after reading the ITB.
+        if !(1..=8).contains(&self.vcpus) {
+            return Err("VM requires 1..=8 vCPUs".into());
+        }
+        crate::affinity::masks(&self.affinity, self.vcpus)?;
+        if self.memory_bytes < 64 * 1024 * 1024 || !self.memory_bytes.is_power_of_two() {
+            return Err("VM memory-bytes must be a power of two of at least 64 MiB".into());
+        }
+        let boot_arguments = BootArguments::new(&self.bootargs)
+            .map_err(|_| "VM bootargs must contain at most 2048 bytes and no NUL".to_string())?;
+        Ok(hyper_vm_image::Configuration {
+            memory_size: self.memory_bytes,
+            vcpu_count: self.vcpus,
+            boot_arguments,
+        })
+    }
+
+    /// Raw arguments avoid JSON escaping expanding the bounded kernel cmdline.
+    pub fn runtime_arguments(&self) -> Result<Vec<String>, String> {
+        self.image_configuration()?;
+        let mut args = vec![
+            self.memory_bytes.to_string(),
+            self.vcpus.to_string(),
+            self.bootargs.clone(),
+        ];
+        // One bounded argument per vCPU stays below the 4096-byte argument limit,
+        // even when every supported host CPU is listed explicitly.
+        for entry in &self.affinity {
+            args.push(serde_json::to_string(entry).map_err(|error| error.to_string())?);
+        }
+        Ok(args)
+    }
+
+    pub fn from_runtime_arguments(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
+        let mut args = args.into_iter();
+        let mut next = || {
+            args.next()
+                .ok_or_else(|| "missing VM configuration argument".to_string())
+        };
+        let config = Self {
+            memory_bytes: next()?.parse().map_err(|_| "invalid VM memory")?,
+            vcpus: next()?.parse().map_err(|_| "invalid VM CPU count")?,
+            bootargs: next()?,
+            affinity: args
+                .map(|value| serde_json::from_str(&value))
+                .collect::<Result<_, _>>()
+                .map_err(|error| error.to_string())?,
+        };
+        config.image_configuration()?;
+        Ok(config)
+    }
+}
+
 /// One exclusive volume authorized by the board's I/O client table.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -61,6 +130,7 @@ impl Definition {
         {
             return Err("VM image must be an absolute path without parent components or control characters (at most 512 bytes)".into());
         }
+        self.configuration.image_configuration()?;
         if let Some(disk) = &self.disk {
             disk.validate()?;
         }

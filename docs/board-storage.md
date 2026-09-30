@@ -205,3 +205,20 @@ retirement, and notification disconnection before A can receive that reply.
 The fixture checks client and generation identities, closes the actual manager
 admission endpoint, and verifies both VM disks and `/data`.
 Production applications are never rebuilt with these fault-injection features.
+
+VM runtime settings live in each board `virtual-machines` entry's required
+`configuration` object (`vcpus`, `memory-bytes`, `bootargs`, plus optional
+`affinity`). For example, `"affinity": [{"vcpu": 0, "cpus": [1, 3]}]` allows
+vCPU 0 to run on host CPU 1 or 3; omitted entries retain normal scheduler
+placement. The packer
+copies it unchanged into `/data/vms.json`. The board's `io-vm` object uses the same
+schema for the resident I/O VM and is projected into `/etc/hyper/io-vms.json` in
+the bootstrap archive, where it is available before `/data` mounts. Resident I/O
+currently requires 128 MiB and an AArch64 ITB matching the host. Standalone I/O
+also reads `BOARD_CONFIG` (by default `boards/qemu.json`); diskless Pi 5 I/O
+bring-up defaults to `boards/rpi5.json`. There is no independent I/O VM settings
+file in `app/init/config`. The installed `io-vms.json` is generated output.
+Storage mode preserves the board's settings verbatim. Standby and bring-up keep
+its CPU count, affinity, memory and ordinary boot arguments, remove the storage-volume
+requirement, and select the corresponding `hyper.mode`. ITBs contain payloads,
+not these settings.

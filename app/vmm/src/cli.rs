@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::{Parser, Subcommand};
-use hyper_vm_policy::fleet::{Action, Definition, Request};
+use hyper_vm_policy::fleet::{Action, Config, Request};
 
 #[derive(Debug, Parser)]
 #[command(
     about = "Manage named virtual machines",
-    after_help = "Examples:\n  vmm list\n  vmm start alpine\n  vmm console alpine\n  vmm create test --image /vm/alpine.itb"
+    after_help = "Examples:\n  vmm list\n  vmm start alpine\n  vmm console alpine\n  vmm create test --config /data/new-vms.json"
 )]
 pub struct Vmm {
     #[command(subcommand)]
@@ -37,15 +37,14 @@ pub enum VmCommand {
     /// Create a temporary definition in the running manager.
     Create {
         name: String,
+        /// VM configuration file containing the named definition.
         #[arg(long)]
-        image: String,
+        config: String,
+        /// Use another definition in that file as the template.
+        #[arg(long)]
+        from: Option<String>,
         #[arg(long)]
         start: bool,
-        /// Board-authorized exclusive disk volume.
-        #[arg(long, requires = "disk_client")]
-        disk_volume: Option<String>,
-        #[arg(long, requires = "disk_volume", value_parser = clap::value_parser!(u32).range(1..=127))]
-        disk_client: Option<u32>,
     },
     /// Remove a stopped definition (does not delete its image or edit the config file).
     Delete { name: String },
@@ -63,23 +62,18 @@ impl VmCommand {
             Self::List => return Ok(Request::List),
             Self::Create {
                 name,
-                image,
+                config,
+                from,
                 start,
-                disk_volume,
-                disk_client,
             } => {
-                let definition = Definition {
-                    name,
-                    image,
-                    autostart: start,
-                    disk: disk_volume
-                        .zip(disk_client)
-                        .map(|(volume, client)| hyper_vm_policy::fleet::Disk { client, volume }),
-                };
-                definition.validate().map_err(std::io::Error::other)?;
-                return Ok(Request::Create {
-                    definitions: vec![definition],
-                });
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                std::fs::File::open(config)?
+                    .take(hyper_vm_policy::fleet::MAX_CONFIG_BYTES + 1)
+                    .read_to_end(&mut bytes)?;
+                let config = Config::parse(&bytes).map_err(std::io::Error::other)?;
+                return create_request(config, name, from, start)
+                    .map_err(|error| std::io::Error::other(error).into());
             }
             Self::Status { name } => (name, Action::Status),
             Self::Start { name } => (name, Action::Start),
@@ -90,6 +84,26 @@ impl VmCommand {
         };
         Ok(Request::Control { name, action })
     }
+}
+
+fn create_request(
+    config: Config,
+    name: String,
+    from: Option<String>,
+    start: bool,
+) -> Result<Request, String> {
+    let selected = from.as_deref().unwrap_or(&name);
+    let mut definition = config
+        .machines
+        .into_iter()
+        .find(|value| value.name == selected)
+        .ok_or_else(|| format!("VM definition '{selected}' not found in configuration"))?;
+    definition.name = name;
+    definition.autostart = start;
+    definition.validate()?;
+    Ok(Request::Create {
+        definitions: vec![definition],
+    })
 }
 
 fn parse_cpu_list(value: &str) -> Result<Vec<u64>, String> {

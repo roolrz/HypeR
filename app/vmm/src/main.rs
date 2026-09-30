@@ -109,7 +109,7 @@ fn write_response(
             if machines.is_empty() {
                 writeln!(
                     output,
-                    "(no virtual machines; use 'vmm create NAME --image PATH')"
+                    "(no virtual machines; use 'vmm create NAME --config PATH')"
                 )?;
             }
             for machine in machines {
