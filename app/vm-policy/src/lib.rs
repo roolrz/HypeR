@@ -3,7 +3,9 @@
 
 //! Resource-containment policy for the initial Native VM fleet.
 
+pub mod affinity;
 pub mod fleet;
+pub mod image;
 
 use hyper_os::task::ResourceLimits;
 

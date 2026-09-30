@@ -245,10 +245,11 @@ fn suite(startup: &Startup<'_>) -> Result<()> {
         return Err("expected modern physical virtio-scsi".into());
     }
     println!("IO-VM-SMOKE: loading business image");
-    let front =
-        Image::load("/vm/business.itb").map_err(|error| format!("load business image: {error}"))?;
+    let front = Image::load("/vm/business.itb", "/etc/hyper/io-vms.json")
+        .map_err(|error| format!("load business image: {error}"))?;
     println!("IO-VM-SMOKE: loading I/O image");
-    let io = Image::load("/vm/io.itb").map_err(|error| format!("load I/O image: {error}"))?;
+    let io = Image::load("/vm/io.itb", "/etc/hyper/io-vms.json")
+        .map_err(|error| format!("load I/O image: {error}"))?;
     let io_extent =
         device::dma_extent(authority, io.memory.as_handle_ref(), 0, RAM_BYTES).map_err(show)?;
     let front_extent =

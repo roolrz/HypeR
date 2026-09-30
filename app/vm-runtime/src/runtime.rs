@@ -33,7 +33,15 @@ pub(super) fn run(
     let lease = startup
         .take(vm_contract::CREATION_LEASE)
         .map_err(Error::OperatingSystem)?;
+    let config =
+        hyper_vm_policy::fleet::Configuration::from_runtime_arguments(std::env::args().skip(1))
+            .map_err(|_| Error::UnsupportedConfiguration)?;
     let image = hyper_vm_image::parse(&source).map_err(classify_image_error)?;
+    // Recheck at every start in case the image changed after manager admission.
+    let image = hyper_vm_policy::image::configure(image, &config).map_err(|error| {
+        eprintln!("HypeR vm-runtime: {error}");
+        Error::UnsupportedConfiguration
+    })?;
     let plan = linux::validate_reference(&source, image).map_err(classify_reference_error)?;
     let profile = hyper_vm_support::profile::native_profile(plan.platform_profile())
         .map_err(|_| Error::UnsupportedConfiguration)?;
@@ -103,6 +111,16 @@ pub(super) fn run(
         serial_binding,
         disk_session.is_some(),
     )?;
+    hyper_vm_policy::affinity::apply(&config.affinity, plan.vcpu_count(), |index, words| {
+        let cpu = vcpus
+            .get(index as usize)
+            .ok_or(hyper_os::Error::InvalidResponse)?;
+        hyper_os::vm::set_vcpu_affinity(cpu.as_handle_ref(), words)
+    })
+    .map_err(|error| {
+        eprintln!("HypeR vm-runtime: {error}");
+        Error::UnsupportedConfiguration
+    })?;
     // Installation, not image loading, opens the broker admission window.
     // The manager retains the session endpoint until this status is observed.
     #[cfg(feature = "broker-test")]

@@ -144,7 +144,7 @@ fn build_device_tree(
 #[inline(never)]
 pub(super) fn prepare_guest_memory(
     source: &ImageSource,
-    image: hyper_vm_image::GuestImage,
+    image: hyper_vm_image::ConfiguredImage,
     plan: &linux::BootPlan,
     metadata: GuestHardwareMetadata,
     with_disk: bool,

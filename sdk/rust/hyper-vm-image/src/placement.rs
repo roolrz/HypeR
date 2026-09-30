@@ -3,7 +3,7 @@
 
 //! Shared checked Linux payload geometry, independent of image-header syntax.
 
-use crate::{GuestImage, ReadAt};
+use crate::{ConfiguredImage, ReadAt};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AddressRange {
@@ -57,7 +57,7 @@ pub(crate) fn plan_initramfs<E>(
 
 pub(crate) fn validate<Source: ReadAt>(
     source: &Source,
-    image: GuestImage,
+    image: ConfiguredImage,
     memory: AddressRange,
     kernel: AddressRange,
     placement_base: u64,

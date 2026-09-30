@@ -14,6 +14,7 @@ autotests = false
 hyper-os = { workspace = true, features = ["std"] }
 hyper-service.workspace = true
 hyper-vm-image.workspace = true
+hyper-vm-policy.workspace = true
 
 [features]
 startup-profile = []

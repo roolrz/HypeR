@@ -45,7 +45,8 @@ authorized console clients.
 
 Each runtime:
 
-1. validates and parses its guest FIT through bounded random-access reads;
+1. parses its guest FIT through bounded random-access reads and validates the
+   startup configuration supplied by the manager;
 2. creates and retains the guest-memory VMO;
 3. streams the selected kernel and initramfs payloads into that VMO;
 4. constructs guest firmware data, including the Linux DTB;
@@ -172,24 +173,26 @@ payload data. The current packer emits this shape:
       arch = "arm64"
       os = "linux"
       compression = "gzip"
-      load
   configurations/
     default = "conf@1"
     conf@1/
-      compatible = "hyper,guest-image-v1"
+      compatible = "hyper,guest-image-v2"
       kernel = "kernel@1"
       ramdisk = "ramdisk@1"
-      bootargs
-      hyper,memory-size
-      hyper,vcpu-count
-      hyper,platform-profile = "aarch64-reference"
 ```
 
-`load`, `entry`, and `hyper,memory-size` must each be encoded as exactly one
-64-bit big-endian value.
-`hyper,vcpu-count` is one 32-bit cell. The selected configuration must identify
-the `hyper,guest-image-v1` storage contract and one supported immutable virtual
-platform profile. References and strings are exact, NUL-terminated UTF-8
+Kernel `load` and `entry` are exactly one 64-bit big-endian value each.
+The FIT `configurations` node selects payloads only; it is not VM runtime policy.
+The selected record identifies the `hyper,guest-image-v2` storage contract.
+VM memory size, vCPU count and boot arguments are required in the external JSON
+definition's `configuration`. The reference platform is selected from ITB `arch`.
+The manager rejects a foreign architecture before publishing a definition, and
+the runtime checks again at every start before allocating guest memory. The parser rejects those legacy
+policy properties in a FIT and rejects v1 images. Ramdisk `load` and `entry`
+are absent: the runtime computes page-aligned placement at the top of configured
+RAM, so changing RAM never requires repacking. Kernel addresses remain payload
+metadata checked against the Linux Image header and selected platform.
+References and strings are exact, NUL-terminated UTF-8
 values. Selected configuration and image records are property-only schema
 leaves; child nodes are rejected. Duplicate selected nodes or properties,
 embedded NUL bytes, overlapping FDT blocks, invalid ranges, unsupported image
@@ -212,7 +215,7 @@ the complete metadata contract succeeds. These are runtime implementation
 limits, not a storage-format promise for other architectures or future VMM
 implementations.
 
-`hyper,vcpu-count` fixes the machine's immutable processor topology before
+JSON `configuration.vcpus` fixes the machine's immutable processor topology before
 construction. AArch64 GICv2 and GICv3 profiles accept 1..8 vCPUs; the RISC-V
 reference profile still accepts one. `pending_virtual_machine_set_bootstrap`
 configures boot vCPU 0. Before installation publishes the VM, all configured
@@ -271,8 +274,14 @@ An individual vCPU remains exclusively scheduled by its owning Thread. Mapping
 changes, executable-code publication, and retirement must account for every CPU
 that can retain the guest translation or instructions.
 
-`tools/fit-pack` creates deterministic development and CI images from an
+`tools/fit-pack` creates deterministic payload-only development and CI images from an
 external kernel and initramfs. Generated guest artifacts remain ignored by Git.
+
+The packer interface is `hyper-fit-pack OUTPUT ARCH KERNEL LOAD ENTRY INITRAMFS`.
+It validates payload metadata and Linux kernel headers. Machine dimensions,
+boot arguments and initramfs placement are checked by the runtime after combining
+the image with external configuration. A single ITB can serve multiple definitions.
+
 
 ## Integrity and licensing
 

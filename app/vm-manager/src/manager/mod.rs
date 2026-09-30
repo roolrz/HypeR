@@ -84,8 +84,10 @@ impl FleetManager {
         }
         let config = fleet::Config::parse(&bytes).map_err(|_| hyper_os::Error::InvalidResponse)?;
         self.clients[0] = Some(Client::initial(provision.control));
-        self.install_definitions(config.machines)
-            .map_err(|_| hyper_os::Error::InvalidResponse)?;
+        self.install_definitions(config.machines).map_err(|error| {
+            eprintln!("HypeR vm-manager: {error}");
+            hyper_os::Error::InvalidResponse
+        })?;
         self.initial_vm = self
             .machines
             .iter()
@@ -258,6 +260,8 @@ impl FleetManager {
                 .root
                 .open(&definition.image, rights)
                 .map_err(|error| format!("cannot open image '{}': {error}", definition.image))?;
+            hyper_vm_policy::image::validate_file(&image, &definition.configuration)
+                .map_err(|error| format!("cannot load image '{}': {error}", definition.image))?;
             prepared.push(Machine {
                 definition,
                 image: image.into_handle(),

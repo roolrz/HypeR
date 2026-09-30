@@ -8,8 +8,14 @@
 readiness and broker endpoints. Edit the board configuration for VM definitions;
 its generated `vms.json` lives on the configuration volume at `/data`.
 
-`native/services.json` and `native/vms.json` provide the standalone Native profile
-without an I/O VM, used for early hardware bring-up.
+The board's `io-vm` object is also the sole source of I/O VM settings. Both board
+and standalone I/O builds generate `/etc/hyper/io-vms.json` from it; this runtime
+file is a build output, not a second configuration to maintain. Diskless bring-up
+uses the selected Pi 5 board in the same way.
+
+`native/services.json` provides the standalone Native profile without VM services,
+used for early hardware bring-up and clock tests. These builds omit `vms.json`;
+an empty VM configuration file is not needed.
 
 Test manifests live in `../tests/config/`. They may autostart test guests and are
 not the production board configuration.

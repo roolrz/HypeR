@@ -44,8 +44,8 @@ vmm start alpine
 vmm console alpine
 vmm stop alpine
 vmm restart alpine
-vmm create test --image /data/vm/alpine.itb
-vmm create worker --image /data/vm/alpine.itb --start
+vmm create test --config /data/new-vms.json
+vmm create worker --config /data/new-vms.json --start
 vmm delete test
 ```
 
@@ -62,12 +62,14 @@ observe `starting`, `running`, `stopping`, `stopped`, or `failed`.
 Each VM owns a separate runtime process, resource domain, task group, lifecycle
 tracker, and console session. The current policy allows eight definitions and budgets up to eight business
 VM instances plus the resident I/O VM and manager overhead. Actual resource
-admission may fail below that ceiling. Guest memory and vCPU configuration still come
-from the FIT image: the default Alpine build uses 256 MiB and two vCPUs on
-AArch64 (one on RISC-V);
-AArch64 supports 1..8 vCPUs and RISC-V currently supports one. The CLI has no
-memory or CPU overrides that would disagree with the image's boot contract.
-For a four-vCPU development image, use `make guest-itb NATIVE_GUEST_VCPUS=4`.
+admission may fail below that ceiling. Guest memory, vCPU count and
+Linux boot arguments come exclusively from each definition's `configuration`.
+The default Alpine configuration uses 256 MiB and two vCPUs on AArch64 (one on
+RISC-V). AArch64 supports 1..8 vCPUs; RISC-V currently supports one. RAM must be
+a power of two of at least 64 MiB, subject to host resource admission.
+Set `configuration.vcpus` to `4` for a four-vCPU VM; the ITB is reusable without
+repacking. The runtime places initramfs at the top of configured RAM and validates
+kernel, initramfs and generated DTB ranges before allocating memory.
 `allocated VM backing` measures resident physical backing, not memory used
 inside Linux. Attaching an I/O-backed disk currently populates the guest's
 entire RAM VMO. See [I/O allocation and zero-copy](io-vm.md#allocation-and-zero-copy-scope)
@@ -90,8 +92,17 @@ The VM file contains definitions, not service capabilities:
 {
   "format": "hyper.vm-config",
   "virtual-machines": [
-    { "name": "alpine", "image": "/data/vm/alpine.itb", "autostart": true },
-    { "name": "test", "image": "/data/vm/alpine.itb", "autostart": false }
+    {
+      "name": "alpine",
+      "image": "/data/vm/alpine.itb",
+      "autostart": true,
+      "configuration": {
+        "vcpus": 2,
+        "memory-bytes": 268435456,
+        "bootargs": "console=ttyAMA0 rdinit=/init loglevel=7 hyper.root=/dev/sda"
+      },
+      "disk": { "client": 1, "volume": "alpine" }
+    }
   ]
 }
 ```
@@ -105,7 +116,47 @@ fails afterward, the definitions remain visible with the failed VM state.
 VM configuration is managed at deployment time. Board images provide
 `/data/vms.json`; update the board's VM definitions before building the image.
 `vmm create` and `vmm delete` only change the running manager and do not persist
-across reboot. Native test images use `app/init/tests/config/vms.json`.
+across reboot. `vmm create NAME --config FILE` reads that named definition from
+FILE; `--from SOURCE` copies another named definition under NAME. Disk assignments
+and all runtime settings are copied together; `--start` starts the new instance.
+Exclusive disk assignments cannot be shared by two definitions. Native test images
+use `app/init/tests/config/vms.json` (or `vms-riscv64.json`).
+
+The `vcpus`, `memory-bytes` and `bootargs` fields are required. `bootargs` may be empty and is
+limited to 2048 UTF-8 bytes without NUL. Architecture comes only from the ITB's
+`arch` metadata (`arm64` or `riscv`); no architecture or platform belongs in JSON.
+The manager rejects images whose architecture differs from the host before
+publishing their definitions. The runtime repeats this check on every start,
+before allocating guest RAM, and selects the corresponding reference platform.
+Architecture-specific vCPU limits are checked against the image.
+The manager snapshots definitions when it loads or creates them; editing the file
+does not mutate a running VM. Reload a definition by stopping and deleting it,
+then creating it from the updated file, or reboot the host.
+
+An optional `configuration.affinity` list sets default placement for selected
+vCPUs, using zero-based vCPU and host CPU indices. For example:
+
+```json
+"affinity": [
+  { "vcpu": 0, "cpus": [0, 2] },
+  { "vcpu": 1, "cpus": [1, 3] }
+]
+```
+
+Each `cpus` list is the allowed host CPU set, not a preference order. Omit the
+field, use `[]`, or leave individual vCPUs out to let the scheduler assign their
+host CPUs automatically. Board examples omit this optional field by default.
+Lists must be nonempty with unique CPU IDs in 0..255; each vCPU may
+appear once and must be below `vcpus`. All specified masks are applied before
+any vCPU starts, including for I/O VMs. A mask rejected by the host (for example,
+one containing no schedulable CPU) fails startup. `vmm affinity` can still change
+the current instance; restarting reapplies the saved definition's defaults.
+For board deployments, edit the board JSON's VM `configuration` or `io-vm`
+object; generated configuration files and ITBs need no manual edits.
+
+Migration: rebuild old ITBs with the current packer and add `configuration` to
+existing JSON definitions. The v2 ITB contract rejects v1 bundles and embedded
+runtime policy; it never falls back to values from an image.
 
 The first autostart VM retains init's boot-critical supervision lease until it first stops;
 later instances and additional VMs are supervised independently by the manager.

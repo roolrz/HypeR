@@ -3,7 +3,7 @@
 
 //! Validation of the raw `AArch64` Linux `Image` header and placement.
 
-use super::{Architecture, Compression, GuestImage, Payload, PlatformProfile, ReadAt};
+use super::{Architecture, Compression, ConfiguredImage, Payload, PlatformProfile, ReadAt};
 
 const HEADER_SIZE: usize = 64;
 const TEXT_OFFSET: usize = 8;
@@ -190,7 +190,7 @@ pub fn validate<Source: ReadAt>(
 /// contracts cannot drift independently.
 pub fn validate_reference<Source: ReadAt>(
     source: &Source,
-    image: GuestImage,
+    image: ConfiguredImage,
 ) -> Result<ReferenceLayout, ReferenceLayoutError<Source::Error>> {
     if image.architecture != Architecture::Aarch64 {
         return Err(ReferenceLayoutError::UnsupportedArchitecture);
@@ -295,7 +295,7 @@ fn le64(bytes: &[u8], offset: usize) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BootArguments, GuestImage, PlatformProfile};
+    use crate::{BootArguments, ConfiguredImage, PlatformProfile};
 
     const FILE_OFFSET: usize = 16;
     const PAYLOAD_LENGTH: usize = HEADER_SIZE + 16;
@@ -513,8 +513,8 @@ mod tests {
         Ok(())
     }
 
-    fn reference_image(kernel: Payload) -> GuestImage {
-        GuestImage {
+    fn reference_image(kernel: Payload) -> ConfiguredImage {
+        ConfiguredImage {
             architecture: Architecture::Aarch64,
             platform_profile: PlatformProfile::Aarch64Reference,
             memory_size: MINIMUM_REFERENCE_MEMORY_SIZE,
