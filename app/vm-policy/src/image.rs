@@ -3,6 +3,8 @@
 
 //! Admit only native guest architectures; ITB metadata owns image identity.
 
+mod read_cache;
+
 use crate::fleet::Configuration;
 use hyper_vm_image::{Architecture, ConfiguredImage, GuestImage, ReadAt};
 
@@ -35,8 +37,13 @@ pub fn validate_file(file: &hyper_os::fs::File, config: &Configuration) -> Resul
             self.0.read_exact_at(offset, output)
         }
     }
+    // FIT metadata alternates between structure tokens and the string table,
+    // often on distant pages separated by payloads. Keep this cache local to
+    // admission; it is not a snapshot, and the runtime still revalidates on start.
+    let source = read_cache::CachedSource::new(Source(file))
+        .map_err(|error| format!("cannot read ITB: {error:?}"))?;
     let image =
-        hyper_vm_image::parse(&Source(file)).map_err(|error| format!("invalid ITB: {error:?}"))?;
+        hyper_vm_image::parse(&source).map_err(|error| format!("invalid ITB: {error:?}"))?;
     configure(image, config)?;
     Ok(())
 }
