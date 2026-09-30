@@ -92,7 +92,7 @@ while :; do
     fi
     if grep -Eq 'HypeR: kernel startup.*failed|HypeR crash monitor' "$log" ||
         grep -Eq '(^|[^[:alnum:]_])(PANIC|BUG)([^[:alnum:]_]|$)' "$log" ||
-        grep -Eq 'HypeR init: (critical service |initial VM (failed|protocol failed)|VM (manager terminated|provisioning channel closed))' "$log"; then
+        grep -Eq 'HypeR init: (bootstrap failed|critical service |VM fleet (configuration rejected|result channel closed|configuration reply is invalid)|VM provisioning channel closed)' "$log"; then
         cat "$log" >&2
         echo "HypeR reported a fatal failure before Native init completed" >&2
         exit 1
@@ -419,6 +419,7 @@ while :; do
             exit 0
         fi
         if grep -Fq 'HypeR vm-manager: ready' "$native_output" &&
+            grep -Fq 'HypeR init: VM fleet configured' "$native_output" &&
             grep -Fq 'HypeR vm-runtime: starting' "$native_output" &&
             grep -q 'Run /init as init process' "$log" &&
             grep -q 'HypeR guest: /init reached' "$log" &&

@@ -50,7 +50,7 @@ impl FleetManager {
         let deadline = hyper_os::time::deadline_after(CAPABILITY_REPLY_DEADLINE)?.as_raw();
         let endpoint = self.clients[client]
             .as_ref()
-            .and_then(|client| client.capabilities.as_ref())
+            .map(|client| &client.capabilities)
             .ok_or(hyper_os::Error::InvalidResponse)?;
         loop {
             let waits = [WaitItem::new(

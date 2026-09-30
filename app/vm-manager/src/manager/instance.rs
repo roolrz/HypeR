@@ -282,29 +282,17 @@ impl FleetManager {
         let outcome =
             std::mem::take(&mut instance.policy).finish(succeeded, &mut instance.disk_admission);
         self.machines[vm].policy.finished(&outcome);
-        if !outcome.reboot {
-            self.publish_initial_event(vm, outcome.event);
+        if let vm_contract::InstanceEvent::Failed(reason) = outcome.event {
+            eprintln!(
+                "HypeR vm-manager: VM '{}' failed: {reason:?}",
+                self.machines[vm].definition.name
+            );
         }
         drop(instance);
         Ok(())
     }
 
-    pub(super) fn publish_boot_event(&self, event: vm_contract::BootEvent) {
-        if let Some(client) = self.clients[0].as_ref()
-            && client.initial
-        {
-            let _ = client.control.as_byte_channel().try_send(&event.encode());
-        }
-    }
-
-    pub(super) fn publish_initial_event(&mut self, vm: usize, event: vm_contract::InstanceEvent) {
-        if self.initial_vm == Some(vm) {
-            self.initial_vm = None;
-            self.publish_boot_event(vm_contract::BootEvent::InstanceTerminated(event));
-        }
-    }
-
-    pub(super) fn complete_restarts(&mut self) -> hyper_os::Result<()> {
+    pub(super) fn complete_restarts(&mut self) {
         let now = Instant::now();
         for vm in 0..self.machines.len() {
             if let Some(instance) = self.machines[vm].instance.as_mut()
@@ -313,16 +301,9 @@ impl FleetManager {
                 let _ = instance.runtime.as_process_supervisor().request_stop();
             }
             let machine = &mut self.machines[vm];
-            if machine.policy.take_restart(machine.instance.is_some())
-                && self.start_instance(vm).is_err()
-            {
-                self.machines[vm].policy.start_failed();
-                self.publish_initial_event(
-                    vm,
-                    vm_contract::InstanceEvent::Failed(vm_contract::InstanceFailure::Runtime),
-                );
+            if machine.policy.take_restart(machine.instance.is_some()) {
+                let _ = self.start_instance(vm);
             }
         }
-        Ok(())
     }
 }

@@ -158,8 +158,11 @@ Migration: rebuild old ITBs with the current packer and add `configuration` to
 existing JSON definitions. The v2 ITB contract rejects v1 bundles and embedded
 runtime policy; it never falls back to values from an image.
 
-The first autostart VM retains init's boot-critical supervision lease until it first stops;
-later instances and additional VMs are supervised independently by the manager.
+Init waits for the manager to accept the complete fleet configuration, including
+an empty fleet or definitions with no autostart VMs. It continues supervising
+the manager as a critical service. Every guest lifecycle belongs to the manager:
+an autostart or later runtime failure marks that VM failed without stopping init
+or unrelated guests. Configuration admission errors still fail system startup.
 
 ## Validation
 
@@ -167,6 +170,8 @@ later instances and additional VMs are supervised independently by the manager.
 two simultaneous VMs, name isolation, and create/delete/restart through
 the real shell. It runs as part of Native CI, alongside the existing startup and
 repeated runtime-crash cleanup tests.
+`make test-fleet-config` checks empty and idle fleets, atomic configuration
+rejection, and an autostart failure followed by a successful independent guest.
 
 ## Interactive transport
 

@@ -42,14 +42,8 @@ pub const MANAGED_IMAGE_RIGHTS: Rights = Rights::READ
     .union(Rights::TRANSFER);
 /// The fleet manager only reads its bootstrap configuration; it does not forward it.
 pub const PROVISIONED_CONFIG_RIGHTS: Rights = Rights::READ;
-/// Rights retained across the init-to-manager control-endpoint hop.
-///
-/// `TRANSFER` is transport authority only. The manager attenuates it away when
-/// it installs the endpoint into the runtime process.
-pub const PROVISIONED_INSTANCE_CONTROL_RIGHTS: Rights = Rights::WAIT
-    .union(Rights::READ)
-    .union(Rights::WRITE)
-    .union(Rights::TRANSFER);
+/// The manager sends one configuration result, then closes this endpoint.
+pub const PROVISIONED_RESULT_RIGHTS: Rights = Rights::WRITE;
 /// Rights visible to one VM runtime for its instance-control endpoint.
 pub const INSTANCE_CONTROL_RIGHTS: Rights = Rights::WAIT.union(Rights::READ).union(Rights::WRITE);
 pub const RUNTIME_CONSOLE_CONNECTION_RIGHTS: Rights = Rights::WAIT.union(Rights::READ);
@@ -149,11 +143,12 @@ const MESSAGE_VERSION: u8 = 1;
 const KIND_PROVISION_REQUEST: u8 = 1;
 const KIND_INSTANCE_COMMAND: u8 = 2;
 const KIND_INSTANCE_STATUS: u8 = 3;
-const KIND_INSTANCE_EVENT: u8 = 4;
 const KIND_MANAGER_CONNECTION: u8 = 5;
+const KIND_PROVISION_RESULT: u8 = 6;
 const KIND_FLEET_CAPABILITY: u8 = 8;
 
-/// Capability-bearing request accepted by the fleet manager while empty.
+/// Installs the initial fleet definitions as one batch. Carries the read-only
+/// configuration file and a write-only, one-shot result endpoint, in that order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisionRequest {
     ConfigureFleet,
@@ -180,6 +175,34 @@ impl ProvisionRequest {
     pub const fn capability_count(self) -> usize {
         match self {
             Self::ConfigureFleet => 2,
+        }
+    }
+}
+
+/// Configuration admission result, independent of guest startup or lifetime.
+/// Sent before autostart begins; an empty fleet is also successfully configured.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProvisionResult {
+    Configured,
+    Rejected,
+}
+
+impl ProvisionResult {
+    #[must_use]
+    pub const fn encode(self) -> [u8; MESSAGE_BYTES] {
+        let value = match self {
+            Self::Configured => 1,
+            Self::Rejected => 2,
+        };
+        encode_message(KIND_PROVISION_RESULT, value, 0)
+    }
+
+    #[must_use]
+    pub fn decode(message: &[u8]) -> Option<Self> {
+        match decode_message(message, KIND_PROVISION_RESULT)? {
+            (1, 0) => Some(Self::Configured),
+            (2, 0) => Some(Self::Rejected),
+            _ => None,
         }
     }
 }
@@ -605,58 +628,11 @@ impl InstanceStatus {
     }
 }
 
-/// Terminal instance state observable through the fleet control endpoint.
+/// Terminal instance outcome derived by the manager from runtime status and exit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstanceEvent {
     Stopped,
     Failed(InstanceFailure),
-}
-
-impl InstanceEvent {
-    #[must_use]
-    pub const fn encode(self) -> [u8; MESSAGE_BYTES] {
-        match self {
-            Self::Stopped => encode_message(KIND_INSTANCE_EVENT, 1, 0),
-            Self::Failed(reason) => encode_message(KIND_INSTANCE_EVENT, 2, reason as u8),
-        }
-    }
-
-    #[must_use]
-    pub fn decode(message: &[u8]) -> Option<Self> {
-        let (value, detail) = decode_message(message, KIND_INSTANCE_EVENT)?;
-        match (value, detail) {
-            (1, 0) => Some(Self::Stopped),
-            (2, reason) => Some(Self::Failed(InstanceFailure::from_wire(reason)?)),
-            _ => None,
-        }
-    }
-}
-
-/// Completion of init's boot-time fleet supervision. No-autostart is not an
-/// instance termination; existing terminal event encodings remain unchanged.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BootEvent {
-    NoAutostart,
-    InstanceTerminated(InstanceEvent),
-}
-
-impl BootEvent {
-    #[must_use]
-    pub const fn encode(self) -> [u8; MESSAGE_BYTES] {
-        match self {
-            Self::NoAutostart => encode_message(KIND_INSTANCE_EVENT, 3, 0),
-            Self::InstanceTerminated(event) => event.encode(),
-        }
-    }
-
-    #[must_use]
-    pub fn decode(message: &[u8]) -> Option<Self> {
-        if decode_message(message, KIND_INSTANCE_EVENT)? == (3, 0) {
-            Some(Self::NoAutostart)
-        } else {
-            InstanceEvent::decode(message).map(Self::InstanceTerminated)
-        }
-    }
 }
 
 /// Pure reducer used by the manager to validate one runtime status stream.
@@ -775,33 +751,67 @@ fn decode_message(message: &[u8], expected_kind: u8) -> Option<(u8, u8)> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BootEvent, INSTANCE_CONTROL_RIGHTS, InstanceCommand, InstanceEvent, InstanceFailure,
-        InstanceStatus, InstanceStopState, InstanceTracker, InvalidStatusTransition,
-        MANAGED_IMAGE_RIGHTS, ManagerConnectionRequest, PROVISIONED_CONFIG_RIGHTS,
-        PROVISIONED_INSTANCE_CONTROL_RIGHTS, ProvisionRequest, RUNTIME_CONSOLE_CONNECTION_CONTRACT,
-        RUNTIME_CREATION_LEASE_CONTRACT, RUNTIME_IMAGE_CONTRACT, RUNTIME_INSTANCE_CONTROL_CONTRACT,
-        RUNTIME_STARTUP_CONTRACTS, StopAction,
+        INSTANCE_CONTROL_RIGHTS, InstanceCommand, InstanceEvent, InstanceFailure, InstanceStatus,
+        InstanceStopState, InstanceTracker, InvalidStatusTransition, MANAGED_IMAGE_RIGHTS,
+        MANAGER_PROVISIONING_CONTRACT, ManagerConnectionRequest, PROVISIONED_CONFIG_RIGHTS,
+        PROVISIONED_RESULT_RIGHTS, ProvisionRequest, ProvisionResult,
+        RUNTIME_CONSOLE_CONNECTION_CONTRACT, RUNTIME_CREATION_LEASE_CONTRACT,
+        RUNTIME_IMAGE_CONTRACT, RUNTIME_INSTANCE_CONTROL_CONTRACT, RUNTIME_STARTUP_CONTRACTS,
+        StopAction,
     };
     use hyper_os::handle::Rights;
 
     #[test]
-    fn boot_without_autostart_is_not_an_instance_termination() {
-        let message = BootEvent::NoAutostart.encode();
-        assert_eq!(BootEvent::decode(&message), Some(BootEvent::NoAutostart));
-        assert_eq!(InstanceEvent::decode(&message), None);
-        assert_eq!(InstanceStatus::decode(&message), None);
-        for event in [
-            InstanceEvent::Stopped,
-            InstanceEvent::Failed(InstanceFailure::Runtime),
-        ] {
-            assert_eq!(
-                BootEvent::decode(&event.encode()),
-                Some(BootEvent::InstanceTerminated(event))
-            );
+    fn provision_results_round_trip_independently_of_instance_messages() {
+        for result in [ProvisionResult::Configured, ProvisionResult::Rejected] {
+            let message = result.encode();
+            assert_eq!(ProvisionResult::decode(&message), Some(result));
+            assert_eq!(ProvisionRequest::decode(&message), None);
+            assert_eq!(InstanceCommand::decode(&message), None);
+            assert_eq!(InstanceStatus::decode(&message), None);
+            assert_eq!(ManagerConnectionRequest::decode(&message), None);
         }
-        let mut malformed = message;
-        malformed[7] = 1;
-        assert_eq!(BootEvent::decode(&malformed), None);
+        for message in [
+            ProvisionRequest::ConfigureFleet.encode(),
+            InstanceCommand::Stop.encode(),
+            InstanceStatus::Stopped.encode(),
+            InstanceStatus::Failed(InstanceFailure::Runtime).encode(),
+            ManagerConnectionRequest.encode(),
+            // Removed boot-time instance notifications are not admission results.
+            [b'H', b'V', b'M', 1, 4, 1, 0, 0],
+            [b'H', b'V', b'M', 1, 4, 2, 1, 0],
+            [b'H', b'V', b'M', 1, 4, 3, 0, 0],
+        ] {
+            assert_eq!(ProvisionResult::decode(&message), None);
+        }
+    }
+
+    #[test]
+    fn provision_results_reject_malformed_envelopes_and_reserved_values() {
+        for result in [ProvisionResult::Configured, ProvisionResult::Rejected] {
+            let message = result.encode();
+            assert_eq!(ProvisionResult::decode(&message[..7]), None);
+            let mut extended = [0; 9];
+            extended[..8].copy_from_slice(&message);
+            assert_eq!(ProvisionResult::decode(&extended), None);
+            for (index, value) in [
+                (0, 0),
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (3, 2),
+                (4, 0),
+                (5, 0),
+                (5, 3),
+                (5, u8::MAX),
+                (6, 1),
+                (7, 1),
+            ] {
+                let mut malformed = message;
+                malformed[index] = value;
+                assert_eq!(ProvisionResult::decode(&malformed), None);
+            }
+        }
     }
 
     #[test]
@@ -832,12 +842,19 @@ mod tests {
     }
 
     #[test]
-    fn provisioned_capabilities_retain_only_required_forwarding_authority() {
+    fn provisioned_capabilities_grant_only_configuration_and_result_access() {
         assert!(MANAGED_IMAGE_RIGHTS.contains(Rights::TRANSFER));
         assert_eq!(PROVISIONED_CONFIG_RIGHTS, Rights::READ);
-        assert!(PROVISIONED_INSTANCE_CONTROL_RIGHTS.contains(Rights::TRANSFER));
+        assert_eq!(PROVISIONED_RESULT_RIGHTS, Rights::WRITE);
+        assert_eq!(
+            MANAGER_PROVISIONING_CONTRACT.required_rights(),
+            Rights::READ.union(Rights::WAIT)
+        );
+        assert_eq!(
+            MANAGER_PROVISIONING_CONTRACT.allowed_rights(),
+            MANAGER_PROVISIONING_CONTRACT.required_rights()
+        );
         assert!(!INSTANCE_CONTROL_RIGHTS.contains(Rights::TRANSFER));
-        assert!(PROVISIONED_INSTANCE_CONTROL_RIGHTS.contains(INSTANCE_CONTROL_RIGHTS));
     }
 
     #[test]
@@ -890,8 +907,12 @@ mod tests {
             [b'H', b'V', b'M', 1, 3, 6, 3, 0]
         );
         assert_eq!(
-            InstanceEvent::Failed(InstanceFailure::GuestMmio).encode(),
-            [b'H', b'V', b'M', 1, 4, 2, 4, 0]
+            ProvisionResult::Configured.encode(),
+            [b'H', b'V', b'M', 1, 6, 1, 0, 0]
+        );
+        assert_eq!(
+            ProvisionResult::Rejected.encode(),
+            [b'H', b'V', b'M', 1, 6, 2, 0, 0]
         );
     }
 
@@ -904,7 +925,7 @@ mod tests {
         );
         assert_eq!(InstanceCommand::decode(&command), None);
         assert_eq!(InstanceStatus::decode(&command), None);
-        assert_eq!(InstanceEvent::decode(&command), None);
+        assert_eq!(ProvisionResult::decode(&command), None);
     }
 
     #[test]
@@ -963,7 +984,7 @@ mod tests {
     }
 
     #[test]
-    fn provisioning_flags_determine_the_atomic_capability_shape() {
+    fn fleet_configuration_requires_both_capabilities_atomically() {
         let request = ProvisionRequest::ConfigureFleet;
         assert_eq!(ProvisionRequest::decode(&request.encode()), Some(request));
         assert_eq!(request.capability_count(), 2);

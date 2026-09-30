@@ -50,9 +50,10 @@ a separate configuration archive to the Linux initramfs.
 
 The shell starts independently. An explicit readiness channel gates init's
 loading of `/data/vms.json` until the configuration filesystem is mounted.
-If no VM is configured for autostart, vm-manager reports `NoAutostart` to init;
-this completes boot supervision without claiming that a VM stopped. The I/O VM
-continues running under io-runtime independently.
+The manager acknowledges the complete fleet configuration before attempting
+autostart, including an empty fleet or one with no autostart VMs. Init supervises
+configuration admission and the manager service; guest lifecycle failures remain
+local to the manager. The I/O VM continues running under io-runtime independently.
 Guest lifecycle management remains in vm-manager and each guest's vm-runtime.
 The manager retains each disk session endpoint until the runtime reports its VM
 installed, then transfers it to the I/O broker through the supervisor wait set.

@@ -230,12 +230,15 @@ only `never` and requires at least one critical service. The physical Console
 input and output workers, the session service, and the VM manager are critical;
 the interactive shell is a replaceable, noncritical client owned by the session
 manager. Init observes every
-service Process and its initial VM instance endpoint in one bounded
+service Process and the fleet's one-shot configuration result in one bounded
 `object_wait_many` set without polling. It reports terminal Process information
 before releasing each dead supervisor handle. A noncritical service exit is
-recorded and removed from the set; a critical exit or failed initial VM stops
-the remaining graph. A clean initial-VM shutdown is nonfatal and leaves the VM
-manager resident for later provisioning. Reliable restart additionally
+recorded and removed from the set; a critical exit or rejected fleet configuration
+stops the remaining graph. The manager acknowledges admission of the complete
+configuration before starting any autostart guest; empty fleets use the same
+result. Init then removes the result endpoint and continues supervising the
+manager Process. All guest starts, stops, and failures belong to the manager,
+independently of definition order. Reliable restart additionally
 requires a monotonic backoff facility. Unsupported supervision graphs are
 rejected during preflight before any child is started.
 
@@ -270,10 +273,17 @@ and runs three restart/reclamation cycles at each of these boundaries:
 - a real Linux `CPU_OFF` request accepted after the requesting CPU detached from
   hardware and entered the Off power state (scheduler parking may still race).
 
-The fixture disables VM autostart so deliberate runtime failure cannot trip
-init's initial-VM boot lease. Each abrupt process exit bypasses Rust destructors;
+The fixture disables VM autostart to measure an idle memory baseline and choose
+each guest's start time. Each abrupt process exit bypasses Rust destructors;
 the test verifies the selected boundary marker, failed VM state, exact guest-page
 reclamation, bounded runtime-memory retention, and successful new instances.
 `test-power-crash` and `HYPER_TEST_POWER_CRASH` are test-only build selections;
 ordinary runtime binaries contain neither the hooks nor a control protocol for
 triggering them. This is QEMU lifecycle coverage, not physical DMA/cache proof.
+
+`make test-fleet-config` separately checks successful configuration admission for
+empty and non-autostart fleets, malformed JSON and image-admission rejection
+without partial guest startup, and a guest startup failure that leaves the next
+autostart guest and Native shell running. An unavailable host CPU affinity
+causes the startup failure after image admission; malformed images remain
+configuration errors.

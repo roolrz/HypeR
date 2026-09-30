@@ -12,7 +12,7 @@ mod supervisor;
 use authority::{AuthorityInventory, VmAuthorities};
 use hyper_init::bootstrap_policy::BootstrapPolicy;
 use launcher::ServiceLauncher;
-use provision::InitialVmProvisioner;
+use provision::FleetProvisioner;
 use supervisor::SupervisorSet;
 
 use std::convert::Infallible;
@@ -28,7 +28,7 @@ use hyper_os::fs::Directory;
 use hyper_os::startup::{self, Startup};
 use hyper_os::task::{create_resource_domain, create_task_group};
 use hyper_service::vm as vm_contract;
-use hyper_vm_policy::INITIAL_VM_FLEET_LIMITS;
+use hyper_vm_policy::VM_FLEET_LIMITS;
 
 const MANIFEST_PATH: &str = "/etc/hyper/services.json";
 
@@ -96,7 +96,7 @@ impl ManifestSource for LoadedManifest {
 /// Top-level init state. Subobjects own disjoint authority and lifecycle roles.
 struct Runtime {
     launcher: ServiceLauncher,
-    provisioner: Option<InitialVmProvisioner>,
+    provisioner: Option<FleetProvisioner>,
     vm_authority:
         Option<hyper_os::OwnedHandle<hyper_os::handle::VirtualMachineCreationAuthorityObject>>,
     supervisors: SupervisorSet,
@@ -175,17 +175,14 @@ impl Runtime {
             .take()
             .ok_or(LaunchError::UnsupportedAuthority)?;
         let authorities = &mut self.launcher.authorities;
-        let domain =
-            create_resource_domain(authorities.domain.as_handle_ref(), INITIAL_VM_FLEET_LIMITS)
-                .map_err(|_| LaunchError::OperatingSystem)?;
+        let domain = create_resource_domain(authorities.domain.as_handle_ref(), VM_FLEET_LIMITS)
+            .map_err(|_| LaunchError::OperatingSystem)?;
         let group = create_task_group(authorities.factory.as_handle_ref(), domain.as_handle_ref())
             .map_err(|_| LaunchError::OperatingSystem)?;
         let (init_vm_provisioning_channel, vm_provisioning_channel) =
             CapabilityChannel::create().map_err(|_| LaunchError::OperatingSystem)?;
         let (vm_client_connection_channel, vm_manager_connection_channel) =
             CapabilityChannel::create().map_err(|_| LaunchError::OperatingSystem)?;
-        let (vm_instance_control_channel, manager_vm_instance_control_channel) =
-            channel::create_pair().map_err(|_| LaunchError::OperatingSystem)?;
         authorities.vm = Some(VmAuthorities {
             authority,
             group,
@@ -194,10 +191,8 @@ impl Runtime {
             vm_client_connection_channel: vm_client_connection_channel.into_handle(),
             vm_manager_connection_channel: Some(vm_manager_connection_channel.into_handle()),
         });
-        self.provisioner = Some(InitialVmProvisioner {
-            init_vm_provisioning_channel,
-            vm_instance_control_channel: Some(vm_instance_control_channel),
-            manager_vm_instance_control_channel: Some(manager_vm_instance_control_channel),
+        self.provisioner = Some(FleetProvisioner {
+            channel: init_vm_provisioning_channel,
         });
         Ok(())
     }
@@ -295,10 +290,9 @@ impl Runtime {
                 )?;
             }
             drop(ready_reader);
-            let mut vm_control = None;
             if let Some((manager, path)) = vm_configuration {
-                let provisioner = self.provisioner.as_mut().ok_or(LaunchError::InvalidPlan)?;
-                provisioner.provision_initial_vm(
+                let provisioner = self.provisioner.take().ok_or(LaunchError::InvalidPlan)?;
+                provisioner.configure_fleet(
                     manifest,
                     manager,
                     path,
@@ -306,10 +300,9 @@ impl Runtime {
                     self.launcher.authorities.console,
                     &mut self.supervisors,
                 )?;
-                vm_control = provisioner.vm_instance_control_channel.take();
             }
             self.supervisors
-                .supervise(manifest, &mut vm_control, self.launcher.authorities.console)
+                .supervise(manifest, self.launcher.authorities.console)
         })();
         match result {
             Ok(never) => match never {},
@@ -337,9 +330,9 @@ pub(super) enum LaunchError {
     UnsupportedAuthority,
     UnsupportedRestartPolicy,
     UnsupportedSupervisionGraph,
-    VmInstanceFailed,
-    VmInstanceProtocol,
-    VmManagerTerminated,
+    VmFleetConfigurationRejected,
+    VmFleetReplyClosed,
+    VmFleetReplyInvalid,
     VmProvisioningClosed,
     StorageNotReady,
 }
@@ -357,9 +350,11 @@ impl LaunchError {
             Self::UnsupportedSupervisionGraph => {
                 b"HypeR init: unsupported critical-service supervision graph\n"
             }
-            Self::VmInstanceFailed => b"HypeR init: initial VM failed\n",
-            Self::VmInstanceProtocol => b"HypeR init: initial VM protocol failed\n",
-            Self::VmManagerTerminated => b"HypeR init: VM manager terminated before provisioning\n",
+            Self::VmFleetConfigurationRejected => b"HypeR init: VM fleet configuration rejected\n",
+            Self::VmFleetReplyClosed => {
+                b"HypeR init: VM fleet result channel closed without a reply\n"
+            }
+            Self::VmFleetReplyInvalid => b"HypeR init: VM fleet configuration reply is invalid\n",
             Self::VmProvisioningClosed => b"HypeR init: VM provisioning channel closed\n",
             Self::StorageNotReady => b"HypeR init: storage readiness failed or timed out\n",
         }
@@ -375,9 +370,9 @@ impl LaunchError {
             Self::UnsupportedAuthority => b"unsupported authority",
             Self::UnsupportedRestartPolicy => b"unsupported restart policy",
             Self::UnsupportedSupervisionGraph => b"unsupported supervision graph",
-            Self::VmInstanceFailed => b"initial VM failed",
-            Self::VmInstanceProtocol => b"initial VM protocol failed",
-            Self::VmManagerTerminated => b"VM manager terminated",
+            Self::VmFleetConfigurationRejected => b"VM fleet configuration rejected",
+            Self::VmFleetReplyClosed => b"VM fleet result channel closed without a reply",
+            Self::VmFleetReplyInvalid => b"VM fleet configuration reply is invalid",
             Self::VmProvisioningClosed => b"VM provisioning channel closed",
             Self::StorageNotReady => b"storage not ready",
         }

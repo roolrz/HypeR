@@ -1,0 +1,64 @@
+// SPDX-FileCopyrightText: 2026 roolrz
+// SPDX-License-Identifier: Apache-2.0
+
+//! One-shot fleet admission, completed before any guest starts.
+
+use super::FleetManager;
+use hyper_os::capability_channel::{CapabilityChannel, CapabilityReceiveSlot};
+use hyper_os::fs::File;
+use hyper_os::handle::{ByteChannelObject, FileObject};
+use hyper_service::vm as vm_contract;
+use hyper_vm_policy::fleet;
+use std::io::Read;
+use std::mem::MaybeUninit;
+
+impl FleetManager {
+    pub(super) fn configure_fleet(
+        &mut self,
+        provisioning: CapabilityChannel,
+    ) -> hyper_os::Result<()> {
+        let mut bytes = [MaybeUninit::<u8>::uninit(); vm_contract::MESSAGE_BYTES];
+        let mut slots = [
+            CapabilityReceiveSlot::new::<FileObject>(vm_contract::PROVISIONED_CONFIG_RIGHTS),
+            CapabilityReceiveSlot::new::<ByteChannelObject>(vm_contract::PROVISIONED_RESULT_RIGHTS),
+        ];
+        let message = provisioning.receive(hyper_os::DEADLINE_INFINITE, &mut bytes, &mut slots)?;
+        let request = vm_contract::ProvisionRequest::decode(message.bytes())
+            .ok_or(hyper_os::Error::InvalidResponse)?;
+        if message.capability_count() != request.capability_count() {
+            return Err(hyper_os::Error::InvalidResponse);
+        }
+        let config = slots[0]
+            .take::<FileObject>()?
+            .ok_or(hyper_os::Error::MissingHandle)?;
+        let result = slots[1]
+            .take::<ByteChannelObject>()?
+            .ok_or(hyper_os::Error::MissingHandle)?;
+        let admitted = read_config(File::from_handle(config))
+            .and_then(|config| self.install_definitions(config.machines));
+        let response = match &admitted {
+            Ok(()) => vm_contract::ProvisionResult::Configured,
+            Err(error) => {
+                eprintln!("HypeR vm-manager: fleet configuration rejected: {error}");
+                vm_contract::ProvisionResult::Rejected
+            }
+        };
+        // A fresh endpoint has room for this single result. Neither endpoint
+        // survives configuration, and init acquires no guest-lifecycle authority.
+        result.as_byte_channel().try_send(&response.encode())?;
+        admitted.map_err(|_| hyper_os::Error::InvalidResponse)
+    }
+}
+
+fn read_config(file: File) -> Result<fleet::Config, String> {
+    // Bound allocation even if the file grows after provisioning.
+    let mut bytes = Vec::new();
+    file.into_std()
+        .take(fleet::MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read configuration: {error}"))?;
+    if bytes.len() as u64 > fleet::MAX_CONFIG_BYTES {
+        return Err("configuration exceeds size limit".into());
+    }
+    fleet::Config::parse(&bytes)
+}

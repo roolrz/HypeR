@@ -18,8 +18,10 @@ impl FleetManager {
             return Ok(());
         };
         if let Some(index) = self.clients.iter().position(Option::is_none) {
-            self.clients[index] =
-                Some(Client::command(connection.control, connection.capabilities));
+            self.clients[index] = Some(Client {
+                control: connection.control,
+                capabilities: connection.capabilities,
+            });
         } else {
             let bytes = fleet::encode(&Response::Error {
                 message: format!("client limit reached (maximum {MAX_CLIENTS} connections); retry after another client exits"),
@@ -60,22 +62,6 @@ impl FleetManager {
         let message = bytes
             .get(..length)
             .ok_or(hyper_os::Error::InvalidResponse)?;
-        if self.clients[index]
-            .as_ref()
-            .is_some_and(|client| client.initial)
-        {
-            if vm_contract::InstanceCommand::decode(message)
-                == Some(vm_contract::InstanceCommand::Stop)
-            {
-                if let Some(vm) = self.initial_vm {
-                    self.machines[vm].policy.request_stop(false);
-                    self.request_stop(vm)?;
-                }
-            } else {
-                self.disconnect_client(index);
-            }
-            return Ok(());
-        }
         match fleet::request(message) {
             Ok(command) => match self.execute_command(index, command) {
                 Ok(()) => Ok(()),
@@ -105,7 +91,6 @@ impl FleetManager {
                 let mut failures = Vec::new();
                 for vm in first..self.machines.len() {
                     if self.machines[vm].definition.autostart && self.start_instance(vm).is_err() {
-                        self.machines[vm].policy.start_failed();
                         failures.push(self.machines[vm].definition.name.clone());
                     }
                 }
@@ -173,13 +158,6 @@ impl FleetManager {
                     return self.reply_error(client, "stop the VM before deleting its definition");
                 }
                 self.machines.remove(vm);
-                if let Some(initial) = self.initial_vm {
-                    self.initial_vm = if initial == vm {
-                        None
-                    } else {
-                        Some(initial - usize::from(initial > vm))
-                    };
-                }
                 self.reply(client, Response::Accepted)
             }
             Action::Stop => {
@@ -195,7 +173,6 @@ impl FleetManager {
                     self.machines[vm].policy.request_stop(true);
                     self.request_stop(vm)?;
                 } else if let Err(error) = self.start_instance(vm) {
-                    self.machines[vm].policy.start_failed();
                     return self.reply_error(client, &format!("cannot start VM '{name}': {error}"));
                 }
                 self.reply(client, Response::Accepted)

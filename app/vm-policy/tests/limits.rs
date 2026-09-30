@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    BUSINESS_VM_CAPACITY, FLEET_CONTROL_PLANE_HEADROOM, INITIAL_VM_FLEET_LIMITS, INITIAL_VM_LIMITS,
-    IO_RUNTIME_LIMITS,
+    BUSINESS_VM_CAPACITY, FLEET_CONTROL_PLANE_HEADROOM, IO_RUNTIME_LIMITS, VM_FLEET_LIMITS,
+    VM_INSTANCE_LIMITS,
 };
 
 #[test]
 fn fleet_domain_contains_all_business_slots_and_resident_io() {
-    let fleet = INITIAL_VM_FLEET_LIMITS;
-    let instance = INITIAL_VM_LIMITS;
+    let fleet = VM_FLEET_LIMITS;
+    let instance = VM_INSTANCE_LIMITS;
     let headroom = FLEET_CONTROL_PLANE_HEADROOM;
     let resident = IO_RUNTIME_LIMITS;
     assert_eq!(
@@ -120,16 +120,13 @@ fn fleet_domain_contains_all_business_slots_and_resident_io() {
 
 #[test]
 fn resident_io_and_two_full_guests_fit_without_weakening_child_limits() {
-    assert_eq!(INITIAL_VM_LIMITS.guest_pages, 64 * 1024);
-    assert_eq!(INITIAL_VM_LIMITS.virtual_machines, 1);
+    assert_eq!(VM_INSTANCE_LIMITS.guest_pages, 64 * 1024);
+    assert_eq!(VM_INSTANCE_LIMITS.virtual_machines, 1);
     assert!(
-        IO_RUNTIME_LIMITS.guest_pages + 2 * INITIAL_VM_LIMITS.guest_pages
-            <= INITIAL_VM_FLEET_LIMITS.guest_pages
+        IO_RUNTIME_LIMITS.guest_pages + 2 * VM_INSTANCE_LIMITS.guest_pages
+            <= VM_FLEET_LIMITS.guest_pages
     );
-    assert!(IO_RUNTIME_LIMITS.virtual_machines + 2 <= INITIAL_VM_FLEET_LIMITS.virtual_machines);
+    assert!(IO_RUNTIME_LIMITS.virtual_machines + 2 <= VM_FLEET_LIMITS.virtual_machines);
     // Filling every business slot plus I/O leaves no unaccounted VM slot.
-    assert_eq!(
-        INITIAL_VM_FLEET_LIMITS.virtual_machines,
-        BUSINESS_VM_CAPACITY + 1
-    );
+    assert_eq!(VM_FLEET_LIMITS.virtual_machines, BUSINESS_VM_CAPACITY + 1);
 }
