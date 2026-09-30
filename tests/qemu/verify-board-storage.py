@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shlex
 import subprocess
 import sys
 import time
@@ -111,8 +112,15 @@ def boot(args, mode):
             if not re.search(re.escape(args.observed_name.encode()) + rb'\s+running\s+yes\s+read-only',
                              await_text(rb'hyper-sh\$ ')):
                 raise RuntimeError('rejected control request changed the observed VM')
+            # This fixture may intentionally have no business VMs. Submit a
+            # complete definition so the request reaches manager admission.
+            child.stdin.write(args.conflict_config_command)
+            child.stdin.flush()
+            prepared = await_text(rb'hyper-sh\$ ')
+            if b'sh: ' in prepared or b'echo:' in prepared:
+                raise RuntimeError(f'cannot prepare name-conflict configuration: {prepared!r}')
             child.stdin.write(
-                f'vmm create {args.observed_name} --config /etc/hyper/vms.json --from alpine\n'.encode())
+                f'vmm create {args.observed_name} --config /data/observed-name-conflict.json\n'.encode())
             child.stdin.flush()
             refused = await_text(rb'hyper-sh\$ ')
             if (f"VM '{args.observed_name}' already exists (observed through broker)".encode() not in refused
@@ -152,6 +160,13 @@ def main():
     args.observed_name = io_vm['name']
     args.observed_image = io_vm['image']
     args.io_configuration = io_vm['configuration']
+    conflict_config = {'format': 'hyper.vm-config', 'virtual-machines': [
+        {field: io_vm[field] for field in ('name', 'image', 'configuration')}]}
+    command = ('echo ' + shlex.quote(json.dumps(conflict_config, separators=(',', ':')))
+               + ' > /data/observed-name-conflict.json')
+    if len(command.encode()) > 512:
+        parser.error('name-conflict fixture exceeds the Native shell command-line limit')
+    args.conflict_config_command = command.encode() + b'\n'
     if args.minimum_stack_remaining is not None and args.minimum_stack_remaining < 0:
         parser.error('stack reserve must be nonnegative')
     if args.maximum_stack_used is not None and args.maximum_stack_used < 1:
