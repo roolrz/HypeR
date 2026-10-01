@@ -197,5 +197,5 @@ fn unexpected_strong_owner() -> ! {
 }
 
 #[cfg(test)]
-#[path = "refcount/tests.rs"]
+#[path = "../../../tests/host/src/cases/fallible_refcount.rs"]
 mod tests;

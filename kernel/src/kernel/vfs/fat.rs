@@ -25,6 +25,7 @@ use hyper::mm::{FallibleArc, WeakFallibleArc};
 mod records;
 use records::{PreparedRecord, Records};
 #[cfg(feature = "kernel-self-test")]
+#[path = "../../../tests/kernel/fat_records.rs"]
 mod records_test;
 #[cfg(feature = "kernel-self-test")]
 pub(super) use records_test::run as test_record_storage;

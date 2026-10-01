@@ -204,4 +204,5 @@ fn invariant_failure() -> ! {
 }
 
 #[cfg(test)]
+#[path = "../../../../tests/host/src/cases/file_cache_eviction.rs"]
 mod tests;

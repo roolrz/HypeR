@@ -3,7 +3,9 @@
 
 //! Real ramfs namespace and publication contracts in scheduled kernel context.
 
+#[path = "../../../tests/kernel/vfs_namespace/content.rs"]
 mod content;
+#[path = "../../../tests/kernel/vfs_namespace/fat_identity.rs"]
 mod fat_identity;
 
 static EMPTY_ARCHIVE: &[u8] = b"07070100000001000000000000000000000000000000010000000000000000000000000000000000000000000000000000000b00000000TRAILER!!!\0\0\0\0";

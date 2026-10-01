@@ -10,6 +10,7 @@ use super::{CacheError, CacheState, FileDataCache, cache_invariant_violation, no
 const RECLAIM_BATCH: usize = 64;
 
 #[cfg(test)]
+#[path = "../../../tests/host/src/cases/file_cache_maintenance.rs"]
 mod tests;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -13,6 +13,7 @@ mod eviction;
 use eviction::EvictionHeap;
 
 #[cfg(test)]
+#[path = "../../../tests/host/src/cases/file_cache_state.rs"]
 mod tests;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

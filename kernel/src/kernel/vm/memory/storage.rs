@@ -21,7 +21,7 @@ use crate::kernel::mm::page_block::PageBlock;
 use crate::kernel::mm::reclaim::Target;
 
 #[cfg(feature = "kernel-self-test")]
-#[path = "storage_tests.rs"]
+#[path = "../../../../tests/kernel/vm_memory_storage.rs"]
 mod tests;
 
 pub(super) enum GuestMemoryBacking {

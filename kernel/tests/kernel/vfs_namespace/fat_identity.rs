@@ -3,6 +3,7 @@
 
 //! Cache-only file identity through the real FAT namespace adapter.
 
+#[path = "fat_identity/quota.rs"]
 mod quota;
 
 use alloc::vec::Vec;
