@@ -232,6 +232,7 @@ fn fat_read_cache_refill_keeps_pending_neighbor_writes_after_drain() {
 fn fat_partial_buffer_drain_failure_stops_all_later_io() {
     let disk = Disk::fresh();
     let mut fs = require_ok(FatVolume::mount(disk.clone()));
+    require_ok(fs.read_status());
     require_ok(fs.create("file", false));
     {
         let mut state = require_ok(disk.0.lock());
@@ -245,6 +246,7 @@ fn fat_partial_buffer_drain_failure_stops_all_later_io() {
         let state = require_ok(disk.0.lock());
         (state.reads, state.writes, state.flushes)
     };
+    assert_eq!(fs.read_status(), Err(Error::Block(BlockError::Io)));
     assert!(matches!(fs.stat("file"), Err(Error::Block(BlockError::Io))));
     assert!(matches!(fs.sync(), Err(Error::Block(BlockError::Io))));
     drop(fs);
@@ -346,6 +348,7 @@ fn fat_failed_write_cannot_serve_cached_metadata_or_data() {
         Err(Error::Block(BlockError::Io))
     ));
     let reads = require_ok(disk.0.lock()).reads;
+    assert_eq!(fs.read_status(), Err(Error::Block(BlockError::Io)));
     assert!(matches!(fs.stat("file"), Err(Error::Block(BlockError::Io))));
     assert!(matches!(
         fs.read_at("file", 0, &mut output),
@@ -563,6 +566,7 @@ fn fat_flush_error_is_reported_and_volume_is_not_reused() {
         state.fail_flush = false;
         (state.reads, state.writes, state.flushes)
     };
+    assert_eq!(fs.read_status(), Err(Error::Block(BlockError::Io)));
     assert!(matches!(fs.entry("", 0), Err(Error::Block(BlockError::Io))));
     assert_eq!(
         fs.write_at("dirty.txt", 0, b"lost"),

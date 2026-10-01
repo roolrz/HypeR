@@ -63,6 +63,7 @@ pub(super) struct Node {
     data: Mutex<NodeData>,
     children: Mutex<Children>,
     pub(super) locks: super::locks::FileLocks,
+    pub(super) content: super::file_data::FileContent,
     _charge: CommittedCharge,
 }
 
@@ -303,6 +304,7 @@ impl Ramfs {
                 data: Mutex::new(NodeData::new(FileData::borrowed(source.data()))),
                 children: Mutex::new(children),
                 locks: super::locks::FileLocks::new(),
+                content: super::file_data::FileContent::new(),
                 _charge: charge,
             })?;
             // Startup cannot acquire sleeping locks. These retained children
@@ -597,6 +599,7 @@ impl Ramfs {
             data: Mutex::new(NodeData::new(data)),
             children: Mutex::new(Children::new()),
             locks: super::locks::FileLocks::new(),
+            content: super::file_data::FileContent::new(),
             _charge: charge,
         })
         .map_err(Error::from)?;

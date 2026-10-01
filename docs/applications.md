@@ -204,11 +204,12 @@ idle-to-input transitions, burst recovery, and returning from top and VM console
 ### Memory cache reporting
 
 `free` retains the physical accounting identity `total = reserved + used + free`.
-Its `cache` column counts complete physical pages recoverable by draining the
-allocator's CPU-local magazines. A page counts only when all its outstanding
-central reservations are cached tokens: a live caller or an in-flight token
-keeps it out of this total. Tokens distributed across CPUs are combined and
-physical pages are counted once. These bytes are already included in `used`.
+Its `cache` column combines unpinned clean VFS file pages and complete physical
+pages recoverable by draining the allocator's CPU-local magazines. A magazine
+page counts only when all outstanding central reservations are cached tokens:
+a live caller or an in-flight token excludes it. Tokens distributed across
+CPUs are combined and physical pages are counted once. These bytes are already
+included in `used`; they are a reclaimability estimate, not additional memory.
 
 The census uses bounded preallocated scratch storage, preserves the caches and
 adds no global atomic operation to allocation fast paths. Magazine epochs,
@@ -218,11 +219,15 @@ show `—` rather than claiming a zero or counting a partial observation. Physic
 `free` remains available independently. The snapshot is not a reservation against
 subsequent allocations and does not guarantee contiguous allocation success.
 
-`buffers` represents an independent block-I/O buffer pool, currently zero because
-no such pool exists. Ramfs content is authoritative data, not discardable cache.
-The existing immutable file-page cache is bypassed by ramfs; no current backend
-populates it. Enabling it for a future backend also requires integrating its
-reclaimable storage into memory accounting.
+`buffers` reports physical VFS cache payloads, including pages being loaded or
+still pinned after eviction. These bytes overlap used kernel memory and the
+unpinned subset reported as `cache`; the columns must not be summed. Cache
+metadata remains ordinary heap memory. FAT uses the common clean file-page
+cache, which grows with demand below managed-memory watermarks and reclaims
+old pages asynchronously under pressure. Ramfs content is authoritative data,
+not discardable cache, and bypasses this layer. The VFS census scans in bounded
+lock intervals and rejects a sample if table replacement invalidates it;
+concurrent reader pins may change after any observation.
 Default units retain small KiB quantities; `free --bytes` avoids rounding.
 
 ## Console and storage visibility

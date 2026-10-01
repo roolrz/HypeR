@@ -3,13 +3,16 @@
 
 //! Disk-backed FAT namespace adapter. All media access is serialized by one
 //! sleepable volume mutex. Live leases prevent unlink; rename updates every
-//! live descendant path before releasing the namespace transaction.
+//! retained descendant path before releasing the namespace transaction.
 
+use super::file_record::FileRecord;
 use super::instance::{Creation, EntryName, Error};
 use super::instance::{EntrySnapshot, NodeMetadata};
 use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
 use super::{ExecutableSnapshot, MetadataUpdate};
-use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceDomain, ResourceKind};
+use crate::kernel::accounting::{
+    CommittedCharge, ResourceAmount, ResourceDomain, ResourceDomainId, ResourceError, ResourceKind,
+};
 use crate::kernel::mm::user_space::{DomainAccount, KernelPageBackend, SnapshotVmo};
 use crate::kernel::sync::Mutex;
 use alloc::{boxed::Box, string::String, vec::Vec};
@@ -19,15 +22,23 @@ use hyper::fs::fat::{Entry, Error as FatError, FatVolume};
 use hyper::fs::{MAX_NAME_BYTES, MAX_PATH_BYTES, Name, NodeAttributes, NodeKind};
 use hyper::mm::{FallibleArc, WeakFallibleArc};
 
+mod records;
+use records::{PreparedRecord, Records};
+#[cfg(feature = "kernel-self-test")]
+#[path = "../../../tests/kernel/fat_records.rs"]
+mod records_test;
+#[cfg(feature = "kernel-self-test")]
+pub(super) use records_test::run as test_record_storage;
+
 pub(super) struct Node {
-    id: u64,
     mount_pins: AtomicU64,
     pub(super) locks: super::locks::FileLocks,
+    pub(super) record: FallibleArc<FileRecord>,
     _charge: CommittedCharge,
 }
 impl Node {
-    pub(super) const fn id(&self) -> u64 {
-        self.id
+    pub(super) fn id(&self) -> u64 {
+        self.record.id()
     }
 }
 pub(super) struct MountPin(FallibleArc<Node>);
@@ -40,14 +51,14 @@ struct Record {
     id: u64,
     path: String,
     node: WeakFallibleArc<Node>,
+    content: WeakFallibleArc<FileRecord>,
     _charge: CommittedCharge,
 }
 struct State<D: BlockDevice> {
     volume: FatVolume<D>,
     metadata: Box<Entry>,
-    records: Vec<Record>,
+    records: Records,
     next_id: u64,
-    records_charge: Option<CommittedCharge>,
 }
 pub(super) struct Fatfs<D: BlockDevice> {
     state: Mutex<State<D>>,
@@ -79,21 +90,20 @@ impl<D: BlockDevice> Fatfs<D> {
         let metadata = metadata_scratch()?;
         let volume = mount_volume(device)?;
         drop(scratch);
-        let root = node(0, &domain)?;
+        let root = node(FileRecord::try_new(0, &domain)?, &domain)?;
         let mut state = State {
             volume,
             metadata,
-            records: Vec::new(),
+            records: Records::new(),
             next_id: 1,
-            records_charge: None,
         };
-        state.prepare_record(&domain)?;
-        state.records.push(Record {
+        state.records.insert(Records::prepare(Record {
             id: 0,
             path: String::new(),
             node: root.downgrade(),
+            content: root.record.downgrade(),
             _charge: record_charge(&domain)?,
-        });
+        })?);
         Ok(Self {
             state: Mutex::new(state),
             root,
@@ -105,7 +115,7 @@ impl<D: BlockDevice> Fatfs<D> {
     #[inline(never)]
     pub(super) fn pin_mount(&self, node: &FallibleArc<Node>) -> Result<MountPin, Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         if !state.is_directory(&path)? {
             return Err(Error::NotDirectory);
@@ -118,12 +128,75 @@ impl<D: BlockDevice> Fatfs<D> {
     pub(super) fn root(&self) -> FallibleArc<Node> {
         self.root.clone()
     }
+    pub(super) fn read_status(&self) -> Result<(), Error> {
+        self.state
+            .lock()
+            .map_err(Error::Lock)?
+            .volume
+            .read_status()
+            .map_err(map)
+    }
     pub(super) fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Acquire)
     }
     pub(super) fn wait_for_namespace(&self) -> Result<(), Error> {
         drop(self.state.lock().map_err(Error::Lock)?);
         Ok(())
+    }
+
+    /// Scheduled housekeeping only: no media I/O and no waiting for a busy
+    /// namespace transaction. Page reclaim has already released content pins.
+    pub(super) fn reclaim_records(&self, limit: usize) -> (usize, usize) {
+        let mut inspected = 0;
+        let mut reclaimed = 0;
+        let mut remaining = None;
+        while inspected < limit {
+            let retired = {
+                let Ok(Some(mut state)) = self.state.try_lock() else {
+                    break;
+                };
+                let remaining = remaining.get_or_insert(state.records.len());
+                if *remaining == 0 {
+                    break;
+                }
+                *remaining -= 1;
+                let Some(retired) = state.records.inspect_next() else {
+                    break;
+                };
+                retired
+            };
+            inspected += 1;
+            if let Some(record) = retired {
+                reclaimed += 1;
+                // Release path storage, weak headers, and quota after the
+                // namespace lock, independently of cache/allocator locks.
+                drop(record);
+            }
+        }
+        (inspected, reclaimed)
+    }
+
+    /// Finish one finite cleanup pass without waiting for a namespace owner.
+    /// A quota requester can hold this volume's mutex; it prunes its own dead
+    /// bindings after the page worker completes instead.
+    pub(super) fn reclaim_idle_records(&self, domain: Option<ResourceDomainId>) {
+        if domain.is_some_and(|id| !self.domain.charges_domain(id)) {
+            return;
+        }
+        let mut remaining = match self.state.try_lock() {
+            Ok(Some(state)) => state.records.cleanup_bound(),
+            _ => return,
+        };
+        while remaining != 0 {
+            let (inspected, _) = self.reclaim_records(remaining.min(64));
+            if inspected == 0 {
+                break;
+            }
+            remaining -= inspected;
+            if crate::kernel::task::scheduler::cond_resched().is_err() {
+                break;
+            }
+        }
     }
     fn mutation(&self, expected: Option<u64>) -> Result<Mutation<'_>, Error> {
         let epoch = self.epoch();
@@ -137,7 +210,7 @@ impl<D: BlockDevice> Fatfs<D> {
     #[inline(never)]
     pub(super) fn attributes(&self, node: &Node) -> Result<NodeAttributes, Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
         Ok(attributes(entry))
@@ -145,7 +218,7 @@ impl<D: BlockDevice> Fatfs<D> {
     #[inline(never)]
     pub(super) fn metadata(&self, node: &Node) -> Result<(NodeAttributes, NodeMetadata), Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
         let attributes = attributes(entry);
@@ -163,7 +236,7 @@ impl<D: BlockDevice> Fatfs<D> {
     #[inline(never)]
     pub(super) fn set_metadata(&self, node: &Node, update: MetadataUpdate) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
         if update
@@ -187,7 +260,7 @@ impl<D: BlockDevice> Fatfs<D> {
         name: Name<'_>,
     ) -> Result<Option<FallibleArc<Node>>, Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES * 3)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES * 3)?;
         let parent = state.path(directory)?;
         if !state.is_directory(&parent)? {
             return Err(Error::NotDirectory);
@@ -209,7 +282,7 @@ impl<D: BlockDevice> Fatfs<D> {
         cookie: u64,
     ) -> Result<Option<EntrySnapshot>, Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(directory)?;
         let mut index = usize::try_from(cookie).map_err(|_| Error::InvalidDirectoryCookie)?;
         loop {
@@ -245,7 +318,7 @@ impl<D: BlockDevice> Fatfs<D> {
             return Err(Error::NotSymlink);
         }
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         if state.is_directory(&path)? {
             return Err(Error::IsDirectory);
@@ -263,7 +336,7 @@ impl<D: BlockDevice> Fatfs<D> {
         input: &[u8],
     ) -> Result<(usize, u64), Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
         if entry.directory {
@@ -279,7 +352,7 @@ impl<D: BlockDevice> Fatfs<D> {
     #[inline(never)]
     pub(super) fn resize(&self, node: &Node, length: u64) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
         if entry.directory {
@@ -309,20 +382,16 @@ impl<D: BlockDevice> Fatfs<D> {
         sponsor: &ResourceDomain,
     ) -> Result<Option<ExecutableSnapshot>, Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
         if entry.directory {
             return Ok(None);
         }
         let size = usize::try_from(entry.size).map_err(|_| Error::InvalidSize)?;
-        let charge = sponsor
-            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, entry.size))
-            .map_err(Error::Resource)?
-            .commit();
+        let charge = state.reclaim_retry(|_| charge(sponsor, size))?;
         let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(size)
+        crate::kernel::mm::reclaim::reserve_exact(&mut bytes, size)
             .map_err(|_| Error::Allocation)?;
         bytes.resize(size, 0);
         if state.volume.read_at(&path, 0, &mut bytes).map_err(map)? != size {
@@ -354,19 +423,31 @@ impl<D: BlockDevice> Fatfs<D> {
             return Err(Error::NotDirectory.into());
         }
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES * 3)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES * 3)?;
         let _mutation = self.mutation(epoch)?;
         let parent = state.path(directory)?;
         if !state.is_directory(&parent)? {
             return Err(Error::NotDirectory.into());
         }
         let path = child(&parent, name.name)?;
-        let lease = state.lease(copy(&path)?, &self.domain)?;
+        // Prepare every owner and binding allocation before touching the directory.
+        // The callback prepares a handle; it must not perform backend I/O.
+        // A failed callback or create drops this unpublished binding, so later
+        // lookup cannot inherit a ghost identity from a failed create.
+        let id = state.next_id;
+        state.next_id = id.checked_add(1).ok_or(Error::IdentifierExhausted)?;
+        let (lease, record) = state.prepare_node(id, path, &self.domain)?;
         let prepared = publish(lease)?;
         state
             .volume
-            .create(&path, creation.kind == NodeKind::Directory)
+            .create(&record.value().path, creation.kind == NodeKind::Directory)
             .map_err(map)?;
+        // Creation succeeded while the namespace mutex excluded competing
+        // lookups. Retire any expired name binding before publishing this one.
+        state
+            .records
+            .retain(|entry| entry.path != record.value().path);
+        state.records.insert(record);
         Ok(prepared)
     }
     #[inline(never)]
@@ -377,7 +458,7 @@ impl<D: BlockDevice> Fatfs<D> {
         publish: impl FnOnce(NodeAttributes) -> Result<R, E>,
     ) -> Result<R, E> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES)?;
         let path = state.path(node)?;
         let entry = state.stat(&path)?;
         if entry.directory {
@@ -405,7 +486,7 @@ impl<D: BlockDevice> Fatfs<D> {
         epoch: Option<u64>,
     ) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES * 3)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES * 3)?;
         let _mutation = self.mutation(epoch)?;
         let parent = state.path(directory)?;
         let candidate = child(&parent, name.name)?;
@@ -426,7 +507,14 @@ impl<D: BlockDevice> Fatfs<D> {
         }) {
             return Err(Error::Busy);
         }
-        state.volume.remove(&path).map_err(map)
+        state.volume.remove(&path).map_err(map)?;
+        // Cached content is not an active lease. Its old numeric identity may
+        // remain in clean pages until eviction, but the removed name must never
+        // reconnect it to a new file (or a recreated directory subtree).
+        state
+            .records
+            .retain(|record| record.path != path && !within(&record.path, &path));
+        Ok(())
     }
     #[inline(never)]
     pub(super) fn link(
@@ -448,7 +536,7 @@ impl<D: BlockDevice> Fatfs<D> {
         epoch: u64,
     ) -> Result<(), Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES * 5)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES * 5)?;
         let _mutation = self.mutation(Some(epoch))?;
         let parent = state.path(source)?;
         let candidate = child(&parent, name.name)?;
@@ -477,19 +565,19 @@ impl<D: BlockDevice> Fatfs<D> {
         if within(&new, &old) {
             return Err(Error::InvalidInput);
         }
-        let _scratch = charge(
-            &self.domain,
-            state
+        let _scratch = state.reclaim_retry(|state| {
+            let bytes = state
                 .records
                 .len()
-                .checked_mul(MAX_PATH_BYTES + core::mem::size_of::<(usize, String)>())
-                .ok_or(Error::Allocation)?,
-        )?;
+                .checked_mul(MAX_PATH_BYTES + core::mem::size_of::<(u64, String)>())
+                .ok_or(Error::Allocation)?;
+            charge(&self.domain, bytes)
+        })?;
         let mut replacements = Vec::new();
         replacements
-            .try_reserve(state.records.len())
+            .try_reserve_exact(state.records.len())
             .map_err(|_| Error::Allocation)?;
-        for (index, record) in state.records.iter().enumerate() {
+        for record in state.records.iter() {
             if record.path == old || within(&record.path, &old) {
                 if record
                     .node
@@ -509,12 +597,22 @@ impl<D: BlockDevice> Fatfs<D> {
                     .map_err(|_| Error::Allocation)?;
                 path.push_str(&new);
                 path.push_str(suffix);
-                replacements.push((index, path));
+                replacements.push((record.id, path));
             }
         }
         state.volume.rename(&old, &new).map_err(map)?;
-        for (index, path) in replacements {
-            state.records[index].path = path;
+        let mut replacements = replacements.into_iter().peekable();
+        // The volume mutex preserves traversal order from preparation through
+        // commit. Apply the prepared IDs in one pass, without repeated lookup.
+        for record in state.records.iter_mut() {
+            if replacements.peek().is_some_and(|(id, _)| *id == record.id)
+                && let Some((_, path)) = replacements.next()
+            {
+                record.path = path;
+            }
+        }
+        if replacements.next().is_some() {
+            hyper::debug::invariant_failure("FAT rename binding order changed");
         }
         Ok(())
     }
@@ -526,7 +624,7 @@ impl<D: BlockDevice> Fatfs<D> {
         budget: &ScratchBudget,
     ) -> Result<ScratchVec<(FallibleArc<Node>, ScratchString)>, Error> {
         let mut state = self.state.lock().map_err(Error::Lock)?;
-        let _paths = charge(&self.domain, MAX_PATH_BYTES * 5)?;
+        let _paths = state.scratch_charge(&self.domain, MAX_PATH_BYTES * 5)?;
         let root_path = state.path(root)?;
         let start_path = state.path(start)?;
         if root_path != start_path && !within(&start_path, &root_path) {
@@ -550,6 +648,68 @@ impl<D: BlockDevice> Fatfs<D> {
     }
 }
 impl<D: BlockDevice> State<D> {
+    fn reclaim_retry<T>(
+        &mut self,
+        mut operation: impl FnMut(&mut Self) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let mut result = operation(self);
+        for _ in 0..2 {
+            let Err(Error::Resource(ResourceError::LimitExceeded {
+                domain,
+                resource: ResourceKind::KernelMemoryBytes,
+                ..
+            })) = &result
+            else {
+                break;
+            };
+            // Only unpublished preparation is retried. The worker scans the
+            // denying domain (including descendant mount sponsors), never
+            // waits for our volume mutex, and drops cache owners outside its
+            // locks. Keep admissions paused through local pruning and retry.
+            let Some(pause) = crate::kernel::mm::reclaim::reclaim(
+                crate::kernel::mm::reclaim::Target::Domain(*domain),
+            ) else {
+                break;
+            };
+            self.records.retain(|record| record.content.is_alive());
+            result = operation(self);
+            drop(pause);
+        }
+        result
+    }
+
+    fn scratch_charge(
+        &mut self,
+        domain: &ResourceDomain,
+        bytes: usize,
+    ) -> Result<CommittedCharge, Error> {
+        self.reclaim_retry(|_| charge(domain, bytes))
+    }
+
+    fn prepare_node(
+        &mut self,
+        id: u64,
+        path: String,
+        domain: &ResourceDomain,
+    ) -> Result<(FallibleArc<Node>, PreparedRecord), Error> {
+        // Keep the path across a quota retry; all fallible quota admission and
+        // object allocation precedes installing it in the prepared binding.
+        let (node, mut record) = self.reclaim_retry(|_| {
+            let record_charge = record_charge(domain)?;
+            let node = node(FileRecord::try_new(id, domain)?, domain)?;
+            let record = Records::prepare(Record {
+                id,
+                path: String::new(),
+                node: node.downgrade(),
+                content: node.record.downgrade(),
+                _charge: record_charge,
+            })?;
+            Ok((node, record))
+        })?;
+        record.set_path(path);
+        Ok((node, record))
+    }
+
     fn stat(&mut self, path: &str) -> Result<&Entry, Error> {
         self.volume
             .stat_into(path, &mut self.metadata)
@@ -571,67 +731,56 @@ impl<D: BlockDevice> State<D> {
         Ok(self.stat(path)?.directory)
     }
 
-    fn prepare_record(&mut self, domain: &ResourceDomain) -> Result<(), Error> {
-        if self.records.len() < self.records.capacity() {
-            return Ok(());
-        }
-        let capacity = self
-            .records
-            .len()
-            .checked_add(1)
-            .and_then(usize::checked_next_power_of_two)
-            .ok_or(Error::Allocation)?;
-        let replacement_charge = charge(
-            domain,
-            capacity
-                .checked_mul(core::mem::size_of::<Record>())
-                .ok_or(Error::Allocation)?,
-        )?;
-        let mut replacement = Vec::new();
-        replacement
-            .try_reserve_exact(capacity)
-            .map_err(|_| Error::Allocation)?;
-        replacement.append(&mut self.records);
-        self.records = replacement;
-        self.records_charge = Some(replacement_charge);
-        Ok(())
-    }
     fn path(&self, node: &Node) -> Result<String, Error> {
         copy(
             &self
                 .records
                 .iter()
-                .find(|record| record.id == node.id)
+                .find(|record| record.id == node.id())
                 .ok_or(Error::Missing)?
                 .path,
         )
     }
     fn lease(&mut self, path: String, domain: &ResourceDomain) -> Result<FallibleArc<Node>, Error> {
-        self.records
-            .retain(|record| record.node.upgrade().is_some());
-        if let Some(node) = self
+        self.records.retain(|record| record.content.is_alive());
+        let existing = self
             .records
             .iter()
             .find(|record| record.path == path)
-            .and_then(|record| record.node.upgrade())
-        {
-            return Ok(node);
+            .map(|record| (record.node.upgrade(), record.content.upgrade()));
+        if let Some((active, content)) = existing {
+            if let Some(node) = active {
+                return Ok(node);
+            }
+            if let Some(content) = content {
+                let node = self.reclaim_retry(|_| node(content.clone(), domain))?;
+                let Some(record) = self
+                    .records
+                    .iter_mut()
+                    .find(|record| record.id == node.id())
+                else {
+                    return Err(Error::InvalidBackendResult);
+                };
+                record.node = node.downgrade();
+                return Ok(node);
+            }
+            // Reclaim may have dropped the final page pin since retain(). No
+            // active node survives without its record, so a fresh identity is
+            // now safe. IDs are never reused within the mounted filesystem.
+            self.records.retain(|record| record.path != path);
         }
         let id = self.next_id;
         let next = id.checked_add(1).ok_or(Error::IdentifierExhausted)?;
-        self.prepare_record(domain)?;
-        let node = node(id, domain)?;
-        self.records.push(Record {
-            id,
-            path,
-            node: node.downgrade(),
-            _charge: record_charge(domain)?,
-        });
+        let (node, record) = self.prepare_node(id, path, domain)?;
+        self.records.insert(record);
         self.next_id = next;
         Ok(node)
     }
 }
-fn node(id: u64, domain: &ResourceDomain) -> Result<FallibleArc<Node>, Error> {
+fn node(
+    record: FallibleArc<FileRecord>,
+    domain: &ResourceDomain,
+) -> Result<FallibleArc<Node>, Error> {
     let charge = domain
         .reserve(ResourceAmount::ZERO.with(
             ResourceKind::KernelMemoryBytes,
@@ -640,9 +789,9 @@ fn node(id: u64, domain: &ResourceDomain) -> Result<FallibleArc<Node>, Error> {
         .map_err(Error::Resource)?
         .commit();
     FallibleArc::try_new(Node {
-        id,
         mount_pins: AtomicU64::new(0),
         locks: super::locks::FileLocks::new(),
+        record,
         _charge: charge,
     })
     .map_err(Error::from)
@@ -709,8 +858,16 @@ fn map(error: FatError) -> Error {
 }
 
 fn record_charge(domain: &ResourceDomain) -> Result<CommittedCharge, Error> {
+    // Both Weak owners retain their complete shared allocations after the
+    // strong payload charges retire. Cover them here as well; while live this
+    // deliberately charges conservatively rather than leaving dead headers
+    // outside the mount sponsor's quota.
+    let bytes = MAX_PATH_BYTES
+        + Records::allocation_size()
+        + FallibleArc::<Node>::allocation_size()
+        + FallibleArc::<FileRecord>::allocation_size();
     domain
-        .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, MAX_PATH_BYTES as u64))
+        .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, bytes as u64))
         .map(|charge| charge.commit())
         .map_err(Error::Resource)
 }

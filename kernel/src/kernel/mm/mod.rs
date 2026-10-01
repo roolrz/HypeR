@@ -7,8 +7,10 @@ use alloc::vec::Vec;
 use hyper::sync::atomic::{AtomicBool, Ordering};
 
 pub mod allocator;
+pub(crate) mod cache_memory;
 pub mod memory;
 pub mod page_block;
+pub(crate) mod reclaim;
 pub mod stack;
 pub(crate) mod translation_id;
 pub(crate) mod user_space;

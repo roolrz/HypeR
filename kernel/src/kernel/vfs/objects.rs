@@ -10,10 +10,12 @@ use crate::kernel::accounting::{
     CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
 };
 use crate::kernel::authority::Rights;
+use crate::kernel::io_cache::FileDataCache;
 use crate::kernel::object::{
     KernelObject, ObjectCreationError, ObjectKind, TransferClass, object_allocation_size, private,
 };
 
+use super::file_record::CachePage;
 use super::instance::{Creation, EntryName, Location, MountNamespace};
 use super::scratch::{ScratchBudget, ScratchString, ScratchVec};
 
@@ -22,7 +24,6 @@ pub(crate) enum Error {
     Allocation,
     AllocationSize,
     Backend(super::instance::Error),
-    Cache(crate::kernel::io_cache::CacheError),
     InvalidDirectoryCookie,
     InvalidPath,
     Missing,
@@ -796,14 +797,14 @@ pub(crate) struct FileObject {
     location: Location,
     admitted_rights: Rights,
     lock_owner: super::locks::LockOwner,
-    cache: FallibleArc<crate::kernel::io_cache::FileDataCache<super::read::FilePage>>,
+    cache: FallibleArc<FileDataCache<CachePage>>,
     _object_charge: CommittedCharge,
 }
 
 impl FileObject {
     fn try_new(
         location: Location,
-        cache: FallibleArc<crate::kernel::io_cache::FileDataCache<super::read::FilePage>>,
+        cache: FallibleArc<FileDataCache<CachePage>>,
         sponsor: &ResourceDomain,
     ) -> Result<Self, Error> {
         let attributes = location
@@ -822,7 +823,7 @@ impl FileObject {
     }
     fn try_new_admitted(
         location: Location,
-        cache: FallibleArc<crate::kernel::io_cache::FileDataCache<super::read::FilePage>>,
+        cache: FallibleArc<FileDataCache<CachePage>>,
         sponsor: &ResourceDomain,
         attributes: NodeAttributes,
         creator: bool,
@@ -908,12 +909,11 @@ impl FileObject {
     }
 
     pub(crate) fn len(&self) -> Result<u64, Error> {
-        Ok(self
-            .location
+        self.location
             .mount()
             .filesystem()
-            .attributes(self.location.node())?
-            .size())
+            .file_len(self.location.node())
+            .map_err(Into::into)
     }
 
     pub(crate) fn info(&self) -> Result<FileInfo, Error> {
@@ -941,32 +941,11 @@ impl FileObject {
     }
 
     pub(crate) fn read(&self, offset: u64, destination: &mut [u8]) -> Result<usize, Error> {
-        match self.location.mount().filesystem().read_cache_policy() {
-            super::instance::ReadCachePolicy::Direct => self.read_uncached(offset, destination),
-            super::instance::ReadCachePolicy::PageCache => {
-                super::read::cached(self, offset, destination)
-            }
-        }
-    }
-
-    pub(super) fn read_uncached(
-        &self,
-        offset: u64,
-        destination: &mut [u8],
-    ) -> Result<usize, Error> {
         self.location
             .mount()
             .filesystem()
-            .read_at(self.location.node(), offset, destination)
+            .read_file(self.location.node(), &self.cache, offset, destination)
             .map_err(Error::from)
-    }
-
-    pub(super) fn location(&self) -> &Location {
-        &self.location
-    }
-
-    pub(super) fn cache(&self) -> &crate::kernel::io_cache::FileDataCache<super::read::FilePage> {
-        &self.cache
     }
 
     pub(crate) fn readable_snapshot(

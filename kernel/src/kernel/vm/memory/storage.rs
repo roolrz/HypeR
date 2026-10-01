@@ -3,6 +3,7 @@
 
 //! Bounded backing metadata and stage-2 table-page ownership.
 
+use core::alloc::Layout;
 use core::ptr::write_bytes;
 
 use alloc::vec::Vec;
@@ -13,8 +14,15 @@ use super::Error;
 use super::backing::Layout as SharedGuestMemory;
 #[cfg(feature = "kernel-self-test")]
 use crate::hal::vm::Stage2AddressSpace;
-use crate::kernel::accounting::{CommittedCharge, ResourceAmount, ResourceDomain, ResourceKind};
+use crate::kernel::accounting::{
+    CommittedCharge, ResourceAmount, ResourceDomain, ResourceError, ResourceKind,
+};
 use crate::kernel::mm::page_block::PageBlock;
+use crate::kernel::mm::reclaim::Target;
+
+#[cfg(feature = "kernel-self-test")]
+#[path = "../../../../tests/kernel/vm_memory_storage.rs"]
+mod tests;
 
 pub(super) enum GuestMemoryBacking {
     #[cfg(feature = "kernel-self-test")]
@@ -70,6 +78,22 @@ pub(super) struct Stage2PagePool {
     error: Option<Error>,
 }
 
+/// Only a failed, unpublished capacity reservation may request reclaim.
+/// The caller must release the address-space spinlock before servicing it.
+pub(crate) struct LivePreparationError {
+    pub(super) error: Error,
+    pub(super) reclaim: Option<Target>,
+}
+
+impl From<Error> for LivePreparationError {
+    fn from(error: Error) -> Self {
+        Self {
+            error,
+            reclaim: None,
+        }
+    }
+}
+
 impl Stage2PagePool {
     pub(super) fn with_capacity(capacity: usize, domain: &ResourceDomain) -> Result<Self, Error> {
         let pages = try_exact_capacity_vec(capacity)?;
@@ -93,21 +117,43 @@ impl Stage2PagePool {
             .ok_or(Error::MetadataAllocation)
     }
 
-    pub(super) fn reserve_live(&mut self, live_capacity: usize) -> Result<(), Error> {
+    pub(super) fn reserve_live(
+        &mut self,
+        live_capacity: usize,
+    ) -> Result<(), LivePreparationError> {
         let target = self.live_capacity_target(live_capacity)?;
         let additional_capacity = target.saturating_sub(self.pages.capacity());
         if additional_capacity == 0 {
             return Ok(());
         }
+        let layout = Layout::array::<PageBlock>(target).map_err(|_| Error::MetadataAllocation)?;
+        let allocation_pages = crate::kernel::mm::cache_memory::allocation_page_bound(layout)
+            .ok_or(Error::MetadataAllocation)?;
         let bytes = additional_capacity
             .checked_mul(core::mem::size_of::<PageBlock>())
             .ok_or(Error::MetadataAllocation)?;
         let reservation = self
             .domain
-            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, bytes as u64))?;
+            .reserve(ResourceAmount::ZERO.with(ResourceKind::KernelMemoryBytes, bytes as u64))
+            .map_err(|error| LivePreparationError {
+                error: Error::Resource(error),
+                reclaim: match error {
+                    ResourceError::LimitExceeded {
+                        domain,
+                        resource: ResourceKind::KernelMemoryBytes,
+                        ..
+                    } => Some(Target::Domain(domain)),
+                    _ => None,
+                },
+            })?;
         self.pages
             .try_reserve_exact(target - self.pages.len())
-            .map_err(|_| Error::MetadataAllocation)?;
+            .map_err(|_| LivePreparationError {
+                error: Error::MetadataAllocation,
+                reclaim: Some(Target::PhysicalOrder(
+                    allocation_pages.trailing_zeros() as usize
+                )),
+            })?;
         accumulate_charge(&mut self.charge, reservation.commit());
         Ok(())
     }

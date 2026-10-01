@@ -8,14 +8,16 @@
 //! that lock has been released. Publication consumes a generation-tagged
 //! reservation, so a stale completion cannot populate a recycled slot.
 //!
-//! The system cache uses a fixed boot-time budget. Cache pages are shared by
-//! filesystems and can predate the root resource domain, so charging the first
-//! reader would assign arbitrary ownership and create an initialization cycle.
-//! Per-mount accounting may be added with writable mounts; it is deliberately
-//! absent from this immutable foundation.
+//! The system service owns a pressure-managed payload budget, independent of
+//! the first reader or mount. Every loader reserves capacity before allocating, and the
+//! immutable payload keeps that permit even after eviction until its last
+//! reader releases it. A worker grows or shrinks metadata outside cache locks.
 
 use alloc::vec::Vec;
-use core::num::NonZeroU64;
+use core::alloc::Layout;
+#[cfg(test)]
+use core::sync::atomic::AtomicUsize;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use hyper::mm::FallibleArc;
 #[cfg(not(test))]
@@ -23,13 +25,32 @@ use hyper::sync::InterruptSpinLock;
 #[cfg(test)]
 use hyper::sync::SpinLock;
 
+mod budget;
+mod index;
+mod key;
+mod load;
+mod maintenance;
+mod memory;
+mod read;
 mod state;
+mod storage;
 
-/// Maximum number of clean file pages retained by the system cache.
-///
-/// Active readers may briefly retain an evicted shared page after the cache
-/// releases it. The bound applies to cache-owned resident entries, while the
-/// internal API keeps reader ownership short-lived and non-exportable.
+#[cfg(not(test))]
+pub(crate) mod worker;
+
+use budget::{Budget, OwnedPage};
+pub(crate) use key::{
+    CacheKey, ContentRevision, FileIdentity, FilePageIndex, FilesystemGeneration, NodeIdentity,
+};
+pub(crate) use load::{LoadReservation, Refill};
+#[cfg(not(test))]
+pub(crate) use maintenance::AdmissionPause;
+pub(crate) use maintenance::{CacheUsage, Maintenance, ReclaimCursor, ReclaimScan};
+pub(crate) use read::{FilePage, ReadError, read};
+
+/// Initial live-payload allowance: loaders, resident pages, and evicted pins.
+/// Each `FilePage` contains at most one page of bytes; payload headers and the
+/// slot metadata are additional admitted service-owned allocations.
 #[cfg(not(test))]
 pub(crate) const SYSTEM_PAGE_CAPACITY: usize = 256;
 
@@ -38,71 +59,12 @@ type CacheLock<T> = InterruptSpinLock<T, crate::hal::irq::LocalMask>;
 #[cfg(test)]
 type CacheLock<T> = SpinLock<T>;
 
-/// One nonzero generation of a mounted filesystem instance.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct FilesystemGeneration(NonZeroU64);
-
-impl FilesystemGeneration {
-    pub(crate) const fn new(value: NonZeroU64) -> Self {
-        Self(value)
-    }
-}
-
-/// Stable identity of one node within a filesystem generation.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct NodeIdentity(NonZeroU64);
-
-impl NodeIdentity {
-    pub(crate) const fn new(value: NonZeroU64) -> Self {
-        Self(value)
-    }
-}
-
-/// Page offset within one file-data stream.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[repr(transparent)]
-pub(crate) struct FilePageIndex(u64);
-
-impl FilePageIndex {
-    pub(crate) const fn new(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-/// Complete cache identity; paths never identify file contents.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct CacheKey {
-    filesystem: FilesystemGeneration,
-    node: NodeIdentity,
-    page: FilePageIndex,
-}
-
-impl CacheKey {
-    pub(crate) const fn new(
-        filesystem: FilesystemGeneration,
-        node: NodeIdentity,
-        page: FilePageIndex,
-    ) -> Self {
-        Self {
-            filesystem,
-            node,
-            page,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CacheError {
     Allocation,
     InvalidCapacity,
     SequenceExhausted,
     StaleLoad,
-    /// A cache consumer detected an impossible published payload.
-    #[cfg_attr(
-        test,
-        expect(dead_code, reason = "Constructed by production filesystem validation")
-    )]
-    Invariant,
 }
 
 impl From<state::Error> for CacheError {
@@ -118,12 +80,12 @@ impl From<state::Error> for CacheError {
 
 /// Read-only shared ownership of one published payload.
 pub(crate) struct CachedPage<Page> {
-    inner: FallibleArc<Page>,
+    inner: FallibleArc<OwnedPage<Page>>,
 }
 
 impl<Page> CachedPage<Page> {
     pub(crate) fn value(&self) -> &Page {
-        &self.inner
+        &self.inner.value
     }
 }
 
@@ -142,7 +104,7 @@ pub(crate) enum CacheAccess<'cache, Page> {
     LoadInProgress,
     /// This caller owns the only admissible fill for the selected slot.
     Load(LoadReservation<'cache, Page>),
-    /// Every bounded slot currently has an unfinished loader.
+    /// All slots are loading, or live payloads exhaust the allocation budget.
     CapacityBusy,
 }
 
@@ -152,6 +114,9 @@ pub(crate) struct CacheSnapshot {
     pub(crate) capacity: usize,
     pub(crate) clean: usize,
     pub(crate) loading: usize,
+    pub(crate) live_payloads: usize,
+    pub(crate) payload_creations: usize,
+    pub(crate) payload_reuses: usize,
     pub(crate) hits: u64,
     pub(crate) misses: u64,
     pub(crate) evictions: u64,
@@ -161,34 +126,123 @@ pub(crate) struct CacheSnapshot {
 
 struct CacheState<Page> {
     model: state::State,
-    pages: Vec<Option<FallibleArc<Page>>>,
+    pages: Vec<Option<FallibleArc<OwnedPage<Page>>>>,
+    metadata_pages: usize,
 }
 
-/// Fixed-capacity immutable file-data cache.
-pub(crate) struct FileDataCache<Page> {
-    state: CacheLock<CacheState<Page>>,
-}
-
-impl<Page> FileDataCache<Page> {
-    #[cfg(not(test))]
-    pub(crate) fn try_new_system() -> Result<Self, CacheError> {
-        Self::try_new_with_capacity(SYSTEM_PAGE_CAPACITY)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn try_new(capacity: usize) -> Result<Self, CacheError> {
-        Self::try_new_with_capacity(capacity)
-    }
-
-    fn try_new_with_capacity(capacity: usize) -> Result<Self, CacheError> {
+impl<Page> CacheState<Page> {
+    fn try_new(capacity: usize) -> Result<Self, CacheError> {
+        let [slots, heads, next, free, entries, positions] =
+            state::State::allocation_layouts(capacity)?;
+        let pages_layout = Layout::array::<Option<FallibleArc<OwnedPage<Page>>>>(capacity)
+            .map_err(|_| CacheError::InvalidCapacity)?;
+        let (reservation, metadata_pages) =
+            memory::reserve(&[slots, heads, next, free, entries, positions, pages_layout])?;
         let model = state::State::try_new(capacity)?;
         let mut pages = Vec::new();
         pages
             .try_reserve_exact(capacity)
             .map_err(|_| CacheError::Allocation)?;
         pages.resize_with(capacity, || None);
+        // Every backing allocation is now reflected in physical free memory.
+        // Release pending admission only after construction or full rollback.
+        drop(reservation);
         Ok(Self {
-            state: CacheLock::new(CacheState { model, pages }),
+            model,
+            pages,
+            metadata_pages,
+        })
+    }
+}
+
+struct CacheControl<Page> {
+    table: Option<CacheState<Page>>,
+    maintenance_pending: bool,
+    maintenance_running: bool,
+    generation: u64,
+    admission_pauses: usize,
+}
+
+/// Immutable file-data cache with worker-managed metadata capacity.
+pub(crate) struct FileDataCache<Page> {
+    state: CacheLock<CacheControl<Page>>,
+    budget: FallibleArc<Budget>,
+    admission: AtomicBool,
+    growth_requested: AtomicBool,
+    #[cfg(test)]
+    fail_publication: AtomicBool,
+    #[cfg(test)]
+    fail_maintenance: AtomicBool,
+    #[cfg(test)]
+    payload_creations: AtomicUsize,
+    #[cfg(test)]
+    payload_reuses: AtomicUsize,
+}
+
+impl<Page> FileDataCache<Page> {
+    #[cfg(not(test))]
+    pub(crate) fn try_new_system() -> Result<Self, CacheError> {
+        match Self::try_new(SYSTEM_PAGE_CAPACITY) {
+            Ok(cache) => Ok(cache),
+            Err(CacheError::Allocation) => {
+                // Caching is optional. Failure to provision its initial arrays
+                // must not prevent VFS startup; demand can enable it later.
+                // This small control owner is still conventionally fallible.
+                let budget =
+                    FallibleArc::try_new(Budget::new(0)).map_err(|_| CacheError::Allocation)?;
+                Ok(Self::from_parts(None, budget))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn try_new(capacity: usize) -> Result<Self, CacheError> {
+        let table = CacheState::try_new(capacity)?;
+        let (reservation, _) = memory::reserve(&[budget_layout()])?;
+        let budget =
+            FallibleArc::try_new(Budget::new(capacity)).map_err(|_| CacheError::Allocation)?;
+        drop(reservation);
+        Ok(Self::from_parts(Some(table), budget))
+    }
+
+    fn from_parts(table: Option<CacheState<Page>>, budget: FallibleArc<Budget>) -> Self {
+        Self {
+            state: CacheLock::new(CacheControl {
+                table,
+                maintenance_pending: false,
+                maintenance_running: false,
+                generation: 0,
+                admission_pauses: 0,
+            }),
+            budget,
+            admission: AtomicBool::new(true),
+            growth_requested: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_publication: AtomicBool::new(false),
+            #[cfg(test)]
+            fail_maintenance: AtomicBool::new(false),
+            #[cfg(test)]
+            payload_creations: AtomicUsize::new(0),
+            #[cfg(test)]
+            payload_reuses: AtomicUsize::new(0),
+        }
+    }
+
+    /// A miss neither reserves a loader nor evicts another file's page.
+    pub(crate) fn lookup(&self, key: CacheKey) -> Result<Option<CachedPage<Page>>, CacheError> {
+        self.state.with(|control| {
+            let Some(cache) = control.table.as_mut() else {
+                return Ok(None);
+            };
+            let Some(slot) = cache.model.lookup(key)? else {
+                return Ok(None);
+            };
+            let Some(page) = cache.pages.get(slot).and_then(Option::as_ref) else {
+                cache_invariant_violation();
+            };
+            Ok(Some(CachedPage {
+                inner: page.clone(),
+            }))
         })
     }
 
@@ -198,10 +252,23 @@ impl<Page> FileDataCache<Page> {
     /// clone. Backend access, allocation, copying, and destruction occur after
     /// the lock is released.
     pub(crate) fn access(&self, key: CacheKey) -> Result<CacheAccess<'_, Page>, CacheError> {
+        let admission = self.admission.load(Ordering::Acquire) && memory::admission_allowed();
         let outcome = self
             .state
-            .with(|cache| -> Result<LockedAccess<Page>, CacheError> {
-                let access = cache.model.access(key)?;
+            .with(|control| -> Result<LockedAccess<Page>, CacheError> {
+                let allow_load =
+                    admission && !control.maintenance_pending && control.admission_pauses == 0;
+                let Some(cache) = control.table.as_mut() else {
+                    if admission && !control.maintenance_running {
+                        self.growth_requested.store(true, Ordering::Release);
+                    }
+                    return Ok(LockedAccess::CapacityBusy);
+                };
+                let access = if allow_load {
+                    cache.model.access(key)?
+                } else {
+                    cache.model.access_with_admission(key, false)?
+                };
                 match access {
                     state::Access::Hit { slot } => {
                         let Some(page) = cache.pages.get(slot).and_then(Option::as_ref) else {
@@ -213,6 +280,9 @@ impl<Page> FileDataCache<Page> {
                     }
                     state::Access::LoadInProgress => Ok(LockedAccess::LoadInProgress),
                     state::Access::Reserved { token, evicted } => {
+                        if evicted {
+                            self.growth_requested.store(true, Ordering::Release);
+                        }
                         let Some(page) = cache.pages.get_mut(token.slot()) else {
                             cache_invariant_violation();
                         };
@@ -225,17 +295,41 @@ impl<Page> FileDataCache<Page> {
                     state::Access::CapacityBusy => Ok(LockedAccess::CapacityBusy),
                 }
             })?;
+        if self.growth_requested.load(Ordering::Acquire) {
+            notify_worker();
+        }
         Ok(match outcome {
             LockedAccess::Hit(page) => CacheAccess::Hit(page),
             LockedAccess::LoadInProgress => CacheAccess::LoadInProgress,
             LockedAccess::Load { token, old } => {
-                // The replaced cache owner is released outside the cache lock.
-                drop(old);
-                CacheAccess::Load(LoadReservation {
-                    cache: self,
-                    token,
-                    active: true,
-                })
+                // No Weak owner of an OwnedPage is ever issued: CachedPage
+                // exposes only its value. Unique conversion and destruction
+                // happen outside the lock, and pinned readers keep their bytes.
+                let recycled = old.and_then(|page| match page.try_into_unique() {
+                    Ok(page) => Some(load::FillStorage::Reused(page)),
+                    Err(page) => {
+                        drop(page);
+                        None
+                    }
+                });
+                let storage = recycled
+                    .or_else(|| Budget::reserve(&self.budget).map(load::FillStorage::Fresh));
+                match storage {
+                    Some(storage) => CacheAccess::Load(LoadReservation::new(self, token, storage)),
+                    None => {
+                        self.state.with(|control| {
+                            let Some(cache) = control.table.as_mut() else {
+                                cache_invariant_violation();
+                            };
+                            if cache.model.abort(token).is_err() {
+                                cache_invariant_violation();
+                            }
+                            cache.model.record_capacity_busy();
+                        });
+                        self.load_finished();
+                        CacheAccess::CapacityBusy
+                    }
+                }
             }
             LockedAccess::CapacityBusy => CacheAccess::CapacityBusy,
         })
@@ -243,11 +337,26 @@ impl<Page> FileDataCache<Page> {
 
     #[cfg(test)]
     pub(crate) fn snapshot(&self) -> CacheSnapshot {
-        let snapshot = self.state.with(|cache| cache.model.snapshot());
+        let snapshot = self
+            .state
+            .with(|control| control.table.as_ref().map(|cache| cache.model.snapshot()));
+        let snapshot = snapshot.unwrap_or(state::Snapshot {
+            capacity: 0,
+            clean: 0,
+            loading: 0,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+            in_progress: 0,
+            capacity_busy: 0,
+        });
         CacheSnapshot {
             capacity: snapshot.capacity,
             clean: snapshot.clean,
             loading: snapshot.loading,
+            live_payloads: self.budget.used(),
+            payload_creations: self.payload_creations.load(Ordering::Relaxed),
+            payload_reuses: self.payload_reuses.load(Ordering::Relaxed),
             hits: snapshot.hits,
             misses: snapshot.misses,
             evictions: snapshot.evictions,
@@ -255,6 +364,33 @@ impl<Page> FileDataCache<Page> {
             capacity_busy: snapshot.capacity_busy,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_publication_for_test(&self) {
+        self.fail_publication.store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exhaust_sequences_for_test(&self) {
+        self.state.with(|control| {
+            if let Some(cache) = control.table.as_mut() {
+                cache.model.exhaust_sequences_for_test();
+            }
+        });
+    }
+}
+
+fn budget_layout() -> Layout {
+    Layout::from_size_align(
+        FallibleArc::<Budget>::allocation_size(),
+        core::mem::align_of::<Budget>(),
+    )
+    .unwrap_or_else(|_| cache_invariant_violation())
+}
+
+fn notify_worker() {
+    #[cfg(not(test))]
+    worker::request();
 }
 
 enum LockedAccess<Page> {
@@ -262,124 +398,9 @@ enum LockedAccess<Page> {
     LoadInProgress,
     Load {
         token: state::LoadToken,
-        old: Option<FallibleArc<Page>>,
+        old: Option<FallibleArc<OwnedPage<Page>>>,
     },
     CapacityBusy,
-}
-
-/// Linear ownership of one cache fill performed without the cache lock.
-#[must_use = "publish the completed fill or let the reservation roll back"]
-pub(crate) struct LoadReservation<'cache, Page> {
-    cache: &'cache FileDataCache<Page>,
-    token: state::LoadToken,
-    active: bool,
-}
-
-impl<Page> LoadReservation<'_, Page> {
-    /// Publishes a completely initialized immutable payload.
-    ///
-    /// Shared-owner allocation occurs before taking the cache lock. Failure
-    /// returns the original payload and leaves Drop to roll back the loader.
-    pub(crate) fn publish(mut self, page: Page) -> Result<CachedPage<Page>, PublishError<Page>> {
-        let shared = match FallibleArc::try_new_or_return(page) {
-            Ok(shared) => shared,
-            Err((_, page)) => {
-                return Err(PublishError {
-                    cause: CacheError::Allocation,
-                    page,
-                });
-            }
-        };
-        let result = self.cache.state.with(|cache| {
-            cache.model.validate(self.token)?;
-            let vacant = cache
-                .pages
-                .get(self.token.slot())
-                .is_some_and(Option::is_none);
-            if !vacant {
-                cache_invariant_violation();
-            }
-            if cache.model.publish(self.token).is_err() {
-                cache_invariant_violation();
-            }
-            let Some(slot) = cache.pages.get_mut(self.token.slot()) else {
-                cache_invariant_violation();
-            };
-            *slot = Some(shared.clone());
-            Ok::<(), CacheError>(())
-        });
-        match result {
-            Ok(()) => {
-                self.active = false;
-                Ok(CachedPage { inner: shared })
-            }
-            Err(cause) => {
-                self.active = false;
-                let page = match shared.try_unwrap() {
-                    Ok(page) => page,
-                    Err(_) => cache_invariant_violation(),
-                };
-                Err(PublishError { cause, page })
-            }
-        }
-    }
-
-    /// Explicitly abandons a failed backend fill.
-    #[cfg(test)]
-    pub(crate) fn abort(mut self) -> Result<(), CacheError> {
-        let result = self
-            .cache
-            .state
-            .with(|cache| cache.model.abort(self.token).map_err(Into::into));
-        // A stale token no longer owns this slot, so it is equally important
-        // not to retry its rollback from Drop.
-        self.active = false;
-        result
-    }
-
-    #[cfg(test)]
-    pub(crate) fn invalidate_slot_for_test(&self) {
-        self.cache
-            .state
-            .with(|cache| cache.model.invalidate_for_test(self.token.slot()));
-    }
-}
-
-impl<Page> Drop for LoadReservation<'_, Page> {
-    fn drop(&mut self) {
-        if !self.active {
-            return;
-        }
-        // Staleness means another generation already owns or cleared the
-        // slot. The generation check prevents this abandoned fill from
-        // affecting that newer owner.
-        let _ = self.cache.state.with(|cache| cache.model.abort(self.token));
-        self.active = false;
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct PublishError<Page> {
-    cause: CacheError,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Owns rejected fill memory until the publication error is dropped"
-        )
-    )]
-    page: Page,
-}
-
-impl<Page> PublishError<Page> {
-    pub(crate) const fn cause(&self) -> CacheError {
-        self.cause
-    }
-
-    #[cfg(test)]
-    pub(crate) fn into_page(self) -> Page {
-        self.page
-    }
 }
 
 #[cold]

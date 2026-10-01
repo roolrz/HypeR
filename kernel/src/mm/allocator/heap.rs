@@ -30,7 +30,10 @@ use partial::{
     SlabClass, SlabLink, SlabPageId,
 };
 
-pub use global::{CacheActivationError, CpuLocalCachePolicy, KernelGlobalAllocator};
+pub use global::{
+    CacheActivationError, CacheMetadataReservation, CpuLocalCachePolicy, KernelGlobalAllocator,
+    PageAvailability,
+};
 
 const SLAB_MAGIC: u64 = 0x4859_5045_5253_4c42;
 const LARGE_MAGIC: u64 = 0x4859_5045_524c_4152;
@@ -248,10 +251,11 @@ pub enum PageOwner {
     PageTable = 1,
     Guest = 2,
     User = 3,
+    FileCache = 4,
 }
 
 impl PageOwner {
-    const COUNT: usize = 4;
+    const COUNT: usize = 5;
 
     const fn index(self) -> usize {
         self as usize
@@ -287,6 +291,7 @@ pub struct HeapStats {
     pub page_table_pages: PageOwnerStats,
     pub guest_pages: PageOwnerStats,
     pub user_pages: PageOwnerStats,
+    pub file_cache_pages: PageOwnerStats,
 }
 
 /// Diagnostic state for the bounded CPU-local slab magazines.
@@ -1036,23 +1041,9 @@ impl SlabAllocator {
 
     fn allocate_large(&mut self, layout: Layout) -> Result<*mut u8, LargeAllocationError> {
         let header_size = core::mem::size_of::<LargeHeader>();
-        let required = match layout
-            .size()
-            .max(1)
-            .checked_add(layout.align() - 1)
-            .and_then(|size| size.checked_add(header_size))
-        {
-            Some(required) => required,
-            None => return Err(LargeAllocationError::UnsupportedLayout),
-        };
-        let pages = required.div_ceil(PAGE_SIZE as usize);
-        let Some(power_of_two_pages) = pages.checked_next_power_of_two() else {
-            return Err(LargeAllocationError::UnsupportedLayout);
-        };
+        let power_of_two_pages =
+            large_allocation_pages(layout).ok_or(LargeAllocationError::UnsupportedLayout)?;
         let order = power_of_two_pages.trailing_zeros() as usize;
-        if order > MAX_ORDER {
-            return Err(LargeAllocationError::UnsupportedLayout);
-        }
         let pending = PendingBuddyBlock::allocate(&mut self.buddy, order).map_err(|error| {
             if error == BuddyError::OutOfMemory {
                 LargeAllocationError::OutOfMemory
@@ -1180,6 +1171,7 @@ impl SlabAllocator {
             page_table_pages: self.page_owners[PageOwner::PageTable.index()],
             guest_pages: self.page_owners[PageOwner::Guest.index()],
             user_pages: self.page_owners[PageOwner::User.index()],
+            file_cache_pages: self.page_owners[PageOwner::FileCache.index()],
         }
     }
 
@@ -1230,6 +1222,29 @@ impl SlabAllocator {
         owner_stats.deallocations = owner_stats.deallocations.saturating_add(1);
         Ok(())
     }
+}
+
+/// Conservative physical backing for one heap allocation, including headers
+/// and alignment. Small objects may share an existing slab; charging a whole
+/// slab page also covers a CPU-magazine refill for the current class limits.
+pub fn allocation_page_bound(layout: Layout) -> Option<usize> {
+    if slab_class_for_layout(layout).is_some() {
+        Some(1)
+    } else {
+        large_allocation_pages(layout)
+    }
+}
+
+fn large_allocation_pages(layout: Layout) -> Option<usize> {
+    let required = layout
+        .size()
+        .max(1)
+        .checked_add(layout.align() - 1)?
+        .checked_add(core::mem::size_of::<LargeHeader>())?;
+    let pages = required
+        .div_ceil(PAGE_SIZE as usize)
+        .checked_next_power_of_two()?;
+    (pages.trailing_zeros() as usize <= MAX_ORDER).then_some(pages)
 }
 
 fn class_index_for(layout: Layout) -> Option<usize> {

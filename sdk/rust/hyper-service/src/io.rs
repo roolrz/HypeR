@@ -138,6 +138,9 @@ pub fn send_capabilities(
 /// Read-only broker observation; no VM/control capability crosses this exchange.
 pub const OBSERVE_MESSAGE: &[u8] = b"HIOSTAT3";
 pub const OBSERVATION_BYTES: usize = 584;
+/// Identity admission can wait behind synchronous guest-mapping retirement.
+/// Best-effort status callers may use a shorter deadline on their reply channel.
+pub const OBSERVATION_TIMEOUT_SECONDS: u64 = 5;
 
 /// RAM is supplied by the owner: the VM address-space span also includes MMIO
 /// and shared guest-memory windows, and is not a resident-memory statistic.

@@ -161,23 +161,44 @@ impl VmoObject {
         size: u64,
         sponsor: &ResourceDomain,
     ) -> Result<Self, MemoryObjectError> {
-        let (pages, transient) = super::kernel_adapter::contiguous_pages(size, sponsor)?;
-        let storage = WritableVmo::try_from_owned_pages(
-            size,
-            KernelPageBackend,
-            DomainAccount::new(sponsor.clone()),
-            pages,
-        )?;
-        drop(transient);
-        Self::from_writable(storage, sponsor)
+        if size < hyper::mm::PAGE_SIZE
+            || !size.is_power_of_two()
+            || size > hyper::abi::native::HYPER_NATIVE_VMO_MAX_CONTIGUOUS_SIZE_BYTES
+        {
+            return Err(MemoryObjectError::AllocationSize);
+        }
+        let layout = NativeWritableVmo::metadata_layout(size)?;
+        let pages = crate::kernel::mm::cache_memory::allocation_page_bound(layout)
+            .ok_or(MemoryObjectError::AllocationSize)?;
+        crate::kernel::mm::reclaim::retry_prepare(
+            crate::kernel::mm::reclaim::Target::PhysicalOrder(pages.trailing_zeros() as usize),
+            || {
+                let (pages, transient) = super::kernel_adapter::contiguous_pages(size, sponsor)?;
+                let storage = WritableVmo::try_from_owned_pages(
+                    size,
+                    KernelPageBackend,
+                    DomainAccount::new(sponsor.clone()),
+                    pages,
+                )?;
+                drop(transient);
+                Self::from_writable(storage, sponsor)
+            },
+            |error| matches!(error, MemoryObjectError::Vmo(VmoError::Allocation)),
+        )
     }
 
     pub(crate) fn try_new_writable(
         size: u64,
         sponsor: &ResourceDomain,
     ) -> Result<Self, MemoryObjectError> {
-        let storage =
-            WritableVmo::try_new(size, KernelPageBackend, DomainAccount::new(sponsor.clone()))?;
+        let layout = NativeWritableVmo::metadata_layout(size)?;
+        let pages = crate::kernel::mm::cache_memory::allocation_page_bound(layout)
+            .ok_or(MemoryObjectError::AllocationSize)?;
+        let storage = crate::kernel::mm::reclaim::retry_prepare(
+            crate::kernel::mm::reclaim::Target::PhysicalOrder(pages.trailing_zeros() as usize),
+            || WritableVmo::try_new(size, KernelPageBackend, DomainAccount::new(sponsor.clone())),
+            |error| matches!(error, VmoError::Allocation),
+        )?;
         Self::from_writable(storage, sponsor)
     }
 

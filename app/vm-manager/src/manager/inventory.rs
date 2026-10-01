@@ -12,6 +12,10 @@ use hyper_vm_policy::fleet;
 use std::mem::MaybeUninit;
 use std::time::Duration;
 
+// Identity discovery and start admission need the same broker response budget.
+// Unlike best-effort status snapshots, they may wait behind mapping retirement.
+const IDENTITY_QUERY_TIMEOUT: Duration = Duration::from_secs(io::OBSERVATION_TIMEOUT_SECONDS);
+
 /// A definition owned by this manager grants lifecycle management; a broker
 /// observation grants only a snapshot. Names identify entries, never authority.
 pub(super) enum VmTarget<'a> {
@@ -105,7 +109,7 @@ impl FleetManager {
 
 impl ObservedVm {
     pub(super) fn connect(broker: CapabilityChannel) -> hyper_os::Result<Self> {
-        let deadline = hyper_os::time::deadline_after(Duration::from_secs(5))?.as_raw();
+        let deadline = hyper_os::time::deadline_after(IDENTITY_QUERY_TIMEOUT)?.as_raw();
         let (name, image) = read_observation(&broker, deadline, |info| {
             (info.name.to_owned(), info.image.to_owned())
         })?;
@@ -122,7 +126,7 @@ impl ObservedVm {
 
     fn check_names<'a>(&self, mut names: impl Iterator<Item = &'a str>) -> Result<(), String> {
         let check = (|| {
-            let deadline = hyper_os::time::deadline_after(Duration::from_millis(250))?.as_raw();
+            let deadline = hyper_os::time::deadline_after(IDENTITY_QUERY_TIMEOUT)?.as_raw();
             read_observation(&self.broker, deadline, |info| {
                 if info.name != self.name || info.image != self.image {
                     return Err("observed VM identity changed on the broker endpoint".into());

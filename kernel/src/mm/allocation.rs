@@ -9,7 +9,11 @@ use core::marker::PhantomData;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::{Deref, DerefMut};
 use core::ptr::NonNull;
-use core::sync::atomic::{AtomicUsize, Ordering, fence};
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+mod refcount;
+
+use refcount::StrongRelease;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AllocationError;
@@ -126,12 +130,12 @@ impl<T> FallibleArc<T> {
 
     /// Returns a non-owning reference-count snapshot for diagnostics.
     pub fn strong_count(&self) -> usize {
-        self.inner().strong.load(Ordering::Relaxed)
+        refcount::strong_count(&self.inner().strong)
     }
 
     /// Creates a non-owning allocation reference.
     pub fn downgrade(&self) -> WeakFallibleArc<T> {
-        retain_reference(&self.inner().weak);
+        refcount::retain_weak(&self.inner().weak);
         WeakFallibleArc {
             inner: self.inner,
             ownership: PhantomData,
@@ -149,7 +153,7 @@ impl<T> FallibleArc<T> {
     /// behavior and returns `None`.
     pub fn release_deferred(self) -> Option<DeferredArcDrop<T>> {
         let owner = ManuallyDrop::new(self);
-        match release_strong(owner.inner) {
+        match refcount::release_strong(&owner.inner().strong) {
             StrongRelease::Final => Some(DeferredArcDrop {
                 inner: owner.inner,
                 ownership: PhantomData,
@@ -170,17 +174,10 @@ impl<T> FallibleArc<T> {
     /// Converts the sole shared reference into a pinned linear owner.
     pub fn try_into_unique(self) -> Result<UniqueFallibleArc<T>, Self> {
         let inner = self.inner();
-        // An external weak owner cannot upgrade while the strong count is
-        // zero, but `into_shared` would republish this same allocation and let
-        // that observer cross the linear-ownership interval. Requiring only
-        // the implicit weak owner prevents that weak-reference ABA and also
-        // permits the unique owner to free the allocation directly.
-        if inner.weak.load(Ordering::Acquire) != 1
-            || inner
-                .strong
-                .compare_exchange(1, 0, Ordering::Acquire, Ordering::Relaxed)
-                .is_err()
-        {
+        // The refcount transition excludes both other strong owners and
+        // external weak observers. A concurrent weak upgrade cancels the
+        // transition without observing a temporary dead value.
+        if !refcount::try_unique(&inner.strong, &inner.weak) {
             return Err(self);
         }
         let owner = ManuallyDrop::new(self);
@@ -208,33 +205,13 @@ impl<T> WeakFallibleArc<T> {
 
     /// Acquires a strong owner while the value remains alive.
     pub fn upgrade(&self) -> Option<FallibleArc<T>> {
-        let strong = &self.inner().strong;
-        let mut current = strong.load(Ordering::Acquire);
-        loop {
-            if current == 0 {
-                return None;
-            }
-            if current == usize::MAX {
-                return Some(FallibleArc {
-                    inner: self.inner,
-                    ownership: PhantomData,
-                });
-            }
-            match strong.compare_exchange_weak(
-                current,
-                current + 1,
-                Ordering::Acquire,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => {
-                    return Some(FallibleArc {
-                        inner: self.inner,
-                        ownership: PhantomData,
-                    });
-                }
-                Err(observed) => current = observed,
-            }
+        if !refcount::try_upgrade(&self.inner().strong) {
+            return None;
         }
+        Some(FallibleArc {
+            inner: self.inner,
+            ownership: PhantomData,
+        })
     }
 
     fn inner(&self) -> &SharedInner<T> {
@@ -361,7 +338,7 @@ fn unreachable_unique_creation() -> ! {
 
 impl<T> Clone for FallibleArc<T> {
     fn clone(&self) -> Self {
-        retain_reference(&self.inner().strong);
+        refcount::retain_strong(&self.inner().strong);
         Self {
             inner: self.inner,
             ownership: PhantomData,
@@ -379,7 +356,7 @@ impl<T> Deref for FallibleArc<T> {
 
 impl<T> Drop for FallibleArc<T> {
     fn drop(&mut self) {
-        if release_strong(self.inner) == StrongRelease::Final {
+        if refcount::release_strong(&self.inner().strong) == StrongRelease::Final {
             destroy_value_and_release_implicit_weak(self.inner);
         }
     }
@@ -387,7 +364,7 @@ impl<T> Drop for FallibleArc<T> {
 
 impl<T> Clone for WeakFallibleArc<T> {
     fn clone(&self) -> Self {
-        retain_reference(&self.inner().weak);
+        refcount::retain_weak(&self.inner().weak);
         Self {
             inner: self.inner,
             ownership: PhantomData,
@@ -398,63 +375,6 @@ impl<T> Clone for WeakFallibleArc<T> {
 impl<T> Drop for WeakFallibleArc<T> {
     fn drop(&mut self) {
         release_weak(self.inner);
-    }
-}
-
-fn retain_reference(counter: &AtomicUsize) {
-    let mut current = counter.load(Ordering::Relaxed);
-    loop {
-        if current == usize::MAX {
-            return;
-        }
-        match counter.compare_exchange_weak(
-            current,
-            current + 1,
-            Ordering::Relaxed,
-            Ordering::Relaxed,
-        ) {
-            Ok(_) => return,
-            Err(observed) => current = observed,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum StrongRelease {
-    Shared,
-    Final,
-    Leaked,
-}
-
-fn release_strong<T>(inner: NonNull<SharedInner<T>>) -> StrongRelease {
-    // SAFETY: the caller owns one strong reference, so the allocation and its
-    // counters remain live throughout this decrement.
-    let strong = unsafe { &inner.as_ref().strong };
-    let mut current = strong.load(Ordering::Relaxed);
-    loop {
-        if current == usize::MAX || current == 0 {
-            // Saturation deliberately leaks every clone. A zero count is
-            // unreachable through the safe API because the caller consumes
-            // one reference; treating it as another leak avoids arithmetic
-            // underflow if unsafe code has already broken that rule.
-            return StrongRelease::Leaked;
-        }
-        match strong.compare_exchange_weak(
-            current,
-            current - 1,
-            Ordering::Release,
-            Ordering::Relaxed,
-        ) {
-            Ok(1) => {
-                // Pair with every releasing decrement whose owner preceded
-                // this final one. The winner must observe those owners' writes
-                // before it accesses or destroys the initialized value.
-                fence(Ordering::Acquire);
-                return StrongRelease::Final;
-            }
-            Ok(_) => return StrongRelease::Shared,
-            Err(observed) => current = observed,
-        }
     }
 }
 
@@ -470,19 +390,9 @@ fn release_weak<T>(inner: NonNull<SharedInner<T>>) {
     // SAFETY: The caller owns one weak reference, so the allocation header is
     // live for this decrement.
     let weak = unsafe { &inner.as_ref().weak };
-    let mut current = weak.load(Ordering::Relaxed);
-    loop {
-        if current == usize::MAX || current == 0 {
-            return;
-        }
-        match weak.compare_exchange_weak(current, current - 1, Ordering::Release, Ordering::Relaxed)
-        {
-            Ok(1) => break,
-            Ok(_) => return,
-            Err(observed) => current = observed,
-        }
+    if !refcount::release_weak(weak) {
+        return;
     }
-    fence(Ordering::Acquire);
     // SAFETY: This thread released the final weak reference after the strong
     // count reached zero and the ManuallyDrop value was already destroyed.
     unsafe { drop(Box::from_raw(inner.as_ptr())) };

@@ -13,6 +13,8 @@
 
 mod executable;
 mod fat;
+mod file_data;
+mod file_record;
 pub(crate) mod instance;
 mod lock_state;
 pub(crate) mod locks;
@@ -21,7 +23,6 @@ mod mounts;
 pub(crate) mod namespace_test;
 mod objects;
 mod ramfs;
-mod read;
 mod read_contract;
 mod resolve;
 mod resolve_state;
@@ -30,6 +31,7 @@ mod scratch;
 pub(crate) mod service;
 
 pub(crate) use executable::ExecutableSnapshot;
+pub(crate) use file_record::CachePage;
 #[cfg(feature = "kernel-self-test")]
 pub(crate) use objects::NodeLocationInfo;
 pub(crate) use objects::{
@@ -99,6 +101,37 @@ impl BootstrapFile {
 }
 
 static SYSTEM_NAMESPACE: PublishedOnce<FallibleArc<MountNamespace>> = PublishedOnce::new();
+
+/// Borrow the system service's cache without creating a namespace or mount pin.
+pub(crate) fn file_cache() -> Option<&'static crate::kernel::io_cache::FileDataCache<CachePage>> {
+    SYSTEM_NAMESPACE
+        .get()
+        .map(|namespace| namespace.cache_ref())
+}
+
+/// Bounded scheduled cleanup of weak namespace bindings after page reclaim.
+/// This is not part of the allocator's emergency callback.
+pub(crate) fn reclaim_file_records(limit: usize) -> usize {
+    SYSTEM_NAMESPACE
+        .get()
+        .map_or(0, |namespace| namespace.reclaim_file_records(limit))
+}
+
+/// Finite scheduled cleanup after an explicit allocation or quota request.
+/// Busy namespace transactions are skipped, never awaited by the worker.
+pub(crate) fn reclaim_idle_records(domain: Option<super::accounting::ResourceDomainId>) {
+    if let Some(namespace) = SYSTEM_NAMESPACE.get() {
+        namespace.reclaim_idle_records(domain);
+    }
+}
+
+#[cfg(feature = "kernel-self-test")]
+pub(crate) fn cache_test_record(
+    id: u64,
+    domain: &super::accounting::ResourceDomain,
+) -> Result<FallibleArc<file_record::FileRecord>, instance::Error> {
+    file_record::FileRecord::try_new(id, domain)
+}
 
 pub(crate) fn initialize(boot: &super::boot::Initialization) -> Result<(), InitializationError> {
     let ramfs = RamFs::from_newc(boot.initial_ramdisk()).map_err(InitializationError::RamFs)?;

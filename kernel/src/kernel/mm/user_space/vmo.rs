@@ -359,6 +359,15 @@ impl<Backend: PageBackend, Account: MemoryAccount> WritableVmo<Backend, Account>
         })
     }
 
+    /// Exact vector backing required before a writable VMO can be published.
+    /// Platform admission/reclaim policy remains with the production caller.
+    pub(crate) fn metadata_layout(
+        size: u64,
+    ) -> Result<core::alloc::Layout, VmoError<Backend::Error, Account::Error>> {
+        core::alloc::Layout::array::<Option<PageRef<Backend, Account>>>(page_count(size)?)
+            .map_err(|_| VmoError::SizeOverflow)
+    }
+
     pub(crate) fn size(&self) -> u64 {
         self.inner.size
     }

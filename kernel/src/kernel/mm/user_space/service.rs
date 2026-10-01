@@ -258,8 +258,7 @@ pub(crate) fn read_vmo(
     let length = transfer_length(destination)?;
     let vmo = process.resolve_handle::<VmoObject>(value, Rights::READ)?;
     let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(length)
+    crate::kernel::mm::reclaim::reserve_exact(&mut bytes, length)
         .map_err(|_| ProcessError::Allocation)?;
     bytes.resize(length, 0);
     vmo.object().read(offset, &mut bytes)?;
@@ -279,8 +278,7 @@ pub(crate) fn write_vmo(
     let length = transfer_length(source)?;
     let vmo = process.resolve_handle::<VmoObject>(value, Rights::WRITE)?;
     let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(length)
+    crate::kernel::mm::reclaim::reserve_exact(&mut bytes, length)
         .map_err(|_| ProcessError::Allocation)?;
     bytes.resize(length, 0);
     process.copy_from_user(source, &mut bytes)?;
