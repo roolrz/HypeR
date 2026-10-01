@@ -258,7 +258,8 @@ impl Broker {
                     listener::Request::Connect(admission) => self.admit(guest, admission)?,
                     listener::Request::Observe(endpoint) => {
                         if self.observations.len() < 4 {
-                            self.observations.push((endpoint, deadline(1)?));
+                            self.observations
+                                .push((endpoint, deadline(io::OBSERVATION_TIMEOUT_SECONDS)?));
                         }
                     }
                 }
