@@ -21,7 +21,7 @@ use hyper_os::startup::{self, Startup};
 use hyper_os::wait::{ObjectSignals, WaitItem, wait_many};
 use hyper_service::process as process_contract;
 use hyper_service::vm as vm_contract;
-use hyper_vm_manager::MachinePolicy;
+use hyper_vm_manager::{FleetConfiguration, MachinePolicy};
 use hyper_vm_policy::fleet;
 use std::time::Instant;
 
@@ -35,6 +35,7 @@ pub(super) struct FleetManager {
     fleet_domain: OwnedHandle<ResourceDomainObject>,
     authority: OwnedHandle<hyper_os::handle::VirtualMachineCreationAuthorityObject>,
     io_service: Option<inventory::ObservedVm>,
+    configuration: FleetConfiguration,
     connections: listener::Listener,
     root: Directory,
     machines: Vec<Machine>,
@@ -57,6 +58,7 @@ impl FleetManager {
             fleet_domain: startup.take(startup::RESOURCE_DOMAIN)?,
             authority: startup.take(startup::VIRTUAL_MACHINE_CREATION_AUTHORITY)?,
             io_service: None,
+            configuration: FleetConfiguration::Unavailable,
             connections: listener::Listener::start(CapabilityChannel::from_handle(
                 startup.take(vm_contract::MANAGER_CONNECTION)?,
             ))?,
@@ -93,7 +95,7 @@ impl FleetManager {
             machine
                 .instance
                 .as_ref()
-                .is_some_and(VmInstance::wants_disk_admission)
+                .is_some_and(VmInstance::wants_io_admission)
         }) && let Some(broker) = self.io_service.as_ref()
         {
             waits.push(WaitItem::new(
@@ -101,7 +103,7 @@ impl FleetManager {
                 ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING
                     .union(ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED),
             ));
-            sources.push(WaitSource::DiskAdmission);
+            sources.push(WaitSource::IoAdmission);
         }
         for (vm, machine) in self.machines.iter().enumerate() {
             if let Some(instance) = machine.instance.as_ref() {
@@ -162,7 +164,7 @@ impl FleetManager {
         self.next_wait = (first + observation.index + 1) % sources.len();
         match sources[observation.index] {
             WaitSource::Connection => self.accept_client(),
-            WaitSource::DiskAdmission => self.admit_disk(),
+            WaitSource::IoAdmission => self.admit_io(),
             WaitSource::RuntimeProcess(vm) => self.finish_instance(vm),
             WaitSource::RuntimeControl(vm) => self.handle_runtime_control(vm),
             WaitSource::Client(index) => self.handle_client(index, observation.observed),
@@ -191,14 +193,8 @@ impl FleetManager {
             {
                 return Err(format!("VM '{}' already exists", definition.name));
             }
-            if let Some(disk) = &definition.disk
-                && self
-                    .machines
-                    .iter()
-                    .filter_map(|machine| machine.definition.disk.as_ref())
-                    .any(|other| other.client == disk.client || other.volume == disk.volume)
-            {
-                return Err(format!("disk volume '{}' is already assigned", disk.volume));
+            for machine in &self.machines {
+                definition.check_conflicts(&machine.definition)?;
             }
             let rights = hyper_os::fs::FileRights::from_rights(vm_contract::MANAGED_IMAGE_RIGHTS)
                 .ok_or("invalid image rights")?;
@@ -235,7 +231,7 @@ struct Client {
 #[derive(Clone, Copy)]
 enum WaitSource {
     Connection,
-    DiskAdmission,
+    IoAdmission,
     RuntimeProcess(usize),
     RuntimeControl(usize),
     Client(usize),

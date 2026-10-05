@@ -7,63 +7,15 @@
 mod graph;
 #[cfg(any(test, all(target_os = "hyper", target_arch = "aarch64")))]
 mod registers;
-mod snapshot;
 #[cfg(all(target_os = "hyper", target_arch = "aarch64"))]
 pub mod worker;
 
+use crate::firmware::{self, FirmwareNode, MmioResource};
 use hyper_os::device::{self, BundleEntry, FirmwareIdentity};
 use hyper_os::handle::{
     DeviceAssignmentAuthorityObject, HandleRef, OwnedHandle, PhysicalDeviceObject,
 };
 use hyper_os::{Error, Result, Status};
-
-#[derive(Clone, Copy, Debug)]
-struct MmioResource {
-    base: u64,
-    length: u64,
-}
-impl MmioResource {
-    fn start(self) -> u64 {
-        self.base
-    }
-    fn size(self) -> u64 {
-        self.length
-    }
-}
-
-#[derive(Clone, Debug)]
-struct FirmwareNode {
-    id: u32,
-    path: String,
-    compatible: Vec<String>,
-    registers: Vec<MmioResource>,
-    properties: Vec<(String, Vec<u8>)>,
-    kernel_owned: bool,
-    interrupt: Option<(u32, bool)>,
-}
-impl FirmwareNode {
-    fn id(&self) -> u32 {
-        self.id
-    }
-    fn path(&self) -> &str {
-        &self.path
-    }
-    fn is_compatible(&self, value: &str) -> bool {
-        self.compatible.iter().any(|item| item == value)
-    }
-    fn registers(&self) -> &[MmioResource] {
-        &self.registers
-    }
-    fn kernel_claimed(&self) -> bool {
-        self.kernel_owned
-    }
-    fn property(&self, name: &str) -> Option<&[u8]> {
-        self.properties
-            .iter()
-            .find(|(key, _)| key == name)
-            .map(|(_, value)| value.as_slice())
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResourceInfo {
@@ -79,6 +31,47 @@ pub struct ProfileInfo {
     pub resources: [ResourceInfo; 5],
 }
 
+const PROPERTIES: &[&str] = &[
+    "#clock-cells",
+    "#gpio-cells",
+    "bias-pull-up",
+    "brcm,gpio-bank-widths",
+    "bus-width",
+    "cd-gpios",
+    "clock-frequency",
+    "clock-names",
+    "clocks",
+    "dma-coherent",
+    "enable-active-high",
+    "function",
+    "gpio-controller",
+    "gpios",
+    "interrupt-controller",
+    "interrupts",
+    "interrupts-extended",
+    "iommus",
+    "mmc-ddr-3_3v",
+    "phandle",
+    "phys",
+    "pinctrl-0",
+    "pinctrl-names",
+    "pins",
+    "power-domains",
+    "reg-names",
+    "regulator-always-on",
+    "regulator-boot-on",
+    "regulator-max-microvolt",
+    "regulator-min-microvolt",
+    "regulator-settling-time-us",
+    "resets",
+    "sd-uhs-ddr50",
+    "sd-uhs-sdr104",
+    "sd-uhs-sdr50",
+    "states",
+    "vmmc-supply",
+    "vqmmc-supply",
+];
+
 struct Plan {
     entries: [BundleEntry; 5],
     irq_node: u32,
@@ -89,6 +82,7 @@ fn plan(nodes: &[FirmwareNode], identity: FirmwareIdentity<'_>) -> Result<Plan> 
     let mut selected = nodes.iter().filter(|node| match identity {
         FirmwareIdentity::Compatible(value) => node.is_compatible(value),
         FirmwareIdentity::FdtPath(value) => node.path() == value,
+        FirmwareIdentity::PciId { .. } => false,
     });
     let device = selected.next().ok_or(Error::Status(Status::NOT_FOUND))?;
     if selected.next().is_some() {
@@ -122,7 +116,7 @@ pub fn claim(
     authority: HandleRef<'_, DeviceAssignmentAuthorityObject>,
     identity: FirmwareIdentity<'_>,
 ) -> Result<(OwnedHandle<PhysicalDeviceObject>, ProfileInfo)> {
-    let nodes = snapshot::read(authority)?;
+    let nodes = firmware::read(authority, PROPERTIES)?;
     let plan = plan(&nodes, identity)?;
     let physical = device::claim_bundle(authority, &plan.entries, plan.irq_node)?;
     Ok((physical, plan.profile))
@@ -135,7 +129,7 @@ pub fn claim_virtio_test(
     authority: HandleRef<'_, DeviceAssignmentAuthorityObject>,
     identity: FirmwareIdentity<'_>,
 ) -> Result<OwnedHandle<PhysicalDeviceObject>> {
-    let nodes = snapshot::read(authority)?;
+    let nodes = firmware::read(authority, PROPERTIES)?;
     let node = virtio_test_node(&nodes, identity)?;
     device::claim_bundle(
         authority,

@@ -1,44 +1,74 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
-//! Board-authored volume identities shared by the Native and Linux supervisors.
+//! Board-authored disk and network policy shared by Native and Linux supervisors.
 
 use hyper_vm_image::guest_fdt::io::DmaRange;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Client {
     pub id: u32,
-    pub volume: String,
+    pub volume: Option<String>,
+    pub network: Option<String>,
+    pub mac: [u8; 6],
+}
+
+impl Client {
+    pub fn connection(&self) -> hyper_service::io::Connection<'_> {
+        hyper_service::io::Connection {
+            client: self.id,
+            volume: self.volume.as_deref(),
+            network: self.network.as_deref(),
+            mac: self.mac,
+        }
+    }
+
+    pub fn devices(&self) -> u32 {
+        self.connection().devices()
+    }
 }
 
 pub fn parse(bytes: &str) -> Result<Vec<Client>, &'static str> {
     let mut lines = bytes.lines();
-    if bytes.len() > 8192 || lines.next() != Some("hyper.clients.v1") {
+    if bytes.len() > 8192 || lines.next() != Some("hyper.clients.v2") {
         return Err("invalid I/O client table header or size");
     }
     let mut clients = Vec::new();
     let mut config = false;
     for line in lines {
-        let (id, volume) = line.split_once(' ').ok_or("invalid I/O client entry")?;
+        let fields: Vec<_> = line.split(' ').collect();
+        let [id, volume, network, mac] = fields.as_slice() else {
+            return Err("invalid I/O client entry");
+        };
         let id: u32 = id.parse().map_err(|_| "invalid I/O client identity")?;
         if id == 0 {
-            if config || volume != "config" {
+            if config || (*volume, *network, *mac) != ("config", "-", "-") {
                 return Err("invalid configuration client");
             }
+            // Native's network identity is reserved, with no live endpoint.
             config = true;
             continue;
         }
-        if hyper_service::io::encode_connect(id, volume).is_none()
-            || clients
-                .iter()
-                .any(|client: &Client| client.id == id || client.volume == volume)
+        let client = Client {
+            id,
+            volume: (*volume != "-").then(|| (*volume).into()),
+            network: (*network != "-").then(|| (*network).into()),
+            mac: if *mac == "-" {
+                [0; 6]
+            } else {
+                hyper_service::io::parse_mac(mac).ok_or("invalid client MAC")?
+            },
+        };
+        if client.connection().encode().is_none()
+            || clients.iter().any(|other: &Client| {
+                other.id == id
+                    || (client.volume.is_some() && other.volume == client.volume)
+                    || (client.network.is_some() && other.mac == client.mac)
+            })
         {
             return Err("invalid or duplicate I/O client");
         }
-        clients.push(Client {
-            id,
-            volume: volume.into(),
-        });
+        clients.push(client);
     }
     if !config {
         return Err("configuration client is required");
@@ -56,7 +86,10 @@ pub fn authorize_request(
     use hyper_vm_support::io_protocol::Command;
     request.binding == identity
         && request.epoch == epoch
-        && matches!(request.command, Command::Hello | Command::Device(_))
+        && matches!(
+            request.command,
+            Command::Hello | Command::Device(_) | Command::NetworkHello | Command::NetworkDevice(_)
+        )
 }
 
 pub fn dynamic_dma_ranges(excluded: &[DmaRange]) -> Result<Vec<DmaRange>, String> {

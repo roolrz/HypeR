@@ -12,6 +12,23 @@ pub const VERSION_1: u64 = 1 << 32;
 pub const REQUEST_QUEUES: usize = 4;
 pub const QUEUES: usize = 2 + REQUEST_QUEUES;
 pub const QUEUE_MAX: u32 = 128;
+use crate::virtio_net;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum DeviceKind {
+    Scsi = 0,
+    Network = 1,
+}
+
+impl DeviceKind {
+    pub const fn queue_count(self) -> usize {
+        match self {
+            Self::Scsi => QUEUES,
+            Self::Network => virtio_net::QUEUES,
+        }
+    }
+}
 const ACKNOWLEDGE: u32 = 1;
 const DRIVER: u32 = 2;
 const DRIVER_OK: u32 = 4;
@@ -68,6 +85,8 @@ struct Pending {
 }
 
 pub struct Device {
+    kind: DeviceKind,
+    network: Option<virtio_net::Configuration>,
     offered: u64,
     features: u64,
     device_selector: u32,
@@ -92,6 +111,8 @@ impl Device {
             return Err(Error::UnsupportedBackend);
         }
         Ok(Self {
+            kind: DeviceKind::Scsi,
+            network: None,
             // No indirect descriptors, EVENT_IDX, packed rings, or SCSI hotplug
             // until the complete bridge supports their semantics.
             offered: backend_features & VERSION_1,
@@ -109,6 +130,28 @@ impl Device {
         })
     }
 
+    pub fn network(
+        backend_features: u64,
+        memory_base: u64,
+        memory_size: u64,
+        configuration: virtio_net::Configuration,
+    ) -> Result<Self, Error> {
+        if !configuration.valid() {
+            return Err(Error::UnsupportedBackend);
+        }
+        let mut device = Self::new(backend_features, memory_base, memory_size)?;
+        device.kind = DeviceKind::Network;
+        device.network = Some(configuration);
+        // MAC is implemented by this configuration model, not Linux vhost.
+        // No checksum/GSO, mergeable RX, control queue or multiqueue is offered.
+        device.offered |= virtio_net::MAC_FEATURE;
+        Ok(device)
+    }
+
+    fn queues(&self) -> &[Queue] {
+        &self.queues[..self.kind.queue_count()]
+    }
+
     pub fn read(&self, offset: u64, width: u8) -> Result<u64, Error> {
         if offset >= 0x100 {
             return self.read_config(offset - 0x100, width);
@@ -116,11 +159,14 @@ impl Device {
         if width != 4 || !offset.is_multiple_of(4) {
             return Err(Error::InvalidAccess);
         }
-        let queue = self.queues.get(self.queue_selector as usize);
+        let queue = self.queues().get(self.queue_selector as usize);
         let value = match offset {
             0x000 => 0x7472_6976,
             0x004 => 2,
-            0x008 => 8, // Standard SCSI device ID.
+            0x008 => match self.kind {
+                DeviceKind::Scsi => 8,
+                DeviceKind::Network => 1,
+            },
             0x00c => 0, // No claimed vendor identifier.
             0x010 => {
                 if self.device_selector < 2 {
@@ -184,7 +230,7 @@ impl Device {
             0x030 => self.queue_selector = value,
             0x044 if value == 0 => {
                 let queue = self
-                    .queues
+                    .queues()
                     .get(self.queue_selector as usize)
                     .ok_or(Error::InvalidQueue)?;
                 if queue.ready && self.status & (DRIVER_OK | NEEDS_RESET) != 0 {
@@ -206,7 +252,7 @@ impl Device {
                     return Err(Error::InvalidStatus);
                 }
                 let index = self.queue_selector as usize;
-                let mut queue = *self.queues.get(index).ok_or(Error::InvalidQueue)?;
+                let mut queue = *self.queues().get(index).ok_or(Error::InvalidQueue)?;
                 // Ready queues cannot change their metadata. QueueReady=0
                 // above is a synchronization point even without RING_RESET.
                 if queue.ready {
@@ -232,8 +278,8 @@ impl Device {
             0x070 => return self.set_status(value),
             0x0ac => {} // No shared-memory capabilities to select.
             // Linux vhost-scsi uses the fixed standard sense and CDB sizes.
-            0x114 if value == 96 => {}
-            0x118 if value == 32 => {}
+            0x114 if self.kind == DeviceKind::Scsi && value == 96 => {}
+            0x118 if self.kind == DeviceKind::Scsi && value == 32 => {}
             _ => return Err(Error::InvalidAccess),
         }
         Ok(None)
@@ -362,9 +408,9 @@ impl Device {
 
     fn validate_queues(&self) -> Result<(), Error> {
         let mut regions = [(0u64, 0u64); QUEUES * 3];
-        for (index, queue) in self.queues.iter().copied().enumerate() {
+        for (index, queue) in self.queues().iter().copied().enumerate() {
             if !queue.ready {
-                if index >= 3 {
+                if self.kind == DeviceKind::Scsi && index >= 3 {
                     continue;
                 }
                 return Err(Error::InvalidQueue);
@@ -387,6 +433,10 @@ impl Device {
 
     fn read_config(&self, offset: u64, width: u8) -> Result<u64, Error> {
         let mut bytes = [0u8; 36];
+        if let Some(network) = self.network {
+            bytes[..6].copy_from_slice(&network.mac);
+            return read_config_bytes(&bytes[..6], offset, width);
+        }
         for (index, value) in [REQUEST_QUEUES as u32, 126, 1024, 64, 16, 96, 32]
             .into_iter()
             .enumerate()
@@ -395,18 +445,22 @@ impl Device {
         }
         bytes[30..32].copy_from_slice(&255u16.to_le_bytes());
         bytes[32..36].copy_from_slice(&16383u32.to_le_bytes());
-        if !matches!(width, 1 | 2 | 4) || !offset.is_multiple_of(u64::from(width)) {
-            return Err(Error::InvalidAccess);
-        }
-        let start = usize::try_from(offset).map_err(|_| Error::InvalidAccess)?;
-        let end = start
-            .checked_add(usize::from(width))
-            .ok_or(Error::InvalidAccess)?;
-        let source = bytes.get(start..end).ok_or(Error::InvalidAccess)?;
-        let mut value = [0u8; 8];
-        value[..source.len()].copy_from_slice(source);
-        Ok(u64::from_le_bytes(value))
+        read_config_bytes(&bytes, offset, width)
     }
+}
+
+fn read_config_bytes(bytes: &[u8], offset: u64, width: u8) -> Result<u64, Error> {
+    if !matches!(width, 1 | 2 | 4) || !offset.is_multiple_of(u64::from(width)) {
+        return Err(Error::InvalidAccess);
+    }
+    let start = usize::try_from(offset).map_err(|_| Error::InvalidAccess)?;
+    let end = start
+        .checked_add(usize::from(width))
+        .ok_or(Error::InvalidAccess)?;
+    let source = bytes.get(start..end).ok_or(Error::InvalidAccess)?;
+    let mut value = [0u8; 8];
+    value[..source.len()].copy_from_slice(source);
+    Ok(u64::from_le_bytes(value))
 }
 
 fn set_half(address: &mut u64, high: bool, value: u32) {
@@ -424,5 +478,5 @@ fn queue_regions(queue: Queue) -> [(u64, u64, u64); 3] {
 }
 
 #[cfg(test)]
-#[path = "../tests/virtio_scsi.rs"]
+#[path = "../tests/virtio_mmio.rs"]
 mod tests;

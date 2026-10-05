@@ -11,8 +11,9 @@ SPDX-License-Identifier: Apache-2.0
 
 The near-term milestone is an end-to-end system on **physical Raspberry Pi 5**:
 HypeR runs Native applications and a trimmed Linux I/O VM; Linux drives the
-physical network and storage devices and exports their services to HypeR over
-shared memory and event-driven notifications. Storage uses standard virtio-scsi
+physical network and storage devices, exposing storage to Native clients and
+guests and networking to guest VMs over shared memory and event-driven
+notifications. The Native network endpoint is reserved for later use. Storage uses standard virtio-scsi
 with Linux vhost-scsi/LIO. QEMU remains the regression platform. Hardware
 bring-up is part of this milestone, not a follow-up after the backend is done.
 
@@ -89,33 +90,38 @@ capabilities; new privileged power operations require explicit Native authority.
      exclusive Native bundle claims and Linux handoff.
    - [x] Exercise the SD storage path on Pi 5 with HypeR-owned RAM excluded
      from Linux's allocator; basic reads and guest persistence are recorded.
-   - [ ] Inventory and assign the network controller's dependencies.
+   - [x] Assign the whole RP1 PCI function through generic PCI/BAR/MSI mediation; keep RP1 drivers in Linux.
    - [ ] Qualify storage stress, DMA fault retirement and direct networking.
-4. **Expose I/O to Native clients.**
+4. **Expose I/O to Native clients and guest VMs.**
    - [x] Validate the AArch64 QEMU cross-VM virtio-scsi/vhost-scsi baseline,
      including a real disk, DMA translations, reset/rebind and VM retirement.
    - [x] Integrate storage with ordinary Native service deployment and mount
      the Pi 5 SD-backed configuration volume at `/data`; directory reads pass.
    - [ ] Qualify SD writes and persistence across reboot.
-   - [ ] Define and implement the virtio-net frontend/backend contract; the
-     storage choice does not by itself complete the network design.
+   - [x] Implement guest virtio-net with Linux vhost-net/TAP, shared client
+     memory ownership and independent storage/network reset epochs.
+   - [x] Validate the QEMU network profile with GICv2/GICv3: DHCP, HTTP payload
+     integrity, DNS/outbound HTTP, disk+network and network-only guests,
+     independent network reset, VM restart and memory-release acknowledgements.
+   - [x] Build, publish, import and pin protocol version 3 QEMU and Pi 5 appliances.
    - [x] Integrate the storage backend and Native block frontend with kernel
      VFS/FAT and the configuration-volume mount.
-   - [ ] Implement network backend/frontend services and the Native network APIs
-     needed by the first end-to-end applications.
+   - [x] Reserve Native client zero for future networking without creating an
+     active Native link. Native network APIs are deferred.
    - [ ] Prove teardown: fence sessions, fail outstanding requests, quiesce DMA
      before releasing memory, and prevent stale completions after reconnect.
 5. **Qualify the complete system on physical Pi 5.**
-   - [ ] Run Native network traffic and block read/write with data verification,
-     then concurrent I/O under memory and queue pressure.
+   - [ ] Run guest network traffic and Native/guest block read/write with data
+     verification, then concurrent I/O under memory and queue pressure.
    - [ ] Test backend failure and shutdown. Restart is allowed only after device
      quiescence/reset is established; otherwise keep affected memory pinned and
      require recovery rather than recycling potentially DMA-visible pages.
    - [ ] Record throughput, latency, CPU consumption and idle behavior alongside
      reproducible build, deployment and test instructions.
 
-The milestone is complete when Native clients use both physical network and
-storage through the Linux VM on Pi 5, correctness and failure tests pass, and
+The milestone is complete when Native clients use physical storage and guest
+VMs use physical network and storage through the Linux VM on Pi 5, correctness
+and failure tests pass, and
 measured results can be reproduced. A Linux boot banner or QEMU-only I/O is not
 sufficient. This is a development milestone, not a production-readiness claim.
 
@@ -127,6 +133,7 @@ and [VFS boundaries](../kernel/docs/vfs.md).
 
 These remain directions rather than prerequisites for the Pi 5 milestone:
 
+- Native network APIs and a connection for the reserved Native endpoint;
 - IOMMU-backed device isolation and untrusted driver domains;
 - transactional multi-vCPU management, richer VM supervision and accounting;
 - broader Native ABI/std coverage, ABI stabilization and generated bindings;

@@ -53,3 +53,9 @@ pub(super) fn report_fleet_configured(output: &OwnedHandle<ConsoleObject>) {
         .as_emergency_console()
         .write_all(b"HypeR init: VM fleet configured\n");
 }
+
+pub(super) fn report_fleet_unavailable(output: &OwnedHandle<ConsoleObject>) {
+    let _ = output.as_emergency_console().write_all(
+        b"HypeR init: VM fleet configuration unavailable; Native services remain available\n",
+    );
+}

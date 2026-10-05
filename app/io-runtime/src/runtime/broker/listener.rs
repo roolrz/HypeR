@@ -25,7 +25,9 @@ pub(super) enum Request {
 
 pub(super) struct Admission {
     pub(super) client: u32,
-    pub(super) volume: String,
+    pub(super) volume: Option<String>,
+    pub(super) network: Option<String>,
+    pub(super) mac: [u8; 6],
     pub(super) session: CapabilityChannel,
     pub(super) machine: OwnedHandle<VirtualMachineObject>,
     pub(super) memory: OwnedHandle<GuestMemoryObject>,
@@ -86,9 +88,11 @@ fn receive(endpoint: &CapabilityChannel) -> hyper_os::Result<Option<Request>> {
     if message.bytes() == io::OBSERVE_MESSAGE {
         return Ok(Some(Request::Observe(session)));
     }
-    let (client, volume) =
-        io::decode_connect(message.bytes()).ok_or(hyper_os::Error::InvalidResponse)?;
-    let volume = volume.to_owned();
+    let connection = io::decode_connect(message.bytes()).ok_or(hyper_os::Error::InvalidResponse)?;
+    let client = connection.client;
+    let volume = connection.volume.map(str::to_owned);
+    let network = connection.network.map(str::to_owned);
+    let mac = connection.mac;
     let admission = (|| -> hyper_os::Result<Admission> {
         let deadline = hyper_os::time::deadline_after(std::time::Duration::from_secs(60))?.as_raw();
         let mut bytes = [MaybeUninit::uninit(); io::MEMORY_BYTES];
@@ -105,6 +109,8 @@ fn receive(endpoint: &CapabilityChannel) -> hyper_os::Result<Option<Request>> {
         Ok(Admission {
             client,
             volume,
+            network,
+            mac,
             session,
             base,
             length,

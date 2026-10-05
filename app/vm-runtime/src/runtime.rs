@@ -4,9 +4,9 @@
 //! Prepare and publish one guest, then supervise its installed lifetime.
 
 use crate::{
-    disk,
     error::{Error, classify_image_error, classify_platform_error, classify_reference_error},
     image::{ImageSource, prepare_guest_memory},
+    io_devices,
     supervisor::supervise_guest,
 };
 use hyper_os::memory::WritableVmo;
@@ -21,7 +21,7 @@ pub(super) fn run(
     control: &hyper_os::channel::ByteChannel<'_>,
     started: Instant,
 ) -> Result<(), Error> {
-    let disk_session = startup
+    let io_session = startup
         .take_optional(hyper_service::io::SESSION)
         .map_err(Error::OperatingSystem)?
         .map(hyper_os::capability_channel::CapabilityChannel::from_handle);
@@ -36,9 +36,12 @@ pub(super) fn run(
     let lease = startup
         .take(vm_contract::CREATION_LEASE)
         .map_err(Error::OperatingSystem)?;
-    let config =
-        hyper_vm_policy::fleet::Configuration::from_runtime_arguments(std::env::args().skip(1))
-            .map_err(|_| Error::UnsupportedConfiguration)?;
+    let arguments = hyper_vm_runtime::arguments::Arguments::parse(
+        std::env::args().skip(1),
+        io_session.is_some(),
+    )
+    .map_err(|_| Error::UnsupportedConfiguration)?;
+    let config = arguments.configuration;
     let image = hyper_vm_image::parse(&source).map_err(classify_image_error)?;
     // Recheck at every start in case the image changed after manager admission.
     let image = hyper_vm_policy::image::configure(image, &config).map_err(|error| {
@@ -94,7 +97,7 @@ pub(super) fn run(
         image,
         &plan,
         metadata,
-        disk_session.is_some(),
+        arguments.io_devices,
         started,
     )?;
     publish_status(control, vm_contract::InstanceStatus::MemoryPrepared)?;
@@ -115,7 +118,7 @@ pub(super) fn run(
             platform_profile: profile,
         },
         serial_binding,
-        disk_session.is_some(),
+        io_session.is_some(),
     )?;
     hyper_vm_policy::affinity::apply(&config.affinity, plan.vcpu_count(), |index, words| {
         let cpu = vcpus
@@ -130,7 +133,7 @@ pub(super) fn run(
     // Installation, not image loading, opens the broker admission window.
     // The manager retains the session endpoint until this status is observed.
     #[cfg(feature = "broker-test")]
-    if disk_session.is_some() {
+    if io_session.is_some() {
         // Exceed the broker's 60-second handshake budget before publishing
         // readiness. Ordinary runtime artifacts never include this delay.
         std::thread::sleep(std::time::Duration::from_secs(65));
@@ -141,16 +144,17 @@ pub(super) fn run(
         started.elapsed().as_micros()
     );
     publish_status(control, vm_contract::InstanceStatus::Installed)?;
-    let (machine, mut disk) = if let Some(session) = disk_session {
+    let (machine, mut devices) = if let Some(session) = io_session {
         let grant = shared_memory.as_ref().ok_or(Error::InvalidControl)?;
-        let (machine, disk) = disk::bind(
+        let (machine, devices) = io_devices::bind(
             session,
             machine,
             grant,
             plan.memory_base(),
             plan.memory_size(),
+            arguments.io_devices,
         )?;
-        (machine, Some(disk))
+        (machine, Some(devices))
     } else {
         (machine, None)
     };
@@ -166,7 +170,7 @@ pub(super) fn run(
         elapsed.subsec_micros() % 1_000,
     );
     publish_status(control, vm_contract::InstanceStatus::Running)?;
-    supervise_guest(&machine, &vcpus, control, &mut console, disk.as_mut())
+    supervise_guest(&machine, &vcpus, control, &mut console, devices.as_mut())
 }
 
 pub(super) fn publish_status(
@@ -190,11 +194,11 @@ fn install_guest(
     plan: &linux::BootPlan,
     configuration: hyper_os::vm::Configuration,
     serial_binding: hyper_os::OwnedHandle<hyper_os::handle::VirtualSerialObject>,
-    with_disk: bool,
+    with_io: bool,
 ) -> Result<InstalledGuest, Error> {
     let pending = hyper_os::vm::create(lease, configuration)
         .map_err(|failure| Error::OperatingSystem(failure.error()))?;
-    let shared_memory = if with_disk {
+    let shared_memory = if with_io {
         let grant = hyper_os::vm::create_guest_memory(memory.as_handle_ref())
             .map_err(Error::OperatingSystem)?;
         hyper_os::vm::map_guest_memory(

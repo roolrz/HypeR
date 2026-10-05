@@ -6,6 +6,15 @@
 use crate::{StartupContract, vm};
 use hyper_os::{handle::Rights, startup};
 
+mod binding;
+mod connection;
+
+pub use binding::{BOUND_BYTES, BOUND_MESSAGE, Binding, NETWORK_DEVICE_ID_BIT};
+pub use connection::{
+    CONNECT_BYTES, Connection, DISK, NETWORK, decode_connect, encode_connect, parse_mac,
+    valid_name, valid_volume,
+};
+
 pub const DEVICE_AUTHORITY_NAME: &str = "io.device-authority";
 pub const STARTUP_CONTRACTS: &[StartupContract] = &[
     vm::MANAGER_CREATION_AUTHORITY_CONTRACT,
@@ -49,42 +58,22 @@ pub const SESSION_CONTRACT: StartupContract =
     StartupContract::exact("io.session", SESSION, SESSION_RIGHTS);
 
 /// Capability rendezvous records have exact lengths and no native-layout fields.
-pub const CONNECT_BYTES: usize = 48;
 pub const MEMORY_BYTES: usize = 24;
-pub const BOUND_MESSAGE: &[u8] = b"HIOBOUND1";
 pub const FRONTEND_MMIO: u64 = 0x0a00_0000;
 pub const FRONTEND_IRQ: u32 = 48;
+/// Client zero belongs to Native services. Its network route remains dormant
+/// until a Native network consumer is implemented; guests cannot claim it.
+pub const NATIVE_CLIENT: u32 = 0;
+pub const NETWORK_NOTIFICATION_BASE: u64 = 0x0a20_0000;
+pub const NETWORK_NOTIFICATION_STRIDE: u64 = 0x10000;
+pub const NETWORK_NOTIFICATION_IRQ_BASE: u32 = 64;
+pub const FRONTEND_NET_MMIO: u64 = 0x0a00_1000;
+pub const FRONTEND_NET_IRQ: u32 = 49;
 pub const MAILBOX_RIGHTS: Rights = Rights::WAIT.union(Rights::READ).union(Rights::WRITE);
 pub const NOTIFICATION_RIGHTS: Rights = Rights::INSPECT.union(Rights::WRITE).union(Rights::WAIT);
 pub const FRONTEND_RIGHTS: Rights = Rights::INSPECT.union(Rights::WRITE).union(Rights::WAIT);
 pub const MEMORY_RIGHTS: Rights = Rights::INSPECT.union(Rights::MAP);
 
-pub fn encode_connect(client: u32, volume: &str) -> Option<[u8; CONNECT_BYTES]> {
-    if !(1..=127).contains(&client)
-        || volume.is_empty()
-        || volume.len() > 32
-        || !volume
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"-_".contains(&byte))
-    {
-        return None;
-    }
-    let mut bytes = [0; CONNECT_BYTES];
-    bytes[..8].copy_from_slice(b"HIOCONN1");
-    bytes[8..12].copy_from_slice(&client.to_le_bytes());
-    bytes[12] = volume.len() as u8;
-    bytes[16..16 + volume.len()].copy_from_slice(volume.as_bytes());
-    Some(bytes)
-}
-pub fn decode_connect(bytes: &[u8]) -> Option<(u32, &str)> {
-    if bytes.len() != CONNECT_BYTES || &bytes[..8] != b"HIOCONN1" {
-        return None;
-    }
-    let client = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
-    let length = bytes[12] as usize;
-    let volume = core::str::from_utf8(bytes.get(16..16usize.checked_add(length)?)?).ok()?;
-    (encode_connect(client, volume)?.as_slice() == bytes).then_some((client, volume))
-}
 pub fn encode_memory(base: u64, length: u64) -> Option<[u8; MEMORY_BYTES]> {
     if length == 0 || (base | length) & 4095 != 0 || base.checked_add(length).is_none() {
         return None;

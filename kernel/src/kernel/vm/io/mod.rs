@@ -46,10 +46,13 @@ fn charge<T: KernelObject, S>(domain: &ResourceDomain) -> Result<CommittedCharge
 }
 
 pub(super) fn valid_location(base: u64, irq: u32) -> bool {
+    use hyper::abi::native as abi;
     crate::hal::vm::supports_io_notifications()
         && (0x0a00_0000..0x0b00_0000).contains(&base)
         && base.is_multiple_of(4096)
-        && (40..64).contains(&irq)
+        && (abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_DEVICE_INTERRUPT_BASE as u32
+            ..abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_INTERRUPT_COUNT as u32)
+            .contains(&irq)
 }
 
 /// Mutation-only saved-model update. The caller serializes its source level
@@ -59,6 +62,14 @@ pub(in crate::kernel) fn set_line(binding: &VmBinding, irq: u32, asserted: bool)
         crate::kernel::crash::fatal(format_args!(
             "validated guest notification IRQ became invalid"
         ));
+    }
+}
+
+/// Mutation-only MSI event update. The caller calls `publish_changed_interrupts`
+/// after releasing the source locks so remote vCPUs reconcile the saved state.
+pub(in crate::kernel) fn inject_interrupt(binding: &VmBinding, irq: u32) {
+    if crate::hal::vm::inject_saved_device_interrupt(binding.interrupts(), irq).is_err() {
+        crate::kernel::crash::fatal(format_args!("validated guest MSI became invalid"));
     }
 }
 
@@ -111,7 +122,7 @@ impl Route {
 
 pub(crate) struct Routes {
     entries: InterruptSpinLock<
-        [Option<Route>; hyper::abi::native::HYPER_NATIVE_IO_MAX_CLIENTS as usize * 2],
+        [Option<Route>; hyper::abi::native::HYPER_NATIVE_IO_MAX_CLIENTS as usize * 3],
         crate::hal::irq::LocalMask,
     >,
 }

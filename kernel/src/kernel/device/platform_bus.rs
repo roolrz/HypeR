@@ -123,8 +123,60 @@ pub(super) fn initialize(
     let services = KernelDriverServices { boot };
     crate::kernel::time::initialize_realtime(&devices, &services);
     let drivers = manager.probe_devices(&devices, &services);
+    // The PCI function owns its bridge/MSI/dependency tree. Firmware
+    // must have quiesced DMA before Image entry; preparation gates bus mastering
+    // and does not expose any packet DMA until an assigned VM owns its backing.
+    let kernel_owned = |node: &PlatformDevice| {
+        node.kernel_claimed()
+            || manager.binding_driver(node.id()).is_some()
+            || reserved_console_base.is_some_and(|base| {
+                node.registers()
+                    .iter()
+                    .any(|range| range.start() <= base && base < range.end())
+            })
+    };
+    // Include aliases outside the PCI tree before the transport touches MMIO.
+    // Catalogue reservation checks physical pages and interrupt identities.
+    catalogue.reserve(kernel_owned);
+    let pci_owned = catalogue.nodes.iter().enumerate().any(|(index, node)| {
+        hyper::drivers::pci::owns_handoff_node(&catalogue.nodes, node) && catalogue.reserved(index)
+    });
+    if pci_owned {
+        crate::pr_warn!("HypeR: PCI function handoff conflicts with a kernel device");
+    } else {
+        match hyper::drivers::pci::Transport::discover::<crate::hal::memory::Barrier>(
+            &catalogue.nodes,
+            &services,
+        ) {
+            Ok(Some(prepared)) => {
+                let identity = prepared.transport.identity();
+                if let Some(resource) =
+                    super::assigned::Resource::pci(prepared, boot.interrupts().root_domain)
+                {
+                    assignable.push(resource);
+                    crate::pr_info!(
+                        "HypeR: PCI function {:04x}:{:04x} prepared; DMA windows configured",
+                        identity & 0xffff,
+                        identity >> 16
+                    );
+                } else {
+                    crate::pr_warn!("HypeR: PCI function ownership allocation unavailable");
+                }
+            }
+            Ok(None) => {}
+            Err(error) => crate::pr_warn!("HypeR: PCI function handoff unavailable: {error:?}"),
+        }
+    }
+    catalogue.reserve(|node| {
+        kernel_owned(node) || hyper::drivers::pci::owns_handoff_node(&catalogue.nodes, node)
+    });
     for device in &devices {
         if manager.binding_driver(device.id()).is_none()
+            && catalogue
+                .nodes
+                .iter()
+                .position(|node| node.id() == device.id())
+                .is_some_and(|index| !catalogue.reserved(index))
             && device.is_compatible("virtio,mmio")
             && let Some(resource) = super::assigned::Resource::discover(
                 device,
@@ -135,12 +187,6 @@ pub(super) fn initialize(
             assignable.push(resource);
         }
     }
-    catalogue.reserve(|node| {
-        node.kernel_claimed()
-            || manager.binding_driver(node.id()).is_some()
-            || reserved_console_base
-                .is_some_and(|base| node.registers().iter().any(|range| range.start() == base))
-    });
     for (index, node) in catalogue.nodes.iter().enumerate() {
         if !catalogue.reserved(index)
             && let Some(resource) = super::assigned::Resource::discover_userspace(
@@ -165,7 +211,7 @@ pub(super) fn claim(index: usize) -> Option<super::assigned::Claim> {
     PLATFORM_BUS.with(|state| match state {
         PlatformBusLifecycle::Ready { _state: state } => {
             let resource = state.assignable.get(index)?;
-            if resource.profile() != 1 {
+            if !super::assigned::transport_profile(resource.profile()) {
                 return None;
             }
             if state
@@ -197,20 +243,27 @@ pub(super) fn claim_matching(
             ));
         };
         let index = super::assigned::select_unique(state.assignable.iter().map(|resource| {
-            resource.profile() == profile
-                && state
-                    ._devices
-                    .iter()
-                    .find(|device| device.id() == resource.firmware())
-                    .is_some_and(|device| match u64::from(identity_kind) {
-                        hyper::abi::native::HYPER_NATIVE_DEVICE_IDENTITY_COMPATIBLE => {
-                            device.is_compatible(identity)
-                        }
-                        hyper::abi::native::HYPER_NATIVE_DEVICE_IDENTITY_FDT_PATH => {
-                            device.path() == identity
-                        }
-                        _ => false,
-                    })
+            if resource.profile() != profile {
+                return false;
+            }
+            if u64::from(identity_kind) == hyper::abi::native::HYPER_NATIVE_DEVICE_IDENTITY_PCI_ID {
+                return super::assigned::parse_pci_identity(identity)
+                    .is_some_and(|identity| resource.pci_identity() == Some(identity));
+            }
+            state
+                .catalogue
+                .nodes
+                .iter()
+                .find(|device| device.id() == resource.firmware())
+                .is_some_and(|device| match u64::from(identity_kind) {
+                    hyper::abi::native::HYPER_NATIVE_DEVICE_IDENTITY_COMPATIBLE => {
+                        device.is_compatible(identity)
+                    }
+                    hyper::abi::native::HYPER_NATIVE_DEVICE_IDENTITY_FDT_PATH => {
+                        device.path() == identity
+                    }
+                    _ => false,
+                })
         }))?;
         if state
             .assignable

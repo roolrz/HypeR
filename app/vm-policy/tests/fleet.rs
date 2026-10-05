@@ -9,6 +9,7 @@ fn rejects_ambiguous_names_paths_and_duplicate_definitions() {
         image: "/vm/alpine.itb".into(),
         autostart: false,
         disk: None,
+        network: None,
         configuration: configuration(),
     };
     assert!(valid.validate().is_ok());
@@ -73,6 +74,142 @@ fn disk_identity_is_explicit_exclusive_and_survives_round_trip() {
         .validate()
         .is_err()
     );
+}
+
+fn network_definition(name: &str, client: u32, mac: &str) -> Definition {
+    Definition {
+        name: name.into(),
+        image: "/data/vm/alpine.itb".into(),
+        configuration: configuration(),
+        autostart: false,
+        disk: None,
+        network: Some(Network {
+            client,
+            network: "default".into(),
+            mac: mac.into(),
+        }),
+    }
+}
+
+#[test]
+fn network_only_and_combined_definitions_share_one_connection() -> Result<(), String> {
+    let mut definition = network_definition("network-vm", 2, "02:48:59:00:00:02");
+    let connection = definition
+        .io_connection()?
+        .ok_or("missing network session")?;
+    assert_eq!(connection.client, 2);
+    assert_eq!(connection.devices(), hyper_service::io::NETWORK);
+    assert_eq!(connection.volume, None);
+    definition.disk = Some(Disk {
+        client: 2,
+        volume: "data".into(),
+    });
+    let connection = definition
+        .io_connection()?
+        .ok_or("missing combined session")?;
+    assert_eq!(
+        connection.devices(),
+        hyper_service::io::DISK | hyper_service::io::NETWORK
+    );
+    let encoded = connection.encode().ok_or("invalid combined admission")?;
+    assert_eq!(
+        hyper_service::io::decode_connect(&encoded),
+        Some(connection)
+    );
+    let config = Config {
+        format: "hyper.vm-config".into(),
+        machines: vec![definition.clone()],
+        copyright: None,
+        license: None,
+    };
+    assert_eq!(
+        Config::parse(&config.to_bytes()?)?.machines,
+        config.machines
+    );
+    definition.disk = Some(Disk {
+        client: 3,
+        volume: "data".into(),
+    });
+    assert!(definition.validate().is_err());
+    assert!(definition.io_connection().is_err());
+    Ok(())
+}
+
+#[test]
+fn fleet_and_incremental_admission_reject_cross_device_authority_collisions() {
+    let first = network_definition("first", 1, "02:48:59:00:00:01");
+    let mut other = network_definition("second", 2, "02:48:59:00:00:02");
+    assert!(validate_definitions(&[first.clone(), other.clone()]).is_ok());
+    assert!(first.check_conflicts(&other).is_ok());
+    other.network = None;
+    other.disk = Some(Disk {
+        client: 1,
+        volume: "second".into(),
+    });
+    assert!(validate_definitions(&[first.clone(), other.clone()]).is_err());
+    assert!(other.check_conflicts(&first).is_err());
+    assert!(first.check_conflicts(&other).is_err());
+    let other = network_definition("second", 2, "02:48:59:00:00:01");
+    assert!(validate_definitions(&[first.clone(), other.clone()]).is_err());
+    assert!(other.check_conflicts(&first).is_err());
+    let mut first = first;
+    first.disk = Some(Disk {
+        client: 1,
+        volume: "shared".into(),
+    });
+    let mut other = network_definition("second", 2, "02:48:59:00:00:02");
+    other.disk = Some(Disk {
+        client: 2,
+        volume: "shared".into(),
+    });
+    assert!(validate_definitions(&[first.clone(), other.clone()]).is_err());
+    assert!(other.check_conflicts(&first).is_err());
+}
+
+#[test]
+fn network_policy_rejects_native_client_and_noncanonical_identity() {
+    for client in [0, 128] {
+        assert!(
+            network_definition("vm", client, "02:48:59:00:00:01")
+                .validate()
+                .is_err()
+        );
+    }
+    for mac in [
+        "",
+        "00:48:59:00:00:01",
+        "03:48:59:00:00:01",
+        "02:48:59:00:00:AA",
+    ] {
+        assert!(network_definition("vm", 1, mac).validate().is_err());
+    }
+    let mut definition = network_definition("vm", 1, "02:48:59:00:00:01");
+    if let Some(network) = definition.network.as_mut() {
+        network.network = "not/a/network".into();
+    }
+    assert!(definition.validate().is_err());
+}
+
+#[test]
+fn summaries_retain_network_policy_without_inventing_a_disk() -> Result<(), String> {
+    let bytes = br#"{"result":"entries","machines":[{"name":"vm","state":"stopped","image":"/data/vm/alpine.itb","autostart":false,"network":{"client":2,"network":"default","mac":"02:48:59:00:00:02"}}]}"#;
+    let Response::Entries { machines } = response(bytes)? else {
+        return Err("wrong response kind".into());
+    };
+    assert!(machines[0].disk.is_none());
+    assert_eq!(
+        machines[0].network.as_ref().map(|value| value.client),
+        Some(2)
+    );
+    let encoded = encode(&Response::Entries { machines })?;
+    let Response::Entries { machines } = response(&encoded)? else {
+        return Err("round trip changed response kind".into());
+    };
+    assert_eq!(
+        machines[0].network.as_ref().map(|value| value.mac.as_str()),
+        Some("02:48:59:00:00:02")
+    );
+    Ok(())
 }
 
 #[test]

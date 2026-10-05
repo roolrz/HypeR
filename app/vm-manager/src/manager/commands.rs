@@ -76,6 +76,9 @@ impl FleetManager {
     }
 
     fn execute_command(&mut self, client: usize, command: Request) -> hyper_os::Result<()> {
+        if let Err(message) = self.configuration.check_request(&command) {
+            return self.reply_error(client, message);
+        }
         let (name, operation) = match command {
             Request::List => {
                 let deadline = hyper_os::time::deadline_after(Duration::from_millis(250))?.as_raw();

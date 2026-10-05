@@ -47,6 +47,9 @@ pub struct NodeResources<'a> {
     /// Invalid device resources are quarantined, not published as capabilities.
     pub resource_error: Option<Error>,
     pub registers: &'a [PhysicalRange],
+    /// A bounded, translated PCI memory aperture admitted by platform discovery.
+    /// The PCI bus address is kept separate from its CPU physical address.
+    pub pci_memory: Option<(u64, PhysicalRange)>,
     pub interrupt_cells: &'a [u32],
 }
 

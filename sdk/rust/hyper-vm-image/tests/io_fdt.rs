@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 extern crate std;
+#[path = "pci_fdt.rs"]
+mod pci;
 use super::{DmaRange, IoDevices, MmioDevice, SharedMemory};
 use crate::guest_fdt::{Aarch64LinuxBoot, Error, build_aarch64_linux_with_io};
 use std::{collections::BTreeMap, string::String, vec::Vec};
@@ -33,6 +35,8 @@ fn devices() -> IoDevices<'static> {
     IoDevices {
         clients: &[],
         sdhci: None,
+        pci: None,
+        network: None,
         virtio: Some(MmioDevice {
             base: 0x0b00_0000,
             size: 0x200,
@@ -259,11 +263,12 @@ fn client(id: u32, memory: u64, dynamic: bool) -> super::IoClient {
             size: 4096,
             irq: 41 + id * 2,
         },
-        notification: MmioDevice {
+        notification: Some(MmioDevice {
             base: 0x0a00_1000 + u64::from(id) * 8192,
             size: 4096,
             irq: 42 + id * 2,
-        },
+        }),
+        network_notification: None,
         dynamic,
     }
 }
@@ -281,13 +286,17 @@ fn clients_have_distinct_phandles_and_context_ids() -> Result<(), &'static str> 
         values
             .get("/hyper-guest-memory@0/memory-region")
             .ok_or("first phandle")?,
-        &4u32.to_be_bytes()
+        values
+            .get("/reserved-memory/guest-memory@44000000/phandle")
+            .ok_or("first memory phandle")?
     );
     assert_eq!(
         values
             .get("/hyper-guest-memory@3/memory-region")
             .ok_or("second phandle")?,
-        &7u32.to_be_bytes()
+        values
+            .get("/reserved-memory/guest-memory@48000000/phandle")
+            .ok_or("second memory phandle")?
     );
     assert_eq!(
         values
@@ -384,7 +393,9 @@ fn rejects_ambiguous_or_fabricated_dynamic_dma_translation() {
 #[test]
 fn rejects_duplicate_client_or_cross_context_irq_and_static_alias() {
     let mut clients = [client(0, 0x4400_0000, false), client(1, 0x4800_0000, false)];
-    clients[1].notification.irq = clients[0].mailbox.irq;
+    if let Some(notification) = clients[1].notification.as_mut() {
+        notification.irq = clients[0].mailbox.irq;
+    }
     assert_eq!(
         build(IoDevices {
             clients: &clients,
@@ -430,6 +441,264 @@ fn all_native_client_slots_fit_the_device_table() {
         })
         .is_ok()
     );
+}
+
+fn network_notification(id: u32) -> MmioDevice {
+    MmioDevice {
+        base: 0x0a20_0000 + u64::from(id) * 0x10000,
+        size: 4096,
+        irq: 64 + id,
+    }
+}
+
+#[test]
+fn physical_network_and_storage_share_one_explicit_dma_bus() -> Result<(), &'static str> {
+    let mut io = devices();
+    io.network = Some(MmioDevice {
+        base: 0x0b01_0000,
+        size: 512,
+        irq: 59,
+    });
+    let values = properties(&build(io).map_err(|_| "two physical devices")?)?;
+    for base in [0x0b00_0000u64, 0x0b01_0000] {
+        let node = std::format!("/io-bus/virtio_mmio@{base:x}");
+        assert_eq!(
+            values.get(&(node.clone() + "/compatible")),
+            Some(&b"virtio,mmio\0".to_vec())
+        );
+        assert_eq!(
+            values.get(&(node + "/reg")),
+            Some(&[base.to_be_bytes(), 512u64.to_be_bytes(),].concat())
+        );
+        assert!(!values.contains_key(&std::format!("/virtio_mmio@{base:x}/compatible")));
+    }
+    assert_eq!(
+        values
+            .keys()
+            .filter(|key| key.ends_with("/dma-ranges"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        values.get("/io-bus/dma-ranges"),
+        Some(
+            &DMA.iter()
+                .flat_map(|range| [range.dma_base, range.cpu_base, range.size])
+                .flat_map(u64::to_be_bytes)
+                .collect::<Vec<_>>()
+        )
+    );
+    assert_eq!(
+        values.get("/io-bus/virtio_mmio@b010000/interrupts"),
+        Some(
+            &[0u32, 27, 4]
+                .into_iter()
+                .flat_map(u32::to_be_bytes)
+                .collect::<Vec<_>>()
+        )
+    );
+    Ok(())
+}
+
+#[test]
+fn guest_network_and_storage_have_independent_virtio_nodes_without_dma_authority()
+-> Result<(), &'static str> {
+    let network = MmioDevice {
+        base: 0x0a00_1000,
+        size: 4096,
+        irq: 49,
+    };
+    for storage in [
+        None,
+        Some(MmioDevice {
+            base: 0x0a00_0000,
+            size: 4096,
+            irq: 48,
+        }),
+    ] {
+        let values = properties(
+            &build(IoDevices {
+                virtio: storage,
+                network: Some(network),
+                ..IoDevices::empty()
+            })
+            .map_err(|_| "guest frontend tree")?,
+        )?;
+        assert_eq!(
+            values.contains_key("/virtio_mmio@a000000/compatible"),
+            storage.is_some()
+        );
+        assert_eq!(
+            values.get("/virtio_mmio@a001000/compatible"),
+            Some(&b"virtio,mmio\0".to_vec())
+        );
+        assert!(
+            !values
+                .keys()
+                .any(|key| key.starts_with("/io-bus/") || key.ends_with("/dma-ranges"))
+        );
+        assert!(
+            !values
+                .keys()
+                .any(|key| key.starts_with("/guest-notification@"))
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn network_only_client_uses_one_memory_identity_without_a_storage_notification()
+-> Result<(), &'static str> {
+    let mut guest = client(1, super::DYNAMIC_ALIAS_OFFSET + 0x8000_0000, true);
+    guest.notification = None;
+    guest.network_notification = Some(network_notification(1));
+    let clients = [client(0, 0x4400_0000, false), guest];
+    let values = properties(
+        &build(IoDevices {
+            clients: &clients,
+            ..IoDevices::empty()
+        })
+        .map_err(|_| "network-only client")?,
+    )?;
+    assert_eq!(
+        values.get("/guest-notification@a210000/hyper,device-kind"),
+        Some(&b"network\0".to_vec())
+    );
+    assert_eq!(
+        values.get("/guest-notification@a210000/hyper,client-id"),
+        Some(&1u32.to_be_bytes().to_vec())
+    );
+    assert!(!values.contains_key("/guest-notification@a003000/compatible"));
+    assert!(!values.contains_key("/guest-notification@a200000/compatible"));
+    assert!(!values.contains_key("/guest-notification@a001000/hyper,device-kind"));
+    assert_eq!(
+        values
+            .keys()
+            .filter(|key| key.ends_with("/hyper,dynamic-memory"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        values
+            .keys()
+            .filter(|key| key.ends_with("/hyper,device-kind"))
+            .count(),
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn all_eight_network_clients_fit_high_interrupts_without_consuming_native_reservation()
+-> Result<(), &'static str> {
+    let clients: Vec<_> = (0..hyper_abi::HYPER_NATIVE_IO_MAX_CLIENTS as u32)
+        .map(|id| {
+            let mut client = client(id, super::DYNAMIC_ALIAS_OFFSET + 0x8000_0000, true);
+            if id != 0 {
+                client.network_notification = Some(network_notification(id));
+            }
+            client
+        })
+        .collect();
+    let values = properties(
+        &build(IoDevices {
+            clients: &clients,
+            ..IoDevices::empty()
+        })
+        .map_err(|_| "full client table")?,
+    )?;
+    for id in 1..=8u32 {
+        let path = std::format!("/guest-notification@{:x}", network_notification(id).base);
+        assert_eq!(
+            values.get(&(path.clone() + "/hyper,device-kind")),
+            Some(&b"network\0".to_vec())
+        );
+        assert_eq!(
+            values.get(&(path + "/interrupts")),
+            Some(
+                &[0u32, 32 + id, 4]
+                    .into_iter()
+                    .flat_map(u32::to_be_bytes)
+                    .collect::<Vec<_>>()
+            )
+        );
+    }
+    assert_eq!(
+        values
+            .keys()
+            .filter(|key| key.ends_with("/hyper,device-kind"))
+            .count(),
+        8
+    );
+    assert!(!values.contains_key("/guest-notification@a200000/compatible"));
+    assert_eq!(
+        values
+            .keys()
+            .filter(|key| key.starts_with("/guest-mailbox@") && key.ends_with("/compatible"))
+            .count(),
+        9
+    );
+    assert_eq!(
+        values
+            .keys()
+            .filter(|key| key.starts_with("/guest-notification@") && key.ends_with("/compatible"))
+            .count(),
+        17
+    );
+    Ok(())
+}
+
+#[test]
+fn network_devices_reject_cross_kind_irq_and_mmio_collisions() {
+    for network in [
+        MmioDevice {
+            base: 0x0b00_0000,
+            size: 512,
+            irq: 59,
+        },
+        MmioDevice {
+            base: 0x0b01_0000,
+            size: 512,
+            irq: 40,
+        },
+        MmioDevice {
+            base: 0x0b01_0000,
+            size: 512,
+            irq: hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_INTERRUPT_COUNT as u32,
+        },
+    ] {
+        assert_eq!(
+            build(IoDevices {
+                network: Some(network),
+                ..devices()
+            }),
+            Err(Error::InvalidInput)
+        );
+    }
+    let mut clients = [client(1, super::DYNAMIC_ALIAS_OFFSET + 0x8000_0000, true)];
+    for network in [
+        MmioDevice {
+            irq: clients[0].mailbox.irq,
+            ..network_notification(1)
+        },
+        MmioDevice {
+            base: clients[0].mailbox.base,
+            ..network_notification(1)
+        },
+        MmioDevice {
+            irq: hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_INTERRUPT_COUNT as u32,
+            ..network_notification(1)
+        },
+    ] {
+        clients[0].network_notification = Some(network);
+        assert_eq!(
+            build(IoDevices {
+                clients: &clients,
+                ..IoDevices::empty()
+            }),
+            Err(Error::InvalidInput)
+        );
+    }
 }
 
 fn sdhci(revision: super::SdhciRevision) -> super::SdhciDevice {

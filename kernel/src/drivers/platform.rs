@@ -162,6 +162,7 @@ pub struct PlatformDevice {
     name: String,
     compatibles: Vec<String>,
     registers: Vec<MmioResource>,
+    pci_memory: Option<(u64, MmioResource)>,
     interrupt_cells: Vec<u32>,
     properties: Vec<DeviceProperty>,
 }
@@ -200,6 +201,20 @@ impl PlatformDevice {
     /// Returns the physical register ranges described by the device.
     pub fn registers(&self) -> &[MmioResource] {
         &self.registers
+    }
+
+    /// The platform-admitted part of a bridge's typed PCI memory window.
+    pub const fn pci_memory(&self) -> Option<(u64, MmioResource)> {
+        self.pci_memory
+    }
+
+    /// All CPU MMIO ownership intervals, including a bridge's admitted memory
+    /// aperture. Alias checks must cover BARs without individual DT leaf nodes.
+    pub fn mmio_resources(&self) -> impl Iterator<Item = MmioResource> + '_ {
+        self.registers
+            .iter()
+            .copied()
+            .chain(self.pci_memory.map(|(_, range)| range))
     }
 
     /// Returns cells that must be translated by the parent IRQ domain.
@@ -313,20 +328,19 @@ impl<'a> DeviceScanner<'a> {
                 builder.compatibles.push(copy_string(compatible)?);
             }
         }
-        if name == "interrupts" {
+        if name == "interrupts"
+            && let Ok(cells) = property.cells()
+        {
             // Resource decoding is quarantined per node by the FDT collector.
-            // Keep valid long interrupt lists for drivers without making an
-            // unknown device's private property fatal to global discovery.
-            let Ok(cells) = property.cells() else {
-                return Ok(());
-            };
+            // A dependency snapshot separately retains the original bytes,
+            // even when they cannot grant a host interrupt resource.
             builder
                 .interrupt_cells
                 .try_reserve_exact(property.bytes().len() / 4)
                 .map_err(|_| ScanError::Allocation)?;
             builder.interrupt_cells.extend(cells);
         }
-        if matches!(name, "compatible" | "interrupts") {
+        if !self.dependencies && matches!(name, "compatible" | "interrupts") {
             return Ok(());
         }
         builder
@@ -347,7 +361,7 @@ impl<'a> DeviceScanner<'a> {
 
     fn complete_node(&mut self, node: NodeResources<'_>) -> Result<(), ScanError> {
         let builder = self.stack.pop().ok_or(ScanError::MalformedTree)?;
-        if !node.enabled
+        if (!node.enabled && !self.dependencies)
             || (!self.dependencies && (builder.compatibles.is_empty() || self.is_claimed(node.id)))
             || self.stack.is_empty()
         {
@@ -363,7 +377,11 @@ impl<'a> DeviceScanner<'a> {
         // ResourceCollector translated these ranges through every parent bus
         // before publishing the completed node. Keeping the tuple constructor
         // private makes DeviceScanner the normal capability minting point.
-        registers.extend(node.registers.iter().copied().map(MmioResource));
+        // The dependency snapshot also preserves disabled firmware subtrees.
+        // They describe guest devices but grant no host MMIO authority.
+        if node.enabled {
+            registers.extend(node.registers.iter().copied().map(MmioResource));
+        }
         let mut path = String::new();
         let length = self
             .stack
@@ -382,14 +400,19 @@ impl<'a> DeviceScanner<'a> {
         path.push('/');
         path.push_str(&builder.name);
         self.devices.push(PlatformDevice {
-            resources_valid: node.resource_error.is_none(),
+            resources_valid: node.enabled && node.resource_error.is_none(),
             kernel_claimed: self.is_claimed(node.id),
             id: builder.id,
             path,
             name: builder.name,
             compatibles: builder.compatibles,
             registers,
-            interrupt_cells: if node.resource_error.is_none() {
+            pci_memory: node
+                .enabled
+                .then_some(node.pci_memory)
+                .flatten()
+                .map(|(bus, range)| (bus, MmioResource(range))),
+            interrupt_cells: if node.enabled && node.resource_error.is_none() {
                 builder.interrupt_cells
             } else {
                 Vec::new()

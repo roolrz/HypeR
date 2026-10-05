@@ -21,7 +21,8 @@ four host CPUs, interrupt-driven debug UART, Linux I/O VM userspace and FAT
 directory reads through the SDIO1/dm-linear/vhost-scsi path. A two-vCPU Alpine
 guest has passed three CPU 1 off/on cycles, ordinary reboot with a synced ext4
 file preserved, and ordinary poweroff with the I/O VM and `/data` still
-available. Power-loss durability, physical DMA retirement under faults and
+available. These results precede the combined SDIO1/RP1 deployment. That
+deployment, power-loss durability, physical DMA retirement under faults and
 networking remain unqualified.
 See the [Pi 5 guide](../kernel/docs/rpi5.md) and
 [image release contract](image-distribution.md).
@@ -143,9 +144,58 @@ standby profile deliberately omits Native storage and business clients.
 `board-storage` tests persistent Native files, Alpine ext4 root, ordinary VM
 disks, broker isolation and userspace device access. `test-io-vm` checks the
 isolated two-VM data path; `test-io-standby` checks idle backend operation.
-Pi 5 SDIO1 assignment is implemented in Native userspace. Networking, automatic
-recovery of quarantined devices and fault-time DMA retirement remain unfinished.
+Pi 5 SDIO1 assignment is implemented in Native userspace. The complete RP1
+PCI function is assigned through a generic PCI configuration/BAR/MSI-X
+transport. Linux owns RP1 interrupts and peripheral drivers; the host retains
+the BCM2712 PCIe bridge and physical MSI controller. This trusted I/O VM path
+has no IOMMU DMA isolation. Physical network qualification, automatic recovery of quarantined
+devices and fault-time DMA retirement remain unfinished.
 QEMU does not qualify physical cache, interrupt or DMA behavior.
+
+## Guest virtio-net implementation
+
+The QEMU guest path uses a Native virtio-mmio frontend and Linux vhost-net/TAP,
+bridged to an assigned virtio-net uplink and QEMU user networking. A VM can have
+a disk, a network interface, or both. Both devices share one guest-memory grant
+and mailbox, with separate notification bindings and reset epochs. All vhost
+users must drain before the shared mapping can be released. Native client zero
+reserves a future network identity without creating a frontend or link.
+
+The reference GICv2/GICv3 controller exposes 256 interrupt IDs, and physical
+assignment supports multiple controllers with common VM publication and
+retirement. The network device has one RX/TX pair, a configured MAC and MTU
+1500; offloads and multiqueue remain disabled.
+
+Host configuration/state-machine tests and Linux control/retirement-failure
+tests pass. Manual AArch64 QEMU TCG acceptance passes with both GICv2 and GICv3:
+
+- A disk+network guest and a network-only guest obtain separate DHCP leases.
+- Each downloads a 256 KiB + 137 byte host-served payload and verifies SHA-256.
+  An additional public HTTP fetch checks DNS and outbound connectivity.
+- Each network driver unbinds/rebinds and transfers again while the other VM
+  remains running; both guests also pass stop/start and repeat transfers.
+- The disk guest retains its proof file; the network-only guest has no SCSI
+  device. All four VM stops receive `RELEASE_MEMORY: ok`.
+
+Alpine now brings up its interfaces and runs a background DHCP client after
+mounting its final root. Automatic address, route and DNS configuration, DHCP
+client liveness, HTTP checksums and repeated start/stop have also passed on the
+default GICv3 QEMU deployment. Separate guest boot checks confirm that a missing
+NIC or DHCP server does not block the shell.
+
+These are functional results, with no throughput or latency benchmark. The
+Pi 5 development image also passed a physical smoke test after PCI host window
+setup was corrected. The implementation assigns the whole RP1 PCI function to
+Linux, with a separate noncoherent DMA bus and exclusive ownership of the RP1
+shared infrastructure. The exact published package's physical qualification,
+stress behavior and DMA retirement remain separate;
+see [Ethernet qualification](../kernel/docs/rpi5.md#ethernet-backend-qualification).
+
+This control plane uses protocol version 3 of the independent Linux appliance.
+The package lock selects the published QEMU and Pi 5 generations from the
+merged upstream source. Ordinary builds import these immutable GHCR digests.
+See [build and validation](io-vm.md#build-and-validation) for the QEMU deployment
+and package boundary.
 
 ## Design priorities
 

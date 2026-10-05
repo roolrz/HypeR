@@ -320,6 +320,8 @@ fn suite(startup: &Startup<'_>) -> Result<()> {
         IoDevices {
             clients: &[],
             sdhci: None,
+            network: None,
+            pci: None,
             virtio: Some(MmioDevice {
                 base: PHYSICAL_MMIO,
                 size: physical_info.mmio_size,

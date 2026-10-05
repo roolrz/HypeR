@@ -63,7 +63,7 @@ pub(in crate::kernel::abi::native) fn sys_device_firmware_read(
                 .try_into()
                 .map_err(|_| HYPER_NATIVE_STATUS_INVALID_ARGUMENT)?,
         );
-        if field > 4 || name_length > 128 || (field == 4) != (name_length != 0) {
+        if field > 5 || name_length > 128 || (field == 4) != (name_length != 0) {
             return Err(HYPER_NATIVE_STATUS_INVALID_ARGUMENT);
         }
         let mut name = [0u8; 128];

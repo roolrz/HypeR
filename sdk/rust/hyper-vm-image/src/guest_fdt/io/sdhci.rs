@@ -29,13 +29,14 @@ pub struct SdhciDevice {
     pub clock_hz: u64,
     pub gpio_widths: [u32; 2],
 }
-// 1..3 belong to the base tree; 4..131 belong to backend client RAM.
-const CLOCK: u32 = 256;
-const MAIN_PINS: u32 = 257;
-const AON_PINS: u32 = 258;
-const GPIO: u32 = 259;
-const IO_VOLTAGE: u32 = 260;
-const CARD_POWER: u32 = 261;
+// Reference-platform and I/O phandles occupy 0xffff_0000 and above;
+// lower values remain available to projected firmware.
+const CLOCK: u32 = 0xffff_0100;
+const MAIN_PINS: u32 = 0xffff_0101;
+const AON_PINS: u32 = 0xffff_0102;
+const GPIO: u32 = 0xffff_0103;
+const IO_VOLTAGE: u32 = 0xffff_0104;
+const CARD_POWER: u32 = 0xffff_0105;
 
 impl SdhciDevice {
     pub(super) fn validate(

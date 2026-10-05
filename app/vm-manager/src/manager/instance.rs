@@ -16,7 +16,7 @@ use hyper_vm_manager::{InstancePolicy, RuntimeControlState, complete_admission};
 use hyper_vm_policy::fleet;
 use std::time::Instant;
 
-pub(super) struct DiskAdmission {
+pub(super) struct IoAdmission {
     pub(super) endpoint: Option<OwnedHandle<CapabilityChannelObject>>,
     pub(super) record: [u8; hyper_service::io::CONNECT_BYTES],
 }
@@ -28,7 +28,7 @@ pub(super) struct VmInstance {
     pub(super) runtime_control: Option<OwnedHandle<ByteChannelObject>>,
     pub(super) console_connection: CapabilityChannel,
     pub(super) policy: InstancePolicy,
-    pub(super) disk_admission: Option<DiskAdmission>,
+    pub(super) io_admission: Option<IoAdmission>,
     pub(super) observation_sequence: u64,
 }
 
@@ -122,9 +122,8 @@ impl VmInstance {
         }
     }
 
-    pub(super) fn wants_disk_admission(&self) -> bool {
-        self.policy
-            .wants_disk_admission(self.disk_admission.is_some())
+    pub(super) fn wants_io_admission(&self) -> bool {
+        self.policy.wants_io_admission(self.io_admission.is_some())
     }
 
     fn receive_runtime_status(&mut self) -> hyper_os::Result<RuntimeControlState> {
@@ -194,17 +193,17 @@ impl VmInstance {
 }
 
 impl FleetManager {
-    pub(super) fn admit_disk(&mut self) -> hyper_os::Result<()> {
+    pub(super) fn admit_io(&mut self) -> hyper_os::Result<()> {
         let Some(instance) = self.machines.iter_mut().find_map(|machine| {
             machine
                 .instance
                 .as_mut()
-                .filter(|instance| instance.wants_disk_admission())
+                .filter(|instance| instance.wants_io_admission())
         }) else {
             return Ok(());
         };
         let admission = instance
-            .disk_admission
+            .io_admission
             .as_mut()
             .ok_or(hyper_os::Error::InvalidResponse)?;
         let broker = self
@@ -218,8 +217,8 @@ impl FleetManager {
         let result = broker
             .broker()
             .try_send(&admission.record, &mut [disposition]);
-        complete_admission(&mut instance.disk_admission, result);
-        if instance.disk_admission.is_some() {
+        complete_admission(&mut instance.io_admission, result);
+        if instance.io_admission.is_some() {
             return Ok(());
         }
         #[cfg(feature = "broker-test")]
@@ -227,7 +226,7 @@ impl FleetManager {
             .machines
             .iter()
             .filter_map(|machine| machine.instance.as_ref())
-            .filter(|instance| instance.disk_admission.is_none())
+            .filter(|instance| instance.io_admission.is_none())
             .count()
             == 2
         {
@@ -263,7 +262,7 @@ impl FleetManager {
     pub(super) fn request_stop(&mut self, vm: usize) -> hyper_os::Result<()> {
         if let Some(instance) = self.machines[vm].instance.as_mut() {
             instance.request_cooperative_stop()?;
-            drop(instance.disk_admission.take());
+            drop(instance.io_admission.take());
         }
         Ok(())
     }
@@ -282,7 +281,7 @@ impl FleetManager {
             Some(ProcessTermination::ProcessExited { status: 0 })
         );
         let outcome =
-            std::mem::take(&mut instance.policy).finish(succeeded, &mut instance.disk_admission);
+            std::mem::take(&mut instance.policy).finish(succeeded, &mut instance.io_admission);
         self.machines[vm].policy.finished(&outcome);
         if let vm_contract::InstanceEvent::Failed(reason) = outcome.event {
             eprintln!(

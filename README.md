@@ -28,14 +28,16 @@ flowchart TB
     Guests("Guest VMs")
 
     Kernel["HypeR kernel<br/>Scheduling · Memory · Capabilities · Virtualization<br/>VFS · FAT · Native block frontend for /data"]
-    IO["Independent trusted Linux I/O VM<br/>vhost-scsi / LIO · Physical device drivers"]
+    IO["Independent trusted Linux I/O VM<br/>vhost-scsi / LIO · vhost-net / TAP · Physical drivers"]
     Disk[("Physical storage")]
+    Net[("Network uplink")]
 
     Apps -->|Native API / Rust std| Kernel
     Guests -.->|Guest execution| Kernel
-    Guests -->|virtio-scsi · shared pages| IO
+    Guests -->|virtio-scsi / virtio-net · shared pages| IO
     Kernel <-->|/data · shared I/O queues| IO
     IO -->|Assigned device access / DMA| Disk
+    IO -->|Assigned network controller| Net
 
     classDef client fill:#eef2ff,stroke:#818cf8,color:#273469
     classDef kernel fill:#24354b,stroke:#182638,color:#ffffff,stroke-width:2px
@@ -44,13 +46,15 @@ flowchart TB
     class Apps,Guests client
     class Kernel kernel
     class IO backend
-    class Disk device
+    class Disk,Net device
 ```
 
 **One I/O backend serves both HypeR and its guests.** Native file access to
 `/data` goes through the kernel VFS and Native block frontend; guest disks use
-virtio-scsi. Both reach the independent, trusted Linux I/O VM through shared
-memory. Native io-runtime configures the backend and mounts `/data`.
+virtio-scsi. Guest networking uses virtio-net through the same trusted Linux
+I/O VM, which automatically bridges each guest TAP to the configured uplink.
+Native io-runtime owns the shared-memory bindings and mounts `/data`.
+HypeR Native reserves a future network endpoint without establishing a link.
 
 Both business guests and the Linux I/O VM execute under the HypeR kernel.
 Native VM management services control their lifecycles through capabilities;
@@ -64,8 +68,9 @@ for access control, interrupts, DMA and safe resource retirement; adding a
 physical device driver to it requires a concrete reason. VFS remains in the
 kernel. The selected I/O VM interfaces are **virtio-scsi** for storage,
 **virtio-net** for networking, and **vfio-user** for general device backends.
-Storage is implemented today; virtio-net and vfio-user are planned. Other
-device models are evaluated case by case, without a general support commitment.
+Storage and guest virtio-net have passed QEMU functional acceptance, including
+network reset and VM restart. vfio-user remains planned. Other device models are
+evaluated case by case, without a general support commitment.
 See the [architecture boundaries](kernel/docs/architecture.md#device-driver-placement)
 and [I/O VM design](docs/io-vm.md) for details.
 
@@ -93,12 +98,15 @@ claim of better performance or stronger security than established alternatives.
 
 The AArch64 QEMU system boots Native init, a shell, and VM management services
 with a resident Linux I/O VM, a persistent `/data` filesystem, and configurable
-Linux guests with console access. RISC-V runs Native init,
+Linux guests with console access. The default deployment provides guest
+DHCP and outbound HTTP through the I/O VM, validated with GICv2 and GICv3.
+RISC-V runs Native init,
 shell, std applications, and userspace-managed Linux guests on QEMU. x86-64 currently has build and image validation only.
 
 Pi 5 D0 hardware has booted the Native shell and Linux I/O VM, and read its
 SD-backed FAT volume through `/data`. A two-vCPU Alpine guest has passed CPU
-off/on cycles, reboot with file persistence, and poweroff on hardware. Write
+off/on cycles, reboot with file persistence, and poweroff on hardware. These
+results precede the combined SDIO1/RP1 deployment. That deployment, write
 durability, networking and device-reset recovery remain under qualification.
 
 The Native ABI is pre-release. Broad hardware support, general-purpose virtual
@@ -121,8 +129,12 @@ virtio-scsi with Linux vhost-scsi/LIO.
   and consume a digest-pinned package; HypeR owns apps and DTS/DTB.
 - [x] Verify cross-VM virtio-scsi/vhost I/O against a real QEMU disk.
 - [x] Mount and read the SD-backed configuration volume through the Pi 5 I/O VM.
-- [ ] Qualify storage writes, durability and DMA retirement; add the network-controller path.
-- [ ] Exercise Native network and storage I/O on Pi 5, including failure handling
+- [x] Implement guest virtio-net with an independent Linux vhost-net/TAP backend.
+- [x] Verify QEMU guest DHCP, HTTP integrity, network reset and VM restart with GICv2/GICv3.
+- [x] Publish and pin matching protocol version 3 appliances.
+- [x] Assign the RP1 PCI function to Linux through generic PCI/BAR/MSI mediation.
+- [ ] Qualify storage writes, durability and physical DMA retirement.
+- [ ] Exercise guest networking and Native/guest storage on Pi 5, including failure handling
   and performance measurements.
 
 See the [roadmap](docs/roadmap.md) for scope and acceptance criteria, and the
@@ -147,11 +159,18 @@ make
 make run
 ```
 
+The build imports the matching protocol version 3 appliance from the committed
+GHCR digest pin. See [I/O VM build and validation](docs/io-vm.md#build-and-validation)
+for package verification and the `boards/qemu.json` deployment.
+
 This boots the AArch64 system with the HypeR shell and a resident Linux I/O VM
 in QEMU. The first build downloads pinned assets and creates a persistent board
-disk; `make run` launches those existing artifacts without building them; HypeR mounts its configuration volume at `/data`. The default guest is
-available through `vmm start alpine`. See [board storage](docs/board-storage.md)
-and [getting started](docs/getting-started.md) for configuration and build targets.
+disk; `make run` launches those existing artifacts without building them.
+HypeR mounts its configuration volume at `/data`. Start the default guest with
+`vmm start alpine`; Alpine enables its network interface and starts DHCP
+automatically. Later builds preserve on-disk VM definitions, guest images and
+root filesystems; see [updating existing deployments](docs/board-storage.md#updating-existing-deployments)
+when adopting changed board policy or guest startup files.
 
 ## Explore and contribute
 

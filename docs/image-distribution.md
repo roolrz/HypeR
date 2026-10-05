@@ -8,7 +8,8 @@ publication and final SD-image releases. The
 [image-distribution repository](https://github.com/roolrz/HypeR-pi5-images) builds
 compressed images and creates draft releases on updates to its main branch.
 Public release publication is manual. Users only need a HypeR checkout: its Make
-targets download pinned external inputs and compose images. The optional
+targets download pinned external inputs and compose images once matching
+appliance pins are available. The optional
 distribution repository publishes versioned outputs using these same targets;
 it is not a build prerequisite.
 
@@ -37,6 +38,14 @@ profile and build configuration. It must consume the I/O VM, official Pi boot
 inputs and Alpine versions selected by that HypeR revision, rather than maintain
 independent dependency pins or silently override them. Dependency upgrades land
 in HypeR first; the distribution repository then advances its HypeR pin.
+
+For a control-plane change that requires a new Linux appliance, publish the
+QEMU and Pi 5 packages from HypeR-io-vm first. Qualify those exact digests with
+the matching HypeR changes, update `scripts/io-vm.lock.json`, and pass HypeR CI.
+The distribution repository can then select that merged HypeR revision.
+See [appliance adoption](io-vm.md#protocol-version-3-appliance-requirement) for
+the pinned protocol version 3 packages. A local `IO_VM_PACKAGE` override supports
+development images; it does not update any published package or release pin.
 
 Generate a resolved release inventory containing the HypeR binary checksums,
 I/O VM OCI digest and matching source artifact, official Pi firmware revision
@@ -68,5 +77,6 @@ Hardware results currently establish Native boot, Linux appliance userspace
 and SD-backed configuration-directory reads on Pi 5 D0. A two-vCPU Alpine
 guest has also passed three secondary-CPU off/on cycles, ordinary reboot with
 a synced file preserved on its ext4 root, and ordinary poweroff while the I/O
-VM remained available. Write durability under power loss, device-reset recovery
+VM remained available. Those results precede the combined SDIO1/RP1 deployment.
+The new deployment, write durability under power loss, device-reset recovery
 and networking still need qualification.

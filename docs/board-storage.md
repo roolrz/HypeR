@@ -55,18 +55,29 @@ autostart, including an empty fleet or one with no autostart VMs. Init supervise
 configuration admission and the manager service; guest lifecycle failures remain
 local to the manager. The I/O VM continues running under io-runtime independently.
 Guest lifecycle management remains in vm-manager and each guest's vm-runtime.
-The manager retains each disk session endpoint until the runtime reports its VM
+If the optional I/O runtime cannot start, exits, closes or corrupts its readiness
+reply, or misses the 120-second deadline, init stops that provider and retains
+the Native console, shell and service supervision. An unreadable or rejected
+fleet configuration likewise leaves these services available. The manager
+continues to answer inspection requests and refuses VM creation and startup
+until configuration is available on a subsequent boot. It does not
+silently retry provisioning or assume that an unobservable I/O VM name is free.
+Critical Native service failures still fail bootstrap. Stopping a failed
+provider does not waive the kernel's DMA retirement requirements.
+
+The manager retains each I/O session endpoint until the runtime reports its VM
 installed, then transfers it to the I/O broker through the supervisor wait set.
-Image loading does not consume the bounded disk-handshake deadline or occupy
+Image loading does not consume the bounded I/O-handshake deadline or occupy
 the shared broker listener. Pending endpoints retire with their owning instance.
-Disk connection setup uses a capability channel to io-runtime. Only negotiation,
+Disk and network setup share a capability channel to io-runtime. Only negotiation,
 reset and release commands pass through that service; queue notifications and
 shared-page data transfers do not.
 
 Ordinary guest memory need not be physically contiguous. A dynamic backend
 mapping retains the exact guest-memory grant and exposes a kernel-authorized
 extent table to the Linux module. Admission binds one generation token to one
-client notification route. After vhost drains and Linux drops its mappings and
+client's primary notification route: storage when present, otherwise network.
+After all configured vhost endpoints drain and Linux drops its mappings and
 page references, the module reports quiescence on that route. HypeR then clears
 the aliases and waits for every CPU's translation invalidation acknowledgment
 before releasing the old storage. A timeout or process exit is not proof that
@@ -102,8 +113,9 @@ Rootfs generation additionally requires e2fsprogs and squashfs-tools (Homebrew:
 `brew install e2fsprogs squashfs`). Run `make test-alpine-rootfs` for a disposable
 root-disk boot and persistence test.
 
-The default imports the digest-pinned appliance. `IO_VM_PACKAGE` optionally
-selects a complete verified local generation.
+The build imports the matching protocol version 3 appliance from the platform's
+immutable GHCR reference in `scripts/io-vm.lock.json`;
+see [appliance requirements](io-vm.md#protocol-version-3-appliance-requirement).
 When importing an uncached package, the fetcher uses ORAS from `PATH` or
 automatically downloads ORAS 1.3.0 into `target/tools` for macOS/Linux on
 ARM64/x86-64. Downloads require `curl` and are checked against pinned SHA-256
@@ -124,7 +136,39 @@ AArch64 `make run` selects this QEMU deployment profile. Build with `make` first
 `board-run` never creates a disk or rebuilds kernel/bootstrap. Existing images
 must pass GPT validation against the selected configuration. QEMU uses the
 kernel/bootstrap from the last build while persistent files and VM images remain
-those stored on disk. Use `make rebuild` to refresh packaged guest artifacts.
+those stored on disk. See [updating existing deployments](#updating-existing-deployments)
+before refreshing packaged guest artifacts.
+
+### Updating existing deployments
+
+Build outputs have distinct lifetimes:
+
+| Artifact | Updated by ordinary `make` / `board-build` |
+| --- | --- |
+| Host kernel and bootstrap, including the I/O VM and its client policy | Yes |
+| `/data/vms.json`, `/data/board.json` and guest FITs on an existing disk | No |
+| Alpine's ext4 root, including `/init` and kernel modules | No |
+
+Changing a board's device policy therefore requires a matching disk deployment.
+For example, adding networking to Alpine changes the bootstrap client table;
+an old `/data/vms.json` that requests only a disk will be rejected by the broker.
+The launcher's GPT check validates the disk layout, not the configuration or
+guest files inside its partitions. See [startup diagnostics](io-vm.md#startup-diagnostics).
+
+To replace a disposable QEMU deployment with the current configuration and
+guest files, run:
+
+```sh
+make board-rebuild ARCH=aarch64 BOARD=qemu
+make board-run ARCH=aarch64 BOARD=qemu
+```
+
+This recreates the entire disk, including guest root filesystems. To retain an
+existing disk, select a fresh `BOARD_OUTPUT` directory with `board-build` and
+use that same directory with `board-run`. There is no automatic in-place
+migration of existing guest files or VM definitions.
+
+### Deployment and acceptance details
 
 An optional VM `disk-image` names a disk artifact. The default board profiles
 select `alpine-rootfs`, generated from the pinned Alpine rootfs and sized to the
@@ -132,7 +176,7 @@ volume. Custom inputs use `BOARD_ARTIFACTS="--artifact NAME=PATH"` and must
 exactly match the declared volume size, preserving any guest backup GPT.
 Without `disk-image`, the newly created VM disk is blank.
 
-`make test-board-storage IO_VM_PACKAGE=/path/to/verified/appliance` creates an
+`make test-board-storage` creates an
 isolated disk under `target/board-tests/` and boots it twice. Its test-only
 application checks multi-megabyte file contents, extension gaps, timestamps,
 rename, copy, directory enumeration and explicit synchronization. The second
@@ -141,6 +185,13 @@ and, in stack-audit builds, require at least 2 KiB of measured stack reserve
 and no more than 24 KiB of measured use (`STACK_MAXIMUM_USED`).
 The fixture keeps its disk and logs for diagnosis and never uses `BOARD_IMAGE`
 as a scratch disk.
+
+`make test-storage-failure ARCH=aarch64` verifies Native recovery with a missing
+controller, provider exit, closed or malformed readiness, the full readiness
+timeout, and an invalid provider executable. It also checks that a critical
+manager failure remains fatal and that an absent fleet file preserves a ready
+provider. These are functional checks without performance
+thresholds; they use separate bootstrap archives and no persistent board disk.
 
 The bootstrap board document selects the physical controller explicitly through
 `io-vm.io-device`: `profile` selects the I/O runtime's device policy and
@@ -153,8 +204,8 @@ The finite fleet quota includes eight business VM allowances and one resident
 I/O VM allowance, plus manager overhead. This is an admission ceiling, not
 preallocated RAM or a guarantee that all eight guests fit the host.
 
-For Pi 5, use `make rpi5-sd` to fetch the pinned official prebuilt DTBs/overlays
-and the separately pinned Pi 5 I/O appliance. The boot chain uses the official
+For Pi 5, use `make rpi5-sd`
+with the pinned official prebuilt DTBs/overlays. The boot chain uses the official
 EEPROM firmware and its built-in BL31; no custom TF-A artifact is required.
 QEMU and Pi 5 package selections live in `scripts/io-vm.lock.json`. Recorded
 Pi 5 development runs established SD-backed reads and basic guest persistence;
@@ -185,6 +236,14 @@ never releases potentially active DMA storage. These are explicit deployment
 constraints, not a claim of successful hardware qualification. The common
 appliance must include the upstream SDHCI/GPIO/pinctrl/regulator drivers, and the
 [Pi 5 bring-up checks](../kernel/docs/rpi5.md) remain required.
+
+The same `boards/rpi5.json` deployment gives Alpine an RP1 GEM network uplink
+alongside its SD-backed disk. The kernel assigns the whole RP1 PCI function
+while retaining host PCIe transport, BAR ownership and MSI routing. Upstream
+Linux owns RP1 interrupts, GEM, clocks, GPIO and the Ethernet bridge. Its DMA
+bus translation is separate from SDHCI. This trusted I/O VM path has no IOMMU
+DMA isolation. It requires the matching new Pi 5 appliance package and physical
+network qualification; see [Ethernet bring-up](../kernel/docs/rpi5.md#ethernet-backend-qualification).
 
 `make test-userspace-device` uses a test-only virtio worker and a real QEMU disk
 with a level interrupt to exercise the same generic bundle/MMIO/IRQ mechanism.

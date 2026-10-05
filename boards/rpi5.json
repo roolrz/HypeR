@@ -16,6 +16,7 @@
     "bcm2712d0-rpi-5-b.dtb": "host-dtb-d0",
     "overlays/bcm2712d0.dtbo": "host-overlay-d0",
     "overlays/overlay_map.dtb": "host-overlay-map",
+    "boot-notices.txt": "boot-notices",
     "vm/alpine.itb": "alpine"
   },
   "virtual-machines": [
@@ -29,6 +30,10 @@
         "memory-bytes": 268435456,
         "vcpus": 2,
         "bootargs": "console=ttyAMA0 earlycon=pl011,mmio32,0x09000000 rdinit=/init loglevel=7 hyper.root=/dev/sda"
+      },
+      "network": {
+        "network": "default",
+        "mac": "02:48:59:00:00:01"
       }
     }
   ],
@@ -44,6 +49,17 @@
     "io-device": {
       "profile": "bcm2712-sdhci",
       "path": "/soc@107c000000/mmc@fff000"
-    }
+    },
+    "network-device": {
+      "profile": "pci-function",
+      "pci-id": "1de4:0001"
+    },
+    "networks": [
+      {
+        "name": "default",
+        "bridge": "hbr0",
+        "uplink": "eth0"
+      }
+    ]
   }
 }

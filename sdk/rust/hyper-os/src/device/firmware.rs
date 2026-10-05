@@ -16,6 +16,8 @@ pub enum FirmwareField {
     Compatible = hyper_abi::HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_COMPATIBLE as u32,
     Registers = hyper_abi::HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_REGISTERS as u32,
     Property = hyper_abi::HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PROPERTY as u32,
+    /// NUL-separated property names from the immutable firmware snapshot.
+    PropertyNames = hyper_abi::HYPER_NATIVE_DEVICE_FIRMWARE_FIELD_PROPERTY_NAMES as u32,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IrqTrigger {

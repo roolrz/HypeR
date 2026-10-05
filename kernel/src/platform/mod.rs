@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2026 roolrz
 // SPDX-License-Identifier: Apache-2.0
 
+pub(crate) mod bcm2712;
 pub mod chosen;
 pub mod fdt;
 

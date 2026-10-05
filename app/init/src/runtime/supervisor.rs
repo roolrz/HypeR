@@ -15,6 +15,29 @@ use super::report::report_service_termination;
 
 const _: () = assert!(MAX_SERVICES < hyper_os::wait::MAX_ITEMS);
 
+pub(super) enum StorageReadiness {
+    Ready,
+    Unavailable(StorageFailure),
+}
+
+pub(super) enum StorageFailure {
+    ProviderUnavailable,
+    ChannelClosed,
+    InvalidReply,
+    TimedOut,
+}
+
+impl StorageFailure {
+    pub(super) const fn diagnostic(&self) -> &'static [u8] {
+        match self {
+            Self::ProviderUnavailable => b"HypeR init: storage unavailable: provider unavailable\n",
+            Self::ChannelClosed => b"HypeR init: storage unavailable: readiness channel closed\n",
+            Self::InvalidReply => b"HypeR init: storage unavailable: invalid readiness reply\n",
+            Self::TimedOut => b"HypeR init: storage unavailable: readiness timed out\n",
+        }
+    }
+}
+
 /// Stable service-index ownership and wait-set mapping.
 pub(super) struct SupervisorSet {
     pub(super) processes: [Option<OwnedHandle<ProcessObject>>; MAX_SERVICES],
@@ -31,32 +54,52 @@ impl SupervisorSet {
         deadline: u64,
         console: &OwnedHandle<ConsoleObject>,
     ) -> Result<u64, LaunchError> {
+        let provider = manifest
+            .service(required_service)
+            .ok_or(LaunchError::InvalidPlan)?;
         if self
             .processes
             .get(required_service)
             .and_then(Option::as_ref)
             .is_none()
         {
-            return Err(LaunchError::InvalidPlan);
+            return Err(if provider.critical() {
+                LaunchError::CriticalServiceTerminated
+            } else {
+                LaunchError::RequiredServiceUnavailable
+            });
         }
         loop {
             let selected = {
                 let mut items = Vec::with_capacity(MAX_SERVICES + 1);
                 let mut services = Vec::with_capacity(MAX_SERVICES);
-                for (index, process) in self.processes.iter().enumerate() {
-                    if let Some(process) = process {
-                        items.push(WaitItem::new(
-                            process.as_handle_ref(),
-                            ObjectSignals::<ProcessObject>::TERMINATED,
-                        ));
-                        services.push(index);
+                // Critical exits must win even when an optional provider exits
+                // or sends its readiness result in the same observation.
+                for critical in [true, false] {
+                    for (index, process) in self.processes.iter().enumerate() {
+                        if let Some(process) = process {
+                            let service =
+                                manifest.service(index).ok_or(LaunchError::InvalidPlan)?;
+                            if service.critical() != critical {
+                                continue;
+                            }
+                            items.push(WaitItem::new(
+                                process.as_handle_ref(),
+                                ObjectSignals::<ProcessObject>::TERMINATED,
+                            ));
+                            services.push(index);
+                        }
                     }
                 }
                 // Process events precede endpoint readiness, so a queued
                 // successful reply cannot hide an observed critical failure.
                 items.push(event);
-                let observation =
-                    wait_many(&items, deadline).map_err(|_| LaunchError::OperatingSystem)?;
+                let observation = wait_many(&items, deadline).map_err(|error| match error {
+                    hyper_os::Error::Status(hyper_os::Status::TIMED_OUT) => {
+                        LaunchError::WaitTimedOut
+                    }
+                    _ => LaunchError::OperatingSystem,
+                })?;
                 if observation.index == services.len() {
                     return Ok(observation.observed);
                 }
@@ -64,9 +107,19 @@ impl SupervisorSet {
                     .get(observation.index)
                     .ok_or(LaunchError::InvalidPlan)?
             };
-            self.observe_service_termination(manifest, selected, console)?;
-            if selected == required_service {
-                return Err(LaunchError::CriticalServiceTerminated);
+            match self.observe_service_termination(
+                manifest,
+                selected,
+                Some(required_service),
+                console,
+            )? {
+                TerminationAction::Continue => {}
+                TerminationAction::ProviderUnavailable => {
+                    return Err(LaunchError::RequiredServiceUnavailable);
+                }
+                TerminationAction::FailSystem => {
+                    return Err(LaunchError::CriticalServiceTerminated);
+                }
             }
         }
     }
@@ -77,39 +130,52 @@ impl SupervisorSet {
         ready_service: usize,
         reader: &OwnedHandle<ByteChannelObject>,
         console: &OwnedHandle<ConsoleObject>,
-    ) -> Result<(), LaunchError> {
+    ) -> Result<StorageReadiness, LaunchError> {
         let deadline = hyper_os::time::deadline_after(std::time::Duration::from_secs(
             hyper_service::io::READY_TIMEOUT_SECONDS,
         ))
         .map_err(|_| LaunchError::OperatingSystem)?
         .as_raw();
         loop {
-            let observed = self
-                .wait_for_service_event(
-                    manifest,
-                    ready_service,
-                    WaitItem::new(
-                        reader.as_handle_ref(),
-                        ObjectSignals::<ByteChannelObject>::READABLE
-                            .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
-                    ),
-                    deadline,
-                    console,
-                )
-                .map_err(|error| match error {
-                    LaunchError::OperatingSystem => LaunchError::StorageNotReady,
-                    other => other,
-                })?;
+            let observed = match self.wait_for_service_event(
+                manifest,
+                ready_service,
+                WaitItem::new(
+                    reader.as_handle_ref(),
+                    ObjectSignals::<ByteChannelObject>::READABLE
+                        .union(ObjectSignals::<ByteChannelObject>::PEER_CLOSED),
+                ),
+                deadline,
+                console,
+            ) {
+                Ok(observed) => observed,
+                Err(LaunchError::WaitTimedOut) => {
+                    return Ok(StorageReadiness::Unavailable(StorageFailure::TimedOut));
+                }
+                Err(LaunchError::RequiredServiceUnavailable) => {
+                    return Ok(StorageReadiness::Unavailable(
+                        StorageFailure::ProviderUnavailable,
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
             if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed) {
-                return Err(LaunchError::StorageNotReady);
+                return Ok(StorageReadiness::Unavailable(StorageFailure::ChannelClosed));
             }
             let mut message = [0; hyper_service::io::READY_MESSAGE.len()];
             match reader.as_byte_channel().try_receive(&mut message) {
                 Ok(length) if message.get(..length) == Some(hyper_service::io::READY_MESSAGE) => {
-                    return Ok(());
+                    return Ok(StorageReadiness::Ready);
                 }
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => continue,
-                _ => return Err(LaunchError::StorageNotReady),
+                Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => {
+                    return Ok(StorageReadiness::Unavailable(StorageFailure::ChannelClosed));
+                }
+                Err(hyper_os::Error::MessageTooLarge { .. }) => {
+                    return Ok(StorageReadiness::Unavailable(StorageFailure::InvalidReply));
+                }
+                Ok(_) => return Ok(StorageReadiness::Unavailable(StorageFailure::InvalidReply)),
+                Err(_) => return Err(LaunchError::OperatingSystem),
             }
         }
     }
@@ -138,7 +204,11 @@ impl SupervisorSet {
                     .get(observation.index)
                     .ok_or(LaunchError::InvalidPlan)?
             };
-            self.observe_service_termination(manifest, selected, console)?;
+            if self.observe_service_termination(manifest, selected, None, console)?
+                == TerminationAction::FailSystem
+            {
+                return Err(LaunchError::CriticalServiceTerminated);
+            }
         }
     }
 
@@ -146,8 +216,9 @@ impl SupervisorSet {
         &mut self,
         manifest: &Manifest<'_>,
         index: usize,
+        required_service: Option<usize>,
         console: &OwnedHandle<ConsoleObject>,
-    ) -> Result<(), LaunchError> {
+    ) -> Result<TerminationAction, LaunchError> {
         let service = manifest.service(index).ok_or(LaunchError::InvalidPlan)?;
         let process = self
             .processes
@@ -155,13 +226,32 @@ impl SupervisorSet {
             .and_then(Option::take)
             .ok_or(LaunchError::InvalidPlan)?;
         report_service_termination(console, service.name(), service.critical(), &process);
-        if supervision::service_termination_action(service.critical())
-            == TerminationAction::FailSystem
-        {
-            Err(LaunchError::CriticalServiceTerminated)
-        } else {
-            Ok(())
+        Ok(supervision::startup_termination_action(
+            service.critical(),
+            required_service == Some(index),
+        ))
+    }
+
+    /// Abandon only the failed provider. Keep its supervisor until termination;
+    /// stopping a process does not itself prove device or DMA retirement.
+    pub(super) fn stop_storage_provider(
+        &self,
+        manifest: &Manifest<'_>,
+        index: usize,
+        console: &OwnedHandle<ConsoleObject>,
+    ) -> Result<(), LaunchError> {
+        let service = manifest.service(index).ok_or(LaunchError::InvalidPlan)?;
+        if service.critical() {
+            return Err(LaunchError::CriticalServiceTerminated);
         }
+        if let Some(process) = self.processes.get(index).and_then(Option::as_ref)
+            && process.as_process_supervisor().request_stop().is_err()
+        {
+            let _ = console.as_emergency_console().write_all(
+                b"HypeR init: could not stop unavailable storage provider; continuing supervision\n",
+            );
+        }
+        Ok(())
     }
 
     pub(super) fn request_service_stop(&self) -> Result<(), LaunchError> {

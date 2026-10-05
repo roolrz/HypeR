@@ -147,11 +147,16 @@ const KIND_MANAGER_CONNECTION: u8 = 5;
 const KIND_PROVISION_RESULT: u8 = 6;
 const KIND_FLEET_CAPABILITY: u8 = 8;
 
-/// Installs the initial fleet definitions as one batch. Carries the read-only
-/// configuration file and a write-only, one-shot result endpoint, in that order.
+/// Completes initial provisioning with a configuration or an explicit
+/// unavailable state. Closing the channel is never a successful request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProvisionRequest {
+    /// Installs definitions as one batch. Carries the read-only configuration
+    /// file and a write-only, one-shot result endpoint, in that order.
     ConfigureFleet,
+    /// Ends initial provisioning without a configuration or broker discovery.
+    /// Carries no capabilities; the receive rendezvous completes this request.
+    ConfigurationUnavailable,
 }
 
 impl ProvisionRequest {
@@ -159,6 +164,7 @@ impl ProvisionRequest {
     pub const fn encode(self) -> [u8; MESSAGE_BYTES] {
         match self {
             Self::ConfigureFleet => encode_message(KIND_PROVISION_REQUEST, 1, 0),
+            Self::ConfigurationUnavailable => encode_message(KIND_PROVISION_REQUEST, 2, 0),
         }
     }
 
@@ -167,6 +173,7 @@ impl ProvisionRequest {
         let (value, detail) = decode_message(message, KIND_PROVISION_REQUEST)?;
         match (value, detail) {
             (1, 0) => Some(Self::ConfigureFleet),
+            (2, 0) => Some(Self::ConfigurationUnavailable),
             _ => None,
         }
     }
@@ -175,6 +182,7 @@ impl ProvisionRequest {
     pub const fn capability_count(self) -> usize {
         match self {
             Self::ConfigureFleet => 2,
+            Self::ConfigurationUnavailable => 0,
         }
     }
 }
@@ -988,6 +996,21 @@ mod tests {
         let request = ProvisionRequest::ConfigureFleet;
         assert_eq!(ProvisionRequest::decode(&request.encode()), Some(request));
         assert_eq!(request.capability_count(), 2);
+    }
+
+    #[test]
+    fn unavailable_configuration_is_an_explicit_capability_free_terminal_request() {
+        let request = ProvisionRequest::ConfigurationUnavailable;
+        assert_eq!(request.encode(), [b'H', b'V', b'M', 1, 1, 2, 0, 0]);
+        assert_eq!(ProvisionRequest::decode(&request.encode()), Some(request));
+        assert_eq!(request.capability_count(), 0);
+        assert_eq!(ProvisionResult::decode(&request.encode()), None);
+        assert_eq!(ProvisionRequest::decode(&[]), None);
+        for (index, value) in [(4, 6), (5, 3), (6, 1), (7, 1)] {
+            let mut invalid = request.encode();
+            invalid[index] = value;
+            assert_eq!(ProvisionRequest::decode(&invalid), None);
+        }
     }
 
     #[test]

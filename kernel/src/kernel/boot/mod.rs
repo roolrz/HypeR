@@ -301,6 +301,12 @@ fn initialize_early_console(
     if let Some(console_info) = early_console {
         install_bootstrap_console(console_info).map_err(PreparationError::Console)?;
         crate::pr_info!("HypeR: early console initialized");
+        crate::pr_info!(
+            "HypeR version {}-{} (built {})",
+            env!("CARGO_PKG_VERSION"),
+            env!("HYPER_BUILD_REVISION"),
+            env!("HYPER_BUILD_TIMESTAMP")
+        );
     }
     Ok(early_console)
 }

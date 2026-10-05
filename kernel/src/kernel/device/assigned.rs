@@ -5,11 +5,15 @@
 
 mod model;
 mod transaction;
+pub(super) use model::pci_identity as parse_pci_identity;
+pub(super) use model::transport_profile;
 pub(super) use model::unique_match as select_unique;
 mod object;
 pub(crate) mod service;
+mod set;
 pub(crate) use object::{Assignment, DeviceAssignmentAuthority, PhysicalDevice};
 pub(crate) use service::{DmaExtent, Info};
+pub(crate) use set::{AssignmentOwners, AssignmentSet};
 
 #[cfg_attr(feature = "kernel-self-test", allow(dead_code))]
 pub(crate) const fn available() -> bool {
@@ -36,38 +40,48 @@ struct Window {
     mapping: PermanentMmioMapping,
     offset: usize,
 }
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Profile {
-    Virtio,
+    Virtio(model::VirtioKind),
+    Pci(hyper::mm::FallibleArc<hyper::drivers::pci::Transport>),
     Userspace,
 }
 impl Profile {
-    const fn id(self) -> u32 {
+    fn id(&self) -> u32 {
         match self {
-            Self::Virtio => 1,
+            Self::Virtio(kind) => kind.profile(),
             Self::Userspace => 2,
+            Self::Pci(_) => hyper::abi::native::HYPER_NATIVE_DEVICE_PROFILE_PCI_FUNCTION as u32,
+        }
+    }
+    fn aperture(&self) -> u64 {
+        match self {
+            Self::Pci(_) => hyper::drivers::pci::APERTURE_SIZE,
+            _ => 65536,
         }
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Hardware {
     extra: [Option<Window>; 7],
     profile: Profile,
     mapping: PermanentMmioMapping,
     domain: IrqDomainId,
     interrupt: InterruptId,
+    interrupt_count: u32,
     trigger: InterruptTrigger,
 }
 
 impl Hardware {
-    fn line_asserted(self) -> bool {
-        match self.profile {
-            Profile::Virtio => self.read(0x60) != 0,
+    fn line_asserted(&self) -> bool {
+        match &self.profile {
+            Profile::Virtio(_) => self.read(0x60) != 0,
             Profile::Userspace => false,
+            Profile::Pci(_) => false,
         }
     }
-    fn register(self, offset: usize, width: usize) -> Option<(PermanentMmioMapping, usize)> {
+    fn register(&self, offset: usize, width: usize) -> Option<(PermanentMmioMapping, usize)> {
         if let Some(local) =
             model::register_offset(offset, width, 0, self.mapping.resource().size())
         {
@@ -84,28 +98,24 @@ impl Hardware {
         })
     }
 
-    fn read(self, offset: usize) -> u32 {
-        // SAFETY: Discovery validates the permanently mapped transport register window;
-        // callers use aligned constant/register-window-checked offsets only.
-        unsafe {
-            core::ptr::with_exposed_provenance::<u32>(self.mapping.virtual_start() + offset)
-                .read_volatile()
-        }
+    fn read(&self, offset: usize) -> u32 {
+        read_register(self.mapping, offset)
     }
-    fn read_access(self, offset: usize, width: usize) -> Option<u64> {
+    fn read_access(&self, offset: usize, width: usize) -> Option<u64> {
         let (mapping, offset) = self.register(offset, width)?;
         let address = mapping.virtual_start() + offset;
         // SAFETY: access_at validates width, alignment and mapped extent. Device
         // configuration fields use byte accesses in upstream virtio-mmio.
-        Some(unsafe {
+        let value = unsafe {
             match width {
                 1 => core::ptr::with_exposed_provenance::<u8>(address).read_volatile() as u64,
                 2 => core::ptr::with_exposed_provenance::<u16>(address).read_volatile() as u64,
                 _ => core::ptr::with_exposed_provenance::<u32>(address).read_volatile() as u64,
             }
-        })
+        };
+        Some(value)
     }
-    fn write_access(self, offset: usize, width: usize, value: u64) -> bool {
+    fn write_access(&self, offset: usize, width: usize, value: u64) -> bool {
         let Some((mapping, offset)) = self.register(offset, width) else {
             return false;
         };
@@ -124,7 +134,7 @@ impl Hardware {
         }
         true
     }
-    fn write(self, offset: usize, value: u32) {
+    fn write(&self, offset: usize, value: u32) {
         // SAFETY: Same mapping proof as read; the exclusive claim serializes
         // guest register access and final reset. No native driver binds it.
         unsafe {
@@ -134,12 +144,48 @@ impl Hardware {
     }
 }
 
+fn read_register(mapping: PermanentMmioMapping, offset: usize) -> u32 {
+    // SAFETY: Discovery validates the permanently mapped transport window;
+    // callers use aligned constant offsets within its first 0x200 bytes.
+    unsafe {
+        core::ptr::with_exposed_provenance::<u32>(mapping.virtual_start() + offset).read_volatile()
+    }
+}
+
 pub(super) struct Resource {
     hardware: Hardware,
     firmware: hyper::platform::fdt::NodeId,
     claimed: bool,
 }
 impl Resource {
+    pub(super) fn pci(
+        prepared: hyper::drivers::pci::Prepared,
+        domain: IrqDomainId,
+    ) -> Option<Self> {
+        let mut bars = prepared.bars.iter().flatten();
+        let first = bars.next()?;
+        let mut extra = [None; 7];
+        for (slot, bar) in extra.iter_mut().zip(bars) {
+            *slot = Some(Window {
+                mapping: bar.mapping,
+                offset: bar.offset as usize,
+            });
+        }
+        Some(Self {
+            hardware: Hardware {
+                mapping: first.mapping,
+                extra,
+                profile: Profile::Pci(hyper::mm::FallibleArc::try_new(prepared.transport).ok()?),
+                domain,
+                interrupt: InterruptId::new(prepared.interrupt),
+                interrupt_count: prepared.interrupt_count,
+                trigger: InterruptTrigger::Edge,
+            },
+            firmware: prepared.firmware,
+            claimed: false,
+        })
+    }
+
     pub(super) fn discover(
         device: &PlatformDevice,
         services: &dyn DriverServices,
@@ -161,21 +207,22 @@ impl Resource {
             hyper::platform::PlatformInterruptTrigger::Level => InterruptTrigger::Level,
             hyper::platform::PlatformInterruptTrigger::Edge => InterruptTrigger::Edge,
         };
+        // Only admitted modern device kinds share the reset/IRQ contract. An
+        // empty QEMU transport or unknown device kind remains unassignable.
+        if read_register(mapping, 0) != 0x7472_6976 || read_register(mapping, 4) != 2 {
+            return None;
+        }
+        let kind = model::VirtioKind::from_device_id(read_register(mapping, 8))?;
         let hardware = Hardware {
             mapping,
             extra: [None; 7],
-            profile: Profile::Virtio,
+            profile: Profile::Virtio(kind),
             domain,
             interrupt: InterruptId::new(irq.interrupt),
+            interrupt_count: 1,
             trigger,
         };
-        // Empty QEMU virtio slots are not advertised as assignable devices.
-        // This driver supports the modern SCSI transport's reset semantics.
-        if hardware.read(0) != 0x7472_6976
-            || hardware.read(4) != 2
-            || hardware.read(8) != 8
-            || hardware.read(0x70) != 0
-        {
+        if hardware.read(0x70) != 0 {
             return None;
         }
         hardware.write(0x14, 1);
@@ -229,6 +276,7 @@ impl Resource {
                 profile: Profile::Userspace,
                 domain,
                 interrupt: InterruptId::new(interrupt),
+                interrupt_count: u32::from(interrupt >= 32),
                 trigger,
             },
             firmware: device.id(),
@@ -263,7 +311,8 @@ impl Resource {
         let irq = resources
             .get(interrupt_owner)
             .ok_or(Error::InvalidArgument)?
-            .hardware;
+            .hardware
+            .clone();
         if !matches!(irq.profile, Profile::Userspace)
             || irq.interrupt.get() < 32
             || !matches!(irq.trigger, InterruptTrigger::Level)
@@ -331,13 +380,25 @@ impl Resource {
     pub(super) fn profile(&self) -> u32 {
         self.hardware.profile.id()
     }
+    pub(super) fn pci_identity(&self) -> Option<u32> {
+        match &self.hardware.profile {
+            Profile::Pci(transport) => Some(transport.identity()),
+            _ => None,
+        }
+    }
     pub(super) fn conflicts(&self, other: &Self) -> bool {
         if self.hardware.interrupt.get() >= 32
-            && self.hardware.interrupt == other.hardware.interrupt
+            && other.hardware.interrupt.get() >= 32
+            && model::interrupt_ranges_conflict(
+                self.hardware.interrupt.get(),
+                self.hardware.interrupt_count,
+                other.hardware.interrupt.get(),
+                other.hardware.interrupt_count,
+            )
         {
             return true;
         }
-        let ranges = |hardware: Hardware| {
+        let ranges = |hardware: &Hardware| {
             core::iter::once(hardware.mapping.resource()).chain(
                 hardware
                     .extra
@@ -346,22 +407,14 @@ impl Resource {
                     .map(|window| window.mapping.resource()),
             )
         };
-        ranges(self.hardware).any(|left| {
-            ranges(other.hardware).any(|right| {
-                let left_start = left.start() & !4095;
-                let right_start = right.start() & !4095;
-                left_start
-                    < (right
-                        .start()
-                        .saturating_add(right.size())
-                        .saturating_add(4095)
-                        & !4095)
-                    && right_start
-                        < (left
-                            .start()
-                            .saturating_add(left.size())
-                            .saturating_add(4095)
-                            & !4095)
+        ranges(&self.hardware).any(|left| {
+            ranges(&other.hardware).any(|right| {
+                model::register_windows_conflict(
+                    left.start(),
+                    left.size(),
+                    right.start(),
+                    right.size(),
+                )
             })
         })
     }
@@ -378,7 +431,7 @@ impl Resource {
         self.claimed = true;
         Some(Claim {
             indices: [Some(index), None, None, None, None, None, None, None],
-            hardware: self.hardware,
+            hardware: self.hardware.clone(),
         })
     }
     pub(super) fn release(&mut self) {

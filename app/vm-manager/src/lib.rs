@@ -13,6 +13,34 @@ use std::time::{Duration, Instant};
 
 const INSTANCE_EXIT_GRACE: Duration = Duration::from_secs(2);
 
+/// Initial configuration failure does not terminate the Native management service.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum FleetConfiguration {
+    Configured,
+    #[default]
+    Unavailable,
+}
+
+impl FleetConfiguration {
+    pub fn check_admission(self) -> Result<(), &'static str> {
+        match self {
+            Self::Configured => Ok(()),
+            Self::Unavailable => Err("VM fleet unavailable: initial configuration is unavailable"),
+        }
+    }
+
+    pub fn check_request(self, request: &fleet::Request) -> Result<(), &'static str> {
+        match request {
+            fleet::Request::Create { .. }
+            | fleet::Request::Control {
+                action: fleet::Action::Start | fleet::Action::Restart,
+                ..
+            } => self.check_admission(),
+            _ => Ok(()),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct MachinePolicy {
     restart_pending: bool,
@@ -145,7 +173,7 @@ impl InstancePolicy {
         }
     }
 
-    pub fn wants_disk_admission(&self, pending: bool) -> bool {
+    pub fn wants_io_admission(&self, pending: bool) -> bool {
         pending
             && self.stop == vm::InstanceStopState::new()
             && self.tracker.last_status() == Some(InstanceStatus::Installed)

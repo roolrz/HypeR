@@ -21,6 +21,11 @@ pub const RAM_BASE: u64 = 0x4000_0000;
 /// RAM budget for the resident, multi-client I/O appliance.
 pub const RAM_BYTES: u64 = 128 * 1024 * 1024;
 pub const PHYSICAL_MMIO: u64 = 0x0b00_0000;
+pub const PHYSICAL_NET_MMIO: u64 = 0x0b01_0000;
+pub const PHYSICAL_NET_IRQ: u32 = 59;
+/// Generic ECAM, MSI frame and BAR resources occupy one disjoint PCI aperture.
+pub const PHYSICAL_PCI_MMIO: u64 = 0x0b80_0000;
+pub const PHYSICAL_PCI_IRQ: u32 = 128;
 fn show(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")
 }
@@ -103,9 +108,12 @@ impl Image {
         })
     }
     pub fn device_tree(&self, gic_version: u32, devices: IoDevices<'_>) -> Result<()> {
-        let mut structure = vec![0; 12 * 1024];
-        let mut strings = vec![0; 2048];
-        let mut output = vec![0; 16 * 1024];
+        let capacity =
+            usize::try_from(self.plan.device_tree().end() - self.plan.device_tree().start())
+                .map_err(|_| "device tree reservation is too large")?;
+        let mut structure = vec![0; capacity];
+        let mut strings = vec![0; capacity];
+        let mut output = vec![0; capacity];
         let length = guest_fdt::build_aarch64_linux_with_io(
             guest_fdt::Aarch64LinuxBoot {
                 memory_base: RAM_BASE,
@@ -168,6 +176,11 @@ pub fn install(
         memory_offset: 0,
         size: ram_bytes,
     });
+    let physical = physical.map(|device| PhysicalAssignment {
+        device: device.as_handle_ref(),
+        base: PHYSICAL_MMIO,
+        irq: 40,
+    });
     install_mapped(
         startup,
         image,
@@ -178,7 +191,7 @@ pub fn install(
         } else {
             ram_bytes
         },
-        physical,
+        physical.as_slice(),
         serial_address,
     )
 }
@@ -191,13 +204,22 @@ pub struct SharedGrant<'a> {
     pub size: u64,
 }
 
+/// A physical controller and its guest trap aperture. All assigned controllers
+/// retain the same installed VM and its DMA backing until retirement completes.
+#[derive(Clone, Copy)]
+pub struct PhysicalAssignment<'a> {
+    pub device: hyper_os::HandleRef<'a, hyper_os::handle::PhysicalDeviceObject>,
+    pub base: u64,
+    pub irq: u32,
+}
+
 pub fn install_mapped(
     startup: &Startup<'_>,
     image: &Image,
     own: &hyper_os::OwnedHandle<hyper_os::handle::GuestMemoryObject>,
     shared: &[SharedGrant<'_>],
     address_space_bytes: u64,
-    physical: Option<&hyper_os::OwnedHandle<hyper_os::handle::PhysicalDeviceObject>>,
+    physical: &[PhysicalAssignment<'_>],
     serial_address: u64,
 ) -> Result<InstalledGuest> {
     if address_space_bytes < image.plan.memory_size() {
@@ -239,12 +261,12 @@ pub fn install_mapped(
         )
         .map_err(show)?;
     }
-    if let Some(physical) = physical {
+    for physical in physical {
         device::assign(
             pending.as_handle_ref(),
-            physical.as_handle_ref(),
-            PHYSICAL_MMIO,
-            40,
+            physical.device,
+            physical.base,
+            physical.irq,
         )
         .map_err(show)?;
     }

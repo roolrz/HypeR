@@ -16,6 +16,14 @@ use super::LaunchError;
 use super::report::report_fleet_configured;
 use super::supervisor::SupervisorSet;
 
+const UNAVAILABLE_HANDSHAKE_SECONDS: u64 = 5;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum FleetConfiguration {
+    Configured,
+    Unavailable,
+}
+
 /// Owns init's single opportunity to configure the fleet manager.
 pub(super) struct FleetProvisioner {
     pub(super) channel: CapabilityChannel,
@@ -32,16 +40,26 @@ impl FleetProvisioner {
         root_directory: &Directory,
         console: &OwnedHandle<ConsoleObject>,
         supervisors: &mut SupervisorSet,
-    ) -> Result<(), LaunchError> {
+    ) -> Result<FleetConfiguration, LaunchError> {
         let requested =
             FileRights::from_rights(vm_contract::PROVISIONED_CONFIG_RIGHTS.union(Rights::TRANSFER))
                 .ok_or(LaunchError::InvalidPlan)?;
-        let mut config = Some(
-            root_directory
-                .open(config_path, requested)
-                .map_err(|_| LaunchError::OperatingSystem)?
-                .into_handle(),
-        );
+        let config = match root_directory.open(config_path, requested) {
+            Ok(config) => config,
+            Err(error) if hyper_init::supervision::service_unavailable(&error) => {
+                let _ = console
+                    .as_emergency_console()
+                    .write_all(b"HypeR init: cannot open VM fleet configuration\n");
+                return self.configuration_unavailable(
+                    manifest,
+                    manager_index,
+                    console,
+                    supervisors,
+                );
+            }
+            Err(_) => return Err(LaunchError::OperatingSystem),
+        };
+        let mut config = Some(config.into_handle());
         let (result_reader, result_writer) =
             hyper_os::channel::create_pair().map_err(|_| LaunchError::OperatingSystem)?;
         let result_reader = result_reader
@@ -52,19 +70,14 @@ impl FleetProvisioner {
         loop {
             // Readiness is not a reservation. A lost rendezvous race retains
             // both capabilities and returns to the complete service wait set.
-            let observed = supervisors.wait_for_service_event(
+            if !self.wait_for_receiver(
                 manifest,
                 manager_index,
-                WaitItem::new(
-                    self.channel.as_handle_ref(),
-                    ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING
-                        .union(ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED),
-                ),
-                hyper_os::DEADLINE_INFINITE,
                 console,
-            )?;
-            if !ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING.is_present_in(observed) {
-                return Err(LaunchError::VmProvisioningClosed);
+                supervisors,
+                hyper_os::DEADLINE_INFINITE,
+            )? {
+                return Ok(FleetConfiguration::Unavailable);
             }
             let config_disposition = CapabilityDisposition::move_handle(
                 &mut config,
@@ -83,7 +96,7 @@ impl FleetProvisioner {
                 Ok(()) => break,
                 Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}
                 Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => {
-                    return Err(LaunchError::VmProvisioningClosed);
+                    return provisioning_closed(manifest, manager_index);
                 }
                 Err(_) => return Err(LaunchError::OperatingSystem),
             }
@@ -97,6 +110,95 @@ impl FleetProvisioner {
             supervisors,
         )
     }
+
+    /// Explicitly ends provisioning without reading configuration or allowing
+    /// the manager to discover an unavailable I/O broker. No reply is needed:
+    /// the capability-channel rendezvous itself proves request delivery.
+    pub(super) fn configuration_unavailable(
+        self,
+        manifest: &Manifest<'_>,
+        manager_index: usize,
+        console: &OwnedHandle<ConsoleObject>,
+        supervisors: &mut SupervisorSet,
+    ) -> Result<FleetConfiguration, LaunchError> {
+        let deadline = hyper_os::time::deadline_after(std::time::Duration::from_secs(
+            UNAVAILABLE_HANDSHAKE_SECONDS,
+        ))
+        .map_err(|_| LaunchError::OperatingSystem)?
+        .as_raw();
+        loop {
+            if !self.wait_for_receiver(manifest, manager_index, console, supervisors, deadline)? {
+                return Ok(FleetConfiguration::Unavailable);
+            }
+            match self.channel.try_send(
+                &vm_contract::ProvisionRequest::ConfigurationUnavailable.encode(),
+                &mut [],
+            ) {
+                Ok(()) => return Ok(FleetConfiguration::Unavailable),
+                Err(hyper_os::Error::Status(hyper_os::Status::WOULD_BLOCK)) => {}
+                Err(hyper_os::Error::Status(hyper_os::Status::PEER_CLOSED)) => {
+                    return provisioning_closed(manifest, manager_index);
+                }
+                Err(_) => return Err(LaunchError::OperatingSystem),
+            }
+        }
+    }
+
+    fn wait_for_receiver(
+        &self,
+        manifest: &Manifest<'_>,
+        manager_index: usize,
+        console: &OwnedHandle<ConsoleObject>,
+        supervisors: &mut SupervisorSet,
+        deadline: u64,
+    ) -> Result<bool, LaunchError> {
+        let observed = match supervisors.wait_for_service_event(
+            manifest,
+            manager_index,
+            WaitItem::new(
+                self.channel.as_handle_ref(),
+                ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING
+                    .union(ObjectSignals::<CapabilityChannelObject>::PEER_CLOSED),
+            ),
+            deadline,
+            console,
+        ) {
+            Ok(observed) => observed,
+            Err(LaunchError::RequiredServiceUnavailable) => return Ok(false),
+            Err(LaunchError::WaitTimedOut) => {
+                // No configuration has been delivered at this boundary. An
+                // optional nonreceiving manager cannot delay Native forever.
+                if manifest
+                    .service(manager_index)
+                    .ok_or(LaunchError::InvalidPlan)?
+                    .critical()
+                {
+                    return Err(LaunchError::WaitTimedOut);
+                }
+                return Ok(false);
+            }
+            Err(error) => return Err(error),
+        };
+        if ObjectSignals::<CapabilityChannelObject>::PEER_RECEIVING.is_present_in(observed) {
+            Ok(true)
+        } else {
+            provisioning_closed(manifest, manager_index).map(|_| false)
+        }
+    }
+}
+
+fn provisioning_closed(
+    manifest: &Manifest<'_>,
+    manager_index: usize,
+) -> Result<FleetConfiguration, LaunchError> {
+    let service = manifest
+        .service(manager_index)
+        .ok_or(LaunchError::InvalidPlan)?;
+    if service.critical() {
+        Err(LaunchError::VmProvisioningClosed)
+    } else {
+        Ok(FleetConfiguration::Unavailable)
+    }
 }
 
 fn wait_for_result(
@@ -105,9 +207,9 @@ fn wait_for_result(
     reader: &OwnedHandle<ByteChannelObject>,
     console: &OwnedHandle<ConsoleObject>,
     supervisors: &mut SupervisorSet,
-) -> Result<(), LaunchError> {
+) -> Result<FleetConfiguration, LaunchError> {
     loop {
-        let observed = supervisors.wait_for_service_event(
+        let observed = match supervisors.wait_for_service_event(
             manifest,
             manager_index,
             WaitItem::new(
@@ -117,7 +219,13 @@ fn wait_for_result(
             ),
             hyper_os::DEADLINE_INFINITE,
             console,
-        )?;
+        ) {
+            Ok(observed) => observed,
+            Err(LaunchError::RequiredServiceUnavailable) => {
+                return Ok(FleetConfiguration::Unavailable);
+            }
+            Err(error) => return Err(error),
+        };
         // A result can be queued when the manager closes its writer. Drain
         // READABLE before interpreting EOF; a close alone is never acceptance.
         if !ObjectSignals::<ByteChannelObject>::READABLE.is_present_in(observed) {
@@ -138,10 +246,13 @@ fn wait_for_result(
         {
             Some(vm_contract::ProvisionResult::Configured) => {
                 report_fleet_configured(console);
-                return Ok(());
+                return Ok(FleetConfiguration::Configured);
             }
             Some(vm_contract::ProvisionResult::Rejected) => {
-                return Err(LaunchError::VmFleetConfigurationRejected);
+                let _ = console
+                    .as_emergency_console()
+                    .write_all(b"HypeR init: VM fleet configuration rejected\n");
+                return Ok(FleetConfiguration::Unavailable);
             }
             None => return Err(LaunchError::VmFleetReplyInvalid),
         }

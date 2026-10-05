@@ -23,7 +23,7 @@ Each vCPU owns its saved GICH control, VMCR, APR and list-register state. Guest
 stage-2 maps the first 4 KiB of the banked GICV CPU interface as Device
 memory. The second page, containing DIR, traps for software deactivation so
 active interrupts outside the hardware list registers can also be retired.
-GICC and GICH remain host-only. The emulated distributor exposes 1..8 vCPUs and 64 interrupt
+GICC and GICH remain host-only. The emulated distributor exposes 1..8 vCPUs and 256 interrupt
 IDs using GICv2 without security extensions. The Native platform-info query reports the
 GIC revision so vm-runtime emits matching guest firmware. GICv3 hosts retain
 their existing guest profile.
@@ -276,22 +276,24 @@ but cannot validate the board's device drivers.
 
 ## SD-card backend qualification
 
-`boards/rpi5-sd.json` selects the physical BCM2712 SDIO1 controller by firmware
+`boards/rpi5.json` selects the physical BCM2712 SDIO1 controller by firmware
 path and contains a 1 GiB FAT configuration partition plus a 2 GiB Alpine ext4 root
 partition, matching the QEMU guest layout. Alpine uses the minimal rootfs and
 remains stopped until `vmm start alpine`. Its FIT lives at `/data/vm/alpine.itb`,
 not in the Native initramfs. Its root disk is exported separately through
 dm-linear and vhost-scsi; use `vmm console alpine` after starting it.
-Build its complete flash image from this checkout with the pinned I/O VM,
-official boot inputs and Alpine downloads (no additional build checkout):
+Build its complete flash image with a matching protocol version 3 Pi 5 I/O
+appliance, official boot inputs and Alpine downloads:
 
 ```sh
-make rpi5-sd ARCH=aarch64 \
-  BOARD_IMAGE_REPLACE=--replace
+make rpi5-sd ARCH=aarch64
 ```
 
 The output is `target/board/rpi5-native/disk.img`, matching the earlier bring-up
-path. Flashing it to the whole SD card replaces existing partitions and data.
+path. The build imports the pinned Pi 5 appliance; `IO_VM_PACKAGE` optionally
+selects a complete local boot package. Add `BOARD_IMAGE_REPLACE=--replace` to
+replace an existing generated image. Flashing it to the whole SD card replaces
+existing partitions and data.
 The build itself only writes this generated image, never the physical card.
 
 Native io-runtime claims the SDIO1 dependency graph and supplies a guest DT;
@@ -310,10 +312,136 @@ with a 128 MiB resident I/O VM: both CPUs online, three CPU 1 off/on cycles,
 one ordinary `reboot`, and one ordinary `poweroff`. A file written and synced
 on the SD-backed ext4 root survived the reboot. After poweroff, Alpine reached
 `stopped`, the I/O VM remained `running`, `/data` remained readable, and the
-backend reported successful memory release. This establishes basic guest
-lifecycle operation, not repeated power-cycle durability or DMA retirement
-under faults. Those stress and failure cases remain unqualified. The kernel retains generic device ownership and
+backend reported successful memory release. That run predates the combined
+SDIO1/RP1 deployment; the current network-enabled image still needs hardware
+qualification of both paths. The result establishes basic guest lifecycle
+operation, not repeated power-cycle durability or DMA retirement under faults.
+Those stress and failure cases remain unqualified. The kernel retains generic device ownership and
 notification mechanisms; SDHCI policy remains in userspace.
+
+## Ethernet backend qualification
+
+`boards/rpi5.json` includes the built-in RP1 Ethernet controller in the SD-card
+deployment. Its `alpine` guest has both a root disk and a network interface.
+The external LAN must provide DHCP and routing. HypeR Native keeps its network
+endpoint reserved; it does not establish a network link.
+
+The I/O VM creates `hbr0`, adds its RP1 `eth0` uplink and brings them up during
+startup. Each guest TAP joins the bridge when its virtio-net device activates.
+No manual bridge configuration is needed. The appliance reports
+`HypeR I/O: network default ready on eth0` after bridge setup; this does not
+establish that the cable, PHY, external switch or DHCP server is working.
+
+The pinned protocol version 3 Pi 5 appliance includes upstream
+PCI host-generic, GICv2m, RP1 PCI/MFD, MACB, Broadcom PHY, RP1 clock and GPIO
+drivers. The build imports its immutable GHCR digest automatically:
+
+```sh
+make rpi5-sd ARCH=aarch64
+```
+
+The resulting `target/board/rpi5-native/disk.img` is a complete SD image. Add
+`BOARD_IMAGE_REPLACE=--replace` only when deliberately replacing an existing
+generated image. The board generates `pciex4_reset=0` in
+`config.txt`, using the official firmware's
+[PCIe configuration handoff](https://github.com/raspberrypi/documentation/blob/master/documentation/asciidoc/computers/config_txt/boot.adoc).
+It retains the existing [AArch64 Image boot requirement](https://docs.kernel.org/arch/arm64/booting.html)
+that firmware quiesce all DMA-capable devices before entering HypeR. Preserving
+PCIe configuration does not waive that requirement. The kernel checks the
+actual link and BARs, then establishes inbound DMA mapping before admitting RP1.
+Firmware may leave the live root port's PCI bus numbers unset. HypeR configures
+primary bus 0 and secondary/subordinate bus 1 in that case, then verifies the
+write before accessing endpoint configuration space. Valid firmware numbering
+is retained; address windows and device-specific RP1 setup are not changed by
+this enumeration step.
+
+DT supplies the bounded CPU MMIO reservation, not a snapshot of firmware's PCI
+BAR assignments. HypeR translates each probed BAR through the live BCM2712
+outbound windows and requires the whole extent to fit that reservation. A
+window need not cover unused space in the reservation; separate windows may
+cover different BARs. Overlapping CPU decoding, ambiguous BAR translations and
+out-of-reservation extents remain rejected.
+
+If firmware placed the only window covering all BARs outside that reservation,
+HypeR relocates its CPU side while preserving its PCI target and endpoint BARs.
+For example, firmware may map PCI `0x80000000` at CPU `0x1c00000000`, while the
+early MMIO reservation starts at `0x1f00000000`. Relocation decodes only the
+MiB-rounded prefix needed to reach all BARs, within the reservation's bound.
+Conflicting windows or a BAR span larger than the reservation are rejected.
+The host gates bus mastering, disables the old decode, then programs and reads
+back the destination before accessing any function MMIO. Intermediate decodes
+cannot extend beyond the old or final window.
+
+Inbound DMA setup belongs to the PCI host, rather than being a prerequisite
+left to the bootloader. While endpoint bus mastering is disabled, HypeR closes
+all ten old inbound decoders and installs the validated `dma-ranges` from DT.
+The supported layout contains the fixed RAM translation at PCI address 64 GiB,
+the MIP MSI page, and optional loopback ranges inside the owned MMIO aperture.
+Unowned SoC register targets, additional RAM aliases and overlapping PCI ranges
+are rejected before register access. Each configuration write is read back;
+the function is not published on failure. This is address translation for the
+trusted I/O VM, not DMA isolation.
+
+If init reports storage readiness failure, first inspect the earlier kernel
+log for `PCI function handoff unavailable` and inspect the forwarded I/O VM
+messages. The Native shell remains available for `dmesg` even if `/data` cannot
+be mounted. A link failure records the root-port
+MMIO address, PCIe status, bus numbers and control register before any endpoint
+access. This distinguishes an inactive PCIe link from rejected bus-number
+programming; neither diagnostic refers to the Ethernet cable or DHCP.
+An `Outbound` failure includes the BAR index, bus address, size, CPU aperture
+base and all four raw outbound-window register sets. `BarType`, `BarSize`,
+`BarPlacement` and `BarOverlap` identify endpoint sizing and placement failures
+separately. Retain the complete diagnostic, including wrapped serial lines.
+An `OutboundWrite` failure identifies a rejected relocation register write,
+including its expected value, observed value and comparison mask.
+A `Dma` failure now records the setup stage, register offset, expected value,
+observed value and comparison mask. Successful preparation reports
+`PCI function 1de4:0001 prepared; DMA windows configured`. The I/O VM's later
+activation controls when endpoint bus mastering can actually be enabled.
+
+The whole RP1 PCI function belongs to the I/O VM. HypeR owns the physical
+BCM2712 PCIe bridge, BAR extents and MSI routing; Linux owns RP1's interrupt
+controller and all enabled peripheral drivers. Guest firmware describes a
+generic ECAM host and GICv2m MSI frame plus the original RP1 subtree. The
+firmware's BCM2712 debug UART remains the host console. RP1 peripherals cannot
+be split between independent owners through this assignment.
+
+The current host transport supports one firmware-initialized, single-function
+endpoint with memory BARs and MSI-X. There is no IOMMU DMA isolation: this is a
+trusted I/O VM deployment, not safe passthrough to an untrusted guest. After
+activation, I/O VM teardown retains its device claims and RAM until host reboot
+because physical DMA retirement is not yet qualified.
+
+Physical validation is still required. Connect the Ethernet cable to a LAN,
+wait for `/data`, then start Alpine and enter its console:
+
+```text
+vmm start alpine
+vmm console alpine
+```
+
+Alpine loads virtio-net and starts DHCP automatically after mounting its root.
+The client keeps running to renew its lease; an unavailable DHCP server does
+not delay the shell. Inside the guest, inspect its address and route:
+
+```sh
+ip addr show eth0
+ip route
+cat /var/log/udhcpc-eth0.log
+```
+
+Verify downloads against a known SHA-256 from a LAN HTTP server and upload a
+file to compare its hash at the receiver. For multi-guest qualification, add a
+second guest with a distinct MAC address to the board configuration, rebuild
+the test image, and repeat with both guests running.
+Detach the console with `Ctrl+]`, then `d`. Repeat guest stop/start and network
+driver unbind/rebind while the other guest transfers data; also verify a synced
+file on Alpine's SD-backed root and Native `/data`. Check that each guest stop
+receives `RELEASE_MEMORY: ok`. Finally exercise cable disconnect/reconnect and
+repeated cold boots. Record the firmware version and C0/D0 board revision with
+the results. These checks are manual hardware qualification, not QEMU CI or a
+performance baseline.
 
 ## Release boundary
 

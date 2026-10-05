@@ -20,6 +20,11 @@ pub const REDISTRIBUTOR_BASE: u32 =
     hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_BASE as u32;
 pub const REDISTRIBUTOR_SIZE: u32 =
     hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_GIC_REDISTRIBUTOR_SIZE as u32;
+/// Reference platform IDs include 32 private interrupts and all advertised SPIs.
+pub const INTERRUPT_COUNT: u32 =
+    hyper_abi::HYPER_NATIVE_VIRTUAL_PLATFORM_AARCH64_REFERENCE_INTERRUPT_COUNT as u32;
+const _: () =
+    assert!(INTERRUPT_COUNT >= 64 && INTERRUPT_COUNT <= 1020 && INTERRUPT_COUNT.is_multiple_of(32));
 
 /// Linux `reg` cells for the distributor and one Redistributor region.
 pub const REFERENCE_REG_CELLS: [u32; 8] = [
